@@ -188,8 +188,7 @@ mod tests {
     use super::*;
     use crate::command::TankCommand;
     use crate::damage::{
-        Capability, Group, Part, TankCapabilities, VolumeFacets, VolumeOf,
-        capability_effectiveness, requirement_met,
+        Capability, Group, Part, TankCapabilities, VolumeFacets, VolumeOf, requirement_met,
     };
 
     // ASSUMED fixture pools and fixed step: synthetic module data, independent of any tank asset.
@@ -310,20 +309,20 @@ mod tests {
     /// instead, or a hold that missed the running timer, fails here.
     #[test]
     fn repairing_holds_the_tank_but_keeps_every_capability_requirement() {
-        use crate::track::drive::{DriveAxes, DriveTarget};
+        use crate::track::drive::{DriveAxes, DriveIntent, DriveTarget};
         use crate::track::sim::drive_target;
+        use crate::track::transmission::DriveSupply;
 
         fn gates(tanks: Query<(&TankVolumes, &TankCapabilities)>, facets: Query<VolumeFacets>) {
             let (volumes, caps) = tanks.single().unwrap();
             assert!(underway(volumes, &facets));
             assert_eq!(
                 drive_target(&drive_command(), Some(volumes), Some(caps), &facets),
-                DriveTarget::Brake { effectiveness: 1.0 },
+                DriveTarget {
+                    intent: DriveIntent::Brake,
+                    supply: DriveSupply::WHOLE,
+                },
                 "the gameplay adapter must turn a running repair into service braking"
-            );
-            assert!(
-                capability_effectiveness(Some(volumes), Some(caps), Capability::Drive, &facets)
-                    > 0.0
             );
             assert!(requirement_met(
                 Some(volumes),
@@ -363,18 +362,21 @@ mod tests {
             .unwrap();
         assert_eq!(
             released,
-            DriveTarget::Axes {
-                axes: DriveAxes {
+            DriveTarget {
+                intent: DriveIntent::Axes(DriveAxes {
                     throttle: 1.0,
                     steer: 0.0
-                },
-                effectiveness: 1.0,
+                }),
+                supply: DriveSupply::WHOLE,
             },
             "a finished repair releases the hold"
         );
         assert_eq!(
             held,
-            DriveTarget::Brake { effectiveness: 1.0 },
+            DriveTarget {
+                intent: DriveIntent::Brake,
+                supply: DriveSupply::WHOLE,
+            },
             "a phase hold still selects service braking with no repair"
         );
     }

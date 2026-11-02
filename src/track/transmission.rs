@@ -1138,12 +1138,49 @@ pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout 
     }
 }
 
+/// The game's damage model: one tick's drivetrain supply, each share read from the part that
+/// produces it (design §7b). Driver intent, the service brakes and the engine's own losses
+/// (motoring drag, compression braking) are construction and never scale.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct DriveSupply {
+    /// The share of the engine's supply the Driver station delivers: its occupant's
+    /// competence (Drive's crew view). Zero only when nobody serves the station.
+    pub competence: f32,
+    /// The engine's share of its combustion torque (Drive's engine view), which also powers
+    /// the idle governor. At zero the crank runs down under its own drag and the clutch.
+    pub combustion: f32,
+    /// The transmission's share of its transmitted capacity (Drive's transmission view): the
+    /// main clutch and the steering member.
+    pub transmitted: f32,
+}
+
+impl DriveSupply {
+    /// An undamaged drivetrain under its native driver: the sandbox lab's supply.
+    pub const WHOLE: Self = Self {
+        competence: 1.0,
+        combustion: 1.0,
+        transmitted: 1.0,
+    };
+
+    /// The share of the combustion curve the driver delivers: a less skilled driver delivers
+    /// less of what the engine supplies.
+    pub fn delivered(self) -> f32 {
+        self.competence * self.combustion
+    }
+
+    /// The share of the full-command drive envelope that reaches the sprockets: the lesser of
+    /// delivered combustion and transmitted capacity.
+    pub fn share(self) -> f32 {
+        self.delivered().min(self.transmitted)
+    }
+}
+
 /// One tick's joint input: the SHAPED drive axes plus the per-side mixed commands (the brake
 /// envelope consumes the sides; the drive and steering laws consume the axes), the pre-tick
 /// belt speeds, and this tick's summed longitudinal ground reactions.
 pub struct TransmissionInput {
-    /// The game's damage model: delivered torque share; intent and service brakes stay whole.
-    pub effectiveness: f32,
+    /// The game's damage model: what the crew, engine and transmission each supply this tick.
+    pub supply: DriveSupply,
     pub throttle: f32,
     pub steer: f32,
     pub side_commands: [f32; 2],
@@ -1265,26 +1302,40 @@ pub(crate) fn predict_shift_landing_m(
 /// Full-throttle mean-axis force available in one gear at the current signed shaft speed. The
 /// engine reads only non-negative rpm. Its torque and the clutch's capacity bound the shaft
 /// torque; gearing converts it to belt force. Contact grip bounds traction separately.
-fn available_force_in_gear(tp: &TransmissionParams, shaft: f32, gear: f32) -> f32 {
+fn available_force_in_gear(
+    tp: &TransmissionParams,
+    supply: DriveSupply,
+    shaft: f32,
+    gear: f32,
+) -> f32 {
     let rpm = shaft.max(0.0) * gear / tp.sprocket_radius / RPM_TO_RAD;
-    tp.torque_at(rpm).min(tp.clutch_capacity) * gear / tp.sprocket_radius
+    (supply.delivered() * tp.torque_at(rpm)).min(supply.transmitted * tp.clutch_capacity) * gear
+        / tp.sprocket_radius
 }
 
 /// DERIVED low-demand headroom (N): a fraction of the lesser of drivetrain force capacity and
 /// nominal material-pair grip. A support-only calibration has no grip population and no such floor.
-fn reserve_floor(fp: &ForceParams, tp: &TransmissionParams) -> f32 {
+fn reserve_floor(fp: &ForceParams, tp: &TransmissionParams, supply: DriveSupply) -> f32 {
     let contact = match fp.grip {
         Some(grip) => 2.0 * grip.side_weight * grip.on_ground(),
         None => 0.0,
     };
     let reduction = tp.gears_fwd[0].max(tp.gears_rev[0]);
-    let drive = tp.peak_torque_nm.min(tp.clutch_capacity) * reduction / tp.sprocket_radius;
+    let drive = (supply.delivered() * tp.peak_torque_nm)
+        .min(supply.transmitted * tp.clutch_capacity)
+        * reduction
+        / tp.sprocket_radius;
     RESERVE_CAPACITY_FRACTION * drive.min(contact)
 }
 
 /// DERIVED positive capability headroom (N, both tracks), from actual demand and vehicle scale.
-pub(crate) fn reserve_margin(fp: &ForceParams, tp: &TransmissionParams, demand: f32) -> f32 {
-    demand.max(0.0) * RESERVE_MARGIN_FRACTION + reserve_floor(fp, tp)
+pub(crate) fn reserve_margin(
+    fp: &ForceParams,
+    tp: &TransmissionParams,
+    supply: DriveSupply,
+    demand: f32,
+) -> f32 {
+    demand.max(0.0) * RESERVE_MARGIN_FRACTION + reserve_floor(fp, tp, supply)
 }
 
 /// Modeled full-throttle reserve for one gear at the current shaft speed.
@@ -1294,11 +1345,12 @@ pub(crate) fn reserve_margin(fp: &ForceParams, tp: &TransmissionParams, demand: 
 /// duplicating it — see the driving-feel probes in `headless_test`.
 pub(crate) fn modeled_reserve_in_gear(
     tp: &TransmissionParams,
+    supply: DriveSupply,
     shaft: f32,
     gear: f32,
     demand: f32,
 ) -> f32 {
-    available_force_in_gear(tp, shaft, gear) - demand
+    available_force_in_gear(tp, supply, shaft, gear) - demand
 }
 
 /// Choose the highest gear below `current` that clears reserve margin, then apply the downshift
@@ -1307,6 +1359,7 @@ pub(crate) fn modeled_reserve_in_gear(
 fn select_grade_target(
     tp: &TransmissionParams,
     fp: &ForceParams,
+    supply: DriveSupply,
     ladder: &[f32],
     shaft: f32,
     current: u8,
@@ -1315,9 +1368,9 @@ fn select_grade_target(
     if current <= 1 || shaft <= -PARK_ENGAGE_SPEED {
         return None;
     }
-    let margin = reserve_margin(fp, tp, demand);
+    let margin = reserve_margin(fp, tp, supply, demand);
     let ideal = (1..current).rev().find(|&gear| {
-        available_force_in_gear(tp, shaft, ladder[(gear - 1) as usize]) - demand >= margin
+        available_force_in_gear(tp, supply, shaft, ladder[(gear - 1) as usize]) - demand >= margin
     })?;
     let lowest_legal = (1..current).find(|&gear| {
         let rpm = shaft * ladder[(gear - 1) as usize] / tp.sprocket_radius / RPM_TO_RAD;
@@ -1332,6 +1385,7 @@ fn select_grade_target(
 fn select_hill_hold_target(
     tp: &TransmissionParams,
     fp: &ForceParams,
+    supply: DriveSupply,
     ladder: &[f32],
     shaft: f32,
     current: u8,
@@ -1342,10 +1396,11 @@ fn select_hill_hold_target(
             let ratio = ladder[(gear - 1) as usize];
             let rpm = shaft * ratio / tp.sprocket_radius / RPM_TO_RAD;
             rpm <= tp.max_curve_rpm() - OVERREV_MARGIN_RPM
-                && modeled_reserve_in_gear(tp, shaft, ratio, demand) >= minimum
+                && modeled_reserve_in_gear(tp, supply, shaft, ratio, demand) >= minimum
         })
     };
-    highest_with_reserve(reserve_margin(fp, tp, demand)).or_else(|| highest_with_reserve(0.0))
+    highest_with_reserve(reserve_margin(fp, tp, supply, demand))
+        .or_else(|| highest_with_reserve(0.0))
 }
 
 /// Commit one grade-target event according to the vehicle's addressing capability.
@@ -1373,12 +1428,13 @@ fn refresh_hill_hold(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
     fp: &ForceParams,
+    supply: DriveSupply,
     ladder: &[f32],
     shaft: f32,
     rollback_rescue: bool,
 ) -> bool {
     let downshift_allowed = shaft > -PARK_ENGAGE_SPEED || rollback_rescue;
-    match select_hill_hold_target(tp, fp, ladder, shaft, st.gear, st.demand_n) {
+    match select_hill_hold_target(tp, fp, supply, ladder, shaft, st.gear, st.demand_n) {
         Some(target) if target < st.gear && downshift_allowed => {
             // A latched rollback that the current gear plus full brakes cannot arrest is the
             // deliberate exception to both ordinary grade-shift guards: this downshift is crew
@@ -1705,10 +1761,15 @@ fn update_demand_filter(
 /// anyway, and re-latching mid-motion was exactly the release/re-latch chatter the cooldown
 /// exists to prevent. While latched, selection runs on EVERY decision tick so a changing EMA can
 /// retarget and GRADE LIMIT always describes current capability.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the hill-hold law's inputs: state, construction, contact, supply, ladder, shaft, intent and reserve"
+)]
 fn update_hill_hold(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
     fp: &ForceParams,
+    supply: DriveSupply,
     ladder: &[f32],
     shaft: f32,
     propulsive: f32,
@@ -1741,7 +1802,7 @@ fn update_hill_hold(
             // A paid interruption masks transmitted force. Only demand above the vehicle's
             // model/contact-scale resolution counts as a grade load rather than residual contact
             // variation. This bound scales with the construction and its material pair.
-            || (st.shift_ticks > 0 && st.demand_n > reserve_floor(fp, tp));
+            || (st.shift_ticks > 0 && st.demand_n > reserve_floor(fp, tp, supply));
         if !st.hill_hold && in_engagement_zone && !hold_cooldown_active && effective_deficit {
             st.hill_hold = true;
         }
@@ -1760,7 +1821,7 @@ fn update_hill_hold(
             let braked_rollback_rescue =
                 real_rollback && current_reserve + 2.0 * tp.brake_capacity_n < 0.0;
             hill_hold_step_committed =
-                refresh_hill_hold(st, tp, fp, ladder, shaft, braked_rollback_rescue);
+                refresh_hill_hold(st, tp, fp, supply, ladder, shaft, braked_rollback_rescue);
         }
     }
     hill_hold_step_committed
@@ -1820,6 +1881,8 @@ struct DecisionInputs {
     detent_turn: bool,
     /// Whether [`update_hill_hold`] already spent a shift window this tick.
     hill_hold_step_committed: bool,
+    /// The game's damage model: the tick's drivetrain supply every reserve is priced against.
+    supply: DriveSupply,
 }
 
 /// One decision tick of the gear scheduler: auto-shift on engine-rpm bands with hysteresis from
@@ -1861,6 +1924,7 @@ fn run_shift_decision(
         grade_landing_positive,
         detent_turn,
         hill_hold_step_committed,
+        supply,
     } = inputs;
     let top = ladder.len() as u8;
     let shaft_rpm_of = |sh: f32, g: f32| sh * g / tp.sprocket_radius / RPM_TO_RAD;
@@ -1886,7 +1950,7 @@ fn run_shift_decision(
     // cascade; a changed capability target retargets while retaining the original HUD `from`.
     if !grade_step_committed && st.grade_target > 0 {
         let selected = (propulsive > 0.0 && current_reserve < 0.0)
-            .then(|| select_grade_target(tp, fp, ladder, shaft, st.gear, st.demand_n))
+            .then(|| select_grade_target(tp, fp, supply, ladder, shaft, st.gear, st.demand_n))
             .flatten()
             .filter(|&target| target < st.gear);
         if let Some(target) = selected {
@@ -1940,7 +2004,7 @@ fn run_shift_decision(
         && current_reserve < 0.0
         && st.grade_confirm_ticks >= GRADE_CONFIRM_TICKS;
     let deficit_target = confirmed_deficit
-        .then(|| select_grade_target(tp, fp, ladder, shaft, st.gear, st.demand_n))
+        .then(|| select_grade_target(tp, fp, supply, ladder, shaft, st.gear, st.demand_n))
         .flatten();
 
     // A confirmed reserve deficit is a CORRECTION, not a preference: with a target it
@@ -1976,7 +2040,7 @@ fn run_shift_decision(
     // decelerates into the near-rest hill-hold path, whose latch + full brake envelope
     // and launch-gear selection are the designed owners of an arrested climb — that
     // fallback is deliberate, not accidental.
-    let deep_deficit = -current_reserve > reserve_margin(fp, tp, st.demand_n);
+    let deep_deficit = -current_reserve > reserve_margin(fp, tp, supply, st.demand_n);
     let deficit_deferred = deficit_target.is_some() && dwell_blocks(-1) && !deep_deficit;
     let mut deficit_step_committed = false;
     if let Some(target) = deficit_target
@@ -2037,10 +2101,10 @@ fn run_shift_decision(
             let landing = predict_shift_landing_m(tp, fp, m, r_mean, dt);
             let landing_shaft = dir * landing;
             let g_up = ladder[st.gear as usize];
-            let next_reserve = modeled_reserve_in_gear(tp, shaft, g_up, st.demand_n);
+            let next_reserve = modeled_reserve_in_gear(tp, supply, shaft, g_up, st.demand_n);
             landing_shaft > 0.0
                 && shaft_rpm_of(landing_shaft, g_up) >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM
-                && next_reserve >= reserve_margin(fp, tp, st.demand_n)
+                && next_reserve >= reserve_margin(fp, tp, supply, st.demand_n)
         };
     if upshift_ready {
         st.band_confirm_ticks = st.band_confirm_ticks.saturating_add(1);
@@ -2280,15 +2344,20 @@ fn crank_free_torque(
         ((omega_target - omega_e) / (REV_MATCH_BAND_RPM * RPM_TO_RAD)).clamp(0.0, 1.0)
     };
 
+    // The game's damage model: the driver delivers a share of what combustion supplies, so the
+    // delivered fueling releases motoring drag only as far as it replaces it. The idle governor
+    // is the engine's own; the drag is construction and never scales.
+    let supply = inp.supply;
+    let u_fuel = u_fuel * supply.delivered();
     let rpm = omega_e / RPM_TO_RAD;
-    let idle_gain = tp.torque_at(tp.engine.idle_rpm) / (K_IDLE_DROOP_RPM * RPM_TO_RAD);
-    let tau_idle =
-        (idle_gain * (omega_idle - omega_e)).clamp(0.0, tp.torque_at(tp.engine.idle_rpm));
+    let idle_torque = supply.combustion * tp.torque_at(tp.engine.idle_rpm);
+    let idle_gain = idle_torque / (K_IDLE_DROOP_RPM * RPM_TO_RAD);
+    let tau_idle = (idle_gain * (omega_idle - omega_e)).clamp(0.0, idle_torque);
     let tau_ind = u_fuel * tp.torque_at(rpm);
     let tau_drag = engine_drag(tp, omega_e, u_fuel);
     let tau_free = tau_ind + tau_idle - tau_drag;
 
-    let p_avail = tp.torque_at(rpm) * omega_e;
+    let p_avail = supply.combustion * tp.torque_at(rpm) * omega_e;
     #[cfg(feature = "bitprobe")]
     {
         probe.u_fuel = u_fuel;
@@ -2336,7 +2405,8 @@ fn steering_force(
     let mut f_s = 0.0;
     let mut lambda = 0.0;
     let mut j = [0.0f32; 2];
-    let f_s_max = 2.0 * tp.steer_capacity_n;
+    let steer_capacity = inp.supply.transmitted * tp.steer_capacity_n;
+    let f_s_max = 2.0 * steer_capacity;
     let r_d = (inp.reactions[0] - inp.reactions[1]) / 2.0;
     let servo =
         |target_d: f32| (2.0 * ((target_d - d) * fp.inertia / dt + r_d)).clamp(-f_s_max, f_s_max);
@@ -2382,7 +2452,7 @@ fn steering_force(
             let jr = -(1.0 + e) / 2.0;
             let g_now = jl * vl + jr * vr;
             let denom = jl * jl + jr * jr;
-            let lambda_max = tp.steer_capacity_n / jl.abs().max(jr.abs()).max(1e-3);
+            let lambda_max = steer_capacity / jl.abs().max(jr.abs()).max(1e-3);
             let l = (-(g_now * fp.inertia / dt + jl * a_l + jr * a_r) / denom)
                 .clamp(-lambda_max, lambda_max);
             let m_next = m + (a_l + l * jl + a_r + l * jr) / (2.0 * fp.inertia) * dt;
@@ -2468,10 +2538,15 @@ fn power_conservation_scale(
 /// release once it transmits its own modeled force: half its non-negative reserve is always below
 /// that force. Equality is accepted for the zero-reserve knife edge. The hold remains through
 /// every declutched window because `f_c = 0` there.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the release law's inputs: state, construction, contact, supply, shaft, ratio, sign and force"
+)]
 fn release_hill_hold(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
     fp: &ForceParams,
+    supply: DriveSupply,
     shaft: f32,
     g: f32,
     dir: f32,
@@ -2482,8 +2557,9 @@ fn release_hill_hold(
     if !st.hill_hold {
         return;
     }
-    let selected_reserve = modeled_reserve_in_gear(tp, shaft, g, st.demand_n);
-    let release_margin = reserve_margin(fp, tp, st.demand_n).min(selected_reserve.max(0.0) * 0.5);
+    let selected_reserve = modeled_reserve_in_gear(tp, supply, shaft, g, st.demand_n);
+    let release_margin =
+        reserve_margin(fp, tp, supply, st.demand_n).min(selected_reserve.max(0.0) * 0.5);
     if dir * f_c >= st.demand_n + release_margin {
         st.hill_hold = false;
         st.hold_reengage_ticks = HOLD_REENGAGE_TICKS;
@@ -2575,10 +2651,13 @@ fn apply_brake_stop_forces(
 /// unmodeled; the field-measured ~9000 rpm belt-following crank is exactly what this backstops).
 /// `max` first also self-heals a NaN (f32::max drops the NaN operand; the floor then rides
 /// through the `min` unchanged, since `ω_floor < ω_over` for every validated spec).
+///
+/// `engaged` carries the engaged clutch's supplied capacity (N·m); `None` while declutched.
+/// For an engine that cannot idle `ω_floor` is rest ([`crank_guards`]).
 fn settle_crank(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
-    engaged: bool,
+    engaged: Option<f32>,
     next: [f32; 2],
     crank: CrankTick,
     #[cfg(feature = "bitprobe")] probe: &mut TransmissionProbe,
@@ -2592,21 +2671,20 @@ fn settle_crank(
         omega_over,
         dt,
     } = crank;
-    if engaged {
+    if let Some(capacity) = engaged {
         let m_next = (next[0] + next[1]) / 2.0;
         let locked = k * dir * m_next;
         let tau_impl = tau_free - (locked - omega_e) * tp.engine_inertia / dt;
         #[cfg(feature = "bitprobe")]
         {
-            let feasible = tau_impl.abs() <= tp.clutch_capacity
-                && locked >= omega_floor
-                && locked <= omega_over;
+            let feasible =
+                tau_impl.abs() <= capacity && locked >= omega_floor && locked <= omega_over;
             probe.reanchor_attempted = true;
             probe.reanchor_locked = locked;
             probe.reanchor_tau_impl = tau_impl;
             probe.reanchor_feasible = feasible;
         }
-        if tau_impl.abs() <= tp.clutch_capacity && locked >= omega_floor && locked <= omega_over {
+        if tau_impl.abs() <= capacity && locked >= omega_floor && locked <= omega_over {
             st.omega_e = locked;
         }
     }
@@ -2618,6 +2696,26 @@ fn settle_crank(
     }
 }
 
+/// The crank's two guard points this tick (rad/s): the stall floor and the over-rev bound.
+///
+/// The game's damage model: the stall guard protects an engine that can idle, whose saturated
+/// idle governor exceeds its motoring drag at the guard point. An engine short of that (no
+/// combustion, or too little) has nothing to guard, so its floor is rest: the crank runs down
+/// under drag or follows the belt through the clutch, and the guard never pulls the belt to
+/// hold a crank speed the engine cannot.
+///
+/// The over-rev bound (see [`clutch_coupling`]) sits one OVERREV_MARGIN_RPM above the rescue
+/// trigger, so the protective upshift's crank corroboration can still read past the ceiling
+/// before the clutch slip saturates.
+fn crank_guards(tp: &TransmissionParams, supply: DriveSupply) -> (f32, f32) {
+    let guard_point = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
+    let can_idle =
+        supply.combustion * tp.torque_at(tp.engine.idle_rpm) > engine_drag(tp, guard_point, 0.0);
+    let omega_floor = if can_idle { guard_point } else { 0.0 };
+    let omega_over = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
+    (omega_floor, omega_over)
+}
+
 /// Advance the joint drivetrain one fixed tick and integrate both belt speeds: the m/d
 /// superimposed model documented at module level.
 pub fn step(
@@ -2626,16 +2724,6 @@ pub fn step(
     st: &mut TransmissionState,
     inp: &TransmissionInput,
 ) -> TransmissionReport {
-    // The game's damage model: one supplied envelope feeds the scheduler, crank, coupling
-    // and steering member. Intent and the construction's service-brake capacity are unchanged.
-    let mut supplied = tp.clone();
-    for (_, torque) in &mut supplied.engine.torque_nm {
-        *torque *= inp.effectiveness;
-    }
-    supplied.peak_torque_nm *= inp.effectiveness;
-    supplied.clutch_capacity *= inp.effectiveness;
-    supplied.steer_capacity_n *= inp.effectiveness;
-    let tp = &supplied;
     let dt = inp.dt;
     let [vl, vr] = inp.speeds;
     let m = (vl + vr) / 2.0;
@@ -2682,11 +2770,19 @@ pub fn step(
     let demand_post = st.demand_n;
 
     let shaft = dir * m;
-    let current_reserve =
-        modeled_reserve_in_gear(tp, shaft, ladder[(st.gear - 1) as usize], st.demand_n);
+    let ratio = ladder[(st.gear - 1) as usize];
+    let current_reserve = modeled_reserve_in_gear(tp, inp.supply, shaft, ratio, st.demand_n);
 
-    let hill_hold_step_committed =
-        update_hill_hold(st, tp, fp, ladder, shaft, propulsive, current_reserve);
+    let hill_hold_step_committed = update_hill_hold(
+        st,
+        tp,
+        fp,
+        inp.supply,
+        ladder,
+        shaft,
+        propulsive,
+        current_reserve,
+    );
 
     let r_mean = (inp.reactions[0] + inp.reactions[1]) / 2.0;
     // Ordinary grade shifts still require a forward landing. The braked rollback rescue commits
@@ -2720,6 +2816,7 @@ pub fn step(
                 grade_landing_positive,
                 detent_turn,
                 hill_hold_step_committed,
+                supply: inp.supply,
             },
         );
     }
@@ -2744,11 +2841,7 @@ pub fn step(
     let omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
     let omega_e = st.omega_e;
     let k = g / tp.sprocket_radius;
-    let omega_floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
-    // The over-rev slip guard's crank bound (see [`clutch_coupling`]): one OVERREV_MARGIN_RPM
-    // above the rescue trigger, so the protective upshift's crank corroboration can still read
-    // past the ceiling before the clutch slip saturates.
-    let omega_over = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
+    let (omega_floor, omega_over) = crank_guards(tp, inp.supply);
 
     update_clutch_latch(st, propulsive, m);
     let engaged = !shifting && !st.clutch_out;
@@ -2783,7 +2876,7 @@ pub fn step(
         clutch_coupling(
             crank,
             tp.engine_inertia,
-            tp.clutch_capacity,
+            inp.supply.transmitted * tp.clutch_capacity,
             m,
             i_m,
             -(inp.reactions[0] + inp.reactions[1]),
@@ -2811,7 +2904,7 @@ pub fn step(
     let f_s = f_s_pre_scale * power_scale;
 
     let hill_brake_active = st.hill_hold;
-    release_hill_hold(st, tp, fp, shaft, g, dir, f_c);
+    release_hill_hold(st, tp, fp, inp.supply, shaft, g, dir, f_c);
 
     // --- Integrate the crank: J·ω̇_e = τ_free − τ_c (the transmitted torque scaled by the
     // power gate exactly as the belt-side force was — one bookkeeping for both ends of the
@@ -2837,7 +2930,7 @@ pub fn step(
     settle_crank(
         st,
         tp,
-        engaged,
+        engaged.then_some(inp.supply.transmitted * tp.clutch_capacity),
         next,
         crank,
         #[cfg(feature = "bitprobe")]

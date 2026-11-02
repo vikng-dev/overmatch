@@ -192,7 +192,7 @@ pub enum FunctionRole {
 /// A gameplay verb the tank can perform (design §7b). Closed enum — consuming systems (driving,
 /// shooting, cameras) reference variants directly. Adding one is a variant, its entry in
 /// [`Self::ALL`] and one consuming system. The *requirements* for each capability are per-tank RON data
-/// ([`TankCapabilities`]); its current degree is its effectiveness ([`capability_effectiveness`]).
+/// ([`TankCapabilities`]); each consumer reads its requirement through [`evaluate`] or [`evaluate_view`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 pub enum Capability {
     Drive,
@@ -225,6 +225,22 @@ pub enum Part {
     GunBarrel,
     CoaxMgBarrel,
     BowMgBarrel,
+}
+
+impl Part {
+    /// Whether this part names a crew station, whose quality is its occupant's competence,
+    /// rather than a module function, whose quality is its pool's held share.
+    pub fn is_crew(self) -> bool {
+        match self {
+            Part::Commander | Part::Gunner | Part::Loader | Part::Driver | Part::BowGunner => true,
+            Part::Engine
+            | Part::Transmission
+            | Part::Breech
+            | Part::GunBarrel
+            | Part::CoaxMgBarrel
+            | Part::BowMgBarrel => false,
+        }
+    }
 }
 
 impl From<CrewStation> for Part {
@@ -283,9 +299,20 @@ pub enum GradedGroup {
 pub type Requirement = Vec<Group>;
 
 /// Per-tank capability requirements, loaded from the `.tank.ron` spec sheet and inserted on the tank
-/// entity at bind time. Drives [`capability_effectiveness`] — the single gate consuming systems query.
+/// entity at bind time. Its consumer is the drive selector, `track::sim::drive_target`.
 #[derive(Component, Clone, Debug)]
 pub struct TankCapabilities(pub std::collections::HashMap<Capability, Requirement>);
+
+impl TankCapabilities {
+    /// The requirement the sheet states for `capability`.
+    pub fn requirement(&self, capability: Capability) -> &Requirement {
+        self.0.get(&capability).unwrap_or_else(|| {
+            panic!(
+                "{capability:?}: TankSpec::validate refuses a sheet that does not state every capability"
+            )
+        })
+    }
+}
 
 /// An ammunition volume. Depletion triggers a cookoff: every crew HP pool is emptied.
 #[derive(Component)]
@@ -510,29 +537,6 @@ pub struct VolumeFacets {
     pub repair: Option<&'static repair::ModuleRepair>,
 }
 
-/// How well this capability is currently served on this tank, ∈ [0, 1] (0 = unavailable, 1 = full)
-/// — the *effectiveness* (design §7b). Resolves each [`Part`]'s live quality (crew in action →
-/// occupant competence; module → held share of its HP pool), then combines via
-/// [`evaluate`]. Requirements are per-tank RON data ([`TankCapabilities`]); the query walks the
-/// tank's volumes once. An entity without volumes or capabilities is not a bound tank, and serves
-/// nothing (0).
-pub fn capability_effectiveness(
-    tank_volumes: Option<&TankVolumes>,
-    tank_caps: Option<&TankCapabilities>,
-    capability: Capability,
-    volumes: &Query<VolumeFacets>,
-) -> f32 {
-    let (Some(tank_volumes), Some(tank_caps)) = (tank_volumes, tank_caps) else {
-        return 0.0;
-    };
-    let requirement = tank_caps.0.get(&capability).unwrap_or_else(|| {
-        panic!(
-            "{capability:?}: TankSpec::validate refuses a sheet that does not state every capability"
-        )
-    });
-    evaluate(requirement, &part_qualities(tank_volumes, volumes))
-}
-
 /// The live quality of each [`Part`] on a tank — the shared core behind *every* requirement check
 /// (a tank-wide [`Capability`], a servo's slew gate, a weapon's fire gate or load rate): resolve once per
 /// tank, then [`evaluate`] any number of requirements against it. Crew in action → competence
@@ -568,7 +572,28 @@ pub fn part_qualities(
 /// `member = coeff × Π(part qualities)`; `group = Single part / Pool capped-sum / Backup max`;
 /// `capability = min across groups`. A part absent from `quality` scores 0.
 pub fn evaluate(requirement: &Requirement, quality: &std::collections::HashMap<Part, f32>) -> f32 {
-    let part_quality = |p: Part| quality.get(&p).copied().unwrap_or(0.0);
+    evaluate_parts(requirement, |p| quality.get(&p).copied().unwrap_or(0.0))
+}
+
+/// The game's damage model: a requirement read through one view of its parts. Parts `seen`
+/// selects keep their live quality; every other part counts whole. A consumer whose parts act at
+/// different places in one mechanism reads each view where that part acts (Drive's crew, engine
+/// and transmission: `track::sim::drive_target`).
+pub fn evaluate_view(
+    requirement: &Requirement,
+    quality: &std::collections::HashMap<Part, f32>,
+    seen: impl Fn(Part) -> bool,
+) -> f32 {
+    evaluate_parts(requirement, |p| {
+        if seen(p) {
+            quality.get(&p).copied().unwrap_or(0.0)
+        } else {
+            1.0
+        }
+    })
+}
+
+fn evaluate_parts(requirement: &Requirement, part_quality: impl Fn(Part) -> f32) -> f32 {
     let member_quality =
         |(coeff, parts): &Member| parts.iter().fold(*coeff, |q, p| q * part_quality(*p));
 
@@ -614,7 +639,7 @@ pub fn requirement_effectiveness(
 /// folds together the three things those systems always reach for as a unit — *which* tank is
 /// controlled, *where its parts are* ([`Rig`]), and *what it can still do* (capabilities) — so a
 /// system takes one `ControlledTank` param instead of repeating a controlled-tank query, a
-/// [`VolumeFacets`] query, and a `capability_effectiveness(..)` call. Scoped to the single [`Controlled`]
+/// [`VolumeFacets`] query, and a requirement evaluation. Scoped to the single [`Controlled`]
 /// tank; per-tank consumers (`track::sim::apply_track_forces`, the HUD) keep using [`VolumeFacets`]
 /// directly since they iterate every tank.
 #[derive(SystemParam)]

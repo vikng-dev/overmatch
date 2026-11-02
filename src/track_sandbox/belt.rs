@@ -226,7 +226,7 @@ pub(super) fn apply_belt_support_field(
         &transmission.0,
         &mut trans_state.0,
         &TransmissionInput {
-            effectiveness: 1.0,
+            supply: transmission::DriveSupply::WHOLE,
             throttle: shaped.0.throttle,
             steer: shaped.0.steer,
             side_commands,

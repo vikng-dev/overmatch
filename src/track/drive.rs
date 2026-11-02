@@ -15,27 +15,26 @@ pub struct DriveAxes {
     pub steer: f32,
 }
 
-/// What the driver does with the controls this tick.
+/// The game's damage model: what happens at the controls this tick, and what the drivetrain
+/// supplies to it. A brake hold changes the intent, never the supply.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum DriveTarget {
-    /// Chase these axes. Zero is a released throttle: the tank coasts under engine drag.
-    Axes { axes: DriveAxes, effectiveness: f32 },
-    /// Release both axes and hold the service brakes: the tank brakes to a stop, then the parking
-    /// latch holds it (`transmission::TransmissionInput::brake`).
-    Brake { effectiveness: f32 },
+pub struct DriveTarget {
+    pub intent: DriveIntent,
+    pub supply: super::transmission::DriveSupply,
 }
 
-impl DriveTarget {
-    /// The axes, brake hold and available torque share. Holding brakes does not change supply.
-    pub fn split(self) -> (DriveAxes, bool, f32) {
-        match self {
-            Self::Axes {
-                axes,
-                effectiveness,
-            } => (axes, false, effectiveness),
-            Self::Brake { effectiveness } => (DriveAxes::default(), true, effectiveness),
-        }
-    }
+/// Who acts on the controls this tick.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum DriveIntent {
+    /// The driver chases these axes. Zero is a released throttle: the tank coasts under engine
+    /// drag.
+    Axes(DriveAxes),
+    /// Release both axes and hold the service brakes: the tank brakes to a stop, then the parking
+    /// latch holds it (`transmission::TransmissionInput::brake`).
+    Brake,
+    /// The game's damage model: nobody serves the Driver station, so no command exists. The
+    /// controls are released at once and nothing brakes; the tank coasts, and parks at rest.
+    Unmanned,
 }
 
 /// Command slew (per second): the vehicle's input shaping, separate from the transmission's belt dynamics —

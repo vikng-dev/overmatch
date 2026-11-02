@@ -124,7 +124,7 @@ fn tiger_tp() -> TransmissionParams {
 
 fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> TransmissionInput {
     TransmissionInput {
-        effectiveness: 1.0,
+        supply: DriveSupply::WHOLE,
         throttle,
         steer,
         side_commands: [
@@ -490,10 +490,10 @@ fn hill_hold_margin_short_capable_gear_can_release() {
 
     fp.inertia = TIGER_BELT_INERTIA;
     tp.clutch_capacity = tp.torque_at(0.0);
-    let modeled = available_force_in_gear(&tp, 0.0, tp.gears_fwd[0]);
+    let modeled = available_force_in_gear(&tp, DriveSupply::WHOLE, 0.0, tp.gears_fwd[0]);
     let demand = modeled - 10_000.0;
     assert!(
-        modeled - demand < reserve_margin(&fp, &tp, demand),
+        modeled - demand < reserve_margin(&fp, &tp, DriveSupply::WHOLE, demand),
         "fixture gear must be capable but margin-short"
     );
     let mut st = TransmissionState {
@@ -533,7 +533,7 @@ fn hill_hold_release_cooldown_never_overridden_then_relatches() {
 
     fp.inertia = TIGER_BELT_INERTIA;
     tp.clutch_capacity = tp.torque_at(0.0);
-    let modeled = available_force_in_gear(&tp, 0.0, tp.gears_fwd[0]);
+    let modeled = available_force_in_gear(&tp, DriveSupply::WHOLE, 0.0, tp.gears_fwd[0]);
     let release_demand = modeled - 10_000.0;
     let mut st = TransmissionState {
         omega_e: tp.engine.idle_rpm * RPM_TO_RAD,
@@ -678,12 +678,12 @@ fn correction_priority_fixture() -> (ForceParams, TransmissionParams, f32, f32) 
         (4_000.0, 2_000.0),
     ];
     let shaft = 1_800.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[1];
-    let current = available_force_in_gear(&tp, shaft, tp.gears_fwd[1]);
-    let lower = available_force_in_gear(&tp, shaft, tp.gears_fwd[0]);
-    let upper = available_force_in_gear(&tp, shaft, tp.gears_fwd[2]);
+    let current = available_force_in_gear(&tp, DriveSupply::WHOLE, shaft, tp.gears_fwd[1]);
+    let lower = available_force_in_gear(&tp, DriveSupply::WHOLE, shaft, tp.gears_fwd[0]);
+    let upper = available_force_in_gear(&tp, DriveSupply::WHOLE, shaft, tp.gears_fwd[2]);
     let demand = current + 12_000.0;
-    assert!(lower - demand >= reserve_margin(&fp, &tp, demand));
-    assert!(upper - demand >= reserve_margin(&fp, &tp, demand));
+    assert!(lower - demand >= reserve_margin(&fp, &tp, DriveSupply::WHOLE, demand));
+    assert!(upper - demand >= reserve_margin(&fp, &tp, DriveSupply::WHOLE, demand));
     (fp, tp, shaft, demand)
 }
 
@@ -719,7 +719,8 @@ fn confirmed_deficit_precedes_upshift_arm() {
         "fixture's predicted F3 landing must clear the fix-1a gate (the landing leg)"
     );
     assert!(
-        modeled_reserve_in_gear(&tp, shaft, g_up, demand) >= reserve_margin(&fp, &tp, demand),
+        modeled_reserve_in_gear(&tp, DriveSupply::WHOLE, shaft, g_up, demand)
+            >= reserve_margin(&fp, &tp, DriveSupply::WHOLE, demand),
         "fixture's F3 reserve must clear the margin (the reserve leg)"
     );
     let contender = |grade_confirm_ticks: u8| TransmissionState {
@@ -772,21 +773,21 @@ fn confirmed_deficit_defers_through_post_upshift_dwell() {
     let (fp, tp, shaft, _) = correction_priority_fixture();
     // A SHALLOW deficit: 4 kN below zero reserve, well inside the margin scale
     // (the demand fraction plus vehicle-scale resolution), so the deferral — not the deep override — owns it.
-    let current = available_force_in_gear(&tp, shaft, tp.gears_fwd[1]);
+    let current = available_force_in_gear(&tp, DriveSupply::WHOLE, shaft, tp.gears_fwd[1]);
     let demand = current + 4_000.0;
     assert!(
-        demand - current < reserve_margin(&fp, &tp, demand),
+        demand - current < reserve_margin(&fp, &tp, DriveSupply::WHOLE, demand),
         "fixture must be a SHALLOW deficit (depth {} vs margin {})",
         demand - current,
-        reserve_margin(&fp, &tp, demand)
+        reserve_margin(&fp, &tp, DriveSupply::WHOLE, demand)
     );
     assert!(
         shaft * tp.gears_fwd[1] / tp.sprocket_radius / RPM_TO_RAD > tp.shift_up_rpm,
         "fixture must keep the ordinary upshift arm live above the band"
     );
     assert!(
-        available_force_in_gear(&tp, shaft, tp.gears_fwd[2]) - demand
-            >= reserve_margin(&fp, &tp, demand),
+        available_force_in_gear(&tp, DriveSupply::WHOLE, shaft, tp.gears_fwd[2]) - demand
+            >= reserve_margin(&fp, &tp, DriveSupply::WHOLE, demand),
         "fixture's upper gear must be capable — the upshift is refused by the HOLD, \
              not by its own reserve gate"
     );
@@ -839,7 +840,8 @@ fn steep_grade_after_upshift_corrects_before_lug() {
     let f4 = tp.gears_fwd[3];
     let shaft0 = 980.0 * RPM_TO_RAD * tp.sprocket_radius / f4;
     assert!(
-        demand - available_force_in_gear(&tp, shaft0, f4) > reserve_margin(&fp, &tp, demand),
+        demand - available_force_in_gear(&tp, DriveSupply::WHOLE, shaft0, f4)
+            > reserve_margin(&fp, &tp, DriveSupply::WHOLE, demand),
         "fixture must be a deep deficit for F4"
     );
     let mut st = TransmissionState {
@@ -1232,7 +1234,7 @@ fn flat_downshift_window_does_not_latch_hill_hold() {
     let mut fp = lab_fp();
 
     fp.inertia = TIGER_BELT_INERTIA;
-    let residual = reserve_floor(&fp, &tp) * 0.5; // DERIVED fixture: below model/contact resolution.
+    let residual = reserve_floor(&fp, &tp, DriveSupply::WHOLE) * 0.5; // DERIVED fixture: below model/contact resolution.
     let mut st = TransmissionState {
         gear: 3,
         demand_n: residual,
@@ -1877,7 +1879,7 @@ fn protective_upshift_fires_under_brake_steer_and_fuel_cut() {
     let g4 = tp.gears_fwd[3];
     let shaft = overrun_rpm * RPM_TO_RAD * tp.sprocket_radius / g4;
     assert_eq!(
-        available_force_in_gear(&tp, shaft, g4),
+        available_force_in_gear(&tp, DriveSupply::WHOLE, shaft, g4),
         0.0,
         "fixture must sit past the fuel cut, where every gear's modeled force is zero"
     );
@@ -1985,7 +1987,7 @@ fn confirmed_deficit_without_target_falls_through_to_legal_upshift() {
     let shaft = dead_zone_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[4];
     let demand = 20_000.0;
     assert_eq!(
-        available_force_in_gear(&tp, shaft, tp.gears_fwd[4]),
+        available_force_in_gear(&tp, DriveSupply::WHOLE, shaft, tp.gears_fwd[4]),
         0.0,
         "fixture must sit in the fuel-cut dead zone (zero modeled force in-gear)"
     );
@@ -2353,7 +2355,7 @@ fn brake_hold_stops_a_rolling_tank_and_parks_it() {
         let mut trace = Vec::new();
         for _ in 0..320 {
             let inp = TransmissionInput {
-                effectiveness: 1.0,
+                supply: DriveSupply::WHOLE,
                 brake,
                 ..input(0.0, 0.0, speeds, [-5_000.0, -5_000.0])
             };
@@ -3522,15 +3524,18 @@ fn reserve_resolution_scales_with_drive_and_contact_capacity() {
     let mut fp = lab_fp();
     let mut tp = lab_tp();
     let demand = 20_000.0; // Fixture demand (N).
-    let before = reserve_margin(&fp, &tp, demand);
+    let before = reserve_margin(&fp, &tp, DriveSupply::WHOLE, demand);
     let scale = 4.0; // Fixture force/mass scale, dimensionless.
     fp.grip.as_mut().unwrap().side_weight *= scale;
     tp.peak_torque_nm *= scale;
     tp.clutch_capacity *= scale;
-    assert!((reserve_margin(&fp, &tp, demand * scale) - before * scale).abs() < 0.01);
-    let firm = reserve_floor(&fp, &tp);
+    assert!(
+        (reserve_margin(&fp, &tp, DriveSupply::WHOLE, demand * scale) - before * scale).abs()
+            < 0.01
+    );
+    let firm = reserve_floor(&fp, &tp, DriveSupply::WHOLE);
     fp.grip.as_mut().unwrap().ground = crate::substances::contact_friction(0.001);
-    assert!(reserve_floor(&fp, &tp) < firm);
+    assert!(reserve_floor(&fp, &tp, DriveSupply::WHOLE) < firm);
 }
 
 /// An individually finite authoring cannot publish unusable derived ratios. The live coupling
@@ -3557,34 +3562,72 @@ fn derived_parameter_overflow_is_refused_at_construction() {
     );
 }
 
-/// The game's damage model: a small positive torque supply must engage under a full command.
-/// Fixture pools are 30 / 336 HP; command thresholds must never turn that share into zero drive.
+/// The game's damage model: under a full command the clutch latches at any positive combustion
+/// share (intent thresholds read the command, never the share), and a half engine pulls away
+/// more weakly than a whole one. Full reverse while rolling brakes at full service capacity
+/// through `step` whatever the engine supplies: brakes are construction. A step that scales the
+/// service brakes, or a command threshold that turns a small share into no drive, fails here.
+/// Fixture pools are 30, 168 and 336 of 336 HP; the belts run free of ground reactions.
 #[test]
 fn reduced_supply_pulls_away_and_retains_full_service_brakes() {
     let fp = lab_fp();
     let tp = lab_tp();
-    let mut full = input(1.0, 0.0, [0.0; 2], [0.0; 2]);
-    let full_report = step(&fp, &tp, &mut fresh(&tp), &full);
-    full.effectiveness = 30.0 / 336.0;
-    let mut state = fresh(&tp);
-    let reduced = step(&fp, &tp, &mut state, &full);
-    assert!(!state.clutch_out);
-    assert!(reduced.forces.iter().all(|force| *force > 0.0));
-    assert!(reduced.forces[0] < full_report.forces[0]);
+    let reduced_engine = DriveSupply {
+        combustion: 30.0 / 336.0,
+        ..DriveSupply::WHOLE
+    };
+    let speeds = [1.0, 0.5, reduced_engine.combustion].map(|combustion| {
+        let mut state = fresh(&tp);
+        let mut speeds = [0.0; 2];
+        for _ in 0..64 {
+            let mut full = input(1.0, 0.0, speeds, [0.0; 2]);
+            full.supply.combustion = combustion;
+            speeds = step(&fp, &tp, &mut state, &full).next_speeds;
+            assert!(
+                !state.clutch_out,
+                "share {combustion}: the clutch must latch"
+            );
+        }
+        speeds[0]
+    });
+    assert!(
+        0.0 < speeds[1] && speeds[1] < speeds[0],
+        "a half engine pulls away weakly: {speeds:?}"
+    );
+
+    let rolling = TransmissionState {
+        park: false,
+        ..fresh(&tp)
+    };
     let mut reverse = input(-1.0, 0.0, [10.0; 2], [0.0; 2]);
-    reverse.effectiveness = full.effectiveness;
-    let intent = driver_intent(&reverse, false, false, 10.0);
-    assert_eq!(intent.service, 1.0);
-    let mut q = [0.0; 2];
-    let mut rolling = fresh(&tp);
-    rolling.park = false;
-    apply_brake_stop_forces(&mut q, &tp, &fp, &rolling, &reverse, intent.service, false);
-    assert_eq!(q, [-tp.brake_capacity_n; 2]);
-    let mut absent = input(1.0, 1.0, [0.0; 2], [0.0; 2]);
-    absent.effectiveness = 0.0;
+    let (mut whole_state, mut braked_state) = (rolling, rolling);
+    let whole = step(&fp, &tp, &mut whole_state, &reverse);
+    reverse.supply = reduced_engine;
+    let braked = step(&fp, &tp, &mut braked_state, &reverse);
+    assert_eq!(
+        braked.forces, whole.forces,
+        "at idle with no fueling, a reduced engine changes nothing the brakes or drag do"
+    );
+    assert!(
+        braked
+            .forces
+            .iter()
+            .all(|force| *force <= -tp.brake_capacity_n),
+        "full service brakes plus engine braking: {:?}",
+        braked.forces
+    );
+
+    let mut no_transmission = input(1.0, 1.0, [0.0; 2], [0.0; 2]);
+    no_transmission.supply = DriveSupply {
+        transmitted: 0.0,
+        ..DriveSupply::WHOLE
+    };
     let mut state = fresh(&tp);
-    let report = step(&fp, &tp, &mut state, &absent);
-    assert_eq!(report.forces, [0.0; 2]);
+    let report = step(&fp, &tp, &mut state, &no_transmission);
+    assert_eq!(
+        report.forces, [0.0; 2],
+        "a transmission out of action transmits nothing"
+    );
     assert_eq!(report.next_speeds, [0.0; 2]);
     assert!(state.omega_e.is_finite());
 }

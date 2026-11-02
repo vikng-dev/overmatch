@@ -169,10 +169,23 @@ fn module_status(
         Some(fraction) => format!("REPAIR {:.0}%", (fraction * 100.0).floor()),
         None if health.is_empty() => "OUT OF ACTION".to_owned(),
         None if health.held() < health.capacity() => format!(
-            "RATE {:.0}%",
-            100.0 * health.held() as f32 / health.capacity() as f32
+            "RATE {}%",
+            served_percent(health.held() as f32 / health.capacity() as f32)
         ),
         None => "READY".to_owned(),
+    }
+}
+
+/// A served share as a whole percent the player can act on: a share that still serves never
+/// reads 0, and one short of whole never reads 100.
+fn served_percent(share: f32) -> i32 {
+    let percent = (share * 100.0).round() as i32;
+    if share <= 0.0 {
+        0
+    } else if share >= 1.0 {
+        100
+    } else {
+        percent.clamp(1, 99)
     }
 }
 
@@ -242,9 +255,11 @@ fn update_status_panel(
     // The game's damage model: the same selector supplies the sim and the readout,
     // including phase and repair brake holds. Sight access has no rate consumer.
     let quality = part_qualities(volumes, &facets);
-    let (_, held, available) =
-        crate::track::sim::drive_target(command, Some(volumes), Some(caps), &facets).split();
-    let drive = if held { 0.0 } else { available };
+    let target = crate::track::sim::drive_target(command, Some(volumes), Some(caps), &facets);
+    let drive = match target.intent {
+        crate::track::drive::DriveIntent::Axes(_) => target.supply.share(),
+        crate::track::drive::DriveIntent::Brake | crate::track::drive::DriveIntent::Unmanned => 0.0,
+    };
 
     // Weapons: name + per-fire-mode state, flagged `no-fire` when the fire gate is unmet (knocked-out
     // gunner/loader/breech). A `Single` reads as the classic READY / reload countdown; an
@@ -336,7 +351,7 @@ fn update_status_panel(
     let card = format!(
         "{state}\nCrew {alive}/{total}\n{} {}%\nWeapons: {}{round_lines}\n{repair_hint}{module_lines}",
         Capability::Drive.label(),
-        (drive * 100.0).round() as i32,
+        served_percent(drive),
         weapon_line,
     );
     set_text(text.reborrow(), &card);
@@ -472,6 +487,26 @@ mod tests {
             module_status(&health, &crate::damage::repair::ModuleRepair::default()),
             "RATE 10%"
         );
+    }
+
+    /// The game's damage model: a module that still serves must not read as out of action, and
+    /// one below capacity must not read as whole, since repair and driving both act on that
+    /// difference. Fixture: 1 and 335 of 336 HP.
+    #[test]
+    fn a_rate_names_a_serving_pool_above_zero_and_a_short_one_below_whole() {
+        let row = |held: u32| {
+            module_status(
+                &crate::ballistics::ComponentHealth::holding(
+                    336,
+                    held * crate::ballistics::POOL_UNITS_PER_HP,
+                ),
+                &crate::damage::repair::ModuleRepair::default(),
+            )
+        };
+        assert_eq!(row(1), "RATE 1%");
+        assert_eq!(row(335), "RATE 99%");
+        assert_eq!(served_percent(0.0), 0);
+        assert_eq!(served_percent(1.0), 100);
     }
 
     const AUTO: FireCycle = FireCycle::Automatic {

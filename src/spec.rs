@@ -1250,7 +1250,7 @@ pub struct TankSpec {
     pub views: HashMap<ViewKind, ViewSpec>,
     /// Per-tank capability requirements (design §7b). Each capability maps to a list of requirement
     /// groups (AND'd): a bare `Part` is mandatory; `Pool(..)`/`Backup(..)` express graded redundancy.
-    /// Drives [`crate::damage::capability_effectiveness`] — the single gate consuming systems query.
+    /// Read by the drive selector, `track::sim::drive_target`.
     /// Required; `{}` gates no capability.
     pub capabilities: HashMap<Capability, Requirement>,
 }
@@ -1781,6 +1781,19 @@ impl TankSpec {
             return Err(format!(
                 "capabilities states no `{}` — key every capability, `[]` for an ungated one",
                 missing.label()
+            )
+            .into());
+        }
+        // The game's damage model: the drive law reads Drive's crew, its engine (combustion) and
+        // its transmission (transmitted capacity), each where it acts. Any other module has no
+        // drivetrain quantity it produces, so it would be silently ignored.
+        if let Some(part) = requirement_parts(&self.capabilities[&Capability::Drive])
+            .into_iter()
+            .find(|part| !part.is_crew() && !matches!(part, Part::Engine | Part::Transmission))
+        {
+            return Err(format!(
+                "capabilities[Drive] requires {part:?}, a module the drive law has no quantity \
+                 for; Drive reads crew stations, Engine and Transmission only, so drop it"
             )
             .into());
         }
@@ -3356,6 +3369,29 @@ TankSpec(
         assert!(
             err.contains("Drive"),
             "the refusal names the capability: {err}"
+        );
+    }
+
+    /// The game's damage model: the drive law reads only Drive's crew, engine and transmission.
+    /// A sheet whose Drive names another module would have that module silently ignored, so
+    /// `validate` refuses it and names the part.
+    #[test]
+    fn validate_refuses_a_drive_requirement_naming_a_module_the_drive_law_lacks() {
+        let mut spec = fixture();
+        let provided = spec
+            .volumes
+            .values()
+            .filter_map(VolumeSpec::component)
+            .filter_map(|volume| volume.function)
+            .map(Part::from)
+            .find(|part| !matches!(part, Part::Engine | Part::Transmission))
+            .expect("the fixture sheet declares a weapon module");
+        spec.capabilities
+            .insert(Capability::Drive, vec![Group::Single(provided)]);
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("capabilities[Drive]") && err.contains(&format!("{provided:?}")),
+            "the refusal names the field and the part: {err}"
         );
     }
 
