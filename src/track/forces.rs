@@ -11,8 +11,8 @@
 //! The model, per station segment × three lateral collocation columns:
 //! - **Support**: directional field depth at pin/mid/pin on the contact envelope (the outer
 //!   face pushed out by the drooped suspension's maximum reach) → two-piece clipped-linear
-//!   pressure profile → spring plus a damper on the depth's rate, soft engagement ramp, along the
-//!   surface's normal (the field's depth gradient; a piece's face is the belt's plane), applied
+//!   pressure profile → spring plus normal-velocity damping, soft engagement ramp, along the
+//!   struck surface's normal (piece orientation is a stand-in; architecture §5a), applied
 //!   at the profile centroid on the terrain surface. Traction lies in that surface's plane, so a
 //!   hull rolling along flat ground under a tilted belt run neither compresses nor shears it.
 //!   Ground intruding into the envelope→rest band IS the suspension compression. The reach is
@@ -32,7 +32,9 @@ use bevy::ecs::entity::Entity;
 use bevy::math::{Affine3A, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
-use super::oracle::TerrainOracle;
+#[cfg(test)]
+use super::oracle::ContactOracle;
+use super::oracle::{TerrainContact, TerrainOracle};
 use super::rubble::{RubbleBodies, Slab, SlabOverlap};
 
 use super::route::{polyline_len, resample};
@@ -384,10 +386,10 @@ pub struct BeltContact {
     pub point: Vec3,
     pub load: f32,
     pub load_elastic: f32,
-    /// The support's rate along the normal at this patch (N/m): the per-metre spring over the
-    /// patch's contacting length, at its column's weight, with the engagement ramp's slope of
-    /// the spring and of a closing damper (DERIVED: the load's rate under a uniform normal
-    /// displacement at the tick's closing speed). The recipient's reaction law
+    /// The profile's support rate per metre of probe depth (N/m): the per-metre spring over
+    /// the patch's contacting length, at its column's weight, including the engagement ramp's
+    /// slope of the spring and closing damper. For a piece's belt-parallel overlap face this
+    /// is also its normal stiffness. The recipient's reaction law
     /// reads it as the stiffness the explicit step integrates (`track::rubble::piece_impulses`).
     pub stiffness: f32,
     /// Normal damping rate of this patch (N·s/m), including engagement and column weight.
@@ -792,31 +794,6 @@ fn probe_depths<O: TerrainOracle>(
     depths
 }
 
-/// The step (m) of the depth gradient's differences along the segment and the pin axis.
-/// `Resolution`: well under the field's finest feature (the block field's 3 cm edge rounding,
-/// `oracle`) so the gradient is the local surface's, and far over f32 position rounding at map
-/// scale (about 6e-5 m at 1 km, DERIVED), so the difference is not rounding noise.
-const DEPTH_GRADIENT_STEP_M: f32 = 0.01;
-
-/// The field's depth gradient at a probe: how much deeper the probe's depth along `out` reads per
-/// metre the probe moves, as a world vector. Along `out` it is exactly 1 by the oracle's
-/// directional contract (a probe moved down its own ray reads that much deeper); along the
-/// segment `axis` and the pin axis `lat` it is a one-sided difference over
-/// [`DEPTH_GRADIENT_STEP_M`]. On a surface parallel to the belt it is `out`; on flat ground under a
-/// tilted belt it points straight down, `1/cos` long. `probe` is the query point, its reach and
-/// the depth already read there.
-fn depth_gradient<O: TerrainOracle>(
-    oracle: &O,
-    (point, reach, depth): (Vec3, f32, f32),
-    (out, axis, lat): (Vec3, Vec3, Vec3),
-) -> Vec3 {
-    let slope = |dir: Vec3| {
-        (oracle.depth_along(point + dir * DEPTH_GRADIENT_STEP_M, out, reach) - depth)
-            / DEPTH_GRADIENT_STEP_M
-    };
-    out + axis * slope(axis) + lat * slope(lat)
-}
-
 /// Fold one support patch into its element's probe record: the load-weighted point, the loads
 /// and the normal. Measurement builds only.
 #[cfg(feature = "bitprobe")]
@@ -835,8 +812,8 @@ fn probe_patch(
     output.normal = normal;
 }
 
-/// A patch's support load (N): the spring on its profile `area` (m²) and the damper on its depth
-/// rate `closing` (m/s) over its contacting `length`, never pulling, at its column's `weight` of
+/// A patch's support load (N): the spring on its profile `area` (m²) and the damper on normal
+/// closing speed (m/s) over its contacting `length`, never pulling, at its column's `weight` of
 /// the per-metre coefficients and through the engagement ramp `engage`.
 fn support_load(
     params: &ForceParams,
@@ -850,7 +827,7 @@ fn support_load(
         * engage
 }
 
-/// The support force's derivative under a uniform normal displacement, at `closing` m/s. The
+/// The profile load's derivative under uniform probe-depth displacement, at `closing` m/s. The
 /// profile area's derivative is its contacting length; inside soft engagement the ramp scales
 /// the spring's force and the damper's, so both contribute its slope. A parting damper's
 /// negative slope is left out: the stability bound stays conservative.
@@ -1001,14 +978,6 @@ fn collect_column_contacts<O: TerrainOracle>(
                 travel.map(|travel| params.probe_reach + travel),
             );
             let pen = probes;
-            // The field's depth gradient, read once per column at its mid probe when a field
-            // patch first needs it.
-            let mid_probe = (
-                (ca + cb) / 2.0 + face_m,
-                params.probe_reach + travel[1],
-                pen[1],
-            );
-            let mut field_gradient: Option<Vec3> = None;
             #[cfg(feature = "bitprobe")]
             let probe_index = {
                 let (query_a, query_m, query_b) =
@@ -1087,31 +1056,27 @@ fn collect_column_contacts<O: TerrainOracle>(
                 let t_c = sample_halves(x_c, len, travel);
                 let p = ca + axis * x_c + out * (params.face_offset + t_c - pen_c);
 
-                // Support: penalty spring and damper on the depth, at the column's share of the
-                // per-metre coefficients, pushing along the surface's own normal (the depth's
-                // gradient). The damper reads the depth's rate, the gradient against the hull's
-                // velocity relative to the surface at `p` (on the ray, so the probe direction's
-                // turning is in it too): a hull gliding along its surface changes no depth and is
-                // damped by nothing, however its belt is tilted. A piece's face is the belt's own
-                // plane (`track::rubble`), so its gradient is the probe direction itself. The
-                // recipient's reaction law (`track::rubble::piece_impulses`) runs later: a body the
-                // explicit step integrates this spring against stably takes the whole opposite
-                // force; any other takes a sequentially clamped impulse. Clamped sizing reads the
-                // recipient's velocity after preceding pushes; whole-force sizing reads no
-                // velocity.
-                let hull_vel = vel_at(p);
-                let (vel, normal, closing) = match collider {
-                    Some(collider) => {
-                        let vel = hull_vel - pieces.velocity_at(collider, p);
-                        (vel, -out, out.dot(vel))
-                    }
+                // The surface owns the support direction. The damper sees only the contact
+                // point's normal velocity, bounded by its speed. A piece's coarse overlap face
+                // is parallel to the belt (orientation stand-in; architecture §5a).
+                let (p, normal) = match collider {
+                    Some(_) => (p, -out),
                     None => {
-                        let gradient = *field_gradient.get_or_insert_with(|| {
-                            depth_gradient(oracle, mid_probe, (out, axis, lat_axis))
-                        });
-                        (hull_vel, -gradient.normalize(), gradient.dot(hull_vel))
+                        let query = ca + axis * x_c + out * (params.face_offset + t_c);
+                        match oracle.contact_along(query, out, params.probe_reach + t_c) {
+                            TerrainContact::Hit { depth, normal } => (query - out * depth, *normal),
+                            // No surface was struck: an open gap or a fully buried probe carries
+                            // no support, even if the profile's other stations report depth.
+                            TerrainContact::Miss | TerrainContact::Buried => continue,
+                        }
                     }
                 };
+                let hull_vel = vel_at(p);
+                let vel = match collider {
+                    Some(collider) => hull_vel - pieces.velocity_at(collider, p),
+                    None => hull_vel,
+                };
+                let closing = -normal.dot(vel);
                 let engage = (pen_max / params.engage_depth).clamp(0.0, 1.0);
                 let load_elastic = weight * params.support_stiffness_per_m * area * engage;
                 let stiffness =
@@ -1489,6 +1454,18 @@ mod tests {
         }
     }
 
+    impl ContactOracle for FlatGround {
+        fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
+            if out.y >= 0.0 {
+                return TerrainContact::Miss;
+            }
+            TerrainContact::Hit {
+                depth: self.depth_along(station, out, reach),
+                normal: bevy::math::Dir3::Y,
+            }
+        }
+    }
+
     /// A closed rectangular pin-line loop in the side plane (z, y), bottom run traversed +z
     /// so its outward normal points DOWN (`out2 = (tan.y, −tan.x)`). `bottom_y` positions the
     /// pin line; the contact face sits `face_offset` further out.
@@ -1573,6 +1550,11 @@ mod tests {
                 FlatGround { surface_y: 0.0 }.depth_along(station, out, reach)
             }
         }
+        impl ContactOracle for CountedGround {
+            fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
+                FlatGround { surface_y: 0.0 }.contact_along(station, out, reach)
+            }
+        }
         let loop_pts = rect_loop(0.02);
         let input = SideInput {
             loop_pts: &loop_pts,
@@ -1599,10 +1581,10 @@ mod tests {
                 |_| Vec3::ZERO,
                 &mut GripElements::for_links(input.count),
             );
-            // Each field contact also reads its depth gradient, two difference casts.
+            // CountedGround counts scalar profile casts; the contact query is separate.
             let raw = report.bitprobe_contacts.len() * 3;
             assert!(
-                oracle.calls.get() - 2 * report.contacts.len() < raw,
+                oracle.calls.get() < raw,
                 "straight neighbours must share their pin casts"
             );
             for contact in &report.bitprobe_contacts {
@@ -1640,6 +1622,18 @@ mod tests {
                 return -reach;
             }
             (station.y - self.under_y).min(reach)
+        }
+    }
+
+    impl ContactOracle for Ceiling {
+        fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
+            if out.y <= 0.0 {
+                return TerrainContact::Miss;
+            }
+            TerrainContact::Hit {
+                depth: self.depth_along(station, out, reach),
+                normal: bevy::math::Dir3::NEG_Y,
+            }
         }
     }
 
@@ -2038,7 +2032,7 @@ mod tests {
     /// does not see) fails here.
     ///
     /// FIXTURE DATA: an asymmetric loop, its 2 m bottom run between approach runs rising 26.6°
-    /// ahead and 20.6° behind, 0.1 m of travel tapering to 0 at the run ends, its rest face 5 cm
+    /// behind (+z) and 20.6° ahead (-z), 0.1 m of travel tapering to 0 at the run ends, its rest face 5 cm
     /// above directional flat ground; the rig's spring, damper and grip; 2 and 10 m/s over 64 ticks.
     #[test]
     fn a_hull_rolling_on_flat_ground_under_tilted_runs_needs_no_drive_force() {
@@ -2083,6 +2077,34 @@ mod tests {
                     |_| Vec3::new(0.0, 0.0, -speed),
                     &mut elems,
                 );
+                let parked = contact_side(
+                    &input,
+                    SideState {
+                        speed: 0.0,
+                        ..state
+                    },
+                    affine,
+                    1.0 / 64.0,
+                    &params,
+                    &crate::track::envelope::FlatRest,
+                    &RubbleBodies::default(),
+                    |_| Vec3::ZERO,
+                    &mut GripElements::for_links(input.count),
+                );
+                assert_eq!(
+                    report.contacts.len(),
+                    parked.contacts.len(),
+                    "rolling tangentially must not change which springs carry load"
+                );
+                for (moving, rest) in report.contacts.iter().zip(&parked.contacts) {
+                    assert!(
+                        (moving.load - rest.load).abs() < 1e-5 * rest.load,
+                        "flat-ground damping changed load {} -> {} at {}",
+                        rest.load,
+                        moving.load,
+                        moving.point
+                    );
+                }
                 reaction += report.belt_reaction.abs();
                 push += report.apps.iter().map(|app| app.force).sum::<Vec3>();
                 load += report.contacts.iter().map(|c| c.load).sum::<f32>();
@@ -2110,6 +2132,255 @@ mod tests {
         }
     }
 
+    /// Surface support at the map edge must stay upright; the driver relies on no lateral
+    /// shove from flat ground. Fixture: a downward probe 5 mm inside a flat grid edge.
+    #[test]
+    fn flat_heightfield_edge_does_not_turn_support_sideways() {
+        use crate::terrain_grid::{HeightGrid, TerrainExtent};
+        let grid = HeightGrid::new(
+            vec![0.0; 4].into(),
+            2,
+            TerrainExtent {
+                world_size_m: 4.0,
+                height_offset_m: 0.0,
+                height_span_m: 1.0,
+            },
+        );
+        let field = crate::track::oracle::BlockField::new(vec![]).with_height(Some(grid));
+        let point = Vec3::new(1.995, -0.05, 0.0);
+        let TerrainContact::Hit { normal, .. } = field.contact_along(point, Vec3::NEG_Y, 0.5)
+        else {
+            panic!("the probe inside the edge must hit the flat facet");
+        };
+        let normal = *normal;
+        println!("MEASURED edge normal {normal}");
+        assert!(
+            (normal - Vec3::Y).length() < 1e-5,
+            "flat edge support {normal}"
+        );
+        let loop_pts = rect_loop(0.02);
+        let input = SideInput {
+            loop_pts: &loop_pts,
+            count: 25,
+            plane_x: 1.995,
+            columns: TEST_COLUMNS,
+            travel: TravelField { knots: &[] },
+        };
+        let report = contact_side(
+            &input,
+            SideState::default(),
+            Affine3A::IDENTITY,
+            1.0 / 64.0,
+            &rig_params(),
+            &field,
+            &RubbleBodies::default(),
+            |_| Vec3::ZERO,
+            &mut GripElements::for_links(input.count),
+        );
+        assert!(
+            !report.contacts.is_empty(),
+            "inside columns must carry the pad"
+        );
+        for contact in report.contacts {
+            assert!(
+                (contact.normal - Vec3::Y).length() < 1e-5,
+                "edge column must load the flat facet, got {}",
+                contact.normal
+            );
+        }
+    }
+
+    /// No first-hit surface means no support: drivers must not feel a phantom belt-normal
+    /// spring over a gap or from saturated buried origins. Fixture: a pad in empty space, then
+    /// fully inside a block; scalar depth remains useful to geometry consumers in both cases.
+    #[test]
+    fn missing_and_buried_probes_carry_no_support() {
+        use crate::track::oracle::{BlockField, TerrainBlock};
+        use bevy::math::Quat;
+        let empty = BlockField::new(vec![]);
+        let solid = BlockField::new(vec![TerrainBlock::new(
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::splat(10.0),
+        )]);
+        assert!(matches!(
+            empty.contact_along(Vec3::ZERO, Vec3::NEG_Y, 0.5),
+            TerrainContact::Miss
+        ));
+        assert!(matches!(
+            solid.contact_along(Vec3::ZERO, Vec3::NEG_Y, 0.5),
+            TerrainContact::Buried
+        ));
+        let loop_pts = rect_loop(0.02);
+        let input = SideInput {
+            loop_pts: &loop_pts,
+            count: 25,
+            plane_x: 0.0,
+            columns: TEST_COLUMNS,
+            travel: TravelField { knots: &[] },
+        };
+        for field in [empty, solid] {
+            let report = contact_side(
+                &input,
+                SideState::default(),
+                Affine3A::IDENTITY,
+                1.0 / 64.0,
+                &rig_params(),
+                &field,
+                &RubbleBodies::default(),
+                |_| Vec3::Z,
+                &mut GripElements::for_links(input.count),
+            );
+            assert!(
+                report.apps.is_empty(),
+                "no struck surface may invent support"
+            );
+        }
+    }
+
+    /// The driver must not receive amplified damping at a step silhouette or a building corner.
+    /// Fixture: a 20 cm block top ending at z=0, or its vertical corner after a rigid rotation;
+    /// the probe is 5 mm inside the silhouette and the hull travels toward -axis at 2 m/s.
+    /// The rotated building corner is crossed along world X (the belt's lateral direction).
+    #[test]
+    fn step_lip_and_vertical_corner_do_not_amplify_closing_speed() {
+        use crate::track::oracle::{BlockField, TerrainBlock};
+        use bevy::math::Quat;
+        for rotation in [
+            Quat::IDENTITY,
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
+                * Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+        ] {
+            let field = BlockField::new(vec![TerrainBlock::new(
+                rotation * Vec3::new(0.0, -0.4, -1.0),
+                rotation,
+                Vec3::new(4.0, 1.2, 2.0),
+            )]);
+            let point = rotation * Vec3::new(0.0, 0.15, -0.005);
+            let out = rotation * Vec3::NEG_Y;
+            let axis = rotation * Vec3::Z;
+            let depth = field.depth_along(point, out, 0.5);
+            let TerrainContact::Hit { normal, .. } = field.contact_along(point, out, 0.5) else {
+                panic!("the lip or corner probe must hit the rounded surface");
+            };
+            let velocity = -axis * 2.0;
+            let closing = -normal.dot(velocity);
+            println!("MEASURED lip/corner depth {depth}, normal {normal:?}, closing {closing}");
+            assert!(
+                closing.abs() <= velocity.length() + 1e-5,
+                "surface damper closing {closing} exceeds speed {}",
+                velocity.length()
+            );
+        }
+    }
+
+    /// A vertical building corner crossed laterally must not manufacture damping from a ray
+    /// miss beside it. Drivers rely on this bound while a wrap arc scrubs along a corner.
+    /// Fixture: a rounded wall facing +z and ending at x=0, a vertical pad 5 mm inside that
+    /// lateral silhouette, moving toward -x at 2 m/s. No rubble or per-building rule is used.
+    #[test]
+    fn vertical_building_corner_damps_only_the_contact_point_normal_speed() {
+        use crate::track::oracle::{BlockField, TerrainBlock};
+        use bevy::math::Quat;
+        let rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)
+            * Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let field = BlockField::new(vec![TerrainBlock::new(
+            rotation * Vec3::new(0.0, -0.4, -1.0),
+            rotation,
+            Vec3::new(4.0, 1.2, 2.0),
+        )]);
+        let loop_pts = rect_loop(0.02);
+        let input = SideInput {
+            loop_pts: &loop_pts,
+            count: 25,
+            plane_x: 0.0,
+            columns: TEST_COLUMNS,
+            travel: TravelField { knots: &[] },
+        };
+        let affine = Affine3A::from_rotation_translation(
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            Vec3::new(-0.005, 0.0, 0.15),
+        );
+        let velocity = Vec3::NEG_X * 2.0;
+        let report = contact_side(
+            &input,
+            SideState::default(),
+            affine,
+            1.0 / 64.0,
+            &rig_params(),
+            &field,
+            &RubbleBodies::default(),
+            |_| velocity,
+            &mut GripElements::for_links(input.count),
+        );
+        assert!(
+            !report.contacts.is_empty(),
+            "the inside columns must strike the wall"
+        );
+        let mut max_closing = 0.0_f32;
+        for contact in &report.contacts {
+            let closing = (contact.load - contact.load_elastic) / contact.damping;
+            max_closing = max_closing.max(closing);
+        }
+        println!("MEASURED vertical corner effective closing {max_closing:.6} m/s for 2 m/s hull");
+        assert!(
+            max_closing <= velocity.length() + 1e-4,
+            "corner damping must not amplify lateral speed: {max_closing}"
+        );
+    }
+
+    /// A driven hull crossing a lip must not receive a rearward damping spike. Fixture: one
+    /// 2 m pad translated forward (-z) across a 20 cm step, held at y=0.15 m, at 2 m/s.
+    /// This force trace isolates the contact law from the hull integrator and gearbox.
+    #[test]
+    fn forward_step_lip_force_trace() {
+        use crate::track::oracle::{BlockField, TerrainBlock};
+        use bevy::math::Quat;
+        let field = BlockField::new(vec![TerrainBlock::new(
+            Vec3::new(0.0, -0.4, -1.0),
+            Quat::IDENTITY,
+            Vec3::new(4.0, 1.2, 2.0),
+        )]);
+        let loop_pts = rect_loop(0.02);
+        let input = SideInput {
+            loop_pts: &loop_pts,
+            count: 25,
+            plane_x: 0.0,
+            columns: TEST_COLUMNS,
+            travel: TravelField { knots: &[] },
+        };
+        let mut peak = 0.0_f32;
+        for z in [
+            1.10, 1.02, 1.00, 0.99, 0.98, 0.97, 0.95, 0.90, 0.80, 0.60, 0.40, 0.20, 0.0, -0.2,
+            -0.4, -0.6, -0.8, -1.0,
+        ] {
+            let report = contact_side(
+                &input,
+                SideState {
+                    speed: 2.0,
+                    ..Default::default()
+                },
+                Affine3A::from_translation(Vec3::new(0.0, 0.15, z)),
+                1.0 / 64.0,
+                &rig_params(),
+                &field,
+                &RubbleBodies::default(),
+                |_| Vec3::NEG_Z * 2.0,
+                &mut GripElements::for_links(input.count),
+            );
+            let force = report.apps.iter().map(|a| a.force.z).sum::<f32>();
+            peak = peak.max(force);
+            println!("MEASURED lip force hull_z={z:.3} F_z={force:.3} N");
+        }
+        println!("MEASURED lip peak rearward {peak:.3} N");
+        // Fixture ceiling: 2 m of pad, c=100 kN s/m per metre, speed=2 m/s plus elastic
+        // load at 5.5 cm penetration; a unit-normal damper cannot exceed that total load.
+        assert!(
+            peak <= 2.0 * (1e5 * 2.0 + 2e6 * 0.055),
+            "rearward spike {peak}"
+        );
+    }
+
     /// Flat horizontal ground that states its ground: [`FlatGround`] whose every point is
     /// `ground`.
     struct GroundedFlat {
@@ -2122,6 +2393,15 @@ mod tests {
         }
         fn ground_at(&self, _point: Vec3) -> Option<crate::ground_field::ContactGround> {
             Some(self.ground)
+        }
+    }
+
+    impl ContactOracle for GroundedFlat {
+        fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
+            FlatGround {
+                surface_y: self.surface_y,
+            }
+            .contact_along(station, out, reach)
         }
     }
 

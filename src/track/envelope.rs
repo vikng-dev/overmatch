@@ -21,7 +21,7 @@
 use bevy::math::{Vec2, Vec3};
 
 use super::forces::{ForceParams, SideInput, SideState, TravelField, contact_side};
-use super::oracle::TerrainOracle;
+use super::oracle::{ContactOracle, TerrainContact, TerrainOracle};
 
 /// The free-travel profile knots for a rest circle set in the rig convention
 /// (`circles[0]` = drive sprocket, middle = sprung road wheels, last = idler): 0 at the
@@ -68,6 +68,25 @@ impl TerrainOracle for FlatRest {
             return -reach;
         }
         (station.y / out.y).min(reach)
+    }
+}
+
+impl ContactOracle for FlatRest {
+    fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
+        if out.y >= -1e-4 {
+            return TerrainContact::Miss;
+        }
+        let depth = station.y / out.y;
+        if depth >= reach {
+            TerrainContact::Buried
+        } else if depth < -reach {
+            TerrainContact::Miss
+        } else {
+            TerrainContact::Hit {
+                depth,
+                normal: bevy::math::Dir3::Y,
+            }
+        }
     }
 }
 

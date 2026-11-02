@@ -1296,6 +1296,12 @@ mod tests {
         at_z: f32,
     }
 
+    impl super::super::oracle::ContactOracle for Ridge {
+        fn contact_along(&self, _: Vec3, _: Vec3, _: f32) -> super::super::oracle::TerrainContact {
+            panic!("this depth-only view fixture must never supply simulation contact forces")
+        }
+    }
+
     impl TerrainOracle for Ridge {
         fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
             let origin = station - out * reach;

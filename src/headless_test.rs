@@ -774,9 +774,10 @@ fn gear_climb_monotone_tiger() {
 }
 
 /// No authored speed cap bounds the game's tanks: the top gear at the fuel governor does. Full
-/// throttle on flat ground must reach the ladder's top gear, come within 3 % (ASSUMED acceptance
-/// band for rolling losses) of its DERIVED governed speed, and hold there: steady over the last
-/// second, and never past the rpm where the governor has cut the engine's torque to zero. A
+/// throttle on lossless flat ground must reach the ladder's top gear and its DERIVED torque-cut
+/// speed, steady over the last second. FIXTURE acceptance: 1 % below the cut-off for finite
+/// settling and 0.1 % above it for fixed-step integration and vertical ride velocity; neither
+/// margin represents rolling loss. A
 /// governor or ladder mutant that lets the hull run away, or stalls it short of top gear, fails.
 /// The ground takes no rolling resistance, so the governor and the ladder are what this measures:
 /// on a ground that does, the ground's resistance may hold the tank below its governed speed
@@ -828,7 +829,7 @@ fn full_throttle_reaches_and_holds_the_governed_top_speed() {
             .0
             .length();
         assert!(
-            speed <= ceiling,
+            speed <= ceiling * 1.001,
             "tick {tick}: hull speed {speed:.3} m/s past the governor's torque cut-off \
              {ceiling:.3} m/s"
         );
@@ -851,12 +852,207 @@ fn full_throttle_reaches_and_holds_the_governed_top_speed() {
     );
     assert_eq!(gear, top, "40 s of full throttle must reach the top gear");
     assert!(
-        mean >= 0.97 * governed,
+        mean >= 0.99 * ceiling,
         "top speed {mean:.3} m/s short of the governed {governed:.3} m/s"
     );
     assert!(
         spread <= 0.01 * governed,
         "top speed must hold steady (spread {spread:.4} m/s over the last second)"
+    );
+}
+
+/// Every authored ground must yield finite steady driving; the ground law's record relies on
+/// this headless measurement. Fixture: the shipped vehicle on uniform flat ground, 40 s throttle,
+/// last-second mean; no per-vehicle speed expectation is encoded.
+#[test]
+fn contact_law_shipped_ground_speeds() {
+    for (name, ground) in crate::ground_types::GroundTypes::load_shipped().types {
+        let (mut app, tank) = booted_offline_sim();
+        {
+            let mut track = app
+                .world_mut()
+                .resource_mut::<crate::track::terrain::TrackField>();
+            let field = track.field.take().expect("boot builds terrain");
+            track.field = Some(
+                field.with_ground(Some(crate::ground_field::GroundField::uniform(
+                    ground.contact(),
+                ))),
+            );
+        }
+        face_positive_z(&mut app, tank);
+        let mut sum = 0.0;
+        let mut min = f32::INFINITY;
+        let mut max = 0.0_f32;
+        for tick in 0..40 * FIXED_TICKS_PER_SECOND {
+            drive_tick(&mut app, tank, 1.0, 0.0);
+            if tick >= 39 * FIXED_TICKS_PER_SECOND {
+                let speed = app
+                    .world()
+                    .get::<avian3d::prelude::LinearVelocity>(tank)
+                    .unwrap()
+                    .0
+                    .length();
+                assert!(
+                    speed.is_finite(),
+                    "ground {name} must deliver finite driving"
+                );
+                sum += speed;
+                min = min.min(speed);
+                max = max.max(speed);
+            }
+        }
+        let state = &app
+            .world()
+            .get::<crate::track::sim::TankTransmission>(tank)
+            .unwrap()
+            .0;
+        let gear = state.gear;
+        println!(
+            "MEASURED ground {name} scheduler {:?}, hill_hold {}, demand {:.3} N",
+            state.scheduler, state.hill_hold, state.demand_n
+        );
+        println!(
+            "MEASURED ground {name}: F{gear} mean {:.5} m/s spread {:.6}",
+            sum / FIXED_TICKS_PER_SECOND as f32,
+            max - min
+        );
+    }
+}
+
+/// A parked hull's roll kick must decay rather than sustain a side-swap limit cycle. Drivers
+/// rely on a settled ride. Fixture: 0.3 rad/s about the hull's longitudinal axis, 3 s observation;
+/// third-second RMS must be below 1 % of the kick. Peak side-load change covers all three seconds.
+#[test]
+fn contact_law_roll_kick_decays() {
+    let (mut app, tank) = booted_offline_sim();
+    app.world_mut()
+        .get_mut::<avian3d::prelude::AngularVelocity>(tank)
+        .unwrap()
+        .0 = Vec3::Z * 0.3;
+    let mut square_sum = 0.0;
+    let mut peak_swing = 0.0_f32;
+    let mut previous_difference: Option<f32> = None;
+    let mut previous_swing = 0.0_f32;
+    let mut alternations = 0;
+    for tick in 0..3 * FIXED_TICKS_PER_SECOND {
+        app.update();
+        let contacts = &app
+            .world()
+            .get::<crate::track::sim::TrackContacts>(tank)
+            .unwrap()
+            .0;
+        let loads = contacts
+            .each_ref()
+            .map(|side| side.iter().map(|c| c.load).sum::<f32>());
+        let difference = loads[0] - loads[1];
+        if let Some(previous) = previous_difference {
+            let swing = difference - previous;
+            peak_swing = peak_swing.max(swing.abs());
+            if swing * previous_swing < 0.0 {
+                alternations += 1;
+            }
+            previous_swing = swing;
+        }
+        previous_difference = Some(difference);
+        if tick >= 2 * FIXED_TICKS_PER_SECOND {
+            let rate = app
+                .world()
+                .get::<avian3d::prelude::AngularVelocity>(tank)
+                .unwrap()
+                .0
+                .z;
+            square_sum += rate * rate;
+        }
+    }
+    let rms = (square_sum / FIXED_TICKS_PER_SECOND as f32).sqrt();
+    println!(
+        "MEASURED ride: third-second roll RMS {rms:.8} rad/s, peak tick side-load swing {peak_swing:.3} N, alternation {:.5}",
+        alternations as f32 / (3 * FIXED_TICKS_PER_SECOND - 2) as f32
+    );
+    assert!(rms < 0.003, "roll kick must decay; third-second RMS {rms}");
+}
+
+/// A hull must climb a block step under forward drive. The trace isolates the game's contact
+/// support and traction from collider solver impulses. Fixture: the course's 0.4 m curb,
+/// hull facing -z at z=-63, from rest at full throttle, stopping once its centre clears the lip.
+#[test]
+fn contact_law_forward_step_trace() {
+    use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
+    let (mut app, tank) = booted_offline_sim();
+    let rest_y = app
+        .world()
+        .resource::<crate::track::rig_geom::RigGeom>()
+        .hull_rest_y;
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<Position>().unwrap().0 = Vec3::new(0.0, rest_y, -63.0);
+        e.get_mut::<Rotation>().unwrap().0 = Quat::IDENTITY;
+        e.get_mut::<LinearVelocity>().unwrap().0 = Vec3::ZERO;
+        e.get_mut::<AngularVelocity>().unwrap().0 = Vec3::ZERO;
+    }
+    for _ in 0..120 {
+        app.update();
+    }
+    let initial_y = app.world().get::<Position>(tank).unwrap().0.y;
+    let mut max_y = initial_y;
+    let mut peak_rearward = 0.0_f32;
+    let mut peak_delta = 0.0_f32;
+    let mut previous_force = 0.0_f32;
+    let mut max_damping_excess = 0.0_f32;
+    let mut last_bin = i32::MIN;
+    let mut end_z = -63.0;
+    for tick in 0..12 * FIXED_TICKS_PER_SECOND {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        let position = app.world().get::<Position>(tank).unwrap().0;
+        end_z = position.z;
+        max_y = max_y.max(position.y);
+        let contacts = &app
+            .world()
+            .get::<crate::track::sim::TrackContacts>(tank)
+            .unwrap()
+            .0;
+        let force = contacts
+            .iter()
+            .flatten()
+            .map(|c| (c.normal * c.load + c.traction).z)
+            .sum::<f32>();
+        for contact in contacts.iter().flatten() {
+            // Belt motion is tangent to the contact plane, so the reported belt velocity
+            // carries the force pass's exact normal velocity without a tick-phase mismatch.
+            let closing = -contact.normal.dot(contact.belt_velocity);
+            let bound = contact.load_elastic + contact.damping * closing.abs();
+            max_damping_excess =
+                max_damping_excess.max((contact.load - bound) / contact.load.max(1.0));
+        }
+        peak_rearward = peak_rearward.max(force);
+        peak_delta = peak_delta.max(force - previous_force);
+        previous_force = force;
+        let bin = (position.z * 10.0).floor() as i32;
+        if bin != last_bin {
+            let speed = -app.world().get::<LinearVelocity>(tank).unwrap().0.z;
+            println!(
+                "MEASURED hull lip tick={tick} z={:.5} y={:.5} speed={speed:.5} F_z={force:.3} N",
+                position.z, position.y
+            );
+            last_bin = bin;
+        }
+        if position.z < -70.0 {
+            break;
+        }
+    }
+    println!(
+        "MEASURED hull lip summary: end_z {end_z:.5}, rise {:.5} m, peak rearward {peak_rearward:.3} N, peak rearward force jump {peak_delta:.3} N",
+        max_y - initial_y
+    );
+    println!("MEASURED hull lip maximum damping bound excess {max_damping_excess:.8}");
+    // Fixture tolerance: f32 arithmetic in the load assembly and normal projection.
+    assert!(
+        max_damping_excess < 1e-5,
+        "contact damping amplified the point speed: {max_damping_excess}"
+    );
+    assert!(
+        end_z < -69.0 && max_y - initial_y > 0.2,
+        "forward drive must climb the fixture step"
     );
 }
 

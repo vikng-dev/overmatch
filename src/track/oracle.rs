@@ -1,11 +1,9 @@
 //! Terrain oracle — the boundary between the track model and whatever the world's ground is
 //! made of (architecture §5).
 //!
-//! The trait is deliberately scalar-and-minimal today: `depth_along` is the one query every
-//! consumer (belt physics, wheel articulation, the wrap view's terrain conform) actually makes,
-//! and the sandbox proved its semantics (exact analytic first hit, C0, deterministic). The
-//! architecture doc records the growth path — batched probes, hit normals, surface material,
-//! `covered` for streamed terrain — to be added WITH their first consumer, not before.
+//! Geometry consumers read signed depth through [`TerrainOracle`]. Its [`ContactOracle`]
+//! contract supplies the force consumer's hit: the surface owns its normal, and a ray miss or buried origin is
+//! represented explicitly rather than being mistaken for a surface parallel to the belt.
 //!
 //! [`BlockField`] is the one implementation, a min-fold of two EXACT analytic terms:
 //!
@@ -20,14 +18,15 @@
 //! collider: [`super::rubble::RubbleBodies`] snapshots it for the belt's footprint checks. Those
 //! shapes enter the support law beside this field, rather than through terrain probe lines.
 
-use bevy::math::{Mat3, Quat, Vec2, Vec3};
+use bevy::math::{Dir3, Mat3, Quat, Vec2, Vec3};
 
 use crate::ground_field::{ContactGround, GroundField};
 use crate::terrain_grid::HeightGrid;
 
-/// A terrain query surface for track consumers. Implementations must be pose-continuous and
-/// deterministic (fixed evaluation order, pure arithmetic) — the belt physics samples this.
-pub trait TerrainOracle {
+/// A terrain query surface for track consumers. Fixed evaluation order and pure arithmetic
+/// keep it deterministic. First hits can change discontinuously at silhouettes; a depth query
+/// across that boundary must never be interpreted as a surface gradient.
+pub trait TerrainOracle: ContactOracle {
     /// Signed directional penetration of `station` past the first terrain surface along `out`:
     /// the ray starts `reach` behind the station and may report at most `reach` of depth
     /// (buried origin saturates to `reach`, like a contact cast). Positive = past the surface,
@@ -44,19 +43,46 @@ pub trait TerrainOracle {
     }
 }
 
-/// Edge rounding radius (m) of the block field: every authored box is evaluated as a rounded
+/// A contact cast's geometric outcome. A buried origin has saturated depth for shape fitting,
+/// but no first-hit surface on which to apply support. Neither absence invents a belt normal.
+#[derive(Clone, Copy, Debug)]
+pub enum TerrainContact {
+    Miss,
+    Buried,
+    Hit { depth: f32, normal: Dir3 },
+}
+
+impl TerrainContact {
+    fn depth(self, reach: f32) -> f32 {
+        match self {
+            Self::Miss => -reach,
+            Self::Buried => reach,
+            Self::Hit { depth, .. } => depth,
+        }
+    }
+}
+
+/// The force consumer's surface query, distinct from the view's depth-only contract. Normals
+/// belong to the struck surface at the hit, never to differences between neighbouring rays.
+pub trait ContactOracle {
+    fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact;
+}
+
+/// `Resolution`: edge rounding radius (m) of the block field, smoothing its contact direction.
+/// Every authored box is evaluated as a rounded
 /// box, so the BLOCK term is C1 across box edges at the cost of visually-invisible 3 cm corner
 /// rounding. Must stay below the smallest authored half-extent. (The heightmap term is only
 /// C0 — it is the collider's triangulation exactly, and matching the collider outranks
 /// smoothness there.)
 pub const FIELD_ROUNDING: f32 = 0.03;
 
-/// How far (m) every block's bottom is extended below its authored extent, so a raised block
+/// `Resolution`: how far (m) each block's bottom is extended to remove interior union seams.
+/// A raised block
 /// resting on other geometry carries no interior union seam (depth below a top face grows
 /// monotonically instead of collapsing past mid-height — the step-19 "washboard ignored" bug).
 pub const FIELD_BURY: f32 = 2.0;
 
-/// Z-extent (m) of one broadphase bucket.
+/// `Resolution`: z-extent (m) of one broadphase bucket; affects candidate lookup cost only.
 const FIELD_CELL: f32 = 4.0;
 
 /// One authored terrain block (world-space oriented box, bottom extended by [`FIELD_BURY`]).
@@ -219,6 +245,25 @@ fn block_sdf(p: Vec3, b: &TerrainBlock) -> f32 {
     q.max(Vec3::ZERO).length() + q.max_element().min(0.0) - FIELD_ROUNDING
 }
 
+/// Gradient of the rounded-box field at its surface, in world space. Outside the core the
+/// nearest core point defines the normal; on a face the largest signed-distance coordinate
+/// selects its axis. Fixed x/y/z tie order makes a core-edge tie deterministic.
+fn block_normal(p: Vec3, b: &TerrainBlock) -> Dir3 {
+    let local = b.inv_rot * (p - b.center);
+    let core = (b.half - Vec3::splat(FIELD_ROUNDING)).max(Vec3::splat(1e-3));
+    let q = local.abs() - core;
+    let outside = q.max(Vec3::ZERO);
+    let gradient = if outside.length_squared() > 0.0 {
+        outside * local.signum()
+    } else {
+        let mut axis = Vec3::ZERO;
+        axis[q.max_position()] = local[q.max_position()].signum();
+        axis
+    };
+    Dir3::new(b.inv_rot.inverse() * gradient)
+        .expect("a rounded-box surface has a finite nonzero field gradient")
+}
+
 /// The analytic block-terrain oracle: a union of authored rounded boxes with a z-bucket AABB
 /// broadphase (the course/world is laid out along z). Built from the SAME transforms that spawn
 /// the terrain colliders, so the two representations cannot drift.
@@ -371,51 +416,69 @@ impl BlockField {
         reach: f32,
         lowering_m: f32,
     ) -> f32 {
-        // Anything past one reach beyond the station is deep clearance — contact profiles only
-        // need the sign + slope there.
+        self.contact_along_lowered_ground(station, out, reach, lowering_m)
+            .depth(reach)
+    }
+
+    pub(crate) fn contact_along_lowered_ground(
+        &self,
+        station: Vec3,
+        out: Vec3,
+        reach: f32,
+        lowering_m: f32,
+    ) -> TerrainContact {
         let t_max = 2.0 * reach;
         let origin = station - out * reach;
         let end = origin + out * t_max;
         let (lo, hi) = (origin.min(end), origin.max(end));
-        let mut t = t_max;
+        let mut best: Option<(f32, Dir3)> = None;
         let mut buried = false;
         self.candidates(lo, hi, |b| {
-            // A buried origin (inside any block) is fully saturated, like a contact cast. The
-            // origin lies inside the probe segment's AABB, so its block is always a candidate.
-            buried = buried || block_sdf(origin, b) <= 0.0;
-            if !buried && let Some(hit) = b.ray_hit(origin, out) {
-                t = t.min(hit);
+            buried |= block_sdf(origin, b) <= 0.0;
+            if let Some(t) = b.ray_hit(origin, out)
+                && t <= t_max
+                && best.is_none_or(|(first, _)| t < first)
+            {
+                best = Some((t, block_normal(origin + out * t, b)));
             }
         });
-        // The heightmap ground term: the EXACT first-hit caster (`HeightGrid::cast_ray` — a 2-D
-        // DDA over the 1–2 cells a suspension probe's XZ footprint crosses, closed-form
-        // ray-vs-triangle per cell on the same anti-diagonal split the collider uses).
-        // Deterministic: fixed iteration order, pure f32 arithmetic, no transcendentals. It
-        // replaced a fixed 8-segment sign-change scan + 24-step bisection, whose 12.5 cm
-        // checkpoints could straddle a thin ridge the ray pierces AND exits between two
-        // checkpoints (no sign change at any checkpoint = the crossing was invisible — see the
-        // ridge-graze test below); the closed-form crossing has no resolution to slip through.
-        // Composes with the blocks by the same min-entry union rule.
-        //
-        // f(0) ≤ 0 saturation: an origin under the surface saturates to the reach, exactly like
-        // a buried block origin (a contact cast) — but only WITHIN the grid span. Outside it the
-        // world ends at the collider edge (`HeightGrid::cast_ray` doc): the height term reports
-        // no ground at all, so the oracle agrees with the parry collider instead of feeling the
-        // clamped phantom ground `height_at` extends for placement queries.
+        // Exact triangle crossings retain thin ridges even when a ray enters and exits them
+        // between two hypothetical marching samples. The collider's anti-diagonal split and
+        // the cast's facet normal are the same surface. Outside the grid span there is no
+        // ground; height_at's clamped placement height must never extend collision there.
         if let Some(grid) = &self.height {
             let ground_origin = origin + Vec3::Y * lowering_m;
             if grid.contains_xz(ground_origin.x, ground_origin.z)
                 && ground_origin.y <= grid.height_at(ground_origin.x, ground_origin.z)
             {
                 buried = true;
-            } else if let Some(hit) = grid.cast_ray(ground_origin, out, t_max) {
-                t = t.min(hit.t);
+            } else if let Some(hit) = grid.cast_ray(ground_origin, out, t_max)
+                && best.is_none_or(|(first, _)| hit.t < first)
+            {
+                best = Some((
+                    hit.t,
+                    Dir3::new(hit.normal)
+                        .expect("the height caster returns a finite nonzero facet normal"),
+                ));
             }
         }
         if buried {
-            return reach;
+            TerrainContact::Buried
+        } else {
+            match best {
+                Some((t, normal)) => TerrainContact::Hit {
+                    depth: reach - t,
+                    normal,
+                },
+                None => TerrainContact::Miss,
+            }
         }
-        reach - t
+    }
+}
+
+impl ContactOracle for BlockField {
+    fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
+        self.contact_along_lowered_ground(station, out, reach, 0.0)
     }
 }
 

@@ -2723,6 +2723,22 @@ fn crank_guards(tp: &TransmissionParams, supply: DriveSupply) -> (f32, f32) {
     (omega_floor, omega_over)
 }
 
+/// Advance the interruption window and the dwell on their separate clocks. The returned flag
+/// names this tick's interruption, before consuming its last tick.
+fn advance_shift_window(st: &mut TransmissionState) -> bool {
+    // The dwell counts only OUTSIDE the interruption window: the frozen window blocks all
+    // decisions anyway, so draining the dwell inside it left only ~12 effective post-engagement
+    // ticks of the promised 32.
+    if st.shift_ticks == 0 && st.dwell_ticks > 0 {
+        st.dwell_ticks -= 1;
+    }
+    let shifting = st.shift_ticks > 0;
+    if shifting {
+        st.shift_ticks -= 1;
+    }
+    shifting
+}
+
 /// Advance the joint drivetrain one fixed tick and integrate both belt speeds: the m/d
 /// superimposed model documented at module level.
 pub fn step(
@@ -2830,16 +2846,7 @@ pub fn step(
             },
         );
     }
-    // The dwell counts only OUTSIDE the interruption window: the frozen window blocks all
-    // decisions anyway, so draining the dwell inside it left only ~12 effective post-engagement
-    // ticks of the promised 32.
-    if st.shift_ticks == 0 && st.dwell_ticks > 0 {
-        st.dwell_ticks -= 1;
-    }
-    let shifting = st.shift_ticks > 0;
-    if shifting {
-        st.shift_ticks -= 1;
-    }
+    let shifting = advance_shift_window(st);
     let g = ladder[(st.gear - 1) as usize];
 
     update_park_latch(st, inp);

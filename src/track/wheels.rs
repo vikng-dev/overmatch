@@ -147,6 +147,12 @@ mod tests {
         y: f32,
     }
 
+    impl super::super::oracle::ContactOracle for FlatGround {
+        fn contact_along(&self, _: Vec3, _: Vec3, _: f32) -> super::super::oracle::TerrainContact {
+            panic!("this depth-only view fixture must never supply simulation contact forces")
+        }
+    }
+
     impl TerrainOracle for FlatGround {
         fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
             if out.y >= -1e-6 {
@@ -162,6 +168,16 @@ mod tests {
     fn probes_preserve_the_gap_between_tread_surfaces() {
         use std::cell::RefCell;
         struct Probes(RefCell<Vec<f32>>);
+        impl super::super::oracle::ContactOracle for Probes {
+            fn contact_along(
+                &self,
+                _: Vec3,
+                _: Vec3,
+                _: f32,
+            ) -> super::super::oracle::TerrainContact {
+                panic!("this depth-only view fixture must never supply simulation contact forces")
+            }
+        }
         impl TerrainOracle for Probes {
             fn depth_along(&self, station: Vec3, _: Vec3, _: f32) -> f32 {
                 self.0.borrow_mut().push(station.x);
