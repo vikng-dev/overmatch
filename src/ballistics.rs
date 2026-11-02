@@ -8133,10 +8133,14 @@ pub(crate) mod march_tests {
             (at - apex).length() < 0.05,
             "the cone's apex, the plate's exit {apex}: {at}"
         );
+        let lowest = segment_pools(&app, tree)
+            .iter()
+            .position(ComponentHealth::is_empty)
+            .expect("the field emptied at least one segment");
         assert_eq!(
             app.world().get::<TreeState>(tree),
             Some(&TreeState::Down {
-                cut: 1,
+                cut: u8::try_from(lowest).unwrap(),
                 dir: azimuth_bin(base.x - at.x, base.z - at.z),
             }),
             "at the emptied segment, away from the apex"
@@ -8214,10 +8218,14 @@ pub(crate) mod march_tests {
             (at - recorded).length() < 1e-4 && (recorded - centre).length() < 0.5,
             "the burst's centre {recorded} (placed at {centre}): {at}"
         );
+        let lowest = segment_pools(&app, beside)
+            .iter()
+            .position(ComponentHealth::is_empty)
+            .expect("the field emptied at least one segment");
         assert_eq!(
             app.world().get::<TreeState>(beside),
             Some(&TreeState::Down {
-                cut: 1,
+                cut: u8::try_from(lowest).unwrap(),
                 dir: azimuth_bin(base.x - at.x, base.z - at.z),
             }),
             "at the emptied segment, away from the centre"

@@ -19,14 +19,23 @@ pub(crate) struct TreePiece {
     pub(crate) cut: u8,
 }
 
-/// A loose trunk body: its segment pools no longer open a second structural cut.
+impl TreePiece {
+    /// Presented carriers partition the trunk in cut order; arrival order never owns geometry.
+    /// The upper bound is exclusive, and an absent upper carrier leaves the prior owner intact.
+    pub(crate) fn end<'a>(&self, pieces: impl Iterator<Item = &'a Self>, segments: usize) -> usize {
+        pieces
+            .filter(|other| other.tree == self.tree && other.cut > self.cut)
+            .map(|other| usize::from(other.cut))
+            .min()
+            .unwrap_or(segments)
+    }
+}
+
+/// A moving construction owner, also used by static replica collision copies.
 #[derive(Component)]
 pub(crate) struct LooseTrunk;
 
-#[derive(Component)]
-pub(super) struct DetachedTrunk(pub(super) Entity);
-
-/// The actual loads that freed this trunk, in its map root's frame.
+/// Pending external loads in the original construction frame.
 #[derive(Component, Default, Clone)]
 pub(crate) struct TrunkLoads(pub(crate) Vec<Load>);
 
@@ -49,16 +58,59 @@ impl TreeBody {
     }
 }
 
-/// The shared launch reads exactly the geometry and density that the dynamic body receives.
-pub(super) fn trunk_launch(body: &TreeBody, cut: u8, loads: &[Load]) -> Launch {
+impl TrunkState {
+    fn partition(&self, owned: std::ops::Range<usize>) -> Self {
+        let mut next = self.clone();
+        for (k, fate) in next.state.fate.iter_mut().enumerate() {
+            *fate = if owned.contains(&k) {
+                fracture::Fate::Standing
+            } else {
+                fracture::Fate::Fallen
+            };
+        }
+        next.owned = owned;
+        next
+    }
+
+    fn partitions(&self, moving: bool) -> Vec<std::ops::Range<usize>> {
+        let first = self.owned.start + usize::from(moving);
+        let mut start = self.owned.start;
+        (first..self.owned.end)
+            .filter(|&k| self.state.cracked[k])
+            .chain([self.owned.end])
+            .map(|end| {
+                let range = start..end;
+                start = end;
+                range
+            })
+            .collect()
+    }
+}
+
+impl TreeBody {
+    /// Carrier origins stay at the original suffix centroid even after later splits. Sorted
+    /// cuts alone can therefore change membership without changing another carrier's pose frame.
+    pub(crate) fn construction_frame(
+        &self,
+        piece: Option<&TreePiece>,
+        at: Vec3,
+        rotation: Quat,
+    ) -> Transform {
+        let origin = piece.map_or(Vec3::ZERO, |piece| self.piece_centroid(piece.cut));
+        Transform::from_translation(at - rotation * origin).with_rotation(rotation)
+    }
+}
+
+fn launch_range(body: &TreeBody, range: std::ops::Range<usize>, loads: &[Load]) -> Launch {
+    let cut = u8::try_from(range.start).expect("tree admission bounds segment indices");
     let centroid = body.piece_centroid(cut);
-    let colliders = (usize::from(cut)..body.kind.segments.len())
+    let colliders = range
+        .clone()
         .map(|k| {
-            let offset = Vec3::Y * body.prefix[k] - centroid;
             (
                 k,
                 Collider::compound(vec![(
-                    offset,
+                    Vec3::Y * body.prefix[k] - centroid,
                     Quat::IDENTITY,
                     segment_collider(&body.kind, k, body.scale),
                 )]),
@@ -67,91 +119,229 @@ pub(super) fn trunk_launch(body: &TreeBody, cut: u8, loads: &[Load]) -> Launch {
         .collect();
     let loads: Vec<_> = loads
         .iter()
-        .filter(|load| load.chunk >= usize::from(cut))
+        .filter(|load| range.contains(&load.chunk))
         .copied()
         .collect();
     launch_colliders(centroid, colliders, |_| body.collider_density(), &loads)
 }
 
-/// Change ownership after every walk: all segment pools survive, and the old carrier is removed
-/// only after its segments have been reparented. Replica segments stay standing until the
-/// authoritative pose becomes present at the interpolation cursor; the network adapter owns
-/// that collision handoff and the streamed copy.
-fn derive_state(
-    trees: Query<
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one carrier is born with its identity, construction partition, pose and launch"
+)]
+fn spawn_range(
+    commands: &mut Commands,
+    tree: u16,
+    frame: Transform,
+    body: &TreeBody,
+    trunk: &TrunkState,
+    parts: &TreeParts,
+    range: std::ops::Range<usize>,
+    mut launch: Launch,
+    exchange: bool,
+) -> Entity {
+    let cut = u8::try_from(range.start).expect("tree admission bounds segment indices");
+    launch.colliders.clear();
+    let at = frame.translation + frame.rotation * launch.centroid;
+    let piece = commands
+        .spawn((
+            Name::new("TreePiece"),
+            TreePiece { tree, cut },
+            LooseTrunk,
+            body.clone(),
+            trunk.partition(range.clone()),
+            TreeParts(parts.0.clone()),
+            TrunkLoads::default(),
+            Transform::from_translation(at).with_rotation(frame.rotation),
+            Position(at),
+            Rotation(frame.rotation),
+            Visibility::default(),
+            crate::debris::DebrisPiece,
+            crate::eased_dynamic_body(),
+            LinearVelocity(frame.rotation * launch.velocity),
+            AngularVelocity(frame.rotation * launch.spin),
+        ))
+        .id();
+    reparent(
+        commands,
+        piece,
+        body,
+        parts,
+        range,
+        launch.centroid,
+        piece_layers(),
+    );
+    if exchange {
+        commands
+            .entity(piece)
+            .insert(PendingLaunch::new(frame, launch));
+    }
+    piece
+}
+
+fn reparent(
+    commands: &mut Commands,
+    parent: Entity,
+    body: &TreeBody,
+    parts: &TreeParts,
+    range: std::ops::Range<usize>,
+    origin: Vec3,
+    layers: CollisionLayers,
+) {
+    for k in range {
+        commands
+            .entity(parts.0[k])
+            .insert((
+                ChildOf(parent),
+                Transform::from_translation(Vec3::Y * body.prefix[k] - origin),
+                layers,
+                ColliderDensity(body.collider_density()),
+            ))
+            .remove::<ColliderDisabled>();
+    }
+}
+
+/// A topology reset restores ownership before the next physics step can read the old seams.
+/// Replicas run this in their topology transaction, including frames without a fixed step.
+pub(super) fn reset_standing(
+    mut trees: Query<
         (
             Entity,
             &MapInstance,
             &TreeState,
             &TreeBody,
+            &TreeParts,
+            &mut TrunkState,
+        ),
+        Changed<TreeState>,
+    >,
+    pieces: Query<(Entity, &TreePiece), With<LooseTrunk>>,
+    mut commands: Commands,
+) {
+    for (root, identity, state, body, parts, mut trunk) in &mut trees {
+        if *state != TreeState::Standing {
+            continue;
+        }
+        reparent(
+            &mut commands,
+            root,
+            body,
+            parts,
+            0..parts.0.len(),
+            Vec3::ZERO,
+            segment_layers(),
+        );
+        for (entity, piece) in &pieces {
+            if piece.tree == identity.ordinal {
+                commands.entity(entity).despawn();
+            }
+        }
+        *trunk = TrunkState::new(&body.structure);
+    }
+}
+
+/// Map topology only lowers the stump's cut. Existing moving owners keep their construction;
+/// a replica's collision handoff waits for the interpolated carrier in the network adapter.
+fn derive_state(
+    mut trees: Query<
+        (
+            &MapInstance,
+            &TreeState,
+            &TreeBody,
             &Transform,
             &TreeParts,
-            Option<&DetachedTrunk>,
-            &TrunkLoads,
+            &mut TrunkState,
+            &mut TrunkLoads,
         ),
         Changed<TreeState>,
     >,
     replica: Option<Res<ClientReplica>>,
     mut commands: Commands,
 ) {
-    for (root, identity, state, body, transform, parts, previous, loads) in &trees {
-        let carrier = match *state {
-            TreeState::Standing => None,
-            TreeState::Down { cut, .. } if replica.is_none() => {
-                let mut launch = trunk_launch(body, cut, &loads.0);
-                // Only the mass calculation uses compound wrappers; every actual collider stays
-                // a single convex frustum so the game's damage-model walk reads one solid.
-                launch.colliders.clear();
-                let at = transform.translation + transform.rotation * launch.centroid;
-                let piece = commands
-                    .spawn((
-                        Name::new("TreePiece"),
-                        TreePiece {
-                            tree: identity.ordinal,
-                            cut,
-                        },
-                        LooseTrunk,
-                        Transform::from_translation(at).with_rotation(transform.rotation),
-                        Position(at),
-                        Rotation(transform.rotation),
-                        Visibility::default(),
-                        crate::debris::DebrisPiece,
-                        crate::eased_dynamic_body(),
-                        LinearVelocity(transform.rotation * launch.velocity),
-                        AngularVelocity(transform.rotation * launch.spin),
-                        PendingLaunch::new(*transform, launch),
-                    ))
-                    .id();
-                commands.entity(root).insert(DetachedTrunk(piece));
-                Some((piece, cut, body.piece_centroid(cut)))
-            }
-            TreeState::Down { .. } => None,
-        };
-        for (k, &segment) in parts.0.iter().enumerate() {
-            let freed = carrier.filter(|(_, cut, _)| k >= usize::from(*cut));
-            let (parent, offset, layers) = match freed {
-                Some((piece, _, centroid)) => {
-                    (piece, Vec3::Y * body.prefix[k] - centroid, piece_layers())
-                }
-                None => (root, Vec3::Y * body.prefix[k], segment_layers()),
-            };
-            let mut entity = commands.entity(segment);
-            entity.insert((ChildOf(parent), Transform::from_translation(offset), layers));
-            if freed.is_some() {
-                entity
-                    .insert(ColliderDensity(body.collider_density()))
-                    .remove::<ColliderDisabled>();
-            } else {
-                entity.remove::<ColliderDisabled>();
-            }
+    if replica.is_some() {
+        return;
+    } // Replicas construct collision only at a presented pose.
+    for (identity, state, body, frame, parts, mut trunk, mut loads) in &mut trees {
+        let TreeState::Down { cut, .. } = *state else {
+            continue;
+        }; // No departure while standing.
+        trunk.state.cracked[usize::from(cut)] = true;
+        let ranges = trunk.partitions(false);
+        for range in ranges.iter().skip(1).filter(|range| !range.is_empty()) {
+            let launch = launch_range(body, range.clone(), &loads.0);
+            spawn_range(
+                &mut commands,
+                identity.ordinal,
+                *frame,
+                body,
+                &trunk,
+                parts,
+                range.clone(),
+                launch,
+                true,
+            );
         }
-        if let Some(previous) = previous {
-            commands.entity(previous.0).despawn();
+        *trunk = trunk.partition(ranges[0].clone());
+        loads.0.clear();
+    }
+}
+
+/// All same-tick source returns land before a moving carrier changes its occupied mass.
+/// DERIVED: each child inherits v + omega cross r at its COM and the parent's omega.
+/// The lower carrier survives, retaining its stable cut and pose origin on the wire.
+pub(super) fn split_moving(
+    mut pieces: Query<
+        (
+            Entity,
+            &TreePiece,
+            &TreeBody,
+            &mut TrunkState,
+            &TreeParts,
+            &Position,
+            &Rotation,
+            &LinearVelocity,
+            &AngularVelocity,
+            &ComputedCenterOfMass,
+        ),
+        Changed<TrunkState>,
+    >,
+    mut commands: Commands,
+) {
+    for (entity, piece, body, mut trunk, parts, at, rotation, velocity, spin, centre) in &mut pieces
+    {
+        let ranges = trunk.partitions(true);
+        if ranges.len() == 1 {
+            continue;
         }
-        if carrier.is_none() {
-            commands.entity(root).remove::<DetachedTrunk>();
+        let frame = body.construction_frame(Some(piece), at.0, rotation.0);
+        let origin = body.piece_centroid(piece.cut);
+        let into = frame.rotation.inverse();
+        for range in ranges.iter().skip(1) {
+            let mut launch = launch_range(body, range.clone(), &[]);
+            launch.velocity =
+                into * velocity.0 + (into * spin.0).cross(launch.centre - origin - centre.0);
+            launch.spin = into * spin.0;
+            spawn_range(
+                &mut commands,
+                piece.tree,
+                frame,
+                body,
+                &trunk,
+                parts,
+                range.clone(),
+                launch,
+                false,
+            );
         }
-        commands.entity(root).insert(TrunkLoads::default());
+        let lower = launch_range(body, ranges[0].clone(), &[]);
+        commands.entity(entity).insert(LinearVelocity(
+            velocity.0
+                + spin
+                    .0
+                    .cross(frame.rotation * (lower.centre - origin - centre.0)),
+        ));
+        *trunk = trunk.partition(ranges[0].clone());
+        commands.entity(entity).remove::<Sleeping>();
     }
 }
 
@@ -205,7 +395,13 @@ pub(crate) fn refit_colliders() -> ScheduleConfigs<ScheduleSystem> {
 }
 
 pub(super) fn derive_systems() -> ScheduleConfigs<ScheduleSystem> {
-    (derive_state, place_colliders, refit_colliders()).chain()
+    (
+        reset_standing,
+        derive_state,
+        place_colliders,
+        refit_colliders(),
+    )
+        .chain()
 }
 
 /// The game's damage model: a march delivers its real line and casing momentum to a trunk
@@ -214,22 +410,27 @@ pub(super) fn derive_systems() -> ScheduleConfigs<ScheduleSystem> {
 pub(super) fn read_shell(
     marched: On<crate::ballistics::ShellMarched>,
     segments: Query<(&TreeSegment, &ChildOf)>,
-    mut trees: Query<(&TreeState, &TreeBody, &Transform, &mut TrunkLoads), Without<DetachedTrunk>>,
+    mut trees: Query<(
+        Option<&TreeState>,
+        &TreeBody,
+        &Position,
+        &Rotation,
+        Option<&TreePiece>,
+        &mut TrunkLoads,
+    )>,
     shells: Query<Option<&crate::ballistics::SpallMarks>>,
 ) {
     for line in &marched.lines {
         let Ok((&TreeSegment(k), parent)) = segments.get(line.crossing.volume) else {
             continue; // A crossing of anything but a trunk segment is another law's.
         };
-        let Ok((state, body, root, mut loads)) = trees.get_mut(parent.parent()) else {
-            continue; // A segment already on a freed body, or a detached tree's stump.
-        };
-        let TreeState::Down { cut, .. } = *state else {
-            continue; // A standing trunk meets the march through its pools and structure.
-        };
-        if k < cut {
-            continue; // The stump stays on the ground and launches nothing.
+        let (state, body, position, rotation, piece, mut loads) = trees
+            .get_mut(parent.parent())
+            .expect("a trunk segment's current owner retains its construction and pending loads");
+        if state.is_some_and(|state| *state == TreeState::Standing) {
+            continue; // Standing construction receives the line through its segment pools.
         }
+        let root = body.construction_frame(piece, position.0, rotation.0);
         let into = root.rotation.inverse();
         loads.0.extend(Load::line(
             usize::from(k),
@@ -269,15 +470,14 @@ pub(super) fn read_shell(
             else {
                 continue; // This ray's hard stop is not a trunk segment.
             };
-            let Ok((state, _, root, mut loads)) = trees.get_mut(parent.parent()) else {
-                continue; // A segment already on a freed body, or a detached tree's stump.
-            };
-            let TreeState::Down { cut, .. } = *state else {
-                continue; // A standing trunk meets the burst through its pools and structure.
-            };
-            if k < cut {
-                continue; // The stump stays on the ground and launches nothing.
+            let (state, body, position, rotation, piece, mut loads) =
+                trees.get_mut(parent.parent()).expect(
+                    "a trunk segment's current owner retains its construction and pending loads",
+                );
+            if state.is_some_and(|state| *state == TreeState::Standing) {
+                continue; // Standing construction receives the field through its segment pools.
             }
+            let root = body.construction_frame(piece, position.0, rotation.0);
             let energy = f64::from(burst.energy) * f64::from(ray.strength) / total;
             let blow = ray.direction * (2.0 * energy / f64::from(burst.sideways_speed)) as f32;
             loads.0.push(Load {
@@ -383,10 +583,231 @@ mod tests {
         for _ in 0..2 {
             app.update();
         }
-        app.world()
-            .get::<DetachedTrunk>(root)
+        app.world_mut()
+            .query::<(Entity, &TreePiece)>()
+            .iter(app.world())
+            .find(|(_, piece)| {
+                piece.tree == app.world().get::<MapInstance>(root).unwrap().ordinal
+                    && piece.cut == cut
+            })
             .expect("the changed state freed its body")
             .0
+    }
+
+    /// The game's damage model: moving construction must open another emptied segment's
+    /// seam. Fixture: the bottom cut frees all three segments, then the upper pool empties.
+    #[test]
+    fn a_moving_trunk_opens_a_second_emptied_segments_joint() {
+        let mut app = world(Vec3::ZERO);
+        let root = tree(&mut app, 0, Vec3::ZERO);
+        let parts = app.world().get::<TreeParts>(root).unwrap().0.clone();
+        let piece = release(&mut app, root, 0, Vec3::ZERO);
+        app.world_mut().trigger(PoolEmptied {
+            entity: parts[2],
+            at: Vec3::Y * 4.0,
+            along: Some(Vec3::X),
+        });
+        assert!(
+            app.world()
+                .get::<TrunkState>(piece)
+                .is_some_and(|trunk| trunk.state.cracked[2]),
+            "a moving trunk retains structural state and opens the second joint"
+        );
+        app.update();
+        let upper = app.world().get::<ChildOf>(parts[2]).unwrap().parent();
+        assert_ne!(
+            upper, piece,
+            "the opened joint separates its actual colliders"
+        );
+        assert_eq!(app.world().get::<TreePiece>(upper).unwrap().cut, 2);
+        assert_eq!(app.world().get::<TrunkState>(piece).unwrap().owned, 0..2);
+        assert_eq!(app.world().get::<TrunkState>(upper).unwrap().owned, 2..3);
+        app.world_mut().trigger(PoolEmptied {
+            entity: parts[1],
+            at: Vec3::Y * 2.0,
+            along: Some(Vec3::X),
+        });
+        app.update();
+        let middle = app.world().get::<ChildOf>(parts[1]).unwrap().parent();
+        assert_ne!(middle, piece);
+        assert_ne!(middle, upper);
+        for (k, &part) in parts.iter().enumerate() {
+            let owner = app.world().get::<ChildOf>(part).unwrap().parent();
+            let trunk = app.world().get::<TrunkState>(owner).unwrap();
+            assert_eq!(
+                trunk.owned,
+                k..k + 1,
+                "every segment has one construction owner"
+            );
+        }
+    }
+
+    /// Contact receivers must retain construction after release. Fixture: a fast finite-mass
+    /// cube strikes the upper segment of an unsupported trunk; the common seam laws open it.
+    #[test]
+    fn a_moving_trunk_assesses_later_contact_loads() {
+        let mut app = world(Vec3::ZERO);
+        // Fixture: weak seams make this a routing invariant, independent of shipped grain facts.
+        let mut kind = (*fixture_kind()).clone();
+        kind.grain.tensile = 1.0e3;
+        kind.grain.fracture_energy = 1.0;
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let root = spawn(
+            &mut Commands::new(&mut queue, app.world()),
+            &Arc::new(kind),
+            MapInstance {
+                id: "fixture".into(),
+                ordinal: 0,
+            },
+            Transform::IDENTITY,
+        );
+        queue.apply(app.world_mut());
+        let piece = release(&mut app, root, 0, Vec3::ZERO);
+        app.world_mut().spawn((
+            RigidBody::Dynamic,
+            Position(Vec3::new(-2.0, 5.0, 0.0)),
+            Rotation::default(),
+            Collider::cuboid(0.5, 0.5, 0.5),
+            ColliderDensity(10000.0),
+            LinearVelocity(Vec3::X * 60.0),
+            CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+        ));
+        assert!(
+            !app.world().get::<TrunkState>(piece).unwrap().state.cracked[1..]
+                .iter()
+                .any(|open| *open)
+        );
+        let checked = app
+            .world()
+            .entity(piece)
+            .get_ref::<TrunkState>()
+            .unwrap()
+            .last_changed();
+        let mut assessed = false;
+        let mut delivered = 0.0_f32;
+        let mut opened = false;
+        for _ in 0..16 {
+            app.update();
+            delivered += app
+                .world()
+                .resource::<ContactTransfers>()
+                .split()
+                .filter(|(point, ..)| point.structure == piece)
+                .map(|(_, blow, _, _)| blow.length())
+                .sum::<f32>();
+            assessed |= app
+                .world()
+                .entity(piece)
+                .get_ref::<TrunkState>()
+                .unwrap()
+                .last_changed()
+                != checked;
+            opened |= app
+                .world()
+                .get::<TrunkState>(piece)
+                .is_some_and(|trunk| trunk.state.cracked[1..].iter().any(|open| *open));
+        }
+        assert!(delivered > 0.0, "the solver delivered the fixture contact");
+        assert!(
+            assessed,
+            "the contact must run the moving owner's structural assessment"
+        );
+        assert!(
+            opened,
+            "later solver contacts assess the moving trunk's remaining seams: {delivered} N s"
+        );
+    }
+
+    /// Later stump cuts partition only the wood still grounded. Fixture cuts descend from
+    /// the tip; already moving owners and each segment's HP component must survive unchanged.
+    #[test]
+    fn lower_stump_cuts_keep_existing_moving_owners() {
+        let mut app = world(Vec3::ZERO);
+        let root = tree(&mut app, 0, Vec3::ZERO);
+        let parts = app.world().get::<TreeParts>(root).unwrap().0.clone();
+        let upper = release(&mut app, root, 2, Vec3::ZERO);
+        let pools: Vec<_> = parts
+            .iter()
+            .map(|&part| *app.world().get::<ComponentHealth>(part).unwrap())
+            .collect();
+        for cut in [1, 0] {
+            app.world_mut().trigger(PoolEmptied {
+                entity: parts[cut],
+                at: Vec3::ZERO,
+                along: Some(Vec3::X),
+            });
+            app.update();
+            assert_eq!(
+                app.world().get::<ChildOf>(parts[2]).unwrap().parent(),
+                upper
+            );
+            assert_eq!(
+                app.world().get::<TreeState>(root),
+                Some(&TreeState::Down {
+                    cut: cut as u8,
+                    dir: 0
+                })
+            );
+        }
+        for (k, &part) in parts.iter().enumerate() {
+            let owner = app.world().get::<ChildOf>(part).unwrap().parent();
+            assert_eq!(app.world().get::<TreePiece>(owner).unwrap().cut, k as u8);
+            assert_eq!(*app.world().get::<ComponentHealth>(part).unwrap(), pools[k]);
+        }
+    }
+
+    /// A split preserves the parent's rigid velocity field and occupied geometry. Physics users
+    /// rely on no invented energy or teleport at release. Fixture: a rotating, translating trunk
+    /// opens both remaining seams in one deposit, with a nonidentity construction rotation.
+    #[test]
+    fn a_split_inherits_the_rigid_velocity_field_without_moving_any_segment() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = world(Vec3::ZERO);
+        let root = tree(&mut app, 0, Vec3::ZERO);
+        let parts = app.world().get::<TreeParts>(root).unwrap().0.clone();
+        let parent = release(&mut app, root, 0, Vec3::ZERO);
+        let at = Vec3::new(8.0, 3.0, -2.0);
+        let turn = Quat::from_rotation_x(0.7);
+        let velocity = Vec3::new(2.0, 3.0, -1.0);
+        let spin = Vec3::new(0.1, -0.2, 0.3);
+        let com = app.world().get::<ComputedCenterOfMass>(parent).unwrap().0;
+        app.world_mut().entity_mut(parent).insert((
+            Position(at),
+            Rotation(turn),
+            LinearVelocity(velocity),
+            AngularVelocity(spin),
+        ));
+        let body = app.world().get::<TreeBody>(parent).unwrap().clone();
+        let before: Vec<_> = parts
+            .iter()
+            .map(|&part| at + turn * app.world().get::<Transform>(part).unwrap().translation)
+            .collect();
+        for &part in &parts[1..] {
+            app.world_mut().trigger(PoolEmptied {
+                entity: part,
+                at: Vec3::ZERO,
+                along: Some(Vec3::X),
+            });
+        }
+        app.world_mut().run_system_once(split_moving).unwrap();
+        for (k, &part) in parts.iter().enumerate() {
+            let owner = app.world().get::<ChildOf>(part).unwrap().parent();
+            let position = app.world().get::<Position>(owner).unwrap().0;
+            let rotation = app.world().get::<Rotation>(owner).unwrap().0;
+            let local = app.world().get::<Transform>(part).unwrap().translation;
+            assert!((position + rotation * local - before[k]).length() < 1e-5);
+            // DERIVED from the authored frustum centroid; each resulting owner has one segment.
+            let centre = at + turn * (body.structure.chunks[k].centroid - body.piece_centroid(0));
+            let expected = velocity + spin.cross(centre - (at + turn * com));
+            assert!(
+                (app.world().get::<LinearVelocity>(owner).unwrap().0 - expected).length() < 1e-4
+            );
+            assert!((app.world().get::<AngularVelocity>(owner).unwrap().0 - spin).length() < 1e-6);
+            assert_eq!(
+                app.world().get::<TrunkState>(owner).unwrap().owned,
+                k..k + 1
+            );
+        }
     }
 
     /// Every freed trunk leaves with the plastic share it was given, using fresh occupied mass.
@@ -419,7 +840,8 @@ mod tests {
                             step: 1.0 / 64.0,
                         },
                     };
-                    let launch = trunk_launch(&body, cut, &[load]);
+                    let launch =
+                        launch_range(&body, usize::from(cut)..body.kind.segments.len(), &[load]);
                     let expected = blow * mass / (source_mass + mass);
                     assert!((launch.mass - mass).abs() < mass * 1e-5);
                     assert!(
@@ -621,7 +1043,11 @@ mod tests {
         let mut app = world(Vec3::ZERO);
         let root = tree(&mut app, 0, Vec3::new(3.0, 2.0, 1.0));
         let rotation = Quat::from_rotation_z(0.4);
-        app.world_mut().get_mut::<Transform>(root).unwrap().rotation = rotation;
+        app.world_mut().entity_mut(root).insert((
+            Transform::from_xyz(3.0, 2.0, 1.0).with_rotation(rotation),
+            Position(Vec3::new(3.0, 2.0, 1.0)),
+            Rotation(rotation),
+        ));
         app.world_mut()
             .entity_mut(root)
             .insert(TreeState::Down { cut: 0, dir: 0 });

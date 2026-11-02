@@ -195,14 +195,16 @@ struct ReplicaTrunk {
     cut: u8,
 }
 #[derive(Component)]
-struct TrunkAttached;
+enum TrunkAttached {
+    Accepted,
+    Refused,
+}
 
 /// A peer carrier is refused visibly at its map-data boundary, before collision construction.
 #[derive(Debug, PartialEq, Eq)]
 enum TrunkCarrierError {
     UnknownTree(u16),
     CutOutside { cut: u8, segments: usize },
-    TopologyMismatch { cut: u8, recorded: u8 },
 }
 impl std::fmt::Display for TrunkCarrierError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -210,9 +212,6 @@ impl std::fmt::Display for TrunkCarrierError {
             Self::UnknownTree(tree) => write!(f, "map tree {tree} is absent"),
             Self::CutOutside { cut, segments } => {
                 write!(f, "cut {cut} is outside the tree's {segments} segments")
-            }
-            Self::TopologyMismatch { cut, recorded } => {
-                write!(f, "carrier cut {cut} differs from recorded cut {recorded}")
             }
         }
     }
@@ -232,11 +231,8 @@ fn resolve_carrier(
     }
     match state {
         TreeState::Standing => Ok(None), // Carrier arrival may precede the topology diff.
-        TreeState::Down { cut, .. } if cut == piece.cut => Ok(Some(body)),
-        TreeState::Down { cut, .. } => Err(TrunkCarrierError::TopologyMismatch {
-            cut: piece.cut,
-            recorded: cut,
-        }),
+        TreeState::Down { cut, .. } if cut <= piece.cut => Ok(Some(body)),
+        TreeState::Down { .. } => Ok(None), // A lower stump cut can precede its ledger diff.
     }
 }
 
@@ -258,7 +254,7 @@ fn attach_trunks(
             Ok(None) => continue, // The topology diff has not arrived yet.
             Err(error) => {
                 error!("tree carrier {carrier:?} refused: {error}");
-                commands.entity(carrier).insert(TrunkAttached);
+                commands.entity(carrier).insert(TrunkAttached::Refused);
                 continue;
             }
         };
@@ -296,7 +292,7 @@ fn attach_trunks(
                 },
             ));
         }
-        commands.entity(carrier).insert(TrunkAttached);
+        commands.entity(carrier).insert(TrunkAttached::Accepted);
     }
 }
 
@@ -305,7 +301,7 @@ fn attach_trunks(
 /// can already be known, but the standing colliders must remain present. The copy takes over in
 /// the same frame its pose becomes present, including frames with no physics tick.
 fn follow_trunks(
-    carriers: Query<(&DebrisPose, &WorldGeneration)>,
+    carriers: Query<(&DebrisPose, &WorldGeneration, &TreePiece, &TrunkAttached)>,
     generation: Res<CurrentWorld>,
     trees: Query<(&TreeState, &crate::trees::TreeParts)>,
     mut trunks: Query<(
@@ -319,7 +315,7 @@ fn follow_trunks(
     mut commands: Commands,
 ) {
     for (entity, trunk, children, mut transform, mut position, mut rotation) in &mut trunks {
-        let Ok((pose, belongs)) = carriers.get(trunk.carrier) else {
+        let Ok((pose, belongs, piece, _)) = carriers.get(trunk.carrier) else {
             commands.entity(entity).despawn(); // Disconnect removed the authority's carrier.
             continue;
         };
@@ -331,16 +327,25 @@ fn follow_trunks(
             commands.entity(entity).despawn(); // The local map was unloaded with its tree roots.
             continue;
         };
-        let active = matches!(*state, TreeState::Down { cut, .. } if cut == trunk.cut);
+        let active = matches!(*state, TreeState::Down { cut, .. } if cut <= trunk.cut);
+        let end = piece.end(
+            carriers
+                .iter()
+                .filter(|(_, belongs, _, status)| {
+                    Some(**belongs) == generation.0 && matches!(status, TrunkAttached::Accepted)
+                })
+                .map(|(_, _, piece, _)| piece),
+            parts.0.len(),
+        );
         if active {
-            for &part in parts.0.iter().skip(usize::from(trunk.cut)) {
+            for &part in &parts.0[usize::from(trunk.cut)..end] {
                 commands
                     .entity(part)
                     .insert_if_new(avian3d::prelude::ColliderDisabled);
             }
         }
-        for &child in children {
-            if active {
+        for (k, child) in children.iter().enumerate() {
+            if active && usize::from(trunk.cut) + k < end {
                 commands
                     .entity(child)
                     .remove::<avian3d::prelude::ColliderDisabled>();
@@ -527,12 +532,20 @@ mod tests {
                 segments: 3
             }
         );
-        assert_eq!(
-            resolve_carrier(piece, Some((&body, TreeState::Down { cut: 2, dir: 0 }))).unwrap_err(),
-            TrunkCarrierError::TopologyMismatch {
-                cut: 1,
-                recorded: 2
-            }
+        assert!(
+            resolve_carrier(piece, Some((&body, TreeState::Down { cut: 2, dir: 0 })))
+                .unwrap()
+                .is_none(),
+            "a new lower stump carrier waits for its ledger transition"
+        );
+        assert!(
+            resolve_carrier(
+                TreePiece { cut: 2, ..piece },
+                Some((&body, TreeState::Down { cut: 1, dir: 0 }))
+            )
+            .unwrap()
+            .is_some(),
+            "a later split belongs to the same recorded tree"
         );
     }
 
@@ -690,5 +703,74 @@ mod tests {
             app.world().get_entity(ghost).is_err(),
             "disconnect removes the static stream copy"
         );
+    }
+    /// Interpolated carrier availability partitions collision, independent of packet order.
+    /// Client casts rely on exactly one enabled copy of every segment through each handoff.
+    /// Fixture: cuts zero and two, with metadata arriving before either pose.
+    #[test]
+    fn later_carriers_partition_collision_only_when_their_poses_are_present() {
+        for order in [[0, 2], [2, 0]] {
+            let (mut app, root) = replica();
+            app.update();
+            app.world_mut().spawn((
+                DestructionLedger(vec![LedgerEntry::State {
+                    index: 3,
+                    word: TreeState::Down { cut: 0, dir: 0 }.encode(),
+                }]),
+                WorldGeneration::default(),
+            ));
+            let carriers = [0, 2].map(|cut| {
+                app.world_mut()
+                    .spawn((TreePiece { tree: 3, cut }, WorldGeneration::default()))
+                    .id()
+            });
+            app.update();
+            app.world_mut().spawn((
+                TreePiece { tree: 3, cut: 255 },
+                WorldGeneration::default(),
+                DebrisPose {
+                    position: Vec3::ZERO,
+                    rotation: Quat::IDENTITY,
+                },
+            ));
+            let mut ready = Vec::new();
+            for cut in order {
+                let pose = DebrisPose {
+                    position: Vec3::new(f32::from(cut) * 4.0, 2.0, 0.0),
+                    rotation: Quat::from_rotation_z(f32::from(cut) * 0.3),
+                };
+                app.world_mut()
+                    .entity_mut(carriers[usize::from(cut == 2)])
+                    .insert(pose);
+                ready.push(cut);
+                app.update();
+                let mut counts = [0; 3];
+                for (segment, disabled, parent) in app
+                    .world_mut()
+                    .query::<(&TreeSegment, Has<ColliderDisabled>, &ChildOf)>()
+                    .iter(app.world())
+                {
+                    if !disabled {
+                        counts[usize::from(segment.0)] += 1;
+                        if let Some(copy) = app.world().get::<ReplicaTrunk>(parent.parent()) {
+                            let expected =
+                                ready.iter().filter(|&&cut| cut <= segment.0).max().unwrap();
+                            assert_eq!(copy.cut, *expected);
+                            assert_eq!(
+                                app.world().get::<RigidBody>(parent.parent()),
+                                Some(&RigidBody::Static)
+                            );
+                        } else {
+                            assert_eq!(parent.parent(), root);
+                            assert!(!ready.iter().any(|&cut| cut <= segment.0));
+                        }
+                    }
+                }
+                assert_eq!(
+                    counts, [1; 3],
+                    "arrival order {ready:?} must neither duplicate nor drop collision"
+                );
+            }
+        }
     }
 }

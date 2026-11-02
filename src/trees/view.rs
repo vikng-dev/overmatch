@@ -551,34 +551,54 @@ fn present_fall(
         let Some(view) = children.iter().find_map(|child| views.get(child).ok()) else {
             continue; // The standing instanced representation has no segmented hierarchy.
         };
-        let turned = match *state {
-            TreeState::Standing => None,
-            TreeState::Down { cut, .. } => pieces
-                .iter()
-                .find(|(piece, _, belongs)| {
-                    // Offline pieces are local bodies, without a streamed generation tag.
-                    belongs.is_none_or(|belongs| {
-                        generation.as_deref().and_then(|current| current.0.as_ref())
-                            == Some(belongs)
-                    }) && piece.tree == identity.ordinal
-                        && piece.cut == cut
-                })
-                .map(|(_, pose, _)| {
-                    let turn = root.rotation.inverse() * pose.rotation;
-                    let pivot = root.rotation.inverse() * (pose.translation - root.translation)
-                        + turn
-                            * (Vec3::Y * body.prefix[usize::from(cut)] - body.piece_centroid(cut));
-                    let cut = usize::from(cut);
-                    let translation =
-                        view.standing[cut] + (pivot - Vec3::Y * body.prefix[cut]) / body.scale;
-                    (cut, turn, translation)
-                }),
-        };
+        let presented: Vec<_> = pieces
+            .iter()
+            .filter(|(piece, _, belongs)| {
+                belongs.is_none_or(|belongs| {
+                    generation.as_deref().and_then(|current| current.0.as_ref()) == Some(belongs)
+                }) && piece.tree == identity.ordinal
+                    && matches!(*state, TreeState::Down { cut, .. } if cut <= piece.cut)
+            })
+            .collect();
+        // Each segment's desired pose in the placed tree frame. Convert against its actual
+        // predecessor in the glb chain, so independently moving pieces do not inherit its turn.
+        let poses: Vec<_> = (0..view.trunks.len())
+            .map(|k| {
+                presented
+                    .iter()
+                    .find(|(piece, _, _)| {
+                        usize::from(piece.cut) <= k
+                            && k < piece.end(
+                                presented.iter().map(|(piece, _, _)| *piece),
+                                view.trunks.len(),
+                            )
+                    })
+                    .map_or(
+                        (Vec3::Y * body.prefix[k], Quat::IDENTITY),
+                        |(piece, pose, _)| {
+                            let turn = root.rotation.inverse() * pose.rotation;
+                            (
+                                root.rotation.inverse() * (pose.translation - root.translation)
+                                    + turn
+                                        * (Vec3::Y * body.prefix[k]
+                                            - body.piece_centroid(piece.cut)),
+                                turn,
+                            )
+                        },
+                    )
+            })
+            .collect();
         for (k, trunk) in view.trunks.iter().enumerate() {
-            let (rotation, translation) = match turned {
-                Some((cut, turn, translation)) if k == cut => (turn, translation),
-                _ => (Quat::IDENTITY, view.standing[k]),
+            let parent = if k == 0 {
+                (Vec3::ZERO, Quat::IDENTITY)
+            } else {
+                poses[k - 1]
             };
+            let rotation = parent.1.inverse() * poses[k].1;
+            let translation = view.standing[k]
+                + (parent.1.inverse() * (poses[k].0 - parent.0)
+                    - Vec3::Y * (body.prefix[k] - if k == 0 { 0.0 } else { body.prefix[k - 1] }))
+                    / body.scale;
             if let Some(trunk) = trunk
                 && let Ok((mut local, _)) = nodes.get_mut(*trunk)
             {
@@ -590,17 +610,20 @@ fn present_fall(
                 }
             }
         }
-        let cut = turned.map(|(cut, _, _)| cut);
+        let cuts: BTreeSet<_> = presented
+            .iter()
+            .map(|(piece, _, _)| usize::from(piece.cut))
+            .collect();
         let tops = view
             .caps_top
             .iter()
             .enumerate()
-            .map(|(k, cap)| (cap, cut.is_some_and(|cut| k + 1 == cut)));
+            .map(|(k, cap)| (cap, cuts.contains(&(k + 1))));
         let bottoms = view
             .caps_bottom
             .iter()
             .enumerate()
-            .map(|(k, cap)| (cap, cut == Some(k)));
+            .map(|(k, cap)| (cap, cuts.contains(&k)));
         for (cap, shown) in tops.chain(bottoms) {
             if let Some(cap) = cap
                 && let Ok((_, mut visibility)) = nodes.get_mut(*cap)
@@ -1026,5 +1049,71 @@ mod tests {
         app.world_mut().entity_mut(root).insert(TreeState::Standing);
         app.update();
         assert_eq!(meshes_under(&mut app, root), standing);
+    }
+    /// Each presented cut owns its segment poses, independent of arrival order. View users
+    /// rely on later pieces escaping the earlier node's transform and exposing both cut caps.
+    /// Fixture: two distinct rotations at cuts zero and two, at a nonunit instance scale.
+    #[test]
+    fn multiple_presented_pieces_pose_their_own_segments() {
+        for order in [[0, 2], [2, 0]] {
+            let (mut app, _, _) = view_bed();
+            let (root, view) = spawn_tree(&mut app, 1.5);
+            app.world_mut()
+                .entity_mut(root)
+                .insert(TreeState::Down { cut: 0, dir: 0 });
+            let body = app.world().get::<TreeBody>(root).unwrap().clone();
+            let poses = [
+                Transform::from_xyz(1.0, 3.0, -2.0).with_rotation(Quat::from_rotation_z(0.4)),
+                Transform::from_xyz(-3.0, 2.0, 1.0).with_rotation(Quat::from_rotation_x(-0.8)),
+            ];
+            let mut ready = Vec::new();
+            for cut in order {
+                let pose = poses[usize::from(cut == 2)];
+                app.world_mut().spawn((TreePiece { tree: 0, cut }, pose));
+                ready.push(cut);
+                app.update();
+                let index = app.world().get::<TreeViewNodes>(view).unwrap();
+                let mut world = Transform::from_scale(Vec3::splat(body.scale));
+                for k in 0..body.kind.segments.len() {
+                    world = world.mul_transform(
+                        *app.world()
+                            .get::<Transform>(index.trunks[k].unwrap())
+                            .unwrap(),
+                    );
+                    let owner = ready.iter().filter(|&&cut| usize::from(cut) <= k).max();
+                    let (at, turn) =
+                        owner.map_or((Vec3::Y * body.prefix[k], Quat::IDENTITY), |&cut| {
+                            let pose = poses[usize::from(cut == 2)];
+                            (
+                                pose.translation
+                                    + pose.rotation
+                                        * (Vec3::Y * body.prefix[k] - body.piece_centroid(cut)),
+                                pose.rotation,
+                            )
+                        });
+                    assert!(
+                        world.translation.abs_diff_eq(at, 1e-5),
+                        "segment {k}, arrival {ready:?}"
+                    );
+                    assert!(world.rotation.abs_diff_eq(turn, 1e-5));
+                    assert_eq!(
+                        app.world().get::<Visibility>(index.caps_bottom[k].unwrap()),
+                        Some(if ready.contains(&(k as u8)) {
+                            &Visibility::Inherited
+                        } else {
+                            &Visibility::Hidden
+                        })
+                    );
+                    assert_eq!(
+                        app.world().get::<Visibility>(index.caps_top[k].unwrap()),
+                        Some(if ready.contains(&((k + 1) as u8)) {
+                            &Visibility::Inherited
+                        } else {
+                            &Visibility::Hidden
+                        })
+                    );
+                }
+            }
+        }
     }
 }

@@ -2904,10 +2904,18 @@ fn a_felled_trees_colliders_follow_its_dynamic_body() {
     let shipped = crate::map::tests::shipped_manifest();
     // Fixture selection: one tree kind the shipped map places. Every bound below is read from the
     // spawned body's own data and its resting record, never from this kind's numbers.
+    let asset = shipped
+        .instances
+        .iter()
+        .find_map(|instance| match &shipped.prototypes[&instance.prototype] {
+            Prototype::Tree { asset } => Some(asset),
+            _ => None,
+        })
+        .expect("the shipped map places a tree");
     let kind = shipped
         .trees
-        .get("fir_1")
-        .expect("the shipped map's tree")
+        .get(asset)
+        .expect("map admission loaded every placed tree kind")
         .clone();
     let bare = {
         let mut manifest = shipped;
@@ -3008,11 +3016,9 @@ fn a_felled_trees_colliders_follow_its_dynamic_body() {
     for _ in 0..128 {
         app.update();
     }
-    let piece = app
-        .world_mut()
-        .query_filtered::<Entity, With<TreePiece>>()
-        .single(app.world())
-        .unwrap();
+    let tip = parts[n - 1];
+    let piece = app.world().get::<ChildOf>(tip).unwrap().parent();
+    assert!(app.world().get::<TreePiece>(piece).is_some());
     assert_eq!(
         app.world().get::<RigidBody>(piece),
         Some(&RigidBody::Dynamic)
@@ -3021,7 +3027,6 @@ fn a_felled_trees_colliders_follow_its_dynamic_body() {
         *app.world().get::<ColliderAabb>(parts[0]).unwrap(),
         standing[0]
     );
-    let tip = parts[n - 1];
     let bound = app.world().get::<ColliderAabb>(tip).unwrap();
     let position = app.world().get::<Position>(tip).unwrap().0;
     let rotation = app.world().get::<Rotation>(tip).unwrap().0;

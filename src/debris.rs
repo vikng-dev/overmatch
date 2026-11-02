@@ -47,7 +47,8 @@
 //! `assets/buildings/house_1/house_1.building.ron`, 1,005 brick and 158 wood, every element's
 //! material stating a seam, times the 74 `house_proxy` placements in
 //! `assets/maps/kalinovo/level.json`).
-//! Each map tree can additionally free at most one trunk body (DERIVED from `trees::TreeState`).
+//! DERIVED: each tree carrier owns at least one segment, so its live bodies never exceed its
+//! segment count; later cuts partition existing ownership.
 //! Awake pieces are the ones in the solver. A sleeping piece's own per-tick cost and an awake pile
 //! held by a tank's island (above) are both unpriced.
 

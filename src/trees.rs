@@ -34,8 +34,9 @@
 //!
 //! The state records only the cut and its direction. The freed segments belong to a dynamic
 //! body ([`TreePiece`]), launched through [`crate::debris::launch`] and simulated only by the
-//! authority. Replicas receive its pose stream. One break per tree; every segment retains its
-//! HP pool when it changes body. See the wall design's "Trees are structures by the same laws".
+//! authority. Each piece retains its construction and structural state for subsequent loads.
+//! Replicas partition segments by sorted carrier cuts; every segment retains its HP pool when
+//! it changes body. See the wall design's "Trees are structures by the same laws".
 
 use crate::buildings::fracture::GroupLoads;
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,7 +44,10 @@ use std::f32::consts::PI;
 use std::path::Path;
 use std::sync::Arc;
 
-use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody};
+use avian3d::prelude::{
+    Collider, CollisionLayers, Forces, LayerMask, ReadRigidBodyForces, RigidBody,
+    WriteRigidBodyForces,
+};
 use avian3d::schedule::PhysicsSystems;
 use bevy::ecs::schedule::ScheduleConfigs;
 use bevy::ecs::system::ScheduleSystem;
@@ -79,8 +83,8 @@ const SPECIES_FILE: &str = "species.ron";
 const WOOD_FILE: &str = "wood.ron";
 
 /// How far below 1 an instance's up vector's Y may fall before the instance counts as tilted:
-/// float rounding of a pure yaw (a few ulps), never a real lean. The standing strength law
-/// reads gravity along the trunk's upright prefix sums.
+/// Resolution: float rounding of a pure yaw (a few ulps), never a real lean. The standing
+/// strength law reads gravity along the trunk's upright prefix sums.
 const UPRIGHT_EPSILON: f32 = 1e-6;
 
 /// Most segments a trunk may have: `cut` travels as one byte, and the wire word reserves
@@ -648,8 +652,7 @@ impl TreeBody {
     }
 }
 
-/// Marks a segment's collider entity, a child of the tree's root, with the segment's index from
-/// the base: the cut a fall at this segment carries.
+/// A segment's stable construction index; its collider is a child of its current owner.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TreeSegment(pub(crate) u8);
 
@@ -811,6 +814,7 @@ pub(crate) fn spawn(
 pub(crate) struct TrunkState {
     state: WallState,
     sections: SectionCache,
+    owned: std::ops::Range<usize>,
 }
 
 impl TrunkState {
@@ -818,6 +822,7 @@ impl TrunkState {
         Self {
             state: WallState::new(structure),
             sections: SectionCache::default(),
+            owned: 0..structure.chunks.len(),
         }
     }
 
@@ -841,12 +846,17 @@ impl TrunkState {
 /// gravity and the presses, from the joints the first opened. Returns the cut after them
 /// ([`TrunkState::cut`]). Nothing of the tree's kind or of the loads' sources enters: the trunk's
 /// construction and the loads alone decide where, and whether, it breaks.
-pub(crate) fn load_trunk(body: &TreeBody, trunk: &mut TrunkState, loads: &[Load]) -> Option<u8> {
+pub(crate) fn load_trunk(
+    body: &TreeBody,
+    trunk: &mut TrunkState,
+    loads: &[Load],
+    spin: Vec3,
+) -> Option<u8> {
     let structure = &body.structure;
     let opened: Vec<usize> = fracture::structural(
         structure,
         &mut trunk.state,
-        GroupLoads::new(loads, Vec3::ZERO),
+        GroupLoads::new(loads, spin),
         &mut trunk.sections,
     )
     .into_iter()
@@ -857,7 +867,7 @@ pub(crate) fn load_trunk(body: &TreeBody, trunk: &mut TrunkState, loads: &[Load]
         &mut trunk.state,
         &[],
         &opened,
-        GroupLoads::new(loads, Vec3::ZERO),
+        GroupLoads::new(loads, spin),
         &[],
         &mut trunk.sections,
     );
@@ -872,36 +882,34 @@ fn fell(state: &mut TreeState, cut: u8, along: Vec3) {
     };
 }
 
-/// A standing tree one of whose segments a dose emptied opens the joint at THAT segment's base in
-/// its structural state, and falls by it ([`TrunkState::cut`]) — only the doses that segment took
-/// count toward its break — along the round's travel, or for a field (no direction) away from the
-/// field's centre. A tree already down ignores it.
+/// The game's damage model: an emptied segment opens its base seam on its current owner,
+/// standing or moving. A stump's lower cut also updates the map topology word.
 pub(crate) fn fell_on_pool_emptied(
     emptied: On<PoolEmptied>,
     segments: Query<(&TreeSegment, &ChildOf)>,
-    mut trees: Query<(&mut TreeState, &mut TrunkState, &Transform)>,
-    loose: Query<(), With<LooseTrunk>>,
+    mut trees: Query<(Option<&mut TreeState>, &mut TrunkState, &Transform)>,
 ) {
-    // An emptied pool on anything but a trunk segment (a module, a crew seat) is another law's.
     let Ok((&TreeSegment(segment), parent)) = segments.get(emptied.entity) else {
-        return;
+        return; // Other HP pools belong to other laws.
     };
-    let root = parent.parent();
-    if loose.contains(root) {
-        return; // A freed trunk keeps its pools but has already made its one structural cut.
-    }
-    let (mut state, mut trunk, transform) = trees
-        .get_mut(root)
-        .expect("a trunk segment is a child of its tree's root");
-    if *state != TreeState::Standing {
-        return;
-    }
+    let (state, mut trunk, transform) = trees
+        .get_mut(parent.parent())
+        .expect("a trunk segment's current owner carries its structural state");
     trunk.state.cracked[usize::from(segment)] = true;
-    let cut = trunk
-        .cut()
-        .expect("the emptied segment's base joint just opened");
-    let along = emptied.along.unwrap_or(transform.translation - emptied.at);
-    fell(&mut state, cut, along);
+    if let Some(mut state) = state {
+        let cut = trunk
+            .cut()
+            .expect("the emptied segment's base joint is open");
+        if matches!(*state, TreeState::Standing)
+            || matches!(*state, TreeState::Down { cut: previous, .. } if cut < previous)
+        {
+            fell(
+                &mut state,
+                cut,
+                emptied.along.unwrap_or(transform.translation - emptied.at),
+            );
+        }
+    }
 }
 
 /// AUTHORITY: queued field loads and each physics step's contacts, read once a step from the
@@ -917,23 +925,28 @@ fn fell_on_loads(
     segments: Query<(&TreeSegment, &ChildOf)>,
     mut trees: Query<(
         Entity,
-        &mut TreeState,
+        Option<&mut TreeState>,
         &TreeBody,
         &mut TrunkState,
-        &Transform,
-        &TrunkLoads,
-        Option<&motion::DetachedTrunk>,
+        &mut TrunkLoads,
+        Option<&TreePiece>,
+        (&avian3d::prelude::Position, &avian3d::prelude::Rotation),
     )>,
-    mut commands: Commands,
+    mut bodies: Query<Forces>,
 ) {
     if transfers.steps() == *read {
         return;
     }
     *read = transfers.steps();
+    let mut per_tree: BTreeMap<Entity, Vec<Load>> = trees
+        .iter_mut()
+        .filter_map(|(root, _, _, _, mut pending, _, _)| {
+            (!pending.0.is_empty()).then(|| (root, std::mem::take(&mut pending.0)))
+        })
+        .collect();
     let awake = transfers
         .split()
-        .map(|(point, blow, press, mass)| (point, blow, press, mass, transfers.dt()));
-    // A resting press has no blow, so no law reads its source mass; the point's own stands.
+        .map(|(point, blow, press, mass)| (point, blow, press, mass, transfers.dt(), false));
     let resting = transfers.resting().iter().map(|rest| {
         (
             &rest.transfer,
@@ -941,81 +954,94 @@ fn fell_on_loads(
             rest.press(),
             rest.transfer.effective_mass,
             rest.dt,
+            true,
         )
     });
-    // Per standing tree: its loads (tree frame) and their push (world, N·s).
-    let mut per_tree: BTreeMap<Entity, (Vec<Load>, Vec3)> = trees
-        .iter()
-        .filter(|(_, _, _, _, _, pending, detached)| !pending.0.is_empty() && detached.is_none())
-        .map(|(root, _, _, _, transform, pending, _)| {
-            let push = pending
-                .0
-                .iter()
-                .map(|load| load.blow + load.press * transfers.dt())
-                .sum::<Vec3>();
-            (root, (pending.0.clone(), transform.rotation * push))
-        })
-        .collect();
-    for (transfer, blow, press, mass, step, asleep) in awake
-        .map(|(point, blow, press, mass, step)| (point, blow, press, mass, step, false))
-        .chain(
-            resting.map(|(point, blow, press, mass, step)| (point, blow, press, mass, step, true)),
-        )
-    {
-        // A structure that is no tree (a building) reads its own contacts.
+    for (transfer, blow, press, mass, step, asleep) in awake.chain(resting) {
         let Ok((&TreeSegment(segment), parent)) = segments.get(transfer.structure_collider) else {
-            continue;
+            continue; // Buildings read their own contacts.
         };
         let root = parent.parent();
-        let (_, state, _, _, transform, _, detached) = trees
-            .get(root)
-            .expect("a trunk segment is a child of its tree's root");
-        if *state != TreeState::Standing && detached.is_some() {
-            continue; // The solver already sees the freed segments on their dynamic body.
-        }
-        let into = transform.rotation.inverse();
-        // A sleeping contact keeps its last checked press, but starts no new law run.
-        // Any awake load on this trunk still reads that sleeping press alongside its own.
+        let (_, _, body, _, _, piece, (position, rotation)) = trees
+            .get_mut(root)
+            .expect("a trunk segment's owner retains its construction and structural state");
+        let frame = body.construction_frame(piece, position.0, rotation.0);
         let entry = if asleep {
             per_tree.get_mut(&root)
         } else {
             Some(per_tree.entry(root).or_default())
         };
-        let Some((loads, push)) = entry else {
-            continue; // No awake load changed this standing trunk.
+        let Some(loads) = entry else {
+            continue; // An unchanged sleeping press starts no assessment.
         };
+        let into = frame.rotation.inverse();
         loads.push(Load {
             chunk: usize::from(segment),
-            at: into * (transfer.point - transform.translation),
+            at: into * (transfer.point - frame.translation),
             energy: 0.0,
             crushed: 0.0,
             blow: into * blow,
             press: into * press,
             peak: None,
-            origin: Origin::Body {
-                body: transfer.body,
-                mass,
-                speed: transfer.closing_speed,
-                step,
+            origin: if piece.is_some() {
+                Origin::Contact {
+                    other: transfer.body,
+                    step,
+                }
+            } else {
+                Origin::Body {
+                    body: transfer.body,
+                    mass,
+                    speed: transfer.closing_speed,
+                    step,
+                }
             },
         });
-        *push += blow + press * step;
     }
-    for (root, (loads, push)) in per_tree {
-        let (_, mut state, body, mut trunk, _, _, _) = trees
+    for (root, loads) in per_tree {
+        let (_, state, body, mut trunk, mut pending, piece, (position, rotation)) = trees
             .get_mut(root)
-            .expect("the tree whose segment the step touched");
-        let cut = match *state {
-            TreeState::Standing => load_trunk(body, &mut trunk, &loads),
-            TreeState::Down { cut, .. } => Some(cut),
-        };
-        if let Some(cut) = cut {
-            if *state == TreeState::Standing {
-                fell(&mut state, cut, push);
+            .expect("a loaded trunk survives through the same tick's laws");
+        let frame = body.construction_frame(piece, position.0, rotation.0);
+        let spin = piece.map_or(Vec3::ZERO, |_| {
+            frame.rotation.inverse()
+                * bodies
+                    .get_mut(root)
+                    .expect("a moving construction owner is a complete dynamic body")
+                    .angular_velocity()
+        });
+        if let Some(TreeState::Down { cut, .. }) = state.as_deref() {
+            trunk.state.cracked[usize::from(*cut)] = true;
+        }
+        let cut = load_trunk(body, &mut trunk, &loads, spin);
+        if let Some(mut state) = state {
+            if let Some(cut) = cut {
+                if matches!(*state, TreeState::Standing)
+                    || matches!(*state, TreeState::Down { cut: previous, .. } if cut < previous)
+                {
+                    let push = loads
+                        .iter()
+                        .map(|load| load.blow + load.press * transfers.dt())
+                        .sum::<Vec3>();
+                    fell(&mut state, cut, frame.rotation * push);
+                }
+                if usize::from(cut) < trunk.owned.end {
+                    pending.0 = loads;
+                }
             }
-            commands.entity(root).insert(TrunkLoads(loads));
         } else {
-            commands.entity(root).insert(TrunkLoads::default());
+            let mut physical = bodies
+                .get_mut(root)
+                .expect("a moving construction owner is a complete dynamic body");
+            for load in loads
+                .iter()
+                .filter(|load| matches!(load.origin, Origin::Field))
+            {
+                physical.apply_linear_impulse_at_point(
+                    frame.rotation * load.blow,
+                    frame.translation + frame.rotation * load.at,
+                );
+            }
         }
     }
 }
@@ -1038,8 +1064,13 @@ pub(crate) fn sim_plugin(app: &mut App) {
         .add_systems(
             FixedPostUpdate,
             (
+                motion::reset_standing.before(PhysicsSystems::First),
                 fell_on_loads.in_set(TreeFallSet),
                 derive_systems().in_set(TreeDerived).after(TreeFallSet),
+                (motion::split_moving, place_colliders, refit_colliders())
+                    .chain()
+                    .after(crate::debris::launch::LaunchSet)
+                    .before(crate::state::SimPhase::Publish),
             )
                 .run_if(not(resource_exists::<ClientReplica>)),
         );
@@ -1711,7 +1742,7 @@ pub(crate) mod tests {
                         step: 1.0 / 64.0,
                     },
                 };
-                load_trunk(&body, &mut trunk, &[load])
+                load_trunk(&body, &mut trunk, &[load], Vec3::ZERO)
             };
             assert_eq!(
                 press(0.99 * least),
@@ -1940,15 +1971,10 @@ pub(crate) mod tests {
         );
     }
 
-    /// THE FALL CUTS AT THE SEGMENT THAT EMPTIED: a segment whose pool a line empties breaks the
-    /// trunk at that segment and fells it along the round's travel; one a field empties breaks it
-    /// there too, away from the field's centre; a tree already down keeps its state whatever
-    /// segment empties next. Each emptying names a point in ANOTHER segment's height range, so a
-    /// mutant reading the cut off the dose's height (the base for the line, segment 2 for the
-    /// field), or one felling a field's tree whole at the base, reds this. The emptying opens the
-    /// joint at the segment's base in the trunk's structural state, the one definition of a break
-    /// a body's contact shares ([`TrunkState`]); a rule setting the state beside it reds this. The
-    /// break rule — only the doses a segment took count toward its break — relies on it.
+    /// The game's damage model: a segment's emptied HP pool opens its own base seam,
+    /// independent of the dose point's height. The topology uses the lowest open seam and the
+    /// input direction, including a later stump cut. Fixture points lie in other segments so
+    /// selecting a cut from height or preserving an earlier higher cut fails.
     #[test]
     fn the_fall_cuts_at_the_segment_that_emptied() {
         let mut world = World::new();
@@ -2007,8 +2033,8 @@ pub(crate) mod tests {
         });
         assert_eq!(
             world.get::<TreeState>(shot_root),
-            Some(&TreeState::Down { cut: 2, dir: 64 }),
-            "a tree already down keeps its state",
+            Some(&TreeState::Down { cut: 0, dir: 0 }),
+            "a lower stump cut updates the topology",
         );
     }
 

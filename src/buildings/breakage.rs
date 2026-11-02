@@ -987,8 +987,9 @@ struct DepositParam<'w, 's> {
         'w,
         's,
         (
-            &'static crate::trees::TreeState,
-            &'static Transform,
+            &'static crate::trees::TreeBody,
+            Option<&'static crate::trees::TreePiece>,
+            (&'static Position, &'static Rotation),
             &'static mut crate::trees::TrunkLoads,
         ),
     >,
@@ -1036,6 +1037,7 @@ fn moving_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
                     .get(of.body)
                     .is_ok_and(|(_, body)| body.is_dynamic())
                     && !p.buildings.contains(of.body)
+                    && !p.trunks.contains(of.body)
             }) {
                 near.push(collider);
             }
@@ -1585,13 +1587,11 @@ fn cast_blast(
                 else {
                     return None;
                 };
-                let (state, root, _) = p
+                let (body, piece, (position, rotation), _) = p
                     .trunks
                     .get(parent.parent())
-                    .expect("a standing segment belongs to its tree root");
-                if matches!(*state, crate::trees::TreeState::Down { cut, .. } if segment < cut) {
-                    return None; // The stump is fixed ground matter.
-                }
+                    .expect("a tree segment's current owner retains its construction");
+                let root = body.construction_frame(piece, position.0, rotation.0);
                 let into = root.rotation.inverse();
                 return Some(fracture::BlastSurface {
                     target: Stop::Trunk(parent.parent(), segment),
@@ -1648,7 +1648,7 @@ fn cast_blast(
                 p.trunks
                     .get_mut(root)
                     .expect("the world-ray tree survives this structural pass")
-                    .2
+                    .3
                     .0
                     .push(Load {
                         chunk: usize::from(segment),

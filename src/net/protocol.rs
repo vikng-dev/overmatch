@@ -272,7 +272,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 78 (#146, driving model): eight canonical fields; construction rest and signed crank.
 /// REV 79 (#147, the game's damage model): the pressure contact law removes the entry bend and the
 /// overmatch verdict from what a crossing records.
-pub const PROTOCOL_REV: u32 = 79;
+/// REV 80 (the game's environment destruction model): sorted tree carrier cuts partition
+/// moving construction; later seams can split and a stump can open a lower cut.
+pub const PROTOCOL_REV: u32 = 80;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
