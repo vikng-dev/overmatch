@@ -186,20 +186,39 @@ pub(crate) fn gravity_mps2() -> f32 {
 mod tests {
     use super::*;
 
-    /// The game's damage model refuses bad physical data before a shell flies. Mutant: unchecked NaN.
+    /// Its own numbers, apart from the shipped file's, so re-authoring shipped data cannot turn the
+    /// refusal test red.
+    const VALID: &str = r#"(
+        gravity_mps2: (9.0, Fixture("fixture")),
+        tnt_energy_j_per_kg: (4.0e6, Fixture("fixture")),
+        surface_burst_factor: (1.5, Fixture("fixture")),
+        air_density: (1.5, Fixture("fixture")),
+        cavity_inertia: (2.0, Fixture("fixture")),
+        contact_friction: (0.25, Fixture("fixture")),
+        floor_m: (-50.0, Fixture("fixture")),
+        reflected_impulse: ((from: 1.0, branches: [(2.0, [0.0])]), Fixture("fixture")),
+        incident_impulse: ((from: 1.0, branches: [(2.0, [0.0])]), Fixture("fixture")),
+        incident_pressure: ((from: 1.0, branches: [(2.0, [0.0])]), Fixture("fixture")),
+        reflected_pressure: ((from: 1.0, branches: [(2.0, [0.0])]), Fixture("fixture")),
+    )"#;
+
+    /// The game's damage model refuses bad physical data before a shell flies, and the shipped file
+    /// passes. Mutant: unchecked NaN.
     #[test]
     fn shared_physical_data_is_required_and_validated() {
         PhysicalLaws::shipped();
+        assert_eq!(PhysicalLaws::from_ron(VALID).unwrap().floor_m, -50.0);
         for (field, good) in [
-            ("gravity_mps2", "9.81"),
-            ("tnt_energy_j_per_kg", "4.184e6"),
-            ("surface_burst_factor", "1.8"),
-            ("air_density", "1.225"),
-            ("cavity_inertia", "1.0"),
-            ("contact_friction", "0.5"),
+            ("gravity_mps2", "9.0"),
+            ("tnt_energy_j_per_kg", "4.0e6"),
+            ("surface_burst_factor", "1.5"),
+            ("air_density", "1.5"),
+            ("cavity_inertia", "2.0"),
+            ("contact_friction", "0.25"),
         ] {
             for bad in ["0.0", "-1.0", "NaN", "inf"] {
-                let text = RON.replace(&format!("{field}: ({good},"), &format!("{field}: ({bad},"));
+                let text =
+                    VALID.replace(&format!("{field}: ({good},"), &format!("{field}: ({bad},"));
                 let error = PhysicalLaws::from_ron(&text).unwrap_err();
                 assert!(
                     error.contains(PATH) && error.contains(field) && error.contains("author"),
@@ -208,14 +227,14 @@ mod tests {
             }
         }
         for bad in ["NaN", "inf", "-inf"] {
-            let text = RON.replace("floor_m: (-100.0,", &format!("floor_m: ({bad},"));
+            let text = VALID.replace("floor_m: (-50.0,", &format!("floor_m: ({bad},"));
             let error = PhysicalLaws::from_ron(&text).unwrap_err();
             assert!(
                 error.contains(PATH) && error.contains("floor_m") && error.contains("author"),
                 "{error}"
             );
         }
-        let missing = RON
+        let missing = VALID
             .lines()
             .filter(|line| !line.trim_start().starts_with("floor_m:"))
             .collect::<Vec<_>>()
