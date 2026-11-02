@@ -31,6 +31,9 @@ use crate::view::PlayerView;
 
 use super::{SightMode, sight_line, view_available};
 
+mod look;
+use look::GraticuleLook;
+
 /// The on-screen intent cursor — the marker the gun chases. It moves immediately with the mouse
 /// (position control) and drifts back to centre as the gun's lay catches up.
 #[derive(Component)]
@@ -91,7 +94,8 @@ struct RangeScaleTick {
 /// black, an overlay, once at startup), then keep them in step with the sight.
 pub(super) fn plugin(app: &mut App) {
     crate::flow::require(app, "sight");
-    app.init_match_resource::<Toast>()
+    app.insert_resource(GraticuleLook::load())
+        .init_match_resource::<Toast>()
         // The optic surround is the sight's one custom-shaded widget: a full-screen node whose
         // fragment punches the glass out of it.
         .add_plugins(UiMaterialPlugin::<OpticMaskMaterial>::default())
@@ -293,53 +297,29 @@ fn update_range_readout(
     }
 }
 
-/// `Taste` (the sight picture's look): the graticule's colour, its marks and their numbers alike —
-/// black, as a graticule etched in an optic's glass reads against a daylit scene. Opaque, because a
-/// one-pixel line at any lower alpha draws grey and sinks into mid-tone ground.
-const RETICLE_COLOR: Color = Color::BLACK;
-
-/// `Taste` (the sight picture's look): every graticule mark's thickness, in PHYSICAL pixels — a
-/// hairline, one device pixel at every target scale factor and `UiScale` rung. [`place_mark`] turns
-/// it into each node's `Val::Px` through that node's own scale factor.
-const HAIRLINE_PHYSICAL_PX: f32 = 1.0;
-
-/// `Taste` (the sight picture's look): bar width, in UI px (`Val::Px`, so it follows `UiScale`), of
-/// the zero mark ([`ReticleLine`]) and of the two graduation weights.
-const LINE_WIDTH: f32 = 96.0;
-const MAJOR_TICK_WIDTH: f32 = 24.0;
-const MINOR_TICK_WIDTH: f32 = 12.0;
-
-/// Bar width of one graduation, by weight.
-fn tick_width(major: bool) -> f32 {
-    if major {
-        MAJOR_TICK_WIDTH
-    } else {
-        MINOR_TICK_WIDTH
-    }
-}
-
 /// Spawn the ranging reticle: the zero mark and the pool of range graduations (200 m steps, majors
 /// numbered in hundreds of metres). Every mark is absolutely positioned — the whole graticule is
 /// placed against the gun's sight line each frame ([`update_ranging_reticle`]), which is not screen
 /// centre at `sight::GUNNER_BLEND`. All hidden until shown in the optic; a mark's height is written
 /// where it is placed ([`place_mark`]).
-fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
+fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>, look: Res<GraticuleLook>) {
+    let colour = look.colour();
     commands.spawn((
         FlowScoped(Flow::InMatch),
         ReticleLine,
         Node {
             position_type: PositionType::Absolute,
-            width: Val::Px(LINE_WIDTH),
+            width: Val::Px(look.line_width_ui_px.0),
             ..default()
         },
-        BackgroundColor(RETICLE_COLOR),
+        BackgroundColor(colour),
         Visibility::Hidden,
     ));
 
     let mut range = 200.0_f32;
     while range <= 4000.0 {
         let major = (range as i32) % 400 == 0;
-        let width = tick_width(major);
+        let width = look.tick_width(major);
         let mut tick = commands.spawn((
             FlowScoped(Flow::InMatch),
             RangeScaleTick { range, major },
@@ -348,27 +328,25 @@ fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
                 width: Val::Px(width),
                 ..default()
             },
-            BackgroundColor(RETICLE_COLOR),
+            BackgroundColor(colour),
             Visibility::Hidden,
         ));
         if major {
             // Label rides the tick: an absolute child offsets from the tick's own top-left.
-            // `Taste` (the sight picture's look): 5 px clear of the bar's end, and `-7` centres the
-            // 12 px number's line box (bevy's default `LineHeight`, 1.2 × the size) on the hairline.
             tick.with_children(|parent| {
                 parent.spawn((
                     Text::new(format!("{}", (range as i32) / 100)),
                     TextFont {
-                        // Regular: a tiny reticle graduation number (12px).
+                        // Regular weight keeps the graduation numbers legible at the authored size.
                         font: fonts.body.clone().into(),
-                        font_size: FontSize::Px(12.0),
+                        font_size: FontSize::Px(look.label_font_ui_px.0),
                         ..default()
                     },
-                    TextColor(RETICLE_COLOR),
+                    TextColor(colour),
                     Node {
                         position_type: PositionType::Absolute,
-                        left: Val::Px(width + 5.0),
-                        top: Val::Px(-7.0),
+                        left: Val::Px(width + look.label_gap_ui_px.0),
+                        top: Val::Px(look.label_top_ui_px.0),
                         ..default()
                     },
                 ));
@@ -383,7 +361,7 @@ fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
 /// its scale factor (the target's, times `UiScale`; `bevy_ui::update::propagate_ui_target_cameras`)
 /// is what layout multiplies this node's `Val::Px` by, so its reciprocal is one physical pixel.
 ///
-/// The bar is [`HAIRLINE_PHYSICAL_PX`] tall and its top edge stands half that above `point`. Layout
+/// The authored physical thickness stands half above and half below `point`. Layout
 /// rounding (`LayoutConfig::use_rounding`, on by default) then puts both edges on the physical grid —
 /// taffy's `round_layout` sets the height to `round(top + h) − round(top)` — so a one-pixel extent
 /// covers exactly one physical row, and that row's centre is within half a pixel of `point`.
@@ -393,13 +371,14 @@ fn place_mark(
     point: Option<Vec2>,
     width: f32,
     target: &ComputedUiRenderTargetInfo,
+    hairline_physical_px: f32,
 ) {
     match point {
         Some(point) => {
             let ui_px_per_physical = target.scale_factor().recip();
             node.left = Val::Px(point.x * ui_px_per_physical - width / 2.0);
-            node.top = Val::Px((point.y - HAIRLINE_PHYSICAL_PX / 2.0) * ui_px_per_physical);
-            node.height = Val::Px(HAIRLINE_PHYSICAL_PX * ui_px_per_physical);
+            node.top = Val::Px((point.y - hairline_physical_px / 2.0) * ui_px_per_physical);
+            node.height = Val::Px(hairline_physical_px * ui_px_per_physical);
             *visibility = Visibility::Visible;
         }
         None => *visibility = Visibility::Hidden,
@@ -431,6 +410,7 @@ fn place_mark(
 fn update_ranging_reticle(
     mode: Res<SightMode>,
     ranging: Res<Ranging>,
+    look: Res<GraticuleLook>,
     controlled: Query<&Rig, With<Controlled>>,
     view_nodes: Query<&ViewNode>,
     gun: Query<&GlobalTransform>,
@@ -497,7 +477,14 @@ fn update_ranging_reticle(
     // the line and the dialed graduation are one place and the graticule cannot come apart.
     if let Ok((mut node, mut visibility, target)) = line.single_mut() {
         let point = mark.as_ref().and_then(|mark| mark(ranging.range));
-        place_mark(&mut node, &mut visibility, point, LINE_WIDTH, target);
+        place_mark(
+            &mut node,
+            &mut visibility,
+            point,
+            look.line_width_ui_px.0,
+            target,
+            look.hairline_physical_px.0,
+        );
     }
     for (tick, mut node, mut visibility, target) in &mut ticks {
         let point = mark.as_ref().and_then(|mark| mark(tick.range));
@@ -505,8 +492,9 @@ fn update_ranging_reticle(
             &mut node,
             &mut visibility,
             point,
-            tick_width(tick.major),
+            look.tick_width(tick.major),
             target,
+            look.hairline_physical_px.0,
         );
     }
 }
@@ -949,7 +937,12 @@ mod tests {
 
     impl SightPicture {
         fn new(lay: Quat) -> Self {
+            Self::with_look(lay, GraticuleLook::load())
+        }
+
+        fn with_look(lay: Quat, look: GraticuleLook) -> Self {
             let mut world = World::new();
+            world.insert_resource(look);
             world.insert_resource(SightMode::Gunner);
             world.insert_resource(Ranging { range: DIALED });
             world.insert_resource(UiFonts {
@@ -1305,6 +1298,58 @@ mod tests {
         );
     }
 
+    /// Sight authors own every graticule look value. A different inline fixture must reach
+    /// the production spawner and placer; a constant left in either path breaks this invariant.
+    #[test]
+    fn authored_graticule_look_reaches_marks_and_labels() {
+        // Fixture: deliberately distinct sizes, offsets and colour expose any kept code taste.
+        let look = ron::from_str::<GraticuleLook>(
+            r#"(
+            hairline_physical_px: (3.0, Fixture("inline thickness")),
+            line_width_ui_px: (57.0, Fixture("inline zero width")),
+            major_tick_width_ui_px: (31.0, Fixture("inline major width")),
+            minor_tick_width_ui_px: (17.0, Fixture("inline minor width")),
+            label_gap_ui_px: (9.0, Fixture("inline label clearance")),
+            label_top_ui_px: (-11.0, Fixture("inline label offset")),
+            label_font_ui_px: (13.0, Fixture("inline label font")),
+            colour_srgba: ((0.2, 0.3, 0.4, 0.9), Fixture("inline colour")),
+        )"#,
+        )
+        .unwrap();
+        let mut picture = SightPicture::with_look(Quat::IDENTITY, look);
+        picture.run();
+        let world = &mut picture.world;
+        let line = world.get::<Node>(picture.line).unwrap();
+        assert_eq!(px(line.width), 57.0);
+        assert_eq!(px(line.height), 3.0);
+        let colour = Color::srgba(0.2, 0.3, 0.4, 0.9);
+        for (node, background, tick) in world
+            .query_filtered::<
+                (&Node, &BackgroundColor, Option<&RangeScaleTick>),
+                Or<(With<ReticleLine>, With<RangeScaleTick>)>,
+            >()
+            .iter(world)
+        {
+            assert_eq!(background.0, colour);
+            if let Some(tick) = tick {
+                assert_eq!(px(node.width), if tick.major { 31.0 } else { 17.0 });
+            }
+        }
+        let mut labels = 0;
+        for (node, font, text_colour) in world.query::<(&Node, &TextFont, &TextColor)>().iter(world)
+        {
+            assert_eq!(px(node.left), 40.0);
+            assert_eq!(px(node.top), -11.0);
+            assert!(matches!(font.font_size, FontSize::Px(13.0)));
+            assert_eq!(text_colour.0, colour);
+            labels += 1;
+        }
+        assert!(
+            labels > 0,
+            "the production spawner supplies numbered graduations"
+        );
+    }
+
     /// **Every mark is a hairline: one physical row, at every scale, on the sight line.** The
     /// owner's sight picture asks for marks one device pixel thick. Measured on bevy's own layout
     /// headless (`crate::gpu_less_default_plugins`: taffy and its pixel rounding run as shipped), in
@@ -1341,6 +1386,7 @@ mod tests {
                 .with_scale_factor_override(1.0),
             ..default()
         })))
+        .insert_resource(GraticuleLook::load())
         .insert_resource(SightMode::Gunner)
         .insert_resource(Ranging { range: DIALED })
         .insert_resource(UiFonts {
