@@ -73,12 +73,12 @@
 //! | s2_stopped_mantlet | 218 | 142 | 0 | 0 | 0 | 0 | – | – |
 //! | s3_ricochet | 226 | 150 | 0 | 0 | 0 | 0 | – | – |
 //! | s4_spaced_then_stopped | 968 | 892 | 620 | 4 | 256 | 0 | 155 | – |
-//! | s5_oblique_through | 858 | 786 | 539 | 1 | 64 | 64 | 539 | – |
+//! | s5_oblique_through | 926 | 854 | 539 | 1 | 64 | 64 | 539 | – |
 //! | s6_overpen | 585 | 509 | 309 | 2 | 128 | 0 | 154 | – |
 //! | s7_engine_shadow | 757 | 693 | 466 | 1 | 64 | 51 | 466 | – |
 //! | s8a_mg_ricochet | 224 | 148 | 0 | 0 | 0 | 0 | – | – |
 //! | s8b_mg_stopped | 216 | 140 | 0 | 0 | 0 | 0 | – | – |
-//! | s9_breech_and_loader | 1728 | 1680 | 1223 | 2 | 128 | 160 | 611 | – |
+//! | s9_breech_and_loader | 1661 | 1617 | 962 | 3 | 192 | 88 | 320 | – |
 //! | s10_gun_barrel_struck | 497 | 425 | 248 | 2 | 128 | 0 | 124 | – |
 //! | s11_mg_barrel_struck | 218 | 145 | 0 | 0 | 0 | 0 | – | – |
 //! | s12_apcr_through_crew | 938 | 890 | 569 | 1 | 64 | 66 | 569 | – |
@@ -91,8 +91,8 @@
 //! component measures 124–155 B on average per scenario (a reach under 128 mm takes one varint
 //! byte, one of 16.4 m or more three). Each hit adds about three bytes (ray skip, volume, dose
 //! palette index, a varint each) and each distinct dose four. Under the ball every direction is
-//! thrown at its own strength, so nearly every hit's dose is distinct. MEASURED: s9's two cones
-//! total 1223 B and its message without a burst is 1728 B. A burst's field at its 256 directions
+//! thrown at its own strength, so nearly every hit's dose is distinct. MEASURED: s9's three cones
+//! total 962 B and its message without a burst is 1661 B. A burst's field at its 256 directions
 //! adds about 310 B where no direction leaves the
 //! burst point (s16) and 1.3 KB where its band reaches the compartment's boxes (s13), so the
 //! largest recorded message is 2.2 KB.

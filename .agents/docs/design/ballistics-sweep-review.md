@@ -1061,9 +1061,9 @@ MEASURED regressions and dispositions:
   still assigned that time by global spatial proximity. A default scenario test compares the live
   march's interaction sequence with the
   stored records, including reflected faces, crossed volumes and field counts.
-- s5 now shows one rack reflection and rest in the hull side; its rack line dose is 13.5 HP
-  (MEASURED). Its turn is 92.0°, correcting the review's 88° claim (DERIVED from recorded vectors).
-  s9 now shows four reflections, rest in the turret bottom, a commander-station line dose of
+- At that review step, s5 showed one rack reflection and rest in the hull side; its rack line
+  dose was 13.5 HP (MEASURED). Its turn is 92.0°, correcting the review's 88° claim (DERIVED from recorded vectors).
+  s9 showed four reflections, rest in the turret bottom, a commander-station line dose of
   21.1 HP, and a second cone of 2000.6 J (MEASURED). Its first turn is 123.7° (DERIVED). The
   canonical angle-law section owns the full scenario account and the current law's consequences.
 - The complete serializer table was measured again: s5 is 858 B for the victim and 786 B for the
@@ -1099,8 +1099,9 @@ and checked against code; the angle-law form remains the owner's open choice.
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
 | Claude | P2: a folded path assigns a cone an earlier leg's record time; the stage comparison repeats that choice | verified | damage_cam: time events on their source crossings (#255) |
-| Claude | P2: the ricochet resume skips the unswept normal lift | verified; unfinished at the lane's green stop | not landed |
+| Claude | P2: the ricochet resume skips the unswept normal lift | verified | ballistics: resume ricochets at reached samples (#255) |
 | Claude | P3: the thick-plate assertion commits the test to an open plate-term choice | verified | ballistics: keep plate-bound tests independent of the open law choice (#255) |
+| Lane follow-through | P2: a latest-face-only pose releases the full model through the preceding nearby face at the next apex | verified | ballistics: resume ricochets at reached samples (#255) |
 
 MEASURED: the DERIVED folded-path fixture failed with a cone at `0.034642003 s`, before its
 source crossing at `0.036097 s`. The writer now restricts each hard event to its mark's own path
@@ -1112,28 +1113,69 @@ the existing scenarios without changing interaction sequences or wire definition
 
 MEASURED clock-step gates: 269 selected tests passed, with four pricing/capture instruments left
 ignored. Formatting and locked workspace/all-target CI clippy with `dev_ui,bitprobe` passed.
-The refreshed s9 second cone is at `0.036387894 s`, within its source crossing (MEASURED).
+At the clock step, the refreshed s9 second cone was at `0.036387894 s`, within its source
+crossing (MEASURED).
 
-The game's damage-model lift fixture reproduced the defect: after a reflection it skipped a
-2 mm neighbour across a 7.2 mm gap (fixture data), with no chord charged. The unlanded hand-off
+At the initial bay's green stop, the game's damage-model lift fixture had reproduced the defect:
+after a reflection it skipped a 2 mm neighbour across a 7.2 mm gap (fixture data), with no chord charged. The unlanded hand-off
 prototype passed that regression and 190 resolver/walk/collector/recording checks, but its final
 cross-module run passed 516 tests but still failed the reflected-body view guard and the
 refreshed field-cast check (MEASURED). The cast records themselves matched: their aggregate
 `PINNED_TOTAL` constant had not been updated. The view guard still checked the previous plane
-at the following reflection's apex; that endpoint needs verification before a fix is landed.
-It is not a green implementation and is excluded from the lane commits. The published s5/s9
-records therefore retain the existing march's geometry, with only the clock-step corrections;
-they still show the lift-driven rests identified by the review. Re-recording a corrected walk,
-settling those two failures and running its gates remain for the next lane.
+at the following reflection's apex; at that stop the endpoint still needed verification.
+That prototype was not green and was excluded from the initial lane commits. The s5/s9
+records at that stop retained the existing march's geometry, with only the clock-step corrections;
+they still showed the lift-driven rests identified by the review. The corrected walk,
+those two failures and its gates were deferred to the continuation below.
 
 The plate-bound test now checks both sides of each struck plate's own critical angle and its
-own energy bound, without ordering the doses of unrelated plates. The angle law's form, the
-owner's floor/reach-bound choice and PROTOCOL_REV 63 are unchanged.
+own energy bound, without ordering the doses of unrelated plates. At that step, the angle law's
+form, the owner's floor/reach-bound choice and PROTOCOL_REV 63 were unchanged.
 
 MEASURED final green-step gates: 83 resolver and whole-tree guard tests passed, including
 `doc_citations`, `ui_ascii`, `net_boundary` and `bake::`. Formatting and locked workspace/all-target
 CI clippy with `dev_ui,bitprobe` passed. Implementation stopped at the user's measured 60-minute
-limit; the already-queued green-step checks completed afterwards. The branch contains the clock
-fix and plate-bound test only; the unlanded walk, its provisional re-records and cast pins are
-excluded. No protected modules, wire definitions, captures, pricing, pushes or issue comments
-were changed or made.
+limit; the already-queued green-step checks completed afterwards. That initial branch contained
+the clock fix and plate-bound test only; the unlanded walk, its provisional re-records and cast
+pins were excluded. No protected modules, wire definitions, captures, pricing, pushes or issue
+comments were changed or made.
+
+The continued game's damage-model lift verification (sweep-ball-12b) is fixed in
+`ballistics: resume ricochets at reached samples (#255)`. Reflected samples resume at their
+reached hand-offs, with no normal lift or outgoing nudge; their offsets survive tick boundaries.
+The thin-neighbour regression charges the 2 mm wall across its DERIVED 7.2 mm gap (fixture data).
+The newer buffered collider re-enable path is retained unchanged.
+
+MEASURED: the unchanged stage guard reproduced a tail depth of `0.15633692 m` at s5 bounce 1,
+`0.009987354 m` after its apex, at the following reflection. Selecting the preceding plane failed
+at the new apex instead: the full model spans both nearby faces. The pose now constrains the
+body against the reached planes within its trailing span, preserving its nose position and
+length. The guard's interval, endpoints and `0.0001 m` tolerance are unchanged. A synthetic
+parallel-face fixture also checks the shared apex and its adjacent f32 values; an independent
+corner checks simultaneous bounds from two distinct normals.
+
+The final re-records and refreshed complete encoded-size table are in
+`pen_cam: record ricochets without the unchecked lift (#255)`. MEASURED from the actual march
+and postcard serializer:
+
+| record | reflected faces, in order | rest | cones | victim B | shooter B | cone B |
+|---|---|---|---|---|---|---|
+| s5 | Ammo_L_1, Hull_Side_Upper_L, Ammo_L_1, Hull_Side_Upper_L | Ammo_L_1 | 1 | 926 | 854 | 539 |
+| s9 | Breech, Turret_Side, Turret_Side, Turret_Bottom, Turret_Bottom, Turret_Bottom | Hull_Top | 3 | 1661 | 1617 | 962 |
+
+s5 now reads the narrow rack/hull gap as flight and repeated contacts, rather than lifting into
+the hull side. s9 continues through six reflections and three source-timed cones rather than
+lifting into its turret-bottom rest; Ammo_L_1 receives only `0.0000228 HP` of raw field dose,
+which converts to zero pool units (MEASURED). The other complete serializer rows are unchanged.
+The field-cast blessing tool re-pinned 2009 records and printed `PINNED_TOTAL = 0x127879570b5d23ea`
+(MEASURED on macOS arm64); the aggregate constant now matches it.
+
+The angle-law form and the owner's open choices are unchanged. No wire definitions changed;
+current main's PROTOCOL_REV 64 is retained. No protected modules, captures, pricing, pushes or
+issue comments were changed or made.
+
+MEASURED continuation gates: 589 targeted tests passed across `ballistics::`, `pen_cam`,
+`field_casts`, `damage_cam`, `recording_tests::` and `headless_test`; 11 capture/pricing tools
+remained ignored. All 44 whole-tree guards passed (`doc_citations`, `ui_ascii`, `net_boundary`,
+`bake::`). Formatting and locked workspace/all-target CI clippy with `dev_ui,bitprobe` passed.
+The source comments describing the removed bounce nudge now state the reached-hand-off invariant.
