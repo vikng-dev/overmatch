@@ -1,54 +1,20 @@
-//! The present-mode capability probe: what the window surface ACTUALLY supports, asked of wgpu
-//! once, instead of guessed from the OS name.
+//! One-shot surface present-mode probe; capability is a surface fact, not an OS guess. Metal
+//! reports `[Fifo, Immediate]` and panics if configured with `Mailbox`; Wayland commonly reports
+//! `[Fifo, Mailbox]` and refuses `Immediate`; Vulkan/X11 and Windows usually offer all three. A
+//! platform table would drift with driver/compositor updates.
 //!
-//! # Why a probe at all
+//! Bevy's render-world `WindowSurfaces` keeps its fields private. Create a short-lived surface
+//! from the primary window's raw handles under `create_surfaces`' unsafe/main-thread contract.
+//! The query configures nothing; the surface drops before return.
 //!
-//! The vsync ladder's uncapped rungs map to `Mailbox` and `Immediate`, and both are per-surface
-//! facts, not per-OS ones: wgpu-hal's Metal backend reports `[Fifo, Immediate]` and hits an
-//! `unreachable!()` if a surface is configured with `Mailbox`; Wayland compositors report
-//! `[Fifo, Mailbox]` and refuse `Immediate`; Vulkan on X11/Windows usually reports all of them.
-//! A `cfg(target_os)` table would be a copy of somebody else's driver matrix that goes stale the
-//! day a compositor updates — so the rule here is **probe, don't guess**: the settings page offers
-//! only rungs the surface reported, and `Settings::present_mode` emits a concrete uncapped mode
-//! only once this probe has confirmed it.
+//! [`ProbeChannel`] shares one `Arc<Mutex<…>>` between worlds: render writes once, main polls
+//! until [`PresentCaps::answered`]. No extract-schedule coupling or main-world polling after arrival.
+//! Without a render app, caps stays Unprobed: offer everything, promise nothing.
 //!
-//! # How the answer travels
-//!
-//! `wgpu::Surface::get_capabilities` needs the surface and the adapter, and both live in the
-//! RENDER world — bevy's own surface (`bevy_render`'s `WindowSurfaces`) holds them in private
-//! fields, so this module creates its own short-lived probe surface from the primary window's raw
-//! handle, exactly as `bevy_render::view::window::create_surfaces` does (same `unsafe` contract,
-//! same main-thread pinning via `NonSendMarker`). The capability query itself configures nothing —
-//! it is read-only against the adapter — and the throwaway surface is dropped before the system
-//! returns.
-//!
-//! The result then crosses to the main world through a shared `Arc<Mutex<…>>` cell
-//! ([`ProbeChannel`]) inserted into BOTH worlds at plugin build: the render-world system writes it
-//! once, and a main-world system polls until it lands in [`PresentCaps`] (and stops running — its
-//! run condition is [`PresentCaps::answered`]). One cell, written once, read until seen: no
-//! extract-schedule coupling, no per-frame cost after arrival.
-//!
-//! Headless roots mount none of this (no render app → the render half is never added), and the
-//! main-world [`PresentCaps`] then simply stays [`PresentCaps::Unprobed`], which every consumer
-//! treats as "offer everything, promise nothing".
-//!
-//! # A probe that could not ask answers UNAVAILABLE, not "empty"
-//!
-//! Surface creation can fail. This module used to report that as a probed-but-empty capability
-//! list, which reads to every consumer as the surface positively refusing both uncapped modes —
-//! and once `settings::normalize_vsync` existed (a writer that SAVES), that fabricated negative
-//! would have eaten a player's stored FAST/OFF for good. The failure path therefore answers
-//! [`PresentCaps::Unavailable`], which is the same "nothing is known" state as pre-probe: safe to
-//! present from, never evidence of anything. See [`PresentCaps`]'s doc for the full argument.
-//!
-//! **The capability QUERY can fail the same way, and it fails silently.**
-//! `Surface::get_capabilities` returns no `Result` — wgpu 29 turns a failed
-//! `surface_get_capabilities` into `SurfaceCapabilities::default()` (an empty `present_modes`
-//! vector), and documents the same empty list for a surface the adapter cannot present to. Since
-//! any presentable surface reports at least `Fifo`, an empty list is exactly the same
-//! "we could not learn" as a failed surface creation, and [`caps_from_present_modes`] maps it to
-//! [`PresentCaps::Unavailable`] for exactly that reason. What is left over — a NON-empty list
-//! without `Immediate` or `Mailbox`, e.g. `[Fifo]` — is the genuine conclusive negative.
+//! Creation failure and an empty capability list mean Unavailable, never a conclusive negative.
+//! wgpu 29 returns defaults on a failed query or adapter-incompatible surface; any presentable
+//! surface reports at least `Fifo`. Only a nonempty list such as `[Fifo]` can prove both uncapped
+//! modes absent. See [`PresentCaps`] for why a false negative would spend a stored player choice.
 
 use std::sync::{Arc, Mutex};
 
@@ -60,8 +26,7 @@ use bevy::render::{Render, RenderApp};
 
 use super::PresentCaps;
 
-/// The one-shot render→main hand-off cell. A resource in BOTH worlds (same `Arc`), which is what
-/// lets the two halves communicate without touching the extract schedule.
+/// One-shot render→main hand-off; both worlds hold the same `Arc`, independent of extraction.
 #[derive(Resource, Clone, Default)]
 struct ProbeChannel(Arc<Mutex<Option<PresentCaps>>>);
 
@@ -83,18 +48,8 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(Render, probe_present_modes);
 }
 
-/// Distil a wgpu capability list into the two facts the ladder gates on. Pure, so the mapping is
-/// testable against fake capability lists.
-///
-/// **An EMPTY list is a failure, not an answer.** `Surface::get_capabilities` does not return a
-/// `Result`: wgpu 29 flattens a failed `surface_get_capabilities` into `SurfaceCapabilities::
-/// default()`, whose `present_modes` is an empty `Vec`, and its own docs specify the same empty
-/// list for a surface the adapter cannot present to. A surface that CAN be presented to always
-/// reports at least `Fifo` (wgpu guarantees it), so "no present modes at all" can only mean the
-/// query failed or the surface is incompatible — it is not evidence about `Immediate` or `Mailbox`,
-/// and letting it reach [`PresentCaps::Reported`] would hand `settings::normalize_vsync` a
-/// fabricated negative to spend a player's stored FAST/OFF on. Same class as the surface-creation
-/// failure below, one layer deeper, and answered the same way.
+/// Distil the two ladder gates. Empty means query failure/incompatibility, never evidence
+/// for normalization; see the module doc.
 fn caps_from_present_modes(present_modes: &[wgpu::PresentMode]) -> PresentCaps {
     if present_modes.is_empty() {
         return PresentCaps::Unavailable;
@@ -139,12 +94,7 @@ fn probe_present_modes(
     let surface = match unsafe { instance.create_surface_unsafe(target) } {
         Ok(surface) => surface,
         Err(err) => {
-            // Answer UNAVAILABLE rather than retrying forever — and specifically NOT an empty
-            // capability list, which would be this code inventing a negative answer it does not
-            // have. `PresentCaps::Unavailable` keeps every consumer on the same graceful
-            // nothing-is-known path as the pre-probe state, and in particular keeps
-            // `settings::normalize_vsync` from rewriting (and SAVING) a stored rung on the strength
-            // of a failure. See [`PresentCaps`]'s doc for the bug that distinction exists to stop.
+            // Terminal failure, not evidence for normalization; see [`PresentCaps`].
             warn!("present-mode probe: could not create a probe surface ({err})");
             *channel.0.lock().unwrap() = Some(PresentCaps::Unavailable);
             *done = true;
@@ -153,9 +103,7 @@ fn probe_present_modes(
     };
     let caps = caps_from_present_modes(&surface.get_capabilities(&adapter).present_modes);
     if caps == PresentCaps::Unavailable {
-        // The only way to hear about a failed capability query: wgpu returns defaults rather than
-        // an error. Warned rather than silently swallowed, because it means the ladder will never
-        // gate on anything on this machine.
+        // wgpu returns defaults rather than an error; report that capability gating is unavailable.
         warn!(
             "present-mode probe: the surface reported no present modes at all — treating that as a \
              failed query rather than as a surface that refuses every mode"
@@ -235,9 +183,7 @@ mod tests {
             },
         );
 
-        // A surface that reports a list with NEITHER uncapped mode in it — `[Fifo]`, or Fifo plus
-        // FifoRelaxed. This is the genuine conclusive negative: the surface answered, and the
-        // answer is "vsync ON only".
+        // A nonempty list without uncapped modes is conclusive: ON only.
         for list in [
             vec![wgpu::PresentMode::Fifo],
             vec![wgpu::PresentMode::Fifo, wgpu::PresentMode::FifoRelaxed],
@@ -253,23 +199,15 @@ mod tests {
             );
         }
 
-        // A FAILED probe is a different thing entirely, and this is the whole point of the
-        // tri-state: it answers the poller so the probe stops, and it claims neither capability.
-        // `settings::the_probe_arrival_writes_the_normalized_rung_back` pins the writer half.
+        // Unavailable stops polling but claims neither capability. The parent normalization test
+        // owns the save-side contract.
         assert!(PresentCaps::Unavailable.answered());
         assert!(!PresentCaps::Unprobed.answered());
         assert!(!PresentCaps::Unavailable.immediate() && !PresentCaps::Unavailable.mailbox());
     }
 
-    /// **The silent half of the failure story.**
-    ///
-    /// `Surface::get_capabilities` cannot report an error — wgpu 29 flattens a failed
-    /// `surface_get_capabilities` into `SurfaceCapabilities::default()`, i.e. an EMPTY
-    /// `present_modes`, and documents the same empty list for an adapter-incompatible surface. A
-    /// presentable surface always reports at least `Fifo`, so an empty list is a failed query, not
-    /// a surface refusing everything — and mapping it to `Reported` would hand
-    /// `settings::normalize_vsync` the fabricated negative all over again, one layer below the
-    /// surface-creation failure that was fixed first.
+    /// An empty wgpu list must remain Unavailable through normalization: no rung removed and no
+    /// save requested. A real minimal `[Fifo]` report is the contrasting case. See the module doc.
     #[test]
     fn an_empty_capability_list_is_a_failed_query_not_an_answer() {
         assert_eq!(
@@ -289,10 +227,7 @@ mod tests {
             PresentCaps::Unavailable,
         );
 
-        // End to end, from the wgpu-shaped input to the WRITER: an empty list must move no stored
-        // rung and write no file. (`Settings`/`normalize_vsync` are the parent module's private
-        // items, which this child module may reach — the point of testing it from here is that the
-        // empty list never even becomes a `PresentCaps::Reported` on the way.)
+        // Exercise the writer from wgpu-shaped input, so the failure cannot become Reported en route.
         for vsync in VsyncMode::ORDER {
             let mut app = App::new();
             app.add_message::<SaveSettings>()
