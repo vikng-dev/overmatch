@@ -199,3 +199,26 @@ the broader Slip trial (#146).
 MEASURED restored-Slip/common gates: formatting and CI clippy passed; 427 targeted,
 headless, spec, bake and source-guard tests passed, four ignored. This verified tree also
 contains item 3's independent energy correction. No experimental Slip arm remains.
+
+## Item 3: governor provenance and crank work
+
+MEASURED red: the 0.01 kg m² admission witness and the isolated synchronous curve-power
+witness both failed before the correction. The power witness reaches the reported lab point
+at 1,100 rpm and also checks a resolved 4 kg m² crank. The small crank is deliberately an
+algebraic work-law counterexample; it is independently refused by construction admission.
+
+The governor's unchanged 100 rpm proportional droop is required StandIn data in engine.ron:
+it names missing governor dynamics and its effect on regulated equilibrium speed. It is no
+longer called Resolution. The independent over-rev outcome and guard are unchanged.
+
+DERIVED Resolution admission: with delta_omega the narrowest authored curve interval or fuel
+cut width, J >= peak_net_torque/(tick_hz delta_omega). This prevents a free-crank tick from
+skipping an entire torque feature. The Blender fixture now supplies 2 kg m² instead of 0.05;
+its 1,200 N m curve at a 100 rpm interval requires approximately 1.79 kg m² (DERIVED). Tests
+no longer claim that a tiny positive inertia resolves a large authored torque curve.
+
+The work budget integrates the virtual unconstrained free crank before coupling; it does not
+clip away combustion work at a guard the physical crank has not reached. Physical crank guards
+and final settlement retain their existing outcomes. Both red witnesses pass. MEASURED gates:
+formatting and CI clippy passed; 427 targeted/headless/spec/bake/guard tests passed, four ignored.
+No wire change. Commit: driving: preserve curve work and admit resolved cranks (#146).

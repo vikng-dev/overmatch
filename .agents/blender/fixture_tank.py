@@ -82,8 +82,8 @@ TankSpec(
                     sound: None,
                     torque_curve: [(700.0, 1000.0), (2000.0, 1200.0), (2400.0, 1100.0)],
                     drag_fraction: 0.25,
-                    // Synthetic light crank: admission follows derived coupling arithmetic.
-                    inertia_kgm2: 0.05,
+                    // Synthetic crank resolves the authored curve and governor at the fixed tick.
+                    inertia_kgm2: 2.0,
                     clutch_capacity_nm: 1600.0,
                 ),
                 gearbox: (

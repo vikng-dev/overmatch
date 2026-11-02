@@ -21,11 +21,6 @@ use crate::bitprobe::TransmissionProbe;
 /// on fixed 64 Hz ticks). Resolution: shift times quantize to this solver clock.
 const TICK_HZ: f32 = 64.0;
 
-/// Fuel-governor cut width (rpm): torque ramps linearly to zero over this band past the
-/// governed rpm, so the top-speed equilibrium is a smooth root instead of a hard clip.
-/// Resolution: a finite ramp avoids discontinuous torque forcing at the fixed tick.
-const GOVERNOR_CUT_RPM: f32 = 100.0;
-
 /// StandIn: the slip guard substitutes for the missing over-rev engine outcome. Its width
 /// can set descent speed; the owner must choose that outcome before this guard is replaced.
 pub(crate) fn overrev_margin_rpm() -> f32 {
@@ -36,6 +31,7 @@ pub(crate) fn overrev_margin_rpm() -> f32 {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EngineControl {
+    governor_cut_rpm: crate::provenance::Labelled<f32>,
     overrev_margin_rpm: crate::provenance::Labelled<f32>,
     idle_catch_droop_rpm: crate::provenance::Labelled<f32>,
     idle_guard_band_rpm: crate::provenance::Labelled<f32>,
@@ -49,6 +45,7 @@ const ENGINE_CONTROL_PATH: &str = "assets/driving/engine.ron";
 impl EngineControl {
     fn validate(&self) {
         for (field, number) in [
+            ("governor_cut_rpm", &self.governor_cut_rpm),
             ("overrev_margin_rpm", &self.overrev_margin_rpm),
             ("idle_catch_droop_rpm", &self.idle_catch_droop_rpm),
             ("idle_guard_band_rpm", &self.idle_guard_band_rpm),
@@ -270,6 +267,19 @@ impl TransmissionParams {
             )
             .into());
         }
+        let peak_torque = a
+            .torque_nm
+            .iter()
+            .map(|&(_, torque)| torque)
+            .fold(0.0, f32::max);
+        // Resolution: a free-crank tick must not skip an entire curve interval or fuel cut.
+        // J >= peak torque * dt / delta_omega follows directly from J*domega = torque*dt.
+        let step_rpm = a
+            .torque_nm
+            .windows(2)
+            .map(|pair| pair[1].0 - pair[0].0)
+            .fold(engine_control().governor_cut_rpm.value, f32::min);
+        let minimum_inertia = peak_torque / (TICK_HZ * step_rpm * RPM_TO_RAD);
         for (field, ok) in [
             (
                 "sprocket radius and track half-tread",
@@ -342,8 +352,10 @@ impl TransmissionParams {
                 (0.0..=1.0).contains(&a.drag_fraction),
             ),
             (
-                "engine.inertia_kgm2",
-                a.engine_inertia_kgm2.is_finite() && a.engine_inertia_kgm2 > 0.0,
+                "engine.inertia_kgm2 (resolve the torque curve and fuel cut at the fixed tick; increase crank inertia)",
+                a.engine_inertia_kgm2.is_finite()
+                    && a.engine_inertia_kgm2 > 0.0
+                    && a.engine_inertia_kgm2 >= minimum_inertia,
             ),
             (
                 "engine.clutch_capacity_nm",
@@ -497,7 +509,8 @@ impl TransmissionParams {
     }
 
     fn fuel_cut(&self, rpm: f32) -> f32 {
-        (1.0 - (rpm - self.engine.governed_rpm) / GOVERNOR_CUT_RPM).clamp(0.0, 1.0)
+        (1.0 - (rpm - self.engine.governed_rpm) / engine_control().governor_cut_rpm.value)
+            .clamp(0.0, 1.0)
     }
 
     pub(crate) fn launch_omega(&self, command: f32) -> f32 {
@@ -1518,10 +1531,10 @@ fn engine_work(
     motor: [f32; 2],
     #[cfg(feature = "bitprobe")] probe: &mut TransmissionProbe,
 ) -> EngineWork {
-    let omega_free = (crank.omega_e + crank.tau_free * crank.dt / tp.engine_inertia)
-        .clamp(-crank.omega_over, crank.omega_over);
+    let omega_free = crank.omega_e + crank.tau_free * crank.dt / tp.engine_inertia;
     // DERIVED: the unclamped constant-torque work is tau_free * dt times mean crank
-    // speed, including construction losses. Guard clipping discards excess work.
+    // speed, including construction losses. This virtual free crank is not the guarded
+    // physical crank: clipping it would discard curve work before the clutch can transmit it.
     let energy = 0.5 * tp.engine_inertia * omega_free * omega_free;
     let spendable =
         (energy - 0.5 * tp.engine_inertia * crank.omega_floor.max(0.0).powi(2)).max(0.0);

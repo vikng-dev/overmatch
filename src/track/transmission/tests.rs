@@ -1602,7 +1602,9 @@ fn transmission_bottleneck_reduces_the_one_drive_task_rate() {
 fn one_fuel_rack_never_exceeds_the_full_load_curve() {
     for tp in [lab_tp(), tiger_tp()] {
         for fraction in 0..=100 {
-            let rpm = (tp.max_curve_rpm() + GOVERNOR_CUT_RPM) * fraction as f32 / 100.0;
+            let rpm = (tp.max_curve_rpm() + engine_control().governor_cut_rpm.value)
+                * fraction as f32
+                / 100.0;
             for command in [0.0, 0.25, 0.5, 0.75, 1.0] {
                 let [fuel, catch, drag] =
                     engine_torques(&tp, DriveSupply::WHOLE, rpm * RPM_TO_RAD, command);
@@ -1621,7 +1623,7 @@ fn one_fuel_rack_never_exceeds_the_full_load_curve() {
 #[test]
 fn the_fuel_cut_includes_drag_reconstruction() {
     let tp = lab_tp();
-    let omega = (tp.engine.governed_rpm + GOVERNOR_CUT_RPM) * RPM_TO_RAD;
+    let omega = (tp.engine.governed_rpm + engine_control().governor_cut_rpm.value) * RPM_TO_RAD;
     for command in [0.0, 0.5, 1.0] {
         let [fuel, catch, drag] = engine_torques(&tp, DriveSupply::WHOLE, omega, command);
         assert_eq!(
@@ -2046,8 +2048,10 @@ fn driver_force_price_uses_the_current_regime_and_both_caps() {
             }
         }
     }
-    let speed =
-        (tp.engine.governed_rpm + GOVERNOR_CUT_RPM) * RPM_TO_RAD * tp.sprocket_radius / ratio;
+    let speed = (tp.engine.governed_rpm + engine_control().governor_cut_rpm.value)
+        * RPM_TO_RAD
+        * tp.sprocket_radius
+        / ratio;
     assert!(
         price_driver_force(
             &tp,
@@ -3171,14 +3175,17 @@ fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
     a.rated_rpm = 40000.0;
     a.torque_nm = &[(25000.0, 200000.0), (40000.0, 150000.0)];
     a.brake_static_factor = 3.0;
-    a.engine_inertia_kgm2 = 200.0;
+    a.engine_inertia_kgm2 =
+        200000.0 / (TICK_HZ * engine_control().governor_cut_rpm.value * RPM_TO_RAD);
     a.clutch_capacity_nm = 100000.0;
     a.belt_inertia = 0.5;
     a.shift_secs = 3.5;
     assert!(TransmissionParams::from_authoring(&a).is_ok());
     a.engine_inertia_kgm2 = 0.01;
     a.clutch_capacity_nm = 50.0;
-    assert!(TransmissionParams::from_authoring(&a).is_ok());
+    assert!(TransmissionParams::from_authoring(&a).is_err());
+    a.engine_inertia_kgm2 =
+        200000.0 / (TICK_HZ * engine_control().governor_cut_rpm.value * RPM_TO_RAD);
     a.shift_secs = (f32::from(u8::MAX) + 1.0) / TICK_HZ;
     assert!(TransmissionParams::from_authoring(&a).is_err());
     a.shift_secs = 0.0;
@@ -3247,5 +3254,55 @@ fn backward_live_crank_has_no_idle_floor() {
         let [fuel, catch, drag] = engine_torques(&tp, inp.supply, state.omega_e, 1.0);
         let (floor, over) = crank_guards(&tp, &inp, &state, 1.0, fuel + catch - drag);
         assert_eq!(floor, -over);
+    }
+}
+
+/// A free-crank tick must resolve its authored torque rather than cross the solver's rpm band.
+/// The constructor protects every admitted drivetrain, including Blender's fixture sheet.
+#[test]
+fn unresolved_crank_inertia_is_refused() {
+    let mut a = tiger_authoring();
+    a.engine_inertia_kgm2 = 0.01; // Fixture: a positive but unresolved crank.
+    assert!(TransmissionParams::from_authoring(&a).is_err());
+}
+
+/// Virtual free-crank guard clipping must not cap synchronous curve power.
+/// This isolates the work law; constructor admission independently bounds the tick's inertia.
+#[test]
+fn virtual_free_crank_energy_does_not_cap_curve_power() {
+    let (fp, mut tp) = (lab_fp(), lab_tp());
+    for inertia in [0.01, 4.0] {
+        // Fixture: the reported algebraic counterexample and resolved crank.
+        tp.engine_inertia = inertia;
+        let omega = 1100.0 * RPM_TO_RAD; // Fixture curve peak.
+        let k = tp.gears_fwd[2] / tp.sprocket_radius;
+        let speed = omega / k;
+        let torque = tp.torque_at(omega / RPM_TO_RAD);
+        let force = torque * k;
+        let inp = input(1.0, 0.0, [speed; 2], [force * 0.5; 2]);
+        let crank = CrankTick {
+            omega_e: omega,
+            tau_free: torque,
+            k,
+            dir: 1.0,
+            omega_floor: 500.0 * RPM_TO_RAD,
+            omega_over: 1900.0 * RPM_TO_RAD,
+            dt: inp.dt,
+        };
+        #[cfg(feature = "bitprobe")]
+        let mut probe = TransmissionProbe::default();
+        let work = engine_work(
+            &tp,
+            &fp,
+            &inp,
+            crank,
+            [force * 0.5; 2],
+            #[cfg(feature = "bitprobe")]
+            &mut probe,
+        );
+        assert_eq!(
+            work.scale, 1.0,
+            "curve power must remain available at J={inertia}"
+        );
     }
 }
