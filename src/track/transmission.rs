@@ -1328,7 +1328,7 @@ pub(crate) fn price_driver_force(
         shaft_rpm
     };
     let [induced, idle, drag] = engine_torques(tp, supply, rpm * RPM_TO_RAD, command);
-    ((induced + idle - drag).min(supply.transmitted * tp.clutch_capacity) * gear
+    ((induced + idle - drag).min(supply.transmission_condition * tp.clutch_capacity) * gear
         / tp.sprocket_radius)
         .min(grip_n)
 }
