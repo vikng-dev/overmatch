@@ -1890,25 +1890,29 @@ fn a_cone_reaches_matter_independently_of_tank_ownership() {
     }
 }
 
-/// THE POOL QUANTUM GATE: a body exit whose cone's whole emission `S/2` converts to no pool unit
-/// (`ballistics::pool_units_of`, the quantum a pool keeps) at the cone's unit is not thrown — no
-/// direction walked, no cone recorded, the crossing counting none — and one above it is, however
-/// far below a whole point: a pool keeps every pool unit, so a gate at a point would drop a dose
-/// the pool accumulates. Fixture: an 88 at 800 m/s through a factor-10 slab as thick as the
-/// readout drop at which it loses 0.15 HP points' worth of energy at the cone's unit, below the
-/// display's whole point before the exit's strength ratio (DERIVED from the force law, the slab
-/// about 3 mm at the shipped unit); through the same slab at a thousandth of the factor, so it
-/// spends and loses a thousandth as much (the energy drop is linear in so small a readout drop)
-/// (DERIVED); and through 20 mm of steel.
+/// THE POOL QUANTUM GATE GATES HP ONLY: a body exit whose cone's whole emission `S/2` converts to
+/// no pool unit (`ballistics::pool_units_of`, the quantum a pool keeps) at the cone's unit doses
+/// no box and counts gated, yet is still thrown and
+/// recorded, so a building reads its joules whatever the HP unit; one above it doses, however far
+/// below a whole point: a pool keeps every pool unit, so a gate at a point would drop a dose the
+/// pool accumulates. Fixture: an 88 at 800 m/s through a factor-10 slab as thick as the readout
+/// drop at which it loses 0.15 HP points' worth of energy at the cone's authored HP per joule
+/// lost, below the display's whole point before the exit's strength ratio (DERIVED from the force
+/// law, the slab about 3 mm at the shipped unit); through the same slab at a thousandth of the
+/// factor, so it spends and loses a thousandth as much (the energy drop is linear in so small a
+/// readout drop) (DERIVED); and through 20 mm of steel.
 #[test]
-fn a_cone_below_the_pool_quantum_is_not_thrown() {
-    let lost = 0.15 / crate::ballistics::spall_cone::cone_unit().hp_per_joule();
+fn a_cone_below_the_pool_quantum_doses_no_pool_and_is_still_thrown() {
+    let energy = crate::ballistics::spall_cone::cone_energy();
+    let per_joule_lost = crate::ballistics::spall_cone::cone_unit().hp_per_joule()
+        * f64::from(energy.debris_share());
+    let lost = 0.15 / per_joule_lost;
     let v_in = 800.0f32;
     let v_out = ((v_in as f64).powi(2) - 2.0 * lost / FIXTURE_88.mass as f64).sqrt() as f32;
     // Reference-mm over the factor's reference-mm per metre.
     let slab = (capability(FIXTURE_88, v_in) - capability(FIXTURE_88, v_out)) / 10.0;
     let unit_factor = 10.0 / crate::ballistics::POOL_UNITS_PER_HP as f32;
-    for (thickness, factor, thrown) in [
+    for (thickness, factor, doses) in [
         (slab, unit_factor, false),
         (slab, 10.0, true),
         (0.02, STEEL, true),
@@ -1941,13 +1945,17 @@ fn a_cone_below_the_pool_quantum_is_not_thrown() {
             .sum();
         assert_eq!(
             (spall.cones.len(), spall.gated, counted),
-            if thrown { (1, 0, 1) } else { (0, 1, 0) },
+            (1, usize::from(!doses), 1),
             "factor {factor}: {:?}",
             spall
                 .cones
                 .iter()
                 .map(|cone| cone.strength)
                 .collect::<Vec<_>>()
+        );
+        assert!(
+            spall.cones[0].strength > 0.0,
+            "factor {factor}: the cone carries energy"
         );
     }
 }

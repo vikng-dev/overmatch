@@ -1796,8 +1796,9 @@ pub struct SpallMarks {
     pub cones: Vec<SpallCone>,
     /// The round's burst field, once it has burst and thrown one.
     pub burst: Option<BurstField>,
-    /// Fields reached whose emission was below the pool quantum and not thrown: body exits' cones
-    /// and a burst's.
+    /// Fields reached whose emission was below the pool quantum, so they dosed no box: body exits'
+    /// cones and a burst's. One carrying energy is still thrown and recorded, without doses, for
+    /// the joules a building reads; one carrying none is not thrown.
     pub gated: usize,
 }
 
@@ -3767,16 +3768,25 @@ fn throw_burst(
         throw.strength.is_finite() && throw.strength >= 0.0,
         "the game's damage model derives finite nonnegative burst strength from validated energy",
     );
-    if !throw.reaches_a_pool_unit() {
+    let doses_pools = throw.reaches_a_pool_unit();
+    if !doses_pools {
         shell.spall.gated += 1;
-        return;
+    }
+    if throw.strength == 0.0 {
+        return; // A field carrying no energy has nothing for a pool or a building.
     }
     let (field, law) = fields.field(speed / burst.sideways_speed);
     let spread = law.spread(field).expect(
         "the game's damage model derives a burst field from a validated round, finite speed and \
          configured field law; it must remain inside that law's domain",
     );
-    let rays = walk_field(&throw, &spread, shell.dose, context, is_box);
+    let rays = walk_field(
+        &throw,
+        &spread,
+        doses_pools.then_some(&mut *shell.dose),
+        context,
+        is_box,
+    );
     shell.spall.burst = Some(BurstField {
         origin: throw.origin,
         axis: throw.axis,
@@ -3803,7 +3813,8 @@ impl FieldThrow<'_> {
     /// ([`field_units`], the rate every one of its doses converts at; [`pool_units_of`], the
     /// quantum a pool keeps). `S/2` is the most one box can take from it, since every direction
     /// doses a box at most once and the field's weights emit `S/2` in all
-    /// ([`spall_cone::EMITTED_SHARE`]).
+    /// ([`spall_cone::EMITTED_SHARE`]). It gates the field's HP doses only: a building reads the
+    /// field's joules whatever its HP unit, so a field below it is still walked.
     fn reaches_a_pool_unit(&self) -> bool {
         pool_units_of(field_units(
             self.strength * spall_cone::EMITTED_SHARE,
@@ -3815,6 +3826,8 @@ impl FieldThrow<'_> {
 /// Walk every direction of `spread` about `throw`'s axis from its origin, direction `k` at
 /// strength `S·f_k`, standing for `1/N` of the field, through every spatially reached volume
 /// ([`resolve::field_direction`]), adding its doses to `dose`; returns the rays in stratum order.
+/// With no `dose` (a field below the pool quantum, [`FieldThrow::reaches_a_pool_unit`]) the rays
+/// dose nothing and record no dose: only their ends and strengths, which a building reads.
 /// Ownership is attribution only: neighboring tanks and unowned environment matter resist and
 /// receive the same field. Material presence and occlusion decide where each direction stops.
 /// The game's damage model requires every direction and witness pass to pair; a contradiction
@@ -3822,7 +3835,7 @@ impl FieldThrow<'_> {
 fn walk_field(
     throw: &FieldThrow<'_>,
     spread: &spall_cone::Spread,
-    dose: &mut ShotDose,
+    mut dose: Option<&mut ShotDose>,
     context: &resolve::ResolveContext<'_, '_, '_>,
     is_box: &dyn Fn(Entity) -> bool,
 ) -> Vec<SpallRay> {
@@ -3844,22 +3857,27 @@ fn walk_field(
             weight,
         );
         let ray = walked.unwrap_or_else(|error| error.panic());
-        dose.add_field(
-            &ray.doses,
-            throw.unit,
-            DoseContext::Field {
-                origin: throw.origin,
-            },
-        );
+        let doses = match dose.as_deref_mut() {
+            Some(dose) => {
+                dose.add_field(
+                    &ray.doses,
+                    throw.unit,
+                    DoseContext::Field {
+                        origin: throw.origin,
+                    },
+                );
+                ray.doses
+                    .iter()
+                    .map(|dose| (dose.address, dose.amount))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
         rays.push(SpallRay {
             direction: ray_dir,
             end: ray.end,
             strength: thrown,
-            doses: ray
-                .doses
-                .iter()
-                .map(|dose| (dose.address, dose.amount))
-                .collect(),
+            doses,
         });
     }
     rays
@@ -3869,15 +3887,17 @@ fn walk_field(
 /// shot's [`ShotDose`] (design doc §5). Returns whether it was thrown.
 ///
 /// The game's damage-model strength `S` is [`walk::SpallSource::strength`] (J): the cone carries
-/// the energy its round lost across the body, weighted by exit material, and its doses convert at
-/// the cone's unit ([`spall_cone::cone_unit`]). A cone whose whole emission converts to no pool
-/// unit ([`FieldThrow::reaches_a_pool_unit`]) is not thrown: no direction is walked and nothing is
-/// recorded. Otherwise the cone is spread
+/// its share of the energy its round lost across the body ([`walk::SpallSource::carried`]), and
+/// its doses convert at the cone's unit ([`spall_cone::cone_unit`]). A cone whose whole emission
+/// converts to no pool unit ([`FieldThrow::reaches_a_pool_unit`]) doses no box, and is counted
+/// gated; it is still thrown and recorded, without doses, for the joules a building reads, unless
+/// it carries none. The cone is spread
 /// by the ball law at the source's ratio ([`walk::SpallSource::debris_ratio`]): direction `k` of
 /// the spread ([`spall_cone::Spread`]) carries `S·f_k` and stands for `1/N` of the cone, walked
 /// through every spatially reached volume ([`walk_field`]). It never doses the body
-/// that threw it, the volumes the exit leaves ([`walk::SpallSource::exited`]): the energy the
-/// round lost there is their line dose, counted once. The game's damage model requires the
+/// that threw it, the volumes the exit leaves ([`walk::SpallSource::exited`]): what the body kept
+/// of the energy the round lost there is their line dose, and the cone carries the rest, so the
+/// energy is spent once. The game's damage model requires the
 /// source ratio and direction to remain inside the law's domain: substances are validated at
 /// load and the crossing derives the source from a resolved flight.
 fn throw_spall_cone(
@@ -3909,9 +3929,12 @@ fn throw_spall_cone(
         unit: spall_cone::cone_unit(),
         exited: &source.exited,
     };
-    if !throw.reaches_a_pool_unit() {
+    let doses_pools = throw.reaches_a_pool_unit();
+    if !doses_pools {
         spall.gated += 1;
-        return false;
+    }
+    if strength == 0.0 {
+        return false; // A cone carrying no energy has nothing for a pool or a building.
     }
     let spread = shape
         .spread(spall_cone::FieldDescriptor::ball(source.debris_ratio))
@@ -3919,7 +3942,13 @@ fn throw_spall_cone(
             "the game's damage model takes a spall source's ratio from its load-validated \
              material; the derived field must stay inside the configured law's domain",
         );
-    let rays = walk_field(&throw, &spread, dose, context, is_box);
+    let rays = walk_field(
+        &throw,
+        &spread,
+        doses_pools.then_some(dose),
+        context,
+        is_box,
+    );
     spall.cones.push(SpallCone {
         origin: source.position,
         axis: throw.axis,
@@ -4349,19 +4378,20 @@ mod tests {
     }
 
     /// A FIELD'S HP UNIT MOVES ITS CREW DOSE AND NEVER THE VOLUME IT CRUSHES (the game's damage
-    /// model and environment destruction model, game state only). A cone carries the energy its
-    /// round lost across the body times the exit's strength ratio ([`walk::SpallSource::strength`]);
-    /// a building reads each direction's `S·f_k / N` joules as the energy it crushes with
+    /// model and environment destruction model, game state only). A cone carries its share of the
+    /// energy its round lost across the body, `κ r` ([`walk::SpallSource::carried`]); a building
+    /// reads each direction's `S·f_k / N` joules as the energy it crushes with
     /// (`buildings::breakage`'s shell reader, [`crate::buildings::fracture::Load::field`]), and a
-    /// crew station's HP pool reads the same joules through the cone's unit ([`field_units`]).
-    /// So doubling the unit doubles the crew dose and leaves the crushed volume where it is, the
-    /// energy carried over the chunk's crushing energy density. A unit or the line rate entering
-    /// the strength (the defect this pins: a balance unit crushing masonry) moves the crushed
-    /// volume; a dose converted at the energy rate fails the doubling. Who relies on it: every
-    /// building a cone meets and every crew pool it doses. Fixture data: 2.7 MJ lost through a
-    /// reference-strength exit (ratio 1) and a softer one (0.2), `λ` 2.4, 64 directions, a chunk
-    /// crushed at 1.35e8 J/m³, a crew station every direction reaches, and units 1.5e-4 and
-    /// 3.0e-4 HP per joule.
+    /// crew station's HP pool reads the same joules through the cone's unit, summed by the shot's
+    /// tally ([`ShotDose`]'s field deposit). So the crushed volume is the energy carried over the
+    /// chunk's crushing energy density whatever the unit, and the crew dose is the joules times
+    /// the unit at each of two units. A unit or the line rate entering the strength (the defect
+    /// this pins: a balance unit crushing masonry) moves the crushed volume; a tally converting a
+    /// field deposit at the energy rate, or at no unit, misses the crew dose. Who relies on it:
+    /// every building a cone meets and every crew pool it doses. Fixture data: 2.7 MJ lost
+    /// through a reference-strength exit (ratio 1) and a softer one (0.2), `λ` 2.4, 64
+    /// directions, a chunk crushed at 1.35e8 J/m³, a crew station every direction reaches, and
+    /// units 1.5e-4 and 3.0e-4 HP per joule, neither the energy rate's 1/3000.
     #[test]
     fn a_fields_hp_unit_moves_crew_dose_and_never_crushed_volume() {
         const CRUSH: f32 = 1.35e8; // Fixture data: J/m³.
@@ -4396,21 +4426,32 @@ mod tests {
                 .iter()
                 .map(|load| f64::from(load.crushed))
                 .sum();
-            let carried = f64::from(source.energy * ratio);
+            let share = spall_cone::cone_energy().debris_share();
+            let carried = f64::from(source.energy * (share * ratio));
             assert!(
                 (crushed - carried / f64::from(CRUSH)).abs() <= 1e-6 * crushed,
                 "ratio {ratio}: crushed {crushed} m³ for {carried} J carried"
             );
-            let crew = |unit: f64| -> u64 {
-                let unit = spall_cone::FieldUnit::fixture(unit);
-                doses.iter().map(|&dose| field_units(dose, unit)).sum()
-            };
-            let (single, double) = (crew(1.5e-4), crew(3.0e-4));
-            assert!(single > 0, "ratio {ratio}: the crew station is dosed");
-            assert!(
-                double.abs_diff(2 * single) <= doses.len() as u64,
-                "ratio {ratio}: {double} dose units at twice the unit, {single} at once"
-            );
+            let station = Entity::from_raw_u32(1).unwrap();
+            for unit in [1.5e-4, 3.0e-4] {
+                let fixture = spall_cone::FieldUnit::fixture(unit);
+                let mut shot = ShotDose::default();
+                let field: Vec<mechanism::Dose> = doses
+                    .iter()
+                    .map(|&amount| mechanism::Dose {
+                        address: station,
+                        amount,
+                        source: mechanism::DoseSource::Field,
+                    })
+                    .collect();
+                shot.add_field(&field, fixture, FIXTURE_CONTEXT);
+                let hp = hp_before_rounding(shot.tallies[0].units) as f64;
+                let joules: f64 = doses.iter().map(|&dose| f64::from(dose)).sum();
+                assert!(
+                    (hp - joules * unit).abs() <= 1e-5 * joules * unit,
+                    "ratio {ratio}: {hp} HP from {joules} J at {unit} HP per joule"
+                );
+            }
         }
     }
 
@@ -7543,7 +7584,8 @@ mod march_tests {
     /// A CHORD ACROSS A SEGMENT SEAM CHARGES BOTH LOCAL POOLS AND CONSERVES ENERGY (the game's
     /// damage model, issue 149): an oblique line crosses the fixture trunk's base and middle
     /// segments, in either travel order. Each pool takes its own recorded line dose at the one
-    /// energy rate; together those doses equal the round's kinetic energy drop, and the top
+    /// energy rate; together with the trunk exit's cone those doses spend the round's kinetic
+    /// energy drop once (design doc §5, "The energy partition"), and the top
     /// segment stays full. Local breaks rely on both addresses surviving collection and settlement.
     /// A shared root address, charging only the entrance segment, or charging the whole crossing
     /// to both segments reds this. Fixture data: pools large enough that neither empties.
@@ -7592,9 +7634,18 @@ mod march_tests {
                 * f64::from(FIXTURE_88.mass)
                 * (f64::from(*speed_in).powi(2) - f64::from(*speed).powi(2));
             let deposited: f64 = volumes.iter().map(|v| f64::from(v.energy)).sum();
+            let carried: f64 = world
+                .query::<&SpallMarks>()
+                .single(world)
+                .unwrap()
+                .cones
+                .iter()
+                .map(|cone| f64::from(cone.strength * spall_cone::EMITTED_SHARE))
+                .sum();
             assert!(
-                (deposited / lost - 1.0).abs() < 1e-5,
-                "the segment doses sum to the kinetic energy drop: {deposited} vs {lost}"
+                ((deposited + carried) / lost - 1.0).abs() < 1e-5,
+                "the segment doses and the exit's cone spend the kinetic energy drop once: \
+                 {deposited} J + {carried} J vs {lost} J"
             );
             assert_eq!(pools[2].held(), pools[2].capacity(), "the top stays full");
         }

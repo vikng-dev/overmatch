@@ -1972,7 +1972,7 @@ pub struct SpallSource {
     /// The volumes the reached members' exits leave ([`ExitMember::exited`]), in entity order: the
     /// body that throws the cone. The surface the cone is thrown from is theirs, so a direction
     /// that starts inside one of them has not entered it there, and the cone never doses one of
-    /// them anywhere, since the line has dosed them the energy its field carries. A volume
+    /// them anywhere, since the line has dosed them the energy the body kept. A volume
     /// only an unreached member leaves is not among them: the round never left it, and a direction
     /// starting inside it enters it there.
     pub exited: Vec<Entity>,
@@ -1985,33 +1985,45 @@ pub struct SpallSource {
     /// stretches, `½ m (v_before² − v_after²)` with `m` the mass that meets the plate
     /// ([`super::mechanism::Mechanism::energy`]), each stretch's drop shared among the samples as
     /// the spend's is, summed over the reached members. Across a body the whole disc crosses it is
-    /// `½ m (v_entry² − v_exit²)`, the energy the line's dose deals the body's volumes.
+    /// `½ m (v_entry² − v_exit²)`. The cone carries [`Self::field_share`] of it out and the line
+    /// deals the body's volumes the rest, so line and field spend it once.
     pub energy: f32,
     /// `λ`, the field law's ratio of the cone thrown here: the debris ratio of the body's last layer
     /// before the exit, the reached member's of the highest rear factor, the greatest ratio on a
     /// tie ([`ExitMember::rear_factor`], [`ExitMember::debris_ratio`]).
     pub debris_ratio: f32,
-    /// The exited substance's strength against the reference armour steel, the share of the
-    /// cone's potency it keeps: [`exit_strength_ratio`] of the highest rear factor among the
-    /// reached members, the layer [`Self::debris_ratio`] is read from. Exactly 1 at or above the
-    /// reference.
+    /// The exited substance's strength against the reference armour steel: [`exit_strength_ratio`]
+    /// of the highest rear factor among the reached members, the layer [`Self::debris_ratio`] is
+    /// read from. Exactly 1 at or above the reference. Its one job is the exit material's term of
+    /// the energy partition ([`Self::field_share`]).
     pub strength_ratio: f32,
     /// The round's speed (m/s) where the latest reached member left it.
     pub exit_speed: f32,
 }
 
 impl SpallSource {
-    /// The cone's strength `S` (J), the strength of a field carrying `energy × ratio` joules
-    /// ([`super::spall_cone::field_strength`]): the kinetic energy the round lost across the body
-    /// ([`Self::energy`]) times the exited substance's strength ratio ([`Self::strength_ratio`]),
-    /// one IEEE f32 product, which the cone emits whole. No HP unit enters it: a box's pool reads
-    /// it through the cone's unit at its dose edge, a building as the energy it crushes with.
-    /// Whatever the round or the plate, a round that loses more energy across a body of one
-    /// substance throws a stronger cone, and one that loses none throws none. A ratio of exactly 1
-    /// leaves the energy itself, so every exit at or above the reference steel carries all the
-    /// energy lost; a softer exit (brick, wood) carries only its share.
+    /// The share of the energy lost across the body that leaves through its exit with the cone,
+    /// `κ r`: `κ` the share at the reference steel ([`super::spall_cone::ConeEnergy::debris_share`],
+    /// `Unknown` data) and `r` the exited substance's strength ratio ([`Self::strength_ratio`]),
+    /// so a softer exit lets out proportionally less. The line deals the body's volumes the rest,
+    /// `1 − κ r`, so the energy the round lost is spent once (design doc §5, "Strength"). In
+    /// `(0, 1]`, since `κ` and `r` are.
+    pub fn field_share(&self) -> f32 {
+        super::spall_cone::cone_energy().debris_share() * self.strength_ratio
+    }
+
+    /// The energy (J) the cone carries out of the body: [`Self::energy`] × [`Self::field_share`].
+    pub fn carried(&self) -> f32 {
+        self.energy * self.field_share()
+    }
+
+    /// The cone's strength `S` (J), the strength of a field carrying [`Self::carried`] joules
+    /// ([`super::spall_cone::field_strength`]), which the cone emits whole. No HP unit enters it: a
+    /// box's pool reads it through the cone's unit at its dose edge, a building as the energy it
+    /// crushes with. Whatever the round or the plate, a round that loses more energy across a body
+    /// of one substance throws a stronger cone, and one that loses none throws none.
     pub fn strength(&self) -> f32 {
-        super::spall_cone::field_strength(self.energy * self.strength_ratio)
+        super::spall_cone::field_strength(self.carried())
     }
 }
 
@@ -3388,8 +3400,27 @@ pub(crate) fn finish<M: Mechanism>(
         },
     };
 
-    let deposits = advanced
-        .doses
+    let (spall, carried_out) = spall_sources(
+        mechanism,
+        &event.exits,
+        &advanced.stretches,
+        advanced.stop,
+        transit.axis,
+    );
+    // Only a sample's stretch inside a reached body loses energy to a field; the body the round
+    // stops inside keeps all the energy lost there.
+    let mut doses = advanced.doses;
+    for (index, stretch) in advanced.stretches.iter().enumerate() {
+        for &(address, sample, energy) in &stretch.lines {
+            if let Some(share) = carried_out.get(&(index, sample)) {
+                doses
+                    .get_mut(&address)
+                    .expect("the game's damage model sums each line where its energy was lost")
+                    .energy -= energy * share;
+            }
+        }
+    }
+    let deposits = doses
         .into_iter()
         .filter(|(_, line)| line.chord as f32 > 0.0)
         .map(|(address, line)| Dose {
@@ -3401,14 +3432,6 @@ pub(crate) fn finish<M: Mechanism>(
             },
         })
         .collect();
-
-    let spall = spall_sources(
-        mechanism,
-        &event.exits,
-        &advanced.stretches,
-        advanced.stop,
-        transit.axis,
-    );
 
     Ok(ResolutionPlan {
         entrance: request.entrance,
@@ -3437,7 +3460,8 @@ pub(crate) fn finish<M: Mechanism>(
 }
 
 /// One volume's line over a crossing, summed over the encounters: the disc-mean chord (m), its
-/// readout cost (reference-mm) and the energy the round lost in it (J), the dose.
+/// readout cost (reference-mm) and the energy the round lost in it (J); [`finish`] makes the dose
+/// of it by taking out what the fields of the reached exits carry ([`SpallSource::field_share`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct LineSum {
     chord: f64,
@@ -3466,6 +3490,9 @@ struct Stretch<S> {
     after: S,
     /// `(sample, factor)` for every sample in the encounter ([`overlap_factor`]).
     resisted: Vec<(usize, f32)>,
+    /// `(volume, sample, joules)`: the energy the round lost in each volume along each sample over
+    /// the encounter ([`Effect::Line`]).
+    lines: Vec<(Entity, usize, f64)>,
 }
 
 /// The encounters a mechanism advances through: each run of encounters joined across no interface
@@ -3496,10 +3523,12 @@ fn advance_through<M: Mechanism>(
         let before = state;
         let advance = mechanism.advance(state, encounter, limits, geometry);
         state = advance.state;
+        let mut lines = Vec::with_capacity(advance.effects.len());
         for effect in advance.effects {
             match effect {
                 Effect::Line {
                     address,
+                    sample,
                     chord,
                     cost,
                     energy,
@@ -3508,6 +3537,7 @@ fn advance_through<M: Mechanism>(
                     slot.chord += chord;
                     slot.cost += cost;
                     slot.energy += energy;
+                    lines.push((address, sample, energy));
                 }
             }
         }
@@ -3526,6 +3556,7 @@ fn advance_through<M: Mechanism>(
                 .iter()
                 .map(|sample| (sample.sample, overlap_factor(&sample.present)))
                 .collect(),
+            lines,
         });
         match advance.control {
             Control::Continue => {}
@@ -3559,13 +3590,17 @@ fn advance_through<M: Mechanism>(
 /// when its midpoint does. A stretch's readout drop, and its energy drop alike, is shared among its
 /// samples by the factor each was resisted by — the share the rigid force law gives each sample of
 /// the disc-mean force.
+///
+/// Also returns, per `(stretch index, sample)` inside a reached body, the share of the energy lost
+/// there that the body's field carries out ([`SpallSource::field_share`]): the line keeps the
+/// rest, so line and field together spend exactly the energy lost.
 fn spall_sources<M: Mechanism>(
     mechanism: &M,
     exits: &[BodyExit],
     stretches: &[Stretch<M::State>],
     stop: Option<f64>,
     direction: Vec3,
-) -> Vec<SpallSource> {
+) -> (Vec<SpallSource>, BTreeMap<(usize, usize), f64>) {
     // Each stretch's `(readout drop, energy drop)` over the whole disc.
     let disc_drops: Vec<(f64, f64)> = stretches
         .iter()
@@ -3577,6 +3612,7 @@ fn spall_sources<M: Mechanism>(
         })
         .collect();
     let mut out = Vec::new();
+    let mut carried_out = BTreeMap::new();
     for exit in exits {
         let reached: Vec<&ExitMember> = exit
             .members
@@ -3587,12 +3623,14 @@ fn spall_sources<M: Mechanism>(
             continue;
         }
         let (mut spend, mut energy) = (0.0f64, 0.0f64);
+        let mut covered = Vec::new();
         for member in &reached {
-            for (stretch, (drop, lost)) in stretches.iter().zip(&disc_drops) {
+            for (index, (stretch, (drop, lost))) in stretches.iter().zip(&disc_drops).enumerate() {
                 let mid = 0.5 * (stretch.start + stretch.end);
                 if !(member.start <= mid && mid < member.end) {
                     continue;
                 }
+                covered.push((index, member.sample));
                 let total: f64 = stretch.resisted.iter().map(|(_, f)| *f as f64).sum();
                 let own = stretch
                     .resisted
@@ -3627,7 +3665,7 @@ fn spall_sources<M: Mechanism>(
             .iter()
             .flat_map(|m| m.exited.iter().copied())
             .collect();
-        out.push(SpallSource {
+        let source = SpallSource {
             t: reached.iter().map(|m| m.end).sum::<f64>() / count as f64,
             position: reached.iter().map(|m| m.position).sum::<Vec3>() / count as f32,
             face,
@@ -3647,8 +3685,18 @@ fn spall_sources<M: Mechanism>(
                     .fold(0.0, f32::max),
             ),
             exit_speed: mechanism.speed(exit_state) as f32,
-        });
+        };
+        let share = f64::from(source.field_share());
+        for pair in covered {
+            let previous = carried_out.insert(pair, share);
+            assert!(
+                previous.is_none(),
+                "the game's damage model puts each sample's stretch in at most one body: a body \
+                 ends where its sample's next layer resists less, and bodies follow on a ray"
+            );
+        }
+        out.push(source);
     }
     out.sort_by(|a, b| a.t.total_cmp(&b.t));
-    out
+    (out, carried_out)
 }

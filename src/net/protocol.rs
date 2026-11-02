@@ -246,7 +246,12 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// strength ratio, a burst's its wall's driven energy) instead of HP encoded as joules at the line
 /// rate. The scalar types stay unchanged, but a REV 65 client would part its potency bands at the
 /// wrong rate, so the protocol fingerprint must differ.
-pub const PROTOCOL_REV: u32 = 66;
+/// REV 67 (#258, the game's damage model): `WireCone::strength` carries a cone's share of the
+/// energy its round lost, the debris share times the exit's strength ratio, and a client converts
+/// it at the cone's unit over that share; a field below the pool quantum is recorded without
+/// doses. The scalar types stay unchanged, but a REV 66 client would read every cone's potency
+/// at the wrong unit.
+pub const PROTOCOL_REV: u32 = 67;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.

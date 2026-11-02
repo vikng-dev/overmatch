@@ -93,11 +93,14 @@ pub(crate) enum Control {
 /// One consequence of an advance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Effect {
-    /// The round's own line put `chord` metres (disc mean) of the volume `address` behind it, a
-    /// readout of `cost` reference-mm (chord × the volume's factor), and deposits `energy` joules
-    /// into it: its share of the kinetic energy the round lost over the advance.
+    /// The round's own line, along disc sample `sample`, put `chord` metres (disc mean) of the
+    /// volume `address` behind it, a readout of `cost` reference-mm (chord × the volume's factor),
+    /// and `energy` joules of the kinetic energy the round lost over the advance were lost in it.
+    /// The sample names which body the energy was lost in, so the walk can part it between the
+    /// body and the field its exit throws ([`super::walk::SpallSource::field_share`]).
     Line {
         address: Entity,
+        sample: usize,
         chord: f64,
         cost: f64,
         energy: f64,
@@ -302,19 +305,18 @@ impl Mechanism for SolidShot {
         // The game's damage model integrates dose at every volume boundary, including seams
         // inside an encounter whose substance set is constant. The force-law advance above stays
         // whole, so adding such a seam cannot change the round's state or its rest point.
-        let contacts: Vec<(f32, &[VolumeContact], &VolumeContact)> = encounter
+        let contacts: Vec<(usize, f32, &[VolumeContact], &VolumeContact)> = encounter
             .samples
             .iter()
             .flat_map(|sample| {
                 let strongest = overlap_factor(&sample.present);
-                sample
-                    .present
-                    .iter()
-                    .map(move |contact| (strongest, sample.present.as_slice(), contact))
+                sample.present.iter().map(move |contact| {
+                    (sample.sample, strongest, sample.present.as_slice(), contact)
+                })
             })
             .collect();
         let mut cuts = vec![0.0, consumed];
-        for (_, _, contact) in &contacts {
+        for (_, _, _, contact) in &contacts {
             cuts.push((contact.start - encounter.start).clamp(0.0, consumed));
             cuts.push((contact.end - encounter.start).clamp(0.0, consumed));
         }
@@ -341,7 +343,7 @@ impl Mechanism for SolidShot {
             };
             let weights: Vec<f64> = contacts
                 .iter()
-                .map(|(strongest, layer, contact)| {
+                .map(|(_, strongest, layer, contact)| {
                     if !inside(contact) || contact.material.factor < *strongest {
                         return 0.0;
                     }
@@ -366,7 +368,7 @@ impl Mechanism for SolidShot {
         let effects = contacts
             .into_iter()
             .zip(energies)
-            .map(|((strongest, _, contact), energy)| {
+            .map(|((sample, strongest, _, contact), energy)| {
                 let covered = (consumed - (contact.start - encounter.start))
                     .min(contact.end - contact.start)
                     .max(0.0);
@@ -377,6 +379,7 @@ impl Mechanism for SolidShot {
                 };
                 Effect::Line {
                     address: contact.volume,
+                    sample,
                     chord,
                     cost: chord * contact.material.factor as f64,
                     energy,
@@ -748,6 +751,7 @@ mod tests {
                          chord,
                          cost,
                          energy,
+                         ..
                      }| (address, chord, cost, energy),
                 )
                 .collect()

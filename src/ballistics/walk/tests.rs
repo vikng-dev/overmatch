@@ -1863,11 +1863,12 @@ fn spall_through(volumes: &VolumeTable, slabs: &[Slab]) -> Vec<SpallSource> {
 }
 
 /// THE CONE KEEPS THE EXITED SUBSTANCE'S STRENGTH (the game's damage model): a plate of every
-/// shipped hard substance, perforated head-on by the fixture 88, throws a field carrying the energy
-/// lost scaled by its factor over the reference's, capped at 1. Every substance at or above the
-/// reference (the reference armour steel, gun steel) carries exactly the energy lost, to the bit;
-/// wood and brick carry at most 4 % of it. A law that skipped the ratio leaves brick's spall whole;
-/// one that scaled armour too, or rounded the product another way, moves an armour cone's bits.
+/// shipped hard substance, perforated head-on by the fixture 88, throws a field carrying the debris
+/// share `κ` of the energy lost scaled by its factor over the reference's, capped at 1. Every
+/// substance at or above the reference (the reference armour steel, gun steel) carries exactly `κ`
+/// of the energy lost, to the bit; wood and brick carry at most 4 % of that. A law that skipped
+/// the ratio leaves brick's spall whole; one that scaled armour too, or rounded the product
+/// another way, moves an armour cone's bits. `κ` is read from the shipped data, never pinned.
 #[test]
 fn a_softer_exit_throws_a_weaker_cone_and_armour_throws_what_it_threw() {
     let registry = SubstanceRegistry::shipped_static();
@@ -1886,17 +1887,18 @@ fn a_softer_exit_throws_a_weaker_cone_and_armour_throws_what_it_threw() {
         };
         assert!(cone.energy > 0.0, "{name}: the round lost energy");
         let strength = cone.strength();
+        let share = crate::ballistics::spall_cone::cone_energy().debris_share();
         if factor >= REFERENCE_FACTOR {
             assert_eq!(
                 strength.to_bits(),
-                field_strength(cone.energy).to_bits(),
+                field_strength(cone.energy * share).to_bits(),
                 "{name}: unchanged"
             );
             armour.push(name);
         } else {
             assert_eq!(
                 strength.to_bits(),
-                field_strength(cone.energy * (factor / REFERENCE_FACTOR)).to_bits(),
+                field_strength(cone.energy * (share * (factor / REFERENCE_FACTOR))).to_bits(),
                 "{name}: scaled by its strength ratio"
             );
             soft.push(name);
@@ -1948,7 +1950,8 @@ fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
 
 /// THE CONE CARRIES THE ENERGY LOST. For one plate, every round's cone emits
 /// `½ m (v_entry² − v_exit²)`, the kinetic energy the round lost crossing it (its strength twice
-/// that, [`EMITTED_SHARE`]), and a round that loses more energy there throws the stronger cone,
+/// the debris share `κ` of that, [`EMITTED_SHARE`]), and a round that loses more energy there
+/// throws the stronger cone,
 /// whatever its mass, calibre or speed: the strengths order as the energies lost. Fixture bodies
 /// and speeds, all perforating one 50 mm fixture plate of the reference factor head-on (a strength
 /// ratio of 1). A strength read from the spend, the speed ratio, the hole's calibre or an HP unit
@@ -1998,8 +2001,9 @@ fn a_round_that_loses_more_energy_at_a_plate_throws_a_stronger_cone() {
             let (v_in, v_out) = (speed as f64, cone.exit_speed as f64);
             let lost = 0.5 * mass as f64 * (v_in * v_in - v_out * v_out);
             let strength = cone.strength();
+            let share = crate::ballistics::spall_cone::cone_energy().debris_share() as f64;
             assert!(
-                (strength as f64 * EMITTED_SHARE as f64 / lost - 1.0).abs() < 1.0e-5,
+                (strength as f64 * EMITTED_SHARE as f64 / (share * lost) - 1.0).abs() < 1.0e-5,
                 "{mass} kg at {speed} m/s: S = {strength} J against {lost} J lost"
             );
             (lost, strength)
@@ -2132,8 +2136,9 @@ fn only_a_softer_step_throws() {
 }
 
 /// Enough capability and the same stack perforates: full cost spent, the crewman charged for HIS
-/// chord at HIS factor (§13.2's damage law: no stronger volume overlaps him), the doses the energy
-/// the round lost, the crewman's the energy lost in him, and the exit throws spall.
+/// chord at HIS factor (§13.2's damage law: no stronger volume overlaps him), the line's doses and
+/// the fields' carried energy together the energy the round lost, spent once (§5), the crewman's
+/// dose what his own body keeps of the energy lost in him, and the exit throws spall.
 #[test]
 fn a_perforation_charges_every_entity_for_its_own_material() {
     let laws = WalkLaws::default();
@@ -2166,18 +2171,24 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
     let (round, state) = solid(AP_88_CAPABILITY);
     let lost = 0.5 * round.body().mass as f64 * (state.speed.powi(2) - plan.state.speed.powi(2));
     let dealt: f64 = plan.deposits.iter().map(|dose| dose.amount as f64).sum();
+    let carried: f64 = plan.spall.iter().map(|cone| cone.carried() as f64).sum();
+    assert!(carried > 0.0, "the exits' cones carry energy out");
     assert!(
-        (dealt / lost - 1.0).abs() < 1.0e-5,
-        "the doses are the energy lost: {dealt} J against {lost} J"
+        ((dealt + carried) / lost - 1.0).abs() < 1.0e-5,
+        "line and fields spend the energy lost once: {dealt} J + {carried} J against {lost} J"
     );
-    assert!(!plan.spall.is_empty());
-    // The crewman is crossed after the plate, at the plate's exit speed: his dose is what the
-    // round lost behind it, never his cost's share of the whole crossing's energy.
-    let behind = plan.spall[0].exit_speed as f64;
+    let [plate, his_body] = plan.spall.as_slice() else {
+        panic!("the plate's exit and the crewman's: {:?}", plan.spall);
+    };
+    // The crewman is crossed after the plate, at the plate's exit speed: his dose is what his own
+    // body keeps of what the round lost behind it, never his cost's share of the whole crossing's
+    // energy.
+    let behind = plate.exit_speed as f64;
     let his = 0.5 * round.body().mass as f64 * (behind.powi(2) - plan.state.speed.powi(2));
+    let kept = his * (1.0 - his_body.field_share() as f64);
     assert!(
-        (crew.amount as f64 / his - 1.0).abs() < 1.0e-3,
-        "the crewman's dose is the energy lost in him: {} J against {his} J",
+        (crew.amount as f64 / kept - 1.0).abs() < 1.0e-3,
+        "the crewman's dose is what his body keeps: {} J against {kept} J",
         crew.amount
     );
 }
@@ -2221,9 +2232,11 @@ fn overmatch_charges_the_perpendicular_projection_everywhere() {
     assert!((cost - 15.0).abs() < 0.2, "deposit cost {cost}");
     let (round, state) = solid(AP_88_CAPABILITY);
     let lost = 0.5 * round.body().mass * (state.speed.powi(2) - plan.state.speed.powi(2)) as f32;
+    let carried: f32 = plan.spall.iter().map(SpallSource::carried).sum();
     assert!(
-        (deposit.amount / lost - 1.0).abs() < 1.0e-4,
-        "the projected crossing deals the energy it took: {} J against {lost} J",
+        ((deposit.amount + carried) / lost - 1.0).abs() < 1.0e-4,
+        "the projected crossing spends the energy it took once: {} J dealt, {carried} J carried, \
+         against {lost} J",
         deposit.amount
     );
     assert!(
@@ -3600,13 +3613,16 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
                 "case {case}: {entity:?} dosed ({chord}, {cost}) against ({old_chord}, {old_cost})"
             );
         }
-        // The doses are the energy the round lost, all of it on a rest: each an f32 of its f64
-        // share, so they sum to it within a few f32 roundings.
+        // The line's doses and the reached exits' fields spend the energy the round lost once,
+        // all of it on a rest: each an f32 of its f64 share, so they sum to it within a few f32
+        // roundings.
         let dealt: f64 = new.deposits.iter().map(|dose| dose.amount as f64).sum();
+        let carried: f64 = new.spall.iter().map(|cone| cone.carried() as f64).sum();
         let lost = 0.5 * body.mass as f64 * (state.speed.powi(2) - new.state.speed.powi(2));
         assert!(
-            (dealt - lost).abs() <= 1.0e-6 * lost + 1.0e-3,
-            "case {case}: the doses deal {dealt} J of the {lost} J lost"
+            (dealt + carried - lost).abs() <= 1.0e-6 * lost + 1.0e-3,
+            "case {case}: the doses deal {dealt} J and the fields carry {carried} J of the {lost} J \
+             lost"
         );
     }
     assert_eq!(

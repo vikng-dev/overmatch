@@ -4,9 +4,9 @@
 // validated at parse.
 // The law (emitted HP, the ball law's centre-weighted profile, shadowing, dose) is design doc
 // §§5–6, `.agents/docs/design/armor-penetration-and-damage.md`. A field carries the energy its
-// source put into it (a cone the energy its round lost at the plate times the exit's strength
-// ratio, a burst its wall's driven energy), which a building crushes with; each mechanism declares
-// its own HP per joule of that energy, which only a box's pool reads.
+// source put into it (a cone its share of the energy its round lost at the plate, a burst its
+// wall's driven energy), which a building crushes with; each mechanism declares its own HP scale,
+// which only a box's pool reads.
 // A cone's half-angle and profile follow from its exit layer's debris ratio in
 // `assets/materials/materials.ron`.
 //
@@ -39,8 +39,22 @@
         H_C·f_k / (q·N), q = 1/2, the field weights' exact normalization).
         The count changes how finely a box's dose is resolved, never the emitted total")),
 
-    // HP per joule of the energy a cone carries, the energy lost across the exited body times its
-    // material strength ratio: a box's field dose is the joules a direction left there times it.
+    // κ: the share of the energy a round loses across a body that its debris carries out through
+    // an exit of the reference steel's strength. A cone carries κ × the exit's strength ratio of
+    // that energy and the line deals the body's volumes the rest, so the two spend it once; a
+    // building reads the cone's share as crushing energy. HP does not move with it (the unit below
+    // is per joule lost).
+    cone_debris_energy_share: (0.06, Unknown("the energy the debris of a perforated body carries
+        away, against the energy the body absorbs, is not in the game's data. Order of magnitude,
+        DERIVED: a plug of the reference steel (7850 kg/m³, materials.ron) the 88 mm reference
+        round's disc wide and its 100 mm reference plate thick, 4.774 kg, leaving at the round's
+        259.69 m/s exit speed carries 161.0 kJ of the 2.7035 MJ the round lost, 0.0596, rounded.
+        Settled by measured behind-armour debris (fragment masses and speeds against the energy
+        the plate absorbed); per exit substance in materials.ron if it differs by substance")),
+
+    // HP per joule of the energy lost across the exited body, weighted by its material strength
+    // ratio: a box's field dose is the joules a direction left there times this over κ, so the
+    // cone's emitted HP is this × the ratio × the energy lost, whatever κ.
     // DERIVED: 0.88 × 1/2 / 3000, a fixed number of its own that no line unit moves.
     cone_emitted_hp_per_joule: (0.00014666666666666666, Unit("provisional emitted HP per joule lost
         at the plate; balance lives here. Set against the retired reference cone's 395.0 HP target,

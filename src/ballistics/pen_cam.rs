@@ -132,7 +132,7 @@ fn record_scenario(scenario: &Scenario) -> PenetrationReport {
 }
 
 /// [`record_scenario`] under `law`'s cones (the shipped shape's when `None`), the wall time (s) its
-/// march steps took, and the cones its body exits did not throw, below the pool quantum
+/// march steps took, and the fields its body exits threw below the pool quantum, dosing no pool
 /// ([`SpallMarks::gated`]).
 fn record_timed(
     scenario: &Scenario,
@@ -496,7 +496,7 @@ fn spall_law_cost() {
         gated += kept;
     }
     println!(
-        "across {} scenarios: {thrown} cones thrown, {gated} below the pool quantum not thrown",
+        "across {} scenarios: {thrown} cones thrown, {gated} below the pool quantum dosing no pool",
         scenarios().len()
     );
 }

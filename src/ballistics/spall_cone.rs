@@ -8,14 +8,15 @@
 //!
 //! # Units
 //!
-//! A field carries joules, the energy its source put into it: a cone the kinetic energy its round
-//! lost across the body it left, weighted by the exit material's strength ratio
-//! (`walk::SpallSource::strength`), a burst its wall's driven energy (`burst::Burst::energy`). Its
-//! strength is that energy over [`EMITTED_SHARE`] ([`field_strength`]), so its directions emit
-//! exactly it, and no HP unit enters it. Each consumer converts at its own edge: a building reads
-//! a direction's joules as the energy it crushes with, and a box's HP pool reads them through its
-//! mechanism's one authored unit ([`FieldUnit`]: [`cone_unit`], [`BurstFields::unit`]). The design
-//! narrative is in §§5–6.
+//! A field carries joules, the energy its source put into it: a cone its share of the kinetic
+//! energy its round lost across the body it left (`walk::SpallSource::carried`, the debris share
+//! [`ConeEnergy::debris_share`] times the exit material's strength ratio; the line deals the body
+//! the rest), a burst its wall's driven energy (`burst::Burst::energy`). Its strength is that
+//! energy over [`EMITTED_SHARE`] ([`field_strength`]), so its directions emit exactly it, and no
+//! HP unit enters it. Each consumer converts at its own edge: a building reads a direction's
+//! joules as the energy it crushes with, and a box's HP pool reads them through its mechanism's
+//! one unit ([`FieldUnit`]: [`cone_unit`], [`BurstFields::unit`]). The design narrative is in
+//! §§5–6.
 //!
 //! # The field law
 //!
@@ -330,6 +331,7 @@ pub(crate) enum AxisRule {
 struct ShapeFile {
     axis: Sourced<AxisRule>,
     directions: Sourced<usize>,
+    cone_debris_energy_share: Sourced<f32>,
     cone_emitted_hp_per_joule: Sourced<f64>,
     burst: BurstFile,
 }
@@ -436,29 +438,76 @@ impl BurstFields {
     }
 }
 
-/// The game's damage-model HP per joule of a cone's energy, parsed once: its dose to a box is the
-/// joules a direction left there times this unit, so its emitted HP is the energy its round lost
-/// across the exited body, weighted by the material's strength ratio, times it. A malformed file
-/// stops startup in [`super::sim_plugin`].
-pub(crate) fn cone_unit() -> FieldUnit {
-    static UNIT: std::sync::LazyLock<FieldUnit> = std::sync::LazyLock::new(|| {
-        crate::provenance::shipped("assets/ballistics/spall_cone.ron", || {
-            cone_unit_from_ron(SPALL_CONE_RON)
-        })
-        .unwrap_or_else(|err| {
-            panic!("spall cone: embedded spall_cone.ron's HP-per-joule unit is unusable: {err}")
-        })
-    });
-    *UNIT
+/// The game's damage model: how a spall cone shares the energy its round lost across a body, and
+/// what the share it carries is worth in HP. Built only from a parsed file ([`cone_energy_from_ron`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ConeEnergy {
+    /// `κ`, in `(0, 1]`: the share of the energy lost across a body that its debris carries out
+    /// through an exit of the reference steel's strength (`cone_debris_energy_share`).
+    debris_share: f32,
+    /// HP per joule the cone carries: the authored emitted HP per joule lost at the plate
+    /// (`cone_emitted_hp_per_joule`, `u_C`) over `κ`, so a cone's emitted HP is `u_C r ΔE`
+    /// whatever `κ`, and `κ` moves only what the body keeps and what a building reads.
+    unit: FieldUnit,
 }
 
-/// Read a shape file's cone unit, refused before play as [`FieldUnit::new`] refuses it.
-fn cone_unit_from_ron(text: &str) -> Result<FieldUnit, String> {
+impl ConeEnergy {
+    /// `κ`: [`super::walk::SpallSource::field_share`] is it times the exit's strength ratio.
+    pub(crate) fn debris_share(self) -> f32 {
+        self.debris_share
+    }
+}
+
+/// The shipped cone's energy partition and unit, parsed once. A malformed file stops startup in
+/// [`super::sim_plugin`].
+pub(crate) fn cone_energy() -> ConeEnergy {
+    static ENERGY: std::sync::LazyLock<ConeEnergy> = std::sync::LazyLock::new(|| {
+        crate::provenance::shipped("assets/ballistics/spall_cone.ron", || {
+            cone_energy_from_ron(SPALL_CONE_RON)
+        })
+        .unwrap_or_else(|err| {
+            panic!("spall cone: embedded spall_cone.ron's cone energy is unusable: {err}")
+        })
+    });
+    *ENERGY
+}
+
+/// The game's damage-model HP per joule a cone carries ([`ConeEnergy::unit`]): its dose to a box
+/// is the joules a direction left there times this unit, so its emitted HP is the energy its round
+/// lost across the exited body, weighted by the material's strength ratio, times the authored
+/// `cone_emitted_hp_per_joule`.
+pub(crate) fn cone_unit() -> FieldUnit {
+    cone_energy().unit
+}
+
+/// Read a shape file's cone partition and unit, refused before play naming the field: a debris
+/// share outside `(0, 1]` (none would carry nothing and divide the unit by zero; more than all
+/// would leave the body a negative dose), and a unit [`FieldUnit::new`] refuses.
+fn cone_energy_from_ron(text: &str) -> Result<ConeEnergy, String> {
     let file: ShapeFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
-    FieldUnit::new(
+    let lost = FieldUnit::new(
         file.cone_emitted_hp_per_joule.0,
         "cone_emitted_hp_per_joule",
-    )
+    )?;
+    let share = file.cone_debris_energy_share.0;
+    if !(share > 0.0 && share <= 1.0) {
+        return Err(format!(
+            "cone_debris_energy_share must lie in (0, 1], a share of the energy lost (got {share})"
+        ));
+    }
+    Ok(ConeEnergy {
+        debris_share: share,
+        unit: FieldUnit::new(
+            lost.hp_per_joule() / f64::from(share),
+            "cone_emitted_hp_per_joule over cone_debris_energy_share",
+        )?,
+    })
+}
+
+/// Read a shape file's cone unit ([`cone_energy_from_ron`]): the tests' reading of a fixture file.
+#[cfg(test)]
+fn cone_unit_from_ron(text: &str) -> Result<FieldUnit, String> {
+    cone_energy_from_ron(text).map(|energy| energy.unit)
 }
 
 /// The game's damage model: one field mechanism's HP per joule of its field's energy, a game unit
@@ -802,6 +851,7 @@ mod tests {
     fn file(fields: &str) -> String {
         format!(
             r#"({fields}, directions: (24, Fixture("fixture")),
+            cone_debris_energy_share: (1.0, Fixture("fixture")),
             cone_emitted_hp_per_joule: (0.5, Fixture("fixture")), {BURST})"#
         )
     }
@@ -814,6 +864,7 @@ mod tests {
     fn burst_file(fields: &str) -> String {
         format!(
             r#"(axis: (ExitDirection, Fixture("fixture")), directions: (24, Fixture("fixture")),
+            cone_debris_energy_share: (1.0, Fixture("fixture")),
             cone_emitted_hp_per_joule: (0.5, Fixture("fixture")), burst: ({fields}))"#
         )
     }
@@ -1003,10 +1054,12 @@ mod tests {
         f64::from(super::super::hp_before_rounding(units))
     }
 
-    /// A fixture shape file whose cone unit is `cone` and whose burst unit is `burst`.
-    fn units_file(cone: f64, burst: f64) -> String {
+    /// A fixture shape file whose cone carries `share` of the energy lost at the reference, at
+    /// `cone` HP per joule lost, and whose burst unit is `burst`.
+    fn units_file(share: f32, cone: f64, burst: f64) -> String {
         format!(
             r#"(axis: (ExitDirection, Fixture("fixture")), directions: (24, Fixture("fixture")),
+            cone_debris_energy_share: ({share:?}, Fixture("fixture")),
             cone_emitted_hp_per_joule: ({cone}, Fixture("fixture")),
             burst: (emitted_hp_per_joule: ({burst}, Fixture("fixture")),
             ring_half_width_deg: (10.0, Fixture("fixture")), ring_directions: (24, Fixture("fixture"))))"#
@@ -1014,15 +1067,17 @@ mod tests {
     }
 
     /// A FIELD EMITS ITS SOURCE'S ENERGY, AND HP ONLY THROUGH ITS OWN UNIT (the game's damage
-    /// model). A cone's strength is the energy its round lost across the body times the exit
-    /// material's strength ratio over the emitted share, a burst's its wall's driven energy over
-    /// it ([`field_strength`]), so either field's directions emit exactly that energy, whatever
-    /// any unit; its emitted HP is that energy times its own mechanism's unit, read from its own
-    /// slot of the file. Buildings read a direction's joules as crushing energy and pools its HP:
-    /// a unit or the line rate entering the strength, a second conversion, or one mechanism's
-    /// unit read for the other fails here. Fixture energies span zero and two scales, fixture
-    /// ratios a reference and a softer exit, fixture units two scales apart and swapped between
-    /// the mechanisms; no shipped unit or round enters.
+    /// model). A cone's strength is the share of the energy its round lost across the body that
+    /// the cone carries out (`κ r`, the debris share times the exit material's strength ratio) over
+    /// the emitted share, a burst's its wall's driven energy over it ([`field_strength`]), so
+    /// either field's directions emit exactly that energy, whatever any unit; a cone's emitted HP
+    /// is the energy lost times `r` times its authored unit whatever `κ`, a burst's its energy
+    /// times its own, each read from its own slot of the file. Buildings read a direction's joules
+    /// as crushing energy and pools its HP: a unit or the line rate entering the strength, a
+    /// second conversion, `κ` left out of the cone's HP unit, or one mechanism's unit read for the
+    /// other fails here. Fixture energies span zero and two scales, fixture ratios a reference and
+    /// a softer exit, fixture shares a whole and a quarter, fixture units two scales apart and
+    /// swapped between the mechanisms; the shipped share is read, never pinned.
     #[test]
     fn a_field_emits_its_sources_energy_and_hp_through_its_own_unit() {
         let (cone, ring) = (
@@ -1046,7 +1101,8 @@ mod tests {
                     strength_ratio: ratio,
                     exit_speed: 0.0,
                 };
-                let carried = f64::from(energy * ratio);
+                let share = cone_energy().debris_share();
+                let carried = f64::from(energy * (share * ratio));
                 assert!(
                     close(emitted(&cone, source.strength()), carried),
                     "{energy} J at {ratio}"
@@ -1057,16 +1113,20 @@ mod tests {
                 close(emitted(&ring, field_strength(energy)), driven),
                 "{energy} J driven"
             );
-            for (cone_hp, burst_hp) in [(0.002, 0.125), (0.125, 0.002)] {
-                // Fixture data: HP per joule.
-                let text = units_file(cone_hp, burst_hp);
+            for ((cone_hp, burst_hp), share) in [(0.002, 0.125), (0.125, 0.002)]
+                .into_iter()
+                .zip([1.0_f32, 0.25])
+            {
+                // Fixture data: HP per joule, and the share of the energy lost a cone carries.
+                let text = units_file(share, cone_hp, burst_hp);
                 let (cone_unit, burst_unit) = (
                     cone_unit_from_ron(&text).unwrap(),
                     BurstFields::from_ron(&text).unwrap().unit(),
                 );
+                let carried = driven * f64::from(share);
                 assert!(
-                    close(hp(driven, cone_unit), cone_hp * driven),
-                    "the cone's unit"
+                    close(hp(carried, cone_unit), cone_hp * driven),
+                    "the cone's unit, per joule lost, at share {share}"
                 );
                 assert!(
                     close(hp(driven, burst_unit), burst_hp * driven),
@@ -1076,9 +1136,11 @@ mod tests {
         }
     }
 
-    /// Measurement bed, run on demand: the shipped cone unit's emission for the reference plate's
-    /// lost energy and every shipped burst round's ring emission, printed MEASURED through the
-    /// spread and the dose edge. It asserts nothing: no shipped unit or round is a pass condition.
+    /// Measurement bed, run on demand: the shipped cone's emission for the reference plate's lost
+    /// energy through a reference-strength exit, and the volume of a shipped Brick chunk its
+    /// directions crush if every one stops on it (`buildings::fracture::Load::field`), and every
+    /// shipped burst round's ring emission, printed MEASURED through the spread and the dose edge.
+    /// It asserts nothing: no shipped unit or round is a pass condition.
     #[test]
     #[ignore = "a measurement bed, run on demand"]
     fn the_shipped_emission_totals() {
@@ -1086,9 +1148,41 @@ mod tests {
         let cone = ConeShape::shipped()
             .spread(FieldDescriptor::ball(RATIO))
             .unwrap();
-        let joules = emitted(&cone, field_strength(energy));
+        let source = super::super::walk::SpallSource {
+            t: 0.0,
+            position: Vec3::ZERO,
+            face: None,
+            direction: Vec3::NEG_Z,
+            exited: Vec::new(),
+            spend: 0.0,
+            energy,
+            debris_ratio: RATIO,
+            strength_ratio: 1.0,
+            exit_speed: 0.0,
+        };
+        let strength = source.strength();
+        let joules = emitted(&cone, strength);
         let cone_hp = hp(joules, cone_unit());
         eprintln!("MEASURED cone: {joules:.3} J emitted, {cone_hp:.6} HP");
+        let brick = crate::buildings::fracture::Masonry::of(
+            crate::substances::SubstanceRegistry::shipped_static(),
+            "Brick",
+        )
+        .unwrap()
+        .unwrap();
+        let share = 1.0 / cone.directions_count() as f32;
+        let hits: Vec<(usize, Vec3, f32, Vec3)> = cone
+            .strata()
+            .map(|[.., f]| (0, Vec3::ZERO, strength * f * share, Vec3::ZERO))
+            .collect();
+        let crushed: f64 = crate::buildings::fracture::Load::field(&hits, |_| brick.crush)
+            .iter()
+            .map(|load| f64::from(load.crushed))
+            .sum();
+        eprintln!(
+            "MEASURED Brick chunk under that cone: {crushed:.6} m³ crushed at {} J/m³",
+            brick.crush
+        );
         let fields = BurstFields::shipped();
         let rounds = crate::rounds::RoundRegistry::shipped();
         for key in rounds.keys() {

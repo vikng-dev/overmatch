@@ -965,6 +965,60 @@ pub(super) mod tests {
     /// box is reached exactly when it took a dose, and a round rested in a plate stops, where the
     /// drawn line ends. The look, its volumes and the kill cam draw every field from the plan, so
     /// a field the plan drops (a burst's, say) is one the corner never draws.
+    /// EACH PLANNED FIELD'S HP IS ITS RECORDED JOULES AT ITS OWN MECHANISM'S UNIT (the game's
+    /// damage model): a planned spall cone emits the HP the sim's dose edge gives its recorded
+    /// emission at the cone's unit, a planned burst field the HP it gives at the burst's
+    /// (`ballistics::field_units`). The potency bands classify these HP, so a burst field read at
+    /// the cone's unit (about 14 times dimmer at the shipped units, DERIVED: 0.035 against
+    /// 0.00014667 / 0.06 HP per carried joule), a cone at the burst's, or joules left unconverted
+    /// would draw every band wrong. Fixture: every recorded scenario, which
+    /// between them throw cones and a burst field; the two shipped units differ.
+    #[test]
+    fn each_planned_field_reads_its_own_mechanisms_unit() {
+        let units = (
+            spall_cone::cone_unit(),
+            spall_cone::BurstFields::shipped().unit(),
+        );
+        assert_ne!(
+            units.0, units.1,
+            "the two mechanisms' units tell them apart"
+        );
+        let emitted = |strength: f32, unit| {
+            let joules = strength * spall_cone::EMITTED_SHARE;
+            f64::from(crate::ballistics::hp_before_rounding(
+                crate::ballistics::field_units(joules, unit),
+            ))
+        };
+        let (mut cones, mut bursts) = (0, 0);
+        for (name, report) in records() {
+            let plan = Plan::new(&report, &shapes(&report));
+            let recorded: Vec<(f32, spall_cone::FieldUnit)> = report
+                .spall
+                .iter()
+                .map(|cone| (cone.strength, units.0))
+                .chain(
+                    report
+                        .burst
+                        .iter()
+                        .filter_map(|burst| burst.field.as_ref())
+                        .map(|field| (field.strength, units.1)),
+                )
+                .collect();
+            assert_eq!(plan.cones.len(), recorded.len(), "{name}");
+            cones += report.spall.len();
+            bursts += recorded.len() - report.spall.len();
+            for (planned, (strength, unit)) in plan.cones.iter().zip(recorded) {
+                let want = emitted(strength, unit);
+                let got = f64::from(planned.strength * spall_cone::EMITTED_SHARE);
+                assert!(
+                    (got - want).abs() <= 1e-6 * want + 1e-6,
+                    "{name}: planned {got} HP against the sim's {want} HP"
+                );
+            }
+        }
+        assert!(cones > 0 && bursts > 0, "{cones} cones, {bursts} bursts");
+    }
+
     #[test]
     fn every_record_plans_a_drawable_picture() {
         let all = records();
