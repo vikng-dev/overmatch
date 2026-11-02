@@ -997,7 +997,11 @@ impl Flight {
     ) -> Self {
         let mut starts = starts.rebased();
         for seed in &mut starts.seeds {
-            seed.inside.clear();
+            assert!(
+                seed.inside.is_empty(),
+                "the game's damage model ends a step only with its read starts outside material: \
+                 the march resolves held material and reads a reflection's starts before it stops"
+            );
             seed.t = 0.0;
         }
         Self {

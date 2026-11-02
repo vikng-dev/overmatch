@@ -2754,12 +2754,8 @@ fn march_shell_step(
     // A burst in flight swaps the round for its nose piece mid-step ([`burst_here`]); the disc keeps
     // its radius, the nose being the round's calibre.
     let radius = resolve::disc_radius(shell.projectile.body().caliber);
-    // The step lays its disc on the carried frame at the round's position ([`launch`]): clearance
-    // reads those starts.
-    let laid: Vec<Vec3> = resolve::layout(&shell.projectile.disc, radius)
-        .into_iter()
-        .map(|offset| shell.transform.translation + offset)
-        .collect();
+    // Clearance admits the source on the very starts the step resumes from ([`launch`]).
+    let laid = launch_starts(shell.projectile, shell.transform.translation, radius);
     let ignored_source = std::cell::Cell::new(shooter.filter(|_| {
         !shell.projectile.source_cleared
             && source_box.is_some_and(|bounds| {
@@ -2897,15 +2893,17 @@ fn march_shell_step(
             }
             continue;
         }
-        if budget.remaining() <= 0.0 && !flight.holds_material() {
-            break;
-        }
-
         let from = (1.0 - budget.remaining() as f32 / dt).clamp(0.0, 1.0);
         world.moment.set(Some(from));
+        // The game's damage model reads unread starts (a reflection's footprint, a newly placed
+        // disc) before the step may end: material holding one is resolved this tick, and the
+        // starts carried across the boundary are read ones.
         flight
             .settle(&context, &not_own, radius)
             .unwrap_or_else(|error| error.panic());
+        if budget.remaining() <= 0.0 && !flight.holds_material() {
+            break;
+        }
         let origin = flight.sweep_origin();
         let dir = flight.direction;
         let remaining = budget.remaining() as f32;
@@ -3227,6 +3225,23 @@ fn publish_path_state(
         drag_k: shell.projectile.drag_k,
     });
     shell.projectile.path_sequence += 1;
+}
+
+/// The game's damage model: the WORLD sample starts [`launch`] resumes the step from: the
+/// carried starts as the last step left them, or the disc a newly placed round lays on its
+/// carried frame at `position`. Launch clearance admits the source on exactly these.
+fn launch_starts(projectile: &Projectile, position: Vec3, radius: f32) -> Vec<Vec3> {
+    match &projectile.starts {
+        Some(starts) => starts
+            .seeds
+            .iter()
+            .map(|seed| starts.world_origin() + seed.offset)
+            .collect(),
+        None => resolve::layout(&projectile.disc, radius)
+            .into_iter()
+            .map(|offset| position + offset)
+            .collect(),
+    }
 }
 
 /// The game's damage model: the step's discovery samples. Each start a sweep reached is
@@ -6760,6 +6775,55 @@ mod march_tests {
             "the reflected rays miss the elevated plate: {read:?}"
         );
         assert_eq!(read[0].1, Verdict::Ricochet);
+    }
+
+    /// The game's damage model admits a round's source on the starts its step resumes from.
+    /// Fixture: tanks pressed together, the round perforating a foreign plate at its own muzzle at
+    /// 60 degrees, leave its starts staggered along the travel by up to `r tan 60°` = 76 mm
+    /// (DERIVED). Its trailing start can stand in its source's box while the square disc at the
+    /// axis lies clear of it; a clearance reading that square disc turns the source solid under the
+    /// trailing start, whose corridor then meets an exit it never entered. Positions are fixture data.
+    #[test]
+    fn launch_clearance_reads_the_starts_launch_resumes() {
+        let radius = resolve::disc_radius(FIXTURE_88.caliber);
+        let travel = Vec3::X;
+        let mut projectile = fixture_round(FIXTURE_88, travel * 700.0);
+        let position = Vec3::new(10.0, 2.0, -3.0);
+        let tilt = 60.0_f32.to_radians().tan();
+        let square = resolve::layout(&projectile.disc, radius);
+        let staggered: Vec<Vec3> = square
+            .iter()
+            .map(|&lateral| lateral + travel * (lateral.dot(Vec3::Y) * tilt))
+            .collect();
+        let fresh = launch_starts(&projectile, position, radius);
+        projectile.starts = Some(resolve::Interior::laid(position, staggered));
+        let carried = launch_starts(&projectile, position, radius);
+        let frame = projectile.disc;
+        let starts = projectile
+            .starts
+            .take()
+            .expect("the fixture carries its starts");
+        let dir = Dir3::new(travel).expect("a direction");
+        let flight = resolve::Flight::launched(dir, dir, 700.0, frame, starts);
+        let resumed = flight.sample_starts(radius);
+        assert_eq!(carried.len(), resumed.len());
+        for (admitted, swept) in carried.iter().zip(&resumed) {
+            assert!(
+                admitted.distance(*swept) < 1.0e-6,
+                "clearance admits {admitted} where launch resumes {swept}"
+            );
+        }
+        let trailing = carried
+            .iter()
+            .map(|start| (*start - position).dot(travel))
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            trailing < -0.05
+                && fresh
+                    .iter()
+                    .all(|start| (*start - position).dot(travel).abs() < 1.0e-6),
+            "the staggered starts trail the square disc by {trailing} m"
+        );
     }
 
     /// A GRAZE AND A PLATE THE DISC MEETS WITHIN THE GRAZE'S DEPTH ARE ONE CROSSING, AND IT BITES.
