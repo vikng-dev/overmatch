@@ -1,4 +1,6 @@
-"""fixture_tank.py — the synthetic trio the door's end-to-end suite runs against.
+"""The game's damage-model tooling fixture: crew are HP pools at stations.
+
+fixture_tank.py — the synthetic trio the door's end-to-end suite runs against.
 
     blender --background --factory-startup \\
       --python .agents/blender/fixture_tank.py -- --dir <workdir> [--defect <name>]
@@ -46,7 +48,7 @@ FACE_UV = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
 
 #: The substances the wheels wear, linked out of the library — real registry keys, because the
 #: consumer contract classifies a primitive by the material name the glTF carries.
-SUBSTANCES = ("RHA", "MildSteel")
+SUBSTANCES = ("RHA", "MildSteel", "Flesh")
 
 SPEC = """\
 #![enable(implicit_some)]
@@ -59,22 +61,22 @@ TankSpec(
     inertia_extents: (2.0, 1.0, 3.0),
     turret: (mass: 100.0, inertia_extents: (1.0, 1.0, 1.0)),
     track: (
+        pin_plane_x: (left: -1.0, right: 1.0),
+        substance: "RHA",
         link_count: 8,
-        link_mass: 10.0,
+        link_mass: (10.0, Unknown("synthetic assembly; no physical vehicle to measure")),
         hinge_torque: 1.0,
-        link_angle: (inward_deg: 20.0, outward_deg: 10.0),
-        sprocket: (teeth: 9, nodes: (left: "Sprocket_L", right: "Sprocket_R")),
-        idler: (nodes: (left: "Idler_L", right: "Idler_R")),
+        link_angle: (inward_deg: 40.0, outward_deg: 10.0),
+        sprocket: (spin_inertia_kgm2: ((left: 4.0, right: 4.0), Unknown("synthetic rotating assemblies")), tooth_tip_rad: (left: 0.0, right: 0.0), teeth: 9, nodes: (left: "Sprocket_L", right: "Sprocket_R")),
+        idler: (spin_inertia_kgm2: ((left: 4.0, right: 4.0), Unknown("synthetic rotating assemblies")), radius: (left: 0.5, right: 0.5), nodes: (left: "Idler_L", right: "Idler_R")),
         powertrain: (
-            max_speed: 10.0,
-            force: 50000.0,
-            inertia: 100.0,
             transmission: (
                 engine: (
                     idle_rpm: 600.0,
                     governed_rpm: 2000.0,
                     rated_rpm: 2400.0,
                     cylinders: 1,
+                    sound: None,
                     torque_curve: [(700.0, 1000.0), (2000.0, 1200.0), (2400.0, 1100.0)],
                     drag_fraction: 0.25,
                     inertia_kgm2: 3.0,
@@ -108,12 +110,18 @@ TankSpec(
     volumes: {
         "Wheel_L": (external: true),
         "Wheel_R": (external: true),
+        "Driver": (crew: Driver),
+        "Commander": (crew: Commander),
     },
-    colliders: ["Hull_Collider"],
+    colliders: [(node: "Hull_Collider", substance: "RHA")],
+    shadow_proxies: [],
     roadwheels: [
-        (node: "Wheel_L", side: Left),
-        (node: "Wheel_R", side: Right),
+        (node: "Wheel_L", side: Left, spin_inertia_kgm2: (8.0, Unknown("synthetic wheel assembly")), tread: (radius: 0.5, spans: [(-0.5, 0.5)])),
+        (node: "Wheel_R", side: Right, spin_inertia_kgm2: (8.0, Unknown("synthetic wheel assembly")), tread: (radius: 0.5, spans: [(-0.5, 0.5)])),
     ],
+    weapons: {},
+    views: {},
+    capabilities: {Drive: []},
 )
 """
 
@@ -229,6 +237,8 @@ def build(directory, library, defect):
     for name, offset in (("Wheel_L", -1.0), ("Wheel_R", 1.0)):
         place(scene, name, cube(name, faces=wheel_faces), (0.0, offset, 0.0),
               link(library, "MildSteel"))
+    for name, offset in (("Driver", 2.0), ("Commander", 4.0)):
+        place(scene, name, cube(name), (offset, 0.0, 0.0), link(library, "Flesh"))
     if defect == "modifier":
         hull.modifiers.new(name="Bevel", type="BEVEL")
 
