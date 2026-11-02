@@ -4502,3 +4502,47 @@ fn the_slope_share_reads_the_entrance_not_the_backing() {
         assert!(read(&[facing]) > 1.0);
     }
 }
+
+/// The game's damage model reads the union's strongest cofacial material, independently of keys.
+/// Mutant: the mark owner's softer factor changes skid or slope while resistance stays steel.
+#[test]
+fn cofacial_material_reads_do_not_depend_on_volume_keys() {
+    let laws = WalkLaws::default();
+    let shot = Shot {
+        contact: crate::rounds::ContactPreset::fixture(),
+        ..AP_88
+    };
+    for angle in [30.0_f32, 76.0] {
+        let normal = Vec3::new(0.0, angle.to_radians().sin(), -angle.to_radians().cos());
+        let slabs = [
+            Slab::at(1, 0, 0.5, normal, 0.4),
+            Slab::at(2, 1, 0.5, normal, 0.4),
+        ];
+        let reference = walk_disc(
+            &entrance_disc(&slabs[1..], 2.0),
+            &table(&[(2, 1000.0)]),
+            &laws,
+        )
+        .unwrap();
+        let expected = begin(&reference, &shot, &laws).unwrap();
+        for factors in [[(1, 10.0), (2, 1000.0)], [(1, 1000.0), (2, 10.0)]] {
+            let walked = walk_disc(&entrance_disc(&slabs, 2.0), &table(&factors), &laws).unwrap();
+            assert_eq!(walked.events[0].entrance_factor, 1000.0);
+            let actual = begin(&walked, &shot, &laws).unwrap();
+            assert_eq!(
+                std::mem::discriminant(&actual),
+                std::mem::discriminant(&expected)
+            );
+            let read = |begin: &Begin| match begin {
+                Begin::Transit(request) => request.entrance,
+                Begin::Ricochet { entrance, .. } | Begin::Held { entrance, .. } => *entrance,
+                Begin::Miss => panic!("the fixture face is occupied"),
+            };
+            assert_eq!(read(&actual).slope_charge, read(&expected).slope_charge);
+            assert_eq!(
+                read(&actual).steel_equivalent,
+                read(&expected).steel_equivalent
+            );
+        }
+    }
+}

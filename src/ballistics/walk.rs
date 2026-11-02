@@ -699,8 +699,8 @@ pub struct WeldedRun {
     /// touched. §13.5's ratified impulse rule routes the whole momentum exchange to its rigid body
     /// (2026-08-07): applying `m·Δv` to every present body would duplicate momentum, and picking by
     /// factor would reintroduce the ownership tie-break §13.2 abolished. Ties at an exact abutment
-    /// are broken by the lowest entity, which is arbitrary but deterministic — at an abutment either
-    /// face IS the entrance surface.
+    /// are broken by the lowest entity, which is arbitrary but deterministic. Material strength
+    /// is read independently from the opening union-field segment.
     pub entry_volume: Entity,
     /// How many micro-gaps this run swallowed.
     pub joints: u32,
@@ -2128,8 +2128,8 @@ pub struct DiscEvent {
     /// §13.5's ratified rule hands the whole momentum exchange to. Taken from the sample that
     /// touched FIRST, ties broken by sample index.
     pub entrance_volume: Entity,
-    /// The entrance volume's factor (reference-mm per metre of chord): the resistance of the
-    /// substance the round bites into, which the contact and slope laws read ([`begin`]).
+    /// The opening union-field factor (reference-mm per metre): the strongest cofacial material,
+    /// independent of the entrance mark's owner. Contact, slope and resistance read this field.
     pub entrance_factor: f32,
     /// Every primitive this crossing touched, sorted — the identity half of the transit check.
     pub primitives: Vec<PrimitiveKey>,
@@ -2573,7 +2573,7 @@ fn build_event(
         let first = &walks[sample].runs[runs[0]];
         let last = &walks[sample].runs[runs[runs.len() - 1]];
         if first.start < start {
-            entrance_volume = Some((sample, first.entry_volume));
+            entrance_volume = Some((sample, runs[0], first.entry_volume));
         }
         start = start.min(first.start);
         end = end.max(last.end);
@@ -2621,7 +2621,7 @@ fn build_event(
     primitives.sort();
     primitives.dedup();
 
-    let Some((entrance_sample, entrance_volume)) = entrance_volume else {
+    let Some((entrance_sample, entrance_run, entrance_volume)) = entrance_volume else {
         // Defensive: a cluster is built from at least one welded run, and every run names the
         // volume whose shell opens it. A stand-in entity here would be an event with no owner,
         // spending capability and marking a penetration against nothing.
@@ -2630,17 +2630,11 @@ fn build_event(
             reason: "a disc crossing cluster holds no run",
         });
     };
-    // Defensive: a run's entry volume is read off its sample's own intervals, and that sample's
-    // presence lists every volume with an interval.
-    let entrance_factor = walks[entrance_sample]
-        .presence
-        .iter()
-        .find(|presence| presence.entity == entrance_volume)
-        .map(|presence| presence.factor)
-        .ok_or(WalkError::BadCorridor {
-            sample: entrance_sample,
-            reason: "the entrance volume has no presence on the sample that touched it",
-        })?;
+    let entrance_factor = walks[entrance_sample].runs[entrance_run]
+        .segments
+        .first()
+        .expect("a welded material run holds its opening union-field segment")
+        .factor;
     Ok(DiscEvent {
         start,
         end,
