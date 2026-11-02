@@ -156,3 +156,46 @@ moving outcome. No option is implemented. Commit: driving: measure the rollback 
 MEASURED boundary-record gates on restored code: formatting and CI clippy passed;
 312 targeted track/command/HUD/citation tests passed. The measurement itself passed and
 was removed before these gates. No production source changed.
+
+## Item 2: completed isolated Slip trial
+
+The one-time fair trial is complete. Each row changes one additional variable; every row ran
+all track tests plus S1 (`a_tank_leaves_first_gear_from_rest_on_a_soft_ground`) and S4
+(`contact_law_shipped_ground_speeds`). The new moving-sub-idle launch-gear witness first went
+red on the unchanged admission. The upshift refusal stayed present through the first three rows.
+
+| Stage / diff summary | MEASURED result | Cause of each failure |
+|---|---|---|
+| Replace the rest-only Slip entry with the declared launch-gear domain; retain continuation to launch rpm | 281 passed, one failed; S1/S4 passed | The old moving-lug test explicitly requires In on a launch gear. This is the replaced admission, not a failed behavior. |
+| Additionally price a fresh below-idle launch-gear landing as Slip | 280 passed, two failed; S1/S4 passed | The same obsolete admission expectation, plus the old candidate-price test expecting In at the catch floor instead of the newly declared launch Slip price. |
+| Additionally omit reflected inertia when the idle guard holds a candidate's crank above its shaft | 280 passed, two failed; S1/S4 passed | The same two replaced expectations; no additional behavioral failure. |
+| Finally delete the upshift-into-lug refusal | 278 passed, four failed; S1/S4 passed | The two replaced expectations plus actual failed quarter-pedal sustained travel and failed retained-notch resumption. |
+
+MEASURED refusal deletion: the five-speed lab at quarter pedal on level ground selects F5,
+ends at zero speed, and has 0.052916586 m/s final-window ripple. Its launch domain ends at F4,
+so broadening launch Slip cannot admit that F5 landing. The unchanged S1 gear path is 4→5→6;
+S4 retains its sustainable seed outcomes, including the sand entry split. Full-pedal S1/S4
+therefore do not establish correct part-pedal delivery.
+
+A diagnostic rerun of the same final stage, with no behavioral change, measured the retained-notch
+failure at -0.00049539556 m/s, F4, parked Slip, 853.5939 rpm. It is not an observed F5 ending.
+Removing the refusal is its isolated trigger; the history of cuts was not logged, so the exact
+mechanical cause of that parked cycle is unresolved and belongs in the owner's pricing decision.
+The failures first appear when the refusal alone goes. The priced catch-floor landing is not
+sustained commanded-pedal travel outside the launch Slip domain. The design's broad clutch
+admission sentence itself passed the behavior witnesses; the stronger statement that the same
+price is delivered, and consequently makes the refusal unnecessary, does not hold for this
+non-launch landing. This precisely limits the earlier all-at-once rejection: broader Slip did
+not cause the observed F5 failure.
+
+Decision: outcome two for the complete proposed form. Restore the baseline experiment rather
+than add another predicate or certify the incomplete pricing law. The owner needs to settle how
+the Driver prices sustainable non-launch sub-idle delivery; options are to retain the current
+upshift refusal with this limitation, or replace the catch-floor candidate price with a defined
+sustained delivery law. No third trial is scheduled. All experiment-only tests and production
+changes are removed; the existing law and its tests remain. Commit: driving: isolate and close
+the broader Slip trial (#146).
+
+MEASURED restored-Slip/common gates: formatting and CI clippy passed; 427 targeted,
+headless, spec, bake and source-guard tests passed, four ignored. This verified tree also
+contains item 3's independent energy correction. No experimental Slip arm remains.
