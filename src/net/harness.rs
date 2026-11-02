@@ -1111,6 +1111,51 @@ mod tests {
         );
     }
 
+    /// The watchdog must not budget a replicated deadline against pre-sync local ticks. Runners
+    /// rely on the first synchronized remainder being accounted once, after the slot arrives.
+    #[test]
+    fn watchdog_waits_for_sync_before_accounting_the_fill_up() {
+        use crate::sim_tick::SimTick;
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::prelude::*;
+        use lightyear::prelude::{LocalTimeline, LocalTimelineSync};
+
+        // Fixture clock: 640 remote ticks remain before sync, only 64 on the synchronized tick.
+        let mut world = World::new();
+        let mut sim = SimulateInput::new(&Script::parse("(ticks: 2)").unwrap());
+        sim.hold_slot(Duration::ZERO);
+        world.insert_resource(sim);
+        world.insert_resource(Time::<Real>::default());
+        world.insert_resource(Time::<Fixed>::from_hz(64.0));
+        world.insert_resource(LocalTimeline::default());
+        world.insert_resource(LocalTimelineSync::default());
+        world.init_resource::<Messages<AppExit>>();
+        world.spawn(super::BattleState {
+            phase: super::BattlePhase::FillUp {
+                ends_at: Some(SimTick::new(640)),
+            },
+            ..default()
+        });
+        world.run_system_once(super::simulate_watchdog).unwrap();
+        assert!(
+            matches!(
+                world.resource::<SimulateInput>().clock,
+                ScriptClock::AwaitingFillUp { .. }
+            ),
+            "an unsynchronized tick cannot consume the one fill-up accounting"
+        );
+        world.resource_mut::<LocalTimeline>().apply_delta(576);
+        world.resource_mut::<LocalTimelineSync>().set_synced(true);
+        world.run_system_once(super::simulate_watchdog).unwrap();
+        assert!(
+            matches!(world.resource::<SimulateInput>().clock,
+                ScriptClock::AwaitingRelease { deadline }
+                if deadline == super::WATCHDOG_SLACK + Duration::from_secs(1)),
+            "only the synchronized remainder extends the launch bound"
+        );
+        assert!(world.resource::<Messages<AppExit>>().is_empty());
+    }
+
     /// The smoke and workload runners need two finite bounds. Repeated countdown snapshots must
     /// not renew startup, a late join adds no fill-up, and a released script's deadline must
     /// scale with its own run length. Fixture spans cross tick wrap and use arbitrary wall times.
