@@ -1389,6 +1389,8 @@ pub(crate) struct Bite {
     pub volumes: Vec<VolumeCrossing>,
     /// The game's damage model keeps effect progress in corridor f64, before world rounding.
     pub volume_ends: std::collections::BTreeMap<Entity, f64>,
+    /// The game's damage model: the sampled matter each delivered line actually met, in WORLD.
+    pub contacts: std::collections::BTreeMap<Entity, Vec<(Vec3, Vec3)>>,
     /// Line-of-sight metres flown from the flight's position, summed over the segments actually
     /// flown: the approach to the AXIS hand-off along the way in, then the transit along the ray,
     /// and for a perforation the nudge on to the resume point.
@@ -1778,6 +1780,7 @@ fn bite(
     first.entrance_energy = 0.5 * carrier * speed_in.powi(2);
     first.dose.amount += first.entrance_energy;
     let volumes = volume_crossings(transit, &plan.crossing, &deposits, rest, &world);
+    let contacts = volume_contacts(transit, &plan.crossing, rest, &world);
     let volume_ends = exposed
         .into_iter()
         .map(|(volume, (_, end))| (volume, rest.map_or(end, |stop| end.min(stop))))
@@ -1826,6 +1829,7 @@ fn bite(
         speed_in,
         volumes,
         volume_ends,
+        contacts,
         normal: plan.entrance.normal,
         struck,
         coverage: plan.entrance.coverage,
@@ -1890,6 +1894,42 @@ fn volume_crossings(
             })
         })
         .collect()
+}
+
+/// The game's damage model retains each exposed sample chord independently of the axis readout.
+/// Chord lengths supply construction weights, so a rim contact cannot become an axis miss.
+fn volume_contacts(
+    transit: &DiscWalk,
+    event: &walk::DiscEvent,
+    rest: Option<f64>,
+    world: &impl Fn(Vec3) -> Vec3,
+) -> std::collections::BTreeMap<Entity, Vec<(Vec3, Vec3)>> {
+    let mut contacts: std::collections::BTreeMap<Entity, Vec<(Vec3, Vec3)>> = Default::default();
+    for encounter in &event.encounters {
+        for sample in &encounter.samples {
+            let strongest = super::mechanism::overlap_factor(&sample.present);
+            for contact in sample
+                .present
+                .iter()
+                .filter(|c| c.material.factor == strongest)
+            {
+                let start = contact.start.max(encounter.start);
+                let end = contact.end.min(encounter.end);
+                let end = rest.map_or(end, |stop| end.min(stop));
+                if end <= start {
+                    continue; // This exposed contact lies beyond the resolved rest.
+                }
+                let at = |t: f64| {
+                    world(transit.origin + transit.offsets[sample.sample] + transit.axis * t as f32)
+                };
+                contacts
+                    .entry(contact.volume)
+                    .or_default()
+                    .push((at(start), at(end)));
+            }
+        }
+    }
+    contacts
 }
 
 /// The game's damage model: exposed volume progress stays in corridor precision until effects

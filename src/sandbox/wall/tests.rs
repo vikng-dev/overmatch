@@ -659,6 +659,7 @@ fn the_sandbox_chunk_outlives_the_hole_cap() {
         lines: vec![(
             c,
             crate::ballistics::DeliveredLine {
+                contacts: vec![(at - Vec3::Z * 0.05, at + Vec3::Z * 0.05)],
                 crossing: crate::ballistics::VolumeCrossing {
                     volume: bevy::prelude::Entity::PLACEHOLDER,
                     entry: at - Vec3::Z * 0.05,
@@ -725,6 +726,7 @@ fn the_inspector_reads_delivered_work_and_momentum_without_guessing_a_round() {
     let volume = app.world_mut().spawn(super::WallChunk(0)).id();
     let shell = app.world_mut().spawn(SpallMarks::default()).id();
     let line = DeliveredLine {
+        contacts: vec![(Vec3::ZERO, Vec3::Z)],
         crossing: VolumeCrossing {
             volume,
             entry: Vec3::ZERO,
@@ -742,7 +744,7 @@ fn the_inspector_reads_delivered_work_and_momentum_without_guessing_a_round() {
         shell,
         marks_from: 0,
         cones_from: 0,
-        lines: vec![line],
+        lines: vec![line.clone()],
         burst: None,
     });
     let queue = app.world().resource::<super::WallQueue>();

@@ -1202,9 +1202,12 @@ pub(crate) struct PoolEmptied {
 
 /// The game's damage model: one line contribution delivered at its resolved path moment.
 /// Its momentum reads the physical exchange, independently of retained energy and HP dose.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct DeliveredLine {
     pub(crate) crossing: VolumeCrossing,
+    /// The game's damage model: exposed sample chords in WORLD, clipped at rest. Construction
+    /// allocation reads these; the crossing's axis endpoints retain the shared rest point.
+    pub(crate) contacts: Vec<(Vec3, Vec3)>,
     pub(crate) momentum: Vec3,
     pub(crate) entrance_momentum: Vec3,
     /// The game's damage model: entrance-only work (J) included in the crossing's retained energy.

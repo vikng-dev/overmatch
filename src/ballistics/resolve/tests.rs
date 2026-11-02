@@ -2959,10 +2959,12 @@ fn hard_volume_records_use_only_exposed_contacts() {
         ((1.0, 1.75), (0.5, 1.5), Some(1.25), (0.5, 1.0), true),
         ((0.25, 1.0), (0.75, 1.5), Some(1.5), (1.0, 1.5), false),
     ] {
-        let walked = exposed_walk(&[
+        let mut walked = exposed_walk(&[
             (plate, plate_span.0, plate_span.1, 1000.0),
             (module, module_span.0, module_span.1, 10.0),
         ]);
+        // Fixture: an exposed rim sample, offset from the shared axis readout.
+        walked.offsets[0] = Vec3::X * 0.03;
         let doses = [Dose {
             address: module,
             amount: 1.0,
@@ -2980,6 +2982,21 @@ fn hard_volume_records_use_only_exposed_contacts() {
         }];
         let crossed =
             volume_crossings(&walked, &walked.events[0], &exchanges, rest, &|point| point);
+        let contacts = volume_contacts(&walked, &walked.events[0], rest, &|point| point);
+        let sampled = &contacts[&module];
+        assert_eq!(
+            sampled.first().unwrap().0,
+            Vec3::X * 0.03 + Vec3::Z * exposed.0
+        );
+        assert_eq!(
+            sampled.last().unwrap().1,
+            Vec3::X * 0.03 + Vec3::Z * exposed.1
+        );
+        assert!(
+            (sampled.iter().map(|(a, b)| a.distance(*b)).sum::<f32>() - (exposed.1 - exposed.0))
+                .abs()
+                < 1e-6
+        );
         assert_eq!(crossed[0].energy, exchanges[0].dose.amount);
         assert_eq!(crossed.len(), 1);
         assert_eq!(crossed[0].entry, Vec3::Z * exposed.0);

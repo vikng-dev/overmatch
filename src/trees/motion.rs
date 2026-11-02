@@ -1073,6 +1073,10 @@ mod tests {
             cones_from: 0,
             burst: None,
             lines: vec![DeliveredLine {
+                contacts: vec![(
+                    root_transform.translation + rotation * entry,
+                    root_transform.translation + rotation * end,
+                )],
                 crossing: VolumeCrossing {
                     volume: segment,
                     entry: root_transform.translation + rotation * entry,

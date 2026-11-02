@@ -3056,3 +3056,51 @@ fn a_closed_box_of_reflectors_returns_to_the_flight_clock() {
         "flight time limits reflections in four fixture ticks"
     );
 }
+
+/// The game's damage model delivers the resolved disc contacts through production playback.
+/// Construction consumers rely on the off-axis chords surviving ShellMarched, while public
+/// crossing endpoints stay on the shared axis. Geometry and firing distance are fixture data.
+#[test]
+fn delivered_lines_keep_the_disc_contacts_beside_the_shared_axis() {
+    #[derive(Resource, Default)]
+    struct Lines(Vec<DeliveredLine>);
+    let mut app = recording_world(false);
+    app.init_resource::<Lines>().add_observer(
+        |event: On<ShellMarched>, mut lines: ResMut<Lines>| {
+            lines.0.extend_from_slice(&event.lines);
+        },
+    );
+    tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[("plate", Vec3::new(3.0, 3.0, THIN), Vec3::ZERO, Kind::Plate)],
+    );
+    fire(&mut app, Vec3::Z * 4.0, FireMechanism::Single);
+    for _ in 0..4 {
+        app.update();
+    }
+    let lines = &app.world().resource::<Lines>().0;
+    assert_eq!(lines.len(), 1);
+    let line = &lines[0];
+    assert!(
+        line.contacts.len() > 1,
+        "the fixture disc has covered rim samples"
+    );
+    assert!(
+        line.contacts
+            .iter()
+            .any(|(a, _)| (a.x - line.crossing.entry.x).abs() > 1e-3)
+    );
+    let mean = line
+        .contacts
+        .iter()
+        .map(|(a, b)| a.distance(*b))
+        .sum::<f32>()
+        / line.contacts.len() as f32;
+    assert!(
+        (mean - line.crossing.chord).abs() < 1e-4,
+        "full coverage retains the resolved disc-mean chord"
+    );
+}

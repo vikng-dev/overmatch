@@ -1116,42 +1116,56 @@ fn take_lines(
         let (a, b) = (frame.unscaled(entry), frame.unscaled(end));
         let length = a.distance(b);
         let dir = (b - a).normalize_or_zero();
-        let shares: Vec<(usize, f32, f32)> = match (element, chunk) {
-            (_, Some(&BuildingChunk(c))) => vec![(usize::from(c), 0.0, length)],
+        let shares: Vec<(usize, f32, f32, f32)> = match (element, chunk) {
+            (_, Some(&BuildingChunk(c))) => vec![(usize::from(c), 0.0, length, length)],
             (Some(&BuildingElement(e)), None) => {
-                let e = usize::from(e);
-                let crossed: Vec<_> = layout
-                    .chunks_of(e)
-                    .filter_map(|c| {
-                        let (t0, t1) = layout.blocks[c].span(a, dir)?;
-                        let (t0, t1) = (t0.max(0.0), t1.min(length));
-                        (t1 > t0).then_some((c, t0, t1))
-                    })
-                    .collect();
-                if crossed.is_empty() {
-                    // The line is the disc's axis, so a disc whose rim alone met the element has
-                    // an axis clear of every chunk.
-                    nearest_chunk(layout, e, (a + b) / 2.0)
-                        .map(|c| (c, 0.0, length))
-                        .into_iter()
-                        .collect()
-                } else {
-                    crossed
+                let chunks: Vec<_> = layout.chunks_of(usize::from(e)).collect();
+                if chunks.is_empty() {
+                    continue; // An element that never breaks has no chunk to wear.
                 }
+                let mut crossed = BTreeMap::<usize, (f32, f32, f32)>::new();
+                for &(from, to) in &line.contacts {
+                    let (from, to) = (frame.unscaled(from), frame.unscaled(to));
+                    let ray = (to - from).normalize();
+                    for &c in &chunks {
+                        let Some((t0, t1)) = layout.blocks[c].span(from, ray) else {
+                            continue; // This sample missed the chunk.
+                        };
+                        let (t0, t1) = (t0.max(0.0), t1.min(from.distance(to)));
+                        if t1 <= t0 {
+                            continue; // The sample met this chunk outside its exposed chord.
+                        }
+                        let (start, end) = (
+                            (from + ray * t0 - a).dot(dir),
+                            (from + ray * t1 - a).dot(dir),
+                        );
+                        let span = crossed.entry(c).or_insert((start, end, 0.0));
+                        span.0 = span.0.min(start);
+                        span.1 = span.1.max(end);
+                        span.2 += t1 - t0;
+                    }
+                }
+                assert!(
+                    !crossed.is_empty(),
+                    "a resolved disc contact with a breakable element meets its partitioning chunks"
+                );
+                crossed
+                    .into_iter()
+                    .map(|(c, (a, b, weight))| (c, a, b, weight))
+                    .collect()
             }
-            (None, None) => {
-                unreachable!("BuildingColliders admits elements and chunks only")
-            }
+            (None, None) => unreachable!("BuildingColliders admits elements and chunks only"),
         };
-        let Some(&(first, _, _)) = shares.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else {
-            continue; // An element that never breaks has no chunk to wear.
-        };
-        let chord: f32 = shares.iter().map(|(_, t0, t1)| t1 - t0).sum();
+        let &(first, _, _, _) = shares
+            .iter()
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("a breakable element or chunk owns the resolved contact");
+        let chord: f32 = shares.iter().map(|(_, _, _, weight)| weight).sum();
         let into = taken.entry(root).or_default();
         let turned = frame.turn(impulse - entrance_impulse);
-        for (c, t0, t1) in shares {
+        for (c, t0, t1, weight) in shares {
             // Rounding can close a single owner's line; it still takes the line whole.
-            let share = if t1 > t0 { (t1 - t0) / chord } else { 1.0 };
+            let share = if chord > 0.0 { weight / chord } else { 1.0 };
             let entry_energy = if c == first { entrance_energy } else { 0.0 };
             let entry_blow = if c == first {
                 frame.turn(entrance_impulse)
@@ -1160,6 +1174,7 @@ fn take_lines(
             };
             let (from, to) = ((a + dir * t0) * frame.scale, (a + dir * t1) * frame.scale);
             let part = DeliveredLine {
+                contacts: line.contacts.clone(),
                 crossing: crate::ballistics::VolumeCrossing {
                     entry: from,
                     end: to,

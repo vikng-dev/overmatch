@@ -987,7 +987,7 @@ fn read_hits(
         .iter()
         .filter_map(|line| {
             match chunks.get(line.crossing.volume) {
-                Ok(chunk) => Some((chunk.0, *line)),
+                Ok(chunk) => Some((chunk.0, line.clone())),
                 Err(_) => None, // Another body's volume belongs to its own reader.
             }
         })

@@ -31,6 +31,7 @@ enum Effect {
     },
     Line {
         crossing: VolumeCrossing,
+        contacts: Vec<(Vec3, Vec3)>,
         units: u64,
         context: DoseContext,
         momentum: Vec3,
@@ -282,6 +283,7 @@ impl Playback {
                     moment,
                     Effect::Line {
                         crossing: *volume,
+                        contacts: bite.contacts[&dose.address].clone(),
                         units: super::super::energy_units(dose.amount),
                         context: DoseContext::Line {
                             entry: volume.entry,
@@ -628,6 +630,7 @@ impl Playback {
                 )),
                 Effect::Line {
                     crossing,
+                    contacts,
                     units,
                     context,
                     momentum,
@@ -641,6 +644,10 @@ impl Playback {
                     }
                     lines.push(super::super::DeliveredLine {
                         crossing: self.volume(*crossing),
+                        contacts: contacts
+                            .iter()
+                            .map(|&(a, b)| (self.point(a), self.point(b)))
+                            .collect(),
                         momentum: *momentum,
                         entrance_momentum: *entrance_momentum,
                         entrance_energy: *entrance_energy,

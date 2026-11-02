@@ -2661,6 +2661,7 @@ fn awake_and_sleeping_presses_join_every_deposit_once() {
         };
         let crossing = RawDeposit {
             crossings: vec![DeliveredLine {
+                contacts: vec![(at - Vec3::X * 0.001, at + Vec3::X * 0.001)],
                 crossing: crate::ballistics::VolumeCrossing {
                     volume,
                     entry: at - Vec3::X * 0.001,
@@ -3698,6 +3699,21 @@ fn marched_line(
         cones_from: 0,
         burst: None,
         lines: vec![DeliveredLine {
+            // Fixture disc: only exposed rays enter the delivered record.
+            contacts: [-0.08, 0.0, 0.08]
+                .into_iter()
+                .filter_map(|x| {
+                    let (from, to) = (a + Vec3::X * x, b + Vec3::X * x);
+                    kind.layout
+                        .chunks_of(e)
+                        .any(|c| {
+                            kind.layout.blocks[c]
+                                .span(from, (to - from).normalize())
+                                .is_some_and(|(lo, hi)| hi.min(from.distance(to)) > lo.max(0.0))
+                        })
+                        .then_some((rotation * from, rotation * to))
+                })
+                .collect(),
             crossing: VolumeCrossing {
                 volume,
                 entry: rotation * a,
@@ -3728,10 +3744,9 @@ fn marched_line(
 
 /// The game's damage model reports a crossing on the disc's axis, so a disc whose rim alone bit an
 /// intact element has an axis clear of every chunk. Destruction relies on that line's whole work
-/// and momentum wearing the chunk the rim met: a mutant that drops the line, or that hands it to
-/// the first chunk, fails here. Fixture: the axis runs 30 mm clear of one side, past each chunk.
+/// and momentum wearing the chunk the rim met. Fixture: the axis runs 30 mm clear of one side, past each chunk.
 #[test]
-fn a_line_only_the_rim_met_wears_the_chunk_nearest_its_middle() {
+fn a_line_only_the_rim_met_wears_the_contacted_chunk() {
     for (near, z) in [(0, 0.1..0.6), (1, 1.4..1.9)] {
         let (mut app, root, kind, e, chunks) = stacked_chunks();
         let (a, b) = (Vec3::new(2.03, 0.0, z.start), Vec3::new(2.03, 0.0, z.end));
@@ -3757,6 +3772,54 @@ fn a_line_only_the_rim_met_wears_the_chunk_nearest_its_middle() {
         assert!((total - transit - entry_blow).length() < 1e-4);
         let work: f32 = taken.line_loads.iter().map(|load| load.energy).sum();
         assert!((work - 7.0).abs() < 1e-5);
+    }
+}
+
+/// The game's damage model allocates a disc's work and momentum over every chunk it met.
+/// Fixture: equal-depth chunks and a disc straddling their side; crossing that side with the
+/// axis must preserve the split, which the destruction laws rely on for continuous wear.
+#[test]
+fn a_rim_crossing_shares_the_work_across_the_chunks_it_met() {
+    for x in [1.97, 1.9999, 2.0001, 2.03] {
+        let (mut app, root, kind, e, [front, rear]) = stacked_chunks();
+        let taken = marched_line(
+            &mut app,
+            root,
+            &kind,
+            e,
+            Quat::IDENTITY,
+            (Vec3::new(x, 0.0, 0.1), Vec3::new(x, 0.0, 1.9)),
+            (Vec3::Z * 30.0, Vec3::X * 12.0),
+        )
+        .unwrap();
+        let work = |c| {
+            taken
+                .line_loads
+                .iter()
+                .filter(|load| load.chunk == c)
+                .map(|load| load.energy)
+                .sum::<f32>()
+        };
+        let blow = |c| {
+            taken
+                .line_loads
+                .iter()
+                .filter(|load| load.chunk == c)
+                .map(|load| load.blow)
+                .sum::<Vec3>()
+        };
+        assert!(
+            (work(front) - 6.0).abs() < 1e-4,
+            "axis {x}: front {} J",
+            work(front)
+        );
+        assert!(
+            (work(rear) - 1.0).abs() < 1e-4,
+            "axis {x}: rear {} J",
+            work(rear)
+        );
+        assert!((blow(front) - Vec3::Z * 15.0 - Vec3::X * 12.0).length() < 1e-4);
+        assert!((blow(rear) - Vec3::Z * 15.0).length() < 1e-4);
     }
 }
 
@@ -3786,7 +3849,7 @@ fn a_line_through_an_element_that_never_breaks_wears_nothing() {
 #[test]
 fn a_marched_line_keeps_carrier_work_and_bend_at_entry() {
     for slope in [0.0, 0.4] {
-        let (mut app, root, kind, e, [front, _]) = stacked_chunks();
+        let (mut app, root, kind, e, [front, rear]) = stacked_chunks();
         let a = Vec3::new(-0.1 * slope, 0.0, -0.1);
         let b = Vec3::new(2.1 * slope, 0.0, 2.1);
         let dir = (b - a).normalize();
@@ -3805,7 +3868,16 @@ fn a_marched_line_keeps_carrier_work_and_bend_at_entry() {
             (transit_blow, entry_blow),
         )
         .unwrap();
+        assert_eq!(
+            taken
+                .lines
+                .iter()
+                .map(|line| line.0)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([front, rear])
+        );
         let holes = holes_of(&kind, 1.0, &taken.lines, &[]);
+        assert_eq!(holes.len(), 2, "both crossed chunks keep a visual channel");
         for &(c, from, to, _) in &taken.lines {
             let energy = if c == front { 6.0 } else { 1.0 };
             let volume = energy / kind.layout.materials[c].crush;
@@ -3822,7 +3894,7 @@ fn a_marched_line_keeps_carrier_work_and_bend_at_entry() {
         let loads = taken.line_loads;
         let total: Vec3 = loads.iter().map(|load| load.blow).sum();
         assert!((total - entry_blow - transit_blow).length() < 1e-4);
-        assert!((loads.iter().map(|load| load.energy).sum::<f32>() - 7.0).abs() < 1e-5);
+        assert!((loads.iter().map(|load| f64::from(load.energy)).sum::<f64>() - 7.0).abs() < 1e-5);
         let first_chunk = loads
             .iter()
             .min_by(|a, b| a.at.dot(dir).total_cmp(&b.at.dot(dir)))
