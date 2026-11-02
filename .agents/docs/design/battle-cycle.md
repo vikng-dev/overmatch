@@ -109,8 +109,10 @@ so combat's first tick releases every command. A client runs the same rule from 
 replicated phase, which holds its own turret and fire presentation. Its phase arrives
 with replication, about one one-way trip after the authority's tick (DERIVED), so the
 own turret's local lead is released that much later; the authority's turret follows
-the player's aim from combat's first tick. A composition with no Battle
-(offline, fixtures) holds nothing.
+the player's aim from combat's first tick. Where the hold is mounted (`net::plugin`) and no
+Battle has arrived yet (a client's first frames before its Battle snapshot, a fixture that mounts
+the plugin without one), every command is held. A composition without the plugin (offline) holds
+nothing.
 
 ## Admission and reporting
 
