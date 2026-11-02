@@ -62,9 +62,9 @@
         "APCR": (
             contact_density: (14000.0, StandIn("Deformation and shatter proxy: tungsten-carbide core survey proxy")),
             slope_penalty_deg: (15.0, StandIn("Deformation and shatter proxy: survey class slope loss; no cap term without evidence")),
-            flight_nose: (Ogive(crh: 1.0), Unknown("no ballistic cap in this table: the round flies
-                on its hit nose, the drag form's blunt anchor. Settled by a sourced drawing of this
-                rigid composite construction flight nose")),
+            flight_nose: (Ogive(crh: 4.0), Unknown("Pointed ballistic cap shown in TM 9-1985-3
+                Fig. 427 and TTT No. 24; 4 crh ASSUMED. Settled by a dimensioned drawing of the
+                Pzgr. 40 ballistic cap")),
             hit_nose: (Ogive(crh: 1.0), Unknown("unverified physical proxy: the Pzgr. 39's blunt
                 ogive of 1 crh. Settled by a sourced drawing of this rigid composite construction
                 hit nose")),
