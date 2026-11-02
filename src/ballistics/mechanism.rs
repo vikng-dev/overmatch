@@ -105,7 +105,7 @@ pub(crate) enum Effect {
         cost: f64,
         energy: f64,
         /// The game's damage model: addressed speed loss (m/s), independently integrated at these
-        /// depths. The crossing multiplies by the flying mass, which may include a kept carrier.
+        /// depths. The crossing multiplies by the penetrator mass; a carrier stops at entry.
         speed_loss: f64,
     },
 }

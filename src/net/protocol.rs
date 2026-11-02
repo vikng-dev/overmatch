@@ -254,7 +254,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 68 (#146, driving input): the client sends persistent signed notch intent and hold
 /// overrides; the server snaps opposing pedal signs to neutral. Wire types and surface are unchanged.
 /// REV 69 (#146, driving model): the main clutch carries Out, Slip or In on the wire.
-pub const PROTOCOL_REV: u32 = 69;
+/// REV 70 (#258, the game's damage model): a kept carrier stops at first resisting contact,
+/// so recorded retained work includes its energy and later crossings carry only the core.
+pub const PROTOCOL_REV: u32 = 70;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.

@@ -1378,13 +1378,11 @@ pub(crate) struct Bite {
     /// Entrance coverage η.
     pub coverage: f32,
     pub overmatched: bool,
-    /// The rigid body owning the entrance face, which takes the momentum exchange (§13.5).
+    /// Entrance ownership for fuze attribution, independent of line momentum routing.
     pub owner: Option<Entity>,
     /// Per-entity transit charges, already clipped at the embed progress: a round that stops in the
     /// first plate deposits nothing behind it.
-    pub deposits: Vec<Dose>,
-    /// The game's damage model: addressed energy and momentum, resolved before HP conversion.
-    pub exchanges: Vec<walk::Exchange>,
+    pub deposits: Vec<walk::Exchange>,
     /// One spall source per body exit the round reached, embedded or through, positions in WORLD
     /// ([`walk::SpallSource`]).
     pub spall: Vec<SpallSource>,
@@ -1430,13 +1428,8 @@ impl Bite {
 #[derive(Clone, Debug)]
 pub(crate) enum BiteEnd {
     /// Defeated: buried at `at`, travelling along `direction` through the body when it stopped
-    /// (the bend at the entrance, not the way in), the whole remaining momentum to the entrance
-    /// body.
-    Embedded {
-        at: Vec3,
-        direction: Dir3,
-        impulse: Vec3,
-    },
+    /// (the bend at the entrance, not the way in).
+    Embedded { at: Vec3, direction: Dir3 },
     /// Punched through.
     Perforated {
         /// The aggregate exit face — what the crossing's marks record.
@@ -1448,8 +1441,6 @@ pub(crate) enum BiteEnd {
         direction: Dir3,
         /// Residual speed (m/s).
         speed: f32,
-        /// The momentum the shell lost crossing, to the entrance body at the entrance.
-        impulse: Vec3,
         /// Which primitives each sample is still inside where the flight resumes. A shell that
         /// punches an outer plate while one ring sample is already inside the crewman behind it
         /// must resume knowing that, or the next corridor reports an exit it never entered.
@@ -1683,7 +1674,7 @@ pub(crate) fn decide(
                 &starts.seeds,
                 ENTRANCE_SPAN,
             )?;
-            let plan = walk::finish(&transit, &request, round, state_in, &LIMITS, mass)?;
+            let plan = walk::finish(&transit, &request, round, state_in, &LIMITS, body.mass)?;
             let feedback = context
                 .world
                 .volumes
@@ -1696,6 +1687,7 @@ pub(crate) fn decide(
                 plan,
                 feedback,
                 mass,
+                body.mass,
                 from,
                 dir,
                 &entrance,
@@ -1719,6 +1711,7 @@ fn bite(
     feedback: crate::substances::SurfaceFeedback,
     // kg.
     mass: f32,
+    core_mass: f32,
     // Where the flight's position is, RELATIVE to the transit's anchor.
     from: Vec3,
     incoming: Dir3,
@@ -1730,7 +1723,7 @@ fn bite(
     owner: impl Fn(Entity) -> Option<Entity>,
     laws: &WalkLaws,
 ) -> Bite {
-    let mut exchanges = plan.exchanges;
+    let mut deposits = plan.deposits;
     // THE BOUNDARY. Everything the walk reports is anchor-relative. What leaves for presentation and
     // physics — the entrance, the exit, the embed point, spall sources, the resume point — is
     // converted to WORLD here, in one place. The continuation ([`Interior`]) deliberately stays
@@ -1773,20 +1766,20 @@ fn bite(
         .iter()
         .min_by(|(a, sa), (b, sb)| sa.0.total_cmp(&sb.0).then(a.cmp(b)))
         .expect("a material transit has an exposed resisting contact");
-    exchanges
+    let first = deposits
         .iter_mut()
-        .find(|exchange| exchange.address == first)
-        .expect("each exposed resisting contact has a physical exchange")
-        .momentum += mass * speed_in * (Vec3::from(incoming) - Vec3::from(bent));
-    let impulse = exchanges.iter().map(|exchange| exchange.momentum).sum();
-    let volumes = volume_crossings(
-        transit,
-        &plan.crossing,
-        &plan.deposits,
-        &exchanges,
-        rest,
-        &world,
+        .find(|line| line.dose.address == first)
+        .expect("each exposed resisting contact has a physical exchange");
+    let carrier = mass - core_mass;
+    assert!(
+        carrier >= 0.0,
+        "the flying assembly contains its penetrator"
     );
+    first.entrance_momentum = core_mass * speed_in * (Vec3::from(incoming) - Vec3::from(bent))
+        + carrier * speed_in * Vec3::from(incoming);
+    first.momentum += first.entrance_momentum;
+    first.dose.amount += 0.5 * carrier * speed_in.powi(2);
+    let volumes = volume_crossings(transit, &plan.crossing, &deposits, rest, &world);
     let volume_ends = exposed
         .into_iter()
         .map(|(volume, (_, end))| (volume, rest.map_or(end, |stop| end.min(stop))))
@@ -1796,7 +1789,6 @@ fn bite(
             BiteEnd::Embedded {
                 at: world(at),
                 direction: bent,
-                impulse,
             },
             t,
         ),
@@ -1804,7 +1796,6 @@ fn bite(
             BiteEnd::Embedded {
                 at: world(exit),
                 direction: bent,
-                impulse,
             },
             t,
         ),
@@ -1820,7 +1811,6 @@ fn bite(
                     resume: world(transit.origin + transit.axis * resume),
                     direction: bent,
                     speed: residual,
-                    impulse,
                     continuation: Interior {
                         anchor: transit.anchor,
                         origin: transit.origin + transit.axis * resume,
@@ -1843,8 +1833,7 @@ fn bite(
         coverage: plan.entrance.coverage,
         overmatched: plan.entrance.overmatched,
         owner: owner(struck),
-        deposits: plan.deposits,
-        exchanges,
+        deposits,
         spall: plan
             .spall
             .into_iter()
@@ -1873,8 +1862,7 @@ fn bite(
 fn volume_crossings(
     transit: &DiscWalk,
     event: &walk::DiscEvent,
-    deposits: &[Dose],
-    exchanges: &[walk::Exchange],
+    deposits: &[walk::Exchange],
     rest: Option<f64>,
     world: &impl Fn(Vec3) -> Vec3,
 ) -> Vec<VolumeCrossing> {
@@ -1882,7 +1870,8 @@ fn volume_crossings(
     let at = |t: f64| world(transit.origin + transit.axis * t as f32);
     deposits
         .iter()
-        .filter_map(|dose| {
+        .filter_map(|line| {
+            let dose = &line.dose;
             let DoseSource::Line { chord, cost } = dose.source else {
                 return None;
             };
@@ -1899,11 +1888,7 @@ fn volume_crossings(
                 end: at(end),
                 chord,
                 cost,
-                energy: exchanges
-                    .iter()
-                    .find(|exchange| exchange.address == dose.address)
-                    .expect("each exposed line has a resolved physical exchange")
-                    .retained,
+                energy: dose.amount,
                 perforated,
             })
         })
@@ -2378,11 +2363,10 @@ fn finish_bite(
     mark: usize,
     shell: &mut MarchingShell,
     terminal_emitted: &mut bool,
-    bodies: &mut Query<Forces>,
     commands: &mut Commands,
 ) {
     let (verdict, position, terminal_at) = match &bite.end {
-        BiteEnd::Embedded { at, impulse, .. } => {
+        BiteEnd::Embedded { at, .. } => {
             #[cfg(any(feature = "dev_ui", test))]
             shell.marks.events.push(PenetrationEvent {
                 entry: bite.entrance,
@@ -2390,18 +2374,11 @@ fn finish_bite(
                 overmatched: bite.overmatched,
             });
             shell.path.points.push(*at);
-            if let Some(owner) = bite.owner {
-                apply_hit_impulse(bodies, owner, *impulse, *at);
-            }
             // The struck FACE reads at the visible surface for an embed, the embed point being
             // inside the steel.
             (TerminalVerdict::Stopped, *at, *at)
         }
-        BiteEnd::Perforated { exit, impulse, .. } => {
-            // The body keeps the momentum the shell lost crossing it; the shell carries the rest on.
-            if let Some(owner) = bite.owner {
-                apply_hit_impulse(bodies, owner, *impulse, bite.entrance);
-            }
+        BiteEnd::Perforated { exit, .. } => {
             #[cfg(any(feature = "dev_ui", test))]
             shell.marks.events.push(PenetrationEvent {
                 entry: bite.entrance,

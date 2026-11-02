@@ -606,9 +606,9 @@ pub(crate) struct WallPiece {
 /// What one shell's march step deposited, in world terms, waiting for [`apply_deposits`].
 #[derive(Debug, Default)]
 struct RawDeposit {
-    /// The game's damage model: each line's `(volume, entry, end, retained J, vector N s)`
+    /// The game's damage model: each line's `(volume, entry, end, retained J, total N s, entrance N s)`
     /// from the physical exchange, independent of its HP conversion.
-    crossings: Vec<(Entity, Vec3, Vec3, f32, Vec3)>,
+    crossings: Vec<(Entity, Vec3, Vec3, f32, Vec3, Vec3)>,
     /// Each field ray's physical energy, direction, stop and blow.
     rays: Vec<RayDeposit>,
     /// A burst's blast: where, and its energy and charge.
@@ -859,6 +859,7 @@ fn read_shell(
             volume.end,
             volume.energy,
             line.momentum,
+            line.entrance_momentum,
         ));
     }
     if let Some(spall) = spall {
@@ -1098,7 +1099,7 @@ fn take_lines(
     deposit: &RawDeposit,
     taken: &mut BTreeMap<Entity, Taken>,
 ) {
-    for &(volume, entry, end, energy, impulse) in &deposit.crossings {
+    for &(volume, entry, end, energy, impulse, entrance_impulse) in &deposit.crossings {
         let Ok((element, chunk, parent)) = p.volumes.get(volume) else {
             continue; // Another body's volume (a hull's armour, a trunk) is another law's.
         };
@@ -1131,7 +1132,20 @@ fn take_lines(
             continue;
         }
         let into = taken.entry(root).or_default();
-        let turned = frame.turn(impulse);
+        let turned = frame.turn(impulse - entrance_impulse);
+        let &(first, start, _) = shares
+            .iter()
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("a positive chunk chord has an entrance");
+        into.line_loads.extend(Load::field(
+            &[(
+                first,
+                (a + dir * start) * frame.scale,
+                0.0,
+                frame.turn(entrance_impulse),
+            )],
+            |c| layout.materials[c].crush,
+        ));
         for (c, t0, t1) in shares {
             let part = energy * (t1 - t0) / chord;
             let (from, to) = ((a + dir * t0) * frame.scale, (a + dir * t1) * frame.scale);

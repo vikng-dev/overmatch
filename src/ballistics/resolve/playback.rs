@@ -34,6 +34,8 @@ enum Effect {
         units: u64,
         context: DoseContext,
         momentum: Vec3,
+        entrance_momentum: Vec3,
+        owner: Option<Entity>,
     },
     Witness {
         crossing: VolumeCrossing,
@@ -259,7 +261,8 @@ impl Playback {
             for (tank, at) in reaches {
                 crossing.effects.push((at, Effect::Reach(tank)));
             }
-            for dose in &bite.deposits {
+            for line in &bite.deposits {
+                let dose = &line.dose;
                 let volume = bite
                     .volumes
                     .iter()
@@ -276,12 +279,14 @@ impl Playback {
                             entry: volume.entry,
                             along: *bite.incoming,
                         },
-                        momentum: bite
-                            .exchanges
-                            .iter()
-                            .find(|exchange| exchange.address == dose.address)
-                            .expect("each line dose reads its resolved physical exchange")
-                            .momentum,
+                        momentum: line.momentum,
+                        entrance_momentum: line.entrance_momentum,
+                        owner: context
+                            .world
+                            .owners
+                            .get(dose.address)
+                            .ok()
+                            .map(|owner| owner.tank()),
                     },
                 ));
             }
@@ -582,6 +587,11 @@ impl Playback {
                     .fuze
                     .entered(*force, *speed, *owner, *approach),
                 Effect::Mark => {
+                    let core = shell.projectile.body();
+                    shell.projectile.drag_k *= shell.projectile.mass / core.mass
+                        * (core.caliber / shell.projectile.caliber).powi(2);
+                    shell.projectile.mass = core.mass;
+                    shell.projectile.caliber = core.caliber;
                     let Decision::Bite(bite) = self.world_decision() else {
                         panic!("only a bite schedules a crossing mark");
                     };
@@ -613,10 +623,17 @@ impl Playback {
                     units,
                     context,
                     momentum,
+                    entrance_momentum,
+                    owner,
                 } => {
+                    let resolved = self.volume(*crossing);
+                    if let Some(owner) = owner {
+                        apply_hit_impulse(bodies, *owner, *momentum, resolved.entry);
+                    }
                     lines.push(super::super::DeliveredLine {
                         crossing: self.volume(*crossing),
                         momentum: *momentum,
+                        entrance_momentum: *entrance_momentum,
                     });
                     shell.dose.add_units(
                         crossing.volume,
@@ -686,7 +703,6 @@ impl Playback {
                             .expect("a finished bite has its own crossing mark"),
                         shell,
                         terminal_emitted,
-                        bodies,
                         commands,
                     ),
                 },

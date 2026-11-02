@@ -525,6 +525,7 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
             _ => None,
         })
         .flatten()
+        .map(|line| &line.dose)
         .filter(|dose| dose.address == gate_target)
         .fold(0.0, |total, dose| total + dose.amount);
     let admitted =
@@ -2668,7 +2669,7 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                             &LIMITS,
                             round.body().mass,
                         )?;
-                        Ok::<_, WalkError>(plan.deposits.iter().find_map(
+                        Ok::<_, WalkError>(plan.deposits.iter().map(|line| &line.dose).find_map(
                             |dose| match dose.source {
                                 DoseSource::Line { chord, .. } if dose.address == segment => {
                                     Some(chord)
@@ -2937,20 +2938,14 @@ fn hard_volume_records_use_only_exposed_contacts() {
             },
         }];
         let exchanges = [walk::Exchange {
-            address: module,
-            retained: 2.0, // Fixture J, deliberately distinct from the HP dose's 1.0.
-            debris: 0.0,
+            dose: doses[0],
+            debris: Vec::new(),
             momentum: Vec3::Z,
+            entrance_momentum: Vec3::ZERO,
         }];
-        let crossed = volume_crossings(
-            &walked,
-            &walked.events[0],
-            &doses,
-            &exchanges,
-            rest,
-            &|point| point,
-        );
-        assert_eq!(crossed[0].energy, exchanges[0].retained);
+        let crossed =
+            volume_crossings(&walked, &walked.events[0], &exchanges, rest, &|point| point);
+        assert_eq!(crossed[0].energy, exchanges[0].dose.amount);
         assert_eq!(crossed.len(), 1);
         assert_eq!(crossed[0].entry, Vec3::Z * exposed.0);
         assert_eq!(crossed[0].end, Vec3::Z * exposed.1);

@@ -11,7 +11,7 @@
 
 use super::*;
 use crate::ballistics::mechanism::{Limits, SolidShot, SolidShotState};
-use crate::ballistics::spall_cone::{EMITTED_SHARE, field_strength};
+use crate::ballistics::spall_cone::EMITTED_SHARE;
 use crate::substances::REFERENCE_FACTOR;
 
 // ---------------------------------------------------------------------------------------------
@@ -1317,17 +1317,16 @@ fn a_wholly_emitted_exchange_retains_zero_without_subtractive_roundoff() {
         LineSum {
             chord: 2.0,
             cost: 2.0,
-            energy: 1.0 + 0.2,
             ..Default::default()
         },
     )]);
     let retained = retained_lines(
         doses,
         &stretches,
-        &BTreeMap::from([((0, 0), 1.0), ((1, 0), 1.0)]),
+        &BTreeMap::from([((0, 0), (1.0, 0)), ((1, 0), (1.0, 0))]),
     );
-    assert_eq!(retained[&address].energy, 0.0);
-    super::super::energy_units(retained[&address].energy as f32);
+    assert_eq!(retained[&address].retained, 0.0);
+    super::super::energy_units(retained[&address].retained as f32);
 
     // The game's damage model uses the same partition on a real fixture crossing's disc samples.
     let laws = WalkLaws::default();
@@ -1358,12 +1357,12 @@ fn a_wholly_emitted_exchange_retains_zero_without_subtractive_roundoff() {
     );
     assert!(!carried.is_empty(), "the fixture reaches a body exit");
     // Fixture κ = r = 1, the accepted upper endpoint, on the crossing's reached samples.
-    carried.values_mut().for_each(|share| *share = 1.0);
+    carried.values_mut().for_each(|(share, _)| *share = 1.0);
     let retained = retained_lines(advanced.doses, &advanced.stretches, &carried);
     for line in retained.values() {
-        assert_eq!(line.energy, 0.0);
-        assert!(line.debris > 0.0 && line.speed_loss > 0.0);
-        super::super::energy_units(line.energy as f32);
+        assert_eq!(line.retained, 0.0);
+        assert!(line.debris.values().sum::<f64>() > 0.0 && line.speed_loss > 0.0);
+        super::super::energy_units(line.retained as f32);
     }
 }
 
@@ -1692,6 +1691,7 @@ fn every_sample_hands_off_on_the_face_it_crossed() {
         assert!(
             plan.deposits
                 .iter()
+                .map(|line| &line.dose)
                 .any(|dose| dose.address == volume(plate) && dose.amount > 0.0),
             "plate {plate} is charged: {:?}",
             plan.deposits
@@ -1823,6 +1823,7 @@ fn capability_exhausted_midway_stops_the_round_and_clips_damage() {
     let armour = plan
         .deposits
         .iter()
+        .map(|line| &line.dose)
         .find(|d| d.address == volume(1))
         .expect("the plate it died in must be charged");
     assert!(
@@ -1830,7 +1831,11 @@ fn capability_exhausted_midway_stops_the_round_and_clips_damage() {
         "{armour:?}"
     );
     assert!(
-        !plan.deposits.iter().any(|d| d.address == volume(2)),
+        !plan
+            .deposits
+            .iter()
+            .map(|line| &line.dose)
+            .any(|d| d.address == volume(2)),
         "a round that stopped in the plate cannot wound the crewman behind it"
     );
     assert!(
@@ -1941,57 +1946,28 @@ fn spall_through(volumes: &VolumeTable, slabs: &[Slab]) -> Vec<SpallSource> {
         .spall
 }
 
-/// THE CONE KEEPS THE EXITED SUBSTANCE'S STRENGTH (the game's damage model): a plate of every
-/// shipped hard substance, perforated head-on by the fixture 88, throws a field carrying the debris
-/// share `κ` of the energy lost scaled by its factor over the reference's, capped at 1. Every
-/// substance at or above the reference (the reference armour steel, gun steel) carries exactly `κ`
-/// of the energy lost, to the bit; wood and brick carry at most 4 % of that. A law that skipped
-/// the ratio leaves brick's spall whole; one that scaled armour too, or rounded the product
-/// another way, moves an armour cone's bits. `κ` is read from the shipped data, never pinned.
+/// The game's damage model emits the debris share times the capped exit-strength ratio of
+/// the core's work. Buildings and pool dose rely on softer exits reducing emission while
+/// reference-and-harder exits use the same share. All factors and chords are fixture data.
 #[test]
-fn a_softer_exit_throws_a_weaker_cone_and_armour_throws_what_it_threw() {
-    let registry = SubstanceRegistry::shipped_static();
-    let (mut armour, mut soft) = (Vec::new(), Vec::new());
-    for name in registry.keys() {
-        let Ok(hard) = registry.hard(name) else {
-            continue;
-        };
-        let factor = hard.factor();
-        // Fixture chords: thin enough that the fixture 88 perforates, thick enough to spend.
+fn a_softer_exit_reduces_debris_and_reference_strength_caps_the_share() {
+    let (round, state) = solid(AP_88_CAPABILITY);
+    for factor in [10.0, 40.0, 500.0, REFERENCE_FACTOR, 1500.0] {
         let chord = if factor >= 500.0 { 0.05 } else { 0.25 };
         let table = substance_table(&[(1, SubstanceId::fixture(factor), factor)]);
         let cones = spall_through(&table, &[Slab::at(1, 0, 0.5, -AXIS, chord)]);
         let [cone] = cones.as_slice() else {
-            panic!("{name}: one cone, {cones:?}");
+            panic!("one fixture exit: {cones:?}")
         };
-        assert!(cone.energy > 0.0, "{name}: the round lost energy");
-        let strength = cone.strength();
-        let share = crate::ballistics::spall_cone::cone_energy().debris_share();
-        if factor >= REFERENCE_FACTOR {
-            assert_eq!(
-                strength.to_bits(),
-                field_strength(cone.energy * share).to_bits(),
-                "{name}: unchanged"
-            );
-            armour.push(name);
-        } else {
-            assert_eq!(
-                strength.to_bits(),
-                field_strength(cone.energy * (share * (factor / REFERENCE_FACTOR))).to_bits(),
-                "{name}: scaled by its strength ratio"
-            );
-            soft.push(name);
-        }
+        let lost = 0.5
+            * f64::from(round.body().mass)
+            * (state.speed.powi(2) - f64::from(cone.exit_speed).powi(2));
+        let expected = lost
+            * f64::from(crate::ballistics::spall_cone::cone_energy().debris_share())
+            * f64::from((factor / REFERENCE_FACTOR).min(1.0));
+        assert!(expected > 0.0);
+        assert!((f64::from(cone.carried()) / expected - 1.0).abs() < 1e-5);
     }
-    for name in ["RHA", "GunSteel"] {
-        assert!(armour.contains(&name), "{name} sits at the reference");
-    }
-    for name in ["Wood", "Brick"] {
-        assert!(soft.contains(&name), "{name} sits below the reference");
-        let factor = registry.hard(name).unwrap().factor();
-        assert!(exit_strength_ratio(factor) <= 0.04, "{name}: {factor}");
-    }
-    assert_eq!(exit_strength_ratio(1500.0), 1.0, "capped at 1");
 }
 
 /// Plates of equal factor in contact are one plate, whatever their substances: 50 mm + 50 mm of two
@@ -2022,7 +1998,6 @@ fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
         };
         assert_eq!(cone.strength(), plate.strength());
         assert_eq!(cone.spend, plate.spend);
-        assert_eq!(cone.energy, plate.energy);
         assert_eq!(cone.exit_speed, plate.exit_speed);
     }
 }
@@ -2236,6 +2211,7 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
     let crew = plan
         .deposits
         .iter()
+        .map(|line| &line.dose)
         .find(|d| d.address == volume(2))
         .expect("the crewman transited must be charged");
     assert!((crew.line_chord().unwrap() - 0.3).abs() < 1.0e-3);
@@ -2249,24 +2225,31 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
     );
     let (round, state) = solid(AP_88_CAPABILITY);
     let lost = 0.5 * round.body().mass as f64 * (state.speed.powi(2) - plan.state.speed.powi(2));
-    let dealt: f64 = plan.deposits.iter().map(|dose| dose.amount as f64).sum();
+    let dealt: f64 = plan
+        .deposits
+        .iter()
+        .map(|line| &line.dose)
+        .map(|dose| dose.amount as f64)
+        .sum();
     let carried: f64 = plan.spall.iter().map(|cone| cone.carried() as f64).sum();
     assert!(carried > 0.0, "the exits' cones carry energy out");
     let exchange_retained: f64 = plan
-        .exchanges
+        .deposits
         .iter()
-        .map(|exchange| f64::from(exchange.retained))
+        .map(|exchange| f64::from(exchange.dose.amount))
         .sum();
     let exchange_debris: f64 = plan
-        .exchanges
+        .deposits
         .iter()
-        .map(|exchange| f64::from(exchange.debris))
+        .map(|exchange| {
+            exchange
+                .debris
+                .iter()
+                .map(|(_, energy)| f64::from(*energy))
+                .sum::<f64>()
+        })
         .sum();
-    let momentum: Vec3 = plan
-        .exchanges
-        .iter()
-        .map(|exchange| exchange.momentum)
-        .sum();
+    let momentum: Vec3 = plan.deposits.iter().map(|exchange| exchange.momentum).sum();
     let expected = f64::from(round.body().mass) * (state.speed - plan.state.speed);
     assert_eq!(exchange_retained, dealt);
     assert!((exchange_debris / carried - 1.0).abs() < 1.0e-6);
@@ -2323,7 +2306,7 @@ fn overmatch_charges_the_perpendicular_projection_everywhere() {
         "spall spend {}",
         exit.spend
     );
-    let deposit = &plan.deposits[0];
+    let deposit = &plan.deposits[0].dose;
     let DoseSource::Line { cost, .. } = deposit.source else {
         panic!("a line dose: {deposit:?}");
     };
@@ -3702,6 +3685,7 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
         let deposits: BTreeMap<Entity, (f64, f64)> = new
             .deposits
             .iter()
+            .map(|line| &line.dose)
             .map(|deposit| match deposit.source {
                 DoseSource::Line { chord, cost } => (deposit.address, (chord as f64, cost as f64)),
                 DoseSource::Field => panic!("case {case}: a field dose on the line"),
@@ -3722,7 +3706,12 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
         // The line's doses and the reached exits' fields spend the energy the round lost once,
         // all of it on a rest: each an f32 of its f64 share, so they sum to it within a few f32
         // roundings.
-        let dealt: f64 = new.deposits.iter().map(|dose| dose.amount as f64).sum();
+        let dealt: f64 = new
+            .deposits
+            .iter()
+            .map(|line| &line.dose)
+            .map(|dose| dose.amount as f64)
+            .sum();
         let carried: f64 = new.spall.iter().map(|cone| cone.carried() as f64).sum();
         let lost = 0.5 * body.mass as f64 * (state.speed.powi(2) - new.state.speed.powi(2));
         assert!(
@@ -3873,7 +3862,7 @@ fn touching_pools_receive_the_energy_lost_at_their_own_depths() {
                     second.state.speed.powi(2)
                 });
         for (index, expected) in [(1, front_energy), (2, rear_energy)] {
-            let actual = joined.doses[&volume(index)].energy;
+            let actual = lost_at(&joined, volume(index));
             assert!(
                 (actual / expected - 1.0).abs() < 1.0e-10,
                 "{speed} m/s, pool {index}: {actual} J against its own {expected} J"
@@ -3898,7 +3887,11 @@ fn touching_pools_receive_the_energy_lost_at_their_own_depths() {
                 joined.state.speed > 0.0,
                 "the fixture leaves a readout remainder"
             );
-            let total: f64 = joined.doses.values().map(|line| line.energy).sum();
+            let total: f64 = joined
+                .doses
+                .keys()
+                .map(|address| lost_at(&joined, *address))
+                .sum();
             assert!(
                 (total / (0.5 * body.mass as f64 * state.speed.powi(2)) - 1.0).abs() < 1.0e-12,
                 "the stopped round's remainder belongs to the rear pool exactly once"
@@ -3951,7 +3944,7 @@ fn partial_overlaps_share_only_the_energy_lost_while_both_are_present() {
     let front = 0.5 * body.mass as f64 * (state.speed.powi(2) - first.state.speed.powi(2));
     let rear = 0.5 * body.mass as f64 * (first.state.speed.powi(2) - joined.state.speed.powi(2));
     for (index, expected) in [(1, 0.5 * front + rear), (2, 0.5 * front)] {
-        let actual = joined.doses[&volume(index)].energy;
+        let actual = lost_at(&joined, volume(index));
         assert!(
             (actual / expected - 1.0).abs() < 1.0e-10,
             "pool {index}: {actual} J against its own {expected} J"
@@ -4006,16 +3999,16 @@ fn a_pool_half_inside_a_plate_is_dosed_only_over_its_open_half() {
         (1, 0.02, energy(state.speed, behind)),
         (2, 0.01, energy(behind, joined.state.speed)),
     ] {
-        let line = joined.doses[&volume(index)];
+        let line = &joined.doses[&volume(index)];
         assert!(
             (line.chord - chord).abs() < 1.0e-12,
             "volume {index}: chord {} against {chord}",
             line.chord
         );
         assert!(
-            (line.energy / expected - 1.0).abs() < 1.0e-9,
+            (lost_at(&joined, volume(index)) / expected - 1.0).abs() < 1.0e-9,
             "volume {index}: {} J against {expected} J",
-            line.energy
+            lost_at(&joined, volume(index))
         );
     }
 }
@@ -4277,6 +4270,7 @@ fn a_disc_meeting_two_pieces_at_overlapping_depths_resolves() {
             assert!(
                 plan.deposits
                     .iter()
+                    .map(|line| &line.dose)
                     .any(|dose| dose.address == volume(piece) && dose.amount > 0.0),
                 "block {block}: piece {piece} is charged: {:?}",
                 plan.deposits
@@ -4582,4 +4576,16 @@ fn a_thin_plate_under_a_large_calibre_is_overmatched() {
         begin(&walked, &shot(0.0079), &laws).unwrap(),
         Begin::Ricochet { .. }
     ));
+}
+
+// The game's damage model: independent per-volume work read from the force-law stretches before
+// any exit partitions it. The depth-attribution tests below the walk rely on this budget.
+fn lost_at<S>(advanced: &Advanced<S>, address: Entity) -> f64 {
+    advanced
+        .stretches
+        .iter()
+        .flat_map(|stretch| &stretch.lines)
+        .filter(|(volume, _, _)| *volume == address)
+        .map(|(_, _, energy)| energy)
+        .sum()
 }

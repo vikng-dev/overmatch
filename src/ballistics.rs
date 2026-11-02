@@ -1212,6 +1212,7 @@ pub(crate) struct PoolEmptied {
 pub(crate) struct DeliveredLine {
     pub(crate) crossing: VolumeCrossing,
     pub(crate) momentum: Vec3,
+    pub(crate) entrance_momentum: Vec3,
 }
 
 /// One authority march step of `shell` that logged armour marks, threw spall cones or burst,
@@ -1331,8 +1332,8 @@ pub(crate) struct Projectile {
     round: mechanism::SolidShot,
     /// The flying body's calibre (m).
     caliber: f32,
-    /// The flying body's mass (kg): a kept carrier stops at the plate with its penetrator;
-    /// a discarded carrier contributes no momentum.
+    /// The flying body's mass (kg): a kept carrier stops at its first resisting contact;
+    /// only the penetrator continues. A discarded carrier contributes no exchange.
     mass: f32,
     /// Crew-line coefficient: disc-mean chord times this times [`HP_PER_REFERENCE_MM`] gives HP dose.
     /// Read only by the witness pass; the hard walk never sees it.
@@ -4407,7 +4408,7 @@ mod tests {
                 direction: Vec3::NEG_Z,
                 exited: Vec::new(),
                 spend: 0.0,
-                energy: 2_700_000.0,
+                emitted: 2_700_000.0 * (spall_cone::cone_energy().debris_share() * ratio),
                 debris_ratio: 2.4,
                 strength_ratio: ratio,
                 exit_speed: 0.0,
@@ -4426,7 +4427,7 @@ mod tests {
                 .map(|load| f64::from(load.crushed))
                 .sum();
             let share = spall_cone::cone_energy().debris_share();
-            let carried = f64::from(source.energy * (share * ratio));
+            let carried = f64::from(2_700_000.0 * (share * ratio));
             assert!(
                 (crushed - carried / f64::from(CRUSH)).abs() <= 1e-6 * crushed,
                 "ratio {ratio}: crushed {crushed} m³ for {carried} J carried"
@@ -6494,6 +6495,9 @@ mod march_tests {
                 },
             );
             let shell = spawn_round(&mut app, FIXTURE_88, Vec3::Y * 51.0, direction * 800.0);
+            // Fixture: the carrier has three times the core mass.
+            let flying_mass = 4.0 * FIXTURE_88.mass;
+            app.world_mut().get_mut::<Projectile>(shell).unwrap().mass = flying_mass;
             app.update();
             let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
             let [
@@ -6508,11 +6512,11 @@ mod march_tests {
                 panic!("the fixture perforates one plate: {:?}", marks.log);
             };
             let lost = 0.5
-                * f64::from(FIXTURE_88.mass)
-                * (f64::from(*speed_in).powi(2) - f64::from(*speed).powi(2));
+                * (f64::from(flying_mass) * f64::from(*speed_in).powi(2)
+                    - f64::from(FIXTURE_88.mass) * f64::from(*speed).powi(2));
             let lines = &app.world().resource::<Lines>().0;
             let axis = (lines[0].crossing.end - lines[0].crossing.entry).normalize();
-            let expected = FIXTURE_88.mass * (*incoming * *speed_in - axis * *speed);
+            let expected = flying_mass * *incoming * *speed_in - FIXTURE_88.mass * axis * *speed;
             let retained: f64 = lines
                 .iter()
                 .map(|line| f64::from(line.crossing.energy))
@@ -6529,8 +6533,66 @@ mod march_tests {
             eprintln!(
                 "MEASURED fixture perforation: lost={lost:.6} J, retained={retained:.6} J, debris={carried:.6} J; momentum={momentum:?} N s, expected={expected:?} N s"
             );
+            assert_eq!(
+                app.world().get::<Projectile>(shell).unwrap().mass,
+                FIXTURE_88.mass
+            );
             assert!(((retained + carried) / lost - 1.0).abs() < 1.0e-5);
             assert!((momentum - expected).length() / expected.length() < 1.0e-4);
+        }
+    }
+
+    /// The game's damage model routes each crossed volume's momentum once. A hull sharing a
+    /// crossing with unowned matter receives only its line, regardless of entrance ownership.
+    /// Fixture: two identical overlapping plates and an inertial body with no external forces.
+    #[test]
+    fn each_crossed_body_receives_only_its_own_line() {
+        #[derive(Resource, Default)]
+        struct Lines(Vec<DeliveredLine>);
+        for owned_index in [0, 1] {
+            let plate = (Vec3::new(3.0, 0.05, 3.0), Vec3::Y * 50.0);
+            let mut app = world_with_trimesh_plates(&[plate, plate]);
+            app.init_resource::<Lines>().add_observer(
+                |event: On<ShellMarched>, mut lines: ResMut<Lines>| {
+                    lines.0.extend_from_slice(&event.lines);
+                },
+            );
+            let body = app
+                .world_mut()
+                .spawn((
+                    RigidBody::Dynamic,
+                    Transform::default(),
+                    Mass(100.0),
+                    AngularInertia::new(Vec3::splat(50.0)),
+                    NoAutoMass,
+                    NoAutoAngularInertia,
+                    GravityScale(0.0),
+                ))
+                .id();
+            let mut plates: Vec<_> = app
+                .world_mut()
+                .query_filtered::<Entity, With<BallisticVolume>>()
+                .iter(app.world())
+                .collect();
+            plates.sort();
+            let owned = plates[owned_index];
+            app.world_mut().entity_mut(owned).insert(VolumeOf(body));
+            app.update();
+            spawn_round(&mut app, FIXTURE_88, Vec3::Y * 51.0, Vec3::NEG_Y * 800.0);
+            app.update();
+            let lines = &app.world().resource::<Lines>().0;
+            assert_eq!(lines.len(), 2);
+            let expected = lines
+                .iter()
+                .find(|line| line.crossing.volume == owned)
+                .unwrap()
+                .momentum;
+            let delivered = app.world().get::<LinearVelocity>(body).unwrap().0 * 100.0;
+            assert!(expected.length() > 0.0);
+            assert!(
+                (delivered - expected).length() / expected.length() < 0.001,
+                "owned index {owned_index}: delivered {delivered:?}, own line {expected:?}"
+            );
         }
     }
 
