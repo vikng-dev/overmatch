@@ -10,8 +10,8 @@
 //!
 //! The target structure and its staging are the design doc's:
 //! `.agents/scratch/damage-cam-2026-10-08/research/recommendation-solid-shot.md`, Parts 1 and 5.
-//! The slope charge is a type preset proxy ([`SlopeCharge`]); its basis is
-//! `.agents/scratch/research/penetration-proxy-2026-11-02.md`. The modelling convention is how an
+//! The resistance adapter combines thin-plate work and the type slope proxy; their basis is
+//! design doc §3b and `.agents/scratch/research/penetration-proxy-2026-11-02.md`. The modelling convention is how an
 //! authoring overlap of different substances resists ([`overlap_factor`]) and is dosed: only its
 //! strongest volume counts ([`SolidShot`]'s advance, §13.2).
 
@@ -448,14 +448,14 @@ pub(crate) fn slope_charge(cosine: f32, penalty_tan: f32, factor: f32) -> f64 {
     1.0 + f64::from(factor.min(1.0)) * (charge - 1.0)
 }
 
-/// The game's damage model: resistance reads a scaled chord; consumed progress and the flight
+/// The game's damage model: plate capacity and slope scale resistance; consumed progress and the flight
 /// clock read the real chord. Effects and reference-mm read the same charged state.
-pub(crate) struct SlopeCharge<'a, M> {
+pub(crate) struct ResistanceCharge<'a, M> {
     pub inner: &'a M,
     pub charge: f64,
 }
 
-impl<M: Mechanism> Mechanism for SlopeCharge<'_, M> {
+impl<M: Mechanism> Mechanism for ResistanceCharge<'_, M> {
     type State = M::State;
 
     fn advance(
@@ -965,7 +965,7 @@ mod tests {
             let mechanism = round();
             let state = mechanism.at(800.0);
             let chord = encounter(0.04, 1, &[&[(1, 1000.0)]]);
-            let adapted = SlopeCharge {
+            let adapted = ResistanceCharge {
                 inner: &mechanism,
                 charge: slope_charge(1.0, preset.slope_tan, 1.0),
             };
@@ -1009,26 +1009,30 @@ mod tests {
     #[test]
     fn slope_adapter_maps_resistance_back_to_real_progress_and_time() {
         let round = round();
-        let adapter = SlopeCharge {
-            inner: &round,
-            charge: 3.0,
-        }; // Fixture charge.
-        for (speed, length) in [(800.0_f32, 0.04), (300.0, 2.0)] {
-            let before = round.at(speed);
-            let charged = round.advance(
-                before,
-                &encounter(length * adapter.charge, 1, &[&[(1, 1000.0)]]),
-                &LIMITS,
-            );
-            let actual = adapter.advance(before, &encounter(length, 1, &[&[(1, 1000.0)]]), &LIMITS);
-            assert_eq!(actual.state, charged.state);
-            assert_eq!(actual.effects, charged.effects);
-            assert_eq!(actual.control, charged.control);
-            assert!((actual.consumed - charged.consumed / adapter.charge).abs() < 1.0e-12);
-            assert_eq!(
-                adapter.flight_time(before, actual.state, actual.consumed),
-                round.flight_time(before, charged.state, actual.consumed)
-            );
+        // Fixture work shares cover thin-plate reduction and slope amplification.
+        for charge in [0.1, 1.0, 3.0] {
+            let adapter = ResistanceCharge {
+                inner: &round,
+                charge,
+            };
+            for (speed, length) in [(800.0_f32, 0.04), (300.0, 2.0)] {
+                let before = round.at(speed);
+                let charged = round.advance(
+                    before,
+                    &encounter(length * adapter.charge, 1, &[&[(1, 1000.0)]]),
+                    &LIMITS,
+                );
+                let actual =
+                    adapter.advance(before, &encounter(length, 1, &[&[(1, 1000.0)]]), &LIMITS);
+                assert_eq!(actual.state, charged.state);
+                assert_eq!(actual.effects, charged.effects);
+                assert_eq!(actual.control, charged.control);
+                assert!((actual.consumed - charged.consumed / adapter.charge).abs() < 1.0e-12);
+                assert_eq!(
+                    adapter.flight_time(before, actual.state, actual.consumed),
+                    round.flight_time(before, charged.state, actual.consumed)
+                );
+            }
         }
     }
 }

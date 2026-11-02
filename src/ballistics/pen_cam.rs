@@ -485,6 +485,31 @@ fn recorded_scenarios_keep_the_current_interaction_sequence() {
     );
 }
 
+/// The game's damage model: review instrument, with no verdict or firing-row pass condition.
+#[test]
+#[ignore = "measurement tool: inspect changed scenarios before re-recording"]
+fn measure_plate_capacity_scenarios() {
+    let dir = crate::assets::asset_root().join(SCENARIO_DIR);
+    for scenario in scenarios() {
+        let stored = PenetrationReport::load(&dir.join(format!("{}.ron", scenario.name))).unwrap();
+        let actual = record_scenario(&scenario);
+        println!(
+            "MEASURED {} verdict {:?}->{:?}; skids {}->{}; plates {}->{}; fields {}->{}",
+            scenario.name,
+            stored.impact.verdict,
+            actual.impact.verdict,
+            stored.ricochets.len(),
+            actual.ricochets.len(),
+            stored.plates.len(),
+            actual.plates.len(),
+            stored.spall.len(),
+            actual.spall.len()
+        );
+        println!("BEFORE {}", serde_json::to_string(&stored).unwrap());
+        println!("AFTER {}", serde_json::to_string(&actual).unwrap());
+    }
+}
+
 /// Re-records every scenario file from today's march (ignored; a tool, run on demand):
 /// `OVERMATCH_BLESS=1 cargo test --lib pen_cam::bless -- --ignored` writes them
 /// ([`crate::tests::bless`]), and the diff is the review; without it the test records and checks
@@ -1640,7 +1665,15 @@ fn the_muzzle_is_read_before_the_globals_catch_up() {
 
 /// The fixture 88 carrying a burst ([`burst::fixture_inputs`]).
 fn fixture_burst() -> burst::Burst {
-    burst::Burst::derived(FIXTURE_88, burst::FIXTURE_STEEL, &burst::fixture_inputs())
+    let mut inputs = burst::fixture_inputs();
+    // Fixture threshold: the thin front must arm independently of authored capacity parameters.
+    let capacity = physical_laws::PhysicalLaws::shipped()
+        .plate_capacity
+        .charge(f64::from(THIN) / f64::from(FIXTURE_88.caliber));
+    inputs.trigger = crate::rounds::fuze::Trigger::SpendExit {
+        arming_spend: THIN * 1000.0 * capacity as f32 * 0.5,
+    };
+    burst::Burst::derived(FIXTURE_88, burst::FIXTURE_STEEL, &inputs)
         .expect("the fixture burst derives")
 }
 
@@ -1693,8 +1726,8 @@ const BURST_TOLERANCE: f32 = 1.0e-3;
 /// field's origin and the nose piece's start. The nose flies on from there at the burst's speed as
 /// an inert round of the derived nose mass and the round's calibre and nose, nothing else of the
 /// round. A mutant that counts the delay from the entrance, flies the nose at the whole round's
-/// mass, or ends the round at a burst in flight fails here. The 50 mm plate spends 50 reference-mm
-/// across, over the fixture threshold (fixture data).
+/// mass, or ends the round at a burst in flight fails here. The fixture trigger is below the
+/// thin plate's charged work.
 #[test]
 fn an_armed_round_bursts_its_delay_past_the_arming_exit() {
     let burst = fixture_burst();
@@ -1875,8 +1908,6 @@ fn a_delay_run_out_between_bodies_bursts_where_the_crossing_hands_back() {
 #[test]
 fn an_armed_round_at_rest_bursts_where_it_rests() {
     let burst = fixture_burst();
-    // The front plate's exit speed, read where its crossing ends there.
-    let mut exit_speed = None;
     let front = plate("front", THIN, 0.0, Kind::Main);
     let soft_box = plate("soft box", 0.2, -0.5 * THIN - 0.1, Kind::Box(100_000));
     for (volumes, crossings) in [
@@ -1897,20 +1928,22 @@ fn an_armed_round_at_rest_bursts_where_it_rests() {
             Some(CrossingEnd::Rest { at }) => *at,
             other => panic!("the back plate stops the round: {other:?}"),
         };
-        if let CrossingEnd::Exit { speed, .. } = ends[0] {
-            exit_speed = Some(speed);
-        }
-        let exit_speed = exit_speed.expect("the far back plate is fired first");
-        let exit = fired
+        // Read this construction's front work: an attached backing changes its capacity share.
+        let (front, entry_speed) = fired
             .log
             .iter()
-            .flat_map(|mark| match mark {
-                ArmourMark::Crossing { volumes, .. } => volumes.as_slice(),
-                _ => &[],
+            .find_map(|mark| match mark {
+                ArmourMark::Crossing {
+                    speed_in, volumes, ..
+                } => volumes
+                    .iter()
+                    .find(|crossed| fired.names[&crossed.volume] == "front")
+                    .map(|crossed| (crossed, *speed_in)),
+                _ => None,
             })
-            .find(|crossed| fired.names[&crossed.volume] == "front")
-            .expect("the round crosses the front plate")
-            .end;
+            .expect("the round crosses the front plate");
+        let exit = front.end;
+        let exit_speed = speed_for(FIXTURE_88, capability(FIXTURE_88, entry_speed) - front.cost);
         let found = bursts(&fired.log);
         assert_eq!(found.len(), 1);
         let (at, speed, _) = found[0];

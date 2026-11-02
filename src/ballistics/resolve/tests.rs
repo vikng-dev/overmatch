@@ -3580,7 +3580,7 @@ fn a_skid_never_rewinds_and_a_future_finite_contact_is_reached() {
         normal: Vec3::Y,
         coverage: 1.0,
         steel_equivalent: 400.0,
-        slope_charge: 1.0,
+        resistance_charge: 1.0,
     };
     let axis = Dir3::new(Vec3::new(0.0, -0.1, 1.0)).unwrap();
     assert_eq!(

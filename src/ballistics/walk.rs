@@ -74,7 +74,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::mechanism::{
-    Control, Dose, DoseSource, Effect, Limits, Mechanism, SlopeCharge, overlap_factor,
+    Control, Dose, DoseSource, Effect, Limits, Mechanism, ResistanceCharge, overlap_factor,
 };
 use crate::substances::{SubstanceError, SubstanceId, SubstanceRegistry};
 
@@ -2143,18 +2143,58 @@ pub struct DiscEvent {
 }
 
 impl DiscEvent {
-    /// The game's damage model charges resistance and entry force along the same real ray.
-    pub(crate) fn slope_charge(
+    /// The game's damage model: covered-sample normal thickness in metres of reference steel.
+    fn steel_equivalent(&self, axis: Vec3, laws: &WalkLaws) -> f32 {
+        assert!(
+            self.coverage > 0.0,
+            "a resisting crossing has covered samples"
+        );
+        self.cost / self.coverage / laws.rha_reference
+            * axis.dot(self.entry_normal).abs().clamp(0.0, 1.0)
+    }
+
+    /// The game's damage model: covered normal geometric thickness, independent of strength.
+    fn normal_thickness(&self, axis: Vec3) -> f64 {
+        assert!(
+            self.coverage > 0.0,
+            "a resisting crossing has covered samples"
+        );
+        let occupied: f64 = self
+            .encounters
+            .iter()
+            .map(|encounter| {
+                let covered = encounter
+                    .samples
+                    .iter()
+                    .filter(|sample| overlap_factor(&sample.present) > 0.0)
+                    .count();
+                (encounter.end - encounter.start) * covered as f64 / encounter.disc as f64
+            })
+            .sum();
+        occupied / f64::from(self.coverage)
+            * f64::from(axis.dot(self.entry_normal).abs().clamp(0.0, 1.0))
+    }
+
+    /// The game's damage model charges capacity from covered geometric thickness and slope from
+    /// the entrance material. The advance and entry force consume this same share.
+    pub(crate) fn resistance_charge(
         &self,
         axis: Vec3,
         preset: crate::rounds::ContactPreset,
+        caliber: f32,
         laws: &WalkLaws,
     ) -> f64 {
-        super::mechanism::slope_charge(
-            axis.dot(self.entry_normal).abs().clamp(0.0, 1.0),
-            preset.slope_tan,
-            self.entrance_factor / laws.rha_reference,
-        )
+        let cosine = axis.dot(self.entry_normal).abs().clamp(0.0, 1.0);
+        let thickness = self.normal_thickness(axis);
+        let capacity = super::physical_laws::PhysicalLaws::shipped()
+            .plate_capacity
+            .charge(thickness / f64::from(caliber));
+        capacity
+            * super::mechanism::slope_charge(
+                cosine,
+                preset.slope_tan,
+                self.entrance_factor / laws.rha_reference,
+            )
     }
 }
 
@@ -2977,7 +3017,8 @@ pub struct Shot {
     pub contact: crate::rounds::ContactPreset,
 }
 
-/// The game's damage model: plate resistance is a StandIn for capacity below one calibre,
+/// The game's damage model: skid pressure remains a StandIn for capacity below one calibre;
+/// design doc §3b records why the potency work fit cannot replace this pressure. It describes
 /// where a pointed round opens the plate rather than plugging it (penetration-proxy-2026-11-02.md).
 /// The exact 4 is plug shear's perimeter-to-area ratio; √3 is the von Mises shear conversion.
 fn contact_resistance(ratio: f64, factor: f64, laws: &WalkLaws) -> f64 {
@@ -3012,8 +3053,8 @@ pub struct EntranceRead {
     pub coverage: f32,
     /// Covered-sample steel-equivalent thickness along the normal (m), never diluted by coverage.
     pub steel_equivalent: f32,
-    /// The game's damage model: resistance-only chord scale; geometry stays on the incoming ray.
-    pub slope_charge: f64,
+    /// The game's damage model: combined plate-capacity and slope work share; geometry stays real.
+    pub resistance_charge: f64,
 }
 
 /// Where [`begin`] leaves the shot.
@@ -3117,7 +3158,7 @@ pub struct TransitRequest {
     pub offsets: Vec<Vec3>,
 }
 
-/// The game's damage model reads its first crossing's contact pressure and slope charge.
+/// The game's damage model reads contact pressure and the combined capacity/slope work share.
 /// The laws and preset basis are in `.agents/scratch/research/penetration-proxy-2026-11-02.md`.
 pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin, WalkError> {
     let Some(HandOff { read: event, at }) = entrance.hand_off()? else {
@@ -3128,10 +3169,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
     }
     let normal = event.entry_normal;
     let along_normal = entrance.axis.dot(normal).abs().clamp(0.0, 1.0);
-    // Covered-sample mean, then projected onto the normal: the thickness of the material that is
-    // actually there, along the direction "thickness" means.
-    let steel_equivalent =
-        (event.cost / event.coverage.max(f32::MIN_POSITIVE)) / laws.rha_reference * along_normal;
+    let steel_equivalent = event.steel_equivalent(entrance.axis, laws);
     let factor = event.entrance_factor / laws.rha_reference;
     let read = EntranceRead {
         position: event.entry_position,
@@ -3139,7 +3177,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         normal,
         coverage: event.coverage,
         steel_equivalent,
-        slope_charge: event.slope_charge(entrance.axis, shot.contact, laws),
+        resistance_charge: event.resistance_charge(entrance.axis, shot.contact, shot.caliber, laws),
     };
 
     let axis = Dir3::new(entrance.axis).expect(
@@ -3373,9 +3411,9 @@ pub(crate) fn finish<M: Mechanism>(
     let crossing = validate_transit(transit, request)?;
     let event = &*crossing;
     let advanced = advance_through(
-        &SlopeCharge {
+        &ResistanceCharge {
             inner: mechanism,
-            charge: request.entrance.slope_charge,
+            charge: request.entrance.resistance_charge,
         },
         state,
         &event.encounters,

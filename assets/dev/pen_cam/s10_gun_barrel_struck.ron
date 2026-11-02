@@ -42,25 +42,25 @@
             point: (-0.07029247, 2.1952019, -4.0),
         ),
         (
-            t: 0.000020327978,
+            t: 0.00001970306,
             point: (-0.055218697, 2.1951985, -4.0),
         ),
         (
-            t: 0.0001756358,
+            t: 0.00016537122,
             point: (0.055217743, 2.1951761, -4.0),
         ),
         (
-            t: 0.00019782176,
+            t: 0.00018543657,
             point: (0.070290565, 2.1951733, -4.0),
         ),
         (
-            t: 0.010909912,
-            point: (7.0082855, 2.1937642, -4.0),
+            t: 0.010909549,
+            point: (8.051582, 2.1935525, -4.0),
         ),
     ],
     spall: [
         (
-            t: 0.000020327978,
+            t: 0.00001970306,
             origin: (-0.055218697, 2.1951985, -4.0),
             axis: (0.999855, 0.017031632, -0.000000070356556),
             field: (
@@ -68,652 +68,652 @@
                 ratio: 2.2649755,
             ),
             half_angle_deg: 26.2,
-            strength: 55262.832,
+            strength: 12950.392,
             fragments: [
                 (
                     end: (0.06331444, 2.1972175, -3.995247),
-                    strength: 46245.51,
+                    strength: 10837.257,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 722.5861,
+                            damage: 169.33214,
                         ),
                     ],
                 ),
                 (
                     end: (0.06293297, 2.1916652, -4.006053),
-                    strength: 45676.082,
+                    strength: 10703.815,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 713.6888,
+                            damage: 167.24712,
                         ),
                     ],
                 ),
                 (
                     end: (0.06193447, 2.2077007, -3.9990778),
-                    strength: 45107.434,
+                    strength: 10570.558,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 704.80365,
+                            damage: 165.16496,
                         ),
                     ],
                 ),
                 (
                     end: (0.06235504, 2.1872797, -3.9923944),
-                    strength: 44539.52,
+                    strength: 10437.472,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 695.93,
+                            damage: 163.0855,
                         ),
                     ],
                 ),
                 (
                     end: (0.06298733, 2.1997018, -4.0140743),
-                    strength: 43972.3,
+                    strength: 10304.548,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 687.0672,
+                            damage: 161.00856,
                         ),
                     ],
                 ),
                 (
                     end: (0.062205315, 2.2056427, -3.9867277),
-                    strength: 43405.723,
+                    strength: 10171.775,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 678.2144,
+                            damage: 158.93399,
                         ),
                     ],
                 ),
                 (
                     end: (0.06150341, 2.1808085, -4.004402),
-                    strength: 42839.742,
+                    strength: 10039.143,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 669.371,
+                            damage: 156.8616,
                         ),
                     ],
                 ),
                 (
                     end: (0.060897827, 2.213356, -4.008402),
-                    strength: 42274.31,
+                    strength: 9906.637,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 660.5361,
+                            damage: 154.7912,
                         ),
                     ],
                 ),
                 (
                     end: (0.062773705, 2.1904573, -3.981516),
-                    strength: 41709.363,
+                    strength: 9774.247,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 651.7088,
+                            damage: 152.72261,
                         ),
                     ],
                 ),
                 (
                     end: (0.0626173, 2.189269, -4.019224),
-                    strength: 41144.855,
+                    strength: 9641.959,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 642.88837,
+                            damage: 150.65561,
                         ),
                     ],
                 ),
                 (
                     end: (0.059574127, 2.2165508, -3.9909248),
-                    strength: 40580.72,
+                    strength: 9509.759,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 634.0737,
+                            damage: 148.58998,
                         ),
                     ],
                 ),
                 (
                     end: (0.059822083, 2.17583, -3.993311),
-                    strength: 40016.906,
+                    strength: 9377.634,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 625.26416,
+                            damage: 146.52553,
                         ),
                     ],
                 ),
                 (
                     end: (0.061743736, 2.209144, -4.020623),
-                    strength: 39453.348,
+                    strength: 9245.568,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 616.45856,
+                            damage: 144.462,
                         ),
                     ],
                 ),
                 (
                     end: (0.06260967, 2.2025661, -3.9756212),
-                    strength: 38889.97,
+                    strength: 9113.545,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 607.65576,
+                            damage: 142.39914,
                         ),
                     ],
                 ),
                 (
                     end: (0.060100555, 2.1765018, -4.0145235),
-                    strength: 38326.703,
+                    strength: 8981.549,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 598.85474,
+                            damage: 140.3367,
                         ),
                     ],
                 ),
                 (
                     end: (0.05709362, 2.222539, -4.003295),
-                    strength: 37763.477,
+                    strength: 8849.561,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 590.0543,
+                            damage: 138.27438,
                         ),
                     ],
                 ),
                 (
                     end: (0.06134224, 2.1795826, -3.9791183),
-                    strength: 37200.207,
+                    strength: 8717.563,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 581.25323,
+                            damage: 136.21193,
                         ),
                     ],
                 ),
                 (
                     end: (0.06346989, 2.1960325, -4.028718),
-                    strength: 36636.82,
+                    strength: 8585.538,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 572.4503,
+                            damage: 134.14903,
                         ),
                     ],
                 ),
                 (
                     end: (0.059246063, 2.2173438, -3.9797087),
-                    strength: 36073.22,
+                    strength: 8453.463,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 563.64404,
+                            damage: 132.08536,
                         ),
                     ],
                 ),
                 (
                     end: (0.056803703, 2.1685452, -4.001321),
-                    strength: 35509.313,
+                    strength: 8321.316,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 554.833,
+                            damage: 130.02057,
                         ),
                     ],
                 ),
                 (
                     end: (0.058102608, 2.2201052, -4.0191708),
-                    strength: 34945.004,
+                    strength: 8189.0757,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 546.0157,
+                            damage: 127.95431,
                         ),
                     ],
                 ),
                 (
                     end: (0.06310272, 2.1929588, -3.96838),
-                    strength: 34380.19,
+                    strength: 8056.716,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 537.1905,
+                            damage: 125.886185,
                         ),
                     ],
                 ),
                 (
                     end: (0.061081886, 2.1788697, -4.026312),
-                    strength: 33814.754,
+                    strength: 7924.211,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 528.3555,
+                            damage: 123.815796,
                         ),
                     ],
                 ),
                 (
                     end: (0.054986, 2.2276282, -3.9931278),
-                    strength: 33248.586,
+                    strength: 7791.5337,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 519.50916,
+                            damage: 121.742714,
                         ),
                     ],
                 ),
                 (
                     end: (0.057022095, 2.1690712, -3.9839354),
-                    strength: 32681.555,
+                    strength: 7658.6543,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 510.6493,
+                            damage: 119.66647,
                         ),
                     ],
                 ),
                 (
                     end: (0.061930656, 2.207727, -4.0330105),
-                    strength: 32113.527,
+                    strength: 7525.542,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 501.77386,
+                            damage: 117.58659,
                         ),
                     ],
                 ),
                 (
                     end: (0.06137371, 2.2119594, -3.968027),
-                    strength: 31544.361,
+                    strength: 7392.162,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 492.88065,
+                            damage: 115.50253,
                         ),
                     ],
                 ),
                 (
                     end: (0.0556612, 2.1657858, -4.013098),
-                    strength: 30973.9,
+                    strength: 7258.4795,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 483.9672,
+                            damage: 113.41374,
                         ),
                     ],
                 ),
                 (
                     end: (0.053679466, 2.2293348, -4.011609),
-                    strength: 30401.986,
+                    strength: 7124.456,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 475.03104,
+                            damage: 111.319626,
                         ),
                     ],
                 ),
                 (
                     end: (0.061385155, 2.1799073, -3.9671307),
-                    strength: 29828.436,
+                    strength: 6990.0493,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 466.0693,
+                            damage: 109.21952,
                         ),
                     ],
                 ),
                 (
                     end: (0.06238079, 2.187471, -4.036909),
-                    strength: 29253.066,
+                    strength: 6855.2163,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 457.07916,
+                            damage: 107.112755,
                         ),
                     ],
                 ),
                 (
                     end: (0.05482769, 2.227838, -3.9802217),
-                    strength: 28675.664,
+                    strength: 6719.9067,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 448.05725,
+                            damage: 104.99854,
                         ),
                     ],
                 ),
                 (
                     end: (0.05287552, 2.1614003, -3.9938755),
-                    strength: 28096.014,
+                    strength: 6584.0703,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 439.0002,
+                            damage: 102.8761,
                         ),
                     ],
                 ),
                 (
                     end: (0.05778408, 2.2208724, -4.0306606),
-                    strength: 27513.871,
+                    strength: 6447.65,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 429.90424,
+                            damage: 100.74453,
                         ),
                     ],
                 ),
                 (
                     end: (0.06286907, 2.2006001, -3.9590883),
-                    strength: 26928.977,
+                    strength: 6310.585,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 420.76526,
+                            damage: 98.60289,
                         ),
                     ],
                 ),
                 (
                     end: (0.056676865, 2.168239, -4.0267),
-                    strength: 26341.049,
+                    strength: 6172.8086,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 411.5789,
+                            damage: 96.450134,
                         ),
                     ],
                 ),
                 (
                     end: (0.049524307, 2.2347498, -3.999816),
-                    strength: 25749.771,
+                    strength: 6034.248,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 402.34018,
+                            damage: 94.285126,
                         ),
                     ],
                 ),
                 (
                     end: (0.05624962, 2.1672058, -3.972888),
-                    strength: 25154.807,
+                    strength: 5894.8228,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 393.04385,
+                            damage: 92.106606,
                         ),
                     ],
                 ),
                 (
                     end: (0.0627861, 2.2012296, -4.043379),
-                    strength: 24555.78,
+                    strength: 5754.446,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 383.68405,
+                            damage: 89.913216,
                         ),
                     ],
                 ),
                 (
                     end: (0.057063103, 2.2226148, -3.966402),
-                    strength: 23952.275,
+                    strength: 5613.0195,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 374.2543,
+                            damage: 87.70343,
                         ),
                     ],
                 ),
                 (
                     end: (0.05018425, 2.1578918, -4.0071125),
-                    strength: 23343.838,
+                    strength: 5470.437,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 364.74747,
+                            damage: 85.47558,
                         ),
                     ],
                 ),
                 (
                     end: (0.051636696, 2.231997, -4.022008),
-                    strength: 22729.959,
+                    strength: 5326.5796,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 355.1556,
+                            damage: 83.227806,
                         ),
                     ],
                 ),
                 (
                     end: (0.062073708, 2.1851354, -3.9559965),
-                    strength: 22110.066,
+                    strength: 5181.3125,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 345.4698,
+                            damage: 80.95801,
                         ),
                     ],
                 ),
                 (
                     end: (0.06007576, 2.176443, -4.040368),
-                    strength: 21483.523,
+                    strength: 5034.488,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 335.68005,
+                            damage: 78.66387,
                         ),
                     ],
                 ),
                 (
                     end: (0.048490524, 2.2360969, -3.9854946),
-                    strength: 20849.611,
+                    strength: 4885.935,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 325.77518,
+                            damage: 76.342735,
                         ),
                     ],
                 ),
                 (
                     end: (0.050082207, 2.1577582, -3.9840307),
-                    strength: 20207.51,
+                    strength: 4735.4644,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 315.74234,
+                            damage: 73.99163,
                         ),
                     ],
                 ),
                 (
                     end: (0.05926323, 2.2173014, -4.0425167),
-                    strength: 19556.287,
+                    strength: 4582.8555,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 305.567,
+                            damage: 71.60712,
                         ),
                     ],
                 ),
                 (
                     end: (0.061437607, 2.2114701, -3.9536753),
-                    strength: 18894.865,
+                    strength: 4427.857,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 295.23227,
+                            damage: 69.185265,
                         ),
                     ],
                 ),
                 (
                     end: (0.0508976, 2.1588225, -4.022374),
-                    strength: 18222.004,
+                    strength: 4270.1772,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 284.7188,
+                            damage: 66.72152,
                         ),
                     ],
                 ),
                 (
                     end: (0.046063423, 2.2392597, -4.0090895),
-                    strength: 17536.242,
+                    strength: 4109.4746,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 274.00378,
+                            damage: 64.21054,
                         ),
                     ],
                 ),
                 (
                     end: (0.05711651, 2.1692991, -3.9608517),
-                    strength: 16835.861,
+                    strength: 3945.3462,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 263.06033,
+                            damage: 61.646034,
                         ),
                     ],
                 ),
                 (
                     end: (0.06282902, 2.190877, -4.050803),
-                    strength: 16118.803,
+                    strength: 3777.3093,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 251.8563,
+                            damage: 59.02046,
                         ),
                     ],
                 ),
                 (
                     end: (0.051068306, 2.2327375, -3.969593),
-                    strength: 15382.579,
+                    strength: 3604.7813,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 240.3528,
+                            damage: 56.324707,
                         ),
                     ],
                 ),
                 (
                     end: (0.045967102, 2.1523943, -3.9983768),
-                    strength: 14624.127,
+                    strength: 3427.0442,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 228.50198,
+                            damage: 53.547565,
                         ),
                     ],
                 ),
                 (
                     end: (0.052041054, 2.2314696, -4.0339384),
-                    strength: 13839.62,
+                    strength: 3243.2014,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 216.24406,
+                            damage: 50.675022,
                         ),
                     ],
                 ),
                 (
                     end: (0.063302994, 2.1944761, -3.9463959),
-                    strength: 13024.16,
+                    strength: 3052.105,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 203.5025,
+                            damage: 47.68914,
                         ),
                     ],
                 ),
                 (
                     end: (0.055336952, 2.1650043, -4.0388174),
-                    strength: 12171.321,
+                    strength: 2852.2495,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 190.1769,
+                            damage: 44.5664,
                         ),
                     ],
                 ),
                 (
                     end: (0.04302311, 2.2422209, -3.9936743),
-                    strength: 11272.394,
+                    strength: 2641.593,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 176.13115,
+                            damage: 41.27489,
                         ),
                     ],
                 ),
                 (
                     end: (0.04947567, 2.156968, -3.9724522),
-                    strength: 10315.064,
+                    strength: 2417.2507,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 161.17288,
+                            damage: 37.769543,
                         ),
                     ],
                 ),
                 (
                     end: (0.06168747, 2.2095776, -4.0538282),
-                    strength: 9280.93,
+                    strength: 2174.9097,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 145.01453,
+                            damage: 33.982964,
                         ),
                     ],
                 ),
                 (
                     end: (0.05670166, 2.223487, -3.9534416),
-                    strength: 8140.2383,
+                    strength: 1907.5981,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 127.19122,
+                            damage: 29.806221,
                         ),
                     ],
                 ),
                 (
                     end: (0.045165062, 2.151349, -4.014778),
-                    strength: 6838.7617,
+                    strength: 1602.6078,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 106.85565,
+                            damage: 25.040747,
                         ),
                     ],
                 ),
                 (
                     end: (0.044351578, 2.2412014, -4.0202065),
-                    strength: 5254.072,
+                    strength: 1231.2485,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 82.09487,
+                            damage: 19.238258,
                         ),
                     ],
                 ),
                 (
                     end: (0.059584618, 2.1752577, -3.9483957),
-                    strength: 2859.7039,
+                    strength: 670.14813,
                     hits: [
                         (
                             volume: "Main_Gun_Barrel",
-                            damage: 44.682873,
+                            damage: 10.471065,
                         ),
                     ],
                 ),
             ],
         ),
         (
-            t: 0.00019782176,
+            t: 0.00018543657,
             origin: (0.070290565, 2.1951733, -4.0),
             axis: (0.99933964, -0.03610484, -0.004096339),
             field: (
@@ -721,326 +721,326 @@
                 ratio: 2.2649755,
             ),
             half_angle_deg: 26.2,
-            strength: 52722.45,
+            strength: 12780.729,
             fragments: [
                 (
                     end: (1.9686852, 2.126598, -3.931635),
-                    strength: 44119.65,
+                    strength: 10695.277,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.0371318, -4.1053524),
-                    strength: 43576.395,
+                    strength: 10563.584,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.2961993, -3.9929056),
-                    strength: 43033.887,
+                    strength: 10432.072,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.9655628, -3.8843927),
-                    strength: 42492.08,
+                    strength: 10300.73,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.1665578, -4.233796),
-                    strength: 41950.934,
+                    strength: 10169.548,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.2626863, -3.794016),
-                    strength: 41410.402,
+                    strength: 10038.515,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.8578811, -4.0799656),
-                    strength: 40870.438,
+                    strength: 9907.619,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.389491, -4.144247),
-                    strength: 40330.996,
+                    strength: 9776.851,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.0176358, -3.7095194),
-                    strength: 39792.02,
+                    strength: 9646.195,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.9980006, -4.3189774),
-                    strength: 39253.46,
+                    strength: 9515.64,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.4447508, -3.8590002),
-                    strength: 38715.26,
+                    strength: 9385.172,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.7708669, -3.8962727),
-                    strength: 38177.367,
+                    strength: 9254.777,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.3198366, -4.341117),
-                    strength: 37639.71,
+                    strength: 9124.442,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.2128162, -3.6160736),
-                    strength: 37102.23,
+                    strength: 8994.148,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.7826238, -4.24942),
-                    strength: 36564.86,
+                    strength: 8863.882,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.5517435, -4.0628414),
-                    strength: 36027.523,
+                    strength: 8733.623,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.8375645, -3.6650114),
-                    strength: 35490.15,
+                    strength: 8603.355,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.1074724, -4.468055),
-                    strength: 34952.656,
+                    strength: 8473.06,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.4585652, -3.6744442),
-                    strength: 34414.965,
+                    strength: 8342.715,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.6353908, -4.0304804),
-                    strength: 33876.98,
+                    strength: 8212.299,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.5079927, -4.3258963),
-                    strength: 33338.613,
+                    strength: 8081.7905,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.0582676, -3.4997845),
-                    strength: 32799.76,
+                    strength: 7951.1646,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.824533, -4.441536),
-                    strength: 32260.322,
+                    strength: 7820.3955,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.6456642, -3.8910856),
-                    strength: 31720.18,
+                    strength: 7689.4565,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.6458001, -3.7324343),
-                    strength: 31179.213,
+                    strength: 7558.3184,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.2967477, -4.5410595),
-                    strength: 30637.297,
+                    strength: 7426.9497,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.3655968, -3.4909706),
-                    strength: 30094.295,
+                    strength: 7295.3174,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.581645, -4.2356825),
-                    strength: 29550.057,
+                    strength: 7163.386,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.6813846, -4.2072134),
-                    strength: 29004.434,
+                    strength: 7031.1187,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.8431807, -3.4687433),
-                    strength: 28457.248,
+                    strength: 6898.4727,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.968358, -4.6073265),
-                    strength: 27908.328,
+                    strength: 6765.4063,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.6497416, -3.671646),
-                    strength: 27357.47,
+                    strength: 6631.8696,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.4890199, -3.8982773),
-                    strength: 26804.465,
+                    strength: 6497.8125,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.5219126, -4.5180063),
-                    strength: 26249.082,
+                    strength: 6363.179,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.181077, -3.3516655),
-                    strength: 25691.076,
+                    strength: 6227.91,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.628983, -4.4677525),
-                    strength: 25130.174,
+                    strength: 6091.939,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.7989044, -4.004504),
-                    strength: 24566.078,
+                    strength: 5955.1934,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.6102138, -3.5395927),
-                    strength: 23998.463,
+                    strength: 5817.5947,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.191216, -4.7057877),
-                    strength: 23426.973,
+                    strength: 5679.0566,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.552647, -3.4468813),
-                    strength: 22851.21,
+                    strength: 5539.4834,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.4072003, -4.138565),
-                    strength: 22270.744,
+                    strength: 5398.769,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.7384658, -4.392617),
-                    strength: 21685.082,
+                    strength: 5256.796,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.9305072, -3.2923899),
-                    strength: 21093.686,
+                    strength: 5113.432,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.7811866, -4.680208),
-                    strength: 20495.945,
+                    strength: 4968.531,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.8291712, -3.747489),
-                    strength: 19891.172,
+                    strength: 4821.925,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.4047399, -3.714098),
-                    strength: 19278.588,
+                    strength: 4673.425,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.4584026, -4.7077036),
-                    strength: 18657.303,
+                    strength: 4522.8154,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.3575125, -3.2596197),
-                    strength: 18026.285,
+                    strength: 4369.8477,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.4287872, -4.4164324),
-                    strength: 17384.354,
+                    strength: 4214.2334,
                     hits: [],
                 ),
                 (
                     end: (1.8766623, 2.8695593, -4.1661377),
-                    strength: 16730.117,
+                    strength: 4055.6362,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.6506, -3.3380032),
-                    strength: 16061.933,
+                    strength: 3893.6582,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.0240536, -4.828991),
-                    strength: 15377.836,
+                    strength: 3727.8228,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.7535377, -3.4745445),
-                    strength: 14675.455,
+                    strength: 3557.555,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.2703552, -3.9765768),
-                    strength: 13951.869,
+                    strength: 3382.1465,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.7272797, -4.599453),
-                    strength: 13203.426,
+                    strength: 3200.7124,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.0827894, -3.1492739),
-                    strength: 12425.451,
+                    strength: 3012.1194,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.5656481, -4.686121),
-                    strength: 11611.816,
+                    strength: 2814.882,
                     hits: [],
                 ),
                 (
                     end: (1.6961823, 2.8695593, -3.9044476),
-                    strength: 10754.212,
+                    strength: 2606.9856,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.386116, -3.4982004),
-                    strength: 9840.89,
+                    strength: 2385.5823,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.3270693, -4.879075),
-                    strength: 8854.293,
+                    strength: 2146.4163,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 2.568366, -3.2287292),
-                    strength: 7766.039,
+                    strength: 1882.6067,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.2422066, -4.294485),
-                    strength: 6524.39,
+                    strength: 1581.612,
                     hits: [],
                 ),
                 (
                     end: (1.7590275, 2.8695593, -4.3421583),
-                    strength: 5012.5464,
+                    strength: 1215.118,
                     hits: [],
                 ),
                 (
                     end: (1.9686852, 1.7612338, -3.146865),
-                    strength: 2728.2458,
+                    strength: 661.3685,
                     hits: [],
                 ),
             ],
@@ -1052,20 +1052,13 @@
     doses: [
         (
             volume: "Main_Gun_Barrel",
-            line: 281.96158,
-            field: 67.543465,
-            taken: 250000,
+            line: 67.18682,
+            field: 15.828257,
+            taken: 83015,
             entered: Some((-0.076693535, 2.1952028, -4.0)),
         ),
     ],
-    consequences: [
-        (
-            t: 0.00018767138,
-            volume: "Main_Gun_Barrel",
-            state: Lost,
-            function: Some("GunBarrel"),
-        ),
-    ],
+    consequences: [],
     components: [
         (
             name: "Ammo_L_0",

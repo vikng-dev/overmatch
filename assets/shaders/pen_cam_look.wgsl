@@ -117,11 +117,11 @@ struct LookParams {
     // reach (m); its law (`law`): the kind of its terms, their two numbers and its strata `N`; and
     // the picture's six faces, two lanes each: the crop's tangent corner `x0, y1` and its size
     // (texels), and its place in `pictures` (texels).
-    prints: array<vec4<f32>, 72>,
+    prints: array<vec4<f32>, 144>,
 }
 
 // `look::FIELDS` and the lanes a field takes.
-const FIELDS: i32 = 4;
+const FIELDS: i32 = 8;
 const PRINT_LANES: i32 = 18;
 // `look::VOLUME_STEPS`, the equal steps each field's stretch is searched in;
 // `look::VOLUME_REFINE`, the golden-section steps about the best sample (`peak`); and
@@ -559,8 +559,8 @@ fn peak(exit: vec3<f32>, p: vec2<i32>) -> f32 {
     var span = 0.0;
     // Each field's stretch (empty, `lo ≥ hi`, where the ray misses it) and its point nearest its
     // origin.
-    var lo = array<f32, 4>(1.0, 1.0, 1.0, 1.0);
-    var hi = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+    var lo = array<f32, 8>(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
+    var hi = array<f32, 8>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     for (var f = 0; f < FIELDS; f = f + 1) {
         if f32(f) >= look.fields.x {
             break;

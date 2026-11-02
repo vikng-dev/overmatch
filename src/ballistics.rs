@@ -68,6 +68,7 @@ mod collect;
 pub(crate) use collect::convex_interval;
 
 mod motion;
+pub(crate) mod plate_capacity;
 
 /// The §13.6 ray fuzzer: random rays at the BOUND tank, the union-field invariants machine-checked,
 /// and every corridor reaching crew or ammunition reported with its admitting caliber and per-caliber
@@ -324,14 +325,15 @@ fn bound(round: RoundBody) -> mechanism::SolidShot {
     )
 }
 
-/// Reference-mm `round` can still defeat at `speed` m/s — the force law
+/// The game's damage model: bulk-work readout in reference-mm at `speed` m/s — the force law
 /// `C = 1000 · m / (2 A k) · ln(1 + k v² / a)`, `A = π c² / 4`, `k = B · N · ρ_ref` (`B` the shared cavity-inertia stand-in), `a`
 /// the reference steel's cavity strength term
 /// ([`crate::substances::MaterialFacts::cavity_strength`], ≈ 3.711e9 Pa, DERIVED).
 ///
 /// Invariants: replica scaling (mass ×s³, calibre ×s gives capability ×s); strictly decreasing in
 /// calibre at fixed mass; local speed exponent 2 at low speed, below 2 above it. Evaluated in f64
-/// and cast once: finite for every round [`round_in_domain`] admits.
+/// and cast once: finite for every round [`round_in_domain`] admits. Thin-plate geometry changes
+/// the charged work, not this bulk reference unit (design doc §3b).
 fn capability(round: RoundBody, speed: f32) -> f32 {
     capability_of(round.terms(), speed as f64) as f32
 }
@@ -4526,7 +4528,94 @@ mod tests {
                 let depth = body.caliber * ratio * 1000.0;
                 let speed = speed_for(body, depth);
                 let f = speed / 0.3048 * 15.0_f32.sqrt() / (0.25 * (ratio * 0.25).sqrt());
-                println!("MEASURED nose={nose_factor:.6} t/d={ratio:.2} speed={speed:.6} F={f:.1}");
+                let charge = physical_laws::PhysicalLaws::shipped()
+                    .plate_capacity
+                    .charge(f64::from(ratio));
+                let after = speed_for(body, (f64::from(depth) * charge) as f32);
+                let after_f = after / 0.3048 * 15.0_f32.sqrt() / (0.25 * (ratio * 0.25).sqrt());
+                println!(
+                    "MEASURED nose={nose_factor:.6} t/d={ratio:.2} before={speed:.6} F={f:.1} after={after:.6} F={after_f:.1}"
+                );
+            }
+        }
+        for (gun, key, round) in crate::guns::GunRegistry::shipped().fired_rounds() {
+            let body = round.penetrator;
+            for ratio in [0.1_f32, 0.5, 0.9] {
+                let thickness = body.caliber * ratio;
+                let bulk = speed_for(body, thickness * 1000.0);
+                let share = physical_laws::PhysicalLaws::shipped()
+                    .plate_capacity
+                    .charge(f64::from(ratio));
+                let thin = speed_for(body, (f64::from(thickness) * 1000.0 * share) as f32);
+                println!(
+                    "MEASURED shot {gun}/{key} plate_mm={:.6} old_limit={bulk:.6} new_limit={thin:.6}",
+                    thickness * 1000.0
+                );
+            }
+        }
+    }
+
+    /// The game's damage model: plate and ammunition authors rely on rising limit speed,
+    /// a continuous one-calibre join, unchanged bulk and preserved mass/nose/calibre ordering.
+    /// Mutants: omit the thin share, apply it above one calibre, or reverse thickness/calibre.
+    /// Fixture thickness sweep; every shipped round supplies its own body and hit-nose proxy.
+    #[test]
+    fn plate_limit_speeds_keep_bulk_and_round_ordering() {
+        let capacity = &physical_laws::PhysicalLaws::shipped().plate_capacity;
+        for (_, _, round) in crate::guns::GunRegistry::shipped().fired_rounds() {
+            let body = round.penetrator;
+            let limit = |body: RoundBody, thickness: f32| {
+                speed_for(
+                    body,
+                    (f64::from(thickness)
+                        * 1000.0
+                        * capacity.charge(f64::from(thickness) / f64::from(body.caliber)))
+                        as f32,
+                )
+            };
+            let mut previous = 0.0;
+            for i in 1..=200 {
+                let thickness = body.caliber * i as f32 / 100.0;
+                let speed = limit(body, thickness);
+                assert!(speed > previous);
+                previous = speed;
+                if thickness >= body.caliber {
+                    assert_eq!(
+                        speed,
+                        speed_for(body, (f64::from(thickness) * 1000.0) as f32)
+                    );
+                }
+                assert!(
+                    limit(
+                        RoundBody {
+                            mass: body.mass * 2.0,
+                            ..body
+                        },
+                        thickness
+                    ) < speed
+                );
+                for widen in [1.001, 1.01, 1.02, 2.0] {
+                    assert!(
+                        limit(
+                            RoundBody {
+                                caliber: body.caliber * widen,
+                                ..body
+                            },
+                            thickness
+                        ) >= speed,
+                        "widening at fixed mass cannot lower the plate limit beyond rounding"
+                    );
+                }
+                let flatter = RoundBody {
+                    nose_factor: 1.0,
+                    ..body
+                };
+                assert!(limit(flatter, thickness) >= speed);
+            }
+            for epsilon in [1.0e-3_f32, 1.0e-4] {
+                let low = limit(body, body.caliber * (1.0 - epsilon));
+                let high = limit(body, body.caliber * (1.0 + epsilon));
+                assert!(low < high && (high / low - 1.0) < 20.0 * epsilon);
             }
         }
     }

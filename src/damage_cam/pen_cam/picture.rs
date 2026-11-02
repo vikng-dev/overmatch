@@ -58,8 +58,8 @@ use bevy::render::{Extract, ExtractSchedule, Render, RenderApp, RenderStartup, R
 use super::plan::Cone;
 use crate::damage_cam::shapes::HardBodies;
 
-/// The most fields one record's atlas holds.
-pub const PICTURE_FIELDS: usize = 4;
+/// Resolution: eight field slots bound atlas and shader work while allowing multi-exit bursts.
+pub const PICTURE_FIELDS: usize = 8;
 /// A field's face lanes in the look's uniform: two for each face of the cube (`look::pack`).
 pub const FACE_LANES: usize = 12;
 /// The near plane (m along a face's forward): a caster face nearer the origin is not drawn.

@@ -49,7 +49,7 @@
     ),
     (
         name: "s5_oblique_through",
-        shows: "an 88 through the hull side at 30 degrees: the cone's axis leans from the path toward the plate normal; the spent round skids once off an ammunition box 7 mm behind the plate, a gap narrower than its calibre, and comes to rest against that box, its rim stopped in the hull plating around it. The box's HP pool is emptied (72 of 72 HP taken) and no crew station takes a dose",
+        shows: "an 88 through the hull side at 30 degrees continues into an ammunition box without a skid; that box's HP pool is emptied and no crew station takes a dose",
         weapon: "MainGun",
         round: "88mm_AP",
         from: (-4.0, 1.5, -1.68),
@@ -148,11 +148,11 @@
     ),
     (
         name: "s16_restart_at_rest",
-        shows: "s4's line 10 cm lower with the burst round: the road wheel's near disc arms the fuze, its far disc restarts the delay and the lower hull side stops the round; it bursts at rest there, with no nose piece to fly on, and the plate around it stops every direction of its field",
+        shows: "s4's line 10 cm lower with the burst round: the wheel arms its fuze, the round crosses the near hull side and transmission, and bursts in flight inside the compartment; its field reaches stations and modules, and the nose piece stops in the opposite hull side",
         weapon: "MainGun",
         round: "88mm_APHE_ring",
         from: (-5.0, 0.7, -0.79),
         toward: (0.0, 0.7, -0.79),
-        verdict: NonPen,
+        verdict: Penetration,
     ),
 ]

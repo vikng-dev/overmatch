@@ -18,6 +18,7 @@ struct File {
     gravity_mps2: Sourced<f32>,
     air_density: Sourced<f64>,
     cavity_inertia: Sourced<f64>,
+    plate_capacity: Sourced<crate::ballistics::plate_capacity::PlateCapacity>,
     contact_friction: Sourced<f32>,
     floor_m: Sourced<f32>,
 }
@@ -33,6 +34,7 @@ pub(crate) struct PhysicalLaws {
     pub gravity_mps2: f32,
     pub air_density: f64,
     pub cavity_inertia: f64,
+    pub plate_capacity: crate::ballistics::plate_capacity::PlateCapacity,
     pub contact_friction: f32,
     pub floor_m: f32,
 }
@@ -57,6 +59,7 @@ impl PhysicalLaws {
                 ));
             }
         }
+        file.plate_capacity.0.validate(PATH)?;
         if !file.floor_m.0.is_finite() {
             return Err(format!(
                 "{PATH}: floor_m: author a finite world boundary in metres"
@@ -80,6 +83,7 @@ impl PhysicalLaws {
             gravity_mps2: file.gravity_mps2.0,
             air_density: file.air_density.0,
             cavity_inertia: file.cavity_inertia.0,
+            plate_capacity: file.plate_capacity.0,
             contact_friction: file.contact_friction.0,
             floor_m: file.floor_m.0,
         })
@@ -194,6 +198,7 @@ mod tests {
         surface_burst_factor: (1.5, Fixture("fixture")),
         air_density: (1.5, Fixture("fixture")),
         cavity_inertia: (2.0, Fixture("fixture")),
+        plate_capacity: ((shear_slope: 1.5, opening_share: 0.6, return_power: 1.5), Fixture("fixture")),
         contact_friction: (0.25, Fixture("fixture")),
         floor_m: (-50.0, Fixture("fixture")),
         reflected_impulse: ((from: 1.0, branches: [(2.0, [0.0])]), Fixture("fixture")),
@@ -245,6 +250,31 @@ mod tests {
                 .contains("floor_m")
         );
     }
+    /// The game's damage model: the file gate, not first contact, admits the capacity law.
+    /// Mutants: omit the required field or bypass its validator. Values belong to VALID.
+    #[test]
+    fn plate_capacity_is_required_and_checked_at_file_admission() {
+        let missing = VALID
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("plate_capacity:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            PhysicalLaws::from_ron(&missing)
+                .unwrap_err()
+                .contains("plate_capacity")
+        );
+        for (field, good, bad) in [
+            ("shear_slope", "1.5", "0.9"),
+            ("opening_share", "0.6", "1.0"),
+            ("return_power", "1.5", "NaN"),
+        ] {
+            let text = VALID.replace(&format!("{field}: {good}"), &format!("{field}: {bad}"));
+            let error = PhysicalLaws::from_ron(&text).unwrap_err();
+            assert!(error.contains(PATH) && error.contains(field) && error.contains("author"));
+        }
+    }
+
     /// The game's field laws need ordered positive domains before evaluating logarithms.
     /// Removing any fit's admission check admits malformed authored branches.
     #[test]

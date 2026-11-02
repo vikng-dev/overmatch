@@ -1630,7 +1630,7 @@ pub(crate) struct ResolveContext<'a, 'w, 's> {
 /// The game's damage model: the resisting force (N, the force law's dE/dx in J/m) the struck body
 /// puts on `round` at first contact, and the tank that owns it; what an impact fuze reads
 /// ([`super::burst::Fuze::entered`]). The force is the disc mean of the entrance walk's first
-/// occupied encounter, with the crossing's slope charge and the advance's union law for each
+/// occupied encounter, with the crossing's capacity/slope work share and the advance's union law for each
 /// sample's factor ([`super::mechanism::overlap_factor`]), so a rim sample off the body pulls the mean down. `None`
 /// when the flight has no established disc or the walk meets nothing.
 pub(crate) fn entry_force(
@@ -1674,7 +1674,8 @@ pub(crate) fn entry_force(
         .get(event.entrance_volume)
         .ok()
         .map(|owner| owner.tank());
-    let charge = event.slope_charge(entrance.axis, preset, &context.laws);
+    let charge =
+        event.resistance_charge(entrance.axis, preset, round.body().caliber, &context.laws);
     Ok(Some((
         round.resisting_force(flight.speed, factor) * charge,
         owner,

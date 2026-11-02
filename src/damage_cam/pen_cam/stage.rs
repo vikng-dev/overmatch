@@ -2716,13 +2716,31 @@ mod tests {
     /// round that burst at rest, nothing; from a burst in flight its nose piece, the model's front
     /// at the nose's share of the round's mass read off the record, its nose on the line where the
     /// record's clock has it, parked at the path's end. Before the burst the whole model is drawn.
-    /// The corner, the lesson and the x-ray place the shell by this. The library holds a round that
-    /// burst at rest and one whose path runs on past its burst point by more than a model length
-    /// (fixture data), so neither a shell drawn whole to the end, a nose piece drawn full length,
-    /// nor one parked at the burst point passes.
+    /// The corner, the lesson and the x-ray place the shell by this. A controlled at-rest variant
+    /// covers zero carried speed independently of the library's verdicts; moving records cover
+    /// the shortened nose continuing and parking at the path end.
     #[test]
     fn a_burst_draws_only_what_flies_on() {
-        let library = Library::load();
+        let mut library = Library::load();
+        // Fixture: keep recorded geometry, with a stationary burst at its terminal node.
+        let mut stationary = library
+            .records
+            .iter()
+            .find(|record| record.report.burst.is_some())
+            .expect("the library demonstrates a burst")
+            .report
+            .clone();
+        let end = stationary.path.last().expect("a recorded path");
+        let burst = stationary.burst.as_mut().expect("the chosen burst");
+        burst.speed_mps = 0.0;
+        burst.point = end.point;
+        burst.t = end.t;
+        let plan = Plan::new(&stationary, &super::super::plan::tests::shapes(&stationary));
+        library.records.push(super::super::plan::tests::Record {
+            stem: "stationary-burst-fixture".to_owned(),
+            report: stationary,
+            plan: Arc::new(plan),
+        });
         let (mut at_rest, mut flying) = (0, 0);
         for record in &library.records {
             let Some(burst) = &record.report.burst else {

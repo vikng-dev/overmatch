@@ -655,8 +655,8 @@ fn a_round_into_a_husk_records_nothing_with_or_without_its_turret() {
 /// An armed round's record stays open while the fuze the struck tank armed runs, though the round
 /// is clear of the tank: it holds the burst wherever the delay ends, while its nose piece flies on.
 /// The fixture 88 at 800 m/s arms in the 50 mm plate and, on a 50 ms delay (fixture data), flies
-/// clear of the tank for 3 ticks and bursts about 26 m past its last box (DERIVED from the fixture
-/// data); the fixture tank's mass leaves it in place under the hit's impulse. A mutant that
+/// clear of the tank before its delay ends; the arming threshold reads the plate's charged work.
+/// The fixture tank's mass leaves it in place under the hit's impulse. A mutant that
 /// finishes the record once the round is clear, or drops the burst's field from the shell's logs,
 /// fails here.
 #[test]
@@ -670,7 +670,13 @@ fn an_armed_round_keeps_its_record_open_until_it_bursts() {
         &plated(DEEP, Kind::Crew(DEEP)),
     );
     settle(&mut app);
+    let capacity = crate::physical_laws::PhysicalLaws::shipped()
+        .plate_capacity
+        .charge(f64::from(THIN) / f64::from(FIXTURE_88.caliber));
     let inputs = burst::BurstInputs {
+        trigger: crate::rounds::fuze::Trigger::SpendExit {
+            arming_spend: THIN * STEEL * capacity as f32 * 0.5,
+        },
         delay: 0.05,
         ..burst::fixture_inputs()
     };
@@ -3225,9 +3231,12 @@ fn delivered_lines_keep_the_disc_contacts_beside_the_shared_axis() {
         .map(|(a, b)| a.distance(*b))
         .sum::<f32>()
         / line.contacts.len() as f32;
+    let capacity = crate::physical_laws::PhysicalLaws::shipped()
+        .plate_capacity
+        .charge(f64::from(THIN) / f64::from(FIXTURE_88.caliber));
     assert!(
-        (mean - line.crossing.chord).abs() < 1e-4,
-        "full coverage retains the resolved disc-mean chord"
+        (mean * capacity as f32 - line.crossing.chord).abs() < 1e-4,
+        "contacts keep real geometry while the readout chord carries the work share"
     );
 }
 

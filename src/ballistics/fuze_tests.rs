@@ -1,6 +1,6 @@
 //! The game's damage model: the fuze in the march. An `Impact` fuze functions at contact with any
 //! solid body, the ground included, and bursts its mode's delay of flight later; the `SpendExit`
-//! fuze the 8.8 cm Pzgr. 39 ring carries keeps today's outcomes.
+//! fuze arms from resisted work at a body exit.
 use super::march_tests::{flat_grid, spawn_round, world_with_plate};
 use super::*;
 use crate::rounds::fuze::Trigger;
@@ -154,117 +154,6 @@ fn an_impact_delay_is_flight_time_from_contact() {
         (flight_s - DELAY_S).abs() < 1e-3,
         "{flight_s} s of flight from contact to the burst at {at}, {speed} m/s"
     );
-}
-
-/// The game's damage model: the 8.8 cm Pzgr. 39 ring's `SpendExit` fuze keeps its outcomes.
-/// Its shipped burst is the one its round file derives (113 g filler, 35.3 mm cavity), field for
-/// field, and on a slab too thin to arm it, one that arms it, and one that stops it, the march
-/// gives the same bursts (position, speed, wait at rest) and the same doses to the struck pool and
-/// to an off-axis pool only the fragment cone reaches. The pins are MEASURED outcomes of the
-/// spend-at-exit law under the shipped round data; a change to that path or to the round's burst
-/// block moves them.
-#[test]
-fn the_spend_exit_fuze_keeps_todays_bursts_and_doses() {
-    let fixture = crate::tank::WeaponRound::resolve("88mm_APHE_ring").unwrap();
-    let shipped = fixture.round.burst.unwrap();
-    // The ring's burst as its round file states it, DERIVED at load.
-    let today = burst::Burst {
-        trigger: Trigger::SpendExit { arming_spend: 35.0 },
-        delay: 0.0015,
-        nose: RoundBody {
-            mass: 6.971_434,
-            caliber: 0.088,
-            nose_factor: 0.291_666_66,
-        },
-        sideways_speed: 534.38837,
-        energy: 397_738.22,
-        core_mass: shipped.core_mass,
-        blast: shipped.blast,
-        filler_setback: shipped.filler_setback,
-        charge_radius: shipped.charge_radius,
-    };
-    assert_eq!(shipped, today, "the shipped burst, field for field");
-    // Per slab: the bursts as (position, speed, seconds waited at rest); the pool units the shot
-    // took from the struck pool and from the off-axis pool; and those the burst alone took from
-    // the off-axis pool.
-    type Snapshot = (Vec<([f32; 3], f32, f32)>, [u32; 2], u32);
-    let pins: [Snapshot; 3] = [
-        (vec![], [192_013, 13_405], 0),
-        (
-            vec![([0.0, 1.999_035_8, -2.914_274_2], 592.8495, 0.0)],
-            [461_070, 3_675_533],
-            3_643_344,
-        ),
-        (vec![], [1_000_000, 0], 0),
-    ];
-    for (thickness, pin) in [0.02, 0.05, 0.5].into_iter().zip(pins) {
-        let fire = |burst| {
-            let mut app = world_with_plate(Vec3::new(3.0, 3.0, thickness), PLATE);
-            let world = app.world_mut();
-            let entities: Vec<_> = world
-                .query_filtered::<Entity, With<BallisticVolume>>()
-                .iter(world)
-                .collect();
-            let primary = entities[0];
-            for entity in entities {
-                world.entity_mut(entity).insert(ComponentHealth::full(1000));
-            }
-            // Fixture data: an off-axis pool the round's line misses and the fragment cone
-            // reaches, so its dose is the burst's potency alone.
-            let side = app
-                .world_mut()
-                .spawn((
-                    Transform::from_xyz(0.65, 2.0, -3.4),
-                    avian3d::prelude::RigidBody::Static,
-                    avian3d::prelude::Collider::cuboid(0.5, 1.0, 0.5),
-                    avian3d::prelude::CollisionLayers::new(
-                        [crate::Layer::Armor],
-                        avian3d::prelude::LayerMask::ALL,
-                    ),
-                    BallisticVolume {
-                        material: walk::VolumeMaterial::fixture(45.0),
-                        substance: "fixture".into(),
-                    },
-                    ComponentHealth::full(100_000),
-                ))
-                .id();
-            for _ in 0..8 {
-                app.update();
-            }
-            let shell = shot(&mut app, ORIGIN, Vec3::NEG_Z * SPEED, burst);
-            advance(&mut app);
-            let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
-            let positions: Vec<_> = marks
-                .log
-                .iter()
-                .filter_map(|mark| match mark {
-                    ArmourMark::Burst {
-                        at, speed, after, ..
-                    } => Some((at.to_array(), *speed, *after)),
-                    _ => None,
-                })
-                .collect();
-            let dose = app.world().get::<ShotDose>(shell).unwrap();
-            let doses = [primary, side].map(|address| {
-                dose.losses()
-                    .find(|(entity, _)| *entity == address)
-                    .map_or(0, |(_, loss)| loss)
-            });
-            let burst_dose: u32 = dose
-                .settles(side)
-                .iter()
-                .filter(|settle| {
-                    matches!(marks.log.get(settle.mark), Some(ArmourMark::Burst { .. }))
-                })
-                .map(|settle| settle.lost)
-                .sum();
-            if !positions.is_empty() {
-                assert!(burst_dose > 0, "off-axis pool receives a burst dose");
-            }
-            (positions, doses, burst_dose)
-        };
-        assert_eq!(fire(shipped), pin, "a {thickness} m slab");
-    }
 }
 
 /// The game's damage model: the exact free-flight apex is a transient state, never a skipped

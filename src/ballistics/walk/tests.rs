@@ -3324,7 +3324,7 @@ fn scalar_outcome(
     breaks.sort_by(f64::total_cmp);
     breaks.dedup();
     breaks.retain(|t| *t >= start && *t <= end);
-    let charge = request.entrance.slope_charge;
+    let charge = request.entrance.resistance_charge;
     let mut cumulative = vec![0.0f64];
     for window in breaks.windows(2) {
         let (a, b) = (window[0], window[1]);
@@ -4078,10 +4078,10 @@ fn a_disc_meeting_two_pieces_at_overlapping_depths_resolves() {
     }
     let (_, first) = &reads[0];
     for (block, read) in &reads[1..] {
-        assert_eq!(
-            (read.normal, read.slope_charge),
-            (first.normal, first.slope_charge),
-            "block {block}: the same surface as with the block struck first"
+        assert_eq!(read.normal, first.normal, "block {block}: same surface");
+        assert!(
+            (read.resistance_charge / first.resistance_charge - 1.0).abs() < 1.0e-6,
+            "block {block}: equivalent thickness within the collected f32 rounding"
         );
         assert!(
             (read.steel_equivalent - first.steel_equivalent).abs()
@@ -4449,9 +4449,16 @@ fn the_slope_share_reads_the_entrance_not_the_backing() {
                 &laws,
             )
             .unwrap();
-            transit_request(&walked, &shot, &laws).entrance.slope_charge
+            let event = walked.hand_off().unwrap().unwrap().read;
+            let capacity = super::super::physical_laws::PhysicalLaws::shipped()
+                .plate_capacity
+                .charge(event.normal_thickness(walked.axis) / f64::from(shot.caliber));
+            transit_request(&walked, &shot, &laws)
+                .entrance
+                .resistance_charge
+                / capacity
         };
-        assert_eq!(read(&[facing]), read(&[facing, backing]));
+        assert!((read(&[facing]) / read(&[facing, backing]) - 1.0).abs() < 1.0e-6);
         assert!(read(&[facing]) > 1.0);
         let steel = walk_disc(
             &entrance_disc(&[facing], 2.0),
@@ -4459,7 +4466,17 @@ fn the_slope_share_reads_the_entrance_not_the_backing() {
             &laws,
         )
         .unwrap();
-        assert!(read(&[facing]) < transit_request(&steel, &shot, &laws).entrance.slope_charge);
+        let event = steel.hand_off().unwrap().unwrap().read;
+        let capacity = super::super::physical_laws::PhysicalLaws::shipped()
+            .plate_capacity
+            .charge(event.normal_thickness(steel.axis) / f64::from(shot.caliber));
+        assert!(
+            read(&[facing])
+                < transit_request(&steel, &shot, &laws)
+                    .entrance
+                    .resistance_charge
+                    / capacity
+        );
     }
 }
 
@@ -4498,7 +4515,10 @@ fn cofacial_material_reads_do_not_depend_on_volume_keys() {
                 Begin::Ricochet { entrance, .. } | Begin::Held { entrance, .. } => *entrance,
                 Begin::Miss => panic!("the fixture face is occupied"),
             };
-            assert_eq!(read(&actual).slope_charge, read(&expected).slope_charge);
+            assert_eq!(
+                read(&actual).resistance_charge,
+                read(&expected).resistance_charge
+            );
             assert_eq!(
                 read(&actual).steel_equivalent,
                 read(&expected).steel_equivalent
@@ -4531,4 +4551,54 @@ fn a_partly_held_disc_does_not_locate_its_strike_at_a_future_entry() {
     assert_eq!(event.start, 0.0);
     assert_eq!(event.entry_position.dot(AXIS), 0.0);
     assert!(event.entry_position.length() <= disc.radius);
+}
+
+/// The game's damage model: the collected plate capacity must reach the production finish
+/// driver; a round between thin and bulk limits perforates only the thin plate. Mutant: leave
+/// the old unit charge on the advance. Fixture geometry; the charge reads its authored owner.
+#[test]
+fn the_thin_plate_work_share_reaches_the_resolved_crossing() {
+    let laws = WalkLaws::default();
+    let caliber = AP_88.caliber;
+    for ratio in [0.05, 0.25, 0.5, 1.0, 2.0] {
+        let thickness = caliber * ratio;
+        let slabs = [Slab::at(1, 0, 0.5, -AXIS, thickness)];
+        let volumes = table(&[(1, laws.rha_reference)]);
+        let entrance = walk_disc(&entrance_disc(&slabs, 2.0), &volumes, &laws).unwrap();
+        let request = transit_request(&entrance, &AP_88, &laws);
+        let transit = walk_disc(&transit_disc(&request, &slabs, 2.0), &volumes, &laws).unwrap();
+        let event = &transit.events[0];
+        let capacity = super::super::physical_laws::PhysicalLaws::shipped()
+            .plate_capacity
+            .charge(f64::from(thickness) / f64::from(caliber));
+        assert!((request.entrance.resistance_charge - capacity).abs() < 1.0e-6);
+        if ratio < 1.0 {
+            let budget = event.cost * (1.0 + capacity as f32) * 0.5;
+            let plan = finish_at(&transit, &request, budget).unwrap();
+            assert!(matches!(plan.outcome, Outcome::Perforated { .. }));
+            assert!(plan.state.speed > 0.0 && plan.cost_spent < budget);
+        } else {
+            assert_eq!(request.entrance.resistance_charge, 1.0);
+        }
+    }
+}
+
+/// The game's damage model: a thick soft body retains the bulk law; material resistance is
+/// separate from the geometric plate opening. Mutant: use steel-equivalent thickness for capacity.
+/// Fixture dimensions and factors; construction consumers rely on this distinction.
+#[test]
+fn thick_soft_bodies_do_not_become_thin_plates() {
+    let laws = WalkLaws::default();
+    let thickness = AP_88.caliber * 2.0;
+    let slabs = [Slab::at(1, 0, 0.5, -AXIS, thickness)];
+    for factor in [0.1, 10.0, 500.0, 1000.0, 5000.0] {
+        let volumes = table(&[(1, factor)]);
+        let walked = walk_disc(&entrance_disc(&slabs, 2.0), &volumes, &laws).unwrap();
+        assert_eq!(
+            transit_request(&walked, &AP_88, &laws)
+                .entrance
+                .resistance_charge,
+            1.0
+        );
+    }
 }

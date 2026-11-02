@@ -1699,7 +1699,7 @@ mod tests {
     /// vanishes behind the slice's body, one without the bound draws over a component in front of
     /// it, and a depth read in two conventions bounds an orthographic view's field at the wrong
     /// place. The pipeline keys and lanes are checked here; the shaders' discards, layer test,
-    /// bound and eye depth are pinned ([`the_shaders_are_the_ones_the_frames_were_captured_with`])
+    /// bound and eye depth are pinned ([`the_shader_algorithms_match_the_captured_frames`])
     /// and the eye depth mirrored ([`the_eye_depth_runs_forward_in_both_projections`]).
     #[test]
     fn the_body_draws_behind_the_scene() {
@@ -2681,15 +2681,68 @@ mod tests {
             .collect()
     }
 
-    /// The look's and the slice's shaders are the ones the Rust mirrors were checked against and
-    /// the frames were captured with: every top-level item, each function and the module scope,
-    /// folds to its pin with comments and whitespace removed. A comment or a layout change keeps
-    /// every pin; any other change moves the pin of the item it touches, whatever text it keeps
-    /// elsewhere. The colour, band, eye-depth and draw-order promises rely on it: their Rust side
+    /// The game's damage-model view: resource extents do not change the captured shading law.
+    /// Lane-count tests check Rust/WGSL agreement; unused search slots retain neutral bounds.
+    /// Every other token stays fingerprinted, including the loops that consume the slots.
+    fn captured_resource_extent(file: &str, text: &str) -> String {
+        if file != "pen_cam_look.wgsl" {
+            return text.to_owned();
+        }
+        // Fixture: the resource extent in the originally captured shader, not a rendering path.
+        const CAPTURED_FIELDS: usize = 4;
+        let mut text = text
+            .replace(
+                &format!("constFIELDS:i32={FIELDS};"),
+                &format!("constFIELDS:i32={CAPTURED_FIELDS};"),
+            )
+            .replace(
+                &format!("prints:array<vec4<f32>,{}>", PRINT_LANES * FIELDS),
+                &format!("prints:array<vec4<f32>,{}>", PRINT_LANES * CAPTURED_FIELDS),
+            );
+        for neutral in ["1.0", "0.0"] {
+            text = text.replace(
+                &format!("array<f32,{FIELDS}>({})", [neutral; FIELDS].join(",")),
+                &format!(
+                    "array<f32,{CAPTURED_FIELDS}>({})",
+                    [neutral; CAPTURED_FIELDS].join(",")
+                ),
+            );
+        }
+        text
+    }
+
+    /// The game's damage-model view: a budget resize may preserve a fingerprint; changing a
+    /// search bound or its neutral initialization must not. Mutants model both shading changes.
+    #[test]
+    fn resource_extent_normalization_preserves_shading_tripwires() {
+        let file = "pen_cam_look.wgsl";
+        let (_, current) = shader_items(&shader(file))
+            .into_iter()
+            .find(|(name, _)| name == "peak")
+            .expect("the captured peak-search item");
+        let captured = captured_resource_extent(file, &current);
+        for changed in [
+            current.replace("lo[f]=a;", "lo[f]=b;"),
+            current.replacen("1.0", "0.99", 1),
+        ] {
+            assert_ne!(changed, current, "the fixture mutation changes the shader");
+            assert_ne!(
+                fnv1a_64(
+                    FNV_OFFSET_BASIS,
+                    captured_resource_extent(file, &changed).as_bytes()
+                ),
+                fnv1a_64(FNV_OFFSET_BASIS, captured.as_bytes())
+            );
+        }
+    }
+
+    /// The game's damage-model view keeps the captured shader algorithms: every top-level item
+    /// folds to its pin after comments, whitespace and checked resource extents are normalized.
+    /// Shading changes still move their item's pin, whatever text remains elsewhere. The colour, band, eye-depth and draw-order promises rely on it: their Rust side
     /// is tested against the WGSL pinned here, and an unpinned item (`orthographic`, a binding)
     /// breaks a pinned one's frame with its text unchanged.
     #[test]
-    fn the_shaders_are_the_ones_the_frames_were_captured_with() {
+    fn the_shader_algorithms_match_the_captured_frames() {
         let hex = |d: u64| {
             format!(
                 "0x{:04x}_{:04x}_{:04x}_{:04x}",
@@ -2707,6 +2760,7 @@ mod tests {
             "pen_cam_picture.wgsl",
         ] {
             for (item, text) in shader_items(&shader(file)) {
+                let text = captured_resource_extent(file, &text);
                 let digest = fnv1a_64(FNV_OFFSET_BASIS, text.as_bytes());
                 let pinned = SHADER_PINS
                     .iter()
