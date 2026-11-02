@@ -653,6 +653,14 @@ fn sanctioned_outcome(marks: &[ArmourMark], from: usize) -> Option<u32> {
     }
 }
 
+/// Whether `shell` still flies inside `tank`'s bounds: the state that holds an encounter open
+/// ([`finish_records`]).
+#[cfg(test)]
+pub(crate) fn round_inside(world: &World, tank: Entity, shell: Entity) -> bool {
+    let at = world.get::<Transform>(shell).map(|at| at.translation);
+    world.get::<Flying>(shell).is_some() && at.is_some_and(|at| !clear_of(world, tank, at))
+}
+
 /// Whether `point` (WORLD) is clear of `tank`'s colliders by [`CLEAR_MARGIN`]; a tank with none
 /// is clear of everything.
 fn clear_of(world: &World, tank: Entity, point: Vec3) -> bool {

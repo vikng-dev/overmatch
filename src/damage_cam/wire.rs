@@ -69,22 +69,22 @@
 //!
 //! | scenario | total B | shooter B | fields B | cones | rays | hits | B per cone | burst B |
 //! |---|---|---|---|---|---|---|---|---|
-//! | s1_through_crew | 942 | 894 | 569 | 1 | 64 | 66 | 569 | – |
-//! | s2_stopped_mantlet | 218 | 142 | 0 | 0 | 0 | 0 | – | – |
+//! | s1_through_crew | 936 | 892 | 548 | 1 | 64 | 63 | 548 | – |
+//! | s2_stopped_mantlet | 217 | 141 | 0 | 0 | 0 | 0 | – | – |
 //! | s3_ricochet | 226 | 150 | 0 | 0 | 0 | 0 | – | – |
-//! | s4_spaced_then_stopped | 968 | 892 | 620 | 4 | 256 | 0 | 155 | – |
-//! | s5_oblique_through | 926 | 854 | 539 | 1 | 64 | 64 | 539 | – |
-//! | s6_overpen | 585 | 509 | 309 | 2 | 128 | 0 | 154 | – |
-//! | s7_engine_shadow | 757 | 693 | 466 | 1 | 64 | 51 | 466 | – |
+//! | s4_spaced_then_stopped | 963 | 887 | 620 | 4 | 256 | 0 | 155 | – |
+//! | s5_oblique_through | 877 | 805 | 539 | 1 | 64 | 64 | 539 | – |
+//! | s6_overpen | 583 | 507 | 309 | 2 | 128 | 0 | 154 | – |
+//! | s7_engine_shadow | 774 | 710 | 484 | 1 | 64 | 54 | 484 | – |
 //! | s8a_mg_ricochet | 224 | 148 | 0 | 0 | 0 | 0 | – | – |
-//! | s8b_mg_stopped | 216 | 140 | 0 | 0 | 0 | 0 | – | – |
-//! | s9_breech_and_loader | 1661 | 1617 | 962 | 3 | 192 | 88 | 320 | – |
-//! | s10_gun_barrel_struck | 497 | 425 | 248 | 2 | 128 | 0 | 124 | – |
+//! | s8b_mg_stopped | 215 | 139 | 0 | 0 | 0 | 0 | – | – |
+//! | s9_breech_and_loader | 1338 | 1282 | 1020 | 3 | 192 | 106 | 340 | – |
+//! | s10_gun_barrel_struck | 944 | 872 | 695 | 2 | 128 | 64 | 347 | – |
 //! | s11_mg_barrel_struck | 218 | 145 | 0 | 0 | 0 | 0 | – | – |
-//! | s12_apcr_through_crew | 938 | 890 | 569 | 1 | 64 | 66 | 569 | – |
-//! | s13_ring_through_crew | 2256 | 2216 | 569 | 1 | 64 | 66 | 569 | 1263 |
-//! | s15_unarmed_overpen | 585 | 509 | 309 | 2 | 128 | 0 | 154 | – |
-//! | s16_restart_at_rest | 926 | 850 | 310 | 2 | 128 | 0 | 155 | 309 |
+//! | s12_apcr_through_crew | 929 | 885 | 548 | 1 | 64 | 63 | 548 | – |
+//! | s13_ring_through_crew | 2052 | 2016 | 548 | 1 | 64 | 63 | 548 | 1068 |
+//! | s15_unarmed_overpen | 583 | 507 | 309 | 2 | 128 | 0 | 154 | – |
+//! | s16_restart_at_rest | 923 | 847 | 310 | 2 | 128 | 0 | 155 | 309 |
 //!
 //! The DERIVED estimate `41 + 2 + 2N` per cone (171 B at N = 64) counts a cone's metadata, its
 //! field descriptor's law byte and `f32` ratio among it, and its reaches; a cone that reaches no
@@ -92,10 +92,10 @@
 //! byte, one of 16.4 m or more three). Each hit adds about three bytes (ray skip, volume, dose
 //! palette index, a varint each) and each distinct dose four. Under the ball every direction is
 //! thrown at its own strength, so nearly every hit's dose is distinct. MEASURED: s9's three cones
-//! total 962 B and its message without a burst is 1661 B. A burst's field at its 256 directions
+//! total 1020 B and its message without a burst is 1338 B. A burst's field at its 256 directions
 //! adds about 310 B where no direction leaves the
-//! burst point (s16) and 1.3 KB where its band reaches the compartment's boxes (s13), so the
-//! largest recorded message is 2.2 KB.
+//! burst point (s16) and 1.1 KB where its band reaches the compartment's boxes (s13), so the
+//! largest recorded message is 2.1 KB.
 
 use std::collections::BTreeMap;
 

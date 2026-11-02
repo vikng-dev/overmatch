@@ -166,18 +166,19 @@ pub(crate) fn disc_radius(caliber: f32) -> f32 {
 
 /// Where each sample's next sweep starts and what it is inside there, in ONE anchor frame.
 ///
-/// INVARIANT: every sample's start (`anchor + origin + seeds[i].offset`) is a point its own ray has
-/// already reached — the end of an open-air sweep, of a corridor that met nothing, or a
-/// perforation's resume point one nudge past the exit along that sample's ray — and
-/// `seeds[i].inside` is what that ray's walk says the sample is inside there. A fresh disc
-/// placed at birth or after a catch-up has no swept membership:
-/// [`Flight::born`] and [`Flight::settle`] read it with [`certified`]; a reflection's starts
-/// ([`Interior::unread`]) are read by [`Flight::settle`] the same way. A disc laid on an
-/// axis start a sweep reached uses [`Interior::laid`]; relative discovery reads material newly
-/// holding that start at its next scene boundary. Offsets are whatever the rays left
-/// behind — staggered along an oblique plate after a perforation, tilted against the travel after a
-/// bend — and are never re-squared, rotated or flattened: any of those moves a start off the ray
-/// that certified it.
+/// INVARIANT: the round's samples approximate its circular cross-section about the axis. Every
+/// sample's offset is its place on that circle, within the disc radius in the plane square to the
+/// heading, plus its own contact cursor along the axis: how far its ray has swept past the axis start.
+/// A perforation's cursors are its stagger along an oblique plate, each start one nudge past the
+/// exit along that sample's ray; a fresh disc and a slide's disc have none. `seeds[i].inside` is what
+/// that ray's walk says the sample is inside there. A fresh disc placed at birth or after a catch-up
+/// has no swept membership: [`Flight::born`] and [`Flight::settle`] read it with [`certified`]; a
+/// skid's starts ([`Interior::unread`]) are read by [`Flight::settle`] the same way. A disc laid on
+/// an axis start a sweep reached uses [`Interior::laid`]; relative discovery reads material newly
+/// holding that start at its next scene boundary. A tick's gravity bend leaves the starts where the
+/// sweep reached them, because moving one takes it off the ray that certified it: a cursor then
+/// leans off the new axis by its length × the bend's sine (DERIVED: 54 µm, a 0.135 m cursor at
+/// 400 m/s and 64 Hz).
 ///
 /// The origin and the seeds share one anchor so they agree to corridor-scale rounding wherever on
 /// the map the shot is. A resume point rebuilt in world f32 is quantized at the world's spacing
@@ -212,7 +213,7 @@ impl Interior {
     }
 
     /// The game's damage model: starts at an anchored axis start that no ray has read on the
-    /// heading they leave on: a reflection's ([`Bounce::continuation`]). Its flight carries
+    /// heading they leave on: a slide's ([`Bounce::continuation`]). Its flight carries
     /// [`Membership::Required`], so nothing reads the empty membership: [`Flight::settle`] reads
     /// the starts in the live scene before anything sweeps from them.
     pub(crate) fn unread(start: AxisStart, offsets: Vec<Vec3>) -> Self {
@@ -285,6 +286,37 @@ pub(crate) fn layout(frame: &DiscFrame, radius: f32) -> Vec<Vec3> {
         walk::disc_offsets(frame, radius, walk::DEFAULT_RING)
     } else {
         vec![Vec3::ZERO]
+    }
+}
+
+/// Resolution: how far (m) a sliding round's lowest sample stands off the face it rests on. It
+/// exceeds the collector's sitting reach (at most a quarter of [`MARCH_EPS`],
+/// `collect::sitting_reach`), so a ray running along the face owns no crossing of it by rounding.
+pub(crate) const REST_CLEARANCE: f32 = MARCH_EPS;
+
+/// The game's damage model: where along the incoming axis a skid turns, metres from `start`, the
+/// axis start.
+///
+/// INVARIANT: a round slides resting on its face. Its axis leaves the incoming ray where it stands
+/// `rest` (its body radius) plus [`REST_CLEARANCE`] off the read plane, so the disc it lays there,
+/// square to the slide, reaches down to the face and not into it, and nothing is lifted: the axis
+/// is on ground it has flown. DERIVED: that point is `r(1 − sin θ)/cos θ` before the rim's first
+/// contact, and the disc lies inside the cylinder the round swept on its way to the plane, whose
+/// section square to the slide is an ellipse of semi-axes `r/sin θ` and `r`. A face that meets that
+/// disc is a real contact: [`Flight::settle`] reads its samples inside it, and the contact law decides.
+///
+/// The turn is never past `hand_off`, where the axis reached. A start already resting high enough
+/// turns at once; one nearer the face than `rest`, where the last leg ended, steps back along the
+/// ray it came in on, by at most the distance above (the rim's contact is still ahead of it). The
+/// clock charges no travel for it.
+fn skid_turn(start: Vec3, axis: Dir3, read: &walk::EntranceRead, rest: f32, hand_off: f32) -> f32 {
+    let into = axis.dot(read.normal);
+    let height = (start - read.position).dot(read.normal) * -into.signum();
+    let turn = (height - rest - REST_CLEARANCE) / into.abs();
+    if height >= rest {
+        turn.max(0.0).min(hand_off)
+    } else {
+        turn.min(hand_off)
     }
 }
 
@@ -987,7 +1019,7 @@ pub(crate) struct Flight {
     /// discovery scene; `None` means a newly placed disc still needs its first layout.
     pub continuation: Option<Interior>,
     /// Whether discovery can rely on the carried membership, or must first re-read the starts
-    /// after a reflected heading or scene change. Tick-boundary relative discovery starts with
+    /// after a skid's heading or scene change. Tick-boundary relative discovery starts with
     /// the preceding scene's clear membership and admits geometry currently holding those points.
     pub membership: Membership,
 }
@@ -1014,7 +1046,7 @@ impl Flight {
             assert!(
                 seed.inside.is_empty(),
                 "the game's damage model ends a step only with its read starts outside material: \
-                 the march resolves held material and reads a reflection's starts before it stops"
+                 the march resolves held material and reads a skid's starts before it stops"
             );
             seed.t = 0.0;
         }
@@ -1057,7 +1089,7 @@ impl Flight {
     }
 
     /// The game's damage model: establish membership at the existing reached starts after a
-    /// reflected heading or scene change. Only a newly placed flight lays a new disc at `position`;
+    /// skid's heading or scene change. Only a newly placed flight lays a new disc at `position`;
     /// established starts retain both their positions and membership.
     pub(crate) fn settle(
         &mut self,
@@ -1171,11 +1203,12 @@ impl Flight {
                 self.direction = bounce.direction;
                 self.speed = bounce.speed;
                 self.position = bounce.resume;
-                self.continuation = Some(bounce.continuation);
-                // The game's damage model reads the reflection's starts in the live scene, on the
+                let rests = bounce.continuation.is_none();
+                self.continuation = bounce.continuation;
+                // The game's damage model reads the skid's starts in the live scene, on the
                 // world heading playback leaves it with ([`Interior::unread`]).
                 self.membership = Membership::Required;
-                false
+                rests
             }
             Decision::Bite(bite) => match bite.end {
                 BiteEnd::Embedded { at, direction, .. } => {
@@ -1239,7 +1272,7 @@ pub(crate) enum Decision {
 impl Decision {
     /// The straight stretches the round's axis flies following this decision, in order, ending
     /// where the next one starts or where it came to rest — what the witness pass intersects
-    /// ([`super::wound`]). A bounce ends at the samples' reached hand-offs.
+    /// ([`super::wound`]). A skid's stretch ends where its axis turns.
     pub(crate) fn legs(&self) -> &[Leg] {
         match self {
             Decision::Clear { leg, .. } => std::slice::from_ref(leg),
@@ -1323,8 +1356,10 @@ impl Leg {
     }
 }
 
-/// A deflection off the entrance face (§4). The deflection ANGLE and the speed lost both already
+/// A skid off the entrance face (§4): no entry. The deflection ANGLE and the speed lost both already
 /// carry η from the core (§13.5) — a graze is a partial ricochet in direction as well as in speed.
+/// With no [`continuation`](Self::continuation) the face held the round ([`walk::Begin::Held`]):
+/// `direction` stays the incoming one and `speed` is 0, the only skid that keeps none.
 #[derive(Clone, Debug)]
 pub(crate) struct Bounce {
     pub feedback: crate::substances::SurfaceFeedback,
@@ -1352,14 +1387,17 @@ pub(crate) struct Bounce {
     pub speed_in: f32,
     /// Momentum handed to `owner` at `position`.
     pub impulse: Vec3,
-    /// Line-of-sight metres flown from the flight's position to the axis hand-off along the way in.
+    /// Line-of-sight metres flown from the flight's position to `resume` along the way in; 0 where
+    /// the turn is behind it ([`skid_turn`]).
     pub travel: f32,
-    /// The axis hand-off, with no lift or outgoing nudge. Each reflected sample resumes at the
-    /// point its incoming ray reached; its membership on the outgoing ray is unread until
+    /// Where the axis leaves the incoming ray ([`skid_turn`]). Each sample resumes on the round's
+    /// disc about it, square to `direction`, with no cursor; its membership there is unread until
     /// [`Flight::settle`] reads it in the live scene ([`Interior::unread`]).
     pub resume: Vec3,
-    pub continuation: Interior,
-    /// The way in: the flight's position to the face, along `incoming`.
+    /// `None`: the face held the round, which rests at `resume`.
+    pub continuation: Option<Interior>,
+    /// The way in, along `incoming`: each sample from the flight's position to the turn, or to the
+    /// face if its ray met that first.
     pub approach: Leg,
 }
 
@@ -1579,6 +1617,59 @@ pub(crate) fn decide(
             .map(|owner| owner.tank())
     };
     let v_in = Vec3::from(dir) * speed;
+    // The exchange of a skid leaving on `out` at `kept` m/s, its axis turning at `turn` and its way
+    // in ending there or at `hand_offs`.
+    let skid = |read: &walk::EntranceRead,
+                hand_offs: &[f64],
+                turn: f32,
+                out: Dir3,
+                kept: f32,
+                continuation: Option<Interior>| {
+        let struck = read.volume;
+        let way_in = Leg {
+            from: anchor + from,
+            axis: dir,
+            samples: entrance
+                .offsets
+                .iter()
+                .zip(hand_offs)
+                .map(|(offset, t)| SampleLeg {
+                    offset: *offset,
+                    length: (*t as f32).min(turn - offset.dot(*dir)).max(0.0),
+                    hard: None,
+                })
+                .collect(),
+        }
+        .with_presence(&entrance);
+        Decision::Bounce(Bounce {
+            feedback: context
+                .world
+                .volumes
+                .get(struck)
+                .expect("the resolved entrance belongs to a gathered volume")
+                .material
+                .feedback,
+            position: anchor + read.position,
+            normal: read.normal,
+            coverage: read.coverage,
+            struck,
+            owner: owner(struck),
+            shock: (0.5
+                * f64::from(mass)
+                * (f64::from(speed).powi(2) - f64::from(kept).powi(2)).max(0.0))
+                as f32,
+            direction: out,
+            speed: kept,
+            incoming: dir,
+            speed_in: speed,
+            impulse: mass * (v_in - Vec3::from(out) * kept),
+            travel: turn.max(0.0),
+            resume: anchor + (start + dir * turn),
+            continuation,
+            approach: way_in,
+        })
+    };
+    let rest = body.caliber * 0.5;
 
     match walk::begin(&entrance, &shot, &context.laws)? {
         Begin::Miss => {
@@ -1601,63 +1692,35 @@ pub(crate) fn decide(
             speed_scale,
             hand_offs,
         } => {
-            let struck = read.volume;
-            let position = anchor + read.position;
             let out = Dir3::new(direction).expect(
                 "the game's damage model derives a finite nonzero ricochet direction from checked unit directions"
             );
-            let kept = speed * speed_scale;
-            let approach = hand_offs[0] as f32;
-            let origin = start + dir * approach;
-            let offsets = entrance
-                .offsets
-                .iter()
-                .zip(&hand_offs)
-                .map(|(offset, t)| *offset + dir * (*t - hand_offs[0]) as f32)
-                .collect();
-            let continuation = Interior::unread(AxisStart { anchor, origin }, offsets);
-            let way_in = Leg {
-                from: anchor + from,
-                axis: dir,
-                samples: entrance
-                    .offsets
-                    .iter()
-                    .zip(hand_offs)
-                    .map(|(offset, t)| SampleLeg {
-                        offset: *offset,
-                        length: t as f32,
-                        hard: None,
-                    })
-                    .collect(),
-            }
-            .with_presence(&entrance);
-            Ok(Decision::Bounce(Bounce {
-                feedback: context
-                    .world
-                    .volumes
-                    .get(struck)
-                    .expect("the resolved entrance belongs to a gathered volume")
-                    .material
-                    .feedback,
-                position,
-                normal: read.normal,
-                coverage: read.coverage,
-                struck,
-                owner: owner(struck),
-                shock: (0.5
-                    * f64::from(mass)
-                    * (f64::from(speed).powi(2) - f64::from(kept).powi(2)).max(0.0))
-                    as f32,
-                direction: out,
-                speed: kept,
-                incoming: dir,
-                speed_in: speed,
-                impulse: mass * (v_in - Vec3::from(out) * kept),
-                travel: approach,
-                resume: continuation.world_origin(),
-                continuation,
-                approach: way_in,
-            }))
+            let turn = skid_turn(start, dir, &read, rest, hand_offs[0] as f32);
+            let continuation = Interior::unread(
+                AxisStart {
+                    anchor,
+                    origin: start + dir * turn,
+                },
+                layout(
+                    &flight.frame.transport(Vec3::from(dir), Vec3::from(out)),
+                    radius,
+                ),
+            );
+            Ok(skid(
+                &read,
+                &hand_offs,
+                turn,
+                out,
+                speed * speed_scale,
+                Some(continuation),
+            ))
+        }
+        Begin::Held {
+            entrance: read,
+            hand_offs,
+        } => {
+            let turn = skid_turn(start, dir, &read, rest, hand_offs[0] as f32);
+            Ok(skid(&read, &hand_offs, turn, dir, 0.0, None))
         }
         Begin::Transit(request) => {
             // Transit starts at the reached hand-offs and re-reads membership there.
@@ -2345,16 +2408,23 @@ fn apply_bounce(
     if let Some(owner) = bounce.owner {
         apply_hit_impulse(bodies, owner, bounce.impulse, bounce.position);
     }
+    let held = bounce.continuation.is_none();
     commands.trigger(Impact {
         position: bounce.position,
         normal: bounce.normal,
         style: shell.projectile.impact_style(),
         surface: ImpactSurface::Material(bounce.feedback),
-        outcome: ImpactOutcome::Ricochet {
-            direction: Vec3::from(bounce.direction),
+        outcome: if held {
+            ImpactOutcome::Stopped
+        } else {
+            ImpactOutcome::Ricochet {
+                direction: Vec3::from(bounce.direction),
+            }
         },
     });
-    shell.marks.ricochets.push(bounce.position);
+    if !held {
+        shell.marks.ricochets.push(bounce.position);
+    }
     shell.marks.log.push(ArmourMark::Bounce {
         position: bounce.position,
         normal: bounce.normal,
@@ -2368,14 +2438,31 @@ fn apply_bounce(
     shell.path.points.push(bounce.position);
     if let Some(shot) = shell.shot {
         if !*terminal_emitted {
-            commands.trigger(ShellRicochet {
-                shot: shot.0,
-                origin: bounce.position,
-                direction: Vec3::from(bounce.direction),
-                speed: bounce.speed,
-                sequence: (shell.marks.ricochets.len() - 1) as u32,
-            });
+            if held {
+                *terminal_emitted = true;
+                shell.terminal_report.0 = true;
+                commands.trigger(ShellTerminal {
+                    shot: shot.0,
+                    position: bounce.position,
+                    normal: bounce.normal,
+                    verdict: TerminalVerdict::Stopped,
+                    after_bounces: shell.marks.ricochets.len() as u32,
+                });
+            } else {
+                commands.trigger(ShellRicochet {
+                    shot: shot.0,
+                    origin: bounce.position,
+                    direction: Vec3::from(bounce.direction),
+                    speed: bounce.speed,
+                    sequence: (shell.marks.ricochets.len() - 1) as u32,
+                });
+            }
         }
+        let verdict = if held {
+            Verdict::Stopped
+        } else {
+            Verdict::Ricochet
+        };
         commands.trigger(ShellStrike {
             feedback: bounce.feedback,
             shot: shot.0,
@@ -2386,11 +2473,11 @@ fn apply_bounce(
             incoming: Vec3::from(bounce.incoming),
             caliber: shell.projectile.caliber(),
             contact_caliber: super::face_contact_caliber(
-                Verdict::Ricochet,
+                verdict,
                 shell.projectile.caliber(),
                 shell.projectile.penetrator_caliber(),
             ),
-            verdict: Verdict::Ricochet,
+            verdict,
         });
     }
 }

@@ -196,7 +196,7 @@ pub struct Shooter {
 /// How the round's flight ended, as the authority marched it.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum RoundEnd {
-    /// It came to rest inside `volume` (armour or a component), at the path's last point.
+    /// It came to rest inside or on `volume` (armour or a component), at the path's last point.
     Rest { volume: String },
     /// It left the struck tank at `at`, on its path: the end of that tank's own volumes (possibly
     /// inside a crossing shared with another tank), or its last bounce. The path runs on past it.

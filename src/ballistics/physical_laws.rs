@@ -12,6 +12,7 @@ struct File {
     gravity_mps2: Sourced<f32>,
     air_density: Sourced<f64>,
     cavity_inertia: Sourced<f64>,
+    contact_friction: Sourced<f32>,
     floor_m: Sourced<f32>,
 }
 
@@ -20,6 +21,7 @@ pub(super) struct PhysicalLaws {
     pub gravity_mps2: f32,
     pub air_density: f64,
     pub cavity_inertia: f64,
+    pub contact_friction: f32,
     pub floor_m: f32,
 }
 
@@ -30,6 +32,7 @@ impl PhysicalLaws {
             ("gravity_mps2", f64::from(file.gravity_mps2.0)),
             ("air_density", file.air_density.0),
             ("cavity_inertia", file.cavity_inertia.0),
+            ("contact_friction", f64::from(file.contact_friction.0)),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!(
@@ -46,6 +49,7 @@ impl PhysicalLaws {
             gravity_mps2: file.gravity_mps2.0,
             air_density: file.air_density.0,
             cavity_inertia: file.cavity_inertia.0,
+            contact_friction: file.contact_friction.0,
             floor_m: file.floor_m.0,
         })
     }
@@ -71,6 +75,7 @@ mod tests {
             ("gravity_mps2", "9.81"),
             ("air_density", "1.225"),
             ("cavity_inertia", "1.0"),
+            ("contact_friction", "0.5"),
         ] {
             for bad in ["0.0", "-1.0", "NaN", "inf"] {
                 let text = RON.replace(&format!("{field}: ({good},"), &format!("{field}: ({bad},"));

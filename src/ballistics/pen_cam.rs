@@ -194,6 +194,7 @@ fn record_edited(
     for _ in 0..STEPS {
         app.update();
     }
+    march_to_the_end(&mut app, tank, shell, scenario);
     let marched = started.elapsed().as_secs_f64();
     let facts = ShotFacts {
         shooter: Some(Shooter {
@@ -211,6 +212,25 @@ fn record_edited(
     let report = record::report(app.world_mut(), &struck, shell, &facts)
         .unwrap_or_else(|| panic!("{}: the shot opens no pen cam", scenario.name));
     (report, marched)
+}
+
+/// March a round still inside its tank's bounds until it rests or leaves them: the live encounter
+/// closes on the same two states (`damage_cam::recorder::finish_records`), so a record never states
+/// an end the live game would not.
+fn march_to_the_end(app: &mut App, tank: Entity, shell: Entity, scenario: &Scenario) {
+    /// 30 s of flight, far past a fall through any hull. A round neither resting nor leaving by
+    /// then is a bug.
+    const MOST_STEPS: usize = 30 * 64;
+    for _ in 0..MOST_STEPS {
+        if !crate::damage_cam::recorder::round_inside(app.world(), tank, shell) {
+            return;
+        }
+        app.update();
+    }
+    panic!(
+        "{}: the round neither rested nor left in {MOST_STEPS} steps",
+        scenario.name
+    );
 }
 
 /// The distance along `direction` (unit) from `origin` to the nearest triangle of `shape`, if the

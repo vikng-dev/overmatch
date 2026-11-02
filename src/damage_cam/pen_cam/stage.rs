@@ -2466,9 +2466,7 @@ mod tests {
                 for kind in [CornerKind::Glass, plan.kind] {
                     let reached = time_at_arc(plan, kind, line.length(), false);
                     for k in 1..=8 {
-                        let c = reached
-                            + shell_length(plan) * timeline::REPLAY_SLOWDOWN / speed
-                            + 0.25 * k as f32;
+                        let c = reached + 0.25 * k as f32;
                         let share = shell_share(plan, kind, c, false);
                         if plan.body.is_none() {
                             assert!(share.is_none(), "{name}: no authored body is drawn");
@@ -2503,10 +2501,7 @@ mod tests {
             }
             let plan = &record.plan;
             let (mut app, _) = staged(&library, &asset, index, plan.kind, Vec3::ZERO);
-            let speed = plan.line.leg_speed(plan.line.points.len() - 1).unwrap();
-            let c = time_at_arc(plan, plan.kind, plan.line.length(), false)
-                + shell_length(plan) * timeline::REPLAY_SLOWDOWN / speed
-                + 0.5;
+            let c = time_at_arc(plan, plan.kind, plan.line.length(), false) + 0.5;
             let head = head_arc(plan, plan.kind, c, false);
             let (tail_arc, tail) = trail_end(plan, head, shell_share(plan, plan.kind, c, false));
             assert!(tail_arc > plan.line.length(), "{name}");

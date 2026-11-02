@@ -3,5 +3,6 @@
     gravity_mps2: (9.81, StandIn("Uniform Earth-like gravity pending a shared environment gravity owner")),
     air_density: (1.225, StandIn("One sea-level atmosphere pending weather and altitude")),
     cavity_inertia: (1.0, StandIn("Approximate cavity inertia fit pending material-specific calibration")),
+    contact_friction: (0.5, StandIn("Coulomb coefficient at which a face holds a round in one contact: the low end of the general dry steel range 0.5 to 0.8, no source read; stands in for a value per surface pair")),
     floor_m: (-100.0, Unit("Metres below the playfield: rounds leave play below this world boundary")),
 )

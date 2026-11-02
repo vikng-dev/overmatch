@@ -94,7 +94,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | ballistics-19 | P3 | `src/damage.rs::TankCapabilities::new` | brevity: Shallow abstraction | A forwarder over two `pub` fields hides no invariant. | Delete it; use the struct literal. | ratchet |
 | ballistics-21 | P3 | `src/damage.rs::backup_zero_score_ties_do_not_decide_authority` | testing: Coupled assertion | The final `controls.permits` reads a literal set and shares nothing with `resolve`'s result, so no tie-break mutant moves it. | Assert the authority of the resolved case, or rename to what it proves. | ratchet |
 | ballistics-22 | P3 | `src/damage.rs::requirement_met`; `ControlledTank::meets`; ADR-0013 | brevity: Repeated why | Prose still says "(effectiveness > 0)" and ADR-0013 still names `part_qualities` after the name was deleted. | Restate against the task rate. | ratchet |
-| ballistics-24 | P3 | `src/ballistics/resolve.rs::apply_bounce`; `src/buildings/breakage.rs::read_shell`; `src/trees/motion.rs::read_shell` | base-truths: Missing exchange route | The game's damage model publishes no line for a bounce on unowned matter, so buildings and trunks receive neither its work nor momentum. | Publish the resolved bounce exchange to those consumers with the ricochet rebuild. | ricochet rebuild |
 
 ## driving
 

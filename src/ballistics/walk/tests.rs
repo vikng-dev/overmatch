@@ -1421,7 +1421,7 @@ fn partial_coverage_does_not_dilute_the_contact_thickness() {
 /// direction too, so 1 mm of aim can never flip the outcome between "flies past" and "full bounce".
 /// At η = 1 the round keeps the striking direction's part along the surface, `√(1 − (axis · n̄)²)`;
 /// below it, the speed retained blends from 1 toward that by η, as the turn does toward the
-/// reflection. A retained share read from a constant, or not blended by η, fails here.
+/// slide. A retained share read from a constant, or not blended by η, fails here.
 #[test]
 fn partial_coverage_scales_the_deflection_angle_and_the_speed_lost() {
     let laws = WalkLaws::default();
@@ -1440,14 +1440,14 @@ fn partial_coverage_scales_the_deflection_angle_and_the_speed_lost() {
         } => (direction, speed_scale),
         other => panic!("expected a ricochet, got {other:?}"),
     };
-    // At η = 1 the blend IS the classic bounce, returned bit-for-bit — the pre-ruling behaviour is
-    // preserved exactly at full coverage.
-    let specular = Vec3::from(super::super::reflect(
-        Dir3::new(AXIS).unwrap(),
-        Dir3::new(full.events[0].entry_normal).unwrap(),
-    ));
-    assert_eq!(full_direction.to_array(), specular.to_array());
-    let along_normal = AXIS.dot(full.events[0].entry_normal);
+    // At η = 1 the round leaves along the face, its part along the normal gone: restitution 0.
+    let surface = full.events[0].entry_normal;
+    assert!(full_direction.dot(surface).abs() < 1.0e-6);
+    assert!(
+        full_direction.distance((AXIS - surface * AXIS.dot(surface)).normalize()) < 1.0e-6,
+        "{full_direction}"
+    );
+    let along_normal = AXIS.dot(surface);
     let sliding = (1.0 - along_normal * along_normal).sqrt();
     assert!(
         (full_scale - sliding).abs() < 1.0e-6,
@@ -1481,6 +1481,39 @@ fn partial_coverage_scales_the_deflection_angle_and_the_speed_lost() {
                 previous_turn = turn;
             }
             other => panic!("expected a partial ricochet at η = {coverage}: {other:?}"),
+        }
+    }
+}
+
+/// The game's damage model: a face holds a round that cannot bite only within the friction angle,
+/// and only at full coverage, at every speed. A spent round's way to an end relies on it: gravity
+/// supplies its direction, so the tilt of the face it lies on is its incidence. Mutants: a hold read
+/// from speed, or one a clip can reach (a graze would stop dead).
+#[test]
+fn a_face_holds_a_skidding_round_within_the_friction_angle_at_full_coverage() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0)]);
+    let frame = DiscFrame::from_axis_and_reference(AXIS, Vec3::Y).unwrap();
+    let limit = laws.contact_friction.atan();
+    let side = frame.u;
+    for speed in [0.15, 30.0] {
+        let shot = Shot { speed, ..AP_88 };
+        for (angle, held) in [(limit - 0.01, true), (limit + 0.01, false)] {
+            let normal = (-AXIS * angle.cos() + side * angle.sin()).normalize();
+            let steel = [Slab::at(1, 0, 0.5, normal, 0.4)];
+            let full = disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &steel, |_| true);
+            let full = walk_disc(&full, &volumes, &laws).unwrap();
+            match begin(&full, &shot, &laws).unwrap() {
+                Begin::Held { .. } => assert!(held, "held at {speed} m/s, {angle} rad"),
+                Begin::Ricochet { .. } => assert!(!held, "slid at {speed} m/s, {angle} rad"),
+                other => panic!("the fixture skids at {speed} m/s: {other:?}"),
+            }
+            let clip = disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &steel, |i| i % 2 == 0);
+            let clip = walk_disc(&clip, &volumes, &laws).unwrap();
+            assert!(
+                matches!(begin(&clip, &shot, &laws).unwrap(), Begin::Ricochet { .. }),
+                "a clip carries on at {speed} m/s, {angle} rad"
+            );
         }
     }
 }

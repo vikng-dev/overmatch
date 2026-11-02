@@ -1133,11 +1133,11 @@ fn a_round_through_one_tank_into_a_second_resolves_both() {
 /// A round that leaves a tank and strikes it again off another tank's armour: each encounter is its
 /// own record of the one shot, their losses partition the shot's loss on the tank, and a knockout
 /// the second encounter dealt is that encounter's. Fixture geometry: the round crosses the struck
-/// tank's front box, glances off a thick plate on a second tank 6 m to its side at ~75° incidence
-/// (past the ricochet angle), and comes back across the struck tank's rear box and the ammunition
-/// behind it, clear of the struck tank's bounds for over a tick in between. The front box's soft
-/// substance turns the round a hundredth of a reference plate's bend, so the return crosses the
-/// tank's axis about 45 m behind the front box (DERIVED: 2 × 6 m / tan 15°).
+/// tank's front box, skids off a thick plate on a second tank 6 m to its side at 65° incidence, and
+/// slides along that plate, yawed 10° back toward the struck tank, across the struck tank's rear box
+/// and the ammunition behind it, clear of the struck tank's bounds for over a tick in between. The
+/// slide stands about 2 m off the tank's axis 45 m behind the front box (DERIVED:
+/// 6 m - (45 m - 6 m / tan 15°) × tan 10°).
 #[test]
 fn a_round_that_strikes_a_tank_again_records_each_encounter() {
     let mut app = recording_world(false);
@@ -1165,10 +1165,15 @@ fn a_round_that_strikes_a_tank_again_records_each_encounter() {
         .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
     tank(
         &mut app,
-        Vec3::new(6.15, 0.0, -28.0),
-        0.0,
+        Vec3::new(6.0, 0.0, -6.0 / 15.0_f32.to_radians().tan()),
+        10.0_f32.to_radians(),
         Vec3::ZERO,
-        &[("glacis", Vec3::new(0.3, 3.0, 40.0), Vec3::ZERO, Kind::Plate)],
+        &[(
+            "glacis",
+            Vec3::new(0.3, 3.0, 40.0),
+            Vec3::new(0.15, 0.0, -10.0),
+            Kind::Plate,
+        )],
     );
     // FIXTURE DATA: the recipient life is the record's live production identity.
     let struck_life = crate::damage_cam::wire::TankLife {
@@ -2605,8 +2610,9 @@ fn the_presented_march_includes_the_birth_to_muzzle_prefix() {
 }
 
 /// The game's damage model: leaving the source's box ends its launch clearance permanently.
-/// A real armour bounce can then bring the round into its source's rear volumes and deposit dose.
-/// All poses, sizes, pools, speed and the grazing angle below are fixture data.
+/// A real armour skid can then bring the round into its source's rear volumes and deposit dose:
+/// the reflector, yawed 10° back toward the source, carries the slide into them. All poses, sizes,
+/// pools, speed and angles below are fixture data.
 #[test]
 fn a_round_that_bounces_back_into_its_source_strikes_it() {
     returning_source_round(false);
@@ -2657,27 +2663,40 @@ fn returning_source_round(queued: bool) {
     app.world_mut()
         .entity_mut(source)
         .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
-    let mut foreign = vec![(
-        "reflector",
-        Vec3::new(0.3, 3.0, 40.0),
-        Vec3::new(6.15, 0.0, -28.0),
-        Kind::Plate,
-    )];
+    tank(
+        &mut app,
+        Vec3::new(6.0, 0.0, -6.0 / 15.0_f32.to_radians().tan()),
+        10.0_f32.to_radians(),
+        Vec3::ZERO,
+        &[(
+            "reflector",
+            Vec3::new(0.3, 3.0, 40.0),
+            Vec3::new(0.15, 0.0, -10.0),
+            Kind::Plate,
+        )],
+    );
     if queued {
-        foreign.push((
-            "first contact inside source box",
-            Vec3::new(2.0, 3.0, 0.01),
-            Vec3::new(2.0, 0.0, -7.5),
-            Kind::Plate,
-        ));
-        foreign.push((
-            "foreign plate beyond returning source contact",
-            Vec3::new(8.0, 3.0, 0.001),
-            Vec3::NEG_Z * 47.0,
-            Kind::Plate,
-        ));
+        tank(
+            &mut app,
+            Vec3::ZERO,
+            0.0,
+            Vec3::ZERO,
+            &[
+                (
+                    "first contact inside source box",
+                    Vec3::new(2.0, 3.0, 0.01),
+                    Vec3::new(2.0, 0.0, -7.5),
+                    Kind::Plate,
+                ),
+                (
+                    "foreign plate beyond returning source contact",
+                    Vec3::new(8.0, 3.0, 0.001),
+                    Vec3::NEG_Z * 47.0,
+                    Kind::Plate,
+                ),
+            ],
+        );
     }
-    tank(&mut app, Vec3::ZERO, 0.0, Vec3::ZERO, &foreign);
     settle(&mut app);
     let angle = 15.0_f32.to_radians();
     let direction = Dir3::new(Vec3::new(angle.sin(), 0.0, -angle.cos())).unwrap();
@@ -2715,7 +2734,7 @@ fn returning_source_round(queued: bool) {
             |mark| matches!(mark, ArmourMark::Wound { volumes: crossed, .. } | ArmourMark::Crossing { volumes: crossed, .. }
         if crossed.iter().any(|v| v.volume == volumes[1]))
         ),
-        "after box clearance the reflected round must strike its source's rear volume"
+        "after box clearance the sliding round must strike its source's rear volume"
     );
     assert!(
         marks.iter().any(|mark| matches!(mark,
@@ -2898,9 +2917,9 @@ fn lagging_samples_clear_the_barrel(foreign_velocity: Vec3, across_tick: bool) {
 
 /// The game's damage model: an exit followed by an immediate return still ends launch clearance.
 /// An axis-only round leaves its source box at x = 1, meets a foreign reflector 0.1 mm past that
-/// face and bounces back at 75° obliquity. Its outgoing x = -sin 15° returns through the source
-/// box by flight (DERIVED), after launch clearance has ended. The return must meet the source's
-/// armour solid. Every pose, size and speed below is fixture data.
+/// face at 75° obliquity and slides along it. Resting a body radius off that face, its axis stands
+/// back inside the source's box (DERIVED), after launch clearance has ended. The slide must meet
+/// the source's armour solid. Every pose, size and speed below is fixture data.
 #[test]
 fn a_bounce_just_past_the_source_box_returns_into_a_solid_source() {
     let mut app = recording_world(false);
@@ -2988,6 +3007,93 @@ fn a_bounce_just_past_the_source_box_returns_into_a_solid_source() {
     );
 }
 
+/// The game's damage model: a round with nothing left to move on comes to rest, so a spent round
+/// trapped in a closed box ends. The live record relies on it: `finish_records` closes only on a
+/// round at rest or clear of the tank, and each further skid would write marks, strikes and impulses
+/// without bound. The last mark says the face held it, with no entry, and the record says it rests
+/// on that face. The box tilts, so no face is level: an exactly head-on read bites. Dimensions,
+/// tilt, speed and direction are fixture data. Mutant: no [`walk::Begin::Held`].
+#[test]
+fn a_spent_round_trapped_in_a_closed_box_comes_to_rest() {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    let (hull, _) = tank(
+        &mut app,
+        Vec3::Y * 20.0,
+        0.0,
+        Vec3::ZERO,
+        &[
+            (
+                "right",
+                Vec3::new(0.4, 4.0, 4.0),
+                Vec3::X * 1.6,
+                Kind::Plate,
+            ),
+            (
+                "left",
+                Vec3::new(0.4, 4.0, 4.0),
+                Vec3::NEG_X * 1.6,
+                Kind::Plate,
+            ),
+            (
+                "front",
+                Vec3::new(4.0, 4.0, 0.4),
+                Vec3::Z * 1.6,
+                Kind::Plate,
+            ),
+            (
+                "back",
+                Vec3::new(4.0, 4.0, 0.4),
+                Vec3::NEG_Z * 1.6,
+                Kind::Plate,
+            ),
+            ("roof", Vec3::new(4.0, 0.4, 4.0), Vec3::Y * 1.6, Kind::Plate),
+            (
+                "floor",
+                Vec3::new(4.0, 0.4, 4.0),
+                Vec3::NEG_Y * 1.6,
+                Kind::Plate,
+            ),
+        ],
+    );
+    app.world_mut()
+        .get_mut::<Transform>(hull)
+        .unwrap()
+        .rotate_local(Quat::from_euler(EulerRot::XYZ, 0.13, 0.0, 0.07));
+    settle(&mut app);
+    let round = crate::tank::WeaponRound::resolve("88mm_AP").unwrap().round;
+    let birth = Vec3::new(0.2, 20.5, 0.1);
+    let mut fire = FireShell::of_round(
+        &round,
+        birth,
+        birth,
+        Dir3::new(Vec3::new(1.0, 0.3, 0.7)).unwrap(),
+        FireMechanism::Single,
+        false,
+        None,
+        None,
+    );
+    fire.speed = 30.0;
+    fire.drag_k = 0.0;
+    app.world_mut().trigger(fire);
+    run(&mut app, 64 * 10);
+    let mut flying = app.world_mut().query::<&Projectile>();
+    assert_eq!(
+        flying.iter(app.world()).count(),
+        0,
+        "the round rests within 10 s of flight in a 2.8 m box"
+    );
+    let mut shells = app.world_mut().query::<&PenetrationMarks>();
+    let marks = shells.single(app.world()).unwrap();
+    let Some(ArmourMark::Bounce { speed_out, .. }) = marks.log.last() else {
+        panic!(
+            "the face holds a round too slow to bite: {:?}",
+            marks.log.last()
+        );
+    };
+    assert_eq!(*speed_out, 0.0, "the face held it");
+}
+
 /// The game's damage model spends real flight time between reflections. The authority must
 /// return to the tick clock instead of planning the unbounded future of a trapped, fuze-less
 /// round. All dimensions, speeds and the 45-degree direction are fixture data.
@@ -3044,16 +3150,19 @@ fn a_closed_box_of_reflectors_returns_to_the_flight_clock() {
     fire.drag_k = 0.0;
     app.world_mut().trigger(fire);
     run(&mut app, 4);
-    let mut shells = app.world_mut().query::<(&Projectile, &PenetrationMarks)>();
-    let (projectile, marks) = shells.single(app.world()).unwrap();
-    assert!(
-        projectile.velocity.is_finite(),
-        "the tick leaves finite flight state"
-    );
-    assert!(!marks.ricochets.is_empty(), "the fixture reflects");
+    let mut shells = app.world_mut().query::<&PenetrationMarks>();
+    let marks = shells.single(app.world()).unwrap();
+    assert!(!marks.ricochets.is_empty(), "the fixture skids");
     assert!(
         marks.ricochets.len() < 4,
-        "flight time limits reflections in four fixture ticks"
+        "flight time limits skids in four fixture ticks"
+    );
+    let mut flying = app.world_mut().query::<&Projectile>();
+    assert!(
+        flying
+            .iter(app.world())
+            .all(|projectile| projectile.velocity.is_finite()),
+        "the tick leaves finite flight state"
     );
 }
 

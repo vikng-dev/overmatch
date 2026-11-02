@@ -1206,3 +1206,37 @@ guards fail on that s9: `the_shell_never_sinks_into_the_face_it_glances_off` (th
 6.2 mm inside the Turret_Bottom face 16 mm past the apex) and `each_front_runs_at_its_own_speed`.
 After the Turret_Bottom reflection a rim sample's 1.17 mm chord into Turret_Side ends the
 flight. The wire definitions and PROTOCOL_REV 66 are unchanged.
+
+## One round through a skid, step 1 (#260)
+
+Subject: the game's damage model, what the walk does with a round after a skid; game state only.
+
+The exit is a slide: the striking direction with its normal part removed, restitution zero, keeping
+`v sin θ` (a `StandIn` and an upper bound) and the coverage blend. The mirror is gone. Every leg
+after a skid lays the round's own circle about its own axis, so no earlier leg's offset survives.
+The round rests on the face: the axis turns on its incoming ray where it stands a body radius plus
+`REST_CLEARANCE` off the read plane, nothing lifted. A plate or step in that disc's path is met and
+decided by the contact law. At full coverage a face within the friction angle (`contact_friction`,
+`StandIn`) holds the round, which ends a spent round's path by a law: DERIVED, `v sin θ ≤ μ v cos θ`
+is angle only. The losing form, continuous Coulomb `v(sin θ − μ cos θ)`, would lower retained speed
+on every skid against the kept `v sin θ`; it is the owner's call if the cliff at `atan μ` shows.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude | P1: samples drift 0.2 m off a 0.044 m axis | verified in the old Ricochet arm, which inherited each offset | ballistics: lay a round's own disc on every leg after a skid (#260) |
+| Codex | P2: s9's crew outcome against `shows` | on the current record the loader station is reduced as stated, not emptied: s9 no longer skids under the pressure law. `shows` omitted the commander station and now states each outcome | same |
+| Claude | F1: a spent round has no rest path | traced, then fixed: `a_spent_round_trapped_in_a_closed_box_comes_to_rest` | same |
+| Claude | F2: `end: Left` for a round that never left | verified: the unwaited stage test failed on the old s5 record (`the body is off the last leg`) | same |
+
+MEASURED, s5 before: 11 skids alternating Ammo_L_1 and Hull_Side_Upper_L, `end: Left` inside the
+tank, 926 B. After: one skid off Ammo_L_1 at 252.5 → 126.3 m/s, then rest within 3.6 mm of
+steel-equivalent chord in the hull plating (Hull_Rear, Hull_Side_Upper_L), because the gap to the
+inner hull face (7.2 mm) is narrower than the calibre, `end: Rest`, 877 B. The box's HP pool is
+emptied in both (72 of 72 HP), and its line dose moves from 86.7 to 81.3. s9 before and after: no
+skid, the same outcomes (breech 142 of 142 HP taken, gunner station 30 of 30, loader station 15.95
+of 30, commander station 5.02 of 30, Ammo_R_1 1.67 of 72); only `shows` changed.
+
+Left for a later lane: a disc partly held at its start reads its entrance at its free samples' first
+face. In s5 that face is 0.75 m on, and the crossing is decided by its normal though the round stops
+short of it; the record's `timeline` skips that node as a named adaptation, and the walk's read
+remains.

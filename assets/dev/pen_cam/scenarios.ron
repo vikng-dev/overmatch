@@ -49,7 +49,7 @@
     ),
     (
         name: "s5_oblique_through",
-        shows: "an 88 through the hull side at 30 degrees: the cone's axis leans from the path toward the plate normal; the spent round then skids repeatedly between an ammunition box and the inner hull face",
+        shows: "an 88 through the hull side at 30 degrees: the cone's axis leans from the path toward the plate normal; the spent round skids once off an ammunition box 7 mm behind the plate, a gap narrower than its calibre, and comes to rest in the hull plating behind it. The box's HP pool is emptied (72 of 72 HP taken) and no crew station takes a dose",
         weapon: "MainGun",
         round: "88mm_AP",
         from: (-4.0, 1.5, -1.68),
@@ -94,7 +94,7 @@
     ),
     (
         name: "s9_breech_and_loader",
-        shows: "the turret traversed 30 degrees: an 88 through its side knocks out two boxes, the breech and the gunner station, and leaves the loader station reduced",
+        shows: "the turret traversed 30 degrees: an 88 through its side knocks out the breech (142 of 142 HP taken) and the gunner station (30 of 30 HP taken), and leaves the loader station reduced (16.0 of 30 HP taken) and the commander station reduced (5.0 of 30 HP taken)",
         weapon: "MainGun",
         round: "88mm_AP",
         from: (-4.0, 2.0, -0.6),

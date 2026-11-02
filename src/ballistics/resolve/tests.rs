@@ -588,7 +588,7 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
     );
 
     // Fixture: a pointed round's normal potency would defeat this chord, but contact pressure
-    // makes it skid. The reflected path passes beside the narrow target below.
+    // makes it skid. The slide passes beside the narrow target below.
     let pointed = RoundBody {
         nose_factor: crate::spec::NoseShape::Ogive { crh: 6.0 }.factor(),
         ..FIXTURE_MG
@@ -600,7 +600,7 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
     );
     let bounced = agree("bounce", pointed, 755.0, |app| {
         tilted_plate(app, 0.003, 75.0_f32.to_radians(), 1.0, STEEL);
-        target_below(app, 0.0, 0.6)
+        target_below(app, 0.0, 0.3)
     });
     assert_eq!(
         bounced.impacts.iter().map(|i| i.0).collect::<Vec<_>>(),
@@ -2041,29 +2041,18 @@ fn first_bounce(flown: &Drive) -> &Bounce {
     }
 }
 
-/// The game's damage model must discover a thin neighbour on the reflected flight, rather than
-/// teleporting the disc over it. Fixture: a 75-degree steel face, a 7.2 mm gap and a 2 mm
-/// neighbour, narrower than the ring spacing so incoming samples miss it. The outgoing axis meets
-/// it; its chord and energy must be charged. Playback and the next crossing rely on that discovery.
+/// The game's damage model must discover a thin neighbour on the slide, rather than carrying the
+/// disc over it. Fixture: a 75-degree steel face and a small neighbour on the outgoing axis, 0.5 m
+/// along the face, narrower than the ring spacing so no incoming sample meets it. Its chord and energy
+/// must be charged. Playback and the next crossing rely on that discovery.
 #[test]
-fn ricochet_resume_does_not_skip_a_thin_neighbour() {
-    let mut app = world_with_trimesh_plates(&[]);
-    let rotation = Quat::from_rotation_z(75.0_f32.to_radians());
-    let normal = rotation * Vec3::Y;
-    let contact = Vec3::new(DROP_FROM.x, 1.0, DROP_FROM.z);
-    let slab = volume(
-        &mut app,
-        Vec3::new(12.0, 0.4, 3.0),
-        Transform::from_translation(contact - normal * 0.2).with_rotation(rotation),
-        STEEL,
-        Some(1000),
-    );
-    let outgoing = Vec3::NEG_Y - 2.0 * Vec3::NEG_Y.dot(normal) * normal;
+fn a_slide_does_not_skip_a_thin_neighbour() {
+    let (mut app, slab, face) = world_with_face(75.0_f32.to_radians());
     let neighbour = volume(
         &mut app,
         Vec3::new(0.001, 0.002, 0.001),
-        Transform::from_translation(contact + outgoing * (0.0082 / outgoing.dot(normal)))
-            .with_rotation(rotation),
+        Transform::from_translation(face.at(-0.5, FIXTURE_88.caliber * 0.5 + REST_CLEARANCE))
+            .with_rotation(face.rotation),
         STEEL,
         Some(1000),
     );
@@ -2074,9 +2063,243 @@ fn ricochet_resume_does_not_skip_a_thin_neighbour() {
     assert_eq!(first_bounce(&flown).struck, slab);
     assert!(
         flown.reaches(neighbour),
-        "the reflected axis crosses the thin neighbour: {:?}",
+        "the sliding axis crosses the thin neighbour: {:?}",
         impacts_of(&flown)
     );
+}
+
+/// A steel face under [`DROP_FROM`]'s drop, `incidence` from it, as the fixture geometry of a
+/// slide. Fixture data, in metres.
+struct Face {
+    contact: Vec3,
+    rotation: Quat,
+}
+
+impl Face {
+    fn normal(&self) -> Vec3 {
+        self.rotation * Vec3::Y
+    }
+
+    /// The point `up_slope` m along the face above the contact and `height` m off it.
+    fn at(&self, up_slope: f32, height: f32) -> Vec3 {
+        self.contact + self.rotation * Vec3::X * up_slope + self.normal() * height
+    }
+}
+
+fn world_with_face(incidence: f32) -> (App, Entity, Face) {
+    let mut app = world_with_trimesh_plates(&[]);
+    let face = Face {
+        contact: Vec3::new(DROP_FROM.x, 1.0, DROP_FROM.z),
+        rotation: Quat::from_rotation_z(incidence),
+    };
+    let slab = volume(
+        &mut app,
+        Vec3::new(12.0, 0.4, 3.0),
+        Transform::from_translation(face.at(0.0, -0.2)).with_rotation(face.rotation),
+        STEEL,
+        Some(1000),
+    );
+    (app, slab, face)
+}
+
+/// How far `offset` lies off an axis along `axis`.
+fn off_axis(offset: Vec3, axis: Vec3) -> f32 {
+    (offset - axis * offset.dot(axis)).length()
+}
+
+/// The game's damage model: after any skid, on every leg, every sample lies within the round's
+/// calibre about the axis. A skid changes the round's velocity, not its calibre; the line dose, the
+/// field casts and every later contact read these samples as its cross-section. Fixture: a face
+/// stepped under the disc, so the incoming samples reach hand-offs 0.03 m / cos θ apart. Mutant:
+/// inherit the previous leg's offsets, which leaves samples a tenth of a metre off the new axis.
+#[test]
+fn every_leg_after_a_skid_is_the_rounds_disc_about_its_axis() {
+    let incidence = 75.0_f32.to_radians();
+    let (mut app, _, face) = world_with_face(incidence);
+    let recessed = volume(
+        &mut app,
+        Vec3::new(12.0, 0.4, 3.0),
+        Transform::from_translation(face.at(-6.0, -0.23)).with_rotation(face.rotation),
+        STEEL,
+        Some(1000),
+    );
+    let raised = volume(
+        &mut app,
+        Vec3::new(12.0, 0.4, 3.0),
+        Transform::from_translation(face.at(6.1, -0.17)).with_rotation(face.rotation),
+        STEEL,
+        Some(1000),
+    );
+    for _ in 0..8 {
+        app.update();
+    }
+    let flown = driven(&mut app, FIXTURE_88, 300.0);
+    let reach = FIXTURE_88.caliber * 0.5 * (1.0 + 1.0e-3);
+    let mut skids = 0;
+    let mut after_skid = false;
+    for decision in &flown.decisions {
+        if after_skid {
+            for leg in decision.legs() {
+                for sample in &leg.samples {
+                    let off = off_axis(sample.offset, Vec3::from(leg.axis));
+                    assert!(off <= reach, "{off} m off a {reach} m round's axis");
+                }
+            }
+        }
+        if let Decision::Bounce(bounce) = decision {
+            skids += 1;
+            after_skid = true;
+            let starts = bounce.continuation.as_ref().expect("the fixture slides");
+            for seed in &starts.seeds {
+                let off = off_axis(seed.offset, Vec3::from(bounce.direction));
+                assert!(off <= reach, "{off} m off a {reach} m round's axis");
+            }
+        }
+    }
+    assert!(
+        skids > 0,
+        "the fixture skids off its steps: {:?} {recessed:?} {raised:?}",
+        impacts_of(&flown)
+    );
+}
+
+/// The game's damage model: a slide on a flat face stays out of that face for its calibre, with
+/// the axis on the ray it came in on and no contact until something changes. Mutants: resume at the
+/// axis hand-off (half the disc lies in the face, and the round bites as if head-on), or lift it off
+/// the ray.
+#[test]
+fn a_slide_on_a_flat_face_rests_on_it_for_its_calibre() {
+    for (body, speed) in [(FIXTURE_88, 300.0), (FIXTURE_MG, 500.0)] {
+        for incidence in [40.0_f32, 60.0, 80.0] {
+            let (mut app, slab, face) = world_with_face(incidence.to_radians());
+            for _ in 0..8 {
+                app.update();
+            }
+            let flown = driven(&mut app, body, speed);
+            let bounce = first_bounce(&flown);
+            assert_eq!(bounce.struck, slab);
+            assert!(
+                matches!(flown.decisions.as_slice(), [Decision::Bounce(_)]),
+                "{incidence}°: one contact: {:?}",
+                impacts_of(&flown)
+            );
+            let normal = face.normal();
+            assert!(bounce.direction.dot(normal).abs() < 1.0e-5, "{incidence}°");
+            let radius = body.caliber * 0.5;
+            let height = (bounce.resume - face.contact).dot(normal);
+            assert!(
+                (height - radius - REST_CLEARANCE).abs() < 1.0e-4,
+                "{incidence}°: the axis rests {height} m off the face"
+            );
+            assert!(
+                (bounce.resume - DROP_FROM).cross(Vec3::NEG_Y).length() < 1.0e-4,
+                "{incidence}°: the axis stays on the ray it flew: {}",
+                bounce.resume
+            );
+            let continuation = bounce.continuation.as_ref().unwrap();
+            for seed in &continuation.seeds {
+                let height = (continuation.world_origin() + seed.offset - face.contact).dot(normal);
+                assert!(
+                    height > 0.5 * REST_CLEARANCE && height < 2.0 * radius + 2.0 * REST_CLEARANCE,
+                    "{incidence}°: a sample {height} m off the face it rests on"
+                );
+            }
+        }
+    }
+}
+
+/// The game's damage model: a step in a slide's path is met and decided, by swept travel from
+/// where the last leg ended, with no lift over it and no immunity. Mutants: a free advance of the
+/// starts along the face, or a turn higher than the calibre's rest over the step's height. The step's
+/// height is below the disc's reach and the distances are fixture data.
+#[test]
+fn a_step_in_a_slides_path_is_met_from_where_the_last_leg_ended() {
+    let (mut app, _, face) = world_with_face(75.0_f32.to_radians());
+    let step = volume(
+        &mut app,
+        Vec3::new(0.4, 0.05, 3.0),
+        Transform::from_translation(face.at(-0.9, 0.025)).with_rotation(face.rotation),
+        STEEL,
+        Some(1000),
+    );
+    for _ in 0..8 {
+        app.update();
+    }
+    let flown = driven(&mut app, FIXTURE_88, 300.0);
+    let bounce = first_bounce(&flown);
+    let second = flown
+        .decisions
+        .get(1)
+        .unwrap_or_else(|| panic!("the slide meets the step: {:?}", impacts_of(&flown)));
+    let struck = match second {
+        Decision::Bounce(bounce) => bounce.struck,
+        Decision::Bite(bite) => bite.struck,
+        Decision::Clear { .. } => panic!("the step's face is in the disc's path"),
+    };
+    assert_eq!(struck, step);
+    let leg = &second.legs()[0];
+    assert!(leg.from.distance(bounce.resume) < 1.0e-4, "{}", leg.from);
+    assert!(
+        leg.axis.dot(*bounce.direction) > 1.0 - 1.0e-5,
+        "the next leg flies the slide"
+    );
+    let continuation = bounce.continuation.as_ref().unwrap();
+    for (seed, sample) in continuation.seeds.iter().zip(&leg.samples) {
+        assert!(seed.offset.distance(sample.offset) < 1.0e-5);
+    }
+}
+
+/// The game's damage model: a trihedral corner and a groove complete within the walk's limits, the
+/// faces each a real contact the law decides. A corner has no room for the disc, so its samples read
+/// inside a face and bite; nothing panics and no count ends it. Fixture: three steel faces square
+/// to each other, opening up the drop, and a 60-degree groove.
+#[test]
+fn a_corner_and_a_groove_complete_within_the_walks_limits() {
+    let corner = Vec3::new(DROP_FROM.x + 0.03, 1.0, DROP_FROM.z - 0.02);
+    let rotation = Quat::from_rotation_arc(Vec3::ONE.normalize(), Vec3::Y);
+    let mut trihedral = world_with_trimesh_plates(&[]);
+    for (normal, a, b) in [
+        (Vec3::X, Vec3::Y, Vec3::Z),
+        (Vec3::Y, Vec3::Z, Vec3::X),
+        (Vec3::Z, Vec3::X, Vec3::Y),
+    ] {
+        let size = (normal * 0.2 + a * 4.0 + b * 4.0).abs();
+        let centre = rotation * (a * 2.0 + b * 2.0 - normal * 0.1);
+        volume(
+            &mut trihedral,
+            size,
+            Transform::from_translation(corner + centre).with_rotation(rotation),
+            STEEL,
+            Some(1000),
+        );
+    }
+    let mut groove = world_with_trimesh_plates(&[]);
+    for (angle, side) in [(60.0_f32, 1.0_f32), (-60.0, -1.0)] {
+        let rotation = Quat::from_rotation_z(angle.to_radians());
+        let centre = Vec3::new(DROP_FROM.x - 0.1, 1.0, DROP_FROM.z)
+            + rotation * (Vec3::X * 2.0 * side - Vec3::Y * 0.1);
+        volume(
+            &mut groove,
+            Vec3::new(4.0, 0.2, 3.0),
+            Transform::from_translation(centre).with_rotation(rotation),
+            STEEL,
+            Some(1000),
+        );
+    }
+    for mut app in [trihedral, groove] {
+        for _ in 0..8 {
+            app.update();
+        }
+        for speed in [150.0, 300.0, 773.0] {
+            let flown = driven(&mut app, FIXTURE_88, speed);
+            assert!(
+                flown.decisions.len() < 64,
+                "{speed} m/s: {} decisions: {:?}",
+                flown.decisions.len(),
+                impacts_of(&flown)
+            );
+        }
+    }
 }
 
 /// A BOUNCE'S SHOCK IS THE ENERGY THE ROUND LOST AT IT: the dose a bounce jars into the face it

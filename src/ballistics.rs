@@ -107,8 +107,8 @@ pub use view::{TracerStreak, plugin as view_plugin};
 pub(crate) use sanctioned::{SanctionedInsert, SanctionedShots};
 
 /// The game's damage model: Resolution exit nudge (m). A perforation resumes this far past
-/// its resolved exit so the next collection does not re-touch that face. Reflections instead
-/// resume at their reached hand-offs, without a nudge; discovery establishes membership there.
+/// its resolved exit so the next collection does not re-touch that face. A skid resumes one body
+/// radius off its face instead ([`resolve::REST_CLEARANCE`]); discovery establishes membership there.
 ///
 /// Shared with [`resolve`]: the seed handed forward describes the next corridor's actual start.
 /// A perforation seed read one nudge earlier can still name the plate the corridor has left,
@@ -773,14 +773,6 @@ fn owned_losses(dose: &ShotDose, owners: &Query<&VolumeOf>, shooter: Option<Enti
         .sum()
 }
 
-/// Mirror a travel direction about a surface normal — the specular deflection of a ricochet.
-fn reflect(dir: Dir3, normal: Dir3) -> Dir3 {
-    let d = Vec3::from(dir);
-    let n = Vec3::from(normal);
-    Dir3::new(d - 2.0 * d.dot(n) * n)
-        .expect("a unit direction mirrored about a unit normal keeps unit length")
-}
-
 /// Rotate `dir` toward `target` by at most `angle` radians. Exactly opposed directions name no
 /// plane to turn in, so `dir` stands, as it does for no angle or no gap.
 fn bend_toward(dir: Dir3, target: Dir3, angle: f32) -> Dir3 {
@@ -1381,7 +1373,7 @@ pub(crate) struct Projectile {
     /// and never use this sampling frame.
     disc: walk::DiscFrame,
     /// The game's damage model: where every sample stands as the last step ended, anchor-relative.
-    /// Discovery retains these reached positions, including reflected or perforated hand-offs,
+    /// Discovery retains these reached positions, including a skid's disc or perforated hand-offs,
     /// and reads any material newly holding them in the current scene.
     ///
     /// `None` at spawn: authority discovery lays its birth disc at the shell's translation.
@@ -2925,7 +2917,7 @@ fn march_shell_step(
         }
         let from = (1.0 - budget.remaining() as f32 / dt).clamp(0.0, 1.0);
         world.moment.set(Some(from));
-        // The game's damage model reads unread starts (a reflection's footprint, a newly placed
+        // The game's damage model reads unread starts (a skid's footprint, a newly placed
         // disc) before the step may end: material holding one is resolved this tick, and the
         // starts carried across the boundary are read ones.
         flight
@@ -3463,19 +3455,13 @@ fn decide_playback(
             matches!(&decision,
             resolve::Decision::Clear { travel, .. } if *travel >= distance)
         });
+        // A skid off a face outside the box ends clearance: the axis turns a body radius short of
+        // that face, so where the axis turned can still stand inside the box.
         let bounced_out = clearance.is_some_and(|bounds| match &decision {
-            resolve::Decision::Bounce(bounce) => {
-                let way_in = &bounce.approach;
-                let ends: Vec<Vec3> = way_in
-                    .samples
-                    .iter()
-                    .map(|sample| way_in.from + sample.offset + way_in.axis * sample.length)
-                    .collect();
-                !bounds.holds_any(&ends, 0.0)
-            }
+            resolve::Decision::Bounce(bounce) => !bounds.holds_any(&[bounce.position], 0.0),
             _ => false,
         });
-        // The game's damage model: a reflection finishes this immutable contact. Playback
+        // The game's damage model: a skid finishes this immutable contact. Playback
         // spends its approach before discovery can reach another face.
         // A trapped round therefore cannot plan arbitrarily slow future bounces in one tick.
         let bounced = matches!(decision, resolve::Decision::Bounce(_));
@@ -5313,8 +5299,8 @@ pub(crate) mod march_tests {
             .deflection
             .expect("a ricochet carries its outgoing direction");
         assert!(
-            deflect.z > 0.0,
-            "the bounce deflects back off the face (+Z), got {deflect:?}"
+            deflect.z.abs() < 1.0e-3 && deflect.x > 0.99,
+            "the round leaves along the face (normal +Z), got {deflect:?}"
         );
         assert_eq!(
             stopped
@@ -7057,28 +7043,88 @@ pub(crate) mod march_tests {
         );
     }
 
-    /// An 88 grazing a thick plate at 75°, and a second plate square to the bounce's outgoing ray,
-    /// its face offset one calibre radius from the struck plane and 10 mm along the outgoing ray, extending `low` m from
-    /// the outgoing axis to 300 mm above it: the impacts the round made. FIXTURE DATA.
-    fn graze_then_plate(low: f32) -> Vec<Captured> {
+    /// The game's damage model: a skid's exchange reaches the matter it struck. A building or trunk
+    /// reads only `ShellMarched::lines`, so a skid that published none would spend its work and
+    /// momentum on nothing. Plate, speed and the 75° graze are fixture data. Mutant: no line for a
+    /// skid.
+    #[test]
+    fn a_skid_delivers_its_exchange_as_a_line_on_the_face() {
+        #[derive(Resource, Default)]
+        struct Lines(Vec<DeliveredLine>);
+        let graze = Vec3::new(
+            75.0_f32.to_radians().sin(),
+            0.0,
+            -75.0_f32.to_radians().cos(),
+        );
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::Y * 2.0);
+        app.init_resource::<Lines>().add_observer(
+            |event: On<ShellMarched>, mut lines: ResMut<Lines>| {
+                lines.0.extend_from_slice(&event.lines);
+            },
+        );
+        let shell = spawn_round(
+            &mut app,
+            FIXTURE_88,
+            Vec3::new(-1.0, 2.0, 0.6),
+            graze * 800.0,
+        );
+        app.update();
+        let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
+        let ArmourMark::Bounce {
+            position,
+            incoming,
+            outgoing,
+            speed_in,
+            speed_out,
+            struck,
+            shock,
+            ..
+        } = marks.log[0]
+        else {
+            panic!("the fixture skids: {:?}", marks.log);
+        };
+        let lines = &app.world().resource::<Lines>().0;
+        assert_eq!(lines.len(), 1, "one contact, one line");
+        let line = &lines[0];
+        assert_eq!(line.crossing.volume, struck);
+        assert_eq!(
+            (line.crossing.entry, line.crossing.end),
+            (position, position)
+        );
+        assert!(shock > 0.0, "the fixture skid does work");
+        assert_eq!(line.crossing.energy, shock);
+        assert_eq!(line.entrance_energy, shock);
+        let exchanged = FIXTURE_88.mass * (incoming * speed_in - outgoing * speed_out);
+        assert!(
+            line.momentum.distance(exchanged) < exchanged.length() * 1.0e-5,
+            "the line carries the skid's impulse: {} of {exchanged}",
+            line.momentum
+        );
+        assert_eq!(line.entrance_momentum, line.momentum);
+    }
+
+    /// An 88 grazing a thick plate at 75°, and a second plate square to the grazing ray's mirror,
+    /// its face offset one calibre radius from the struck plane and 10 mm along that mirror,
+    /// extending from 40 mm below the mirror's line to 300 mm above it: the impacts the round made.
+    /// FIXTURE DATA.
+    fn graze_and_plate() -> Vec<Captured> {
         let incidence = 75.0_f32.to_radians();
         let incoming = Vec3::new(incidence.sin(), 0.0, -incidence.cos());
         let normal = Vec3::Z;
-        let outgoing = incoming - 2.0 * incoming.dot(normal) * normal;
+        let mirror = incoming - 2.0 * incoming.dot(normal) * normal;
         let first = (Vec3::new(3.0, 3.0, 0.1), Vec3::new(0.0, 2.0, 0.0));
         let bounce = Vec3::new(0.0, 2.0, 0.05);
         let radius = FIXTURE_88.caliber * 0.5;
         let layout_anchor = bounce + normal * radius;
-        // The second plate's frame: local +Z faces back up the outgoing ray, local +Y leans away from
-        // the first plate.
-        let back = -outgoing;
-        let up = (normal - outgoing * normal.dot(outgoing)).normalize();
+        // The second plate's frame: local +Z faces back up the mirror, local +Y leans away from the
+        // first plate.
+        let back = -mirror;
+        let up = (normal - mirror * normal.dot(mirror)).normalize();
         let side = up.cross(back);
         let rotation = Quat::from_mat3(&Mat3::from_cols(side, up, back));
         let thickness = 0.05;
-        let high = 0.300;
-        let centre =
-            layout_anchor + outgoing * (0.010 + thickness * 0.5) + up * ((low + high) * 0.5);
+        let (low, high) = (-0.040, 0.300);
+        let centre = layout_anchor + mirror * (0.010 + thickness * 0.5) + up * ((low + high) * 0.5);
         let mut app = world_with_trimesh_plates(&[first]);
         app.world_mut().spawn((
             Transform::from_translation(centre).with_rotation(rotation),
@@ -7103,22 +7149,6 @@ pub(crate) mod march_tests {
             app.update();
         }
         app.world().resource::<ImpactLog>().0.clone()
-    }
-
-    /// The game's damage model retains the samples that reached the reflected face. This fixture's
-    /// second plate lies above their outgoing rays, so the reflection alone is recorded. A fresh
-    /// lifted layout would invent a contact there; the thin-neighbour resolver fixture separately
-    /// requires a real outgoing contact to be charged. All geometry is fixture data.
-    #[test]
-    fn a_bounce_keeps_its_reached_samples_at_the_face() {
-        let impacts = graze_then_plate(0.005);
-        let read: Vec<(Vec3, Verdict)> = impacts.iter().map(|i| (i.position, i.verdict)).collect();
-        assert_eq!(
-            read.len(),
-            1,
-            "the reflected rays miss the elevated plate: {read:?}"
-        );
-        assert_eq!(read[0].1, Verdict::Ricochet);
     }
 
     /// The game's damage model admits a round's source on the starts its step resumes from.
@@ -7172,15 +7202,15 @@ pub(crate) mod march_tests {
 
     /// A GRAZE AND A PLATE THE DISC MEETS WITHIN THE GRAZE'S DEPTH ARE ONE CROSSING, AND IT BITES.
     ///
-    /// [`graze_then_plate`] with the second plate reaching 40 mm below the outgoing axis, into the
-    /// incoming disc's path: the disc's upper samples meet its face before they would meet the
-    /// grazed plate's, inside the graze's depth, so both pieces are one crossing (design doc §13.5,
-    /// the hand-off) and the entrance reads both surfaces. The second face, square to the outgoing
-    /// ray, tilts the read's normal toward the round, so the graze that ricochets alone bites:
+    /// [`graze_and_plate`]: the second plate reaches into the incoming disc's path, so the disc's
+    /// upper samples meet its face before they would meet the grazed plate's, inside the graze's
+    /// depth, and both pieces are one crossing (design doc §13.5, the hand-off) with the entrance
+    /// reading both surfaces. The second face, square to the mirror, tilts the read's normal toward
+    /// the round, so the graze that ricochets alone bites:
     /// one entry, its normal leaning toward the second face, and no bounce or walk contradiction.
     #[test]
     fn a_graze_and_a_plate_struck_together_bite_as_one_crossing() {
-        let impacts = graze_then_plate(-0.040);
+        let impacts = graze_and_plate();
         let read: Vec<(Vec3, Verdict)> = impacts.iter().map(|i| (i.position, i.verdict)).collect();
         assert!(
             impacts

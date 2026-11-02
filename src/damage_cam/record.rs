@@ -582,11 +582,18 @@ fn timeline(
             }
             ArmourMark::Crossing {
                 entrance,
+                incoming,
                 speed_in,
                 end,
                 ..
             } => {
-                legs.push((*entrance, *speed_in, index));
+                // A disc held in material at its start can stop short of the face its free samples
+                // read; the round never flew to that face.
+                let (CrossingEnd::Rest { at: reached } | CrossingEnd::Exit { at: reached, .. }) =
+                    *end;
+                if (reached - *entrance).dot(*incoming) >= 0.0 {
+                    legs.push((*entrance, *speed_in, index));
+                }
                 // The struck tank's first contact is its own first volume, which an overlapping
                 // tank's volume may precede inside the crossing.
                 if index == first_touch
@@ -749,10 +756,11 @@ pub(crate) fn report_from(
                 outgoing,
                 struck: volume,
                 shock,
+                speed_out,
                 ..
             } => {
                 let directions = [*normal, *incoming, *outgoing];
-                ledger.bounce(index, *position, directions, *volume, *shock);
+                ledger.bounce(index, *position, directions, *volume, *shock, *speed_out);
             }
             ArmourMark::Crossing {
                 volumes,
@@ -963,8 +971,10 @@ impl<'a> Ledger<'a> {
     }
 
     /// Mark `index`, a bounce at `position` off `volume`'s face, its `[normal, incoming, outgoing]`
-    /// `directions` (WORLD): its ricochet, the `shock` it jarred into a box, and the round leaving
-    /// there.
+    /// `directions` (WORLD): its ricochet, the `shock` it jarred into a box, and the round's end as
+    /// this mark states it: at rest on the face where it `kept` no speed, else leaving there. An
+    /// encounter closes only with the round at rest or clear of the tank
+    /// ([`super::recorder`]), so while the round stays inside a later mark replaces this end.
     fn bounce(
         &mut self,
         index: usize,
@@ -972,6 +982,7 @@ impl<'a> Ledger<'a> {
         directions: [Vec3; 3],
         volume: Entity,
         shock: f32,
+        kept: f32,
     ) {
         let on = self.on;
         let t = on.time_at(index, position);
@@ -989,8 +1000,14 @@ impl<'a> Ledger<'a> {
             self.line.push((volume, energy_units(shock), t, index));
             self.entered.push((volume, t, position, index));
         }
-        self.end = Some(RoundEnd::Left {
-            at: on.struck.point(index, position),
+        self.end = Some(if kept == 0.0 {
+            RoundEnd::Rest {
+                volume: name_of(on.world, volume),
+            }
+        } else {
+            RoundEnd::Left {
+                at: on.struck.point(index, position),
+            }
         });
     }
 

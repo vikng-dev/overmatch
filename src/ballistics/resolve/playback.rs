@@ -404,6 +404,15 @@ impl Playback {
         let world = self.flight_at_end();
         let (stopped, impact) = match self.world_decision() {
             Decision::Clear { .. } => (false, None),
+            Decision::Bounce(bounce) if bounce.continuation.is_none() => (
+                true,
+                Some(PathImpact::Stopped {
+                    at: bounce.position,
+                    normal: bounce.normal,
+                    feedback: bounce.feedback,
+                    ordinal,
+                }),
+            ),
             Decision::Bounce(bounce) => (
                 false,
                 Some(PathImpact::Bounce {
@@ -534,9 +543,11 @@ impl Playback {
             Decision::Bounce(bounce) => {
                 bounce.position = self.point(bounce.position);
                 bounce.resume = self.point(bounce.resume);
-                bounce.continuation.anchor += self.carrier * self.crossing.seconds as f32;
-                bounce.direction = direction;
-                bounce.speed = velocity.length();
+                if let Some(continuation) = &mut bounce.continuation {
+                    continuation.anchor += self.carrier * self.crossing.seconds as f32;
+                    bounce.direction = direction;
+                    bounce.speed = velocity.length();
+                }
             }
             Decision::Bite(bite) => {
                 bite.entrance = self.point(bite.entrance);
@@ -708,6 +719,22 @@ impl Playback {
                     Decision::Clear { .. } => {}
                     Decision::Bounce(bounce) => {
                         apply_bounce(bounce, shell, terminal_emitted, bodies, commands);
+                        // Buildings and trunks read only lines. A skid does all its work at the
+                        // face, so its line has no length and is all entrance.
+                        lines.push(super::super::DeliveredLine {
+                            crossing: VolumeCrossing {
+                                volume: bounce.struck,
+                                entry: bounce.position,
+                                end: bounce.position,
+                                chord: 0.0,
+                                cost: 0.0,
+                                energy: bounce.shock,
+                                perforated: false,
+                            },
+                            momentum: bounce.impulse,
+                            entrance_momentum: bounce.impulse,
+                            entrance_energy: bounce.shock,
+                        });
                         removed +=
                             shell
                                 .dose

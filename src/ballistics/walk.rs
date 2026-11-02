@@ -438,6 +438,8 @@ pub struct WalkLaws {
     pub reference: crate::substances::MaterialFacts,
     /// Reference-mm per metre of the reference substance.
     pub rha_reference: f32,
+    /// Coulomb coefficient of a round's contact with a face ([`Begin::Held`]).
+    pub contact_friction: f32,
 }
 
 impl Default for WalkLaws {
@@ -464,6 +466,7 @@ impl Default for WalkLaws {
             event_secant_cap: 100.0,
             reference: SubstanceRegistry::shipped_static().reference_facts(),
             rha_reference: crate::substances::REFERENCE_FACTOR,
+            contact_friction: super::physical_laws::PhysicalLaws::shipped().contact_friction,
         }
     }
 }
@@ -837,7 +840,7 @@ impl RayWalk {
     ///
     /// Only the strict interior is seeded. An entry coincident with the restart belongs to the
     /// new corridor; an exit coincident with it has already been left and the unseeded collector
-    /// drops it in the same ownership band. Thus reflection does not charge a rounding-sized
+    /// drops it in the same ownership band. Thus a skid does not charge a rounding-sized
     /// remainder of the face it just left, while a separate finite interval keeps both faces.
     ///
     /// "AT the restart" is a TOLERANCE, not an equality, and that is the whole reason this takes
@@ -860,7 +863,7 @@ impl RayWalk {
                         *open == f64::NEG_INFINITY || (*open < t && !coincident(*open, t, laws));
                     // The game's damage model treats an outward face at the restart as already
                     // left. The unseeded collector drops that exit in the same ownership band;
-                    // a reflected ray must not invent a positive chord from its rounding hair.
+                    // a skid's ray must not invent a positive chord from its rounding hair.
                     let still_inside = t < *close && !coincident(*close, t, laws);
                     entered && still_inside
                 })
@@ -3001,13 +3004,15 @@ pub struct EntranceRead {
 pub enum Begin {
     /// The disc met no material.
     Miss,
-    /// The contact pressure cannot hold the face: deflect off `n̄`, no entry, no spall (§4).
+    /// The contact pressure cannot hold the face: the round slides off `n̄`, no entry, no spall (§4).
     Ricochet {
         entrance: EntranceRead,
-        /// Outgoing direction, blended from the incoming ray toward the full specular reflection by
-        /// η (§13.5). η = 1 is the classic bounce, returned bit-for-bit; η → 0
-        /// fades to undisturbed flight. Continuity is the whole point — 1 mm of aim must never flip
-        /// the outcome between "flies past" and "full bounce".
+        /// Outgoing direction, blended from the incoming ray toward the slide by η (§13.5). The
+        /// slide is the striking direction with its part along `n̄` removed, restitution 0: η = 1
+        /// leaves along the face, and η → 0 fades to undisturbed flight. Continuity is the whole
+        /// point — 1 mm of aim must never flip the outcome between "flies past" and "full slide".
+        /// Sources put a rigid pointed round at a small restitution below about 0.6 V50, so the
+        /// slide is the simplest exit they allow.
         ///
         /// The lateral TORQUE a corner clip really applies stays deferred (§13.5): only the deflection MAGNITUDE ships. The mean lateral offset of the covered
         /// samples is the ready-made kick direction whenever it is wanted.
@@ -3017,9 +3022,27 @@ pub enum Begin {
         /// motion pointed into the face, restitution 0, so the energy it loses there is
         /// `½ m (v cos θ)²`. η blends it from 1 (η → 0, nothing lost) to that, as it blends the
         /// direction — a graze IS a partial ricochet.
+        ///
+        /// StandIn and an upper bound: no source gives a steel-on-steel retained speed, and
+        /// `v sin θ` is measured only on spheres in soft plate. It stands in for the law of how
+        /// much a sliding round loses to the face
+        /// (`.agents/scratch/research/cap-contact-sources-2026-11-02.md`).
         speed_scale: f32,
         /// Per sample, the progress along its incoming ray where its way in ends: its hand-off
         /// ([`DiscWalk::hand_off`]), as a transit's way in does.
+        hand_offs: Vec<f64>,
+    },
+    /// The contact pressure cannot hold the face, and at full coverage the face holds the round:
+    /// the motion along it is within what friction on the contact's normal impulse can stop,
+    /// `v sin θ ≤ μ v cos θ`, so nothing is left to move on. No entry, no spall; it rests there.
+    ///
+    /// The test is an angle, so one law serves every speed: a round gravity alone presses on a
+    /// face rests below the angle of repose and slides on above it, and a spent round in a closed
+    /// hull ends on the first face flat enough to hold it. A clip has no such rest: only η of the
+    /// motion into the face is exchanged, so the rest of the round's motion carries it on.
+    Held {
+        entrance: EntranceRead,
+        /// As [`Begin::Ricochet::hand_offs`].
         hand_offs: Vec<f64>,
     },
     /// It bit in. The caller must now collect the transit corridor along `request.axis`.
@@ -3119,17 +3142,25 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
     };
 
     if skids(shot, along_normal, steel_equivalent, factor, laws) {
-        let specular = super::reflect(axis, surface);
-        // Full coverage returns the mirror verbatim; rotating onto it would perturb its low bits.
-        let direction = if event.coverage >= 1.0 {
-            specular
-        } else {
-            blend_by_coverage(axis, specular, event.coverage)
-        };
         // `sin θ` as the striking direction's part along the surface, `√(1 − (axis · n̄)²)`: an
         // IEEE square root rather than the sine of the read incidence, so the share is the same on
         // every target.
         let sliding = (1.0 - along_normal * along_normal).max(0.0).sqrt();
+        if event.coverage >= 1.0 && sliding <= laws.contact_friction * along_normal {
+            return Ok(Begin::Held {
+                entrance: read,
+                hand_offs: at,
+            });
+        }
+        let along = Vec3::from(axis) - Vec3::from(surface) * Vec3::from(axis).dot(normal);
+        let slide = Dir3::new(along)
+            .expect("the game's damage model skids only with sin θ > 0, so a part along the face");
+        // Full coverage returns the slide verbatim; rotating onto it would perturb its low bits.
+        let direction = if event.coverage >= 1.0 {
+            slide
+        } else {
+            blend_by_coverage(axis, slide, event.coverage)
+        };
         return Ok(Begin::Ricochet {
             entrance: read,
             direction: Vec3::from(direction),
