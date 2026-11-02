@@ -38,13 +38,17 @@ pub enum DriveIntent {
 }
 
 /// Shared keyboard feel, admitted before play by the command core. The embedded data is also
-/// used by pure shaping callers (the track sandbox has no device gather).
+/// used by the track sandbox, whose arrow keys supply raw full-axis intent without notches.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DriveFeel {
     pub(crate) tap_window_s: crate::provenance::Sourced<f64>,
     pub(crate) notch_step: crate::provenance::Sourced<f32>,
     pub(crate) rise_per_second: crate::provenance::Sourced<f32>,
+    pub(crate) wide_on: crate::provenance::Sourced<f32>,
+    pub(crate) wide_off: crate::provenance::Sourced<f32>,
+    pub(crate) tight_on: crate::provenance::Sourced<f32>,
+    pub(crate) tight_off: crate::provenance::Sourced<f32>,
 }
 
 pub(crate) fn drive_feel() -> &'static DriveFeel {
@@ -66,6 +70,24 @@ pub(crate) fn drive_feel() -> &'static DriveFeel {
             data.rise_per_second.0.is_finite() && data.rise_per_second.0 > 0.0,
             "assets/input/drive.ron: rise_per_second must be finite and positive; author the keyboard rise rate"
         );
+        assert!(
+            0.0 < data.wide_off.0
+                && data.wide_off.0 < data.wide_on.0
+                && data.wide_on.0 < data.tight_off.0
+                && data.tight_off.0 < data.tight_on.0
+                && data.tight_on.0 <= 1.0,
+            "assets/input/drive.ron: author ordered wide_off < wide_on < tight_off < tight_on within [0, 1]"
+        );
+        for (name, off, on) in [
+            ("wide", data.wide_off.0, data.wide_on.0),
+            ("tight", data.tight_off.0, data.tight_on.0),
+        ] {
+            let first_notch = (off / data.notch_step.0).ceil() * data.notch_step.0;
+            assert!(
+                first_notch >= on || first_notch > 1.0,
+                "assets/input/drive.ron: {name} detent hysteresis contains a persistent notch; move both thresholds between notch_step multiples"
+            );
+        }
         data
     });
     &DATA

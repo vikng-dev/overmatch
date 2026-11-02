@@ -774,9 +774,9 @@ fn gear_climb_monotone_tiger() {
 }
 
 /// No authored speed cap bounds the game's tanks: the top gear at the fuel governor does. Full
-/// throttle on lossless flat ground must reach the ladder's top gear and its DERIVED torque-cut
-/// speed, steady over the last second. FIXTURE acceptance: 1 % below the cut-off for finite
-/// settling and 0.1 % above it for fixed-step integration and vertical ride velocity; neither
+/// throttle on lossless flat ground must reach the ladder's top gear and settle within its
+/// governor ramp: construction drag balances fuel before the complete cut. FIXTURE acceptance:
+/// 1 % below governed for settling and 0.1 % above cut-off for integration and ride; neither
 /// margin represents rolling loss. A
 /// governor or ladder mutant that lets the hull run away, or stalls it short of top gear, fails.
 /// The ground takes no rolling resistance, so the governor and the ladder are what this measures:
@@ -852,7 +852,7 @@ fn full_throttle_reaches_and_holds_the_governed_top_speed() {
     );
     assert_eq!(gear, top, "40 s of full throttle must reach the top gear");
     assert!(
-        mean >= 0.99 * ceiling,
+        mean >= 0.99 * governed,
         "top speed {mean:.3} m/s short of the governed {governed:.3} m/s"
     );
     assert!(
@@ -2048,6 +2048,7 @@ fn full_simulation_replay_is_bit_exact_through_the_flat_and_slope_scripts() {
 /// Frames to run past `Startup`. Both roots need two updates to get their subject up (the `Startup`
 /// command flush, then the `Update` that consumes `TankBlueprint`); the rest are slack, so systems
 /// gated on the built rig/tank run for several ticks rather than once.
+#[cfg(feature = "dev_ui")]
 const SANDBOX_BOOT_FRAMES: usize = 8;
 
 /// Boot one sandbox root headless and run [`SANDBOX_BOOT_FRAMES`] frames of it.
@@ -2057,6 +2058,7 @@ const SANDBOX_BOOT_FRAMES: usize = 8;
 ///
 /// Serialized against every other full-app fixture by [`BOOT_LEASE`]: these boots parse the whole
 /// Tiger glb (`bake`) and run Avian, and the suite's rule is that full apps take turns.
+#[cfg(feature = "dev_ui")]
 fn boot_sandbox_headless(root: fn(&mut App)) -> (App, MutexGuard<'static, ()>) {
     let lease = BOOT_LEASE
         .lock()
@@ -2074,6 +2076,7 @@ fn boot_sandbox_headless(root: fn(&mut App)) -> (App, MutexGuard<'static, ()>) {
 /// Every string a `Text` node shows this frame — its own `Visibility` and every ancestor's other
 /// than `Hidden`: the sandboxes' HUD surface, read without reaching into another module's private
 /// marker components.
+#[cfg(feature = "dev_ui")]
 fn shown_text(app: &mut App) -> Vec<String> {
     let world = app.world_mut();
     let mut texts = world.query::<(Entity, &Text)>();

@@ -9,15 +9,21 @@ use super::transmission::{TransmissionParams, TransmissionState};
 /// Numerical force resolution, admitted before play; the scheduler does not consume it yet.
 #[derive(bevy::prelude::Resource)]
 pub(crate) struct DriverResolution {
-    pub(crate) landing_force_margin_n: f32,
+    pub(crate) landing_force_margin_share: f32,
 }
 
 impl DriverResolution {
+    /// M scales with the vehicle's own nominal weight; the data never carries another rig's N.
+    #[cfg(any(test, feature = "bitprobe"))]
+    pub(crate) fn margin_n(&self, weight_n: f32) -> f32 {
+        self.landing_force_margin_share * weight_n
+    }
+
     pub(crate) fn load() -> Self {
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Source {
-            landing_force_margin_n: crate::provenance::Labelled<f32>,
+            landing_force_margin_share: crate::provenance::Labelled<f32>,
         }
         const PATH: &str = "assets/driving/driver.ron";
         let source: Source = crate::provenance::from_shipped_str(
@@ -25,15 +31,15 @@ impl DriverResolution {
             include_str!("../../assets/driving/driver.ron"),
         )
         .unwrap_or_else(|error| panic!("{error}"));
-        let margin = source.landing_force_margin_n;
+        let margin = source.landing_force_margin_share;
         assert!(
             matches!(margin.label, crate::provenance::Provenance::Resolution(_))
                 && margin.value.is_finite()
                 && margin.value > 0.0,
-            "{PATH}: landing_force_margin_n must be finite, positive and labelled Resolution; remeasure the landing gap and observer spread",
+            "{PATH}: landing_force_margin_share must be finite, positive and labelled Resolution; remeasure the weight-normalized landing gap and observer spread",
         );
         Self {
-            landing_force_margin_n: margin.value,
+            landing_force_margin_share: margin.value,
         }
     }
 }
@@ -174,6 +180,22 @@ mod tests {
                 (0.7, rolling),
             )
         })
+    }
+
+    /// A second fixture weight must get its own force resolution, rather than a global N
+    /// copied from the calibration rig. The scheduler relies on this homogeneous scaling.
+    #[test]
+    fn landing_resolution_scales_with_vehicle_weight() {
+        let resolution = DriverResolution::load();
+        // Fixture: two vehicle masses, independent of the calibration rig's authored mass.
+        let weights = [20_000.0, 60_000.0].map(|mass| mass * super::super::derive::G);
+        assert!(
+            (resolution.margin_n(weights[1]) / resolution.margin_n(weights[0]) - 3.0).abs() < 1e-6
+        );
+        assert!(
+            resolution.margin_n(weights[0]) < weights[0],
+            "a numerical margin cannot consume a lighter fixture's entire weight"
+        );
     }
 
     /// The gear-law observer must price gravity and rolling from support geometry at rest as

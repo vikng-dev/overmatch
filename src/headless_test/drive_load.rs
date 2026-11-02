@@ -6,69 +6,121 @@ use crate::bitprobe::TransmissionProbe;
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGripEffect};
 use crate::track::transmission::{DriveSupply, price_driver_force};
 
+struct Landing {
+    gear: u8,
+    price: f32,
+    speed: f32,
+    first_delivery: Option<f32>,
+    delivery: Vec<f32>,
+}
+
 #[derive(Default)]
 struct Measurements {
     loads: Vec<f32>,
     gaps: Vec<f32>,
     landing_speed_errors: Vec<f32>,
-    pending: Option<(u8, f32, f32)>,
+    pending: Option<Landing>,
     was_shifting: bool,
     last_gear: u8,
 }
 
 impl Measurements {
+    fn finish_landing(&mut self) {
+        let Some(landing) = self.pending.take() else {
+            return;
+        }; // No cut observed yet.
+        if landing.delivery.is_empty() {
+            return;
+        } // Another cut overtook coupling settlement.
+        let mean = landing.delivery.iter().map(|x| f64::from(*x)).sum::<f64>() as f32
+            / landing.delivery.len() as f32;
+        let gap = landing.price - mean;
+        self.gaps.push(gap);
+        println!(
+            "MEASURED sustained_landing gear={} predicted_force_n={:.6} first_delivery_n={:.6} mean_delivery_n={mean:.6} gap_n={gap:.6} samples={}",
+            landing.gear,
+            landing.price,
+            landing
+                .first_delivery
+                .expect("coupled samples follow the first coupled tick"),
+            landing.delivery.len()
+        );
+    }
+
     fn tick(&mut self, app: &App, tank: Entity) {
+        use crate::track::transmission::ClutchState;
         let probe = probe(app, tank);
         self.loads.push(probe.perceived_load_n);
         let gear = app.world().resource::<crate::track::sim::TrackGear>();
-        let current_gear = app.world().get::<TankTransmission>(tank).unwrap().0.gear;
-        if probe.shifting && (!self.was_shifting || current_gear != self.last_gear) {
-            let landed_speed = probe.shaft_speed
+        let state = &app.world().get::<TankTransmission>(tank).unwrap().0;
+        if probe.shifting && (!self.was_shifting || state.gear != self.last_gear) {
+            self.finish_landing();
+            let speed = probe.shaft_speed
                 - probe.perceived_load_n * f32::from(gear.trans().shift_ticks) * probe.dt
                     / gear.landing_mass();
             let price = price_driver_force(
                 gear.trans(),
                 DriveSupply::WHOLE,
-                landed_speed,
+                speed,
                 probe.gear_reduction,
                 1.0,
                 probe.grip_limit_n,
+                state.clutch,
             );
-            self.pending = Some((
-                app.world().get::<TankTransmission>(tank).unwrap().0.gear,
+            self.pending = Some(Landing {
+                gear: state.gear,
                 price,
-                landed_speed,
-            ));
+                speed,
+                first_delivery: None,
+                delivery: Vec::new(),
+            });
         }
         if !probe.shifting
             && probe.engaged
-            && let Some((landed_gear, price, speed)) = self.pending.take()
+            && let Some(landing) = &mut self.pending
         {
             assert_eq!(
-                landed_gear, current_gear,
-                "a price must be compared with delivery in the same landing gear"
+                landing.gear, state.gear,
+                "price and delivery must name the same landing gear"
             );
-            let gap = price - probe.delivered_force_n;
-            self.gaps.push(gap);
-            self.landing_speed_errors.push(probe.shaft_speed - speed);
-            println!(
-                "MEASURED landing gear={landed_gear} predicted_force_n={price:.3} delivered_force_n={:.3} gap_n={gap:.3} price_at_actual_n={:.3} speed_error_m_s={:.6}",
-                probe.delivered_force_n,
-                probe.priced_force_n,
-                probe.shaft_speed - speed
-            );
+            if landing.first_delivery.is_none() {
+                landing.first_delivery = Some(probe.delivered_force_n);
+                self.landing_speed_errors
+                    .push(probe.shaft_speed - landing.speed);
+            }
+            let tp = gear.trans();
+            let target = match state.clutch {
+                ClutchState::Out => unreachable!("an engaged probe has a coupled clutch"),
+                ClutchState::Slip => {
+                    (tp.engine.idle_rpm
+                        + probe.throttle.abs() * (tp.peak_torque_rpm - tp.engine.idle_rpm))
+                        * crate::track::transmission::RPM_TO_RAD
+                }
+                ClutchState::In => {
+                    (probe.next_speeds[0] + probe.next_speeds[1]) * 0.5 * probe.direction * probe.k
+                }
+            };
+            // Resolution: one rpm distinguishes spool/lock transients from a settled coupling,
+            // matching the public crank readout. Observe one whole interruption's coupled ticks.
+            if (state.omega_e - target).abs() <= crate::track::transmission::RPM_TO_RAD {
+                landing.delivery.push(probe.delivered_force_n);
+            }
+            if landing.delivery.len() >= usize::from(tp.shift_ticks).max(1) {
+                self.finish_landing();
+            }
         }
         self.was_shifting = probe.shifting;
-        self.last_gear = current_gear;
+        self.last_gear = state.gear;
     }
 
-    fn report(&self, label: &str, expected: f32) {
-        let margin = crate::track::load::DriverResolution::load().landing_force_margin_n;
+    fn report(&mut self, label: &str, expected: f32, weight: f32) {
+        self.finish_landing();
+        let margin = crate::track::load::DriverResolution::load().margin_n(weight);
         assert!(
             self.gaps
                 .iter()
                 .all(|gap| gap.is_finite() && gap.abs() < margin),
-            "the measured numerical margin must cover every observed landing gap"
+            "the measured numerical margin must cover sustained landing gaps"
         );
         let summary = |values: &[f32]| {
             if values.is_empty() {
@@ -77,7 +129,7 @@ impl Measurements {
             let mut values = values.to_vec();
             values.sort_by(f32::total_cmp);
             format!(
-                "n={} min={:.3} median={:.3} p95={:.3} max={:.3}",
+                "n={} min={:.6} median={:.6} p95={:.6} max={:.6}",
                 values.len(),
                 values[0],
                 values[values.len() / 2],
@@ -86,7 +138,7 @@ impl Measurements {
             )
         };
         println!(
-            "MEASURED load {label}: expected_n={expected:.3} L[{}] landing_gap_n[{}] landing_speed_error_m_s[{}]",
+            "MEASURED load {label}: weight_n={weight:.6} expected_n={expected:.6} L[{}] sustained_gap_n[{}] landing_speed_error_m_s[{}]",
             summary(&self.loads),
             summary(&self.gaps),
             summary(&self.landing_speed_errors)
@@ -215,7 +267,7 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
                 );
             }
             let expected = ground.contact().rolling_resistance * weight;
-            measurements.report(&format!("{name} rolling={rolling}"), expected);
+            measurements.report(&format!("{name} rolling={rolling}"), expected, weight);
             for load in measurements.loads {
                 assert!(
                     (load - expected).abs() < weight * 1e-4,
@@ -311,7 +363,7 @@ fn perceived_load_and_landing_gaps_on_the_course() {
             drive_tick(&mut app, tank, 1.0, 0.0);
             measurements.tick(&app, tank);
         }
-        measurements.report(&format!("course {degrees} degrees"), expected);
+        measurements.report(&format!("course {degrees} degrees"), expected, weight);
     }
 }
 
@@ -322,15 +374,30 @@ fn perceived_load_and_landing_gaps_on_the_course() {
 #[test]
 fn perceived_load_during_a_rearward_shot_uphill() {
     let run = |fire: bool| {
-        let (mut app, tank) = booted_offline_sim();
         let angle = 20.0_f32.to_radians();
+        // Fixture: an uninterrupted incline; recoil cannot move a patch across a ramp edge.
+        let extent = crate::terrain_grid::FIXTURE_EXTENT;
+        let height = extent.half_extent() * angle.tan();
+        let grid = crate::terrain_grid::HeightGrid::new(
+            vec![height, height, -height, -height].into(),
+            2,
+            extent,
+        );
+        let mut app = booted_sim_on(Some(grid));
+        start_fixed_clock(&mut app);
+        app.update();
+        let tank = app
+            .world_mut()
+            .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+            .single(app.world())
+            .expect("the fixture spawns one controlled tank");
         let rotation = Quat::from_rotation_x(angle);
         let normal = rotation * Vec3::Y;
         let rest = app
             .world()
             .resource::<crate::track::rig_geom::RigGeom>()
             .hull_rest_y;
-        let position = Vec3::new(0.0, -1.0 + 5.0 * angle.sin(), -40.0) + normal * rest;
+        let position = Vec3::new(100.0, 0.0, 0.0) + normal * rest;
         place(&mut app, tank, position, rotation, 0.0, 1);
         for _ in 0..128 {
             drive_tick(&mut app, tank, 0.0, 0.0);
@@ -364,7 +431,19 @@ fn perceived_load_during_a_rearward_shot_uphill() {
                 .unwrap()
                 .fire_primary = fire && tick == 64;
             drive_tick(&mut app, tank, 0.4, 0.0);
-            samples.push(probe(&app, tank).perceived_load_n);
+            let load = probe(&app, tank).perceived_load_n;
+            let weight =
+                app.world().resource::<TankBlueprint>().spec.mass * crate::track::derive::G;
+            let rolling = crate::ground_types::GroundTypes::load_shipped()
+                .get(crate::terrain_blend::BASE_GROUND)
+                .contact()
+                .rolling_resistance;
+            let expected = weight * (angle.sin() + rolling * angle.cos());
+            assert!(
+                (load - expected).abs() < weight * 1e-4,
+                "the shot fixture must remain on its declared incline: {load} vs {expected}"
+            );
+            samples.push(load);
         }
         let fired = app
             .world()
@@ -379,18 +458,22 @@ fn perceived_load_during_a_rearward_shot_uphill() {
             fire,
             "the paired fixture must actually distinguish a shot"
         );
-        samples
+        (
+            samples,
+            app.world().resource::<TankBlueprint>().spec.mass * crate::track::derive::G,
+        )
     };
-    let baseline = run(false);
-    let fired = run(true);
+    let (baseline, weight) = run(false);
+    let (fired, _) = run(true);
     let change = baseline
         .iter()
         .zip(fired)
         .map(|(a, b)| (a - b).abs())
         .fold(0.0_f32, f32::max);
     println!("MEASURED rearward shot uphill: maximum paired L change {change:.6} N");
-    // The gear law relies on recoil changing L by less than its admitted force resolution.
-    let margin = crate::track::load::DriverResolution::load().landing_force_margin_n;
+    // Resolution: the fixed support plane must stay within one ten-thousandth of nominal
+    // weight; a force-calibration margin must never mask recoil entering the terrain observer.
+    let margin = weight * 1e-4;
     assert!(
         change < margin,
         "recoil entered the terrain observation: {change} N"

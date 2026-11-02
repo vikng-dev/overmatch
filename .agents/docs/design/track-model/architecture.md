@@ -376,43 +376,56 @@ load. No acceleration, spring/damper force, temporal filter or recoil term enter
 sandbox share this implementation. The existing scheduler still reads `demand_n` unchanged;
 the bitprobe records both observations, priced force and effective delivered force.
 
-MEASURED by `headless_test::drive_load`: uniform shipped grounds, rest and rolling entries;
-extended fixture planes at the course angles, parked then rolling. The extension isolates each
-incline from the slab/crest under the short authored ramps. Values below are kN. L ranges pool
-both ground entries; gap ranges include every first coupled landing, with its count in brackets.
-A rolling entry with no shift contributes no landing sample. Distribution, individual landings,
-fixture method and precision are in
-[the measurement record](../../../scratch/research/drive-load-measurements-2026-11-02.json).
+MEASURED by `headless_test::drive_load` after one-rack fueling and `ClutchState` launch slip.
+The instrument waits for the post-tick crank to settle within one rpm of its Slip target or In
+shaft, then averages delivery over up to one interruption's coupled ticks (a new cut ends a
+partial sample). The forecast belongs to the same landing gear; the raw first coupled force and
+forecast speed error remain diagnostic fields. This replaces the first-tick 327,846 N bound,
+which priced clutch lock-up impulses and even a still-spooling zero-force tick as steady work.
+No scheduler decision has been replaced in this measurement.
 
-| Ground or fixture slope | L expected (DERIVED) | L measured range (MEASURED) | Landing gap range [count] (MEASURED) | M (DERIVED, Resolution) |
-|---|---:|---:|---:|---:|
-| concrete | 22.366799 | 22.366783–22.366809 | −69.476…237.746 [7] | 327.846 |
-| dirt | 33.550199 | 33.550180–33.550211 | −90.099…193.811 [6] | 327.846 |
-| gravel | 27.958500 | 27.958520–27.958549 | −83.800…216.126 [7] | 327.846 |
-| mud | 83.875500 | 83.875445–83.875562 | 38.943…63.028 [2] | 327.846 |
-| sand | 67.100398 | 67.100359–67.100422 | 41.420 [1] | 327.846 |
-| 10° fixture plane | 124.632594 | 124.632531–124.632656 | 51.139…102.517 [2] | 327.846 |
-| 20° fixture plane | 217.519797 | 217.519938–217.520109 | 169.886 [1] | 327.846 |
-| 30° fixture plane | 303.797781 | 303.797375–303.797594 | −0.000125 [1] | 327.846 |
+| Case | L expected kN (DERIVED) | L range kN (MEASURED) | Sustained forecast gap N (MEASURED) |
+|---|---:|---:|---|
+| course 10 degrees | 124.632594 | 124.632531–124.632656 | n=2 min=2034.515625 median=35639.828125 p95=2034.515625 max=35639.828125 |
+| course 20 degrees | 217.519797 | 217.519953–217.520109 | n=1 min=145695.187500 median=145695.187500 p95=145695.187500 max=145695.187500 |
+| course 30 degrees | 303.797781 | 303.797375–303.797594 | n=1 min=-0.031250 median=-0.031250 p95=-0.031250 max=-0.031250 |
+| concrete rolling=false | 22.366799 | 22.366783–22.366811 | n=7 min=-415.355469 median=14463.070312 p95=144832.265625 max=261415.078125 |
+| concrete rolling=true | 22.366799 | 22.366783–22.366813 | none |
+| dirt rolling=false | 33.550199 | 33.550172–33.550207 | n=6 min=-909.425781 median=35704.531250 p95=118062.031250 max=250715.406250 |
+| dirt rolling=true | 33.550199 | 33.550176–33.550207 | none |
+| gravel rolling=false | 27.958500 | 27.958521–27.958547 | n=7 min=-777.488281 median=14146.820312 p95=133674.093750 max=251190.718750 |
+| gravel rolling=true | 27.958500 | 27.958521–27.958549 | none |
+| mud rolling=false | 83.875500 | 83.875461–83.875555 | none |
+| mud rolling=true | 83.875500 | 83.875453–83.875555 | n=2 min=815.613281 median=6097.515625 p95=815.613281 max=6097.515625 |
+| sand rolling=false | 67.100398 | 67.100359–67.100422 | none |
+| sand rolling=true | 67.100398 | 67.100359–67.100414 | n=1 min=2160.906250 median=2160.906250 p95=2160.906250 max=2160.906250 |
 
-The gap is price at `v_land = v − L t_cut / M_c` minus first-coupled-tick delivery, both bounded
-by the same nominal observed grip; the price follows the most recent cut through contiguous
-windows, so a cascade cannot compare different gears. MEASURED global signed range is
-−90,098.891…237,746.234 N, span 327,845.125 N; maximum absolute L residual is 0.406 N.
-DERIVED `M = floor(span + residual) + 1 N = 327,846 N`, the smallest whole-Newton bound strictly
-above that sum, lives in `assets/driving/driver.ron` under `Resolution` and is admitted before
-play. This is a bound on the **current first-tick drivetrain**, including crank/clutch transients
-and braked shift cuts, not certification of a small margin for the replacement Driver laws.
-For example, MEASURED concrete's first landing prices 411.641 kN (415.758 kN at actual landing
-speed) and delivers 173.895 kN: observer noise cannot explain the gap. Remeasure after the
-clutch/fuel law changes; no scheduler decision consumes this margin in this instrument lane.
+MEASURED signed gap range `-909.425781…261415.078125 N`; DERIVED span `262324.503906 N`.
+MEASURED maximum absolute observer residual `0.406250 N`. DERIVED the bound is
+`max(span, max(abs(gap))) + residual = 262324.910156 N`. At the fixture's `559170.000000 N`
+weight this is rounded strictly upward at one part per million to `0.469133` of nominal
+vehicle weight. `assets/driving/driver.ron` stores this dimensionless Resolution share, so
+`M = 0.469133 W` (DERIVED `262325.099610 N` on the measured rig). The second-weight
+fixture proves the force resolution scales rather than imposing this rig's absolute Newtons
+on a lighter vehicle.
 
-MEASURED finite-radius turns add 9.901–16.561 kN above straight rolling across the shipped
-grounds. In the paired rearward-shot uphill probe on the authored middle ramp, one actual primary
-shot changes L by at most 0.093750 N, below M. DERIVED design predictions remain conditional:
-dirt converges on F8 if `M < 8.0 kN`; this measured bound does not meet that premise. Sand's F7
-landing spare of approximately −6 kN refuses the upshift for every positive M. These are the
-accepted design's predictions, not runs of the replacement scheduler.
+This remains a large forecast-versus-delivery envelope: coupled crank acceleration and the
+speed gained while coupling settles change delivery after the original landing forecast.
+It is not an observer-noise-only bound or certification of a small-margin gear law. DERIVED
+dirt's `M < 8.0 kN` premise is **not met**; its F8 convergence remains unproved. Sand's previously
+MEASURED F7 spare near `−6 kN` still refuses that upshift for every positive M. Lane 3 must assess
+those predictions with its actual gear law, including this inertia/forecast discrepancy.
+
+MEASURED launch from rest to 0.5 m/s, before → after: concrete `0.593750 → 0.656250 s`,
+sand `0.640625 → 0.671875 s`. Concrete to 2 m/s is `2.609375 → 2.593750 s`; sand does not
+reach 2 m/s within either 40-second run under the unchanged scheduler. MEASURED paired shot
+on an uninterrupted 20-degree fixture incline changes L by `0.093750 N`; each tick also checks
+that L reads that plane, using a support-precision bound independent of M. Short ramp edges are
+not a valid invariant fixture once the new launch moves the tank onto different support.
+
+[Distributions and derivation](../../../scratch/research/drive-clutch-measurements-2026-11-02.json)
+record every sustained sample and the raw first delivery. The historical first-tick record remains
+in `drive-load-measurements-2026-11-02.json` for comparison.
 
 **Rolling on flat ground costs nothing else.** `c_rr` is published motion resistance, which
 lumps in running-gear losses, so the contact law spends nothing else on steady flat travel.

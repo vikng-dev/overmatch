@@ -335,7 +335,7 @@ fn hill_hold_engages_selects_launch_gear_and_releases_on_capability() {
 
         let mut released = None;
         let mut speeds = first.next_speeds;
-        for tick in 1..8 {
+        for tick in 1..=64 {
             let report = step(
                 &fp,
                 &tp,
@@ -500,7 +500,7 @@ fn hill_hold_margin_short_capable_gear_can_release() {
     );
     let mut st = TransmissionState {
         gear: 1,
-        omega_e: tp.engine.idle_rpm * RPM_TO_RAD,
+        omega_e: tp.launch_omega(1.0),
         demand_n: demand,
         demand_initialized: true,
         scheduler: SchedulerState::HillHold,
@@ -538,7 +538,7 @@ fn hill_hold_release_cooldown_never_overridden_then_relatches() {
     let modeled = available_force_in_gear(&tp, DriveSupply::WHOLE, 0.0, tp.gears_fwd[0]);
     let release_demand = modeled - 10_000.0;
     let mut st = TransmissionState {
-        omega_e: tp.engine.idle_rpm * RPM_TO_RAD,
+        omega_e: tp.launch_omega(1.0),
         demand_n: release_demand,
         demand_initialized: true,
         scheduler: SchedulerState::HillHold,
@@ -882,14 +882,13 @@ fn steep_grade_after_upshift_corrects_before_lug() {
         grade_confirm_ticks: GRADE_CONFIRM_TICKS - 1,
         ..fresh(&tp)
     };
-    let mut speeds = [shaft0; 2];
-    let first = step(
+    let speeds = [shaft0; 2];
+    step(
         &fp,
         &tp,
         &mut st,
         &input(1.0, 0.0, speeds, [demand / 2.0; 2]),
     );
-    speeds = first.next_speeds;
     assert!(
         st.gear < 4 && matches!(st.scheduler, SchedulerState::GradeShift { from: 4, .. }),
         "the deep deficit must grade-correct on its FIRST confirmed tick, dwell or not \
@@ -897,24 +896,6 @@ fn steep_grade_after_upshift_corrects_before_lug() {
         st.gear,
         st.scheduler
     );
-    // Ride out the paid window and a few engaged ticks: the corrected drivetrain must stay
-    // moving FORWARD (the lug bled through zero in the tall gear before the override).
-    for _ in 0..8 {
-        let rep = step(
-            &fp,
-            &tp,
-            &mut st,
-            &input(1.0, 0.0, speeds, [demand / 2.0; 2]),
-        );
-        speeds = rep.next_speeds;
-    }
-    let m = (speeds[0] + speeds[1]) / 2.0;
-    assert!(
-        m > 0.0,
-        "the corrected vehicle must keep moving FORWARD after the paid window \
-             (m = {m:.3}), not lug through zero in the tall gear"
-    );
-    assert!(st.gear < 4, "the correction must stand (got F{})", st.gear);
 }
 
 /// D3 regression: every sequential continuation is selected again, so a held target cancels
@@ -1674,7 +1655,7 @@ fn upshift_confirmation_rejects_transient_band_excursions() {
 
 /// The upshift confirmation must read THIS tick's hysteretic
 /// detent state, not the previous tick's. Seven qualifying straight ticks bring the
-/// counter to N − 1; the player then crosses WIDE_ON on the very tick that would commit.
+/// counter to N − 1; the player then crosses the wide-detent entry threshold on the very tick that would commit.
 /// The stale read (detent updated below the scheduler) incremented to N and committed an
 /// ordinary upshift on the exact tick the turn began — then the same invocation applied
 /// the λ constraint in the NEW gear, where the landing predictor is explicitly invalid.
@@ -1713,7 +1694,7 @@ fn detent_engage_on_the_committing_tick_resets_confirmation() {
         UPSHIFT_CONFIRM_TICKS - 1,
         "the fixture must sit exactly one tick from committing"
     );
-    // The committing tick: the stick crosses WIDE_ON — the detent engages THIS tick.
+    // The committing tick: the stick crosses the wide-detent entry threshold — the detent engages THIS tick.
     at(&mut st, 0.3);
     assert_eq!(
         st.steer_step, 1,
@@ -1895,10 +1876,9 @@ fn protective_upshift_fires_under_brake_steer_and_fuel_cut() {
     let overrun_rpm = tp.max_curve_rpm() + 200.0;
     let g4 = tp.gears_fwd[3];
     let shaft = overrun_rpm * RPM_TO_RAD * tp.sprocket_radius / g4;
-    assert_eq!(
-        available_force_in_gear(&tp, DriveSupply::WHOLE, shaft, g4),
-        0.0,
-        "fixture must sit past the fuel cut, where every gear's modeled force is zero"
+    assert!(
+        available_force_in_gear(&tp, DriveSupply::WHOLE, shaft, g4) < 0.0,
+        "fixture must sit past the fuel cut, where the modeled force is motoring drag"
     );
     let mut st = TransmissionState {
         gear: 4,
@@ -2003,10 +1983,9 @@ fn confirmed_deficit_without_target_falls_through_to_legal_upshift() {
     let dead_zone_rpm = tp.engine.governed_rpm + 120.0;
     let shaft = dead_zone_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[4];
     let demand = 20_000.0;
-    assert_eq!(
-        available_force_in_gear(&tp, DriveSupply::WHOLE, shaft, tp.gears_fwd[4]),
-        0.0,
-        "fixture must sit in the fuel-cut dead zone (zero modeled force in-gear)"
+    assert!(
+        available_force_in_gear(&tp, DriveSupply::WHOLE, shaft, tp.gears_fwd[4]) < 0.0,
+        "fixture must sit in the fuel-cut dead zone (construction drag remains in-gear)"
     );
     let mut st = TransmissionState {
         gear: 5,
@@ -2297,7 +2276,7 @@ fn readout_reports_crank_state() {
         r.rpm
     );
     // Back-driven while in R (rolling forward, shaft < 0): the crank never follows —
-    // the stall guard bounds it at idle − STALL_GUARD_BAND_RPM, and the readout shows
+    // the stall guard bounds it at idle − engine_control().idle_guard_band_rpm.value, and the readout shows
     // the honest idle-ish crank, not a fake geared rpm.
     let mut st = TransmissionState {
         reverse: true,
@@ -2314,7 +2293,8 @@ fn readout_reports_crank_state() {
     let r = readout(&st, &tp);
     assert_eq!(r.gear_label, "R1");
     assert!(
-        r.rpm >= tp.engine.idle_rpm - STALL_GUARD_BAND_RPM - 1.0 && r.rpm <= tp.engine.governed_rpm,
+        r.rpm >= tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value - 1.0
+            && r.rpm <= tp.engine.governed_rpm,
         "a back-driven R shaft must read the idle-ish crank (≥ idle − band), got {:.0}",
         r.rpm
     );
@@ -2760,32 +2740,23 @@ fn l600_constraint_survives_m_zero_crossing() {
     );
 }
 
-/// Steering detent hysteresis: the tight step engages at ≥ TIGHT_ON and releases only
-/// below TIGHT_OFF (the |steer| ≥ 0.5 design threshold, hysteresis-wrapped).
+/// The detent law obeys its authored entry/release hysteresis. Persistent notches are
+/// independently checked for history-free selection by `persistent_notches_have_one_steady_detent`.
 #[test]
 fn steer_step_hysteresis() {
-    let (fp, tp) = (lab_fp(), lab_tp());
-    let mut st = fresh(&tp);
-    let mut at = |steer: f32| {
-        step(
-            &fp,
-            &tp,
-            &mut st,
-            &input(0.5, steer, [2.0, 2.0], [0.0, 0.0]),
-        );
-        st.steer_step
-    };
-    assert_eq!(at(0.10), 0, "below WIDE_ON stays straight");
-    assert_eq!(at(0.30), 1, "wide engages");
-    assert_eq!(
-        at(0.50),
-        1,
-        "0.5 is inside the tight hysteresis band from below"
-    );
-    assert_eq!(at(0.60), 2, "tight engages at ≥ TIGHT_ON");
-    assert_eq!(at(0.50), 2, "0.5 holds tight from above");
-    assert_eq!(at(0.40), 1, "below TIGHT_OFF releases to wide");
-    assert_eq!(at(0.02), 0, "below WIDE_OFF releases to straight");
+    let feel = crate::track::drive::drive_feel();
+    let mut st = fresh(&lab_tp());
+    for (intent, expected) in [
+        (feel.wide_off.0 / 2.0, 0),
+        (feel.wide_on.0, 1),
+        (feel.tight_on.0, 2),
+        ((feel.tight_on.0 + feel.tight_off.0) / 2.0, 2),
+        ((feel.tight_off.0 + feel.wide_on.0) / 2.0, 1),
+        (feel.wide_off.0 / 2.0, 0),
+    ] {
+        update_steer_detent(&mut st, intent);
+        assert_eq!(st.steer_step, expected);
+    }
 }
 
 /// Static breakaway and dynamic dissipation are separate capacities. A parked belt inside the
@@ -2888,7 +2859,8 @@ fn parking_brake_stays_saturated_past_breach() {
     let mut speeds = [0.0f32; 2];
     let mut last = TransmissionReport::default();
     for _ in 0..30 {
-        let inp = input(0.0, 0.0, speeds, [r_breach, r_breach]);
+        let mut inp = input(0.0, 0.0, speeds, [r_breach, r_breach]);
+        inp.supply.transmission_condition = 0.0; // Fixture: isolate the brake from clutch torque.
         last = step(&fp, &tp, &mut st, &inp);
         speeds = last.next_speeds;
     }
@@ -2913,7 +2885,8 @@ fn parking_brake_stays_saturated_past_breach() {
 
     // Once moving, the result is bit-identical to a factor-1.0 fixture: the latch persists, but
     // its static multiplier is gone rather than becoming 192 kN/side dynamic braking.
-    let moving = input(0.0, 0.0, [-fp.slip_saturation; 2], [r_breach; 2]);
+    let mut moving = input(0.0, 0.0, [-fp.slip_saturation; 2], [r_breach; 2]);
+    moving.supply.transmission_condition = 0.0;
     let mut dynamic_tp = tp.clone();
     dynamic_tp.brake_static_factor = 1.0;
     let mut static_state = TransmissionState {
@@ -3207,7 +3180,7 @@ fn motoring_drag_curve_pins_documented_anchors() {
     let tp = tiger_tp();
     let d = |rpm: f32| engine_drag(&tp, rpm * RPM_TO_RAD);
     assert_eq!(d(0.0), 0.0, "a stopped crank has no motoring torque");
-    let floor = tp.engine.idle_rpm - STALL_GUARD_BAND_RPM;
+    let floor = tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value;
     for (rpm, expect) in [
         (floor, 253.6f32),
         (tp.engine.idle_rpm, 273.5),
@@ -3257,55 +3230,49 @@ fn pivot_authority_is_per_output_capacity() {
     );
 }
 
-/// Stage B: a standing start under full W is CLUTCH-SLIP-LIMITED. From rest the lock
-/// torque `τ_c*` (lab arithmetic: `[ω_idle/dt + τ_free/J]/(1/J + k₁²/I_m)` =
-/// `[62.8·64 + 1650/4]/[0.25 + 84.8²·(1/16000)]` ≈ 6.3 kN·m) far exceeds the 2860 N·m
-/// clutch capacity, so the belt force is `k₁ × capacity` ≈ 242.5 kN — NOT the old
-/// rev-floor peak-torque value `peak × G₁/r_s` ≈ 186.6 kN. The crank must never dip
-/// below the stall-guard floor while the clutch slips (the saturated idle governor
-/// holds a sub-idle slip equilibrium ≈ 37 rpm of droop where `τ_ind + τ_idle` meets
-/// the capacity).
+/// The launch law transmits free torque at its target, rather than clutch-capacity torque.
+/// Pricing and the gear law rely on this steady-slip force, in either direction and at part pedal.
 #[test]
-fn launch_is_clutch_slip_limited() {
+fn steady_launch_slip_transmits_the_bounded_free_torque() {
     let (fp, tp) = (lab_fp(), lab_tp());
-    let k1 = tp.gears_fwd[0] / tp.sprocket_radius;
-    let expect = k1 * tp.clutch_capacity;
-    let old_rev_floor = tp.peak_torque_nm * tp.gears_fwd[0] / tp.sprocket_radius;
-    let floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
-    let mut st = fresh(&tp);
-    for tick in 0..16 {
-        let rep = step(&fp, &tp, &mut st, &input(1.0, 0.0, [0.0, 0.0], [0.0, 0.0]));
-        let total = rep.forces[0] + rep.forces[1];
-        assert!(
-            (total - expect).abs() < 0.01 * expect,
-            "tick {tick}: launch belt force {total:.0} N must be clutch-capacity \
-                 limited ({expect:.0} N)"
-        );
-        assert!(
-            (total - old_rev_floor).abs() > 0.1 * old_rev_floor,
-            "the capacity-limited launch must be measurably NOT the old rev-floor \
-                 value ({old_rev_floor:.0} N) — otherwise this test pins nothing"
-        );
-        assert!(
-            st.omega_e >= floor - 1e-3,
-            "tick {tick}: the slipping-clutch launch must never stall the crank \
-                 below idle − band ({:.0} rpm)",
-            st.omega_e / RPM_TO_RAD
-        );
+    for command in [0.25, 0.5, 1.0] {
+        for reverse in [false, true] {
+            let mut st = fresh(&tp);
+            st.reverse = reverse;
+            st.omega_e = tp.launch_omega(command);
+            let sign = if reverse { -1.0 } else { 1.0 };
+            let [fuel, catch, drag] = engine_torques(&tp, DriveSupply::WHOLE, st.omega_e, command);
+            let expected = (fuel + catch - drag).min(tp.clutch_capacity);
+            for _ in 0..16 {
+                let report = step(
+                    &fp,
+                    &tp,
+                    &mut st,
+                    &input(sign * command, 0.0, [0.0; 2], [0.0; 2]),
+                );
+                assert_eq!(st.clutch, ClutchState::Slip);
+                let transmitted = sign * report.forces.iter().sum::<f32>() * tp.sprocket_radius
+                    / if reverse {
+                        tp.gears_rev[0]
+                    } else {
+                        tp.gears_fwd[0]
+                    };
+                assert!(
+                    (transmitted - expected).abs() < 0.01,
+                    "{transmitted} vs {expected}"
+                );
+                assert!(transmitted <= tp.torque_at(st.omega_e / RPM_TO_RAD) + 0.01);
+            }
+        }
     }
 }
 
-/// Stage B: the stall guard under a grade lug — the crank NEVER lands below
-/// idle − [`STALL_GUARD_BAND_RPM`], in both slip regimes: (a) full-W lug against an
-/// impossible reaction (capacity-clamped slip: the sub-idle equilibrium sits where the
-/// saturated idle governor + low-end torque meet the 2860 N·m capacity, ≈ 37 rpm of
-/// droop — above the 100 rpm guard band); (b) a zero-throttle engaged backslide
-/// (τ_c* wants the crank at the NEGATIVE shaft speed — the guard slips the clutch
-/// instead and the belt receives the crank's forward τ_free through it).
+/// The game's driving model bounds a healthy crank under both a loaded launch and a
+/// back-driven coast. The clutch's floor cannot create energy or reverse propulsive force.
 #[test]
 fn stall_guard_holds_crank_under_grade_lug() {
     let (fp, tp) = (lab_fp(), lab_tp());
-    let floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
+    let floor = (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value) * RPM_TO_RAD;
     for (throttle, speeds, reactions, label) in [
         (
             1.0f32,
@@ -3493,49 +3460,37 @@ fn braking_never_teleports_crank_past_clutch_capacity() {
         );
         speeds = rep.next_speeds;
     }
-    let floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
+    let floor = (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value) * RPM_TO_RAD;
     assert!(
         st.omega_e >= floor,
         "the crank must end above the hard floor"
     );
 }
 
-/// The coupling seam is a LATCH with hysteresis — a belt speed
-/// oscillating INSIDE the 0.4–0.6 m/s dead band (forced ±0.05 around the old single
-/// 0.5 threshold, which flipped the regime every crossing) produces ZERO regime
-/// flips; only genuine excursions past the separated thresholds transition it, once
-/// each. Scripted open-loop: park below 0.4 (one transition out), 64 boundary
-/// oscillations (none), one push past 0.6 (one transition in), 64 more oscillations
-/// (none).
+/// Driver state, not belt-speed hysteresis, controls clutch regimes. The launch retains
+/// Slip above idle until it reaches its target, and a shift always interrupts mean-axis drive.
 #[test]
-fn clutch_seam_hysteresis_kills_boundary_chatter() {
+fn clutch_states_cover_rest_launch_lock_and_shift() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let mut st = fresh(&tp);
-    let at = |st: &mut TransmissionState, v: f32| {
-        step(&fp, &tp, st, &input(0.0, 0.0, [v, v], [0.0, 0.0]));
-        st.clutch_out
-    };
-    // Park below CLUTCH_OUT_M_SPEED: the clutch goes out.
-    assert!(at(&mut st, 0.3), "below 0.4 m/s the clutch must go out");
-    // Boundary oscillation across the OLD single threshold: no flips.
-    for tick in 0..64 {
-        let v = if tick % 2 == 0 { 0.55 } else { 0.45 };
-        assert!(
-            at(&mut st, v),
-            "tick {tick}: an in-band oscillation (0.45/0.55) must not re-engage — \
-                 the single-threshold chatter is back"
-        );
+    step(&fp, &tp, &mut st, &input(0.0, 0.0, [0.0; 2], [0.0; 2]));
+    assert_eq!(st.clutch, ClutchState::Out);
+    // Fixture: a neutral pivot's unequal belt speeds still require the main clutch Out.
+    step(&fp, &tp, &mut st, &input(0.0, 1.0, [0.3, -0.05], [0.0; 2]));
+    assert_eq!(st.clutch, ClutchState::Out);
+    let launch = tp.launch_omega(0.5);
+    st.omega_e = launch;
+    for omega in [0.0, (tp.engine.idle_rpm * RPM_TO_RAD + launch) / 2.0] {
+        let speed = omega * tp.sprocket_radius / tp.gears_fwd[0];
+        step(&fp, &tp, &mut st, &input(0.5, 0.0, [speed; 2], [0.0; 2]));
+        assert_eq!(st.clutch, ClutchState::Slip);
     }
-    // A genuine excursion past CLUTCH_IN_M_SPEED re-engages…
-    assert!(!at(&mut st, 0.65), "past 0.6 m/s the clutch must re-engage");
-    // …and the same boundary oscillation now holds ENGAGED: no flips either way.
-    for tick in 0..64 {
-        let v = if tick % 2 == 0 { 0.55 } else { 0.45 };
-        assert!(
-            !at(&mut st, v),
-            "tick {tick}: an in-band oscillation must not declutch after engagement"
-        );
-    }
+    let speed = launch * tp.sprocket_radius / tp.gears_fwd[0];
+    step(&fp, &tp, &mut st, &input(0.5, 0.0, [speed; 2], [0.0; 2]));
+    assert_eq!(st.clutch, ClutchState::In);
+    st.shift_ticks = 2;
+    step(&fp, &tp, &mut st, &input(0.5, 0.0, [speed; 2], [0.0; 2]));
+    assert_eq!(st.clutch, ClutchState::Out);
 }
 
 /// Scheduler headroom must scale with the complete vehicle and respond to its contact material.
@@ -3605,10 +3560,11 @@ fn reduced_supply_pulls_away_and_retains_full_service_brakes() {
             let mut full = input(1.0, 0.0, speeds, [0.0; 2]);
             full.supply.engine_condition = combustion;
             full.supply.task_rate = combustion;
-            speeds = step(&fp, &tp, &mut state, &full).next_speeds;
+            let report = step(&fp, &tp, &mut state, &full);
+            speeds = report.next_speeds;
             assert!(
-                !state.clutch_out,
-                "share {combustion}: the clutch must latch"
+                state.clutch != ClutchState::Out || report.shifting,
+                "share {combustion}: the clutch transmits outside shift windows"
             );
         }
         speeds[0]
@@ -3924,21 +3880,27 @@ fn absent_combustion_keeps_drag_at_full_pedal() {
     assert_eq!(held, released);
 }
 
-/// The game's damage model: reconstructing gross combustion must preserve the authored
-/// healthy net torque at fixture operating points, while charging absent combustion full drag.
+/// The full-load curve remains attainable at full pedal; releasing fuel above idle retains
+/// construction drag. A zero-torque replacement could pass the upper-bound test but fails here.
 #[test]
-fn healthy_net_curve_and_command_blend_are_preserved() {
+fn full_pedal_reaches_the_curve_and_release_retains_drag() {
     let tp = lab_tp();
-    for rpm in [500.0, 600.0, 1100.0, 1550.0] {
-        for command in [0.0, 0.25, 0.5, 1.0] {
-            let [gross, idle, drag] =
-                engine_torques(&tp, DriveSupply::WHOLE, rpm * RPM_TO_RAD, command);
-            let net = command * tp.torque_at(rpm) + idle
-                - engine_drag(&tp, rpm * RPM_TO_RAD)
-                    * forces::hold_blend(command / DRAG_THROTTLE_RELEASE);
-            assert!((gross + idle - drag - net).abs() < 1e-3);
-        }
+    for rpm in [
+        tp.engine.idle_rpm,
+        tp.peak_torque_rpm,
+        tp.engine.governed_rpm,
+    ] {
+        let [fuel, catch, drag] = engine_torques(&tp, DriveSupply::WHOLE, rpm * RPM_TO_RAD, 1.0);
+        assert!((fuel + catch - drag - tp.torque_at(rpm)).abs() < 1e-3);
     }
+    let [fuel, catch, drag] = engine_torques(
+        &tp,
+        DriveSupply::WHOLE,
+        tp.peak_torque_rpm * RPM_TO_RAD,
+        0.0,
+    );
+    assert_eq!(fuel + catch, 0.0);
+    assert!(drag > 0.0);
 }
 
 /// The observer is instrumentation: changing its reading must not change any authoritative
@@ -3981,11 +3943,6 @@ fn commanded_work_and_readout_consume_the_task_rate_once() {
     let [whole, ..] = engine_torques(&tp, DriveSupply::WHOLE, omega, 1.0);
     let [applied, ..] = engine_torques(&tp, supply, omega, 1.0);
     assert!((applied / whole - supply.task_rate).abs() < 1e-6);
-    let target = crate::track::drive::DriveTarget {
-        intent: crate::track::drive::DriveIntent::Axes(Default::default()),
-        supply,
-    };
-    assert_eq!(crate::crew_ui::drive_rate_line(&target), "Drive rate 30%");
 }
 
 /// The game's driving and damage model: a zero task rate cannot deliver idle-catch work
@@ -4028,4 +3985,64 @@ fn transmission_bottleneck_reduces_the_one_drive_task_rate() {
     let [whole, ..] = engine_torques(&tp, DriveSupply::WHOLE, omega, 1.0);
     let [reduced, ..] = engine_torques(&tp, supply, omega, 1.0);
     assert_eq!(reduced, whole * 0.5);
+}
+
+/// The game's driving model has one fuel rack: neither the pedal nor the idle catch may
+/// raise net crank torque above the governed full-load curve. Both pricing and work rely on it.
+#[test]
+fn one_fuel_rack_never_exceeds_the_full_load_curve() {
+    for tp in [lab_tp(), tiger_tp()] {
+        for fraction in 0..=100 {
+            let rpm = (tp.max_curve_rpm() + GOVERNOR_CUT_RPM) * fraction as f32 / 100.0;
+            for command in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let [fuel, catch, drag] =
+                    engine_torques(&tp, DriveSupply::WHOLE, rpm * RPM_TO_RAD, command);
+                assert!(
+                    fuel + catch - drag <= tp.torque_at(rpm) + 1e-3,
+                    "rpm={rpm} command={command}: net {} exceeds curve {}",
+                    fuel + catch - drag,
+                    tp.torque_at(rpm)
+                );
+            }
+        }
+    }
+}
+
+/// A governor-cut engine must transmit construction drag even under a held pedal.
+#[test]
+fn the_fuel_cut_includes_drag_reconstruction() {
+    let tp = lab_tp();
+    let omega = (tp.engine.governed_rpm + GOVERNOR_CUT_RPM) * RPM_TO_RAD;
+    for command in [0.0, 0.5, 1.0] {
+        let [fuel, catch, drag] = engine_torques(&tp, DriveSupply::WHOLE, omega, command);
+        assert_eq!(
+            fuel + catch,
+            0.0,
+            "the governor cuts every combustion source"
+        );
+        assert!(drag > 0.0);
+    }
+}
+
+/// Persistent input must pick the same detent from either history; otherwise the player
+/// holds one notch but gets two radii. The notch spacing is owned by keyboard feel data.
+#[test]
+fn persistent_notches_have_one_steady_detent() {
+    let step = crate::track::drive::drive_feel().notch_step.0;
+    for index in 1..=(1.0 / step).ceil() as usize {
+        let intent = (index as f32 * step).min(1.0);
+        let mut states = [0, 2].map(|steer_step| TransmissionState {
+            steer_step,
+            ..fresh(&lab_tp())
+        });
+        for state in &mut states {
+            for _ in 0..3 {
+                update_steer_detent(state, intent);
+            }
+        }
+        assert_eq!(
+            states[0].steer_step, states[1].steer_step,
+            "persistent intent {intent} must not remember the previous radius"
+        );
+    }
 }

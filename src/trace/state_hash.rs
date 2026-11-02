@@ -572,7 +572,7 @@ mod tests {
             last_shift_dir: -1,
             dwell_ticks: 7,
             omega_e: 250.0,
-            clutch_out: true,
+            clutch: crate::track::transmission::ClutchState::Out,
             demand_n: 42_000.0,
             demand_initialized: true,
             grade_confirm_ticks: 9,
@@ -945,14 +945,14 @@ mod tests {
         assert_ne!(baseline, hash(&gate), "work anchor");
     }
 
-    /// Every field in the authoritative 16-field inventory affects the exact transmission stream.
+    /// Every field in the authoritative 17-field inventory affects the exact transmission stream.
     #[test]
     fn transmission_inventory_fields_all_affect_hash() {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
         let base = sample_transmission();
         let base_hash = hash_sample((p, q, lv, av), &drive, &grip, &base, &sim).trn;
-        let mut variants = [base; 16];
+        let mut variants = [base; 17];
         variants[0].0.gear = variants[0].0.gear.wrapping_add(1);
         variants[1].0.shift_ticks = variants[1].0.shift_ticks.wrapping_add(1);
         variants[2].0.steer_step = variants[2].0.steer_step.wrapping_add(1);
@@ -961,7 +961,7 @@ mod tests {
         variants[5].0.last_shift_dir = 1;
         variants[6].0.dwell_ticks = variants[6].0.dwell_ticks.wrapping_add(1);
         variants[7].0.omega_e = f32::from_bits(variants[7].0.omega_e.to_bits() ^ 1);
-        variants[8].0.clutch_out = !variants[8].0.clutch_out;
+        variants[8].0.clutch = crate::track::transmission::ClutchState::Slip;
         variants[9].0.demand_n = f32::from_bits(variants[9].0.demand_n.to_bits() ^ 1);
         variants[10].0.demand_initialized = !variants[10].0.demand_initialized;
         variants[11].0.grade_confirm_ticks = variants[11].0.grade_confirm_ticks.wrapping_add(1);
@@ -969,6 +969,7 @@ mod tests {
         variants[13].0.scheduler = SchedulerState::HillHold;
         variants[14].0.hill_hold = !variants[14].0.hill_hold;
         variants[15].0.hold_reengage_ticks = variants[15].0.hold_reengage_ticks.wrapping_add(1);
+        variants[16].0.band_confirm_ticks = variants[16].0.band_confirm_ticks.wrapping_add(1);
 
         for (index, variant) in variants.iter().enumerate() {
             let hash = hash_sample((p, q, lv, av), &drive, &grip, variant, &sim).trn;
@@ -1010,8 +1011,8 @@ mod tests {
         assert_eq!(
             base,
             CanonicalTankStateDigest {
-                simulation: 11_550_725_941_933_736_927,
-                rollback: 6_029_533_328_437_272_448,
+                simulation: 16_055_371_865_458_535_420,
+                rollback: 12_705_658_730_295_286_342,
                 position: 5_276_285_167_157_175_194,
                 rotation: 5_407_327_877_548_523_030,
                 linear_velocity: 8_825_002_124_784_658_797,
@@ -1021,7 +1022,7 @@ mod tests {
                 weapon_gate: 18_442_197_694_147_503_009,
                 recoil: 12_037_784_973_900_930_602,
                 belts: 16_317_528_332_690_472_771,
-                transmission: 16_561_026_162_406_393_170,
+                transmission: 17_281_342_849_281_328_611,
                 elements: 6_815_987_066_798_852_301,
                 rounds_fired: 17_086_694_953_553_481_862,
             }

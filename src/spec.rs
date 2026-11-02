@@ -3035,9 +3035,11 @@ TankSpec(
             ("clutch_capacity_nm", |tr| {
                 engine(tr).clutch_capacity_nm = 80_000.0;
             }),
-            // DERIVED: the healthy idle guard and drag-fade scale need positive headroom
-            // above the 100 rpm guard band. The game's damage model can still reach rest.
-            ("engine.idle_rpm floor", |tr| engine(tr).idle_rpm = 200.0),
+            // The game's driving model requires idle above its authored stall-guard band;
+            // the drag regularisation independently reaches rest.
+            ("engine.idle_rpm floor", |tr| {
+                engine(tr).idle_rpm = f32::from_bits(1)
+            }),
             ("steering capacity", |tr| {
                 tr.steering.capacity = f32::INFINITY
             }),

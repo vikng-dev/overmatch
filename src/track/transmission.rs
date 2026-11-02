@@ -54,18 +54,18 @@
 //! Engine crank state ω_e (stage B): the crank is REAL STATE
 //! ([`TransmissionState::omega_e`], rad/s) with its own inertia J
 //! ([`TransmissionParams::engine_inertia`]). Per tick it produces a free torque
-//! `τ_free = τ_ind + τ_idle − τ_drag` (induced torque at the crank's OWN rpm under the
+//! `τ_free = max(τ_command, τ_catch) − τ_drag` (induced torque at the crank's OWN rpm under the
 //! governor cut; a saturating idle-governor recovery below idle; compression-braking drag,
 //! ENGINE-side — the belt has NO separate drag term and drag reaches it only through the
 //! coupling), and a capacity-clamped main clutch couples it to the geared shaft
 //! ([`clutch_coupling`] — the semi-implicit lock torque, the ONE seamed coupling-law slot).
 //! Engaged, the belt's engine force is `F_c = k·s·τ_c`; a STALL GUARD slips the clutch
-//! one-sidedly at idle − [`STALL_GUARD_BAND_RPM`] only while combustion can sustain idle.
+//! one-sidedly at idle − `engine.ron`'s idle guard band only while combustion can sustain idle.
 //! The game's damage model permits a reduced engine to run down to rest. Declutched (shift window / the generalized
 //! neutral-idle seam), the belt gets NO engine force and NO engine drag, and the crank
 //! REV-MATCHES toward the larger of the landing shaft speed and the steer-demand rpm target
-//! (the steering member is engine-driven in every regime). Launch rpm is the emergent
-//! clutch-slip equilibrium; pivot power spools with the crank; `readout` reports ω_e
+//! (the steering member is engine-driven in every regime). Launch slip retains the commanded
+//! launch speed; pivot power spools with the crank; `readout` reports ω_e
 //! directly (the state IS the display).
 //!
 //! Reserve scheduler (stage C): on every decision tick the box projects the
@@ -191,12 +191,7 @@
 //! | [`GRADE_CONFIRM_TICKS`] | SIM POLICY |
 //! | [`UPSHIFT_CONFIRM_TICKS`] | SIM POLICY |
 //! | [`HOLD_REENGAGE_TICKS`] | SIM POLICY |
-//! | [`WIDE_ON`]/[`WIDE_OFF`]/[`TIGHT_ON`]/[`TIGHT_OFF`] | SIM POLICY |
 //! | [`TICK_HZ`] | SIM POLICY |
-//! | [`K_IDLE_DROOP_RPM`] | SIM POLICY |
-//! | [`STALL_GUARD_BAND_RPM`] | SIM POLICY |
-//! | [`CLUTCH_OUT_M_SPEED`]/[`CLUTCH_IN_M_SPEED`] | SIM POLICY |
-//! | [`REV_MATCH_BAND_RPM`] | SIM POLICY |
 //! | `gearbox.shift_addressing` / [`ShiftAddressing`] | VEHICLE DATA |
 //! | [`CRANK_DRAG_FADE_RPM`] | Resolution: numerical rest band, independent of the healthy idle guard |
 //!
@@ -417,42 +412,44 @@ const HOLD_REENGAGE_TICKS: u8 = 32;
 /// gets the same treatment. SIM POLICY.
 const GOVERNOR_CUT_RPM: f32 = 100.0;
 
-/// Idle-governor droop width (rpm): the idle governor's recovery torque ramps linearly from
-/// zero at idle to FULL `torque_at(idle)` this far below it (gain = `torque_at(idle) /
-/// (K_IDLE_DROOP_RPM·RPM_TO_RAD)` N·m per rad/s), saturating beyond. Expressing the gain as a
-/// droop WIDTH is what keeps it policy: it is a governor stand-in, not an engine datum — any
-/// governed engine gets the same recovery shape, and the TORQUE it recovers with is the
-/// vehicle's own curve. SIM POLICY.
-const K_IDLE_DROOP_RPM: f32 = 50.0;
+/// Driver actuation stand-ins, admitted before the drivetrain can be constructed.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EngineControl {
+    idle_catch_droop_rpm: crate::provenance::Labelled<f32>,
+    idle_guard_band_rpm: crate::provenance::Labelled<f32>,
+    rev_match_band_rpm: crate::provenance::Labelled<f32>,
+}
 
-/// Resolution: idle guard band (rpm), twice the idle-governor droop width so the governor
-/// saturates before the clutch slips. The game's damage model guards this speed only when
-/// combustion can exceed motoring drag there (`crank_guards`); otherwise the floor is rest.
-/// The guard cannot add crank energy during recovery from below the band.
-const STALL_GUARD_BAND_RPM: f32 = 100.0;
+fn engine_control() -> &'static EngineControl {
+    static DATA: std::sync::LazyLock<EngineControl> = std::sync::LazyLock::new(|| {
+        const PATH: &str = "assets/driving/engine.ron";
+        let data: EngineControl = crate::provenance::from_shipped_str(
+            PATH,
+            include_str!("../../assets/driving/engine.ron"),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        for (field, number) in [
+            ("idle_catch_droop_rpm", &data.idle_catch_droop_rpm),
+            ("idle_guard_band_rpm", &data.idle_guard_band_rpm),
+            ("rev_match_band_rpm", &data.rev_match_band_rpm),
+        ] {
+            assert!(
+                number.value.is_finite()
+                    && number.value > 0.0
+                    && matches!(number.label, crate::provenance::Provenance::StandIn(_)),
+                "{PATH}: {field} must be finite, positive and labelled StandIn; author the missing Driver actuation law's width"
+            );
+        }
+        data
+    });
+    &DATA
+}
 
 /// Resolution: regularise the drag sign only within one rpm of rest; the public readout
 /// resolves whole rpm. The nonnegative crank integration clips a crossing to rest;
 /// the healthy idle guard must not set a physical run-down time constant.
 const CRANK_DRAG_FADE_RPM: f32 = 1.0;
-
-/// Declutched rev-match proportional band (rpm): full fueling one band below the landing
-/// target, tapering to zero at it (`u_match = clamp((ω_target − ω_e)/band, 0, 1)`) — a smooth
-/// approach at 64 Hz instead of bang-bang chatter. Only the BAND is policy; the match
-/// AUTHORITY is the vehicle's own torque curve over its own J. SIM POLICY.
-const REV_MATCH_BAND_RPM: f32 = 200.0;
-
-/// Clutch-seam hysteresis on |m| (stage B) — the coupling seam is a
-/// REGIME boundary and a single threshold chatters on it (traced: a boundary creeper at
-/// constant sub-neutral throttle sawtoothed engage/declutch every few ticks — the engaged
-/// tick's drag/creep impulse threw the belt back across the line the declutched tick let
-/// it re-cross). Detent-style separated thresholds, derived from [`NEUTRAL_M_SPEED`]
-/// (±20%): the clutch goes OUT below `NEUTRAL_M_SPEED × 0.8`, back IN at
-/// `NEUTRAL_M_SPEED × 1.2` (or any propulsive drive command, which re-engages at any
-/// speed — the launch). Deterministic state ([`TransmissionState::clutch_out`]), no blend.
-/// SIM POLICY.
-const CLUTCH_OUT_M_SPEED: f32 = NEUTRAL_M_SPEED * 0.8;
-const CLUTCH_IN_M_SPEED: f32 = NEUTRAL_M_SPEED * 1.2;
 
 /// Propulsive command magnitude at which the healthy engine reaches its authored net curve.
 /// Below it the hold-blend shapes the transition from motoring to combustion; construction
@@ -498,18 +495,8 @@ const DIRECTION_SWAP_SPEED: f32 = 0.5;
 /// thresholds only — the neutral turn's SPEED SCALE is the spec-DERIVED
 /// [`TransmissionParams::neutral_d_full`], not a module constant. SIM POLICY.
 const NEUTRAL_THROTTLE: f32 = 0.1;
-/// The |m| half of that entry test. [`CLUTCH_OUT_M_SPEED`]/[`CLUTCH_IN_M_SPEED`] are derived
-/// from it. SIM POLICY.
+/// The |m| half of neutral-turn entry; independent of the main clutch's regime. SIM POLICY.
 const NEUTRAL_M_SPEED: f32 = 0.5;
-
-/// Steering-detent hysteresis on |steer| (design: two steps per gear, `|steer| ≥ 0.5` tight):
-/// straight→wide engages at `WIDE_ON`, releases at `WIDE_OFF`; wide→tight at `TIGHT_ON`,
-/// back at `TIGHT_OFF`. STICK-TO-DETENT input mapping only — the detent RATIOS these select
-/// are spec ([`TransmissionParams::steer_kappa`], authored as `steering.radii`). SIM POLICY.
-const WIDE_ON: f32 = 0.15;
-const WIDE_OFF: f32 = 0.05;
-const TIGHT_ON: f32 = 0.55;
-const TIGHT_OFF: f32 = 0.45;
 
 /// The engine's declared operating envelope: a piecewise-linear torque curve (N·m over rpm,
 /// ascending, clamped at the ends) under a fuel governor at `governed_rpm`.
@@ -700,7 +687,7 @@ impl TransmissionParams {
                 // DERIVED healthy idle-guard scale: the 100 rpm guard band needs
                 // positive headroom. The game's damage model can still reach rest.
                 "engine.idle_rpm floor",
-                a.idle_rpm >= 300.0,
+                a.idle_rpm > engine_control().idle_guard_band_rpm.value,
             ),
             (
                 "gearbox shift bands",
@@ -904,8 +891,16 @@ impl TransmissionParams {
             }
             t
         };
-        let cut = (1.0 - (rpm - self.engine.governed_rpm) / GOVERNOR_CUT_RPM).clamp(0.0, 1.0);
-        raw * cut
+        raw * self.fuel_cut(rpm)
+    }
+
+    fn fuel_cut(&self, rpm: f32) -> f32 {
+        (1.0 - (rpm - self.engine.governed_rpm) / GOVERNOR_CUT_RPM).clamp(0.0, 1.0)
+    }
+
+    fn launch_omega(&self, command: f32) -> f32 {
+        (self.engine.idle_rpm + command * (self.peak_torque_rpm - self.engine.idle_rpm))
+            * RPM_TO_RAD
     }
 
     /// The engine's max authored curve rpm (the last torque point — the curve is authored
@@ -913,6 +908,15 @@ impl TransmissionParams {
     pub fn max_curve_rpm(&self) -> f32 {
         self.engine.torque_nm[self.engine.torque_nm.len() - 1].0
     }
+}
+
+/// Physical main-clutch regime. Slip retains a launch until its shaft reaches the command's
+/// launch speed; Out carries no mean-axis torque.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum ClutchState {
+    Out,
+    Slip,
+    In,
 }
 
 /// The joint transmission's path-dependent state — the ONLY memory (design §2's REV-14 list):
@@ -942,10 +946,8 @@ pub struct TransmissionState {
     /// Engine crank speed ω_e (rad/s) — stage B's crank state. Initialized explicitly from
     /// vehicle data by [`Self::from_spec`]; the regenerative tick path has no in-band sentinel.
     pub omega_e: f32,
-    /// Main-clutch-out latch (stage B): the coupling-seam regime with
-    /// hysteresis — set below [`CLUTCH_OUT_M_SPEED`] without propulsive drive, cleared at
-    /// [`CLUTCH_IN_M_SPEED`] or on any propulsive command.
-    pub clutch_out: bool,
+    /// Main clutch's physical regime, replicated with the crank and gear.
+    pub clutch: ClutchState,
     /// Filtered positive load demand on the signed mean shaft axis (N, both tracks). Updated only
     /// on decision ticks and frozen through shift windows so the torque cut cannot pollute it.
     pub demand_n: f32,
@@ -1006,7 +1008,7 @@ pub(crate) fn transmission_state_projection(
         last_shift_dir,
         dwell_ticks,
         omega_e,
-        clutch_out,
+        clutch,
         demand_n,
         demand_initialized,
         grade_confirm_ticks,
@@ -1046,7 +1048,11 @@ pub(crate) fn transmission_state_projection(
         I8(last_shift_dir),
         U8(dwell_ticks),
         F32(omega_e),
-        Bool(clutch_out),
+        U8(match clutch {
+            ClutchState::Out => 0,
+            ClutchState::Slip => 1,
+            ClutchState::In => 2,
+        }),
         F32(demand_n),
         Bool(demand_initialized),
         U8(grade_confirm_ticks),
@@ -1083,7 +1089,7 @@ impl TransmissionState {
             last_shift_dir: 0,
             dwell_ticks: 0,
             omega_e,
-            clutch_out: false,
+            clutch: ClutchState::Out,
             demand_n: 0.0,
             demand_initialized: false,
             grade_confirm_ticks: 0,
@@ -1281,12 +1287,16 @@ fn engine_torques(
 ) -> [f32; 3] {
     let drag = engine_drag(tp, omega);
     let released = 1.0 - forces::hold_blend(command / DRAG_THROTTLE_RELEASE);
-    let induced = supply.task_rate * (command * tp.torque_at(omega / RPM_TO_RAD) + released * drag);
+    let rpm = omega / RPM_TO_RAD;
+    let curve = tp.torque_at(rpm);
+    let induced = supply.task_rate * (command * curve + released * drag * tp.fuel_cut(rpm));
     let idle_capacity = supply.engine_condition * tp.torque_at(tp.engine.idle_rpm);
-    let idle = (idle_capacity * (tp.engine.idle_rpm * RPM_TO_RAD - omega)
-        / (K_IDLE_DROOP_RPM * RPM_TO_RAD))
-        .clamp(0.0, idle_capacity);
-    [induced, idle, drag]
+    let catch = (idle_capacity * (tp.engine.idle_rpm * RPM_TO_RAD - omega)
+        / (engine_control().idle_catch_droop_rpm.value * RPM_TO_RAD))
+        .clamp(0.0, idle_capacity)
+        .min(curve + drag);
+    // Both requests move one rack; the catch supplies only what the command has not supplied.
+    [induced, (catch - induced).max(0.0), drag]
 }
 
 /// Full-throttle mean-axis force available in one gear at the current signed shaft speed. The
@@ -1317,12 +1327,13 @@ pub(crate) fn price_driver_force(
     gear: f32,
     command: f32,
     grip_n: f32,
+    clutch: ClutchState,
 ) -> f32 {
-    let launch_rpm = tp.engine.idle_rpm + command * (tp.peak_torque_rpm - tp.engine.idle_rpm);
+    let launch_rpm = tp.launch_omega(command) / RPM_TO_RAD;
     let shaft_rpm = shaft.max(0.0) * gear / tp.sprocket_radius / RPM_TO_RAD;
     // The design prices a fresh sub-idle landing as a launch slip; other landings are In.
     // pricing every sub-peak landing at the peak would invent a slip the clutch never made.
-    let rpm = if shaft_rpm < tp.engine.idle_rpm {
+    let rpm = if clutch == ClutchState::Slip || shaft_rpm < tp.engine.idle_rpm {
         launch_rpm
     } else {
         shaft_rpm
@@ -1859,17 +1870,18 @@ fn update_hill_hold(
 /// unchanged.
 fn update_steer_detent(st: &mut TransmissionState, steer: f32) {
     let a = steer.abs();
+    let feel = super::drive::drive_feel();
     st.steer_step = match st.steer_step {
-        0 => u8::from(a >= WIDE_ON),
+        0 => u8::from(a >= feel.wide_on.0),
         1 => {
-            if a >= TIGHT_ON {
+            if a >= feel.tight_on.0 {
                 2
             } else {
-                u8::from(a >= WIDE_OFF)
+                u8::from(a >= feel.wide_off.0)
             }
         }
         _ => {
-            if a < TIGHT_OFF {
+            if a < feel.tight_off.0 {
                 1
             } else {
                 2
@@ -2292,37 +2304,53 @@ fn update_park_latch(st: &mut TransmissionState, inp: &TransmissionInput) {
     }
 }
 
-/// THE COUPLING SEAM latch: engaged ⇔ not shifting ∧ not the neutral-idle regime. The
-/// neutral-idle regime generalizes the L600 neutral-turn seam from steering to the whole drive —
-/// no propulsive drive near standstill means the driver has the main clutch out (an engaged
-/// idle-governed crank at standstill would otherwise ride the clutch: idle torque through a
-/// first-gear reduction is hundreds of kN of spurious creep/pivot-drag force). Keyed on
-/// `propulsive` (not |throttle|) so a service-brake command at speed stays engaged (engine
-/// braking through the coupling); the L600's own steering-regime check keeps its historical
-/// |throttle| form — the seams coincide except transiently under opposing-throttle-at-standstill,
-/// where the direction swap + shift window take over within a tick.
-///
-/// The seam is a LATCH with hysteresis (`st.clutch_out`, the steering-detent doctrine), not a
-/// single threshold — a boundary creeper chattered engage/declutch on the bare
-/// [`NEUTRAL_M_SPEED`] line. Any propulsive command re-engages at any speed (the launch);
-/// otherwise the belt must fall below [`CLUTCH_OUT_M_SPEED`] to take the clutch out and climb
-/// past [`CLUTCH_IN_M_SPEED`] to put it back in.
-fn update_clutch_latch(st: &mut TransmissionState, propulsive: f32, m: f32, supply: DriveSupply) {
-    if supply.control_authority && supply.task_rate == 0.0 {
-        st.clutch_out = true;
-    } else if propulsive >= NEUTRAL_THROTTLE || m.abs() >= CLUTCH_IN_M_SPEED {
-        st.clutch_out = false;
-    } else if m.abs() < CLUTCH_OUT_M_SPEED {
-        st.clutch_out = true;
-    }
+/// The neutral steering member needs the main clutch open even while its counter-rotating
+/// belts carry unequal speeds. Mean-axis drift must not close it and remove its rev-match fuel.
+fn neutral_turn(inp: &TransmissionInput, mean: f32) -> bool {
+    inp.throttle.abs() < NEUTRAL_THROTTLE && mean.abs() < NEUTRAL_M_SPEED
 }
 
-/// The crank's free torque `τ_free = τ_ind + τ_idle − τ_drag` from the PRE-tick crank speed, and
+/// The Driver opens at rest and when its task cannot operate the clutch. A launch starts
+/// below idle, retaining Slip until the signed shaft reaches the commanded launch speed.
+/// An unstaffed station cannot move its neutral lever; a released slipping clutch springs In.
+fn update_clutch_state(
+    st: &mut TransmissionState,
+    tp: &TransmissionParams,
+    inp: &TransmissionInput,
+    shifting: bool,
+    propulsive: f32,
+    shaft_omega: f32,
+) {
+    let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
+    st.clutch = if shifting {
+        ClutchState::Out
+    } else if !inp.supply.control_authority {
+        match st.clutch {
+            ClutchState::Out => ClutchState::Out,
+            _ => ClutchState::In,
+        }
+    } else if inp.supply.task_rate == 0.0
+        || (propulsive < DEAD
+            && (mean.abs() < PARK_ENGAGE_SPEED
+                || (inp.steer.abs() >= DEAD && neutral_turn(inp, mean))))
+    {
+        ClutchState::Out
+    } else if propulsive >= DEAD
+        && (shaft_omega < tp.engine.idle_rpm * RPM_TO_RAD
+            || (st.clutch == ClutchState::Slip && shaft_omega < tp.launch_omega(propulsive)))
+    {
+        ClutchState::Slip
+    } else {
+        ClutchState::In
+    };
+}
+
+/// The crank's free torque `τ_free = max(τ_command, τ_catch) − τ_drag` from the PRE-tick crank speed, and
 /// the engine power available at that operating point.
 ///
 /// Fueling command u. Engaged: the unscaled propulsive throttle (a brake command is not
 /// fueling). The game's damage model scales gross combustion while retaining construction drag.
-/// Declutched: a proportional-band rev governor ([`REV_MATCH_BAND_RPM`]) toward the LARGER of two
+/// Declutched: a proportional-band rev governor (the width in `assets/driving/engine.ron`) toward the LARGER of two
 /// targets —
 ///   * the REV-MATCH target `|m|·k` (`st.gear` is already the landing gear during the window), so
 ///     the clutch re-engages near-synchronous;
@@ -2357,7 +2385,8 @@ fn crank_free_torque(
         let omega_steer =
             omega_idle + (tp.peak_torque_rpm * RPM_TO_RAD - omega_idle) * inp.steer.abs().min(1.0);
         let omega_target = omega_match.max(omega_steer);
-        ((omega_target - omega_e) / (REV_MATCH_BAND_RPM * RPM_TO_RAD)).clamp(0.0, 1.0)
+        ((omega_target - omega_e) / (engine_control().rev_match_band_rpm.value * RPM_TO_RAD))
+            .clamp(0.0, 1.0)
     };
 
     let supply = inp.supply;
@@ -2421,7 +2450,7 @@ fn steering_force(
     // The steering detent (`st.steer_step`) was already updated for THIS tick
     // above the shift scheduler — one detent truth per tick; this law only
     // consumes it.
-    let neutral = inp.throttle.abs() < NEUTRAL_THROTTLE && m.abs() < NEUTRAL_M_SPEED;
+    let neutral = neutral_turn(inp, m);
     if neutral {
         // The marginal brake-gated neutral turn: a slow capacity-limited servo
         // toward the DERIVED pivot scale `neutral_d_full = κ_tight(F1) ×
@@ -2752,19 +2781,28 @@ fn settle_crank(
 /// before the clutch slip saturates.
 fn crank_guards(
     tp: &TransmissionParams,
-    supply: DriveSupply,
-    omega: f32,
+    inp: &TransmissionInput,
+    st: &TransmissionState,
+    propulsive: f32,
     tau_free: f32,
-    dt: f32,
 ) -> (f32, f32) {
-    let guard_point = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
-    let can_idle =
-        supply.engine_condition * tp.torque_at(tp.engine.idle_rpm) > engine_drag(tp, guard_point);
-    let omega_floor = if can_idle { guard_point } else { 0.0 };
-    let omega_over = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
-    // The game's damage model: recovery from rest cannot jump to the idle band for free.
-    let reachable = (omega + tau_free * dt / tp.engine_inertia).max(0.0);
-    (omega_floor.min(reachable), omega_over)
+    let guard_point =
+        (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value) * RPM_TO_RAD;
+    let can_idle = inp.supply.engine_condition * tp.torque_at(tp.engine.idle_rpm)
+        > engine_drag(tp, guard_point);
+    let floor = if st.clutch == ClutchState::Slip && tau_free > 0.0 {
+        tp.launch_omega(propulsive)
+    } else if can_idle {
+        guard_point
+    } else {
+        0.0
+    };
+    // Recovery cannot create crank energy: below the floor, spool before transmitting torque.
+    let reachable = (st.omega_e + tau_free * inp.dt / tp.engine_inertia).max(0.0);
+    (
+        floor.min(reachable),
+        (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD,
+    )
 }
 
 /// The input half of the optional drivetrain trace, kept out of the physical solve.
@@ -2798,7 +2836,8 @@ fn input_probe(
 fn force_probe(
     tp: &TransmissionParams,
     inp: &TransmissionInput,
-    (shaft, reduction, delivered): (f32, f32, f32),
+    (shaft, reduction, delivered, command): (f32, f32, f32, f32),
+    clutch: ClutchState,
     probe: &mut TransmissionProbe,
 ) {
     probe.priced_force_n = price_driver_force(
@@ -2806,8 +2845,9 @@ fn force_probe(
         inp.supply,
         shaft,
         reduction,
-        inp.throttle.abs(),
+        command,
         inp.perceived_load.grip_n,
+        clutch,
     );
     probe.delivered_force_n = delivered.min(inp.perceived_load.grip_n);
 }
@@ -2928,16 +2968,13 @@ pub fn step(
 
     update_park_latch(st, inp);
 
-    // --- Engine crank state ω_e (stage B). The crank is real state with inertia J; stage
-    // A's command-proxy rev floor is DEAD (launch rpm is now the emergent clutch-slip
-    // equilibrium). The crank is NEVER negative — it cannot follow a back-driven shaft
-    // (stage A's principle, now enforced by the stall guard instead of a floor).
+    // The crank carries real inertia; launch slip limits transmitted torque while it spools.
     let omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
     let omega_e = st.omega_e;
     let k = g / tp.sprocket_radius;
 
-    update_clutch_latch(st, propulsive, m, inp.supply);
-    let engaged = !shifting && !st.clutch_out;
+    update_clutch_state(st, tp, inp, shifting, propulsive, shaft * k);
+    let engaged = st.clutch != ClutchState::Out;
 
     let (tau_free, p_avail) = crank_free_torque(
         tp,
@@ -2956,7 +2993,7 @@ pub fn step(
     // through the gear (in place of the old f_p + f_drag — drag reaches the belt only
     // through the coupling now). Declutched, the belt gets NOTHING from the engine.
     let i_m = 2.0 * fp.inertia;
-    let (omega_floor, omega_over) = crank_guards(tp, inp.supply, omega_e, tau_free, dt);
+    let (omega_floor, omega_over) = crank_guards(tp, inp, st, propulsive, tau_free);
     let crank = CrankTick {
         omega_e,
         tau_free,
@@ -3039,7 +3076,8 @@ pub fn step(
         .min((2.0 * work.crank_energy / tp.engine_inertia).sqrt());
     #[cfg(feature = "bitprobe")]
     {
-        force_probe(tp, inp, (dir * m, g, dir * f_c), &mut bitprobe);
+        let sample = (dir * m, g, dir * f_c, propulsive);
+        force_probe(tp, inp, sample, st.clutch, &mut bitprobe);
         bitprobe.power_scale = power_scale;
         bitprobe.omega_end = st.omega_e;
     }

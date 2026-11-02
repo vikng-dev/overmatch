@@ -253,7 +253,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// at the wrong unit.
 /// REV 68 (#146, driving input): the client sends persistent signed notch intent and hold
 /// overrides; the server snaps opposing pedal signs to neutral. Wire types and surface are unchanged.
-pub const PROTOCOL_REV: u32 = 68;
+/// REV 69 (#146, driving model): the main clutch carries Out, Slip or In on the wire.
+pub const PROTOCOL_REV: u32 = 69;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1158,7 +1159,7 @@ const WIRE_SURFACE_HASH: u64 = 0xc0256acf39c3f9da;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xacc601ec59bc4506;
+const WIRE_TYPES_HASH: u64 = 0x1a2f2d497a53027a;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -2039,6 +2040,7 @@ mod tests {
         ("src/track/sim.rs", "EngineRpm"),
         ("src/track/transmission.rs", "TransmissionState"),
         ("src/track/transmission.rs", "SchedulerState"),
+        ("src/track/transmission.rs", "ClutchState"),
         ("src/tank/model.rs", "WeaponGate"),
         ("src/tank/model.rs", "WeaponGateState"),
         ("src/tank/model.rs", "LoadRate"),

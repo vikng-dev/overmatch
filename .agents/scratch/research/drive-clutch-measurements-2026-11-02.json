@@ -1,0 +1,384 @@
+{
+  "subject": "The game's driving model; game state only",
+  "method": "After each cut, observe up to one interruption's ticks whose post-tick crank is within one rpm of its retained Slip target or In shaft speed; finish a partial sample if the next cut arrives. Mean force, not first-tick force, is compared with the cut's forecast. Forecast speed error is recorded separately. Coupled crank acceleration remains a material price/delivery discrepancy; no small-margin certification is claimed.",
+  "landings": [
+    {
+      "gear": 5.0,
+      "predicted_n": 129862.703125,
+      "first_n": 78723.960938,
+      "mean_n": 127828.1875,
+      "gap_n": 2034.515625,
+      "samples": 20.0
+    },
+    {
+      "gear": 4.0,
+      "predicted_n": 208066.671875,
+      "first_n": 105550.015625,
+      "mean_n": 172426.84375,
+      "gap_n": 35639.828125,
+      "samples": 20.0
+    },
+    {
+      "gear": 1.0,
+      "predicted_n": 472902.90625,
+      "first_n": 0.0,
+      "mean_n": 327207.71875,
+      "gap_n": 145695.1875,
+      "samples": 20.0
+    },
+    {
+      "gear": 1.0,
+      "predicted_n": 435829.90625,
+      "first_n": -0.0,
+      "mean_n": 435829.9375,
+      "gap_n": -0.03125,
+      "samples": 20.0
+    },
+    {
+      "gear": 2.0,
+      "predicted_n": 409804.53125,
+      "first_n": 197029.21875,
+      "mean_n": 148389.453125,
+      "gap_n": 261415.078125,
+      "samples": 16.0
+    },
+    {
+      "gear": 3.0,
+      "predicted_n": 298654.15625,
+      "first_n": 162777.890625,
+      "mean_n": 153821.890625,
+      "gap_n": 144832.265625,
+      "samples": 16.0
+    },
+    {
+      "gear": 4.0,
+      "predicted_n": 201247.46875,
+      "first_n": 272936.84375,
+      "mean_n": 158242.109375,
+      "gap_n": 43005.359375,
+      "samples": 20.0
+    },
+    {
+      "gear": 5.0,
+      "predicted_n": 131165.921875,
+      "first_n": 192506.078125,
+      "mean_n": 116702.851562,
+      "gap_n": 14463.070312,
+      "samples": 20.0
+    },
+    {
+      "gear": 6.0,
+      "predicted_n": 90411.976562,
+      "first_n": 129872.53125,
+      "mean_n": 87658.90625,
+      "gap_n": 2753.070312,
+      "samples": 20.0
+    },
+    {
+      "gear": 7.0,
+      "predicted_n": 62526.417969,
+      "first_n": 88994.625,
+      "mean_n": 62572.914062,
+      "gap_n": -46.496094,
+      "samples": 20.0
+    },
+    {
+      "gear": 8.0,
+      "predicted_n": 41721.980469,
+      "first_n": 59787.136719,
+      "mean_n": 42137.335938,
+      "gap_n": -415.355469,
+      "samples": 20.0
+    },
+    {
+      "gear": 2.0,
+      "predicted_n": 395027.34375,
+      "first_n": 182186.75,
+      "mean_n": 144311.9375,
+      "gap_n": 250715.40625,
+      "samples": 18.0
+    },
+    {
+      "gear": 3.0,
+      "predicted_n": 291453.25,
+      "first_n": 253834.140625,
+      "mean_n": 173391.21875,
+      "gap_n": 118062.03125,
+      "samples": 20.0
+    },
+    {
+      "gear": 4.0,
+      "predicted_n": 198335.75,
+      "first_n": 278836.90625,
+      "mean_n": 162631.21875,
+      "gap_n": 35704.53125,
+      "samples": 20.0
+    },
+    {
+      "gear": 5.0,
+      "predicted_n": 129688.109375,
+      "first_n": 192506.078125,
+      "mean_n": 119268.664062,
+      "gap_n": 10419.445312,
+      "samples": 20.0
+    },
+    {
+      "gear": 6.0,
+      "predicted_n": 89709.71875,
+      "first_n": 129872.53125,
+      "mean_n": 89484.210938,
+      "gap_n": 225.507812,
+      "samples": 20.0
+    },
+    {
+      "gear": 7.0,
+      "predicted_n": 62173.363281,
+      "first_n": 88994.625,
+      "mean_n": 63082.789062,
+      "gap_n": -909.425781,
+      "samples": 20.0
+    },
+    {
+      "gear": 2.0,
+      "predicted_n": 402408.40625,
+      "first_n": 213149.609375,
+      "mean_n": 151217.6875,
+      "gap_n": 251190.71875,
+      "samples": 17.0
+    },
+    {
+      "gear": 3.0,
+      "predicted_n": 295123.5,
+      "first_n": 183072.3125,
+      "mean_n": 161449.40625,
+      "gap_n": 133674.09375,
+      "samples": 17.0
+    },
+    {
+      "gear": 4.0,
+      "predicted_n": 199627.15625,
+      "first_n": 287473.375,
+      "mean_n": 163156.4375,
+      "gap_n": 36470.71875,
+      "samples": 20.0
+    },
+    {
+      "gear": 5.0,
+      "predicted_n": 130441.117188,
+      "first_n": 192506.078125,
+      "mean_n": 116294.296875,
+      "gap_n": 14146.820312,
+      "samples": 20.0
+    },
+    {
+      "gear": 6.0,
+      "predicted_n": 90066.882812,
+      "first_n": 129872.53125,
+      "mean_n": 87597.046875,
+      "gap_n": 2469.835938,
+      "samples": 20.0
+    },
+    {
+      "gear": 7.0,
+      "predicted_n": 62358.9375,
+      "first_n": 88994.625,
+      "mean_n": 62163.519531,
+      "gap_n": 195.417969,
+      "samples": 20.0
+    },
+    {
+      "gear": 8.0,
+      "predicted_n": 41605.167969,
+      "first_n": 59787.136719,
+      "mean_n": 42382.65625,
+      "gap_n": -777.488281,
+      "samples": 20.0
+    },
+    {
+      "gear": 7.0,
+      "predicted_n": 66124.0,
+      "first_n": 27180.515625,
+      "mean_n": 65308.386719,
+      "gap_n": 815.613281,
+      "samples": 20.0
+    },
+    {
+      "gear": 6.0,
+      "predicted_n": 95654.5625,
+      "first_n": 32612.328125,
+      "mean_n": 89557.046875,
+      "gap_n": 6097.515625,
+      "samples": 20.0
+    },
+    {
+      "gear": 7.0,
+      "predicted_n": 64199.292969,
+      "first_n": 22779.365234,
+      "mean_n": 62038.386719,
+      "gap_n": 2160.90625,
+      "samples": 20.0
+    }
+  ],
+  "loads": [
+    {
+      "case": "course 10 degrees",
+      "weight_n": 559170.0,
+      "expected_n": 124632.59375,
+      "n": 576,
+      "min": 124632.53125,
+      "median": 124632.601562,
+      "p95": 124632.632812,
+      "max": 124632.65625,
+      "gaps": "n=2 min=2034.515625 median=35639.828125 p95=2034.515625 max=35639.828125"
+    },
+    {
+      "case": "course 20 degrees",
+      "weight_n": 559170.0,
+      "expected_n": 217519.796875,
+      "n": 576,
+      "min": 217519.953125,
+      "median": 217520.03125,
+      "p95": 217520.078125,
+      "max": 217520.109375,
+      "gaps": "n=1 min=145695.187500 median=145695.187500 p95=145695.187500 max=145695.187500"
+    },
+    {
+      "case": "course 30 degrees",
+      "weight_n": 559170.0,
+      "expected_n": 303797.78125,
+      "n": 576,
+      "min": 303797.375,
+      "median": 303797.46875,
+      "p95": 303797.53125,
+      "max": 303797.59375,
+      "gaps": "n=1 min=-0.031250 median=-0.031250 p95=-0.031250 max=-0.031250"
+    },
+    {
+      "case": "concrete rolling=false",
+      "weight_n": 559170.0,
+      "expected_n": 22366.798828,
+      "n": 64,
+      "min": 22366.783203,
+      "median": 22366.796875,
+      "p95": 22366.806641,
+      "max": 22366.810547,
+      "gaps": "n=7 min=-415.355469 median=14463.070312 p95=144832.265625 max=261415.078125"
+    },
+    {
+      "case": "concrete rolling=true",
+      "weight_n": 559170.0,
+      "expected_n": 22366.798828,
+      "n": 64,
+      "min": 22366.783203,
+      "median": 22366.794922,
+      "p95": 22366.806641,
+      "max": 22366.8125,
+      "gaps": "none"
+    },
+    {
+      "case": "dirt rolling=false",
+      "weight_n": 559170.0,
+      "expected_n": 33550.199219,
+      "n": 64,
+      "min": 33550.171875,
+      "median": 33550.191406,
+      "p95": 33550.203125,
+      "max": 33550.207031,
+      "gaps": "n=6 min=-909.425781 median=35704.531250 p95=118062.031250 max=250715.406250"
+    },
+    {
+      "case": "dirt rolling=true",
+      "weight_n": 559170.0,
+      "expected_n": 33550.199219,
+      "n": 64,
+      "min": 33550.175781,
+      "median": 33550.191406,
+      "p95": 33550.207031,
+      "max": 33550.207031,
+      "gaps": "none"
+    },
+    {
+      "case": "gravel rolling=false",
+      "weight_n": 559170.0,
+      "expected_n": 27958.5,
+      "n": 64,
+      "min": 27958.521484,
+      "median": 27958.535156,
+      "p95": 27958.544922,
+      "max": 27958.546875,
+      "gaps": "n=7 min=-777.488281 median=14146.820312 p95=133674.093750 max=251190.718750"
+    },
+    {
+      "case": "gravel rolling=true",
+      "weight_n": 559170.0,
+      "expected_n": 27958.5,
+      "n": 64,
+      "min": 27958.521484,
+      "median": 27958.535156,
+      "p95": 27958.544922,
+      "max": 27958.548828,
+      "gaps": "none"
+    },
+    {
+      "case": "mud rolling=false",
+      "weight_n": 559170.0,
+      "expected_n": 83875.5,
+      "n": 64,
+      "min": 83875.460938,
+      "median": 83875.507812,
+      "p95": 83875.546875,
+      "max": 83875.554688,
+      "gaps": "none"
+    },
+    {
+      "case": "mud rolling=true",
+      "weight_n": 559170.0,
+      "expected_n": 83875.5,
+      "n": 64,
+      "min": 83875.453125,
+      "median": 83875.5,
+      "p95": 83875.539062,
+      "max": 83875.554688,
+      "gaps": "n=2 min=815.613281 median=6097.515625 p95=815.613281 max=6097.515625"
+    },
+    {
+      "case": "sand rolling=false",
+      "weight_n": 559170.0,
+      "expected_n": 67100.398438,
+      "n": 64,
+      "min": 67100.359375,
+      "median": 67100.382812,
+      "p95": 67100.40625,
+      "max": 67100.421875,
+      "gaps": "none"
+    },
+    {
+      "case": "sand rolling=true",
+      "weight_n": 559170.0,
+      "expected_n": 67100.398438,
+      "n": 64,
+      "min": 67100.359375,
+      "median": 67100.382812,
+      "p95": 67100.40625,
+      "max": 67100.414062,
+      "gaps": "n=1 min=2160.906250 median=2160.906250 p95=2160.906250 max=2160.906250"
+    }
+  ],
+  "derivation": {
+    "weight_n": 559170.0,
+    "min_gap_n": -909.425781,
+    "max_gap_n": 261415.078125,
+    "span_n": 262324.503906,
+    "max_load_residual_n": 0.40625,
+    "bound_n": 262324.910156,
+    "share": 0.469133,
+    "M_n": 262325.09961000003
+  },
+  "launches": [
+    "MEASURED launch concrete: time_to_0_5_m_s=Some(0.65625) time_to_2_m_s=Some(2.59375)",
+    "MEASURED launch dirt: time_to_0_5_m_s=Some(0.65625) time_to_2_m_s=Some(3.28125)",
+    "MEASURED launch gravel: time_to_0_5_m_s=Some(0.65625) time_to_2_m_s=Some(2.671875)",
+    "MEASURED launch mud: time_to_0_5_m_s=Some(0.671875) time_to_2_m_s=None",
+    "MEASURED launch sand: time_to_0_5_m_s=Some(0.671875) time_to_2_m_s=None"
+  ]
+}

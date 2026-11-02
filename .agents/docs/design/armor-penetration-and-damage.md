@@ -1236,8 +1236,8 @@ the crank's stored energy. The crank retains only unspent energy; neither accele
 rest nor a clutch re-anchor creates work. Inner-to-outer transfer pays the declared
 recirculation loss; pure engine braking has no such transfer. An engine that cannot sustain
 idle can run down to rest, and the recovery guard never supplies energy of its own. The
-healthy idle-guard band is Resolution: 100 rpm, twice the idle-governor droop width. It does
-not also shape engine friction. The separate numerical drag-sign band is Resolution: one rpm,
+healthy idle-guard band is a StandIn for the missing stall/restart law, authored in
+`assets/driving/engine.ron`; it does not also shape engine friction. The separate numerical drag-sign band is Resolution: one rpm,
 at the public readout's whole-rpm resolution; above that band the run-down follows the authored
 drag and crank inertia. A stopped public crank pauses its running sound loop.
 

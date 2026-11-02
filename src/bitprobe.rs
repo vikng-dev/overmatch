@@ -114,8 +114,6 @@ const TRANSMISSION_INPUT_FIELDS: &[(&str, &str)] = &[
     ("demand_post", "f32"),
     ("perceived_load_n", "f32"),
     ("grip_limit_n", "f32"),
-    ("priced_force_n", "f32"),
-    ("delivered_force_n", "f32"),
     ("demand_updated", "bool"),
 ];
 
@@ -164,6 +162,8 @@ const CLUTCH_ENGINE_FIELDS: &[(&str, &str)] = &[
     ("reanchor_tau_impl", "f32"),
     ("reanchor_feasible", "bool"),
     ("omega_end", "f32"),
+    ("priced_force_n", "f32"),
+    ("delivered_force_n", "f32"),
 ];
 
 const TRANSMISSION_STATE_FIELDS: &[(&str, &str)] = &[
@@ -175,7 +175,7 @@ const TRANSMISSION_STATE_FIELDS: &[(&str, &str)] = &[
     ("last_shift_dir", "i32"),
     ("dwell_ticks", "u32"),
     ("omega_e", "f32"),
-    ("clutch_out", "bool"),
+    ("clutch", "u32"),
     ("demand_n", "f32"),
     ("demand_initialized", "bool"),
     ("grade_confirm_ticks", "u32"),
@@ -470,7 +470,7 @@ fn build_app() -> App {
     app
 }
 
-fn wait_for_plugins(app: &mut App) -> Result<(), String> {
+fn wait_for_plugins(app: &mut App) -> Result<(), BitprobeError> {
     for _ in 0..60_000 {
         if app.plugins_state() != PluginsState::Adding {
             app.finish();
@@ -479,10 +479,10 @@ fn wait_for_plugins(app: &mut App) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    Err("plugins did not finish initialization within 60 seconds".to_string())
+    Err(BitprobeError::PluginInitializationTimeout)
 }
 
-fn prepare_fixture(app: &mut App) -> Result<Entity, String> {
+fn prepare_fixture(app: &mut App) -> Entity {
     for _ in 0..16 {
         app.update();
         let world = app.world();
@@ -493,13 +493,10 @@ fn prepare_fixture(app: &mut App) -> Result<Entity, String> {
             && world.get_resource::<FixtureEntity>().is_some()
             && *world.resource::<State<AppState>>().get() == AppState::Playing;
         if ready {
-            return Ok(world.resource::<FixtureEntity>().0);
+            return world.resource::<FixtureEntity>().0;
         }
     }
-    Err(
-        "fixture did not reach Playing with TrackGear and TrackField after 16 frozen updates"
-            .into(),
-    )
+    panic!("the fixture must reach Playing with TrackGear and TrackField after 16 frozen updates")
 }
 
 fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
@@ -538,10 +535,16 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
         .bitprobe_startup(&mut out);
     world.resource::<TrackGear>().bitprobe_startup(&mut out);
     out.f32(
+        "driver.landing_force_margin_share",
+        world
+            .resource::<crate::track::load::DriverResolution>()
+            .landing_force_margin_share,
+    );
+    out.f32(
         "driver.landing_force_margin_n",
         world
             .resource::<crate::track::load::DriverResolution>()
-            .landing_force_margin_n,
+            .margin_n(world.resource::<TankBlueprint>().spec.mass * crate::track::derive::G),
     );
 
     let spec = &world.resource::<TankBlueprint>().spec;
@@ -647,55 +650,35 @@ struct DumpWriter {
 }
 
 impl DumpWriter {
-    fn create(path: PathBuf, header: &serde_json::Value) -> Result<Self, String> {
-        let file = File::create(&path)
-            .map_err(|error| format!("creating {} failed: {error}", path.display()))?;
-        // mtime=0 makes the gzip wrapper reproducible; all target/run identity lives in the
-        // self-describing inner header where the comparator can deliberately ignore it.
+    fn create(path: PathBuf, header: &serde_json::Value) -> std::io::Result<Self> {
+        let file = File::create(path)?;
         let mut output = GzBuilder::new()
             .mtime(0)
             .write(BufWriter::new(file), Compression::default());
-        let header = serde_json::to_vec(header)
-            .map_err(|error| format!("serializing dump header failed: {error}"))?;
-        let header_len = u32::try_from(header.len())
-            .map_err(|_| "serialized dump header exceeds u32 length".to_string())?;
-        output
-            .write_all(MAGIC)
-            .and_then(|_| output.write_all(&header_len.to_le_bytes()))
-            .and_then(|_| output.write_all(&header))
-            .map_err(|error| format!("writing dump header failed: {error}"))?;
+        let header = serde_json::to_vec(header).expect("the dump header contains only JSON values");
+        let len = u32::try_from(header.len()).expect("the fixed dump schema fits a u32 byte count");
+        output.write_all(MAGIC)?;
+        output.write_all(&len.to_le_bytes())?;
+        output.write_all(&header)?;
         Ok(Self { output })
     }
 
-    fn tick(&mut self, tick: u32, seams: &[Vec<u32>; SEAM_NAMES.len()]) -> Result<(), String> {
-        self.output
-            .write_all(&tick.to_le_bytes())
-            .map_err(|error| format!("writing tick {tick} failed: {error}"))?;
+    fn tick(&mut self, tick: u32, seams: &[Vec<u32>; SEAM_NAMES.len()]) -> std::io::Result<()> {
+        self.output.write_all(&tick.to_le_bytes())?;
         for payload in seams {
-            let hash = hash_words(payload);
             let len = u32::try_from(payload.len())
-                .map_err(|_| format!("tick {tick} seam payload exceeds u32 words"))?;
-            self.output
-                .write_all(&hash.to_le_bytes())
-                .and_then(|_| self.output.write_all(&len.to_le_bytes()))
-                .map_err(|error| format!("writing tick {tick} seam header failed: {error}"))?;
+                .expect("one fixture tank's seam fits a u32 word count");
+            self.output.write_all(&hash_words(payload).to_le_bytes())?;
+            self.output.write_all(&len.to_le_bytes())?;
             for word in payload {
-                self.output
-                    .write_all(&word.to_le_bytes())
-                    .map_err(|error| format!("writing tick {tick} seam payload failed: {error}"))?;
+                self.output.write_all(&word.to_le_bytes())?;
             }
         }
         Ok(())
     }
 
-    fn finish(self) -> Result<(), String> {
-        let mut output = self
-            .output
-            .finish()
-            .map_err(|error| format!("finishing gzip dump failed: {error}"))?;
-        output
-            .flush()
-            .map_err(|error| format!("flushing dump failed: {error}"))
+    fn finish(self) -> std::io::Result<()> {
+        self.output.finish()?.flush()
     }
 }
 
@@ -798,8 +781,6 @@ fn transmission_input_payload(capture: &BitprobeCapture) -> Vec<u32> {
         probe.demand_post,
         probe.perceived_load_n,
         probe.grip_limit_n,
-        probe.priced_force_n,
-        probe.delivered_force_n,
     ] {
         f32_word(&mut output, value);
     }
@@ -861,6 +842,8 @@ fn clutch_engine_payload(probe: TransmissionProbe) -> Vec<u32> {
     f32_word(&mut output, probe.reanchor_tau_impl);
     bool_word(&mut output, probe.reanchor_feasible);
     f32_word(&mut output, probe.omega_end);
+    f32_word(&mut output, probe.priced_force_n);
+    f32_word(&mut output, probe.delivered_force_n);
     output
 }
 
@@ -928,18 +911,16 @@ fn pose_payload(world: &World, tank: Entity) -> Vec<u32> {
     output
 }
 
-fn tick_payloads(world: &World, tank: Entity) -> Result<[Vec<u32>; SEAM_NAMES.len()], String> {
+fn tick_payloads(world: &World, tank: Entity) -> [Vec<u32>; SEAM_NAMES.len()] {
     let capture = world.resource::<BitprobeCapture>();
-    if capture.tanks_seen != 1 {
-        return Err(format!(
-            "tick captured {} tanks; the differential fixture requires exactly one",
-            capture.tanks_seen
-        ));
-    }
+    assert_eq!(
+        capture.tanks_seen, 1,
+        "the differential fixture captures exactly one tank"
+    );
     let transmission = world
         .get::<TankTransmission>(tank)
-        .ok_or_else(|| "fixture tank lost TankTransmission".to_string())?;
-    let seams = [
+        .expect("the fixture tank retains its spawn-time transmission");
+    [
         contact_payload(capture),
         element_payload(capture),
         belt_payload(capture),
@@ -947,27 +928,48 @@ fn tick_payloads(world: &World, tank: Entity) -> Result<[Vec<u32>; SEAM_NAMES.le
         clutch_engine_payload(capture.transmission),
         transmission_state_payload(transmission),
         pose_payload(world, tank),
-    ];
-    Ok(seams)
+    ]
+}
+
+/// Outside inputs to the differential probe retain their failure category.
+#[derive(Debug)]
+pub enum BitprobeError {
+    Usage,
+    PluginInitializationTimeout,
+    Output(std::io::Error),
+}
+
+impl std::fmt::Display for BitprobeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Usage => {
+                f.write_str("usage: bitprobe <output.obp.gz>; supply exactly one output path")
+            }
+            Self::PluginInitializationTimeout => {
+                f.write_str("plugins did not finish initialization within 60 seconds")
+            }
+            Self::Output(error) => write!(f, "bitprobe output failed: {error}"),
+        }
+    }
+}
+impl std::error::Error for BitprobeError {}
+impl From<std::io::Error> for BitprobeError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Output(error)
+    }
 }
 
 /// Run the fixed canned fixture and write one complete raw-bit dump.
-pub fn run_bitprobe() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args_os();
-    let executable = args.next().unwrap_or_default();
-    let output = args.next().ok_or_else(|| {
-        format!(
-            "usage: {} <output.obp.gz>",
-            PathBuf::from(executable).display()
-        )
-    })?;
-    if args.next().is_some() {
-        return Err("bitprobe accepts exactly one output path".into());
-    }
+pub fn run_bitprobe() -> Result<(), BitprobeError> {
+    let mut args = std::env::args_os().skip(1);
+    let output = match (args.next(), args.next()) {
+        (Some(path), None) => path,
+        _ => return Err(BitprobeError::Usage),
+    };
 
     let mut app = build_app();
     wait_for_plugins(&mut app)?;
-    let tank = prepare_fixture(&mut app)?;
+    let tank = prepare_fixture(&mut app);
     app.world_mut()
         .resource_mut::<Time<Fixed>>()
         .set_timestep_hz(TICK_HZ);
@@ -981,12 +983,12 @@ pub fn run_bitprobe() -> Result<(), Box<dyn std::error::Error>> {
             let mut entity = app.world_mut().entity_mut(tank);
             let mut command = entity
                 .get_mut::<TankCommand>()
-                .ok_or("fixture tank lost TankCommand")?;
+                .expect("the fixture tank retains its spawn-time command");
             command.throttle = throttle;
             command.steer = steer;
         }
         app.update();
-        writer.tick(tick, &tick_payloads(app.world(), tank)?)?;
+        writer.tick(tick, &tick_payloads(app.world(), tank))?;
     }
     writer.finish()?;
     Ok(())
@@ -1029,7 +1031,7 @@ mod tests {
         }
         world.insert_resource(capture);
 
-        let payloads = tick_payloads(&world, tank).expect("the fixture captured one tank");
+        let payloads = tick_payloads(&world, tank);
         let header = header(&StartupBuilder::default());
         let seams = header["seams"]
             .as_array()
