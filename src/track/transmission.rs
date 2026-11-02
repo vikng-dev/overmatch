@@ -2315,7 +2315,8 @@ fn neutral_turn(inp: &TransmissionInput, mean: f32) -> bool {
 
 /// The Driver opens at rest and when its task cannot operate the clutch. A launch starts
 /// below idle, retaining Slip until the signed shaft reaches the commanded launch speed.
-/// An unstaffed station cannot move its neutral lever; a released slipping clutch springs In.
+/// At rest an unstaffed station retains its neutral lever. A moving shift interruption expires
+/// with its window, and a released slipping clutch springs In.
 fn update_clutch_state(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
@@ -2329,7 +2330,7 @@ fn update_clutch_state(
         ClutchState::Out
     } else if !inp.supply.control_authority {
         match st.clutch {
-            ClutchState::Out => ClutchState::Out,
+            ClutchState::Out if mean.abs() < PARK_ENGAGE_SPEED => ClutchState::Out,
             _ => ClutchState::In,
         }
     } else if inp.supply.task_rate == 0.0

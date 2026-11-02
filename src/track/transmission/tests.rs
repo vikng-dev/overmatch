@@ -4081,3 +4081,35 @@ fn driver_turn_radius_reads_each_detent_on_both_ladders() {
         }
     }
 }
+
+/// The game's driving and damage model: a shift's interruption must expire even after
+/// control authority leaves. The moving drivetrain must resume transmitting motoring drag.
+#[test]
+fn empty_station_shift_window_expires_into_motoring_drag() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    // Fixture: descending at 5 m/s on a 10-degree grade, authority lost mid-window.
+    let speed = 5.0;
+    let k = tp.gears_fwd[3] / tp.sprocket_radius;
+    let grade = fp.grip.unwrap().side_weight * 10.0_f32.to_radians().sin();
+    let mut st = TransmissionState {
+        gear: 4,
+        park: false,
+        clutch: ClutchState::In,
+        shift_ticks: 3,
+        omega_e: speed * k,
+        ..fresh(&tp)
+    };
+    let mut inp = input(0.0, 0.0, [speed; 2], [-grade; 2]);
+    let first = step(&fp, &tp, &mut st, &inp);
+    assert!(first.shifting);
+    inp.supply.control_authority = false;
+    inp.supply.task_rate = 0.0;
+    while st.shift_ticks > 0 {
+        assert!(step(&fp, &tp, &mut st, &inp).shifting);
+        assert_eq!(st.clutch, ClutchState::Out);
+    }
+    let report = step(&fp, &tp, &mut st, &inp);
+    assert!(!report.shifting);
+    assert_eq!(st.clutch, ClutchState::In);
+    assert!(report.forces.into_iter().all(|force| force < 0.0));
+}
