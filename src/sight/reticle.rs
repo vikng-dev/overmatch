@@ -729,9 +729,12 @@ fn update_intent_reticle(
     camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
     controlled: Query<(Entity, &Rig), With<Controlled>>,
     hull: Query<&GlobalTransform, With<Hull>>,
-    mut reticle: Query<(&mut Node, &mut Visibility), With<IntentReticle>>,
+    mut reticle: Query<
+        (&mut Node, &mut Visibility, &ComputedUiRenderTargetInfo),
+        With<IntentReticle>,
+    >,
 ) {
-    let Ok((mut node, mut visibility)) = reticle.single_mut() else {
+    let Ok((mut node, mut visibility, target)) = reticle.single_mut() else {
         return;
     };
     if *mode != SightMode::Gunner {
@@ -755,6 +758,12 @@ fn update_intent_reticle(
 
     match camera.world_to_viewport(cam_transform, point) {
         Ok(screen) => {
+            // Camera logical pixels -> physical target pixels -> this node's UI pixels.
+            let to_ui = camera
+                .target_scaling_factor()
+                .expect("a successful viewport projection has the camera's target scale")
+                / target.scale_factor();
+            let screen = screen * to_ui;
             node.left = Val::Px(screen.x - 4.0);
             node.top = Val::Px(screen.y - 4.0);
             *visibility = Visibility::Visible;
@@ -1357,6 +1366,8 @@ mod tests {
     /// sub-pixel steps so the marks land at many fractions of a pixel. Every drawn mark must lay out
     /// exactly one physical pixel tall with its top edge on the physical grid, and the zero mark's
     /// row must hold the sight line's physical projection to within half a pixel on both axes.
+    /// The intent cursor, bore dot and held aim dot must also centre on their own physical
+    /// projections in the same frame, so the player sees one consistent coordinate system.
     ///
     /// Mutants: a thickness in `Val::Px` (two rows at 2x, none or two at a fractional scale); the
     /// window's scale without `UiScale`; a camera-logical point written to `Val::Px` unconverted
@@ -1393,10 +1404,10 @@ mod tests {
             hud: Handle::default(),
             body: Handle::default(),
         })
-        .add_systems(Startup, spawn_ranging_reticle)
+        .add_systems(Startup, (spawn_ranging_reticle, spawn_intent_reticle))
         .init_resource::<CommittedAim>()
         .init_resource::<Assets<OpticMaskMaterial>>()
-        .add_plugins(mount_placement);
+        .add_plugins((mount_placement, crate::aim::tests::mount_layout_fixture));
         // `App::run` normally drives plugin finish/cleanup; a bare `update()` loop must do it.
         while app.plugins_state() == bevy::app::PluginsState::Adding {
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1416,17 +1427,25 @@ mod tests {
             PlayerView,
         ));
         let gun = world.spawn(Transform::from_translation(GUN)).id();
-        let muzzle = world.spawn(table()).id();
-        let hull = world.spawn_empty().id();
-        world.spawn((
-            Controlled,
-            Rig {
-                hull,
-                turret: hull,
-                gun,
-                muzzle,
-            },
-        ));
+        let muzzle = world
+            .spawn((table(), Transform::from_translation(GUN)))
+            .id();
+        let hull = world.spawn((Hull, Transform::IDENTITY)).id();
+        let tank = world
+            .spawn((
+                Controlled,
+                crate::command::TankCommand::default(),
+                Rig {
+                    hull,
+                    turret: hull,
+                    gun,
+                    muzzle,
+                },
+            ))
+            .id();
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
 
         app.update();
         for window_scale in WINDOW_SCALES {
@@ -1441,11 +1460,23 @@ mod tests {
                 app.insert_resource(UiScale(ui_scale));
                 for pose in 0..LAY_POSES {
                     let lay = LAY_STEP * f32::from(pose);
-                    app.world_mut().entity_mut(gun).insert(Transform {
+                    let rotation = Quat::from_rotation_y(lay.x) * Quat::from_rotation_x(lay.y);
+                    let world = app.world_mut();
+                    let gun_pose = Transform {
                         translation: GUN,
-                        rotation: Quat::from_rotation_y(lay.x) * Quat::from_rotation_x(lay.y),
+                        rotation,
                         ..default()
-                    });
+                    };
+                    world.entity_mut(gun).insert(gun_pose);
+                    world.entity_mut(muzzle).insert(gun_pose);
+                    // Fixture: a resolved point along the sight, with an identity hull so local
+                    // and world coordinates coincide. The empty collider tree leaves the bore at sky.
+                    let point = GUN + sight_line(rotation, table().superelevation(DIALED)) * 100.0;
+                    world.resource_mut::<CommittedAim>().set(tank, point);
+                    world
+                        .get_mut::<crate::command::TankCommand>(tank)
+                        .unwrap()
+                        .aim = Some(crate::command::AimIntent::World(point));
                     // The first frame after changing scale and pose must already lay out correctly.
                     app.update();
 
@@ -1463,12 +1494,18 @@ mod tests {
                         .query_filtered::<(&Camera, &GlobalTransform), With<PlayerView>>()
                         .single(world)
                         .expect("the fixture's one player view");
-                    let sight_point = camera
-                        .world_to_viewport(view, GUN + sight)
-                        .expect("the sight line is in front of the camera")
-                        * camera
-                            .target_scaling_factor()
-                            .expect("the camera renders to the window");
+                    let physical_projection = |point| {
+                        camera
+                            .world_to_viewport(view, point)
+                            .expect("the fixture's marker projects in front of the camera")
+                            * camera
+                                .target_scaling_factor()
+                                .expect("the camera renders to the window")
+                    };
+                    let sight_point = physical_projection(GUN + sight);
+                    let intent_point = physical_projection(point);
+                    let bore_point =
+                        physical_projection(GUN + rotation * Vec3::NEG_Z * crate::aim::MAX_RANGE);
 
                     let mut drawn = 0;
                     for (node, transform, visibility, zero) in world
@@ -1506,6 +1543,25 @@ mod tests {
                         "{case}: the hairline must be measured on the scale, not on a stray mark \
                          — only {drawn} marks were drawn",
                     );
+                    let (intent, visibility) = world
+                        .query_filtered::<(&UiGlobalTransform, &Visibility), With<IntentReticle>>()
+                        .single(world)
+                        .unwrap();
+                    assert_eq!(*visibility, Visibility::Visible);
+                    let intent = ("intent", intent.translation);
+                    let [bore, aim] = crate::aim::tests::laid_out_indicator_centres(world);
+                    let mut errors = Vec::new();
+                    for ((kind, actual), expected) in [intent, bore, aim].into_iter().zip([
+                        intent_point,
+                        bore_point,
+                        intent_point,
+                    ]) {
+                        let off = (actual - expected).abs();
+                        if off.max_element() > 0.5 + ROUND_OFF {
+                            errors.push(format!("{kind} centre {actual} misses physical projection {expected} by {off}"));
+                        }
+                    }
+                    assert!(errors.is_empty(), "{case}: {}", errors.join("; "));
                 }
             }
         }

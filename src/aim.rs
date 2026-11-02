@@ -20,6 +20,7 @@ use avian3d::prelude::{LayerMask, Position, Rotation, SpatialQuery, SpatialQuery
 use bevy::ecs::entity::EntityHashMap;
 use bevy::math::Affine3A;
 use bevy::prelude::*;
+use bevy::ui::UiSystems;
 
 use crate::Layer;
 use crate::camera::GunnerCameraPlaced;
@@ -222,18 +223,25 @@ pub fn client_plugin(app: &mut App) {
                 .after(SightToggled)
                 .in_set(GameplaySet)
                 .in_set(InMatchSystems),
-        )
-        // HUD markers reproject through the camera, so they run after the camera's pose is final
-        // for the frame — after propagation and after the gunner camera places itself — or they
-        // lag/jitter against the rendered view (worst at the gunner optic's high zoom).
-        .add_systems(
-            PostUpdate,
-            (update_bore_indicator, update_aim_indicator)
-                .in_set(GameplaySet)
-                .after(TransformSystems::Propagate)
-                .after(GunnerCameraPlaced)
-                .in_set(InMatchSystems),
         );
+    mount_indicator_placement(app);
+}
+
+/// Reproject indicators after the camera and UI scale are current, before layout consumes them.
+fn mount_indicator_placement(app: &mut App) {
+    // HUD markers reproject through the camera, so they run after the camera's pose is final
+    // for the frame — after propagation and after the gunner camera places itself — or they
+    // lag/jitter against the rendered view (worst at the gunner optic's high zoom).
+    app.add_systems(
+        PostUpdate,
+        (update_bore_indicator, update_aim_indicator)
+            .in_set(GameplaySet)
+            .after(TransformSystems::Propagate)
+            .after(GunnerCameraPlaced)
+            .after(UiSystems::Propagate)
+            .before(UiSystems::Layout)
+            .in_set(InMatchSystems),
+    );
 }
 
 fn spawn_hud(mut commands: Commands) {
@@ -516,9 +524,16 @@ fn place_indicator(
     cam_transform: &GlobalTransform,
     world_point: Vec3,
     half_size: f32,
+    target: &ComputedUiRenderTargetInfo,
 ) {
     match camera.world_to_viewport(cam_transform, world_point) {
         Ok(screen) => {
+            // Camera logical pixels -> physical target pixels -> this node's UI pixels.
+            let to_ui = camera
+                .target_scaling_factor()
+                .expect("a successful viewport projection has the camera's target scale")
+                / target.scale_factor();
+            let screen = screen * to_ui;
             node.left = Val::Px(screen.x - half_size);
             node.top = Val::Px(screen.y - half_size);
             *visibility = Visibility::Visible;
@@ -539,12 +554,15 @@ fn update_bore_indicator(
     muzzle: Query<&GlobalTransform>,
     volumes: Query<&VolumeOf>,
     parents: Query<&ChildOf>,
-    mut indicator: Query<(&mut Node, &mut Visibility), With<BoreIndicator>>,
+    mut indicator: Query<
+        (&mut Node, &mut Visibility, &ComputedUiRenderTargetInfo),
+        With<BoreIndicator>,
+    >,
 ) {
     let (camera, cam_transform) = camera_query
         .single()
         .expect("the in-match aim HUD has exactly one player camera");
-    let (mut node, mut visibility) = indicator
+    let (mut node, mut visibility, target) = indicator
         .single_mut()
         .expect("the in-match aim HUD spawns exactly one indicator of each kind");
     let Some((tank, rig)) = crate::tank::controlled_one(controlled.single()) else {
@@ -580,6 +598,7 @@ fn update_bore_indicator(
         cam_transform,
         point,
         2.0,
+        target,
     );
 }
 
@@ -592,13 +611,16 @@ fn update_aim_indicator(
     camera_query: Query<(&Camera, &Transform), With<PlayerView>>,
     controlled: Query<(&Rig, &TankCommand), With<Controlled>>,
     hull: Query<&GlobalTransform, With<Hull>>,
-    mut indicator: Query<(&mut Node, &mut Visibility), With<AimIndicator>>,
+    mut indicator: Query<
+        (&mut Node, &mut Visibility, &ComputedUiRenderTargetInfo),
+        With<AimIndicator>,
+    >,
 ) {
     let (camera, cam_transform) = camera_query
         .single()
         .expect("the in-match aim HUD has exactly one player camera");
     let cam_transform = GlobalTransform::from(*cam_transform);
-    let (mut node, mut visibility) = indicator
+    let (mut node, mut visibility, target) = indicator
         .single_mut()
         .expect("the in-match aim HUD spawns exactly one indicator of each kind");
 
@@ -634,11 +656,12 @@ fn update_aim_indicator(
         &cam_transform,
         world,
         3.0,
+        target,
     );
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::VecDeque;
     use std::time::Duration;
 
@@ -651,6 +674,37 @@ mod tests {
     use crate::firecontrol::{RangeTable, Ranging};
     use crate::sight::drive_gunner_aim;
     use crate::tank::{ServoIndex, ServoRest, ServoSpec, TankServos, drive_servos};
+
+    /// Use the shipped indicator spawner and schedule in the sight's GPU-less layout scene.
+    pub(crate) fn mount_layout_fixture(app: &mut App) {
+        app.init_resource::<ColliderTrees>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_systems(Startup, spawn_hud);
+        mount_indicator_placement(app);
+    }
+
+    pub(crate) fn laid_out_indicator_centres(world: &mut World) -> [(&'static str, Vec2); 2] {
+        let (bore, visibility) = world
+            .query_filtered::<(&UiGlobalTransform, &Visibility), With<BoreIndicator>>()
+            .single(world)
+            .unwrap();
+        assert_eq!(
+            *visibility,
+            Visibility::Visible,
+            "the fixture's bore projects on screen"
+        );
+        let bore = bore.translation;
+        let (aim, visibility) = world
+            .query_filtered::<(&UiGlobalTransform, &Visibility), With<AimIndicator>>()
+            .single(world)
+            .unwrap();
+        assert_eq!(
+            *visibility,
+            Visibility::Visible,
+            "the fixture holds a committed aim in free-look"
+        );
+        [("bore", bore), ("aim", aim.translation)]
+    }
 
     /// Reference per-tank scan: every servo is visited for every tank, against the same parsed
     /// input and hull-pose invariants as the production pass.
