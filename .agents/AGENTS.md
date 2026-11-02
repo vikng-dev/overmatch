@@ -14,7 +14,7 @@ Single-context: `.agents/GLOSSARY.md` + `.agents/docs/adr/`. See `.agents/docs/d
 
 ### Review lenses
 
-Each core principle has a lens in `.agents/lenses/`: the checklist an independent reviewer applies to the diff at each batch boundary and before a release, and to the whole tree in a sweep. See `.agents/lenses/README.md`.
+Each core principle has a lens in `.agents/lenses/`: the checklist an independent reviewer applies to the diff at each batch boundary and before a release, and to the whole tree in a sweep. See `.agents/lenses/README.md`. The lenses ratchet: a lane leaves every item it edits, and that item's tests, clean under every lens, and closes the rows of `.agents/lenses/backlog.md` that name a file it edits.
 
 ### Playtest forks
 

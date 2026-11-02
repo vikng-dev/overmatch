@@ -16,8 +16,11 @@ what is not a finding, and the fix each class takes.
 
 - **Diff mode**, at each batch boundary and before a release: one reviewer per lens over every
   commit landed since the last boundary.
-- **Sweep mode**, over the whole tree, area by area (the areas below): the inventory that a sweep
-  lane then fixes.
+- **Sweep mode**, over the whole tree, area by area (the areas below): its findings become rows of
+  [`backlog.md`](backlog.md).
+- **Ratchet**, in every lane: the items a lane edits, and their tests, leave clean under every lens,
+  and the lane closes the rows of [`backlog.md`](backlog.md) naming a file it edits, each verified
+  first. Only P1 rows get lanes of their own. Diff-mode review checks both.
 - **Direction audit**, when one subsystem reaches its third fix round in one chain (each fix
   exposing the next defect): before the next fix lane, one reviewer reads the subsystem's code and
   history against the `base-truths` lens and answers whether the chain converges on one declarative
