@@ -28,6 +28,7 @@ use bevy::ui::{ComputedNode, Overflow, ScrollPosition, UiGlobalTransform};
 use bevy::window::PrimaryWindow;
 
 use super::displays::DisplayLadder;
+use super::look::page as page_look;
 use super::preset::Preset;
 use super::{
     BloomLevel, DebugPanel, FrameCap, KillCam, MsaaLevel, PenCamCorner, PixelBudget, PresentCaps,
@@ -304,11 +305,11 @@ impl Row {
 
     /// How wide the row's value well is, in logical px. Wider for the display row alone: its values
     /// are display NAMES, and every other stepper's are two to six characters.
-    const fn value_well_px(self) -> f32 {
+    fn value_well_px(self) -> f32 {
         match (self, self.kind()) {
-            (Row::Display, _) => DISPLAY_VALUE_WELL_PX,
-            (_, RowKind::Stepper) => STEPPER_VALUE_WELL_PX,
-            (_, RowKind::Slider) => SLIDER_VALUE_WELL_PX,
+            (Row::Display, _) => page_look().display_value_well_px.0,
+            (_, RowKind::Stepper) => page_look().stepper_value_well_px.0,
+            (_, RowKind::Slider) => page_look().slider_value_well_px.0,
         }
     }
 
@@ -346,7 +347,7 @@ impl Row {
             Row::ShadowResolution => settings.shadow_resolution.label().to_string(),
             Row::ShadowCascades => settings.shadow_cascades.label().to_string(),
             Row::TrackPrints => settings.track_prints.label().to_string(),
-            Row::TrackPrintRange => settings.track_print_range.label().to_string(),
+            Row::TrackPrintRange => settings.track_print_range.label(),
             Row::Msaa => settings.msaa.label().to_string(),
             Row::Bloom => settings.bloom.label().to_string(),
             Row::VSync => settings.vsync.label().to_string(),
@@ -731,7 +732,7 @@ fn refresh_save_notice(
 
 /// The fixed-height box the hint is drawn into: always exactly two lines tall, whether the selected
 /// row's hint fills one line or two, so walking the selection never moves the rows above it. See
-/// [`HINT_SLOT_HEIGHT_PX`].
+/// [`super::look::PageLook::hint_slot_height_px`].
 #[derive(Component)]
 struct HintSlot;
 
@@ -769,70 +770,6 @@ impl ActiveDrag {
         track_fraction(cursor_x, self.track_center_x, self.track_width)
     }
 }
-
-/// Selected/resting row colours stay together to own their contrast; slab and text colours
-/// come from `ui_font`.
-const ROW_BG_SELECTED: Color = Color::srgba(0.16, 0.28, 0.36, 0.95);
-const ROW_BG: Color = Color::NONE;
-
-/// The slider family: the empty track, the filled bar, and the filled bar of a DISABLED row. The
-/// fill leans on the same cold blue-white family as `ui_font::TEXT`.
-const SLIDER_TRACK_BG: Color = Color::srgba(0.10, 0.14, 0.18, 0.9);
-const SLIDER_FILL_COLOR: Color = Color::srgb(0.45, 0.72, 0.92);
-const SLIDER_FILL_DISABLED: Color = Color::srgb(0.28, 0.34, 0.40);
-
-/// Layout constants shared by [`spawn_page`]: the slider track's clickable width/height, and the
-/// fixed value-text wells that keep the controls from shifting as the value's text width changes.
-const TRACK_WIDTH_PX: f32 = 150.0;
-const TRACK_HIT_HEIGHT_PX: f32 = 18.0;
-const TRACK_BAR_HEIGHT_PX: f32 = 6.0;
-const STEPPER_VALUE_WELL_PX: f32 = 110.0;
-/// The display row's own well — its values are OS display NAMES, not two-character rungs. MEASURED
-/// against the shipped Barlow Condensed SemiBold at the row's 18 px: `* BUILT-IN RETINA DISPLAY`
-/// draws 143 px, and 26 solid `M` (the `LABEL_MAX_CHARS` ceiling `settings::displays` truncates to)
-/// draw 210 px. Sized for names, so that worst case overhangs the arrows rather than reflowing the
-/// row. DERIVED: the widest row label plus this well plus both arrows is ~370 px inside the card's
-/// 512 px interior, so no stepper row has to give up width for it.
-const DISPLAY_VALUE_WELL_PX: f32 = 190.0;
-const SLIDER_VALUE_WELL_PX: f32 = 64.0;
-/// The space between two tab names, and the height of the bar under the open one.
-const TAB_GAP_PX: f32 = 24.0;
-const TAB_MARKER_HEIGHT_PX: f32 = 2.0;
-
-/// Hint slot reserves two explicit line heights, so changing selection never shifts rows.
-/// One-line hints leave the second empty. `LineHeight` uses the same constant as the reservation
-/// instead of relying on Bevy's default RelativeToFont(1.2), currently 16.8 px.
-///
-/// Use min_height on a wrapper ([`HintSlot`]), not height: overlong copy must grow visibly,
-/// not clip. No test measures copy against the slot. Bevy 0.19 text measurement resolves height
-/// as known.or(preferred.or(min)); min_height on Text would fix its height without measuring
-/// content. MEASURED: overlong text on such a node never grew.
-/// Source: bevy_ui-0.19.1/src/measurement.rs:51-68 (`resolve_axis`).
-///
-/// Neither node has padding; the top margin is outside the reservation.
-const HINT_FONT_PX: f32 = 14.0;
-const HINT_LINE_HEIGHT_PX: f32 = HINT_FONT_PX * 1.2;
-const HINT_SLOT_HEIGHT_PX: f32 = HINT_LINE_HEIGHT_PX * 2.0;
-
-/// Card width minus padding defines the DERIVED 512 logical-px hint wrapping budget.
-const CARD_WIDTH_PX: f32 = 560.0;
-const CARD_PADDING_PX: f32 = 24.0;
-
-/// One gap for card children and panel rows prevents a seam around the scrolling list.
-const CARD_ROW_GAP_PX: f32 = 6.0;
-
-/// Maximum card height before rows scroll. MEASURED headless with 11 rows: 506/666/1000 logical
-/// px at UI scales 75/100/150%, versus a 720 px minimum window; 9 rows reached ~875 px at 150%.
-/// Overflow hid the hint and legend.
-///
-/// 90% leaves a visible scrim and clipped-row affordance. No scrollbar: keyboard selection
-/// scrolls into view (`scroll_rows`), so no scroll handle needs aiming at.
-const CARD_MAX_HEIGHT_PERCENT: f32 = 90.0;
-
-/// How far one LINE-unit wheel notch scrolls the row list, in CSS px — roughly one row, so a notch
-/// moves the list by a readable unit instead of a hair or a page. Trackpads report
-/// `MouseScrollUnit::Pixel` and are used as-is.
-const WHEEL_LINE_PX: f32 = 40.0;
 
 /// Shared page plugin; `settings::plugin` must also mount exactly one entry declarer. Making
 /// entry its parameter prevents a mounted page that never becomes visible.
@@ -927,13 +864,13 @@ fn spawn_page(
             wrapper
                 .spawn((
                     Node {
-                        width: Val::Px(CARD_WIDTH_PX),
-                        // Limit the card so overflow scrolls rows; see `CARD_MAX_HEIGHT_PERCENT`.
-                        max_height: Val::Percent(CARD_MAX_HEIGHT_PERCENT),
-                        padding: UiRect::all(Val::Px(CARD_PADDING_PX)),
-                        border_radius: BorderRadius::all(Val::Px(6.0)),
+                        width: Val::Px(page_look().card_width_px.0),
+                        // Limit the card so overflow scrolls rows; see `super::look::PageLook::card_max_height_percent`.
+                        max_height: Val::Percent(page_look().card_max_height_percent.0),
+                        padding: UiRect::all(Val::Px(page_look().card_padding_px.0)),
+                        border_radius: BorderRadius::all(Val::Px(page_look().card_radius_px.0)),
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(CARD_ROW_GAP_PX),
+                        row_gap: Val::Px(page_look().card_row_gap_px.0),
                         ..default()
                     },
                     BackgroundColor(MODAL_BG),
@@ -944,12 +881,12 @@ fn spawn_page(
                         TextFont {
                             // SemiBold: the page title.
                             font: fonts.hud.clone().into(),
-                            font_size: FontSize::Px(30.0),
+                            font_size: FontSize::Px(page_look().title_font_px.0),
                             ..default()
                         },
                         TextColor(TEXT),
                         Node {
-                            margin: UiRect::bottom(Val::Px(10.0)),
+                            margin: UiRect::bottom(Val::Px(page_look().title_bottom_margin_px.0)),
                             // Only rows may shrink; flexbox's default would squeeze title and footer first.
                             flex_shrink: 0.0,
                             ..default()
@@ -983,8 +920,8 @@ fn spawn_page(
                                     Node {
                                         width: Val::Percent(100.0),
                                         flex_direction: FlexDirection::Column,
-                                        // Match the card gap to avoid a seam; see `CARD_ROW_GAP_PX`.
-                                        row_gap: Val::Px(CARD_ROW_GAP_PX),
+                                        // Match the card gap to avoid a seam; see `super::look::PageLook::card_row_gap_px`.
+                                        row_gap: Val::Px(page_look().card_row_gap_px.0),
                                         // The panel is the content the viewport scrolls, so it
                                         // must keep its full height rather than shrink into it.
                                         flex_shrink: 0.0,
@@ -1001,13 +938,13 @@ fn spawn_page(
                         }
                     });
 
-                    // Reserve on a wrapper, not Text; see `HINT_SLOT_HEIGHT_PX`.
+                    // Reserve on a wrapper, not Text; see `super::look::PageLook::hint_slot_height_px`.
                     card.spawn((
                         HintSlot,
                         Node {
                             width: Val::Percent(100.0),
-                            margin: UiRect::top(Val::Px(14.0)),
-                            min_height: Val::Px(HINT_SLOT_HEIGHT_PX),
+                            margin: UiRect::top(Val::Px(page_look().hint_top_margin_px.0)),
+                            min_height: Val::Px(page_look().hint_slot_height_px()),
                             flex_shrink: 0.0,
                             // Do not stretch text to slot height: its measured height must remain visible to layout.
                             align_items: AlignItems::FlexStart,
@@ -1021,10 +958,10 @@ fn spawn_page(
                             TextFont {
                                 // Regular: the quiet explanatory footer.
                                 font: fonts.body.clone().into(),
-                                font_size: FontSize::Px(HINT_FONT_PX),
+                                font_size: FontSize::Px(page_look().hint_font_px.0),
                                 ..default()
                             },
-                            LineHeight::Px(HINT_LINE_HEIGHT_PX),
+                            LineHeight::Px(page_look().hint_line_height_px()),
                             TextColor(TEXT_DIM),
                         ));
                     });
@@ -1034,12 +971,12 @@ fn spawn_page(
                         TextFont {
                             // Regular: the control legend.
                             font: fonts.body.clone().into(),
-                            font_size: FontSize::Px(13.0),
+                            font_size: FontSize::Px(page_look().legend_font_px.0),
                             ..default()
                         },
                         TextColor(TEXT_DIM),
                         Node {
-                            margin: UiRect::top(Val::Px(6.0)),
+                            margin: UiRect::top(Val::Px(page_look().legend_top_margin_px.0)),
                             flex_shrink: 0.0,
                             ..default()
                         },
@@ -1059,14 +996,17 @@ fn spawn_tab_strip(card: &mut ChildSpawnerCommands, fonts: &UiFonts, open: Tab) 
         Node {
             width: Val::Percent(100.0),
             align_items: AlignItems::Center,
-            column_gap: Val::Px(TAB_GAP_PX),
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(7.0)),
-            border_radius: BorderRadius::all(Val::Px(4.0)),
+            column_gap: Val::Px(page_look().tab_gap_px.0),
+            padding: UiRect::axes(
+                Val::Px(page_look().row_padding_x_px.0),
+                Val::Px(page_look().row_padding_y_px.0),
+            ),
+            border_radius: BorderRadius::all(Val::Px(page_look().row_radius_px.0)),
             // Fixed furniture, like the title: see the title's `flex_shrink`.
             flex_shrink: 0.0,
             ..default()
         },
-        BackgroundColor(ROW_BG),
+        BackgroundColor(page_look().row_bg()),
     ))
     .with_children(|strip| {
         for tab in Tab::ORDER {
@@ -1075,7 +1015,7 @@ fn spawn_tab_strip(card: &mut ChildSpawnerCommands, fonts: &UiFonts, open: Tab) 
                     TabLabel(tab),
                     Node {
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(3.0),
+                        row_gap: Val::Px(page_look().tab_row_gap_px.0),
                         ..default()
                     },
                 ))
@@ -1088,7 +1028,7 @@ fn spawn_tab_strip(card: &mut ChildSpawnerCommands, fonts: &UiFonts, open: Tab) 
                         TextFont {
                             // SemiBold: a tab name is an affordance, like the arrows.
                             font: fonts.hud.clone().into(),
-                            font_size: FontSize::Px(18.0),
+                            font_size: FontSize::Px(page_look().control_font_px.0),
                             ..default()
                         },
                         TextColor(if tab == open { TEXT } else { TEXT_DIM }),
@@ -1097,7 +1037,7 @@ fn spawn_tab_strip(card: &mut ChildSpawnerCommands, fonts: &UiFonts, open: Tab) 
                         TabMarker(tab),
                         Node {
                             width: Val::Percent(100.0),
-                            height: Val::Px(TAB_MARKER_HEIGHT_PX),
+                            height: Val::Px(page_look().tab_marker_height_px.0),
                             ..default()
                         },
                         BackgroundColor(marker_color(tab == open)),
@@ -1124,8 +1064,12 @@ const fn panel_visibility(open: bool) -> Visibility {
 
 /// The bar under a tab's name: the slider fill's colour under the open tab, nothing under the
 /// others.
-const fn marker_color(open: bool) -> Color {
-    if open { SLIDER_FILL_COLOR } else { Color::NONE }
+fn marker_color(open: bool) -> Color {
+    if open {
+        page_look().slider_fill_color()
+    } else {
+        Color::NONE
+    }
 }
 
 /// One row: `LABEL` on the left; on the right either `< VALUE >` (stepper) or `[track] VALUE`
@@ -1146,11 +1090,14 @@ fn spawn_row(
             width: Val::Percent(100.0),
             justify_content: JustifyContent::SpaceBetween,
             align_items: AlignItems::Center,
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(7.0)),
-            border_radius: BorderRadius::all(Val::Px(4.0)),
+            padding: UiRect::axes(
+                Val::Px(page_look().row_padding_x_px.0),
+                Val::Px(page_look().row_padding_y_px.0),
+            ),
+            border_radius: BorderRadius::all(Val::Px(page_look().row_radius_px.0)),
             ..default()
         },
-        BackgroundColor(ROW_BG),
+        BackgroundColor(page_look().row_bg()),
     ))
     .with_children(|line| {
         line.spawn((
@@ -1159,7 +1106,7 @@ fn spawn_row(
             TextFont {
                 // Regular: a dense settings row.
                 font: fonts.body.clone().into(),
-                font_size: FontSize::Px(18.0),
+                font_size: FontSize::Px(page_look().control_font_px.0),
                 ..default()
             },
             TextColor(TEXT),
@@ -1167,7 +1114,7 @@ fn spawn_row(
         line.spawn(Node {
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
-            column_gap: Val::Px(6.0),
+            column_gap: Val::Px(page_look().control_gap_px.0),
             ..default()
         })
         .with_children(|controls| match row.kind() {
@@ -1188,8 +1135,8 @@ fn spawn_row(
                     .spawn((
                         SliderTrack(row),
                         Node {
-                            width: Val::Px(TRACK_WIDTH_PX),
-                            height: Val::Px(TRACK_HIT_HEIGHT_PX),
+                            width: Val::Px(page_look().track_width_px.0),
+                            height: Val::Px(page_look().track_hit_height_px.0),
                             align_items: AlignItems::Center,
                             ..default()
                         },
@@ -1199,11 +1146,13 @@ fn spawn_row(
                             .spawn((
                                 Node {
                                     width: Val::Percent(100.0),
-                                    height: Val::Px(TRACK_BAR_HEIGHT_PX),
-                                    border_radius: BorderRadius::all(Val::Px(3.0)),
+                                    height: Val::Px(page_look().track_bar_height_px.0),
+                                    border_radius: BorderRadius::all(Val::Px(
+                                        page_look().track_radius_px.0,
+                                    )),
                                     ..default()
                                 },
-                                BackgroundColor(SLIDER_TRACK_BG),
+                                BackgroundColor(page_look().slider_track_bg()),
                             ))
                             .with_children(|bar| {
                                 let fraction = row
@@ -1214,10 +1163,12 @@ fn spawn_row(
                                     Node {
                                         width: Val::Percent(fraction * 100.0),
                                         height: Val::Percent(100.0),
-                                        border_radius: BorderRadius::all(Val::Px(3.0)),
+                                        border_radius: BorderRadius::all(Val::Px(
+                                            page_look().track_radius_px.0,
+                                        )),
                                         ..default()
                                     },
-                                    BackgroundColor(SLIDER_FILL_COLOR),
+                                    BackgroundColor(page_look().slider_fill_color()),
                                 ));
                             });
                     });
@@ -1252,12 +1203,15 @@ fn spawn_arrow(
         TextFont {
             // SemiBold: an affordance, not prose.
             font: fonts.hud.clone().into(),
-            font_size: FontSize::Px(18.0),
+            font_size: FontSize::Px(page_look().control_font_px.0),
             ..default()
         },
         TextColor(TEXT_DIM),
         Node {
-            padding: UiRect::axes(Val::Px(8.0), Val::Px(2.0)),
+            padding: UiRect::axes(
+                Val::Px(page_look().arrow_padding_x_px.0),
+                Val::Px(page_look().arrow_padding_y_px.0),
+            ),
             ..default()
         },
     ));
@@ -1286,7 +1240,7 @@ fn spawn_value_well(
             TextFont {
                 // SemiBold: the value is what the eye goes to.
                 font: fonts.hud.clone().into(),
-                font_size: FontSize::Px(18.0),
+                font_size: FontSize::Px(page_look().control_font_px.0),
                 ..default()
             },
             TextColor(TEXT),
@@ -1355,7 +1309,7 @@ fn page_pressed(
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
 ) {
-    let window = super::optional_primary_window(window.single());
+    let window = crate::state::primary_window(window.single());
     if let Ok(arrow) = arrows.get(press.entity) {
         press.propagate(false);
         if press.button == PointerButton::Primary && arrow.row.enabled(&settings, *caps) {
@@ -1429,7 +1383,7 @@ fn mouse_input(
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
 ) {
-    let window = super::optional_primary_window(window.single());
+    let window = crate::state::primary_window(window.single());
     // A drag owns selection until release/page close, saves once, and keeps its frozen rect.
     if let Some(active) = drag.0 {
         if !visible.0 || !buttons.pressed(MouseButton::Left) {
@@ -1488,7 +1442,7 @@ fn change_row(
 }
 
 /// Wheel delta in CSS px for [`ScrollPosition`]; to_css is the viewport's inverse_scale_factor.
-/// Line is a dimensionless notch count scaled by WHEEL_LINE_PX, so it grows with the rows.
+/// Line is a dimensionless notch count scaled by the authored CSS distance, so it grows with the rows.
 /// Pixel is winit PhysicalPosition copied unchanged by Bevy; convert once to CSS:
 /// winit-0.30.13/src/event.rs:961-975 (`PixelDelta`),
 /// bevy_winit-0.19.1/src/state.rs:342-349 (`MouseWheel`). Layout
@@ -1497,7 +1451,7 @@ fn change_row(
 /// content distances. Pure for unit tests without selection-follow interference.
 fn wheel_delta_css(unit: bevy::input::mouse::MouseScrollUnit, y: f32, to_css: f32) -> f32 {
     match unit {
-        bevy::input::mouse::MouseScrollUnit::Line => y * WHEEL_LINE_PX,
+        bevy::input::mouse::MouseScrollUnit::Line => y * page_look().wheel_line_px.0,
         bevy::input::mouse::MouseScrollUnit::Pixel => y * to_css,
     }
 }
@@ -1668,16 +1622,16 @@ fn refresh_page(
             node.width = width;
         }
         color.set_if_neq(BackgroundColor(if fill.0.enabled(&settings, *caps) {
-            SLIDER_FILL_COLOR
+            page_look().slider_fill_color()
         } else {
-            SLIDER_FILL_DISABLED
+            page_look().slider_fill_disabled()
         }));
     }
     for (line, mut background) in &mut lines {
         background.set_if_neq(BackgroundColor(if selected == Some(line.0) {
-            ROW_BG_SELECTED
+            page_look().row_bg_selected()
         } else {
-            ROW_BG
+            page_look().row_bg()
         }));
     }
     let rendered = selected.map_or(TAB_STRIP_HINT, Row::hint);
@@ -1724,9 +1678,9 @@ fn refresh_tabs(
     }
     for mut background in &mut strip {
         background.set_if_neq(BackgroundColor(if page.line == Line::Tabs {
-            ROW_BG_SELECTED
+            page_look().row_bg_selected()
         } else {
-            ROW_BG
+            page_look().row_bg()
         }));
     }
 }
@@ -1793,7 +1747,7 @@ mod tests {
         for budget in [
             PixelBudget::default(),
             PixelBudget(1.2),
-            PixelBudget(PixelBudget::MIN),
+            PixelBudget(PixelBudget::min()),
         ] {
             let settings = Settings {
                 lod_pixel_budget: budget,
@@ -2276,7 +2230,7 @@ mod tests {
     /// [`headless_card_app`] in a window of a chosen HEIGHT — the knob the scroll tests need, since
     /// whether the row list overflows is a fact about the window, not about the card. The width
     /// stays 1920 for every caller: it only has to be wide enough that the card never flex-shrinks
-    /// at any rung of the ladder (the top rung asks for `CARD_WIDTH_PX * 1.5` = 840 physical px).
+    /// at any rung of the ladder (the top rung asks for `page_look().card_width_px.0 * 1.5` = 840 physical px).
     fn headless_card_app_in(ui_scale: f32, window_height: u32) -> App {
         let mut app = App::new();
         app.add_plugins(crate::gpu_less_default_plugins(Some(Window {
@@ -2763,7 +2717,7 @@ mod tests {
         let (_, _, scrolled) = viewport_state(&mut app);
         assert!(
             scrolled > 0.0,
-            "one wheel notch must move the list ({scrolled} after a notch of {WHEEL_LINE_PX} px)",
+            "one wheel notch must move the list, got {scrolled} px",
         );
 
         // Far past the end: the clamp is the content overflow, not infinity. The overflow is read
@@ -2840,9 +2794,9 @@ mod tests {
             // The LINE unit is the opposite case and must NOT be converted.
             assert_eq!(
                 wheel_delta_css(MouseScrollUnit::Line, 1.0, to_css),
-                WHEEL_LINE_PX,
+                page_look().wheel_line_px.0,
                 "ui {ui_scale}x on a {target_scale}x target: a wheel NOTCH is a dimensionless \
-                 count and must stay {WHEEL_LINE_PX} css px, scaling with the UI like the rows it \
+                 count and must keep its authored CSS distance, scaling with the UI like the rows it \
                  steps past",
             );
         }

@@ -1460,7 +1460,7 @@ mod tests {
         /// Slack (px) on the half-pixel bound for f32 round-off through projection and layout.
         const ROUND_OFF: f32 = 1e-3;
 
-        let ui_scales = [UiScalePercent::MIN, 100, 115, UiScalePercent::MAX]
+        let ui_scales = [UiScalePercent::min(), 100, 115, UiScalePercent::max()]
             .map(|percent| UiScalePercent(percent).factor());
 
         let mut app = App::new();

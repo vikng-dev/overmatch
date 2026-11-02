@@ -649,16 +649,15 @@ mod tests {
         }
     }
 
-    /// Old settings files must select SUN SHADOW at 30 m, and every relief/range row choice must
-    /// survive the persistence seam. Comparing only with Settings::default would silently approve
-    /// a changed default, while checking only one non-default misses enum tokens a player can save.
+    /// Old sparse files take the authored defaults, and every relief/range choice survives the
+    /// persistence seam. The defaults' owner may retune them without changing this contract.
     #[test]
-    fn track_print_settings_keep_the_fixed_defaults_and_every_saved_choice() {
+    fn track_print_settings_keep_authored_defaults_and_every_saved_choice() {
         let Parsed::Ok(loaded) = parse("()") else {
             panic!("an older file without print settings loads");
         };
-        assert_eq!(loaded.track_prints, TrackPrintRelief::SunShadow);
-        assert_eq!(loaded.track_print_range.metres(), 30.0);
+        assert_eq!(loaded.track_prints, TrackPrintRelief::default());
+        assert_eq!(loaded.track_print_range, TrackPrintRange::default());
         for relief in TrackPrintRelief::ORDER {
             for range in TrackPrintRange::ORDER {
                 let settings = Settings {

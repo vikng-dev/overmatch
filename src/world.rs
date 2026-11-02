@@ -1,6 +1,5 @@
-//! The battlefield: environment lighting and a locomotion test course now, real terrain later.
-//! Also home to the ground-plane query that aiming and the camera both use — the seam to swap
-//! for an Avian raycast once terrain has colliders.
+//! Battlefield construction, environment lighting, and the ground queries shared by aiming and
+//! the camera. Required lighting data lives in `assets/world/lighting.ron`.
 
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +17,8 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 
 use crate::Layer;
 use crate::render_policy::CameraProfile;
+
+mod look;
 
 /// The world's construction generation. Streamed environment pieces belong to exactly this
 /// generation; consumers must not resolve an older piece against a newly constructed map.
@@ -98,31 +99,7 @@ const GROUND_SIZE: f32 = crate::terrain_grid::FIXTURE_EXTENT.world_size_m;
 /// Thickness of the ground slab. Only the top face (at y=0) matters; the rest is buried.
 const GROUND_THICKNESS: f32 = 1.0;
 
-/// Sun elevation above the horizon, degrees — LOW, and deliberately so. Relief on a normal-mapped
-/// surface is carried by the cosine between the light and the perturbed normal, so a high sun
-/// (the old `(4, 8, 4)` placement was ~55°) flattens ground detail into near-uniform brightness
-/// no matter how good the map is: every ripple faces the light about equally. At a grazing angle
-/// the same bump swings from lit to self-shadowed across a few centimetres, which is what makes
-/// the terrain read as SURFACE instead of a photograph. Also the honest tactical light for a tank
-/// sim — long shadows are cover and a range cue.
-const SUN_ELEVATION_DEG: f32 = 17.0;
-
-/// Sun azimuth, degrees, measured from +X toward +Z. Unchanged from the old `(4, _, 4)` placement
-/// (both horizontal components equal ⇒ 45°), so lowering the sun does not rotate which side of
-/// the terrain's character is lit — only how hard.
-const SUN_AZIMUTH_DEG: f32 = 45.0;
-
-/// Sun intensity, lux. Raised with the elevation drop, not independently of it: a surface's lit
-/// brightness carries a `sin(elevation)` factor, so the old 10 000 lux at ~55° put ~8 200 lux on
-/// flat ground, and holding that at 17° would take ~28 000. 25 000 lands flat ground at ~7 300 —
-/// about a sixth of a stop darker than before, so the scene reads as evening rather than murk,
-/// without inventing brightness the geometry did not lose.
-const SUN_ILLUMINANCE_LUX: f32 = 25_000.0;
-
-/// Sun colour — a restrained golden-hour warm. Subtle on purpose: this is a legibility change, and
-/// a strongly orange key would tint the albedo readings the gunner uses to tell surfaces apart.
-const SUN_COLOR: Color = Color::srgb(1.0, 0.94, 0.86);
-
+/// Resolution: shadow lookup offset suppresses numerical self-shadowing at grazing incidence.
 /// Shadow normal bias for the sun. Bevy's default (1.8) is tuned for a mid-height light; at 17°
 /// the depth slope across one shadow-map texel grows by `cot(17°)/cot(55°)` ≈ 4.7×, which is
 /// exactly the geometry that produces acne (a surface shadowing itself in stripes). This is a
@@ -136,36 +113,39 @@ const SUN_SHADOW_NORMAL_BIAS: f32 = 2.6;
 /// casting is the caller's call — the overlay light must not cast.
 pub(crate) fn sun_light() -> DirectionalLight {
     DirectionalLight {
-        color: SUN_COLOR,
-        illuminance: SUN_ILLUMINANCE_LUX,
+        color: {
+            let [r, g, b] = look::get().sun_srgb.0;
+            Color::srgb(r, g, b)
+        },
+        illuminance: look::get().sun_illuminance_lux.0,
         shadow_normal_bias: SUN_SHADOW_NORMAL_BIAS,
         ..default()
     }
 }
 
-/// The sun's irradiance on level ground, lux: [`SUN_ILLUMINANCE_LUX`] times the sine of the sun's
+/// The sun's irradiance on level ground, lux: `look::Lighting::sun_illuminance_lux` times the sine of the sun's
 /// elevation ([`sun_elevation_deg`]). The key light a lit view-only mass shares with the ground it
 /// rose from; the sky's share is not in it.
 pub(crate) fn level_ground_irradiance_lux() -> f32 {
-    SUN_ILLUMINANCE_LUX * sun_elevation_deg().to_radians().sin()
+    look::get().sun_illuminance_lux.0 * sun_elevation_deg().to_radians().sin()
 }
 
-/// The sun's elevation, degrees: [`SUN_ELEVATION_DEG`], or a capture plan's
+/// The sun's elevation, degrees: `look::Lighting::sun_elevation_deg`, or a capture plan's
 /// `scene.sun_elevation_deg` (`dev_capture::plan`, validated there). It moves the key light, its
 /// sky and the baked terrain shadow (`terrain_shadow`) together, so a capture can judge terrain
 /// shadows on a map whose slopes stay under the shipped sun.
 fn sun_elevation_deg() -> f32 {
     crate::dev_capture::plan()
         .and_then(|plan| plan.scene.sun_elevation_deg)
-        .unwrap_or(SUN_ELEVATION_DEG)
+        .unwrap_or(look::get().sun_elevation_deg.0)
 }
 
 /// Unit vector pointing FROM the scene TOWARD the sun, from [`sun_elevation_deg`] /
-/// [`SUN_AZIMUTH_DEG`]. The one place that turns the two angles into a direction, so the key light
+/// `look::Lighting::sun_azimuth_deg`. The one place that turns the two angles into a direction, so the key light
 /// and the sky it is embedded in can never disagree about where the sun is.
 fn toward_sun() -> Vec3 {
     let (sin_elevation, cos_elevation) = sun_elevation_deg().to_radians().sin_cos();
-    let (sin_azimuth, cos_azimuth) = SUN_AZIMUTH_DEG.to_radians().sin_cos();
+    let (sin_azimuth, cos_azimuth) = look::get().sun_azimuth_deg.0.to_radians().sin_cos();
     Vec3::new(
         cos_elevation * cos_azimuth,
         sin_elevation,
@@ -174,62 +154,48 @@ fn toward_sun() -> Vec3 {
 }
 
 /// Where the sun sits, from [`toward_sun`]. Only the ROTATION reaches the shader — bevy fits the
-/// shadow cascades around the camera, not around the light's position — so the 100 m stand-off is
+/// shadow cascades around the camera, not around the light's position — so the authored stand-off is
 /// purely so the entity reads sensibly in debug views.
 pub(crate) fn sun_transform() -> Transform {
-    Transform::from_translation(toward_sun() * 100.0).looking_at(Vec3::ZERO, Vec3::Y)
+    Transform::from_translation(toward_sun() * look::get().sun_debug_distance_m.0)
+        .looking_at(Vec3::ZERO, Vec3::Y)
 }
 
-/// Face resolution of the environment light's source cubemap, pixels. Small on purpose: the source
+/// Resolution: face size of the environment source cubemap, pixels; limits startup filtering cost. Small on purpose: the source
 /// is a smooth analytic sky with no small features, and bevy convolves it (Lambertian for diffuse,
 /// GGX per mip for specular) before anything samples it, so 128² per face resolves everything this
 /// sky contains — 393 kB, built in memory, never an asset on disk. MUST be a power of two;
 /// `GeneratedEnvironmentMapLight` panics otherwise.
 const SKY_CUBEMAP_FACE_PX: u32 = 128;
 
-/// Environment-light luminance, cd/m² — the fill level, and the number to turn if this is wrong.
-///
-/// Balanced AGAINST the sun rather than picked for looks. The 17° key puts
-/// `SUN_ILLUMINANCE_LUX · sin 17° ≈ 7300` lux on flat ground, i.e. ≈ 2300 cd/m² of diffuse
-/// radiance. This sky's upper hemisphere averages 0.41 of its own scale seen from a flat surface
-/// (cosine-weighted, MEASURED), so 600 cd/m² adds ≈ 245: about 11 % of the sun. That is the whole point of the number: enough
-/// that a shadowed face is lit by something, far too little to lift shadows into the lit side and
-/// undo the relief the low sun was chosen to create. Raising this is the fastest way to flatten the
-/// terrain again.
-///
-/// Metals are the reason it exists at all. A `metallic = 1.0` surface has NO diffuse response, so
-/// with only a directional light it renders black except where it happens to mirror the sun — which
-/// is exactly how the track links were reading. Specular reflection of this sky is what makes them
-/// metal instead of shadow.
-const SKY_ENVIRONMENT_INTENSITY: f32 = 600.0;
-
 /// The analytic golden-hour sky as LINEAR radiance ratios in `0..1` for one direction; the absolute
-/// level is [`SKY_ENVIRONMENT_INTENSITY`]. Deep blue overhead, warm haze at the horizon, a broad
+/// level is `look::Lighting::sky_intensity_cd_m2`. Deep blue overhead, warm haze at the horizon, a broad
 /// warm glow on the sun's side, and a dim warm bounce below — the ground half matters as much as
 /// the sky half, because it is what keeps the underside of a hull and the lower run of track darker
 /// than their tops (a uniform environment would flatten them exactly the way ambient light does).
 fn sky_radiance(dir: Vec3) -> Vec3 {
-    /// Straight up: the deep part of a low-sun sky.
-    const ZENITH: Vec3 = Vec3::new(0.22, 0.34, 0.55);
-    /// The horizon band, warm with the long air path.
-    const HAZE: Vec3 = Vec3::new(0.85, 0.65, 0.42);
-    /// The sun's own quarter of the sky.
-    const GLOW: Vec3 = Vec3::new(1.00, 0.78, 0.50);
-    /// Downward: dim, warm sand bounce, not black — the terrain is lit sand, not a void.
-    const GROUND: Vec3 = Vec3::new(0.10, 0.085, 0.07);
+    let look = look::get();
+    let vector = |[x, y, z]: [f32; 3]| Vec3::new(x, y, z);
+    let zenith = vector(look.zenith_linear.0);
+    let haze = vector(look.haze_linear.0);
+    let glow = vector(look.glow_linear.0);
+    let ground = vector(look.ground_linear.0);
 
     let up = dir.y.clamp(-1.0, 1.0);
     if up >= 0.0 {
         // `sqrt` hugs the gradient to the horizon, where a real low-sun sky keeps its warmth.
         let t = up.sqrt();
-        let base = HAZE.lerp(ZENITH, t);
+        let base = haze.lerp(zenith, t);
         // The glow follows the KEY LIGHT's azimuth, so the reflection sliding along a track link
         // agrees with the shadow that link is casting.
         let sun_xz = toward_sun().xz().normalize_or_zero();
         let toward = dir.xz().normalize_or_zero().dot(sun_xz).max(0.0);
-        base.lerp(GLOW, toward.powi(6) * (1.0 - t) * 0.6)
+        base.lerp(
+            glow,
+            toward.powi(look.glow_exponent.0) * (1.0 - t) * look.glow_strength.0,
+        )
     } else {
-        HAZE.lerp(GROUND, (-up).sqrt())
+        haze.lerp(ground, (-up).sqrt())
     }
 }
 
@@ -372,7 +338,7 @@ fn light_battlefield_views(
                     Name::new("Sky light filter"),
                     GeneratedEnvironmentMapLight {
                         environment_map: images.add(sky_cubemap()),
-                        intensity: SKY_ENVIRONMENT_INTENSITY,
+                        intensity: look::get().sky_intensity_cd_m2.0,
                         ..default()
                     },
                 ))
@@ -452,6 +418,7 @@ fn report_recorded_sky_filters(
 }
 
 pub fn plugin(app: &mut App) {
+    look::get();
     // Decode the heightmap FIRST (synchronous, ADR-0014), then spawn whichever world it selects:
     // the heightfield when the grid decoded, the flat slab + authored course otherwise.
     app.add_systems(
@@ -487,12 +454,9 @@ pub(crate) enum MapEncoding {
     Linear,
 }
 
-/// Anisotropic-filter taps for every surface map. The terrain is the one surface always seen at
-/// grazing angles out to the horizon, which is exactly the case isotropic filtering blurs, and a
-/// building's wall is met at the same angles along a street; 8 is the usual quality/cost knee (16
-/// costs more for little visible gain at this texel density). Only meaningful because the maps
-/// carry mip chains — anisotropy is a rule for choosing among mip levels, so on the old
-/// single-level PNGs it cost sampling work and bought nothing.
+/// Resolution: eight taps bound sampling cost while filtering surfaces at grazing angles.
+/// Mip chains are required: anisotropy chooses among mip levels rather than adding detail to a
+/// single-level texture.
 const SURFACE_ANISOTROPY: u16 = 8;
 
 /// How a surface image is addressed outside `0..1`. A surface pack TILES — bevy's default clamps,
@@ -604,15 +568,9 @@ fn spawn_environment(
     ablate: Option<Res<crate::render_cost::Ablate>>,
 ) {
     let mut blocks: Vec<Transform> = Vec::new();
-    // The sun (see [`sun_light`]). NO cascade config is spawned here on purpose: `settings::
-    // apply_settings` is the single writer of the cascade ladder, so that the settings page and the
-    // picture cannot disagree. As of 2026-07-28 it writes 3 splits out to 350 m with the first bound
-    // at 40 m (`settings::SHADOW_CASCADES`, `ShadowDistance`'s default rung and
-    // `settings::SHADOW_FIRST_CASCADE_FAR_BOUND_M`) — none of which are bevy's defaults of 4 / 150 m
-    // / 10 m any more, and all of which are live player-facing rows. What IS decided here is the
-    // light itself: cascades are fitted around the CAMERA, so the low sun does not stretch them;
-    // what a low sun does stretch is the shadow texel's footprint along the light, which is what
-    // [`SUN_SHADOW_NORMAL_BIAS`] answers.
+    // Settings owns the cascade ladder; this spawn supplies only the key light and its pose.
+    // Cascades fit around the camera. A low sun stretches the texel footprint along the light,
+    // which is what `SUN_SHADOW_NORMAL_BIAS` addresses.
     commands.spawn((
         DirectionalLight {
             shadow_maps_enabled: true,
@@ -1025,7 +983,7 @@ mod tests {
             EnvironmentMapLight {
                 diffuse_map: images.add(Image::default()),
                 specular_map: images.add(Image::default()),
-                intensity: SKY_ENVIRONMENT_INTENSITY,
+                intensity: look::get().sky_intensity_cd_m2.0,
                 ..default()
             }
         };
@@ -1065,7 +1023,7 @@ mod tests {
                 (&light.diffuse_map, &light.specular_map),
                 (&maps.diffuse_map, &maps.specular_map),
             );
-            assert_eq!(light.intensity, SKY_ENVIRONMENT_INTENSITY);
+            assert_eq!(light.intensity, look::get().sky_intensity_cd_m2.0);
         }
     }
 }

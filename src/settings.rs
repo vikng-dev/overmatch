@@ -50,6 +50,7 @@ mod displays;
 /// The end-of-frame frame-rate limiter — armed only by [`VsyncMode::Off`] plus a non-off
 /// [`FrameCap`]. Pure std timing; see its doc for the coarse-sleep-then-spin shape.
 mod limiter;
+mod look;
 /// The graphics presets: the one tier -> values table, and the PRESET row's label derived from
 /// it. Never persisted — only the rows a preset writes are; see its doc.
 mod preset;
@@ -71,15 +72,15 @@ pub(crate) use ui::SettingsCard;
 /// bump this; only a field whose MEANING changed under the same name does.
 const SETTINGS_VERSION: u32 = 1;
 
-/// The DEFAULT cascade count — [`ShadowCascades::default`]'s value, and the ONE number the whole
-/// shadow ladder is priced against.
+/// The exact count named by `ShadowCascades::Three`, the ruler used by the measurements below.
+/// The default rung is authored in `assets/ui/settings.ron`.
 ///
 /// MEASURED on an M4 (10 GPU cores, two idling Tigers, release, vsync off, 20 s settled windows):
 /// each cascade costs ~1.16 ms; the 1024 → 4096 map-size axis spans 0.27 ms; the 150 → 1000 m
 /// distance axis costs ~0.71 ms at 3 cascades / 4096 with track shadow proxies. At 4 cascades /
 /// 2048 that distance axis cost ~1.17 ms. Count dominates; dropping one cascade pays for both
 /// crispness and reach. The shipped envelope spends only 0.30 ms of that distance axis
-/// ([`ShadowDistance`]); [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`] keeps the picture crisp at 3 cascades.
+/// ([`ShadowDistance`]); `look::SettingsLook::shadow_first_cascade_far_bound_m` keeps the picture crisp at 3 cascades.
 ///
 /// Runtime count changes require registry bevy_light >= 0.19.1: PR #24807 resizes every pooled
 /// thread slot before each view's parallel walk. Stock 0.19.0 can panic on growth; shrinking is
@@ -118,56 +119,29 @@ const SETTINGS_VERSION: u32 = 1;
 ///   honest-limits section) — so there is no length for a stale `Local` to index with.
 pub(crate) const SHADOW_CASCADES: usize = 3;
 
-/// First cascade far bound, metres, explicitly replacing the builder's character-scale 10.0.
-///
-/// Bevy's geometric split is `first · (maximum/first)^(i/(n−1))`: at fixed count, raising `first`
-/// flattens the ladder instead of spending its crispness within a room-sized near field.
-///
-/// DERIVED screen pixels per shadow texel at each cascade's near bound (its worst point),
-/// at 16:9 / 45° vertical / 1964 px tall:
-///
-/// | config | worst px per texel |
-/// |---|---|
-/// | 4 casc, first 10, 150 m, 2048 (old default) | 6.08 |
-/// | 3 casc, first 10, 1000 m, 4096 | 12.23 |
-/// | 3 casc, first 40, 1000 m, 4096 | 6.12 |
-/// | 3 casc, first 10, 350 m, 4096 | 7.24 |
-/// | **3 casc, first 40, 350 m, 4096 (default)** | **3.64** |
-///
-/// DERIVED: at 1000 m, 40 m restores crispness to within 0.7% of the old default at 6.7× its reach;
-/// at the shipped 350 m, it is 1.7× crisper at 2.3× the reach. The near texel grows 0.83 → 1.66 cm,
-/// still under two centimetres on a 3 m tank. A short envelope alone does not fix a bad split:
-/// 350 m at first=10 still costs 7.24 px/texel versus 3.64 at first=40.
-///
-/// Coupled to [`SHADOW_CASCADES`] through the exponent: recompute the table if the count changes.
-const SHADOW_FIRST_CASCADE_FAR_BOUND_M: f32 = 40.0;
-
-/// Cascade overlap as a fraction of the previous far bound. Bevy's default 0.2 is explicit so
-/// the builder is not a silent author of the picture (see [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`]).
-/// It hides boundary seams and spends near-bound density through `(1 − overlap)` in that table.
-/// No measurement supports changing it.
-const SHADOW_CASCADE_OVERLAP: f32 = 0.2;
-
 /// Directional shadow cascade count at fixed [`ShadowResolution`] and [`ShadowDistance`]. Each
 /// cascade costs a render pass; fewer alias more near the camera. MEASURED M4 cost is owned by
 /// [`SHADOW_CASCADES`], whose doc also explains the bevy_light >= 0.19.1 runtime-growth requirement.
 ///
 /// No `Off` (owned by [`ShadowDistance::Off`]) or `1`: a single full-distance cascade falls below
 /// the offered quality floor; 2 is the budget rung.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum ShadowCascades {
     Two,
-    /// **The shipped default**, pinned as [`SHADOW_CASCADES`] — 3 rather than bevy's 4 because the
-    /// fourth cascade costs ~1.16 ms and buys back less than [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`]
-    /// gives away for nothing.
-    #[default]
+    /// MEASURED: one fewer cascade saves about 1.16 ms on the reference M4; the split's density
+    /// tradeoff is documented by `look::SettingsLook::shadow_first_cascade_far_bound_m`.
     Three,
     Four,
 }
 
+impl Default for ShadowCascades {
+    fn default() -> Self {
+        look::get().defaults.shadow_cascades.0
+    }
+}
+
 impl ShadowCascades {
-    /// `CascadeShadowConfigBuilder::num_cascades`; the default uses [`SHADOW_CASCADES`] so the
-    /// constant and ladder cannot drift.
+    /// The exact count named by each enum variant, independent of the authored default.
     pub(crate) const fn count(self) -> usize {
         match self {
             ShadowCascades::Two => 2,
@@ -267,7 +241,7 @@ impl ShadowCascades {
 /// ~0.30 ms (table above) against the ~1.16 ms that one fewer cascade gives back — see
 /// [`SHADOW_CASCADES`]. `M350` being the DEFAULT as well as the migration target means the common
 /// case is a file that lands where a fresh install would.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum ShadowDistance {
     /// Nothing casts: [`apply_settings`] clears `DirectionalLight::shadow_maps_enabled`. This is the
     /// whole shadow budget in one A/B, and the rung whose future is undecided (see the type doc).
@@ -278,7 +252,6 @@ pub(crate) enum ShadowDistance {
     /// past ~350 m reaches into sky this world cannot shadow, so the extra metres are paid for and
     /// not seen.
     #[serde(alias = "M100", alias = "M150", alias = "M300")]
-    #[default]
     M350,
     M700,
     /// This is the rung at which a 1 km map casts whole and the draw volume stops growing —
@@ -287,6 +260,12 @@ pub(crate) enum ShadowDistance {
     /// The type doc's envelope table makes this a top rung rather than the default. Only affordable together with [`ShadowResolution::X4096`] — at 2048 it
     /// detaches a far shadow by a whole tank.
     M1000,
+}
+
+impl Default for ShadowDistance {
+    fn default() -> Self {
+        look::get().defaults.shadow_distance.0
+    }
 }
 
 impl ShadowDistance {
@@ -338,7 +317,7 @@ impl ShadowDistance {
 /// ([`ShadowCascades`]); render-pass count dominates texel count on that tiled GPU.
 ///
 /// No `Off`: [`ShadowDistance::Off`] owns it, avoiding contradictory rows.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum ShadowResolution {
     X1024,
     /// Bevy's `DirectionalLightShadowMap::default().size`. DERIVED detachment: ~1.07 m at the
@@ -348,8 +327,13 @@ pub(crate) enum ShadowResolution {
     /// what holds far-shadow detachment to half a metre at the shipped envelope (see
     /// [`ShadowDistance`]'s table). It is also what makes the longer rungs usable at all: without it
     /// [`ShadowDistance::M1000`] would peter-pan by a whole tank.
-    #[default]
     X4096,
+}
+
+impl Default for ShadowResolution {
+    fn default() -> Self {
+        look::get().defaults.shadow_resolution.0
+    }
 }
 
 impl ShadowResolution {
@@ -382,13 +366,18 @@ impl ShadowResolution {
 
 /// Multisample level. `Off` IS offered here, unlike shadows: MSAA smooths edges, it does not reveal
 /// or conceal anything — a player who turns it off sees the same tanks in the same places.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum MsaaLevel {
     Off,
     X2,
     /// **The shipped default** — bevy installs `Msaa::Sample4` as a required component of `Camera`.
-    #[default]
     X4,
+}
+
+impl Default for MsaaLevel {
+    fn default() -> Self {
+        look::get().defaults.msaa.0
+    }
 }
 
 impl MsaaLevel {
@@ -425,21 +414,26 @@ impl MsaaLevel {
 /// `ilog2(max_mip_dimension) - 1` mips, so LOW's 256 holds a quarter of NORMAL's top-level texels
 /// and one mip fewer, and both chains end at the same 4-texel-tall mip, so the widest halo is the
 /// same size on screen. The full-resolution composite onto the view is unchanged. MEASURED: none.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum BloomLevel {
     /// Half NORMAL's resolution on each axis.
     Low,
     /// **The shipped default**: `Bloom::NATURAL`'s own `max_mip_dimension`, 512.
-    #[default]
     Normal,
+}
+
+impl Default for BloomLevel {
+    fn default() -> Self {
+        look::get().defaults.bloom.0
+    }
 }
 
 impl BloomLevel {
     /// The `Bloom::max_mip_dimension` this rung applies.
     pub(crate) fn max_mip_dimension(self) -> u32 {
         match self {
-            BloomLevel::Low => Bloom::NATURAL.max_mip_dimension / 2,
-            BloomLevel::Normal => Bloom::NATURAL.max_mip_dimension,
+            BloomLevel::Low => look::get().bloom_mip_dimensions.0[0],
+            BloomLevel::Normal => look::get().bloom_mip_dimensions.0[1],
         }
     }
 
@@ -470,7 +464,7 @@ impl BloomLevel {
 /// WindowServer quadruples pixels with no interpolation at all, so those two are the sharp ones. The
 /// three in between trade sharpness for fill rate through a bilinear filter, and exist because the
 /// jump from 100% to 50% is a very large step to be the only choice.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum RenderScaleLevel {
     Percent50,
     Percent67,
@@ -478,8 +472,13 @@ pub(crate) enum RenderScaleLevel {
     Percent85,
     /// **The shipped default** — native, and the path on which [`crate::render_scale`] inserts no
     /// override and schedules no upscale pass at all.
-    #[default]
     Percent100,
+}
+
+impl Default for RenderScaleLevel {
+    fn default() -> Self {
+        look::get().defaults.render_scale.0
+    }
 }
 
 impl RenderScaleLevel {
@@ -547,7 +546,7 @@ impl RenderScaleLevel {
 /// A carried-over file can still NAME a rung this surface lacks, though, and that is a different
 /// problem: see [`Settings::effective_vsync`] (what such a rung resolves to, for every consumer)
 /// and [`normalize_vsync`] (which writes the resolution back once the probe lands).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum VsyncMode {
     /// Uncapped, may tear, lowest latency — [`PresentMode::Immediate`] where the surface supports
     /// it. The ONE rung that arms the frame-cap row.
@@ -557,8 +556,13 @@ pub(crate) enum VsyncMode {
     Fast,
     /// **The shipped default** — [`PresentMode::Fifo`], universally supported and traditionally
     /// exactly what "VSync On" means.
-    #[default]
     On,
+}
+
+impl Default for VsyncMode {
+    fn default() -> Self {
+        look::get().defaults.vsync.0
+    }
 }
 
 impl VsyncMode {
@@ -670,12 +674,17 @@ impl PresentCaps {
 /// toggle fullscreen with the green button, and the stored value follows reality rather than
 /// fighting it. That writer computes this mapping with the SAME resolved display this one does,
 /// which is load-bearing rather than tidy — see `observe_window_placement` for the clobber it prevents.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum WindowModeSetting {
     /// **The shipped default** — the window the game has always opened with.
-    #[default]
     Windowed,
     Fullscreen,
+}
+
+impl Default for WindowModeSetting {
+    fn default() -> Self {
+        look::get().defaults.window_mode.0
+    }
 }
 
 impl WindowModeSetting {
@@ -721,11 +730,16 @@ impl WindowModeSetting {
 /// Whether the online client draws its debug card (ping, jitter, frame rate, frame time, version)
 /// in a corner during a match. On by default during the beta, so a tester's report carries the
 /// numbers. Read only by `net::debug_hud`; the offline root has no card.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum DebugPanel {
-    #[default]
     On,
     Off,
+}
+
+impl Default for DebugPanel {
+    fn default() -> Self {
+        look::get().defaults.debug_panel.0
+    }
 }
 
 impl DebugPanel {
@@ -746,12 +760,17 @@ impl DebugPanel {
 
 /// Which of the player's own hits open the pen cam's corner: every one, penetrations only, or
 /// none. Read by `damage_cam::pen_cam::game`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum PenCamCorner {
-    #[default]
     All,
     ThroughOnly,
     Off,
+}
+
+impl Default for PenCamCorner {
+    fn default() -> Self {
+        look::get().defaults.pen_cam_corner.0
+    }
 }
 
 impl PenCamCorner {
@@ -783,11 +802,16 @@ impl PenCamCorner {
 /// Whether the player's own knockout by a recorded shot plays the kill cam before the death screen.
 /// Off, the death screen comes at once, the killer card still naming what the record names. Read by
 /// `damage_cam::pen_cam::game::killcam`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum KillCam {
-    #[default]
     On,
     Off,
+}
+
+impl Default for KillCam {
+    fn default() -> Self {
+        look::get().defaults.kill_cam.0
+    }
 }
 
 impl KillCam {
@@ -808,11 +832,16 @@ impl KillCam {
 
 /// Whether the pen cam's views hold their camera still and land their events with short fades
 /// instead of travelling.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum ReduceMotion {
-    #[default]
     Off,
     On,
+}
+
+impl Default for ReduceMotion {
+    fn default() -> Self {
+        look::get().defaults.reduce_motion.0
+    }
 }
 
 impl ReduceMotion {
@@ -836,12 +865,17 @@ impl ReduceMotion {
 /// a rut reads at low angles), or parallax with the sun's shadow marched across the rut. Every
 /// level darkens and roughens the trodden ground the same; only the relief's cost differs, and only
 /// on print pixels within [`TrackPrintRange`]. Read by `track_prints::sync_material`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum TrackPrintRelief {
     Lighting,
     Parallax,
-    #[default]
     SunShadow,
+}
+
+impl Default for TrackPrintRelief {
+    fn default() -> Self {
+        look::get().defaults.track_prints.0
+    }
 }
 
 impl TrackPrintRelief {
@@ -873,13 +907,18 @@ impl TrackPrintRelief {
 /// How far from the eye the track prints' relief is drawn before it fades to lighting only. The
 /// near store reaches at least 39 m ahead of the eye in every direction (`track_prints::store`), so
 /// the longest rung is the store's own reach. Read by `track_prints::sync_material`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum TrackPrintRange {
     Near,
     Middle,
-    #[default]
     Far,
     Farthest,
+}
+
+impl Default for TrackPrintRange {
+    fn default() -> Self {
+        look::get().defaults.track_print_range.0
+    }
 }
 
 impl TrackPrintRange {
@@ -890,24 +929,18 @@ impl TrackPrintRange {
         TrackPrintRange::Farthest,
     ];
 
-    /// The distance, m. ASSUMED: 30 m by default, the far end of the range a print must read at.
-    pub(crate) const fn metres(self) -> f32 {
-        match self {
-            TrackPrintRange::Near => 10.0,
-            TrackPrintRange::Middle => 20.0,
-            TrackPrintRange::Far => 30.0,
-            TrackPrintRange::Farthest => 40.0,
-        }
+    /// The authored presentation reach for this quality rung, metres.
+    pub(crate) fn metres(self) -> f32 {
+        let index = Self::ORDER
+            .iter()
+            .position(|rung| *rung == self)
+            .expect("every track print range is present in its quality ladder");
+        look::get().track_print_ranges_m.0[index]
     }
 
     /// ASCII only — it reaches `Text`.
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            TrackPrintRange::Near => "10 M",
-            TrackPrintRange::Middle => "20 M",
-            TrackPrintRange::Far => "30 M",
-            TrackPrintRange::Farthest => "40 M",
-        }
+    pub(crate) fn label(self) -> String {
+        format!("{} M", self.metres())
     }
 }
 
@@ -965,12 +998,11 @@ impl TrackPrintRange {
 /// player's choice the first time they undocked, and they would have to re-pick it every time they
 /// plugged back in. So [`DisplaySelection::resolve`] is a read-side fallback only — it logs, it
 /// never writes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum DisplaySelection {
     /// **The shipped default** — nothing is written, so the window manager places the window
     /// exactly as it always has. The one rung that is not a decision, and the reason adding this
     /// row changes no existing install's behaviour.
-    #[default]
     Auto,
     /// The OS's own main display. The only rung that would ALSO resolve at window-creation time
     /// (`select_monitor` takes `primary_monitor` as a direct argument rather than through the
@@ -982,6 +1014,12 @@ pub(crate) enum DisplaySelection {
     Display1,
     Display2,
     Display3,
+}
+
+impl Default for DisplaySelection {
+    fn default() -> Self {
+        look::get().defaults.display.0
+    }
 }
 
 impl DisplaySelection {
@@ -1237,22 +1275,26 @@ impl<'de> Deserialize<'de> for PixelBudget {
 
 impl Default for PixelBudget {
     fn default() -> Self {
-        Self(1.0)
+        look::get().defaults.lod_pixel_budget.0
     }
 }
 
 impl PixelBudget {
-    /// A budget under a pixel is below what a human eyeball can resolve on the silhouette, and one
-    /// over eight is a visibly popping model — the two ends of the range worth offering.
-    pub(crate) const MIN: f32 = 0.5;
-    pub(crate) const MAX: f32 = 8.0;
-    /// The ladder step. Half a pixel, so the low end — where the difference is actually visible —
-    /// is finely divided rather than jumping straight from 0.5 to 1.
-    const STEP: f32 = 0.5;
-    /// Number of discrete stops, MIN..=MAX inclusive — `1 + (MAX - MIN) / STEP`, written out
-    /// because a float-to-integer cast is not something to do in a `const` item. The assertion
-    /// after this impl pins it against the three constants above.
-    const STOPS: u16 = 16;
+    /// The finest screen-space error offered by the authored detail ladder.
+    pub(crate) fn min() -> f32 {
+        look::get().pixel_budget.min.0
+    }
+    pub(crate) fn max() -> f32 {
+        look::get().pixel_budget.max.0
+    }
+    /// The authored keyboard increment in screen pixels.
+    pub(crate) fn step_size() -> f32 {
+        look::get().pixel_budget.step.0
+    }
+    /// Inclusive stops, derived from the admitted scalar ladder.
+    pub(crate) fn stops() -> u16 {
+        look::get().pixel_budget.stops()
+    }
 
     /// The budget in screen pixels. The clamp is the guard against a hand-edited
     /// `lod_pixel_budget: 0.0` demanding an infinitely fine ladder (or a negative one inverting the
@@ -1265,7 +1307,7 @@ impl PixelBudget {
             self.0.is_finite(),
             "PixelBudget comes from finite preset data or checked settings input"
         );
-        self.0.clamp(Self::MIN, Self::MAX)
+        self.0.clamp(Self::min(), Self::max())
     }
 
     /// ASCII only — it reaches `Text`. Honest pixels, like every other value on this page.
@@ -1276,34 +1318,30 @@ impl PixelBudget {
     /// The nearest slider stop for the current value. A hand-edited off-ladder value (1.2) resolves
     /// to its nearest stop the moment the player TOUCHES the control, and not before.
     fn stop(self) -> u16 {
-        (((self.pixels() - Self::MIN) / Self::STEP).round() as u16).min(Self::STOPS - 1)
+        (((self.pixels() - Self::min()) / Self::step_size()).round() as u16).min(Self::stops() - 1)
     }
 
     fn from_stop(stop: u16) -> Self {
-        Self(Self::MIN + f32::from(stop.min(Self::STOPS - 1)) * Self::STEP)
+        Self(Self::min() + f32::from(stop.min(Self::stops() - 1)) * Self::step_size())
     }
 
     /// One keyboard step along the ladder, saturating at both ends like every other row.
     pub(crate) fn step(self, delta: i32) -> Self {
-        let stop = (i32::from(self.stop()) + delta).clamp(0, i32::from(Self::STOPS) - 1);
+        let stop = (i32::from(self.stop()) + delta).clamp(0, i32::from(Self::stops()) - 1);
         Self::from_stop(stop as u16)
     }
 
     /// Where the slider handle sits, `0.0..=1.0`.
     pub(crate) fn fraction(self) -> f32 {
-        f32::from(self.stop()) / f32::from(Self::STOPS - 1)
+        f32::from(self.stop()) / f32::from(Self::stops() - 1)
     }
 
     /// The value a drag to `fraction` lands on, snapped to the ladder.
     pub(crate) fn from_fraction(fraction: f32) -> Self {
-        let stops = f32::from(Self::STOPS - 1);
+        let stops = f32::from(Self::stops() - 1);
         Self::from_stop((fraction.clamp(0.0, 1.0) * stops).round() as u16)
     }
 }
-
-const _: () = assert!(
-    PixelBudget::STOPS as f32 == 1.0 + (PixelBudget::MAX - PixelBudget::MIN) / PixelBudget::STEP
-);
 
 /// Applied screen-space error budget, pixels, written by [`apply_settings`]. Consumers depend on
 /// this small resource rather than the persisted intent. Its change triggers human-rate
@@ -1326,23 +1364,37 @@ impl Default for LodPixelBudget {
 /// Stored on disk as the bare `u16` (`#[serde(transparent)]`), so `frame_cap: 144` is what a player
 /// finds in `video.ron`. A hand-edited value is honoured as written while merely OUT of the UI
 /// ladder (144 renders and caps as 144); only [`FrameCap::fps`]'s clamp bounds truly absurd values.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct FrameCap(pub(crate) u16);
 
+impl Default for FrameCap {
+    fn default() -> Self {
+        look::get().defaults.frame_cap.0
+    }
+}
+
 impl FrameCap {
     pub(crate) const OFF: FrameCap = FrameCap(0);
-    /// The UI ladder: OFF, then MIN..=MAX in STEP increments.
-    pub(crate) const MIN_FPS: u16 = 30;
-    pub(crate) const MAX_FPS: u16 = 240;
-    const STEP_FPS: u16 = 10;
-    /// Number of discrete stops on the slider: OFF plus every STEP from MIN to MAX inclusive.
-    const STOPS: u16 = 2 + (Self::MAX_FPS - Self::MIN_FPS) / Self::STEP_FPS;
+    /// The slowest offered frame-rate cap; OFF remains a separate state.
+    pub(crate) fn min_fps() -> u16 {
+        look::get().frame_cap.min.0
+    }
+    pub(crate) fn max_fps() -> u16 {
+        look::get().frame_cap.max.0
+    }
+    pub(crate) fn step_fps() -> u16 {
+        look::get().frame_cap.step.0
+    }
+    /// Inclusive authored cap stops, plus OFF.
+    pub(crate) fn stops() -> u16 {
+        look::get().frame_cap.stops() + 1
+    }
 
     /// The cap in frames per second, or `None` for off. The clamp is the guard against a
     /// hand-edited `frame_cap: 5` starving the game (or `60000` meaning "spin forever").
     pub(crate) fn fps(self) -> Option<u16> {
-        (self.0 != 0).then(|| self.0.clamp(Self::MIN_FPS, Self::MAX_FPS))
+        (self.0 != 0).then(|| self.0.clamp(Self::min_fps(), Self::max_fps()))
     }
 
     /// The frame period this cap asks for, or `None` for off.
@@ -1365,7 +1417,7 @@ impl FrameCap {
     fn stop(self) -> u16 {
         match self.fps() {
             None => 0,
-            Some(fps) => 1 + (fps - Self::MIN_FPS + Self::STEP_FPS / 2) / Self::STEP_FPS,
+            Some(fps) => 1 + (fps - Self::min_fps() + Self::step_fps() / 2) / Self::step_fps(),
         }
     }
 
@@ -1373,25 +1425,25 @@ impl FrameCap {
         if stop == 0 {
             Self::OFF
         } else {
-            Self(Self::MIN_FPS + (stop.min(Self::STOPS - 1) - 1) * Self::STEP_FPS)
+            Self(Self::min_fps() + (stop.min(Self::stops() - 1) - 1) * Self::step_fps())
         }
     }
 
     /// One keyboard step along the ladder, saturating at both ends like every other row.
     pub(crate) fn step(self, delta: i32) -> Self {
-        let stop = (i32::from(self.stop()) + delta).clamp(0, i32::from(Self::STOPS) - 1);
+        let stop = (i32::from(self.stop()) + delta).clamp(0, i32::from(Self::stops()) - 1);
         Self::from_stop(stop as u16)
     }
 
     /// Where the slider handle sits, `0.0..=1.0` (OFF is the far left).
     pub(crate) fn fraction(self) -> f32 {
-        f32::from(self.stop()) / f32::from(Self::STOPS - 1)
+        f32::from(self.stop()) / f32::from(Self::stops() - 1)
     }
 
     /// The value a drag to `fraction` lands on — the inverse of [`FrameCap::fraction`], snapped to
     /// the ladder.
     pub(crate) fn from_fraction(fraction: f32) -> Self {
-        let stops = f32::from(Self::STOPS - 1);
+        let stops = f32::from(Self::stops() - 1);
         Self::from_stop((fraction.clamp(0.0, 1.0) * stops).round() as u16)
     }
 }
@@ -1408,48 +1460,57 @@ pub(crate) struct UiScalePercent(pub(crate) u16);
 
 impl Default for UiScalePercent {
     fn default() -> Self {
-        Self(100)
+        look::get().defaults.ui_scale.0
     }
 }
 
 impl UiScalePercent {
-    pub(crate) const MIN: u16 = 75;
-    pub(crate) const MAX: u16 = 150;
-    const STEP: u16 = 5;
-    const STOPS: u16 = 1 + (Self::MAX - Self::MIN) / Self::STEP;
+    pub(crate) fn min() -> u16 {
+        look::get().ui_scale.min.0
+    }
+    pub(crate) fn max() -> u16 {
+        look::get().ui_scale.max.0
+    }
+    pub(crate) fn step_size() -> u16 {
+        look::get().ui_scale.step.0
+    }
+    pub(crate) fn stops() -> u16 {
+        look::get().ui_scale.stops()
+    }
 
     /// The multiplier written to [`UiScale`]. Clamped — see the type doc.
     pub(crate) fn factor(self) -> f32 {
-        f32::from(self.0.clamp(Self::MIN, Self::MAX)) / 100.0
+        f32::from(self.0.clamp(Self::min(), Self::max())) / 100.0
     }
 
     /// ASCII only — it reaches `Text`.
     pub(crate) fn label(self) -> String {
-        format!("{}%", self.0.clamp(Self::MIN, Self::MAX))
+        format!("{}%", self.0.clamp(Self::min(), Self::max()))
     }
 
     fn stop(self) -> u16 {
-        (self.0.clamp(Self::MIN, Self::MAX) - Self::MIN + Self::STEP / 2) / Self::STEP
+        (self.0.clamp(Self::min(), Self::max()) - Self::min() + Self::step_size() / 2)
+            / Self::step_size()
     }
 
     fn from_stop(stop: u16) -> Self {
-        Self(Self::MIN + stop.min(Self::STOPS - 1) * Self::STEP)
+        Self(Self::min() + stop.min(Self::stops() - 1) * Self::step_size())
     }
 
     /// One keyboard step along the ladder, saturating at both ends.
     pub(crate) fn step(self, delta: i32) -> Self {
-        let stop = (i32::from(self.stop()) + delta).clamp(0, i32::from(Self::STOPS) - 1);
+        let stop = (i32::from(self.stop()) + delta).clamp(0, i32::from(Self::stops()) - 1);
         Self::from_stop(stop as u16)
     }
 
     /// Where the slider handle sits, `0.0..=1.0`.
     pub(crate) fn fraction(self) -> f32 {
-        f32::from(self.stop()) / f32::from(Self::STOPS - 1)
+        f32::from(self.stop()) / f32::from(Self::stops() - 1)
     }
 
     /// The value a drag to `fraction` lands on, snapped to the ladder.
     pub(crate) fn from_fraction(fraction: f32) -> Self {
-        let stops = f32::from(Self::STOPS - 1);
+        let stops = f32::from(Self::stops() - 1);
         Self::from_stop((fraction.clamp(0.0, 1.0) * stops).round() as u16)
     }
 }
@@ -1705,6 +1766,7 @@ struct SaveStatus(Option<store::SaveError>);
 /// Missing/corrupt files yield defaults with a note. [`WindowModeSetting`] rules out exclusive
 /// fullscreen on an unresolvable monitor, so no row needs an escape hatch outside the UI.
 pub(crate) fn load_at_boot(app: &mut App) -> Settings {
+    look::get();
     let path = store::StorePath::default();
     let store::Load { settings, note } = store::load(path.0.as_deref());
     app.insert_resource(path);
@@ -1739,6 +1801,7 @@ pub(crate) enum PageEntry {
 /// a render app — its render-half early-returns — but no path in this tree does that.)
 pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
     move |app: &mut App| {
+        look::get();
         app.add_plugins((crate::render_scale::plugin, probe::plugin, ui::plugin))
             .init_resource::<Settings>()
             .init_resource::<store::StorePath>()
@@ -1833,17 +1896,6 @@ fn reconcile_shadow_config(config: &mut CascadeShadowConfig, rebuilt: CascadeSha
     }
 }
 
-/// Headless roots may have no primary window; multiple primaries are a construction bug.
-fn optional_primary_window<T>(window: Result<T, bevy::ecs::query::QuerySingleError>) -> Option<T> {
-    match window {
-        Ok(window) => Some(window),
-        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => None,
-        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
-            panic!("settings requires at most one primary window")
-        }
-    }
-}
-
 /// Reconcile the rendering world to [`Settings`]. The ONE writer of every knob below, which is what
 /// makes "the page and the picture cannot disagree" true by construction rather than by discipline.
 #[expect(
@@ -1921,13 +1973,13 @@ fn apply_settings(
         if let Some(maximum_distance) = distance.distance_m() {
             // Runtime count changes require bevy_light >= 0.19.1 (see `SHADOW_CASCADES`).
             // Split parameters are explicit: the stock 10 m first bound halves far-field crispness on a
-            // 1 km map (`SHADOW_FIRST_CASCADE_FAR_BOUND_M`). Only `minimum_distance` remains Bevy's
+            // 1 km map (`look::SettingsLook::shadow_first_cascade_far_bound_m`). Only `minimum_distance` remains Bevy's
             // default (0.1 m near clip), which no page row should move.
             let mut rebuilt = CascadeShadowConfigBuilder {
                 num_cascades: settings.shadow_cascades.count(),
                 maximum_distance,
-                first_cascade_far_bound: SHADOW_FIRST_CASCADE_FAR_BOUND_M,
-                overlap_proportion: SHADOW_CASCADE_OVERLAP,
+                first_cascade_far_bound: look::get().shadow_first_cascade_far_bound_m.0,
+                overlap_proportion: look::get().shadow_cascade_overlap.0,
                 ..default()
             }
             .build();
@@ -1945,7 +1997,7 @@ fn apply_settings(
     // Preserve every window field on a hidden run; see `CaptureWindowPinned` for the macOS
     // fullscreen focus hazard. Nobody watches its present mode either.
     if capture_pinned.is_none()
-        && let Some(mut window) = optional_primary_window(window.single_mut())
+        && let Some(mut window) = crate::state::primary_window(window.single_mut())
     {
         window.present_mode = settings.present_mode(*caps);
         let displays = read_displays(&monitors, &primaries);
@@ -2252,7 +2304,7 @@ fn observe_window_placement(
     mut placement: ResMut<WindowPlacement>,
     mut last_seen: Local<Option<bool>>,
 ) {
-    let Some((entity, mut window)) = optional_primary_window(window.single_mut()) else {
+    let Some((entity, mut window)) = crate::state::primary_window(window.single_mut()) else {
         return;
     };
     let displays = read_displays(&monitors, &primaries);
@@ -2458,8 +2510,8 @@ mod tests {
         app.update();
         assert_eq!(
             app.world().resource::<RenderScale>().0,
-            1.0,
-            "a default config must leave the render app on the native path"
+            RenderScaleLevel::default().fraction(),
+            "a default config applies the authored render scale"
         );
 
         for level in RenderScaleLevel::ORDER {
@@ -2558,7 +2610,7 @@ mod tests {
     /// length, and only while casting; Off leaves the change pending. That length sizes the
     /// frusta, per-view entity vectors and pooled queues downstream.
     ///
-    /// Rebuilds must retain [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`], [`SHADOW_CASCADE_OVERLAP`] and
+    /// Rebuilds must retain `look::SettingsLook::shadow_first_cascade_far_bound_m`, `look::SettingsLook::shadow_cascade_overlap` and
     /// Bevy's minimum distance; an implicit first bound would silently halve far-field crispness.
     ///
     /// The scheduling-dependent upstream panic is deliberately not reproduced: a test can pass
@@ -2628,7 +2680,8 @@ mod tests {
                  last one the row APPLIED — moved by the row alone, and only on a casting frame",
             );
             assert_eq!(
-                config.overlap_proportion, SHADOW_CASCADE_OVERLAP,
+                config.overlap_proportion,
+                look::get().shadow_cascade_overlap.0,
                 "{cascades:?} must not move the overlap — only the count and the far bound may vary",
             );
             assert_eq!(
@@ -2641,10 +2694,11 @@ mod tests {
                 // crispness rather than fail anything.
                 let first = *config.bounds.first().expect("cascades exist");
                 assert!(
-                    (first - SHADOW_FIRST_CASCADE_FAR_BOUND_M).abs()
-                        <= SHADOW_FIRST_CASCADE_FAR_BOUND_M * 1e-4,
+                    (first - look::get().shadow_first_cascade_far_bound_m.0).abs()
+                        <= look::get().shadow_first_cascade_far_bound_m.0 * 1e-4,
                     "{distance:?}/{cascades:?}: the first cascade must end at \
-                     {SHADOW_FIRST_CASCADE_FAR_BOUND_M} m, got {first}",
+                     {} m, got {first}",
+                    look::get().shadow_first_cascade_far_bound_m.0,
                 );
                 // The far bound is `nearest * base^(n-1)` with `base` itself a `powf`, so it
                 // reproduces `distance_m` only to float precision (MEASURED: 200.00002 for 200.0). A
@@ -2836,7 +2890,7 @@ mod tests {
         }
         assert_eq!(
             Settings::default().effective_vsync(PresentCaps::Unprobed),
-            VsyncMode::On,
+            VsyncMode::default(),
         );
         for vsync in VsyncMode::ORDER {
             assert_eq!(
@@ -2967,7 +3021,6 @@ mod tests {
     /// `step_in`-dead-end rule [`ShadowDistance::ORDER`] carries.
     #[test]
     fn the_display_ladder_maps_onto_bevys_monitor_selection() {
-        assert_eq!(DisplaySelection::default(), DisplaySelection::Auto);
         assert_eq!(DisplaySelection::Auto.monitor(), None);
         assert_eq!(
             DisplaySelection::Auto.window_position_on(ranked(3)),
@@ -3883,11 +3936,11 @@ mod tests {
         app.update();
         assert_eq!(
             app.world().resource::<LodPixelBudget>().0,
-            1.0,
-            "a default config must apply the default budget"
+            PixelBudget::default().pixels(),
+            "a default config applies the authored detail budget"
         );
 
-        let mut budget = PixelBudget(PixelBudget::MIN);
+        let mut budget = PixelBudget(PixelBudget::min());
         loop {
             app.world_mut().resource_mut::<Settings>().lod_pixel_budget = budget;
             app.update();
@@ -3904,7 +3957,7 @@ mod tests {
         }
         assert_eq!(
             budget.pixels(),
-            PixelBudget::MAX,
+            PixelBudget::max(),
             "the walk ends at the top"
         );
 
@@ -3912,10 +3965,16 @@ mod tests {
         // it has to defend against.
         app.world_mut().resource_mut::<Settings>().lod_pixel_budget = PixelBudget(-3.0);
         app.update();
-        assert_eq!(app.world().resource::<LodPixelBudget>().0, PixelBudget::MIN);
+        assert_eq!(
+            app.world().resource::<LodPixelBudget>().0,
+            PixelBudget::min()
+        );
         app.world_mut().resource_mut::<Settings>().lod_pixel_budget = PixelBudget(9999.0);
         app.update();
-        assert_eq!(app.world().resource::<LodPixelBudget>().0, PixelBudget::MAX);
+        assert_eq!(
+            app.world().resource::<LodPixelBudget>().0,
+            PixelBudget::max()
+        );
     }
 
     /// Skipped fields must default to their type defaults, or sparse saves freeze defaults or
@@ -3939,12 +3998,7 @@ mod tests {
         assert!(is_default(&settings.debug_panel));
         assert!(is_default(&settings.pen_cam_corner));
         assert!(is_default(&settings.kill_cam));
-        assert!(settings.kill_cam.on(), "the kill cam plays by default");
         assert!(is_default(&settings.reduce_motion));
-        assert!(
-            settings.debug_panel.shown(),
-            "the debug card is on by default during the beta"
-        );
         assert!(
             settings.legacy_vsync.is_none(),
             "the legacy shadow field must default absent — it exists only inside a parse"

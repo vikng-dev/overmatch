@@ -5,7 +5,7 @@
 //! [`Look`] limits scope to picture/cost rows; window, display, vsync, cap, UI scale and gameplay
 //! rows are outside its write set.
 //!
-//! Values are provisional (#159), to be retuned in [`Preset::look`] against the night battery
+//! Values are provisional (#159), to be retuned in `assets/ui/settings.ron` against the night battery
 //! into hardware promises (class X, 30-tank battle, 120 fps on tier Y). Tests pin ladder membership,
 //! non-decreasing cost and pairwise distinctness, never particular tier values.
 
@@ -24,7 +24,8 @@ pub(crate) enum Preset {
 }
 
 /// The rows a preset drives, one field each.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Look {
     pub(crate) render_scale: RenderScaleLevel,
     pub(crate) lod_pixel_budget: PixelBudget,
@@ -74,7 +75,7 @@ impl Look {
     pub(crate) fn ranks(self) -> [usize; DRIVEN_ROWS] {
         [
             rank(&RenderScaleLevel::ORDER, self.render_scale),
-            usize::from(PixelBudget::STOPS - 1 - self.lod_pixel_budget.stop()),
+            usize::from(PixelBudget::stops() - 1 - self.lod_pixel_budget.stop()),
             rank(&ShadowDistance::ORDER, self.shadow_distance),
             rank(&ShadowResolution::ORDER, self.shadow_resolution),
             rank(&ShadowCascades::ORDER, self.shadow_cascades),
@@ -118,56 +119,10 @@ impl Preset {
         }
     }
 
-    /// **The table.** The owner's provisional values on #159, except the detail budget, which that
-    /// table does not list: LOW's 2 px is the issue body's ASSUMED value, and the other tiers keep
-    /// the 1 px default (ASSUMED).
-    pub(crate) const fn look(self) -> Look {
-        match self {
-            Preset::Low => Look {
-                render_scale: RenderScaleLevel::Percent75,
-                lod_pixel_budget: PixelBudget(2.0),
-                shadow_distance: ShadowDistance::M350,
-                shadow_resolution: ShadowResolution::X2048,
-                shadow_cascades: ShadowCascades::Two,
-                msaa: MsaaLevel::Off,
-                bloom: BloomLevel::Low,
-                track_prints: TrackPrintRelief::Lighting,
-                track_print_range: TrackPrintRange::Middle,
-            },
-            Preset::Medium => Look {
-                render_scale: RenderScaleLevel::Percent100,
-                lod_pixel_budget: PixelBudget(1.0),
-                shadow_distance: ShadowDistance::M350,
-                shadow_resolution: ShadowResolution::X2048,
-                shadow_cascades: ShadowCascades::Three,
-                msaa: MsaaLevel::X2,
-                bloom: BloomLevel::Normal,
-                track_prints: TrackPrintRelief::Parallax,
-                track_print_range: TrackPrintRange::Far,
-            },
-            Preset::High => Look {
-                render_scale: RenderScaleLevel::Percent100,
-                lod_pixel_budget: PixelBudget(1.0),
-                shadow_distance: ShadowDistance::M350,
-                shadow_resolution: ShadowResolution::X4096,
-                shadow_cascades: ShadowCascades::Three,
-                msaa: MsaaLevel::X4,
-                bloom: BloomLevel::Normal,
-                track_prints: TrackPrintRelief::SunShadow,
-                track_print_range: TrackPrintRange::Far,
-            },
-            Preset::Ultra => Look {
-                render_scale: RenderScaleLevel::Percent100,
-                lod_pixel_budget: PixelBudget(1.0),
-                shadow_distance: ShadowDistance::M700,
-                shadow_resolution: ShadowResolution::X4096,
-                shadow_cascades: ShadowCascades::Four,
-                msaa: MsaaLevel::X4,
-                bloom: BloomLevel::Normal,
-                track_prints: TrackPrintRelief::SunShadow,
-                track_print_range: TrackPrintRange::Farthest,
-            },
-        }
+    /// The authored picture/cost row for this tier.
+    pub(crate) fn look(self) -> Look {
+        let index = rank(&Self::ORDER, self);
+        super::look::get().presets[index].0
     }
 
     /// The tier whose table equals `settings`' driven rows exactly, or `None` — CUSTOM.
@@ -407,7 +362,12 @@ mod tests {
     /// The rung distance the CUSTOM step minimises: zero to itself, one per rung on any one row.
     #[test]
     fn the_distance_counts_rungs() {
-        let high = Preset::High.look();
+        // Fixture: controlled adjacent rungs, independent of the tier table's tastes.
+        let high = Look {
+            msaa: MsaaLevel::X4,
+            lod_pixel_budget: PixelBudget::from_stop(0),
+            ..Preset::High.look()
+        };
         assert_eq!(high.distance(high), 0);
         let one_off = Look {
             msaa: MsaaLevel::X2,

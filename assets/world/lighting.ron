@@ -1,0 +1,15 @@
+// Required presentation tastes for the battlefield light and analytic sky.
+(
+    sun_elevation_deg: (17.0, Taste("battlefield lighting: sun elevation deg")),
+    sun_azimuth_deg: (45.0, Taste("battlefield lighting: sun azimuth deg")),
+    sun_illuminance_lux: (25000.0, Taste("battlefield lighting: sun illuminance lux")),
+    sun_srgb: ((1.0, 0.94, 0.86), Taste("battlefield lighting: sun srgb")),
+    sky_intensity_cd_m2: (600.0, Taste("battlefield lighting: sky intensity cd m2")),
+    sun_debug_distance_m: (100.0, Taste("battlefield lighting: sun debug distance m")),
+    zenith_linear: ((0.22, 0.34, 0.55), Taste("battlefield lighting: zenith linear")),
+    haze_linear: ((0.85, 0.65, 0.42), Taste("battlefield lighting: haze linear")),
+    glow_linear: ((1.0, 0.78, 0.5), Taste("battlefield lighting: glow linear")),
+    ground_linear: ((0.10, 0.085, 0.07), Taste("battlefield lighting: ground linear")),
+    glow_exponent: (6, Taste("battlefield lighting: glow exponent")),
+    glow_strength: (0.6, Taste("battlefield lighting: glow strength")),
+)
