@@ -33,6 +33,9 @@ sys.path.insert(0, os.path.join(_HERE, "addons"))
 
 import overmatch_export as addon  # noqa: E402
 
+sys.path.insert(0, os.path.join(_ROOT, "scripts", "tank"))
+import report  # noqa: E402
+
 _WORK = tempfile.mkdtemp(prefix="overmatch-addon-test-")
 
 CASES = []
@@ -214,12 +217,12 @@ def a_door_that_never_returns_is_killed_and_refused():
 def a_refusal_uses_only_the_doors_report_channel():
     """The artist needs the actual refusal even after more diagnostics than the popup can hold."""
     for noise in ([], ["warning: unused import: XRayRelease"] * 40):
-        stage, message = addon.refusal_of(noise + [
-            'overmatch-report ▸ ' + json.dumps({
+        stage, message = addon.refusal_of(_ROOT, noise + [
+            report.REPORT_PREFIX + json.dumps({
                 "text": "L1.MODIFIER_STACK error: Hull\n  repair: apply modifier",
             }),
             "warning: a compiler message mentions refused at canon",
-            'overmatch-verdict ▸ ' + json.dumps({"stage": "source"}),
+            report.VERDICT_PREFIX + json.dumps({"stage": "source"}),
         ])
         assert stage == "source", stage
         assert "L1.MODIFIER_STACK" in message and "apply modifier" in message, message
@@ -229,13 +232,13 @@ def a_refusal_uses_only_the_doors_report_channel():
 
 @case
 def a_multiword_stage_and_a_broken_channel_are_reported_deliberately():
-    stage, message = addon.refusal_of([
-        'overmatch-report ▸ ' + json.dumps({"text": "L2.SPEC error: fix the sheet"}),
-        'overmatch-verdict ▸ ' + json.dumps({"stage": "consumer (raw)"}),
+    stage, message = addon.refusal_of(_ROOT, [
+        report.REPORT_PREFIX + json.dumps({"text": "L2.SPEC error: fix the sheet"}),
+        report.VERDICT_PREFIX + json.dumps({"stage": "consumer (raw)"}),
     ])
     assert stage == "consumer (raw)" and "L2.SPEC" in message, (stage, message)
     for broken in ('{"text":', '{"text": null}', '[]'):
-        stage, message = addon.refusal_of(['overmatch-report ▸ ' + broken])
+        stage, message = addon.refusal_of(_ROOT, [report.REPORT_PREFIX + broken])
         assert stage == "door" and "invalid report" in message, (stage, message)
 
 
@@ -243,7 +246,7 @@ def a_multiword_stage_and_a_broken_channel_are_reported_deliberately():
 def build_output_without_a_door_report_is_a_process_failure():
     """An unsuccessful process with no report must not pass compiler output off as asset findings."""
     for printed in ([], ["warning: unused import: XRayRelease", "refused at canon"]):
-        stage, message = addon.refusal_of(printed)
+        stage, message = addon.refusal_of(_ROOT, printed)
         assert stage == "door", stage
         assert "without a report" in message, message
         assert "warning:" not in message, message

@@ -63,6 +63,7 @@ bl_info = {
 
 import json
 import os
+import runpy
 import select
 import shutil
 import signal
@@ -363,29 +364,27 @@ class Refused(Exception):
         self.stage = stage
 
 
-# The door's tagged JSON channel is independent of cargo, Blender and encoder diagnostics.
-_REPORT_PREFIX = "overmatch-report ▸ "
-_VERDICT_PREFIX = "overmatch-verdict ▸ "
-
 #: Maximum report lines in the popup; the system console retains the complete report.
 POPUP_LINES = 24
 
 
-def refusal_of(printed):
+def refusal_of(root, printed):
     """Read only the door's report and stage envelopes after an unsuccessful exit.
 
     `printed` contains merged stdout AND stderr, including compiler diagnostics on warm builds.
     Neither a diagnostic's position nor words resembling a verdict make it an asset finding.
     """
+    channel = runpy.run_path(os.path.join(root, "scripts", "tank", "report.py"))
+    report_prefix, verdict_prefix = channel["REPORT_PREFIX"], channel["VERDICT_PREFIX"]
     stage, text = "door", "The door exited without a report."
     try:
         for line in printed:
-            if line.startswith(_REPORT_PREFIX):
-                text = json.loads(line[len(_REPORT_PREFIX):])["text"]
+            if line.startswith(report_prefix):
+                text = json.loads(line[len(report_prefix):])["text"]
                 if not isinstance(text, str):
                     raise ValueError("report text must be a string")
-            elif line.startswith(_VERDICT_PREFIX):
-                stage = json.loads(line[len(_VERDICT_PREFIX):])["stage"]
+            elif line.startswith(verdict_prefix):
+                stage = json.loads(line[len(verdict_prefix):])["stage"]
                 if not isinstance(stage, str) or not stage:
                     raise ValueError("refusal stage must be a nonempty string")
     except (ValueError, KeyError, TypeError):
@@ -415,7 +414,7 @@ def export_open_blend(root):
         [python, os.path.join(root, BUILD_RELPATH), "build", blend], root,
     )
     if code:
-        raise Refused(*refusal_of(printed))
+        raise Refused(*refusal_of(root, printed))
     return os.path.join(os.path.dirname(blend), stem + ".glb")
 
 

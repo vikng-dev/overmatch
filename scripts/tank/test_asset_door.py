@@ -716,6 +716,34 @@ except asset_door.Refused as refusal:
         self.assertNotIn("door.stage-failed", result.stdout)
 
 
+class RustReportChannel(unittest.TestCase):
+    """The popup needs Rust's complete refusal; canon stdout must remain JSON-only."""
+
+    def test_canon_and_both_consumers_emit_their_own_lossless_report(self):
+        for stage in ("canon", "raw", "baked"):
+            with self.subTest(stage=stage):
+                # Fixture: a path exercises JSON quoting and multiline report evidence.
+                spec = os.path.join(_WORK, stage, 'missing "sheet" ▸\n.tank.ron')
+                model = os.path.splitext(os.path.splitext(spec)[0])[0] + ".glb"
+                arguments = ("--canon", spec) if stage == "canon" else (model,)
+                result = subprocess.run(
+                    asset_door.contract(os.path.join(ROOT, "assets/materials/materials.ron"),
+                                        *arguments),
+                    cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                output = result.stderr if stage == "canon" else result.stdout
+                if stage == "canon":
+                    self.assertEqual(result.stdout, "", "a refusal polluted canon.json")
+                envelopes = [json.loads(line[len(report.REPORT_PREFIX):])["text"]
+                             for line in output.splitlines()
+                             if line.startswith(report.REPORT_PREFIX)]
+                self.assertEqual(len(envelopes), 1, output)
+                self.assertIn("L2.SPEC", envelopes[0])
+                self.assertIn(spec, envelopes[0])
+                self.assertIn(envelopes[0] + report.REPORT_PREFIX, output)
+
+
 class RefusalsLeaveTheModelAlone(unittest.TestCase):
     """One case per stage that can refuse. Each asserts the same thing: the tracked glb is the file
     it was, and no candidate was staged."""

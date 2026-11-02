@@ -19,6 +19,8 @@
 
 use std::path::{Path, PathBuf};
 
+const REPORT_PREFIX: &str = "overmatch-report ▸ ";
+
 const USAGE: &str = "usage: asset_verify [--registry <materials.ron>] <assets/<id>/<id>.glb> \
                      [more models…]\n       \
                      asset_verify [--registry <materials.ron>] --canon \
@@ -88,5 +90,5 @@ fn verify(models: &[PathBuf], registry: Option<&Path>) {
 
 /// The Blender adapter's report channel contains only the consumer's own rendering.
 fn report_envelope(text: &str) -> String {
-    format!("overmatch-report ▸ {}", serde_json::json!({ "text": text }))
+    format!("{REPORT_PREFIX}{}", serde_json::json!({ "text": text }))
 }
