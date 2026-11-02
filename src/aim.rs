@@ -527,7 +527,12 @@ fn place_indicator(
     target: &ComputedUiRenderTargetInfo,
 ) {
     match camera.world_to_viewport(cam_transform, world_point) {
-        Ok(screen) => {
+        Ok(screen)
+            if camera
+                .logical_viewport_rect()
+                .expect("a successful viewport projection has the viewport it projected into")
+                .contains(screen) =>
+        {
             // Camera logical pixels -> physical target pixels -> this node's UI pixels.
             let to_ui = camera
                 .target_scaling_factor()
@@ -538,7 +543,7 @@ fn place_indicator(
             node.top = Val::Px(screen.y - half_size);
             *visibility = Visibility::Visible;
         }
-        Err(_) => *visibility = Visibility::Hidden,
+        Ok(_) | Err(_) => *visibility = Visibility::Hidden,
     }
 }
 
@@ -674,6 +679,64 @@ pub(crate) mod tests {
     use crate::firecontrol::{RangeTable, Ranging};
     use crate::sight::drive_gunner_aim;
     use crate::tank::{ServoIndex, ServoRest, ServoSpec, TankServos, drive_servos};
+
+    /// A successfully projected point may still be beyond a viewport edge. The aim and bore
+    /// widgets share this placer, so neither may show an off-screen dot or clamp it to an edge.
+    #[test]
+    fn indicators_hide_points_beyond_the_viewport() {
+        // Fixture: a finite perspective camera and points in front, beyond each edge, and behind.
+        let camera = Camera {
+            computed: ComputedCameraValues {
+                clip_from_view: Mat4::perspective_infinite_reverse_rh(
+                    std::f32::consts::FRAC_PI_2,
+                    16.0 / 9.0,
+                    0.1,
+                ),
+                target_info: Some(RenderTargetInfo {
+                    physical_size: UVec2::new(1280, 720),
+                    scale_factor: 1.0,
+                }),
+                ..default()
+            },
+            ..default()
+        };
+        let pose = GlobalTransform::default();
+        for (point, visible) in [
+            (Vec3::new(0.0, 0.0, -10.0), true),
+            (Vec3::new(-100.0, 0.0, -10.0), false),
+            (Vec3::new(100.0, 0.0, -10.0), false),
+            (Vec3::new(0.0, -100.0, -10.0), false),
+            (Vec3::new(0.0, 100.0, -10.0), false),
+            (Vec3::new(0.0, 0.0, 10.0), false),
+        ] {
+            if point.z < 0.0 {
+                assert!(
+                    camera.world_to_viewport(&pose, point).is_ok(),
+                    "the regression must exercise projections that succeed even beyond an edge"
+                );
+            }
+            let mut node = Node::default();
+            let mut visibility = Visibility::Visible;
+            place_indicator(
+                &mut node,
+                &mut visibility,
+                &camera,
+                &pose,
+                point,
+                2.0,
+                &ComputedUiRenderTargetInfo::default(),
+            );
+            assert_eq!(
+                visibility,
+                if visible {
+                    Visibility::Visible
+                } else {
+                    Visibility::Hidden
+                },
+                "point {point} must only show inside the viewport"
+            );
+        }
+    }
 
     /// Use the shipped indicator spawner and schedule in the sight's GPU-less layout scene.
     pub(crate) fn mount_layout_fixture(app: &mut App) {

@@ -613,6 +613,11 @@ fn read_device(mut read: ResMut<DeviceRead>, own: Query<&TankCommand, With<Contr
 /// leaves ([`DeviceRead`]). Mounted before the app finishes ([`app_with`]); [`device`] gives them
 /// their world.
 fn mount_device(app: &mut App) {
+    // Fixture handles: device ownership reads the widgets without shaping or rendering text.
+    app.insert_resource(crate::ui_font::UiFonts {
+        hud: Handle::default(),
+        body: Handle::default(),
+    });
     bevy::state::app::StatesPlugin.build(app);
     crate::flow::in_match_plugin(app);
     crate::command::client_plugin(app);
