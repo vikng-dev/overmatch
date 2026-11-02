@@ -68,7 +68,7 @@ mod tests;
 
 /// How far past first contact the first corridor reaches. Most crossings close well inside it; the
 /// driver extends when they do not, so this is a starting guess, not a limit.
-const ENTRANCE_SPAN: f32 = 0.5;
+pub(super) const ENTRANCE_SPAN: f32 = 0.5;
 
 /// The game's damage model: spatial reach of a field throw (ASSUMED metres), also used as an
 /// initial discovery guess for held material. Material corridors extend independently of it.
@@ -2194,7 +2194,7 @@ pub(crate) fn clear_path(
     clippy::too_many_arguments,
     reason = "private kernel of `decide`; every argument is corridor geometry"
 )]
-fn closing_walk(
+pub(super) fn closing_walk(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
     anchor: Vec3,

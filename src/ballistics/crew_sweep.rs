@@ -123,7 +123,7 @@ fn knockout_count(outcomes: &[Hit]) -> usize {
 }
 
 /// splitmix64: a deterministic stream, so a rerun draws the same hits.
-fn next(state: &mut u64) -> u64 {
+pub(super) fn next(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
     let mut z = *state;
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -132,7 +132,7 @@ fn next(state: &mut u64) -> u64 {
 }
 
 /// A uniform draw in `[0, 1)`.
-fn unit(state: &mut u64) -> f32 {
+pub(super) fn unit(state: &mut u64) -> f32 {
     (next(state) >> 40) as f32 / (1u64 << 24) as f32
 }
 

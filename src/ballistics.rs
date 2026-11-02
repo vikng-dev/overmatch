@@ -90,6 +90,11 @@ mod pen_cam;
 #[cfg(test)]
 mod crew_sweep;
 
+/// What the contact walk does per geometric class (ignored; run on demand): real shots at the
+/// shipped hull through the real march, read per exchange.
+#[cfg(test)]
+mod contact_classes;
+
 /// The game's pen cam recorder on the fixed tick: rounds fired at fixture tanks read back as the
 /// records the authority emits.
 #[cfg(test)]
@@ -2304,6 +2309,8 @@ struct ProjectileMarchWorld<'w, 's> {
     burst_law: Option<Res<'w, spall_cone::BurstLaw>>,
     #[cfg(test)]
     step_crossings: Option<Res<'w, resolve::StepCrossings>>,
+    #[cfg(test)]
+    contact_log: Option<Res<'w, contact_classes::ContactLog>>,
     // Witness volumes (ADR-0040) and their colliders: read by the witness pass, excluded from every
     // armour classification.
     witnesses: Query<'w, 's, &'static WitnessVolume>,
@@ -3404,7 +3411,7 @@ fn decide_playback(
                     .unwrap_or_else(|error| error.panic())
                     .decision
             } else {
-                resolve::decide(
+                let decided = resolve::decide(
                     context,
                     admit,
                     &shell.projectile.round,
@@ -3413,7 +3420,18 @@ fn decide_playback(
                     &flight,
                     distance,
                 )
-                .unwrap_or_else(|error| error.panic())
+                .unwrap_or_else(|error| error.panic());
+                #[cfg(test)]
+                contact_classes::note(
+                    context,
+                    admit,
+                    &shell.projectile.round,
+                    shell.projectile.contact,
+                    &flight,
+                    distance,
+                    &decided,
+                );
+                decided
             }
         } else {
             let reach = if flight.holds_material() {
