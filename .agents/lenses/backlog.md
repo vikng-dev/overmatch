@@ -34,7 +34,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
-| net-01 | P1 | `src/net/server.rs::respawn_player_tanks` | error-handling: Invented default | When every candidate is occupied, a coordinate-based fallback bypasses occupancy and standing-footprint checks. | Select a checked authored point or retain an explicit waiting state until space exists. | fix-p1-net |
 | net-02 | P1 | `src/net/interp_delay.rs::derive_interpolation_delay` | base-truths: Compensation | The half-tick follower treats intentional delay movement as clock drift, delays coverage increases and can accumulate beyond the resync threshold. | Distinguish objective relocation from clock drift in the controller; delete the follower and cap. | fix-p1-net |
 | net-03 | P2 | `src/net/debris_stress.rs::DebrisPose` | error-handling: Outside input reaching a panic | Deserialized nonfinite positions and invalid quaternions reach interpolation and can panic the client's NaN tripwire. | Parse checked poses at ingress and visibly refuse malformed peer records. | ratchet |
 | net-04 | P2 | `src/net/fire_presentation.rs::recover_unannounced_rounds` | error-handling: Outside input reaching a default | An out-of-range disclosed round index logs refusal but presents index zero instead. | Validate indices against handshake-matched construction at ingress and return a typed refusal. | ratchet |

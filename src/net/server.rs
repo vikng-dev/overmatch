@@ -544,7 +544,7 @@ const SPAWN_DIRS_38: [Vec2; 38] = [
 
 /// The outward spawn search, inside the ~50 m budget: ring radii (m) ascending, each paired
 /// with its direction table (see [`SPAWN_DIRS_8`] for the density rationale). Past the last
-/// ring the caller falls back to the lane spawn.
+/// ring the request waits until a candidate is free.
 const SPAWN_SEARCH_RINGS: [(f32, &[Vec2]); 6] = [
     (8.0, &SPAWN_DIRS_8),
     (16.0, &SPAWN_DIRS_13),
@@ -1018,13 +1018,13 @@ fn respawn_dead_bots(
     }
 }
 
-/// A legitimate crowded-map state: an accepted automatic respawn waits for a point outside the
-/// mode's minimum. The server retries without requiring another client input edge.
+/// A legitimate crowded-map state: a respawn waits for a free map pick or an automatic point
+/// outside the mode's minimum. The server retries without another client input edge.
 #[derive(Component)]
 struct AwaitingSpawnPoint;
 
 /// The game's damage model: server-authoritative player respawn replaces an owned knocked-out
-/// tank only after a client request. A request remains pending while no automatic point is safe.
+/// tank only after a client request. A request remains pending while its placement is blocked.
 /// The authority's `TankKnockedOut` marker validates eligibility; `ControlledBy` excludes bots. A
 /// request before the life's respawn opens (`score::RespawnGate`, the mode's wait after the
 /// knockout) is refused: it is dropped, and the client, which shows the time left, sends another.
@@ -1146,14 +1146,17 @@ fn respawn_player_tanks(
                         Some(spawn_pos(height.as_deref(), spot))
                     }
                     None => {
-                        info!(
-                            "server: spawn override ({:.1}, {:.1}) and every candidate within \
-                             {} m occupied — falling back to the lane spawn",
-                            xz.x,
-                            xz.y,
-                            SPAWN_SEARCH_RINGS[SPAWN_SEARCH_RINGS.len() - 1].0
-                        );
-                        None
+                        if !waiting {
+                            info!(
+                                "server: spawn override ({:.1}, {:.1}) and every candidate within \
+                                 {} m occupied — waiting for space",
+                                xz.x,
+                                xz.y,
+                                SPAWN_SEARCH_RINGS[SPAWN_SEARCH_RINGS.len() - 1].0
+                            );
+                            commands.entity(root).insert(AwaitingSpawnPoint);
+                        }
+                        continue;
                     }
                 }
             }
@@ -1161,8 +1164,8 @@ fn respawn_player_tanks(
         };
         let spawn_pos = if let Some(pos) = override_pos {
             pos
-        } else if picked.is_some() || harness_pos.is_some() {
-            // Existing override exhaustion and the harness instrument retain their lane placement.
+        } else if harness_pos.is_some() {
+            // The harness instrument retains its exact contact pose and lane layout.
             let pos = lane_spawn_pos(
                 harness_pos,
                 lane.0,
@@ -1933,6 +1936,61 @@ mod tests {
         );
     }
 
+    /// The game's damage model: an exhausted map pick keeps the old life pending instead of
+    /// spawning into occupied space. Players need no second input edge when the space clears.
+    #[test]
+    fn an_exhausted_map_pick_waits_and_retries_without_a_lane_fallback() {
+        let mut app = placement_app();
+        let client_id = PeerId::Netcode(1);
+        let link = app.world_mut().spawn((RemoteId(client_id), Connected)).id();
+        app.world_mut()
+            .resource_mut::<PendingClients>()
+            .0
+            .push((link, client_id));
+        app.update();
+        let root = app
+            .world_mut()
+            .query_filtered::<Entity, With<ControlledBy>>()
+            .single(app.world())
+            .expect("one player tank");
+        // Fixture: one standing footprint covers the entire search and the origin lane.
+        app.world_mut()
+            .resource_mut::<SpawnObstacles>()
+            .0
+            .push(Transform::from_translation(Vec3::Y).with_scale(Vec3::splat(1000.0)));
+        let picked = Vec2::new(50.0, 0.0); // Fixture: inside the map, away from the origin.
+        app.world_mut()
+            .resource_mut::<SpawnOverrides>()
+            .0
+            .insert(link, picked);
+        knock_out(&mut app, root);
+        advance(&mut app, shipped_wait().ticks());
+        app.world_mut().entity_mut(root).insert(TankCommand {
+            respawn: true,
+            ..default()
+        });
+        app.update();
+        assert!(
+            app.world().get::<AwaitingSpawnPoint>(root).is_some(),
+            "an occupied search must retain the old root and a pending request"
+        );
+        app.world_mut()
+            .get_mut::<TankCommand>(root)
+            .expect("the waiting root retains its command")
+            .respawn = false;
+        app.update();
+        assert!(app.world().get::<AwaitingSpawnPoint>(root).is_some());
+        app.world_mut().resource_mut::<SpawnObstacles>().0.clear();
+        app.update();
+        assert!(app.world().get_entity(root).is_err());
+        let position = app
+            .world_mut()
+            .query_filtered::<&Position, With<ControlledBy>>()
+            .single(app.world())
+            .expect("one replacement after space clears");
+        assert_eq!(position.0.xz(), picked, "the persistent map pick wins");
+    }
+
     /// Commands are deferred, so two queued joins must include earlier placements in the pass's
     /// live set. A disconnected waiting player must not receive an orphan tank later.
     #[test]
@@ -2098,7 +2156,7 @@ mod tests {
 
     /// The occupancy policy: a free request passes through untouched; a request on top of a live
     /// tank is nudged to the FIRST free candidate of the deterministic ring search; a fully
-    /// crowded neighbourhood returns `None` (lane-spawn fallback).
+    /// crowded neighbourhood returns `None` (the request waits).
     #[test]
     fn occupied_spawn_requests_are_nudged_deterministically() {
         let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
@@ -2140,7 +2198,7 @@ mod tests {
                 .expect("a ring is free");
         assert!(nudged);
         assert_eq!(spot, desired + Vec2::new(SPAWN_SEARCH_RINGS[0].0, 0.0));
-        // Every candidate occupied (a tank parked on each): lane fallback.
+        // Every candidate occupied (a tank parked on each): the request waits.
         let mut crowd = vec![desired];
         for (radius, dirs) in SPAWN_SEARCH_RINGS {
             for &dir in dirs {
