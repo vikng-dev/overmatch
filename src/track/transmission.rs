@@ -11,6 +11,7 @@
 
 use bevy::ecs::error::BevyError;
 
+use super::drive::DriveIntent;
 use super::forces::ForceParams;
 
 #[cfg(feature = "bitprobe")]
@@ -710,11 +711,12 @@ impl DriveSupply {
 
 /// Shaped drive axes, requested intent, pre-tick belt speeds and ground reactions.
 /// The mixed side commands are probe telemetry only.
+#[derive(Clone, Copy)]
 pub struct TransmissionInput {
     /// The game's damage model: what the crew, engine and transmission each supply this tick.
     pub supply: DriveSupply,
     /// Requested pedal before shaping; gear choices must not read the actuator ramp.
-    pub command: f32,
+    pub intent: DriveIntent,
     pub throttle: f32,
     pub steer: f32,
     pub side_commands: [f32; 2],
@@ -723,9 +725,6 @@ pub struct TransmissionInput {
     /// Unfiltered support load and grip seen by the Driver.
     pub perceived_load: super::load::PerceivedLoad,
     pub dt: f32,
-    /// The driver holds the service brakes: no drive at any throttle, the full service brakes while
-    /// the tank moves, and the parking latch once it is at rest (`driver_intent`).
-    pub brake: bool,
 }
 
 /// What the joint solve produced: the integrated next belt speeds, the per-side sprocket
@@ -779,9 +778,6 @@ fn engine_torques(
     if omega < 0.0 {
         return [0.0, 0.0, drag]; // A backward crank cannot fire.
     }
-    if !supply.control_authority {
-        return [0.0, 0.0, drag]; // No Driver fuel request or independent idle actuator.
-    }
     let pedal = (command / engine_control().drag_throttle_release.value).clamp(0.0, 1.0);
     let released = pedal * pedal * (3.0 - 2.0 * pedal);
     let rpm = omega / RPM_TO_RAD;
@@ -799,11 +795,7 @@ fn engine_torques(
 /// The game's driving and damage model: the Driver's idle catch is work by the Drive task,
 /// requiring control authority and consuming its throughput once, like commanded fueling.
 fn idle_catch_capacity(tp: &TransmissionParams, supply: DriveSupply) -> f32 {
-    if supply.control_authority {
-        supply.task_rate * tp.torque_at(tp.engine.idle_rpm)
-    } else {
-        0.0
-    }
+    supply.task_rate * tp.torque_at(tp.engine.idle_rpm)
 }
 
 /// Instrument for the accepted Driver law: price the crank at the landing shaft speed,
@@ -999,12 +991,8 @@ fn choose_gear(
     command: f32,
     shaft: f32,
 ) {
-    if !inp.supply.control_authority
-        || inp.supply.task_rate == 0.0
-        || st.shift_ticks != 0
-        || inp.perceived_load.grip_n == 0.0
-    {
-        return; // No Driver work, paid cut, or airborne: no gear decision.
+    if st.shift_ticks != 0 || inp.perceived_load.grip_n == 0.0 {
+        return; // A paid cut or airborne rig cannot choose another gear.
     }
     let ladder = if st.reverse {
         &tp.gears_rev
@@ -1147,12 +1135,11 @@ fn swap_ladder_direction(
     tp: &TransmissionParams,
     st: &mut TransmissionState,
     inp: &TransmissionInput,
+    command: f32,
+    brake: bool,
 ) {
-    if !inp.supply.control_authority || inp.supply.task_rate == 0.0 {
-        return;
-    }
-    let opposite = inp.command.abs() >= DEAD && (inp.command < 0.0) != st.reverse;
-    if !opposite || inp.brake {
+    let opposite = command.abs() >= DEAD && (command < 0.0) != st.reverse;
+    if !opposite || brake {
         st.reversal_hold_ticks = 0;
         return;
     }
@@ -1169,36 +1156,111 @@ fn swap_ladder_direction(
         return;
     }
     if st.shift_ticks == 0 {
-        st.reverse = inp.command < 0.0;
+        st.reverse = command < 0.0;
         st.gear = 1;
         st.shift_ticks = tp.shift_ticks;
     }
 }
 
-struct DriverIntent {
+/// Controls for one mechanical tick. Only the Driver resolves staffing and task work;
+/// physical laws receive its fuel request, brake regime and construction rest.
+struct Controls {
+    input: TransmissionInput,
+    command: f32,
     dir: f32,
     propulsive: f32,
     service: bool,
+    one_way: bool,
+    ceiling: bool,
+    shifting: bool,
 }
 
-/// Opposing motion gets the full service brake at every nonzero notch. The engaged ladder
-/// alone determines propulsion; releasing the request coasts above the data-derived stop speed.
-fn driver_intent(inp: &TransmissionInput, reverse: bool, parked: bool) -> DriverIntent {
-    let dir = if reverse { -1.0 } else { 1.0 };
-    let opposing = inp.command * dir < -DEAD;
-    let against_motion = inp.command.abs() >= DEAD
-        && inp
+/// The game's driving and damage model: intent names whether someone acts on the controls.
+/// Absence releases fuel and steering, retains gear and park, and lets the clutch spring In
+/// after any paid cut. Staffing alone works brakes; task throughput works gear and clutch.
+fn driver(
+    intent: DriveIntent,
+    fp: &ForceParams,
+    tp: &TransmissionParams,
+    st: &mut TransmissionState,
+    inp: &TransmissionInput,
+) -> Controls {
+    let mut input = *inp;
+    let mut staffed = input.supply.control_authority;
+    let (command, brake) = match intent {
+        DriveIntent::Axes(axes) => (axes.throttle, false),
+        DriveIntent::Brake => (0.0, true),
+        DriveIntent::Unmanned => {
+            input.throttle = 0.0;
+            input.steer = 0.0;
+            staffed = false;
+            (0.0, false)
+        }
+    };
+    input.supply.task_rate = if staffed { input.supply.task_rate } else { 0.0 };
+    let work = input.supply.task_rate > 0.0;
+    if work {
+        swap_ladder_direction(tp, st, &input, command, brake);
+    } else {
+        input.steer = 0.0;
+    }
+    if staffed {
+        update_park_latch(st, tp, &input, command, brake);
+    }
+    let dir = if st.reverse { -1.0 } else { 1.0 };
+    let mean = (input.speeds[0] + input.speeds[1]) * 0.5;
+    let ladder = if st.reverse {
+        &tp.gears_rev
+    } else {
+        &tp.gears_fwd
+    };
+    st.gear = st.gear.clamp(1, ladder.len() as u8);
+    let opposing = command * dir < -DEAD;
+    let against_motion = command.abs() >= DEAD
+        && input
             .speeds
             .iter()
-            .any(|v| v * inp.command.signum() < -PARK_ENGAGE_SPEED);
-    DriverIntent {
-        dir,
-        propulsive: if inp.brake || opposing {
-            0.0
+            .any(|v| v * command.signum() < -PARK_ENGAGE_SPEED);
+    let service = against_motion || ((brake || opposing) && !st.park);
+    let propulsive = if brake || opposing {
+        0.0
+    } else {
+        (input.throttle * dir).clamp(0.0, 1.0)
+    };
+    update_steer_detent(st, input.steer);
+    if work {
+        let price_command = if service { 0.0 } else { command.abs().min(1.0) };
+        choose_gear(st, tp, fp, &input, price_command, dir * mean);
+    }
+    let shifting = advance_shift_window(st);
+    if work {
+        let ratio = ladder[usize::from(st.gear - 1)] / tp.sprocket_radius;
+        update_clutch_state(
+            st,
+            tp,
+            &input,
+            shifting,
+            propulsive,
+            dir * mean * ratio,
+            brake,
+        );
+    } else {
+        st.clutch = if shifting {
+            ClutchState::Out
         } else {
-            (inp.throttle * dir).clamp(0.0, 1.0)
-        },
-        service: against_motion || ((inp.brake || opposing) && !parked),
+            ClutchState::In
+        };
+    }
+    let one_way = !brake && st.clutch != ClutchState::Out && command.abs() >= DEAD && work;
+    Controls {
+        input,
+        command,
+        dir,
+        propulsive,
+        service,
+        one_way,
+        ceiling: staffed,
+        shifting,
     }
 }
 
@@ -1228,13 +1290,15 @@ fn update_steer_detent(st: &mut TransmissionState, steer: f32) {
 
 /// At rest the lever is on. Drive lets it carry only rollback; steering releases it for
 /// a neutral turn. A released tank below first gear's idle speed stops and parks.
-fn update_park_latch(st: &mut TransmissionState, tp: &TransmissionParams, inp: &TransmissionInput) {
-    // The game's damage model: an unstaffed station retains the player's lever position.
-    if !inp.supply.control_authority {
-        return;
-    }
+fn update_park_latch(
+    st: &mut TransmissionState,
+    tp: &TransmissionParams,
+    inp: &TransmissionInput,
+    command: f32,
+    brake: bool,
+) {
     let speed = inp.speeds[0].abs().max(inp.speeds[1].abs());
-    let requested = inp.command.abs() >= DEAD;
+    let requested = command.abs() >= DEAD;
     let steering = inp.steer.abs() >= DEAD;
     let first = if st.reverse {
         tp.gears_rev[0]
@@ -1242,11 +1306,11 @@ fn update_park_latch(st: &mut TransmissionState, tp: &TransmissionParams, inp: &
         tp.gears_fwd[0]
     };
     let stop_speed = tp.engine.idle_rpm * RPM_TO_RAD * tp.sprocket_radius / first;
-    if !inp.brake && !requested && steering {
+    if !brake && !requested && steering {
         st.park = false;
     } else if speed < PARK_ENGAGE_SPEED || (!requested && !steering && speed < stop_speed) {
         st.park = true;
-    } else if requested && inp.command * (inp.speeds[0] + inp.speeds[1]) > 0.0 {
+    } else if requested && command * (inp.speeds[0] + inp.speeds[1]) > 0.0 {
         st.park = false;
     }
 }
@@ -1270,13 +1334,11 @@ fn update_clutch_state(
     shifting: bool,
     propulsive: f32,
     shaft_omega: f32,
+    brake: bool,
 ) {
     let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
-    st.clutch = if shifting {
-        ClutchState::Out
-    } else if !inp.supply.control_authority || inp.supply.task_rate == 0.0 {
-        ClutchState::In // Without opening work, the clutch springs engaged.
-    } else if (st.park && (inp.brake || propulsive < DEAD))
+    st.clutch = if shifting
+        || (st.park && (brake || propulsive < DEAD))
         || (propulsive < DEAD
             && (mean.abs() < PARK_ENGAGE_SPEED
                 || (inp.steer.abs() >= DEAD && neutral_turn(inp, mean))))
@@ -1294,8 +1356,8 @@ fn update_clutch_state(
 
 /// Free crank torque is commanded fuel or the Driver catch, less construction drag, all
 /// evaluated at the pre-tick crank speed. Engaged fueling follows propulsive throttle only.
-/// With the clutch open, authority plus a paid window or active steering admits a proportional
-/// rev governor. A paid window targets `|m|*k` in the already selected landing gear, so the
+/// With the clutch open, a paid window or active steering requests a proportional rev
+/// governor. `driver` admits its task throughput once for all fueling. A paid window targets `|m|*k` in the already selected landing gear, so the
 /// clutch re-engages near-synchronous; without a window that target is idle. Steering targets
 /// `idle + (peak - idle)*|steer|`; the governor takes the larger target. Open rest requests no
 /// fuel. The catch and induced combustion consume task throughput; drag stays unscaled.
@@ -1319,7 +1381,7 @@ fn crank_free_torque(
 ) -> (f32, f32) {
     let u_fuel = if engaged {
         propulsive
-    } else if inp.supply.control_authority && (inp.steer.abs() >= DEAD || shifting) {
+    } else if inp.steer.abs() >= DEAD || shifting {
         let omega_match = if shifting { m.abs() * k } else { omega_idle };
         let omega_steer =
             omega_idle + (tp.peak_torque_rpm * RPM_TO_RAD - omega_idle) * inp.steer.abs().min(1.0);
@@ -1550,15 +1612,11 @@ fn apply_brake_stop_forces(
     tp: &TransmissionParams,
     fp: &ForceParams,
     st: &TransmissionState,
-    inp: &TransmissionInput,
-    service: bool,
+    controls: &Controls,
 ) {
-    // Opposite intent owns the complete stop/pause/cut. Only the launch is one-way.
-    let one_way = !inp.brake
-        && st.clutch != ClutchState::Out
-        && inp.command.abs() >= DEAD
-        && inp.supply.control_authority
-        && inp.supply.task_rate > 0.0;
+    let inp = &controls.input;
+    let service = controls.service;
+    let one_way = controls.one_way;
     let lever = st.park || one_way;
     for (i, qi) in q.iter_mut().enumerate() {
         if !lever && !service {
@@ -1567,7 +1625,7 @@ fn apply_brake_stop_forces(
         let cap = brake_capacity_for_regime(tp, lever, service, inp.speeds[i]);
         let stop = inp.reactions[i] - *qi - inp.speeds[i] * fp.inertia / inp.dt;
         let brake = if one_way && !service {
-            inp.command.signum() * (stop * inp.command.signum()).clamp(0.0, cap)
+            controls.command.signum() * (stop * controls.command.signum()).clamp(0.0, cap)
         } else {
             stop.clamp(-cap, cap)
         };
@@ -1577,25 +1635,19 @@ fn apply_brake_stop_forces(
 
 /// The Driver holds the crank ceiling with service brakes. Below it no brake acts; beyond
 /// capacity the clutch's independent slip guard still bounds the crank. No gear change is paid.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "ceiling service reads construction, contact inertia, Driver state and the tick's crank/brake regime"
-)]
 fn apply_ceiling_brakes(
     q: &mut [f32; 2],
     tp: &TransmissionParams,
     fp: &ForceParams,
     st: &TransmissionState,
-    inp: &TransmissionInput,
+    controls: &Controls,
     crank: CrankTick,
-    shifting: bool,
-    service: bool,
 ) {
-    if !inp.supply.control_authority
-        || inp.supply.task_rate == 0.0
-        || shifting
+    let inp = &controls.input;
+    if !controls.ceiling
+        || controls.shifting
         || st.clutch == ClutchState::Out
-        || service
+        || controls.service
         || st.park
         || crank.omega_e < tp.max_curve_rpm() * RPM_TO_RAD
     {
@@ -1765,40 +1817,27 @@ pub fn step(
     #[cfg(feature = "bitprobe")]
     let mut bitprobe = input_probe(st, inp, m, d);
 
-    swap_ladder_direction(tp, st, inp);
-    update_park_latch(st, tp, inp);
-
-    let ladder: &[f32] = if st.reverse {
+    let controls = driver(inp.intent, fp, tp, st, inp);
+    let inp = &controls.input;
+    let Controls {
+        dir,
+        propulsive,
+        shifting,
+        ..
+    } = controls;
+    let ladder = if st.reverse {
         &tp.gears_rev
     } else {
         &tp.gears_fwd
     };
-    let top = ladder.len() as u8;
-    st.gear = st.gear.clamp(1, top);
-
-    let DriverIntent {
-        dir,
-        propulsive,
-        service,
-    } = driver_intent(inp, st.reverse, st.park);
-
+    let g = ladder[usize::from(st.gear - 1)];
     let shaft = dir * m;
-    let command = if service {
-        0.0
-    } else {
-        inp.command.abs().min(1.0)
-    };
-    update_steer_detent(st, inp.steer);
-    choose_gear(st, tp, fp, inp, command, shaft);
-    let shifting = advance_shift_window(st);
-    let g = ladder[(st.gear - 1) as usize];
 
     // The crank carries real inertia; launch slip limits transmitted torque while it spools.
     let omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
     let omega_e = st.omega_e;
     let k = g / tp.sprocket_radius;
 
-    update_clutch_state(st, tp, inp, shifting, propulsive, shaft * k);
     let engaged = st.clutch != ClutchState::Out;
 
     let (tau_free, p_avail) = crank_free_torque(
@@ -1877,8 +1916,8 @@ pub fn step(
         f_c / 2.0 - f_s / 2.0 + lambda * j[1],
     ];
 
-    apply_ceiling_brakes(&mut q, tp, fp, st, inp, crank, shifting, service);
-    apply_brake_stop_forces(&mut q, tp, fp, st, inp, service);
+    apply_ceiling_brakes(&mut q, tp, fp, st, &controls, crank);
+    apply_brake_stop_forces(&mut q, tp, fp, st, &controls);
 
     // --- Integrate both sides simultaneously: I·v̇ = Q − R (the reaction ALWAYS applies).
     let next = [

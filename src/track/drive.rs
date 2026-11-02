@@ -30,7 +30,7 @@ pub enum DriveIntent {
     /// drag.
     Axes(DriveAxes),
     /// Release both axes and hold the service brakes: the tank brakes to a stop, then the parking
-    /// latch holds it (`transmission::TransmissionInput::brake`).
+    /// latch holds it.
     Brake,
     /// The game's damage model: the authored controls are unstaffed, so no command exists.
     /// The controls release at once; the existing park lever retains its state.

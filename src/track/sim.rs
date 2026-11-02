@@ -285,7 +285,10 @@ impl TrackGear {
             &self.params,
             &TransmissionInput {
                 supply: transmission::DriveSupply::WHOLE,
-                command: 1.0,
+                intent: DriveIntent::Axes(DriveAxes {
+                    throttle: 1.0,
+                    steer: 0.0,
+                }),
                 throttle: 1.0,
                 steer: 0.0,
                 side_commands: [1.0; 2],
@@ -298,7 +301,6 @@ impl TrackGear {
                     ..Default::default()
                 },
                 dt: probe.dt,
-                brake: false,
             },
             state,
             candidate,
@@ -624,16 +626,12 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     rig: BeltRig<'_>,
 ) -> ([SideReport; 2], TransmissionReport) {
     let DriveTarget { intent, supply } = target;
-    let (target, brake) = match intent {
-        DriveIntent::Axes(axes) => (axes, false),
-        DriveIntent::Brake => (DriveAxes::default(), true),
+    let target = match intent {
+        DriveIntent::Axes(axes) => axes,
+        DriveIntent::Brake => DriveAxes::default(),
         DriveIntent::Unmanned => {
-            let rest = DriveAxes::default();
-            *rig.signal = DriveSignal {
-                throttle: rest.throttle,
-                steer: rest.steer,
-            };
-            (rest, false)
+            *rig.signal = DriveSignal::default();
+            DriveAxes::default()
         }
     };
     let shaped = shape_drive(
@@ -690,7 +688,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
         &gear.trans,
         rig.transmission,
         &TransmissionInput {
-            command: target.throttle,
+            intent,
             throttle: rig.signal.throttle,
             steer: rig.signal.steer,
             side_commands,
@@ -707,7 +705,6 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
                 rig.transmission,
             ),
             dt,
-            brake,
             supply,
         },
     );

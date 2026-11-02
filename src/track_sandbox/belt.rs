@@ -237,7 +237,7 @@ pub(super) fn apply_belt_support_field(
         &mut trans_state.0,
         &TransmissionInput {
             supply: transmission::DriveSupply::WHOLE,
-            command: raw.0.throttle,
+            intent: crate::track::drive::DriveIntent::Axes(raw.0),
             throttle: shaped.0.throttle,
             steer: shaped.0.steer,
             side_commands,
@@ -246,7 +246,6 @@ pub(super) fn apply_belt_support_field(
 
             perceived_load,
             dt,
-            brake: false,
         },
     );
     telemetry.0 = Some(tr);

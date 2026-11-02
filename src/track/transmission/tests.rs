@@ -1,3 +1,4 @@
+use super::super::drive::DriveAxes;
 use super::super::forces;
 use super::*;
 
@@ -122,7 +123,7 @@ fn tiger_tp() -> TransmissionParams {
 fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> TransmissionInput {
     TransmissionInput {
         supply: DriveSupply::WHOLE,
-        command: throttle,
+        intent: DriveIntent::Axes(DriveAxes { throttle, steer }),
         throttle,
         steer,
         side_commands: [
@@ -134,7 +135,6 @@ fn input(throttle: f32, steer: f32, speeds: [f32; 2], reactions: [f32; 2]) -> Tr
 
         perceived_load: super::super::load::PerceivedLoad::default(),
         dt: 1.0 / 64.0,
-        brake: false,
     }
 }
 
@@ -234,7 +234,11 @@ fn brake_hold_stops_a_rolling_tank_and_parks_it() {
         for _ in 0..320 {
             let inp = TransmissionInput {
                 supply: DriveSupply::WHOLE,
-                brake,
+                intent: if brake {
+                    DriveIntent::Brake
+                } else {
+                    DriveIntent::Axes(DriveAxes::default())
+                },
                 ..input(0.0, 0.0, speeds, [-5_000.0, -5_000.0])
             };
             speeds = step(&fp, &tp, &mut st, &inp).next_speeds;
@@ -621,9 +625,11 @@ fn brake_is_discretely_passive() {
             for r in [-1.5f32, -0.5, 0.0, 0.5, 1.5] {
                 let r = r * tp.brake_capacity_n;
                 let inp = input(0.0, 0.0, [v, v], [r, r]);
-                let state = TransmissionState { park, ..fresh(&tp) };
+                let mut state = TransmissionState { park, ..fresh(&tp) };
+                let controls = driver(inp.intent, &fp, &tp, &mut state, &inp);
+                state.park = park;
                 let mut q = [0.0; 2];
-                apply_brake_stop_forces(&mut q, &tp, &fp, &state, &inp, false);
+                apply_brake_stop_forces(&mut q, &tp, &fp, &state, &controls);
                 let free = v - r * inp.dt / fp.inertia;
                 for force in q {
                     let (b, f) = (v + (force - r) * inp.dt / fp.inertia, free);
@@ -1334,6 +1340,7 @@ fn an_unmanned_station_preserves_the_park_lever() {
         st.omega_e = 0.0; // Fixture: no stored crank energy obscures the brake decision.
         let mut inp = input(0.0, 0.0, [0.0; 2], [1000.0; 2]); // Fixture back-driving load.
         inp.supply.control_authority = false;
+        inp.intent = DriveIntent::Unmanned;
         inp.supply.task_rate = 0.0;
         let rep = step(&fp, &tp, &mut st, &inp);
         assert_eq!(st.park, parked);
@@ -1528,8 +1535,7 @@ fn zero_task_rate_springs_clutch_in_at_rest_and_in_motion() {
             };
             let mut inp = input(command, 0.0, [speed; 2], [0.0; 2]);
             inp.supply.task_rate = 0.0;
-            let shaft = speed * tp.gears_fwd[0] / tp.sprocket_radius;
-            update_clutch_state(&mut state, &tp, &inp, false, command, shaft);
+            driver(inp.intent, &lab_fp(), &tp, &mut state, &inp);
             assert_eq!(
                 state.clutch,
                 ClutchState::In,
@@ -1680,6 +1686,7 @@ fn empty_station_shift_window_expires_into_motoring_drag() {
     let first = step(&fp, &tp, &mut st, &inp);
     assert!(first.shifting);
     inp.supply.control_authority = false;
+    inp.intent = DriveIntent::Unmanned;
     inp.supply.task_rate = 0.0;
     while st.shift_ticks > 0 {
         assert!(step(&fp, &tp, &mut st, &inp).shifting);
@@ -1704,7 +1711,13 @@ fn idle_catch_requires_working_controls() {
                 task_rate,
                 ..DriveSupply::WHOLE
             };
-            let [fuel, catch, drag] = engine_torques(&tp, supply, omega, 0.0);
+            let mut inp = input(0.0, 0.0, [0.0; 2], [0.0; 2]);
+            inp.supply = supply;
+            if !control_authority {
+                inp.intent = DriveIntent::Unmanned;
+            }
+            let controls = driver(inp.intent, &lab_fp(), &tp, &mut fresh(&tp), &inp);
+            let [fuel, catch, drag] = engine_torques(&tp, controls.input.supply, omega, 0.0);
             assert_eq!(
                 catch, 0.0,
                 "catch requires authority and throughput: {supply:?}"
@@ -1731,6 +1744,9 @@ fn zero_rate_catch_cannot_sustain_lug_or_pivot() {
             };
             let mut inp = input(throttle, steer, speeds, [0.0; 2]);
             inp.supply.control_authority = authority;
+            if !authority {
+                inp.intent = DriveIntent::Unmanned;
+            }
             inp.supply.task_rate = 0.0;
             let mut last = TransmissionReport::default();
             for _ in 0..64 * 4 {
@@ -1763,6 +1779,7 @@ fn empty_station_at_rest_springs_engaged_and_retains_park() {
         };
         let mut inp = input(0.0, 0.0, [0.0; 2], [1000.0; 2]); // Fixture grade inside brake capacity.
         inp.supply.control_authority = false;
+        inp.intent = DriveIntent::Unmanned;
         inp.supply.task_rate = 0.0;
         for _ in 0..64 * 4 {
             let report = step(&fp, &tp, &mut st, &inp);
@@ -2146,6 +2163,7 @@ fn overrun_slip_guard_bounds_crank_at_top_gear() {
         let mut report = TransmissionReport::default();
         let mut inp = input(0.0, 0.0, [speed; 2], [40_000.0; 2]);
         inp.supply.control_authority = false;
+        inp.intent = DriveIntent::Unmanned;
         for _ in 0..64 {
             report = step(&fp, &tp, &mut state, &inp);
             assert!(state.omega_e <= guard + 0.001);
@@ -2492,7 +2510,7 @@ fn law_arrested_climb_reenters_launch_slip() {
             ..fresh(&tp)
         };
         let inp = input(1.0, 0.0, [0.0; 2], [0.0; 2]);
-        update_clutch_state(&mut state, &tp, &inp, false, 1.0, 0.0);
+        driver(inp.intent, &lab_fp(), &tp, &mut state, &inp);
         assert_eq!(
             state.clutch,
             ClutchState::Slip,
@@ -2592,14 +2610,15 @@ fn released_motion_coasts_without_brake_force() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let speed = tp.governed_speed(false) * 0.5; // Fixture: moving well above the stop threshold.
     let inp = input(0.0, 0.0, [speed; 2], [1000.0; 2]);
-    let state = TransmissionState {
+    let mut state = TransmissionState {
         park: false,
         clutch: ClutchState::In,
         gear: 3,
         ..fresh(&tp)
     };
+    let controls = driver(inp.intent, &fp, &tp, &mut state, &inp);
     let mut q = [0.0; 2];
-    apply_brake_stop_forces(&mut q, &tp, &fp, &state, &inp, false);
+    apply_brake_stop_forces(&mut q, &tp, &fp, &state, &controls);
     assert_eq!(q, [0.0; 2]);
 }
 
@@ -2741,10 +2760,10 @@ fn backward_crank_has_only_opposing_motoring_drag() {
 }
 
 /// The Driver must brake at the curve ceiling without buying a shift; without authority,
-/// or throughput, only the independent clutch guard remains. Fixture: overrun below top gear
+/// only the independent clutch guard remains. Fixture: overrun below top gear
 /// where the ladder permits it, with a live drive request so gear holding exercises C2.
 #[test]
-fn ceiling_brake_requires_driver_work_and_holds_the_current_gear() {
+fn ceiling_brake_requires_a_driver_and_holds_the_current_gear() {
     for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
         for reverse in [false, true] {
             let dir = if reverse { -1.0 } else { 1.0 };
@@ -2768,7 +2787,7 @@ fn ceiling_brake_requires_driver_work_and_holds_the_current_gear() {
                 &fp,
                 speed,
                 dir * inp.reactions.iter().sum::<f32>(),
-                inp.command,
+                0.25 * dir,
             )
             .perceived_load;
             let mut state = TransmissionState {
@@ -2784,15 +2803,13 @@ fn ceiling_brake_requires_driver_work_and_holds_the_current_gear() {
             assert!(!staffed.shifting);
             assert_eq!(state.gear, gear);
             assert!(staffed.next_speeds[0] * dir <= ceiling + 1e-5);
-            for (authority, rate) in [(false, 1.0), (true, 0.0)] {
-                inp.supply.control_authority = authority;
-                inp.supply.task_rate = rate;
-                let unworked = step(&fp, &tp, &mut { initial }, &inp);
-                assert!(
-                    unworked.next_speeds[0] * dir > staffed.next_speeds[0] * dir + 1e-5,
-                    "ceiling brakes require authority and throughput: {authority}, {rate}"
-                );
-            }
+            inp.supply.control_authority = false;
+            inp.intent = DriveIntent::Unmanned;
+            let unworked = step(&fp, &tp, &mut { initial }, &inp);
+            assert!(
+                unworked.next_speeds[0] * dir > staffed.next_speeds[0] * dir + 1e-5,
+                "ceiling brakes require a staffed Driver"
+            );
         }
     }
 }
@@ -2807,10 +2824,15 @@ fn rev_match_requires_a_window_or_steering_and_authority() {
         for shifting in [false, true] {
             let mut inp = input(1.0, 0.0, [5.0; 2], [0.0; 2]);
             inp.supply.control_authority = authority;
+            if !authority {
+                inp.intent = DriveIntent::Unmanned;
+            }
+            let controls = driver(inp.intent, &lab_fp(), &tp, &mut fresh(&tp), &inp);
+            let inp = &controls.input;
             let mut probe = TransmissionProbe::default();
             crank_free_torque(
                 &tp,
-                &inp,
+                inp,
                 false,
                 shifting,
                 0.0,
@@ -2910,13 +2932,17 @@ fn restaffed_rollback_retains_gear_and_refuses_backward_overrev() {
     };
     let mut state = initial;
     inp.supply.control_authority = false;
+    inp.intent = DriveIntent::Unmanned;
     inp.supply.task_rate = 0.0;
     // The production adapter masks the retained notch while the station is empty.
-    inp.command = 0.0;
+    inp.intent = DriveIntent::Axes(DriveAxes::default());
     inp.throttle = 0.0;
     assert!(!step(&fp, &tp, &mut state, &inp).shifting);
     inp.supply = DriveSupply::WHOLE;
-    inp.command = 1.0;
+    inp.intent = DriveIntent::Axes(DriveAxes {
+        throttle: 1.0,
+        steer: 0.0,
+    });
     inp.throttle = 1.0;
     inp.speeds = [speed; 2];
     let report = step(&fp, &tp, &mut state, &inp);
@@ -3039,4 +3065,85 @@ fn free_crank_drag_stops_without_crossing_zero() {
             );
         }
     }
+}
+
+/// The game's driving and damage model: a staffed station can retain its park lever when
+/// the engine HP pool is emptied. A steering request with no task work must not release it.
+#[test]
+fn zero_rate_steering_retains_park_on_a_supported_slope() {
+    for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
+        // Fixture: ten-degree supported grade; no stored crank energy can turn the belts.
+        let grade = fp.grip.unwrap().side_weight * 10.0_f32.to_radians().sin();
+        let mut state = TransmissionState {
+            park: true,
+            gear: tp.launch_gears,
+            omega_e: 0.0,
+            ..fresh(&tp)
+        };
+        let mut speeds = [0.0; 2];
+        for tick in 0..128 {
+            let mut inp = input(0.0, if tick < 64 { 1.0 } else { 0.0 }, speeds, [grade; 2]);
+            inp.supply.task_rate = 0.0;
+            inp.supply.engine_condition = 0.0;
+            let report = step(&fp, &tp, &mut state, &inp);
+            assert!(state.park, "unworked steering must retain the park lever");
+            // Resolution: f32 stop-force cancellation at the supported rest.
+            assert!(report.next_speeds.iter().all(|v| v.abs() < 1e-5));
+            speeds = report.next_speeds;
+        }
+    }
+}
+
+/// The game's driving and damage model: service brakes belong to the staffed Driver,
+/// independently of engine throughput. An empty station retains only construction drag.
+#[test]
+fn zero_rate_staffed_descent_keeps_the_crank_ceiling_with_brakes() {
+    for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
+        // Fixture: upper-middle forward gear at the curve ceiling on ten degrees downhill.
+        let gear = (tp.gears_fwd.len() * 3 / 4).max(1) as u8;
+        let k = tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius;
+        let ceiling = tp.max_curve_rpm() * RPM_TO_RAD / k;
+        let grade = fp.grip.unwrap().side_weight * 10.0_f32.to_radians().sin();
+        let state = TransmissionState {
+            gear,
+            park: false,
+            clutch: ClutchState::In,
+            omega_e: tp.max_curve_rpm() * RPM_TO_RAD,
+            ..fresh(&tp)
+        };
+        let mut inp = input(0.0, 0.0, [ceiling; 2], [-grade; 2]);
+        inp.supply.task_rate = 0.0;
+        inp.supply.engine_condition = 0.0;
+        let staffed = step(&fp, &tp, &mut { state }, &inp);
+        // Resolution: f32 integration at a data-derived ceiling.
+        assert!(staffed.next_speeds[0] <= ceiling + 1e-5);
+        inp.supply.control_authority = false;
+        inp.intent = DriveIntent::Unmanned;
+        let unstaffed = step(&fp, &tp, &mut { state }, &inp);
+        assert!(unstaffed.next_speeds[0] > ceiling);
+    }
+}
+
+/// A phase hold remains a service brake with an empty station, but it cannot work the
+/// retained park lever or refill the crank. The phase gate relies on this independent hold.
+#[cfg(feature = "bitprobe")]
+#[test]
+fn explicit_hold_without_a_driver_retains_construction_rest() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let mut inp = input(0.0, 0.0, [0.0; 2], [1000.0; 2]); // Fixture: within service capacity.
+    inp.intent = DriveIntent::Brake;
+    inp.supply.control_authority = false;
+    let mut state = TransmissionState {
+        park: false,
+        omega_e: 0.0,
+        ..fresh(&tp)
+    };
+    let report = step(&fp, &tp, &mut state, &inp);
+    assert!(!state.park);
+    assert_eq!(state.clutch, ClutchState::In);
+    assert_eq!(report.next_speeds, [0.0; 2]);
+    assert_eq!(
+        [report.bitprobe.tau_induced, report.bitprobe.tau_idle],
+        [0.0; 2]
+    );
 }
