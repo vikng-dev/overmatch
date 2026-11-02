@@ -7,7 +7,7 @@ Subject: the game's environment destruction and damage model; game state only.
 | Claude F6; Codex P1 | Rim-only crossings choose one midpoint-nearest chunk | Verified red: the front took about 7 J at axis x=2.0001, the rear none (MEASURED fixture) | buildings: allocate disc exchanges by sampled chunk chords (#106) |
 | Claude F3 | Missing hole records pass a loop over an empty list | Verified: the guard had no independent expected chunk set | buildings: allocate disc exchanges by sampled chunk chords (#106) |
 | Claude F7–8; Codex thickness/cap | Contact separation changes ballistic thickness; cap and guards contradict certified geometry | Verified red against the spawned collider; whole-hull casts now pass | buildings: separate ballistic hulls from contact separation (#106) |
-| Claude F4 | Cone-only events are discarded by read_hits | Verified: the early return precedes the cone cursor; pending | — |
+| Claude F4 | Cone-only events are discarded by read_hits | Verified red: no cone was recorded; cone, witness and once-only next-line checks now pass | dev: retain cone-only events for the next wall deposit (#106) |
 | Claude F2/F5; Codex launch | Sandbox launch and inspector tests bypass production paths | Verified against their callees; pending | — |
 | Claude F14/F16; Codex numeric | Sandbox number jobs and duplicate shrink law | Verified; pending | — |
 | Claude F9–13 | Stale sample, mass-hull, decision and API prose; view fade in code | Verified; pending | — |
@@ -50,3 +50,8 @@ invariants. The ballistic face regression went red before this fix (MEASURED).
 CI clippy and formatting passed. The breakage, debris and headless tests passed individually in
 the combined run; two new sandbox-path fixtures failed because their mesh-asset message was not
 registered. Those uncommitted test replacements remain item 4, not evidence for this fix.
+
+Cone reading is unconditional. WallLog holds strength until the next line, then takes it once;
+rebuilding the wall clears it with the rest of that log. The recorded cone's admitted nonempty
+ray set is asserted instead of hidden by a denominator fallback. The cone-only regression went
+red before the fix and passes after it (MEASURED); formatting and CI clippy passed.

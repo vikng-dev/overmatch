@@ -772,3 +772,92 @@ fn the_inspection_tool_refuses_invalid_spread_at_admission() {
         assert!(error.contains("spread_rad"));
     }
 }
+
+/// The game's damage-model inspector must read a cone before any line is delivered, and attach
+/// its strength to the next line exactly once. Fixture: one cone, one witness endpoint and two
+/// later line deliveries; the cone cursor advances before either line.
+#[test]
+fn a_cone_without_a_line_survives_for_the_next_inspector_deposit() {
+    use crate::ballistics::spall_cone::{AxisRule, ConeShape, FieldDescriptor};
+    use crate::ballistics::{
+        DeliveredLine, ShellMarched, SpallCone, SpallMarks, SpallRay, VolumeCrossing,
+    };
+    use bevy::prelude::*;
+    let mut app = App::new();
+    app.init_resource::<super::WallQueue>()
+        .init_resource::<super::WallLog>()
+        .add_observer(super::read_hits);
+    let volume = app.world_mut().spawn(super::WallChunk(0)).id();
+    let spread = ConeShape::new(AxisRule::ExitDirection, 1)
+        .unwrap()
+        .spread(FieldDescriptor::ball(0.0))
+        .unwrap();
+    let (direction, profile) = spread.directions(Dir3::NEG_Z).next().unwrap();
+    let strength = 17.0; // Fixture: recorded field strength, J.
+    let cone = SpallCone {
+        origin: Vec3::ZERO,
+        axis: Dir3::NEG_Z,
+        field: spread.field(),
+        strength,
+        rays: vec![SpallRay {
+            direction,
+            end: super::witness_tile(0).center(),
+            strength: strength * profile,
+            doses: Vec::new(),
+        }],
+    };
+    let shell = app
+        .world_mut()
+        .spawn(SpallMarks {
+            cones: vec![cone],
+            ..default()
+        })
+        .id();
+    app.world_mut().trigger(ShellMarched {
+        shell,
+        marks_from: 0,
+        cones_from: 0,
+        lines: Vec::new(),
+        burst: None,
+    });
+    let log = app.world().resource::<super::WallLog>();
+    assert_eq!(
+        log.cones.len(),
+        1,
+        "a cone-only event must advance its reader"
+    );
+    assert!((log.witness.iter().sum::<f32>() - strength * profile).abs() < 1e-5);
+    assert!(app.world().resource::<super::WallQueue>().0.is_empty());
+    let line = DeliveredLine {
+        crossing: VolumeCrossing {
+            volume,
+            entry: Vec3::ZERO,
+            end: Vec3::Z,
+            chord: 1.0,
+            cost: 0.0,
+            energy: 7.0,
+            perforated: true,
+        },
+        contacts: vec![(Vec3::ZERO, Vec3::Z)],
+        momentum: Vec3::Z,
+        entrance_energy: 0.0,
+        entrance_momentum: Vec3::ZERO,
+    };
+    for _ in 0..2 {
+        app.world_mut().trigger(ShellMarched {
+            shell,
+            marks_from: 0,
+            cones_from: 1,
+            lines: vec![line.clone()],
+            burst: None,
+        });
+    }
+    let queue = &app.world().resource::<super::WallQueue>().0;
+    assert_eq!(queue.len(), 2);
+    let strength_of = |deposit: &Deposit| match deposit {
+        Deposit::Line { spall, .. } => *spall,
+        _ => panic!("the fixture emits line deposits"),
+    };
+    assert_eq!(strength_of(&queue[0]), strength);
+    assert_eq!(strength_of(&queue[1]), 0.0);
+}

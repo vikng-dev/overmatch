@@ -423,6 +423,8 @@ struct WallLog {
     cones: Vec<WallCone>,
     witness: Vec<f32>,
     blast: Option<(Vec3, f32, Vec<Vec3>)>,
+    /// The game's damage model can deliver an exit cone before its line's last path moment.
+    pending_spall: f32,
 }
 
 /// One deposit's outcome, for the readout.
@@ -983,9 +985,6 @@ fn read_hits(
             }
         })
         .collect();
-    if lines.is_empty() {
-        return; // This march deposited no line on the inspector's wall.
-    }
     let spall = shells
         .get(marched.shell)
         .expect("ShellMarched observers run before their shell despawns");
@@ -997,7 +996,11 @@ fn read_hits(
             .get(marched.cones_from..)
             .expect("ShellMarched's cone cursor precedes this tick's new cones")
         {
-            let weight = 1.0 / cone.rays.len().max(1) as f32;
+            assert!(
+                !cone.rays.is_empty(),
+                "a recorded cone has its admitted nonempty direction set"
+            );
+            let weight = 1.0 / cone.rays.len() as f32;
             for ray in &cone.rays {
                 if let Some(tile) = witness_at(ray.end) {
                     log.witness[tile] += ray.strength * weight;
@@ -1014,11 +1017,14 @@ fn read_hits(
             strength += cone.strength;
         }
     }
-    queue.0.push(Deposit::Line {
-        what: "resolved round".to_string(),
-        lines,
-        spall: strength,
-    });
+    log.pending_spall += strength;
+    if !lines.is_empty() {
+        queue.0.push(Deposit::Line {
+            what: "resolved round".to_string(),
+            lines,
+            spall: std::mem::take(&mut log.pending_spall),
+        });
+    }
 }
 
 /// What one deposit did to the wall.
