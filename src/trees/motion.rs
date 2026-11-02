@@ -1109,13 +1109,20 @@ mod tests {
             "the intervening static surface shades the tree"
         );
     }
-    /// The game's damage model delivers the same momentum to the same wood, standing or stump.
-    /// Structural assessment relies on the line and casing paths, the frame turn and entrance
-    /// impulse. Fixture: a rotated root and distinct axial, entrance and casing impulses.
+    /// The game's damage model delivers the same momentum to the same wood, standing or stump,
+    /// across a nonzero line and a zero-chord skid. Structural assessment relies on the line and
+    /// casing paths, the frame turn and the entrance impulse, which a skid must keep with no
+    /// exposed chord or axial work. Fixture: a rotated root and distinct axial, entrance and
+    /// casing impulses.
     #[test]
     fn a_marched_line_reaches_the_same_wood_in_every_grounded_state() {
         use crate::ballistics::{DeliveredLine, ShellMarched, VolumeCrossing};
-        for state in [TreeState::Standing, TreeState::Down { cut: 2, dir: 0 }] {
+        for (state, skid) in [
+            (TreeState::Standing, false),
+            (TreeState::Standing, true),
+            (TreeState::Down { cut: 2, dir: 0 }, false),
+            (TreeState::Down { cut: 2, dir: 0 }, true),
+        ] {
             let mut app = world(Vec3::ZERO);
             let root = tree(&mut app, 0, Vec3::new(3.0, 2.0, 1.0));
             let rotation = Quat::from_rotation_z(0.4);
@@ -1134,9 +1141,9 @@ mod tests {
                 .unwrap();
             let root_transform = *app.world().get::<Transform>(root).unwrap();
             let entry = Vec3::Y;
-            let end = Vec3::Y * 1.2;
+            let end = if skid { entry } else { Vec3::Y * 1.2 };
             let entrance = Vec3::X * 7.0;
-            let axial = Vec3::Y * 11.0;
+            let axial = if skid { Vec3::ZERO } else { Vec3::Y * 11.0 };
             let shell = app
                 .world_mut()
                 .spawn(crate::ballistics::PenetrationMarks::default())
@@ -1147,10 +1154,14 @@ mod tests {
                 cones_from: 0,
                 burst: None,
                 lines: vec![DeliveredLine {
-                    contacts: vec![(
-                        root_transform.translation + rotation * entry,
-                        root_transform.translation + rotation * end,
-                    )],
+                    contacts: if skid {
+                        Vec::new()
+                    } else {
+                        vec![(
+                            root_transform.translation + rotation * entry,
+                            root_transform.translation + rotation * end,
+                        )]
+                    },
                     crossing: VolumeCrossing {
                         volume: segment,
                         entry: root_transform.translation + rotation * entry,
@@ -1158,7 +1169,7 @@ mod tests {
                         chord: entry.distance(end),
                         cost: 0.0,
                         energy: 0.0,
-                        perforated: true,
+                        perforated: !skid,
                     },
                     momentum: rotation * (entrance + axial),
                     entrance_energy: 0.0,
