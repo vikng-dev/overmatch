@@ -1,49 +1,25 @@
-//! The frame-rate limiter: hold the END of each main-world frame until the cap's deadline.
+//! Hold the end of each main-world frame until the cap deadline, in `Last`.
+//! [`super::Settings::frame_limit_period`] owns arming: effective vsync OFF plus a non-off cap;
+//! otherwise this costs one resource read.
 //!
-//! Armed by exactly one conjunction — [`super::Settings::frame_limit_period`] returns `Some` only
-//! under an EFFECTIVE vsync OFF with a non-off [`super::FrameCap`] — so with any present-mode wait
-//! in play this module costs one resource read per frame and nothing else.
+//! Coarse sleep saves a core; spinning the tail absorbs OS timer overshoot (hundreds of µs on
+//! macOS/Linux, up to 15.6 ms default resolution on Windows). The std-only hybrid follows
+//! spin_sleep/bevy_framepace.
 //!
-//! # Shape: a hybrid coarse-sleep + adaptive spin, in `Last`
+//! The spin window is MEASURED from sleep overshoot by [`Limiter::observe`]: instant attack, slow
+//! release, clamped to [`MIN_SPIN`]..=[`MAX_SPIN`]. DERIVED: a fixed 1.5 ms at 240 FPS spends ~36%
+//! of a 4.17 ms frame spinning; ~100 µs spends ~2.4%. Coarse timers reach the old fixed ceiling.
 //!
-//! `std::thread::sleep` overshoots (macOS/Linux timer slack is hundreds of microseconds; Windows'
-//! default timer resolution is up to 15.6 ms), and a pure spin burns a core. So the wait sleeps in
-//! coarse chunks while the remainder is large, then SPINS the final stretch against `Instant::now()`
-//! — the standard shape (spin_sleep, bevy_framepace) hand-rolled on std alone.
+//! `NonSendMarker` keeps the wait on the main thread, off `ComputeTaskPool` workers needed by
+//! pipelined render/visibility/extract work, especially on low-core machines. Blocking the main
+//! schedule's tail delays the next extract and paces uncapped presentation. Winit's frame events
+//! are already consumed; the wait appears upstream as a long frame.
 //!
-//! **The spin window is MEASURED, not assumed.** It used to be a fixed 1.5 ms, which at a 240 FPS
-//! cap is ~36% of every 4.17 ms frame spent in a busy loop — a whole core burned to buy timing
-//! precision that most machines do not need. Instead every `thread::sleep` call reports how far past
-//! its request it actually returned, and the window tracks that overshoot ([`Limiter::observe`]):
-//! instant attack (one bad sleep widens the window immediately), slow release, clamped to
-//! [`MIN_SPIN`]..=[`MAX_SPIN`]. A machine whose sleeps land within ~100 µs therefore spins ~100 µs
-//! (~2.4% of a core at that same cap) and one with a coarse timer degrades to the old fixed window.
+//! Deadlines advance on a fixed grid, not wake + period: adding workload to each cycle would
+//! undershoot the cap. A whole-slot overrun resets to now + period instead of racing to catch up.
 //!
-//! It runs as a MAIN-THREAD system at the end of `Last`, i.e. inside bevy's frame, not against the
-//! runner: blocking the main schedule's tail delays the NEXT frame's start, which paces the whole
-//! pipeline (with pipelined rendering the render app consumes one extract per main-world frame, so
-//! main-loop cadence IS present cadence under an uncapped present mode). Nothing here fights the
-//! winit runner — by the time this system runs the frame's events are long consumed, and the sleep
-//! is indistinguishable from a long frame to everything upstream.
-//!
-//! **Why the `NonSendMarker`** (the same pin `probe` and `settings::observe_window_placement` use): an
-//! ordinary `Send` system may be handed to any `ComputeTaskPool` worker by the multithreaded
-//! executor, so this one would park a POOL thread — the very threads pipelined rendering and the
-//! parallel visibility/extract work run on — for the whole tail of every frame. On a low-core
-//! machine (where a frame cap is most likely to be set) that starves the render app the limiter is
-//! supposed to be pacing. The marker forces the wait onto the main thread, which is the one thread
-//! that has nothing else to do while the frame is being held.
-//!
-//! # The schedule, not the gap
-//!
-//! Deadlines advance on a fixed grid (`deadline += period`), not `now + period`: sleeping "period
-//! after the previous wake" would add the frame's own work time to every cycle and undershoot the
-//! target rate by exactly the workload. When a frame overruns its slot entirely, the grid resets to
-//! `now + period` instead of racing to catch up — a spiral of death is a limiter bug, not a cap.
-//!
-//! MEASURED (test `the_limiter_holds_the_cap`, release-mode timing asserted loosely enough for CI):
-//! 60 simulated frames at a 250 FPS cap take >= 0.95x the ideal 240 ms wall time, and a workload
-//! slower than the cap is passed through un-delayed within tolerance.
+//! MEASURED (`the_limiter_holds_the_cap`, loose release-mode timing bound for CI): 60 simulated
+//! frames at 250 FPS take >= 0.95x the ideal 240 ms; slower workloads pass through within tolerance.
 
 use std::time::{Duration, Instant};
 
@@ -57,23 +33,20 @@ use super::{PresentCaps, Settings};
 /// sleep loop for a few microseconds at a time; 100 µs is under 2.5% of a 240 FPS frame.
 const MIN_SPIN: Duration = Duration::from_micros(100);
 
-/// The ceiling of the adaptive spin window — the value this whole knob used to be fixed at. Wide
-/// enough to absorb the OS oversleeping a coarse chunk by a scheduler quantum; anything beyond it
-/// is left to the grid to repay rather than bought with more busy-waiting.
+/// Spin-window ceiling: absorbs a scheduler quantum of coarse-sleep overshoot; larger misses
+/// are repaid by the grid rather than more busy-waiting.
 const MAX_SPIN: Duration = Duration::from_micros(1500);
 
 /// Release rate of the spin window: each in-budget sleep pulls the estimate `1/DECAY` of the way
 /// down toward what was actually observed. A power of two, so the arithmetic is a shift.
 const DECAY: u32 = 8;
 
-/// The limiter's state: the next deadline on the fixed grid (`None` while disarmed) plus the
-/// measured spin window.
+/// Fixed-grid deadline and measured spin window.
 pub(super) struct Limiter {
     /// The next deadline on the fixed grid, or `None` while disarmed.
     next: Option<Instant>,
-    /// How much of the tail of each wait to spin — an asymmetric EWMA of the observed
-    /// `thread::sleep` overshoot. Starts at [`MAX_SPIN`] so the very first capped frame is as
-    /// precise as the old fixed window, and walks down from there.
+    /// Asymmetric EWMA of sleep overshoot. Starts at [`MAX_SPIN`] for first-frame precision
+    /// and decays toward observed error.
     spin: Duration,
 }
 
@@ -87,12 +60,8 @@ impl Default for Limiter {
 }
 
 impl Limiter {
-    /// Fold one measured sleep overshoot into the spin window.
-    ///
-    /// Asymmetric on purpose: a single bad sleep widens the window IMMEDIATELY (missing a deadline
-    /// is visible as a dropped frame, so the estimate must not average a spike away), while a good
-    /// one only narrows it by `1/DECAY` — otherwise the window would collapse onto the best sleep
-    /// the machine ever managed and then miss every deadline until it grew back.
+    /// Instant attack avoids averaging away a visible deadline miss. Release by `1/DECAY` keeps
+    /// the estimate from collapsing onto the best sleep and missing deadlines until it recovers.
     fn observe(&mut self, overshoot: Duration) {
         self.spin = if overshoot > self.spin {
             overshoot
@@ -103,11 +72,7 @@ impl Limiter {
     }
 }
 
-/// The `Last` system. Reads the settings every frame (one `Option` construction); does nothing at
-/// all unless the cap is armed.
-///
-/// The `NonSendMarker` is load-bearing — see the module doc: it keeps the wait off the shared
-/// `ComputeTaskPool`, which pipelined rendering needs while this thread is parked.
+/// `Last` system; [`NonSendMarker`] keeps the wait off the shared compute pool (see module doc).
 pub(super) fn limit_frame_rate(
     _non_send_marker: NonSendMarker,
     settings: Res<Settings>,
@@ -192,10 +157,8 @@ mod tests {
         );
     }
 
-    /// A workload SLOWER than the cap passes through: when every frame overruns its slot, the
-    /// limiter resets the grid instead of stacking debt, and adds (nearly) no extra wait. The
-    /// workload's own time is MEASURED, not assumed — `thread::sleep` overshoots by a scheduler
-    /// quantum per call, and blaming that on the limiter made the first cut of this test flaky.
+    /// Over-budget work must pass through without stacked wait debt. MEASURED work time excludes
+    /// OS sleep overshoot from the limiter's cost; assuming requested work time makes the test flaky.
     #[test]
     fn a_slow_frame_is_not_punished() {
         let period = Duration::from_millis(2);
@@ -232,9 +195,7 @@ mod tests {
         assert_eq!(second.duration_since(first), period);
     }
 
-    /// The adaptive window: instant attack, slow release, clamped at both ends. This is the
-    /// property that lets a well-behaved machine spin ~100 µs instead of the 1.5 ms this used to
-    /// burn unconditionally, without ever spinning LESS than the machine's own sleep error.
+    /// Instant attack, slow release and both clamps let precise timers spin less; see module doc.
     #[test]
     fn the_spin_window_tracks_measured_oversleep() {
         let mut limiter = Limiter::default();
