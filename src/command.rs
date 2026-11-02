@@ -523,7 +523,7 @@ impl AxisLever {
                 keys.just_pressed(binding.neg),
             );
             if let Some(start) = direction.or(tapped) {
-                self.notch = (self.notch + start.sign() * feel.notch_step.0).clamp(-1.0, 1.0);
+                self.notch = feel.tap_notch(self.notch, start == LeverDirection::Positive);
                 self.press = direction.map(|direction| LeverPress {
                     direction,
                     started_at: now,

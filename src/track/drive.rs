@@ -67,15 +67,41 @@ impl DriveFeel {
             0.0 < self.wide_on.0 && self.wide_on.0 < self.tight_on.0 && self.tight_on.0 <= 1.0,
             "assets/input/drive.ron: author ordered wide_on < tight_on within (0, 1]"
         );
-        // Taps step from neutral or a clamped endpoint. Thresholds must lie between both
-        // notch lattices; equality would let accumulated f32 roundoff choose a radius.
-        for threshold in [self.wide_on.0, self.tight_on.0] {
+        for notch in self.reachable_notches() {
             assert!(
-                (threshold / self.notch_step.0).fract() != 0.0
-                    && ((1.0 - threshold) / self.notch_step.0).fract() != 0.0,
+                notch.abs() != self.wide_on.0 && notch.abs() != self.tight_on.0,
                 "assets/input/drive.ron: detent threshold rests on a notch; move wide_on, tight_on or notch_step between lever positions"
             );
         }
+    }
+
+    /// The client and admission use the same binary32 tap, including endpoint clamping.
+    pub(crate) fn tap_notch(&self, current: f32, positive: bool) -> f32 {
+        let sign = if positive { 1.0 } else { -1.0 };
+        (current + sign * self.notch_step.0).clamp(-1.0, 1.0)
+    }
+
+    fn reachable_notches(&self) -> Vec<f32> {
+        // Resolution: bound admission's memory and transition work. Finer lever lattices are
+        // refused rather than making startup enumerate an unbounded number of binary32 states.
+        const MAX_NOTCH_STATES: usize = 4096;
+        let mut states = vec![-1.0_f32, 0.0, 1.0];
+        let mut seen: std::collections::HashSet<_> = states.iter().map(|n| n.to_bits()).collect();
+        let mut cursor = 0;
+        while cursor < states.len() {
+            for positive in [false, true] {
+                let next = self.tap_notch(states[cursor], positive);
+                if seen.insert(next.to_bits()) {
+                    assert!(
+                        states.len() < MAX_NOTCH_STATES,
+                        "assets/input/drive.ron: notch_step exceeds the reachable-state admission budget; author a coarser binary-exact lever step"
+                    );
+                    states.push(next);
+                }
+            }
+            cursor += 1;
+        }
+        states
     }
 }
 
@@ -261,6 +287,31 @@ mod tests {
         feel.notch_step.0 = 0.25;
         feel.wide_on.0 = 0.25;
         feel.tight_on.0 = 0.625;
+        feel.validate();
+    }
+
+    /// Fixture: decimal taps reach 13 binary32 states, including tight_on after a decrement
+    /// from one. The old inverse-division check missed this exact resting detent.
+    #[test]
+    fn decimal_taps_enumerate_rounding_paths_and_refuse_threshold_collisions() {
+        let mut feel: DriveFeel = crate::provenance::from_shipped_str(
+            "assets/input/drive.ron",
+            include_str!("../../assets/input/drive.ron"),
+        )
+        .unwrap();
+        feel.notch_step.0 = 0.4;
+        feel.wide_on.0 = 0.15;
+        feel.tight_on.0 = 0.6;
+        let states = feel.reachable_notches();
+        assert_eq!(states.len(), 13);
+        assert_eq!(feel.tap_notch(1.0, false), feel.tight_on.0);
+        for state in &states {
+            for positive in [false, true] {
+                assert!(states.contains(&feel.tap_notch(*state, positive)));
+            }
+        }
+        assert!(std::panic::catch_unwind(|| feel.validate()).is_err());
+        feel.tight_on.0 = 0.65; // Fixture: between reachable states.
         feel.validate();
     }
 }

@@ -34,3 +34,18 @@ MEASURED start: 2026-11-02 21:48:36 UTC; the lane's sixty-minute boundary is 22:
 Builds and tests use `serial-cargo` with the unattended/headless/mute environment. Queue waits
 are taken from the build queue's queued/started timestamps, not inferred from compilation time.
 The first correction waited behind another session's whole-library run; final totals follow below.
+
+## Reachable notch admission
+
+Commit: `driving: admit the notches the client actually reaches (#146)`.
+
+Verified Codex's binary32 counterexample from the preceding lane. Admission now traverses the
+actual tap transition in both directions from neutral and both clamped endpoints. The client
+calls that same `DriveFeel::tap_notch` operation. MEASURED: step 0.4 reaches thirteen states;
+one decrement from one equals tight_on 0.6 exactly, and admission refuses it. Moving that
+Fixture threshold to 0.65 is admitted. The regression also checks transition closure.
+
+Decision: a Resolution budget of 4,096 reachable states bounds startup memory and work; a finer
+lattice is refused by name with an authoring fix, rather than making startup enumerate millions
+of binary32 states. This is an admission cost bound, not a control threshold. Default shipped
+keyboard feel is unchanged. Formatting, CI clippy and 417 affected-module/guard tests pass.
