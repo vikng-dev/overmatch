@@ -206,17 +206,16 @@ fn hold_commands(
     mut published: ResMut<MatchCommands>,
     mut tanks: Query<(&mut TankCommand, &mut ParsedTankCommand)>,
 ) {
-    let battle = match battles.single() {
-        Ok(battle) => battle,
-        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => {
-            published.set_if_neq(MatchCommands::Held);
-            return;
-        }
+    let combat = match battles.single() {
+        Ok(battle) => battle.is_combat(),
+        // The local tank may precede its Battle snapshot. It commands nothing until the phase
+        // arrives, and the published state must agree with the raw and parsed commands.
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => false,
         Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
             panic!("a peer holds at most one Battle: the server spawns one, a client replicates it")
         }
     };
-    if battle.is_combat() {
+    if combat {
         published.set_if_neq(MatchCommands::Live);
         return;
     }
@@ -249,6 +248,31 @@ pub(super) fn in_combat(battles: Query<&BattleState>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A local tank can arrive before its Battle snapshot. Gameplay and instruments both rely
+    /// on that interval holding raw and parsed commands, rather than publishing a hold alone.
+    #[test]
+    fn a_tank_before_its_battle_snapshot_commands_nothing() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(MatchCommands::Live);
+        // Fixture intent: nonzero drive and a fire edge expose an unheld pre-snapshot command.
+        let raw = TankCommand {
+            throttle: 1.0,
+            fire_primary: true,
+            ..default()
+        };
+        let tank = world
+            .spawn((raw, ParsedTankCommand::try_from(raw).unwrap()))
+            .id();
+        world.run_system_once(hold_commands).unwrap();
+        assert!(world.get::<ParsedTankCommand>(tank).unwrap().held());
+        assert_eq!(
+            *world.get::<TankCommand>(tank).unwrap(),
+            TankCommand::default()
+        );
+        assert_eq!(*world.resource::<MatchCommands>(), MatchCommands::Held);
+    }
 
     /// Every authored phase span is refused at the load gate when the shared signed deadline
     /// relation would be ambiguous. Operators receive the mode file, field and repair direction.
