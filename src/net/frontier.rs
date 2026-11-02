@@ -21,7 +21,7 @@ use lightyear::prelude::{Connected, Interpolated, NetworkTimeline, SyncSystems};
 
 use super::protocol::NetTank;
 
-/// ASSUMED diagnostic cadence in seconds: an operator sees the counters roughly twice a minute.
+/// Resolution: a 30 s summary interval bounds stdout cost while keeping run diagnostics visible.
 const SUMMARY_PERIOD_SECS: f32 = 30.0;
 
 /// Mount the read-only edge and resync instruments.
@@ -35,7 +35,9 @@ pub(super) fn install(app: &mut App) {
     app.add_systems(
         PostUpdate,
         (
-            note_pre_sync_cursor.before(SyncSystems::Sync),
+            note_pre_sync_cursor
+                .after(super::interp_delay::derive_interpolation_delay)
+                .before(SyncSystems::Sync),
             count_interp_resyncs.after(SyncSystems::Sync),
         ),
     );
@@ -63,9 +65,8 @@ pub(super) enum ImpulseClass {
 
 /// Ring of recent impulse-class authority ticks, consulted when a starvation gap closes.
 ///
-/// ASSUMED memory budget: retain the most recent 256 distinct tick/class facts. Eviction can
-/// remove older coincidences during a long gap, so the reported coincidence count is a lower
-/// bound, not a completeness claim.
+/// Resolution: retain 256 distinct tick/class facts to bound diagnostic memory. Eviction can
+/// remove older coincidences, so the reported count is a lower bound.
 #[derive(Resource, Default, Debug)]
 pub(super) struct ImpulseTicks {
     ring: VecDeque<(Tick, ImpulseClass)>,
@@ -164,11 +165,9 @@ fn note_pre_sync_cursor(
 /// Count interpolation-timeline resyncs. Steady state after the handshake must be zero — a
 /// nonzero steady count is every remote hull jumping, and the periodic summary flags it.
 ///
-/// Lightyear emits no event for this timeline's resync, so it is detected: the cursor advances
-/// only in `PreUpdate` (`TimelineSystems::Advance`), and inside `SyncSystems::Sync` the speed
-/// controller only rescales it — the one write to `now` there is `TimelineSync::resync`'s snap. So
-/// `now` differing across the sync set IS a resync. (A snap onto the exact current instant is
-/// invisible, and moves nothing to observe.)
+/// The pre-sync sample follows deliberate delay relocation. Between that sample and this
+/// observer, clock pacing changes only speed; `TimelineSync::resync` is the sole cursor write.
+/// A snap onto the exact current instant is invisible and moves nothing to observe.
 fn count_interp_resyncs(
     timeline: Option<Res<InterpolationTimeline>>,
     pre: Res<PreSyncCursor>,
@@ -356,6 +355,63 @@ mod tests {
     use avian3d::prelude::{AngularVelocity, LinearVelocity, Rotation};
     use bevy::ecs::system::RunSystemOnce;
     use lightyear::prelude::TimelineSync;
+
+    /// The diagnostic must exclude deliberate delay relocation while still counting a real
+    /// controller snap. Mount its shipped installer and the delay writer around a sync sample.
+    #[test]
+    fn delay_relocation_is_not_reported_as_a_clock_resync() {
+        use super::super::sync_margin::{ArrivalDelay, ArrivalStats};
+        use core::time::Duration;
+        use lightyear::core::tick::TickDuration;
+        use lightyear::core::time::TickDelta;
+        use lightyear::interpolation::timeline::InterpolationConfig;
+        use lightyear::prelude::client::RemoteTimeline;
+        use lightyear::prelude::{Client, PingManager};
+
+        let tick = Duration::from_millis(20); // Fixture interval, independent of shipped cadence.
+        let mut app = App::new();
+        install(&mut app);
+        let mut config = super::super::interp_delay::install(&mut app, tick);
+        config.sync.handshake_pings = 0; // Fixture: the clock has already synchronized.
+        let pings = PingManager::default();
+        let mut remote = RemoteTimeline::default();
+        remote.set_now(Tick(1000).into()); // Fixture epoch, beyond the test delay.
+        let mut timeline = InterpolationTimeline::default();
+        timeline.set_now(timeline.sync_objective(&remote, &config, &pings, tick));
+        timeline.set_synced(true);
+        let mut estimator = ArrivalDelay::default();
+        estimator.stats = ArrivalStats::test_spread(1.0); // Fixture: a large deliberate delay step.
+        app.insert_resource(config)
+            .insert_resource(timeline)
+            .insert_resource(TickDuration(tick))
+            .insert_resource(estimator)
+            .add_systems(
+                PostUpdate,
+                (move |config: Res<InterpolationConfig>,
+                       mut timeline: ResMut<InterpolationTimeline>,
+                       peers: Query<(&RemoteTimeline, &PingManager)>| {
+                    let (remote, pings) = peers.single().unwrap();
+                    let now = timeline.now();
+                    timeline.sync(now, remote, &config, pings, tick);
+                })
+                .in_set(SyncSystems::Sync),
+            );
+        app.world_mut().spawn((Client, remote, pings));
+        app.world_mut()
+            .resource_mut::<FrontierDiag>()
+            .handshake_spent = true;
+        app.world_mut().run_schedule(PostUpdate);
+        assert_eq!(app.world().resource::<FrontierDiag>().steady_resyncs, 0);
+
+        app.world_mut()
+            .resource_mut::<InterpolationTimeline>()
+            .apply_delta(TickDelta::from_duration(
+                tick.mul_f32(config.sync.max_error_margin + 1.0),
+                tick,
+            ));
+        app.world_mut().run_schedule(PostUpdate);
+        assert_eq!(app.world().resource::<FrontierDiag>().steady_resyncs, 1);
+    }
 
     fn edge_world() -> (World, Entity) {
         let mut world = World::new();

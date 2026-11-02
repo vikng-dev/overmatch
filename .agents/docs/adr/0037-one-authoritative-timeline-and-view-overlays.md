@@ -82,7 +82,7 @@ presentation consumers (recoil microsim, belt view).
 
 ## Surviving levers (all threshold-clean by design, or named as debt)
 
-- `interp_delay` — the receipt-spread delay law, with bounded objective slew.
+- `interp_delay` — the receipt-spread delay law; deliberate objective relocation preserves clock error.
 - `sync_margin` — derived margins, both wire directions.
 - `fire_presentation` — client owns fire start/stop and cadence; the replicated `WeaponGate`
   is a legality report consumed as a belt-delta ledger, threshold-free.

@@ -29,6 +29,21 @@ retention of 60 s at 64 samples/s; skipped remote ticks lengthen wall-clock rete
 before play or timeline synchronization remain outside the established stream. The debug readout reports the same full
 spread, with display severity expressed in authority intervals rather than a physical horizon.
 
+Delay is an intentional offset from the remote clock, not evidence that the clocks drifted.
+When the measured law changes, `derive_interpolation_delay` computes the old and new objectives
+against the same remote estimate and ping sample, then moves the synced presentation cursor by
+`new_objective - old_objective`. DERIVED: `(cursor + new_objective - old_objective) - new_objective`
+remains `cursor - old_objective`; the clock controller sees exactly its prior error. The full
+coverage value applies immediately in either direction. A cold cursor instead acquires its first
+objective at the ordinary handshake. The resync diagnostic samples after relocation and before
+clock sync, so deliberate offset movement is not counted as a clock fault.
+
+The rejected half-tick follower delayed coverage and bounded only each write, not accumulated
+clock error. No follower or cap remains. Actual drift still uses the installed clock controller's
+speed adjustment and resync bounds. An increased delay may move the presentation cursor behind
+retained history; the existing unknown-history holding policy applies there. This change does
+not promise monotonic presentation time or eliminate starvation outside empirical coverage.
+
 Previously reported MEASURED `min_delay`, one clean loopback session per row (local server, one
 scripted idle client, no conditioner, 2026-11-01), armed value, then after the own tank's arrival stall:
 
