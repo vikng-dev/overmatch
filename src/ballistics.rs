@@ -3096,63 +3096,55 @@ fn march_shell_step(
         let moving = world.contact_motion.take();
         world.sweep.set(None);
         let mut carrier = Vec3::ZERO;
+        let mut short = 0.0;
         if let Some(moving) = moving {
             world.moment.set(Some(moving.fraction));
-            if world.motion_padding() > 0.0 || moving.contained {
-                let leg = resolve::Leg::new(origin, dir, contact, &flight.sample_offsets(radius));
-                damage_dealt += wound_legs(shell, &context, &not_own, &[leg], flight.speed, health);
-                // The game's damage model clocks contact by fraction even when world speed
-                // is zero: a moving body can still enter a stationary round's position.
-                budget.fly(f64::from(moving.fraction - from) * f64::from(dt));
-                shell.projectile.fuze.flown(contact);
-                carrier = moving.velocity;
-                let offsets = flight.sample_offsets(radius);
-                let relative = flight.direction * flight.speed - carrier;
-                if relative == Vec3::ZERO {
-                    // The game's damage model: this collider has no relative traversal, but
-                    // other bodies can still meet the world path during the remaining seconds.
-                    // Rediscover without this resting material until another crossing changes
-                    // the velocity; the next tick reads all membership again.
-                    resting.borrow_mut().push(
-                        hit.expect("relative-rest contact was discovered on an addressed collider")
-                            .entity,
-                    );
-                    flight.position = moving.point;
-                    flight.continuation = None;
-                    bent = true;
-                    continue;
-                }
-                let direction = Dir3::new(relative).expect(
-                    "game's damage model: posed collider motion and flight give finite relative velocity",
+            // The game's damage model clocks contact by fraction even when world speed is zero:
+            // a moving body can still enter a stationary round's position.
+            let seconds = (moving.fraction - from) * dt;
+            // No relative traversal: there is no frame to decide a crossing in.
+            let opened = (flight.direction * flight.speed != moving.velocity).then(|| {
+                resolve::at_first_touch(
+                    &context,
+                    &not_own,
+                    &shell.projectile.round,
+                    shell.projectile.contact,
+                    &flight,
+                    moving,
+                    seconds,
+                    dt,
+                )
+                .unwrap_or_else(|error| error.panic())
+            });
+            // Seconds of the way to first touch the opened flight still has to fly, in its frame.
+            short = opened
+                .as_ref()
+                .map_or(0.0, |(opened, stand_off)| stand_off / opened.speed);
+            let flown = (contact - flight.speed * short).max(0.0);
+            let leg = resolve::Leg::new(origin, dir, flown, &flight.sample_offsets(radius));
+            damage_dealt += wound_legs(shell, &context, &not_own, &[leg], flight.speed, health);
+            budget.fly(f64::from((seconds - short).max(0.0)));
+            shell.projectile.fuze.flown(flown);
+            let Some((opened, stand_off)) = opened else {
+                // The game's damage model: other bodies can still meet the world path during the
+                // remaining seconds. Rediscover without this resting material until another
+                // crossing changes the velocity; the next tick reads all membership again.
+                resting.borrow_mut().push(
+                    hit.expect("relative-rest contact was discovered on an addressed collider")
+                        .entity,
                 );
-                flight.frame = flight.frame.transport(*flight.direction, *direction);
-                flight.direction = direction;
-                flight.speed = relative.length();
-                // The crossing is decided in the struck body's frame, where the round flies at
-                // its relative speed: an armed `Impact` count keeps its seconds there too.
-                shell.projectile.fuze.at_speed(flight.speed);
                 flight.position = moving.point;
-                // The game's damage model admits simultaneous geometry in the one frozen
-                // contact scene, including material already holding the discovery start.
-                flight.continuation = Some(
-                    resolve::certified_samples(
-                        &context,
-                        &not_own,
-                        resolve::AxisStart {
-                            anchor: moving.point,
-                            origin: Vec3::ZERO,
-                        },
-                        direction,
-                        flight.frame,
-                        radius,
-                        offsets,
-                    )
-                    .unwrap_or_else(|error| error.panic()),
-                );
-                flight.membership = resolve::Membership::Established;
-                contact = 0.0;
+                flight.continuation = None;
                 bent = true;
-            }
+                continue;
+            };
+            carrier = moving.velocity;
+            flight = opened;
+            // The crossing is decided in the struck body's frame, where the round flies at its
+            // relative speed: an armed `Impact` count keeps its seconds there too.
+            shell.projectile.fuze.at_speed(flight.speed);
+            contact = stand_off;
+            bent = true;
         }
         if let Some((ended, removed)) = function_on_contact(
             shell,
@@ -3169,6 +3161,8 @@ fn march_shell_step(
                 stopped = true;
                 break;
             }
+            // The burst flew the stand-off in the struck body's frame; the world path carries it too.
+            flight.fly(carrier * short);
             let velocity = flight.direction * flight.speed + carrier;
             if let Ok(direction) = Dir3::new(velocity) {
                 flight.frame = flight.frame.transport(*flight.direction, *direction);

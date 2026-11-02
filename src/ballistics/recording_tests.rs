@@ -236,8 +236,21 @@ fn fire_round(
     shot: Option<crate::ShotId>,
     burst: Option<burst::Burst>,
 ) {
+    let fire = fixture_fire(app, from, direction, mechanism, shot, burst);
+    app.world_mut().trigger(fire);
+}
+
+/// The event [`fire_round`] triggers, for a test that also sets its speed or drag.
+fn fixture_fire(
+    app: &mut App,
+    from: Vec3,
+    direction: Dir3,
+    mechanism: FireMechanism,
+    shot: Option<crate::ShotId>,
+    burst: Option<burst::Burst>,
+) -> FireShell {
     let shooter = app.world_mut().spawn_empty().id();
-    app.world_mut().trigger(FireShell {
+    FireShell {
         effects: crate::rounds::FlightEffects::fixture_traced(),
         muzzle: crate::guns::MuzzleEmission::fixture_cannon(),
         birth: from,
@@ -264,7 +277,7 @@ fn fire_round(
         shot_origin: FireShellOrigin::Local,
         catch_up_ticks: 0,
         shot,
-    });
+    }
 }
 
 /// Run `ticks` fixed ticks and collect every record emitted.
@@ -2662,10 +2675,7 @@ fn returning_source_round(queued: bool) {
             ),
         ],
     );
-    app.world_mut()
-        .entity_mut(source)
-        .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
-    let (reflector, _) = tank(
+    tank(
         &mut app,
         Vec3::new(6.0, 0.0, -6.0 / 15.0_f32.to_radians().tan()),
         10.0_f32.to_radians(),
@@ -2677,11 +2687,8 @@ fn returning_source_round(queued: bool) {
             Kind::Plate,
         )],
     );
-    app.world_mut()
-        .entity_mut(reflector)
-        .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
     if queued {
-        let (foreign, _) = tank(
+        tank(
             &mut app,
             Vec3::ZERO,
             0.0,
@@ -2701,9 +2708,6 @@ fn returning_source_round(queued: bool) {
                 ),
             ],
         );
-        app.world_mut()
-            .entity_mut(foreign)
-            .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
     }
     settle(&mut app);
     let angle = 15.0_f32.to_radians();
@@ -2850,9 +2854,6 @@ fn lagging_samples_clear_the_barrel(foreign_velocity: Vec3, across_tick: bool) {
             Kind::Crew(DEEP),
         )],
     );
-    app.world_mut()
-        .entity_mut(source)
-        .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
     tank(
         &mut app,
         Vec3::new(0.0, 0.0, if across_tick { -3.0 } else { -2.9 }),
@@ -2952,9 +2953,6 @@ fn a_bounce_just_past_the_source_box_returns_into_a_solid_source() {
             ),
         ],
     );
-    app.world_mut()
-        .entity_mut(source)
-        .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
     let angle = 15.0_f32.to_radians();
     let birth = Vec3::new(0.5, 0.0, 0.0);
     // Where the axis meets x = 1.0001: (1.0001 - 0.5) / sin 15° of travel.
@@ -3231,4 +3229,162 @@ fn delivered_lines_keep_the_disc_contacts_beside_the_shared_axis() {
         (mean - line.crossing.chord).abs() < 1e-4,
         "full coverage retains the resolved disc-mean chord"
     );
+}
+
+/// Fixture face, normal `+Z`, and the round's incidence on it from that normal: at 75° the fixture
+/// 88 skids at the fixture speed below.
+const SKID_FACE: Vec3 = Vec3::new(40.0, 40.0, 0.3);
+const SKID_INCIDENCE_DEG: f32 = 75.0;
+const SKID_SPEED: f32 = 773.0;
+
+/// What one oblique strike came to: its one bounce mark, and the round at the end of the run.
+#[derive(Debug)]
+struct Skid {
+    bounces: Vec<(f32, f32, f32, Vec3)>,
+    end: Vec3,
+    /// `None`: the round came to rest.
+    velocity: Option<Vec3>,
+}
+
+/// A drag-free fixture 88 meets [`SKID_FACE`], at rest or moving at `face`, with the relative
+/// velocity [`SKID_SPEED`] at [`SKID_INCIDENCE_DEG`]; `elsewhere` is the velocity of a body far off
+/// the round's path. Marks are read in the face's frame: every bounce's speeds, shock and outgoing
+/// direction are relative to it, and the end velocity has `face` taken off.
+fn skid_on(face: Vec3, elsewhere: Option<Vec3>) -> Skid {
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    let (root, _) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[("face", SKID_FACE, Vec3::ZERO, Kind::Plate)],
+    );
+    let mover = elsewhere.map(|_| {
+        tank(
+            &mut app,
+            Vec3::Y * 200.0,
+            0.0,
+            Vec3::ZERO,
+            &[("elsewhere", Vec3::splat(2.0), Vec3::ZERO, Kind::Plate)],
+        )
+        .0
+    });
+    settle(&mut app);
+    app.world_mut()
+        .entity_mut(root)
+        .insert(LinearVelocity(face));
+    if let (Some(mover), Some(velocity)) = (mover, elsewhere) {
+        app.world_mut()
+            .entity_mut(mover)
+            .insert(LinearVelocity(velocity));
+    }
+    let incidence = SKID_INCIDENCE_DEG.to_radians();
+    let relative = Vec3::new(incidence.sin(), 0.0, -incidence.cos()) * SKID_SPEED;
+    let velocity = relative + face;
+    let strike = Vec3::Z * (SKID_FACE.z * 0.5);
+    let from = strike - relative.normalize() * 6.0;
+    let mut fire = fixture_fire(
+        &mut app,
+        from,
+        Dir3::new(velocity).unwrap(),
+        FireMechanism::Single,
+        None,
+        None,
+    );
+    fire.speed = velocity.length();
+    fire.drag_k = 0.0;
+    app.world_mut().trigger(fire);
+    run(&mut app, 4);
+    let mut shells = app
+        .world_mut()
+        .query::<(&Transform, Option<&Projectile>, &PenetrationMarks)>();
+    let (transform, projectile, marks) = shells.single(app.world()).unwrap();
+    Skid {
+        bounces: marks
+            .log
+            .iter()
+            .filter_map(|mark| match mark {
+                ArmourMark::Bounce {
+                    speed_in,
+                    speed_out,
+                    shock,
+                    outgoing,
+                    ..
+                } => Some((*speed_in, *speed_out, *shock, *outgoing)),
+                _ => None,
+            })
+            .collect(),
+        end: transform.translation,
+        velocity: projectile.map(|projectile| projectile.velocity - face),
+    }
+}
+
+/// The game's damage model: unrelated motion in the world changes no shot's outcome. Every player
+/// relies on it: whether a round skids off a parked hull, and what it keeps, cannot depend on
+/// whether another tank is driving. Mutant: a contact placed at first touch has its resting height
+/// behind it, ends the round at the face and charges it `½ m v²` where the law says
+/// `½ m (v cos θ)²`, only while something moves.
+#[test]
+fn unrelated_motion_changes_no_shots_outcome() {
+    let at_rest = skid_on(Vec3::ZERO, None);
+    assert_eq!(
+        at_rest.bounces.len(),
+        1,
+        "the fixture skids once: {at_rest:?}"
+    );
+    let (speed_in, speed_out, shock, _) = at_rest.bounces[0];
+    let incidence = SKID_INCIDENCE_DEG.to_radians();
+    assert!(
+        (speed_in - SKID_SPEED).abs() < 1.0,
+        "the bounce reads the striking speed: {speed_in}"
+    );
+    assert!(
+        (speed_out - speed_in * incidence.sin()).abs() < 1.0,
+        "the skid keeps the speed along the face: {speed_out}"
+    );
+    let moving = skid_on(Vec3::ZERO, Some(Vec3::X * 20.0));
+    assert_eq!(
+        at_rest.bounces, moving.bounces,
+        "a body driving elsewhere leaves the skid alone"
+    );
+    assert_eq!(at_rest.velocity, moving.velocity, "and what it keeps");
+    assert_eq!(at_rest.end, moving.end, "and where it ends");
+    assert!(shock > 0.0);
+}
+
+/// The game's damage model: a moving face decides a strike in its own frame. A round's verdict, the
+/// speed it keeps and its way out rely on the relative velocity alone, so a player's shot at a
+/// driving tank obeys the same skid as at a parked one. Mutant: a first touch resolved with no
+/// approach left ends the round at the face. A mark's outgoing motion is the world's, so the face's
+/// velocity comes off it. The fixture's face velocities lie along and into it.
+#[test]
+fn a_moving_face_decides_a_skid_in_its_own_frame() {
+    let at_rest = skid_on(Vec3::ZERO, None);
+    let (_, kept, jarred, out) = at_rest.bounces[0];
+    let flying_on = at_rest.velocity.expect("a skid carries the round on");
+    for face in [Vec3::X * 20.0, Vec3::Z * 8.0, Vec3::new(-15.0, 0.0, 6.0)] {
+        let moving = skid_on(face, None);
+        assert_eq!(moving.bounces.len(), 1, "{face}: {moving:?}");
+        let (speed_in, speed_out, shock, outgoing) = moving.bounces[0];
+        assert!(
+            (speed_in - SKID_SPEED).abs() < 0.5,
+            "{face}: the frame's striking speed {speed_in}"
+        );
+        let leaving = outgoing * speed_out - face;
+        assert!(
+            (leaving - out * kept).length() < 1.0,
+            "{face}: the frame's way out {leaving} against {}",
+            out * kept
+        );
+        assert!(
+            (shock / jarred - 1.0).abs() < 0.01,
+            "{face}: the frame's shock {shock} against {jarred}"
+        );
+        let end = moving.velocity.expect("a skid carries the round on");
+        assert!(
+            (end - flying_on).length() < 1.0,
+            "{face}: the end velocity in the face's frame {end} against {flying_on}",
+        );
+    }
 }

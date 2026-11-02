@@ -294,10 +294,25 @@ pub(crate) fn layout(frame: &DiscFrame, radius: f32) -> Vec<Vec3> {
 /// `collect::sitting_reach`), so a ray running along the face owns no crossing of it by rounding.
 pub(crate) const REST_CLEARANCE: f32 = MARCH_EPS;
 
-/// The game's damage model: a skid advances along the incoming ray to its resting height,
-/// bounded by the reached hand-off. It never retraces a paid crossing. If the disc already holds
-/// material, a turn with no forward travel ends the round; a future finite contact must first be
-/// reached. Thus every exchange spends flight time or is terminal, including converging faces.
+/// Resolution: how far (m) before first touch a live contact opens. It exceeds the collector's
+/// sitting reach (at most a quarter of [`MARCH_EPS`] along the ray, `collect::sitting_reach`), so
+/// the first-touched sample reads a reached face, never material at its start.
+const CONTACT_STAND_OFF: f32 = MARCH_EPS;
+
+/// Metres along `axis` from `start` to the resting height above `read`'s face: negative when the
+/// axis already stands below it, as it does at a disc's first touch (DERIVED: the rim reaches a flat
+/// face with the axis `r sin θ` above it, under the resting height `r`, `θ` the incidence).
+fn to_resting_height(start: Vec3, axis: Dir3, read: &walk::EntranceRead, rest: f32) -> f32 {
+    let into = axis.dot(read.normal);
+    let height = (start - read.position).dot(read.normal) * -into.signum();
+    (height - rest - REST_CLEARANCE) / into.abs()
+}
+
+/// The game's damage model: a skid advances along the incoming ray to its resting height, bounded
+/// by the reached hand-off. Where that gives no forward travel it advances to `contact`, the first
+/// touch, which no hand-off bounds. It never retraces a paid crossing. If the disc already holds
+/// material, `contact` is zero and the skid ends the round: every exchange spends flight time or is
+/// terminal, including converging faces.
 fn skid_turn(
     start: Vec3,
     axis: Dir3,
@@ -306,12 +321,112 @@ fn skid_turn(
     hand_off: f32,
     contact: f32,
 ) -> f32 {
-    let into = axis.dot(read.normal);
-    let height = (start - read.position).dot(read.normal) * -into.signum();
-    let turn = ((height - rest - REST_CLEARANCE) / into.abs())
+    let turn = to_resting_height(start, axis, read, rest)
         .max(0.0)
         .min(hand_off.max(0.0));
     if turn > 0.0 { turn } else { contact.max(0.0) }
+}
+
+/// The game's damage model: `flight` standing before a first touch the sweep found, in the struck
+/// point's frame and that moment's frozen scene, with how many relative metres short of the touch
+/// it stands. `seconds` is what the flight takes to reach the touch from where it is, so the stand-off
+/// never exceeds what it still has to fly: zero for a body newly holding a start.
+///
+/// The crossing law reads this flight as it reads any other, and a world in which something else
+/// moves reads what a still one reads: only the struck point's velocity enters. The stand-off is
+/// [`CONTACT_STAND_OFF`], unless the entrance reads a skid whose resting height lies behind that
+/// ([`to_resting_height`]): the flight then opens just before that height, so the turn lies ahead
+/// of it. The frozen scene stays this close to first touch because a third body arriving there is
+/// read at that moment; a corridor opened from the flight's own start would read such a body across
+/// an approach it never stood on.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the flight's contact read spans the crossing's context, the round and the sweep's clock"
+)]
+pub(super) fn at_first_touch(
+    context: &ResolveContext<'_, '_, '_>,
+    not_own: &dyn Fn(Entity) -> bool,
+    round: &SolidShot,
+    preset: crate::rounds::ContactPreset,
+    flight: &Flight,
+    touch: super::motion::ContactMotion,
+    seconds: f32,
+    dt: f32,
+) -> Result<(Flight, f32), WalkError> {
+    let velocity = flight.direction * flight.speed;
+    // A still struck point leaves heading and speed exactly as they are, not renormalised.
+    let (axis, speed) = if touch.velocity == Vec3::ZERO {
+        (flight.direction, flight.speed)
+    } else {
+        Dir3::new_and_length(velocity - touch.velocity).expect(
+            "game's damage model: posed collider motion and flight give finite relative velocity",
+        )
+    };
+    let body = round.body();
+    let radius = disc_radius(body.caliber);
+    let frame = flight.frame.transport(*flight.direction, *axis);
+    let offsets = flight.sample_offsets(radius);
+    let retained = speed * seconds;
+    let open = |stand_off: f32| -> Result<Flight, WalkError> {
+        let short = stand_off / speed;
+        context
+            .world
+            .moment
+            .set(Some((touch.fraction - short / dt).max(0.0)));
+        let anchor = touch.point - velocity * short;
+        Ok(Flight {
+            position: anchor,
+            direction: axis,
+            speed,
+            frame,
+            continuation: Some(certified_samples(
+                context,
+                not_own,
+                AxisStart {
+                    anchor,
+                    origin: Vec3::ZERO,
+                },
+                axis,
+                frame,
+                radius,
+                offsets.clone(),
+            )?),
+            membership: Membership::Established,
+        })
+    };
+    let stand_off = CONTACT_STAND_OFF.min(retained);
+    let opened = open(stand_off)?;
+    let interior = opened
+        .continuation
+        .as_ref()
+        .expect("an opened flight carries its read starts");
+    let entrance = closing_walk(
+        context,
+        not_own,
+        interior.anchor,
+        interior.origin,
+        Vec3::from(axis),
+        frame,
+        radius,
+        &interior.seeds,
+        stand_off + ENTRANCE_SPAN,
+    )?;
+    let shot = Shot {
+        caliber: body.caliber,
+        speed,
+        contact: preset,
+    };
+    let (Begin::Ricochet { entrance: read, .. } | Begin::Held { entrance: read, .. }) =
+        walk::begin(&entrance, &shot, &context.laws)?
+    else {
+        return Ok((opened, stand_off));
+    };
+    let ahead = to_resting_height(interior.origin, axis, &read, body.caliber * 0.5);
+    if ahead > 0.0 {
+        return Ok((opened, stand_off));
+    }
+    let stand_off = (stand_off - ahead + CONTACT_STAND_OFF).min(retained);
+    Ok((open(stand_off)?, stand_off))
 }
 
 /// How far outside the candidates' bounds a containment probe starts and ends, and how far a
