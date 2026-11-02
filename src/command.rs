@@ -404,6 +404,7 @@ fn snapshot_device_command(
 /// [`DeviceClaim`].
 fn claim_device(
     mut owner: ResMut<DeviceOwner>,
+    mut drive_input: ResMut<DriveInput>,
     mut own: Query<(&mut TankCommand, Has<TankKnockedOut>), With<Controlled>>,
 ) {
     let dead = own.iter().any(|(_, knocked_out)| knocked_out);
@@ -412,6 +413,9 @@ fn claim_device(
     } else {
         DeviceOwner::Tank
     });
+    if dead || own.is_empty() {
+        *drive_input = DriveInput::default();
+    }
     if dead {
         for (mut command, _) in &mut own {
             let neutral = command.neutral();
@@ -431,9 +435,78 @@ pub struct AxisKeys {
     pub neg: KeyCode,
 }
 
-impl AxisKeys {
-    fn value(&self, keys: &ButtonInput<KeyCode>) -> f32 {
-        keys.pressed(self.pos) as i8 as f32 - keys.pressed(self.neg) as i8 as f32
+/// Client-only persistent levers. Ownership changes discard both axes so a respawn or Tab swap
+/// cannot inherit a previous tank's cruise command. No field is sent or replicated.
+#[derive(Resource, Default)]
+pub(crate) struct DriveInput {
+    owner: Option<Entity>,
+    throttle: AxisLever,
+    steer: AxisLever,
+}
+
+impl DriveInput {
+    pub(crate) fn notches(&self) -> crate::track::drive::DriveAxes {
+        crate::track::drive::DriveAxes {
+            throttle: self.throttle.notch,
+            steer: self.steer.notch,
+        }
+    }
+}
+
+#[derive(Default)]
+struct AxisLever {
+    notch: f32,
+    press: Option<LeverPress>,
+}
+
+struct LeverPress {
+    direction: f32,
+    started_at: f64,
+}
+
+impl AxisLever {
+    fn sample(&mut self, binding: &AxisKeys, keys: &ButtonInput<KeyCode>, now: f64) -> f32 {
+        let feel = crate::track::drive::drive_feel();
+        let (pos, neg) = (keys.pressed(binding.pos), keys.pressed(binding.neg));
+        // Opposite keys together are a deliberate neutral command, cancelling the lever.
+        if pos && neg {
+            *self = Self::default();
+            return 0.0;
+        }
+        let direction = i8::from(pos) as f32 - i8::from(neg) as f32;
+        if let Some(press) = &self.press {
+            let repressed = if press.direction > 0.0 {
+                keys.just_released(binding.pos) && keys.just_pressed(binding.pos)
+            } else {
+                keys.just_released(binding.neg) && keys.just_pressed(binding.neg)
+            };
+            if direction != press.direction || repressed {
+                // A hold that ends between gather frames still clears its notch on release.
+                if now - press.started_at >= feel.tap_window_s.0 {
+                    self.notch = 0.0;
+                }
+                self.press = None;
+            }
+        }
+        if self.press.is_none() {
+            // Both edges may arrive in one frame: a sub-frame tap still steps exactly once.
+            let tapped = i8::from(keys.just_pressed(binding.pos)) as f32
+                - i8::from(keys.just_pressed(binding.neg)) as f32;
+            let start = if direction != 0.0 { direction } else { tapped };
+            if start != 0.0 {
+                self.notch = (self.notch + start * feel.notch_step.0).clamp(-1.0, 1.0);
+                if direction != 0.0 {
+                    self.press = Some(LeverPress {
+                        direction,
+                        started_at: now,
+                    });
+                }
+            }
+        }
+        match &self.press {
+            Some(press) if now - press.started_at >= feel.tap_window_s.0 => press.direction,
+            _ => self.notch,
+        }
     }
 }
 
@@ -509,6 +582,7 @@ pub struct ConsumeCommandEdges;
 /// command. No devices — the game adds those via [`plugin`]; the sandbox writes commands from its
 /// own controls (the crew bar).
 pub fn core_plugin(app: &mut App) {
+    crate::track::drive::drive_feel();
     app.add_systems(
         FixedUpdate,
         parse_commands.in_set(ParseCommands).before(GameplaySet),
@@ -526,6 +600,7 @@ pub fn core_plugin(app: &mut App) {
 pub fn client_plugin(app: &mut App) {
     app.init_resource::<Bindings>()
         .init_resource::<DeviceOwner>()
+        .init_resource::<DriveInput>()
         .configure_sets(RunFixedMainLoop, TankDeviceSet.run_if(tank_owns_device))
         .configure_sets(Update, TankDeviceSet.run_if(tank_owns_device))
         .configure_sets(
@@ -653,19 +728,31 @@ pub(crate) fn gather_commands(
     mouse: Res<ButtonInput<MouseButton>>,
     bindings: Res<Bindings>,
     ranging: Res<Ranging>,
-    mut tanks: Query<&mut TankCommand, With<Controlled>>,
+    time: Res<Time<Real>>,
+    mut drive_input: ResMut<DriveInput>,
+    mut tanks: Query<(Entity, &mut TankCommand), With<Controlled>>,
 ) {
-    for mut command in &mut tanks {
-        command.throttle = bindings.throttle.value(&keys);
-        command.steer = bindings.steer.value(&keys);
-        // `|=`: a click must survive frames the fixed loop skips, until a tick consumes it.
-        command.fire_primary |= bindings.fire_primary.just_pressed(&keys, &mouse);
-        command.repair |= bindings.repair.just_pressed(&keys, &mouse);
-        command.fire_secondary = bindings.fire_secondary.pressed(&keys, &mouse);
-        // The dial itself (`Ranging`, scroll in the optic) is client-side control state; the
-        // command carries its absolute value. `aim` is written by the per-view commit systems.
-        command.range = ranging.range;
+    // No controlled body before spawn or between possessions: no persistent drive input.
+    let Some((entity, mut command)) = crate::tank::controlled_one(tanks.single_mut()) else {
+        *drive_input = DriveInput::default();
+        return;
+    };
+    if drive_input.owner != Some(entity) {
+        *drive_input = DriveInput {
+            owner: Some(entity),
+            ..default()
+        };
     }
+    let now = time.elapsed_secs_f64();
+    command.throttle = drive_input.throttle.sample(&bindings.throttle, &keys, now);
+    command.steer = drive_input.steer.sample(&bindings.steer, &keys, now);
+    // `|=`: a click must survive frames the fixed loop skips, until a tick consumes it.
+    command.fire_primary |= bindings.fire_primary.just_pressed(&keys, &mouse);
+    command.repair |= bindings.repair.just_pressed(&keys, &mouse);
+    command.fire_secondary = bindings.fire_secondary.pressed(&keys, &mouse);
+    // The dial itself (`Ranging`, scroll in the optic) is client-side control state; the
+    // command carries its absolute value. `aim` is written by the per-view commit systems.
+    command.range = ranging.range;
 }
 
 /// Latch a round-selection step for the controlled tank's weapon on the `Primary` trigger from the
@@ -894,6 +981,8 @@ mod tests {
         world.insert_resource(ButtonInput::<KeyCode>::default());
         world.insert_resource(ButtonInput::<MouseButton>::default());
         world.insert_resource(Ranging::default());
+        world.insert_resource(Time::<Real>::default());
+        world.insert_resource(DriveInput::default());
         let tank = world.spawn((Controlled, TankCommand::default())).id();
         world.resource_mut::<ButtonInput<KeyCode>>().press(key);
         world.run_system_once(gather_commands).unwrap();
@@ -906,6 +995,199 @@ mod tests {
         world.resource_mut::<ButtonInput<KeyCode>>().press(key);
         world.run_system_once(gather_commands).unwrap();
         assert!(world.get::<TankCommand>(tank).unwrap().repair);
+    }
+
+    /// Script the production gather with real ButtonInput edges and an explicit wall clock.
+    /// Fixture durations are chosen relative to the shipped tap/hold boundary.
+    struct DriveKeys {
+        world: World,
+        tank: Entity,
+    }
+
+    impl DriveKeys {
+        fn new() -> Self {
+            let mut world = World::new();
+            world.insert_resource(Bindings::default());
+            world.insert_resource(ButtonInput::<KeyCode>::default());
+            world.insert_resource(ButtonInput::<MouseButton>::default());
+            world.insert_resource(Ranging::default());
+            world.insert_resource(Time::<Real>::default());
+            world.insert_resource(DriveInput::default());
+            let tank = world.spawn((Controlled, TankCommand::default())).id();
+            Self { world, tank }
+        }
+
+        fn press(&mut self, key: KeyCode) {
+            self.world.resource_mut::<ButtonInput<KeyCode>>().press(key);
+        }
+
+        fn release(&mut self, key: KeyCode) {
+            self.world
+                .resource_mut::<ButtonInput<KeyCode>>()
+                .release(key);
+        }
+
+        fn gather(&mut self, dt: f64) -> crate::track::drive::DriveAxes {
+            use bevy::ecs::system::RunSystemOnce;
+            self.world
+                .resource_mut::<Time<Real>>()
+                .advance_by(std::time::Duration::from_secs_f64(dt));
+            self.world.run_system_once(gather_commands).unwrap();
+            self.world.resource_mut::<ButtonInput<KeyCode>>().clear();
+            let c = self.world.get::<TankCommand>(self.tank).unwrap();
+            crate::track::drive::DriveAxes {
+                throttle: c.throttle,
+                steer: c.steer,
+            }
+        }
+
+        fn tap(&mut self, key: KeyCode) -> crate::track::drive::DriveAxes {
+            self.press(key);
+            self.gather(0.0);
+            self.release(key);
+            self.gather(crate::track::drive::drive_feel().tap_window_s.0 / 2.0)
+        }
+    }
+
+    /// The Driver consumes a signed persistent lever, not a direction key. Stepping down from
+    /// cruise must not request opposing intent during the tap window, on either axis.
+    #[test]
+    fn taps_step_both_signed_levers_without_flashing_opposing_intent() {
+        let feel = crate::track::drive::drive_feel();
+        // Fixture: two increments start at +50%; three decrements cross neutral to -25%.
+        for (positive, negative, throttle) in [
+            (KeyCode::KeyW, KeyCode::KeyS, true),
+            (KeyCode::KeyD, KeyCode::KeyA, false),
+        ] {
+            let mut script = DriveKeys::new();
+            let axis =
+                |v: crate::track::drive::DriveAxes| if throttle { v.throttle } else { v.steer };
+            assert_eq!(axis(script.tap(positive)), 0.25);
+            assert_eq!(axis(script.tap(positive)), 0.5);
+            for expected in [0.25, 0.0, -0.25] {
+                script.press(negative);
+                assert_eq!(axis(script.gather(0.0)), expected);
+                assert_eq!(axis(script.gather(feel.tap_window_s.0 / 2.0)), expected);
+                script.release(negative);
+                assert_eq!(axis(script.gather(0.0)), expected);
+                assert_eq!(
+                    axis(script.gather(feel.tap_window_s.0)),
+                    expected,
+                    "notch persists"
+                );
+            }
+        }
+    }
+
+    /// A hold owns the full axis after the window, then releases to coast/straight. Keeping the
+    /// previous notch here would leave the player's vehicle cruising or turning after release.
+    #[test]
+    fn a_hold_overrides_and_release_clears_each_notch() {
+        let window = crate::track::drive::drive_feel().tap_window_s.0;
+        for key in [KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD] {
+            let mut script = DriveKeys::new();
+            script.tap(key);
+            script.press(key);
+            let start = script.gather(0.0);
+            assert!(start.throttle.abs() == 0.5 || start.steer.abs() == 0.5);
+            let held = script.gather(window);
+            assert!(held.throttle.abs() == 1.0 || held.steer.abs() == 1.0);
+            script.release(key);
+            assert_eq!(
+                script.gather(0.0),
+                crate::track::drive::DriveAxes::default()
+            );
+            let next = script.tap(key);
+            assert!(next.throttle.abs() == 0.25 || next.steer.abs() == 0.25);
+        }
+    }
+
+    /// The keyboard feel contract includes the window and the pedal rise. A mutant that sends
+    /// full intent immediately, or waits for release to apply a notch, misses this derived time.
+    #[test]
+    fn a_hold_reaches_full_at_the_window_plus_remaining_pedal_travel() {
+        use crate::track::drive::{DriveAxes, drive_feel, shape_drive};
+        let feel = drive_feel();
+        let expected_s =
+            feel.tap_window_s.0 + f64::from((1.0 - feel.notch_step.0) / feel.rise_per_second.0);
+        let dt = 1.0 / 256.0; // Fixture: binary-exact sampling bounds the derived full time to one sample.
+        let mut script = DriveKeys::new();
+        script.press(KeyCode::KeyW);
+        let mut target = script.gather(0.0);
+        let mut axes = DriveAxes::default();
+        let mut elapsed = 0.0;
+        while axes.throttle < 1.0 {
+            assert!(
+                elapsed < expected_s + dt,
+                "hold must finish within its derived bound"
+            );
+            target = if elapsed == 0.0 {
+                target
+            } else {
+                script.gather(dt)
+            };
+            axes = shape_drive(axes, target, dt as f32);
+            elapsed += dt;
+        }
+        assert!(
+            (elapsed - expected_s).abs() <= dt,
+            "{elapsed} vs derived {expected_s}"
+        );
+        println!(
+            "MEASURED scripted hold full at {elapsed:.8} s; DERIVED continuous time {expected_s:.8} s"
+        );
+    }
+
+    /// The Driver must get neutral on the first opposing hold tick, rather than another tick
+    /// asking for forward motion. This covers the production gather-to-shaper boundary.
+    #[test]
+    fn a_reversal_hold_snaps_on_its_first_tick_after_the_tap_window() {
+        use crate::track::drive::{DriveAxes, drive_feel, shape_drive};
+        let mut script = DriveKeys::new();
+        script.tap(KeyCode::KeyW);
+        script.tap(KeyCode::KeyW);
+        script.press(KeyCode::KeyS);
+        let target = script.gather(0.0);
+        let axes = DriveAxes {
+            throttle: 0.5,
+            steer: 0.0,
+        }; // Fixture: forward cruise.
+        assert_eq!(target.throttle, 0.25);
+        let held = script.gather(drive_feel().tap_window_s.0);
+        assert_eq!(held.throttle, -1.0);
+        assert_eq!(shape_drive(axes, held, 1.0 / 64.0).throttle, 0.0); // Fixture tick.
+    }
+
+    /// Real devices may deliver both edges in one frame. That tap still counts once, and the
+    /// bounded wire axis must survive repeated taps, a chord, and a change of controlled body.
+    #[test]
+    fn subframe_taps_clamp_and_opposite_keys_or_possession_cancel_the_lever() {
+        let mut script = DriveKeys::new();
+        script.press(KeyCode::KeyW);
+        script.release(KeyCode::KeyW);
+        assert_eq!(script.gather(0.0).throttle, 0.25);
+        assert_eq!(script.gather(0.0).throttle, 0.25, "tap counts once");
+        for _ in 0..8 {
+            script.tap(KeyCode::KeyW);
+        } // Fixture: enough to exceed the bound.
+        assert_eq!(script.gather(0.0).throttle, 1.0);
+        script.press(KeyCode::KeyW);
+        script.press(KeyCode::KeyS);
+        assert_eq!(script.gather(0.0).throttle, 0.0);
+        script.release(KeyCode::KeyW);
+        script.release(KeyCode::KeyS);
+        script.gather(0.0);
+        script.tap(KeyCode::KeyW);
+        script.world.entity_mut(script.tank).remove::<Controlled>();
+        script.tank = script
+            .world
+            .spawn((Controlled, TankCommand::default()))
+            .id();
+        assert_eq!(
+            script.gather(0.0).throttle,
+            0.0,
+            "new body has no inherited cruise"
+        );
     }
 
     /// One intention, two frames, one point: [`AimIntent`]'s conversions are the seam every
@@ -1128,7 +1410,7 @@ mod tests {
         }
         let alive = std::mem::take(&mut app.world_mut().resource_mut::<TickReads>().0);
         assert!(
-            !alive.is_empty() && alive.iter().all(|command| command.throttle == 1.0),
+            !alive.is_empty() && alive.iter().all(|command| command.throttle == 0.25),
             "alive, every tick reads the gathered command: {alive:?}"
         );
 
@@ -1137,7 +1419,7 @@ mod tests {
         let reads = &app.world().resource::<TickReads>().0;
         assert_eq!(reads.len(), TICKS_PER_FRAME as usize, "{reads:?}");
         assert_eq!(
-            reads[0].throttle, 1.0,
+            reads[0].throttle, 0.25,
             "the latching tick read its command before the knockout: {reads:?}"
         );
         assert!(
@@ -1149,6 +1431,10 @@ mod tests {
         assert_eq!(
             *app.world().resource::<DeviceOwner>(),
             DeviceOwner::DeathFlow
+        );
+        assert_eq!(
+            app.world().resource::<DriveInput>().notches(),
+            crate::track::drive::DriveAxes::default()
         );
     }
 }

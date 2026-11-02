@@ -251,7 +251,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// it at the cone's unit over that share; a field below the pool quantum is recorded without
 /// doses. The scalar types stay unchanged, but a REV 66 client would read every cone's potency
 /// at the wrong unit.
-pub const PROTOCOL_REV: u32 = 67;
+/// REV 68 (#146, driving input): the client sends persistent signed notch intent and hold
+/// overrides; the server snaps opposing pedal signs to neutral. Wire types and surface are unchanged.
+pub const PROTOCOL_REV: u32 = 68;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.

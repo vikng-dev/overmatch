@@ -37,11 +37,39 @@ pub enum DriveIntent {
     Unmanned,
 }
 
-/// Command slew (per second): the vehicle's input shaping, separate from the transmission's belt dynamics —
-/// folding them changes keyboard feel and damage-recovery semantics.
-/// Provenance: adopted into the sandbox reference untuned; a playtest feel dial, not a physics
-/// constant.
-pub const DRIVE_SLEW_PER_SECOND: f32 = 4.0;
+/// Shared keyboard feel, admitted before play by the command core. The embedded data is also
+/// used by pure shaping callers (the track sandbox has no device gather).
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DriveFeel {
+    pub(crate) tap_window_s: crate::provenance::Sourced<f64>,
+    pub(crate) notch_step: crate::provenance::Sourced<f32>,
+    pub(crate) rise_per_second: crate::provenance::Sourced<f32>,
+}
+
+pub(crate) fn drive_feel() -> &'static DriveFeel {
+    static DATA: std::sync::LazyLock<DriveFeel> = std::sync::LazyLock::new(|| {
+        let data: DriveFeel = crate::provenance::from_shipped_str(
+            "assets/input/drive.ron",
+            include_str!("../../assets/input/drive.ron"),
+        )
+        .expect("assets/input/drive.ron: author tap_window_s, notch_step and rise_per_second with provenance");
+        assert!(
+            data.tap_window_s.0.is_finite() && data.tap_window_s.0 > 0.0,
+            "assets/input/drive.ron: tap_window_s must be finite and positive; author the tap/hold boundary"
+        );
+        assert!(
+            data.notch_step.0.is_finite() && data.notch_step.0 > 0.0 && data.notch_step.0 <= 1.0,
+            "assets/input/drive.ron: notch_step must be in (0, 1]; author a bounded lever step"
+        );
+        assert!(
+            data.rise_per_second.0.is_finite() && data.rise_per_second.0 > 0.0,
+            "assets/input/drive.ron: rise_per_second must be finite and positive; author the keyboard rise rate"
+        );
+        data
+    });
+    &DATA
+}
 
 /// Move `current` toward `target` by at most `step` — never overshoots, exact at the target.
 fn approach(current: f32, target: f32, step: f32) -> f32 {
@@ -52,13 +80,21 @@ fn approach(current: f32, target: f32, step: f32) -> f32 {
     }
 }
 
-/// One fixed tick of command slew: each axis approaches its target at
-/// [`DRIVE_SLEW_PER_SECOND`], independently (a reversal −1→+1 takes twice the 0→1 time).
+/// One fixed tick of pedal travel. Opposing nonzero signs snap to neutral for this tick;
+/// subsequent ticks approach the target at the authored keyboard rise rate. Release and
+/// same-sign notch changes use that same rate without overshoot.
 pub fn shape_drive(current: DriveAxes, target: DriveAxes, dt: f32) -> DriveAxes {
-    let step = DRIVE_SLEW_PER_SECOND * dt;
+    let step = drive_feel().rise_per_second.0 * dt;
+    let shape = |current: f32, target: f32| {
+        if current * target < 0.0 {
+            0.0
+        } else {
+            approach(current, target, step)
+        }
+    };
     DriveAxes {
-        throttle: approach(current.throttle, target.throttle, step),
-        steer: approach(current.steer, target.steer, step),
+        throttle: shape(current.throttle, target.throttle),
+        steer: shape(current.steer, target.steer),
     }
 }
 
@@ -80,6 +116,7 @@ impl DriveAxes {
 mod tests {
     use super::*;
 
+    // Fixture: the simulation tick used to exercise pedal travel.
     const DT: f32 = 1.0 / 64.0;
 
     #[test]
@@ -106,6 +143,31 @@ mod tests {
         }
         axes = shape_drive(axes, DriveAxes::default(), DT);
         assert_eq!(axes, DriveAxes::default());
+    }
+
+    /// The Driver must see neutral immediately on reversal; a slew through the previous sign
+    /// would keep asking for the old direction. Each axis reverses independently.
+    #[test]
+    fn reversal_snaps_to_zero_before_rising_in_the_new_direction() {
+        let current = DriveAxes {
+            throttle: 0.5,
+            steer: -0.75,
+        }; // Fixture.
+        let target = DriveAxes {
+            throttle: -1.0,
+            steer: 1.0,
+        };
+        let snapped = shape_drive(current, target, DT);
+        assert_eq!(snapped, DriveAxes::default());
+        let next = shape_drive(snapped, target, DT);
+        let step = drive_feel().rise_per_second.0 * DT;
+        assert_eq!(
+            next,
+            DriveAxes {
+                throttle: -step,
+                steer: step
+            }
+        );
     }
 
     #[test]

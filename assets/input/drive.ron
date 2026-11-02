@@ -1,0 +1,6 @@
+// Shared player keyboard feel; no vehicle-specific parameters.
+(
+    tap_window_s: (0.15, Taste("keyboard feel: duration separating a persistent notch tap from a full-axis hold")),
+    notch_step: (0.25, Taste("keyboard feel: signed lever increment for each short press")),
+    rise_per_second: (4.0, Taste("keyboard feel: pedal travel per second for notch changes, holds and release")),
+)

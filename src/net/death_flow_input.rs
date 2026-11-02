@@ -339,10 +339,10 @@ fn neutral(command: &TankCommand) -> bool {
     } == TankCommand::default()
 }
 
-/// The held levels: drive, sustained fire and the aim.
-fn live(command: &TankCommand) -> bool {
-    command.throttle == 1.0
-        && command.steer == 1.0
+/// The frame's drive levels, sustained fire and aim. The first notch precedes a full hold.
+fn live(command: &TankCommand, drive_level: f32) -> bool {
+    command.throttle == drive_level
+        && command.steer == drive_level
         && command.fire_secondary
         && command.aim.is_some()
 }
@@ -363,7 +363,7 @@ fn a_dead_tank_files_only_the_neutral_command() {
         alive.extend(step(&mut server, &mut client));
     }
     assert!(
-        alive.iter().all(|(_, command)| live(command)),
+        alive.iter().all(|(_, command)| live(command, 1.0)),
         "alive, the device's command is filed: {alive:?}"
     );
 
@@ -400,7 +400,8 @@ fn a_dead_tank_files_only_the_neutral_command() {
         );
     }
 
-    // A live status: the device's command on every tick of the frame.
+    // A live status: the reset lever starts at its first notch on every tick of this frame.
+    // Fixture: 0.25 is the shipped keyboard notch; old cruise must not survive the death flow.
     client
         .world_mut()
         .entity_mut(tank)
@@ -412,7 +413,7 @@ fn a_dead_tank_files_only_the_neutral_command() {
     );
     for (tick, command) in &respawned {
         assert!(
-            live(command),
+            live(command, 0.25),
             "the new life's tick {tick} filed {command:?}"
         );
     }
@@ -426,13 +427,13 @@ fn a_dead_tank_files_only_the_neutral_command() {
     }
     for (tick, command) in restored_on(&client, &ticks(&respawned)) {
         assert!(
-            live(&command),
+            live(&command, 0.25),
             "the new life's tick {tick} restored {command:?}"
         );
     }
     for (tick, command) in received_on(&server, &ticks(&respawned)) {
         assert!(
-            live(&command),
+            live(&command, 0.25),
             "the server received {command:?} for the new life's tick {tick}"
         );
     }
@@ -459,13 +460,15 @@ fn every_tick_of_a_frame_files_the_devices_command() {
     let mut keys = client.world_mut().resource_mut::<ButtonInput<KeyCode>>();
     keys.release(KeyCode::KeyW);
     keys.press(KeyCode::KeyS);
+    // Fixture: the new negative press starts at -0.25 during its tap window; the wire must
+    // retain that frame's value even after the device's later hold reaches -1.
     let reversed = step(&mut server, &mut client);
     assert!(
         reversed.len() > 1,
         "the reversing frame runs several ticks: {reversed:?}"
     );
     for (tick, command) in &reversed {
-        assert_eq!(command.throttle, -1.0, "tick {tick} filed {command:?}");
+        assert_eq!(command.throttle, -0.25, "tick {tick} filed {command:?}");
     }
 
     client
@@ -490,11 +493,11 @@ fn every_tick_of_a_frame_files_the_devices_command() {
         step(&mut server, &mut client);
     }
     for (tick, command) in restored_on(&client, &ticks(&reversed)) {
-        assert_eq!(command.throttle, -1.0, "tick {tick} restored {command:?}");
+        assert_eq!(command.throttle, -0.25, "tick {tick} restored {command:?}");
     }
     for (tick, command) in received_on(&server, &ticks(&reversed)) {
         assert_eq!(
-            command.throttle, -1.0,
+            command.throttle, -0.25,
             "the server received {command:?} for tick {tick}"
         );
     }

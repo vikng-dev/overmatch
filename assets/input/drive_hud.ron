@@ -1,0 +1,18 @@
+// HUD appearance. Every dimension and colour is a Taste in the drive-gauge look family.
+(
+    standard_font_px: (15.0, Taste("drive HUD look: compact ordinary drive row font")),
+    debug_font_px: (14.0, Taste("drive HUD look: compact debug and gauge label font")),
+    standard_bottom_px: (34.0, Taste("drive HUD look: drive row above the crew row")),
+    left_px: (10.0, Taste("drive HUD look: left screen margin")),
+    debug_top_px: (10.0, Taste("drive HUD look: debug top screen margin")),
+    debug_right_px: (12.0, Taste("drive HUD look: debug right screen margin")),
+    standard_rgb: ((0.92, 0.94, 0.78), Taste("drive HUD look: ordinary text and live notch highlight sRGB")),
+    debug_rgb: ((0.8, 0.75, 0.5), Taste("drive HUD look: debug text and gauge rail sRGB")),
+    gauge_bottom_px: (56.0, Taste("drive HUD look: notch gauges above the normal drive row")),
+    gauge_width_px: (120.0, Taste("drive HUD look: signed axis rail span")),
+    gauge_height_px: (10.0, Taste("drive HUD look: notch mark height")),
+    gauge_label_px: (40.0, Taste("drive HUD look: aligned throttle and steer labels")),
+    gauge_gap_px: (4.0, Taste("drive HUD look: separation between the two rails")),
+    rail_px: (1.0, Taste("drive HUD look: rail and neutral-reference stroke width")),
+    mark_px: (3.0, Taste("drive HUD look: live notch stroke width")),
+)

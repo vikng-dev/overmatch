@@ -249,7 +249,7 @@ pub(super) fn harness_setup(
         harness.t2,
         harness.throttle2,
         harness.steer2,
-        crate::track::drive::DRIVE_SLEW_PER_SECOND,
+        crate::track::drive::drive_feel().rise_per_second.0,
         fixed_time.timestep().as_secs_f64(),
         rig.weight_n,
     )
@@ -261,7 +261,7 @@ pub(super) fn harness_setup(
 
 /// Drive the scenario: zero input through warmup, then the scripted RAW command — the shared
 /// fixed-tick shaper slews it exactly as it slews a player's keys, so the ramp is part of the
-/// tested path (a `t2` reversal takes the same ~32 ticks a keyboard reversal does). Runs in
+/// tested path (a `t2` reversal snaps to neutral, then rises at the authored rate). Runs in
 /// FixedUpdate BEFORE the force systems, so phase boundaries (warmup end, `t2`) land on exact
 /// ticks regardless of frame pacing — one half of the harness's bit-repeatability (the other is
 /// the manual-duration clock). It overrides whatever `read_drive_input` wrote last frame.

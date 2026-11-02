@@ -171,7 +171,7 @@ const LEG_TIMEOUT_S: f32 = 25.0;
 /// DERIVED stopping advance (m, signed along the lane): full-brake stopping distance plus
 /// travel during the command slew. The estimate holds speed during that transition; it is a
 /// controller lookahead, and the evidence still checks actual lane overruns.
-fn stopping_advance(speed: f32, deceleration: f32) -> f32 {
+fn stopping_advance(speed: f32, deceleration: f32, fixed_dt: f32) -> f32 {
     if speed == 0.0 {
         return 0.0;
     }
@@ -179,7 +179,9 @@ fn stopping_advance(speed: f32, deceleration: f32) -> f32 {
         // These brakes cannot arrest the downslope load: reverse intent immediately.
         return f32::INFINITY.copysign(speed);
     }
-    let reversal_secs = 2.0 / crate::track::drive::DRIVE_SLEW_PER_SECOND;
+    // DERIVED: one neutral snap tick, then one full stroke in the opposite direction.
+    // The script authors raw commands, so the player's tap window is not part of this path.
+    let reversal_secs = fixed_dt + 1.0 / crate::track::drive::drive_feel().rise_per_second.0;
     speed * speed.abs() / (2.0 * deceleration) + speed * reversal_secs
 }
 
@@ -548,7 +550,7 @@ struct Runs {
 /// leg's throttle and steer, the held shot's aim and range, the main-gun edge when a shot comes
 /// due and the machine-gun level through a burst.
 fn drive(
-    time: Res<Time<Virtual>>,
+    (time, fixed_time): (Res<Time<Virtual>>, Res<Time<Fixed>>),
     plan: Option<Res<Plan>>,
     grid: Option<Res<HeightGrid>>,
     geometry: Res<crate::track::rig_geom::RigGeom>,
@@ -647,7 +649,11 @@ fn drive(
             (grid.height_at(front.x, front.y) - grid.height_at(rear.x, rear.y)) / (high - low)
         }); // A slab world has zero grade.
         let grade_sine = grade / (1.0 + grade * grade).sqrt();
-        let stop = stopping_advance(speed, gear.braking_deceleration(grade_sine, speed.signum()));
+        let stop = stopping_advance(
+            speed,
+            gear.braking_deceleration(grade_sine, speed.signum()),
+            fixed_time.timestep().as_secs_f32(),
+        );
         let timed_out = t - run.leg_since > LEG_TIMEOUT_S;
         let next = match run.leg {
             Leg::Forward if along + stop >= script.lane.length() || timed_out => Leg::Reverse,
@@ -1162,12 +1168,13 @@ mod ownership_tests {
     /// and request reversal immediately on a grade with no finite stopping distance.
     #[test]
     fn stopping_lookahead_uses_current_speed_and_braking_capability() {
-        let weak = stopping_advance(4.0, 1.0);
-        let strong = stopping_advance(4.0, 2.0);
+        let fixed_dt = 1.0 / 64.0; // Fixture simulation tick.
+        let weak = stopping_advance(4.0, 1.0, fixed_dt);
+        let strong = stopping_advance(4.0, 2.0, fixed_dt);
         assert!(strong < weak);
-        assert_eq!(stopping_advance(-4.0, 1.0), -weak);
-        assert_eq!(stopping_advance(0.0, 0.0), 0.0);
-        assert_eq!(stopping_advance(1.0, -0.1), f32::INFINITY);
+        assert_eq!(stopping_advance(-4.0, 1.0, fixed_dt), -weak);
+        assert_eq!(stopping_advance(0.0, 0.0, fixed_dt), 0.0);
+        assert_eq!(stopping_advance(1.0, -0.1, fixed_dt), f32::INFINITY);
     }
 
     /// In the game's damage model, evidence follows the struck volume's owner even when the

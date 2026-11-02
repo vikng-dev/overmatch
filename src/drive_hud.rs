@@ -1,7 +1,7 @@
-//! Shared controlled-tank drive HUD for the offline and predicted-network clients.
+//! Shared controlled-tank drive HUD for the offline and server-stream clients.
 //!
-//! This is view state only: it reads rollback/predicted components in `Update`, owns one local F3
-//! toggle, and writes only UI [`Text`] / [`Visibility`]. It never writes a tank component or enters a
+//! This is view state only: it reads server-stream components in `Update`, owns one local F3
+//! toggle, and writes only UI text, nodes and visibility. It never writes a tank component or enters a
 //! fixed schedule.
 
 use avian3d::prelude::{LinearVelocity, Rotation};
@@ -12,6 +12,90 @@ use crate::tank::Controlled;
 use crate::track::sim::{DriveSignal, TankTransmission, TrackDrive, TrackGear};
 use crate::track::transmission::{DriveReadout, SchedulerState, TransmissionState, readout};
 use crate::ui_font::{UiFonts, set_text};
+
+/// HUD look is authored data; positions and colours are tastes, never drivetrain parameters.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HudLook {
+    standard_font_px: crate::provenance::Sourced<f32>,
+    debug_font_px: crate::provenance::Sourced<f32>,
+    standard_bottom_px: crate::provenance::Sourced<f32>,
+    left_px: crate::provenance::Sourced<f32>,
+    debug_top_px: crate::provenance::Sourced<f32>,
+    debug_right_px: crate::provenance::Sourced<f32>,
+    standard_rgb: crate::provenance::Sourced<[f32; 3]>,
+    debug_rgb: crate::provenance::Sourced<[f32; 3]>,
+    gauge_bottom_px: crate::provenance::Sourced<f32>,
+    gauge_width_px: crate::provenance::Sourced<f32>,
+    gauge_height_px: crate::provenance::Sourced<f32>,
+    gauge_label_px: crate::provenance::Sourced<f32>,
+    gauge_gap_px: crate::provenance::Sourced<f32>,
+    rail_px: crate::provenance::Sourced<f32>,
+    mark_px: crate::provenance::Sourced<f32>,
+}
+
+fn hud_look() -> &'static HudLook {
+    static LOOK: std::sync::LazyLock<HudLook> = std::sync::LazyLock::new(|| {
+        let look: HudLook = crate::provenance::from_shipped_str(
+            "assets/input/drive_hud.ron",
+            include_str!("../assets/input/drive_hud.ron"),
+        )
+        .expect(
+            "assets/input/drive_hud.ron: author all HUD dimensions and colours with provenance",
+        );
+        for (field, value) in [
+            ("standard_font_px", look.standard_font_px.0),
+            ("debug_font_px", look.debug_font_px.0),
+            ("standard_bottom_px", look.standard_bottom_px.0),
+            ("left_px", look.left_px.0),
+            ("debug_top_px", look.debug_top_px.0),
+            ("debug_right_px", look.debug_right_px.0),
+            ("gauge_bottom_px", look.gauge_bottom_px.0),
+            ("gauge_width_px", look.gauge_width_px.0),
+            ("gauge_height_px", look.gauge_height_px.0),
+            ("gauge_label_px", look.gauge_label_px.0),
+            ("gauge_gap_px", look.gauge_gap_px.0),
+            ("rail_px", look.rail_px.0),
+            ("mark_px", look.mark_px.0),
+        ] {
+            assert!(
+                value.is_finite() && value > 0.0,
+                "assets/input/drive_hud.ron: {field} must be finite and positive; author a HUD dimension"
+            );
+        }
+        assert!(
+            look.mark_px.0 <= look.gauge_width_px.0 && look.rail_px.0 <= look.gauge_height_px.0,
+            "assets/input/drive_hud.ron: mark_px and rail_px must fit gauge_width_px and gauge_height_px; shrink the marks or enlarge the gauge"
+        );
+        for (field, rgb) in [
+            ("standard_rgb", look.standard_rgb.0),
+            ("debug_rgb", look.debug_rgb.0),
+        ] {
+            assert!(
+                rgb.into_iter()
+                    .all(|v| v.is_finite() && (0.0..=1.0).contains(&v)),
+                "assets/input/drive_hud.ron: {field} must contain finite channels in [0, 1]; author an sRGB colour"
+            );
+        }
+        look
+    });
+    &LOOK
+}
+
+#[derive(Component)]
+struct DriveNotchGauge;
+
+#[derive(Component, Clone, Copy)]
+enum NotchMark {
+    Throttle,
+    Steer,
+}
+
+/// The signed bounded axis maps onto the usable rail, keeping the full mark inside both ends.
+fn notch_left(value: f32) -> f32 {
+    let look = hud_look();
+    (value + 1.0) / 2.0 * (look.gauge_width_px.0 - look.mark_px.0)
+}
 
 /// The normal-play drive row. One instance is mounted by this plugin in both client roots.
 #[derive(Component)]
@@ -27,11 +111,12 @@ struct DriveDebugVisible(bool);
 
 pub(crate) fn plugin(app: &mut App) {
     crate::flow::require(app, "drive_hud");
+    hud_look();
     app.init_match_resource::<DriveDebugVisible>()
         .add_systems(OnEnter(Flow::InMatch), spawn_drive_hud)
         .add_systems(
             Update,
-            (toggle_drive_debug, update_drive_hud)
+            (toggle_drive_debug, update_drive_hud, update_notch_gauge)
                 .chain()
                 .in_set(InMatchSystems),
         );
@@ -44,6 +129,11 @@ pub(crate) fn mount_layout_test(app: &mut App) {
 }
 
 fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
+    let look = hud_look();
+    let [r, g, b] = look.standard_rgb.0;
+    let standard_color = Color::srgb(r, g, b);
+    let [r, g, b] = look.debug_rgb.0;
+    let debug_color = Color::srgb(r, g, b);
     // Bottom-left, one line above `crew_ui`'s crew row (bottom 10 px). This is ordinary HUD, not an
     // overlay: its fixed-HUD layer sits below the overlay authority's layers, and its dock
     // reserves space for modal HUD content.
@@ -54,14 +144,14 @@ fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
         Text::new(""),
         TextFont {
             font: fonts.body.clone().into(),
-            font_size: FontSize::Px(15.0),
+            font_size: FontSize::Px(look.standard_font_px.0),
             ..default()
         },
-        TextColor(Color::srgb(0.92, 0.94, 0.78)),
+        TextColor(standard_color),
         Node {
             position_type: PositionType::Absolute,
-            bottom: Val::Px(34.0),
-            left: Val::Px(10.0),
+            bottom: Val::Px(look.standard_bottom_px.0),
+            left: Val::Px(look.left_px.0),
             ..default()
         },
         Visibility::Hidden,
@@ -75,18 +165,96 @@ fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
         Text::new(""),
         TextFont {
             font: fonts.body.clone().into(),
-            font_size: FontSize::Px(14.0),
+            font_size: FontSize::Px(look.debug_font_px.0),
             ..default()
         },
-        TextColor(Color::srgb(0.8, 0.75, 0.5)),
+        TextColor(debug_color),
         Node {
             position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
-            right: Val::Px(12.0),
+            top: Val::Px(look.debug_top_px.0),
+            right: Val::Px(look.debug_right_px.0),
             ..default()
         },
         Visibility::Hidden,
     ));
+    commands
+        .spawn((
+            FlowScoped(Flow::InMatch),
+            DriveNotchGauge,
+            crate::hud::HudDock::Fixed,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(look.left_px.0),
+                bottom: Val::Px(look.gauge_bottom_px.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(look.gauge_gap_px.0),
+                ..default()
+            },
+            Visibility::Hidden,
+        ))
+        .with_children(|gauge| {
+            for (label, axis) in [("THR", NotchMark::Throttle), ("STEER", NotchMark::Steer)] {
+                gauge
+                    .spawn(Node {
+                        align_items: AlignItems::Center,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn((
+                            Text::new(label),
+                            TextFont {
+                                font: fonts.body.clone().into(),
+                                font_size: FontSize::Px(look.debug_font_px.0),
+                                ..default()
+                            },
+                            TextColor(standard_color),
+                            Node {
+                                width: Val::Px(look.gauge_label_px.0),
+                                ..default()
+                            },
+                        ));
+                        row.spawn(Node {
+                            width: Val::Px(look.gauge_width_px.0),
+                            height: Val::Px(look.gauge_height_px.0),
+                            ..default()
+                        })
+                        .with_children(|rail| {
+                            rail.spawn((
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    top: Val::Px((look.gauge_height_px.0 - look.rail_px.0) / 2.0),
+                                    width: Val::Px(look.gauge_width_px.0),
+                                    height: Val::Px(look.rail_px.0),
+                                    ..default()
+                                },
+                                BackgroundColor(debug_color),
+                            ));
+                            // The neutral reference and the live notch are shapes, not font glyphs.
+                            rail.spawn((
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    left: Val::Px((look.gauge_width_px.0 - look.rail_px.0) / 2.0),
+                                    width: Val::Px(look.rail_px.0),
+                                    height: Val::Px(look.gauge_height_px.0),
+                                    ..default()
+                                },
+                                BackgroundColor(debug_color),
+                            ));
+                            rail.spawn((
+                                axis,
+                                Node {
+                                    position_type: PositionType::Absolute,
+                                    left: Val::Px(notch_left(0.0)),
+                                    width: Val::Px(look.mark_px.0),
+                                    height: Val::Px(look.gauge_height_px.0),
+                                    ..default()
+                                },
+                                BackgroundColor(standard_color),
+                            ));
+                        });
+                    });
+            }
+        });
 }
 
 /// Pure toggle transition used by the input system and the offline HUD regression tests.
@@ -173,7 +341,7 @@ pub(crate) fn steering_hud_line(
     format!("STEER {detent} R~{radius:.0}m")
 }
 
-/// Rebuild both shared HUD surfaces from the controlled tank's predicted/tick-truth components.
+/// Rebuild both shared HUD surfaces from the controlled tank's server-stream components.
 /// The standard row is always visible once a controlled body exists; detailed formatting is skipped
 /// entirely while F3 is closed.
 fn update_drive_hud(
@@ -265,4 +433,83 @@ fn update_drive_hud(
         signal.steer,
     );
     set_text(debug_text.reborrow(), &debug);
+}
+
+/// A retained notch is local input feedback. Hide the gauge during spawn/possession gaps and the
+/// death flow; the client input state is reset there rather than inherited by another body.
+fn update_notch_gauge(
+    input: Res<crate::command::DriveInput>,
+    controlled: Query<Has<crate::damage::TankKnockedOut>, With<Controlled>>,
+    mut gauges: Query<&mut Visibility, With<DriveNotchGauge>>,
+    mut marks: Query<(&NotchMark, &mut Node)>,
+) {
+    let visible = crate::tank::controlled_one(controlled.single()).is_some_and(|dead| !dead);
+    for mut visibility in &mut gauges {
+        visibility.set_if_neq(if visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        });
+    }
+    let notches = input.notches();
+    for (axis, mut node) in &mut marks {
+        let value = match axis {
+            NotchMark::Throttle => notches.throttle,
+            NotchMark::Steer => notches.steer,
+        };
+        node.left = Val::Px(notch_left(value));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// Players need both signed lever positions, including neutral and both bounds. The marks
+    /// stay inside the rails and follow independent axes through the real gather and HUD systems.
+    #[test]
+    fn gauge_marks_follow_the_two_local_notches_and_hide_without_a_body() {
+        let mut world = World::new();
+        world.insert_resource(UiFonts {
+            hud: Handle::default(),
+            body: Handle::default(),
+        });
+        world.insert_resource(crate::command::Bindings::default());
+        world.insert_resource(crate::command::DriveInput::default());
+        world.insert_resource(crate::firecontrol::Ranging::default());
+        world.insert_resource(Time::<Real>::default());
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+        world.insert_resource(ButtonInput::<MouseButton>::default());
+        world.run_system_once(spawn_drive_hud).unwrap();
+        let tank = world
+            .spawn((Controlled, crate::command::TankCommand::default()))
+            .id();
+        for key in [KeyCode::KeyW, KeyCode::KeyA] {
+            world.resource_mut::<ButtonInput<KeyCode>>().press(key);
+            world.resource_mut::<ButtonInput<KeyCode>>().release(key);
+        }
+        world
+            .run_system_once(crate::command::gather_commands)
+            .unwrap();
+        world.run_system_once(update_notch_gauge).unwrap();
+        let mut marks = world.query::<(&NotchMark, &Node)>();
+        assert_eq!(marks.iter(&world).count(), 2);
+        for (axis, node) in marks.iter(&world) {
+            let expected = match axis {
+                NotchMark::Throttle => 0.25,
+                NotchMark::Steer => -0.25,
+            }; // Fixture tap.
+            assert_eq!(node.left, Val::Px(notch_left(expected)));
+        }
+        assert_eq!(notch_left(-1.0), 0.0);
+        let span = hud_look().gauge_width_px.0 - hud_look().mark_px.0;
+        assert_eq!(notch_left(0.0), span / 2.0);
+        assert_eq!(notch_left(1.0), span);
+        let mut gauge = world.query_filtered::<&Visibility, With<DriveNotchGauge>>();
+        assert_eq!(*gauge.single(&world).unwrap(), Visibility::Visible);
+        world.entity_mut(tank).remove::<Controlled>();
+        world.run_system_once(update_notch_gauge).unwrap();
+        assert_eq!(*gauge.single(&world).unwrap(), Visibility::Hidden);
+    }
 }
