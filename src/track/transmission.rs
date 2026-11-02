@@ -1145,7 +1145,7 @@ pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout 
 pub struct DriveSupply {
     pub control_authority: bool,
     pub task_rate: f32,
-    /// The engine's held HP share; the idle governor reads its own source condition.
+    /// The engine's held HP share; the power readout reads its own source condition.
     pub engine_condition: f32,
     /// The transmission's held HP share; clutch and steering capacity read this source.
     pub transmission_condition: f32,
@@ -1293,13 +1293,23 @@ fn engine_torques(
     let rpm = omega / RPM_TO_RAD;
     let curve = tp.torque_at(rpm);
     let induced = supply.task_rate * (command * curve + released * drag * tp.fuel_cut(rpm));
-    let idle_capacity = supply.engine_condition * tp.torque_at(tp.engine.idle_rpm);
+    let idle_capacity = idle_catch_capacity(tp, supply);
     let catch = (idle_capacity * (tp.engine.idle_rpm * RPM_TO_RAD - omega)
         / (engine_control().idle_catch_droop_rpm.value * RPM_TO_RAD))
         .clamp(0.0, idle_capacity)
         .min(curve + drag);
     // Both requests move one rack; the catch supplies only what the command has not supplied.
     [induced, (catch - induced).max(0.0), drag]
+}
+
+/// The game's driving and damage model: the Driver's idle catch is work by the Drive task,
+/// requiring control authority and consuming its throughput once, like commanded fueling.
+fn idle_catch_capacity(tp: &TransmissionParams, supply: DriveSupply) -> f32 {
+    if supply.control_authority {
+        supply.task_rate * tp.torque_at(tp.engine.idle_rpm)
+    } else {
+        0.0
+    }
 }
 
 /// Full-throttle mean-axis force available in one gear at the current signed shaft speed. The
@@ -2775,7 +2785,7 @@ fn settle_crank(
 /// The crank's two guard points this tick (rad/s): the stall floor and the over-rev bound.
 ///
 /// The game's damage model: the stall guard protects an engine that can idle, whose saturated
-/// idle governor exceeds its motoring drag at the guard point. An engine short of that (no
+/// Driver-operated catch exceeds its motoring drag at the guard point. An engine short of that (no
 /// combustion, or too little) has nothing to guard, so its floor is rest: the crank runs down
 /// under drag or follows the belt through the clutch, and the guard never pulls the belt to
 /// hold a crank speed the engine cannot.
@@ -2792,8 +2802,7 @@ fn crank_guards(
 ) -> (f32, f32) {
     let guard_point =
         (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value) * RPM_TO_RAD;
-    let can_idle = inp.supply.engine_condition * tp.torque_at(tp.engine.idle_rpm)
-        > engine_drag(tp, guard_point);
+    let can_idle = idle_catch_capacity(tp, inp.supply) > engine_drag(tp, guard_point);
     let floor = if st.clutch == ClutchState::Slip && tau_free > 0.0 {
         tp.launch_omega(propulsive)
     } else if can_idle {

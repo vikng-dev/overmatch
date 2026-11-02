@@ -4113,3 +4113,89 @@ fn empty_station_shift_window_expires_into_motoring_drag() {
     assert_eq!(st.clutch, ClutchState::In);
     assert!(report.forces.into_iter().all(|force| force < 0.0));
 }
+
+/// The game's driving and damage model: the idle catch is operator work, subject to the
+/// Drive task rate. A whole engine alone cannot supply it to propulsion or a neutral pivot.
+#[test]
+fn idle_catch_requires_working_controls() {
+    for tp in [lab_tp(), tiger_tp()] {
+        let omega = (tp.engine.idle_rpm - engine_control().idle_guard_band_rpm.value) * RPM_TO_RAD;
+        // Fixture: absent authority, absent task throughput, and their independent corners.
+        for (control_authority, task_rate) in [(false, 0.0), (false, 1.0), (true, 0.0)] {
+            let supply = DriveSupply {
+                control_authority,
+                task_rate,
+                ..DriveSupply::WHOLE
+            };
+            let [fuel, catch, drag] = engine_torques(&tp, supply, omega, 0.0);
+            assert_eq!(
+                catch, 0.0,
+                "catch requires authority and throughput: {supply:?}"
+            );
+            assert_eq!(fuel, 0.0);
+            assert!(drag > 0.0);
+        }
+    }
+}
+
+/// The game's driving and damage model: losing the Driver must remove the catch from a
+/// moving, engaged clutch. A staffed zero-rate pivot may spend crank inertia but cannot refill it.
+#[test]
+fn zero_rate_catch_cannot_sustain_lug_or_pivot() {
+    for tp in [lab_tp(), tiger_tp()] {
+        let fp = lab_fp();
+        // Fixture: both reviews' whole drivetrain, zero task rate; a slow engaged coast or pivot.
+        for (authority, throttle, steer, speeds) in
+            [(true, 0.0, 1.0, [0.0; 2]), (false, 0.0, 0.0, [0.1; 2])]
+        {
+            let mut st = TransmissionState {
+                clutch: ClutchState::In,
+                ..fresh(&tp)
+            };
+            let mut inp = input(throttle, steer, speeds, [0.0; 2]);
+            inp.supply.control_authority = authority;
+            inp.supply.task_rate = 0.0;
+            let mut last = TransmissionReport::default();
+            for _ in 0..64 * 4 {
+                last = step(&fp, &tp, &mut st, &inp);
+            }
+            if authority {
+                assert_eq!(st.omega_e, 0.0, "a zero-rate pivot cannot sustain idle");
+                assert_eq!(last.forces, [0.0; 2], "stored crank energy is finite");
+            } else {
+                assert_eq!(st.clutch, ClutchState::In);
+                assert!(
+                    last.forces.into_iter().all(|force| force < 0.0),
+                    "a slow coast must receive drag, not catch propulsion: {:?}",
+                    last.forces
+                );
+            }
+        }
+    }
+}
+
+/// The game's driving and damage model: the neutral lever and park lever persist without
+/// authority, but neither creates idle fuel. The stopped tank must remain held inside capacity.
+#[test]
+fn empty_station_at_rest_retains_park_while_crank_runs_down() {
+    for tp in [lab_tp(), tiger_tp()] {
+        let fp = lab_fp();
+        let mut st = TransmissionState {
+            park: true,
+            ..fresh(&tp)
+        };
+        let mut inp = input(0.0, 0.0, [0.0; 2], [1000.0; 2]); // Fixture grade inside brake capacity.
+        inp.supply.control_authority = false;
+        inp.supply.task_rate = 0.0;
+        for _ in 0..64 * 4 {
+            let report = step(&fp, &tp, &mut st, &inp);
+            assert_eq!(st.clutch, ClutchState::Out);
+            assert!(st.park);
+            assert_eq!(report.next_speeds, [0.0; 2]);
+        }
+        assert_eq!(
+            st.omega_e, 0.0,
+            "without fuel, construction drag stops the crank"
+        );
+    }
+}
