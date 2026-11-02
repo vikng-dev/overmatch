@@ -167,7 +167,6 @@ pub(super) enum SaveOperation {
     CreateDirectory,
     Write,
     Replace,
-    SyncDirectory,
 }
 
 impl std::fmt::Display for SaveOperation {
@@ -176,7 +175,6 @@ impl std::fmt::Display for SaveOperation {
             Self::CreateDirectory => "create directory",
             Self::Write => "write temporary file",
             Self::Replace => "replace settings file",
-            Self::SyncDirectory => "sync settings directory",
         })
     }
 }
@@ -361,13 +359,12 @@ fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// Atomically replace settings: serialize, write a pid-unique sibling, sync its bytes, rename,
-/// then sync the directory on Unix. Pid uniqueness prevents one game instance renaming another's
+/// then best-effort sync the directory on Unix. Pid uniqueness prevents one game instance renaming another's
 /// partial write; last-writer-wins needs no lock. Sync before rename avoids ext4 delayed-allocation
 /// zero-length files after power loss. `F_FULLFSYNC` is deliberately excluded: SQLite measures it
 /// as profoundly slow, while reverting to the previous whole file is acceptable here.
 ///
-/// Errors retain their cause for the page and logs. A directory-sync failure occurs after the file
-/// was replaced: the bytes are written, but power-loss durability is unconfirmed.
+/// Errors retain their cause for the page and logs.
 pub(super) fn save<'a>(path: Option<&'a Path>, settings: &Settings) -> Result<&'a Path, SaveError> {
     use std::io::Write;
 
@@ -402,9 +399,13 @@ pub(super) fn save<'a>(path: Option<&'a Path>, settings: &Settings) -> Result<&'
         return Err(error);
     }
     #[cfg(unix)]
-    std::fs::File::open(dir)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| SaveError::io(SaveOperation::SyncDirectory, dir, error))?;
+    // Best-effort rename durability: filesystems rejecting directory sync have still saved the file.
+    if let Err(error) = std::fs::File::open(dir).and_then(|directory| directory.sync_all()) {
+        bevy::log::debug!(
+            "settings: saved {}, directory sync unavailable ({error})",
+            path.display()
+        );
+    }
     Ok(path)
 }
 

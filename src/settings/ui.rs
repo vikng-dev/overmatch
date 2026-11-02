@@ -646,10 +646,6 @@ fn save_failure_text(error: &super::store::SaveError) -> &'static str {
     match error {
         SaveError::NoLocation => "Settings not saved: your config folder is unavailable.",
         SaveError::InvalidPath(_) => "Settings not saved: the config file path is invalid.",
-        SaveError::Io {
-            operation: SaveOperation::SyncDirectory,
-            ..
-        } => "Settings written, but disk sync failed. Power-loss recovery is uncertain.",
         SaveError::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied => {
             "Settings not saved: permission denied. Check your config folder permissions."
         }
