@@ -1506,13 +1506,14 @@ pub(crate) struct ResolveContext<'a, 'w, 's> {
 /// The game's damage model: the resisting force (N, the force law's dE/dx in J/m) the struck body
 /// puts on `round` at first contact, and the tank that owns it; what an impact fuze reads
 /// ([`super::burst::Fuze::entered`]). The force is the disc mean of the entrance walk's first
-/// occupied encounter, each sample's factor read by the union law the advance reads
-/// ([`super::mechanism::overlap_factor`]), so a rim sample off the body pulls the mean down. `None`
+/// occupied encounter, with the crossing's slope charge and the advance's union law for each
+/// sample's factor ([`super::mechanism::overlap_factor`]), so a rim sample off the body pulls the mean down. `None`
 /// when the flight has no established disc or the walk meets nothing.
 pub(crate) fn entry_force(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
     round: &SolidShot,
+    preset: crate::rounds::ContactPreset,
     flight: &Flight,
     contact: f32,
 ) -> Result<Option<(f64, Option<Entity>)>, WalkError> {
@@ -1530,9 +1531,10 @@ pub(crate) fn entry_force(
         &interior.seeds,
         contact + ENTRANCE_SPAN,
     )?;
-    let Some(event) = entrance.events.first() else {
+    let Some(hand_off) = entrance.hand_off()? else {
         return Ok(None);
     };
+    let event = hand_off.read;
     let Some(encounter) = event.encounters.first() else {
         return Ok(None);
     };
@@ -1548,7 +1550,11 @@ pub(crate) fn entry_force(
         .get(event.entrance_volume)
         .ok()
         .map(|owner| owner.tank());
-    Ok(Some((round.resisting_force(flight.speed, factor), owner)))
+    let charge = event.slope_charge(entrance.axis, preset, &context.laws);
+    Ok(Some((
+        round.resisting_force(flight.speed, factor) * charge,
+        owner,
+    )))
 }
 
 /// Decide one crossing of the union field from first contact, with no consequence applied:

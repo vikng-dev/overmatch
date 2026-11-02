@@ -3358,9 +3358,15 @@ fn decide_playback(
                 trigger: crate::rounds::fuze::Trigger::Impact { .. },
                 ..
             }) = fuze
-                && let Some((force, owner)) =
-                    resolve::entry_force(context, admit, &shell.projectile.round, &flight, distance)
-                        .unwrap_or_else(|error| error.panic())
+                && let Some((force, owner)) = resolve::entry_force(
+                    context,
+                    admit,
+                    &shell.projectile.round,
+                    shell.projectile.contact,
+                    &flight,
+                    distance,
+                )
+                .unwrap_or_else(|error| error.panic())
             {
                 fuze.entered(force, flight.speed, owner, distance);
                 entered = Some((force, owner, flight.speed, distance));
@@ -3503,9 +3509,15 @@ fn function_on_contact(
         return None;
     };
     // The game's damage model reads the same certified entrance as the crossing driver.
-    let (force, owner) =
-        resolve::entry_force(context, not_own, &shell.projectile.round, flight, contact)
-            .unwrap_or_else(|error| error.panic())?;
+    let (force, owner) = resolve::entry_force(
+        context,
+        not_own,
+        &shell.projectile.round,
+        shell.projectile.contact,
+        flight,
+        contact,
+    )
+    .unwrap_or_else(|error| error.panic())?;
     shell
         .projectile
         .fuze

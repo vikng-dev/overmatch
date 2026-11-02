@@ -3476,3 +3476,87 @@ fn a_kept_carrier_skid_reads_one_body_for_work_and_impulse() {
         mass * (*bounce.incoming * bounce.speed_in - *bounce.direction * bounce.speed);
     assert!((bounce.impulse - expected_impulse).length() < 1.0e-3);
 }
+
+/// The game's damage model: impact fuzes read dE/dx along real travel, including slope charge.
+/// Mutant: an uncharged entrance force misses a sensitivity between F and qF.
+#[test]
+fn impact_fuze_reads_the_charged_entry_force() {
+    // Fixture geometry: a biting 30-degree face; both reads meet the same leading samples.
+    let mut app = world_with_trimesh_plates(&[]);
+    let angle = 30.0_f32.to_radians();
+    let rotation = Quat::from_rotation_z(angle);
+    volume(
+        &mut app,
+        Vec3::new(12.0, 0.01, 3.0),
+        Transform::from_translation(
+            Vec3::new(DROP_FROM.x, 1.0, DROP_FROM.z) - rotation * Vec3::Y * 0.005,
+        )
+        .with_rotation(rotation),
+        STEEL,
+        None,
+    );
+    for _ in 0..8 {
+        app.update();
+    }
+    let (force, uncharged) = app
+        .world_mut()
+        .run_system_once(|world: ProjectileMarchWorld, colliders: Colliders| {
+            let context = ResolveContext {
+                world: &world,
+                colliders: &colliders,
+                deposit: false,
+                laws: WalkLaws::default(),
+            };
+            let mut flight = Flight {
+                position: DROP_FROM,
+                direction: Dir3::NEG_Y,
+                speed: SPEED,
+                frame: DiscFrame::anchored(Vec3::NEG_Y).unwrap(),
+                continuation: None,
+                membership: Membership::Required,
+            };
+            flight
+                .settle(&context, &|_| true, disc_radius(ROUND.caliber))
+                .unwrap();
+            let force = |preset| {
+                entry_force(
+                    &context,
+                    &|_| true,
+                    &bound(ROUND),
+                    preset,
+                    &flight,
+                    DROP_FROM.y - 1.0,
+                )
+                .unwrap()
+                .expect("the fixture face is occupied")
+                .0
+            };
+            let preset = crate::rounds::ContactPreset::fixture();
+            (
+                force(preset),
+                force(crate::rounds::ContactPreset {
+                    slope_tan: 0.0,
+                    ..preset
+                }),
+            )
+        })
+        .unwrap();
+    let preset = crate::rounds::ContactPreset::fixture();
+    let charge = 1.0 / (1.0 - f64::from(angle.tan() * preset.slope_tan));
+    assert!((force / uncharged - charge).abs() < 1.0e-6);
+    let sensitivity = 0.5 * (uncharged + uncharged * charge);
+    assert!(uncharged < sensitivity && force > sensitivity);
+    let burst = crate::rounds::RoundRegistry::shipped()
+        .get("88mm_HE")
+        .unwrap()
+        .burst
+        .unwrap();
+    let mut fuze = super::super::burst::Fuze::Unarmed(super::super::burst::Burst {
+        trigger: crate::rounds::fuze::Trigger::Impact {
+            sensitivity_n: sensitivity as f32,
+        },
+        ..burst
+    });
+    fuze.entered(force, SPEED, None, 0.0);
+    assert!(matches!(fuze, super::super::burst::Fuze::Armed { .. }));
+}

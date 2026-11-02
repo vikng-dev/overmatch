@@ -2147,6 +2147,22 @@ pub struct DiscEvent {
     pub runs: Vec<(usize, usize)>,
 }
 
+impl DiscEvent {
+    /// The game's damage model charges resistance and entry force along the same real ray.
+    pub(crate) fn slope_charge(
+        &self,
+        axis: Vec3,
+        preset: crate::rounds::ContactPreset,
+        laws: &WalkLaws,
+    ) -> f64 {
+        super::mechanism::slope_charge(
+            axis.dot(self.entry_normal).abs().clamp(0.0, 1.0),
+            preset.slope_tan,
+            self.entrance_factor / laws.rha_reference,
+        )
+    }
+}
+
 /// Every crossing the disc corridor met, in order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiscWalk {
@@ -3120,7 +3136,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         normal,
         coverage: event.coverage,
         steel_equivalent,
-        slope_charge: super::mechanism::slope_charge(along_normal, shot.contact.slope_tan, factor),
+        slope_charge: event.slope_charge(entrance.axis, shot.contact, laws),
     };
 
     let axis = Dir3::new(entrance.axis).expect(
