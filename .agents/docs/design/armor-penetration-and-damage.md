@@ -160,7 +160,8 @@ coefficient has no speed dependence. These are provisional game tuning anchors.
 
 The data gives APCBC a **4-crh** flight ogive over its **1-crh** hit ogive (TUNED, accepted
 starting point); AP keeps its fixture hit nose and flies on a **6-crh** ogive (ASSUMED typical
-pointed bullet, not a measured shape). APCR retains its blunt flight nose and kept carrier.
+pointed bullet, not a measured shape). APCR flies on its pointed ballistic cap: **4 crh** is
+Unknown pending a dimensioned cap drawing; its blunt hit nose and kept carrier remain independent.
 Flight and hit proxies are independent data; a round's own nose override changes only the hit
 proxy. A discarded carrier resolves the runtime flying body to its penetrator for drag, visual
 size and delivered momentum. The launched assembly remains available for recoil and domain
@@ -177,10 +178,13 @@ Subject: the game's damage model; game state only. The accepted proxy and its ev
 
 At the first crossing, read the covered-sample steel-equivalent thickness along its normal `t_n`,
 the entrance factor over the reference `f`, contact calibre `d`, speed `v` and type density `ρ`.
-A round skids iff `ρ v² cos²θ < R_eff sin θ`, where `R_eff = min(f R, 4τ t_n/d)`.
+A round skids iff `ρ v² cos²θ < R_eff sin θ`, where `R_eff = min(f R, 4τ x sqrt(x/s))`,
+`x = t_n/d` and `s = R/(4τ)`.
 `R` is the march reference steel's cavity strength, `τ = Y/√3` its shear flow stress. The exact
 constants 4 and √3 are plug shear and von Mises respectively. The axis-normal dot gives cos θ;
-`sqrt(1 − cos²θ)` gives sin θ without runtime trigonometry in the decision.
+`sqrt(1 − cos²θ)` gives sin θ without runtime trigonometry in the decision. The thin branch is a
+StandIn for plate capacity below one calibre, named in the proxy note; it joins the reference bulk
+resistance continuously at `x = s`.
 
 A skid retains the shipped mirror direction and speed `v sin θ`, blended by coverage; it does
 not enter or throw spall. Work and impulse both read the current flying assembly. Directional
@@ -196,17 +200,21 @@ can throw a spall cone.
 Subject: the game's damage model; game state only. The required per-type `contact_density` and
 `slope_penalty_deg` in `assets/ballistics/round_types.ron` stand in for deformation and shatter;
 the penalty is converted once at load to tan β. No per-round construction field or separate cap
-term is used. The capped density rests on one measured round; the proxy note owns the basis.
+term is used. Capped and uncapped steel share density 6000 kg/m³: every surveyed firing row is a
+bite and bounds density only from below. A capped/uncapped pair at t/d ≥ 1.6, θ ≥ 40° and speed
+≥ 600 m/s would settle a capped premium. APCR's 16.5° penalty restates the survey ratios in this
+charge's form, with no new firing rows; the proxy note owns the basis.
 
 The resistance charge is `cos θ / (cos θ − sin θ tan β)`, exactly one head-on. At a denominator
 at or below `cos θ / CEILING`, it is `CEILING`: Resolution 5 keeps it finite as θ + β approaches
 90 degrees. A softer entrance pays `1 + min(1, f) (charge − 1)`.
 
 Overmatch is the contact law's thin-plate result, not a verdict or a slope exemption: thinning a
-plate raises its skid limit toward grazing. Past `t_n/d = R/(4τ)`, thickness stops moving the
-skid decision. Density and speed raise the limit; material strength lowers it. Replica scaling
+plate raises its skid limit toward grazing. For the reference face, past `t_n/d = R/(4τ)`,
+thickness stops moving the skid decision. Density and speed raise the limit; material strength lowers it. Replica scaling
 preserves it. The tests compare this decision against `sin θc = sqrt(1+x²) − x`,
-`x = R_eff/(2ρv²)`, and the proxy note's labelled fixtures.
+`x = R_eff/(2ρv²)`. The lane's evidence record compares the proxy note's labelled illustrations;
+firing rows stay in the research record, outside the tests.
 
 ## 5. Spall — the spall cone
 
@@ -867,7 +875,7 @@ shot:
 | 85° | 768.32 | 23 044 | 7.7 | 8 |
 
 The most a bounce can deal off a given part is just past its pressure-contact limit (§4a),
-`cos² θc` of the striking energy. It rises with thickness until plug shear reaches the bulk
+`cos² θc` of the striking energy. It rises with thickness until thin-plate capacity reaches the bulk
 resistance. A thin part's dose cannot bound a thicker one's; each reads its own material and
 contact thickness. Armour bounces take no HP.
 

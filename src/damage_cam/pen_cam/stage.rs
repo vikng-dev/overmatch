@@ -2426,7 +2426,8 @@ mod tests {
     /// A round the record has leave the tank runs on past its path's last node, which is where the
     /// record stops logging its flight, not where the round stopped: from the corner time its nose
     /// reaches that node the shell stays drawn, its nose on the last leg produced at that leg's
-    /// record speed over [`timeline::REPLAY_SLOWDOWN`] and its body along it. The corner, the
+    /// record speed over [`timeline::REPLAY_SLOWDOWN`]; its body aligns after a model length
+    /// clears the last bend. The corner, the
     /// lesson and the x-ray place the shell by this. Each leaving record plays as recorded and cut
     /// 5 cm past the point it left (fixture data), its last node then well inside the frame, so
     /// neither a nose clamped to the last node nor a shell hidden there passes. The trail
@@ -2465,7 +2466,9 @@ mod tests {
                 for kind in [CornerKind::Glass, plan.kind] {
                     let reached = time_at_arc(plan, kind, line.length(), false);
                     for k in 1..=8 {
-                        let c = reached + 0.25 * k as f32;
+                        let c = reached
+                            + shell_length(plan) * timeline::REPLAY_SLOWDOWN / speed
+                            + 0.25 * k as f32;
                         let share = shell_share(plan, kind, c, false);
                         if plan.body.is_none() {
                             assert!(share.is_none(), "{name}: no authored body is drawn");
@@ -2500,7 +2503,10 @@ mod tests {
             }
             let plan = &record.plan;
             let (mut app, _) = staged(&library, &asset, index, plan.kind, Vec3::ZERO);
-            let c = time_at_arc(plan, plan.kind, plan.line.length(), false) + 0.5;
+            let speed = plan.line.leg_speed(plan.line.points.len() - 1).unwrap();
+            let c = time_at_arc(plan, plan.kind, plan.line.length(), false)
+                + shell_length(plan) * timeline::REPLAY_SLOWDOWN / speed
+                + 0.5;
             let head = head_arc(plan, plan.kind, c, false);
             let (tail_arc, tail) = trail_end(plan, head, shell_share(plan, plan.kind, c, false));
             assert!(tail_arc > plan.line.length(), "{name}");

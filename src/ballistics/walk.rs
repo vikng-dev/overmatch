@@ -2957,14 +2957,25 @@ pub struct Shot {
     pub contact: crate::rounds::ContactPreset,
 }
 
-/// The game's damage model skids iff ρv²cos²θ < R_eff sin θ. The exact 4 is plug shear's
-/// perimeter-to-area ratio; √3 converts von Mises flow stress to shear flow stress.
+/// The game's damage model: plate resistance is a StandIn for capacity below one calibre,
+/// where a pointed round opens the plate rather than plugging it (penetration-proxy-2026-11-02.md).
+/// The exact 4 is plug shear's perimeter-to-area ratio; √3 is the von Mises shear conversion.
+fn contact_resistance(ratio: f64, factor: f64, laws: &WalkLaws) -> f64 {
+    let reference = laws.reference.cavity_strength();
+    let shear = laws.reference.flow_strength / 3.0_f64.sqrt();
+    let saturation = reference / (4.0 * shear);
+    (factor * reference).min(4.0 * shear * ratio * (ratio / saturation).sqrt())
+}
+
+/// The game's damage model skids iff ρv²cos²θ < R_eff sin θ; the dot supplies cos θ.
 fn skids(shot: &Shot, cosine: f32, thickness: f32, factor: f32, laws: &WalkLaws) -> bool {
     let cosine = f64::from(cosine.clamp(0.0, 1.0));
     let sine = (1.0 - cosine * cosine).max(0.0).sqrt();
-    let shear = laws.reference.flow_strength / 3.0_f64.sqrt();
-    let resistance = (f64::from(factor) * laws.reference.cavity_strength())
-        .min(4.0 * shear * f64::from(thickness) / f64::from(shot.caliber));
+    let resistance = contact_resistance(
+        f64::from(thickness) / f64::from(shot.caliber),
+        f64::from(factor),
+        laws,
+    );
     f64::from(shot.contact.density) * f64::from(shot.speed).powi(2) * cosine * cosine
         < resistance * sine
 }

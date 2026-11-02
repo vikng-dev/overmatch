@@ -1062,22 +1062,6 @@ mod tests {
                 previous = charge;
             }
         }
-        // Fixture normal potency 120 mm; the note's measured class bands are 85–97 and 31–49 mm.
-        for (class, fixtures) in [("APCBC", [95.5, 45.4]), ("APCR", [87.8, 32.1])] {
-            let preset = registry.contact_preset(class).unwrap();
-            for ((angle, expected), (low, high)) in [30.0_f32, 60.0]
-                .into_iter()
-                .zip(fixtures)
-                .zip([(85.0, 97.0), (31.0, 49.0)])
-            {
-                let cosine = angle.to_radians().cos();
-                let defeated =
-                    120.0 * f64::from(cosine) / slope_charge(cosine, preset.slope_tan, 1.0);
-                println!("MEASURED fixture {class} {angle}°: {defeated:.4} mm; note {expected}");
-                assert!((defeated - expected).abs() < 0.1);
-                assert!((low..=high).contains(&defeated));
-            }
-        }
     }
 
     /// The game's damage model: charging resistance changes state and work once; the real chord

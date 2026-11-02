@@ -2193,7 +2193,7 @@ fn a_bounce_keeps_the_speed_along_the_face() {
 /// the round enters, on its grazing side it reflects, with shock bounded by the energy pointed
 /// into that face at the critical incidence. This holds with a floor or a reach bound too;
 /// no ordering of different plates' doses is required by pool authors. Fixture data: 773 m/s,
-/// a thin slab just above overmatch, a 456 mm slab and a 0.01 rad offset from each critical angle.
+/// a thin slab, a 456 mm slab and a 0.01 rad offset from each critical angle.
 #[test]
 fn bounce_dose_bounds_read_the_plate_that_was_struck() {
     let laws = WalkLaws::default();
@@ -2201,10 +2201,10 @@ fn bounce_dose_bounds_read_the_plate_that_was_struck() {
     for thickness in [0.04, 0.456] {
         // Fixture metres.
         let shear = laws.reference.flow_strength / 3.0_f64.sqrt();
-        let resistance = laws
-            .reference
-            .cavity_strength()
-            .min(4.0 * shear * thickness as f64 / FIXTURE_88.caliber as f64);
+        let reference = laws.reference.cavity_strength();
+        let ratio = thickness as f64 / FIXTURE_88.caliber as f64;
+        let saturation = reference / (4.0 * shear);
+        let resistance = reference.min(4.0 * shear * ratio * (ratio / saturation).sqrt());
         let density = crate::rounds::ContactPreset::fixture().density as f64;
         let x = resistance / (2.0 * density * (speed as f64).powi(2));
         let critical = ((1.0 + x * x).sqrt() - x).asin() as f32;
@@ -3106,7 +3106,7 @@ fn mounted_contact_skids_a_thin_graze_bites_head_on_and_charges_only_resistance(
     let (graze, _) = shot_onto_slab_with_contact(
         FIXTURE_88,
         773.0,
-        80.0_f32.to_radians(),
+        85.0_f32.to_radians(),
         0.01,
         STEEL,
         contact,

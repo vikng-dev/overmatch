@@ -352,7 +352,7 @@ The reference-millimetres of armor a shell can defeat at its *current* velocity 
 _Avoid_: penetration value, pen (it changes shot-to-shot as velocity bleeds)
 
 **Ricochet**:
-In the game's damage model, a skid without entry when `ρv²cos²θ < min(fR, 4τt_n/d) sin θ`: type density and speed meet the face's bulk or plug-shear resistance (design doc §4; the penetration proxy note owns the evidence). The shipped exit mirrors the direction and retains speed magnitude `v sin θ`, both blended by coverage. Work and impulse read one flying assembly; its lost energy is the dose to a struck HP pool. A bite goes straight and pays the slope charge.
+In the game's damage model, a skid without entry when `ρv²cos²θ < min(fR, 4τx√(x/s)) sin θ`, with `x = t_n/d` and `s = R/(4τ)`; thin plates have less capacity to turn a round (design doc §4; the penetration proxy note owns the evidence). The shipped exit mirrors the direction and retains speed magnitude `v sin θ`, both blended by coverage. Work and impulse read one flying assembly; its lost energy is the dose to a struck HP pool. A bite goes straight and pays the slope charge.
 
 **Overmatch**:
 The game's damage model's thin-plate result: decreasing steel-equivalent thickness over contact calibre raises the pressure law's skid limit toward grazing. It grants no separate verdict or slope exemption.

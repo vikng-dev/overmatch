@@ -4337,8 +4337,9 @@ fn pressure_contact_obeys_its_class_invariants_and_closed_form() {
                 for factor in [0.05, 0.5, 1.0, 2.0] {
                     for ratio in [0.01, 0.5, 1.0, 2.0, 5.0] {
                         let thickness = caliber * ratio;
+                        let ratio = f64::from(thickness) / f64::from(caliber);
                         let resistance = (f64::from(factor) * reference)
-                            .min(4.0 * shear * f64::from(thickness / caliber));
+                            .min(4.0 * shear * ratio * (ratio / saturation).sqrt());
                         let x = resistance
                             / (2.0 * f64::from(contact.density) * f64::from(speed).powi(2));
                         let critical_sine = (1.0 + x * x).sqrt() - x;
@@ -4401,43 +4402,44 @@ fn pressure_contact_obeys_its_class_invariants_and_closed_form() {
         limit(base, saturated * 2.0, 1.0),
         limit(base, saturated * 8.0, 1.0)
     );
-    assert!(limit(base, saturated * 0.1, 1.0) > limit(base, saturated * 0.5, 1.0));
+    let mut previous = limit(base, 0.0, 1.0);
+    for step in 1..=100 {
+        let current = limit(base, saturated * step as f32 / 100.0, 1.0);
+        assert!(
+            current < previous,
+            "thicker plates lower the skid limit up to saturation"
+        );
+        previous = current;
+    }
     assert!(limit(base, 1.0e-8, 1.0).to_degrees() > 89.9);
 }
 
-/// The game's damage model: labelled proxy-note fixtures constrain the published illustration,
-/// while the generic sweep above proves the law. Mutant: omit density or the plug-shear ceiling.
+/// The game's damage model: thin-plate capacity joins bulk resistance continuously at its
+/// derived knee. Mutants: plain plug shear, a discontinuous knee or a thickness sign reversal;
+/// plate authors rely on thinner plates never lowering the skid limit.
 #[test]
-fn contact_limits_match_the_proxy_note_fixtures() {
+fn plate_capacity_rises_continuously_to_bulk_and_below_plain_plug_shear() {
     let laws = WalkLaws::default();
-    let contact = crate::rounds::RoundRegistry::shipped()
-        .contact_preset("APCBC")
-        .unwrap();
-    for (thickness, speed, expected) in [
-        (0.010, 773.0, 76.6),
-        (0.045, 773.0, 62.1),
-        (0.080, 773.0, 53.5),
-        (1.0, 773.0, 43.2),
-        (0.045, 500.0, 48.4),
-    ] {
-        let shot = Shot {
-            caliber: 0.088,
-            speed,
-            contact,
-        };
-        let (mut low, mut high) = (0.0_f32, 90.0_f32);
-        for _ in 0..30 {
-            let mid = (low + high) * 0.5;
-            if skids(&shot, mid.to_radians().cos(), thickness, 1.0, &laws) {
-                high = mid;
-            } else {
-                low = mid;
-            }
+    let reference = laws.reference.cavity_strength();
+    let shear = laws.reference.flow_strength / 3.0_f64.sqrt();
+    let saturation = reference / (4.0 * shear);
+    let at = |fraction| contact_resistance(saturation * fraction, 1.0, &laws);
+    let mut previous = at(0.0);
+    for step in 1..=1000 {
+        let fraction = f64::from(step) / 1000.0; // Fixture sampling of the whole thin branch.
+        let actual = at(fraction);
+        assert!(actual > previous);
+        if step < 1000 {
+            assert!(actual < 4.0 * shear * saturation * fraction);
         }
-        println!(
-            "MEASURED fixture: t={thickness} m v={speed} m/s limit={low:.4}° note={expected}°"
-        );
-        assert!((low - expected).abs() < 0.1);
+        previous = actual;
+    }
+    assert!((at(1.0) / reference - 1.0).abs() < 1.0e-12);
+    // Fixture neighbourhood: a jump at the knee exceeds the continuity bound.
+    for offset in [1.0e-3, 1.0e-6, 1.0e-9] {
+        assert!(at(1.0 - offset) < at(1.0));
+        assert!((at(1.0 - offset) / reference - 1.0).abs() < 2.0 * offset);
+        assert_eq!(at(1.0 + offset), at(2.0));
     }
 }
 

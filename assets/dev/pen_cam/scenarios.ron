@@ -49,7 +49,7 @@
     ),
     (
         name: "s5_oblique_through",
-        shows: "an 88 through the hull side at 30 degrees: the cone's axis leans from the path toward the plate normal",
+        shows: "an 88 through the hull side at 30 degrees: the cone's axis leans from the path toward the plate normal; the spent round then skids repeatedly between an ammunition box and the inner hull face",
         weapon: "MainGun",
         round: "88mm_AP",
         from: (-4.0, 1.5, -1.68),

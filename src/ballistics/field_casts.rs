@@ -83,7 +83,7 @@ const LINE_WOUND: f32 = 30.0;
 const LINE_REACH: f32 = 20.0;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0xdcf0fc80e7642ab3;
+const PINNED_TOTAL: u64 = 0x76a1cf451d2cf59e;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
