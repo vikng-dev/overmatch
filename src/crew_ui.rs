@@ -242,8 +242,9 @@ fn update_status_panel(
     // The game's damage model: the same selector supplies the sim and the readout,
     // including phase and repair brake holds. Sight access has no rate consumer.
     let quality = part_qualities(volumes, &facets);
-    let (_, _, drive) =
+    let (_, held, available) =
         crate::track::sim::drive_target(command, Some(volumes), Some(caps), &facets).split();
+    let drive = if held { 0.0 } else { available };
 
     // Weapons: name + per-fire-mode state, flagged `no-fire` when the fire gate is unmet (knocked-out
     // gunner/loader/breech). A `Single` reads as the classic READY / reload countdown; an

@@ -676,10 +676,10 @@ pub(crate) fn drive_target(
     caps: Option<&TankCapabilities>,
     volumes: &Query<VolumeFacets>,
 ) -> DriveTarget {
+    let effectiveness = capability_effectiveness(tank, caps, Capability::Drive, volumes);
     if command.held() || tank.is_some_and(|tank| crate::damage::repair::underway(tank, volumes)) {
-        DriveTarget::Brake
+        DriveTarget::Brake { effectiveness }
     } else {
-        let effectiveness = capability_effectiveness(tank, caps, Capability::Drive, volumes);
         DriveTarget::Axes {
             axes: DriveAxes {
                 throttle: command.throttle,
@@ -1339,6 +1339,18 @@ mod tests {
                                 },
                                 effectiveness: expected,
                             }
+                        );
+                        assert_eq!(
+                            drive_target(
+                                &ParsedTankCommand::hold(),
+                                Some(volumes),
+                                Some(caps),
+                                &facets
+                            ),
+                            DriveTarget::Brake {
+                                effectiveness: expected
+                            },
+                            "a phase hold changes intent, never the available torque envelope"
                         );
                     },
                 )

@@ -318,7 +318,7 @@ mod tests {
             assert!(underway(volumes, &facets));
             assert_eq!(
                 drive_target(&drive_command(), Some(volumes), Some(caps), &facets),
-                DriveTarget::Brake,
+                DriveTarget::Brake { effectiveness: 1.0 },
                 "the gameplay adapter must turn a running repair into service braking"
             );
             assert!(
@@ -374,7 +374,7 @@ mod tests {
         );
         assert_eq!(
             held,
-            DriveTarget::Brake,
+            DriveTarget::Brake { effectiveness: 1.0 },
             "a phase hold still selects service braking with no repair"
         );
     }

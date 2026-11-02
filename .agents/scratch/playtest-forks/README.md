@@ -576,7 +576,7 @@ Subject: the game's damage model, game state only. Crew are HP pools at stations
 
 **Default — F starts or cancels parallel module repair.** Every function-bearing module
 below capacity at the press starts its own timer, missing HP divided by one shared work rate.
-The **20 HP/s** balance `Unit`, held with provenance in `assets/damage/repair.ron`.
+The shared rate is a **20 HP/s** balance `Unit`, held with provenance in `assets/damage/repair.ron`.
 DERIVED for the current Tiger asset: the largest module pool, 479 HP, takes **23.95 s**.
 Each module keeps its held share until its own work finishes, then returns whole. Cancelling
 keeps finished modules and discards the remaining work. There is no repair-use limit.
@@ -661,3 +661,9 @@ Subject: the game's damage model, game state only. `damage: bound replicated loa
 rescaling (#228)` makes load work a checked Q63 share of the local admitted base and removes rates
 from Ready and work-free intervals. Design §7b owns the timing contract and the per-finding
 verification table. This also keeps zero-work guards outside the capability-rate budget.
+
+Subject: the game's damage model, game state only. Brake holds retain the underlying torque
+supply and show zero applied Drive (`damage: preserve torque supply during brake holds (#228)`).
+Repair snapshots also refuse active work for non-module pools before applying any HP
+(`damage: refuse repair work on non-module pools (#228)`). These are boundary invariants;
+design §7b and its #228 verification record remain the home of the rule and evidence.

@@ -22,18 +22,18 @@ pub enum DriveTarget {
     Axes { axes: DriveAxes, effectiveness: f32 },
     /// Release both axes and hold the service brakes: the tank brakes to a stop, then the parking
     /// latch holds it (`transmission::TransmissionInput::brake`).
-    Brake,
+    Brake { effectiveness: f32 },
 }
 
 impl DriveTarget {
-    /// The slew target of the two axes and whether the brakes are held.
+    /// The axes, brake hold and available torque share. Holding brakes does not change supply.
     pub fn split(self) -> (DriveAxes, bool, f32) {
         match self {
             Self::Axes {
                 axes,
                 effectiveness,
             } => (axes, false, effectiveness),
-            Self::Brake => (DriveAxes::default(), true, 0.0),
+            Self::Brake { effectiveness } => (DriveAxes::default(), true, effectiveness),
         }
     }
 }

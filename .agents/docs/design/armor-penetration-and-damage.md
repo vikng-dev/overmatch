@@ -1191,7 +1191,8 @@ Subject: the game's damage model, game state only. Drive scales the delivered to
 engine torque, clutch capacity and steering capacity. The scheduler and force solve consume the
 same supplied envelope. Driver intent passes through unchanged, so the clutch/drag thresholds
 read the full command and opposite-throttle braking retains full service capacity. Explicit
-repair and phase holds select the brakes. Servo slew keeps its requirement-rate scale.
+repair and phase holds select the brakes without changing the underlying torque supply;
+the panel maps either hold to zero applied Drive. Servo slew keeps its requirement-rate scale.
 Automatic cyclic cadence, fire eligibility and sight access keep their mechanism or on/off
 gates. The panel shows Drive's supplied rate (zero during either hold), actual weapon deadlines
 and explicit load pauses; the sight-derived Gunner percentage has no rate consumer.
@@ -2065,15 +2066,15 @@ kept: verified fixes needing those files remain open, rather than being called f
 Subject: the game's damage model, game state only. Module quality is its pool's held share;
 crew quality remains occupant competence while in action. The production rate consumers are
 reload, belt swap, servo slew and the drive torque supply described in §7b. F18 preserves the
-checkpoint alternative in prose. Declared protocol revision is 65: the atomic weapon gate now carries checked normalized work
-inside load phases. Its state hash includes the share, rate, reference base and work anchor;
+checkpoint alternative in prose. Declared protocol revision is 65: the atomic weapon gate now
+carries checked normalized work inside load phases. Its state hash includes the share, rate, reference base and work anchor;
 Ready and work-free intervals carry no rate.
 
 MEASURED in generic production-system fixtures: the half-full engine serves 0.5, an empty engine
 zero; a foreign loader takes 54 ticks for 32 base reload ticks and 107 ticks for 64 base swap
 ticks at the current 0.6 competence. The pause/rate-change fixture keeps its frozen gate stable
-and reaches its re-derived deadline. Drive keeps its 0.8 throttle command while its torque supply becomes the foreign competence
-or 0.5 under half engine condition. These are fixture observations, never shipped
+and reaches its re-derived deadline. Drive keeps its 0.8 throttle command while its torque
+supply becomes the foreign competence or 0.5 under half engine condition. These are fixture observations, never shipped
 asset pass conditions. The panel removes the unused sight percentage and labels paused work
 even when the frozen interval is zero.
 
@@ -2089,16 +2090,15 @@ even when the frozen interval is zero.
 | Codex | P1: a decoded peer span panics when rescaled | verified red with paused work 2,147,483,647 at rate 0.5; bounded normalized work now parses at the wire edge and scales against the local admitted base | `damage: bound replicated load work before rescaling (#228)` |
 | Codex | P2: zero work scales the duplicate-emission guard | verified red at rate 0.5; zero work now keeps a work-free one-tick interval at every rate, including zero | `damage: bound replicated load work before rescaling (#228)` |
 | Claude | P3: Ready and cyclic gates carry meaningless load rates | verified: only Loading and Paused now hold `LoadWork`, including its retained rate | `damage: bound replicated load work before rescaling (#228)` |
-| Claude | P3: stale gate, trace, protocol, panel fixture and drive prose | verified against their consumers; comments name fire gates versus load rates, complete work hashing, REV 64/65, current Drive text and delivered torque | `damage: bound replicated load work before rescaling (#228)` |
+| Claude | P3: stale gate, trace, protocol, panel fixture and drive prose | verified against their consumers: fire gates versus load rates, complete work hashing, REV 64/65, current Drive text and delivered torque | `damage: declare foreign competence and pin load floors (#228)`; `damage: preserve drive intent under reduced supply (#228)`; `damage: bound replicated load work before rescaling (#228)` |
 
 MEASURED in regression fixtures: the original peer span panicked before the fix; its old wire
 shape is now refused. A maximal cached paused span with one full work share resumes in 64 ticks
 for a local 32-tick base at rate 0.5. Zero-work reloads mature after one tick at rates 0, 0.01,
 0.5 and 1. A module holding 1 HP of 21 completes its missing-HP repair on the 64th fixture tick,
 not the 63rd. The production driving adapter preserves full throttle and pulls away under a
-30/336 engine share, with MEASURED belt speeds of 0.037314706 m/s reduced versus 0.20654215 m/s full in the
-stationary-hull fixture after input slew. These are generic fixture
-observations, not authored vehicle pass conditions. No capture or pricing run was taken.
+30/336 engine share, with MEASURED belt speeds of 0.037314706 m/s reduced versus 0.20654215 m/s
+full in the stationary-hull fixture after input slew. These are generic fixture observations, not authored vehicle pass conditions. No capture or pricing run was taken.
 
 The wire check also exposed a related phase case: a peer could name load work beside a nonempty
 belt and later reach the pause assertion. The load-phase parser now refuses both active and
@@ -2116,3 +2116,19 @@ a full pool has no work denominator. `ModuleRepair::from_snapshot` now parses th
 prospective timer before the atomic health record is applied, refusing that contradictory
 snapshot with a typed error and visible handling. Its regression preserves the prior valid
 snapshot (`damage: bound replicated load work before rescaling (#228)`).
+
+The same outside-input boundary now refuses active repair metadata on a non-module pool,
+rather than dropping the timer while applying its HP. The membership check uses the shared
+`repair::Modules` filter and a typed error; the regression preserves the previous complete
+record (`damage: refuse repair work on non-module pools (#228)`).
+
+A brake hold is an activity, not a change to the engine's available supply. Both phase and
+repair holds carry the derived torque share through the same selector, so idle/drag and the
+scheduler retain the supplied envelope while the brakes are held. The panel reads the hold
+as zero applied Drive. The selector fixtures check full, foreign, half-pool and empty supply
+under a phase hold; the repair fixture checks the same distinction while repair is active
+(`damage: preserve torque supply during brake holds (#228)`).
+
+Final gates: MEASURED 885 targeted tests passed, six intentionally ignored; all 44 whole-tree
+`doc_citations`, `ui_ascii`, `net_boundary` and `bake::` guards passed. Formatting and the CI
+workspace/all-target clippy feature set passed. The lane took no captures or pricing runs.
