@@ -151,6 +151,12 @@ pub struct EngineParams {
     pub torque_nm: Vec<(f32, f32)>,
 }
 
+/// Delivered-torque polynomial in local rpm, after splitting at curve and fuel-cut knots.
+struct TorqueSpan {
+    width_rpm: f64,
+    torque: [f64; 3],
+}
+
 /// The joint transmission's declared data — everything vehicle spec, nothing tuned-to-feel.
 /// Built from authored tables via [`TransmissionParams::from_authoring`].
 #[derive(Clone, Debug)]
@@ -275,19 +281,6 @@ impl TransmissionParams {
             )
             .into());
         }
-        let peak_torque = a
-            .torque_nm
-            .iter()
-            .map(|&(_, torque)| torque)
-            .fold(0.0, f32::max);
-        // Resolution: a free-crank tick must not skip an entire curve interval or fuel cut.
-        // J >= peak torque * dt / delta_omega follows directly from J*domega = torque*dt.
-        let step_rpm = a
-            .torque_nm
-            .windows(2)
-            .map(|pair| pair[1].0 - pair[0].0)
-            .fold(engine_control().governor_cut_rpm.value, f32::min);
-        let minimum_inertia = peak_torque / (TICK_HZ * step_rpm * RPM_TO_RAD);
         for (field, ok) in [
             (
                 "sprocket radius and track half-tread",
@@ -366,10 +359,8 @@ impl TransmissionParams {
                 (0.0..=1.0).contains(&a.drag_fraction),
             ),
             (
-                "engine.inertia_kgm2 (resolve the torque curve and fuel cut at the fixed tick; increase crank inertia)",
-                a.engine_inertia_kgm2.is_finite()
-                    && a.engine_inertia_kgm2 > 0.0
-                    && a.engine_inertia_kgm2 >= minimum_inertia,
+                "engine.inertia_kgm2",
+                a.engine_inertia_kgm2.is_finite() && a.engine_inertia_kgm2 > 0.0,
             ),
             (
                 "engine.clutch_capacity_nm",
@@ -401,7 +392,7 @@ impl TransmissionParams {
             return Err("engine.torque_curve / governed_rpm / rated_rpm: bracket the governor with curve data and keep idle < governed <= rated".into());
         }
         if !a.crank_limit_rpm.is_finite()
-            || a.crank_limit_rpm < a.governed_rpm + engine_control().governor_cut_rpm.value
+            || a.crank_limit_rpm - a.governed_rpm < engine_control().governor_cut_rpm.value
         {
             return Err("engine.crank_limit_rpm: must be finite and at or beyond completed fuel cut (governed_rpm + governor_cut_rpm); raise the limit or lower governed_rpm so fuel is shut off at the limit".into());
         }
@@ -464,6 +455,21 @@ impl TransmissionParams {
     /// The authored scalars can each be finite while their ratios, squared coupling terms or
     /// force capacities overflow/underflow. Refuse those coupled outputs before publication.
     fn check_derived(&self, belt_inertia: f32) -> Result<(), BevyError> {
+        // Resolution: dt*max|dT/domega|/J <= 1 keeps a falling torque branch from reversing
+        // a crank-speed perturbation in one explicit tick. Fuel cut makes each span quadratic;
+        // its derivative is linear, so the largest magnitude occurs at a span endpoint.
+        let slope = self
+            .torque_spans()
+            .into_iter()
+            .map(|span| {
+                let [_, b, c] = span.torque;
+                b.abs().max((b + 2.0 * c * span.width_rpm).abs())
+            })
+            .fold(0.0_f64, f64::max);
+        let minimum_inertia = slope / (f64::from(TICK_HZ) * f64::from(RPM_TO_RAD));
+        if !minimum_inertia.is_finite() || f64::from(self.engine_inertia) < minimum_inertia {
+            return Err("engine.inertia_kgm2 / torque_curve: fixed-tick torque slope is unresolved; correct the curve or crank inertia from construction data, or increase solver tick resolution".into());
+        }
         let fail = |field: &str| {
             BevyError::from(format!(
                 "track.powertrain.transmission: non-finite or nonpositive derived {field}; correct gearbox speeds, steering radii, sprocket radius or inertia"
@@ -489,11 +495,9 @@ impl TransmissionParams {
                 return Err(fail("steering curvature"));
             }
         }
-        // A virtual free tick may add at most one admitted fuel-cut width to the guarded crank.
-        let free_bound = (self.engine.crank_limit_rpm
-            + overrev_margin_rpm()
-            + engine_control().governor_cut_rpm.value)
-            * RPM_TO_RAD;
+        // Full net torque bounds positive crank acceleration; a free tick can add T_peak*dt/J.
+        let free_bound = (self.engine.crank_limit_rpm + overrev_margin_rpm()) * RPM_TO_RAD
+            + self.peak_torque_nm / self.engine_inertia / TICK_HZ;
         let energy_bound = 0.5 * self.engine_inertia * free_bound * free_bound;
         if !energy_bound.is_finite() || energy_bound <= 0.0 {
             return Err(fail(
@@ -551,8 +555,12 @@ impl TransmissionParams {
     /// Engine torque (N·m) at `rpm`: piecewise-linear over the authored points (end-clamped),
     /// under the fuel-governor cut past `governed_rpm`.
     pub fn torque_at(&self, rpm: f32) -> f32 {
+        self.raw_torque_at(rpm) * self.fuel_cut(rpm)
+    }
+
+    fn raw_torque_at(&self, rpm: f32) -> f32 {
         let pts = &self.engine.torque_nm;
-        let raw = if rpm <= pts[0].0 {
+        if rpm <= pts[0].0 {
             pts[0].1
         } else if rpm >= pts[pts.len() - 1].0 {
             pts[pts.len() - 1].1
@@ -566,8 +574,42 @@ impl TransmissionParams {
                 }
             }
             t
-        };
-        raw * self.fuel_cut(rpm)
+        }
+    }
+
+    /// Split at every slope change of the raw curve or fuel ramp. In local rpm x,
+    /// delivered torque is a + b*x + c*x^2; the end-clamped raw tail needs no extra knots.
+    fn torque_spans(&self) -> Vec<TorqueSpan> {
+        let end = self.engine.governed_rpm + engine_control().governor_cut_rpm.value;
+        let mut points: Vec<_> = self
+            .engine
+            .torque_nm
+            .iter()
+            .map(|&(rpm, _)| rpm)
+            .chain([0.0, self.engine.governed_rpm, end])
+            .filter(|rpm| *rpm <= end)
+            .collect();
+        points.sort_by(f32::total_cmp);
+        points.dedup();
+        points
+            .windows(2)
+            .map(|pair| {
+                let [start, end] = [pair[0], pair[1]];
+                let width = f64::from(end) - f64::from(start);
+                let raw = f64::from(self.raw_torque_at(start));
+                let raw_slope = (f64::from(self.raw_torque_at(end)) - raw) / width;
+                let cut = f64::from(self.fuel_cut(start));
+                let cut_slope = (f64::from(self.fuel_cut(end)) - cut) / width;
+                TorqueSpan {
+                    width_rpm: width,
+                    torque: [
+                        raw * cut,
+                        raw_slope * cut + raw * cut_slope,
+                        raw_slope * cut_slope,
+                    ],
+                }
+            })
+            .collect()
     }
 
     fn fuel_cut(&self, rpm: f32) -> f32 {

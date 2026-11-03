@@ -3347,7 +3347,7 @@ fn backward_live_crank_has_no_idle_floor() {
     }
 }
 
-/// A free-crank tick must resolve its authored torque rather than cross the solver's rpm band.
+/// A free-crank tick must resolve the slope of its authored torque and fuel cut.
 /// The constructor protects every admitted drivetrain, including Blender's fixture sheet.
 #[test]
 fn unresolved_crank_inertia_is_refused() {
@@ -3586,4 +3586,42 @@ fn the_crank_limit_requires_completed_fuel_cut() {
     );
     a.crank_limit_rpm += engine_control().governor_cut_rpm.value;
     assert!(TransmissionParams::from_authoring(&a).is_ok());
+}
+
+/// Admission follows the torque law's slope, not how many samples the author used.
+/// A collinear point must not force a construction fact to change.
+#[test]
+fn a_collinear_knot_does_not_change_crank_admission() {
+    let original = tiger_authoring();
+    let base = TransmissionParams::from_authoring(&original).unwrap();
+    let mut curve = original.torque_nm.to_vec();
+    curve.insert(1, (826.0, 1311.0)); // Fixture: 26 rpm and 11 N m on the first line.
+    let refined = TransmissionParams::from_authoring(&TransmissionAuthoring {
+        torque_nm: &curve,
+        ..original
+    })
+    .expect("a collinear knot must leave the inertia admission unchanged");
+    for rpm in [800.0, 826.0, 1000.0, 1500.0, 2100.0, 2550.0] {
+        // Fixture samples.
+        assert!((base.torque_at(rpm) - refined.torque_at(rpm)).abs() < 0.001);
+    }
+}
+
+/// A genuinely steep torque branch must still be refused at the fixed tick; authors must
+/// correct physical inputs or the solver resolution, rather than change curve sampling.
+#[test]
+fn a_steep_torque_branch_is_refused_by_its_slope() {
+    let original = tiger_authoring();
+    let mut curve = original.torque_nm.to_vec();
+    curve.insert(1, (810.0, 1850.0)); // Fixture: a genuinely steep 55 N m/rpm branch.
+    let error = TransmissionParams::from_authoring(&TransmissionAuthoring {
+        torque_nm: &curve,
+        ..original
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("torque slope") && error.contains("inertia_kgm2"),
+        "{error}"
+    );
 }

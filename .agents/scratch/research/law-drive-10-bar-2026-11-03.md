@@ -38,3 +38,25 @@ law and tolerance are unchanged. The focused rerun and asset guards are recorded
 MEASURED correction gate: formatting and CI clippy passed. The focused fuel-rack/ceiling,
 doc-citation and asset guards passed 188 tests, with four ignored. All other 434 targeted checks
 had passed before the assertion correction. No backlog row names an edited file in this step.
+
+## Inertia admission
+
+Commit: `driving: bound crank admission by torque slope (#146)`.
+
+MEASURED red: adding the inline Fixture point (826 rpm, 1311 N m), collinear with its neighbours,
+refused the unchanged construction with an inertia error. The minimum-gap bound is removed.
+Admission splits the governed torque law at raw-curve knots and both fuel-cut boundaries.
+Each span is quadratic, so its largest absolute derivative is at an endpoint. The Resolution
+bound is J >= dt * max|dT/domega|: a falling branch cannot reverse a crank-speed perturbation
+in one free-crank Euler tick. Adding a collinear knot cannot change that stability reason.
+A separate genuinely steep branch must still be refused with the named curve/inertia fields
+and an instruction to correct construction data or increase solver resolution.
+
+Decision: no fixture inertia changes. The runtime torque arithmetic is unchanged. The virtual
+free-crank energy admission now bounds one tick's acceleration by raw peak torque * dt / J,
+rather than assuming a whole fuel-cut width, which the retired gap bound had guaranteed.
+The crank-limit gate compares the actual rpm difference with the fuel-cut width so rounding
+at very large authored rpm cannot admit fuel still flowing at the limit.
+
+MEASURED inertia gate: formatting, CI clippy and 437 targeted module/source-guard tests passed,
+with four ignored. The collinear-knot regression is green, and the steep branch is refused.
