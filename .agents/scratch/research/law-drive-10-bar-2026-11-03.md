@@ -103,3 +103,80 @@ The second-spec integration doc explicitly states that it replaces the match's s
 It makes no coexistence claim. Decisions: preserve the narrow arithmetic/contact fixtures and
 read their owned inputs; do not build a second-match-construction mechanism. The corrected
 rundown, course, coast and second-spec tests all passed in the shared whole-library gate above.
+
+## Pivot witness and executed mutant
+
+Commit: `driving: exercise steering work in the unfueled pivot witness (#146)`.
+
+Verified Codex's finding: every old stationary seed set task throughput to zero, so Driver
+cleared steering and set park. The replacement retains the stopped zero-work corner, but each
+stored-energy seed has staffed, available controls and starts at authored governed/limit rpm.
+Above the rev target no combustion is requested. The witness stops before renewed fueling,
+asserts actual induced/catch torque is zero, and requires counter-rotating belts, released park
+and an open main clutch. Total crank-plus-belt energy may only decrease in that interval.
+
+MEASURED production mutation: the actual `step` caller passed only mean coupling forces to
+`engine_work`, while still applying its steering forces. The repaired witness failed: energy
+rose from 70,675.53 to 73,689.69 J without combustion. The saved production source was restored
+and compared byte-for-byte; the shared whole-library gate then passed. No mutant remains.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude | Crank ceiling inferred from curve endpoint | Verified executed red; all four readers covered | driving: declare the crank ceiling independently of curve sampling (#146) |
+| Claude | Inertia floor depends on digitization | Verified executed collinear red; steep refusal stays | driving: bound crank admission by torque slope (#146) |
+| Codex | Launch target beyond fuel cut | Verified executed reds on both classes and interior-peak green | driving: target the torque peak available after fuel cut (#146) |
+| Claude | Seed-specific rundown/course entry | Verified literal/index preconditions; corrected tests pass | driving: derive test entry points from each construction (#146) |
+| Codex | Pivot witness never pivots | Verified; actual steering-work mutant red, restored green | driving: exercise steering work in the unfueled pivot witness (#146) |
+| Claude + Codex | Small rows, item 6 | Verified by source; unfinished at the hour boundary | — |
+
+## Item 6: verified, still outstanding
+
+These rows were not dismissed as non-defects. They remain for the next green step.
+
+| finding | live evidence / needed change |
+|---|---|
+| `Controls` staffing doc | `engine_torques`, `idle_catch_capacity` and the adapter also resolve served work; correct the claim of exclusive Driver ownership. |
+| `steer_radii_m` doc | Candidate pricing and `load::turn_radius` consume the radii; they are not presentation-only. |
+| Optional grip after admission | `step` still reconstructs `DriveConstruction` with an `expect` each tick; braking repeats it. Retain checked driving construction after the edge. |
+| `ParsedTankCommand::hold` doc | Names nonexistent `DriveTarget::Brake`; the variant belongs to `DriveIntent`. |
+| `DriveFeel` admission/error | The first threshold gate permits `tight_on == 1`, which reachable-notch admission refuses; the parse error lists only three of five fields. |
+| Edit-history comments | The named comments remain in `drive.rs`, `transmission.rs`, `spec.rs`, the shipped sheet and transmission tests. Preserve current rationale while removing history labels. |
+| Conditional part-pedal/domain evidence | Capability guards still have no per-class non-vacuity requirement. |
+| Weak launch, grade, top-gear and paid-shift shapes/prose | The reported selector-controlled absence, implied else assertion, universal prose and double negative remain. |
+| `price_driver_force` default-build residue | Static caller check confirms non-test use only by the bitprobe trace; its compile guard is still absent. |
+| `TrackGripElements` doc | Still describes removed initialization replication and rollback/checkpoint paths. |
+
+## Decisions, feel and disposition
+
+- Keep one required, provenanced crank limit independent of torque sampling. Preserve the
+  shipped 3000 rpm value; the inline lab moves to completed fuel cut at 1900 rpm.
+- Use the monotone explicit-tick torque-slope bound, including fuel cut; do not alter physical
+  fixture inertia to satisfy digitization. Derive the free-energy bound from peak torque/J.
+- Target the deliverable torque maximum, including ramp vertices; retain raw peak N m for the
+  existing drag anchor. No shipped torque evaluation or target rpm changes.
+- Derive rundown/course entry from each sheet. The 95% band point and upper-middle gear are
+  Fixture choices, not pass conditions on a named tank. The second-spec fixture replaces the
+  match singleton. Coexistence is explicitly outside this lane.
+- Exercise the existing unfueled interval with staffed controls; add no new Driver or Slip
+  predicate to make the pivot witness possible.
+- Share final gates for independent items 3–5 and commit each separately; start no item-6
+  overhaul with insufficient time left for its gates. No stop-rule design change was attempted.
+- Leave rollback arrest, sub-idle/upshift refusal, over-rev outcome and empty-station descent
+  decisions untouched. No wire change, so deliberately no `PROTOCOL_REV` bump.
+
+Shipped feel is unchanged by construction: its ceiling, deliverable peak rpm, runtime torque
+arithmetic, inertia, gears, steering, brakes and actuator data are unchanged. The complete
+library and shipped driving witnesses pass; there was no visual playtest or capture. A future
+construction with a raw torque peak beyond fuel cut no longer loses a capable launch. Curve
+redigitization no longer forces an inertia change or moves the crank ceiling.
+
+Judgment: **the full owner's bar does not clear yet**. Items 1–5 are complete; checked grip,
+non-vacuous test evidence and the stale interface/history prose in item 6 still stand in the way.
+No new owner gameplay decision is needed to complete those already-authorized rows.
+
+MEASURED queue evidence: 15 cargo calls waited a total of 1,573 seconds, with a longest wait of
+444 seconds, from the queue log's queued/started timestamps. These waits count toward the hour.
+Final gates: formatting, CI clippy, 44 whole-tree guards and 2,266 library tests passed; 29 library
+tests are ignored measurement/opt-in cases. Asset guards also passed in the first step. No push,
+merge, issue comment, capture, pricing run or visible window occurred. All lane-run processes
+terminated. The bay stays on its lane branch for the orchestrator; it is not released here.

@@ -1371,12 +1371,12 @@ fn an_unmanned_station_preserves_the_park_lever() {
     }
 }
 
-/// The game's damage model: a pivot can spend a stopped engine's stored crank energy only
-/// once. With no outside work, total belt-plus-crank kinetic energy cannot grow at any tick.
+/// The game's driving model: above the Driver's rev target a pivot has no combustion.
+/// Steering must spend stored crank energy once; total belt-plus-crank energy cannot grow.
 #[test]
 fn a_pivot_without_combustion_spends_only_stored_crank_energy() {
     let (fp, tp) = (lab_fp(), lab_tp());
-    for rpm in [0.0, 600.0, 1550.0] {
+    for rpm in [0.0, tp.engine.governed_rpm, tp.engine.crank_limit_rpm] {
         // Fixture initial energy states.
         let mut st = fresh(&tp);
         st.omega_e = rpm * RPM_TO_RAD;
@@ -1389,12 +1389,24 @@ fn a_pivot_without_combustion_spends_only_stored_crank_energy() {
                     .sum::<f32>()
         };
         let mut previous = energy(st.omega_e, speeds);
+        let mut pivoted = false;
         for _ in 0..64 * 5 {
+            if rpm > 0.0 && st.omega_e < tp.peak_torque_rpm * RPM_TO_RAD {
+                break; // Below the rev target the Driver may fuel again.
+            }
             let mut inp = input(0.0, 1.0, speeds, [0.0; 2]);
-            inp.supply.engine_condition = 0.0;
-            inp.supply.task_rate = 0.0;
+            if rpm == 0.0 {
+                inp.supply.task_rate = 0.0; // A stopped, unworked control is the zero-energy corner.
+            }
             let rep = step(&fp, &tp, &mut st, &inp);
+            #[cfg(feature = "bitprobe")]
+            assert_eq!(rep.bitprobe.tau_induced + rep.bitprobe.tau_idle, 0.0);
             speeds = rep.next_speeds;
+            pivoted |= speeds[0] > PARK_ENGAGE_SPEED && speeds[1] < -PARK_ENGAGE_SPEED;
+            if pivoted {
+                assert!(!st.park);
+                assert_eq!(st.clutch, ClutchState::Out);
+            }
             let next = energy(st.omega_e, speeds);
             // Resolution: f32 kinetic-energy arithmetic permits a relative roundoff margin.
             assert!(
@@ -1403,6 +1415,11 @@ fn a_pivot_without_combustion_spends_only_stored_crank_energy() {
             );
             previous = next;
         }
+        assert_eq!(
+            pivoted,
+            rpm > 0.0,
+            "every stored-energy seed must actually pivot"
+        );
     }
 }
 
