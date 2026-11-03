@@ -339,16 +339,16 @@ fn update_status_panel(
             .get(volume)
             .is_ok_and(|(_, _, repair)| repair.elapsed.is_some())
     });
-    let repair_hint = if knocked_out.is_some() {
-        "Repair unavailable"
+    let repair_line = if knocked_out.is_some() {
+        "\nRepair unavailable"
     } else if repairing {
-        "Repairing — F cancels"
+        "\nRepairing"
     } else {
-        "F — repair modules"
+        ""
     };
     let module_lines: String = module_rows.into_iter().map(|(_, row)| row).collect();
     let card = format!(
-        "{state}\nCrew {alive}/{total}\n{drive_line}\nWeapons: {weapon_line}{round_lines}\n{repair_hint}{module_lines}",
+        "{state}\nCrew {alive}/{total}\n{drive_line}\nWeapons: {weapon_line}{round_lines}{repair_line}{module_lines}",
     );
     set_text(text.reborrow(), &card);
 }

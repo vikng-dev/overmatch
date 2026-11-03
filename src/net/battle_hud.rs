@@ -633,7 +633,6 @@ mod tests {
             "Drive 100%",
             "Weapons: Coax 150 rds   HullMG 150 rds   MainGun READY",
             "MainGun round: 8.8 cm Pzgr. 39 ring",
-            "F — repair modules",
             "Breech: READY",
             "Coax_MG_Barrel: READY",
             "Engine: READY",
