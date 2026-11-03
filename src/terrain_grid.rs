@@ -906,8 +906,8 @@ pub(crate) mod tests {
         // A genuinely non-planar cell: one raised corner (h11 = H), sample the interior. On the
         // anti-diagonal split, (fu, fv) = (0.75, 0.75) lies in the upper triangle
         // {h10, h11, h01}: H + (0 − H)·0.25 + (0 − H)·0.25 = 0.5·H — NOT bilinear's 0.5625·H,
-        // and NOT a main-diagonal split's 0.75·H. This is the same point the collider test
-        // below raycasts, so height_at and parry are pinned to the same answer.
+        // and NOT a main-diagonal split's 0.75·H. The collider comparison uses a separate
+        // seeded grid in `oracle_matches_collider_at_seeded_points`.
         let hi = 200.0 / 255.0 * FIXTURE_SPAN;
         let corner = grid_from(2, |i, j| if i == 1 && j == 1 { 200 } else { 0 });
         assert!((corner.height_at(h / 2.0, h / 2.0) - hi * 0.5).abs() < 1e-4);
@@ -916,14 +916,15 @@ pub(crate) mod tests {
         assert!(corner.height_at(0.0, 0.0).abs() < 1e-4);
     }
 
-    /// A deterministic LCG stream (no platform RNG) for the seeded oracle-vs-collider pins.
+    /// Deterministic LCG for oracle/collider probes. DERIVED: 31 high bits divided by the
+    /// 32-bit maximum yield at most 0.5 after f32 rounding, restricting the callers' coverage.
     fn lcg(seed: u64) -> impl FnMut() -> f32 {
         let mut state = seed;
         move || {
             state = state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            ((state >> 33) as u32) as f32 / u32::MAX as f32 // 0..1
+            ((state >> 33) as u32) as f32 / u32::MAX as f32 // at most 0.5; see the coverage limit above
         }
     }
 
@@ -938,7 +939,7 @@ pub(crate) mod tests {
     }
 
     /// Oracle height and exact cast must match the production parry collider within millimetres
-    /// across a seeded rough grid, including its outer 2 % and just-outside misses. The module's
+    /// at seeded negative-X/Z points and negative-Z off-map misses. The module's
     /// one-surface invariant owns the MEASURED 0.519 m mismatch vs the 0.5 m suspension reach.
     /// Placement clamping must not extend either surface beyond the collider edge.
     #[test]
@@ -948,8 +949,8 @@ pub(crate) mod tests {
         let collider = heightfield_collider(&grid);
         let mut worst = 0.0f32;
         for k in 0..512 {
-            // Full span, outer 2% included: 1/8 of the points land in the outer band, and
-            // boundary-exact rays (a measure-zero parry edge case) are avoided by the noise.
+            // DERIVED: `lcg` keeps both coordinates nonpositive. The two span scales do not
+            // reserve an outer band; noise avoids boundary-exact parry edge cases.
             let span = if k % 8 == 0 {
                 FIXTURE_HALF * 0.9999
             } else {
@@ -999,8 +1000,8 @@ pub(crate) mod tests {
     }
 
     /// The DIRECTIONAL pin: the exact caster vs a parry cast of the production collider over a
-    /// seeded sweep of ray directions — steep to shallow-grazing — from origins across the full
-    /// span. Both must agree on hit/no-hit everywhere, and on the hit parameter within the
+    /// seeded sweep from negative-X/Z origins, with azimuths in the positive-Z half-turn.
+    /// Both must agree on hit/no-hit at those probes, and on the hit parameter within the
     /// pinned tolerance wherever both report one. (Shallow rays amplify any surface mismatch
     /// along `t` by 1/sin(elevation), so this is the harshest agreement test the two float
     /// paths face.)
@@ -1016,8 +1017,8 @@ pub(crate) mod tests {
             let x = (next() * 2.0 - 1.0) * FIXTURE_HALF * 0.98;
             let z = (next() * 2.0 - 1.0) * FIXTURE_HALF * 0.98;
             let origin = Vec3::new(x, grid.height_at(x, z) + 0.5 + next() * 30.0, z);
-            // Downward elevation from 1.7° (shallow graze) to ~86°; any azimuth. Test-only
-            // trig — the production caster itself stays transcendental-free.
+            // DERIVED from `lcg` ≤ 0.5: elevation 0.03..0.765 rad (~1.7..43.8°), azimuth
+            // 0..π. Test-only trig; the production caster stays transcendental-free.
             let elevation = 0.03 + next() * 1.47;
             let azimuth = next() * core::f32::consts::TAU;
             let dir = Vec3::new(
