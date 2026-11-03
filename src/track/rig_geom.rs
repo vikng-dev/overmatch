@@ -118,6 +118,9 @@ pub(crate) enum RigFault {
     NonfiniteGeometry {
         side: Side,
     },
+    ZeroFootprint {
+        side: Side,
+    },
     TooFewTeeth(u32),
     LinkAddress(usize),
     ShortLoop {
@@ -157,6 +160,10 @@ impl std::fmt::Display for RigFault {
             Self::NonfiniteGeometry { side } => write!(
                 f,
                 "track: the {side:?} route is not finite; correct the axle transforms, contact radii and pin markers"
+            ),
+            Self::ZeroFootprint { side } => write!(
+                f,
+                "roadwheels: the {side:?} longitudinal centre span must be finite and positive; declare at least two longitudinally separated stations and correct their axle transforms"
             ),
             Self::TooFewTeeth(teeth) => write!(
                 f,
@@ -202,17 +209,20 @@ pub(crate) fn ground_pressure_kpa(mass_kg: f32, track_width_m: f32, contact_leng
 /// Nominal footprint uses shoe width and the mean span of both road-wheel centre sets.
 /// The sim stores this pressure at spawn; view-only prints consume the same construction.
 pub(crate) fn tank_ground_pressure_kpa(geom: &RigGeom) -> f32 {
-    let span = |side: Side| {
-        let wheels = geom.road_wheels.get(side);
-        let (low, high) = wheels
-            .iter()
-            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), w| {
-                (lo.min(w.z), hi.max(w.z))
-            });
-        (high - low).max(0.0)
-    };
-    let length = 0.5 * (span(Side::Left) + span(Side::Right));
+    let length = 0.5
+        * (road_wheel_span(geom.road_wheels.get(Side::Left))
+            + road_wheel_span(geom.road_wheels.get(Side::Right)));
     ground_pressure_kpa(geom.model.mass, geom.model.width, length)
+}
+
+/// An empty or coincident station set has no longitudinal footprint and fails rig admission.
+fn road_wheel_span(wheels: &[Vec3]) -> f32 {
+    let (low, high) = wheels
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), wheel| {
+            (low.min(wheel.z), high.max(wheel.z))
+        });
+    high - low
 }
 
 impl RigGeom {
@@ -228,9 +238,8 @@ impl RigGeom {
         link_count: usize,
         params: &SuspensionParams,
     ) -> Self {
-        // The module's only file read; `rebuild` reuses its measurements. Mass is a readout input,
-        // passed as a scalar so `DerivedModel::build` cannot substitute RON geometry for missing
-        // glb datums; those abort the build.
+        // The module's only file read; `rebuild` reuses its measurements. Mass supplies nominal
+        // ground pressure as well as readouts; geometry still comes only from the sim artifact.
         let model = DerivedModel::build(blueprint.spec.mass, glb_path);
         let road_wheels = PerSide::new(
             side_wheel_centres(blueprint, Side::Left),
@@ -329,6 +338,10 @@ impl RigGeom {
                 })
             {
                 return Err(RigFault::NonfiniteGeometry { side });
+            }
+            let span = road_wheel_span(self.road_wheels.get(side));
+            if !span.is_finite() || span <= 0.0 {
+                return Err(RigFault::ZeroFootprint { side });
             }
             for demand in self.wrap_demands(side) {
                 if demand.pin_radius < self.pitch * 0.5 {
@@ -1099,6 +1112,55 @@ mod tests {
             message.contains(crate::tank::TANK_SPEC_PATH) && message.contains("differs by side"),
             "{message}"
         );
+    }
+
+    /// Startup collider construction must refuse a zero pressure denominator before any body
+    /// spawns, with the sheet, field and repair. Tooling sheets may still parse with one wheel.
+    /// Fixture: the shipped geometry with a single road station per side, or coincident stations.
+    #[test]
+    fn running_gear_admission_refuses_a_zero_footprint_naming_the_sheet() {
+        let glb = crate::assets::asset_root().join(crate::tank::TANK_SIM_GLB_PATH);
+        for single_station in [true, false] {
+            let mut spec = tiger_spec();
+            if single_station {
+                let first = Side::ALL.map(|side| {
+                    spec.roadwheels
+                        .iter()
+                        .find(|wheel| wheel.side == track_side(side))
+                        .unwrap()
+                        .node
+                        .clone()
+                });
+                spec.roadwheels.retain(|wheel| first.contains(&wheel.node));
+            }
+            spec.validate()
+                .expect("structural sheets permit one wheel per side");
+            let mut geometry = crate::bake::extract_tank_geometry(
+                &glb,
+                &spec,
+                &crate::substances::SubstanceRegistry::shipped(),
+            )
+            .unwrap();
+            if !single_station {
+                for &(index, _) in &geometry.roadwheels {
+                    geometry.nodes[index].root_position.z = 0.0;
+                }
+            }
+            let blueprint =
+                TankBlueprint::new("fixture/zero-footprint.tank.ron".into(), geometry, spec);
+            let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::super::bump_stop::TrackColliders::of_blueprint(&blueprint, &glb)
+            }))
+            .err()
+            .expect("zero footprint must refuse at startup collider admission");
+            let message = refusal.downcast_ref::<String>().unwrap();
+            assert!(
+                message.contains(&blueprint.file)
+                    && message.contains("roadwheels")
+                    && message.contains("separated stations"),
+                "{message}"
+            );
+        }
     }
 
     /// Live count tuning uses the same address bound as file admission, before replacing a rig.

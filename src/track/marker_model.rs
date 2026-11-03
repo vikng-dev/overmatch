@@ -56,7 +56,7 @@ pub struct DerivedModel {
     /// for anything lateral — use [`Self::lateral_min`]/[`Self::lateral_max`], which carry the real
     /// asymmetry, and this for the centre.
     pub link_center_x: f32,
-    /// Hull mass (RON) — for the spring-rate readout.
+    /// Hull mass (RON), supplying nominal ground pressure and spring-rate readouts.
     pub mass: f32,
 }
 
