@@ -628,20 +628,13 @@ mod tests {
     #[test]
     fn esc_cannot_latch_a_menu_under_an_overlay_declared_the_same_frame() {
         let mut app = App::new();
-        app.init_resource::<Overlays>();
-        app.init_resource::<ButtonInput<KeyCode>>();
-        crate::state::escape_router(&mut app);
-        app.configure_sets(
-            Update,
-            (OverlaySet::Declare, OverlaySet::Toggle, OverlaySet::Cursor).chain(),
-        );
-        app.add_systems(
-            Update,
-            (
-                esc_toggle.in_set(OverlaySet::Toggle).after(EscapeRouted),
-                declare_connect_status.in_set(OverlaySet::Declare),
-            ),
-        );
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin));
+        crate::flow::plugin(&mut app);
+        app.insert_state(Flow::InMatch)
+            .init_resource::<ButtonInput<KeyCode>>()
+            .add_message::<WindowFocused>();
+        plugin(&mut app);
+        app.add_systems(Update, declare_connect_status.in_set(OverlaySet::Declare));
         app.edit_schedule(Update, |schedule| {
             schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
         });
