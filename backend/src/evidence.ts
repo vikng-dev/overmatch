@@ -4,15 +4,14 @@ import type { Provider } from "./edgegap";
 import { diag } from "./reasons";
 
 // Resolution: cap each archive at 1 MiB to bound D1 storage; retain the newest diagnostic lines.
-// Bound bytes after filtering and redaction, not UTF-16 characters.
+// Bound bytes after redaction, not UTF-16 characters.
 export const SERVER_LOG_MAX_BYTES = 1024 * 1024;
 
 /** The deployed server never logs hosting secrets (hosting.rs); netcode does log peer addresses
  * and token whitelist diagnostics. Drop credential-bearing lines and URLs defensively, including
  * crash_data env dumps. Mask the generated 32-byte hex credentials even without a field label. */
 function sanitizedTail(raw: string, providerToken: string): { log: string; truncated: boolean } {
-	// src/net/diagnostics.rs::log_sim_evidence owns SIM-EVIDENCE; server_stats supplies the pace.
-	let clean = raw.split("\n").filter((line) => !line.includes("SIM-EVIDENCE")).map((line) =>
+	let clean = raw.split("\n").map((line) =>
 		/secret|token|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment/i.test(line)
 			? "[credential line redacted]" : line,
 	).join("\n");

@@ -79,9 +79,8 @@ generated hex credentials and credential-bearing lines. `hosting.rs` never logs
 hosting secret values; Lightyear's UDP and netcode diagnostics can log addresses. Crash env dumps
 are discarded as credential-bearing lines. No raw provider errors are stored.
 
-Lines containing `SIM-EVIDENCE` (owned by `src/net/diagnostics.rs::log_sim_evidence`) are dropped;
-the stats line supplies the pace. Every other line remains subject to the existing redaction. The
-tail is bounded at 1 MiB and `truncated` records cutting. Every mark, fetch and write is bounded by
+The Worker keeps a plain 1 MiB tail of redacted server output; `truncated` records cutting.
+Every mark, fetch and write is bounded by
 `PROVIDER_TIMEOUT_S`; handled failures warn, record a diagnostic when D1 answers, and still stop. The cron
 deletes successful and failed captures after `SERVER_LOG_RETENTION_DAYS` (operator choice: 14 days),
 even when the provider listing fails. Session history has its own lifetime.

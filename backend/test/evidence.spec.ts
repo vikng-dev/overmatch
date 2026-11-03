@@ -85,16 +85,6 @@ describe("stopped match servers leave evidence for the operator", () => {
 		expect(row.log!.endsWith("last reading")).toBe(true);
 	});
 
-	it("drops a SIM-EVIDENCE flood before the tail bound so the operator retains earlier stats", async () => {
-		await join({ version: V, locations: ["Paris"], pings: {} });
-		const s = await bringUp();
-		const stats = 'server_stats {"ticks":320}';
-		const floodLine = `net: SIM-EVIDENCE ${"x".repeat(1024)}\n`;
-		edgegap.logBody = { logs: `${stats}\n${floodLine.repeat(Math.ceil(SERVER_LOG_MAX_BYTES / floodLine.length) + 1)}last diagnostic` };
-		await end(s);
-		expect(await archive(s.deploymentId)).toMatchObject({ log: `${stats}\nlast diagnostic`, truncated: 0 });
-	});
-
 	it("cancels an oversized log stream at the byte limit and still stops the deployment", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp();
