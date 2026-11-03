@@ -2,69 +2,43 @@
 //! already draws (`terrain_grid::terrain_mesh_tiles`), selected declaratively by bevy's
 //! [`VisibilityRange`].
 //!
-//! # What this is, in one paragraph
-//!
-//! Every render tile is a 129² patch of THE grid (129 = 2⁷ + 1 — [`MESH_TILE_CELLS`] and
-//! `GRID_RESOLUTION` already satisfy RTIN's 2ⁿ+1 constraint). For each tile we build the RTIN /
-//! Martini right-triangle error pyramid ONCE, then extract one mesh per rung of a declared
-//! deviation ladder ([`TERRAIN_LOD_LADDER`]). Triangle count is an OUTPUT, never a tuning dial:
-//! the rung says "this mesh is within δ metres of the ground everywhere", and whatever triangle
-//! count that costs on this tile is what the tile costs. A flat perimeter tile collapses to a
-//! handful of triangles at δ = 2 cm; a ridge tile stays dense until δ = 25 cm.
+//! Each tile is a DERIVED 129² patch (129 = 2⁷ + 1; [`MESH_TILE_CELLS`] and `GRID_RESOLUTION`
+//! satisfy RTIN's 2ⁿ+1 constraint). Build its RTIN / Martini error pyramid once, then extract
+//! [`TERRAIN_LOD_LADDER`] rungs. Deviation δ bounds the mesh everywhere; triangle count follows,
+//! never drives it. CLAIMED examples: a flat perimeter collapses to a handful at 2 cm; a ridge
+//! stays dense until 25 cm.
 //!
 //! # THE THREE INVARIANTS
 //!
-//! 1. **ONE-SURFACE (`terrain_grid` module doc) holds by construction.** The levels are generated
-//!    at STARTUP from the in-memory [`HeightGrid`] — the identical object the oracle, the Avian
-//!    collider and spawn placement read. There is no build tool, no baked artefact and therefore
-//!    no way for a stale product to diverge from the decoded grid. (Re-arm a versioned manifest
-//!    the day generation becomes a build step for streaming or a 5 km map.)
+//! 1. **ONE-SURFACE** (`terrain_grid`): generate at Startup from the same [`HeightGrid`] as
+//!    oracle, collider and spawns. No baked product can go stale. Re-arm a versioned manifest if
+//!    generation becomes a build step for streaming or a 5 km map.
+//!    Kept vertices are exact samples (`interior_vertices_are_exact_grid_samples`), which alone
+//!    does not certify the surface: RTIN changes connectivity from canonical anti-diagonals to
+//!    main diagonals. [`rtin::Rtin::canonicalize_cell_diagonals`] re-splits fully refined cells;
+//!    [`worst_deviation_m`] measures the continuous maximum over both triangulations' overlay.
 //!
-//!    RTIN only ever REMOVES vertices, never moves one, so every kept vertex is an exact grid
-//!    sample — `interior_vertices_are_exact_grid_samples` pins that pointwise. **That is a claim
-//!    about vertices and NOT about the surface**, and the difference is the whole reason for the two
-//!    mechanisms below: RTIN also changes cell CONNECTIVITY, splitting cells along the main diagonal
-//!    where the canonical surface uses the anti-diagonal, and two tessellations can agree at every
-//!    grid node while being different ground between them. So
-//!    [`rtin::Rtin::canonicalize_cell_diagonals`] re-splits every fully refined cell onto the
-//!    canonical diagonal, and certification measures the exact CONTINUOUS maximum over the overlay
-//!    of the two triangulations ([`worst_deviation_m`]) rather than sampling nodes.
+//! 2. **NO SKIRTS.** Full-density borders match vertex-for-vertex at every tile/level pairing:
+//!    no neighbour state, 16 edge-index variants or metre-class curtains casting grid shadows
+//!    under the 17° sun. [`rtin::Rtin::error_pyramid`] enforces borders before extraction; post-
+//!    processing would break restricted-bintree agreement and crack tile interiors.
 //!
-//! 2. **NO SKIRTS. Every level keeps the exact full-density border row on all four edges.**
-//!    Borders are therefore identical across every level of every tile, so any level of tile A
-//!    meets any level of tile B vertex-for-vertex: crack-free BY CONSTRUCTION, with no neighbour
-//!    state, no 16 edge-index variants, and no metre-class curtain walls casting grid-aligned
-//!    shadows under the 17° sun. This is enforced inside the error pyramid (see
-//!    [`rtin::Rtin::error_pyramid`]), not by post-processing, which keeps RTIN's restricted-bintree
-//!    property intact and so leaves the tile INTERIOR crack-free too.
-//!
-//! 3. **Thresholds are octave-quantized and SHARED.** A tile-level's MEASURED deviation is
-//!    assigned UP to the smallest ladder rung that contains it, and the switch distance is a pure
-//!    function of (rung, view profile). Bevy retains a permanent range-table slot per distinct
-//!    [`VisibilityRange`] value for the lifetime of the app and indexes them with a `u16`
-//!    (`bevy_render-0.19.0/src/view/visibility/range.rs`), so per-tile floats are a slow leak that
-//!    ends in slot-zero aliasing. With this shape the table sees at most a couple of dozen values
-//!    no matter how many tiles exist.
+//! 3. **Shared discrete thresholds.** Quantize each level's MEASURED deviation upward to the
+//!    smallest containing rung; switch distance depends only on (rung, view profile).
+//!    `bevy_render-0.19.0/src/view/visibility/range.rs` retains range slots for app lifetime and
+//!    indexes them with `u16`: per-tile floats eventually leak into slot-zero aliasing. Shared
+//!    rungs bound this to a couple of dozen distinct values regardless of tile count.
 //!
 //! # THE DOCTRINE, AND WHAT IT DELIBERATELY DOES NOT COVER
 //!
-//! **There is exactly ONE hard limit in the LOD doctrine, terrain and models alike: a level's
-//! worst-case surface deviation must project under the pixel budget through the LIVE view.** That
-//! is the whole gate. It is enforced here by `every_lod_level_stays_within_its_declared_deviation`
-//! (the exact continuous maximum, not a sample) and by the switch distance every rung is wired at.
+//! As with model LOD, the sole gate is worst-case surface deviation projected under the live
+//! view's pixel budget (`every_lod_level_stays_within_its_declared_deviation` plus rung switches).
+//! The following channels escape that bound. Deliberately no extra gate, threshold or held-back
+//! rung: a shared bound avoids per-channel rules. MEASURED on the shipped map, 2026-08-02.
 //!
-//! Three channels are KNOWN to escape that bound. They are measured, recorded here, and
-//! deliberately NOT handled — no special-case gate, no second threshold, no held-back rung. The
-//! simplicity is the point: one bound that every asset class shares is worth more than a set of
-//! per-channel rules nobody can hold in their head. All figures MEASURED on the shipped map,
-//! 2026-08-02.
-//!
-//! 1. **Shadows.** While the terrain's sun shadow is the baked field (`terrain_shadow`), no level
-//!    casts: the field reads the canonical grid. A level still RECEIVES at its own height, so an
-//!    edge on it moves by its deviation times `cot 17°`, the same factor as below. What follows is
-//!    the receiving edge: a vertical displacement `δh` moves its intersection with the baked
-//!    field by `δh·cot 17° ≈ 3.27 δh` on a flat receiver (DERIVED). Terrain geometry never casts
-//!    into the cascades, so changing its LOD cannot move the shadow field itself.
+//! 1. **Shadows.** `terrain_shadow`'s baked field reads the canonical grid; terrain levels never
+//!    cast into cascades, so LOD cannot move the field. They receive at their own height:
+//!    DERIVED on a flat receiver, δh moves the edge by δh·cot 17° ≈ 3.27 δh.
 //!
 //! 2. **Grazing-LOS first-hit slide.** Projected error cannot see motion ALONG a pixel ray. Near
 //!    tangency the intersection satisfies `δt ≈ δh / (d_y − ∇h·d_xz)`, whose denominator goes to
@@ -83,20 +57,15 @@
 //!
 //! # The landmine this module is built around
 //!
-//! `check_visibility_ranges` (`bevy_camera-0.19.0/src/visibility/range.rs:263`) measures the
-//! camera distance to `entity_transform.translation()` — the WORLD ORIGIN for every terrain tile,
-//! since tiles carry world-space vertices at `Transform::IDENTITY` — UNLESS `use_aabb` is set, in
-//! which case it measures to `affine.transform_point3a(aabb.center)`. Note carefully: the AABB
-//! **CENTRE**, not its nearest point. So `use_aabb: true` + an explicit [`Aabb`] gives us the tile
-//! centre as the anchor (which is what we want, and identical for every level of a tile because we
-//! pin the same exact-level bounds on all of them), and the switch distances must then add the
-//! tile bounding radius themselves to stay conservative about the tile's NEAREST surface.
+//! `check_visibility_ranges` (`bevy_camera-0.19.0/src/visibility/range.rs:263`) measures to
+//! `entity_transform.translation()` — world origin for world-space tiles at identity — unless
+//! `use_aabb` selects `affine.transform_point3a(aabb.center)`. This is the centre, not the nearest
+//! point: pin the same exact-level [`Aabb`] on every level, and add tile bounding radius to
+//! switch distances to protect the nearest surface.
 //!
-//! Because `use_aabb` resolves the anchor through the pinned AABB, tile-LOCAL vertices buy nothing
-//! here: an identity transform applied to a pinned world-space AABB gives exactly the same anchor
-//! a tile-local mesh at a tile-centre transform would. So the vertices stay WORLD-SPACE, which
-//! keeps `terrain_mesh_tiles` and every ONE-SURFACE assertion made against it (`mesh vertex is the
-//! grid sample at node (i, j)`) untouched.
+//! Tile-local vertices buy no different anchor: identity plus world-space bounds equals a
+//! tile-centre transform plus local bounds. Keep world-space vertices so `terrain_mesh_tiles`
+//! and its exact-grid-sample assertions share one layout.
 //!
 //! `NoAutoAabb` is not optional either: bevy's `calculate_bounds` re-derives the AABB on
 //! `Changed<Mesh3d>` (`bevy_camera-0.19.0/src/visibility/mod.rs:568`), which fires on spawn and
@@ -117,56 +86,31 @@ use crate::terrain_grid::{
 };
 use crate::view::{ViewFacts, ViewProfile};
 
-/// The DECLARED deviation ladder, metres — both the extraction schedule and the rung vocabulary a
-/// measured level is quantized up into. A level carrying rung `r` lies within
-/// `TERRAIN_LOD_LADDER[r]` of the canonical surface EVERYWHERE, not merely at grid nodes.
+/// Declared metre deviations, both extraction schedule and upward-quantized rung vocabulary.
+/// Each kept mesh lies within its rung everywhere, not just at nodes. Rung 0 uses the exact
+/// [`crate::terrain_grid::terrain_mesh_tiles`] surface.
 ///
-/// Rung 0 is the exact surface (every grid sample kept) and is generated by
-/// [`crate::terrain_grid::terrain_mesh_tiles`], the same full-density path the collider-matched
-/// ground has always used — the close-up picture is that surface and nothing else.
-///
-/// **The DELIVERED set on the shipped map is {0, 0.05, 0.10, 0.25, 0.50} m** (ratified). The 2 cm
-/// entry survives as an extraction threshold only: it produces a finer triangulation on some tiles,
-/// but no tile's measured deviation quantizes down to it, so no level ever carries that rung. Drop
-/// it and those tiles lose their 5 cm level; keep it and it costs one extraction pass. The rungs are
-/// a shared error VOCABULARY, not a density schedule — a tile carries only what produces a distinct
-/// mesh on it.
+/// MEASURED delivered set on the shipped map: {0, 0.05, 0.10, 0.25, 0.50} m (ratified).
+/// The 2 cm extraction earns no rung itself, but produces some tiles' 5 cm levels; deleting it
+/// loses those levels. One extra extraction preserves them. Tiles keep only distinct meshes.
 pub(crate) const TERRAIN_LOD_LADDER: [f32; 6] = [0.0, 0.02, 0.05, 0.10, 0.25, 0.50];
 
-/// Screen-space error budget, PIXELS: the on-screen size a level's deviation is allowed to project
-/// to before the next-finer level must take over.
-///
-/// THE SEAM: when `settings` grows a player-facing LOD-quality row this becomes its value. Until
-/// then it is one constant with one home, and the whole selection chain derives from it — the
-/// derivation test re-computes every wired threshold from this number and fails if a literal ever
-/// creeps into the wiring.
+/// Pixel budget below which a level's deviation may project before its finer neighbour takes over.
+/// Fixed separately from model LOD settings: terrain error can hide or expose a hull at a crest.
+/// `wired_thresholds_are_the_derivation` catches literal thresholds or unpropagated budget changes.
 pub(crate) const TERRAIN_LOD_BUDGET_PX: f32 = 1.0;
 
-/// The view this ladder selects through: the shared live view (`crate::view`) spent at
-/// [`TERRAIN_LOD_BUDGET_PX`].
-///
-/// The FACTS have one home and one writer for the whole tree; the BUDGET is this ladder's own
-/// tuning knob. Composed rather than stored, so there is nothing here that can drift from what the
-/// tank's chains are being selected against.
+/// Shared live view facts at this ladder's [`TERRAIN_LOD_BUDGET_PX`]. Compose rather than store
+/// a profile, so its facts cannot drift from the tank chains' selection view.
 pub(crate) fn terrain_view(facts: ViewFacts) -> ViewProfile {
     ViewProfile::of(facts, TERRAIN_LOD_BUDGET_PX)
 }
 
-/// The distance (metres, camera → tile CENTRE) at or beyond which rung `rung` is legal for a tile
-/// whose bounding radius is `radius_m`.
-///
-/// Two terms, and both are load-bearing:
-/// * the exact projection ([`ViewFacts::sub_pixel_distance_m`]) — when the rung's declared
-///   deviation stops being worth a pixel;
-/// * `+ radius_m` — because `use_aabb` measures to the tile's CENTRE (verified in the vendored
-///   source, see the module doc) while the deviation lives on the tile's nearest SURFACE, which can
-///   be a full bounding radius closer to the camera. One shared radius (the largest over all tiles)
-///   rather than a per-tile float, so the range table stays small.
-///
-/// Rung 0 is the exact surface: it starts at the camera, always.
-///
-/// A FREE FUNCTION, not a method: the ladder holds the radius and is borrowed mutably while its
-/// levels are spawned, and the profile is a value composed on the spot.
+/// Camera-to-tile-centre metres at which `rung` becomes legal; rung 0 starts at the camera.
+/// Exact projection ([`ViewFacts::sub_pixel_distance_m`]) plus radius protects the nearest
+/// surface because `use_aabb` measures to the centre (source pin in module doc). Use the largest
+/// tile radius for every tile: conservative without per-tile floats leaking range-table slots.
+/// Free function because spawning mutably borrows the ladder's radius; the profile is composed.
 pub(crate) fn rung_switch_distance_m(view: ViewProfile, rung: usize, radius_m: f32) -> f32 {
     if rung == 0 {
         return 0.0;
@@ -174,35 +118,26 @@ pub(crate) fn rung_switch_distance_m(view: ViewProfile, rung: usize, radius_m: f
     view.switch_distance_m(TERRAIN_LOD_LADDER[rung], radius_m)
 }
 
-/// One extracted level of one tile.
 pub(crate) struct TerrainLodLevel {
     /// Index into [`TERRAIN_LOD_LADDER`] this level's MEASURED deviation was quantized up to. THIS
     /// is what the switch distance is computed from, and `measured_dev_m ≤ TERRAIN_LOD_LADDER[rung]`
     /// always holds.
     pub(crate) rung: usize,
-    /// The threshold fed to the RTIN extraction that produced this mesh.
-    ///
-    /// NOT the guarantee, and deliberately recorded separately from [`Self::rung`]: MEASURED on the
-    /// shipped map, the pyramid under-reports the true continuous deviation by up to 15.9×. That is
-    /// not a port bug, it is what the metric means, twice over. The pyramid records at each node the
-    /// error of dropping that node from ITS OWN level's interpolation, so per-level errors COMPOUND
-    /// down the hierarchy rather than dominating; and it is a NODE metric, blind to everything the
-    /// two tessellations do between nodes. Martini/Cesium ship it as a heuristic and so do we — but
-    /// we never declare it. The declared rung comes from [`Self::measured_dev_m`], the exact
-    /// continuous maximum.
+    /// Extraction threshold, a heuristic, not the guarantee. MEASURED: the pyramid under-reports
+    /// continuous deviation by up to 15.9× on the shipped map. Errors compound down levels, and
+    /// node measurements miss between-node differences. Martini/Cesium use it as a heuristic;
+    /// [`Self::measured_dev_m`]'s exact continuous maximum determines the declared rung instead.
     pub(crate) extracted_at_m: f32,
     /// The EXACT continuous maximum of |this level − the canonical surface| over the whole tile,
     /// metres ([`worst_deviation_m`]) — every point, not every node. Always ≤ the declared rung;
     /// that is the invariant the switch distance rests on.
     pub(crate) measured_dev_m: f32,
-    /// Triangles in the extracted mesh (an OUTPUT of the error bound, never a target).
     pub(crate) triangles: usize,
     /// The renderable mesh: world-space positions, full-grid central-difference normals, world-XZ
     /// UVs and (after spawn) a mikktspace tangent basis.
     pub(crate) mesh: Mesh,
 }
 
-/// One render tile's ladder.
 pub(crate) struct TerrainLodTile {
     /// Exact-level minimum corner of the tile, world space.
     pub(crate) min: Vec3,
@@ -222,12 +157,10 @@ impl TerrainLodTile {
     }
 }
 
-/// The whole map's ladder plus the numbers the census line reports.
 pub(crate) struct TerrainLod {
     /// One entry per render tile, in `mesh_tile_node_ranges` order.
     pub(crate) tiles: Vec<TerrainLodTile>,
-    /// The ONE shared bounding radius every switch distance adds — the largest tile radius on the
-    /// map, so the threshold is conservative for every tile without a per-tile float.
+    /// Largest tile radius: shared conservative slack without per-tile threshold floats.
     pub(crate) bounding_radius_m: f32,
     /// Wall time of the whole generation, for the startup census.
     pub(crate) build: std::time::Duration,
@@ -249,8 +182,7 @@ impl TerrainLod {
                 VisibilityRange {
                     start_margin: start..start,
                     end_margin: end..end,
-                    // See the module doc: without this the distance is measured to the world
-                    // ORIGIN for every tile, because terrain vertices are world-space at identity.
+                    // Use the pinned centre; world-space tiles' transforms sit at world origin.
                     use_aabb: true,
                 }
             })
@@ -272,16 +204,11 @@ pub(crate) struct TerrainLodEntity {
 // Generation
 // ---------------------------------------------------------------------------------------------
 
-/// Build the whole map's LOD ladder from the decoded grid.
-///
-/// Rung 0 is taken from [`crate::terrain_grid::terrain_mesh_tiles`] — the shipped full-density
-/// path, untouched — so the close-up picture is exactly what it was; rungs 1.. come from RTIN.
-/// `rtin_at_zero_error_reproduces_the_full_grid` pins the two paths to the same triangle count, so
-/// this is one surface described two ways, not two surfaces.
-///
-/// A grid whose tiles are not 2ⁿ+1 (test fixtures, a re-authored map at another resolution) simply
-/// gets a one-level ladder: RTIN's hierarchy does not exist there, and a silently-wrong
-/// triangulation would be far worse than no LOD.
+/// Build from the decoded grid: exact rung 0 uses [`crate::terrain_grid::terrain_mesh_tiles`];
+/// reduced rungs use RTIN. Negative-threshold extraction has identical canonical connectivity
+/// (`rtin_at_zero_error_reproduces_the_canonical_tessellation`).
+/// Only full-sized tiles use the shared 2ⁿ+1 hierarchy; smaller/re-authored fixture tiles keep
+/// their exact level rather than attempting an invalid triangulation.
 pub(crate) fn build(grid: &HeightGrid) -> TerrainLod {
     let started = Instant::now();
     let ranges = mesh_tile_node_ranges(grid);
@@ -326,22 +253,18 @@ pub(crate) fn build(grid: &HeightGrid) -> TerrainLod {
             let mut previous: Option<Vec<[u32; 3]>> = None;
             for &threshold in &TERRAIN_LOD_LADDER[1..] {
                 let tris = hierarchy.triangulate(&errors, threshold);
-                // Drop DOMINATED levels: a threshold that buys no triangles on this tile (a flat
-                // perimeter tile is already minimal at 2 cm) would only cost a range-table slot
-                // and a draw call's worth of bookkeeping.
+                // Duplicate meshes buy no triangles but cost a range slot and draw bookkeeping
+                // (a flat perimeter tile may already be minimal at 2 cm).
                 if previous.as_ref().is_some_and(|p| *p == tris) {
                     continue;
                 }
                 previous = Some(tris.clone());
                 let measured = worst_deviation_m(&heights, full, &tris);
-                // THE DECLARED RUNG IS THE MEASUREMENT, NOT THE THRESHOLD. The extraction
-                // threshold is the pyramid's heuristic (see `TerrainLodLevel::extracted_at_m` —
-                // measured to under-report by up to ~1.6× on this map), so the rung is the
-                // MEASURED deviation quantized UP to the smallest ladder value that contains it.
-                // A mesh extracted at 5 cm that really deviates 7.7 cm declares 10 cm and switches
-                // in at the 10 cm distance; a mesh extracted at 50 cm that really deviates 3 cm
-                // declares 5 cm and switches in nearer than its threshold would suggest. Both
-                // directions happen, and both are safe only because this reads the measurement.
+                // Quantize the continuous measurement, not the heuristic threshold; see
+                // `TerrainLodLevel::extracted_at_m`. No multiplier, including the ~1.6× estimate,
+                // replaces that measurement. DERIVED examples: extracted at 5 cm, measured
+                // 7.7 cm → rung 10 cm; extracted at 50 cm, measured 3 cm → rung 5 cm. Either
+                // direction is safe only because the measured bound determines switch distance.
                 let Some(quantized) = TERRAIN_LOD_LADDER
                     .iter()
                     .position(|&declared| measured <= declared)
@@ -384,12 +307,8 @@ pub(crate) fn build(grid: &HeightGrid) -> TerrainLod {
     }
 }
 
-/// A tile-local RTIN triangulation → a renderable mesh.
-///
-/// Positions are the grid's own samples in WORLD space (unchanged from the shipped layout);
-/// normals come from [`surface_normal_at`] — the FULL-GRID central difference at the kept node,
-/// never a normal recomputed from the simplified triangles, so shading does not pop when geometry
-/// does; UVs are the same world-XZ tiling every level and the collider-matched surface share.
+/// RTIN indices → world-space grid samples, [`surface_normal_at`] full-grid shading and shared
+/// world-XZ UVs. Recomputing normals from simplified triangles would pop shading with geometry.
 fn tile_mesh(grid: &HeightGrid, ia: usize, ja: usize, size: usize, tris: &[[u32; 3]]) -> Mesh {
     let mut remap = vec![u32::MAX; size * size];
     let mut positions: Vec<[f32; 3]> = Vec::new();
@@ -419,42 +338,24 @@ fn tile_mesh(grid: &HeightGrid, ia: usize, ja: usize, size: usize, tris: &[[u32;
     mesh
 }
 
-/// The EXACT continuous worst deviation between a triangulation and THE canonical surface over the
-/// tile, metres — not a sampled statistic.
+/// Exact continuous maximum |LOD − canonical surface| over a tile, metres.
 ///
-/// # Why NODE sampling is not enough, and why this is exact
+/// Node agreement is insufficient: RTIN's alternating bintree uses main diagonals for roughly
+/// half its leaves; [`HeightGrid::height_at`] and parry use anti-diagonals. At a cell's centre
+/// these differ by `|h₀₀ + h₁₁ − h₁₀ − h₀₁| / 2` despite identical corners: MEASURED 0.323 m in a
+/// shipped cell, twelve times its node-sampled error.
 ///
-/// Sampling grid nodes would be enough if the two triangulations differed only in which vertices
-/// they keep. They do not: they also differ in cell CONNECTIVITY. The canonical surface splits every
-/// cell along the ANTI-diagonal (`HeightGrid::height_at`, and parry's own triangulation with it),
-/// while RTIN's alternating bintree gives roughly half its leaf cells the MAIN diagonal. Those are
-/// two triangulations of the same four corner heights, agreeing at all four nodes and disagreeing by
-/// half the cell's twist `|h₀₀ + h₁₁ − h₁₀ − h₀₁| / 2` at the centre — MEASURED at 0.323 m in one
-/// shipped cell, twelve times what node sampling reports there.
+/// The difference is piecewise linear on the triangulations' overlay, so its maximum occurs at
+/// an overlay vertex. Both meshes' vertices are grid nodes. LOD edges run along grid lines or
+/// at 45° through nodes: axis edges meet canonical anti-diagonals only at node endpoints, and
+/// 45° edges cross grid lines only at nodes. Within a cell they coincide with its anti-diagonal
+/// or cross it on the main diagonal at the centre. Thus nodes plus centres contain every overlay
+/// vertex; extra centres inside a linear region are redundant but safe. One exact pass needs no
+/// sampling parameter and cannot alias past a maximum.
 ///
-/// Both surfaces are piecewise linear over the same square, so their difference is piecewise linear
-/// over the OVERLAY (common refinement) of the two triangulations, and its maximum is attained at
-/// an overlay VERTEX. Enumerating those vertices is not a search:
-///
-/// * every vertex of either triangulation is a grid node;
-/// * LOD edges are axis-aligned along grid lines, or 45° through grid nodes — so within any cell a
-///   LOD edge is a full cell diagonal, never a partial chord;
-/// * a LOD axis edge lies on a grid line, and a canonical anti-diagonal touches grid lines only at
-///   its two endpoints, which are nodes — no new vertex;
-/// * a LOD 45° edge crosses grid lines only at nodes — no new vertex;
-/// * within a cell, a LOD diagonal either COINCIDES with the canonical anti-diagonal (no new
-///   vertex) or is the MAIN diagonal, which meets it at exactly one point: the cell CENTRE.
-///
-/// So the overlay vertex set is exactly `grid nodes ∪ centres of cells the LOD splits the other
-/// way`, and evaluating at every node AND every cell centre is a superset of it. Centres inside a
-/// single linear region are redundant, never wrong. Hence: EXACT, in one pass, no sampling
-/// parameter to tune and nothing to alias past.
-///
-/// Implementation works in DOUBLED node coordinates, where a node is `(2i, 2j)` and a cell centre is
-/// `(2i+1, 2j+1)` — so both live on one integer lattice (the same-parity points) and every
-/// inside-test stays exact integer arithmetic. The canonical height at a cell centre has a closed
-/// form: the centre lies ON the anti-diagonal, where `height_at` reduces to the mean of the two
-/// corners that diagonal joins.
+/// Doubled coordinates put nodes `(2i, 2j)` and centres `(2i+1, 2j+1)` on the same-parity integer
+/// lattice for exact inside tests. On the anti-diagonal, a centre's canonical height is the mean
+/// of its two endpoints.
 pub(crate) fn worst_deviation_m(heights: &[f32], size: usize, tris: &[[u32; 3]]) -> f32 {
     let n = size as i64;
     let node = |k: u32| (i64::from(k) % n, i64::from(k) / n);
@@ -484,9 +385,8 @@ pub(crate) fn worst_deviation_m(heights: &[f32], size: usize, tris: &[[u32; 3]])
             // is an edge midpoint, which is never an overlay vertex.
             let mut p = x0 + ((x0 ^ q) & 1);
             while p <= x1 {
-                // Edge functions against each edge, all sharing the sign of `area2` inside the
-                // triangle (zero on an edge counts — a shared edge is covered twice and both
-                // cover-events agree, which is exactly what "the surface here" means).
+                // Inside signs match `area2`; include zero so both triangles cover shared edges
+                // with the same surface value.
                 let ea = (cx - bx) * (q - by) - (cy - by) * (p - bx);
                 let eb = (ax - cx) * (q - cy) - (ay - cy) * (p - cx);
                 let ec = (bx - ax) * (q - ay) - (by - ay) * (p - ax);
@@ -596,28 +496,15 @@ pub(crate) mod rtin {
             }
         }
 
-        /// The error pyramid: for every non-corner node, the largest vertical error that removing
-        /// it (and everything below it) would introduce, in the same units as `heights`.
+        /// Per-node midpoint-error heuristic, in height units; not a continuous-deviation bound
+        /// (see `TerrainLodLevel::extracted_at_m`). Bottom-up max-folding of own/child errors is
+        /// monotone: hypotenuse neighbours read the same entry and therefore split together.
         ///
-        /// Bottom-up and MONOTONE — a parent's entry is the max of its own midpoint error and both
-        /// children's entries. That monotonicity is the whole reason the extraction is crack-free
-        /// inside the tile: if a triangle splits, the triangle sharing its hypotenuse splits too,
-        /// because they read the same entry.
-        ///
-        /// # THE BORDER RULE (no skirts)
-        ///
-        /// Every non-corner node on the tile's four edges is seeded to `+∞` BEFORE the fold. Each
-        /// non-corner node is the hypotenuse midpoint of exactly one diamond (or of one unpaired
-        /// border triangle), so an infinite entry forces that triangle to split at every threshold,
-        /// and the fold carries the infinity up the ancestor chain — which force-splits exactly the
-        /// graded band of triangles that reach the border and nothing else. The result is the exact
-        /// full-density border row on all four edges of every level, with the restricted-bintree
-        /// property still intact (we changed the pyramid, not the extraction), so the tile interior
-        /// stays crack-free too.
-        ///
-        /// Seeding before the fold (rather than post-processing the extraction) is what makes this
-        /// safe: forcing splits after the fact would break the neighbour agreement the monotone
-        /// pyramid guarantees and open T-junctions in the tile INTERIOR.
+        /// Seed non-corner border nodes to infinity before folding. Each is a diamond midpoint
+        /// (or an unpaired border triangle's), forcing splits at every threshold and propagating
+        /// infinity through ancestors. This refines only the graded band reaching the full-density
+        /// borders. Changing the pyramid preserves restricted-bintree agreement inside the tile;
+        /// post-processing extracted splits instead would open interior T-junctions.
         pub(crate) fn error_pyramid(&self, heights: &[f32]) -> Vec<f32> {
             let size = self.size;
             assert_eq!(
@@ -654,15 +541,11 @@ pub(crate) mod rtin {
             errors
         }
 
-        /// Extract the triangulation whose deviation is bounded by `max_error`, as node indices
-        /// (`v * size + u`) in the tile's own patch.
-        ///
-        /// `max_error < 0` extracts the EXACT surface (every error is ≥ 0, so every splittable
-        /// triangle splits): `2 · cells²` triangles, and — after the diagonal canonicalization
-        /// below — the identical triangle SET `terrain_mesh_tiles` builds. That equality is the
-        /// sanity gate, and it is a connectivity claim, not a count.
-        /// `max_error == 0` is NOT the same thing — a perfectly flat region has error exactly zero
-        /// and would collapse.
+        /// Extract at the heuristic `max_error`, returning patch node indices `v * size + u`.
+        /// Certify continuous deviation separately with `worst_deviation_m`.
+        /// A negative threshold splits every nonnegative-error triangle: DERIVED `2 · cells²`
+        /// triangles, canonicalized to the exact `terrain_mesh_tiles` set. Equality of connectivity,
+        /// not only count, is the sanity gate. Zero differs: a flat region has zero error and collapses.
         pub(crate) fn triangulate(&self, errors: &[f32], max_error: f32) -> Vec<[u32; 3]> {
             let last = (self.size - 1) as i32;
             let mut raw: Vec<[(i32, i32); 3]> = Vec::new();
@@ -686,28 +569,12 @@ pub(crate) mod rtin {
                 .collect()
         }
 
-        /// Re-split every FULLY REFINED cell along the canonical ANTI-diagonal.
-        ///
-        /// # Why this exists
-        ///
-        /// The canonical surface splits every cell along the anti-diagonal — `HeightGrid::height_at`
-        /// evaluates it and parry's heightfield triangulates it, and the ONE-SURFACE invariant is
-        /// that claim. RTIN's bintree does NOT: its leaf orientation is fixed by position parity,
-        /// so roughly half of its leaf cells come out on the MAIN diagonal. The two agree at all
-        /// four corners and disagree by half the cell's twist, `|h₀₀ + h₁₁ − h₁₀ − h₀₁| / 2`, at the
-        /// centre — invisible to node sampling, MEASURED at 0.323 m in one shipped cell.
-        ///
-        /// Constraining the hierarchy itself to the anti-diagonal is not possible: the alternating
-        /// bintree's leaf parity is structural, not a choice at extraction time. It does not need
-        /// to be — a cell covered by exactly TWO leaf triangles can be re-split locally, because
-        /// both splittings have the IDENTICAL four boundary edges and the identical vertex set. Only
-        /// the interior diagonal changes, so nothing outside the cell can observe it: no crack, no
-        /// T-junction, no change in triangle count.
-        ///
-        /// A cell covered by one leaf and one flank of a coarser triangle is left alone (it cannot
-        /// be re-split without touching that coarser triangle). Those cells keep a genuine
-        /// simplification error, which is exactly what `worst_deviation_m`'s overlay maximum now
-        /// measures and what the declared rung is quantized from.
+        /// Re-split fully refined cells along the canonical anti-diagonal. RTIN's structural
+        /// leaf parity cannot be constrained to that diagonal; see `worst_deviation_m` for the
+        /// half-twist error and MEASURED 0.323 m counterexample invisible at nodes.
+        /// Two leaf halves share four corners and boundary edges, so changing only the interior
+        /// diagonal preserves count, neighbours and crack-freeness. A leaf beside a coarser flank
+        /// cannot be re-split locally; keep its error for continuous certification and rung quantization.
         fn canonicalize_cell_diagonals(&self, raw: &mut [[(i32, i32); 3]]) {
             let cells = self.size - 1;
             let mut halves = vec![[u32::MAX; 2]; cells * cells];
@@ -737,9 +604,8 @@ pub(crate) mod rtin {
                 if anti.contains(&a) && anti.contains(&b) {
                     continue;
                 }
-                // Same four corners, same four boundary edges, canonical interior diagonal — and
-                // in the `(a, b, c)` shape whose winding fix reproduces `terrain_mesh_tiles`'
-                // `[i00, i01, i10]` / `[i10, i01, i11]` exactly.
+                // Canonical halves in the `(a, b, c)` shape whose winding fix matches
+                // `terrain_mesh_tiles`' `[i00, i01, i10]` / `[i10, i01, i11]`.
                 raw[slot[0] as usize] = [(i, j), (i + 1, j), (i, j + 1)];
                 raw[slot[1] as usize] = [(i + 1, j), (i + 1, j + 1), (i, j + 1)];
             }
@@ -772,16 +638,10 @@ pub(crate) mod rtin {
 // Spawning + the adaptive layer
 // ---------------------------------------------------------------------------------------------
 
-/// Give every level its mikktspace tangent basis, across the machine's cores.
-///
-/// Required, no fallback, at EVERY level and not just the finest (ADR-0011: a level that cannot
-/// carry a tangent basis is a broken ship, not a degraded one — the normal map has no frame to
-/// rotate its directions into and the ground renders flat and greasy).
-///
-/// Parallel because it is the startup cost that matters: MEASURED at 3.19 s single-threaded over
-/// the shipped map's 3.83 M pyramid triangles, against 134 ms for the whole of generation. The
-/// generator is per-mesh and stateless, so splitting the level list across threads changes nothing
-/// about the result — the same tangents in the same order, just sooner.
+/// Require mikktspace tangents at every rung (ADR-0011); without a basis, normal-map directions
+/// have no frame and terrain renders flat/greasy. Parallelize per-mesh stateless work without
+/// changing tangent order or values. MEASURED shipped map: 3.19 s single-threaded on 3.83 M pyramid
+/// triangles versus 134 ms for generation, so tangents dominate startup cost.
 fn generate_tangents(lod: &mut TerrainLod) {
     let mut pending: Vec<(usize, usize, &mut Mesh)> = lod
         .tiles
@@ -818,19 +678,13 @@ fn generate_tangents(lod: &mut TerrainLod) {
     });
 }
 
-/// Build and spawn the whole terrain LOD ladder, logging the per-rung census. Called from
-/// `world::spawn_environment` in place of the flat tile loop, on windowed compositions only.
+/// Build, spawn and log the census for windowed `world::spawn_environment`.
+/// At Startup the declared camera may not have supplied a view: `None` gives exact levels every
+/// distance and coarser levels none, until [`adapt_ranges`] gets facts. A seeded profile would
+/// guess the player's field and screen; source detail is conservatively over-detailed.
 ///
-/// `view` IS AN OPTION because the ladder is spawned at Startup, before anything has read the
-/// declared camera — and there is no default view to seed it with (`crate::view`). NONE spawns
-/// every tile at its FINEST level, owning every distance, with the coarser ones out of range: the
-/// authored surface, over-detailed rather than under-detailed, until [`adapt_ranges`] rewrites
-/// every threshold on the first frame that has facts. A seeded profile would be a guess at the
-/// player's field and screen, and a guess is what this whole shape removes.
-///
-/// Every level carries `scope`: [`VisualScope::BAKED_CASTER`] when the terrain's sun shadow is the
-/// baked field (`terrain_shadow`), so no level casts into the cascades, or
-/// [`VisualScope::WORLD_SOLID`] when the cascades carry it.
+/// Every level carries `scope`: [`VisualScope::BAKED_CASTER`] for `terrain_shadow`'s baked field
+/// (no cascade casting), or [`VisualScope::WORLD_SOLID`] for cascades.
 pub(crate) fn spawn(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -865,9 +719,8 @@ pub(crate) fn spawn(
             *tiles_kept += 1;
             *tris += level.triangles;
             *worst = worst.max(level.measured_dev_m);
-            // The mesh (already tangented above) is MOVED out of the ladder here — what stays
-            // behind is the census, not the geometry, because the whole pyramid resident twice is
-            // ~200 MB of nothing.
+            // Move tangented geometry; retain only the census. DERIVED: a second resident copy
+            // of the whole pyramid would cost ~200 MB.
             let mesh = std::mem::replace(
                 &mut level.mesh,
                 Mesh::new(PrimitiveTopology::TriangleList, TERRAIN_MESH_USAGE),
@@ -883,8 +736,7 @@ pub(crate) fn spawn(
                 crate::render_cost::CasterClass::Terrain,
                 scope,
                 MeshMaterial3d(material.clone()),
-                // The pinned anchor: the SAME bounds on every level of the tile, and no auto-AABB
-                // to overwrite them on the spawn-frame `Changed<Mesh3d>` (module doc).
+                // Pin identical bounds; `NoAutoAabb` protects the anchor (module source pin).
                 aabb,
                 NoAutoAabb,
                 VisibilityRange {
@@ -942,14 +794,11 @@ pub(crate) fn spawn(
 #[derive(Resource)]
 pub(crate) struct TerrainLodLadder(pub(crate) TerrainLod);
 
-/// THE ONE WRITER of terrain visibility ranges. Rewrites every threshold when the shared view moves
-/// — fov (the optic toggle, a magnification step), rendered height (window resize, render scale).
-///
-/// NOT A READER OF THE VIEW. `view::track_view_facts` owns that, dead band included; this system
-/// consumes [`ViewFacts`] and pairs it with this ladder's own budget. Affordable BECAUSE terrain is
-/// a few hundred entities and both triggers are human-rate. The thresholds stay octave-shared: this
-/// writes at most one distinct value per (rung, profile), never a per-tile float, so the permanent
-/// range table grows by a handful of slots per profile the player actually visits.
+/// Sole range writer, consuming `view::track_view_facts`' facts and dead band with this ladder's
+/// budget. FOV (optic/magnification) and height (resize/render scale) change at human rates across
+/// a few hundred entities. Shared (rung, profile) thresholds add only a handful of permanent
+/// range-table slots per visited profile, never per-tile floats. Narrower FOV moves thresholds out;
+/// widening it moves them back in.
 fn adapt_ranges(
     mut commands: Commands,
     ladder: Option<Res<TerrainLodLadder>>,
@@ -990,11 +839,9 @@ fn adapt_ranges(
     );
 }
 
-/// Mount the adaptive layer. Generation itself is driven by `world::spawn_environment`.
-///
-/// `world::plugin` mounts this module on the DEDICATED SERVER too, which has no window, no camera
-/// and therefore no `view::plugin` — and no ladder either, since nothing there spawns terrain
-/// meshes. The run condition states that: a composition with no live view has no selection to make.
+/// Adapt after view facts change in the same frame; `world::spawn_environment` owns generation.
+/// Also mounted by the dedicated server's `world::plugin`, which has no window, camera,
+/// `view::plugin` or render ladder. Without view facts there is no selection to make.
 pub(crate) fn plugin(app: &mut App) {
     app.add_systems(
         Update,
@@ -1009,8 +856,7 @@ pub(crate) fn plugin(app: &mut App) {
 mod tests {
     use super::*;
 
-    /// A MEASURED view — the only kind there is (`crate::view`: no default view). Every fixture
-    /// below states real numbers, so the `expect` is the honest reading of the constructor.
+    /// FIXTURE view with explicit valid measurements; `ViewFacts` supplies no default.
     fn measured(vfov_rad: f32, height_px: f32) -> ViewFacts {
         ViewFacts::new(vfov_rad, height_px).expect("a measured view")
     }
@@ -1064,15 +910,9 @@ mod tests {
         heights
     }
 
-    /// THE sanity gate, and it is a CONNECTIVITY claim rather than a count: the extraction at a
-    /// negative threshold must reproduce not merely `2 · 128²` triangles per tile, but the IDENTICAL
-    /// triangle set `terrain_mesh_tiles` builds — same triples, same winding.
-    ///
-    /// Counting alone cannot see the failure that matters: RTIN's alternating bintree emits the
-    /// right NUMBER of leaf triangles while splitting roughly half its cells along the main diagonal
-    /// instead of parry's anti-diagonal, which is a different SURFACE with identical corner heights.
-    /// A set comparison against the canonical tessellation does see it, and it is what pins
-    /// `canonicalize_cell_diagonals` to the ONE-SURFACE invariant.
+    /// Negative-threshold RTIN must match `terrain_mesh_tiles`' triangle set and winding, not
+    /// only its DERIVED `2 · 128²` count. Alternating-bintree main diagonals can keep the count
+    /// and corner heights while changing the surface; this pins `canonicalize_cell_diagonals`.
     #[test]
     fn rtin_at_zero_error_reproduces_the_canonical_tessellation() {
         let full = MESH_TILE_CELLS + 1;
@@ -1122,20 +962,10 @@ mod tests {
         assert_eq!(total, 2 * 1024 * 1024, "2,097,152 triangles over the map");
     }
 
-    /// THE POSITIONAL CERTIFICATION: every kept level, on every tile of the shipped map, must lie
-    /// within its DECLARED rung of the CONTINUOUS canonical surface — not merely at grid nodes. The
-    /// declared rung is what the switch distance is computed from, so a level that quietly exceeds
-    /// it anywhere is a level shown too close.
-    ///
-    /// Certified against the OVERLAY maximum (see `worst_deviation_m`): grid nodes AND cell centres,
-    /// which together contain every vertex of the common refinement of the two triangulations, so
-    /// the maximum of their piecewise-linear difference is attained among the points evaluated. The
-    /// node-only form is not a looser tolerance on the same quantity, it is a different quantity:
-    /// it passes a level whose true deviation is 0.323 m while declaring 5 cm.
-    ///
-    /// A brute-force sub-cell sweep over one tile cross-checks that the overlay argument is not
-    /// merely self-consistent — if the exact maximum were being missed, dense sampling would find a
-    /// point above it.
+    /// Every kept level's continuous deviation must fit its declared rung, which sets its switch
+    /// distance. `worst_deviation_m`'s nodes + centres contain the overlay vertices; node-only
+    /// checks can declare 5 cm despite MEASURED 0.323 m error. The separate dense sub-cell test
+    /// cross-checks the maximum instead of relying only on this bookkeeping agreement.
     #[test]
     fn every_lod_level_stays_within_its_declared_deviation() {
         let grid = shipped_grid();
@@ -1172,10 +1002,8 @@ mod tests {
         }
     }
 
-    /// The overlay-maximum argument, CHECKED rather than asserted: a dense sub-cell sweep over the
-    /// roughest tile must never find a point where the LOD surface departs from the canonical one by
-    /// more than `worst_deviation_m` reported. Sampling cannot prove a maximum — but it can falsify
-    /// one, and this is the test that would have caught the node-only version instantly.
+    /// Dense sub-cell probes on the roughest tile must not beat `worst_deviation_m`. Sampling
+    /// cannot prove a maximum but can falsify it, exposing a node-only certificate.
     #[test]
     fn the_overlay_maximum_is_not_beaten_by_dense_sub_cell_sampling() {
         let grid = shipped_grid();
@@ -1291,10 +1119,8 @@ mod tests {
         }
     }
 
-    /// NO SKIRTS, and no cracks either: every level of every tile carries the EXACT full-density
-    /// border row on all four edges, so any level of one tile meets any level of its neighbour
-    /// vertex-for-vertex. This is the whole crack strategy — if it holds, independent per-tile
-    /// selection is safe; if it fails, tiles tear.
+    /// Full-density borders on all levels must meet neighbours vertex-for-vertex: independent
+    /// tile selection is crack-free only under this invariant, without skirts.
     #[test]
     fn borders_are_exact_at_every_level() {
         let grid = shipped_grid();
@@ -1343,14 +1169,10 @@ mod tests {
         }
     }
 
-    /// The ranges a tile ships with must tile `[0, ∞)` exactly once: no distance at which the
-    /// ground is drawn twice (z-fighting, doubled shadow cost) and none at which it vanishes.
-    ///
-    /// Across the legal fov interval up to its open ends, and at a DEGENERATE profile: a headless
-    /// or not-yet-sized window reports a zero pixel height, which collapses every switch distance
-    /// onto the bounding radius so the middle levels own EMPTY intervals. Coverage must survive
-    /// that, so the chain is checked by adjacency at every profile and is strictly increasing only
-    /// where the profile has pixels.
+    /// Ranges partition `[0, ∞)` without double draw (z-fighting/shadow cost) or missing ground.
+    /// Check adjacency through the legal FOV interval and a synthetic zero-height profile, which
+    /// `ViewFacts::new` refuses. That profile collapses switches to the radius, leaving empty
+    /// middle intervals; strict increase is required only for profiles with pixels.
     #[test]
     fn terrain_lod_ranges_are_complementary() {
         let lod = build(&shipped_grid());
@@ -1404,10 +1226,8 @@ mod tests {
         }
     }
 
-    /// The DERIVATION pin: every wired threshold is re-computed here from the constants alone —
-    /// ladder rung, pixel budget, view profile, bounding radius — and must equal what the ladder
-    /// hands the ECS. A literal metre count creeping into the wiring fails here, and so does a
-    /// changed budget that someone forgot to propagate.
+    /// Independently rederive ECS thresholds from rung, budget, view and radius. Literal metre
+    /// wiring or an unpropagated budget change must fail.
     #[test]
     fn wired_thresholds_are_the_derivation() {
         let lod = build(&shipped_grid());
@@ -1460,8 +1280,7 @@ mod tests {
         );
     }
 
-    /// A two-level ladder with no geometry — enough to exercise selection and the adaptive layer
-    /// without decoding a heightmap.
+    /// Three kept levels without geometry exercise selection/adaptation without heightmap decode.
     fn synthetic_ladder() -> TerrainLod {
         let level = |rung: usize| TerrainLodLevel {
             rung,
@@ -1482,19 +1301,13 @@ mod tests {
         }
     }
 
-    /// THE ADAPTIVE LAYER: switching to the gunner optic must pull every terrain switch distance
-    /// OUT (a narrow field magnifies the same deviation, so the coarse level is only legal much
-    /// further away), and returning to the commander view must pull them back in.
-    ///
-    /// This is the whole reason terrain gets the adaptive layer on day one and the shoe does not:
-    /// a few hundred entities and a human-rate trigger. If it silently stopped firing, the ladder
-    /// would be selected for whatever view happened to be live at startup — which is why this
-    /// asserts the DIRECTION of the rewrite and not merely that something changed.
+    /// An optic's narrow field magnifies error, so thresholds must move outward; unchanged facts
+    /// must leave them there. Assert direction, not just a change, to catch stale startup-view
+    /// selection. A few hundred entities and human-rate triggers make adaptation cheap.
     #[test]
     fn the_adaptive_layer_rewrites_thresholds_when_the_view_changes() {
         let mut app = App::new();
-        // The SHARED view alongside the ladder: this module no longer reads a camera or a window,
-        // so without `view::plugin` there is nothing for it to consume.
+        // Mount the shared reader: this module consumes view facts, not cameras or windows.
         app.add_plugins((crate::view::plugin, plugin));
         app.insert_resource(TerrainLodLadder(synthetic_ladder()));
         let world = app.world_mut();
@@ -1588,9 +1401,8 @@ mod tests {
         }
     }
 
-    /// Terrain meshes are RENDER-WORLD ONLY. The ground never changes after startup and nothing in
-    /// the main world reads its vertices back, so the default flags' permanent CPU copy — DERIVED at
-    /// ~100 MiB across this ladder — buys nothing. Pinned because the cost of losing it is invisible.
+    /// Pin [`TERRAIN_MESH_USAGE`]'s render-only contract: losing it silently adds the owner's
+    /// DERIVED ~100 MiB permanent CPU copy, which no main-world reader needs.
     #[test]
     fn terrain_meshes_do_not_keep_a_main_world_copy() {
         assert_eq!(
