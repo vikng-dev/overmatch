@@ -27,7 +27,10 @@ fn range(text: &str) -> Result<f32, String> {
     Ok(range)
 }
 
-pub(super) static RANGE: LazyLock<f32> =
+/// Where a ray that reaches no surface ends, standing in for a direction at infinity. Every aim
+/// ray reads it (the third-person pick, the bore dot, `sight::drive_gunner_aim`), so the sky is one
+/// far point in all of them.
+pub(crate) static MAX_RANGE: LazyLock<f32> =
     LazyLock::new(|| range(INPUT_RON).unwrap_or_else(|error| panic!("{error}")));
 
 #[cfg(test)]
@@ -49,6 +52,32 @@ mod tests {
         assert_eq!(
             range("(sky_range_m: (100.0, StandIn(\"fixture sky point\")))").unwrap(),
             100.0
+        );
+    }
+
+    /// The handshake and every sky ray trust this file, so it must state the distance and label
+    /// its job: absence and the test-only label are both refused before play.
+    #[test]
+    fn the_sky_distance_is_required_labelled_data() {
+        let missing = range("()").unwrap_err();
+        assert!(
+            missing.contains("assets/input/aim.ron") && missing.contains("sky_range_m"),
+            "{missing}"
+        );
+        let fixture = range("(sky_range_m: (100.0, Fixture(\"fixture sky point\")))").unwrap_err();
+        assert!(
+            fixture.contains("Fixture provenance is test-only"),
+            "{fixture}"
+        );
+    }
+
+    /// Input parsing (`command::ParsedTankCommand`) admits a pick anywhere a ray can end: on the
+    /// world's cast envelope, or at the sky point beyond it.
+    #[test]
+    fn the_input_bound_spans_the_world_and_the_sky() {
+        assert_eq!(
+            *crate::aim::AIM_LIMIT,
+            crate::world::VIEW_CAST_MAX_M + range(INPUT_RON).unwrap()
         );
     }
 }

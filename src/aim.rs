@@ -8,7 +8,7 @@
 //! The mode-agnostic servo bridge converts either in the hull frame of the consuming tick.
 
 mod data;
-pub(crate) use data::INPUT_RON;
+pub(crate) use data::{INPUT_RON, MAX_RANGE};
 
 use std::sync::LazyLock;
 
@@ -30,11 +30,6 @@ use crate::tank::{
     Controlled, Hull, Rig, ServoCommand, ServoRole, Tank, TankRoot, ViewNode, rig_world_pose,
 };
 use crate::view::PlayerView;
-
-/// Maximum engagement range; rays that hit nothing fall back to a point this far out. Shared by
-/// every aim ray — the third-person pick, the bore dot, and the optic's resolve
-/// (`sight::drive_gunner_aim`) — so "the sky" is one far point in all of them.
-pub(crate) static MAX_RANGE: LazyLock<f32> = LazyLock::new(|| *data::RANGE);
 
 /// DERIVED per-axis input bound (`command::ParsedTankCommand`): world's diagonal
 /// ([`crate::world::VIEW_CAST_MAX_M`]) + [`MAX_RANGE`] sky fallback bounds all legitimate picks
