@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[2]
 SUSTAINED_S = 5
 # Resolution: ignore deficits below 10%, above the one-decimal period quantization noise.
 SAMPLE_SPEED = 0.9
+STATS_PERIOD_S = 1
+# Resolution: bound the log reader's lag without busy-waiting beside the server.
+POLL_S = 0.1
 
 
 def positive(text):
@@ -105,7 +108,7 @@ def run(args, out):
     env = os.environ.copy()
     env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1",
                OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_BOT="0", OVERMATCH_DEBRIS_STRESS="off",
-               OVERMATCH_SERVER_STATS_S="1", OVERMATCH_HE_STRESS=f"{args.bursts}:{args.period}",
+               OVERMATCH_SERVER_STATS_S=str(STATS_PERIOD_S), OVERMATCH_HE_STRESS=f"{args.bursts}:{args.period}",
                BEVY_ASSET_ROOT=str(ROOT), RUST_BACKTRACE="1")
     # Refuse a busy port before the child can fail, without contacting another server.
     import socket
@@ -119,7 +122,7 @@ def run(args, out):
             server = subprocess.Popen([str(ROOT / "target/debug/overmatch-server")], cwd=ROOT,
                                       env=env, stdout=log, stderr=subprocess.STDOUT)
             with logpath.open() as reader:
-                while time.monotonic() - start < args.duration:
+                while True:
                     if server.poll() is not None:
                         raise RuntimeError(f"SERVER EXITED EARLY (status {server.returncode})")
                     for line in reader.readlines():
@@ -133,6 +136,9 @@ def run(args, out):
                             window.append(row)
                             while len(window) > 1 and sum(r["period_s"] for r in list(window)[1:]) >= SUSTAINED_S:
                                 window.popleft()
+                    now = time.monotonic()
+                    if now - start >= args.duration:
+                        break
                     # Sample once a sustained slowdown is visible. If none appears, sample the
                     # settled observation after the requested burst count, labelled in the output.
                     sustained = window and sum(r["period_s"] for r in window) >= SUSTAINED_S
@@ -142,11 +148,16 @@ def run(args, out):
                         sample = subprocess.Popen(["/usr/bin/sample", str(server.pid), "3", "1", "-file", str(out / "sample.txt")],
                                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                         sampled = True
-                    time.sleep(0.1)
+                    time.sleep(min(POLL_S, args.duration - (now - start)))
                 if server.poll() is not None:
                     raise RuntimeError(f"SERVER EXITED EARLY (status {server.returncode})")
         if not rows:
             raise RuntimeError("SERVER PRINTED NO STATS")
+        tail_s = time.monotonic() - start - rows[-1]["wall_s"]
+        # A report is due every stats period, with at most one reader poll of delivery lag.
+        # Beyond that bound the final interval is censored, not evidence of healthy speed.
+        if tail_s > STATS_PERIOD_S + POLL_S:
+            raise RuntimeError(f"UNMEASURED TRAILING INTERVAL: no stats for {tail_s:.2f} s at deadline; run incomplete")
         if sample:
             _, error = sample.communicate(timeout=15)
             if sample.returncode:

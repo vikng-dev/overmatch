@@ -1314,6 +1314,79 @@ mod tests {
     // The shared spawn rule these tests assert the server composes correctly.
     use crate::terrain_grid::spawn_surface_height;
 
+    /// The game's server instrument must refuse invalid HE input through the production
+    /// entry point. Operators rely on refusal before a benchmark starts; omitting its installer
+    /// leaves the child running instead. The child has its own environment and no screen.
+    #[test]
+    fn dedicated_server_refuses_bad_he_before_running() {
+        use std::process::{Command, Stdio};
+        use std::time::Instant;
+
+        const CHILD: &str = "OVERMATCH_TEST_HE_STARTUP_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            run();
+            panic!("the dedicated-server entry point returned without refusing invalid HE input");
+        }
+        let mut command =
+            Command::new(std::env::current_exe().expect("the test binary has a path"));
+        command.args([
+            "--exact",
+            "net::server::tests::dedicated_server_refuses_bad_he_before_running",
+            "--nocapture",
+        ]);
+        // Hosting is outside this local startup probe; the contract owns its environment keys.
+        let contract: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(include_str!("../../backend/contract/server-env.json"))
+                .expect("the shipped hosting contract is a JSON object");
+        for key in contract.keys() {
+            command.env_remove(key);
+        }
+        let mut child = command
+            .env(CHILD, "1")
+            .env("OVERMATCH_HE_STRESS", "invalid")
+            .env("OVERMATCH_DEBRIS_STRESS", "off")
+            .env("OVERMATCH_BOT", "0")
+            .env("OVERMATCH_SERVER_BIND", "127.0.0.1")
+            .env("OVERMATCH_UNATTENDED", "1")
+            .env("OVERMATCH_WINDOW", "headless")
+            .env("OVERMATCH_MUTE", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the current test binary can run the dedicated-server entry point");
+        // Resolution: bound a missing startup refusal; no gameplay timing is under test.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child
+            .try_wait()
+            .expect("the startup child can be polled")
+            .is_none()
+        {
+            if Instant::now() >= deadline {
+                child
+                    .kill()
+                    .expect("the running startup child can be killed");
+                let output = child
+                    .wait_with_output()
+                    .expect("the killed startup child is reaped");
+                panic!(
+                    "dedicated server did not refuse OVERMATCH_HE_STRESS before startup deadline: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            // Resolution: avoid busy-waiting alongside the startup child.
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child
+            .wait_with_output()
+            .expect("the startup child is reaped");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "startup refusal: {error}");
+        assert!(
+            error.contains("OVERMATCH_HE_STRESS") && error.contains("expected"),
+            "the typed refusal must name the malformed operator input: {error}"
+        );
+    }
+
     /// Each spawn of a combatant is its next life, counted per combatant: a respawn is never the
     /// life it replaced, and one combatant's spawns do not advance another's.
     #[test]

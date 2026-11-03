@@ -143,15 +143,28 @@ status_fields() {
 # Every live deployment as `id tags_csv`, all pages. Returns 1 (message on stderr) when any page
 # fails: a partial list must never read as "absent".
 list_all() {
-  local page=1 code
+  local page=1 code lines
   while :; do
     code="$(call GET "/v1/deployments?page=$page&limit=100")"
     if [[ "$code" != 200 ]]; then
       say "listing deployments failed (HTTP $code) $(api_message)"
       return 1
     fi
-    jq -r '.data // [] | .[] | "\(.request_id) \((.tags // []) | join(",") | if . == "" then "-" else . end)"' "$work/out"
-    [[ "$(jq -r '.pagination.has_next // false' "$work/out")" == true ]] || return 0
+    # Parse the whole page before emitting rows; an invalid page is never an absent tag.
+    # The final line carries pagination even for a valid empty page.
+    lines="$(jq -er '
+      if type != "object" or (.data | type) != "array"
+         or (.pagination | type) != "object" or (.pagination.has_next | type) != "boolean"
+      then error("expected data array and pagination.has_next boolean")
+      elif all(.data[]; type == "object" and (.request_id | type) == "string"
+               and (.request_id | length) > 0
+               and (.tags == null or ((.tags | type) == "array" and all(.tags[]; type == "string")))) | not
+      then error("expected deployment request_id and optional string-array tags")
+      else (.data[] | "\(.request_id) \((.tags // []) | join(",") | if . == "" then "-" else . end)"),
+           (if .pagination.has_next then "more" else "done" end)
+      end' "$work/out")" || { say "listing deployments failed: malformed JSON or page schema"; return 1; }
+    if [[ "$lines" == *$'\n'* ]]; then printf '%s\n' "${lines%$'\n'*}"; fi
+    [[ "${lines##*$'\n'}" == more ]] || return 0
     page=$((page + 1))
     if ((page > 50)); then
       say "more than 50 pages of deployments; refusing to guess"

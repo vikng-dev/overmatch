@@ -35,13 +35,25 @@ body = json.loads(args[args.index('--data-binary') + 1]) if '--data-binary' in a
 with open(os.environ['CALLS'], 'a') as f:
     f.write(json.dumps({'method': method, 'url': url, 'body': body}) + '\\n')
 if '/v1/deployments?' in url:
-    code, response = 503, {'message': 'listing unavailable'}
+    scenario = os.environ['SCENARIO']
+    responses = {'invalid_json': '{', 'missing_data': {'pagination': {'has_next': False}},
+                 'missing_pagination': {'data': []}, 'invalid_row': {'data': [None], 'pagination': {'has_next': False}}}
+    if scenario == 'empty':
+        code, response = 200, {'data': [], 'pagination': {'has_next': False}}
+    elif scenario == 'reconciled':
+        posts = [json.loads(line) for line in Path(os.environ['CALLS']).read_text().splitlines() if json.loads(line)['method'] == 'POST']
+        code, response = 200, {'data': [{'request_id': 'fixture', 'tags': posts[0]['body']['tags']}], 'pagination': {'has_next': False}}
+    elif scenario == 'later_invalid_json':
+        code = 200
+        response = {'data': [{'request_id': 'other', 'tags': []}], 'pagination': {'has_next': True}} if 'page=1&' in url else '{'
+    else:
+        code, response = (200, responses[scenario]) if scenario in responses else (503, {'message': 'listing unavailable'})
 elif method == 'POST':
-    code, response = (502, {}) if os.environ.get('SCENARIO') == 'lost' else (200, {'request_id': 'fixture'})
+    code, response = (502, {}) if os.environ.get('SCENARIO') != 'ready' else (200, {'request_id': 'fixture'})
 else:
     code, response = 200, {'current_status': 'Status.READY', 'running': True, 'public_ip': '192.0.2.1',
                          'ports': {'game': {'external': 5888}}, 'tags': ['profile-fixture']}
-Path(args[args.index('-o') + 1]).write_text(json.dumps(response))
+Path(args[args.index('-o') + 1]).write_text(response if isinstance(response, str) else json.dumps(response))
 print(code, end='')
 """)
         for executable in binary.iterdir():
@@ -91,6 +103,31 @@ print(code, end='')
         self.assertIn("deployment outcome unknown; refusing another deploy", run.stderr)
         self.assertEqual(len([c for c in self.calls() if c["method"] == "POST"]), 1)
 
+    def test_malformed_listing_never_becomes_an_absent_deployment(self):
+        # A lost POST followed by malformed HTTP 200 must not permit a second deployment.
+        for scenario in ["invalid_json", "missing_data", "missing_pagination", "invalid_row", "later_invalid_json"]:
+            with self.subTest(scenario=scenario):
+                self.calls_path.unlink(missing_ok=True)
+                self.env["SCENARIO"] = scenario
+                run = self.deploy("--city", "Tokyo")
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("deployment outcome unknown; refusing another deploy", run.stderr)
+                self.assertEqual(len([c for c in self.calls() if c["method"] == "POST"]), 1)
+
+    def test_valid_listing_recovers_the_single_uncertain_deployment(self):
+        self.env["SCENARIO"] = "reconciled"
+        run = self.deploy("--city", "Tokyo")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.strip(), "fixture")
+        self.assertEqual(len([c for c in self.calls() if c["method"] == "POST"]), 1)
+
+    def test_valid_empty_listing_is_an_absent_deployment(self):
+        self.env["SCENARIO"] = "empty"
+        run = self.deploy("--city", "Tokyo")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("no city turned READY", run.stderr)
+        self.assertNotIn("deployment outcome unknown", run.stderr)
+        self.assertEqual(len([c for c in self.calls() if c["method"] == "POST"]), 2)
 
     def test_bad_he_refuses_before_any_deploy(self):
         for recipe in ["2:0", "2:NaN", "2:1_0", "2:١", "4294967296:1"]:

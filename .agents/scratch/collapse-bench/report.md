@@ -1,18 +1,20 @@
 Subject: the video game's damage model and environment destruction; game state only.
 
-Run `scripts/perf/collapse.sh --duration 60 --bursts 20 --period 1`; add `--sample` for macOS symbols. Builds use the queue; the headless, silent run holds the machine lock and reaps its processes. Off mounts nothing; invalid values return `LeverError` and refuse startup.
+Run `scripts/perf/collapse.sh --duration 60 --bursts 20 --period 1`; add `--sample` for macOS symbols. Builds queue; locked headless runs reap their processes. Off mounts nothing; invalid values refuse startup with `LeverError`.
 
-Decision: lowest map ordinal, first registry-ordered impact-fuzed round, vertical flight from above the building's bounds centre. No client or tank. `FireShell::of_round` enters ordinary flight, fuze, deposits and breakage; gun controls, reload, recoil and player transport are skipped. Idle Battle fill-up holds commands without gating these laws. No physics, breakage or wire change.
+Decision: lowest map ordinal, first registry-ordered impact-fuzed round, vertical flight above the building's bounds centre. No client/tank. `FireShell::of_round` uses ordinary flight, fuze, deposits and breakage, skipping gun controls, reload, recoil and player transport. Idle fill-up does not gate these laws. Physics and wire unchanged.
 
-MEASURED on M4, dev, ten compute threads: no-rebuild command **60.62 s**, including **0.50 s** freshness check; rebuild after one Rust documentation-line edit **1m03s Cargo**, **161.54 s including queue wait**. Recipe: **20 actual bursts**, **53 native pieces**, zero clients/tanks throughout. The prolonged one-third-speed incident was not reproduced; final census **29 awake / 24 asleep**, near real time.
+Historical MEASURED M4/dev results, ten compute threads: no-rebuild command **60.62 s**, **0.50 s** freshness check; one-line rebuild **1m03s Cargo**, **161.54 s including queue**. **20 bursts**, **53 pieces**, zero clients/tanks. No prolonged one-third-speed incident reproduced; final **29 awake / 24 asleep**, near real time.
 
-DERIVED worst five-second stats window: **0.634x**, 0.3–5.2 s. Mean period p50: tick **20.50 ms**, physics **0.78 ms**, send **0.11 ms** (outside tick). A separate sampled pass showed `fracture::loose_groups`, `held`, `incident`, and `breakage::first_chunk`; sampling perturbs timing.
+Historical DERIVED worst five-second window: **0.634x**, 0.3–5.2 s. Mean period p50: tick **20.50 ms**, physics **0.78 ms**, send **0.11 ms** (outside tick). Sample: `fracture::loose_groups`, `held`, `incident`, `breakage::first_chunk`; sampling perturbs timing.
 
-Green: formatting, CI clippy, 51 HE/guard/bake tests, 28 headless tests (four ignored), five script tests. Closed verified backlog rows dev-11/dev-12.
+Review fixes: drain stats at the deadline; overdue final stats fail incomplete instead of reporting healthy earlier data. Malformed deployment JSON/schema refuses retries. A subprocess witnesses production `run` refusing HE input; deleting its installer failed the test and reaped the child. Main closed dev-11/dev-12.
 
-First carrying registered version: **unassigned; none registered yet**. Orchestrator ships it. Edgegap `deploy ... --he 20:1` is wired; no deployment made.
+Current gates: formatting, CI clippy, 51 Rust HE/startup/guard/bake tests, 14 script tests. Original headless group: 28 passed, four ignored.
 
-Artifacts: `target/collapse-bench-{first,final}/`, `target/collapse-*.log`. Table: unprofiled one-second stats, timings are period p50s.
+First registered version: **unassigned; none registered**. Orchestrator ships it. Edgegap `deploy ... --he 20:1` is wired; no deployment made.
+
+Artifacts: `target/collapse-*`; table: historical unprofiled period p50s.
 
 | time s | bursts | awake | asleep | speed | tick ms | physics ms | send ms | RSS MiB |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
