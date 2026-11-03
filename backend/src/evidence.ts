@@ -7,9 +7,10 @@ import { diag } from "./reasons";
 // Bound bytes after redaction, not UTF-16 characters.
 export const SERVER_LOG_MAX_BYTES = 1024 * 1024;
 
-/** The deployed server never logs hosting secrets (hosting.rs); netcode does log peer addresses
- * and token whitelist diagnostics. Drop credential-bearing lines and URLs defensively, including
- * crash_data env dumps. Mask the generated 32-byte hex credentials even without a field label. */
+/** Hosting diagnostics omit configured secrets, but arbitrary panic messages reach the default
+ * hook before Worker sanitisation. Netcode also logs peer addresses and token whitelist diagnostics.
+ * Redact credential-bearing lines, URLs and crash_data env dumps; mask generated 32-byte hex
+ * credentials even without a field label. This sanitises archives, not the container's raw output. */
 function sanitizedTail(raw: string, providerToken: string): { log: string; truncated: boolean } {
 	let clean = raw.split("\n").map((line) =>
 		/secret|token|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment/i.test(line)

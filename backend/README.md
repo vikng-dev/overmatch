@@ -88,12 +88,14 @@ correct a known session that already started or completed stopping. A failed cra
 request after stop/ticket cleanup; the registry retains the crash reason for its stop retry. Existing end requests
 without `crash` keep their current behaviour. The server preserves default panic output, captures
 the panicking thread's backtrace without requiring `RUST_BACKTRACE`. A prestarted watchdog arms
-before default output, capture, locks or allocation: its whole-hook deadline is 15 seconds, observed
-at 10 ms resolution (Resolution: allow provider capture without spinning while healthy). It uses
+before default output, capture, locks or allocation: its whole-hook deadline is 15 seconds
+(Resolution: allow provider capture). The watchdog blocks until armed, then waits for the deadline. It uses
 `_exit(101)` to bypass runtime cleanup and blocked output. Completed failed sends attempt one
-failure line; the deadline itself performs no logging. Normal shutdown waits for an armed panic;
-only the first panic sends, and it terminates promptly after the reply. Blocked default output can
-consume the budget before any report is sent. The normal wait keeps the container alive for capture.
+failure line; the deadline itself performs no logging. Panic and normal shutdown share one end claim;
+a panic that claims first sends and terminates promptly after the reply. Normal shutdown waits when
+a panic has armed. A panic after the clean claim sends no second end report and still exits with 101;
+its crash text may only survive in raw output. Blocked default output can consume the budget before
+any report is sent. The normal wait keeps the container alive for capture.
 Every mark, fetch and write is bounded by
 `PROVIDER_TIMEOUT_S`; handled failures warn, record a diagnostic when D1 answers, and still stop. The cron
 deletes successful and failed captures after `SERVER_LOG_RETENTION_DAYS` (operator choice: 14 days),

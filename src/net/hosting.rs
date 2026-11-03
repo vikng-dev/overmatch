@@ -20,7 +20,7 @@ use core::time::Duration;
 use std::backtrace::Backtrace;
 use std::ffi::OsString;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -40,18 +40,35 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// The whole hook shares this deadline, including default output, capture, HTTP and failure logging.
 const PANIC_REPORT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Resolution: observe the deadline within 10 ms without spinning while the server is healthy.
-const PANIC_WATCH_INTERVAL: Duration = Duration::from_millis(10);
-
 static PANIC_DEADLINE: OnceLock<PanicDeadline> = OnceLock::new();
 
 struct PanicDeadline {
     epoch: Instant,
     at_ns: AtomicU64,
+    end: AtomicU8,
 }
 
 impl PanicDeadline {
-    fn arm(&self) -> bool {
+    // Independent bits let one atomic operation claim /end and mark any panic, even after a clean
+    // claim. Shutdown cannot observe a claimed panic without also observing that it must wait.
+    const END_CLAIMED: u8 = 1;
+    const PANIC_ARMED: u8 = 2;
+
+    fn claim_clean_end(&self) -> bool {
+        self.end
+            .compare_exchange(0, Self::END_CLAIMED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn is_panicking(&self) -> bool {
+        self.end.load(Ordering::Acquire) & Self::PANIC_ARMED != 0
+    }
+
+    fn arm(&self, watchdog: &std::thread::Thread) -> bool {
+        let owns_end = self
+            .end
+            .fetch_or(Self::END_CLAIMED | Self::PANIC_ARMED, Ordering::AcqRel)
+            == 0;
         // Saturating the clock representation can only shorten the deadline, never postpone exit.
         let at = self
             .epoch
@@ -59,18 +76,30 @@ impl PanicDeadline {
             .saturating_add(PANIC_REPORT_TIMEOUT)
             .as_nanos()
             .min(u128::from(u64::MAX)) as u64;
-        self.at_ns
+        if self
+            .at_ns
             .compare_exchange(0, at, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+        {
+            // Only the hook signals this dedicated parker; no application thread can hold its
+            // synchronisation. The token also survives an arm before the watchdog calls park.
+            watchdog.unpark();
+        }
+        owns_end
     }
 
     fn watch(&self) {
         loop {
             let at = self.at_ns.load(Ordering::Acquire);
-            if at != 0 && self.epoch.elapsed().as_nanos() >= u128::from(at) {
+            if at == 0 {
+                std::thread::park();
+                continue;
+            }
+            let remaining = Duration::from_nanos(at).saturating_sub(self.epoch.elapsed());
+            if remaining.is_zero() {
                 panic_exit();
             }
-            std::thread::sleep(PANIC_WATCH_INTERVAL);
+            std::thread::park_timeout(remaining);
         }
     }
 }
@@ -86,9 +115,9 @@ fn await_panic_exit() {
     // Reporter-only fixtures have no installed hook. A shipped hosted process installs it first.
     while PANIC_DEADLINE
         .get()
-        .is_some_and(|deadline| deadline.at_ns.load(Ordering::Acquire) != 0)
+        .is_some_and(PanicDeadline::is_panicking)
     {
-        std::thread::park_timeout(PANIC_WATCH_INTERVAL);
+        std::thread::park();
     }
 }
 
@@ -356,10 +385,20 @@ pub(super) fn install_panic_hook(config: &HostedConfig) -> std::io::Result<()> {
     let deadline = PANIC_DEADLINE.get_or_init(|| PanicDeadline {
         epoch: Instant::now(),
         at_ns: AtomicU64::new(0),
+        end: AtomicU8::new(0),
     });
-    std::thread::Builder::new()
+    let (ready, watching) = mpsc::channel();
+    let watchdog = std::thread::Builder::new()
         .name("hosting-panic-deadline".into())
-        .spawn(move || deadline.watch())?;
+        .spawn(move || {
+            // A dropped installer has no hook to enforce.
+            if ready.send(()).is_ok() {
+                deadline.watch();
+            }
+        })?;
+    // Start the watchdog before publishing the hook; an early unpark token survives until park.
+    watching.recv().map_err(std::io::Error::other)?;
+    let watchdog = watchdog.thread().clone();
     let api = Api::new(config, PANIC_REPORT_TIMEOUT);
     let (send, receive) = mpsc::channel::<(String, Backtrace, mpsc::Sender<bool>)>();
     std::thread::Builder::new()
@@ -385,9 +424,11 @@ pub(super) fn install_panic_hook(config: &HostedConfig) -> std::io::Result<()> {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // The atomic arm precedes output, allocation, locks, stack walking and network work.
-        let first = deadline.arm();
+        let first = deadline.arm(&watchdog);
         previous(info);
         if !first {
+            // A clean end claimed before this panic keeps sole /end ownership. Such a late panic
+            // preserves local output but may lose archived crash text; it still exits with 101.
             await_panic_exit();
             return;
         }
@@ -590,6 +631,13 @@ impl Hosted {
             decided.map_or(Some("shutdown".to_owned()), ExitReason::end_reason)
         };
         if let Some(reason) = reason {
+            if PANIC_DEADLINE
+                .get()
+                .is_some_and(|deadline| !deadline.claim_clean_end())
+            {
+                await_panic_exit();
+                return;
+            }
             match self.api.end(&reason) {
                 Ok(Answer::Accepted) => info!("hosting: reported end ({reason})"),
                 Ok(answer) => warn!("hosting: end ({reason}) answered {answer:?}"),
@@ -1021,12 +1069,41 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "subprocess fixture: panic capture overlaps reporter joining"]
+    fn panic_while_joining_child() {
+        let config = HostedConfig::from_env().unwrap().unwrap();
+        let previous = std::panic::take_hook();
+        let (entered, armed) = mpsc::channel();
+        let (release, capture) = mpsc::channel();
+        let capture = Mutex::new(capture);
+        std::panic::set_hook(Box::new(move |info| {
+            previous(info);
+            entered.send(()).unwrap();
+            capture.lock().unwrap().recv().unwrap();
+        }));
+        install_panic_hook(&config).unwrap();
+        let hosting = Hosted::start(&config).unwrap();
+        hosting.control.send(Control::Listening).unwrap();
+        std::thread::spawn(move || {
+            let mut command = [0];
+            std::io::stdin().read_exact(&mut command).unwrap();
+            std::thread::spawn(|| panic!("panic while joining fixture"));
+            armed.recv().unwrap();
+            writeln!(std::io::stdout(), "panic armed").unwrap();
+            std::io::stdin().read_exact(&mut command).unwrap();
+            release.send(()).unwrap();
+        });
+        hosting.finish();
+        std::process::exit(0);
+    }
+
+    #[test]
     #[ignore = "subprocess fixture for the shipped server entry point"]
     fn hosted_entry_child() {
         crate::run_server();
     }
 
-    fn panic_child(worker: &FakeWorker, entry: &str) -> std::process::Child {
+    fn panic_command(worker: &FakeWorker, entry: &str) -> std::process::Command {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
             .args(["--exact", entry, "--ignored", "--nocapture"])
@@ -1038,7 +1115,11 @@ mod tests {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
-        command.spawn().unwrap()
+        command
+    }
+
+    fn panic_child(worker: &FakeWorker, entry: &str) -> std::process::Child {
+        panic_command(worker, entry).spawn().unwrap()
     }
 
     fn wait_for_panic_child(child: std::process::Child) -> std::process::Output {
@@ -1115,6 +1196,61 @@ mod tests {
             "clean shutdown cut off the panic report before the Worker replied"
         );
         assert_eq!(output.status.code(), Some(101));
+    }
+
+    /// A panic armed during reporter joining owns /end even before it can capture its backtrace.
+    #[test]
+    fn panic_during_reporter_join_claims_end_before_clean_shutdown_can_stop_the_container() {
+        let _child = PANIC_CHILD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (release, gate) = mpsc::channel();
+        let worker = FakeWorker::with_reply_gate(vec![204], Some(gate));
+        let mut child = panic_command(&worker, "net::hosting::tests::panic_while_joining_child")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (signal, armed) = mpsc::channel();
+        let observer = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if line.unwrap().contains("panic armed") {
+                    signal.send(()).unwrap();
+                    return;
+                }
+            }
+        });
+        assert!(worker.next().path.ends_with("/heartbeat"));
+        // Fixture scheduling allowance: finish waits in join while heartbeat HTTP is held.
+        std::thread::sleep(Duration::from_millis(100));
+        child.stdin.as_mut().unwrap().write_all(b"x").unwrap();
+        let panic_armed = armed.recv_timeout(Duration::from_secs(2));
+        release.send(()).unwrap();
+        let early_end = worker.seen.recv_timeout(Duration::from_millis(100));
+        child.stdin.as_mut().unwrap().write_all(b"x").unwrap();
+        let output = wait_for_child_within(child, Duration::from_secs(2));
+        observer.join().unwrap();
+        assert!(
+            panic_armed.is_ok(),
+            "fixture must arm before heartbeat retirement"
+        );
+        assert!(
+            early_end.is_err(),
+            "clean /end overtook an armed panic before capture: {:?}",
+            early_end.as_ref().map(|seen| &seen.body)
+        );
+        let crash = worker.next();
+        assert!(crash.path.ends_with("/end"));
+        assert_eq!(crash.body["reason"], "panic");
+        assert!(
+            crash.body["crash"]
+                .as_str()
+                .unwrap()
+                .contains("panic while joining fixture")
+        );
+        assert_eq!(output.status.code(), Some(101));
+        assert!(
+            worker.seen.recv_timeout(Duration::from_millis(50)).is_err(),
+            "only one /end may stop the container"
+        );
     }
 
     /// The operator needs the first panic's payload and source even when another thread panics.
