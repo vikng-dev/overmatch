@@ -273,11 +273,7 @@
                 sparks: (true, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
             ),
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
-            friction: Some((1.62, StandIn("Stand-in for grouser bite into the ground: the
-                owner-tuned grip of a track on the terrain, 0.9, on the base ground's 0.5: 0.9² /
-                0.5 = 1.62 (DERIVED), so the pair rule reproduces it. Far above a steel sliding
-                coefficient (ASSUMED 0.4–0.8 on stone, no source read): the missing factor is the
-                shoe's grousers biting into the ground, which no law reads yet (#146)"))),
+            friction: Some((0.6, Unknown("steel sliding coefficient: provisional middle of the CLAIMED 0.4-0.8 steel-on-stone range, no source read; settle by a dry sliding test of cast manganese steel on paving; soil grouser traction belongs to the soil shear law"))),
             facts: Some((
                 density: (7890.0, Derived("0.285 lb/in³ × 27 680 (kg/m³)/(lb/in³): CLAIMED for
                     austenitic manganese steel by a Columbia Steel alloy paper, read only in a search

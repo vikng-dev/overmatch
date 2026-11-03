@@ -1357,8 +1357,8 @@ mod tests {
         assert_eq!(app.world().resource::<GroundMarkRing>().0.live.len(), 1);
     }
 
-    /// One contact is one read: a blended ground's shares sum into one lift and one roll picks one
-    /// soil. FIXTURE half base pack, half first layer, of distinct soils and lifts. Across contacts
+    /// The game's damage-model view: one contact is one soil read. Its shares sum into one lift.
+    /// FIXTURE approximately half base pack and half first layer in the 8-bit mask, with distinct soils and lifts. Across contacts
     /// both soils appear, while every contact leaves one scar at the blended opacity, and the
     /// layers of a contact share one palette. A mutant looping the sources stacks two reads, each
     /// fainter, and fails here. ADR-0023's surface evidence relies on it.
@@ -1367,9 +1367,10 @@ mod tests {
         let mut app = harness();
         let mut table = crate::ground_types::GroundTypes::load_shipped();
         let soils = [[0.2, 0.2, 0.2], [0.8, 0.8, 0.8]];
+        let lifts = [0.4, 0.8];
         for (name, lifted, colour) in [
-            (BASE_GROUND, 0.4, soils[0]),
-            (BLEND_LAYERS[0].ground, 0.8, soils[1]),
+            (BASE_GROUND, lifts[0], soils[0]),
+            (BLEND_LAYERS[0].ground, lifts[1], soils[1]),
         ] {
             let ground = table.types.get_mut(name).expect("a pack's ground");
             ground.strike.lifted.value = lifted;
@@ -1379,6 +1380,11 @@ mod tests {
         app.insert_resource(table).insert_resource(
             crate::track_prints::PrintDepths::painted_everywhere(Vec3::new(0.5, 0.0, 0.0)),
         );
+        let weights = app
+            .world()
+            .resource::<crate::track_prints::PrintDepths>()
+            .ground_weights(Vec2::ZERO);
+        let lifted = weights.x * lifts[0] + weights.y * lifts[1];
         let palettes = soils.map(|colour| {
             app.world_mut()
                 .resource_scope(|world, mut palettes: Mut<DustPalettes>| {
@@ -1399,7 +1405,7 @@ mod tests {
                 .fade
                 .w;
             assert!(
-                (opacity - look().scar_fade.w * 0.6).abs() < 1e-5,
+                (opacity - look().scar_fade.w * lifted).abs() < 1e-5,
                 "{opacity}"
             );
             let lut = lut_of(&app, scar);

@@ -180,9 +180,8 @@ impl MapManifest {
         &self.heightmap
     }
 
-    /// The declared masks, as an ASSET-SERVER path — the map directory's own name, not a
-    /// filesystem path, because this one is loaded through the asset server rather than decoded
-    /// synchronously (it is view-only, ADR-0014).
+    /// Asset-root-relative masks path: synchronously decoded for ground facts and loaded
+    /// through the asset server for rendering.
     pub(crate) fn masks_asset(&self) -> String {
         map_asset(&self.masks)
     }

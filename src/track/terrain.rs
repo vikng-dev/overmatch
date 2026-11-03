@@ -56,12 +56,33 @@ fn build_track_field(
         .collect();
     // The heightmap ground term rides along when the grid decoded (Startup, before the first
     // PreUpdate build): an Arc-cheap clone of the same immutable samples every peer decoded. The
-    // ground field is the same decode's (`terrain_grid::decode_height_grid` inserts one in every
-    // world it builds); only a bare test world's hand-made `TerrainMap` comes without one.
+    // ground field is required whenever a TerrainMap is published.
     track.field = Some(
         BlockField::new(blocks)
             .with_height(grid.map(|g| g.clone()))
-            .with_ground(ground.map(|g| g.clone())),
+            .with_ground(Some(ground.expect("a published TerrainMap requires its decoded GroundField; insert both at world construction").clone())),
     );
     track.revision = Some(map.revision);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// Simulation must refuse a partial world composition before using a fixture's rigid
+    /// pair as ground truth. Server and sandbox construction rely on this publication gate.
+    #[test]
+    #[should_panic(expected = "a published TerrainMap requires its decoded GroundField")]
+    fn a_published_map_requires_its_ground_facts() {
+        let mut world = World::new();
+        world.insert_resource(TerrainMap {
+            revision: 0,
+            blocks: Vec::new(),
+        });
+        world.init_resource::<TrackField>();
+        world
+            .run_system_once(build_track_field)
+            .expect("the publication system's parameters are present");
+    }
 }

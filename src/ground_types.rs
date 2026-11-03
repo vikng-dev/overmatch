@@ -19,7 +19,7 @@
 //!
 //! The track law reads each terrain contact's own ground: the map's painted blend weights, decoded
 //! once at the data edge into the sim's [`crate::ground_field::GroundField`], blend the four packs'
-//! frictions and rolling resistances at the contact's point (`track::forces::contact_side`). The
+//! soil capacities, rigid pair capacities and rolling resistances at the contact's point (`track::forces::contact_side`). The
 //! terrain's one Avian collider carries the base pack's ground alone
 //! ([`GroundTypes::terrain_friction`]): the hull's and the pieces' solver contacts with the ground
 //! read that, not the paint. The law's narrative is the track design doc's
@@ -42,7 +42,7 @@
 //!
 //! # Where the starting values come from
 //!
-//! Every value in the shipped file is ASSUMED. The ORDER follows the ground-stamping note's §2
+//! Print values are ASSUMED; traction and rolling facts carry their own provenance. Print ordering follows the ground-stamping note's §2
 //! table (`.agents/scratch/impact-feedback-2026-10-28/track-prints-ground-stamping.md`): its
 //! Bekker fits at a DERIVED 111 kPa put soft mud deepest (held at the note's 0.15 m visual cap), dry
 //! sand next (92 mm, so 0.8 mm/kPa), then firm dirt (5.9 mm) and gravel (7.6 mm), and intact paving
@@ -128,10 +128,23 @@ pub(crate) struct StrikeSource {
     pub(crate) sparks: bool,
 }
 
+/// The surface's constitutive choice; rigid paving needs no soil parameters.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) enum TractionLaw {
+    Rigid,
+    Soil {
+        cohesion_pa: Labelled<f32>,
+        friction_angle_deg: Labelled<f32>,
+        shear_deformation_m: Labelled<f32>,
+    },
+}
+
 /// One ground type: one block per thing the ground drives.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct GroundType {
+    pub(crate) traction: TractionLaw,
     pub(crate) print: PrintResponse,
     /// The friction coefficient this ground brings to a contact, dimensionless: one side's value
     /// ([`crate::substances::PAIR_RULE`] combines it with the other side's), finite and not
@@ -149,6 +162,19 @@ impl GroundType {
     pub(crate) fn contact(&self) -> crate::ground_field::ContactGround {
         crate::ground_field::ContactGround {
             friction: self.friction,
+            traction: match &self.traction {
+                TractionLaw::Rigid => crate::ground_field::ContactTraction::RIGID,
+                TractionLaw::Soil {
+                    cohesion_pa,
+                    friction_angle_deg,
+                    shear_deformation_m,
+                } => crate::ground_field::ContactTraction {
+                    cohesion_pa: cohesion_pa.value,
+                    tan_phi: friction_angle_deg.value.to_radians().tan(),
+                    shear_m: shear_deformation_m.value,
+                    rigid_share: 0.0,
+                },
+            },
             rolling_resistance: self.rolling_resistance.value,
         }
     }
@@ -172,14 +198,15 @@ pub(crate) struct GroundTypes {
 /// The comment the table is written back under: the file stays self-describing after a save.
 #[cfg(any(feature = "dev_ui", test))]
 const FILE_HEADER: &str = "\
-// The ground-type table (`src/ground_types.rs`): how each kind of ground takes a track print, the
-// game's cosmetic terrain marks. Each terrain pack names its type (`src/terrain_blend.rs`).
+// The ground-type table (`src/ground_types.rs`): physical traction and motion resistance,
+// and cosmetic prints and dust. Each terrain pack names its type (`src/terrain_blend.rs`).
 //
 //   softness_mm_per_kpa  print depth per unit of the tank's ground pressure, mm per kPa
 //   depth_cap_mm         the deepest print this ground takes, mm
 //   darkening            the share of albedo a print takes away, 0..1
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
 //   friction             the friction coefficient the ground brings to a contact, one side's
+//   traction             rigid friction or labelled soil cohesion, friction angle and shear distance
 //   rolling_resistance   the ground's motion resistance coefficient on a moving track, labelled
 //   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
 //   dust.colour_srgb     the lifted soil's albedo, sRGB, each channel 0..1
@@ -249,6 +276,53 @@ impl GroundTypes {
     pub(crate) fn parse(text: &str) -> Result<Self, GroundTableError> {
         let table: Self = ron::de::from_str(text).map_err(GroundTableError::Ron)?;
         for (name, ground) in &table.types {
+            if let TractionLaw::Soil {
+                cohesion_pa,
+                friction_angle_deg,
+                shear_deformation_m,
+            } = &ground.traction
+            {
+                for (field, labelled) in [
+                    ("cohesion_pa", cohesion_pa),
+                    ("friction_angle_deg", friction_angle_deg),
+                    ("shear_deformation_m", shear_deformation_m),
+                ] {
+                    if !matches!(
+                        labelled.label,
+                        crate::provenance::Provenance::Measured(_)
+                            | crate::provenance::Provenance::Derived(_)
+                            | crate::provenance::Provenance::Unknown(_)
+                            | crate::provenance::Provenance::Fixture(_)
+                    ) {
+                        return Err(GroundTableError::Refused(format!(
+                            "{GROUND_TYPES_PATH}: ground {name:?}: traction.{field} must state a fact or Unknown with its settling measurement, never a taste or solver setting"
+                        )));
+                    }
+                }
+                for (field, value, valid) in [
+                    (
+                        "traction.cohesion_pa",
+                        cohesion_pa.value,
+                        cohesion_pa.value.is_finite() && cohesion_pa.value >= 0.0,
+                    ),
+                    (
+                        "traction.friction_angle_deg",
+                        friction_angle_deg.value,
+                        (0.0..90.0).contains(&friction_angle_deg.value),
+                    ),
+                    (
+                        "traction.shear_deformation_m",
+                        shear_deformation_m.value,
+                        shear_deformation_m.value.is_finite() && shear_deformation_m.value > 0.0,
+                    ),
+                ] {
+                    if !valid {
+                        return Err(GroundTableError::Refused(format!(
+                            "{GROUND_TYPES_PATH}: ground {name:?}: `{field}` is {value}; supply finite nonnegative cohesion, an angle in [0,90), and positive shear deformation"
+                        )));
+                    }
+                }
+            }
             let print = &ground.print;
             for (field, value, in_domain, domain) in [
                 (
@@ -420,7 +494,7 @@ mod tests {
     /// authored, the first one (`gravel`, the base pack's) carrying `gravel` in place of its block.
     /// FIXTURE DATA: the numbers are round and stand for no ground.
     fn table_text(gravel: &str) -> String {
-        let block = "print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
+        let block = "traction: Rigid, print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
                      roughness_gain: 1.0), friction: 0.5, rolling_resistance: (0.05, \
                      Fixture(\"fixture\")), dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3)), \
                      strike: (lifted: (0.5, Fixture(\"fixture\")), sparks: (false, \
@@ -503,7 +577,7 @@ mod tests {
     /// of these. The terrain collider reads the base ground's friction under the pair rule.
     #[test]
     fn a_ground_that_states_too_little_is_refused_at_load() {
-        let block = "print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
+        let block = "traction: Rigid, print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
                      roughness_gain: 1.0)";
         let dust = "dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3)), strike: (lifted: (0.5, \
                     Fixture(\"fixture\")), sparks: (false, Fixture(\"fixture\")))";
@@ -513,7 +587,10 @@ mod tests {
             format!("{block}, friction: 0.5, {rolling}, {bare_dust}, strike: ({strike})")
         };
         for (missing, gravel) in [
-            ("print", format!("friction: 0.5, {rolling}, {dust}")),
+            (
+                "print",
+                format!("traction: Rigid, friction: 0.5, {rolling}, {dust}"),
+            ),
             (
                 "strike",
                 format!("{block}, friction: 0.5, {rolling}, {bare_dust}"),
@@ -574,6 +651,45 @@ mod tests {
         );
     }
 
+    /// Missing, unlabelled or invalid soil facts must be refused before a contact can read
+    /// them. The traction choice is required even on rigid surfaces; no silent default law.
+    #[test]
+    fn a_traction_law_requires_its_own_valid_facts() {
+        // FIXTURE table with one soil row; the remaining rows are valid rigid surfaces.
+        let base = "print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, roughness_gain: 1.0), friction: 0.5, rolling_resistance: (0.05, Fixture(\"fixture\")), dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3)), strike: (lifted: (0.5, Fixture(\"fixture\")), sparks: (false, Fixture(\"fixture\")))";
+        assert!(GroundTypes::parse(&table_text(base)).is_err());
+        let law = "Soil(cohesion_pa: (1000.0, Fixture(\"fixture\")), friction_angle_deg: (30.0, Fixture(\"fixture\")), shear_deformation_m: (0.01, Fixture(\"fixture\")))";
+        let text = table_text(&format!("traction: {law}, {base}"));
+        GroundTypes::parse(&text).expect("a complete soil row loads");
+        for (from, to, field) in [
+            ("cohesion_pa: (1000.0", "cohesion_pa: (-1.0", "cohesion_pa"),
+            (
+                "friction_angle_deg: (30.0",
+                "friction_angle_deg: (90.0",
+                "friction_angle_deg",
+            ),
+            (
+                "shear_deformation_m: (0.01",
+                "shear_deformation_m: (0.0",
+                "shear_deformation_m",
+            ),
+            (
+                "shear_deformation_m: (0.01, Fixture",
+                "shear_deformation_m: (0.01, Taste",
+                "shear_deformation_m",
+            ),
+        ] {
+            let error = GroundTypes::parse(&text.replace(from, to))
+                .expect_err(field)
+                .to_string();
+            assert!(error.contains(field) && error.contains("gravel"), "{error}");
+        }
+        for field in ["cohesion_pa", "friction_angle_deg", "shear_deformation_m"] {
+            let bad = text.replacen(field, "misspelt", 1);
+            assert!(GroundTypes::parse(&bad).is_err());
+        }
+    }
+
     /// A VALUE OUT OF DOMAIN IS REFUSED AT LOAD, NAMING THE GROUND AND THE FIELD: a negative
     /// friction under the pair rule's `√(μa·μb)` is a NaN contact friction and an infinite one an
     /// unbounded grip; a darkening outside 0..=1 is an albedo gain no material holds; a negative
@@ -599,7 +715,7 @@ mod tests {
             lifted,
         ]: [&str; 11]| {
             format!(
-                "print: (softness_mm_per_kpa: {softness}, depth_cap_mm: {cap}, darkening: \
+                "traction: Rigid, print: (softness_mm_per_kpa: {softness}, depth_cap_mm: {cap}, darkening: \
                  {darkening}, roughness_gain: {roughness}), friction: {friction}, \
                  rolling_resistance: ({rolling}, Fixture(\"fixture\")), \
                  dust: (erodibility: {erodibility}, colour_srgb: ({red}, {green}, {blue})), \

@@ -29,10 +29,29 @@ use crate::ground_types::GroundTypes;
 use crate::terrain_blend::{BASE_GROUND, BLEND_LAYERS};
 use crate::terrain_grid::RowOrder;
 
+/// Area-weighted constitutive facts. A painted boundary mixes capacities, not law names.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactTraction {
+    pub cohesion_pa: f32,
+    pub tan_phi: f32,
+    pub shear_m: f32,
+    pub rigid_share: f32,
+}
+
+impl ContactTraction {
+    pub const RIGID: Self = Self {
+        cohesion_pa: 0.0,
+        tan_phi: 0.0,
+        shear_m: 0.0,
+        rigid_share: 1.0,
+    };
+}
+
 /// What the ground under a track contact brings to the track law, blended over the packs at the
 /// contact's point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContactGround {
+    pub traction: ContactTraction,
     /// The friction coefficient the ground brings to the contact, one side's
     /// ([`crate::ground_types::GroundType::friction`]).
     pub friction: f32,
@@ -65,6 +84,34 @@ enum Paint {
     },
 }
 
+#[derive(Debug)]
+pub(crate) enum GroundMaskError {
+    Decode(image::ImageError),
+    Colour(image::ColorType),
+    Resolution {
+        actual: [u32; 2],
+        declared: [u32; 2],
+    },
+}
+
+impl std::fmt::Display for GroundMaskError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decode(error) => write!(f, "terrain mask decode failed: {error}"),
+            Self::Colour(colour) => write!(
+                f,
+                "terrain masks must be 8-bit RGB, not {colour:?}; export the declared RGB PNG"
+            ),
+            Self::Resolution { actual, declared } => write!(
+                f,
+                "terrain masks are {actual:?}, not declared {declared:?}; fix the mask or manifest resolution"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GroundMaskError {}
+
 impl GroundField {
     /// The four packs' grounds from `table` ([`GroundTypes::parse`] requires every pack's).
     fn slots(table: &GroundTypes) -> [ContactGround; 4] {
@@ -93,6 +140,23 @@ impl GroundField {
         }
     }
 
+    /// FIXTURE: decoded texels in world-row order, quantized like the shipped RGB PNG.
+    #[cfg(test)]
+    pub(crate) fn fixture_mask(size: UVec2, world_size_m: f32, values: Vec<Vec3>) -> Self {
+        Self {
+            slots: Self::slots(&GroundTypes::load_shipped()),
+            paint: Paint::Painted {
+                size,
+                world_size_m,
+                texels: values
+                    .into_iter()
+                    .map(|v| v.to_array().map(|x| (x * 255.0).round() as u8))
+                    .collect::<Vec<_>>()
+                    .into(),
+            },
+        }
+    }
+
     /// The map's painted ground from its mask's PNG `bytes`: 8-bit RGB at `resolution`, its rows
     /// running toward `rows`, stretched over the square of side `world_size_m`. Pure, so the
     /// tests decode the shipped mask through it.
@@ -102,20 +166,18 @@ impl GroundField {
         rows: RowOrder,
         world_size_m: f32,
         table: &GroundTypes,
-    ) -> Result<Self, String> {
-        let image = image::load_from_memory(bytes).map_err(|err| err.to_string())?;
+    ) -> Result<Self, GroundMaskError> {
+        let image = image::load_from_memory(bytes).map_err(GroundMaskError::Decode)?;
         let color = image.color();
         let image::DynamicImage::ImageRgb8(mask) = image else {
-            return Err(format!(
-                "the masks must be the 8-bit RGB the map declares, not {color:?}"
-            ));
+            return Err(GroundMaskError::Colour(color));
         };
         let (width, height) = mask.dimensions();
         if [width, height] != resolution {
-            return Err(format!(
-                "the masks are {width}x{height}, not the {}x{} the map declares",
-                resolution[0], resolution[1]
-            ));
+            return Err(GroundMaskError::Resolution {
+                actual: [width, height],
+                declared: resolution,
+            });
         }
         let rows_in_file: Vec<[u8; 3]> = mask.pixels().map(|pixel| pixel.0).collect();
         let texels: Vec<[u8; 3]> = match rows {
@@ -173,6 +235,28 @@ impl GroundField {
         field
     }
 
+    /// Upload bytes in the file's row order for the shader's manifest mapping. The view
+    /// uploads the already decoded mask; it does not read or decode the PNG a second time.
+    pub(crate) fn mask_rgba(&self, rows: RowOrder) -> (UVec2, Vec<u8>) {
+        match &self.paint {
+            Paint::Unpainted => (UVec2::ONE, vec![0, 0, 0, 255]),
+            Paint::Painted { size, texels, .. } => {
+                let mut rgba = Vec::with_capacity(texels.len() * 4);
+                for file_row in 0..size.y {
+                    let world_row = match rows {
+                        RowOrder::TowardPositiveZ => file_row,
+                        RowOrder::TowardNegativeZ => size.y - 1 - file_row,
+                    };
+                    let start = (world_row * size.x) as usize;
+                    for [r, g, b] in &texels[start..start + size.x as usize] {
+                        rgba.extend_from_slice(&[*r, *g, *b, 255]);
+                    }
+                }
+                (*size, rgba)
+            }
+        }
+    }
+
     /// The pack weights at world XZ `xz`, in slot order: the print's painted weights
     /// ([`crate::terrain_blend::print_weights`]) of the mask read bilinearly and clamped at the
     /// texel centres, as the material's sampler reads it. All base pack on an unpainted world.
@@ -204,8 +288,25 @@ impl GroundField {
         let blend = |of: fn(&ContactGround) -> f32| {
             weights.dot(Vec4::from_array(self.slots.each_ref().map(of)))
         };
+        let soil_share = blend(|g| 1.0 - g.traction.rigid_share);
+        let rigid_share = blend(|g| g.traction.rigid_share);
         ContactGround {
-            friction: blend(|ground| ground.friction),
+            traction: ContactTraction {
+                cohesion_pa: blend(|g| g.traction.cohesion_pa),
+                tan_phi: blend(|g| g.traction.tan_phi),
+                shear_m: if soil_share > 0.0 {
+                    blend(|g| g.traction.shear_m * (1.0 - g.traction.rigid_share)) / soil_share
+                } else {
+                    0.0
+                },
+                rigid_share,
+            },
+            friction: if rigid_share > 0.0 {
+                // Geometric-mean pairs mix capacities: average sqrt(mu), then square.
+                (blend(|g| g.traction.rigid_share * g.friction.sqrt()) / rigid_share).powi(2)
+            } else {
+                blend(|ground| ground.friction)
+            },
             rolling_resistance: blend(|ground| ground.rolling_resistance),
         }
     }
@@ -255,14 +356,61 @@ mod tests {
             (Vec2::new(15.0, 15.0), row(BLEND_LAYERS[2].ground)),
         ] {
             let read = field.ground_at(xz);
-            assert!(
-                (read.friction - ground.friction).abs() < 1e-6
-                    && (read.rolling_resistance - ground.rolling_resistance).abs() < 1e-6,
-                "at {xz}: read {read:?}, the pack's ground is {ground:?}"
+            assert_eq!(
+                read, ground,
+                "at {xz}: the whole constitutive row must follow its pack"
             );
         }
         let flat = GroundField::unpainted(&table);
         assert_eq!(flat.ground_at(Vec2::new(15.0, 15.0)), row(BASE_GROUND));
+    }
+
+    /// Painted boundaries mix pressure capacities. A mutant interpolating angles or raw
+    /// rigid coefficients instead of strengths moves traction away from the visual mixture.
+    #[test]
+    fn painted_boundaries_mix_soil_strength_and_rigid_pair_capacities() {
+        // FIXTURE: two cohesive soils and two rigid surfaces under a mixed mask.
+        let rigid = |friction| ContactGround {
+            friction,
+            rolling_resistance: 0.0,
+            traction: ContactTraction::RIGID,
+        };
+        let soil = |c, tangent, k| ContactGround {
+            friction: 0.0,
+            rolling_resistance: 0.0,
+            traction: ContactTraction {
+                cohesion_pa: c,
+                tan_phi: tangent,
+                shear_m: k,
+                rigid_share: 0.0,
+            },
+        };
+        let mut field = fixture(2, 1.0, |_, _| [0, 0, 0]);
+        field.slots = [
+            rigid(0.2),
+            rigid(0.8),
+            soil(1000.0, 0.5, 0.01),
+            soil(3000.0, 0.7, 0.03),
+        ];
+        // Capacity expectations read weights from their owner; the test varies only constitutive mixing.
+        field.paint = GroundField::fixture_mask(UVec2::ONE, 1.0, vec![Vec3::splat(0.2)]).paint;
+        let actual_weights = field.weights_at(Vec2::ZERO);
+        assert!(actual_weights.is_finite());
+        let mixed = field.ground_at(Vec2::ZERO);
+        let area = 2.0;
+        let load = 10_000.0;
+        let track = 0.6_f32;
+        let capacity = |g: ContactGround| {
+            area * g.traction.cohesion_pa
+                + load * (g.traction.tan_phi + g.traction.rigid_share * (track * g.friction).sqrt())
+        };
+        let expected: f32 = field
+            .slots
+            .iter()
+            .zip(actual_weights.to_array())
+            .map(|(&g, w)| capacity(g) * w)
+            .sum();
+        assert!((capacity(mixed) - expected).abs() < 1e-3);
     }
 
     /// THE SIM READS THE MASK WHERE THE VIEW DRAWS IT: the field's rows run the way the map
@@ -287,6 +435,19 @@ mod tests {
             (RowOrder::TowardNegativeZ, 15.0),
         ] {
             let field = GroundField::painted(&png, [side, side], rows, 40.0, &table).unwrap();
+            let (size, rgba) = field.mask_rgba(rows);
+            assert_eq!(size, UVec2::splat(side));
+            assert_eq!(rgba.len(), (side * side) as usize * 4);
+            for (index, texel) in rgba.as_chunks::<4>().0.iter().enumerate() {
+                assert_eq!(
+                    texel,
+                    if index < side as usize {
+                        &[255, 0, 0, 255]
+                    } else {
+                        &[0, 0, 0, 255]
+                    }
+                );
+            }
             assert_eq!(
                 field.weights_at(Vec2::new(0.0, painted_z)),
                 Vec4::Y,
@@ -299,12 +460,16 @@ mod tests {
             );
         }
         let refused = GroundField::painted(&png, [8, 8], RowOrder::TowardPositiveZ, 40.0, &table);
-        assert!(refused.is_err_and(|why| why.contains("4x4")));
+        assert!(
+            refused.is_err_and(|why| matches!(
+                why,
+                GroundMaskError::Resolution { actual: [4, 4], .. }
+            ))
+        );
     }
 
-    /// The shipped map's mask decodes into the field at the resolution its manifest declares, and
-    /// every point's weights are a partition (the blend's law): the server's tracks read a real
-    /// ground everywhere on the map.
+    /// The server can decode the shipped mask at its manifest resolution; channel placement
+    /// and row direction are proved independently by the quadrant and row-order fixtures.
     #[test]
     fn the_shipped_mask_decodes_into_the_field() {
         let manifest = crate::map::tests::shipped_manifest();
@@ -316,18 +481,8 @@ mod tests {
             "ground field: the shipped masks read and decoded in {:.1} ms",
             started.elapsed().as_secs_f64() * 1000.0
         );
-        let half = manifest.extent.half_extent();
-        for xz in [
-            Vec2::splat(-half),
-            Vec2::new(half, -half),
-            Vec2::ZERO,
-            Vec2::splat(half),
-        ] {
-            let weights = field.weights_at(xz);
-            assert!(
-                (weights.element_sum() - 1.0).abs() < 1e-5,
-                "{xz}: {weights}"
-            );
-        }
+        assert!(
+            matches!(field.paint, Paint::Painted { size, .. } if size.to_array() == manifest.masks_resolution)
+        );
     }
 }

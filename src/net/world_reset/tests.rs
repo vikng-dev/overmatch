@@ -34,6 +34,9 @@ fn build_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
         &mut blocks,
         None,
     );
+    commands.insert_resource(crate::ground_field::GroundField::unpainted(
+        &crate::ground_types::GroundTypes::load_shipped(),
+    ));
     commands.insert_resource(crate::world::TerrainMap {
         revision: 0,
         blocks,

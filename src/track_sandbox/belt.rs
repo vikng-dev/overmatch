@@ -34,7 +34,7 @@ use super::*;
 use crate::track::forces::{
     ForceParams, SideInput, SideReport, SideState, contact_side, phase_decompose,
 };
-use crate::track::oracle::{BlockField, TerrainOracle};
+use crate::track::oracle::{BlockField, DepthOracle};
 use crate::track::rubble::{
     BeltSource, PieceData, RubbleBodies, RubbleQuery, apply_pushes, piece_impulses,
 };

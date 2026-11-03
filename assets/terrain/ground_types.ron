@@ -1,11 +1,12 @@
-// The ground-type table (`src/ground_types.rs`): how each kind of ground takes a track print, the
-// game's cosmetic terrain marks. Each terrain pack names its type (`src/terrain_blend.rs`).
+// The ground-type table (`src/ground_types.rs`): physical traction and motion resistance,
+// and cosmetic prints and dust. Each terrain pack names its type (`src/terrain_blend.rs`).
 //
 //   softness_mm_per_kpa  print depth per unit of the tank's ground pressure, mm per kPa
 //   depth_cap_mm         the deepest print this ground takes, mm
 //   darkening            the share of albedo a print takes away, 0..1
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
 //   friction             the friction coefficient the ground brings to a contact, one side's
+//   traction             rigid friction or labelled soil cohesion, friction angle and shear distance
 //   rolling_resistance   the ground's motion resistance coefficient on a moving track, labelled
 //   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
 //   dust.colour_srgb     the lifted soil's albedo, sRGB, each channel 0..1
@@ -25,6 +26,7 @@
 (
     types: {
         "concrete": (
+            traction: Rigid,
             print: (
                 softness_mm_per_kpa: 0.0,
                 depth_cap_mm: 0.0,
@@ -43,6 +45,11 @@
             ),
         ),
         "dirt": (
+            traction: Soil(
+                cohesion_pa: (4830.0, Unknown("sandy loam, moisture 11%: CLAIMED specimen fit from NASA tire-ground overview Table 1 reproduced in track-prints-ground-stamping section 2; no map soil specimen measured; settle with a direct shear test")),
+                friction_angle_deg: (20.0, Unknown("sandy loam, moisture 11%: CLAIMED specimen proxy from ground-stamping section 2; gravel angle is provisional, no gravel fit supplied; settle with a direct shear test")),
+                shear_deformation_m: (0.01, Unknown("sandy loam, moisture 11%: CLAIMED characteristic shear distance, clay 6 mm, firm soil 10 mm, loose sand 25 mm; settle with a shear-displacement curve on the map soil")),
+            ),
             print: (
                 softness_mm_per_kpa: 0.5,
                 depth_cap_mm: 70.0,
@@ -61,6 +68,11 @@
             ),
         ),
         "gravel": (
+            traction: Soil(
+                cohesion_pa: (1040.0, Unknown("compacted granular ground; angle provisional, dry-sand cohesion proxy: CLAIMED specimen fit from NASA tire-ground overview Table 1 reproduced in track-prints-ground-stamping section 2; no map soil specimen measured; settle with a direct shear test")),
+                friction_angle_deg: (35.0, Unknown("compacted granular ground; angle provisional, dry-sand cohesion proxy: CLAIMED specimen proxy from ground-stamping section 2; gravel angle is provisional, no gravel fit supplied; settle with a direct shear test")),
+                shear_deformation_m: (0.01, Unknown("compacted granular ground; angle provisional, dry-sand cohesion proxy: CLAIMED characteristic shear distance, clay 6 mm, firm soil 10 mm, loose sand 25 mm; settle with a shear-displacement curve on the map soil")),
+            ),
             print: (
                 softness_mm_per_kpa: 0.45,
                 depth_cap_mm: 60.0,
@@ -79,6 +91,11 @@
             ),
         ),
         "mud": (
+            traction: Soil(
+                cohesion_pa: (4140.0, Unknown("clayey soil, moisture 38%: CLAIMED specimen fit from NASA tire-ground overview Table 1 reproduced in track-prints-ground-stamping section 2; no map soil specimen measured; settle with a direct shear test")),
+                friction_angle_deg: (13.0, Unknown("clayey soil, moisture 38%: CLAIMED specimen proxy from ground-stamping section 2; gravel angle is provisional, no gravel fit supplied; settle with a direct shear test")),
+                shear_deformation_m: (0.006, Unknown("clayey soil, moisture 38%: CLAIMED characteristic shear distance, clay 6 mm, firm soil 10 mm, loose sand 25 mm; settle with a shear-displacement curve on the map soil")),
+            ),
             print: (
                 softness_mm_per_kpa: 1.6,
                 depth_cap_mm: 150.0,
@@ -97,6 +114,11 @@
             ),
         ),
         "sand": (
+            traction: Soil(
+                cohesion_pa: (1040.0, Unknown("dry loose sand: CLAIMED specimen fit from NASA tire-ground overview Table 1 reproduced in track-prints-ground-stamping section 2; no map soil specimen measured; settle with a direct shear test")),
+                friction_angle_deg: (28.0, Unknown("dry loose sand: CLAIMED specimen proxy from ground-stamping section 2; gravel angle is provisional, no gravel fit supplied; settle with a direct shear test")),
+                shear_deformation_m: (0.025, Unknown("dry loose sand: CLAIMED characteristic shear distance, clay 6 mm, firm soil 10 mm, loose sand 25 mm; settle with a shear-displacement curve on the map soil")),
+            ),
             print: (
                 softness_mm_per_kpa: 0.8,
                 depth_cap_mm: 120.0,

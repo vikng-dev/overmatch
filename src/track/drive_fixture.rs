@@ -36,6 +36,7 @@ pub(crate) fn compact_spec() -> crate::spec::TankSpec {
 /// Fixture: a firmer loaded surface with a friction coefficient distinct from the lab's.
 pub(crate) fn ground() -> crate::ground_field::ContactGround {
     crate::ground_field::ContactGround {
+        traction: crate::ground_field::ContactTraction::RIGID,
         friction: 0.65,
         rolling_resistance: 0.04,
     }

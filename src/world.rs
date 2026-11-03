@@ -510,12 +510,37 @@ pub(crate) fn surface_map(
         .load(path.to_owned())
 }
 
+/// GPU view of the one mask decode. File-row order matches the shader's existing mapping.
+fn ground_mask_image(
+    field: &crate::ground_field::GroundField,
+    rows: crate::terrain_grid::RowOrder,
+) -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::ImageSampler;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let (size, rgba) = field.mask_rgba(rows);
+    let mut image = Image::new(
+        Extent3d {
+            width: size.x,
+            height: size.y,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        rgba,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::Descriptor(surface_sampler(MapTiling::Stretched));
+    image
+}
+
 /// The terrain images whose load must succeed, held by id for [`report_failed_terrain_map`]: the
-/// base pack's three maps, the three blend-layer arrays, and the map's weight mask. Only inserted
+/// base pack's three maps and the three blend-layer arrays. The weight mask is uploaded from
+/// the synchronous ground decode. Only inserted
 /// by the heightmap world with a window — the flat slab / authored course and the dedicated server
 /// never load them, so they can never fail there.
 #[derive(Resource)]
-struct TerrainMaps([AssetId<Image>; 7]);
+struct TerrainMaps([AssetId<Image>; 6]);
 
 /// Surface a failed terrain-map load instead of swallowing it (ADR-0011, the same stance as
 /// `spec::report_failed_spec`). A texture that fails to decode does NOT draw untextured: bevy
@@ -556,6 +581,7 @@ fn spawn_environment(
     // The track prints' two stores, which the ground's material reads (`track_prints`).
     mut images: ResMut<Assets<Image>>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
+    ground_field: Option<Res<crate::ground_field::GroundField>>,
     // The one parse of the map's manifest (`terrain_grid::decode_height_grid` publishes it), which
     // the scatter's placement is read out of.
     manifest: Option<Res<crate::map::MapManifest>>,
@@ -655,12 +681,10 @@ fn spawn_environment(
                 MapEncoding::Linear,
                 MapTiling::Repeat,
             );
-            let masks = surface_map(
-                &asset_server,
-                &manifest.masks_asset(),
-                MapEncoding::Linear,
-                MapTiling::Stretched,
-            );
+            let field = ground_field
+                .as_ref()
+                .expect("heightmap rendering requires the ground field decoded with its map");
+            let masks = images.add(ground_mask_image(field, manifest.rows));
             commands.insert_resource(TerrainMaps([
                 diffuse.id(),
                 normal.id(),
@@ -668,7 +692,6 @@ fn spawn_environment(
                 layer_albedo.id(),
                 layer_normal.id(),
                 layer_arm.id(),
-                masks.id(),
             ]));
             // The ground-type table every pack's print response is read from; the prints keep it
             // as a resource, the one the owner tunes live (`track_prints::tuning`).
@@ -706,7 +729,7 @@ fn spawn_environment(
                     layer_albedo,
                     layer_normal,
                     layer_arm,
-                    masks: masks.clone(),
+                    masks,
                     prints_near: prints.near.clone(),
                     prints_world: prints.world.clone(),
                 },
@@ -716,7 +739,7 @@ fn spawn_environment(
                 &mut commands,
                 prints,
                 material.clone(),
-                masks,
+                field.as_ref().clone(),
                 manifest.extent.world_size_m,
                 ground,
             );

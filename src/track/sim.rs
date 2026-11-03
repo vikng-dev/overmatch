@@ -198,8 +198,8 @@ impl TrackGripElements {
 }
 
 /// Coarse diagnostic field digest used by [`TrackGripEffect`]. Strain axes are
-/// projected to signed 8-bit bins across the force law's exact `[-K, K]` range before FNV-1a. This
-/// deliberately ignores sub-bin float noise; determinism traces retain raw-bit state.
+/// projected to signed 8-bit bins over the solver floor before FNV-1a; larger soil
+/// displacement saturates these diagnostic bins. Determinism traces retain raw-bit state.
 pub(crate) fn coarse_grip_digest(elements: &TrackGripElements) -> u32 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     let mut write = |byte: u8| {
@@ -213,7 +213,7 @@ pub(crate) fn coarse_grip_digest(elements: &TrackGripElements) -> u32 {
                 write(byte);
             }
             for axis in strain.to_array() {
-                let bin = (axis / super::forces::grip_shear_modulus_m() * 127.0)
+                let bin = (axis / super::forces::GRIP_SHEAR_FLOOR_M * 127.0)
                     .round()
                     .clamp(-127.0, 127.0) as i8;
                 write(bin.to_le_bytes()[0]);

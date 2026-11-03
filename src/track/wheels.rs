@@ -17,7 +17,7 @@
 
 use bevy::math::{Affine3A, Vec3};
 
-use super::oracle::TerrainOracle;
+use super::oracle::DepthOracle;
 
 /// Probe stations along a road wheel's lower arc as (sin θ, cos θ) from straight down, every 5°
 /// to ±50° — fixed samples, so the wheel's terrain read is deterministic like every other
@@ -79,9 +79,9 @@ pub struct WheelParams<'a> {
 /// `[-max_droop, max_lift]`. `pivot_local` is the wheel's REST pivot in hull-local space; `down`
 /// is the hull's world down.
 ///
-/// `TerrainOracle::depth_along` returns negative clearance, so on clear ground the arc max is
+/// `DepthOracle::depth_along` returns negative clearance, so on clear ground the arc max is
 /// negative and the target lands at `-max_droop` (full droop).
-pub fn wheel_lift_target<O: TerrainOracle>(
+pub fn wheel_lift_target<O: DepthOracle>(
     oracle: &O,
     affine: &Affine3A,
     down: Vec3,
@@ -147,13 +147,7 @@ mod tests {
         y: f32,
     }
 
-    impl super::super::oracle::ContactOracle for FlatGround {
-        fn contact_along(&self, _: Vec3, _: Vec3, _: f32) -> super::super::oracle::TerrainContact {
-            panic!("this depth-only view fixture must never supply simulation contact forces")
-        }
-    }
-
-    impl TerrainOracle for FlatGround {
+    impl DepthOracle for FlatGround {
         fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
             if out.y >= -1e-6 {
                 return -reach;
@@ -168,17 +162,7 @@ mod tests {
     fn probes_preserve_the_gap_between_tread_surfaces() {
         use std::cell::RefCell;
         struct Probes(RefCell<Vec<f32>>);
-        impl super::super::oracle::ContactOracle for Probes {
-            fn contact_along(
-                &self,
-                _: Vec3,
-                _: Vec3,
-                _: f32,
-            ) -> super::super::oracle::TerrainContact {
-                panic!("this depth-only view fixture must never supply simulation contact forces")
-            }
-        }
-        impl TerrainOracle for Probes {
+        impl DepthOracle for Probes {
             fn depth_along(&self, station: Vec3, _: Vec3, _: f32) -> f32 {
                 self.0.borrow_mut().push(station.x);
                 if station.x.abs() < 0.1 { 1.0 } else { -1.0 }

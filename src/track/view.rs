@@ -29,7 +29,7 @@ use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
 use super::belt_draw::BeltAssets;
 use super::gear_phase::{GearFrame, hull_from_parent, spin_angle, tooth_angle};
 use super::link_view::{self, BeltFrames, LinkTemplate, Stragglers};
-use super::oracle::{BlockField, TerrainOracle};
+use super::oracle::{BlockField, DepthOracle};
 use super::rig_geom::RigGeom;
 use super::shadow_proxy::{self, ProxySide, ProxyStep};
 use super::side::Side;
@@ -122,15 +122,7 @@ struct Sunk<'a, F> {
     max_sink_m: f32,
 }
 
-impl<F: Fn(Vec2) -> f32> super::oracle::ContactOracle for Sunk<'_, F> {
-    fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> super::oracle::TerrainContact {
-        let depth = (self.depth_m)(station.xz()).clamp(0.0, self.max_sink_m);
-        self.ground
-            .contact_along_lowered_ground(station, out, reach, depth)
-    }
-}
-
-impl<F: Fn(Vec2) -> f32> TerrainOracle for Sunk<'_, F> {
+impl<F: Fn(Vec2) -> f32> DepthOracle for Sunk<'_, F> {
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
         let depth = (self.depth_m)(station.xz()).clamp(0.0, self.max_sink_m);
         self.ground
@@ -1375,17 +1367,7 @@ mod tests {
             field: BlockField,
             rays: Cell<usize>,
         }
-        impl super::super::oracle::ContactOracle for Counted {
-            fn contact_along(
-                &self,
-                _: Vec3,
-                _: Vec3,
-                _: f32,
-            ) -> super::super::oracle::TerrainContact {
-                panic!("this depth-only view fixture must never supply simulation contact forces")
-            }
-        }
-        impl TerrainOracle for Counted {
+        impl DepthOracle for Counted {
             fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
                 self.rays.set(self.rays.get() + 1);
                 self.field.depth_along(station, out, reach)
@@ -1500,17 +1482,7 @@ mod tests {
     fn moving_wrap_contacts_wait_for_ticks_and_reseed_without_stale_depths() {
         use std::cell::Cell;
         struct Counted(Cell<usize>);
-        impl super::super::oracle::ContactOracle for Counted {
-            fn contact_along(
-                &self,
-                _: Vec3,
-                _: Vec3,
-                _: f32,
-            ) -> super::super::oracle::TerrainContact {
-                panic!("this depth-only view fixture must never supply simulation contact forces")
-            }
-        }
-        impl TerrainOracle for Counted {
+        impl DepthOracle for Counted {
             fn depth_along(&self, station: Vec3, out: Vec3, _: f32) -> f32 {
                 self.0.set(self.0.get() + 1);
                 if out.y < -0.2 {
@@ -1679,17 +1651,7 @@ mod tests {
     fn follow_rising_ground(frames: &[Time<Fixed>]) -> Vec<f32> {
         use std::cell::Cell;
         struct Rising(Cell<f32>);
-        impl super::super::oracle::ContactOracle for Rising {
-            fn contact_along(
-                &self,
-                _: Vec3,
-                _: Vec3,
-                _: f32,
-            ) -> super::super::oracle::TerrainContact {
-                panic!("this depth-only view fixture must never supply simulation contact forces")
-            }
-        }
-        impl TerrainOracle for Rising {
+        impl DepthOracle for Rising {
             fn depth_along(&self, _: Vec3, _: Vec3, _: f32) -> f32 {
                 self.0.get()
             }

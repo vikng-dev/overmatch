@@ -1528,6 +1528,9 @@ mod tests {
             .insert_resource(crate::map::tests::fixture_manifest(750.0, 0.0, 50.0))
             .insert_resource(SpawnPlacement::new(BattleMode::shipped().spawn))
             // Fixture world: no standing blocks or buildings.
+            .insert_resource(crate::ground_field::GroundField::unpainted(
+                &crate::ground_types::GroundTypes::load_shipped(),
+            ))
             .insert_resource(TerrainMap {
                 revision: 0,
                 blocks: Vec::new(),

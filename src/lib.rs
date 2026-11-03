@@ -100,7 +100,7 @@ mod geometry_lod;
 /// decoded once at startup, and each pack's ground. See the module doc.
 pub(crate) mod ground_field;
 /// The ground-type table (`assets/terrain/ground_types.ron`): each kind of ground the terrain packs
-/// name, and how it takes a track print. Data; see the module doc.
+/// name: physical traction and motion resistance, and cosmetic prints and dust. See the module doc.
 mod ground_types;
 /// The gun registry (`assets/guns/`): every gun model and its ammunition table, the muzzle speed it
 /// fires each round it chambers at. A [`rounds::Round`] is a round fired from a gun.
@@ -227,7 +227,7 @@ mod tank;
 /// livery (paint, camouflage), through one `ExtendedMaterial`. View-only. See the module doc.
 pub(crate) mod tank_surface;
 /// The ground's surface blend: four material packs mixed per fragment by the map's author-painted
-/// weight masks, through one `ExtendedMaterial`. View-only. See the module doc.
+/// weight masks. Its CPU weights also select ground facts; rendering uses `ExtendedMaterial`.
 pub(crate) mod terrain_blend;
 /// The world heightmap: PNG → shared height grid (oracle ground term, heightfield collider,
 /// client render mesh, server spawn heights). See the module doc for the mapping constants.

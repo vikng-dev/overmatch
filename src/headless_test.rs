@@ -993,6 +993,19 @@ fn contact_law_shipped_ground_speeds() {
                 next_max <= margin,
                 "a sustainable better higher gear must be selected"
             );
+            // FIXTURE historical comparison: the base map previously gripped at 0.9.
+            let contacts = &app.world().get::<TrackContacts>(tank).unwrap().0;
+            let capacity: f32 = contacts
+                .iter()
+                .flatten()
+                .map(|c| c.mu * c.load_elastic)
+                .sum();
+            let supported_load: f32 = contacts.iter().flatten().map(|c| c.load_elastic).sum();
+            let net_pull = capacity - ground.rolling_resistance.value * weight;
+            println!(
+                "DERIVED ground={name} rolling={rolling} contact_capacity_n={capacity:.3} supported_elastic_n={supported_load:.3} net_drawbar_n={net_pull:.3} old_0_9_capacity_n={:.3}",
+                0.9 * weight
+            );
             outcomes.push((state.gear, mean));
         }
         println!(
@@ -1019,6 +1032,7 @@ fn a_tank_leaves_first_gear_from_rest_on_a_soft_ground() {
         track.field = Some(
             field.with_ground(Some(crate::ground_field::GroundField::uniform(
                 crate::ground_field::ContactGround {
+                    traction: crate::ground_field::ContactTraction::RIGID,
                     friction: 0.4,
                     rolling_resistance: 0.12,
                 },
@@ -1878,7 +1892,7 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
     let approach_speed = 3.0;
     // DERIVED fixture placement: put the rest envelope on the actual terrain face along its
     // normal, rather than dropping the rig from an unrelated world height.
-    use crate::track::oracle::TerrainOracle as _;
+    use crate::track::oracle::DepthOracle as _;
     let normal = rot * Vec3::Y;
     let rest_height = app
         .world()

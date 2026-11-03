@@ -1,7 +1,7 @@
 //! Terrain oracle — the boundary between the track model and whatever the world's ground is
 //! made of (architecture §5).
 //!
-//! Geometry consumers read signed depth through [`TerrainOracle`]. Its [`ContactOracle`]
+//! Geometry consumers read signed depth through [`DepthOracle`]. The [`ContactOracle`]
 //! contract supplies the force consumer's hit: the surface owns its normal, and a ray miss or buried origin is
 //! represented explicitly rather than being mistaken for a surface parallel to the belt.
 //!
@@ -26,22 +26,17 @@ use crate::terrain_grid::HeightGrid;
 /// A terrain query surface for track consumers. Fixed evaluation order and pure arithmetic
 /// keep it deterministic. First hits can change discontinuously at silhouettes; a depth query
 /// across that boundary must never be interpreted as a surface gradient.
-pub trait TerrainOracle: ContactOracle {
+pub trait DepthOracle {
     /// Signed directional penetration of `station` past the first terrain surface along `out`:
     /// the ray starts `reach` behind the station and may report at most `reach` of depth
     /// (buried origin saturates to `reach`, like a contact cast). Positive = past the surface,
     /// negative = clearance.
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32;
-
-    /// The ground under world point `point` (its XZ): what the track law's grip and rolling
-    /// resistance read per terrain contact (`track::forces::contact_side`). `None` is an oracle
-    /// that states no ground (the view's and the calibration's geometry-only oracles, a bare
-    /// fixture field): its contacts grip at the grip's own ground pair
-    /// (`track::forces::GripParams::ground`) and take no rolling resistance.
-    fn ground_at(&self, _point: Vec3) -> Option<ContactGround> {
-        None
-    }
 }
+
+/// The simulation needs both contracts; depth-only view adapters never implement this trait.
+pub trait TerrainOracle: DepthOracle + ContactOracle {}
+impl<T: DepthOracle + ContactOracle> TerrainOracle for T {}
 
 /// A contact cast's geometric outcome. A buried origin has saturated depth for shape fitting,
 /// but no first-hit surface on which to apply support. Neither absence invents a belt normal.
@@ -65,6 +60,14 @@ impl TerrainContact {
 /// The force consumer's surface query, distinct from the view's depth-only contract. Normals
 /// belong to the struck surface at the hit, never to differences between neighbouring rays.
 pub trait ContactOracle {
+    /// The ground under world point `point` (its XZ): what the track law's grip and rolling
+    /// resistance read per terrain contact (`track::forces::contact_side`). `None` is an oracle
+    /// that states no ground (calibration and bare force fixtures): its contacts grip at the grip's own ground pair
+    /// (`track::forces::GripParams::ground`) and take no rolling resistance.
+    fn ground_at(&self, _point: Vec3) -> Option<ContactGround> {
+        None
+    }
+
     fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact;
 }
 
@@ -285,7 +288,7 @@ pub struct BlockField {
     /// invariant, `terrain_grid` module doc) — instead of the flat-slab block the old world
     /// authored. Blocks still union on top.
     height: Option<HeightGrid>,
-    /// Which ground is under each point ([`TerrainOracle::ground_at`]): the world's ground field,
+    /// Which ground is under each point ([`ContactOracle::ground_at`]): the world's ground field,
     /// absent only from a bare fixture field, which states no ground.
     ground: Option<GroundField>,
 }
@@ -480,17 +483,16 @@ impl ContactOracle for BlockField {
     fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
         self.contact_along_lowered_ground(station, out, reach, 0.0)
     }
-}
-
-impl TerrainOracle for BlockField {
-    fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
-        self.depth_along_lowered_ground(station, out, reach, 0.0)
-    }
-
     fn ground_at(&self, point: Vec3) -> Option<ContactGround> {
         self.ground
             .as_ref()
             .map(|ground| ground.ground_at(Vec2::new(point.x, point.z)))
+    }
+}
+
+impl DepthOracle for BlockField {
+    fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+        self.depth_along_lowered_ground(station, out, reach, 0.0)
     }
 }
 

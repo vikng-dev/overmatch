@@ -169,47 +169,22 @@ struct TankPrints {
 /// last received them, and the map's painted mask. The belt sink reads its depth here.
 #[derive(Resource)]
 pub(crate) struct PrintDepths {
-    masks: Handle<Image>,
-    /// The mask's weights, row-major RGB, once its image has loaded.
-    mask: Option<(UVec2, Vec<Vec3>)>,
+    ground: crate::ground_field::GroundField,
     /// The material's parameters as last written ([`sync_material`]).
     params: TerrainBlendParams,
 }
 
 impl PrintDepths {
-    /// The mask's weights at world XZ `xz`, bilinear and clamped as the material's sampler reads
-    /// them; silent before the mask loads.
-    fn mask_at(&self, xz: Vec2) -> Vec3 {
-        let Some((size, weights)) = &self.mask else {
-            return Vec3::ZERO;
-        };
-        let map = self.params.mask_map;
-        let uv = xz * map.truncate().truncate() + Vec2::new(map.z, map.w);
-        let texel = uv * size.as_vec2() - 0.5;
-        let low = texel.floor();
-        let t = texel - low;
-        let at = |i: f32, j: f32| {
-            let i = (i as i32).clamp(0, size.x as i32 - 1) as u32;
-            let j = (j as i32).clamp(0, size.y as i32 - 1) as u32;
-            weights[(j * size.x + i) as usize]
-        };
-        let top = at(low.x, low.y).lerp(at(low.x + 1.0, low.y), t.x);
-        let bottom = at(low.x, low.y + 1.0).lerp(at(low.x + 1.0, low.y + 1.0), t.x);
-        top.lerp(bottom, t.y)
-    }
-
-    /// The painted ground weights at world XZ `xz` in the shader's slot order
-    /// ([`crate::terrain_blend::print_weights`]); the base pack alone before the mask loads.
+    /// The same decoded mask and sampling law the simulation reads.
     pub(crate) fn ground_weights(&self, xz: Vec2) -> Vec4 {
-        crate::terrain_blend::print_weights(self.mask_at(xz))
+        self.ground.weights_at(xz)
     }
 
-    /// FIXTURE: a painted ground whose mask has not loaded, so the base pack is the whole ground.
+    /// FIXTURE: an unpainted ground, so the base pack is the whole ground.
     #[cfg(test)]
     pub(crate) fn unpainted() -> Self {
         Self {
-            masks: Handle::default(),
-            mask: None,
+            ground: crate::ground_field::GroundField::unpainted(&GroundTypes::load_shipped()),
             params: TerrainBlendParams::default(),
         }
     }
@@ -219,8 +194,7 @@ impl PrintDepths {
     #[cfg(test)]
     pub(crate) fn painted_everywhere(mask: Vec3) -> Self {
         Self {
-            masks: Handle::default(),
-            mask: Some((UVec2::ONE, vec![mask])),
+            ground: crate::ground_field::GroundField::fixture_mask(UVec2::ONE, 1.0, vec![mask]),
             params: TerrainBlendParams::default(),
         }
     }
@@ -230,11 +204,7 @@ impl PrintDepths {
     /// stores it, in whole [`KPA_PER_UNIT`], so this is the shader's own number.
     pub(crate) fn full_press_m(&self, xz: Vec2, kpa: f32) -> f32 {
         let stored = (kpa / KPA_PER_UNIT).round().clamp(1.0, 255.0) * KPA_PER_UNIT;
-        crate::terrain_blend::print_depth_m(
-            &self.params,
-            crate::terrain_blend::print_weights(self.mask_at(xz)),
-            stored,
-        )
+        crate::terrain_blend::print_depth_m(&self.params, self.ground_weights(xz), stored)
     }
 }
 
@@ -279,12 +249,12 @@ pub(crate) fn images(images: &mut Assets<Image>) -> PrintImages {
 }
 
 /// Start printing onto the map of side `world_size_m`, drawn through `material`, whose painted
-/// mask is `masks`, on the ground types of `ground`.
+/// mask is shared with `field`, on the ground types of `ground`.
 pub(crate) fn install(
     commands: &mut Commands,
     images: PrintImages,
     material: Handle<TerrainMaterial>,
-    masks: Handle<Image>,
+    field: crate::ground_field::GroundField,
     world_size_m: f32,
     ground: GroundTypes,
 ) {
@@ -299,8 +269,7 @@ pub(crate) fn install(
     );
     commands.insert_resource(ground);
     commands.insert_resource(PrintDepths {
-        masks,
-        mask: None,
+        ground: field,
         params: TerrainBlendParams::default(),
     });
     commands.insert_resource(prints);
@@ -640,38 +609,6 @@ fn sync_material(
     *synced = true;
 }
 
-/// Copy the painted mask to the CPU for [`PrintDepths`], once its image has loaded. A mask whose
-/// texels the CPU cannot read is refused: the belt's sink depth is read from it.
-fn read_mask(mut depths: ResMut<PrintDepths>, images: Res<Assets<Image>>) {
-    if depths.mask.is_some() {
-        return;
-    }
-    // The mask is still loading; a failed load is `world::report_failed_terrain_map`'s refusal.
-    let Some(image) = images.get(&depths.masks) else {
-        return;
-    };
-    let size = image.size();
-    let mut weights = Vec::with_capacity((size.x * size.y) as usize);
-    for j in 0..size.y {
-        for i in 0..size.x {
-            let color = image.get_color_at(i, j).unwrap_or_else(|err| {
-                panic!(
-                    "{}: terrain masks: {:?} texels are unreadable on the CPU ({err}); export the \
-                     masks as the 8-bit RGB PNG the map's level.json declares",
-                    depths
-                        .masks
-                        .path()
-                        .map_or_else(|| "unnamed image".to_owned(), ToString::to_string),
-                    image.texture_descriptor.format,
-                )
-            });
-            let linear = color.to_linear();
-            weights.push(Vec3::new(linear.red, linear.green, linear.blue));
-        }
-    }
-    depths.mask = Some((size, weights));
-}
-
 /// Whether anything of the prints exists in `world`: their stores, their upload queue, the depth
 /// field the belt sinks by, or the ground-type table they are drawn with.
 #[cfg(test)]
@@ -691,12 +628,9 @@ pub(crate) fn plugin(app: &mut App) {
     app.add_plugins(upload::plugin);
     app.add_systems(
         Update,
-        (
-            bake_shoes.run_if(|prints: Option<Res<TrackPrints>>| {
-                prints.is_some_and(|prints| prints.shoes.is_empty())
-            }),
-            read_mask.run_if(resource_exists::<PrintDepths>),
-        ),
+        (bake_shoes.run_if(|prints: Option<Res<TrackPrints>>| {
+            prints.is_some_and(|prints| prints.shoes.is_empty())
+        }),),
     );
     app.configure_sets(
         PostUpdate,
@@ -882,8 +816,7 @@ mod tests {
         );
         let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
         let mut depths = PrintDepths {
-            masks: Handle::default(),
-            mask: None,
+            ground: crate::ground_field::GroundField::unpainted(&GroundTypes::load_shipped()),
             params: TerrainBlendParams::default(),
         };
         crate::terrain_blend::set_print_lanes(&mut depths.params, &table);
@@ -922,8 +855,7 @@ mod tests {
             })
             .collect();
         let depths = PrintDepths {
-            masks: Handle::default(),
-            mask: Some((UVec2::splat(4), weights)),
+            ground: crate::ground_field::GroundField::fixture_mask(UVec2::splat(4), 64.0, weights),
             params: params.clone(),
         };
         let shoes = vec![ClearanceStamp::pooled(&stamp_fixture(), NEAR_TEXEL_M)];
@@ -961,12 +893,10 @@ mod tests {
             assert_eq!(texel[0], 255, "the sole at full press");
             // The shader: pressure from G, the depth law on the painted weights, times R.
             let kpa_read = f32::from(texel[1]) / 255.0 * params.print_law.x;
-            let drawn = crate::terrain_blend::print_depth_m(
-                &params,
-                crate::terrain_blend::print_weights(depths.mask_at(at)),
-                kpa_read,
-            ) * f32::from(texel[0])
-                / 255.0;
+            let drawn =
+                crate::terrain_blend::print_depth_m(&params, depths.ground_weights(at), kpa_read)
+                    * f32::from(texel[0])
+                    / 255.0;
             let sink = depths.full_press_m(at, kpa);
             assert!(
                 (sink - drawn).abs() < 1e-6 && sink > 0.0,

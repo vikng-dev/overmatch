@@ -241,6 +241,7 @@ pub(crate) struct ElementOutputProbe {
     pub column: u32,
     pub active: bool,
     pub point: Vec3,
+    /// Load-weighted mean; multiplying by total load reconstructs the support resultant.
     pub normal: Vec3,
     pub load: f32,
     pub load_elastic: f32,

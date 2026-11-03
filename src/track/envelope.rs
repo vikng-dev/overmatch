@@ -21,7 +21,7 @@
 use bevy::math::{Vec2, Vec3};
 
 use super::forces::{ForceParams, SideInput, SideState, TravelField, contact_side};
-use super::oracle::{ContactOracle, TerrainContact, TerrainOracle};
+use super::oracle::{ContactOracle, DepthOracle, TerrainContact};
 
 /// The free-travel profile knots for a rest circle set in the rig convention
 /// (`circles[0]` = drive sprocket, middle = sprung road wheels, last = idler): 0 at the
@@ -62,7 +62,7 @@ pub(crate) const MIN_ENVELOPE_TRAVEL: f32 = 0.01;
 /// different share of the weight than they were calibrated for.
 pub(crate) struct FlatRest;
 
-impl TerrainOracle for FlatRest {
+impl DepthOracle for FlatRest {
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
         if out.y >= -1e-4 {
             return -reach;

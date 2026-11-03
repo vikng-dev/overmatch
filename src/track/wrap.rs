@@ -22,7 +22,7 @@
 use bevy::math::{Affine3A, Vec2, Vec3};
 
 use super::forces::phase_decompose;
-use super::oracle::TerrainOracle;
+use super::oracle::DepthOracle;
 use super::route::{
     SagClip, external_tangent, max_admissible_depth, polyline_len, resample, sag_depth, sag_span,
     slack, taut_lower_run,
@@ -148,7 +148,7 @@ pub struct WrapSideOutput {
 ///
 /// This uncached entry point is the sandbox/reference path. The game's view uses [`step_cached`]
 /// to separate terrain probes from render-rate filters and phase sampling.
-pub fn step<O: TerrainOracle>(
+pub fn step<O: DepthOracle>(
     input: &WrapInput,
     oracle: &O,
     state: &mut [WrapState; 2],
@@ -160,7 +160,7 @@ pub fn step<O: TerrainOracle>(
     ]
 }
 
-fn side_step<O: TerrainOracle>(
+fn side_step<O: DepthOracle>(
     input: &WrapInput,
     si: usize,
     oracle: &O,
@@ -545,7 +545,7 @@ impl DepthProfile {
 /// depths, then evolve filters, enforce current wheel clearance and sample phase every frame.
 /// `refresh` advances sample history even if the inputs are unchanged, completing the last blend.
 /// `alpha` weights the previous sample's depths toward the current sample's.
-pub(crate) fn step_cached<O: TerrainOracle>(
+pub(crate) fn step_cached<O: DepthOracle>(
     input: &WrapInput,
     oracle: &O,
     state: &mut [WrapState; 2],
@@ -636,7 +636,7 @@ struct RawBelly {
 /// ordered pin-line `circles` (`[sprocket, road wheels…, idler]`, already articulated & sorted
 /// front→rear), then the bottom run densely resampled and probed against the field along its
 /// outward normal.
-fn raw_belly<O: TerrainOracle>(
+fn raw_belly<O: DepthOracle>(
     oracle: &O,
     affine: &Affine3A,
     plane_x: f32,
@@ -703,7 +703,7 @@ fn belly_geometry(circles: &[(Vec2, f32)]) -> RawBelly {
     }
 }
 
-fn probe_belly<O: TerrainOracle>(
+fn probe_belly<O: DepthOracle>(
     oracle: &O,
     affine: &Affine3A,
     plane_x: f32,
@@ -849,7 +849,7 @@ mod tests {
     use bevy::math::Vec3;
 
     use crate::track::derive::SuspensionParams;
-    use crate::track::oracle::{BlockField, TerrainOracle};
+    use crate::track::oracle::{BlockField, DepthOracle};
     use crate::track::rig_geom::{tiger_rig, tiger_spec};
     use crate::track::route::{SAG_CLIP_INSET, chord_inset, deepest_inside, on_circle};
     use crate::track::side::Side;
@@ -1296,13 +1296,7 @@ mod tests {
         at_z: f32,
     }
 
-    impl super::super::oracle::ContactOracle for Ridge {
-        fn contact_along(&self, _: Vec3, _: Vec3, _: f32) -> super::super::oracle::TerrainContact {
-            panic!("this depth-only view fixture must never supply simulation contact forces")
-        }
-    }
-
-    impl TerrainOracle for Ridge {
+    impl DepthOracle for Ridge {
         fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
             let origin = station - out * reach;
             // Ray parameters where it is inside the half-plane `y ≤ a·z + b`.
