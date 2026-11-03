@@ -916,15 +916,14 @@ pub(crate) mod tests {
         assert!(corner.height_at(0.0, 0.0).abs() < 1e-4);
     }
 
-    /// Deterministic LCG for oracle/collider probes. DERIVED: 31 high bits divided by the
-    /// 32-bit maximum yield at most 0.5 after f32 rounding, restricting the callers' coverage.
+    /// Fixture RNG: DERIVED 32 high bits over the 32-bit maximum span `[0, 1]` after f32 rounding.
     fn lcg(seed: u64) -> impl FnMut() -> f32 {
         let mut state = seed;
         move || {
             state = state
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            ((state >> 33) as u32) as f32 / u32::MAX as f32 // at most 0.5; see the coverage limit above
+            ((state >> 32) as u32) as f32 / u32::MAX as f32
         }
     }
 
@@ -939,7 +938,7 @@ pub(crate) mod tests {
     }
 
     /// Oracle height and exact cast must match the production parry collider within millimetres
-    /// at seeded negative-X/Z points and negative-Z off-map misses. The module's
+    /// in every X/Z quadrant and outside each map edge. The module's
     /// one-surface invariant owns the MEASURED 0.519 m mismatch vs the 0.5 m suspension reach.
     /// Placement clamping must not extend either surface beyond the collider edge.
     #[test]
@@ -948,9 +947,9 @@ pub(crate) mod tests {
         let grid = noise_grid(&mut next);
         let collider = heightfield_collider(&grid);
         let mut worst = 0.0f32;
+        let mut quadrants = [false; 4];
         for k in 0..512 {
-            // DERIVED: `lcg` keeps both coordinates nonpositive. The two span scales do not
-            // reserve an outer band; noise avoids boundary-exact parry edge cases.
+            // Fixture span scales avoid boundary-exact parry edge cases; neither reserves an outer band.
             let span = if k % 8 == 0 {
                 FIXTURE_HALF * 0.9999
             } else {
@@ -961,6 +960,7 @@ pub(crate) mod tests {
             if x.abs() >= FIXTURE_HALF || z.abs() >= FIXTURE_HALF {
                 continue;
             }
+            quadrants[usize::from(x >= 0.0) * 2 + usize::from(z >= 0.0)] = true;
             let cast = cast_down(&collider, x, z);
             let analytic = grid.height_at(x, z);
             worst = worst.max((cast - analytic).abs());
@@ -971,8 +971,12 @@ pub(crate) mod tests {
                 .unwrap_or_else(|| panic!("cast_ray missed a vertical ray at ({x}, {z})"));
             worst = worst.max((origin.y - ours.t - analytic).abs());
         }
-        // Measured: worst 6.9e-5 m over these points (height_at alone read 6.1e-5 before the
-        // caster joined the pin) — the 3 mm bound is pure headroom, not observed error.
+        assert!(
+            quadrants.into_iter().all(|seen| seen),
+            "height agreement must cover every X/Z quadrant"
+        );
+        println!("MEASURED oracle/collider height disagreement: {worst:.9} m");
+        // Resolution: 3 mm is headroom for collider/f32 arithmetic, not the observed error.
         assert!(
             worst < 3e-3,
             "oracle-vs-collider disagreement {worst} m exceeds the few-mm pin"
@@ -980,6 +984,7 @@ pub(crate) mod tests {
 
         // Just OUTSIDE the span both surfaces must agree there is NO ground: the collider ends
         // at the edge, and the caster ends with it (a vertical ray outside misses both).
+        let mut edges = [false; 4];
         for _ in 0..64 {
             let along = (next() * 2.0 - 1.0) * (FIXTURE_HALF + 200.0);
             let out = FIXTURE_HALF + 0.5 + next() * 200.0;
@@ -987,6 +992,18 @@ pub(crate) mod tests {
                 (true, flip) => (if flip { out } else { -out }, along),
                 (false, flip) => (along, if flip { out } else { -out }),
             };
+            if x > FIXTURE_HALF {
+                edges[0] = true;
+            }
+            if x < -FIXTURE_HALF {
+                edges[1] = true;
+            }
+            if z > FIXTURE_HALF {
+                edges[2] = true;
+            }
+            if z < -FIXTURE_HALF {
+                edges[3] = true;
+            }
             let origin = Vec3::new(x, FIXTURE_SPAN + 100.0, z);
             assert!(
                 parry_cast(&collider, origin, Vec3::NEG_Y, 1.0e5).is_none(),
@@ -997,10 +1014,14 @@ pub(crate) mod tests {
                 "cast_ray must end at the span edge (hit at ({x}, {z}))"
             );
         }
+        assert!(
+            edges.into_iter().all(|seen| seen),
+            "off-map agreement must cover all four edges"
+        );
     }
 
     /// The DIRECTIONAL pin: the exact caster vs a parry cast of the production collider over a
-    /// seeded sweep from negative-X/Z origins, with azimuths in the positive-Z half-turn.
+    /// seeded sweep covering every origin quadrant and horizontal direction quadrant.
     /// Both must agree on hit/no-hit at those probes, and on the hit parameter within the
     /// pinned tolerance wherever both report one. (Shallow rays amplify any surface mismatch
     /// along `t` by 1/sin(elevation), so this is the harshest agreement test the two float
@@ -1013,12 +1034,14 @@ pub(crate) mod tests {
         let t_max = 4_000.0_f32; // beyond the world diagonal: range never truncates a hit
         let mut worst = 0.0f32;
         let mut hits = 0u32;
+        let mut origins = [false; 4];
+        let mut directions = [false; 4];
         for _ in 0..512 {
             let x = (next() * 2.0 - 1.0) * FIXTURE_HALF * 0.98;
             let z = (next() * 2.0 - 1.0) * FIXTURE_HALF * 0.98;
             let origin = Vec3::new(x, grid.height_at(x, z) + 0.5 + next() * 30.0, z);
-            // DERIVED from `lcg` ≤ 0.5: elevation 0.03..0.765 rad (~1.7..43.8°), azimuth
-            // 0..π. Test-only trig; the production caster stays transcendental-free.
+            // Fixture elevations 0.03..1.5 rad (DERIVED ~1.7..85.9°), azimuth 0..τ.
+            // Test-only trig; the production caster stays transcendental-free.
             let elevation = 0.03 + next() * 1.47;
             let azimuth = next() * core::f32::consts::TAU;
             let dir = Vec3::new(
@@ -1026,6 +1049,8 @@ pub(crate) mod tests {
                 -elevation.sin(),
                 elevation.cos() * azimuth.sin(),
             );
+            origins[usize::from(x >= 0.0) * 2 + usize::from(z >= 0.0)] = true;
+            directions[usize::from(dir.x >= 0.0) * 2 + usize::from(dir.z >= 0.0)] = true;
             let theirs = parry_cast(&collider, origin, dir, t_max);
             let ours = grid.cast_ray(origin, dir, t_max).map(|hit| hit.t);
             match (ours, theirs) {
@@ -1040,8 +1065,18 @@ pub(crate) mod tests {
             }
         }
         assert!(hits > 300, "the sweep must actually exercise hits ({hits})");
-        // Measured: worst 3.3e-4 m of ray parameter over 509 seeded hits (graze-amplified);
-        // the 5 cm pin is headroom for parry/f32 arithmetic changes, not observed error.
+        assert!(
+            origins.into_iter().all(|seen| seen),
+            "ray agreement must cover every origin quadrant"
+        );
+        assert!(
+            directions.into_iter().all(|seen| seen),
+            "ray agreement must cover a full azimuth turn"
+        );
+        println!(
+            "MEASURED oracle/collider ray-parameter disagreement: {worst:.9} m over {hits} hits"
+        );
+        // Resolution: 5 cm is headroom for graze-amplified parry/f32 error, not the observed error.
         assert!(
             worst < 5e-2,
             "cast_ray vs parry cast disagreement {worst} m over {hits} hits"
