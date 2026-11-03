@@ -463,7 +463,7 @@ fn top_gear_wide_steer_preserves_the_outer_belt_differential() {
     );
 }
 
-/// Regression: a tick that carries `m` through zero must not project the
+/// A tick that carries `m` through zero must not project the
 /// constraint onto the pre-tick |m| branch — that enforces `d = s·κ·m` on the wrong
 /// side of the cusp, flipping `d` AGAINST the commanded steer for a tick (a yaw
 /// impulse, and ringing if m chatters around zero). The scenario: slow forward
@@ -2124,6 +2124,7 @@ fn driver_observation_uses_the_engaged_ladder_in_both_directions() {
         normal: rotation * bevy::math::Vec3::Y,
         length_weight: 2.0,
         mu: 0.7,
+        cohesion_n: 0.0,
         rolling_coefficient: 0.04,
     };
     for reverse in [false, true] {
@@ -3285,7 +3286,19 @@ fn backward_live_crank_has_no_idle_floor() {
 #[test]
 fn unresolved_crank_inertia_is_refused() {
     let mut a = tiger_authoring();
-    a.engine_inertia_kgm2 = 0.01; // Fixture: a positive but unresolved crank.
+    let raw_slope = a
+        .torque_nm
+        .windows(2)
+        .map(|p| ((p[1].1 - p[0].1) / (p[1].0 - p[0].0)).abs())
+        .fold(0.0_f32, f32::max);
+    let resolved = TransmissionParams::from_authoring(&a).unwrap();
+    let cut_slope =
+        resolved.raw_torque_at(a.governed_rpm) / engine_control().governor_cut_rpm.value;
+    assert!(
+        cut_slope > raw_slope,
+        "the fixture distinguishes raw slope from fuel cut"
+    );
+    a.engine_inertia_kgm2 = (raw_slope + cut_slope) / (2.0 * TICK_HZ * RPM_TO_RAD);
     assert!(TransmissionParams::from_authoring(&a).is_err());
 }
 
@@ -3295,7 +3308,7 @@ fn unresolved_crank_inertia_is_refused() {
 fn virtual_free_crank_energy_does_not_cap_curve_power() {
     let (fp, mut tp) = (lab_fp(), lab_tp());
     for inertia in [0.01, 4.0] {
-        // Fixture: the reported algebraic counterexample and resolved crank.
+        // Fixture: unresolved and resolved crank inertias.
         tp.engine_inertia = inertia;
         let omega = 1100.0 * RPM_TO_RAD; // Fixture curve peak.
         let k = tp.gears_fwd[2] / tp.sprocket_radius;
@@ -3625,4 +3638,53 @@ fn launch_peak_can_lie_inside_the_fuel_cut_ramp() {
     let expected = 1000.0 + 8.0 / 0.18; // DERIVED vertex of 100 + 8*x - 0.09*x^2.
     assert!((tp.peak_torque_rpm - expected).abs() < 0.01); // Resolution: f32 rpm interpolation.
     assert!(tp.torque_at(tp.peak_torque_rpm) > tp.torque_at(a.governed_rpm));
+}
+
+/// A vanishing footprint patch contributes vanishing cohesive force, never an inverse
+/// spring-load spike. The Driver cannot pay a downshift on that tick alone.
+#[test]
+fn a_vanishing_soil_patch_cannot_manufacture_a_paid_downshift() {
+    use super::super::load::{SupportFact, observe};
+    use bevy::math::Vec3;
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let weight = fp.grip.unwrap().side_weight * 2.0;
+    let contacts = [-2.0, 2.0].map(|z| SupportFact {
+        point: Vec3::Z * z,
+        half_span: Vec3::ZERO,
+        normal: Vec3::Y,
+        length_weight: 1.0,
+        mu: 0.5,
+        cohesion_n: 1000.0,
+        rolling_coefficient: 0.04,
+    }); // FIXTURE uniform footprint.
+    let speed = 1200.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[2];
+    let mut initial = fresh(&tp);
+    initial.gear = 3;
+    initial.steer_step = 1;
+    initial.clutch = ClutchState::In;
+    initial.omega_e = 1200.0 * RPM_TO_RAD;
+    let radius = super::super::load::turn_radius(&tp, &initial);
+    let base = observe(contacts.iter(), Vec3::NEG_Z, weight, radius);
+    let mut inp = driver_input(&fp, speed, 0.0, 1.0);
+    inp.perceived_load = base;
+    let margin = force_margin(&construction(&fp), &tp);
+    let spare = landed_spare(&tp, &construction(&fp), &inp, &initial, 3, 1.0);
+    inp.perceived_load.grade_n += spare - 2.0 * margin;
+    let patch = SupportFact {
+        length_weight: 1e-7,
+        cohesion_n: 1e-4,
+        ..contacts[0]
+    }; // FIXTURE tiny area, finite nominal pressure.
+    let mixed = observe(contacts.iter().chain([&patch]), Vec3::NEG_Z, weight, radius);
+    for load in [base, mixed] {
+        let mut state = initial;
+        let mut tick = inp;
+        tick.perceived_load.turn_n = load.turn_n;
+        tick.perceived_load.grip_n = load.grip_n;
+        choose_gear(&mut state, &tp, &construction(&fp), &tick, 1.0, speed);
+        assert!(
+            state.gear >= initial.gear,
+            "a tiny patch cannot create a lower-gear deficit"
+        );
+    }
 }

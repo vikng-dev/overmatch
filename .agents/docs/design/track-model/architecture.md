@@ -762,6 +762,50 @@ No wire layout changed, so PROTOCOL_REV is unchanged.
 which keeps its job and note through a load and writes them back, so the panel's whole-table save
 keeps every value's source (`ground_types::tests::a_saved_table_reads_back_unchanged`).
 
+### Ground review: measured gaps and bounded fixes
+
+The stop witness used the production `contact_side` path: a fixed flat pad, locked belt,
+shipped mud, FIXTURE 4 m/s entry, 64 Hz, hull mass derived from elastic support divided by g,
+20 simulated seconds. MEASURED before the observer/plane fix: 2.568670 m maximum advance,
+1.199998 m rollback, peak reverse speed 0.480283 m/s. The pad stops, then gives its retained
+16 K of skid displacement back. This is a real defect, not a harmless precision bound.
+No unloading change is included in `driving: observe soil at nominal pressure and preserve patch shear (#146)`;
+the flat-contact force law is unchanged, so this lane has no improved after-stop measurement.
+
+The monotonic Janosi-Hanamoto curve does not specify unloading or a plastic set. Choosing
+one requires the owner's design decision, including mixed contacts. Options and costs:
+
+- Elastic/plastic split with an unloading stiffness and hardening history: preserves the
+  monotonic curve and bounds recoverable travel, but adds per-element history, checkpoint/wire
+  admission and a rule for dissimilar patches sharing an element. A wire change bumps the protocol.
+- Force-state Dahl return with the soil curve's tangent: bounds reversal memory with existing
+  vector state and can read each patch's curve, but changes the accepted elastic zone and
+  cyclic/parking behavior. It needs an explicit hysteresis choice and new park/turn evidence.
+- Ground-owned shear rather than pad-owned memory: models what yielded ground retains, but
+  needs spatial history, ownership and lifetime rules beyond this contact law.
+
+MEASURED turning witness: FIXTURE uniform 4.27 m pad, 1.4 m half tread, moving material
+links at the pivot's belt speed on shipped gravel, steady final five seconds of a 20-second
+run at 64 Hz. At 0.2 rad/s the resisting moment was 11,346.383 N m against the Driver's
+30,332.969 N m price (37.406%); at 0.6 rad/s it was 19,460.770 against 30,374.113 N m
+(64.070%). This measures the force path and material advection, not full-body yaw. The Driver
+prices uniform saturated sliding; long-memory soil strain need not attain it. Steering on soil
+is therefore overpriced in this witness. Choosing a mobilization-aware prospective price
+requires a planned slip/dwell model; changing shear history shares the unloading decision above.
+Neither is hidden behind a correction factor in this lane.
+
+The Driver now sums `A*c` as newtons over its footprint and applies the geometric mean of
+`tan(phi)` plus rigid pair shares to nominal normal weight. It never divides cohesion by
+spring load. MEASURED fixed-footprint stiffness-halving witness: 135,545.84 to 163,975.27 N
+before; 109,048.43 to 109,048.43 N after. The vanishing-patch gear witness keeps positive
+current-gear spare and cannot pay a downshift from that tick. Shared world strain is projected
+separately at each patch's force readout; a low-load curb cannot erase a flat patch by coming first.
+
+`ForceParams::inertia` / backlog driving-09 remains verified and open: removing the field also
+requires the force fixture initializer in `track/rubble.rs`, explicitly excluded from this lane.
+The test-only no-ground rigid path similarly has callers in the excluded rubble fixtures;
+its removal requires migrating those fixtures together rather than relocating the fallback.
+
 ## 6. Tiers and budget (codex G — numbers corrected)
 
 **There is no tier machinery, and the reason is now a measurement, not a deferral.** Every tank

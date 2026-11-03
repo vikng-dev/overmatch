@@ -69,7 +69,7 @@ fn grip_law() -> &'static GripLaw {
     &DATA
 }
 
-/// Resolution floor (m) on shear compliance, also the strain digest's scale.
+/// Resolution floor (m) on shear compliance.
 /// DERIVED: ADR-0026's coupled mode has omega*dt about 0.27 at 75 mm and 64 Hz;
 /// stiffness varies as 1/K, so 5 mm raises omega*dt to about 1.05, where the coupled
 /// experiment rang at half the tick rate. This is a conservative measured-mode floor,
@@ -133,18 +133,9 @@ impl GripParams {
     }
 }
 
-/// Resolution: bristle damping ratio: the elastic-zone bristle is an undamped integrator in the hull's
-/// resonance loop — without its damping partner a large disturbance (spawn drop, explosion
-/// kick) can capture a saturated oscillation attractor (the literature's textbook pairing —
-/// TMeasy `F = c·x + d·ẋ`, Pacejka's Besselink term). LuGre sizes the bristle damper
-/// σ1 = 2ζ√(σ0·m) with ζ = 0.5 (Canudas de Wit et al., "A New Model for Control of Systems
-/// with Friction", IEEE TAC 1995 — the canonical bristle-mode damping choice, NOT a
-/// measured rubber loss factor). Sized against the 64 Hz explicit bound: 143.5 kN·s/m per
-/// side is 47% below the ~270 kN·s/m regularizer slope that measurably rang the contact
-/// modes (ADR-0026 §3), with an 11.7× Jury margin on the measured 1.6 Hz post-stop yaw mode
-/// — the wobble this constant exists to close (one ≤0.03 rad/s rebound instead of a ζ=0.15
-/// ring; the Dupont elastic zone is deliberately lossless there, and lowering it was
-/// quantitatively dead: ζ_eq ≈ 0.002 at the observed amplitude, 79× short).
+/// Resolution: LuGre bristle damping at half critical damping, sized from each patch's
+/// initial stiffness and supported mass. ADR-0026 records the coupled stability experiment;
+/// this ratio is solver damping, never a material loss factor.
 const GRIP_ELEMENT_DAMPING_RATIO: f32 = 0.5;
 
 /// Resolution: element membership bounds, as fractions of the side's nominal weight: a pad ENTERS the
@@ -261,8 +252,8 @@ pub struct ForceParams {
 /// material link × lateral column (flat index `link * 3 + column`), WORLD space, meters.
 /// Each grounded element resists relative ground motion in ANY direction (no friction
 /// ellipse, no authored lateral share); turning resistance emerges from the footprint geometry —
-/// fore and aft elements strain in opposing directions under yaw; a per-side mean slip
-/// would cancel that rotational resistance.
+/// a per-side mean slip would erase the footprint's rotational resistance. On soil,
+/// advected long-memory displacement can reduce it; architecture section 5a owns that gap.
 /// State rides MATERIAL identity (advects with belt phase, same mapping as the witness
 /// link). A pad's memory survives as long as the pad is plausibly on the ground: membership
 /// is keyed to ELASTIC load with enter/leave hysteresis plus a short loss dwell
@@ -447,7 +438,7 @@ impl SideReport {
         (point, normal): (Vec3, Vec3),
         half_span: Vec3,
         length_weight: f32,
-        (mu, rolling_coefficient): (f32, f32),
+        (mu, cohesion_n, rolling_coefficient): (f32, f32, f32),
         (collider, out): (Option<Entity>, Vec3),
         pieces: &RubbleBodies,
     ) {
@@ -464,6 +455,7 @@ impl SideReport {
             half_span,
             length_weight,
             mu,
+            cohesion_n,
             rolling_coefficient,
         });
     }
@@ -1191,7 +1183,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                     (p, normal),
                     (load, load_elastic),
                 );
-                let (mu, rolling, shear_m, soil_capacity_share) = surface_under(
+                let surface = surface_under(
                     params.grip,
                     collider,
                     p,
@@ -1206,7 +1198,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                     (p, normal),
                     axis * (contact_len / 2.0),
                     weight * contact_len,
-                    (mu, rolling),
+                    (surface.nominal_mu, surface.cohesion_n, surface.rolling),
                     (collider, out),
                     pieces,
                 );
@@ -1235,10 +1227,10 @@ fn collect_column_contacts<O: TerrainOracle>(
                     element: material(i) * 3 + ci,
                     belt_velocity,
                     collider,
-                    mu,
-                    shear_m,
-                    soil_capacity_share,
-                    rolling,
+                    mu: surface.mu,
+                    shear_m: surface.shear_m,
+                    soil_capacity_share: surface.soil_capacity_share,
+                    rolling: surface.rolling,
                     #[cfg(feature = "bitprobe")]
                     probe_index,
                 });
@@ -1274,8 +1266,30 @@ fn patch_contact<O: TerrainOracle>(
     }
 }
 
-/// Capacity expressed as an equivalent coefficient for the common force/Driver pipeline.
-/// Soil supplies A*c + W*tan(phi); rigid surfaces supply the substance pair.
+/// Dynamic capacity and nominal-pressure facts share a surface query. Only the force pass
+/// divides cohesion by elastic load; the Driver sums the footprint's cohesion in newtons.
+struct SurfaceGrip {
+    mu: f32,
+    nominal_mu: f32,
+    cohesion_n: f32,
+    rolling: f32,
+    shear_m: f32,
+    soil_capacity_share: f32,
+}
+
+impl SurfaceGrip {
+    fn rigid(mu: f32, rolling: f32) -> Self {
+        Self {
+            mu,
+            nominal_mu: mu,
+            cohesion_n: 0.0,
+            rolling,
+            shear_m: GRIP_SHEAR_FLOOR_M,
+            soil_capacity_share: 0.0,
+        }
+    }
+}
+
 fn surface_under<O: TerrainOracle>(
     grip: Option<GripParams>,
     collider: Option<Entity>,
@@ -1283,40 +1297,36 @@ fn surface_under<O: TerrainOracle>(
     (area, load): (f32, f32),
     oracle: &O,
     pieces: &RubbleBodies,
-) -> (f32, f32, f32, f32) {
-    let floor = GRIP_SHEAR_FLOOR_M;
+) -> SurfaceGrip {
     match (grip, collider) {
-        (None, _) => (0.0, 0.0, floor, 0.0),
-        (Some(grip), Some(collider)) => (
+        (None, _) => SurfaceGrip::rigid(0.0, 0.0),
+        (Some(grip), Some(collider)) => SurfaceGrip::rigid(
             grip.pair(pieces.friction(collider)),
             grip_law().rigid_rolling_resistance.value,
-            floor,
-            0.0,
         ),
         (Some(grip), None) => match oracle.ground_at(p) {
             Some(ground) => {
                 let law = ground.traction;
-                let cohesion = if load > 0.0 {
-                    area * law.cohesion_pa / load
-                } else {
-                    0.0
-                };
+                let cohesion_n = area * law.cohesion_pa;
+                let cohesion = if load > 0.0 { cohesion_n / load } else { 0.0 };
                 let soil = law.tan_phi + cohesion;
-                let total = law.rigid_share
+                let nominal_mu = law.rigid_share
                     * grip.pair(crate::substances::contact_friction(ground.friction))
-                    + soil;
-                (
-                    total,
-                    ground.rolling_resistance,
-                    law.shear_m.max(floor),
-                    if total > 0.0 { soil / total } else { 0.0 },
-                )
+                    + law.tan_phi;
+                let total = nominal_mu + cohesion;
+                SurfaceGrip {
+                    mu: total,
+                    nominal_mu,
+                    cohesion_n,
+                    rolling: ground.rolling_resistance,
+                    shear_m: law.shear_m.max(GRIP_SHEAR_FLOOR_M),
+                    soil_capacity_share: if total > 0.0 { soil / total } else { 0.0 },
+                }
             }
-            // Geometry-only calibration and inline force fixtures explicitly state no ground.
             None => {
                 #[cfg(test)]
                 {
-                    (grip.on_ground(), 0.0, floor, 0.0)
+                    SurfaceGrip::rigid(grip.on_ground(), 0.0)
                 }
                 #[cfg(not(test))]
                 {
@@ -1341,17 +1351,11 @@ fn soil_mobilization(displacement: Vec3, shear_m: f32) -> Vec3 {
     displacement / length * -(-length / shear_m).exp_m1()
 }
 
-/// Tangent-plane displacement: soil accumulates vector slip for the exponential readout;
+/// Shared world displacement: soil accumulates vector slip for the exponential readout;
 /// rigid contact uses Dupont's elastic zone and Dahl return. Architecture section 5a owns
-/// the constitutive choice and the soil saturation bound.
-fn advance_element_strain(
-    j0: Vec3,
-    sdot: Vec3,
-    normal: Vec3,
-    dt: f32,
-    shear_m: f32,
-    soil_share: f32,
-) -> Vec3 {
+/// the constitutive choice and its unresolved unloading. Each patch projects the shared
+/// displacement into its own tangent plane when reading force.
+fn advance_element_strain(j0: Vec3, sdot: Vec3, dt: f32, shear_m: f32, soil_share: f32) -> Vec3 {
     let speed = sdot.length();
     let alpha = if soil_share > 0.0 || j0.dot(sdot) < 0.0 {
         0.0
@@ -1362,7 +1366,6 @@ fn advance_element_strain(
         m * m * (3.0 - 2.0 * m)
     };
     let mut j1 = (j0 + sdot * dt) / (1.0 + alpha * (dt / shear_m) * speed);
-    j1 -= j1.dot(normal) * normal;
     let j_len = j1.length();
     let limit = if soil_share > 0.0 {
         SOIL_SATURATION_SHEAR * shear_m
@@ -1473,7 +1476,6 @@ fn update_grip_elements(
                 elements.strain[c.element] = advance_element_strain(
                     elements.strain[c.element],
                     mean_slip,
-                    c.normal,
                     dt,
                     compliances[c.element] / loads[c.element],
                     soils[c.element] / loads[c.element],
@@ -1483,7 +1485,8 @@ fn update_grip_elements(
             // with its own current elastic load, including its own local damping slip.
             advanced[c.element] = true;
         }
-        let j1 = elements.strain[c.element];
+        let shared = elements.strain[c.element];
+        let j1 = shared - c.normal * shared.dot(c.normal);
         if c.mu <= 0.0 {
             // A frictionless pair has no grip budget, and its damping partner is unbounded.
             continue;
@@ -2988,7 +2991,7 @@ mod tests {
                     },
                 },
             };
-            let (_, _, effective, _) = surface_under(
+            let surface = surface_under(
                 grip,
                 None,
                 Vec3::ZERO,
@@ -2996,7 +2999,7 @@ mod tests {
                 &oracle,
                 &RubbleBodies::default(),
             );
-            assert_eq!(effective, k.max(GRIP_SHEAR_FLOOR_M));
+            assert_eq!(surface.shear_m, k.max(GRIP_SHEAR_FLOOR_M));
         }
     }
 
@@ -3057,9 +3060,106 @@ mod tests {
         let k = 0.1; // FIXTURE shear distance.
         let mut j = Vec3::ZERO;
         for _ in 0..16 {
-            j = advance_element_strain(j, Vec3::X * k, Vec3::Y, 1.0 / 16.0, k, 1.0);
+            j = advance_element_strain(j, Vec3::X * k, 1.0 / 16.0, k, 1.0);
         }
         assert!((soil_mobilization(j, k).x - (1.0 - (-1.0_f32).exp())).abs() < 1e-6);
         assert_eq!(soil_mobilization(Vec3::ZERO, k), Vec3::ZERO);
+    }
+    /// Driver grip is nominal-pressure strength. Spring stiffness is not a ground fact;
+    /// changing it at fixed footprint must not change a paid gear decision's load.
+    #[test]
+    fn driver_soil_observation_does_not_read_spring_load() {
+        let oracle = GroundedFlat {
+            surface_y: 0.0,
+            ground: crate::ground_types::GroundTypes::load_shipped()
+                .get("dirt")
+                .contact(),
+        };
+        let loop_pts = rect_loop(0.02);
+        let input = SideInput {
+            loop_pts: &loop_pts,
+            count: 25,
+            plane_x: 0.0,
+            columns: TEST_COLUMNS,
+            travel: TravelField { knots: &[] },
+        };
+        let mut params = rig_params();
+        let mut observed = Vec::new();
+        for factor in [1.0, 0.5] {
+            params.support_stiffness_per_m = rig_params().support_stiffness_per_m * factor;
+            let report = contact_side(
+                &input,
+                SideState::default(),
+                Affine3A::IDENTITY,
+                1.0 / 64.0,
+                &params,
+                &oracle,
+                &RubbleBodies::default(),
+                |_| Vec3::ZERO,
+                &mut GripElements::for_links(25),
+            );
+            observed.push(super::super::load::observe(
+                report.perceived_support.iter(),
+                Vec3::NEG_Z,
+                params.grip.unwrap().side_weight * 2.0,
+                Some(10.0),
+            ));
+        }
+        println!(
+            "MEASURED observer grip: {} -> {} N",
+            observed[0].grip_n, observed[1].grip_n
+        );
+        assert_eq!(observed[0].grip_n, observed[1].grip_n);
+        assert_eq!(observed[0].turn_n, observed[1].turn_n);
+    }
+
+    /// A curb patch must not erase the loaded flat patch's longitudinal shear. Contact
+    /// enumeration is geometry bookkeeping, not a choice of constitutive plane.
+    #[test]
+    fn shared_strain_is_independent_of_patch_order() {
+        let patch = |normal, load| ColumnContact {
+            p: Vec3::ZERO,
+            normal,
+            load,
+            load_elastic: load,
+            stiffness: 1.0,
+            damping: 0.0,
+            long_dir: Vec3::X,
+            lat_dir: normal.cross(Vec3::X),
+            has_plane: true,
+            slip_long: 0.0,
+            slip_lat: 0.0,
+            element: 0,
+            belt_velocity: Vec3::ZERO,
+            collider: None,
+            mu: 0.5,
+            shear_m: GRIP_SHEAR_FLOOR_M,
+            soil_capacity_share: 1.0,
+            rolling: 0.0,
+            #[cfg(feature = "bitprobe")]
+            probe_index: 0,
+        };
+        let mut results = Vec::new();
+        for normals in [
+            [(Vec3::Z, 1.0), (Vec3::Y, 1000.0)],
+            [(Vec3::Y, 1000.0), (Vec3::Z, 1.0)],
+        ] {
+            let cols = normals.map(|(normal, load)| patch(normal, load));
+            let mut elements = GripElements::for_links(1);
+            elements.strain[0] = Vec3::Z * 0.02; // FIXTURE elastic displacement.
+            let g = update_grip_elements(
+                &cols,
+                &[],
+                &mut elements,
+                1000.0,
+                1.0 / 64.0,
+                3,
+                &mut SideReport::default(),
+            );
+            let flat = normals.iter().position(|(n, _)| *n == Vec3::Y).unwrap();
+            results.push(g[flat]);
+        }
+        assert_eq!(results[0], results[1]);
+        assert!(results[0].length() > 0.0);
     }
 }

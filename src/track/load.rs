@@ -64,7 +64,10 @@ pub struct SupportFact {
     pub half_span: Vec3,
     pub normal: Vec3,
     pub length_weight: f32,
+    /// Load-proportional strength: rigid pair share plus soil tan(phi).
     pub mu: f32,
+    /// Footprint area times soil cohesion, N; independent of suspension load.
+    pub cohesion_n: f32,
     pub rolling_coefficient: f32,
 }
 
@@ -114,7 +117,8 @@ pub(crate) fn observe_rig<'a>(
     )
 }
 
-/// `L = W sin(theta) + c_rr W cos(theta) + mu W cos(theta) length/(4 radius)`.
+/// `L = W sin(theta) + c_rr W cos(theta) + T_nominal length/(4 radius)`.
+/// Nominal capacity sums footprint cohesion and the load-proportional strength at nominal pressure.
 /// The uniform-pressure footprint model weights patches by their geometric length and column
 /// share; actual spring/damper loads never weight the observation. Forward is projected into
 /// the support plane, so hull pitch alone cannot manufacture a grade. The footprint's span is
@@ -153,6 +157,7 @@ pub fn observe<'a>(
         .map(|c| c.mu * c.length_weight)
         .sum::<f32>()
         / length_weight;
+    let grip = mu * weight * normal.y + contacts.clone().map(|c| c.cohesion_n).sum::<f32>();
     let (min, max) = contacts
         .flat_map(|c| {
             [
@@ -167,9 +172,9 @@ pub fn observe<'a>(
         grade_n: weight * tangent.y,
         rolling_n: rolling * weight * normal.y,
         // The exact factor 1/4 is the uniform-pressure resisting-moment integral.
-        turn_n: radius.map_or(0.0, |r| mu * weight * normal.y * (max - min) / (4.0 * r)),
-        turn_moment_nm: mu * weight * normal.y * (max - min) / 4.0,
-        grip_n: mu * weight * normal.y,
+        turn_n: radius.map_or(0.0, |r| grip * (max - min) / (4.0 * r)),
+        turn_moment_nm: grip * (max - min) / 4.0,
+        grip_n: grip,
     }
 }
 
@@ -187,6 +192,7 @@ mod tests {
             half_span: Vec3::ZERO,
             length_weight: 1.0,
             mu: 0.7,
+            cohesion_n: 0.0,
             rolling_coefficient: rolling,
         })
     }
@@ -271,6 +277,7 @@ mod tests {
             normal: rot * Vec3::Y,
             length_weight: 4.0,
             mu: 0.7,
+            cohesion_n: 0.0,
             rolling_coefficient: 0.05,
         };
         let actual = observe([contact].iter(), rot * Vec3::NEG_Z, 560_000.0, Some(10.0));
