@@ -987,6 +987,8 @@ mod tests {
     fn fixture_look() -> GraticuleLook {
         use crate::provenance::Sourced;
         let mut look = GraticuleLook::load();
+        // Fixture: physical-grid tests exercise one device row independently of shipped thickness.
+        look.hairline_physical_px = Sourced(1.0);
         // Fixture: the geometric laws sample a complete scale with DIALED on a graduation.
         look.graduation_spacing_m = Sourced(200);
         look.major_interval_m = Sourced(400);
