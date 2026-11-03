@@ -1,0 +1,687 @@
+{
+ "runs": [
+  {
+   "stem": "r79_mud.today.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_mud.today.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "677.7,-662.3,45.0"
+   }
+  },
+  {
+   "stem": "r79_mud.design.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_mud.design.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "677.7,-662.3,45.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/r79_mud.presentation.ron"
+   }
+  },
+  {
+   "stem": "r79_mud.today.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_mud.today.t500.ron",
+   "env": {
+    "OVERMATCH_START": "311.4,-321.4,135.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "677.7,-662.3,45.0"
+   }
+  },
+  {
+   "stem": "r79_mud.design.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_mud.design.t500.ron",
+   "env": {
+    "OVERMATCH_START": "311.4,-321.4,135.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "677.7,-662.3,45.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/r79_mud.presentation.ron"
+   }
+  },
+  {
+   "stem": "r79_mud.today.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_mud.today.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "682.4,-670.3,75.0"
+   }
+  },
+  {
+   "stem": "r79_mud.design.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_mud.design.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "682.4,-670.3,75.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/r79_mud.presentation.ron"
+   }
+  },
+  {
+   "stem": "r79_mud_loft3.design.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_mud_loft3.design.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "677.7,-662.3,45.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/r79_mud_loft3.presentation.ron"
+   }
+  },
+  {
+   "stem": "r79_mud_loft3.design.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_mud_loft3.design.t500.ron",
+   "env": {
+    "OVERMATCH_START": "311.4,-321.4,135.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "677.7,-662.3,45.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/r79_mud_loft3.presentation.ron"
+   }
+  },
+  {
+   "stem": "r79_mud_loft3.design.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_mud_loft3.design.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "682.4,-670.3,75.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/r79_mud_loft3.presentation.ron"
+   }
+  },
+  {
+   "stem": "r79_gravel.today.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_gravel.today.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,393.0,0.0"
+   }
+  },
+  {
+   "stem": "r79_gravel.design.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_gravel.design.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,393.0,0.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/r79_gravel.presentation.ron"
+   }
+  },
+  {
+   "stem": "r79_gravel.today.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_gravel.today.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-515.0,375.0,90.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "-15.0,393.0,0.0"
+   }
+  },
+  {
+   "stem": "r79_gravel.design.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_gravel.design.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-515.0,375.0,90.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "-15.0,393.0,0.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/r79_gravel.presentation.ron"
+   }
+  },
+  {
+   "stem": "r79_gravel.today.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_gravel.today.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-27.7,387.7,315.0"
+   }
+  },
+  {
+   "stem": "r79_gravel.design.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_gravel.design.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-27.7,387.7,315.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/r79_gravel.presentation.ron"
+   }
+  },
+  {
+   "stem": "r79_steel.today.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_steel.today.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,0.0",
+    "OVERMATCH_STILLS_PLATE": "-16.90,34.16,375.00,-1.0000,0.0,-0.0000"
+   }
+  },
+  {
+   "stem": "r79_steel.design.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_steel.design.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,0.0",
+    "OVERMATCH_STILLS_PLATE": "-16.90,34.16,375.00,-1.0000,0.0,-0.0000",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/r79_steel.presentation.ron"
+   }
+  },
+  {
+   "stem": "r79_steel.today.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_steel.today.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-515.0,375.0,90.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,0.0",
+    "OVERMATCH_STILLS_PLATE": "-16.90,34.16,375.00,-1.0000,0.0,-0.0000"
+   }
+  },
+  {
+   "stem": "r79_steel.design.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_steel.design.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-515.0,375.0,90.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,0.0",
+    "OVERMATCH_STILLS_PLATE": "-16.90,34.16,375.00,-1.0000,0.0,-0.0000",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/r79_steel.presentation.ron"
+   }
+  },
+  {
+   "stem": "r79_steel.today.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_steel.today.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,315.0",
+    "OVERMATCH_STILLS_PLATE": "-16.34,34.16,373.66,-0.7071,0.0,-0.7071"
+   }
+  },
+  {
+   "stem": "r79_steel.design.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/r79_steel.design.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,315.0",
+    "OVERMATCH_STILLS_PLATE": "-16.34,34.16,373.66,-0.7071,0.0,-0.7071",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/r79_steel.presentation.ron"
+   }
+  },
+  {
+   "stem": "ap88_mud.today.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_mud.today.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "677.7,-662.3,45.0"
+   }
+  },
+  {
+   "stem": "ap88_mud.design.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_mud.design.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "677.7,-662.3,45.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/ap88_mud.presentation.ron"
+   }
+  },
+  {
+   "stem": "ap88_mud.today.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_mud.today.t500.ron",
+   "env": {
+    "OVERMATCH_START": "311.4,-321.4,135.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "677.7,-662.3,45.0"
+   }
+  },
+  {
+   "stem": "ap88_mud.design.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_mud.design.t500.ron",
+   "env": {
+    "OVERMATCH_START": "311.4,-321.4,135.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "677.7,-662.3,45.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/ap88_mud.presentation.ron"
+   }
+  },
+  {
+   "stem": "ap88_mud.today.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_mud.today.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "682.4,-670.3,75.0"
+   }
+  },
+  {
+   "stem": "ap88_mud.design.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_mud.design.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "682.4,-670.3,75.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/ap88_mud.presentation.ron"
+   }
+  },
+  {
+   "stem": "ap88_mud_h217.design.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_mud_h217.design.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "677.7,-662.3,45.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/ap88_mud_h217.presentation.ron"
+   }
+  },
+  {
+   "stem": "ap88_mud_h217.design.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_mud_h217.design.t500.ron",
+   "env": {
+    "OVERMATCH_START": "311.4,-321.4,135.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "677.7,-662.3,45.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/ap88_mud_h217.presentation.ron"
+   }
+  },
+  {
+   "stem": "ap88_mud_h217.design.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_mud_h217.design.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "682.4,-670.3,75.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/ap88_mud_h217.presentation.ron"
+   }
+  },
+  {
+   "stem": "ap88_gravel.today.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_gravel.today.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,393.0,0.0"
+   }
+  },
+  {
+   "stem": "ap88_gravel.design.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_gravel.design.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,393.0,0.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/ap88_gravel.presentation.ron"
+   }
+  },
+  {
+   "stem": "ap88_gravel.today.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_gravel.today.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-515.0,375.0,90.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "-15.0,393.0,0.0"
+   }
+  },
+  {
+   "stem": "ap88_gravel.design.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_gravel.design.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-515.0,375.0,90.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "-15.0,393.0,0.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/ap88_gravel.presentation.ron"
+   }
+  },
+  {
+   "stem": "ap88_gravel.today.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_gravel.today.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-27.7,387.7,315.0"
+   }
+  },
+  {
+   "stem": "ap88_gravel.design.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_gravel.design.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-27.7,387.7,315.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/ap88_gravel.presentation.ron"
+   }
+  },
+  {
+   "stem": "ap88_steel.today.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_steel.today.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,0.0",
+    "OVERMATCH_STILLS_PLATE": "-16.90,34.16,375.00,-1.0000,0.0,-0.0000"
+   }
+  },
+  {
+   "stem": "ap88_steel.design.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_steel.design.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,0.0",
+    "OVERMATCH_STILLS_PLATE": "-16.90,34.16,375.00,-1.0000,0.0,-0.0000",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/ap88_steel.presentation.ron"
+   }
+  },
+  {
+   "stem": "ap88_steel.today.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_steel.today.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-515.0,375.0,90.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,0.0",
+    "OVERMATCH_STILLS_PLATE": "-16.90,34.16,375.00,-1.0000,0.0,-0.0000"
+   }
+  },
+  {
+   "stem": "ap88_steel.design.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_steel.design.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-515.0,375.0,90.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,0.0",
+    "OVERMATCH_STILLS_PLATE": "-16.90,34.16,375.00,-1.0000,0.0,-0.0000",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/ap88_steel.presentation.ron"
+   }
+  },
+  {
+   "stem": "ap88_steel.today.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_steel.today.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,315.0",
+    "OVERMATCH_STILLS_PLATE": "-16.34,34.16,373.66,-0.7071,0.0,-0.7071"
+   }
+  },
+  {
+   "stem": "ap88_steel.design.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/ap88_steel.design.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,315.0",
+    "OVERMATCH_STILLS_PLATE": "-16.34,34.16,373.66,-0.7071,0.0,-0.7071",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/ap88_steel.presentation.ron"
+   }
+  },
+  {
+   "stem": "skid_steel.today.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/skid_steel.today.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,0.0",
+    "OVERMATCH_STILLS_PLATE": "-16.90,34.16,375.00,-1.0000,0.0,-0.0000",
+    "OVERMATCH_STILLS_RICOCHET": "-0.3420,0.0000,0.9397"
+   }
+  },
+  {
+   "stem": "skid_steel.design.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/skid_steel.design.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,0.0",
+    "OVERMATCH_STILLS_PLATE": "-16.90,34.16,375.00,-1.0000,0.0,-0.0000",
+    "OVERMATCH_STILLS_RICOCHET": "-0.3420,0.0000,0.9397",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/skid_steel.presentation.ron"
+   }
+  },
+  {
+   "stem": "skid_steel.today.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/skid_steel.today.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-515.0,375.0,90.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,0.0",
+    "OVERMATCH_STILLS_PLATE": "-16.90,34.16,375.00,-1.0000,0.0,-0.0000",
+    "OVERMATCH_STILLS_RICOCHET": "-0.3420,0.0000,0.9397"
+   }
+  },
+  {
+   "stem": "skid_steel.design.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/skid_steel.design.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-515.0,375.0,90.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,0.0",
+    "OVERMATCH_STILLS_PLATE": "-16.90,34.16,375.00,-1.0000,0.0,-0.0000",
+    "OVERMATCH_STILLS_RICOCHET": "-0.3420,0.0000,0.9397",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/skid_steel.presentation.ron"
+   }
+  },
+  {
+   "stem": "skid_steel.today.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/skid_steel.today.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,315.0",
+    "OVERMATCH_STILLS_PLATE": "-16.34,34.16,373.66,-0.7071,0.0,-0.7071",
+    "OVERMATCH_STILLS_RICOCHET": "-0.9063,0.0000,0.4226"
+   }
+  },
+  {
+   "stem": "skid_steel.design.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/skid_steel.design.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "-15.0,375.0,315.0",
+    "OVERMATCH_STILLS_PLATE": "-16.34,34.16,373.66,-0.7071,0.0,-0.7071",
+    "OVERMATCH_STILLS_RICOCHET": "-0.9063,0.0000,0.4226",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/skid_steel.presentation.ron"
+   }
+  },
+  {
+   "stem": "he88_dirt.today.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/he88_dirt.today.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "43.4,403.8,320.0"
+   }
+  },
+  {
+   "stem": "he88_dirt.design.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/he88_dirt.design.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "43.4,403.8,320.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/he88_dirt.presentation.ron"
+   }
+  },
+  {
+   "stem": "he88_dirt.today.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/he88_dirt.today.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-328.0,68.6,50.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "43.4,403.8,320.0"
+   }
+  },
+  {
+   "stem": "he88_dirt.design.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/he88_dirt.design.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-328.0,68.6,50.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "43.4,403.8,320.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/he88_dirt.presentation.ron"
+   }
+  },
+  {
+   "stem": "he88_dirt.today.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/he88_dirt.today.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "43.4,403.8,320.0"
+   }
+  },
+  {
+   "stem": "he88_dirt.design.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/he88_dirt.design.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "43.4,403.8,320.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/he88_dirt.presentation.ron"
+   }
+  },
+  {
+   "stem": "he88_dirt_thin.design.g500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/he88_dirt_thin.design.g500.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "43.4,403.8,320.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/he88_dirt_thin.presentation.ron"
+   }
+  },
+  {
+   "stem": "he88_dirt_thin.design.t500",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/he88_dirt_thin.design.t500.ron",
+   "env": {
+    "OVERMATCH_START": "-328.0,68.6,50.0",
+    "OVERMATCH_STILLS_FIELD_DEG": "45",
+    "OVERMATCH_STILLS_TARGET": "43.4,403.8,320.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/he88_dirt_thin.presentation.ron"
+   }
+  },
+  {
+   "stem": "he88_dirt_thin.design.g1000",
+   "plan": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/plans/he88_dirt_thin.design.g1000.ron",
+   "env": {
+    "OVERMATCH_STILLS_FIELD_DEG": "25",
+    "OVERMATCH_STILLS_TARGET": "43.4,403.8,320.0",
+    "OVERMATCH_STILLS_LOOK": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/out/ron/he88_dirt_thin.presentation.ron"
+   }
+  }
+ ],
+ "cases": {
+  "r79_mud": {
+   "title": "7.9 mm AP on mud",
+   "round": "7.9mm_AP",
+   "site": "mud",
+   "kind": "ground",
+   "arms": [
+    "today",
+    "design"
+   ],
+   "flash": false,
+   "zoom": 6
+  },
+  "r79_mud_loft3": {
+   "title": "7.9 mm AP on mud, thrown powder x3",
+   "round": "7.9mm_AP",
+   "site": "mud",
+   "kind": "ground",
+   "arms": [
+    "design"
+   ],
+   "today": "r79_mud",
+   "flash": false,
+   "zoom": 6
+  },
+  "r79_gravel": {
+   "title": "7.9 mm AP on gravel",
+   "round": "7.9mm_AP",
+   "site": "gravel",
+   "kind": "ground",
+   "arms": [
+    "today",
+    "design"
+   ],
+   "flash": true,
+   "zoom": 6
+  },
+  "r79_steel": {
+   "title": "7.9 mm AP on steel",
+   "round": "7.9mm_AP",
+   "site": "gravel",
+   "kind": "plate",
+   "arms": [
+    "today",
+    "design"
+   ],
+   "flash": true,
+   "zoom": 6
+  },
+  "ap88_mud": {
+   "title": "88 mm AP on mud, column 7.7 m",
+   "round": "88mm_AP",
+   "site": "mud",
+   "kind": "ground",
+   "arms": [
+    "today",
+    "design"
+   ],
+   "flash": false,
+   "zoom": 3
+  },
+  "ap88_mud_h217": {
+   "title": "88 mm AP on mud, column 2.17 m",
+   "round": "88mm_AP",
+   "site": "mud",
+   "kind": "ground",
+   "arms": [
+    "design"
+   ],
+   "today": "ap88_mud",
+   "flash": false,
+   "zoom": 3
+  },
+  "ap88_gravel": {
+   "title": "88 mm AP on gravel",
+   "round": "88mm_AP",
+   "site": "gravel",
+   "kind": "ground",
+   "arms": [
+    "today",
+    "design"
+   ],
+   "flash": true,
+   "zoom": 3
+  },
+  "ap88_steel": {
+   "title": "88 mm AP on steel",
+   "round": "88mm_AP",
+   "site": "gravel",
+   "kind": "plate",
+   "arms": [
+    "today",
+    "design"
+   ],
+   "flash": true,
+   "zoom": 3
+  },
+  "skid_steel": {
+   "title": "88 mm AP skid on steel",
+   "round": "88mm_AP",
+   "site": "gravel",
+   "kind": "skid",
+   "arms": [
+    "today",
+    "design"
+   ],
+   "flash": true,
+   "zoom": 3
+  },
+  "he88_dirt": {
+   "title": "88 mm HE burst on dirt",
+   "round": "88mm_HE",
+   "site": "dirt",
+   "kind": "ground",
+   "arms": [
+    "today",
+    "design"
+   ],
+   "flash": true,
+   "zoom": 3,
+   "smoke": true
+  },
+  "he88_dirt_thin": {
+   "title": "88 mm HE burst on dirt, column opacity 0.6",
+   "round": "88mm_HE",
+   "site": "dirt",
+   "kind": "ground",
+   "arms": [
+    "design"
+   ],
+   "today": "he88_dirt",
+   "flash": true,
+   "zoom": 3,
+   "smoke": true
+  }
+ },
+ "framings": [
+  "g500",
+  "t500",
+  "g1000"
+ ],
+ "times": [
+  5.5,
+  6.02,
+  6.15,
+  6.5,
+  7.0,
+  8.5,
+  11.0
+ ],
+ "t0": 6.0
+}

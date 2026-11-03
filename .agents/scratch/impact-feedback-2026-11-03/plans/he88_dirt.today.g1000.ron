@@ -1,0 +1,16 @@
+// 88 mm HE burst on dirt, g1000, today. Capture configuration (ASSUMED), not game data.
+(
+    frames: (
+        out: "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/raw/he88_dirt.today.g1000.png",
+        at: [5.50, 6.02, 6.15, 6.50, 7.00, 8.50, 11.00],
+        size: (1920, 1080),
+        scale_factor: 1.0,
+        ui: false,
+        gizmos: false,
+        step_s: 0.02,
+        camera: Pose(eye: (-711.04, 23.05, -252.79), look: (55.0, 38.56, 390.0)),
+    ),
+    impacts: [
+        (x: 55.0, z: 390.0, round: "88mm_HE", surface: Terrain, at: 6.0),
+    ],
+)

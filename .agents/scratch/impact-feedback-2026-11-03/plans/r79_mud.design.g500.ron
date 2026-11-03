@@ -1,0 +1,16 @@
+// 7.9 mm AP on mud, g500, design. Capture configuration (ASSUMED), not game data.
+(
+    frames: (
+        out: "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/raw/r79_mud.design.g500.png",
+        at: [5.50, 6.02, 6.15, 6.50, 7.00, 8.50, 11.00],
+        size: (1920, 1080),
+        scale_factor: 1.0,
+        ui: false,
+        gizmos: false,
+        step_s: 0.02,
+        camera: Pose(eye: (311.45, 30.20, -321.45), look: (665.0, 12.98, -675.0)),
+    ),
+    impacts: [
+        (x: 665.0, z: -675.0, round: "7.9mm_AP", surface: Terrain, at: 6.0),
+    ],
+)

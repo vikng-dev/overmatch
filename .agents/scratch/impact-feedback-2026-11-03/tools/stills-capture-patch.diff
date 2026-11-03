@@ -1,0 +1,105 @@
+diff --git a/src/dev_capture.rs b/src/dev_capture.rs
+index ee1bb5ad..faf9f831 100644
+--- a/src/dev_capture.rs
++++ b/src/dev_capture.rs
+@@ -433,14 +433,30 @@ fn raise_impacts(
+         let origin = Vec3::new(cue.x, IMPACT_PROBE_TOP_M, cue.z);
+         match spatial.cast_ray(origin, Dir3::NEG_Y, 2.0 * IMPACT_PROBE_TOP_M, true, &filter) {
+             Some(hit) => {
+-                let position = origin - Vec3::Y * hit.distance;
++                let mut position = origin - Vec3::Y * hit.distance;
++                let mut normal = hit.normal;
++                let numbers = |name: &str| -> Option<Vec<f32>> {
++                    std::env::var(name)
++                        .ok()
++                        .map(|spec| spec.split(',').map(|n| n.parse().unwrap()).collect())
++                };
++                if let Some(plate) = numbers("OVERMATCH_STILLS_PLATE") {
++                    position = Vec3::new(plate[0], plate[1], plate[2]);
++                    normal = Vec3::new(plate[3], plate[4], plate[5]);
++                }
++                let outcome = match numbers("OVERMATCH_STILLS_RICOCHET") {
++                    Some(d) => crate::ballistics::ImpactOutcome::Ricochet {
++                        direction: Vec3::new(d[0], d[1], d[2]),
++                    },
++                    None => crate::ballistics::ImpactOutcome::Struck,
++                };
+                 info!("capture: impact at {position} ({now:.4} s)");
+                 commands.trigger(crate::ballistics::Impact {
+                     position,
+-                    normal: hit.normal,
++                    normal,
+                     style: cue.style,
+                     surface: cue.surface,
+-                    outcome: crate::ballistics::ImpactOutcome::Struck,
++                    outcome,
+                 });
+             }
+             None => panic!("capture: impacts: no terrain under {cue:?}; place the cue inside the terrain collider"),
+@@ -468,13 +484,19 @@ struct Pose {
+ fn hold_pose(
+     pose: Res<Pose>,
+     captive: Option<ResMut<crate::camera::CameraCaptive>>,
+-    mut cameras: Query<&mut Transform, With<crate::view::PlayerView>>,
++    mut cameras: Query<(&mut Transform, &mut Projection), With<crate::view::PlayerView>>,
+ ) {
+     if let Some(mut captive) = captive {
+         captive.set_if_neq(crate::camera::CameraCaptive(true));
+     }
+-    for mut transform in &mut cameras {
++    let field: Option<f32> = std::env::var("OVERMATCH_STILLS_FIELD_DEG")
++        .ok()
++        .map(|deg| deg.parse().unwrap());
++    for (mut transform, mut projection) in &mut cameras {
+         *transform = Transform::from_translation(pose.eye).looking_at(pose.look, Vec3::Y);
++        if let (Some(field), Projection::Perspective(lens)) = (field, projection.as_mut()) {
++            lens.fov = field.to_radians();
++        }
+     }
+ }
+ 
+diff --git a/src/tank/scenario.rs b/src/tank/scenario.rs
+index b69b30e7..353258da 100644
+--- a/src/tank/scenario.rs
++++ b/src/tank/scenario.rs
+@@ -596,11 +596,21 @@ fn spawn_tank_when_loaded(
+         0,
+         true,
+     );
++    let (b_at, b_turn) = std::env::var("OVERMATCH_STILLS_TARGET")
++        .ok()
++        .and_then(|spec| parse_start(&spec))
++        .map(|(at, heading)| {
++            (
++                at,
++                Quat::from_rotation_y(heading.to_radians() + std::f32::consts::PI),
++            )
++        })
++        .unwrap_or((duel[1], b_turn));
+     spawn_tank(
+         &mut commands,
+         content,
+         pending.presentation(),
+-        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, duel[1]))
++        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, b_at))
+             .with_rotation(b_turn),
+         "Tiger I (B)",
+         1,
+diff --git a/src/vfx/look.rs b/src/vfx/look.rs
+index d60c93e9..82c2a6fe 100644
+--- a/src/vfx/look.rs
++++ b/src/vfx/look.rs
+@@ -398,7 +398,12 @@ pub(super) struct VfxLook {
+ 
+ pub(super) fn load() -> &'static VfxLook {
+     static LOOK: OnceLock<VfxLook> = OnceLock::new();
+-    LOOK.get_or_init(|| parse(DATA).unwrap_or_else(|error| panic!("{error}")))
++    LOOK.get_or_init(|| {
++        let text = std::env::var("OVERMATCH_STILLS_LOOK")
++            .map(|path| std::fs::read_to_string(path).expect("the stills' look file"))
++            .unwrap_or_else(|_| DATA.to_owned());
++        parse(&text).unwrap_or_else(|error| panic!("{error}"))
++    })
+ }
+ 
+ fn parse(text: &str) -> Result<VfxLook, String> {

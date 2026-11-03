@@ -1,0 +1,16 @@
+// 88 mm AP skid on steel, g1000, design. Capture configuration (ASSUMED), not game data.
+(
+    frames: (
+        out: "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/impact-stills/raw/skid_steel.design.g1000.png",
+        at: [5.50, 6.02, 6.15, 6.50, 7.00, 8.50, 11.00],
+        size: (1920, 1080),
+        scale_factor: 1.0,
+        ui: false,
+        gizmos: false,
+        step_s: 0.02,
+        camera: Pose(eye: (-722.11, 25.26, -332.11), look: (-15.0, 35.76, 375.0)),
+    ),
+    impacts: [
+        (x: -15.0, z: 375.0, round: "88mm_AP", surface: Substance("RHA"), at: 6.0),
+    ],
+)
