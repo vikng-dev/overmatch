@@ -1326,57 +1326,29 @@ fn input_send_due(cadence: Res<InputSendCadence>) -> bool {
     cadence.due
 }
 
-/// Observable count of buffers cleared before Lightyear's native input encoder.
-#[derive(Resource, Default)]
-pub(super) struct InputBufferGuardMetrics {
-    pub(super) cleared: u64,
-}
-
-/// Mount the input-buffer safety boundary for every composition that installs `ClientPlugins` and
-/// can attach an [`InputMarker`]. It must precede `PrepareInputMessage` in the same `PostUpdate` and
-/// relies on the production invariant of at most one client connection per [`App`].
+/// Refuse inverted native-input encoder intervals. Lightyear 0.30.1's installed timeline-shift
+/// observer moves buffer start/remote ticks together; clearing a future buffer would conceal a
+/// broken timeline invariant and discard authored input. The upstream encoder still mislabels
+/// inverted ranges (`src/net/tests/net_input_buffer_wrap.rs`).
 pub(super) fn install_input_buffer_guard(app: &mut App) {
-    app.init_resource::<InputBufferGuardMetrics>().add_systems(
+    app.add_systems(
         PostUpdate,
-        drop_stranded_input_buffer.before(InputSystems::PrepareInputMessage),
+        assert_input_buffer_ranges.before(InputSystems::PrepareInputMessage),
     );
 }
 
-fn clear_stranded_input_buffer(
-    buffer: &mut NativeBuffer<TankCommand>,
-    delayed_tick: Tick,
-) -> Option<Tick> {
-    let start = buffer.start_tick?;
-    if start - delayed_tick <= 0 {
-        return None;
-    }
-    *buffer = NativeBuffer::default();
-    Some(start)
-}
-
-/// Remove an input buffer that leads Lightyear's next send tick, preventing an invalid range from
-/// reaching the native encoder. Remove this guard only after verifying that the upstream encoder
-/// rejects inverted ranges; `src/net/tests/net_input_buffer_wrap.rs` pins the safe enablers, not
-/// the unbounded encoder call.
-fn drop_stranded_input_buffer(
+fn assert_input_buffer_ranges(
     timeline: Res<LocalTimeline>,
     sync: Res<LocalTimelineSync>,
     sender: Query<Entity, With<Client>>,
-    mut buffers: Query<&mut NativeBuffer<TankCommand>, With<InputMarker<TankCommand>>>,
-    mut metrics: ResMut<InputBufferGuardMetrics>,
+    buffers: Query<&NativeBuffer<TankCommand>, With<InputMarker<TankCommand>>>,
 ) {
-    // There is no encoder work, and therefore no range-wrap risk, before an input buffer exists.
-    // Checking this first also leaves startup/teardown alone when no locally controlled tank is
-    // present.
     if buffers.is_empty() {
         return;
     }
-    let client = match sender.single() {
-        Ok(client) => client,
-        // No link: an empty buffer holds no range for the encoder to invert. A buffer holding one
-        // has outlived its link, which cannot happen: the production buffer rides the own replica
-        // (`claim_input_slot`), and lightyear 0.30.1 despawns every non-persistent replica in the
-        // flush that removes the link's `Connected` (`on_replication_disconnect`).
+    match sender.single() {
+        Ok(_) => {}
+        // Replicas disappear with Connected, so a linkless buffer can hold no authored range.
         Err(QuerySingleError::NoEntities(_)) => {
             for buffer in &buffers {
                 assert!(
@@ -1384,7 +1356,7 @@ fn drop_stranded_input_buffer(
                         && buffer.is_empty()
                         && buffer.last_remote_tick.is_none(),
                     "an input buffer holding a range outlived its client link: lightyear despawns \
-                     the own replica with the link's `Connected`"
+                     the own replica with the link's Connected"
                 );
             }
             return;
@@ -1392,17 +1364,14 @@ fn drop_stranded_input_buffer(
         Err(error @ QuerySingleError::MultipleEntities(_)) => {
             panic!("one client connection per App (`spawn_matched_link` refuses a second): {error}")
         }
-    };
-    let delayed_tick = timeline.tick() + sync.input_delay() as i32;
-    for mut buffer in &mut buffers {
-        let buffered_states = buffer.len();
-        if let Some(start) = clear_stranded_input_buffer(&mut buffer, delayed_tick) {
-            metrics.cleared += 1;
-            let lead: i32 = start - delayed_tick;
-            warn!(
-                "client: input-buffer guard clear; MEASURED client={client:?} start={start:?} \
-                 delayed_tick={delayed_tick:?} lead={lead} buffered_states={buffered_states}; observed \
-                 start ahead of encoder tick, likely after backward connection resync"
+    }
+    let end = timeline.tick() + sync.input_delay() as i32;
+    for buffer in &buffers {
+        if let Some(start) = buffer.start_tick {
+            assert!(
+                start - end <= 0,
+                "input-buffer start {start:?} exceeds encoder end {end:?}: timeline shifts move \
+                 buffer indices with the local tick, and shipping input delay is fixed"
             );
         }
     }
@@ -2669,61 +2638,94 @@ mod tests {
         buffer
     }
 
-    /// Installed PostUpdate guard, deliberately without `ClientPlugins`/native encoding: prove
-    /// its real query clears buffers and counts them, not just its helper's return value.
+    /// Encoder boundaries must expose inverted internal ranges rather than erase authored input.
+    /// Both retained slots and a popped-empty buffer still carry an interval start.
     #[test]
-    fn installed_input_buffer_guard_clears_only_inverted_ranges_and_counts_them() {
-        let mut app = App::new();
-        install_input_buffer_guard(&mut app);
-
-        let mut timeline = LocalTimeline::default();
-        timeline.apply_delta(20);
-        app.insert_resource(timeline);
-        app.init_resource::<LocalTimelineSync>();
-        app.world_mut().spawn(Client);
-
-        let stranded = app
-            .world_mut()
-            .spawn((
-                InputMarker::<TankCommand>::default(),
-                slotless_buffer(Tick(313), Tick(312)),
-            ))
-            .id();
-        let stranded_slot = app
-            .world_mut()
-            .spawn((
-                InputMarker::<TankCommand>::default(),
-                one_slot_buffer(Tick(313), Tick(312)),
-            ))
-            .id();
-        let current = app
-            .world_mut()
-            .spawn((
-                InputMarker::<TankCommand>::default(),
-                slotless_buffer(Tick(20), Tick(20)),
-            ))
-            .id();
-
-        app.world_mut().run_schedule(PostUpdate);
-
-        for stranded in [stranded, stranded_slot] {
-            let stranded = app
-                .world()
-                .get::<NativeBuffer<TankCommand>>(stranded)
-                .unwrap();
-            assert_eq!(stranded.start_tick, None);
-            assert!(stranded.is_empty());
-            assert_eq!(stranded.last_remote_tick, None);
+    fn installed_input_buffer_guard_refuses_inverted_ranges() {
+        for buffer in [
+            slotless_buffer(Tick(313), Tick(312)),
+            one_slot_buffer(Tick(313), Tick(312)),
+        ] {
+            let mut app = App::new();
+            install_input_buffer_guard(&mut app);
+            let mut timeline = LocalTimeline::default();
+            timeline.apply_delta(20); // Fixture: encoder end precedes retained start.
+            app.insert_resource(timeline);
+            app.init_resource::<LocalTimelineSync>();
+            app.world_mut().spawn(Client);
+            app.world_mut()
+                .spawn((InputMarker::<TankCommand>::default(), buffer));
+            let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                app.world_mut().run_schedule(PostUpdate);
+            }));
+            let refused =
+                refused.expect_err("an inverted encoder interval is a bug, never a buffer reset");
+            let message = refused
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| refused.downcast_ref::<&str>().copied())
+                .expect("the invariant names its cause");
+            assert!(message.contains("exceeds encoder end"), "{message}");
         }
+    }
 
-        let current = app
-            .world()
-            .get::<NativeBuffer<TankCommand>>(current)
+    /// Mount the shipped native input protocol: backward shifts move both indices, preserve
+    /// snapshots and allow the next write. A local clearing repair cannot make this test pass.
+    #[test]
+    fn native_timeline_shift_preserves_the_input_buffer() {
+        let mut app = crate::net::test_harness::base_app();
+        app.add_plugins(ClientPlugins {
+            tick_duration: crate::net::test_harness::TICK,
+        });
+        super::super::protocol::plugin(&mut app);
+        app.insert_resource(InputTimelineConfig::new(
+            SyncConfig::default(),
+            shipping_input_delay(),
+        ));
+        // Fixture timeline 313 shifts to 20; use the shipped delay for buffered indices.
+        app.world_mut()
+            .resource_mut::<LocalTimeline>()
+            .apply_delta(313);
+        let delay = i32::from(SHIPPING_INPUT_DELAY_TICKS);
+        let mut buffer = NativeBuffer::<TankCommand>::default();
+        let held = ActionState(TankCommand {
+            throttle: 0.75,
+            for_tick: (313 + delay) as u32,
+            ..default()
+        });
+        buffer.set(Tick((313 + delay) as u32), held.clone());
+        buffer.last_remote_tick = Some(Tick((312 + delay) as u32));
+        let slot = app
+            .world_mut()
+            .spawn((InputMarker::<TankCommand>::default(), buffer))
+            .id();
+        app.world_mut().spawn(Client);
+        app.world_mut().trigger(LocalTimelineShift { delta: -293 });
+        assert_eq!(app.world().resource::<LocalTimeline>().tick(), Tick(20));
+        app.world_mut()
+            .run_system_once(assert_input_buffer_ranges)
             .unwrap();
-        assert_eq!(current.start_tick, Some(Tick(20)));
-        assert!(current.is_empty());
-        assert_eq!(current.last_remote_tick, Some(Tick(20)));
-        assert_eq!(app.world().resource::<InputBufferGuardMetrics>().cleared, 2);
+        let mut buffer = app
+            .world_mut()
+            .get_mut::<NativeBuffer<TankCommand>>(slot)
+            .unwrap();
+        let shifted = Tick((20 + delay) as u32);
+        assert_eq!(buffer.start_tick, Some(shifted));
+        assert_eq!(buffer.last_remote_tick, Some(Tick((19 + delay) as u32)));
+        assert_eq!(
+            buffer.get(shifted),
+            Some(&held),
+            "shift indices, never re-author provenance"
+        );
+        let next = shifted + 1;
+        buffer.set(
+            next,
+            ActionState(TankCommand {
+                for_tick: next.0,
+                ..default()
+            }),
+        );
+        assert_eq!(buffer.get(next).unwrap().0.for_tick, next.0);
     }
 
     /// A resync that shifts the timeline AND shrinks the input delay must not suppress the next
@@ -3788,10 +3790,9 @@ mod tests {
         );
     }
 
-    /// A matchmaking link closes on exactly its three exits — a server reported gone (at once), a
-    /// link that never connected after the hint threshold, a once-connected link whose reconnects
-    /// are exhausted — and a never-connected close is a failed join, a once-connected one the
-    /// match's end. Time alone closes nothing: only an exhausted ledger does.
+    /// Exercise server-gone, failed-join and exhausted-reconnect exits. A never-connected close
+    /// is a failed join; a once-connected close ends the match. Time alone cannot exhaust retries.
+    /// Authenticated refusal is covered by the admission probes, outside these cases.
     #[test]
     fn match_link_closes_on_each_exit_and_not_before() {
         use super::super::matchmaking::MatchClosed;

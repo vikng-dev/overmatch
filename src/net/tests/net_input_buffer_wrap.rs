@@ -1,5 +1,5 @@
 //! UPSTREAM TRIPWIRE for the input-message range wrap that `src/net/client.rs`'s
-//! `drop_stranded_input_buffer` guard compensates for (the 2026-07-11 §7 connect-hang fix; full
+//! `assert_input_buffer_ranges` boundary refuses (full
 //! decode in `.agents/docs/design/sim-divergence-and-determinism.md` §7).
 //!
 //! The mechanism, as lightyear 0.28 had it (`lightyear_inputs_native` input_message.rs):
@@ -14,7 +14,7 @@
 //! Lightyear 0.30 BOUNDS the encoder (`(end - start).saturating_add(1).max(0)` pre-sizing and a
 //! `tick <= end_tick` loop), so the call is now safe to make here — and the bounded reproduction
 //! below shows it is still WRONG: an inverted range encodes one state, the value stored at the
-//! future `start_tick`, labelled as `end_tick`. The guard stays until that stops being true. The
+//! future `start_tick`, labelled as `end_tick`. The boundary asserts before that interval reaches encoding. The
 //! two enablers are pinned beside it: a still-negative `Tick` difference, and `set_raw`'s refusal
 //! to re-anchor below `start_tick`. If the reproduction's pin fails after an upgrade, re-read the
 //! encoder: the guard in `src/net/client.rs` may be retirable.
@@ -43,7 +43,7 @@ fn tick_subtraction_still_goes_negative() {
         d, -293,
         "lightyear changed Tick - Tick semantics (expected plain i32 difference -293, got {d}) — \
          the §7 wrap may be closed upstream; re-verify with a loaded connect batch and retire \
-         drop_stranded_input_buffer in src/net/client.rs (see module doc)"
+         assert_input_buffer_ranges in src/net/client.rs (see module doc)"
     );
 }
 
@@ -64,7 +64,7 @@ fn set_raw_still_refuses_lower_ticks() {
 }
 
 /// The bounded reproduction: a buffer stranded at tick 313 asked to encode up to tick 20 — the
-/// inverted range the guard clears. 0.30 returns promptly with ONE state, the value authored for
+/// inverted range the boundary refuses. 0.30 returns promptly with ONE state, the value authored for
 /// tick 313, which the receiver will file under tick 20. Fires when upstream changes the answer
 /// (refuses the range, or encodes nothing) — the signal that the guard may be retirable.
 #[test]
@@ -78,6 +78,6 @@ fn an_inverted_range_encodes_one_mislabeled_state() {
         Some(1),
         "lightyear's encoder changed its answer to an inverted range (expected one mislabeled \
          state, got {len:?}) — re-read `build_from_input_buffer` and consider retiring \
-         drop_stranded_input_buffer in src/net/client.rs (see module doc)"
+         assert_input_buffer_ranges in src/net/client.rs (see module doc)"
     );
 }
