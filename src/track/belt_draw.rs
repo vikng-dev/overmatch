@@ -48,7 +48,7 @@
 //! index counts, an ASSUMED 52-byte vertex), ~26 MB of it rung 0. Every belt of one count shares
 //! them ([`BeltMeshes`]). They are built on the main thread, one rung and side at a time, on the
 //! first frame a belt of that count draws that rung, and dropped with the last table of that
-//! count; the build logs each mesh's size.
+//! count.
 //!
 //! Vertex pulling (the link read as `vertex_index / V` off one copy of the shoe) does not remove
 //! the cost on bevy 0.19's material path: `DrawMesh` draws exactly the mesh's own index range
