@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
 use crate::spec::{NodeReference, NodeRole, TankSpec, TankSpecHandle};
-use crate::substances::SubstanceRegistry;
+use crate::substances::{Matter, SubstanceRegistry};
 use crate::tank::{SimParts, TrackSide, rig_world_pose};
 
 mod embedding;
@@ -288,7 +288,7 @@ pub(crate) struct TankGeometry {
     pub nodes: Vec<NodeGeometry>,
     pub by_name: HashMap<String, usize>,
     /// One `(node index, TrackSide)` per spec `roadwheels` entry, in declaration order, never
-    /// name-pattern sorted. Each station carries its wheel mesh and is also a ballistic volume.
+    /// name-pattern sorted. A station's hard solids are declared on it or beneath its frame.
     pub roadwheels: Vec<(usize, TrackSide)>,
     /// Spec `colliders` in declaration order for deterministic spawn; no wire-shared index derives
     /// from this list (each proxy yields convex hulls).
@@ -1541,14 +1541,15 @@ fn declared_roles_resolve(
         let node = &geometry.nodes[index];
         let ballistic = node.is_ballistic();
         let refusal = match role {
-            // A facet on a node the march never meets is inert; a station that is not its own
-            // armour is a wheel shells pass through.
+            // A declared volume without captured matter is inert in the game's damage model.
             NodeRole::Volume if !ballistic => Some(
                 "it is declared armour, and no primitive of it wears a registry substance"
                     .to_string(),
             ),
-            NodeRole::Roadwheel if !spec.volumes.contains_key(name) => {
-                Some("it is not declared armour (no `volumes` key)".to_string())
+            // Every volumes key has a Volume reference, which owns missing-matter diagnostics.
+            NodeRole::Roadwheel if !ballistic && spec.volumes.contains_key(name) => None,
+            NodeRole::Roadwheel if !station_has_solid(geometry, index) => {
+                Some("neither the station nor its descendants hold declared hard volumes; declare their `volumes` keys under this station frame".to_string())
             }
             NodeRole::Collider if node.primitives.iter().any(|p| p.indices.is_empty()) => {
                 Some("its mesh data is unindexed".to_string())
@@ -1612,6 +1613,29 @@ fn declared_roles_resolve(
         ));
     }
     findings
+}
+
+/// The game's damage model: declared hard volumes belong to a station through the authored
+/// parent chain. The station may be a bare frame; mesh shape and names never infer membership.
+fn station_has_solid(geometry: &TankGeometry, station: usize) -> bool {
+    geometry.ballistic_volumes.iter().any(|&solid| {
+        if !geometry.nodes[solid].primitives.iter().any(|primitive| {
+            primitive
+                .substance
+                .as_ref()
+                .is_some_and(|substance| matches!(substance.matter, Matter::Hard { .. }))
+        }) {
+            return false;
+        }
+        let mut ancestor = Some(solid);
+        while let Some(index) = ancestor {
+            if index == station {
+                return true;
+            }
+            ancestor = geometry.nodes[index].parent;
+        }
+        false
+    })
 }
 
 /// Compare every instantiated tank view with extracted sim data. Read-only and global, hence
@@ -2655,6 +2679,35 @@ mod tests {
         let findings = verify("collider-substance", &nodes, &spec);
         assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
         assert_eq!(findings[0].subject.name, "Proxy", "{}", render(&findings));
+    }
+
+    /// The game's damage model admits a bare station frame carrying separately declared solids.
+    /// Bake consumers rely on authored hierarchy, not a requirement that the frame own the mesh.
+    #[test]
+    fn a_station_can_carry_its_declared_solids_on_children() {
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[3] = Node::new("Station_L").child_of("Hull");
+        nodes.push(
+            Node::new("DeclaredSolid")
+                .child_of("Station_L")
+                .holding(solid(SUBSTANCE, [3.0, 0.0, 0.0])),
+        );
+        let spec = spec.replace(
+            "\"Station_L\": (main: true)",
+            "\"DeclaredSolid\": (main: true)",
+        );
+        let findings = verify("station-child-solid", &nodes, &spec);
+        assert!(!has_error(&findings), "{}", render(&findings));
+
+        nodes.last_mut().unwrap().parent = Some("Hull".into());
+        let findings = verify("station-unrelated-solid", &nodes, &spec);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.check.id == "L2.ROLE_COHERENCE" && finding.subject.name == "Station_L"
+            }),
+            "unrelated hard matter cannot supply the station's construction: {}",
+            render(&findings)
+        );
     }
 
     /// L2.ROLE_COHERENCE — a declared role the resolved node cannot play is refused by name.
