@@ -161,12 +161,13 @@ const AIM_HOLD_S: f32 = 0.3;
 
 // ---- The driver ----
 
-/// Full steer at this heading error, degrees (TUNED).
+// Scripted-driver tastes stay inline because this offline scenario has no data owner;
+// the network Battle mode's data owns match rules, not this driver.
+/// Taste: scripted steering response, degrees of heading error for full steer.
 const STEER_FULL_DEG: f32 = 20.0;
-/// The forward leg steers at a point this far past the lane's front, m, so the approach stays
-/// straight (TUNED).
+/// Taste: scripted approach straightness, metres past the lane's front to steer toward.
 const LOOKAHEAD_M: f32 = 10.0;
-/// A leg that has not reached its end in this long reverses anyway, s (ASSUMED).
+/// Taste: scripted shuttle cadence, seconds before an unfinished leg reverses anyway.
 const LEG_TIMEOUT_S: f32 = 25.0;
 /// DERIVED stopping advance (m, signed along the lane): full-brake stopping distance plus
 /// travel during the command slew. The estimate holds speed during that transition; it is a
