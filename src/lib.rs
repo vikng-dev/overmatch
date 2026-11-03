@@ -17,18 +17,14 @@ mod aim;
 mod armaments_index {
     include!(concat!(env!("OUT_DIR"), "/armaments_index.rs"));
 }
-/// The runtime asset-root resolver (`asset_root`) — where `assets/` lives, resolved once and shared
-/// by both `AssetPlugin` (`net::client`) and the tank bake (`bake`) so they never open different
-/// `.glb` files.
+/// Resolve `assets/` once for `AssetPlugin` (`net::client`) and bake, keeping their glb reads
+/// on the same tree.
 mod assets;
-/// The tank-geometry extractor + shadow harness (sim/view split — design
-/// `sim-view-split-and-tank-bake.md` §8). `extract(glb) → TankGeometry` IS the sim skeleton's
-/// construction source; the shadow harness keeps proving it
-/// equivalent to the instantiated scene on every view bind.
+/// `extract(glb) → TankGeometry` constructs the sim skeleton; the shadow harness checks
+/// equivalence at every view bind (design `sim-view-split-and-tank-bake.md` §8).
 mod bake;
-/// The consumer contract, and the one report shape it answers in. `bin/asset_verify` is a thin
-/// adapter over [`verify_asset`]; the runtime bake calls the same implementation at startup, so a
-/// law cannot hold at one door and not the other.
+/// Shared consumer contract/report for [`verify_asset`] and runtime bake admission:
+/// `bin/asset_verify` and startup must enforce the same laws.
 pub use bake::{Check, Finding, canon_lists, has_error, render, verify_asset};
 mod ballistics;
 /// The §13.6 ray fuzzer's bake-scale entry point (`cargo run --bin ballistic_fuzzer`). The gate
@@ -39,8 +35,8 @@ mod bitprobe;
 #[cfg(feature = "bitprobe")]
 pub use bitprobe::run_bitprobe;
 mod branding;
-/// The scatter buildings' surface: brick walls and a timber roof mapped in metres on every face,
-/// through one `ExtendedMaterial` every building shares. View-only. See the module doc.
+/// View-only brick/timber surfaces mapped in metres on every face through a shared `ExtendedMaterial`.
+/// See the module doc.
 mod building_surface;
 /// Buildings in the game's destruction model, as data: `buildings::schema` is the
 /// `<id>.building.ron` format the asset tools write and the game reads. Public for the tools.
@@ -49,18 +45,17 @@ mod camera;
 /// A collider moved onto another rigid body (a launched turret's) drops its contact pairs, so
 /// Avian makes them again naming its new body. Mounted by `damage::plugin`, the only launcher.
 mod collider_rehome;
-/// The command layer: device reads → player bindings → per-tank serializable `TankCommand`. The
-/// seam authoritative multiplayer hangs off; sim modules consume commands, never devices.
+/// Devices → bindings → serializable per-tank `TankCommand`: the multiplayer seam.
+/// Sim modules consume commands, never devices.
 mod command;
 /// What the physics solver moved through each contact between a standing structure and a dynamic
 /// body, per step (the game's environment destruction): the reading a body's contact load comes
 /// from. Mounted by `SimPlugin`.
 mod contact_transfer;
-/// The fixed-tick wall clock and the per-fixed-tick sim-COST recorder (`SPIKE_COST_TRACE=<path>`): an
-/// env-gated JSONL log of FixedUpdate tick time, the `ballistics::integrate_projectiles` share of it,
-/// and entity/projectile counts — the reusable measurement rig for the machine-gun-march cost spike.
-/// The clock also feeds the server's stats line. Off (zero cost) unless a consumer arms it;
-/// registered on the net server and client composition roots.
+/// Fixed-tick wall clock/server stats and `SPIKE_COST_TRACE=<path>` JSONL recorder:
+/// FixedUpdate time, `ballistics::integrate_projectiles` share and entity/projectile counts.
+/// Measures the machine-gun march; idle at zero cost unless armed by a consumer.
+/// Registered on network server/client roots.
 mod cost;
 /// The controlled tank's crew bar + swap input — a shared piece of the fixed player UI, mounted by
 /// both `GamePlugin` and the sandbox (each scoped to the `Controlled` tank).
@@ -77,9 +72,8 @@ mod debug;
 /// The controlled tank's standard drive row + F3 diagnostics — one view-only implementation mounted
 /// by both the offline and network client roots.
 mod drive_hud;
-/// Exact integer arithmetic over `f32`-sourced polynomials — the arithmetic the bake's embedding
-/// certificate and the corridor collector's parallel test are decided in, so neither has a
-/// tolerance.
+/// Exact integer arithmetic over `f32` polynomials for bake embedding certificates and the
+/// corridor collector's parallel test: neither decision uses a tolerance.
 mod exact;
 /// The FNV-1a fold the compatibility tags are made with: the protocol's and the shot vocabulary's.
 mod fingerprint;
@@ -90,11 +84,9 @@ mod firecontrol;
 /// the fixed clock.
 mod flow;
 mod frame_cost;
-/// The tank build's certificate applied at runtime (ADR-0035): `<id>.lod.json` read as data, the
-/// trio fingerprinted, and one coincident `VisibilityRange` sibling per certified rung on every
-/// scene primitive (a track belt swaps its one mesh handle instead — `track::link_view`). The
-/// single seam between what the build measured and what the renderer selects — no measurement is
-/// transcribed into Rust.
+/// Runtime ADR-0035 certificate: read `<id>.lod.json`, fingerprint the trio, attach coincident
+/// one `VisibilityRange` sibling per certified primitive rung. Belts swap one mesh handle instead
+/// (`track::link_view`). Render selection consumes build measurements without Rust transcription.
 mod geometry_lod;
 /// Which ground type is under each point of the map, sim side: the map's painted blend weights,
 /// decoded once at startup, and each pack's ground. See the module doc.
@@ -120,9 +112,8 @@ mod hull_marks;
 mod keyed_map;
 /// Capture-plan LOD inspection: certified fine/coarse shoe pairs at each reachable switch range.
 mod lod_showcase;
-/// The map manifest (`assets/maps/<id>/level.json`): map selection, the ONE parse of the file that
-/// declares a map's terrain block, its object placement and the coordinate conventions it was
-/// exported in. `terrain_grid` reads it at Startup; `scatter` places out of the same struct.
+/// Select/parse `assets/maps/<id>/level.json` once: terrain, placements and export coordinates.
+/// `terrain_grid` reads at Startup; `scatter` uses the same struct.
 mod map;
 /// The networking implementation. Executables enter through [`run_client`] and [`run_server`];
 /// the adapter tree is private to the library.
@@ -132,11 +123,10 @@ pub use net::{run_client, run_server};
 /// Documentation frames to disk, from the capture plan `OVERMATCH_CAPTURE` names; inert without it.
 /// Public so the sandbox and demo bins can mount it (module doc).
 pub mod dev_capture;
-/// The net client's single overlay authority (active-set resource + pure input/cursor/scrim rules for
-/// the connect / death / menu / view-death overlays). Lives at the crate root, NOT under `net`,
-/// because it is pure view-state that the always-sim `sight` module also declares into — putting it
-/// here keeps `sight` from naming `crate::net` (the `src/net/tests/net_boundary.rs` guard). Mounted
-/// only by [`NetClientPlugin`]; single-player has `state::client_plugin`'s real pause instead.
+/// Net-client overlay authority: active set and pure input/cursor/scrim rules for connect,
+/// death, menu and view-death overlays. At the crate root because `sight` declares view state
+/// into it without naming netcode (`src/net/tests/net_boundary.rs`). Mounted only by
+/// [`NetClientPlugin`]; single-player uses `state::client_plugin`'s real pause.
 mod overlay;
 mod physical_laws;
 /// OS-level process and window helpers that belong to no game layer.
@@ -144,33 +134,24 @@ mod platform;
 /// Provenance of authored data values: each authored value names its fact, unit, taste,
 /// resolution or stand-in job; an unlabelled value does not load.
 mod provenance;
-/// Shutting down: the macOS `Cmd+Q` route into [`AppExit`](bevy::app::AppExit), and the recall of
-/// bevy's render `SubApp` that keeps its exit teardown from deadlocking against its own render
-/// thread. Both are pure exit-path plumbing with no per-frame cost; mounted once per windowed root
-/// ([`ClientPlugin`] and [`NetClientPlugin`] — the headless server has no render app and no menu to
-/// be quit from).
+/// macOS `Cmd+Q` → [`AppExit`](bevy::app::AppExit) and render-`SubApp` recall to avoid teardown
+/// deadlock against its render thread. Exit-only, no per-frame cost. Mounted once per windowed
+/// root ([`ClientPlugin`] / [`NetClientPlugin`]); headless servers have neither render app nor menu.
 mod quit;
-/// The RENDER-PASS cost recorder (`SPIKE_RENDER_COST=<path>`): an env-gated JSONL log of bevy's
-/// built-in per-pass `elapsed_cpu`/`elapsed_gpu` diagnostics — fresh raw measurements per sample
-/// window only, never rolling averages, so spikes survive and dead passes go silent. Mounts
-/// `RenderDiagnosticsPlugin` itself, so it works without a tracy build; covers the main
-/// passes/prepass/bloom/tonemapping span sites but NOT the shadow pass (tracy is the shadow
-/// instrument). Off (zero cost) unless the env var is set; windowed clients only. Analyzed by
-/// `scripts/render/analyze.py`.
+/// `SPIKE_RENDER_COST=<path>` JSONL of Bevy per-pass `elapsed_cpu` / `elapsed_gpu` diagnostics.
+/// Fresh samples only: no rolling averages, so spikes survive and dead passes go silent.
+/// Mounts `RenderDiagnosticsPlugin` without needing tracy; covers main/prepass/bloom/tonemapping,
+/// not shadows (use tracy). Windowed clients only; zero cost when unset.
+/// Analyze with `scripts/render/analyze.py`.
 mod render_cost;
-/// The ONE module that knows a render-layer number or writes a bevy shadow marker: semantic
-/// channels, camera/light profiles, and the per-object `VisualScope` that resolves into both. Every
-/// other module declares intent and never touches `RenderLayers` — a source scan in that module
-/// enforces it. Mounted by each windowed root; the sandboxes deliberately keep their own layering
-/// (ADR-0031).
+/// Owns render-layer numbers and Bevy shadow markers: semantic channels, camera/light profiles
+/// and per-object `VisualScope`. Others declare intent; a source scan enforces this ownership.
+/// Every windowed root mounts it; sandboxes keep separate layering (ADR-0031).
 mod render_policy;
-/// Render scale (research brief "Route A"): the 3D main pass renders at a fraction of the window
-/// through `MainPassResolutionOverride` and one bilinear upscale node, while bloom, tonemapping and
-/// the whole UI stay native. `settings::apply_settings` is the one writer of its resource.
-/// Render-app blast radius only: the camera still targets the window, so
-/// every `world_to_viewport` consumer (`aim`, `sight`, `hud`) is untouched. Mounted by `settings`
-/// itself (the one writer of its resource mounts the resource's owner), so it reaches every windowed
-/// root and no other.
+/// Render-scale "Route A": fractional 3D main pass through `MainPassResolutionOverride` and
+/// bilinear upscale; bloom, tonemapping and UI stay native. Window camera targeting is unchanged,
+/// preserving `world_to_viewport` consumers (`aim`, `sight`, `hud`). The sole resource writer,
+/// `settings::apply_settings`, mounts this owner through `settings` on every windowed root.
 mod render_scale;
 /// The round registry (`assets/rounds/`, one file per round) and the round-type table
 /// (`assets/ballistics/round_types.ron`): every round's core material, nose, mass, calibre, crew
@@ -191,15 +172,12 @@ pub mod sandbox;
 /// spawned by `trees` — a static root with a state,
 /// one frustum collider per segment, each segment with its own HP pool.
 mod scatter;
-/// The scene depth the player's camera serves its soft-edged sprites and hull marks: the camera's
-/// own main-pass depth, copied into bevy's prepass depth texture after the opaque pass, so no depth
-/// prepass draws the scene a second time. Mounted by `camera`, which spawns its marker.
+/// Copy the player's main-pass depth into Bevy's prepass texture after opaque rendering for
+/// soft sprites/hull marks, avoiding a second scene draw. `camera` mounts it and spawns its marker.
 mod scene_depth;
-/// Player-facing graphics settings: the persisted model (`video.ron` in the platform config
-/// directory), the ONE reconciler that applies it to the rendering world, and the `Esc` settings
-/// page; it is the only writer of the renderer's knobs. ONE mount per windowed root —
-/// `settings::plugin(PageEntry::…)` pulls in `render_scale`, the page and the page's
-/// entry declarer — and never the headless server.
+/// Persisted graphics (`video.ron` in platform config), sole render-knob reconciler and Esc page.
+/// Each windowed root mounts `settings::plugin(PageEntry::…)` once, bringing `render_scale` and
+/// the page with its entry declarer. Never mounted on the headless server.
 mod settings;
 /// Ship-facing view-layer audio: render-only subscribers to the device and `FireShell` seams (the
 /// trigger click and the 88's report) plus the RPM-driven engine loop every tank carries. Owns the
@@ -229,12 +207,12 @@ pub(crate) mod tank_surface;
 /// The ground's surface blend: four material packs mixed per fragment by the map's author-painted
 /// weight masks. Its CPU weights also select ground facts; rendering uses `ExtendedMaterial`.
 pub(crate) mod terrain_blend;
-/// The world heightmap: PNG → shared height grid (oracle ground term, heightfield collider,
-/// client render mesh, server spawn heights). See the module doc for the mapping constants.
+/// PNG → shared height grid for oracle, collider, client mesh and server spawn heights.
+/// The module doc owns mapping constants.
 pub(crate) mod terrain_grid;
-/// The terrain render LOD ladder: RTIN/Martini error-bounded levels per render tile, generated at
-/// startup from the SAME decoded grid the collider and oracle read, selected by `VisibilityRange`.
-/// View-only — the oracle, the collider and `height_at` are untouched. See the module doc.
+/// View-only RTIN/Martini error-bounded terrain tiles, built at startup from the collider/oracle's
+/// decoded grid and selected by `VisibilityRange`. Collider, oracle and `height_at` stay unchanged.
+/// See the module doc.
 mod terrain_lod;
 /// The terrain's sun shadow, baked once from the canonical grid toward the fixed sun and sampled by
 /// every lit fragment in place of terrain casters in the cascades. View-only. See the module doc.
@@ -242,32 +220,28 @@ mod terrain_shadow;
 /// The repository-wide gates and the upstream tripwires on the engine.
 #[cfg(test)]
 mod tests;
-/// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs.
-/// simulated pose — passive instrumentation for the MP hull-jitter investigation. Off (zero cost) unless the env var is set. Everything compiles unconditionally;
-/// net-specific rows exist only where the MP client/server plugin registers them, and the net
-/// extras read their resources through `Option`, so they are absent in single-player.
+/// `SPIKE_TRACE=<path>` rendered-vs-simulated pose JSONL for MP hull-jitter investigation.
+/// Unconditionally compiled, zero cost when unset. Only MP roots register net rows;
+/// optional net resources are absent in single-player.
 mod trace;
-/// The track model's pure core (route/oracle/wrap math) — consumed by the sandbox lab and, in
-/// phase A, the game's track view. See `.agents/docs/design/track-model/architecture.md`.
+/// Shared sandbox/game track model: route/oracle/wrap math and sim/view adapters.
+/// See `.agents/docs/design/track-model/architecture.md`.
 pub mod track;
 /// Track prints in the ground: cosmetic terrain marks stamped from every grounded shoe of the
 /// conformed belt view, stored around the camera and over the map, and drawn by the ground's
 /// shader. View only (ADR-0014), client-local, mounted by the track view. See the module doc.
 mod track_prints;
-/// The track-model sandbox (`bin/track_sandbox`) — the single dev tool for the track/suspension
-/// work, having absorbed the retired suspension editor. Public so the binary can mount it; not part
-/// of `GamePlugin`. Tiger-only: it loads the real blueprint (geometry + spec), derives the running
-/// gear from the glb markers, and overlays the derived suspension/track geometry (cast shapes,
-/// route, contact) as live-tweakable gizmo layers on a hull that actually drives.
+/// Track/suspension dev tool (`bin/track_sandbox`), public for the binary and outside `GamePlugin`.
+/// Loads the selected tank's real blueprint/marker-derived running gear, then overlays live-tuned
+/// cast/route/contact gizmos on a driving hull. Also owns suspension inspection.
 #[cfg(feature = "dev_ui")]
 pub mod track_sandbox;
 /// Trees in the game's damage model: a hard body of segments, each with its own HP pool, and a
 /// state, built at spawn from `assets/trees/` data (the glb is the view), dosed by the union walk
 /// and felled at the segment whose pool empties.
 mod trees;
-/// The bundled UI typeface (Barlow Condensed): loads the two weights once and exposes them as a
-/// `ui_font::UiFonts` resource that every `Text`-spawning client plugin reads. Mounted by each
-/// windowed composition root; retires Bevy's ASCII-only default font.
+/// Load both bundled Barlow Condensed weights once into `ui_font::UiFonts` for client `Text` spawners,
+/// replacing Bevy's ASCII-only font. Mounted by every windowed root.
 mod ui_font;
 /// An unattended run (`OVERMATCH_UNATTENDED=1`): silent, and a focus loss never pauses it. Mounted by
 /// [`windowed_runtime`], so every windowed root honours it. See the module doc.
@@ -277,27 +251,21 @@ mod unattended;
 /// the shared billboard/erosion/gradient-LUT machinery they are built from. Mounted by both
 /// windowed clients (ADR-0014 — never the server).
 mod vfx;
-/// THE LIVE VIEW, once: the single 3-D camera's field and the pixel height the main pass renders
-/// at, read by ONE system on human-rate events, plus the exact screen-space projection (ADR-0033
-/// §9) both LOD ladders derive their switch distances through. `terrain_lod` and `geometry_lod` are
-/// consumers of it — each pairing the shared facts with its OWN pixel budget, which is a tuning
-/// knob and not view state. Mounted by every windowed root; a headless composition has no view.
+/// The single 3D camera's field/main-pass pixel height, read by one system on human-rate events,
+/// and exact projection (ADR-0033 §9). `terrain_lod` / `geometry_lod` share these facts but own
+/// separate pixel-budget tuning.
+/// Every windowed root mounts it; headless roots have no view.
 mod view;
 mod world;
 
-/// Bevy's default plugin group as every composition root mounts it: the asset server rooted at
-/// [`assets::asset_root`], and the windowed clients' [`client_render_plugin`]. It is the one place
-/// `src/` names `DefaultPlugins` (`tests::default_plugins_root` fails on any other), so the asset
-/// server and every direct reader of `asset_root()` (the bake, the terrain grid, the tank's sim
-/// glb) open the same tree on every root. A root reaches it through [`windowed_runtime`] or
-/// [`gpu_less_default_plugins`] (the same test fails on any other caller outside tests), so no
-/// root opens a window the run's window mode has not seen.
+/// Shared `DefaultPlugins`: [`assets::asset_root`] and [`client_render_plugin`].
+/// `tests::default_plugins_root` guards this sole declaration and its only entry points,
+/// [`windowed_runtime`] / [`gpu_less_default_plugins`], so all readers open the same asset tree
+/// and every window passes through run-mode handling.
 ///
-/// Invariant: `file_path` is absolute. Bevy's `FileAssetReader::new` joins `file_path` onto its own
-/// base path (`BEVY_ASSET_ROOT`, else `CARGO_MANIFEST_DIR`, else the executable's directory), and
-/// joining an absolute path yields that path, so Bevy's chain never picks the tree. The root is
-/// made absolute against the working directory, where the direct readers resolve a relative one;
-/// an unreadable working directory refuses the start (exit 2) rather than hand Bevy a relative root.
+/// `file_path` must be absolute: Bevy's `FileAssetReader::new` joins it onto `BEVY_ASSET_ROOT`,
+/// `CARGO_MANIFEST_DIR` or the executable directory; an absolute path bypasses that choice.
+/// Resolve against cwd like direct readers; unreadable cwd refuses startup (exit 2).
 pub(crate) fn default_plugins() -> bevy::app::PluginGroupBuilder {
     let root = assets::asset_root();
     let root = std::path::absolute(&root).unwrap_or_else(|error| {
@@ -315,16 +283,15 @@ pub(crate) fn default_plugins() -> bevy::app::PluginGroupBuilder {
         .set(client_render_plugin())
 }
 
-/// The runtime every windowed composition root is built on: [`default_plugins`] with `window` as
-/// its primary window, the run's window mode (`OVERMATCH_WINDOW`, [`run_window`]; visible when
-/// unset) applied before winit creates that window, and the unattended lever
-/// (`OVERMATCH_UNATTENDED`, [`unattended`]). Every windowed root is built on it (the offline game,
-/// the windowed network client, both sandboxes), so a run that asked for a
-/// hidden window shows none and one that asked for silence makes no sound, on any root.
+/// Mount [`default_plugins`] with the primary `window`, apply [`run_window`]'s
+/// `OVERMATCH_WINDOW` (default visible) before winit creates it, and honour
+/// `OVERMATCH_UNATTENDED` through [`unattended`]. Offline/network clients and both sandboxes
+/// share this path so hidden/silent runs stay hidden/silent on every windowed root.
 ///
-/// # Panics
+/// # Failures
 ///
-/// When `OVERMATCH_WINDOW` names no mode, or names `headless` (`run_window::mount`).
+/// Invalid `OVERMATCH_WINDOW` refuses startup; `headless` panics (`run_window::mount` requires
+/// a windowed root).
 pub fn windowed_runtime(app: &mut App, window: Window) {
     let mode = run_window::RunWindow::of_run(run_window::RunWindow::Visible);
     app.add_plugins(default_plugins().set(WindowPlugin {
@@ -359,22 +326,16 @@ pub(crate) fn gpu_less_default_plugins(
         .disable::<bevy::winit::WinitPlugin>()
 }
 
-/// The dedicated server's plugin floor: [`gpu_less_default_plugins`] without the plugins that serve
-/// only a player's screen, speakers or hands, with task pools sized for the host
-/// (`net::server_host::host_task_pools`). Mounted by the server and by the bitprobe fixture, so
-/// the fixture simulates on the floor the authority runs, with the same sizing rule.
-///
-/// No authority system reads what a dropped plugin produces: UI nodes and text, sprites, picking
-/// pointers, input focus, accessibility, gamepads, the clipboard, audio, animation, gizmos, light
-/// clusters, frusta and cascades, and scenes. One server entity is of a kind these plugins serve:
-/// the sun `world::spawn_environment` spawns on every composition, a `DirectionalLight` that only
-/// the client's `settings::apply_settings` reads, so on the server it is an unused presentation
-/// entity. `LightPlugin` goes with `GizmoPlugin` because it mounts a light-gizmo group whose
-/// systems read the gizmo asset store. A plugin stays when a server system needs it or it touches
-/// simulated entities: `CameraPlugin`'s bounds pass inserts `Aabb` on the `Mesh3d` entities
-/// `world::spawn_environment` spawns on every composition, and that system writes the mesh, image
-/// and PBR asset stores. `GltfPlugin` stays because `PbrPlugin` registers a glTF extension handler
-/// at build.
+/// Server/bitprobe floor: [`gpu_less_default_plugins`] minus presentation/device plugins,
+/// with `net::server_host::host_task_pools` sizing. The fixture uses the authority's floor.
+/// No authority system reads the removed plugins' outputs: UI/text, sprites, picking, focus,
+/// accessibility, gamepads, clipboard, audio, animation, gizmos, light clusters/frusta/cascades,
+/// or scenes. `world::spawn_environment`'s `DirectionalLight` is unused on the server; only the
+/// client's `settings::apply_settings` reads it.
+/// `LightPlugin` must go with `GizmoPlugin`: its light-gizmo systems read the gizmo asset store.
+/// Keep plugins that touch sim entities: `CameraPlugin` bounds inserts `Aabb` on the world's
+/// `Mesh3d`s; that spawn system writes mesh/image/PBR stores. Keep `GltfPlugin` because
+/// `PbrPlugin` registers a glTF extension handler at build.
 pub(crate) fn server_plugin_floor() -> bevy::app::PluginGroupBuilder {
     use bevy::{
         a11y, animation, audio, clipboard, gilrs, gizmos, gizmos_render, input_focus, light,
@@ -415,33 +376,25 @@ pub(crate) fn server_plugin_floor() -> bevy::app::PluginGroupBuilder {
         .disable::<world_serialization::WorldSerializationPlugin>()
 }
 
-/// The windowed clients' `RenderPlugin`: stock settings everywhere except macOS, where the two
-/// GPU-query wgpu features are removed before device creation. Part of [`default_plugins`], so
-/// every windowed root has it; a GPU-less root replaces it with [`gpu_less_default_plugins`]'
-/// render settings.
+/// Windowed render settings, stock except macOS GPU-query features. [`default_plugins`]
+/// mounts it; [`gpu_less_default_plugins`] replaces its backend settings for GPU-less roots.
 ///
-/// WHY (the whole causal chain, MEASURED 2026-07-26 on the M4 / macOS 26.5 / Metal / wgpu 29):
-/// under the default `WgpuSettingsPriority::Functionality`, bevy takes the ADAPTER's feature set
-/// wholesale and only then applies `disabled_features`, before device creation (vendored
-/// bevy_render-0.19.0/src/renderer/mod.rs:298-315). A `bevy/trace_tracy` build auto-mounts
-/// `RenderDiagnosticsPlugin` (vendored bevy_render-0.19.0/src/lib.rs:379-380), whose
-/// `DiagnosticsRecorder` sees `TIMESTAMP_QUERY` on the device and allocates a 256-entry timestamp
-/// query set (`FrameData::new`, vendored bevy_render-0.19.0/src/diagnostic/internal.rs:236-254).
-/// Metal refuses `newCounterSampleBufferWithDescriptor` ("Cannot allocate sample buffer"),
-/// wgpu-hal turns that into a `DeviceLost` render error, and bevy's error handler quits the app
-/// within ~1 s of the first frame. Removing the feature HERE means the recorder never allocates
-/// the query set, so a tracy session survives on this Mac and keeps every CPU span (per-system,
-/// render-graph nodes, the shadow pass).
+/// MEASURED on M4 / macOS 26.5 / Metal / wgpu 29: Bevy's default
+/// `WgpuSettingsPriority::Functionality` copies adapter features then applies `disabled_features`
+/// before device creation (vendored bevy_render-0.19.0/src/renderer/mod.rs:298-315).
+/// `bevy/trace_tracy` auto-mounts `RenderDiagnosticsPlugin` (vendored
+/// bevy_render-0.19.0/src/lib.rs:379-380); device `TIMESTAMP_QUERY` makes `DiagnosticsRecorder`
+/// allocate a 256-entry query set (`FrameData::new`, vendored
+/// bevy_render-0.19.0/src/diagnostic/internal.rs:236-254). Metal refuses
+/// `newCounterSampleBufferWithDescriptor` ("Cannot allocate sample buffer"); wgpu-hal reports
+/// `DeviceLost`, and Bevy quits within ~1 s of the first frame. Removing the feature prevents
+/// allocation while preserving tracy CPU spans (systems, render-graph nodes, shadow pass).
 ///
-/// On macOS this costs nothing real: bevy already no-ops every encoder timestamp on macOS citing
-/// the bevy#22257 Tahoe flicker (`WriteTimestamp for CommandEncoder`, vendored
-/// bevy_render-0.19.0/src/diagnostic/internal.rs:744-760), and wgpu#9414 reports Metal4 timestamp
-/// queries return zeros anyway — the GPU-timestamp path is dead upstream on this platform.
-/// `PIPELINE_STATISTICS_QUERY` rides along because the same `FrameData::new` allocates a second
-/// query set for it and wgpu implements pipeline statistics only on Vulkan/DX12.
-///
-/// The cfg gate is the point: on Windows/Linux (Vulkan/DX12) both features stay enabled, so
-/// `elapsed_gpu` diagnostics and the tracy GPU track remain real there.
+/// Bevy already no-ops macOS encoder timestamps for bevy#22257 Tahoe flicker
+/// (`WriteTimestamp for CommandEncoder`, vendored
+/// bevy_render-0.19.0/src/diagnostic/internal.rs:744-760); wgpu#9414 reports Metal4 queries return
+/// zeros. `PIPELINE_STATISTICS_QUERY` also allocates in `FrameData::new`, and wgpu supports it
+/// only on Vulkan/DX12. Windows/Linux retain both features, real `elapsed_gpu` and tracy GPU tracks.
 fn client_render_plugin() -> bevy::render::RenderPlugin {
     #[cfg(target_os = "macos")]
     let disabled_features = Some(
@@ -460,8 +413,6 @@ fn client_render_plugin() -> bevy::render::RenderPlugin {
     }
 }
 
-/// Push an entity onto a capped FIFO, then evict the oldest entities until the cap is restored.
-///
 /// Cleanup uses `try_despawn` because another lifetime owner may already have removed an evictee.
 pub(crate) fn push_capped_entity(
     commands: &mut Commands,
@@ -482,11 +433,10 @@ mod drive_row_tests {
     use super::*;
     use track::transmission::{DriveReadout, TransmissionState};
 
-    /// One formatter owns the normal row in both client roots. `P` marks park; with no readout the
-    /// row hides the gear/rpm fields without hiding speed, and speed is horizontal ground speed.
+    /// Both clients share this row: `P` means park, missing readout hides gear/rpm but retains
+    /// horizontal ground speed.
     #[test]
     fn standard_drive_row_format_is_shared_and_compact() {
-        // The row's fields and markers, with the column padding stripped.
         fn fields(row: String) -> Vec<String> {
             row.split_whitespace().map(str::to_owned).collect()
         }
@@ -551,11 +501,9 @@ mod easing_tests {
     use bevy::time::TimeUpdateStrategy;
     use std::time::Duration;
 
-    /// A moving tank is still eased: a body spawned as an [`eased_dynamic_body`] under
-    /// [`offline_physics`] is drawn between its last two fixed poses, behind the latest one, in
-    /// both translation and rotation. The scenario's tanks and a launched turret rely on it for
-    /// smooth motion between fixed steps; dropping the interpolation plugin from the composition,
-    /// or either easing component from the bundle, draws the body on its fixed pose instead.
+    /// Offline moving bodies must render translation/yaw between the last two fixed poses,
+    /// behind the latest. The scenario's tanks and launched turret rely on this smoothness;
+    /// removing the interpolation plugin or either [`eased_dynamic_body`] component must fail.
     #[test]
     fn a_moving_eased_body_is_drawn_behind_its_latest_fixed_pose() {
         let mut app = App::new();
@@ -696,44 +644,31 @@ pub(crate) struct ShotId {
     pub(crate) fire_tick: u32,
 }
 
-/// The simulation — the authority layer, in the client/server sense (see the memory note and
-/// bevy_replicon's "abstracting over configurations"): everything the server must run to be the
-/// truth; the net client mounts the same rules for its derived cosmetics (shells, servos, recoil
-/// response). Consumes `TankCommand`s, never devices;
-/// steps on the fixed clock. A dedicated server mounts exactly this (plus netcode) on
-/// `MinimalPlugins`; the single-player game mounts it alongside [`ClientPlugin`].
+/// Authoritative fixed-tick rules consuming `TankCommand`s, never devices. Network clients
+/// also mount them for derived shell/servo/recoil cosmetics. The dedicated server adds netcode
+/// on [`server_plugin_floor`]; offline [`GamePlugin`] pairs them with [`ClientPlugin`].
 pub struct SimPlugin;
 
 impl Plugin for SimPlugin {
     fn build(&self, app: &mut App) {
-        // NOTE: physics (avian `PhysicsPlugins`) is deliberately NOT mounted here — its
-        // configuration is the one thing that legitimately differs per composition root:
-        // single-player eases only the bodies that opt in ([`offline_physics`]), the networked
-        // bins must disable avian's interpolation plugin for `LightyearAvianPlugin` (spike log,
-        // increment 5). The composition root (GamePlugin / the net bins) owns the choice.
+        // Composition roots own physics: offline roots opt bodies into [`offline_physics`]
+        // easing; network roots disable Avian interpolation for `LightyearAvianPlugin`.
         app.add_plugins((
             state::sim_plugin,
             world::plugin,
-            // The shared analytic terrain field (track architecture §5): built from
-            // `TerrainMap` for the sim force systems (phase B) and the client track view —
-            // one oracle on server, SP, and net client alike.
+            // Shared oracle built from `TerrainMap` for sim forces and client track views
+            // on server, offline and net client.
             track::terrain_plugin,
-            // `spec` registers the `.tank.ron` data-asset loader before `tank` spawns the tank
-            // and requests one (ADR-0010).
+            // Register `.tank.ron` loading before `tank` requests it (ADR-0010).
             spec::plugin,
             // The trio's certificate, and the fingerprint of the ONE artifact both ends walk
             // (`<id>.sim.glb`). Mounted before `bake`, which opens that artifact.
             geometry_lod::sim_plugin,
-            // Sim/view split: extract the tank's SIM glb as data at startup — the sim skeleton's
-            // spawn source on every composition (SP, net client, net server) — and shadow-verify it
-            // against every instantiated scene.
             bake::plugin,
             tank::sim_plugin,
-            // Commands are the sim's only input: `core_plugin` puts a `TankCommand` on every tank
-            // and consumes latched edges each tick; `driving`/`shooting`/`aim` read it.
+            // Put commands on every tank and consume latched edges each tick.
             command::core_plugin,
-            // Phase-B locomotion: the track model's belt forces ARE the driving sim
-            // (ADR-0025; replaces the raycast-roadwheel model of ADR-0005).
+            // Belt-force locomotion (ADR-0025).
             track::sim_plugin,
             aim::sim_plugin,
             // `ballistics` owns the shell trajectory + impact seam; `shooting` is the gun control
@@ -760,12 +695,10 @@ impl Plugin for SimPlugin {
     }
 }
 
-/// Gate the device-reading [`state::PlayerInputSet`] on a captured cursor (`state::cursor_locked`),
-/// in each schedule its members live in: `Update` (aim commit, view toggle), `PostUpdate` (free-look
-/// orbit), and `RunFixedMainLoop` (gunner aim, range dial, drive gather). Shared by both windowed
-/// composition roots — SP [`ClientPlugin`] and net [`NetClientPlugin`] — so the license to consume
-/// mouse/gameplay input (`grab_mode == Locked`) is configured identically in one place. The headless
-/// server and the scripted harness mount neither root, so the gate never touches them.
+/// Gate [`state::PlayerInputSet`] on `state::cursor_locked` in its three schedules:
+/// Update aim/view toggle, PostUpdate free-look and RunFixedMainLoop gunner/range/drive gather.
+/// Both windowed clients share this `grab_mode == Locked` rule; server/scripted harness mount
+/// neither client root and remain unaffected.
 fn gate_player_input(app: &mut App) {
     use bevy::ecs::schedule::ScheduleLabel;
     use state::{PlayerInputSet, cursor_locked};
@@ -778,9 +711,8 @@ fn gate_player_input(app: &mut App) {
     }
 }
 
-/// The client — command generation (devices → `TankCommand`) and presentation (state → screen).
-/// Requires [`SimPlugin`] in the same app (single-player and listen-server mount both; a pure
-/// network client will too, for interpolation/prediction).
+/// Offline devices → `TankCommand` and state → screen. Requires [`SimPlugin`] in the same app;
+/// network presentation uses [`NetClientPlugin`].
 pub struct ClientPlugin;
 
 impl Plugin for ClientPlugin {
@@ -794,17 +726,14 @@ impl Plugin for ClientPlugin {
             // spawn systems below always find it (see `ui_font`).
             ui_font::plugin,
             branding::plugin,
-            // Exit plumbing: `Cmd+Q` -> `AppExit` on macOS, and the render-app recall that keeps
-            // bevy's own exit teardown from deadlocking against the render thread (bevy#12912).
+            // Shared windowed exit handling; see `quit`.
             quit::plugin,
             // Pause/cursor handling (drives the states that `state::sim_plugin` owns).
             state::client_plugin,
-            // Device gather: the only device→command translation.
             command::client_plugin,
             tank::client_plugin,
-            // Resolves every `VisualScope`/`CameraProfile`/`LightProfile` into bevy's own render
-            // components. Mounted before the modules that declare them so the ordering reads in
-            // dependency order; the systems themselves are `PostUpdate` and order-independent.
+            // Mount before consumer declarations for readable dependency order; actual PostUpdate
+            // resolution is order-independent.
             render_policy::plugin,
             camera::plugin,
             aim::client_plugin,
@@ -848,34 +777,28 @@ impl Plugin for ClientPlugin {
         // each weapon's authored report on the fire seam, and the per-tank engine loop. An
         // unattended run (`windowed_runtime`) silences it.
         app.add_plugins(sfx::plugin);
-        // Per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set) — mounted on this
-        // root so the offline frame-budget sweep needs no server; the net root mounts it too.
+        // Offline frame-budget sweeps need no server; both client roots mount this recorder.
+        // Idle unless `SPIKE_FRAME_COST` is set.
         app.add_plugins(frame_cost::client_plugin);
-        // Per-render-pass cost recorder (idle unless `SPIKE_RENDER_COST` is set), the render-side
-        // companion to the recorder above. Mounted here for the same reason: the offline captures
-        // (`scripts/perf/run-fire-capture.sh`) set both variables and run with no server, and
-        // without this mount the render-cost half asked for was silently never written.
+        // `scripts/perf/run-fire-capture.sh` requests both recorders without a server.
+        // Keep the render half mounted too (`SPIKE_RENDER_COST`, idle when unset).
         app.add_plugins(render_cost::client_plugin);
-        // Player graphics settings + the Esc settings page + the render-scale render-app half, all
-        // behind one mount. SP's pause surface is `AppState::Paused` (there is no overlay authority
-        // here), so the page's visibility is declared from the state — which is the plugin's one
-        // parameter, so mounting the page without a declarer is unrepresentable.
+        // Offline Esc uses `AppState::Paused`, not overlay authority. `PageEntry` requires
+        // the page's visibility declarer, making a mount without one unrepresentable.
         app.add_plugins(settings::plugin(settings::PageEntry::PauseState));
 
         // Physics visualization (collider/ray wireframes) + debug toggles, in every build.
-        // Offline SP registers no diagnostic plugins at all, which is accepted: the settings page
+        // Offline SP registers no diagnostic plugins by default, which is accepted: the settings page
         // covers the render knobs, `cargo tracy` is the frame-cost instrument, and the net client
         // still has `net::debug_hud`'s fps/frame-time card.
         app.add_plugins((avian3d::prelude::PhysicsDebugPlugin, debug::plugin));
     }
 }
 
-/// The networked client's presentation + device gather (Milestone B step 8): [`ClientPlugin`]
-/// minus the single-player-only pieces. No `state::client_plugin` — its Esc pause freezes the
-/// local sim and physics clock, which desyncs a predicting client from a server that keeps
-/// ticking; there is no online pause, so the netcode bin owns its own cursor-release menu overlay
-/// instead. No `tank::client_plugin` — the Tab possession swap is an SP scenario tool; under
-/// netcode the server assigns possession (`ControlledBy`).
+/// Network presentation/device gather. Excludes `state::client_plugin`: online menus must not
+/// pause local clocks while the server keeps ticking, so the net overlay owns cursor release.
+/// Excludes `tank::client_plugin`: Tab possession swap is an offline scenario tool;
+/// server `ControlledBy` assigns network possession.
 pub struct NetClientPlugin;
 
 impl Plugin for NetClientPlugin {
@@ -885,7 +808,7 @@ impl Plugin for NetClientPlugin {
         // `net::client`'s, which owns the link facts it derives from.
         app.add_plugins(flow::plugin);
         app.add_plugins((
-            // Load the bundled UI font first (inserts `UiFonts` at build time; see `ui_font`).
+            // Build-time `UiFonts` must precede UI plugins, as in `ClientPlugin`.
             ui_font::plugin,
             branding::plugin,
             command::client_plugin,
@@ -895,10 +818,8 @@ impl Plugin for NetClientPlugin {
             firecontrol::client_plugin,
             hud::plugin,
             crew_ui::plugin,
-            // The single overlay authority (net-client only): one active-set resource + derived
-            // input/cursor/scrim rules behind which connect status, the death screen, the Esc menu,
-            // and the view-death black all compose with explicit priority and z-order. Owns the one
-            // cursor system; the connect/death/sight owners declare their presence into it.
+            // One cursor system; connect/death/sight owners declare presence into the shared
+            // overlay priority/z-order and input/scrim rules.
             overlay::plugin,
             // Bottom-right ping/FPS/frame-time debug panel — net-client only (ping is meaningless
             // in SP), for testing against the deployed server.
@@ -915,14 +836,12 @@ impl Plugin for NetClientPlugin {
             // Live tracks on the presented pose — own AND remote tanks (one code path).
             track::view_plugin,
         ));
-        // The live view + the render half of the certificate (see `ClientPlugin`), separate for the
-        // same arity reason as the block below.
+        // Both LOD ladders require `view`; see `ClientPlugin`.
         app.add_plugins((
             view::plugin,
             geometry_lod::view_plugin,
             tank_surface::plugin,
         ));
-        // (Separate call: the tuple above is at bevy's 15-plugin tuple arity limit.)
         app.add_plugins((
             // The render half of ballistics (see `ClientPlugin`): the shell glb, the tracer streak
             // and hold visibility. `SimPlugin` mounts only the sim half.
@@ -932,13 +851,9 @@ impl Plugin for NetClientPlugin {
             // The broken buildings and their fallen pieces (view-only, ADR-0014).
             buildings::view::plugin,
             drive_hud::plugin,
-            // The render-policy resolver (see `ClientPlugin`) — every windowed root needs it, or
-            // nothing that declares a scope or a profile is ever resolved. Down here rather than
-            // beside `camera::plugin`: the tuple above is at bevy's 15-plugin arity limit.
+            // Required by every scope/profile declarer; see `render_policy`.
             render_policy::plugin,
-            // Exit plumbing: `Cmd+Q` -> `AppExit` on macOS, and the render-app recall that keeps
-            // bevy's own exit teardown from deadlocking against the render thread (bevy#12912).
-            // (Down here rather than beside `branding::plugin`: the tuple above is full.)
+            // Shared windowed exit handling; see `quit`.
             quit::plugin,
             // The `M` spawn map — net-client only: a top view of the terrain whose click asks the
             // authority to place this player's NEXT respawn there (nothing teleports now).
@@ -946,11 +861,8 @@ impl Plugin for NetClientPlugin {
             // The Battle's match UI — net-client only: the time left, the scoreboard held on Tab
             // and the results, read from the replicated Battle and score.
             net::battle_hud_plugin,
-            // Player graphics settings + the Esc settings page + the render-scale render-app half,
-            // all behind one mount. The page IS the Esc menu's content (`Overlay::Menu` already
-            // blocks input, frees the cursor and owns the scrim), which is what the `OverlayMenu`
-            // entry names — and naming it is not optional, so the page cannot be mounted without the
-            // declarer that makes it visible.
+            // The page is `Overlay::Menu` content; the overlay owns input/cursor/scrim.
+            // Required `PageEntry` names its visibility declarer.
             settings::plugin(settings::PageEntry::OverlayMenu),
         ));
         // View-layer audio (see `ClientPlugin`): the trigger click, each weapon's authored report,
@@ -968,21 +880,17 @@ impl Plugin for NetClientPlugin {
     }
 }
 
-/// The physics every offline composition mounts: the game and both dev sandboxes. Avian's
-/// interpolation plugin keeps its default, which eases no body that has not opted in, and the one
-/// opt-in is [`eased_dynamic_body`]. A body that never moves therefore takes no easing write. The
-/// rejected alternative, `PhysicsInterpolationPlugin::interpolate_all()`, eases every `RigidBody`:
-/// it rewrote each static map body's `Transform` every fixed step and frame, which re-propagated
-/// its whole hierarchy and re-sent its hidden meshes through render extraction
+/// Physics for offline game/sandboxes: default interpolation eases only opted-in
+/// [`eased_dynamic_body`] bodies. Unmoving bodies take no easing writes.
+/// Rejected `PhysicsInterpolationPlugin::interpolate_all()` rewrites static-body transforms
+/// each fixed step/frame, re-propagating hierarchies and re-extracting hidden meshes
 /// (`.agents/scratch/perf-2026-10-29/bookkeeping-diagnosis.md`).
 pub(crate) fn offline_physics() -> bevy::app::PluginGroupBuilder {
     PhysicsPlugins::default().build()
 }
 
-/// A dynamic rigid body whose drawn pose is eased between fixed steps, translation and rotation,
-/// under [`offline_physics`]. Every body that moves in an offline composition takes it in the
-/// insertion that makes it dynamic. Inert in the networked compositions, which mount no easing
-/// plugin.
+/// Every moving offline body opts translation/rotation into [`offline_physics`] easing in the
+/// insertion that makes it dynamic. Inert on network roots, which mount no easing plugin.
 pub(crate) fn eased_dynamic_body() -> (RigidBody, TranslationInterpolation, RotationInterpolation) {
     (
         RigidBody::Dynamic,
@@ -1003,9 +911,8 @@ impl Plugin for GamePlugin {
             SimPlugin,
             // The single-player scenario: two-tank duel spawn, first tank controlled.
             tank::sp_spawn_plugin,
-            // The LOD eyeball harness's runtime half — the per-tank shoe clamp and its one-shot
-            // camera aim. Adds NO systems unless the capture plan selects `LodShowcase`, and the scenario
-            // spawn above lays out the pairs instead of the duel under that same scene selection.
+            // `LodShowcase` capture selection enables shoe clamps/camera aim and makes the
+            // scenario above spawn pairs instead of the duel. Otherwise installs no systems.
             lod_showcase::plugin,
             ClientPlugin,
             // The shot clock, and each pen cam record explained to the player without a hop.
@@ -1019,11 +926,9 @@ impl Plugin for GamePlugin {
     }
 }
 
-/// The offline feel-test route (`overmatch --offline`): the windowed runtime plugin set
-/// [`run_client`](net::run_client) mounts — exe-relative asset root, continuous winit updates —
-/// plus [`GamePlugin`], the true single-player composition. NO netcode: no lightyear plugins, no
-/// connection entity, nothing that can attempt a connect.
-///
+/// `overmatch --offline`: [`run_client`](net::run_client)'s windowed runtime (exe-relative
+/// asset root, continuous winit updates) plus [`GamePlugin`]. No Lightyear/connection entities
+/// or path to connect.
 pub fn run_offline() {
     let mut app = App::new();
     // Read the player's settings BEFORE the window is described — see `load_at_boot`, which also
@@ -1032,18 +937,14 @@ pub fn run_offline() {
     windowed_runtime(
         &mut app,
         Window {
-            // ASCII hyphen: `lib.rs` is scanned by the ui_ascii guard now that the
-            // offline feel label spawns `Text` here (default-font surface).
             title: "Overmatch - offline".into(),
             // `Unprobed` on purpose: the capability probe needs a surface, which needs this
             // window — the mapping self-negotiates until the probe lands.
             present_mode: settings.present_mode(settings::PresentCaps::Unprobed),
-            // Described at creation so a persisted fullscreen boots fullscreen instead of
-            // flashing a window first. The monitor is `at_window_creation`'s and NOT the
-            // stored rung: naming an indexed display here would be cached unresolved by
-            // bevy and would make the `Startup` correction unrepresentable — see
-            // `settings::DisplaySelection`. A hidden run keeps it a plain window
-            // (`run_window`).
+            // Apply persisted fullscreen at creation to avoid a window flash. Use
+            // `at_window_creation`, not the stored display rung: Bevy caches an unresolved
+            // indexed display and prevents Startup correction (see `settings::DisplaySelection`).
+            // Hidden runs stay windowed (`run_window`).
             mode: settings
                 .window_mode
                 .to_window_mode(settings.display.at_window_creation()),
