@@ -638,11 +638,34 @@ pub(crate) mod rtin {
 // Spawning + the adaptive layer
 // ---------------------------------------------------------------------------------------------
 
+/// OS failures before terrain mesh publication.
+#[derive(Debug)]
+enum TangentStartupError {
+    Parallelism(std::io::Error),
+    Worker(std::io::Error),
+}
+
+impl std::fmt::Display for TangentStartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parallelism(error) => {
+                write!(f, "cannot discover terrain tangent worker count: {error}")
+            }
+            Self::Worker(error) => write!(f, "cannot start a terrain tangent worker: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for TangentStartupError {}
+
 /// Require mikktspace tangents at every rung (ADR-0011); without a basis, normal-map directions
 /// have no frame and terrain renders flat/greasy. Parallelize per-mesh stateless work without
 /// changing tangent order or values. MEASURED shipped map: 3.19 s single-threaded on 3.83 M pyramid
 /// triangles versus 134 ms for generation, so tangents dominate startup cost.
-fn generate_tangents(lod: &mut TerrainLod) {
+fn generate_tangents(
+    lod: &mut TerrainLod,
+    parallelism: impl FnOnce() -> std::io::Result<std::num::NonZeroUsize>,
+) -> Result<(), TangentStartupError> {
     let mut pending: Vec<(usize, usize, &mut Mesh)> = lod
         .tiles
         .iter_mut()
@@ -656,26 +679,30 @@ fn generate_tangents(lod: &mut TerrainLod) {
         })
         .collect();
     if pending.is_empty() {
-        return;
+        return Ok(());
     }
-    let threads = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZero::get)
+    let threads = parallelism()
+        .map_err(TangentStartupError::Parallelism)?
+        .get()
         .min(pending.len());
     let chunk = pending.len().div_ceil(threads);
     std::thread::scope(|scope| {
         for batch in pending.chunks_mut(chunk) {
-            scope.spawn(move || {
-                for (tile, level, mesh) in batch {
-                    mesh.generate_tangents().unwrap_or_else(|err| {
-                        panic!(
-                            "terrain LOD tile {tile} level {level} failed mikktspace tangent \
+            std::thread::Builder::new()
+                .spawn_scoped(scope, move || {
+                    for (tile, level, mesh) in batch {
+                        mesh.generate_tangents().unwrap_or_else(|err| {
+                            panic!(
+                                "terrain LOD tile {tile} level {level} failed mikktspace tangent \
                              generation: {err}"
-                        )
-                    });
-                }
-            });
+                            )
+                        });
+                    }
+                })
+                .map_err(TangentStartupError::Worker)?;
         }
-    });
+        Ok(())
+    })
 }
 
 /// Build, spawn and log the census for windowed `world::spawn_environment`.
@@ -695,7 +722,10 @@ pub(crate) fn spawn(
 ) {
     let mut lod = build(grid);
     let tangents_started = Instant::now();
-    generate_tangents(&mut lod);
+    generate_tangents(&mut lod, std::thread::available_parallelism).unwrap_or_else(|error| {
+        error!("terrain startup refused before mesh publication: {error}");
+        std::process::exit(1);
+    });
     let tangents = tangents_started.elapsed();
     let mut census = vec![(0usize, 0usize, 0.0f32); TERRAIN_LOD_LADDER.len()];
     let mut entities = 0usize;
@@ -898,6 +928,35 @@ mod tests {
     }
 
     use crate::terrain_grid::{GRID_RESOLUTION, tests::shipped_grid};
+
+    /// Terrain normal maps need tangent bases on every published mesh. An OS discovery refusal
+    /// must remain an error before any worker runs, never silently select one worker.
+    #[test]
+    fn tangent_startup_refuses_os_errors_before_writing_meshes() {
+        // Fixture: a flat 2x2 grid; its geometry requires a tangent basis but no LOD reduction.
+        let grid = HeightGrid::new(vec![0.0; 4].into(), 2, crate::terrain_grid::FIXTURE_EXTENT);
+        let mut lod = build(&grid);
+        let refusal = generate_tangents(&mut lod, || {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        })
+        .expect_err("OS discovery failure must refuse startup");
+        assert!(matches!(refusal, TangentStartupError::Parallelism(error)
+            if error.kind() == std::io::ErrorKind::PermissionDenied));
+        assert!(
+            lod.tiles
+                .iter()
+                .flat_map(|tile| &tile.levels)
+                .all(|level| !level.mesh.contains_attribute(Mesh::ATTRIBUTE_TANGENT))
+        );
+        generate_tangents(&mut lod, || Ok(std::num::NonZeroUsize::new(1).unwrap()))
+            .expect("one available fixture worker builds tangent bases");
+        assert!(
+            lod.tiles
+                .iter()
+                .flat_map(|tile| &tile.levels)
+                .all(|level| level.mesh.contains_attribute(Mesh::ATTRIBUTE_TANGENT))
+        );
+    }
 
     /// One tile's height patch, in the layout the hierarchy expects.
     fn patch(grid: &HeightGrid, [ia, ib, ja, jb]: [usize; 4]) -> Vec<f32> {
