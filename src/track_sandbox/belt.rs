@@ -91,8 +91,9 @@ impl PinBelt {
 ///   searching it, so there is nothing to tie-break;
 /// - stations are signed (clearance below zero), so the profile's closed-form clipping still
 ///   finds the lift-off point between stations;
-/// - support + total tangent force applied at the profile centroid on the terrain surface
-///   (`+ out·(t/2 − pen_c)`), so the lever arm includes the shoe.
+/// - support + total tangent force applied at the profile centroid on the struck surface:
+///   the pin line plus `out * (pin_to_outer + travel_c - depth_c)`, using the measured outer-face
+///   offset, local suspension travel and struck-surface depth, so the lever arm includes the shoe.
 #[expect(
     clippy::too_many_arguments,
     reason = "the sandbox's belt contact: hull, field, drive input, belt state, grip, transmission and rig"
