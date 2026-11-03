@@ -5,7 +5,8 @@
 //!
 //! - **Flow.** Startup fetches `GET /v1/locations?version=`, then every listed same-city beacon is
 //!   probed ([`ping`]); the picker ([`picker`]) shows continents and locations with ping and match
-//!   counts. Join posts the selection and the measured pings, then polls the ticket ([`ticket`])
+//!   counts. Region lists start collapsed. Join posts the selection and the measured pings, then
+//!   polls the ticket ([`ticket`])
 //!   until `ready` or `failed`. A ready ticket is sent as [`MatchReady`]; `net::client` spawns the
 //!   link to that address with that key.
 //! - **Exits.** `net::client` owns the link and closes it with a [`MatchClosed`], which returns the
@@ -226,8 +227,7 @@ fn receive_replies(
     apply_default_selection(&mut lobby);
 }
 
-/// Once every probe has finished, tick the best continent and list its locations — unless the
-/// player already chose.
+/// Once every probe has finished, tick the best continent unless the player already chose.
 fn apply_default_selection(lobby: &mut Lobby) {
     if lobby.touched || lobby.defaulted {
         return;
@@ -237,9 +237,6 @@ fn apply_default_selection(lobby: &mut Lobby) {
         return;
     }
     lobby.selection = picker::default_selection(&groups);
-    if let Some(best) = groups.first().filter(|_| !lobby.selection.is_empty()) {
-        lobby.expanded.insert(best.continent.clone());
-    }
     lobby.defaulted = true;
 }
 
@@ -312,4 +309,59 @@ pub(super) fn ready_fixture(world: &mut World, ready: ReadyMatch) {
         StatusEvent::Ready(ready)
     );
     world.write_message(MatchReady(ready));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contract::{Continent, Location};
+    use picker::Estimate;
+    use ping::PingSummary;
+
+    #[test]
+    fn default_selects_best_continent_and_keeps_all_region_lists_collapsed() {
+        // Fixture continent/location ids and settled RTTs in ms; the best is listed second.
+        let entries = [("slower", 80.0), ("best", 20.0)];
+        let mut lobby = Lobby {
+            locations: Locations::Loaded(LocationsResponse {
+                version: "fixture".into(),
+                continents: entries
+                    .iter()
+                    .map(|(id, _)| Continent {
+                        continent: (*id).into(),
+                        matches: 0,
+                        locations: vec![Location {
+                            id: (*id).into(),
+                            city: (*id).into(),
+                            country: String::new(),
+                            beacon: None,
+                            matches: 0,
+                        }],
+                    })
+                    .collect(),
+            }),
+            pings: entries
+                .into_iter()
+                .map(|(id, median_ms)| {
+                    (
+                        id.into(),
+                        Estimate::Measured(PingSummary {
+                            median_ms,
+                            spread_ms: 0.0,
+                            samples: 1,
+                        }),
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        apply_default_selection(&mut lobby);
+
+        assert_eq!(lobby.selection, BTreeSet::from(["best".into()]));
+        assert!(
+            lobby.expanded.is_empty(),
+            "the server selector leaves every region list collapsed after the default pick"
+        );
+    }
 }
