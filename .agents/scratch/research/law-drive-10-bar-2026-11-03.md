@@ -86,3 +86,20 @@ required track, headless, command and crew-UI tests. No wire type changed; `PROT
 unchanged. No backlog row names any edited file. The final source was read against error
 handling, branching, base truths, testing and brevity; the explicitly outstanding item-6 rows
 below prevent a claim that the whole drivetrain clears the bar.
+
+## Sheet-derived test entry points
+
+Commit: `driving: derive test entry points from each construction (#146)`.
+
+Verified Claude's two couplings by reading their exact preconditions: the rundown witness
+required 2400 rpm regardless of governed speed, and course entry indexed F6 regardless of the
+ladder length. The rundown now reaches a Fixture point 95% of the way from authored idle to
+governed rpm. Course entry uses the construction's upper-middle gear and its mid-band crank
+speed, deriving belt speed through that gear's ratio and sprocket radius. The file sweep also
+bounded the declared launch limit by the actual ladder in the coast witness; a declared launch
+limit may legitimately exceed a short ladder. The hull fixture reads gravity from its owner.
+
+The second-spec integration doc explicitly states that it replaces the match's single blueprint.
+It makes no coexistence claim. Decisions: preserve the narrow arithmetic/contact fixtures and
+read their owned inputs; do not build a second-match-construction mechanism. The corrected
+rundown, course, coast and second-spec tests all passed in the shared whole-library gate above.

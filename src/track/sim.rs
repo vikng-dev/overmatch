@@ -1747,7 +1747,7 @@ mod tests {
                 .params
                 .grip
                 .expect("the shipped running gear carries a grip law");
-            let mass = 2.0 * grip.side_weight / 9.81;
+            let mass = 2.0 * grip.side_weight / super::super::derive::G;
             Self {
                 app,
                 root,
@@ -1922,14 +1922,17 @@ mod tests {
     #[test]
     fn an_emptied_engine_runs_down_with_the_belt_and_recovers_from_there() {
         let mut hull = DrivenHull::new();
+        let engine = &hull.app.world().resource::<TrackGear>().trans.engine;
+        // Fixture: reach the upper operating band on the sheet's own rpm scale.
+        let target_rpm = engine.idle_rpm + 0.95 * (engine.governed_rpm - engine.idle_rpm);
         for _ in 0..64 * 60 {
             hull.tick(1.0, 0.0);
-            if hull.rpm() >= 2400.0 {
+            if hull.rpm() >= target_rpm {
                 break;
             }
         }
         let at = hull.rpm();
-        assert!(at >= 2400.0, "the fixture reached only {at} rpm");
+        assert!(at >= target_rpm, "the fixture reached only {at} rpm");
         hull.engine_held(0);
         let mut trace = Vec::new();
         for tick in 0..64 {
@@ -2361,6 +2364,7 @@ mod tests {
     /// Spec construction, terrain observation and contact must carry a second drivetrain's
     /// own mass, curve and launch domain through the production belt tick. Fixture: fixed
     /// attitude/ride height on a loaded incline; only longitudinal hull motion is integrated.
+    /// Replaces the match's single blueprint before constructing its running gear.
     #[test]
     fn second_spec_drives_and_settles_through_observation_and_contact() {
         use super::super::drive_fixture::{compact_spec, ground};

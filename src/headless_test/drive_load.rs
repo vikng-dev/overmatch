@@ -593,7 +593,16 @@ fn perceived_load_and_landing_gaps_on_the_course() {
             .get::<avian3d::prelude::Position>(tank)
             .unwrap()
             .0;
-        place(&mut app, tank, position, rotation, 3.0, 6);
+        let tp = app
+            .world()
+            .resource::<crate::track::sim::TrackGear>()
+            .trans();
+        // Fixture: mid-band crank in this construction's upper-middle gear.
+        let gear = (tp.gears_fwd.len() * 3 / 4).max(1) as u8;
+        let rpm = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5;
+        let speed = rpm * crate::track::transmission::RPM_TO_RAD * tp.sprocket_radius
+            / tp.gears_fwd[usize::from(gear - 1)];
+        place(&mut app, tank, position, rotation, speed, gear);
         for _ in 0..512 {
             drive_tick(&mut app, tank, 1.0, 0.0);
             measurements.tick(&app, tank);
@@ -785,7 +794,7 @@ fn empty_driver_station_coast_and_rollback() {
                 .resource::<crate::track::sim::TrackGear>()
                 .trans();
             let gear = if launch_gear {
-                tp.launch_gears
+                tp.launch_gears.min(tp.gears_fwd.len() as u8)
             } else {
                 (tp.gears_fwd.len() * 3 / 4).max(1) as u8
             };
