@@ -21,11 +21,9 @@ use crate::track::side::{PerSide, Side};
 use super::derive::{self, SuspensionParams};
 use super::marker_model::DerivedModel;
 
-/// Load share of each EDGE grip column — the value that makes the edge pair reproduce a uniform
-/// pressure strip's second moment exactly (see [`RigGeom::grip_columns`]). Width-independent.
+/// Width-independent edge load share; [`RigGeom::grip_columns`] derives the strip's second moment.
 pub(crate) const EDGE_COLUMN_SHARE: f32 = 1.0 / 6.0;
-/// Load share of the CENTRE grip column: the remainder, so the three shares sum to exactly 1 and a
-/// flat-ground total is identical to the single-column model's.
+/// Centre share: total load stays one, matching the single-column flat-ground model.
 pub(crate) const CENTER_COLUMN_SHARE: f32 = 1.0 - 2.0 * EDGE_COLUMN_SHARE;
 
 /// Which vertical offset the SPRUNG road wheels get before the belt envelope is built. Sprocket and
@@ -40,13 +38,9 @@ pub(crate) enum Pose {
     Compression,
 }
 
-/// The droop stroke a rig can actually reach, split into what the SPRINGS want and what the CHAIN
-/// allows. The spring wants the full static deflection; the inextensible loop may go taut first and
-/// stop the belly short, so the pose the track can physically reach is the SMALLER of the two.
-///
-/// Both numbers are carried (not just the effective one) so the HUD can say *chain-limited* and show
-/// how much droop the loop is eating. `spring` is `derive::static_deflection`; `effective` is what
-/// [`RigGeom::circles`] lowers the belly by for [`Pose::Droop`].
+/// Spring-requested and chain-permitted droop. The inextensible loop may go taut before full
+/// static deflection; the HUD carries both to show how much droop the chain removes.
+/// [`RigGeom::circles`] lowers the belly by `effective` for [`Pose::Droop`].
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) struct DroopTravel {
     /// Spring static deflection `g/(2πf)²` (m) — the free-extension droop the springs alone reach.
@@ -70,17 +64,15 @@ impl DroopTravel {
 /// One tank's derived running gear, built once at spawn and read by everything downstream.
 #[derive(Resource, Clone)]
 pub(crate) struct RigGeom {
-    /// The marker-derived model this was assembled from (pitch, surface offsets, wheel/idler radii,
-    /// centres). Always measured off the glb: a rig cannot exist on any other geometry, because a
-    /// marker the export dropped aborts the build rather than substituting the RON's numbers.
+    /// Shoe pitch and face datums measured from the sim glb; missing markers abort the build.
+    /// Station construction and contact radii come from the blueprint, not this template.
     pub model: DerivedModel,
     /// Per-side REST-pose pin-line circles, front→rear: `[sprocket, road wheels…, idler]`.
     /// Hull-local side plane `(z, y)`; the radius is the PIN-LINE radius (what the route wraps),
     /// not the visible tread.
     pub rest: PerSide<Vec<(Vec2, f32)>>,
-    /// Hull-local road-wheel centres per side, sorted front→rear (same order as the middle of
-    /// [`Self::rest`]), full 3-D so wheel entities can be spawned straight off them. These keep the
-    /// node's own lateral `x` — the wheel sits where the model says, not on the track's median plane.
+    /// Hull-local road-wheel centres, front→rear as in [`Self::rest`]. Full 3-D for wheel spawning:
+    /// each retains its node's lateral `x`, rather than the track's median plane.
     pub road_wheels: PerSide<Vec<Vec3>>,
     /// Each declared station's tread, in the same front-to-rear order as `road_wheels`.
     pub wheel_treads: PerSide<Vec<crate::spec::WheelTread>>,
@@ -102,9 +94,8 @@ pub(crate) struct RigGeom {
     /// Half the separation of the two authored pin planes (m), the drivetrain's steering lever.
     /// Actual contact and draw placements use `side_plane_x`.
     pub plane_x: f32,
-    /// Where the authored `link_count` falls in the feasible window at build-time params — the
-    /// answer to "can this loop even wrap this hull, and what stops the droop". Recomputed by
-    /// [`Self::link_window`] when the suspension knobs move.
+    /// Build-time loop feasibility and droop limiter; [`Self::link_window`] recomputes it when
+    /// suspension knobs move.
     #[cfg(any(feature = "dev_ui", test))]
     pub window: LinkWindow,
 }
@@ -207,11 +198,9 @@ impl RigGeom {
         link_count: usize,
         params: &SuspensionParams,
     ) -> Self {
-        // The ONLY file read in this module. Everything after it is arithmetic on the numbers it
-        // returned, which is exactly why [`Self::rebuild`] can skip it. Mass is the one number the
-        // model takes from the blueprint (a readout input, not geometry); it is handed over as a
-        // scalar so `model` has no route back to the RON's stale geometry fields. Aborts if the glb
-        // cannot answer — see `DerivedModel::build`.
+        // The module's only file read; `rebuild` reuses its measurements. Mass is a readout input,
+        // passed as a scalar so `DerivedModel::build` cannot substitute RON geometry for missing
+        // glb datums; those abort the build.
         let model = DerivedModel::build(blueprint.spec.mass, glb_path);
         let road_wheels = PerSide::new(
             side_wheel_centres(blueprint, Side::Left),
@@ -380,22 +369,15 @@ impl RigGeom {
         (low, high)
     }
 
-    /// Re-assemble this rig at DIFFERENT authored counts, reusing the cached measurements.
-    ///
-    /// This is the sandbox's live `link_count` / `teeth` knob (see `mod.rs`'s `tune_rig_counts`).
-    /// The glb is never reopened: [`DerivedModel`] and the blueprint's road-wheel centres are pure
-    /// MEASUREMENTS of the model file — they cannot move when an authored count moves — so the
-    /// keypress only has to redo the assembly (sprocket circle → rest circles → ride height →
-    /// window). Parsing the Tiger glb per keystroke would make the knob unusable; caching the
-    /// measurement and recomputing the assembly makes it free.
-    ///
-    /// `teeth` matters here as much as `link_count` does: it sets the chord-exact sprocket pitch
-    /// radius, so it moves the front circle, every route around it, all three taut perimeters, and
-    /// therefore the window verdict too.
+    /// Sandbox `link_count` / `teeth` tuning (`tune_rig_counts`), without reopening the glb on each
+    /// keypress. Cached shoe measurements and blueprint station centres cannot move with counts;
+    /// only assembly repeats: sprocket circle → rest circles → ride height → window.
+    /// `teeth` sets the chord-exact sprocket pitch radius, changing every route, all three taut
+    /// perimeters and the window verdict.
     #[cfg(any(feature = "dev_ui", test))]
     pub(crate) fn rebuild(&self, teeth: u32, link_count: usize, params: &SuspensionParams) -> Self {
-        // `DerivedModel` is `Copy` (a flat bag of measurements); only the wheel-centre lists are
-        // heap-backed, and two ~8-element `Vec<Vec3>`s per keypress is nothing next to a glb parse.
+        // `DerivedModel` is `Copy`; clone centres and treads instead of reparsing the glb per keypress.
+        // MEASURED seed sheet: two eight-centre lists.
         Self::assemble(
             self.model,
             self.road_wheels.clone(),
@@ -415,8 +397,7 @@ impl RigGeom {
         )
     }
 
-    /// The assembly step both constructors share: measurements + the two authored counts in, whole
-    /// geometry contract out. Pure — no file, no ECS.
+    /// Shared pure assembly from measurements, construction and authored counts; no file or ECS.
     #[expect(
         clippy::too_many_arguments,
         reason = "the measured shoe and authored per-side station construction are independent inputs"
@@ -484,20 +465,16 @@ impl RigGeom {
         }
     }
 
-    /// The pin-line circles for one side at a cast pose, front→rear with the sprocket first and the
-    /// idler last — the exact shape `track::route::build_route` expects. Droop lowers the sprung
-    /// road wheels by the static deflection, compression raises them by the bump-stop; the hull-fixed
-    /// sprocket and idler stay put.
+    /// Pin-line circles for `track::route::build_route`, front→rear: sprocket, road wheels, idler.
+    /// Droop lowers road wheels by chain-permitted travel; compression raises them by the bump-stop.
+    /// Sprocket and idler stay hull-fixed.
     pub(crate) fn circles(
         &self,
         side: Side,
         pose: Pose,
         params: &SuspensionParams,
     ) -> Vec<(Vec2, f32)> {
-        // Droop is the one pose the inextensible loop can restrain: the springs want the full static
-        // deflection, but the chain may go taut first. Lower the belly by the CLAMPED travel so the
-        // drawn (and downstream-consumed) pose is one the track can physically reach. Rest and
-        // compression are hull-limited, not chain-limited, so they wrap straight through.
+        // Only droop is chain-limited; rest and compression use the hull-limited poses directly.
         if pose == Pose::Droop {
             let droop = self.side_droop_travel(side, params).effective;
             return droop_circles(self.rest.get(side), droop);
@@ -505,13 +482,8 @@ impl RigGeom {
         pose_circles(self.rest.get(side), pose, params)
     }
 
-    /// How far the belly can actually droop at the given knobs: the spring static deflection, and the
-    /// smaller CHAIN-CLAMPED value the inextensible loop permits (see [`DroopTravel`]).
-    ///
-    /// The clamp is exact and threshold-free: the taut droop-pose wrap grows monotonically with the
-    /// droop `d` (more belly drop → longer belt path), so the largest reachable `d` is found by
-    /// bisecting `d ∈ [0, spring]` for the point where the wrap fills the material loop `link_count ·
-    /// pitch`. Each side uses its own authored stations and contact radii.
+    /// Spring-requested and chain-permitted droop, using this side's authored stations and radii.
+    /// [`droop_travel`] owns the monotone, threshold-free clamp derivation.
     pub(crate) fn side_droop_travel(&self, side: Side, params: &SuspensionParams) -> DroopTravel {
         droop_travel(self.rest.get(side), self.pitch, self.link_count, params)
     }
@@ -530,28 +502,18 @@ impl RigGeom {
         *self.pin_planes.get(side)
     }
 
-    /// The material loop length (m) = `pitch × link_count`, exact. The loop is INEXTENSIBLE: this
-    /// number never changes with pose, which is the whole premise of [`LinkWindow`].
+    /// Inextensible material loop length (m), independent of pose; the premise of [`LinkWindow`].
     pub(crate) fn belt_len(&self) -> f32 {
         self.pitch * self.link_count as f32
     }
 
-    /// Where arc length ZERO sits on the sprocket, as a side-plane angle (rad, `atan2(y, z)` about
-    /// the sprocket centre) — i.e. **where `BeltPhase = 0` puts the first pin**.
-    ///
-    /// Both belt views parameterise the loop from the same vertex: `build_route` (and
-    /// `track_sandbox::belt::conform_belts_field`, which repeats its construction) start the point
-    /// list at the UPPER external tangent between the rear circle and the front one, then wrap
-    /// forward around the sprocket's front. `resample(.., offset)` puts station 0 at exactly `offset`
-    /// along that list and `phase_decompose` makes `offset` the belt phase mod one pitch — so at
-    /// zero phase pin 0 sits precisely on that tangent point, where the return run lands back on the
-    /// sprocket.
-    ///
-    /// That is the ONE fact `wheel_view`'s sprocket needs in order to be phase-locked rather than
-    /// merely rate-locked, and it belongs here because it is a statement about the RIG's route
-    /// parameterisation, not about rendering. It is also a constant of the rig: the tangent is taken
-    /// between the two HULL-FIXED circles ([`Pose`] moves only the sprung road wheels), so no
-    /// suspension travel can move it.
+    /// First pin at `BeltPhase = 0`: side-plane angle (rad, `atan2(y, z)` about the sprocket centre).
+    /// Both belt views start at the upper idler-to-sprocket tangent, where the return run lands,
+    /// then wrap forward around the sprocket. `build_route` and
+    /// `track_sandbox::belt::conform_belts_field` construct that same origin; `resample` places
+    /// station 0 at its offset, and `phase_decompose` reduces phase modulo one pitch.
+    /// `wheel_view` needs this rig parameterisation to phase-lock, rather than only rate-lock,
+    /// the sprocket. Both tangent circles are hull-fixed, so suspension travel cannot move it.
     pub(crate) fn belt_origin_angle(&self, side: Side) -> f32 {
         let circles = self.rest.get(side);
         let (sprocket_c, sprocket_r) = circles[0];
@@ -574,52 +536,36 @@ impl RigGeom {
             .fold(0.0, f32::max)
     }
 
-    /// Road wheels on a side.
     #[cfg(feature = "dev_ui")]
     pub(crate) fn wheel_count(&self, side: Side) -> usize {
         self.road_wheels.get(side).len()
     }
 
-    /// Taut wrap length (m) around one side's circles at a pose — the perimeter a zero-slack loop
-    /// would need. Built with `belt_len = 0` so the return run stays a straight chord (the editor's
-    /// self-check precedent): this measures the HULL, not the belt.
+    /// Taut pose perimeter (m), measuring the hull rather than belt slack; [`window_of`] owns
+    /// the zero-length construction.
     #[cfg(any(feature = "dev_ui", test))]
     pub(crate) fn taut_perimeter(&self, side: Side, pose: Pose, params: &SuspensionParams) -> f32 {
         build_route(&self.circles(side, pose, params), 0.0).total()
     }
 
-    /// The RED hard-stop wrap for a side, in the side plane `(z, y)` — the outermost surface the
-    /// track can ever present toward the hull, and therefore the pure penetration BACKSTOP a
-    /// collider is extruded from ([`super::bump_stop`]). Everything softer than this is the
-    /// support penalty's job; this is only the wall the suspension bottoms against.
+    /// Red rigid-bottoming boundary in `(z, y)`, extruded by [`super::bump_stop`]; softer contact
+    /// belongs to the support penalty. Wrap [`Pose::Compression`] taut (`belt_len = 0`), raising
+    /// road wheels by `params.bump_stop` while sprocket/idler stay fixed, then subtract the measured
+    /// `pin_to_inner` from every pin-line radius to reach the inner surface (wheel tread/rim).
     ///
-    /// It is the taut wrap of the [`Pose::Compression`] circles (road wheels raised by
-    /// `params.bump_stop`, sprocket and idler unsprung) DEFLATED to the track's INNER surface
-    /// (every pin-line radius minus the measured `pin_to_inner` — the wheel tread the belt
-    /// rides on). The rigid thing behind the belt is the WHEEL RIM, and everything between the
-    /// rim and the ground — the full plate, `pin_to_inner + pin_to_outer` (~50 mm) — is track
-    /// material the support penalty may dig into for support and grinding traction (owner
-    /// verdict 2026-07-24: give the track its full thickness of bite). A rigid boundary at the
-    /// belt face would mask the penalty entirely, and a pin-line stop would grant only the outer
-    /// half. This matters most at the unsprung sprocket/idler arcs, where the envelope's travel profile
-    /// is zero and the plate is the ONLY compliance. Cost: at most one full plate depth of
-    /// visual crush at a bottoming impact. Built taut (`belt_len = 0`) like every perimeter.
+    /// The full plate, `pin_to_inner + pin_to_outer` (MEASURED ~50 mm), remains available for penalty
+    /// support and grinding traction. A face stop would mask the penalty; a pin-line stop allows
+    /// only its outer portion. At unsprung end arcs, envelope travel is zero and plate thickness
+    /// is the only compliance. Bottoming can visually crush at most one full plate depth.
     ///
-    /// Pose-consistent with the ride height: the rest PIN wrap's belly is `pin_to_outer` above
-    /// `-hull_rest_y`, this wrap's belly is a further `pin_to_inner` ABOVE the pose's pin wrap
-    /// (deflating the radii pulls the belly up toward the wheels), and the compression pose
-    /// raises it by up to `bump_stop` more — so on flat ground at rest the red belly clears
-    /// the ground by the FULL PLATE plus the belly rise, and touches nothing (the invariant
-    /// the collider MUST hold, or it would carry the tank instead of the belt).
+    /// Ride-height invariant: the rest pin belly is `pin_to_outer` above `-hull_rest_y`; deflation
+    /// adds `pin_to_inner` clearance and compression adds up to `bump_stop`. Thus on flat ground
+    /// at rest the stop clears the ground by a full plate plus belly rise; otherwise the rigid
+    /// collider would carry the tank instead of the belt.
     ///
-    /// The taut wrap points come from `build_route`, but the returned polyline is their CONVEX HULL,
-    /// and that is not a formality: in the compression pose the sprung wheels rise into the return
-    /// run, where `build_route`'s belt model scallops the top over each raised wheel (its taut return
-    /// run rides wheel tops — a belt fact, not a hard-stop fact). The outermost surface the track can
-    /// occupy toward the hull is by definition the convex hull of those wheels, so hulling the wrap
-    /// both matches the physical meaning and hands `Collider::convex_hull` a boundary that is already
-    /// what it will compute — CONVEX and CLOSED (first == last), the two properties the collider and
-    /// the tests rely on.
+    /// Hull the `build_route` points: raised wheels scallop its taut return run, which rides their
+    /// tops. The hard stop needs their outer convex envelope. Return it CCW and closed (first ==
+    /// last), matching `Collider::convex_hull`'s boundary and the tests' contract.
     pub(crate) fn hard_stop_polyline(&self, side: Side, params: &SuspensionParams) -> Vec<Vec2> {
         let inner: Vec<(Vec2, f32)> = self
             .circles(side, Pose::Compression, params)
@@ -629,22 +575,15 @@ impl RigGeom {
         convex_hull_ccw(build_route(&inner, 0.0).pts)
     }
 
-    /// The three lateral GRIP COLUMNS on a side: hull-local `x` and load share, ordered
-    /// INBOARD → CENTRE → OUTBOARD.
+    /// Hull-local `x` and load share, inboard → centre → outboard. Width enters only here and
+    /// [`Self::link_center_x`], through the true [`DerivedModel::lateral_min`]/[`DerivedModel::lateral_max`]
+    /// rather than `plane_x ± width/2`. MEASURED seed-shoe bias: ~17 mm outboard, flush with the wheel
+    /// pack inboard and overhanging outboard. Symmetric placement shifts both edges by 17 mm,
+    /// over-reporting inboard contact and under-reporting the overhang that catches rut lips.
     ///
-    /// This is one of the only two places width is allowed to enter (the other is
-    /// [`Self::link_center_x`]), and it is built from the shoe's TRUE lateral faces
-    /// ([`DerivedModel::lateral_min`]/[`DerivedModel::lateral_max`]) rather than from
-    /// `plane_x ± width/2`. The difference is not cosmetic: the Tiger's shoe is authored ~17 mm
-    /// outboard of the pin plane — flush with the wheel pack inboard, overhanging outboard — so the
-    /// symmetric construction puts BOTH edge columns 17 mm off, over-reporting inboard contact and
-    /// under-reporting the overhang that actually catches a rut lip.
-    ///
-    /// The weights are unchanged by that asymmetry, and it is worth saying why: they come from
-    /// making the edge pair reproduce a laterally-uniform pressure strip's second moment exactly
-    /// (`2·w_e·(w/2)² = w²/12` → `w_e = 1/6`, Simpson's weights), which is a statement about the
-    /// strip's SHAPE, not about where it sits. Moving the whole strip outboard moves all three
-    /// columns together and leaves the shares alone.
+    /// DERIVED Simpson shares reproduce a uniform strip's second moment:
+    /// `2·w_e·(w/2)² = w²/12` → `w_e = 1/6`. Translation moves all columns without changing that
+    /// shape or its shares.
     pub(crate) fn grip_columns(&self, side: Side) -> [(f32, f32); 3] {
         // The sheet places the common shoe template independently on each pin plane. Its
         // left-side mirror preserves inboard-to-outboard column order.
@@ -656,18 +595,14 @@ impl RigGeom {
         ]
     }
 
-    /// The same three columns as OFFSETS from this side's median plane (`±plane_x`) — the form
-    /// [`crate::track::forces::ForceParams::columns`] takes, where the offset is applied along a
-    /// single hull-frame lateral axis. Note the offsets are NOT `−w/2, 0, +w/2`: the middle one is
-    /// the shoe's own outboard bias, which is exactly the fact the symmetric form threw away.
+    /// Columns relative to this side's pin plane, applied along one hull-frame lateral axis by
+    /// [`crate::track::forces::ForceParams::columns`]. Not `−w/2, 0, +w/2`: the centre retains shoe bias.
     pub(crate) fn grip_column_offsets(&self, side: Side) -> [(f32, f32); 3] {
         let median_x = self.side_plane_x(side);
         self.grip_columns(side).map(|(x, w)| (x - median_x, w))
     }
 
-    /// Just the lateral OFFSETS of [`Self::grip_column_offsets`] — what the wrap conform's and
-    /// the wheel probes' terrain stations sample at (they carry no per-column weight; only the
-    /// force law splits the coefficients across the columns).
+    /// Terrain-sampling offsets for wrap conform and wheel probes; only the force law uses weights.
     pub(crate) fn grip_stations(&self, side: Side) -> [f32; 3] {
         self.grip_column_offsets(side).map(|(x, _)| x)
     }
@@ -695,14 +630,9 @@ impl RigGeom {
         )
     }
 
-    /// What every wrap circle on a side DEMANDS of the link hinge, front→rear.
-    ///
-    /// Walks [`Self::rest`] rather than naming the wheels one by one, so a rig that grows a return
-    /// roller or a second idler is covered the day the circle appears — the list IS the set of
-    /// things the belt has to bend around. Pose-independent by construction: a cast pose moves
-    /// wheel CENTRES, and a wrap angle is a function of the RADIUS alone.
-    ///
-    /// Admission compares each demand directly with the sheet's usable articulation.
+    /// Per-circle hinge demand, front→rear, compared directly with authored usable articulation.
+    /// [`Self::rest`] also covers added return rollers/idlers without a separate wheel list.
+    /// Pose changes centres, not radii, so demands are pose-independent.
     pub(crate) fn wrap_demands(&self, side: Side) -> Vec<WrapDemand> {
         let circles = self.rest.get(side);
         let last = circles.len().saturating_sub(1);
@@ -763,9 +693,8 @@ pub(crate) struct WrapDemand {
     pub joint_angle: f32,
 }
 
-/// One side's cast-pose circles from its stored REST list: split off the hull-fixed sprocket (first)
-/// and idler (last), move what's between them, reassemble. Free-standing so [`RigGeom::build`] can
-/// classify the link window before the resource exists.
+/// Cast-pose circles, moving only road wheels between hull-fixed sprocket and idler.
+/// Free-standing so [`RigGeom::build`] can classify the window before the resource exists.
 fn pose_circles(rest: &[(Vec2, f32)], pose: Pose, params: &SuspensionParams) -> Vec<(Vec2, f32)> {
     let dy = match pose {
         Pose::Rest => 0.0,
@@ -877,9 +806,7 @@ fn track_side(side: Side) -> TrackSide {
     }
 }
 
-/// One side's droop-pose circles with the sprung wheels lowered by an arbitrary droop magnitude
-/// `droop` (m, ≥ 0) — the same split as [`pose_circles`], but at a caller-chosen droop rather than the
-/// fixed spring deflection. This is the parametric hook the chain clamp bisects over.
+/// [`pose_circles`]'s sprung-wheel split at caller-chosen `droop` (m, ≥ 0), for chain-clamp bisection.
 fn droop_circles(rest: &[(Vec2, f32)], droop: f32) -> Vec<(Vec2, f32)> {
     let last = rest.len() - 1;
     rest.iter()
@@ -893,18 +820,11 @@ fn droop_circles(rest: &[(Vec2, f32)], droop: f32) -> Vec<(Vec2, f32)> {
         .collect()
 }
 
-/// The reachable droop for a side: the spring static deflection, CLAMPED so the taut droop-pose wrap
-/// never exceeds the material loop length `link_count · pitch`.
-///
-/// The taut wrap of the droop pose is monotone increasing in the droop `d` (dropping the belly only
-/// lengthens the belt path), so:
-///   * if the full spring droop already fits the loop, the chain never binds — return it unclamped;
-///   * if even `d = 0` (the loaded rest pose) already overruns the loop, no droop is reachable — the
-///     loop is too short (`DroopLimiter::Impossible`), clamp to `0`;
-///   * otherwise bisect `d ∈ [0, spring]` for the droop whose taut wrap exactly fills the loop.
-///
-/// Wraps are built taut (`belt_len = 0`) like every other perimeter in this module — the return run
-/// stays a straight chord, so this measures the HULL at that droop, not the belt's own slack.
+/// Chain-permitted droop, bounded by spring static deflection and the inextensible `link_count ·
+/// pitch` loop. Taut wrap increases monotonically with droop: return full spring droop if it fits,
+/// zero if even rest overruns the loop (including every [`DroopLimiter::Impossible`] count), else
+/// bisect `[0, spring]` until the wrap fills the loop, without a physical threshold.
+/// As in [`window_of`], `belt_len = 0` keeps the return chord straight, measuring hull, not slack.
 fn droop_travel(
     rest: &[(Vec2, f32)],
     pitch: f32,
@@ -927,8 +847,8 @@ fn droop_travel(
             effective: 0.0,
         };
     }
-    // Monotone bisection: `lo` always fits the loop, `hi` never does. ~48 halvings drives the
-    // bracket well below f32 precision on a sub-metre stroke, deterministically.
+    // Resolution: `lo` fits, `hi` does not; DERIVED 48 halvings put a sub-metre bracket below f32
+    // precision, with deterministic iteration count.
     let (mut lo, mut hi) = (0.0_f32, spring);
     for _ in 0..48 {
         let mid = 0.5 * (lo + hi);
@@ -990,8 +910,7 @@ pub(crate) enum DroopLimiter {
     /// The chain goes taut part-way through the droop stroke and restrains the suspension. The
     /// track is the droop limiter — historically the normal case for a tensioned track.
     Chain,
-    /// The springs reach full extension before the chain runs out; slack remains even at full
-    /// droop, so the belt sags. The springs are the droop limiter.
+    /// Springs reach full extension without chain restraint; excess loop length remains as sag.
     Spring,
 }
 
@@ -1003,7 +922,7 @@ pub(crate) enum DroopLimiter {
 pub(crate) struct LinkWindow {
     /// `ceil(P_min / pitch)` — the fewest links that can wrap the FULLY COMPRESSED hull.
     pub n_min: usize,
-    /// `round(P_droop / pitch)` — links to exactly fill the FULLY DROOPED hull (zero slack there).
+    /// `round(P_droop / pitch)` — nearest link count to fill the fully drooped hull.
     pub n_droop: usize,
     /// The current authored/tuned link count.
     pub n: usize,
@@ -1016,20 +935,16 @@ pub(crate) struct LinkWindow {
 
 /// Classify a loop length against the poses it must wrap.
 ///
-/// The loop is INEXTENSIBLE — its length is `L = n · pitch`, full stop. The taut perimeter `P(pose)`
-/// is the wrap around the wheel-circle hull; since sprocket and idler are hull-fixed and only the
-/// belly moves, `P` is smallest at full compression and largest at full spring droop.
-///
-/// The consequence that is easy to get backwards: `L < P(pose)` does NOT mean the links stretch, it
-/// means **that pose is unreachable** — the chain physically restrains the suspension before it gets
-/// there. So:
+/// Inextensible `L = n · pitch` versus taut wheel-hull perimeter `P(pose)`: fixed sprocket/idler
+/// and moving belly make `P` smallest at full compression, largest at full spring droop.
+/// `L < P(pose)` makes that pose unreachable; links cannot stretch to reach it.
 ///
 ///   * `L < P_min` → [`DroopLimiter::Impossible`]: the loop cannot wrap even the most-compressed
 ///     hull, so there is no pose it fits. Author more links.
 ///   * `P_min ≤ L < P_droop` → [`DroopLimiter::Chain`]: reachable, and somewhere inside the travel
 ///     the chain goes taut and becomes the droop stop.
-///   * `L ≥ P_droop` → [`DroopLimiter::Spring`]: the springs bottom out on droop first and slack is
-///     still left over at full extension — the belt sags.
+///   * `L ≥ P_droop` → [`DroopLimiter::Spring`]: full spring extension is reachable; any excess
+///     loop length sags.
 ///
 /// Perimeters come from the caller (`RigGeom::taut_perimeter`) so this stays pure `f32` math.
 pub(crate) fn link_window(
@@ -1071,13 +986,8 @@ pub(crate) fn tiger_spec() -> crate::spec::TankSpec {
     .expect("tiger_1.tank.ron parses")
 }
 
-/// The REAL rig, built the way the sandbox builds it: the shipped glb + the shipped RON's two
-/// authored counts. Nothing about it is synthetic, which is the point — this is what catches a
-/// re-export that shrinks a wheel or turns the sprocket.
-///
-/// At module level rather than inside [`mod tests`] because [`crate::track_sandbox::wheel_view`]'s tooth-phase
-/// calibration is asserted against the same shipped rig, and two independent "build the Tiger"
-/// helpers would be two things to keep in step.
+/// Shipped glb and authored counts, built as in the sandbox to catch wheel/sprocket re-export drift.
+/// Shared with [`crate::track_sandbox::wheel_view`]'s tooth-phase calibration to keep one rig fixture.
 #[cfg(test)]
 pub(crate) fn tiger_rig() -> RigGeom {
     let glb = crate::assets::asset_root().join(crate::tank::TANK_SIM_GLB_PATH);
@@ -1103,10 +1013,8 @@ pub(crate) fn tiger_rig() -> RigGeom {
 mod tests {
     use super::*;
 
-    /// The belt's reflected inertia and the drawn idler spin read one circle per wrapped wheel:
-    /// the rest sprocket pitch circle and the idler's pin-line circle, its contact radius plus
-    /// the shoe's measured pin offset. A `wrap_radii` that read the idler's contact radius, or a
-    /// road wheel's circle, would reflect the idler at a radius the belt does not turn it at.
+    /// Reflected inertia and drawn idler spin require rest sprocket/idler pin circles, including
+    /// the idler's measured pin offset. Contact-only or roadwheel radii would give the wrong rate.
     #[test]
     fn wrap_radii_are_the_rest_sprocket_and_idler_pin_circles() {
         let rig = tiger_rig();
@@ -1244,12 +1152,9 @@ mod tests {
         );
     }
 
-    /// Inside the CHAIN regime the inextensible loop goes taut before the springs bottom, so the
-    /// reachable droop is strictly short of the spring deflection — and the defining fact of the
-    /// clamp is that the taut wrap of the clamped droop pose exactly fills the material loop
-    /// `link_count · pitch`. The count probed is the TOP Chain count, the one with the most droop
-    /// left under the clamp: `n_droop` rounds `P_droop / pitch`, so that is `n_droop` itself when
-    /// the rounding went down and `n_droop − 1` when it went up.
+    /// Chain-limited droop is below spring deflection and its taut wrap fills `link_count · pitch`.
+    /// Probe the highest Chain count (most remaining droop): `n_droop` rounds `P_droop / pitch`, so
+    /// use it when rounded down, or `n_droop − 1` when rounded up.
     #[test]
     fn the_chain_clamp_shortens_the_droop_and_pins_the_wrap_to_the_loop() {
         let p = SuspensionParams {
@@ -1296,8 +1201,7 @@ mod tests {
             rig.belt_len(),
         );
 
-        // And the pose `RigGeom::circles` actually DRAWS is the clamped one: its belly sits above the
-        // unclamped spring-droop belly the free `pose_circles` would produce.
+        // The drawn pose must use clamped travel, above the free spring-droop belly.
         let belly = |circles: &[(Vec2, f32)]| {
             build_route(circles, 0.0)
                 .pts
@@ -1352,12 +1256,9 @@ mod tests {
         }
     }
 
-    /// The clamp is bounded on BOTH ends across every regime: never negative (a taut loop stops the
-    /// belly, it does not pull the wheels up past rest) and never past the spring deflection. Swept
-    /// from below the feasible window (Impossible) up through Spring; the Impossible floor is exactly
-    /// zero, from the branch that fires when even the rest pose overruns the loop. Wherever the
-    /// SPRINGS bind first (Spring) the clamp is a no-op: `effective` is the full spring deflection
-    /// and nothing is chain-limited.
+    /// Across Impossible → Spring, droop stays in `[0, spring]`: the chain stops the belly without
+    /// pulling wheels above rest. Impossible counts overrun even rest and yield exactly zero;
+    /// Spring counts retain full static deflection without chain limitation.
     #[test]
     fn the_clamped_droop_is_never_negative() {
         let p = SuspensionParams::default();
@@ -1429,8 +1330,7 @@ mod tests {
         (sprocket, idler, wheels)
     }
 
-    /// A whole synthetic rig through the same [`RigGeom::assemble`] both constructors use — the glb
-    /// read is the ONLY thing a test cannot do, and it is exactly the thing `rebuild` skips.
+    /// Synthetic measurements and construction through production [`RigGeom::assemble`], without a glb read.
     fn synthetic_rig(teeth: u32, link_count: usize) -> RigGeom {
         let model = DerivedModel {
             pitch: 0.13,
@@ -1509,9 +1409,8 @@ mod tests {
         ));
     }
 
-    /// The live-tuning contract behind the sandbox's `;` `'` / `n` `m` knobs: a retune must move
-    /// exactly what the authored count owns and nothing else, and it must do it WITHOUT re-reading
-    /// the model (the measurements simply ride along).
+    /// Sandbox `;` `'` / `n` `m` retuning changes only what each count owns, preserving measurements
+    /// without rereading the model.
     #[test]
     fn rebuild_retunes_the_counts_and_carries_the_measurements() {
         let p = SuspensionParams::default();
@@ -1523,9 +1422,7 @@ mod tests {
         assert_eq!(same.hull_rest_y, base.hull_rest_y);
         assert_eq!(same.window, base.window);
 
-        // MORE LINKS: the loop lengthens, the slack verdict follows, and the hull geometry — the
-        // measured part — does not move at all. That asymmetry is the whole point: the link count
-        // is the belt, not the running gear.
+        // Link count owns belt length and slack, not measured hull geometry.
         let longer = base.rebuild(base.teeth, base.link_count + 3, &p);
         assert_eq!(longer.model.pitch, base.model.pitch);
         assert_eq!(longer.rest.get(Side::Right), base.rest.get(Side::Right));
@@ -1535,8 +1432,7 @@ mod tests {
         assert_eq!(longer.window.n_droop, base.window.n_droop);
         assert!(longer.window.slack_rest > base.window.slack_rest);
 
-        // MORE TEETH: the sprocket pitch circle grows, so the wrap grows, so the window itself
-        // shifts — the tooth count is running gear, and it moves everything downstream of it.
+        // Tooth count owns sprocket geometry, hence wrap length and the feasible window.
         let toothier = base.rebuild(base.teeth + 6, base.link_count, &p);
         assert!(toothier.rest.get(Side::Right)[0].1 > base.rest.get(Side::Right)[0].1);
         assert!(
@@ -1548,11 +1444,8 @@ mod tests {
         assert!(toothier.window.slack_rest < base.window.slack_rest);
     }
 
-    /// The wrap DEMAND list: one entry per circle the belt bends around, in route order, each
-    /// carrying the joint angle that circle costs. The supply side is the AUTHORED
-    /// `track.link_angle.inward`; this is the half a synthetic rig can pin, and
-    /// [`the_authored_hinge_clears_every_wrap_the_running_gear_demands`] is where the two meet on
-    /// the real model.
+    /// Synthetic demand coverage and radius/angle relations; shipped authored supply meets demand
+    /// in [`the_authored_hinge_clears_every_wrap_the_running_gear_demands`].
     #[test]
     fn wrap_demands_cover_every_circle_and_the_tightest_one_wins() {
         let rig = synthetic_rig(20, 97);
@@ -1569,8 +1462,7 @@ mod tests {
         let per_tooth = std::f32::consts::TAU / rig.teeth as f32;
         assert!((demands[0].joint_angle - per_tooth).abs() < 1e-5);
 
-        // The tightest wrap is the smallest circle. This is the relation the clearance test exists
-        // to protect: shrink a wheel and the demand goes UP.
+        // Smaller circles demand tighter folds: shrinking a wheel must increase demand.
         let worst = rig.worst_wrap_demand(Side::Right);
         let smallest = demands
             .iter()
@@ -1664,11 +1556,9 @@ mod tests {
             .fold(f32::INFINITY, f32::min)
     }
 
-    /// The hull keeps every extreme vertex, so it encloses every input point: the hard-stop
-    /// collider is extruded from it, and a dropped vertex dents the backstop by that vertex's arc
-    /// sagitta. The fixture is a convex pentagon whose rightmost apex stands alone, its lower
-    /// neighbour just left of it — where an upper chain sharing the lower chain's buffer pops
-    /// the apex.
+    /// Dropping an extreme vertex dents the extruded hard stop by its arc sagitta. Fixture: convex
+    /// pentagon with a lone rightmost apex and lower neighbour just left; sharing the lower chain's
+    /// buffer lets the upper chain pop that apex.
     #[test]
     fn the_convex_hull_keeps_a_lone_extreme_apex() {
         let pts = vec![
@@ -1692,12 +1582,9 @@ mod tests {
         }
     }
 
-    /// The wrap must be CLOSED and CONVEX — the twin properties `Collider::convex_hull` relies on.
-    /// Convexity is checked as the turn direction at every vertex, NORMALISED by the edge lengths so
-    /// the threshold is an angle, not a raw cross product; the small negative tolerance is the
-    /// arc-tessellation seam noise (`build_route` renders each wrap arc as 10 chords, so two nearly
-    /// collinear segments can read a sub-degree right turn at a seam). CCW winding is confirmed by a
-    /// positive signed area.
+    /// The hard-stop collider requires a closed convex wrap. Normalising turns by edge lengths
+    /// makes tolerance angular; DERIVED: 10 chords per `build_route` arc can leave sub-degree right
+    /// turns at nearly collinear seams. Positive signed area verifies CCW winding.
     #[test]
     fn the_hard_stop_wrap_is_convex_and_closed() {
         let p = SuspensionParams::default();
@@ -1785,15 +1672,11 @@ mod tests {
         }
     }
 
-    /// The enclosure guarantee: nothing the suspension bottoms onto crosses the wrap. Every
-    /// compression INNER (wheel-rim) circle is inside-or-on the wrap to within the arc-chord
-    /// sagitta — `build_route` renders each wrap arc as 10 chords that cut inside the true
-    /// circle, so a smooth-circle sample bulges past the polyline by up to that sagitta on the
-    /// arcs it defines (largest at the wide-sweep end circles). The collider re-hulls these
-    /// same points, so its own boundary is convex regardless. (The stop deliberately lives on
-    /// the track's INNER surface — the full plate below it is the support penalty's dig-in
-    /// band, see [`RigGeom::hard_stop_polyline`] — so the PIN circles sit `pin_to_inner`
-    /// OUTSIDE the wrap by design and are not tested for enclosure.)
+    /// Bottoming must enclose every compressed inner (wheel-rim) circle within arc-chord sagitta.
+    /// DERIVED: `build_route` uses 10 chords per arc, cutting inside smooth circles most at wide-sweep
+    /// end arcs. The collider re-hulls these points, so its boundary is convex regardless.
+    /// Pin circles sit `pin_to_inner` outside by design; [`RigGeom::hard_stop_polyline`] owns why
+    /// only inner circles are enclosed and the full plate remains the penalty's dig-in band.
     #[test]
     fn the_hard_stop_wrap_encloses_every_compression_circle() {
         let p = SuspensionParams::default();
