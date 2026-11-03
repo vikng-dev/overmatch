@@ -19,6 +19,7 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | load-11 | P2 | `src/substances.rs::the_reference_cavity_strength_is_the_derived_value` | base-truths: Asset-specific gate | Corrected reference facts fail a constant expected value despite unchanged cavity-law arithmetic. | Derive expectations from loaded facts or use controlled inline fixture facts. | ratchet |
 | load-12 | P2 | `src/substances.rs::every_shipped_row_holds_its_kinds_invariants` | base-truths: Asset-specific gate | A valid `Hard(Effective(0))` row fails a strict-positive assertion although admission explicitly permits zero. | Assert the admitted nonnegative domain or change the generic law and admission contract together. | ratchet |
 | load-13 | P2 | `tools/src/buildings.rs::most_cuts_follow_joints_and_some_crack_through_bricks` | base-truths: Asset-specific gate | Valid `crack_chance: 0` data fails mandatory cracks; other valid constructions can fail the required majority of joint cuts. | Test stochastic behavior with inline fixtures and condition shipped assertions on authored construction. | ratchet |
+| load-24 | P3 | `src/settings/ui.rs::tests::the_selection_skips_disabled_rows` | testing: Coupled assertion | A permitted `defaults.vsync: Off` taste change fails the ON premise before testing selection, though row skipping is unchanged. | Set the disabled-cap fixture to explicit `VsyncMode::On` rather than pinning the authored default. | ratchet |
 
 ## net
 

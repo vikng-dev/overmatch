@@ -38,9 +38,8 @@ use super::{
 };
 use crate::ui_font::{MODAL_BG, TEXT, TEXT_DIM, UiFonts};
 
-/// Whether the page is on screen this frame. Written by whichever pause surface the composition root
-/// mounts ([`declare_from_overlay_menu`] on the net client, [`declare_from_pause_state`] in SP), read
-/// by everything else here. One bool is the entire coupling between the two entry paths.
+/// Sole coupling to pause surfaces: [`declare_from_overlay_menu`] or [`declare_from_pause_state`]
+/// writes visibility; the rest of the page reads it.
 #[derive(Resource, Default, PartialEq)]
 pub(super) struct SettingsPageVisible(bool);
 
@@ -71,7 +70,6 @@ impl Tab {
         }
     }
 
-    /// This tab's rows in on-screen order: [`Row::ORDER`] filtered by [`Row::tab`].
     fn rows(self) -> impl Iterator<Item = Row> {
         Row::ORDER.into_iter().filter(move |row| row.tab() == self)
     }
@@ -81,13 +79,11 @@ impl Tab {
 const TAB_STRIP_HINT: &str = "Left and right switch tabs. VIDEO holds display and graphics; \
      GAMEPLAY holds the pen cam, the kill cam and the debug panel.";
 
-/// Settings rows, ordered within tabs by [`Row::ORDER`]. To extend: add a variant to ORDER and
-/// arms to tab/label/hint/value/step; scalars also need kind and both slider-fraction mappings.
-/// The card lays out from ORDER; Settings accepts new fields without migration.
+/// [`Row::ORDER`] drives tab layout. Add rows there and to tab/label/hint/value/step; scalars also
+/// need kind and both slider mappings. Settings accepts new fields without migration.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 enum Row {
-    /// LOW to ULTRA: writes every row directly below it at once, and reads CUSTOM whenever their
-    /// values match no tier — see `settings::preset`. Heads VIDEO, its rows beneath it.
+    /// Heads VIDEO and drives the rows directly below; `settings::preset` owns tiers and CUSTOM.
     Preset,
     RenderScale,
     /// The LOD screen-space error budget, in pixels. Beside render scale because they are the two
@@ -114,8 +110,7 @@ enum Row {
     Bloom,
     /// Capability-gated: only the rungs the surface's probe reported are offered ([`PresentCaps`]).
     VSync,
-    /// The one row that can be DISABLED: it renders greyed and is skipped by every input path
-    /// unless vsync is OFF (see [`Row::enabled`]).
+    /// Only conditional row; [`Row::enabled`] owns the gate.
     FrameCap,
     UiScale,
     DebugPanel,
@@ -182,7 +177,7 @@ impl Row {
         }
     }
 
-    /// The row's name. ASCII only — it reaches `Text`.
+    /// ASCII only: reaches `Text`.
     const fn label(self) -> &'static str {
         match self {
             Row::Preset => "PRESET",
@@ -246,7 +241,7 @@ impl Row {
                  OFF disables them entirely, and may be removed later."
             }
             // Shadow bias is in texels: a wider envelope detaches shadows unless resolution rises.
-            // MEASURED: see `ShadowDistance`'s detachment table.
+            // DERIVED: see `ShadowDistance`'s detachment table.
             Row::ShadowResolution => {
                 "How crisp shadows are, and how tightly distant ones stay attached. \
                  Higher costs more memory."
@@ -303,8 +298,7 @@ impl Row {
         }
     }
 
-    /// How wide the row's value well is, in logical px. Wider for the display row alone: its values
-    /// are display NAMES, and every other stepper's are two to six characters.
+    /// Logical px; variable display names need a wider well than fixed setting labels.
     fn value_well_px(self) -> f32 {
         match (self, self.kind()) {
             (Row::Display, _) => page_look().display_value_well_px.0,
@@ -360,9 +354,8 @@ impl Row {
         }
     }
 
-    /// Step by delta, saturating: holding right must stop, not wrap from the highest setting to
-    /// Off. Walk within caps/display-ladder offers; Metal skips FAST and two displays exclude a
-    /// third display.
+    /// Saturate within offered caps/display rungs: holding right must not wrap from highest to Off.
+    /// Metal skips FAST; two attached displays exclude a third.
     fn step(self, settings: &mut Settings, delta: i32, caps: PresentCaps, ladder: &DisplayLadder) {
         match self {
             Row::Preset => Preset::step(settings, delta),
@@ -426,8 +419,7 @@ impl Row {
         }
     }
 
-    /// Where this row's slider handle sits, `0.0..=1.0` — `None` for the steppers. Kept beside
-    /// [`Row::set_from_fraction`] so the two directions of the mapping cannot drift.
+    /// `0.0..=1.0`, or `None` for steppers; beside [`Row::set_from_fraction`] to keep inverses together.
     fn slider_fraction(self, settings: &Settings) -> Option<f32> {
         match self {
             Row::RenderScale => Some(ladder_fraction(
@@ -441,8 +433,7 @@ impl Row {
         }
     }
 
-    /// Set a slider row from a drag position. Snaps to the row's own ladder stops — every value a
-    /// drag can produce is a value the keyboard could also have reached.
+    /// Snap drags to the row's ladder: mouse and keyboard must reach the same values.
     fn set_from_fraction(self, settings: &mut Settings, fraction: f32) {
         match self {
             Row::RenderScale => {
@@ -471,7 +462,7 @@ fn step_in<T: Copy + PartialEq>(order: &[T], current: T, delta: i32) -> T {
     order[next]
 }
 
-/// Where `current` sits in a discrete ladder, as a `0.0..=1.0` slider position.
+/// Discrete ladder position, `0.0..=1.0`.
 fn ladder_fraction<T: Copy + PartialEq>(order: &[T], current: T) -> f32 {
     let index = order
         .iter()
@@ -480,8 +471,7 @@ fn ladder_fraction<T: Copy + PartialEq>(order: &[T], current: T) -> f32 {
     index as f32 / (order.len().saturating_sub(1)).max(1) as f32
 }
 
-/// The ladder entry a slider position lands on — the inverse of [`ladder_fraction`], rounded to the
-/// nearest stop.
+/// Inverse of [`ladder_fraction`], rounded to the nearest stop.
 fn ladder_at_fraction<T: Copy>(order: &[T], fraction: f32) -> T {
     let last = order.len() - 1;
     let index = (fraction.clamp(0.0, 1.0) * last as f32).round() as usize;
@@ -515,7 +505,6 @@ impl Default for Page {
 }
 
 impl Page {
-    /// The selected row, or `None` while the tab strip is selected.
     fn row(self) -> Option<Row> {
         match self.line {
             Line::Tabs => None,
@@ -552,21 +541,19 @@ impl Page {
         }
     }
 
-    /// Point the selection at a specific row — what a mouse hover does. A row of another tab is
-    /// hidden and cannot be hovered; refusing it here keeps the invariant independent of that.
+    /// Refuse other tabs independently of picking's hidden-row exclusion.
     fn select(&mut self, row: Row) {
         if row.tab() == self.tab {
             self.line = Line::Row(row);
         }
     }
 
-    /// Switch tabs by `delta` places, saturating at both ends like every row, with the strip
-    /// selected — what `Left`/`Right` do on the strip.
+    /// Saturate tab movement and select the strip (Left/Right there).
     fn switch(&mut self, delta: i32) {
         self.open(step_in(&Tab::ORDER, self.tab, delta));
     }
 
-    /// Open `tab` with the strip selected — what a click on a tab's name does.
+    /// A tab-name click selects the strip.
     fn open(&mut self, tab: Tab) {
         self.tab = tab;
         self.line = Line::Tabs;
@@ -612,13 +599,11 @@ struct RowLabelText(Row);
 #[derive(Component)]
 struct RowValueText(Row);
 
-/// The row's whole clickable line — carries the [`Row`] and is what hover-selection hit-tests
-/// against.
+/// Whole-row hover-selection target.
 #[derive(Component)]
 struct RowLine(Row);
 
-/// One of a stepper row's `<` / `>` glyphs: a visible, hover-highlighted, clickable affordance.
-/// `delta` is what a click applies (`-1` left, `+1` right).
+/// Visible stepper affordance; clicks apply `delta` (`-1` left, `+1` right).
 #[derive(Component, Clone, Copy)]
 struct ArrowGlyph {
     row: Row,
@@ -630,11 +615,11 @@ struct ArrowGlyph {
 #[derive(Component)]
 struct SliderTrack(Row);
 
-/// The filled portion of a slider's bar — its width IS the value.
+/// Width encodes the slider value.
 #[derive(Component)]
 struct SliderFill(Row);
 
-/// The footer hint line — the text itself, which [`refresh_page`] rewrites as the selection moves.
+/// Selection hint, rewritten by [`refresh_page`].
 #[derive(Component)]
 struct HintText;
 
@@ -770,11 +755,9 @@ impl ActiveDrag {
     }
 }
 
-/// Shared page plugin; `settings::plugin` must also mount exactly one entry declarer. Making
-/// entry its parameter prevents a mounted page that never becomes visible.
+/// Shared page plugin; `settings::plugin` requires exactly one entry declarer.
 pub(super) fn plugin(app: &mut App) {
-    // The display row's offered rungs. Mounted here rather than beside the other settings plugins
-    // because this page is the only thing that reads them.
+    // Mount display rungs here with their sole consumer.
     app.add_plugins(super::displays::plugin)
         .init_resource::<SettingsPageVisible>()
         .init_resource::<Page>()
@@ -788,11 +771,9 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                // Input first, then the refresh reads the same frame's result — so a keypress
-                // repaints immediately instead of one frame late.
+                // Refresh after input so keypresses repaint this frame.
                 (keyboard_input, mouse_input),
-                // After the input, so the selection this follows is the one the arrow key just
-                // moved rather than last frame's.
+                // Follow this frame's selection.
                 scroll_rows,
                 (refresh_page, refresh_tabs),
             )
@@ -803,14 +784,9 @@ pub(super) fn plugin(app: &mut App) {
         );
 }
 
-/// Net client: the page is visible exactly when the Esc menu owns the scrim. Reading `draws_scrim`
-/// (not "is Menu latched") is what keeps the page from showing THROUGH a death or connect screen
-/// that outranks the menu — the one-scrim rule, applied to the menu's content as well as its
-/// backdrop. Runs after `OverlaySet::Toggle`, like every other consumer of the reconciled set.
-///
-/// `set_if_neq`, like every other per-frame resource write in this tree: a menu that has been open
-/// for a second is not a change, and marking the resource dirty every frame would defeat any future
-/// `resource_changed` reader of it.
+/// Net page follows `draws_scrim`, not the Menu latch: higher-priority death/connect screens must
+/// hide content as well as backdrop. Runs after `OverlaySet::Toggle`. Guard writes so a standing
+/// menu does not defeat `resource_changed` readers.
 pub(super) fn declare_from_overlay_menu(
     overlays: Res<crate::overlay::Overlays>,
     mut visible: ResMut<SettingsPageVisible>,
@@ -821,8 +797,7 @@ pub(super) fn declare_from_overlay_menu(
     )));
 }
 
-/// Single-player: the page is visible while paused. SP has no overlay authority — `state` owns the
-/// Esc toggle, the cursor release and the physics freeze — so the predicate is simply the state.
+/// SP follows pause state, whose owner already handles Esc, cursor release and physics freeze.
 pub(super) fn declare_from_pause_state(
     state: Res<State<crate::state::AppState>>,
     mut visible: ResMut<SettingsPageVisible>,
@@ -839,15 +814,12 @@ fn spawn_page(
     ladder: Res<DisplayLadder>,
     page: Res<Page>,
 ) {
-    // A full-screen, centring wrapper holding the card — the same shape `ui_font::spawn_overlay`
-    // uses, so the page centres itself without depending on a parent container that neither pause
-    // surface provides. The wrapper draws nothing (no `BackgroundColor`): the menu's scrim is the
-    // backdrop on the net client, and SP deliberately has none.
+    // Neither pause surface supplies a centring parent; use `ui_font::spawn_overlay`'s shape.
+    // No BackgroundColor: net uses the menu scrim, SP deliberately has no backdrop.
     commands
         .spawn((
             SettingsCard,
-            // The page's z comes from `overlay`'s ladder, not from a literal here: it is the menu's
-            // CONTENT rung, and `overlay` is this project's z authority (see `Overlay::zindex`).
+            // `Overlay::zindex` owns z ordering; this is the menu CONTENT rung.
             GlobalZIndex(crate::overlay::Overlay::MENU_CONTENT_Z),
             Node {
                 position_type: PositionType::Absolute,
@@ -894,8 +866,7 @@ fn spawn_page(
 
                     spawn_tab_strip(card, &fonts, page.tab);
 
-                    // The scrolling viewport. Every row lives inside it, in its tab's panel;
-                    // nothing else does.
+                    // Only rows scroll; fixed furniture stays outside.
                     card.spawn((
                         RowViewport,
                         ScrollPosition::default(),
@@ -903,9 +874,8 @@ fn spawn_page(
                             width: Val::Percent(100.0),
                             flex_direction: FlexDirection::Column,
                             overflow: Overflow::scroll_y(),
-                            // Load-bearing: a flex item's default `min_height: auto` is its CONTENT
-                            // height, so without this the viewport refuses to shrink, the card
-                            // grows past its `max_height` anyway, and nothing ever scrolls.
+                            // Auto minimum is content height: without zero the viewport cannot
+                            // shrink or scroll, and the card exceeds max_height.
                             min_height: Val::Px(0.0),
                             ..default()
                         },
@@ -921,8 +891,7 @@ fn spawn_page(
                                         flex_direction: FlexDirection::Column,
                                         // Match the card gap to avoid a seam; see `super::look::PageLook::card_row_gap_px`.
                                         row_gap: Val::Px(page_look().card_row_gap_px.0),
-                                        // The panel is the content the viewport scrolls, so it
-                                        // must keep its full height rather than shrink into it.
+                                        // Keep content full-height so it overflows the viewport.
                                         flex_shrink: 0.0,
                                         display: panel_display(open),
                                         ..default()
@@ -984,9 +953,7 @@ fn spawn_page(
         });
 }
 
-/// The tab strip: every tab's name in one line, the open one lit and underlined. The strip is a
-/// selectable line of its own ([`Line::Tabs`]), padded and highlighted like a row, so it reads as
-/// one more stop on the arrow-key walk.
+/// Pad/highlight [`Line::Tabs`] like a row so it reads as another arrow-key stop.
 fn spawn_tab_strip(card: &mut ChildSpawnerCommands, fonts: &UiFonts, open: Tab) {
     card.spawn((
         TabStrip,
@@ -1046,13 +1013,11 @@ fn spawn_tab_strip(card: &mut ChildSpawnerCommands, fonts: &UiFonts, open: Tab) 
     });
 }
 
-/// A tab panel's layout: in the flow while open, out of it while closed.
 const fn panel_display(open: bool) -> Display {
     if open { Display::Flex } else { Display::None }
 }
 
-/// A tab panel's visibility — see [`TabPanel`] for why a closed panel is hidden as well as
-/// removed from layout.
+/// [`TabPanel`] owns why layout removal also needs hidden visibility.
 const fn panel_visibility(open: bool) -> Visibility {
     if open {
         Visibility::Inherited
@@ -1061,8 +1026,6 @@ const fn panel_visibility(open: bool) -> Visibility {
     }
 }
 
-/// The bar under a tab's name: the slider fill's colour under the open tab, nothing under the
-/// others.
 fn marker_color(open: bool) -> Color {
     if open {
         page_look().slider_fill_color()
@@ -1071,9 +1034,7 @@ fn marker_color(open: bool) -> Color {
     }
 }
 
-/// One row: `LABEL` on the left; on the right either `< VALUE >` (stepper) or `[track] VALUE`
-/// (slider). The value sits in a fixed-width well so the arrows and track do not shuffle as the
-/// value text's width changes.
+/// Label left, control right; [`spawn_value_well`] keeps arrows/tracks fixed as value text changes.
 fn spawn_row(
     card: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
@@ -1184,10 +1145,9 @@ fn spawn_row(
     });
 }
 
-/// A `<` / `>` affordance: dim at rest, bright on hover ([`refresh_page`] paints it from the glyph's
-/// own [`Hovered`]), padded so its clickable rect is meaningfully larger than the glyph. Picking
-/// honours that padding — the UI backend hit-tests the whole node rect and only narrows to a text
-/// SECTION when the point is inside a shaped run, so a click in the pad still resolves here.
+/// Pad `<`/`>` hit areas beyond the glyph; [`refresh_page`] uses their own [`Hovered`] to brighten
+/// them. Picking tests the whole node rect and narrows to a text SECTION only inside shaped runs,
+/// so clicks in the padding still resolve here.
 fn spawn_arrow(
     controls: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
@@ -1216,9 +1176,8 @@ fn spawn_arrow(
     ));
 }
 
-/// The row's value, in a fixed-width well ([`Row::value_well_px`]) so the control beside it does not
-/// shuffle as the value text's width changes. `justify` is the only other thing the two row kinds
-/// disagree about.
+/// Fixed [`Row::value_well_px`] prevents control shuffle as text width changes. Row kinds differ
+/// otherwise only in `justify`.
 fn spawn_value_well(
     controls: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
@@ -1259,8 +1218,7 @@ fn keyboard_input(
     if !visible.0 {
         return;
     }
-    // Guarded rather than stepped by zero every frame: `Page` is a `ResMut`, and a write is a
-    // change-tick bump even when the value lands where it already was.
+    // Avoid zero steps: even an equal ResMut write bumps the change tick.
     let move_by = i32::from(keys.just_pressed(KeyCode::ArrowDown))
         - i32::from(keys.just_pressed(KeyCode::ArrowUp));
     if move_by != 0 {
@@ -1285,9 +1243,8 @@ fn keyboard_input(
     }
 }
 
-/// One Press observer handles arrows, slider grabs and tab clicks. Deepest-first bubbling
-/// lets arrows or tracks stop propagation before their enclosing row; fills bubble to tracks.
-/// Picking excludes the hidden card via InheritedVisibility.
+/// Fills bubble to tracks; arrows/tracks stop before enclosing rows. The module doc owns
+/// picking's hidden-card exclusion.
 ///
 /// Read the live track rect only on grab; [`ActiveDrag`] freezes it and [`track_fraction`]
 /// requires the matching physical cursor.
@@ -1383,7 +1340,7 @@ fn mouse_input(
     mut save: MessageWriter<SaveSettings>,
 ) {
     let window = crate::state::primary_window(window.single());
-    // A drag owns selection until release/page close, saves once, and keeps its frozen rect.
+    // [`SliderDrag`] owns selection until release/page close.
     if let Some(active) = drag.0 {
         if !visible.0 || !buttons.pressed(MouseButton::Left) {
             drag.0 = None;
@@ -1418,8 +1375,7 @@ fn track_fraction(cursor_x: f32, track_center_x: f32, track_width: f32) -> f32 {
     ((cursor_x - (track_center_x - track_width / 2.0)) / track_width).clamp(0.0, 1.0)
 }
 
-/// Apply one step and — only if the value actually moved — request a save. The guard is what keeps a
-/// player leaning on the right arrow at the top of a ladder from rewriting the file every frame.
+/// Save only changes: holding right at the ladder top must not rewrite the file every frame.
 fn change_row(
     row: Row,
     delta: i32,
@@ -1488,7 +1444,6 @@ fn scroll_rows(
         wheel.clear();
         return;
     }
-    // Physical -> CSS px, the space `ScrollPosition` is in. See the doc above.
     let to_css = node.inverse_scale_factor();
     let mut wanted = scroll.0.y;
 
@@ -1504,7 +1459,7 @@ fn scroll_rows(
     {
         let view_half = node.size().y / 2.0;
         let row_half = row_node.size().y / 2.0;
-        // Both rects are physical and share an origin, so their difference is a physical distance.
+        // Both rects share a physical origin.
         let above =
             (transform.translation.y - view_half) - (row_transform.translation.y - row_half);
         let below =
@@ -1519,16 +1474,14 @@ fn scroll_rows(
     // Include scrollbar_size to match Bevy's max_possible_offset and keep the last row reachable.
     let overflow = (node.content_size().y - node.size().y + node.scrollbar_size.y).max(0.0);
     let wanted = wanted.clamp(0.0, overflow * to_css);
-    // Guarded: `ScrollPosition` is a `Mut`, and a write is a change-tick bump even when the value
-    // lands where it already was — which is every frame the page is merely open.
+    // Equal Mut writes still bump change ticks; avoid them while the page is merely open.
     if scroll.0.y != wanted {
         scroll.0.y = wanted;
     }
 }
 
-/// Rebuild every value, the selection highlight, the slider fills, the enabled/disabled colours and
-/// the footer hint. Runs only while the page is up; the visibility write itself is `set_if_neq`, so
-/// a closed page costs one comparison per frame.
+/// Refresh values, highlights, fills, enabled colours and hint only while visible; guarded
+/// visibility costs one comparison per closed frame.
 #[expect(
     clippy::too_many_arguments,
     reason = "one query per disjoint page element plus the settings model, kept disjoint by their `Without` filters"
@@ -1639,9 +1592,7 @@ fn refresh_page(
     }
 }
 
-/// The tab strip's half of [`refresh_page`]: the open tab's panel in the layout and every other one
-/// out of it, the names lit while open or hovered, the bar under the open tab, and the strip's own
-/// selection highlight. Runs only while the page is up, like that system.
+/// Visible-page tab refresh: panel layout, open/hovered names, open marker and strip selection.
 fn refresh_tabs(
     visible: Res<SettingsPageVisible>,
     page: Res<Page>,
@@ -1732,8 +1683,7 @@ mod tests {
     /// The unprobed capability state every pure test steps under: all rungs offered.
     const ALL_RUNGS: PresentCaps = PresentCaps::Unprobed;
 
-    /// The display ladder of a world whose monitors have not been synchronised — every variant a
-    /// file can hold, which is what the rows that are not the display row want to step under.
+    /// Unsynchronised monitors offer every persisted variant for pure row tests.
     fn unlearned() -> DisplayLadder {
         DisplayLadder::default()
     }
@@ -1757,8 +1707,7 @@ mod tests {
                 "{budget:?}: settings must equal themselves, or every no-op guard on this page \
                  fails open and the file is written every frame",
             );
-            // Walk every row to BOTH ends and then step past them: the last step of each walk must
-            // land on a value that compares equal, which is what `change_row` returns early on.
+            // Past either end must compare equal, triggering `change_row`'s no-op guard.
             for row in Row::ORDER {
                 for direction in [-1, 1] {
                     let mut walked = settings;
@@ -1798,10 +1747,8 @@ mod tests {
         }
     }
 
-    /// The vsync row walks only the rungs the probe offered: on a Metal-shaped surface (no
-    /// Mailbox) the walk goes ON <-> OFF and FAST is never visited; unprobed walks all three; a
-    /// current value the caps no longer offer (a config from another machine) still steps out into
-    /// the offered set instead of panicking.
+    /// Metal walks ON/OFF without FAST; unprobed walks all three. Unsupported imported choices
+    /// must step into the offered set without panicking.
     #[test]
     fn the_vsync_row_walks_only_the_offered_rungs() {
         let metal = PresentCaps::Reported {
@@ -1876,8 +1823,7 @@ mod tests {
         assert!(Row::FrameCap.enabled(&settings, metal));
         assert!(settings.frame_limit_period(metal).is_some());
 
-        // And a probe that could not ASK is not a surface that said no: the row stays lit on the
-        // player's own rung, matching the limiter (see `Row::enabled`'s doc for the choice).
+        // Unknown caps keep the row lit, matching the limiter; [`Row::enabled`] owns why.
         for unknown in [PresentCaps::Unprobed, PresentCaps::Unavailable] {
             assert!(
                 Row::FrameCap.enabled(&settings, unknown),
@@ -1941,8 +1887,7 @@ mod tests {
         page.step(1, |row| row.enabled(&armed, ALL_RUNGS));
         assert_eq!(page.row(), Some(Row::FrameCap));
 
-        // Holding down stops at the open tab's last row, never wrapping and never crossing into
-        // the next tab's rows.
+        // Holding down must stay on this tab's last row.
         for tab in Tab::ORDER {
             let last = tab.rows().last().expect("every tab has rows");
             let mut page = Page {
@@ -1986,10 +1931,8 @@ mod tests {
         assert_eq!(Page::default().row(), Some(Row::ORDER[0]));
     }
 
-    /// **The tab strip is walked with the arrows, like a row.** `Up` from a tab's first row selects
-    /// the strip, `Left`/`Right` there switch tabs (saturating, like every row), and `Down` enters
-    /// the open tab's first row. A row of a closed tab can never be selected, by the walk or by
-    /// [`Page::select`] — the hint would describe a row the player cannot see.
+    /// Up reaches the strip, Left/Right saturate across tabs, Down enters the open tab. Walking or
+    /// [`Page::select`] must refuse closed tabs or the hint describes an invisible row.
     #[test]
     fn the_tab_strip_is_the_line_above_every_tab() {
         let all = |_: Row| true;
@@ -2089,10 +2032,9 @@ mod tests {
         assert_eq!(Look::of(&settings), Preset::ORDER[1].look());
     }
 
-    /// **Nothing hidden: every value a preset drives has its own row, and those rows sit directly
-    /// below PRESET** — which is what its hint promises. A row is found to be driven by stepping it
-    /// and watching [`Look::ranks`] move, so the test names no row: each driven row moves exactly
-    /// one of the driven values, and together they move all of them.
+    /// Every driven value needs its own row directly below PRESET, as the hint promises. Detect
+    /// membership through [`Look::ranks`] changes, never row names: each row moves one value, and
+    /// together they cover all driven values.
     #[test]
     fn the_rows_a_preset_drives_sit_directly_below_it() {
         use super::super::preset::{DRIVEN_ROWS, Look};
@@ -2230,32 +2172,25 @@ mod tests {
 
     // --- The real page -------------------------------------------------------------------------
     //
-    // Measured on the REAL page, headless. `DefaultPlugins` with the GPU backends and winit off (the
-    // `headless_test` recipe) still runs the whole UI stack — taffy layout and parley text shaping
-    // against the SHIPPED Barlow Condensed — so what these tests read out of `ComputedNode` is
-    // bevy's own answer about the card, not an arithmetic re-derivation of it.
+    // MEASURED headlessly on the real UI: `DefaultPlugins` without GPU/winit (`headless_test`) runs
+    // taffy and parley with shipped Barlow Condensed. `ComputedNode` supplies Bevy's layout, not a
+    // re-derived approximation.
 
-    /// How long to wait for the font asset (real, async, wall-clock file IO) before calling it a
-    /// failure. Generous: the loop exits the moment the card has laid out.
+    /// Generous async font-IO deadline; the loop exits as soon as layout settles.
     const LAYOUT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
-    /// A headless app running the REAL page — [`plugin`], not just [`spawn_page`] — with `UiScale`
-    /// set to `ui_scale`. The whole plugin, so the mouse test below exercises the wiring the game
-    /// ships (observer included) rather than a hand-assembled lookalike.
+    /// Run [`plugin`], including the shipped mouse observer, at `ui_scale`; spawning alone would
+    /// not test that wiring.
     ///
-    /// The window and camera are load-bearing rather than ceremony: the UI's scale factor and
-    /// viewport come from the camera's target (`propagate_ui_target_cameras`), and with no target at
-    /// all the root node is zero-sized, the fixed-width card flex-shrinks into it, and every hint
-    /// wraps into nonsense. No winit and no GPU are needed for that — a `Window` COMPONENT carries
-    /// its own resolution, which is all `Camera::physical_viewport_size` reads.
+    /// Camera target supplies UI scale/viewport (`propagate_ui_target_cameras`); without one the
+    /// zero-sized root flex-shrinks the card and miswraps hints. `Window` carries all resolution
+    /// `Camera::physical_viewport_size` needs; neither winit nor a GPU is required.
     fn headless_card_app(ui_scale: f32) -> App {
         headless_card_app_in(ui_scale, 1080)
     }
 
-    /// [`headless_card_app`] in a window of a chosen HEIGHT — the knob the scroll tests need, since
-    /// whether the row list overflows is a fact about the window, not about the card. The width
-    /// stays 1920 for every caller: it only has to be wide enough that the card never flex-shrinks
-    /// at any rung of the ladder (the top rung asks for `page_look().card_width_px.0 * 1.5` = 840 physical px).
+    /// Choose window height to control scroll overflow. Fixture width 1920 prevents flex-shrink
+    /// at every UI rung: the top needs `page_look().card_width_px.0 * 1.5` = 840 physical px.
     fn headless_card_app_in(ui_scale: f32, window_height: u32) -> App {
         let mut app = App::new();
         app.add_plugins(crate::gpu_less_default_plugins(Some(Window {
@@ -2315,8 +2250,7 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        // The card's height, the viewport's rect and its content: the three numbers every
-        // measurement below is taken from, so a frame that repeats all three is a settled layout.
+        // All measured geometry must repeat before layout is settled.
         let mut last = None;
         for _ in 0..32 {
             app.update();
@@ -2487,10 +2421,9 @@ mod tests {
         assert_eq!(notice(&mut app), SAVE_LEGEND);
     }
 
-    /// A synthetic pointer on a laid-out arrow must step its setting through the shipped page
-    /// plugin: backend UiStack hit test, arrow priority (including padding), observer and change_row.
-    /// A lost observer/backend/visibility path otherwise fails silently, as dead Retina mouse
-    /// support did. PointerInput is the mouse plugin's own input; no winit or real cursor.
+    /// Synthetic PointerInput must step a laid-out arrow through the shipped UiStack/padding/
+    /// priority/observer/change_row path: lost wiring silently disables mouse support. No winit
+    /// or real cursor.
     #[test]
     fn a_picked_press_on_an_arrow_steps_its_row() {
         let mut app = headless_card_app(1.0);
@@ -2560,12 +2493,8 @@ mod tests {
         app.update();
     }
 
-    /// **A click on a tab's name opens it, and only the open tab's rows can be seen or picked.**
-    ///
-    /// Through the real picking chain, like the arrow test above, because a dead tab strip fails
-    /// the same silent way a dead arrow does. The closed tab's rows must be out of picking too
-    /// (`InheritedVisibility` false), or a click on empty space could step a row the player cannot
-    /// see.
+    /// Real picking must open clicked tabs and exclude closed rows (`InheritedVisibility` false).
+    /// Otherwise tab clicks silently fail or empty-space clicks step invisible rows.
     #[test]
     fn a_picked_press_on_a_tab_opens_it_and_hides_the_others() {
         let mut app = headless_card_app(1.0);
@@ -2745,9 +2674,7 @@ mod tests {
             "one wheel notch must move the list, got {scrolled} px",
         );
 
-        // Far past the end: the clamp is the content overflow, not infinity. The overflow is read
-        // in the SAME breath as the offset it bounds, because that is what the clamp is a statement
-        // about — the card the player is looking at now, not the one measured twenty frames ago.
+        // Clamp against current overflow: read it with the offset, not from an earlier layout.
         app.world_mut().resource_mut::<Page>().line =
             Line::Row(Tab::Video.rows().last().expect("VIDEO has rows"));
         spin(&mut app, -1.0, 50);
@@ -2799,8 +2726,7 @@ mod tests {
             let combined = ui_scale * target_scale;
             let to_css = 1.0 / combined;
             let css = wheel_delta_css(MouseScrollUnit::Pixel, FLICK_PHYSICAL_PX, to_css);
-            // What the layout will actually move: the CSS delta re-multiplied by the very factor
-            // `bevy_ui` applies to `ScrollPosition`.
+            // Reapply Bevy's ScrollPosition scale to obtain physical travel.
             let physical_travel = css * combined;
             assert!(
                 (physical_travel - FLICK_PHYSICAL_PX).abs() <= 1e-3,
@@ -2809,8 +2735,7 @@ mod tests {
                  pixels, so it must be converted to CSS before it reaches ScrollPosition — \
                  otherwise the UI scale is applied to it twice.",
             );
-            // CONTROL: the stored CSS value therefore has to DIFFER by rung. If it did not, nothing
-            // would be being converted and the assertion above would pass on a coincidence.
+            // CSS must differ by rung; otherwise the physical-travel assertion could pass by coincidence.
             assert!(
                 (css - FLICK_PHYSICAL_PX * to_css).abs() <= 1e-3,
                 "ui {ui_scale}x on a {target_scale}x target: stored {css} css px",
