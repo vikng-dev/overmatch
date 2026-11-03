@@ -25,8 +25,7 @@ mod report;
 use report::sorted;
 pub use report::{Check, Finding, Severity, Stage, Subject, has_error, render};
 
-/// The L2 consumer contract, one static row per law. Severity is compiled in beside the id: every
-/// row is an error, because every row is a refusal to build the sim from this asset.
+/// L2 consumer laws refuse sim construction; each row therefore has Error severity.
 static L2_SPEC: Check = Check {
     id: "L2.SPEC",
     stage: Stage::Consumer,
@@ -95,11 +94,8 @@ static L2_POSITIVE_SHELL_VOLUME: Check = Check {
     severity: Severity::Error,
     law: "every edge-connected shell has finite, strictly positive signed volume",
 };
-/// The door's own row, not a law of the asset: the substance registry is DATA, and a lane
-/// verifying a REVISION must evaluate that revision's registry rather than whatever the running
-/// binary was compiled against. The door hands the file over; a file it cannot hand over is the
-/// door failing to feed the contract, which is a mechanical refusal of the same kind as an
-/// unpinned exporter — never a finding about the model.
+/// Door refusal, not an asset law: verification needs the revision's registry, not the binary's.
+/// An unreadable registry is a mechanical failure to supply the contract, like an unpinned exporter.
 static DOOR_REGISTRY: Check = Check {
     id: "door.registry",
     stage: Stage::Door,
@@ -132,13 +128,10 @@ pub(crate) struct NodeGeometry {
     /// node holding a substance primitive it must be bit-exactly `1`; [`manifold_gate`] refuses
     /// anything else.
     pub root_scale: Vec3,
-    /// Raw mesh buffers, captured only where the sim consumes them ([`classify`]): collision
-    /// proxies (convex hull source) and ballistic volumes, the road wheels included (trimesh source).
-    /// Vertices are **node-local** — exactly the bytes the glb holds, which is what the shadow
-    /// compare needs to diff against the loaded `Mesh` assets. Consumers that build colliders hang
-    /// them under the node entity and let avian compose [`transform`](Self::transform)'s scale down
-    /// the hierarchy (`ColliderTransform`), so a collision proxy may be authored at any scale; a
-    /// ballistic node may not.
+    /// Node-local GLB buffers for collision proxies (convex hulls) and ballistic volumes, including
+    /// road wheels (trimeshes); see [`classify`]. Exact bytes let the shadow compare loaded `Mesh`
+    /// assets. Colliders attach under the node; avian's `ColliderTransform` composes
+    /// [`transform`](Self::transform)'s scale, so proxies permit any scale; ballistic nodes do not.
     pub primitives: Vec<MeshGeometry>,
 }
 
@@ -158,8 +151,7 @@ pub(crate) struct MeshGeometry {
     /// What [`manifold_gate`] proved about this primitive, and the identities it proved it with.
     /// `None` for a non-substance primitive, which is not armour and is never walked.
     pub certificate: Option<ShellCertificate>,
-    /// The colliders built from these buffers, each on first use: every later spawn clones them,
-    /// and a [`Collider`] clone shares its shape.
+    /// Built on first use; later spawns clone the [`Collider`], sharing its shape.
     pub colliders: ColliderCache,
 }
 
@@ -172,12 +164,8 @@ pub(crate) struct ColliderCache {
     hulls: std::sync::OnceLock<Option<Vec<Collider>>>,
 }
 
-/// The manifold gate's findings, carried forward instead of discarded — the identities the §13.4
-/// walk pairs on.
-///
-/// Without them a coincidence of two shells of one primitive and a duplicate claim of one shell are
-/// the same three numbers at the collector's interface, and the walk has to guess which; with them,
-/// pairing is a fact.
+/// Shell identities for §13.4 pairing. Without them, coincident shells of one primitive and duplicate
+/// claims of one shell present the same three numbers to the collector, leaving pairing ambiguous.
 #[derive(Debug)]
 pub(crate) struct ShellCertificate {
     /// Which closed shell each triangle belongs to, index-aligned with `indices.chunks_exact(3)` —
@@ -299,15 +287,12 @@ impl MeshGeometry {
 pub(crate) struct TankGeometry {
     pub nodes: Vec<NodeGeometry>,
     pub by_name: HashMap<String, usize>,
-    /// Load-bearing roadwheel stations — `(node index, TrackSide)`, one per entry of the spec's
-    /// `roadwheels` list, **in declaration order**. That order is load-bearing: it is the
-    /// `WheelIndex` slot order both wire ends derive, so it comes from the authored file (one
-    /// source of truth, ordered by construction) rather than from a name pattern plus a sort.
-    /// These nodes carry the wheel mesh itself, so they are also ballistic volumes.
+    /// Load-bearing stations in spec `roadwheels` declaration order: both wire ends derive their
+    /// `WheelIndex` slots from this order, never a name pattern and sort. Each node carries its
+    /// wheel mesh and is also a ballistic volume.
     pub roadwheels: Vec<(usize, TrackSide)>,
-    /// Collision-proxy nodes — the spec's `colliders` list, in declaration order. No wire-shared
-    /// index derives from it (each proxy just yields a convex hull); the order is fixed anyway so
-    /// spawn is deterministic.
+    /// Spec `colliders` in declaration order for deterministic spawn; no wire-shared index derives
+    /// from this list (each proxy yields convex hulls).
     pub collision_proxies: Vec<usize>,
     /// Every declared armour node (the keys of [`TankSpec::volumes`]): MEMBERSHIP IS THE DECLARATION,
     /// never the material. A node is here iff the sheet names it, and a named node wears registry
@@ -326,10 +311,9 @@ impl TankGeometry {
             .is_some_and(|index| self.nodes[*index].is_ballistic())
     }
 
-    /// Whether a node is a declared collision proxy — the only nodes that exist for the SIM alone
-    /// and must never render (RULED 2026-08-10). Since mesh unification the ballistic plates ARE
-    /// the vehicle's rendered body, and the component volumes they enclose render behind a closed
-    /// hull, so declaration in the spec is the one thing that separates a proxy from the picture.
+    /// Only declared collision proxies are sim-only and must never render. Ballistic plates form
+    /// the rendered body; enclosed component volumes render behind the closed hull. The spec's
+    /// declaration, not mesh appearance, separates a proxy from the picture.
     pub fn is_collision_proxy(&self, name: &str) -> bool {
         self.by_name
             .get(name)
@@ -361,10 +345,9 @@ impl NodeGeometry {
     }
 }
 
-/// Runtime spawn data for the shipped Tiger, assembled before network receive can run. The spec is
-/// embedded and geometry is parsed synchronously from the GLB, so spawn does not depend on Bevy's
-/// asset-server timing. Runtime GLB extraction and the missing content fingerprint remain the
-/// transitional seam recorded in `ARCHITECTURE.md`.
+/// Spawn data assembled before network receive: an embedded spec and synchronous GLB extraction
+/// remove asset-server timing from spawn. Runtime extraction remains the transitional seam in
+/// `ARCHITECTURE.md`; [`construction_digest`] supplies the handshake's construction fingerprint.
 #[derive(Resource, Clone)]
 pub(crate) struct TankBlueprint {
     /// The tank file, relative to the asset root: the name a record gives the vehicle.
@@ -413,8 +396,8 @@ pub(crate) fn turret_node(geometry: &TankGeometry, spec: &TankSpec) -> Option<us
     geometry.by_name.get(spec.turret.node.as_ref()?).copied()
 }
 
-/// The selected tank's sheet, embedded: named by the same selection (`assets::tank_file!`) as the
-/// model and certificate the bake pairs it with, so geometry and construction are one tank's.
+/// Embedded sheet selected with the model and certificate by `assets::tank_file!`, keeping
+/// geometry and construction paired.
 const TANK_SPEC_RON: &str = include_str!(concat!(
     "../assets/",
     crate::assets::tank_file!(".tank.ron")
@@ -455,9 +438,8 @@ pub(crate) fn construction_digest(root: &Path) -> u64 {
 ///   substance, whose resistance the walk reads; a registry material on an undeclared node is view
 ///   geometry and captures nothing. Nothing is parsed out
 ///   of a node name.
-/// * **Collision proxies — DECLARED.** The `colliders` list in `<tank>.tank.ron` names them; the
-///   `*_Collider` suffix scan is retired with the rest. Every primitive of a declared proxy is
-///   captured (a proxy is a hull source, not a substance).
+/// * **Collision proxies — DECLARED.** The `colliders` list in `<tank>.tank.ron`, never a suffix,
+///   names them. Every primitive is captured as a hull source, not a substance.
 ///
 /// Roadwheels are the one node class that is BOTH a rig station and a volume: the wheels ship as one
 /// watertight mesh per station, so the same node is the suspension station AND its own armour. The
@@ -469,10 +451,9 @@ pub(crate) fn construction_digest(root: &Path) -> u64 {
 /// [`extract_tank_geometry`]): half-armour has no honest meaning here, and the shadow compare's
 /// whole-node mesh diff would quietly stop covering the uncaptured half.
 ///
-/// This is the substance lookup only: whether the node is armour is the sheet's declaration, never
-/// this verdict. `Some(Err(material))` is a primitive wearing a registry key that is no matter
-/// ([`crate::substances::Substance::matter`] is `None`: an unworn substance); on a declared node
-/// the volume has nothing the walk reads, so the capture refuses it rather than read it as art.
+/// This lookup does not decide armour membership; the sheet does. `Some(Err(material))` names an
+/// unworn substance ([`crate::substances::Substance::matter`] is `None`): the walk can read nothing
+/// from it, so capture refuses a declared node wearing it rather than treating it as art.
 fn classify<'p>(
     primitive: &gltf::Primitive<'p>,
     registry: &SubstanceRegistry,
@@ -527,15 +508,13 @@ pub(crate) const CERTIFIED_RANGE: (f32, f32) = (
     f32::from_bits(0x4780_0000),
 );
 
-/// Whether one coordinate is inside [`CERTIFIED_RANGE`].
 pub(crate) fn certified_coordinate(value: f32) -> bool {
     let magnitude = value.abs();
     magnitude == 0.0 || (magnitude >= CERTIFIED_RANGE.0 && magnitude <= CERTIFIED_RANGE.1)
 }
 
-/// One check emits one finding per subject: the first offender in the check's own deterministic
-/// order, and how many there are. A primitive that fails a law fails it thousands of times, and a
-/// report with one row per triangle is a report nobody reads.
+/// One finding per subject: first offender in the check's deterministic order, plus a count,
+/// keeping a primitive's thousands of failing triangles from overwhelming the report.
 fn first_of(offenders: &[String]) -> Option<String> {
     offenders.first().map(|first| match offenders.len() {
         1 => first.clone(),
@@ -543,39 +522,26 @@ fn first_of(offenders: &[String]) -> Option<String> {
     })
 }
 
-/// The §13.6 per-primitive manifold gate: weld by position, then closed-manifold + consistent
-/// outward orientation per connected shell.
+/// The §13.6 gate runs at extraction on every substance primitive, before any consumer. Failure
+/// refuses extraction and names the node, primitive and defect. A hole leaves the walk without
+/// an exit to pair, silently producing zero armour (§13).
 ///
-/// Runs on every substance primitive, at extraction, before anything downstream can consume it. A
-/// non-watertight ballistic mesh is SILENT ZERO ARMOUR — the walk pairs entry/exit per closed
-/// surface, and a hole means the exit is never found — which is the exact defect class §13 exists to
-/// kill, so a failure names the node, the primitive and the defect and refuses the whole extraction.
+/// Weld by exact position first: glTF splits vertices at normal/UV seams, so index-level edge
+/// parity would falsely reject every seam of a flat-shaded plate instead of measuring its surface.
+/// Each edge-connected shell must have:
+/// * two triangles per undirected edge, each directed edge appearing once (closure and consistent
+///   winding; repeated traversal in the same direction signals inconsistent winding);
+/// * positive signed volume `Σ v₀·(v₁×v₂)/6` (outward winding). Inward shells are closed but their
+///   normals make the walk read entries as exits.
 ///
-/// **Weld first.** glTF splits a vertex wherever the normal or UV differs, so every flat-shaded
-/// plate arrives with each face's corners duplicated: a naive index-level edge-parity test
-/// false-positives on literally every seam. Welding by exact position first is what makes the test
-/// measure the surface instead of the export's vertex-splitting.
+/// Multiple shells per primitive are legal (§13.7): a substance region may have several islands,
+/// e.g. a wheel's two steel bodies and axle. Return their surface identities for §13.4 pairing:
+/// one id per triangle, dense in first-triangle order.
 ///
-/// Per connected shell, two conditions:
-/// * every undirected edge is shared by exactly two triangles, and each DIRECTED edge appears
-///   exactly once — closed, and consistently wound (an inconsistent winding shows up as a directed
-///   edge traversed twice the same way);
-/// * the signed volume `Σ v₀·(v₁×v₂)/6` is positive — the winding is outward, not inward. An
-///   inward-wound shell is closed but every normal points the wrong way, and the walk would read
-///   its entry faces as exits.
-///
-/// Multiple closed shells in one primitive are legal and expected (§13.7: one shell per substance
-/// region, and a substance region may be several islands — the wheel's two steel bodies plus axle).
-/// Which is why the roots are the RETURN VALUE and not a local: they are the surface identity the
-/// §13.4 walk pairs crossings on, dense and in first-triangle order, one per triangle.
-///
-/// UNIT SCALE IS THE CONTRACT, and `scale` — the composed authored scale
-/// ([`NodeGeometry::root_scale`]) — is where it is enforced. A ballistic node reaches the world at
-/// scale `1` or it does not reach it at all: everything below is judged on the stored buffer, and a
-/// componentwise scale is injective over the reals but not over `f32`, so scaling can weld two
-/// distinct coordinates into one (a positive-thickness shell becomes zero-thickness) or carry a
-/// certified coordinate out of [`CERTIFIED_RANGE`]. Nothing here compensates for a scale; it names
-/// the node and refuses. Apply the scale in the .blend and re-export.
+/// `scale` is the composed authored scale ([`NodeGeometry::root_scale`]) and must be exactly `1`:
+/// the gate judges stored buffers. Componentwise scaling is injective over reals but not `f32`;
+/// it can weld distinct coordinates (collapsing shell thickness) or move certified coordinates out
+/// of [`CERTIFIED_RANGE`]. Refuse rather than compensate; apply scale in the .blend and re-export.
 pub(crate) fn manifold_gate(
     node: &str,
     index: usize,
@@ -680,9 +646,7 @@ fn form_refusals(at: &impl Fn() -> Subject, primitive: &MeshGeometry, scale: Vec
 fn weld(positions: &[[f32; 3]]) -> (Vec<u32>, Vec<[f32; 3]>) {
     let mut canonical: HashMap<[u32; 3], u32> = HashMap::new();
     let mut welded: Vec<u32> = Vec::with_capacity(positions.len());
-    // The canonical position of each welded id, which is what the embedding certificate measures:
-    // one point per id, so two triangles naming a corner the same way are AT the same point by
-    // construction rather than by comparison.
+    // One canonical point per welded id makes shared corners coincide by construction for embedding.
     let mut points: Vec<[f32; 3]> = Vec::new();
     for position in positions {
         let mut key = [0u32; 3];
@@ -730,10 +694,9 @@ fn welded_triangles(
         if !resolved {
             continue;
         }
-        // ZERO AREA, in both its spellings. Repeated welded ids is the cheap one; three DISTINCT
-        // ids on one line is the other, and it is exact — the integer plane normal of the welded
-        // positions, not a float cross product with a threshold under it. A face with no
-        // orientation breaks edge parity and gives the embedding certificate no plane to intersect.
+        // Zero area: repeated welded ids, or distinct collinear points. Use the exact integer
+        // plane normal, not a thresholded float cross product: an unoriented face breaks edge
+        // parity and gives embedding no plane to intersect.
         let [a, b, c] = welded_corners;
         if a == b || b == c || a == c {
             degenerate.push(format!(
@@ -772,10 +735,8 @@ fn welded_triangles(
 /// Directed-edge census: closure AND winding consistency over the welded triangles, refused unless
 /// each directed welded edge occurs exactly once and its reverse exactly once.
 ///
-/// A `BTreeMap` and two ORDERED passes, so the diagnostic is the same sentence every run — a defect
-/// that reports differently each time is one nobody can grep for. Winding is checked FIRST, because
-/// a duplicated or same-wound face also looks like a closure failure, and naming it that way sends
-/// the fix the wrong way.
+/// `BTreeMap` and ordered passes keep diagnostics reproducible and searchable. Winding comes first:
+/// duplicate or same-wound faces also look like closure failures, which would suggest the wrong fix.
 fn directed_edge_census(at: &impl Fn() -> Subject, triangles: &[[u32; 3]]) -> Vec<Finding> {
     let mut findings: Vec<Finding> = Vec::new();
     let mut directed: BTreeMap<(u32, u32), u32> = BTreeMap::new();
@@ -828,7 +789,6 @@ fn outward_shells(
     primitive: &MeshGeometry,
     triangles: &[[u32; 3]],
 ) -> Result<Vec<u32>, Finding> {
-    // Connected shells, by shared welded edge. Union-find over triangles.
     let mut parent: Vec<usize> = (0..triangles.len()).collect();
     fn find(parent: &mut [usize], mut node: usize) -> usize {
         while parent[node] != node {
@@ -886,9 +846,7 @@ fn outward_shells(
         ));
     }
 
-    // Publish the roots as DENSE ids in first-triangle order. The root is a union-find artefact —
-    // it moves when path compression moves — and the id is the walk's surface name, so it is
-    // derived from the triangle order the mesh actually ships with and nothing else.
+    // Dense surface ids follow shipped triangle order, independent of union-find root selection.
     let mut ids: HashMap<usize, u32> = HashMap::new();
     let mut shells: Vec<u32> = Vec::with_capacity(triangles.len());
     for triangle in 0..triangles.len() {
@@ -912,13 +870,9 @@ pub(crate) fn plugin(app: &mut App) {
 }
 
 fn extract_at_startup(mut commands: Commands) {
-    // Resolve the glb through the SAME `asset_root()` that `AssetPlugin`'s `file_path` uses, so the
-    // bake and the asset server always open the same file. `asset_root()` already returns the
-    // `…/assets` directory (on a macOS `.app`, `Contents/Resources/assets` — not the exe dir), so we
-    // join the glb path straight onto it with NO extra `assets` segment. Using Bevy's raw
-    // `get_base_path()` here instead was the v0.3.0-alpha.2 macOS crash: it resolved the exe dir
-    // (`Contents/MacOS`) in a double-clicked bundle, `+ "assets"` → a directory that does not exist,
-    // while the asset server was reading `Contents/Resources/assets`. See `crate::assets`.
+    // Use `AssetPlugin`'s `asset_root()` so bake and view open the same file; it already ends in
+    // `assets` (`Contents/Resources/assets` in a macOS .app). Bevy's raw `get_base_path()` resolves
+    // `Contents/MacOS` in a double-clicked bundle; appending `assets` there crashes. See `crate::assets`.
     let root = crate::assets::asset_root();
     // THE SIM ARTIFACT (ADR-0035), not the view glb: a byte-strip of the certified view glb holding
     // LOD0 geometry and material names — the walk's substance lookup
@@ -974,12 +928,9 @@ pub(crate) struct CertifiedAsset {
     pub geometry: TankGeometry,
 }
 
-/// **The consumer contract.** Parse a spec sheet and the model it names, and either certify the
-/// pair or say — in one report shape, deterministically ordered — exactly what refused it.
-///
-/// This is the single implementation of every `L2.*` law. The runtime bake calls it at startup on
-/// the shipped asset; [`verify_asset`] calls it from the CLI on an export candidate before the
-/// texture encode, and from CI on every committed pair. There is no second copy to drift from.
+/// The single `L2.*` contract: certify a spec/model pair or return deterministic, ordered refusals.
+/// Runtime calls it at startup; [`verify_asset`] serves CLI export candidates before texture encode
+/// and CI's committed pairs, keeping all three on the same laws.
 pub(crate) fn certify_asset(
     glb: &Path,
     spec_ron: &str,
@@ -1027,15 +978,9 @@ fn spec_ron_name(glb: &Path) -> String {
     glb.with_extension("").to_string_lossy().into_owned() + ".tank.ron"
 }
 
-/// What a spec finding NAMES, given the model the sheet was certified against.
-///
-/// The sibling rule only holds for the TRACKED model, `assets/<id>/<id>.glb`, whose stem is the
-/// asset id — and an id is a directory name, so it carries no dot. A derived artifact does:
-/// the runtime bake certifies `<id>.sim.glb` (ADR-0035) against a sheet compiled into the binary,
-/// and stripping one extension off that path yields `<id>.sim.tank.ron`, a file that does not exist
-/// and never will, offered to the reader as the thing to go and fix. So a model whose stem is not
-/// an id names ITSELF: the finding points at the pair that refused, and the sim artifact is the
-/// half of that pair which is on disk.
+/// Name a tracked model's sibling sheet, or a derived artifact itself. Tracked stems are asset ids
+/// (directory names without dots); `<id>.sim.glb` (ADR-0035) uses an embedded sheet, so deriving
+/// `<id>.sim.tank.ron` would direct repairs to a nonexistent file. The artifact is the pair's disk half.
 fn spec_subject_for(glb: &Path) -> Subject {
     let derived = glb
         .file_stem()
@@ -1092,9 +1037,7 @@ pub fn verify_asset(glb: &Path, registry: Option<&Path>) -> Vec<Finding> {
 /// `scripts/tank/build.py verify` re-exports and compares. `spec_validates` is the verdict alone,
 /// not its message.
 ///
-/// A sheet that does not parse is the same `L2.SPEC` refusal the consumer contract gives it: there
-/// is one report shape, and a canon generator that invented a second vocabulary would be a second
-/// door.
+/// Parse failures use the consumer contract's `L2.SPEC` report, keeping one refusal vocabulary.
 pub fn canon_lists(spec_path: &Path, registry: Option<&Path>) -> Result<String, Vec<Finding>> {
     let refused = |evidence: String, repair: &str| {
         vec![Finding::new(
@@ -1126,16 +1069,15 @@ pub fn canon_lists(spec_path: &Path, registry: Option<&Path>) -> Result<String, 
     .to_string())
 }
 
-/// Parse the glb as data into [`TankGeometry`]. Pure with respect to the app: `gltf` crate only,
-/// usable identically from the runtime (step 0/phase 1) and the offline compiler (phase 2).
+/// Parse GLB data into [`TankGeometry`] using only `gltf`, independent of app state, for both
+/// runtime and offline compilation.
 pub(crate) fn extract_tank_geometry(
     path: &Path,
     spec: &TankSpec,
     registry: &SubstanceRegistry,
 ) -> Result<TankGeometry, Vec<Finding>> {
-    // Every extraction validates the sheet first: the declarations capture reads (duplicate or
-    // overlapping nodes, a collider that is also armour) are only sound on a validated sheet, so no
-    // caller can reach extraction with one that is not.
+    // Validate before capture: duplicate or overlapping declarations (e.g. collider + armour)
+    // would make capture unsound, regardless of caller.
     spec.validate().map_err(|err| {
         vec![Finding::new(
             &L2_SPEC,
@@ -1166,10 +1108,8 @@ pub(crate) fn extract_tank_geometry(
         .collect();
     let declared_armour: HashSet<&str> = spec.volumes.keys().map(String::as_str).collect();
 
-    // Resolve buffer data: a .glb's buffers are the BIN chunk (`Source::Bin`). A `Source::Uri`
-    // buffer — a sidecar or a data: URI — is refused, not resolved: the geometry the fingerprint
-    // names must be the bytes of the file it names, so vertices living beside the glb are a
-    // different artifact. Same refusal as `track::marker_model`, which reads the same glb.
+    // Only the BIN chunk belongs to the fingerprinted GLB. Refuse `Source::Uri` (sidecars and
+    // data: URIs), as `track::marker_model` does, so geometry stays within the named artifact.
     let mut buffers: Vec<Vec<u8>> = Vec::new();
     for buffer in document.buffers() {
         match buffer.source() {
@@ -1221,7 +1161,7 @@ pub(crate) fn extract_tank_geometry(
     by_name.insert(nodes[0].name.clone(), 0);
     let mut findings: Vec<Finding> = Vec::new();
 
-    // Depth-first over the node tree, mirroring the loader's spawn recursion.
+    // Depth-first traversal mirrors the loader's spawn recursion.
     let mut stack: Vec<(gltf::Node, usize)> = scene.nodes().map(|n| (n, 0usize)).collect();
     while let Some((node, parent)) = stack.pop() {
         // bevy_gltf's `node_name` rule, verbatim: every node ends up named.
@@ -1282,8 +1222,7 @@ pub(crate) fn extract_tank_geometry(
         }
     }
 
-    // The sim's typed lists, resolved once here (design §8 step 3), each from the spec's explicit
-    // declarations. Nothing scans a node name for sim meaning.
+    // Resolve typed lists from spec declarations, never node-name patterns.
     let mut collision_proxies: Vec<usize> = Vec::new();
     for collider in &spec.colliders {
         collision_proxies.extend(by_name.get(&collider.node).copied());
@@ -1355,9 +1294,7 @@ fn collider_substances(spec: &TankSpec, registry: &SubstanceRegistry) -> Vec<Fin
         .collect()
 }
 
-/// What every node's mesh is captured against: the registry that names the substances
-/// ([`classify`]), the spec's declared collision proxies and armour, and the document's resolved
-/// buffers.
+/// Capture inputs: the substance registry ([`classify`]), declared proxies/armour and resolved buffers.
 struct MeshCapture<'a> {
     registry: &'a SubstanceRegistry,
     declared_colliders: &'a HashSet<&'a str>,
@@ -1407,9 +1344,7 @@ impl MeshCapture<'_> {
                 }
             }
         }
-        // Half-armour has no honest meaning: the shadow compare diffs a node's mesh bytes as a
-        // whole, so a partially-captured node would quietly stop being covered, and the walk
-        // would meet a solid whose other half it cannot see.
+        // Refuse partial capture: see [`classify`]'s whole-node shadow-coverage invariant.
         if ballistic > 0 && plain > 0 {
             findings.push(Finding::new(
                 &L2_ROLE_COHERENCE,
@@ -1517,13 +1452,9 @@ fn witness_roles(geometry: &TankGeometry, spec: &TankSpec) -> Vec<Finding> {
     findings
 }
 
-/// What the spec DECLARED, met with what the model turned out to hold: every typed reference
-/// resolves (`L2.SPEC`), every declared role is one the resolved node can actually play
-/// (`L2.ROLE_COHERENCE`), and every node the rigid pose composition walks through is authored at
-/// unit scale (`L2.UNIT_SCALE`).
-///
-/// The reference vocabulary is `TankSpec::node_references`, so a spec field added later is checked
-/// here without this function learning its name.
+/// Resolve typed references (`L2.SPEC`), check their roles (`L2.ROLE_COHERENCE`) and require unit
+/// authored scale throughout rigid-pose chains (`L2.UNIT_SCALE`). `TankSpec::node_references` owns
+/// the vocabulary, so new spec fields reach this gate without another field-name list.
 fn declared_roles_resolve(
     geometry: &TankGeometry,
     spec: &TankSpec,
@@ -1621,11 +1552,8 @@ fn declared_roles_resolve(
     findings
 }
 
-/// The shadow harness: on every tank scene instantiation, verify the extracted geometry against
-/// what the scene actually contains — the step-0 equivalence proof, kept as the sim-data-vs-view
-/// guard (module doc). Read-only, so it is order-independent with respect to the view binder
-/// (`tank::bind_tank_view`, an entity-scoped observer of this same event; this one is global and
-/// writes nothing).
+/// Compare every instantiated tank view with extracted sim data. Read-only and global, hence
+/// order-independent of `tank::bind_tank_view`, the entity-scoped observer of the same event.
 #[expect(
     clippy::too_many_arguments,
     reason = "an observer comparing the blueprint with an instantiated scene: hierarchy, names, transforms and meshes are separate reads"
@@ -1650,9 +1578,8 @@ fn shadow_compare_on_instance_ready(
         fail(vec!["TankBlueprint resource missing at bind".into()]);
     };
     let geometry = &blueprint.geometry;
-    // The tank root's descendants hold TWO same-named trees since step 1: the data-spawned sim
-    // skeleton and the instantiated glb scene (the view). The shadow's subject is the VIEW — skip
-    // the sim parts, whose transforms are the extracted values by construction.
+    // Sim and view trees share names; compare only the view, since sim transforms are extracted
+    // values by construction.
     let skeleton: std::collections::HashSet<Entity> = sim_parts
         .get(ready.entity)
         .expect("a tank root holds its SimParts from spawn (tank::spawn), before its scene loads")
@@ -1662,12 +1589,9 @@ fn shadow_compare_on_instance_ready(
         .collect();
     let mut mismatches: Vec<String> = Vec::new();
 
-    // Scene side: every named descendant that is a glTF NODE. Mesh data always spawns as child
-    // entities carrying `Mesh3d` — that presence is the primitive-leaf discriminator, NOT
-    // `GltfMaterialName`: a primitive with an UNNAMED material never gets that marker (the coax
-    // MG volumes' physics-only meshes), which the shadow's first run caught. (The binder's walk
-    // still uses the marker and so silently indexes those mesh names — latent fragility, dies
-    // with the walk in phase 1.)
+    // Compare named glTF nodes, excluding `Mesh3d` primitive leaves. `GltfMaterialName` cannot
+    // distinguish leaves with unnamed materials (e.g. physics-only coax MG volumes); the view
+    // binder likewise uses `Mesh3d`.
     let mut seen: HashMap<&str, Entity> = HashMap::new();
     for entity in children.iter_descendants(ready.entity) {
         if skeleton.contains(&entity) || primitives.contains(entity) {
@@ -1684,7 +1608,6 @@ fn shadow_compare_on_instance_ready(
         };
         let node = &geometry.nodes[index];
 
-        // Local transform, bit-exact.
         if let Ok(local) = transforms.get(entity)
             && !transform_bits_eq(local, &node.transform)
         {
@@ -1788,7 +1711,6 @@ fn shadow_compare_on_instance_ready(
         }
     }
 
-    // Reverse direction: every extracted node must exist in the scene.
     for node in &geometry.nodes {
         if !seen.contains_key(node.name.as_str()) {
             mismatches.push(format!("extracted node `{}` not in scene", node.name));
@@ -1867,12 +1789,10 @@ mod tests {
         manifold_gate(node, 0, primitive, Vec3::ONE).map(|certificate| certificate.shells.to_vec())
     }
 
-    /// The check ids a report names, in report order.
     fn refusals(findings: &[Finding]) -> Vec<&str> {
         findings.iter().map(|finding| finding.check.id).collect()
     }
 
-    /// A substance primitive built from a raw index buffer.
     fn ballistic(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> MeshGeometry {
         MeshGeometry {
             positions,
@@ -1985,12 +1905,9 @@ mod tests {
         verify_asset(&asset.glb, None)
     }
 
-    /// THE REGISTRY IS AN INPUT, because it is DATA. A lane verifying a REVISION hydrates that
-    /// revision's trio and its material library, and the substance numbers those bytes were
-    /// authored against travel with them; a gate reading whatever registry the running binary was
-    /// compiled with would certify a pair that never existed. So the door names the file, and a
-    /// file it cannot name is a refusal of the door's own — never silence, and never a fallback to
-    /// the compiled-in one, which is exactly how a wrong verdict would look like a right one.
+    /// Verification reads the revision's registry with its trio: the binary's registry could
+    /// certify a pair that never existed. Missing registry files must produce door refusals,
+    /// never silence or fallback to the compiled-in registry.
     #[test]
     fn the_registry_the_door_supplies_is_the_one_the_contract_reads() {
         let (nodes, spec) = sound_vehicle();
@@ -2009,9 +1926,7 @@ mod tests {
         let findings = verify_asset(&asset.glb, Some(&elsewhere));
         assert!(findings.is_empty(), "{}", render(&findings));
 
-        // A registry that declares OTHER substances is a different verdict about the same bytes,
-        // which is the whole reason the file has to come from the right revision: the plates'
-        // substance is no row of it, and neither is the collider's.
+        // Different registry keys leave both plate and collider substances unresolved.
         std::fs::write(
             &elsewhere,
             r#"SubstanceRegistry(substances: {"Cheese": Hard(resistance: Reference, visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))),
@@ -2032,8 +1947,7 @@ mod tests {
             render(&findings)
         );
 
-        // And a registry the door could not hand over refuses mechanically, under the door's own
-        // id — not as a finding about the model, and not by falling back to the embedded one.
+        // A missing registry is a door refusal, not a model finding or embedded-registry fallback.
         std::fs::remove_file(&elsewhere).expect("the fixture registry is removable");
         let findings = verify_asset(&asset.glb, Some(&elsewhere));
         assert_eq!(
@@ -2055,11 +1969,8 @@ mod tests {
         );
     }
 
-    /// A SPEC FINDING NAMES SOMETHING THAT EXISTS. The sibling `<id>.glb` → `<id>.tank.ron` rule
-    /// holds for the tracked model and for nothing else, and the runtime bake certifies the SIM
-    /// artifact (ADR-0035) against a sheet compiled into the binary — so deriving a path from
-    /// `tiger_1.sim.glb` invents `tiger_1.sim.tank.ron` and hands the reader a file to go and fix
-    /// that has never existed. The pair that refused is what a finding may name.
+    /// Spec findings must name existing files: the tracked GLB has a sibling sheet, whereas the
+    /// sim artifact (ADR-0035) uses an embedded sheet. Its finding must not invent a `.sim.tank.ron`.
     #[test]
     fn a_finding_against_the_sim_artifact_names_the_sim_artifact() {
         let tracked = Path::new("assets/tiger_1/tiger_1.glb");
@@ -2080,21 +1991,11 @@ mod tests {
         );
     }
 
-    /// EVERY SHIPPED ASSET, THROUGH THE REAL GATE. Discovery, not a list: a second vehicle is a
-    /// directory, never a line of test code.
-    /// THE WALK IS THE SAME WALK ON BOTH ENDS, and it is the same walk it was before the split.
-    ///
-    /// The dedicated server opens `<id>.sim.glb` and nothing else; the client opens it too, for the
-    /// ballistic/armour walk, while its render path keeps `<id>.glb`. Two claims follow, and this
-    /// is where they are checked on the shipped bytes rather than argued:
-    ///
-    /// 1. SERVER == CLIENT. Both ends call [`extract_at_startup`] on the SAME path constant, so the
-    ///    geometry is one file read twice. What that leaves to prove is that the read is a pure
-    ///    function of the bytes: extracting the sim artifact twice must produce bit-identical
-    ///    positions, indices, substances and composed poses.
-    /// 2. NOTHING MOVED. The sim artifact is a byte-strip of the certified view glb, so extracting
-    ///    the view glb — what the walk used to read — must produce the identical geometry. A
-    ///    ballistics change hiding inside a packaging change would show up here as a moved vertex.
+    /// The selected tank's server and client walk `<id>.sim.glb`; rendering reads `<id>.glb`.
+    /// Both ends call [`extract_at_startup`] with the same path constant. On shipped bytes, repeated
+    /// sim extraction must give bit-identical positions, indices, substances and composed poses;
+    /// extracting the view must agree too, since the sim artifact is its byte-strip (ADR-0035).
+    /// A moved vertex would expose a geometry change hidden in packaging.
     #[test]
     fn the_sim_artifact_walks_the_bytes_the_view_glb_carried() {
         let root = crate::assets::asset_root();
@@ -2118,13 +2019,9 @@ mod tests {
                     let mut row = format!(
                         "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
                         node.name,
-                        // The PARENT, by name rather than by index: the sim skeleton is spawned as
-                        // a hierarchy and a re-parented node moves everything under it. By name so
-                        // a reordered node list is not a false positive.
+                        // Reparenting moves descendants; compare names so list reordering stays legal.
                         node.parent.map(|p| geometry.nodes[p].name.as_str()),
-                        // The LOCAL transform, which is what the skeleton's entities are spawned
-                        // with — the composed pose below can agree while the chain that produced it
-                        // does not.
+                        // Spawn uses local transforms; equal composed poses can hide different chains.
                         node.transform.translation.to_array().map(f32::to_bits),
                         node.transform.rotation.to_array().map(f32::to_bits),
                         node.transform.scale.to_array().map(f32::to_bits),
@@ -2173,6 +2070,7 @@ mod tests {
         );
     }
 
+    /// Discover every shipped asset through the real gate: adding a vehicle adds no test-code row.
     #[test]
     fn every_shipped_asset_passes_the_consumer_contract() {
         let shipped = fixture::shipped_assets();
@@ -2194,9 +2092,7 @@ mod tests {
                 .expect("the pair certifies");
             let geometry = &asset.geometry;
 
-            // What certification means, held to at the data: every volume the material rule found
-            // carries usable armour, and the spawn order is the name order rather than the glTF
-            // node order.
+            // Declared volumes carry usable armour; spawn follows name order, not glTF node order.
             let names: Vec<&str> = geometry
                 .ballistic_volumes
                 .iter()
@@ -2392,9 +2288,7 @@ mod tests {
         }
     }
 
-    /// The canon file — the document shape the Blender source pass parses, and the two canonical
-    /// lists inside it. Python maintains no vocabulary of RON field names or substance keys, so
-    /// this is the only place either is pinned.
+    /// Pin Blender's canon document and both lists: Python owns no RON-field or substance vocabulary.
     #[test]
     fn the_canon_file_carries_the_reference_list_and_the_registry_keys() {
         let (nodes, _) = sound_vehicle();
@@ -2438,9 +2332,7 @@ mod tests {
                 )
             })
             .collect();
-        // Role order, then node, then the authored path — `TankSpec::node_references`' own
-        // ordering, carried through. Every field here is pinned nowhere else: Python maintains no
-        // vocabulary of RON paths and renders whatever arrives in this document.
+        // Preserve `TankSpec::node_references` order: role, node, authored path, as Python renders it.
         assert_eq!(
             references,
             [
@@ -2861,9 +2753,8 @@ mod tests {
 
     /// A BALLISTIC NODE IS UNIT-SCALE OR IT IS REFUSED, BY NAME.
     ///
-    /// The same geometry passes at `1` and fails at every other scale, including one a millionth of
-    /// an ULP away — nothing here compensates, rescales, or tolerates. The message names the node,
-    /// because the fix is in the .blend and the artist has to be told which object.
+    /// Geometry passes at `1` and fails at other scales, including one ULP away; no compensation
+    /// or tolerance. The message names the node so the artist can fix the object in the .blend.
     #[test]
     fn the_gate_refuses_every_composed_scale_that_is_not_exactly_one() {
         let tetra = tetrahedron(CLOSED.to_vec());
@@ -2944,7 +2835,6 @@ mod tests {
     /// certificate no plane to intersect.
     #[test]
     fn a_zero_area_face_is_refused() {
-        // Two corners at one position: the welded ids repeat.
         let mut repeated = CLOSED.to_vec();
         repeated.extend_from_slice(&[0, 1, 1]);
         let findings =
@@ -3090,15 +2980,10 @@ mod tests {
         }
     }
 
-    /// SAME-PRIMITIVE FACE-TO-FACE CONTACT IS REFUSED, AND THAT IS THE CONTRACT (§13.7).
-    ///
-    /// Two closed shells of one primitive that share a welded edge present four triangles on it, so
-    /// the directed-edge census rejects them before union-find can even be asked whether they are
-    /// one shell or two. That refusal is deliberate and it is the answer: a geometric guess at where
-    /// one shell ends and the next begins is exactly the ambiguity surface identity exists to
-    /// remove, and the walk's pairing, restart seeding and contact ownership all depend on the
-    /// distinction. Plates authored face to face stay separate PRIMITIVES; only vertex contact and
-    /// interior intersection are legal inside one.
+    /// Same-primitive face contact is refused (§13.7): shells sharing a welded edge present four
+    /// triangles there, failing the directed-edge census before union-find. Guessing shell boundaries
+    /// would make pairing, restart seeding and contact ownership ambiguous. Face-to-face plates
+    /// must be separate primitives; vertex contact and interior intersection remain legal within one.
     #[test]
     fn same_primitive_face_to_face_contact_is_refused() {
         // Two unit cubes sharing the whole `x = 1` face, in one primitive.
@@ -3151,14 +3036,9 @@ mod tests {
         );
     }
 
-    /// L2.SHELL_EMBEDDING — A SHELL THAT PASSES THROUGH ITSELF IS REFUSED, THROUGH THE WHOLE
-    /// CONTRACT.
-    ///
-    /// `fixture::pierced` is built to reach this law and no earlier one: it is closed, consistently
-    /// wound and encloses a positive volume, so the census and the volume gate both pass it and the
-    /// embedding certificate is the only thing between it and the walk. That is what the pair-level
-    /// witnesses in `embedding::tests` cannot say — they are handed a triangle list, not an asset —
-    /// and it is the whole reason this case is driven from the glb.
+    /// L2.SHELL_EMBEDDING must refuse self-intersection through the whole asset contract.
+    /// `fixture::pierced` is closed, consistently wound and positive-volume, isolating embedding
+    /// refusal. Unlike `embedding::tests`' triangle lists, this GLB also proves asset-level wiring.
     #[test]
     fn a_shell_that_passes_through_itself_is_refused() {
         // The gate's own three products first: the defect is not a census or a volume defect.
@@ -3197,10 +3077,8 @@ mod tests {
         assert!(findings.is_empty(), "{}", render(&findings));
     }
 
-    /// Weld-by-position is what makes the gate measure the SURFACE instead of the export's vertex
-    /// splitting: glTF duplicates a vertex wherever the normal or UV differs, so a flat-shaded
-    /// plate arrives with every corner split and a naive index-level edge test false-positives on
-    /// every seam of every volume in the model.
+    /// Welding must ignore glTF's normal/UV vertex splits: index-level edge tests would falsely
+    /// reject every seam of a flat-shaded plate.
     #[test]
     fn the_gate_welds_before_it_measures() {
         // The same tetrahedron with EVERY corner split per face — 12 vertices, 4 faces, no shared
@@ -3221,12 +3099,8 @@ mod tests {
             .expect("welding by position closes the split shell");
     }
 
-    /// TWO SHELLS IN ONE PRIMITIVE ARE TWO KEYS, AND ONE SHARED VERTEX DOES NOT MERGE THEM.
-    ///
-    /// This is what the §13.4 walk pairs on. Edge-connected components are the right grain and
-    /// vertex-connected ones are not: two legal shells may legally touch at a point (§13.7's
-    /// islands), and merging them there would put one key on two surfaces — exactly the ambiguity
-    /// the identity exists to remove.
+    /// §13.4 pairing needs one key per edge-connected shell. Legal shells may touch at a vertex
+    /// (§13.7's islands); vertex connectivity would ambiguously merge two surfaces into one key.
     #[test]
     fn two_shells_in_one_primitive_are_two_keys() {
         // Two tetrahedra sharing the single vertex at the origin, one either side of it.
@@ -3254,8 +3128,7 @@ mod tests {
         );
     }
 
-    /// The report is one shape, in one order: stage, severity, check id, subject, element. Two
-    /// runs of a defective asset produce the same rows in the same order, or nobody can diff them.
+    /// Reports sort by stage, severity, check id, subject, element, making repeated runs diffable.
     #[test]
     fn the_report_is_deterministic_and_carries_every_field() {
         let (mut nodes, spec) = sound_vehicle();
