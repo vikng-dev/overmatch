@@ -3020,13 +3020,14 @@ fn a_bounce_just_past_the_source_box_returns_into_a_solid_source() {
 /// trapped in a closed box ends. The live record relies on it: `finish_records` closes only on a
 /// round at rest or clear of the tank, and each further skid would write marks, strikes and impulses
 /// without bound. The last mark says the face held it, with no entry, and the record says it rests
-/// on that face. The box tilts, so no face is level: an exactly head-on read bites. Dimensions,
-/// tilt, speed and direction are fixture data. Mutant: no [`walk::Begin::Held`].
+/// on that face. Its first reached face is oblique within the Held friction cone, so an ordinary
+/// skid followed by a solver stop cannot imitate Held. The box tilts: an exactly head-on read
+/// bites. Dimensions, tilt, speed and direction are fixture data. Mutant: no [`walk::Begin::Held`].
 #[test]
 fn a_spent_round_trapped_in_a_closed_box_comes_to_rest() {
     let mut app = recording_world(false);
     app.insert_resource(RetainSpentShells(true));
-    let (hull, _) = tank(
+    let (hull, walls) = tank(
         &mut app,
         Vec3::Y * 20.0,
         0.0,
@@ -3069,14 +3070,30 @@ fn a_spent_round_trapped_in_a_closed_box_comes_to_rest() {
         .get_mut::<Transform>(hull)
         .unwrap()
         .rotate_local(Quat::from_euler(EulerRot::XYZ, 0.13, 0.0, 0.07));
+    app.world_mut().entity_mut(hull).insert(RigidBody::Static);
+    let template = crate::damage_cam::delivery::tests::report("s1_through_crew");
+    // Fixture: the box's faces are parts of one main-armour assembly in the delivery vocabulary.
+    let name = template
+        .plates
+        .iter()
+        .find(|plate| plate.class == crate::damage_cam::PlateClass::Main)
+        .expect("the fixture template names main armour")
+        .name
+        .clone();
+    for wall in &walls {
+        app.world_mut()
+            .entity_mut(*wall)
+            .insert(Name::new(name.clone()));
+    }
     settle(&mut app);
-    let round = crate::tank::WeaponRound::resolve("88mm_AP").unwrap().round;
+    let round_key = "88mm_AP";
+    let round = crate::tank::WeaponRound::resolve(round_key).unwrap().round;
     let birth = Vec3::new(0.2, 20.5, 0.1);
     let mut fire = FireShell::of_round(
         &round,
         birth,
         birth,
-        Dir3::new(Vec3::new(1.0, 0.3, 0.7)).unwrap(),
+        Dir3::new(Vec3::new(1.0, 0.2, 0.1)).unwrap(),
         FireMechanism::Single,
         false,
         None,
@@ -3085,7 +3102,13 @@ fn a_spent_round_trapped_in_a_closed_box_comes_to_rest() {
     fire.speed = 30.0;
     fire.drag_k = 0.0;
     app.world_mut().trigger(fire);
-    let records = run(&mut app, 64 * 10);
+    let mut records = Vec::new();
+    let mut ticks = 0;
+    while ticks < 64 * 10 && records.is_empty() {
+        records.extend(run(&mut app, 1));
+        ticks += 1;
+    }
+    let elapsed = ticks as f32 * TICK.as_secs_f32();
     let mut flying = app.world_mut().query::<&Projectile>();
     assert_eq!(
         flying.iter(app.world()).count(),
@@ -3094,13 +3117,51 @@ fn a_spent_round_trapped_in_a_closed_box_comes_to_rest() {
     );
     let mut shells = app.world_mut().query::<&PenetrationMarks>();
     let marks = shells.single(app.world()).unwrap();
-    let Some(ArmourMark::Bounce { speed_out, .. }) = marks.log.last() else {
+    let Some(ArmourMark::Bounce {
+        speed_out,
+        incoming,
+        normal,
+        ..
+    }) = marks.log.last()
+    else {
         panic!(
             "the face holds a round too slow to bite: {:?}",
             marks.log.last()
         );
     };
     assert_eq!(*speed_out, 0.0, "the face held it");
+    let Some(ArmourMark::Bounce {
+        speed_out: first_out,
+        ..
+    }) = marks.log.first()
+    else {
+        panic!("the fixture's first face must hold it");
+    };
+    assert_eq!(
+        *first_out, 0.0,
+        "Held ends the first contact, before a terminal skid can imitate it"
+    );
+    let normal_share = incoming.dot(*normal).abs();
+    let sliding_share = incoming.cross(*normal).length();
+    let friction = crate::physical_laws::PhysicalLaws::shipped().contact_friction;
+    assert!(
+        sliding_share <= friction * normal_share,
+        "rest must satisfy Held, not a terminal skid: {normal_share}, {sliding_share}, {friction}"
+    );
+    let mut previous = birth;
+    let mut distance = 0.0;
+    let mut fastest = 30.0_f32;
+    for mark in &marks.log {
+        if let ArmourMark::Bounce { at, speed_in, .. } = mark {
+            distance += at.distance(previous);
+            fastest = fastest.max(*speed_in);
+            previous = *at;
+        }
+    }
+    assert!(
+        elapsed >= distance / fastest,
+        "{elapsed} s cannot fly {distance} m at at most {fastest} m/s"
+    );
     assert_eq!(records.len(), 1, "the stopped round delivers its encounter");
     let report = &records[0].report;
     let crate::damage_cam::RoundEnd::Rest { volume } = &report.end else {
@@ -3112,16 +3173,63 @@ fn a_spent_round_trapped_in_a_closed_box_comes_to_rest() {
             .iter()
             .any(|plate| &plate.name == volume && plate.exit.is_none())
     );
+    let mut report = records.remove(0).report;
+    // Fixture identity comes from the loaded vocabulary; all live geometry, clocks and outcomes stay.
+    // Unhit staffing belongs to the tank helper, outside this armour-only delivery fixture.
+    report.components.clear();
+    report.round = round_key.to_owned();
+    report.projectile.name = template.projectile.name.clone();
+    report.vehicle = template.vehicle.clone();
+    report.servo_deg = template.servo_deg.clone();
+    let vocabulary = crate::damage_cam::delivery::tests::vocabulary(&template);
+    let mut delivery = App::new();
+    delivery
+        .add_plugins(MinimalPlugins)
+        .add_plugins(crate::damage_cam::delivery::offline_plugin);
+    delivery.insert_resource(vocabulary);
+    delivery.insert_resource(crate::WeaponClock(crate::sim_tick::SimTick::new(0)));
+    delivery
+        .world_mut()
+        .spawn((crate::CombatantId(9), crate::tank::Controlled));
+    let recorded = crate::damage_cam::delivery::tests::recorded(
+        &report,
+        crate::CombatantId(7),
+        1200,
+        crate::damage_cam::wire::TankLife {
+            combatant: crate::CombatantId(9),
+            life: crate::CombatantLife(1),
+        },
+    );
+    delivery.world_mut().write_message(recorded);
+    delivery.world_mut().run_schedule(FixedUpdate);
+    let store = delivery
+        .world()
+        .resource::<crate::damage_cam::delivery::ShotExplanations>();
+    let delivered: Vec<_> = store.iter().map(|(_, stored)| &stored.report).collect();
+    assert_eq!(
+        delivered.len(),
+        1,
+        "the live box record survives real delivery"
+    );
+    assert_eq!(delivered[0].end, report.end);
+    assert!(
+        delivered[0]
+            .plates
+            .iter()
+            .any(|plate| plate.exit.is_none() && plate.chord_mm == 0.0)
+    );
 }
 
 /// The game's damage model spends real flight time between skids. The authority must
 /// return to the tick clock instead of planning the unbounded future of a trapped, fuze-less
-/// round. All dimensions, speeds and the 45-degree direction are fixture data.
+/// round. Its long open slide leaves the far wall beyond four ticks, so pre-planning that wall
+/// leaves playback where discovery should have returned to the tick clock. All dimensions, speeds
+/// and the 45-degree direction are fixture data.
 #[test]
 fn a_closed_box_of_faces_returns_to_the_flight_clock() {
     let mut app = recording_world(false);
     app.insert_resource(RetainSpentShells(true));
-    tank(
+    let (hull, _) = tank(
         &mut app,
         Vec3::Y * 20.0,
         0.0,
@@ -3129,30 +3237,31 @@ fn a_closed_box_of_faces_returns_to_the_flight_clock() {
         &[
             (
                 "right",
-                Vec3::new(0.4, 4.0, 4.0),
+                Vec3::new(0.4, 4.0, 40.0),
                 Vec3::X * 1.2,
                 Kind::Plate,
             ),
             (
                 "left",
-                Vec3::new(0.4, 4.0, 4.0),
+                Vec3::new(0.4, 4.0, 40.0),
                 Vec3::NEG_X * 1.2,
                 Kind::Plate,
             ),
             (
                 "front",
                 Vec3::new(2.0, 4.0, 0.4),
-                Vec3::Z * 1.2,
+                Vec3::Z * 20.2,
                 Kind::Plate,
             ),
             (
                 "back",
                 Vec3::new(2.0, 4.0, 0.4),
-                Vec3::NEG_Z * 1.2,
+                Vec3::NEG_Z * 20.2,
                 Kind::Plate,
             ),
         ],
     );
+    app.world_mut().entity_mut(hull).insert(RigidBody::Static);
     settle(&mut app);
     let round = crate::tank::WeaponRound::resolve("7.9mm_AP").unwrap().round;
     let birth = Vec3::new(0.2, 20.0, 0.0);
@@ -3169,21 +3278,51 @@ fn a_closed_box_of_faces_returns_to_the_flight_clock() {
     fire.speed = 100.0;
     fire.drag_k = 0.0;
     app.world_mut().trigger(fire);
-    run(&mut app, 4);
+    let records = run(&mut app, 4);
+    assert!(records.is_empty(), "four ticks leave the round in flight");
     let mut shells = app.world_mut().query::<&PenetrationMarks>();
     let marks = shells.single(app.world()).unwrap();
     assert!(!marks.ricochets.is_empty(), "the fixture skids");
+    let elapsed = 4.0 * TICK.as_secs_f32();
+    let mut previous = birth;
+    let mut distance = 0.0;
+    let mut fastest = 100.0_f32;
+    for mark in &marks.log {
+        if let ArmourMark::Bounce {
+            at,
+            speed_in,
+            speed_out,
+            incoming,
+            normal,
+            ..
+        } = mark
+        {
+            distance += at.distance(previous);
+            previous = *at;
+            fastest = fastest.max(*speed_in);
+            let normal_share = incoming.dot(*normal).abs();
+            let friction = crate::physical_laws::PhysicalLaws::shipped().contact_friction;
+            assert!(
+                incoming.cross(*normal).length() > friction * normal_share,
+                "this fixture's reached faces permit flight"
+            );
+            assert!(*speed_out > 0.0, "a permitted skid keeps its motion");
+        }
+    }
     assert!(
-        marks.ricochets.len() < 4,
-        "flight time limits skids in four fixture ticks"
+        distance <= fastest * elapsed,
+        "{distance} m exceeds {elapsed} s of flight"
     );
     let mut flying = app.world_mut().query::<&Projectile>();
+    let projectile = flying
+        .single(app.world())
+        .expect("four ticks leave one projectile in flight");
     assert!(
-        flying
-            .iter(app.world())
-            .all(|projectile| projectile.velocity.is_finite()),
-        "the tick leaves finite flight state"
+        projectile.playback.is_empty(),
+        "the open slide returns discovery to the tick clock"
     );
+    assert!(projectile.velocity.is_finite());
+    assert!(projectile.velocity.length() > 0.0);
 }
 
 /// The game's damage model delivers the resolved disc contacts through production playback.
