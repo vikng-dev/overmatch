@@ -2623,7 +2623,11 @@ mod tests {
                     late_force += force / 64.0;
                     // DERIVED remove actual faded drag and apply the full potential at this
                     // same force state: a refused launch cannot deliver sustained surplus.
-                    let rolling: f32 = reports.iter().map(|r| r.rolling_resistance).sum();
+                    let rolling: f32 = reports
+                        .iter()
+                        .flat_map(|r| &r.contacts)
+                        .map(|c| c.rolling_force.z)
+                        .sum();
                     full_drag_force += (force + rolling - load.rolling_n) / 64.0;
                 }
                 speed += force / mass * dt;

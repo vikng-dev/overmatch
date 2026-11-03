@@ -447,8 +447,6 @@ pub struct SideReport {
     pub contacts: Vec<BeltContact>,
     /// Longitudinal grip reaction summed into belt dynamics (N): sum of f_long.
     pub belt_reaction: f32,
-    /// Signed sum of patch rolling resistance on the hull (N), excluded from belt reaction.
-    pub rolling_resistance: f32,
     /// Terrain/construction facts before dynamic support damping; Driver observation only.
     pub perceived_support: Vec<super::load::SupportFact>,
     /// Material-station depth probes; surface quadrature casts are not recorded.
@@ -596,8 +594,7 @@ pub fn contact_side<O: TerrainOracle>(
         ),
         None => Vec::new(),
     };
-    let (elem_sum, belt_reaction, rolling) =
-        emit_contact_forces(&mut report, &cols, &elem_g, elements_mode);
+    let (elem_sum, belt_reaction) = emit_contact_forces(&mut report, &cols, &elem_g, elements_mode);
 
     // The grip slot carries the summed element force (long, lat) — telemetry only (the
     // element state is authoritative and lives with the caller). Belt dynamics (the joint
@@ -605,7 +602,6 @@ pub fn contact_side<O: TerrainOracle>(
     // `state.phase` are returned untouched, the pre-tick truth the phase advection and the
     // transmission both key on. Only grip reacts on the belt; rolling acts on the hull.
     report.state.grip = elem_sum;
-    report.rolling_resistance = rolling;
     report.belt_reaction = belt_reaction;
     report
 }
@@ -1329,9 +1325,10 @@ fn surface_under<O: TerrainOracle>(
 }
 
 /// Dupont elastic zone with Dahl return, shared by every surface. Below breakaway and
-/// during unloading the state is elastic; plastic flow bounds recoverable shear to `shear_m`.
-/// Each patch projects this shared world vector into its own plane when reading force.
-fn advance_element_strain(j0: Vec3, sdot: Vec3, dt: f32, shear_m: f32) -> Vec3 {
+/// during unloading the state is elastic; plastic flow bounds recoverable shear to
+/// [`GRIP_SHEAR_FLOOR_M`]. Each patch projects this vector into its own plane when reading force.
+fn advance_element_strain(j0: Vec3, sdot: Vec3, dt: f32) -> Vec3 {
+    let shear_m = GRIP_SHEAR_FLOOR_M;
     let speed = sdot.length();
     let alpha = if j0.dot(sdot) < 0.0 {
         0.0
@@ -1441,12 +1438,8 @@ fn update_grip_elements(
                 } else {
                     slips[c.element] / loads[c.element]
                 };
-                elements.strain[c.element] = advance_element_strain(
-                    elements.strain[c.element],
-                    mean_slip,
-                    dt,
-                    GRIP_SHEAR_FLOOR_M,
-                );
+                elements.strain[c.element] =
+                    advance_element_strain(elements.strain[c.element], mean_slip, dt);
             }
             // Below the enter bound the existing strain holds; each patch's force still scales
             // with its own current elastic load, including its own local damping slip.
@@ -1490,17 +1483,16 @@ fn update_grip_elements(
     elem_g
 }
 
-/// Emit support then total tangent force per contact. Returns summed grip, longitudinal
-/// belt reaction and signed hull rolling resistance, each in N.
+/// Emit support then total tangent force per contact. Returns summed grip and longitudinal
+/// belt reaction, each in N.
 fn emit_contact_forces(
     report: &mut SideReport,
     cols: &[ColumnContact],
     elem_g: &[Vec2],
     elements_mode: bool,
-) -> (Vec2, f32, f32) {
+) -> (Vec2, f32) {
     let mut elem_sum = Vec2::ZERO;
     let mut belt_reaction = 0.0;
-    let mut rolling_sum = 0.0;
     for (idx, c) in cols.iter().enumerate() {
         report.apps.push(ForceApp {
             force: c.normal * c.load,
@@ -1529,7 +1521,6 @@ fn emit_contact_forces(
             0.0 // No longitudinal tangent exists on this contact.
         };
         let rolling_force = -c.long_dir * rolling;
-        rolling_sum += rolling;
         if c.has_plane && elements_mode {
             report.apps.push(ForceApp {
                 force: traction + rolling_force,
@@ -1565,7 +1556,7 @@ fn emit_contact_forces(
             output.f_lat += f_lat;
         }
     }
-    (elem_sum, belt_reaction, rolling_sum)
+    (elem_sum, belt_reaction)
 }
 
 #[cfg(test)]
@@ -2820,8 +2811,11 @@ mod tests {
                 if hull.abs() < 1e-4 && state.speed.abs() < 1e-4 {
                     state.speed = 0.0;
                     let at_rest = grounded_tick(&oracle, &mut state, &mut elems, 0.0);
-                    assert_eq!(
-                        at_rest.rolling_resistance, 0.0,
+                    assert!(
+                        at_rest
+                            .contacts
+                            .iter()
+                            .all(|c| c.rolling_force == Vec3::ZERO),
                         "a vehicle at rest takes no rolling resistance"
                     );
                     let a = c_rr * (load_sum / ticks) / (mass + inertia);
@@ -2938,7 +2932,7 @@ mod tests {
         // FIXTURE: 1 mm/s alternating slip, 64 Hz, 60 simulated seconds.
         for tick in 0..64 * 60 {
             let slip = Vec3::X * if tick % 2 == 0 { 0.001 } else { -0.001 };
-            state = advance_element_strain(state, slip, 1.0 / 64.0, k);
+            state = advance_element_strain(state, slip, 1.0 / 64.0);
         }
         println!(
             "MEASURED closed-dither holding share {} -> {}",
@@ -2959,7 +2953,7 @@ mod tests {
         let mut state = Vec3::ZERO;
         for quarter in 1..=8 {
             for _ in 0..1024 {
-                state = advance_element_strain(state, Vec3::X * k, 1.0 / 4096.0, k);
+                state = advance_element_strain(state, Vec3::X * k, 1.0 / 4096.0);
             }
             let travel = quarter as f32 / 4.0;
             assert!(state.x > 0.0 && state.x <= k);
@@ -3241,7 +3235,8 @@ mod tests {
                 );
                 let load: f32 = report.contacts.iter().map(|c| c.load).sum();
                 let expected = ground.rolling_resistance * load * (hull_speed / ROLLING_FADE_SPEED);
-                assert!((report.rolling_resistance - expected).abs() < load * 1e-6);
+                let rolling: f32 = report.contacts.iter().map(|c| c.rolling_force.z).sum();
+                assert!((rolling - expected).abs() < load * 1e-6);
                 let reaction: f32 = report.contacts.iter().map(|c| c.f_long).sum();
                 assert_eq!(report.belt_reaction, reaction);
                 let hull_force: f32 = report.apps.iter().map(|a| -a.force.z).sum();
@@ -3300,7 +3295,8 @@ mod tests {
                 );
                 let normal: f32 = report.contacts.iter().map(|c| c.load).sum();
                 assert!(normal > 0.0);
-                assert!((report.rolling_resistance - expected * normal).abs() < normal * 1e-6);
+                let rolling: f32 = report.contacts.iter().map(|c| c.rolling_force.z).sum();
+                assert!((rolling - expected * normal).abs() < normal * 1e-6);
                 let grip_reaction: f32 = report.contacts.iter().map(|c| c.f_long).sum();
                 assert_eq!(
                     report.belt_reaction, grip_reaction,
