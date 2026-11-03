@@ -552,14 +552,9 @@ const SPAWN_SEARCH_RINGS: [(f32, &[Vec2]); 6] = [
     (48.0, &SPAWN_DIRS_38),
 ];
 
-/// Per-client spawn overrides chosen on the client's spawn map, keyed by the CLIENT LINK entity —
-/// the same key [`CombatantIds`] and `ControlledBy::owner` use, so a client can only ever move its
-/// own spawn (the message carries no id to forge).
-///
-/// Lifecycle: set/overwritten by [`receive_spawn_points`] on every accepted request, read by
-/// [`respawn_player_tanks`] on that client's next respawn, and PERSISTENT — it is NOT cleared on
-/// use, so every subsequent respawn keeps landing at the last point the player picked until they
-/// pick another. The initial join spawn ignores it entirely (the automatic rule owns first placement).
+/// Each link's last accepted map pick, retained through respawns until disconnect or the next
+/// fill-up. Sender-derived link keys prevent choosing for another player. Initial joins use
+/// automatic placement.
 #[derive(Resource, Default)]
 struct SpawnOverrides(bevy::platform::collections::HashMap<Entity, Vec2>);
 
@@ -718,6 +713,7 @@ fn receive_spawn_points(
 ) {
     let half_extent = spawn_map::world_half_extent(ground.height.as_deref());
     refused.retain(|link, _| receivers.contains(*link));
+    overrides.0.retain(|link, _| receivers.contains(*link));
     let mut geometry = None;
     for (link, mut receiver) in &mut receivers {
         if let Some(request) = receiver.receive().last() {
@@ -1680,6 +1676,31 @@ mod tests {
             app.world().get::<RespawnState>(root),
             Some(&RespawnState::default())
         );
+    }
+
+    /// Accepted destinations belong to their sending link. Disconnect churn must remove each
+    /// departed player's choice while a connected player's retained destination stays available.
+    #[test]
+    fn spawn_choices_end_with_the_sending_link() {
+        let mut app = spawn_pick_app();
+        let staying = pick_link(&mut app, 1);
+        let point = Vec2::new(100.0, 0.0); // Fixture clear destination.
+        send_pick(&mut app, staying, point);
+        for peer in 2..5 {
+            let leaving = pick_link(&mut app, peer);
+            send_pick(&mut app, leaving, point);
+            assert!(
+                app.world()
+                    .resource::<SpawnOverrides>()
+                    .0
+                    .contains_key(&leaving)
+            );
+            app.world_mut().despawn(leaving);
+            app.update();
+            let choices = &app.world().resource::<SpawnOverrides>().0;
+            assert_eq!(choices.len(), 1, "gone links retain no spawn choice");
+            assert_eq!(choices.get(&staying), Some(&point));
+        }
     }
 
     /// A peer can supersede many choices in one frame; only the newest may spend solver work
