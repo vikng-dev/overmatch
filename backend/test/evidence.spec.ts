@@ -20,6 +20,34 @@ async function end(s: { id: string; secret: string }): Promise<void> {
 }
 
 describe("stopped match servers leave evidence for the operator", () => {
+	it("preserves diagnostic text so the operator can read paths, timestamps and stats", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp();
+		const lines = [
+			"overmatch::net::server: server: client connected",
+			"src/buildings/fracture.rs:2100:9",
+			"12:45:41.925415Z",
+			"lightyear_netcode::server_plugin",
+			'server_stats {"tick_us":{"p50":123.4},"debris":{"live":2,"sleeping":18}}',
+			"SimTick(3963)",
+			"0.7.0-alpha.10",
+			"panic at fracture::weigh",
+			"::apply",
+			"::",
+		];
+		edgegap.logBody = { logs: lines.join("\n") };
+		await end(s);
+		expect((await archive(s.deploymentId))!.log).toBe(lines.join("\n"));
+	});
+
+	it("masks whole IPv4 and IPv6 address tokens before the operator's archive is stored", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp();
+		edgegap.logBody = { logs: ["42.113.67.73:57658", "[::ffff:1.2.3.4]:5888", "2001:db8::1", "fe80::1%en0", "::1"].join("\n") };
+		await end(s);
+		expect((await archive(s.deploymentId))!.log).toBe(["[ip]:57658", "[[ip]]:5888", "[ip]", "[ip]", "[ip]"].join("\n"));
+	});
+
 	it("archives stdout and crash fields before stop, with addresses and credentials masked in D1", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp();

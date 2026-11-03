@@ -19,9 +19,9 @@ function sanitizedTail(raw: string, providerToken: string): { log: string; trunc
 	clean = clean
 		.replace(/https?:\/\/\S+/gi, "[url]")
 		.replace(/\b[0-9a-f]{64,}\b/gi, "[credential]")
-		// IPv6 candidates include mapped IPv4 and zone ids; leave ordinary clock timestamps intact.
-		.replace(/[0-9a-f]*:[0-9a-f:.]+(?:%[a-z0-9]+)?/gi, (candidate) =>
-			candidate.includes("::") || (candidate.match(/:/g)?.length ?? 0) >= 3 ? "[ip]" : candidate)
+		// Whole IPv6 tokens include mapped IPv4 and zone ids; preserve Rust paths and clock timestamps.
+		.replace(/(?<![\w:])[0-9a-f]*:[0-9a-f:.]+(?:%[a-z0-9]+)?(?![\w:])/gi, (candidate) =>
+			/[0-9a-f]/i.test(candidate) && (candidate.includes("::") || (candidate.match(/:/g)?.length ?? 0) >= 3) ? "[ip]" : candidate)
 		.replace(/(?:\d{1,3}\.){3}\d{1,3}/g, "[ip]");
 	const bytes = new TextEncoder().encode(clean);
 	let start = Math.max(0, bytes.length - SERVER_LOG_MAX_BYTES);
