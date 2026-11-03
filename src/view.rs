@@ -188,16 +188,13 @@ pub(crate) struct ViewProfile {
 pub(crate) const DEFAULT_BUDGET_PX: f32 = 1.0;
 
 impl ViewProfile {
-    /// Shared facts at `budget_px`; invalid budgets substitute [`DEFAULT_BUDGET_PX`].
+    /// Shared facts at a positive finite `budget_px`; callers choose any authored default.
     pub(crate) fn of(facts: ViewFacts, budget_px: f32) -> Self {
-        Self {
-            facts,
-            budget_px: if budget_px.is_finite() && budget_px > 0.0 {
-                budget_px
-            } else {
-                DEFAULT_BUDGET_PX
-            },
-        }
+        assert!(
+            budget_px.is_finite() && budget_px > 0.0,
+            "LOD consumers supply a positive finite pixel budget from admitted settings or their authored default"
+        );
+        Self { facts, budget_px }
     }
 
     /// Distance where `dev_m` fits the budget, plus radius slack: `VisibilityRange` measures an
@@ -336,7 +333,6 @@ mod tests {
     }
 
     /// Invalid FOV/height cannot masquerade as measurements (e.g. narrow optic/1080 px).
-    /// Only the authored budget knob has a default ([`DEFAULT_BUDGET_PX`]).
     #[test]
     fn an_input_that_is_not_a_measurement_is_not_a_view() {
         for (fov, height) in [
@@ -354,13 +350,22 @@ mod tests {
                 "{fov} rad × {height} px is not a view anything may select through",
             );
         }
-        for budget in [-1.0, 0.0, f32::NAN, f32::INFINITY] {
-            let view = ViewProfile::of(measured(0.12, 1440.0), budget);
-            assert_eq!(view.budget_px, DEFAULT_BUDGET_PX);
-            assert!(view.switch_distance_m(0.01, 0.5).is_finite());
-        }
         // A zero-deviation level is the source surface: it owns the camera, not the radius alone.
         assert_eq!(measured(0.12, 1080.0).sub_pixel_distance_m(0.0, 1.0), 0.0);
+    }
+
+    /// LOD consumers must not silently replace invalid internal budgets with another selection
+    /// policy. A removed constructor assertion lets every invalid fixture reach a profile.
+    #[test]
+    fn invalid_lod_budgets_are_bugs_in_the_consumer() {
+        // Fixture measurements and invalid budgets; independent of any consumer's chosen taste.
+        let facts = measured(0.12, 1440.0);
+        for budget in [-1.0, 0.0, f32::NEG_INFINITY, f32::NAN, f32::INFINITY] {
+            assert!(
+                std::panic::catch_unwind(|| ViewProfile::of(facts, budget)).is_err(),
+                "invalid internal budget {budget} must be refused"
+            );
+        }
     }
 
     /// Subthreshold FOV nudges hold the field to avoid permanent `VisibilityRange` table growth.
