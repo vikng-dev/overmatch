@@ -33,7 +33,7 @@ pub(crate) enum Overlay {
     /// The Esc cursor-release menu (the net stand-in for SP pause; the sim never stops). Esc is the
     /// only thing that opens it — losing focus releases the cursor without declaring an overlay.
     Menu,
-    /// The match's link dropped: "RECONNECTING…". Declared only in a match, while its link is down.
+    /// The match's link dropped: reconnect status, with LEAVE MATCH available above its scrim.
     ConnectStatus,
 }
 
@@ -55,10 +55,9 @@ impl Overlay {
     /// presence or backdrop of its own; the menu owns those.
     pub(crate) const MENU_CONTENT_Z: i32 = Overlay::Menu.zindex() + 10;
 
-    /// Matchmaking's LEAVE MATCH button: above the full-screen settings wrapper to receive clicks,
-    /// below layers covering the menu. Like [`Self::MENU_CONTENT_Z`], it has no `OverlayNode` and
-    /// shows only while the menu owns the scrim.
-    pub(crate) const MENU_ACTIONS_Z: i32 = Overlay::MENU_CONTENT_Z + 1;
+    /// Matchmaking's LEAVE MATCH button: above both the menu page and reconnect scrim so the
+    /// player can leave immediately. No `OverlayNode`; shown only over `Menu` or `ConnectStatus`.
+    pub(crate) const MATCH_ACTIONS_Z: i32 = Overlay::ConnectStatus.zindex() + 1;
 
     /// Optic surround with glass cut out (`sight::reticle`): below world labels, fixed HUD, graticule,
     /// intent cursor and every overlay, so overlays cover it whole. Keep its rung here, like
@@ -483,9 +482,9 @@ mod tests {
             "the map and the death screen must still cover the menu's content",
         );
         assert!(
-            Overlay::MENU_ACTIONS_Z > Overlay::MENU_CONTENT_Z
-                && Overlay::MENU_ACTIONS_Z < Overlay::SpawnMap.zindex(),
-            "the menu's actions draw over its page and under whatever covers the menu",
+            Overlay::MATCH_ACTIONS_Z > Overlay::MENU_CONTENT_Z
+                && Overlay::MATCH_ACTIONS_Z > Overlay::ConnectStatus.zindex(),
+            "leave match stays clickable over the menu page and reconnect scrim",
         );
     }
 

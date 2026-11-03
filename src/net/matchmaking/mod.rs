@@ -297,3 +297,50 @@ pub(super) fn try_join(world: &mut World, ids: &[&str]) -> bool {
 pub(super) fn join_failure(world: &World) -> Option<String> {
     world.resource::<Lobby>().flow.failure().map(str::to_owned)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The returning player sees the server-loss cause through the installed MatchClosed reader,
+    /// lobby screen spawner and footer refresher, even when the location fetch fails separately.
+    #[test]
+    fn an_ended_match_renders_its_server_loss_cause_in_the_lobby() {
+        let mut app = crate::net::test_harness::base_app();
+        app.init_asset::<Font>()
+            .add_plugins((crate::ui_font::plugin, crate::flow::plugin));
+        install(&mut app, "http://127.0.0.1:9");
+        crate::net::test_harness::finish(&mut app);
+        // Fixture ticket: the lobby has handed a ready match to the client link.
+        let ready = ReadyMatch {
+            addr: "127.0.0.1:9".parse().unwrap(),
+            key: [0; 32],
+        };
+        let flow = &mut app.world_mut().resource_mut::<Lobby>().flow;
+        let generation = flow.join(0.0).unwrap();
+        flow.joined(generation, Ok("fixture-ticket".into()), 0.0);
+        assert_eq!(
+            flow.status(generation, ticket::StatusOutcome::Ready(ready), 0.0),
+            StatusEvent::Ready(ready)
+        );
+        app.world_mut()
+            .resource_mut::<NextState<Flow>>()
+            .set(Flow::InMatch);
+        app.update();
+        let cause = "the match server stopped answering";
+        app.world_mut()
+            .write_message(MatchClosed::Ended(cause.into()));
+        app.world_mut()
+            .resource_mut::<NextState<Flow>>()
+            .set(Flow::Lobby);
+        app.update();
+        let world = app.world_mut();
+        assert!(
+            world
+                .query::<&Text>()
+                .iter(world)
+                .any(|text| { text.0 == format!("Match server lost: {cause}") }),
+            "returning to the lobby must explain the lost server on screen"
+        );
+    }
+}

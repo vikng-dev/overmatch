@@ -42,6 +42,8 @@ use crate::{CombatantId, NetClientPlugin, ShotId, SimPlugin};
 mod policy;
 use policy::client_policy;
 
+const RECONNECT_LABEL: &str = "Connection lost, trying to reconnect…";
+
 const SERVER_PORT: u16 = 5888;
 const LOCAL_SERVER: &str = "127.0.0.1:5888";
 /// The matchmaking Worker's base URL baked in at build time (the release workflow sets
@@ -715,7 +717,7 @@ struct ConnectRetry {
     /// rest, not a failed attempt to retry.
     initiated: bool,
     /// We reached `Connected` at least once on this link. Distinguishes "never connected yet" (the
-    /// joining screen) from "was in game, lost the link" (the match with `RECONNECTING…` over it).
+    /// joining screen) from "was in game, lost the link" (the match with the reconnect overlay).
     connected_once: bool,
     /// Connect attempts that have already failed and been retried — drives the `(retry N)` suffix
     /// and the backoff schedule. Reset to 0 on a successful `Connected`.
@@ -747,7 +749,7 @@ fn reconnect_backoff_secs(attempts: u32) -> f64 {
 
 /// Frame-rate first-connect/retry driver over the single link's markers.
 ///
-/// * `Connected`: clear retry ledger, latch `connected_once`; later loss shows RECONNECTING.
+/// * `Connected`: clear retry ledger, latch `connected_once`; later loss shows the reconnect overlay.
 /// * Uninitiated: await tank assets so the replicated root assembles whole from extracted data
 ///   with view pop-in of CLAIMED ~one frame. `SimPlugin` / `world::plugin` supplies real terrain
 ///   on both peers for track probes; no local ground spawn.
@@ -1070,7 +1072,7 @@ fn close_lost_match(
 
 /// The connect screens. The first connect is the [`Flow::Joining`](crate::flow::Flow) screen,
 /// spawned on entering it and labelled from [`ConnectRetry`]; a match's dropped link is
-/// `Overlay::ConnectStatus` ("RECONNECTING…"), declared only in a match, in the `Declare` phase,
+/// `Overlay::ConnectStatus`, declared only in a match, in the `Declare` phase,
 /// before the cursor owner derives the input license from the set.
 pub(super) fn connect_screen_plugin(app: &mut App) {
     use crate::flow::{Flow, InMatchSystems};
@@ -1105,7 +1107,7 @@ fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
             crate::overlay::OverlayNode(crate::overlay::Overlay::ConnectStatus),
             Visibility::Hidden,
         ),
-        "RECONNECTING…",
+        RECONNECT_LABEL,
         ConnectStatusText,
         Some(Color::srgba(0.0, 0.0, 0.0, 0.6)),
     );
@@ -1129,7 +1131,7 @@ fn screen_label(retry: &ConnectRetry) -> String {
     match retry.refusal {
         Some(reason) => reason.message().to_owned(),
         None if !retry.initiated => "LOADING…".to_owned(),
-        None if retry.connected_once && retry.down_since.is_some() => "RECONNECTING…".to_owned(),
+        None if retry.connected_once && retry.down_since.is_some() => RECONNECT_LABEL.to_owned(),
         None if retry.connected_once => "LOADING…".to_owned(),
         None => joining_label(retry.attempts),
     }
@@ -1170,7 +1172,7 @@ fn update_connect_status(
 ) {
     let down = links.iter().any(|connected| !connected);
     overlays.declare(crate::overlay::Overlay::ConnectStatus, down);
-    let label = retry.refusal.map_or("RECONNECTING…", JoinRefusal::message);
+    let label = retry.refusal.map_or(RECONNECT_LABEL, JoinRefusal::message);
     for mut text in &mut labels {
         if text.0 != label {
             text.0 = label.to_owned();

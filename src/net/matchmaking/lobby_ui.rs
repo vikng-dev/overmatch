@@ -459,7 +459,7 @@ fn status(lobby: &Lobby, now: f64) -> (String, Color) {
         return (format!("Couldn't join: {}", printable(reason)), WARN);
     }
     if let Some(reason) = flow.ended() {
-        return (format!("The match ended: {}", printable(reason)), TEXT);
+        return (format!("Match server lost: {}", printable(reason)), TEXT);
     }
     match &lobby.locations {
         Locations::Loaded(_) if lobby.selection.is_empty() => {

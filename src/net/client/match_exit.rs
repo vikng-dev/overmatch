@@ -18,7 +18,7 @@
 //!   returning to the lobby has no replica to clean up. Both exits replicate one tank root first
 //!   and fail if it outlives the link.
 //! - **A stall over a live server.** The link drops (the server stops answering), then one client
-//!   frame spans [`LONG_STALL`], past the give-up, while the server comes back. The client must
+//!   frame spans twice the policy give-up while the server comes back. The client must
 //!   try again on resume and stay in the match: the give-up counts failed attempts, not a stall.
 //!
 //! The asset gate on the first connect is stood in for: the test marks the attempt initiated and
@@ -44,8 +44,6 @@ const SLOW_FRAME: Duration = Duration::from_secs(1);
 /// Fixture bound in [`SLOW_FRAME`] units: the shipped reconnect budget, backoff cap and slack.
 /// Virtual time clamps each frame, so the same bound refuses a virtual-clock give-up.
 const GONE_FRAMES: u32 = 45;
-/// One frame of a suspended or hitched client, twice the give-up.
-const LONG_STALL: Duration = Duration::from_secs(60);
 /// Slow frames of a server outage: past netcode's 3 s client timeout, so the link is down.
 const OUTAGE_FRAMES: u32 = 8;
 
@@ -268,7 +266,9 @@ fn a_stall_past_the_give_up_over_a_live_server_reconnects_into_the_match() {
         "fixture: the give-up clock runs from before the stall"
     );
 
-    client.insert_resource(TimeUpdateStrategy::ManualDuration(LONG_STALL));
+    client.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        2.0 * client_policy().reconnect_give_up_s.0,
+    )));
     step(None, &mut client);
     client.insert_resource(TimeUpdateStrategy::ManualDuration(TICK));
     let mut back = false;
@@ -292,4 +292,30 @@ fn a_stall_past_the_give_up_over_a_live_server_reconnects_into_the_match() {
     }
     assert!(back, "the link never reconnected after the stall");
     assert!(client.world().resource::<Closed>().0.is_empty());
+}
+
+/// Players survive brief stalls and roughly three-second network hitches without being sent back
+/// to the lobby. Fixture outage durations describe the owner's recovery scenarios, not policy.
+#[test]
+fn brief_stalls_and_three_second_hitches_keep_the_match() {
+    let _udp = lock_real_udp_test();
+    for outage in [Duration::from_millis(500), Duration::from_secs(3)] {
+        let (mut server, mut client) = in_match();
+        let link = links(&mut client)[0];
+        client.insert_resource(TimeUpdateStrategy::ManualDuration(outage));
+        step(None, &mut client);
+        client.insert_resource(TimeUpdateStrategy::ManualDuration(TICK));
+        let mut back = false;
+        for _ in 0..CONNECT_STEPS {
+            step(Some(&mut server), &mut client);
+            assert_eq!(flow(&client), Flow::InMatch, "outage {outage:?}");
+            assert!(client.world().get_entity(link).is_ok());
+            if client.world().get::<Connected>(link).is_some() {
+                back = true;
+                break;
+            }
+        }
+        assert!(back, "the link never recovered from {outage:?}");
+        assert!(client.world().resource::<Closed>().0.is_empty());
+    }
 }

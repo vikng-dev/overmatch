@@ -1,5 +1,5 @@
 (
-    reconnect_give_up_s: (30.0, Taste("connection UX: retry a dropped match for twice the Worker's 15-second heartbeat deadline before ending it")),
+    reconnect_give_up_s: (12.0, Taste("connection UX: return promptly when a match server is lost, while allowing brief stalls and network hitches to recover")),
     reconnect_base_s: (1.0, Taste("connection UX: initial retry wait avoids hammering a down server")),
     reconnect_step_s: (0.5, Taste("connection UX: mild retry growth while a server recovers")),
     reconnect_cap_s: (5.0, Taste("connection UX: keep checking a down server at least this often; direct links retry indefinitely")),

@@ -33,7 +33,7 @@ pub(crate) enum Flow {
     /// view through the asset load and the connect until this client's own tank is presented
     /// (`net::client::latch_tank_seen`: its view has bound to a complete local body).
     Joining,
-    /// The match world is on screen, a dropped link (RECONNECTING…) included.
+    /// The match world is on screen, a dropped link with its reconnect overlay included.
     InMatch,
 }
 
@@ -173,7 +173,7 @@ fn log_flow(flow: Res<State<Flow>>) {
 mod tests {
     use super::*;
 
-    /// A dropped link stays in the match: RECONNECTING… is an overlay over the match world, not a
+    /// A dropped link stays in the match: reconnect status is an overlay over the match world, not a
     /// screen. Only losing the link entity (an abandoned or left match) leaves it.
     #[test]
     fn a_dropped_link_stays_in_the_match_and_a_lost_link_returns_to_the_lobby() {
