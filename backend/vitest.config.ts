@@ -10,7 +10,7 @@ export default defineConfig({
 				bindings: {
 					TEST_MIGRATIONS: await readD1Migrations(path.join(import.meta.dirname, "migrations")),
 					EDGEGAP_API: "https://edgegap.test",
-					EDGEGAP_TOKEN: "test-token",
+					EDGEGAP_TOKEN: "fixture-opaque-value",
 					PROVIDER_TIMEOUT_S: "0.5",
 					ACCESS_TEAM_DOMAIN: "https://team.access.test",
 					ACCESS_AUD: "test-aud",

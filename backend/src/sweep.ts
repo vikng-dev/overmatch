@@ -25,8 +25,11 @@ import { idOf, validVersion } from "./ids";
 import { diag } from "./reasons";
 import { registryFor } from "./registry";
 
+// Resolution: cap serial listing work at 100 provider calls; warn if the account exceeds that budget.
 export const SWEEP_MAX_PAGES = 100;
+// Resolution: ten five-task waves bound status work, leaving capture/stop work a separate budget.
 export const SWEEP_MAX_CHECKS = 50;
+// Resolution: five five-task waves bound stop work; rotation gives deferred deployments a turn.
 export const SWEEP_MAX_STOPS = 25;
 /** The `triggers.crons` period: one rotation step per sweep. */
 const SWEEP_PERIOD_MS = 60_000;

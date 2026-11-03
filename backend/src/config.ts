@@ -67,6 +67,7 @@ export function config(env: Env): Config {
 		reservationTtlMs: num(env, "RESERVATION_TTL_S", 0) * s,
 		ticketTtlMs: num(env, "TICKET_TTL_S", 1) * s,
 		emptyExitS: num(env, "EMPTY_EXIT_S", 0),
+		// Unknown: no operating-frequency or storage budget establishes this 1 ms minimum.
 		serverStatsS: num(env, "SERVER_STATS_S", 0.001),
 		serverLogRetentionMs: num(env, "SERVER_LOG_RETENTION_DAYS", 1) * 24 * 60 * 60 * s,
 		endedRetentionMs: num(env, "ENDED_RETENTION_S", 0) * s,

@@ -3,15 +3,16 @@ import { bounded } from "./deadline";
 import type { Provider } from "./edgegap";
 import { diag } from "./reasons";
 
-// Resolution: 1 MiB tail. DERIVED from the owner's 140 KB / 42 min log plus about 250 KB of
-// 5 s stats, with headroom for longer matches. Bound bytes after redaction, not UTF-16 characters.
+// Resolution: cap each archive at 1 MiB to bound D1 storage; retain the newest diagnostic lines.
+// Bound bytes after filtering and redaction, not UTF-16 characters.
 export const SERVER_LOG_MAX_BYTES = 1024 * 1024;
 
 /** The deployed server never logs hosting secrets (hosting.rs); netcode does log peer addresses
  * and token whitelist diagnostics. Drop credential-bearing lines and URLs defensively, including
  * crash_data env dumps. Mask the generated 32-byte hex credentials even without a field label. */
 function sanitizedTail(raw: string, providerToken: string): { log: string; truncated: boolean } {
-	let clean = raw.split("\n").map((line) =>
+	// src/net/diagnostics.rs::log_sim_evidence owns SIM-EVIDENCE; server_stats supplies the pace.
+	let clean = raw.split("\n").filter((line) => !line.includes("SIM-EVIDENCE")).map((line) =>
 		/secret|token|password|authorization|private[_ -]?key|netcode[_ -]?key|env_vars|environment/i.test(line)
 			? "[credential line redacted]" : line,
 	).join("\n");
@@ -30,19 +31,20 @@ function sanitizedTail(raw: string, providerToken: string): { log: string; trunc
 	return { log: new TextDecoder().decode(bytes.subarray(start)), truncated: start > 0 };
 }
 
-/** All Worker stop paths archive first. Each read/write/fetch is bounded; capture failure never
- * vetoes the stop. A stored log survives stop retries, registry retention and missing history. */
+/** The committed marker precedes all log reads. Any existing row skips capture, so an invocation
+ * killed during capture cannot make its stop retries refetch the same body and die again.
+ * Handled capture failures still stop in this invocation; an interrupted one needs a later stop. */
 export async function stopWithEvidence(env: Env, provider: Provider, serverId: string, deploymentId: string, timeoutMs: number): Promise<void> {
 	try {
-		const stored = await bounded(timeoutMs, () => env.DB.prepare("SELECT log IS NOT NULL AS stored FROM server_logs WHERE deployment_id = ?1")
-			.bind(deploymentId).first<{ stored: number }>());
-		if (!stored?.stored) {
+		const mark = await bounded(timeoutMs, () => env.DB.prepare(
+			`INSERT INTO server_logs (server_id, deployment_id, captured_at, log, truncated, error)
+			 VALUES (?1, ?2, ?3, NULL, 0, 'capture incomplete') ON CONFLICT (deployment_id) DO NOTHING`,
+		).bind(serverId, deploymentId, Date.now()).run());
+		if (mark.meta.changes > 0) {
 			const tail = sanitizedTail(await provider.containerLogs(deploymentId), env.EDGEGAP_TOKEN);
 			await bounded(timeoutMs, () => env.DB.prepare(
-				`INSERT INTO server_logs (server_id, deployment_id, captured_at, log, truncated, error) VALUES (?1, ?2, ?3, ?4, ?5, NULL)
-				 ON CONFLICT (deployment_id) DO UPDATE SET captured_at = excluded.captured_at, log = excluded.log,
-				 truncated = excluded.truncated, error = NULL WHERE server_logs.log IS NULL`,
-			).bind(serverId, deploymentId, Date.now(), tail.log, Number(tail.truncated)).run());
+				"UPDATE server_logs SET log = ?2, truncated = ?3, error = NULL WHERE deployment_id = ?1",
+			).bind(deploymentId, tail.log, Number(tail.truncated)).run());
 		}
 	} catch (err) {
 		const error = diag(err);

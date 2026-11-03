@@ -74,8 +74,8 @@ export interface Provider {
 	beacons(): Promise<Beacon[]>;
 }
 
-/** A failed provider call. It carries the operation and HTTP status only; the response body is
- *  discarded unread, because it may echo request values (see reasons.ts). */
+/** A failed provider call. It carries the operation and HTTP status only; error bodies are
+ * discarded unread because they may echo request values. Locally refused log bodies use 413. */
 export class ProviderError extends Error {
 	constructor(
 		readonly op: string,
@@ -91,8 +91,13 @@ export function edgegapFor(env: Env, timeoutMs: number): Provider {
 	return new Edgegap(env.EDGEGAP_API, env.EDGEGAP_TOKEN, env.EDGEGAP_APP, env.EDGEGAP_PORT_NAME, timeoutMs);
 }
 
+// Resolution: request up to 100 records per exchange to amortize HTTP calls; follow shorter pages.
 const PAGE_LIMIT = 100;
+// Resolution: refuse a location listing after 50 serial calls rather than follow pagination forever.
 const MAX_PAGES = 50;
+// Resolution: cap raw log input before decoding/parsing to bound peak memory. DERIVED: 16 MiB
+// times roughly four transient body copies budgets about 64 MiB of working data per capture.
+export const SERVER_LOG_BODY_MAX_BYTES = 16 * 1024 * 1024;
 
 export class Edgegap implements Provider {
 	constructor(
@@ -188,16 +193,41 @@ export class Edgegap implements Provider {
 
 	async containerLogs(deploymentId: string): Promise<string> {
 		return this.request("logs", "GET", `/v1/deployment/${encodeURIComponent(deploymentId)}/container-logs`, undefined, async (res) => {
-			const out = await this.json<Record<string, unknown>>(res, "logs");
-			if (!out || typeof out !== "object" || Array.isArray(out)) throw new ProviderError("logs", 502);
-			for (const key of ["logs", "crash_logs"]) {
-				if (out[key] != null && typeof out[key] !== "string") throw new ProviderError("logs", 502);
+			if (!res.ok) {
+				await res.body?.cancel();
+				throw new ProviderError("logs", res.status);
 			}
-			if (!["logs", "crash_logs", "crash_data"].some((key) => key in out)) throw new ProviderError("logs", 502);
+			if (!res.body) throw new ProviderError("logs", 502);
+			const reader = res.body.getReader();
+			const decoder = new TextDecoder();
+			const parts: string[] = [];
+			let bytes = 0;
+			try {
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					bytes += value.byteLength;
+					if (bytes > SERVER_LOG_BODY_MAX_BYTES) {
+						await reader.cancel();
+						throw new ProviderError("logs", 413);
+					}
+					parts.push(decoder.decode(value, { stream: true }));
+				}
+				parts.push(decoder.decode());
+			} finally {
+				reader.releaseLock();
+			}
+			const out: unknown = JSON.parse(parts.join(""));
+			if (!out || typeof out !== "object" || Array.isArray(out)) throw new ProviderError("logs", 502);
+			const fields = out as Record<string, unknown>;
+			for (const key of ["logs", "crash_logs"]) {
+				if (fields[key] != null && typeof fields[key] !== "string") throw new ProviderError("logs", 502);
+			}
+			if (!["logs", "crash_logs", "crash_data"].some((key) => key in fields)) throw new ProviderError("logs", 502);
 			return [
-				out.logs ?? "",
-				...(out.crash_logs != null ? ["--- crash_logs ---", out.crash_logs] : []),
-				...(out.crash_data != null ? ["--- crash_data ---", JSON.stringify(out.crash_data)] : []),
+				fields.logs ?? "",
+				...(fields.crash_logs != null ? ["--- crash_logs ---", fields.crash_logs] : []),
+				...(fields.crash_data != null ? ["--- crash_data ---", JSON.stringify(fields.crash_data)] : []),
 			].join("\n");
 		});
 	}

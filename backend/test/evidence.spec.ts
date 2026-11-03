@@ -1,7 +1,7 @@
-import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it, vi } from "vitest";
 import { config } from "../src/config";
-import { edgegapFor } from "../src/edgegap";
+import { edgegapFor, SERVER_LOG_BODY_MAX_BYTES } from "../src/edgegap";
 import { SERVER_LOG_MAX_BYTES, stopWithEvidence } from "../src/evidence";
 import { idOf } from "../src/ids";
 import { sweep } from "../src/sweep";
@@ -85,6 +85,61 @@ describe("stopped match servers leave evidence for the operator", () => {
 		expect(row.log!.endsWith("last reading")).toBe(true);
 	});
 
+	it("drops a SIM-EVIDENCE flood before the tail bound so the operator retains earlier stats", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp();
+		const stats = 'server_stats {"ticks":320}';
+		const floodLine = `net: SIM-EVIDENCE ${"x".repeat(1024)}\n`;
+		edgegap.logBody = { logs: `${stats}\n${floodLine.repeat(Math.ceil(SERVER_LOG_MAX_BYTES / floodLine.length) + 1)}last diagnostic` };
+		await end(s);
+		expect(await archive(s.deploymentId)).toMatchObject({ log: `${stats}\nlast diagnostic`, truncated: 0 });
+	});
+
+	it("cancels an oversized log stream at the byte limit and still stops the deployment", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp();
+		// Fixture chunks expose any read beyond the first over-limit chunk, without allocating a huge body.
+		const chunkBytes = 64 * 1024;
+		let bytesRead = 0;
+		let cancelled = false;
+		edgegap.logResponse = () => new Response(new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (bytesRead > SERVER_LOG_BODY_MAX_BYTES) throw new Error("read beyond the oversized chunk");
+				const chunk = new Uint8Array(chunkBytes).fill(120);
+				if (bytesRead === 0) chunk.set(new TextEncoder().encode('{"logs":"'));
+				bytesRead += chunk.byteLength;
+				controller.enqueue(chunk);
+			},
+			cancel() { cancelled = true; },
+		}, { highWaterMark: 0 }));
+		await end(s);
+		expect(cancelled).toBe(true);
+		expect(bytesRead).toBe(SERVER_LOG_BODY_MAX_BYTES + chunkBytes);
+		expect(await archive(s.deploymentId)).toMatchObject({ log: null, error: "logs HTTP 413" });
+		expect(edgegap.deployment().status).toBe("Status.TERMINATED");
+	});
+
+	it("commits the marker before a killed capture and lets the retried stop skip fetching", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp();
+		edgegap.hangLogs.add(s.deploymentId);
+		const ending = call("POST", `/v1/servers/${s.id}/end`, { reason: "empty" }, { authorization: `Bearer ${s.secret}` });
+		try {
+			await vi.waitFor(() => expect(edgegap.count("GET", `/v1/deployment/${s.deploymentId}/container-logs`)).toBe(1));
+			expect(await archive(s.deploymentId)).toMatchObject({ log: null, error: "capture incomplete" });
+			expect(edgegap.count("DELETE", `/v1/stop/${s.deploymentId}`)).toBe(0);
+		} finally {
+			// Reset the live object while its fetch is pending, preserving its SQLite and D1 state.
+			await abortAllDurableObjects();
+			await ending;
+		}
+		await age(V, config(env).statusPollMs + 1);
+		await runDurableObjectAlarm(registry(V));
+		expect(edgegap.count("GET", `/v1/deployment/${s.deploymentId}/container-logs`)).toBe(1);
+		expect(edgegap.deployment().status).toBe("Status.TERMINATED");
+		expect(await archive(s.deploymentId)).toMatchObject({ log: null, error: "capture incomplete" });
+	});
+
 	for (const failure of ["404", "503", "malformed", "timeout"] as const) {
 		it(`records a ${failure} log failure and still stops the server`, async () => {
 			await join({ version: V, locations: ["Paris"], pings: {} });
@@ -115,17 +170,19 @@ describe("stopped match servers leave evidence for the operator", () => {
 		expect(edgegap.deployment().status).toBe("Status.TERMINATED");
 	});
 
-	it("retries failed capture when stop also failed, preserving the later successful log", async () => {
+	it("never retries a failed capture when the provider stop needs another attempt", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp();
 		edgegap.logStatus = 503;
 		edgegap.failStops = 1;
 		await end(s);
+		const failed = await archive(s.deploymentId);
 		edgegap.logStatus = 200;
 		await age(V, config(env).statusPollMs + 1);
 		await runDurableObjectAlarm(registry(V));
-		expect(edgegap.count("GET", `/v1/deployment/${s.deploymentId}/container-logs`)).toBe(2);
-		expect(await archive(s.deploymentId)).toMatchObject({ error: null, log: expect.stringContaining("server_stats") });
+		expect(edgegap.count("GET", `/v1/deployment/${s.deploymentId}/container-logs`)).toBe(1);
+		expect(await archive(s.deploymentId)).toEqual(failed);
+		expect(edgegap.deployment().status).toBe("Status.TERMINATED");
 	});
 
 	it("captures a heartbeat-lost server before the alarm stops it", async () => {
@@ -174,7 +231,23 @@ describe("stopped match servers leave evidence for the operator", () => {
 		expect(d.status).toBe("Status.TERMINATED");
 	});
 
-	it("a D1 read or failure-write stall cannot veto the provider stop", async () => {
+	it("skips reading logs after a failed marker and records the failure if D1 recovers", async () => {
+		const d = edgegap.foreign([], V);
+		let refuseMark = true;
+		const broken = { ...env, DB: { prepare: (sql: string) => {
+			if (refuseMark) {
+				refuseMark = false;
+				throw new Error("fixture marker write refused");
+			}
+			return env.DB.prepare(sql);
+		} } as unknown as D1Database };
+		await stopWithEvidence(broken, edgegapFor(env, config(env).providerTimeoutMs), "fixture", d.id, config(env).providerTimeoutMs);
+		expect(edgegap.count("GET", `/v1/deployment/${d.id}/container-logs`)).toBe(0);
+		expect(await archive(d.id)).toMatchObject({ log: null, error: "Error" });
+		expect(d.status).toBe("Status.TERMINATED");
+	});
+
+	it("a D1 marker or failure-write stall cannot veto the provider stop", async () => {
 		const d = edgegap.foreign([], V);
 		const stalled = () => new Promise<never>(() => {});
 		const broken = { ...env, DB: { prepare: () => ({ bind: () => ({ first: stalled, run: stalled }) }) } as unknown as D1Database };

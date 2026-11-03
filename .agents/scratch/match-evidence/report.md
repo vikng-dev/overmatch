@@ -1,18 +1,19 @@
-New match deployments enable stats every 5 seconds (Resolution: sampling detail versus log size).
-The released `v0.7.0-alpha.10` source already reads this lever; no game release is required.
+Normal ends, losses, startup failures, forgotten claims and attributed orphans mark D1 before
+reading logs. Later stops skip capture, including failures. Killed invocations leave
+`capture incomplete`; another stop must follow. Concurrent stops can overtake capture.
+Mark failure skips reading and still stops, recording what D1 permits.
 
-Normal end, heartbeat loss, startup failure, late forgotten claims and attributed orphan stops all
-archive before stopping. D1 keeps the redacted UTF-8 tail, deployment/server ids, capture time,
-truncation flag, or a safe failure diagnostic. Successful snapshots survive stop retries; cron
-expires snapshots and failures after 14 days (operator retention choice). The 1 MiB bound is
-DERIVED from the supplied log-size estimate plus headroom.
+Resolution: stream at most 16 MiB before parsing; oversize responses leave an error, no log. Drop
+`SIM-EVIDENCE`; its detailed tank/track readings are lost, while stats retain pace. Redact and keep
+the newest 1 MiB of other lines. Earlier overflow, later lines, failed captures, disappeared
+deployments without another stop, and unattributed orphans remain unavailable. Process-exit log
+availability is unverified. D1 outages can also lose diagnostics. Retention deletes evidence after
+14 days (operator choice). Released servers already support 5-second stats.
 
-Capture failures never veto stops. D1 outages can lose evidence and its diagnostic. Later lines,
-unattributed orphans, and deployments disappearing without a following Worker stop remain lost.
-`cmd_logs` says deployment stops delete provider logs; availability after process exit alone is
-unverified. A 404 is recorded when capture is attempted.
+The 0.001-second minimum remains unjustified. Page/sweep limits name work budgets.
+`scripts/edgegap/test_session.py` still has no runner.
 
-Orchestrator commands after merge, from the repository root (not run here):
+Orchestrator only; not run remotely:
 
 ```sh
 cd backend
@@ -21,8 +22,8 @@ npx wrangler d1 migrations apply overmatch-sessions --remote
 npx wrangler deploy
 ```
 
-Read by deployment id from `backend/`:
+Read from `backend/` (Wrangler output shape checked locally):
 
 ```sh
-npx wrangler d1 execute overmatch-sessions --remote --command "SELECT server_id, captured_at, truncated, error, log FROM server_logs WHERE deployment_id = 'eb3ad1b3be65';"
+npx wrangler d1 execute overmatch-sessions --remote --json --command "SELECT log, error FROM server_logs WHERE deployment_id = 'eb3ad1b3be65';" | jq -r '.[] | .results[] | .log // .error // empty'
 ```

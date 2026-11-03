@@ -12,8 +12,8 @@
 // - The alarm is idempotent (delivery is at-least-once) and is always set to the earliest deadline;
 //   with no rows left it is cleared and the object goes idle. It makes every due transition and
 //   persists every row's next attempt time synchronously, re-arms itself, and only then does the
-//   outbound work — each call bounded (PROVIDER_TIMEOUT_S) and independent of the others, so one
-//   slow call delays no other row.
+//   outbound work. Each call is bounded by PROVIDER_TIMEOUT_S. A stop can occupy an outbound
+//   slot for five bounds (mark, fetch, result, failure record, stop); later work and replacements wait.
 // - A claim whose deploy outcome is unknown (timeout, lost response, 5xx) is never replaced while
 //   its fate is unknown: its tickets stay with it, and the alarm looks the deployment up by the
 //   claim's tag (`tagOf`). Found, it is adopted (or stopped, past the deadline); a lookup past the
@@ -345,6 +345,7 @@ export class Registry extends DurableObject<Env> {
 		this.sql.exec("DELETE FROM servers WHERE state = 'ended' AND ended_at <= ?", now - this.cfg.endedRetentionMs);
 		await this.reschedule();
 
+		// A slow capture holds a slot; replacements wait for the complete outbound batch.
 		await settleAll(work, OUTBOUND_CONCURRENCY);
 		await this.replace(retry);
 		await this.reschedule();
@@ -620,7 +621,7 @@ export class Registry extends DurableObject<Env> {
 
 	/** End a live server: move it to `stopping`, give the tickets of a server that never became ready
 	 *  another placement (bounded by JOIN_ATTEMPTS), and try the stop. The row stays until the stop
-	 *  is confirmed (`tryStop`). */
+	 *  is confirmed (`tryStop`); replacements wait behind this capture/stop attempt. */
 	private async finish(serverId: string, outcome: Outcome, reason: string, from?: "starting" | "ready"): Promise<void> {
 		const retry = this.beginStop(serverId, outcome, reason, from);
 		if (retry === null) return;

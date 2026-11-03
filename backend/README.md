@@ -61,34 +61,43 @@ lookup past the deadline that finds nothing frees the tickets.
 **Ending.** An ended, lost or failed server moves to `stopping`; the alarm retries the Edgegap stop
 every `STATUS_POLL_S` until it succeeds (or Edgegap no longer knows the deployment). Only then is
 the row `ended` and its D1 history closed; retention never deletes a row whose stop is unconfirmed.
-Every Edgegap call and D1 write is bounded by `PROVIDER_TIMEOUT_S`, and the alarm makes all its
-transitions and re-arms itself before running that outbound work, so one slow call holds up no
-other row.
+Every Edgegap call and D1 write is bounded by `PROVIDER_TIMEOUT_S`. The alarm transitions rows and
+re-arms before outbound work. That work uses five slots; a first capture/stop can occupy one for
+up to five bounds (mark, fetch, result write, failure record, stop), or 50 seconds with the deployed
+timeout (DERIVED). Queued rows wait for slots, and replacements wait for the outbound batch.
 
-Before each Worker stop (including late forgotten claims and attributed sweep orphans), the Worker
-fetches Edgegap's `container-logs` (`logs`, `crash_logs`, `crash_data`) and saves a redacted UTF-8
-tail in D1 `server_logs`, independently of session history. IPv4/IPv6 addresses, URLs, generated
-hex credentials and credential-bearing lines are masked before storage. `hosting.rs` never logs
+Before its first capture for a deployment (including late forgotten claims and attributed sweep
+orphans), the Worker commits a `capture incomplete` row in D1 `server_logs`. Only the invocation
+that inserted it fetches Edgegap's `container-logs` (`logs`, `crash_logs`, `crash_data`), independently
+of session history. Any existing row skips capture on later stops, including a failed or interrupted
+attempt. A killed invocation leaves the marker; a later stop does not read the log again. A failed
+mark never fetches: the Worker records the failure if D1 recovers and still stops.
+
+The response is streamed with a 16 MiB byte limit before JSON parsing; crossing it cancels the
+reader and records `logs HTTP 413`. Before storage, redaction masks IPv4/IPv6 addresses, URLs,
+generated hex credentials and credential-bearing lines. `hosting.rs` never logs
 hosting secret values; Lightyear's UDP and netcode diagnostics can log addresses. Crash env dumps
 are discarded as credential-bearing lines. No raw provider errors are stored.
 
-The tail is bounded at 1 MiB and `truncated` records cutting. A successful archive (even an empty
-log) is reused on stop retries. Every capture read, fetch and write is bounded by
-`PROVIDER_TIMEOUT_S`; failures warn, record a diagnostic when D1 answers, and still stop. The cron
+Lines containing `SIM-EVIDENCE` (owned by `src/net/diagnostics.rs::log_sim_evidence`) are dropped;
+the stats line supplies the pace. Every other line remains subject to the existing redaction. The
+tail is bounded at 1 MiB and `truncated` records cutting. Every mark, fetch and write is bounded by
+`PROVIDER_TIMEOUT_S`; handled failures warn, record a diagnostic when D1 answers, and still stop. The cron
 deletes successful and failed captures after `SERVER_LOG_RETENTION_DAYS` (operator choice: 14 days),
 even when the provider listing fails. Session history has its own lifetime.
 
 Read one archive by deployment id (replace the example id), from `backend/`:
 
 ```sh
-npx wrangler d1 execute overmatch-sessions --remote --command "SELECT server_id, captured_at, truncated, error, log FROM server_logs WHERE deployment_id = 'eb3ad1b3be65';"
+npx wrangler d1 execute overmatch-sessions --remote --json --command "SELECT log, error FROM server_logs WHERE deployment_id = 'eb3ad1b3be65';" | jq -r '.[] | .results[] | .log // .error // empty'
 ```
 
 This is a snapshot before stop, not continuous log shipping: later lines are absent. Edgegap
 deletes logs on deployment stop (`session.sh`'s `cmd_logs` contract). A process exit alone does not
 prove whether Edgegap still serves them; the Worker tries and records a 404 or other failure. A
 deployment that disappears without a following Worker stop, an unattributed orphan, or a capture
-that fails cannot leave a recoverable log. D1 failure can also lose the diagnostic itself.
+that fails cannot leave a recoverable log. Failed and interrupted captures are never retried;
+concurrent stops can overtake a still-running capture. D1 failure can also lose the diagnostic itself.
 
 **Orphan sweep.** Every minute (`triggers.crons`) the Worker lists every Edgegap deployment (all
 pages, hard bound 100 pages) and stops each one tagged `om-<hex>` that no live claim owns. Ownership is the

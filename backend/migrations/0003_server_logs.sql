@@ -1,5 +1,5 @@
 -- Independent of sessions: even a forgotten claim or a lost history write must leave evidence.
--- captured_at is epoch milliseconds; error contains only diag() output, never provider text.
+-- captured_at is epoch milliseconds; error is the incomplete-capture marker or diag(), never provider text.
 CREATE TABLE server_logs (
 	server_id     TEXT PRIMARY KEY,
 	deployment_id TEXT NOT NULL UNIQUE,

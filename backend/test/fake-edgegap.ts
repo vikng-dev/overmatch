@@ -85,6 +85,7 @@ export class FakeEdgegap {
 	/** Container-log fixtures; stopped deployments no longer expose logs. */
 	logBody: unknown = { logs: "server_stats fixture\n", crash_logs: null, crash_data: null };
 	logStatus = 200;
+	logResponse: (() => Response) | null = null;
 	hangLogs = new Set<string>();
 	/** When set, status answers carry no `app_version`. */
 	omitVersion = false;
@@ -151,7 +152,7 @@ export class FakeEdgegap {
 			return Response.json(this.jwks);
 		}
 		if (url.origin !== this.base) throw new Error(`unexpected outbound fetch: ${req.method} ${req.url}`);
-		if (req.headers.get("authorization") !== "token test-token") return Response.json({ message: "unauthorized" }, { status: 401 });
+		if (req.headers.get("authorization") !== "token fixture-opaque-value") return Response.json({ message: "unauthorized" }, { status: 401 });
 		this.calls.push({ method: req.method, path: url.pathname + url.search });
 
 		if (req.method === "GET" && url.pathname === "/v1/locations") {
@@ -221,6 +222,7 @@ export class FakeEdgegap {
 			if (this.hangLogs.has(m[1])) return new Promise<Response>(() => {});
 			const d = this.deployments.get(m[1]);
 			if (!d || d.status === "Status.TERMINATED") return Response.json({ message: "not found" }, { status: 404 });
+			if (this.logResponse) return this.logResponse();
 			return Response.json(this.logBody, { status: this.logStatus });
 		}
 		m = /^\/v1\/status\/(.+)$/.exec(url.pathname);
