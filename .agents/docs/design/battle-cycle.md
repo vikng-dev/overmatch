@@ -148,8 +148,9 @@ re-pick. Its status line carries the same meaning through a map or menu, with th
 to that overlay. R sends no redundant request and cannot re-arm the local retry timeout. That timeout
 covers only an unacknowledged request, not an authority-reported placement wait.
 
-The authority validates each pick on receipt: reject nonfinite coordinates, clamp finite ones to the
-spawn region, then search for a candidate clear of standing map footprints. If none exists, refuse
+The authority evaluates only the newest pick per link in each frame; earlier clicks in that drain
+are superseded before admission. It rejects nonfinite coordinates, clamps finite ones to the
+spawn region, then searches for a candidate clear of standing map footprints. If none exists, refuse
 it as `SpawnPickRefusal::NoClearGround` rather than waiting. Body occupancy is different: tanks can move or their owners
 can replace them, so a geometrically admissible pick may wait for space. This distinction promises no
 deadline for another player's action; re-picking is the waiting player's way out. Placement checks

@@ -5,6 +5,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::app::ScheduleRunnerPlugin;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::{ActionState, NativeStateSequence};
 use lightyear::prelude::input::server::{InputValidationAppExt, authorize_controlled_targets};
@@ -698,47 +699,73 @@ fn install_spawn_picks(app: &mut App) {
     app.add_systems(Update, receive_spawn_points);
 }
 
-/// Record each client's latest spawn-map choice. The key is the SENDING LINK, so authority is
-/// structural: nothing in the message names a target. Reliable-and-ordered lane, and only the last
-/// accepted request survives — so the surviving override matches the player's latest click, which
-/// is exactly the semantics of "where I want to come back".
+#[derive(SystemParam)]
+struct SpawnPickGround<'w> {
+    height: Option<Res<'w, crate::terrain_grid::HeightGrid>>,
+    map: Res<'w, TerrainMap>,
+    obstacles: Res<'w, SpawnObstacles>,
+    source: TankSimSource<'w>,
+}
+
+/// Evaluate each sending link's newest pick per frame. Superseded clicks do not run placement
+/// or change its accepted destination. Nothing in a request names another player.
 fn receive_spawn_points(
     mut receivers: Query<(Entity, &mut MessageReceiver<SetSpawnPoint>), With<ClientOf>>,
     mut overrides: ResMut<SpawnOverrides>,
-    height: Option<Res<crate::terrain_grid::HeightGrid>>,
-    map: Res<TerrainMap>,
-    obstacles: Res<SpawnObstacles>,
-    source: TankSimSource,
+    ground: SpawnPickGround,
     mut own: Query<(&ControlledBy, &mut RespawnState)>,
+    mut refused: Local<bevy::platform::collections::HashMap<Entity, SpawnPickRefusal>>,
 ) {
-    let half_extent = spawn_map::world_half_extent(height.as_deref());
+    let half_extent = spawn_map::world_half_extent(ground.height.as_deref());
+    refused.retain(|link, _| receivers.contains(*link));
+    let mut geometry = None;
     for (link, mut receiver) in &mut receivers {
-        for request in receiver.receive() {
-            let standing: Vec<Transform> = map.blocks.iter().chain(&obstacles.0).copied().collect();
+        if let Some(request) = receiver.receive().last() {
+            let (standing, radius) = geometry.get_or_insert_with(|| {
+                (
+                    ground
+                        .map
+                        .blocks
+                        .iter()
+                        .chain(&ground.obstacles.0)
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    ground.source.get().contact_radius(),
+                )
+            });
             let checked = check_spawn_pick(
                 half_extent,
                 request,
-                &standing,
-                height.as_deref(),
-                source.get().contact_radius(),
+                standing.as_slice(),
+                ground.height.as_deref(),
+                *radius,
             );
             // A phase boundary can remove the old root before this frame drains its last messages.
             for (controlled, mut state) in &mut own {
                 if controlled.owner == link {
-                    state.pick_refusal = checked.as_ref().err().copied();
+                    let next = RespawnState {
+                        pick_refusal: checked.as_ref().err().copied(),
+                        ..*state
+                    };
+                    state.set_if_neq(next);
                 }
             }
             match checked {
                 Ok(xz) => {
+                    refused.remove(&link);
                     overrides.0.insert(link, xz);
-                    info!(
+                    debug!(
                         "server: link {link} set next spawn to ({:.1}, {:.1})",
                         xz.x, xz.y
                     );
                 }
-                Err(reason) => warn!(
-                    "server: refused spawn pick from link {link}: {reason:?}; choose another point on the map"
-                ),
+                Err(reason) => {
+                    if refused.insert(link, reason) != Some(reason) {
+                        warn!(
+                            "server: refused spawn pick from link {link}: {reason:?}; previous spawn choice kept"
+                        );
+                    }
+                }
             }
         }
     }
@@ -1555,7 +1582,7 @@ mod tests {
             .id()
     }
 
-    fn send_pick(app: &mut App, link: Entity, point: Vec2) {
+    fn queue_pick(app: &mut App, link: Entity, point: Vec2) {
         app.world_mut()
             .get_mut::<MessageSender<SetSpawnPoint>>(link)
             .unwrap()
@@ -1563,6 +1590,10 @@ mod tests {
                 x: point.x,
                 z: point.y,
             });
+    }
+
+    fn send_pick(app: &mut App, link: Entity, point: Vec2) {
+        queue_pick(app, link, point);
         app.update(); // Local delivery runs in Last, after the receiver drain.
         app.update();
     }
@@ -1648,6 +1679,57 @@ mod tests {
         );
     }
 
+    /// A peer can supersede many choices in one frame; only the newest may spend solver work
+    /// or alter the retained destination. Evaluating every earlier valid pick breaks this contract.
+    #[test]
+    fn a_spawn_pick_flood_supersedes_earlier_choices_before_admission() {
+        let mut app = spawn_pick_app();
+        let link = pick_link(&mut app, 1);
+        let root = app
+            .world_mut()
+            .spawn((
+                ControlledBy {
+                    owner: link,
+                    lifetime: Default::default(),
+                },
+                RespawnState::default(),
+            ))
+            .id();
+        // Fixture in-map points and a footprint covering the nearby search at the refused point.
+        let retained = Vec2::new(200.0, 0.0);
+        let superseded = Vec2::new(100.0, 0.0);
+        let refused = Vec2::new(-100.0, 0.0);
+        send_pick(&mut app, link, retained);
+        app.world_mut()
+            .resource_mut::<SpawnObstacles>()
+            .0
+            .push(Transform::from_xyz(refused.x, 1.0, refused.y).with_scale(Vec3::splat(120.0)));
+        for _ in 0..1024 {
+            // Fixture flood delivered in one frame's drain.
+            queue_pick(&mut app, link, superseded);
+            queue_pick(&mut app, link, refused);
+        }
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world().resource::<SpawnOverrides>().0.get(&link),
+            Some(&retained)
+        );
+        assert_eq!(
+            app.world().get::<RespawnState>(root).unwrap().pick_refusal,
+            Some(SpawnPickRefusal::NoClearGround)
+        );
+        send_pick(&mut app, link, superseded);
+        assert_eq!(
+            app.world().resource::<SpawnOverrides>().0.get(&link),
+            Some(&superseded)
+        );
+        assert_eq!(
+            app.world().get::<RespawnState>(root).unwrap().pick_refusal,
+            None
+        );
+    }
+
     /// The game's damage model: a refused map pick costs neither a retained destination nor an
     /// outstanding automatic respawn. The owner can press R after a living misclick or keep waiting.
     #[test]
@@ -1723,6 +1805,16 @@ mod tests {
                 position.0.xz(),
                 accepted,
                 "the accepted destination remains reachable"
+            );
+            let state = app
+                .world_mut()
+                .query_filtered::<&RespawnState, With<ControlledBy>>()
+                .single(app.world())
+                .unwrap();
+            assert_eq!(
+                state.pick_refusal,
+                Some(SpawnPickRefusal::NoClearGround),
+                "the replacement root preserves the map's refused-marker feedback"
             );
         }
     }
@@ -2267,9 +2359,8 @@ mod tests {
     }
 
     /// Receipt refuses nonfinite coordinates and a search wholly covered by standing footprints.
-    /// A valid re-pick keeps a waiting request, while a refusal cancels that request visibly.
     #[test]
-    fn spawn_pick_admission_distinguishes_refusal_from_retry() {
+    fn spawn_pick_admission_refuses_nonfinite_and_fully_blocked_ground() {
         let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
         let blocked = [Transform::from_translation(Vec3::Y).with_scale(Vec3::splat(1000.0))]; // Fixture footprint.
         let pick = SetSpawnPoint { x: 0.0, z: 0.0 };
