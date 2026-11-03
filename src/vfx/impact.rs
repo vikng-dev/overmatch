@@ -19,9 +19,9 @@ use crate::view::PlayerView;
 
 use super::ViewRng;
 use super::billboard::{
-    BILLBOARD_CAP, BillboardLook, BillboardMaterials, BillboardRing, BillboardSpec, Flipbook,
-    VfxParams, gradient_lut, soft_particle_depth, spawn_ballistic_billboard, spawn_billboard,
-    unit_quad,
+    BILLBOARD_CAP, BillboardLook, BillboardMaterials, BillboardRing, BillboardSpec, CLOD_CELL,
+    Flipbook, POWDER_CELLS, VfxParams, gradient_lut, powder_flipbook, soft_particle_depth,
+    spawn_ballistic_billboard, spawn_billboard, unit_quad,
 };
 use super::ground::{PaintedGround, soil_light, soil_of};
 use super::muzzle::DustPalettes;
@@ -171,7 +171,7 @@ impl ImpactAssets {
     fn ground_mark_material(&self, palette: Handle<Image>) -> BillboardLook {
         BillboardLook {
             params: VfxParams {
-                frame: Vec4::new(3.0, 2.0, 2.0, 0.0),
+                frame: Vec4::new(CLOD_CELL, 2.0, 2.0, 0.0),
                 fade: look().scar_fade,
                 glow: Vec4::ZERO,
             },
@@ -534,11 +534,8 @@ fn spawn_small_impact(
             lifetime: rng.range(look().dust_lifetime.0, look().dust_lifetime.1),
             origin: position + normal * (start_size * 0.5),
             drift: normal * look().dust_normal_push + Vec3::Y * look().dust_rise,
-            frames: 4,
-            flipbook: Flipbook::Loop {
-                start: rng.range(0.0, 4.0),
-                rate: look().dust_frame_rate,
-            },
+            frames: POWDER_CELLS,
+            flipbook: powder_flipbook(rng, look().dust_frame_rate),
             start_size,
             end_size: dust_size,
             aspect: Vec3::ONE,
@@ -710,11 +707,8 @@ fn spawn_big_splash(
                 lifetime: look().splash_plume_lifetime,
                 origin: position + normal * (look().splash_plume_size.0 * scale * 0.5),
                 drift: Vec3::Y * look().splash_plume_rise,
-                frames: 4,
-                flipbook: Flipbook::Loop {
-                    start: rng.range(0.0, 4.0),
-                    rate: 0.0,
-                },
+                frames: POWDER_CELLS,
+                flipbook: powder_flipbook(rng, 0.0),
                 start_size: look().splash_plume_size.0 * scale,
                 end_size: look().splash_plume_size.1 * scale,
                 aspect: look().splash_plume_aspect,
@@ -738,11 +732,8 @@ fn spawn_big_splash(
             lifetime: look().splash_ring_lifetime,
             origin: position + normal * look().wide_quad_clearance_m,
             drift: Vec3::ZERO,
-            frames: 4,
-            flipbook: Flipbook::Loop {
-                start: rng.range(0.0, 4.0),
-                rate: 0.0,
-            },
+            frames: POWDER_CELLS,
+            flipbook: powder_flipbook(rng, 0.0),
             start_size: look().splash_ring_size.0 * scale,
             end_size: look().splash_ring_size.1 * scale,
             aspect: Vec3::ONE,
@@ -774,11 +765,8 @@ fn spawn_big_splash(
                 + normal * (look().splash_cloud_size.0 * scale * 0.5)
                 + Vec3::Y * look().cloud_lift_m,
             drift: Vec3::Y * look().splash_cloud_rise,
-            frames: 4,
-            flipbook: Flipbook::Loop {
-                start: rng.range(0.0, 4.0),
-                rate: 0.0,
-            },
+            frames: POWDER_CELLS,
+            flipbook: powder_flipbook(rng, 0.0),
             start_size: look().splash_cloud_size.0 * scale,
             end_size: look().splash_cloud_size.1 * scale,
             aspect: Vec3::ONE,
@@ -805,7 +793,7 @@ fn spawn_big_splash(
             drift: Vec3::ZERO,
             frames: 4,
             flipbook: Flipbook::Loop {
-                start: 3.0,
+                start: CLOD_CELL,
                 rate: 0.0,
             },
             start_size: look().ground_mark_size * scale,
@@ -936,11 +924,8 @@ fn spawn_sparking_read(
             lifetime: rng.range(look().spall_puff_lifetime.0, look().spall_puff_lifetime.1),
             origin: position + normal * (look().spall_puff_size.0 * 0.5),
             drift: normal * look().spall_push_mps + Vec3::Y * look().spall_puff_rise,
-            frames: 4,
-            flipbook: Flipbook::Loop {
-                start: rng.range(0.0, 4.0),
-                rate: 0.0,
-            },
+            frames: POWDER_CELLS,
+            flipbook: powder_flipbook(rng, 0.0),
             start_size: look().spall_puff_size.0,
             end_size: puff_size,
             aspect: Vec3::ONE,
@@ -966,11 +951,8 @@ fn spawn_sparking_read(
                 lifetime: look().flame_lick_lifetime,
                 origin: position + normal * (look().flame_lick_size.1 * 0.5),
                 drift: normal * look().flame_push_mps + Vec3::Y * look().flame_lick_rise,
-                frames: 4,
-                flipbook: Flipbook::Loop {
-                    start: rng.range(0.0, 4.0),
-                    rate: 0.0,
-                },
+                frames: POWDER_CELLS,
+                flipbook: powder_flipbook(rng, 0.0),
                 start_size: look().flame_lick_size.0,
                 end_size: look().flame_lick_size.1,
                 aspect: Vec3::ONE,
@@ -1018,7 +1000,7 @@ mod tests {
 
     use crate::terrain_blend::{BASE_GROUND, BLEND_LAYERS};
     use crate::vfx::billboard::{
-        BILLBOARD_SLOTS, Billboard, BillboardFamilies, VfxBillboardMaterial,
+        BILLBOARD_SLOTS, Billboard, BillboardFamilies, VfxBillboardMaterial, flipbook_frame,
     };
 
     /// FIXTURE DATA: the compact contact recipe.
@@ -1636,6 +1618,69 @@ mod tests {
             app.world().resource::<GroundMarkRing>().0.live.is_empty(),
             "only a layered soil strike scars"
         );
+    }
+
+    /// Powder never draws a clod cell: every read's sprite on the dust sheet walks the sheet's
+    /// powder cells for its whole life, and a ground scar alone holds the clod cell. The read's look
+    /// relies on it, because a clod cell hangs hard silhouettes in the air for seconds. FIXTURE: a
+    /// dust-sheet handle of its own, telling those sprites from the streak sheet's. Mutant: any
+    /// powder layer rolling or walking all four cells fails within these contacts.
+    #[test]
+    fn powder_never_draws_a_clod_cell() {
+        let mut app = harness();
+        let sheet = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+        app.world_mut().resource_mut::<ImpactAssets>().dust_atlas = sheet.clone();
+        let hard = ImpactSurface::Material(SurfaceFeedback::fixture());
+        let soft = ImpactSurface::Material(SurfaceFeedback {
+            sparks: false,
+            ..SurfaceFeedback::fixture()
+        });
+        let mut drawn = 0;
+        for _ in 0..24 {
+            trigger_impact(&mut app, Vec3::Y, LAYERED);
+            trigger_impact(&mut app, Vec3::Y, COMPACT);
+            trigger_surface(&mut app, Vec3::Y, LAYERED, hard, ImpactOutcome::Through);
+            trigger_surface(&mut app, Vec3::Y, LAYERED, soft, ImpactOutcome::Struck);
+            let scars = app.world().resource::<GroundMarkRing>().0.live.clone();
+            let world = app.world_mut();
+            let sprites: Vec<_> = world
+                .query::<(Entity, &Billboard, &MeshMaterial3d<VfxBillboardMaterial>)>()
+                .iter(world)
+                .filter(|(.., material)| {
+                    world
+                        .resource::<Assets<VfxBillboardMaterial>>()
+                        .get(&material.0)
+                        .expect("the family material exists")
+                        .atlas
+                        == sheet
+                })
+                .map(|(entity, billboard, _)| {
+                    (
+                        entity,
+                        billboard.flipbook,
+                        billboard.lifetime,
+                        billboard.frames,
+                    )
+                })
+                .collect();
+            for (sprite, flipbook, lifetime, frames) in sprites {
+                drawn += 1;
+                for step in 0..=64 {
+                    let age = lifetime * step as f32 / 64.0;
+                    let on_clods =
+                        flipbook_frame(flipbook, age, lifetime, frames) as f32 == CLOD_CELL;
+                    assert_eq!(
+                        on_clods,
+                        scars.contains(&sprite),
+                        "at age {age} of {lifetime}"
+                    );
+                }
+            }
+        }
+        assert!(drawn > 0, "the reads draw on the dust sheet");
     }
 
     /// Resolved surfaces supply a finite nonzero normal. Inventing an up-facing surface would

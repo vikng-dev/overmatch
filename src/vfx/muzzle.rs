@@ -34,8 +34,9 @@ use crate::view::PlayerView;
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardLook, BillboardMaterials, BillboardRing, BillboardSpec, Flipbook, VfxParams,
-    gradient_lut, smoothstep, soft_particle_depth, spawn_billboard, unit_quad,
+    BillboardLook, BillboardMaterials, BillboardRing, BillboardSpec, Flipbook, POWDER_CELLS,
+    VfxParams, gradient_lut, powder_flipbook, smoothstep, soft_particle_depth, spawn_billboard,
+    unit_quad,
 };
 use super::ground::{PaintedGround, soil_light, soil_of};
 
@@ -734,7 +735,7 @@ fn spawn_ground_dust(
         let offset = kit.rng.range(blast.spread_m.0, blast.spread_m.1);
         let push = kit.rng.range(blast.push_mps.0, blast.push_mps.1);
         let lifetime = kit.rng.range(blast.lifetime_s.0, blast.lifetime_s.1);
-        let start = kit.rng.range(0.0, 4.0);
+        let flipbook = powder_flipbook(&mut kit.rng, look().ground_dust_frame_rate);
         let roll = kit.rng.range(0.0, std::f32::consts::TAU);
         let spin = kit
             .rng
@@ -747,11 +748,8 @@ fn spawn_ground_dust(
             // Half a birth diameter up: the puff's lower edge sits ON the surface.
             origin: base + away * offset + Vec3::Y * (start_size * 0.5),
             drift: away * push + Vec3::Y * blast.rise_mps,
-            frames: 4,
-            flipbook: Flipbook::Loop {
-                start,
-                rate: look().ground_dust_frame_rate,
-            },
+            frames: POWDER_CELLS,
+            flipbook,
             start_size,
             end_size,
             aspect: Vec3::ONE,
@@ -804,7 +802,8 @@ mod tests {
     use bevy::render::storage::ShaderBuffer;
 
     use crate::vfx::billboard::{
-        Billboard, BillboardFamilies, VfxBillboardMaterial, age_billboards,
+        Billboard, BillboardFamilies, CLOD_CELL, VfxBillboardMaterial, age_billboards,
+        flipbook_frame,
     };
 
     /// Minimal app carrying what the fire observer and the agers read: bare asset stores, a
@@ -1330,6 +1329,25 @@ mod tests {
         ));
         cannon(&mut undrawn, 0);
         assert!(dust_puffs(&mut undrawn).is_empty());
+    }
+
+    /// A muzzle's ground dust is powder: a puff walking onto the dust sheet's clod cell hangs hard
+    /// clod silhouettes in the air, which the shot's look relies on not doing. Mutant: a puff
+    /// walking all four cells fails here, at the shot's rate, within its life.
+    #[test]
+    fn ground_dust_never_draws_a_clod_cell() {
+        let mut app = harness_ground(0.0);
+        cannon(&mut app, 0);
+        let puffs = dust_puffs(&mut app);
+        assert!(!puffs.is_empty());
+        for (puff, ..) in puffs {
+            let puff = app.world().get::<Billboard>(puff).expect("a live puff");
+            for step in 0..=64 {
+                let age = puff.lifetime * step as f32 / 64.0;
+                let cell = flipbook_frame(puff.flipbook, age, puff.lifetime, puff.frames);
+                assert_ne!(cell as f32, CLOD_CELL, "at age {age}");
+            }
+        }
     }
 
     /// The sunlit (young, full-signal) texel of a dust puff's palette, linear 8-bit RGB, and the

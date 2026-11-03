@@ -223,6 +223,19 @@ pub(crate) enum Flipbook {
     Once,
 }
 
+/// `impact_dust.png`'s layout: its first cells hold powder and its last holds clods. Powder walks
+/// these alone, so no hard clod silhouette hangs in the air; a ground scar holds [`CLOD_CELL`].
+pub(crate) const POWDER_CELLS: u32 = 3;
+pub(crate) const CLOD_CELL: f32 = 3.0;
+
+/// A powder sprite's walk over the dust sheet's [`POWDER_CELLS`], from a rolled start.
+pub(crate) fn powder_flipbook(rng: &mut super::ViewRng, rate: f32) -> Flipbook {
+    Flipbook::Loop {
+        start: rng.range(0.0, POWDER_CELLS as f32),
+        rate,
+    }
+}
+
 /// A live billboard's animation state. [`age_billboards`] drives everything visible from `age`:
 /// flipbook frame, erosion threshold, LUT row, size ease, drift, spin — and despawns it at
 /// `lifetime`.
