@@ -19,7 +19,10 @@ use bevy::prelude::*;
 use crate::ballistics::{Impact, ImpactMarker};
 use crate::track::sim::TrackContacts;
 
-/// Metres of arrow per newton of contact force (so ~35 kN reads as a ~1.75 m arrow).
+// Game debug-arrow tastes stay inline because this view has no data owner; the track sandbox
+// owns its own diagnostic palette and scale.
+/// Taste: force-arrow length in metres per newton, for legibility
+/// (DERIVED: 35 kN reads as a 1.75 m arrow).
 const FORCE_VIZ_SCALE: f32 = 1.0 / 20_000.0;
 /// How many impact markers the game client keeps on screen before the oldest is despawned — the
 /// markers are never explicitly cleared here (unlike the sandbox's `C` key), so this ring bounds
@@ -83,11 +86,13 @@ fn draw_wheel_forces(tanks: Query<&TrackContacts>, mut gizmos: Gizmos) {
             for c in side {
                 if c.load > 0.0 {
                     let tip = c.point + c.normal * (c.load * FORCE_VIZ_SCALE);
+                    // Taste: force-arrow palette, cyan identifies support load (sRGB).
                     gizmos.arrow(c.point, tip, Color::srgb(0.1, 0.9, 1.0));
                 }
                 let tangential = c.tangential_force();
                 if tangential != Vec3::ZERO {
                     let tip = c.point + tangential * FORCE_VIZ_SCALE;
+                    // Taste: force-arrow palette, orange identifies total tangent force (sRGB).
                     gizmos.arrow(c.point, tip, Color::srgb(1.0, 0.55, 0.1));
                 }
             }
