@@ -652,7 +652,15 @@ fn drive(
         let grade_sine = grade / (1.0 + grade * grade).sqrt();
         let stop = stopping_advance(
             speed,
-            gear.braking_deceleration(grade_sine, speed.signum(), grip.traction_capacity_n),
+            gear.braking_deceleration(
+                grade_sine,
+                speed.signum(),
+                grip.traction_capacity_n,
+                -grip
+                    .rolling_force
+                    .dot(Vec3::new(lane_axis.x, 0.0, lane_axis.y))
+                    * speed.signum(),
+            ),
             fixed_time.timestep().as_secs_f32(),
         );
         let timed_out = t - run.leg_since > LEG_TIMEOUT_S;
@@ -1178,8 +1186,8 @@ mod ownership_tests {
         assert_eq!(stopping_advance(1.0, -0.1, fixed_dt), f32::INFINITY);
     }
 
-    /// The game's driving model: the scripted driver must use live contact capacity when
-    /// choosing reversal. Replacing that argument with a rigid pair or brake budget fails.
+    /// The scripted driver prices live capacity and delivered rolling when choosing reversal.
+    /// Dropping either input or reversing the rolling projection fails this caller witness.
     /// FIXTURE: one slab-lane pose between two capacities' stopping points. Approach speed
     /// fits the lane at any declared brake strength and command slew.
     #[cfg(feature = "bitprobe")]
@@ -1209,13 +1217,22 @@ mod ownership_tests {
         let speed = 1.0_f32
             .min((capacities[0] * lane.length() / (2.0 * mass)).sqrt())
             .min(lane.length() / (4.0 * transition));
-        let stops =
-            capacities.map(|capacity| speed * speed * mass / (2.0 * capacity) + speed * transition);
+        let stops = capacities.map(|capacity| {
+            stopping_advance(
+                speed,
+                gear.braking_deceleration(0.0, 1.0, capacity, 0.0),
+                dt,
+            )
+        });
         let remaining = (stops[0] + stops[1]) / 2.0;
         let axis = lane.axis();
         let point = lane.front - axis * remaining;
         app.insert_resource(plan);
-        for (capacity, expected_throttle) in capacities.into_iter().zip([-1.0, 1.0]) {
+        for (capacity, rolling, expected_throttle) in [
+            (capacities[0], 0.0, -1.0),
+            (capacities[1], 0.0, 1.0),
+            (capacities[0], capacities[1] - capacities[0], 1.0),
+        ] {
             app.insert_resource(Runs {
                 start: Some(0.0),
                 tanks: Vec::new(),
@@ -1230,6 +1247,7 @@ mod ownership_tests {
                     LinearVelocity(Vec3::new(axis.x, 0.0, axis.y) * speed),
                     TrackGripEffect {
                         traction_capacity_n: capacity,
+                        rolling_force: -Vec3::new(axis.x, 0.0, axis.y) * rolling,
                         ..Default::default()
                     },
                 ))

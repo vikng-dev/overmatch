@@ -155,6 +155,8 @@ pub struct TrackGripEffect {
     pub traction_force: Vec3,
     /// Current contact capacity (N), before mobilization, for prospective stopping.
     pub traction_capacity_n: f32,
+    /// Delivered world-space rolling force on the hull (N), for prospective stopping.
+    pub rolling_force: Vec3,
     /// Total world-space grip and rolling torque about the hull center of mass (N*m).
     pub traction_torque: Vec3,
     /// Longitudinal ground reaction on `[left, right]` belts (N).
@@ -305,17 +307,21 @@ impl TrackGear {
     }
 
     /// DERIVED full service-brake deceleration along the direction of motion (m/s^2).
-    /// The brakes and observed contact capacity bound force; hull mass plus both reflected belt inertias
-    /// must be arrested. A nonpositive result names a grade these brakes cannot hold.
+    /// Grip is limited by brakes and observed capacity; delivered rolling acts alongside it.
+    /// `rolling_braking_n` is the contact law's rolling force projected opposite travel, so
+    /// its support-relative speed and fade are read once at delivery. Hull mass plus both
+    /// reflected belt inertias must be arrested. Nonpositive means the stop is unaffordable.
     pub(crate) fn braking_deceleration(
         &self,
         grade_sine: f32,
         direction: f32,
         contact_capacity_n: f32,
+        rolling_braking_n: f32,
     ) -> f32 {
         let grip = self.construction.grip();
         let weight = 2.0 * grip.side_weight;
-        let available = (2.0 * self.trans.brake_capacity_n).min(contact_capacity_n);
+        let available =
+            (2.0 * self.trans.brake_capacity_n).min(contact_capacity_n) + rolling_braking_n;
         (available + direction * weight * grade_sine)
             / transmission::coupled_mass(&self.construction)
     }
@@ -966,6 +972,7 @@ fn apply_track_forces(
             effect.belt_reaction[si] = report.belt_reaction;
             for contact in &report.contacts {
                 effect.traction_force += contact.tangential_force();
+                effect.rolling_force += contact.rolling_force;
                 effect.traction_capacity_n += contact.mu * contact.load_elastic;
                 effect.traction_torque +=
                     (contact.point - center_of_mass).cross(contact.tangential_force());
@@ -2290,7 +2297,7 @@ mod tests {
         app.world_mut().run_schedule(Startup);
         app.world_mut().run_schedule(PreUpdate);
         let mut gear = app.world_mut().resource_mut::<TrackGear>();
-        let before = gear.braking_deceleration(0.1, -1.0, gear.construction.weight_n());
+        let before = gear.braking_deceleration(0.1, -1.0, gear.construction.weight_n(), 0.0);
         let scale = 3.0; // Fixture scale, dimensionless.
         gear.construction.belt_inertia *= scale;
         gear.params.grip.as_mut().unwrap().side_weight *= scale;
@@ -2300,12 +2307,13 @@ mod tests {
         );
         gear.trans.brake_capacity_n *= scale;
         assert!(
-            (gear.braking_deceleration(0.1, -1.0, gear.construction.weight_n()) - before).abs()
+            (gear.braking_deceleration(0.1, -1.0, gear.construction.weight_n(), 0.0) - before)
+                .abs()
                 < 1e-5
         );
         assert!(
-            gear.braking_deceleration(0.1, 1.0, gear.construction.weight_n())
-                > gear.braking_deceleration(0.1, -1.0, gear.construction.weight_n())
+            gear.braking_deceleration(0.1, 1.0, gear.construction.weight_n(), 0.0)
+                > gear.braking_deceleration(0.1, -1.0, gear.construction.weight_n(), 0.0)
         );
     }
 
@@ -2326,7 +2334,7 @@ mod tests {
             let gear = app.world().resource::<TrackGear>();
             let mass = gear.params.grip.unwrap().side_weight * 2.0 / super::super::derive::G;
             let inertia = gear.construction.belt_inertia;
-            let decel = gear.braking_deceleration(0.0, 1.0, gear.construction.weight_n());
+            let decel = gear.braking_deceleration(0.0, 1.0, gear.construction.weight_n(), 0.0);
             // DERIVED full-throttle, no-slip flat acceleration at the peak-torque operating
             // point in the highest gear: crank inertia is reflected separately through k^2.
             let k = gear.trans.gears_fwd.last().unwrap() / gear.trans.sprocket_radius;
@@ -2675,7 +2683,9 @@ mod tests {
         }
     }
 
-    /// Bot stopping must use the same capacity as the contact force pass. FIXTURE: the shipped vehicle's adapter at flat support on mud, 4 m/s entry.
+    /// Bot stopping must price the force the contact law delivers, including rolling.
+    /// FIXTURE: the production adapter on flat mud, 4 m/s entry. Saturated grip makes
+    /// delivered braking an independent oracle; transient mobilization is not forecast.
     #[test]
     fn service_stop_reads_contact_capacity_and_records_rollback() {
         let mut hull = DrivenHull::new();
@@ -2693,6 +2703,7 @@ mod tests {
         let mut peak = 0.0_f32;
         let mut reverse = 0.0_f32;
         let mut capacity = 0.0_f32;
+        let mut saturated = false;
         for _ in 0..64 * 20 {
             hull.app
                 .world_mut()
@@ -2711,17 +2722,43 @@ mod tests {
             capacity = expected;
             let gear = hull.app.world().resource::<TrackGear>();
             let available = 2.0 * gear.trans.brake_capacity_n;
-            let decel = gear.braking_deceleration(0.0, 1.0, effect.traction_capacity_n);
-            assert!(
-                (decel * transmission::coupled_mass(&gear.construction) - available.min(expected))
-                    .abs()
-                    < 1.0
+            let decel = gear.braking_deceleration(
+                0.0,
+                1.0,
+                effect.traction_capacity_n,
+                effect.rolling_force.z,
             );
+            let grip_force: f32 = contacts.0.iter().flatten().map(|c| c.traction.z).sum();
+            let rolling: f32 = contacts.0.iter().flatten().map(|c| c.rolling_force.z).sum();
+            assert!((effect.rolling_force.z - rolling).abs() < 1.0);
+            // Resolution: saturation within 1 N; force assembly within 2 N.
+            if hull.speed > super::super::forces::ROLLING_FADE_SPEED
+                && (grip_force - expected).abs() < 1.0
+            {
+                assert!(
+                    available > expected && rolling > 0.0,
+                    "fixture must separate grip and drag"
+                );
+                assert!(
+                    (decel * transmission::coupled_mass(&gear.construction)
+                        - effect.traction_force.z)
+                        .abs()
+                        < 2.0,
+                    "forecast {} N must match delivered {} N, rolling {rolling} N",
+                    decel * transmission::coupled_mass(&gear.construction),
+                    effect.traction_force.z
+                );
+                saturated = true;
+            }
             hull.speed -= effect.traction_force.z / hull.mass / 64.0;
             hull.distance += hull.speed / 64.0;
             peak = peak.max(hull.distance);
             reverse = reverse.min(hull.speed);
         }
+        assert!(
+            saturated,
+            "the stop must reach saturated grip outside the rolling fade"
+        );
         println!(
             "MEASURED mud service stop: capacity={capacity:.3} N peak={peak:.6} m rollback={:.6} m reverse={reverse:.6} m/s",
             peak - hull.distance
