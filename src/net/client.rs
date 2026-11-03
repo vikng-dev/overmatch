@@ -2316,8 +2316,8 @@ mod match_exit;
 /// unavailable to external integration tests. Recoil probes exercise the local-spec derivation.
 #[cfg(test)]
 mod tests {
-    /// The loading screen's consumers need the own tank presented, which its bound view states;
-    /// ownership alone precedes it. Results and respawn must retain the once-ready latch.
+    /// Loading needs the own bound view and a playable snapshot, in either arrival order.
+    /// Another tank's view cannot release it; later tank removal retains the once-ready latch.
     #[test]
     fn loading_waits_for_the_own_tanks_bound_view() {
         use bevy::ecs::system::RunSystemOnce;
@@ -2326,12 +2326,17 @@ mod tests {
             connected_once: true,
             ..default()
         });
+        let playable = world
+            .spawn(super::super::battle::BattleState::combat_fixture())
+            .id();
+        world.spawn((NetTank, crate::tank::TankViewReady));
         let own = world.spawn((GameControlled, NetTank)).id();
         world.run_system_once(latch_tank_seen).unwrap();
         assert!(
             !world.resource::<ConnectRetry>().tank_seen,
-            "ownership is not presentation"
+            "a playable phase and another tank's view cannot present the own tank"
         );
+        world.despawn(playable);
         world.entity_mut(own).insert(crate::tank::TankViewReady);
         world.run_system_once(latch_tank_seen).unwrap();
         assert!(
@@ -2355,7 +2360,7 @@ mod tests {
         world.run_system_once(latch_tank_seen).unwrap();
         assert!(
             world.resource::<ConnectRetry>().tank_seen,
-            "results remain in the match"
+            "later tank removal must not reopen loading"
         );
     }
 
