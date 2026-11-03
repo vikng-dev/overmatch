@@ -107,8 +107,8 @@ pub(crate) struct ViewFacts {
 
 impl ViewFacts {
     /// Admit finite positive height and FOV in `(0, π)`; otherwise return `None`.
-    /// Zero/negative height means an unsized window or zero scale, not a tiny view: using it would
-    /// collapse thresholds onto the bounding radius and show coarse geometry first.
+    /// Nonpositive height is unmeasurable: an unsized window or zero/invalid scale, not a tiny view.
+    /// Zero height collapses thresholds onto radius slack, showing coarse geometry first.
     /// Invalid FOV corrupts the divisor: NaN ranges draw nothing, negative angles invert chains,
     /// and ≥π is outside the perspective domain. `spec::TankSpec::validate` gates authored FOV;
     /// this also guards debug tools and partially initialised cameras.
@@ -237,8 +237,9 @@ pub(crate) fn track_view_facts(
     let held = facts.as_deref().copied();
     let wanted = match held {
         // Missing image, unsized window or surface teardown under `ExitCondition::DontExit`:
-        // hold measured height (e.g. 1440/2160 px). A smaller substitute shortens every threshold
-        // by that ratio, showing coarse geometry nearer than its certificate permits.
+        // hold measured height (e.g. 1440/2160 px). A smaller substitute shortens every projected
+        // deviation term by the height ratio; radius slack stays fixed. Coarse geometry then appears
+        // nearer than its certificate permits.
         Some(held) => held.settled(
             projection.fov,
             if measured > 0.0 {
@@ -552,8 +553,8 @@ mod tests {
     }
 
     /// Surface teardown under `ExitCondition::DontExit` holds height while still accepting FOV
-    /// changes. DERIVED counterexample: replacing 1440 with 1080 px shortens thresholds by a quarter,
-    /// exposing coarse geometry too near. Passing zero directly to [`ViewFacts::settled`] would
+    /// changes. DERIVED counterexample: 1440 → 1080 px reduces the deviation term by a quarter,
+    /// leaving radius slack unchanged and exposing coarse geometry too near. Passing zero directly to [`ViewFacts::settled`] would
     /// reject the whole request and incorrectly hold FOV too.
     #[test]
     fn a_window_that_goes_away_holds_the_height_it_settled_on() {
