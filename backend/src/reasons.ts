@@ -10,6 +10,7 @@ export const REASONS = {
 	providerUnavailable: "the provider did not answer",
 	noLocation: "no selected location could start a server",
 	serverLost: "the server stopped reporting",
+	serverCrashed: "the server crashed",
 	serverEnded: "the server ended",
 	providerTerminated: "the provider stopped the server",
 } as const;

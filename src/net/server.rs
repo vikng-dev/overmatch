@@ -63,6 +63,12 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    if let Some(config) = &hosted {
+        super::hosting::install_panic_hook(config).unwrap_or_else(|err| {
+            eprintln!("overmatch-server: fatal: could not start panic reporter: {err}");
+            std::process::exit(2);
+        });
+    }
     let bind = harness::env_text("OVERMATCH_SERVER_BIND")
         .and_then(|value| bind_ip(value.as_deref()))
         .unwrap_or_else(harness::refuse_start);

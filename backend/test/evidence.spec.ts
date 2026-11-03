@@ -20,6 +20,96 @@ async function end(s: { id: string; secret: string }): Promise<void> {
 }
 
 describe("stopped match servers leave evidence for the operator", () => {
+	it("records authenticated panic text before log capture, sanitises it, and calls the session a crash", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp();
+		const crash = `panic fixture at src/net/hosting.rs:1:2\n${s.secret}\nAuthorization: Bearer fixture\npeer 192.0.2.1\nhttps://example.test/key\n${env.EDGEGAP_TOKEN}`;
+		let crashAtLogRead: Promise<{ crash: string } | null> | undefined;
+		edgegap.logResponse = () => {
+			crashAtLogRead = env.DB.prepare("SELECT crash FROM server_crashes WHERE server_id = ?1").bind(s.id).first<{ crash: string }>();
+			return new Response(null, { status: 404 });
+		};
+		const response = await call("POST", `/v1/servers/${s.id}/end`, { reason: "panic", crash }, { authorization: `Bearer ${s.secret}` });
+		expect(response.status).toBe(204);
+		const saved = await env.DB.prepare("SELECT * FROM server_crashes WHERE server_id = ?1").bind(s.id).first<{ crash: string; truncated: number }>();
+		expect(saved!.crash).toContain("panic fixture at src/net/hosting.rs:1:2");
+		for (const secret of [s.secret, "192.0.2.1", "example.test", env.EDGEGAP_TOKEN]) expect(saved!.crash).not.toContain(secret);
+		expect(saved!.truncated).toBe(0);
+		expect(await crashAtLogRead).toEqual({ crash: saved!.crash });
+		expect(await env.DB.prepare("SELECT outcome, reason FROM sessions WHERE server_id = ?1").bind(s.id).first()).toEqual({ outcome: "failed", reason: "the server crashed" });
+		expect(await archive(s.deploymentId)).toMatchObject({ log: null, error: "logs HTTP 404" });
+	});
+
+	it("refuses unauthenticated and malformed crash input without changing the live server", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp();
+		expect((await call("POST", `/v1/servers/${s.id}/end`, { crash: "untrusted" })).status).toBe(401);
+		expect((await call("POST", `/v1/servers/${s.id}/end`, { crash: 1 }, { authorization: `Bearer ${s.secret}` })).status).toBe(400);
+		expect(await env.DB.prepare("SELECT * FROM server_crashes WHERE server_id = ?1").bind(s.id).first()).toBeNull();
+		expect((await registry(V).snapshot()).find((row) => row.id === s.id)).toMatchObject({ state: "ready", outcome: null });
+	});
+
+	it("preserves a startup panic while the provider's deployment response is lost", async () => {
+		edgegap.loseDeployResponses = 1;
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = launched();
+		expect((await registry(V).snapshot()).find((row) => row.id === s.id)!.deployment_id).toBeNull();
+		expect((await call("POST", `/v1/servers/${s.id}/end`, { crash: "startup panic fixture" }, { authorization: `Bearer ${s.secret}` })).status).toBe(204);
+		expect(await env.DB.prepare("SELECT crash FROM server_crashes WHERE server_id = ?1").bind(s.id).first()).toEqual({ crash: "startup panic fixture" });
+	});
+
+	it("keeps the crash cause when a clean stop is in flight or has already closed history", async () => {
+		for (const stopFails of [true, false]) {
+			await join({ version: V, locations: ["Paris"], pings: {} });
+			const s = await bringUp(edgegap.deployments.size - 1);
+			if (stopFails) edgegap.refuseStops.add(s.deploymentId);
+			await end(s);
+			expect((await registry(V).snapshot()).find((row) => row.id === s.id)!.state).toBe(stopFails ? "stopping" : "ended");
+			// The released clean-end contract still refuses a duplicate stop.
+			expect((await call("POST", `/v1/servers/${s.id}/end`, {}, { authorization: `Bearer ${s.secret}` })).status).toBe(410);
+			expect((await call("POST", `/v1/servers/${s.id}/end`, { crash: "late panic fixture" }, { authorization: `Bearer ${s.secret}` })).status).toBe(204);
+			expect(await env.DB.prepare("SELECT crash FROM server_crashes WHERE server_id = ?1").bind(s.id).first()).toEqual({ crash: "late panic fixture" });
+			expect(await env.DB.prepare("SELECT outcome, reason FROM sessions WHERE server_id = ?1").bind(s.id).first()).toEqual({ outcome: "failed", reason: "the server crashed" });
+			edgegap.refuseStops.delete(s.deploymentId);
+		}
+	});
+
+	it("fails a lost crash write visibly while still stopping and replacing waiting join tickets", async () => {
+		await join({ version: V, locations: ["Paris", "Frankfurt"], pings: {} });
+		const s = launched();
+		// Fixture D1 fault affects only the crash sink; stop evidence and session history still work.
+		await env.DB.prepare("ALTER TABLE server_crashes RENAME TO fixture_crashes_unavailable").run();
+		try {
+			expect((await call("POST", `/v1/servers/${s.id}/end`, { crash: "panic fixture" }, { authorization: `Bearer ${s.secret}` })).status).toBe(500);
+			expect(edgegap.deployment().status).toBe("Status.TERMINATED");
+			expect(edgegap.deployments.size).toBe(2);
+			expect((await registry(V).snapshot()).find((row) => row.id === s.id)!.state).toBe("ended");
+		} finally {
+			await env.DB.prepare("ALTER TABLE fixture_crashes_unavailable RENAME TO server_crashes").run();
+		}
+	});
+
+	it("bounds a crash's sanitised UTF-8 bytes without corrupting its tail", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp();
+		const crash = "old head\n" + "界".repeat(SERVER_LOG_MAX_BYTES) + "\nlast frame";
+		expect((await call("POST", `/v1/servers/${s.id}/end`, { crash }, { authorization: `Bearer ${s.secret}` })).status).toBe(204);
+		const saved = await env.DB.prepare("SELECT crash, truncated FROM server_crashes WHERE server_id = ?1").bind(s.id).first<{ crash: string; truncated: number }>();
+		expect(saved!.truncated).toBe(1);
+		expect(new TextEncoder().encode(saved!.crash).length).toBeLessThanOrEqual(SERVER_LOG_MAX_BYTES);
+		expect(saved!.crash).not.toContain("old head");
+		expect(saved!.crash).not.toContain("\ufffd");
+		expect(saved!.crash.endsWith("last frame")).toBe(true);
+	});
+
+	it("leaves old-server end reports as clean ends without crash evidence", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp();
+		await end(s);
+		expect(await env.DB.prepare("SELECT * FROM server_crashes WHERE server_id = ?1").bind(s.id).first()).toBeNull();
+		expect(await env.DB.prepare("SELECT outcome, reason FROM sessions WHERE server_id = ?1").bind(s.id).first()).toEqual({ outcome: "ended", reason: "server: empty" });
+	});
+
 	it("preserves diagnostic text so the operator can read paths, timestamps and stats", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp();
@@ -252,8 +342,12 @@ describe("stopped match servers leave evidence for the operator", () => {
 		for (const [id, at, log] of [["old", cutoff - 1, "old log"], ["failed", cutoff - 1, null], ["kept", cutoff, "recent log"]] as const) {
 			await env.DB.prepare("INSERT INTO server_logs VALUES (?1, ?1, ?2, ?3, 0, NULL)").bind(id, at, log).run();
 		}
+		for (const [id, at] of [["old", cutoff - 1], ["kept", cutoff]] as const) {
+			await env.DB.prepare("INSERT INTO server_crashes VALUES (?1, ?2, 'panic fixture', 0)").bind(id, at).run();
+		}
 		edgegap.listingDown = true;
 		await sweep(env, now);
+		expect(await env.DB.prepare("SELECT server_id FROM server_crashes").all()).toMatchObject({ results: [{ server_id: "kept" }] });
 		expect(await archive("old")).toBeNull();
 		expect(await archive("failed")).toBeNull();
 		expect(await archive("kept")).not.toBeNull();

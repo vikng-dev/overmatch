@@ -6,17 +6,20 @@
 //! always has (all-zero netcode key, no reporting, no player cap below lightyear's default).
 //!
 //! Entry points, in `server::run` order: [`HostedConfig::from_env`] (fatal on a malformed value),
+//! [`install_panic_hook`] (fatal panic reporting before app construction),
 //! [`Hosted::start`] (spawns the reporter thread, idle until the socket listens),
 //! [`Hosted::install`] (the Bevy systems), [`Hosted::finish`] (after `App::run` returns: stops the
 //! reporter and posts `end` unless the Worker already forgot this server).
 //!
-//! Every HTTP call runs on the reporter thread or after the app has stopped, bounded by
-//! [`HTTP_TIMEOUT`]; the fixed loop only reads and writes atomics. No secret value (report secret,
-//! netcode key) reaches a log line, an error message or a `Debug` string.
+//! Normal HTTP reports use [`HTTP_TIMEOUT`]; panic reporting uses [`PANIC_REPORT_TIMEOUT`].
+//! The fixed loop only reads and writes atomics. Hosting code never logs configured secret values;
+//! arbitrary panic output is preserved locally and sanitised by the Worker before storage.
 
 use core::fmt;
 use core::time::Duration;
+use std::backtrace::Backtrace;
 use std::ffi::OsString;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -30,8 +33,12 @@ use serde::Serialize;
 
 use super::admission::JoinAdmission;
 
-/// Upper bound on one heartbeat or end call, connect to last body byte.
+/// Resolution: cap HTTP work so a failed Worker cannot stall shutdown indefinitely.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Resolution: allow the Worker's deployed log-fetch timeout plus time for archive writes.
+/// The hook waits at most this long for symbolication and HTTP together; it never joins the helper.
+const PANIC_REPORT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The largest `OVERMATCH_CAPACITY` accepted: lightyear netcode's own default client ceiling, 256 in
 /// 0.30.1.
@@ -223,6 +230,8 @@ enum ServerState {
 #[derive(Serialize)]
 struct End<'a> {
     reason: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    crash: Option<&'a str>,
 }
 
 /// How the Worker answered a report.
@@ -245,9 +254,9 @@ struct Api {
 }
 
 impl Api {
-    fn new(config: &HostedConfig) -> Self {
+    fn new(config: &HostedConfig, timeout: Duration) -> Self {
         let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(HTTP_TIMEOUT))
+            .timeout_global(Some(timeout))
             .http_status_as_error(false)
             .build()
             .new_agent();
@@ -263,11 +272,17 @@ impl Api {
     }
 
     fn end(&self, reason: &str) -> Result<Answer, ureq::Error> {
-        self.post("end", &End { reason })
+        self.post(
+            "end",
+            &End {
+                reason,
+                crash: None,
+            },
+        )
     }
 
     fn post(&self, call: &str, body: &impl Serialize) -> Result<Answer, ureq::Error> {
-        let body = serde_json::to_string(body).expect("report bodies are plain JSON objects");
+        let body = serde_json::to_string(body).map_err(std::io::Error::other)?;
         let response = self
             .agent
             .post(format!("{}/{call}", self.base))
@@ -280,6 +295,68 @@ impl Api {
             status => Answer::Refused(status),
         })
     }
+}
+
+/// Install before the hosted server constructs its app, so startup and task-thread panics report.
+/// Backtrace capture stays on the panicking thread; symbolication and HTTP use a fresh helper,
+/// independent of heartbeat locks and of any async runtime the panicking thread occupies.
+pub(super) fn install_panic_hook(config: &HostedConfig) -> std::io::Result<()> {
+    let api = Api::new(config, PANIC_REPORT_TIMEOUT);
+    let (send, receive) = mpsc::channel::<(String, Backtrace, mpsc::Sender<bool>)>();
+    std::thread::Builder::new()
+        .name("hosting-crash-report".into())
+        .spawn(move || {
+            // No panic is the normal lifetime of a healthy server; process exit ends this helper.
+            if let Ok((summary, backtrace, reply)) = receive.recv() {
+                let crash = format!("{summary}\n{backtrace}");
+                let accepted = matches!(
+                    api.post(
+                        "end",
+                        &End {
+                            reason: "panic",
+                            crash: Some(&crash)
+                        }
+                    ),
+                    Ok(Answer::Accepted)
+                );
+                // A timed-out hook is already terminating the process.
+                let _ = reply.send(accepted);
+            }
+        })?;
+    let previous = std::panic::take_hook();
+    let sent = AtomicBool::new(false);
+    let failure_logged = std::sync::Once::new();
+    std::panic::set_hook(Box::new(move |info| {
+        let failed = || {
+            failure_logged.call_once(|| {
+                // stderr can be closed during a crash; a failed write must not panic again.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "hosting: panic report failed or timed out"
+                );
+            });
+        };
+        previous(info);
+        if sent.swap(true, Ordering::Relaxed) {
+            // A second panicking thread must not end the process ahead of the first report.
+            // The first hook exits sooner; this wait is bounded even if that thread is stuck.
+            std::thread::sleep(PANIC_REPORT_TIMEOUT);
+            failed();
+            std::process::exit(101);
+        }
+        let (reply, answer) = mpsc::channel();
+        let report = (info.to_string(), Backtrace::force_capture(), reply);
+        // Await the reply while the container still exists: /end reads its log before stopping it.
+        if send.send(report).is_err()
+            || !matches!(answer.recv_timeout(PANIC_REPORT_TIMEOUT), Ok(true))
+        {
+            failed();
+        }
+        // Rust can unwind an isolated task without ending the process. Every hosted panic is
+        // fatal, including a failed report; use the panic exit status without an OS crash dialog.
+        std::process::exit(101);
+    }));
+    Ok(())
 }
 
 /// Why the app stopped, as far as hosting cares. Unrecorded = a clean exit from elsewhere (Ctrl-C).
@@ -410,7 +487,7 @@ impl Hosted {
             config.heartbeat_interval,
             config.empty_exit
         );
-        let api = Api::new(config);
+        let api = Api::new(config, HTTP_TIMEOUT);
         let shared = Arc::new(Shared::default());
         let (control, receiver) = mpsc::channel();
         let reporter = std::thread::Builder::new()
@@ -700,7 +777,7 @@ mod tests {
     }
 
     /// One HTTP request as the fake Worker saw it.
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct Seen {
         method: String,
         path: String,
@@ -717,6 +794,10 @@ mod tests {
 
     impl FakeWorker {
         fn start(statuses: Vec<u16>) -> Self {
+            Self::with_reply_gate(statuses, None)
+        }
+
+        fn with_reply_gate(statuses: Vec<u16>, mut gate: Option<mpsc::Receiver<()>>) -> Self {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("loopback TCP");
             let base = format!("http://{}", listener.local_addr().unwrap());
             let (sender, seen) = mpsc::channel();
@@ -746,21 +827,23 @@ mod tests {
                     let mut body = vec![0; length];
                     reader.read_exact(&mut body).unwrap();
                     let status = statuses[index.min(statuses.len() - 1)];
+                    let request = Seen {
+                        method,
+                        path,
+                        headers,
+                        body: serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+                    };
+                    let held = gate.is_some();
+                    if let Some(gate) = gate.take() {
+                        sender.send(request.clone()).unwrap();
+                        gate.recv_timeout(PANIC_REPORT_TIMEOUT).unwrap();
+                    }
                     write!(
                         stream,
                         "HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
                     )
                     .unwrap();
-                    let body = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
-                    if sender
-                        .send(Seen {
-                            method,
-                            path,
-                            headers,
-                            body,
-                        })
-                        .is_err()
-                    {
+                    if !held && sender.send(request).is_err() {
                         return;
                     }
                 }
@@ -799,11 +882,203 @@ mod tests {
         );
     }
 
+    // Only mutual exclusion is shared; a failed assertion must not poison another child's checks.
+    static PANIC_CHILD_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Runs in a subprocess because a panic hook belongs to the whole process, including tests.
+    #[test]
+    #[ignore = "subprocess fixture for panic reporting"]
+    fn panic_hook_child() {
+        let config = HostedConfig::from_env().unwrap().unwrap();
+        let previous = std::panic::take_hook();
+        let both = std::sync::Barrier::new(2);
+        std::panic::set_hook(Box::new(move |info| {
+            previous(info);
+            both.wait();
+        }));
+        install_panic_hook(&config).unwrap();
+        std::thread::spawn(|| panic!("hosted panic fixture A"));
+        std::thread::spawn(|| panic!("hosted panic fixture B"));
+        // An isolated thread panic must still terminate the server, even if the Worker fails.
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for the shipped server entry point"]
+    fn hosted_entry_child() {
+        crate::run_server();
+    }
+
+    fn panic_child(worker: &FakeWorker, entry: &str) -> std::process::Child {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", entry, "--ignored", "--nocapture"])
+            .envs(contract_env())
+            .env(API, &worker.base)
+            .env("OVERMATCH_UNATTENDED", "1")
+            .env("OVERMATCH_WINDOW", "headless")
+            .env("OVERMATCH_MUTE", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        command.spawn().unwrap()
+    }
+
+    fn wait_for_panic_child(mut child: std::process::Child) -> std::process::Output {
+        // Fixture allowance covers process startup and shutdown outside the hook's own bound.
+        let deadline = Instant::now() + PANIC_REPORT_TIMEOUT + Duration::from_secs(5);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                let output = child.wait_with_output().unwrap();
+                assert!(
+                    !output.status.success(),
+                    "reporting must not swallow the panic"
+                );
+                return output;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "panic reporting hung the process: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The operator needs the first panic's payload and source even when another thread panics.
+    #[test]
+    fn panic_reports_message_location_and_backtrace_once_and_preserves_default_output() {
+        let _child = PANIC_CHILD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (release, gate) = mpsc::channel();
+        let worker = FakeWorker::with_reply_gate(vec![204], Some(gate));
+        let mut child = panic_child(&worker, "net::hosting::tests::panic_hook_child");
+        let seen = worker.next();
+        // Fixture delay exposes a hook that sends but exits before the Worker captures the log.
+        std::thread::sleep(Duration::from_millis(100));
+        let alive_until_reply = child.try_wait().unwrap().is_none();
+        release.send(()).unwrap();
+        let output = wait_for_panic_child(child);
+        assert!(
+            alive_until_reply,
+            "the Worker must finish log capture before the process exits"
+        );
+        let config = hosted(&contract_env());
+        assert_authorized_json_post(&seen, &format!("/v1/servers/{}/end", config.server_id));
+        assert_eq!(seen.body["reason"], "panic");
+        let crash = seen.body["crash"].as_str().unwrap();
+        assert!(crash.contains("hosted panic fixture"), "{crash}");
+        let location = crash
+            .split("src/net/hosting.rs:")
+            .nth(1)
+            .expect("panic source file");
+        let mut coordinates = location.split(':');
+        assert!(
+            coordinates.next().unwrap().parse::<u32>().is_ok(),
+            "panic line: {crash}"
+        );
+        assert!(
+            coordinates.next().unwrap().parse::<u32>().is_ok(),
+            "panic column: {crash}"
+        );
+        assert!(
+            crash.contains("panic_hook_child"),
+            "backtrace must capture the panicking thread: {crash}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("hosted panic fixture A") && stderr.contains("hosted panic fixture B")
+        );
+        assert!(
+            worker.seen.recv_timeout(Duration::from_millis(50)).is_err(),
+            "a second panic must not report again"
+        );
+    }
+
+    /// Refusal and a Worker that never replies cannot keep a crashing process alive.
+    #[test]
+    fn failed_and_stalled_panic_reports_release_the_panicking_thread_within_the_bound() {
+        let _child = PANIC_CHILD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let refused = FakeWorker::start(vec![503]);
+        let output = wait_for_panic_child(panic_child(
+            &refused,
+            "net::hosting::tests::panic_hook_child",
+        ));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr)
+                .matches("hosting: panic report failed or timed out")
+                .count(),
+            1,
+            "a failed report logs once even when two panic deadlines race"
+        );
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let (_send, seen) = mpsc::channel();
+        let stalled = FakeWorker {
+            base: format!("http://{}", listener.local_addr().unwrap()),
+            seen,
+        };
+        // The listening socket accepts TCP handshakes but never reads or answers HTTP.
+        let start = Instant::now();
+        let output = wait_for_panic_child(panic_child(
+            &stalled,
+            "net::hosting::tests::panic_hook_child",
+        ));
+        assert!(start.elapsed() < PANIC_REPORT_TIMEOUT + Duration::from_secs(5));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr)
+                .matches("hosting: panic report failed or timed out")
+                .count(),
+            1,
+            "a failed report logs once even when two panic deadlines race"
+        );
+    }
+
+    /// Deleting the hook installation from server::run must lose this real startup refusal report.
+    #[test]
+    fn shipped_hosted_entry_reports_a_startup_asset_panic() {
+        let _child = PANIC_CHILD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let worker = FakeWorker::start(vec![204]);
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        let empty =
+            std::env::temp_dir().join(format!("overmatch-crash-report-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let child = command
+            .args([
+                "--exact",
+                "net::hosting::tests::hosted_entry_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .envs(contract_env())
+            .env(API, &worker.base)
+            .env("BEVY_ASSET_ROOT", &empty)
+            .env("OVERMATCH_UNATTENDED", "1")
+            .env("OVERMATCH_WINDOW", "headless")
+            .env("OVERMATCH_MUTE", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = wait_for_panic_child(child);
+        std::fs::remove_dir(&empty).unwrap();
+        let report = worker.next();
+        assert!(report.path.ends_with("/end"));
+        assert_eq!(report.body["reason"], "panic");
+        assert!(
+            report.body["crash"].as_str().unwrap().contains("assets"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn heartbeat_and_end_requests_match_the_contract() {
         let worker = FakeWorker::start(vec![204]);
         let config = hosted_against(&worker, Duration::from_secs(5));
-        let api = Api::new(&config);
+        let api = Api::new(&config, HTTP_TIMEOUT);
         let id = &config.server_id;
 
         let heartbeat = Heartbeat {

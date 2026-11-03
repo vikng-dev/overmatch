@@ -105,7 +105,9 @@ async function route(req: Request, env: Env): Promise<Response> {
 			r = await reg.heartbeat(id, bearer(req), hb);
 		} else {
 			const reason = typeof b === "object" && b !== null && typeof (b as { reason?: unknown }).reason === "string" ? (b as { reason: string }).reason : "exit";
-			r = await reg.end(id, bearer(req), reason.slice(0, 200));
+			const crash = typeof b === "object" && b !== null ? (b as { crash?: unknown }).crash : undefined;
+			if (crash !== undefined && typeof crash !== "string") return error(400, "crash: expected text");
+			r = await reg.end(id, bearer(req), reason.slice(0, 200), crash);
 		}
 		if (r.status === 204) return new Response(null, { status: 204 });
 		return error(r.status, r.error ?? (r.status === 410 ? "unknown server" : "error"));

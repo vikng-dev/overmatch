@@ -31,7 +31,7 @@ import { DurableObject } from "cloudflare:workers";
 import { config, type Config, type Env } from "./config";
 import { definiteRejection, edgegapFor, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./edgegap";
 import { settleAll } from "./deadline";
-import { stopWithEvidence } from "./evidence";
+import { recordCrash, stopWithEvidence } from "./evidence";
 import { recordEvent, type Outcome, type SessionEvent } from "./history";
 import { timingSafeEqual, newId, randomHex, sha256Hex, versionOf } from "./ids";
 import { groupLocations, locationId } from "./locations";
@@ -256,11 +256,11 @@ export class Registry extends DurableObject<Env> {
 		return { status: 204 };
 	}
 
-	async end(serverId: string, secret: string, reason: string): Promise<ServerCallResult> {
+	async end(serverId: string, secret: string, reason: string, crash?: string): Promise<ServerCallResult> {
 		const s = this.server(serverId);
-		if (!s || !live(s)) return { status: 410 };
+		if (!s || (crash === undefined && !live(s))) return { status: 410 };
 		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
-		await this.finish(serverId, "ended", serverReason(reason));
+		await this.finish(serverId, crash === undefined ? "ended" : "failed", crash === undefined ? serverReason(reason) : REASONS.serverCrashed, undefined, crash);
 		return { status: 204 };
 	}
 
@@ -622,12 +622,23 @@ export class Registry extends DurableObject<Env> {
 	/** End a live server: move it to `stopping`, give the tickets of a server that never became ready
 	 *  another placement (bounded by JOIN_ATTEMPTS), and try the stop. The row stays until the stop
 	 *  is confirmed (`tryStop`); replacements wait behind this capture/stop attempt. */
-	private async finish(serverId: string, outcome: Outcome, reason: string, from?: "starting" | "ready"): Promise<void> {
+	private async finish(serverId: string, outcome: Outcome, reason: string, from?: "starting" | "ready", crash?: string): Promise<void> {
 		const retry = this.beginStop(serverId, outcome, reason, from);
-		if (retry === null) return;
-		await this.tryStop(serverId);
-		await this.replace(retry);
-		await this.reschedule();
+		if (retry === null && crash === undefined) return;
+		try {
+			if (crash !== undefined) {
+				// A heartbeat expiry or clean end can win the stop transition while a panic is reporting.
+				// Preserve its cause even if the stop/history already completed; old end calls still get 410.
+				this.sql.exec("UPDATE servers SET outcome = 'failed', reason = ? WHERE id = ?", REASONS.serverCrashed, serverId);
+				// Persist before provider requests; failure returns 500 after stop/ticket cleanup.
+				await recordCrash(this.env, serverId, crash, this.cfg.providerTimeoutMs);
+				await this.record({ kind: "crashed", serverId });
+			}
+		} finally {
+			await this.tryStop(serverId);
+			await this.replace(retry ?? []);
+			await this.reschedule();
+		}
 	}
 
 	/** The synchronous half of `finish`: the transition and the ticket bookkeeping. Returns the

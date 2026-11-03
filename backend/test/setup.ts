@@ -17,7 +17,7 @@ beforeAll(() => {
 // Storage isolation is per file; every test here wants a clean registry and history.
 beforeEach(async () => {
 	await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
-	await env.DB.batch(["sessions", "sweep", "server_logs"].map((table) => env.DB.prepare(`DELETE FROM ${table}`)));
+	await env.DB.batch(["sessions", "sweep", "server_logs", "server_crashes"].map((table) => env.DB.prepare(`DELETE FROM ${table}`)));
 	globalThis.edgegap = new FakeEdgegap();
 });
 

@@ -1,8 +1,8 @@
 import { bounded } from "./deadline";
-import { diag } from "./reasons";
+import { diag, REASONS } from "./reasons";
 
 // `recordEvent` is the single writer of D1 `sessions` (migrations/0001_sessions.sql): one row per
-// server lifetime, touched only on transitions. Writes are best effort and bounded — a D1 failure or
+// server lifetime, touched on transitions and reported crashes. Writes are best effort and bounded — a D1 failure or
 // stall is logged and never fails or holds up the registry operation that caused it. A durable
 // outbox, or a second sink such as Analytics Engine, would be added here and nowhere else.
 
@@ -12,6 +12,7 @@ export type SessionEvent =
 	| { kind: "requested"; serverId: string; version: string; location: string; at: number }
 	| { kind: "deployed"; serverId: string; version: string; location: string; requestedAt: number; deploymentId: string }
 	| { kind: "ready"; serverId: string; at: number }
+	| { kind: "crashed"; serverId: string }
 	| { kind: "ended"; serverId: string; at: number; outcome: Outcome; reason: string; peakPlayers: number };
 
 export async function recordEvent(db: D1Database, e: SessionEvent, timeoutMs: number): Promise<void> {
@@ -44,6 +45,10 @@ async function write(db: D1Database, e: SessionEvent): Promise<void> {
 			return;
 		case "ready":
 			await db.prepare("UPDATE sessions SET ready_at = ?2 WHERE server_id = ?1 AND ready_at IS NULL").bind(e.serverId, e.at).run();
+			return;
+		case "crashed":
+			await db.prepare("UPDATE sessions SET outcome = 'failed', reason = ?2 WHERE server_id = ?1")
+				.bind(e.serverId, REASONS.serverCrashed).run();
 			return;
 		case "ended":
 			await db

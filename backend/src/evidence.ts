@@ -30,6 +30,15 @@ function sanitizedTail(raw: string, providerToken: string): { log: string; trunc
 	return { log: new TextDecoder().decode(bytes.subarray(start)), truncated: start > 0 };
 }
 
+/** Keep the first panic even if provider log capture fails or the deployment id is still unknown. */
+export async function recordCrash(env: Env, serverId: string, crash: string, timeoutMs: number): Promise<void> {
+	const tail = sanitizedTail(crash, env.EDGEGAP_TOKEN);
+	await bounded(timeoutMs, () => env.DB.prepare(
+		`INSERT INTO server_crashes (server_id, captured_at, crash, truncated) VALUES (?1, ?2, ?3, ?4)
+		 ON CONFLICT (server_id) DO NOTHING`,
+	).bind(serverId, Date.now(), tail.log, Number(tail.truncated)).run());
+}
+
 /** The committed marker precedes all log reads. Any existing row skips capture, so an invocation
  * killed during capture cannot make its stop retries refetch the same body and die again.
  * Handled capture failures still stop in this invocation; an interrupted one needs a later stop. */
@@ -63,7 +72,10 @@ export async function stopWithEvidence(env: Env, provider: Provider, serverId: s
 
 export async function expireServerLogs(env: Env, before: number, timeoutMs: number): Promise<void> {
 	try {
-		await bounded(timeoutMs, () => env.DB.prepare("DELETE FROM server_logs WHERE captured_at < ?1").bind(before).run());
+		await bounded(timeoutMs, () => env.DB.batch([
+			env.DB.prepare("DELETE FROM server_logs WHERE captured_at < ?1").bind(before),
+			env.DB.prepare("DELETE FROM server_crashes WHERE captured_at < ?1").bind(before),
+		]));
 	} catch (err) {
 		console.warn("server log retention failed", diag(err));
 	}

@@ -28,7 +28,7 @@ Design and decisions: `.agents/scratch/hosting-2026-10/` (`decisions.md`, `state
 | `POST /v1/join` | client | none | `{ticket}`. Body: `{version, locations, pings}` |
 | `POST /v1/join/status` | client | the ticket, in the body `{ticket}` | `{state: starting\|ready\|failed, address?, port?, key?, reason?}`; poll until not `starting` |
 | `POST /v1/servers/{id}/heartbeat` | game server | `Authorization: Bearer <OVERMATCH_REPORT_SECRET>` | 204; **410 = unknown server, exit now**; 401 bad secret |
-| `POST /v1/servers/{id}/end` | game server | same | 204 (the Worker stops the deployment); 410 unknown |
+| `POST /v1/servers/{id}/end` | game server | same | 204 (optional body `crash` is archived before the Worker stops the deployment); 410 unknown |
 | `POST /v1/edgegap/webhook/{id}/{nonce}` | Edgegap | the per-server nonce in the path | 204, or 404 for a wrong nonce; triggers only a status re-read for that server (a body `request_id` is adopted if its status shows the server's tag) |
 | `GET /admin` | Yan | Cloudflare Access | HTML dashboard |
 
@@ -80,6 +80,17 @@ hosting secret values; Lightyear's UDP and netcode diagnostics can log addresses
 are discarded as credential-bearing lines. No raw provider errors are stored.
 
 The Worker keeps a plain 1 MiB tail of redacted server output; `truncated` records cutting.
+A hosted panic sends optional `crash` text on the authenticated end request. Before fetching logs,
+the Worker saves its first sanitised tail in `server_crashes`, independently of the deployment id
+and log-capture marker, and marks the session `failed` with reason `the server crashed`.
+Crash text has the same byte cap, redaction and retention as logs. Authenticated crashes also
+correct a known session that already started or completed stopping. A failed crash write fails the
+request after stop/ticket cleanup; the registry retains the crash reason for its stop retry. Existing end requests
+without `crash` keep their current behaviour. The server preserves default panic output, captures
+the panicking thread's backtrace without requiring `RUST_BACKTRACE`, and waits at most 15 seconds
+for the report helper (Resolution: permit the deployed provider log-fetch deadline plus archive
+writes). This wait keeps the container alive for log capture; then the hook terminates the process
+with the panic exit status, even for a background-thread panic or a failed report.
 Every mark, fetch and write is bounded by
 `PROVIDER_TIMEOUT_S`; handled failures warn, record a diagnostic when D1 answers, and still stop. The cron
 deletes successful and failed captures after `SERVER_LOG_RETENTION_DAYS` (operator choice: 14 days),
@@ -88,8 +99,22 @@ even when the provider listing fails. Session history has its own lifetime.
 Read one archive by deployment id (replace the example id), from `backend/`:
 
 ```sh
-npx wrangler d1 execute overmatch-sessions --remote --json --command "SELECT log, error FROM server_logs WHERE deployment_id = 'eb3ad1b3be65';" | jq -r '.[] | .results[] | .log // .error // empty'
+npx wrangler d1 execute overmatch-sessions --remote --json --command "SELECT crash, log, error FROM server_logs LEFT JOIN server_crashes USING (server_id) WHERE deployment_id = 'eb3ad1b3be65';" | jq -r '.[] | .results[] | (.crash // empty), (.log // .error // empty)'
 ```
+
+If no log archive exists yet, read `server_crashes` directly by `server_id`; it does not depend on
+successful log capture or session history. Apply migration `0004_server_crashes.sql` and deploy
+the Worker before releasing a game build that reports panics. No game protocol revision changes.
+
+DERIVED from `Cargo.toml`'s release profile, the server build action and the container Dockerfile:
+[Cargo's profile settings](https://doc.rust-lang.org/cargo/reference/profiles.html#strip) mean the
+release strips symbols and emits no debug information, and the image carries no separate symbol
+files. Most server backtrace frames will therefore be addresses or `<unknown>`; panic file/line
+comes from the panic hook and remains available. The smallest server-only fix is setting
+`CARGO_PROFILE_RELEASE_STRIP=debuginfo` on the existing CI server build: it retains function-name
+symbol tables without changing code optimisation. Its cost is a larger binary/image and a rebuild;
+the byte increase is unmeasured. Full frame file/line information additionally needs debug info.
+The release profile is unchanged.
 
 This is a snapshot before stop, not continuous log shipping: later lines are absent. Edgegap
 deletes logs on deployment stop (`session.sh`'s `cmd_logs` contract). A process exit alone does not
