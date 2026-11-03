@@ -57,7 +57,7 @@ fn grip_law() -> &'static GripLaw {
                     data.breakaway_share.label,
                     crate::provenance::Provenance::StandIn(_)
                 ),
-            "{PATH}: breakaway_share must lie in (0,1) and be labelled StandIn; author the missing rigid-contact presliding curve"
+            "{PATH}: breakaway_share must lie in (0,1) and be labelled StandIn; author the missing contact presliding curve"
         );
         assert!(
             data.rigid_rolling_resistance.value.is_finite()
@@ -260,27 +260,20 @@ pub struct ForceParams {
     pub grip: Option<GripParams>,
 }
 
-/// Per-element soil displacement or rigid-surface bristle displacement. One vector per
-/// material link × lateral column (flat index `link * 3 + column`), WORLD space, meters.
-/// Each grounded element resists relative ground motion in ANY direction (no friction
-/// ellipse, no authored lateral share); turning resistance emerges from the footprint geometry —
-/// a per-side mean slip would erase the footprint's rotational resistance. On soil,
-/// advected long-memory displacement can reduce it; architecture section 5a owns that gap.
-/// State rides MATERIAL identity (advects with belt phase, same mapping as the witness
-/// link). A pad's memory survives as long as the pad is plausibly on the ground: membership
-/// is keyed to ELASTIC load with enter/leave hysteresis plus a short loss dwell
-/// ([`GRIP_ELEMENT_LOSS_DWELL_TICKS`]), and only definitive departure (dwell expired —
-/// cycled to the return run, or lifted off) forgets — memory expires within one
-/// contact-patch dwell while driving; a parked tank holds it through contact flicker.
+/// Recoverable shear state, one WORLD-space vector (m) per material link × lateral column
+/// (flat index `link * 3 + column`). Force reads this vector divided by contact compliance,
+/// capped at that contact's capacity. Sliding returns the state within one shear distance;
+/// skid travel beyond it is plastic. Architecture section 5a owns the constitutive decision.
+/// Material identity advects with belt phase. Elastic-load hysteresis and contact-loss dwell
+/// preserve a parked pad's state through support flicker; definitive departure forgets it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GripElements {
-    /// The pads' accumulated shear against the ground (bristle deflection, world-space
-    /// meters), one per material link × lateral column, flat index `link * 3 + column`.
+    /// Recoverable bristle deflection, world-space m.
     pub strain: Vec<Vec3>,
     /// Ticks of contact-loss grace left per element before its shear is forgotten. A
     /// parallel `Vec<u8>` rather than a widened strain entry: 1 byte/element with no
     /// padding (a `(Vec3, u8)` entry rounds up to 16 bytes) and the strain slab stays
-    /// densely packed — this state is rollback-historied and checkpointed, every byte counts.
+    /// densely packed on the authority.
     pub dwell: Vec<u8>,
 }
 
@@ -620,7 +613,6 @@ struct ColumnContact {
     /// [`BeltContact::mu`].
     mu: f32,
     shear_m: f32,
-    soil_capacity_share: f32,
     /// Motion resistance coefficient: ground total or undeforming-support running-gear loss.
     rolling: f32,
     #[cfg(feature = "bitprobe")]
@@ -1241,7 +1233,6 @@ fn collect_column_contacts<O: TerrainOracle>(
                     collider,
                     mu: surface.mu,
                     shear_m: surface.shear_m,
-                    soil_capacity_share: surface.soil_capacity_share,
                     rolling: surface.rolling,
                     #[cfg(feature = "bitprobe")]
                     probe_index,
@@ -1286,7 +1277,6 @@ struct SurfaceGrip {
     cohesion_n: f32,
     rolling: f32,
     shear_m: f32,
-    soil_capacity_share: f32,
 }
 
 impl SurfaceGrip {
@@ -1297,7 +1287,6 @@ impl SurfaceGrip {
             cohesion_n: 0.0,
             rolling,
             shear_m: GRIP_SHEAR_FLOOR_M,
-            soil_capacity_share: 0.0,
         }
     }
 }
@@ -1321,7 +1310,6 @@ fn surface_under<O: TerrainOracle>(
                 let law = ground.traction;
                 let cohesion_n = area * law.cohesion_pa;
                 let cohesion = if load > 0.0 { cohesion_n / load } else { 0.0 };
-                let soil = law.tan_phi + cohesion;
                 let nominal_mu = law.rigid_share
                     * grip.pair(crate::substances::contact_friction(ground.friction))
                     + law.tan_phi;
@@ -1332,7 +1320,6 @@ fn surface_under<O: TerrainOracle>(
                     cohesion_n,
                     rolling: ground.rolling_resistance,
                     shear_m: law.shear_m.max(GRIP_SHEAR_FLOOR_M),
-                    soil_capacity_share: if total > 0.0 { soil / total } else { 0.0 },
                 }
             }
             None => {
@@ -1351,26 +1338,12 @@ fn surface_under<O: TerrainOracle>(
     }
 }
 
-/// Sliding displacement clip: exp(-16) omits about 1.1e-7 of loading capacity (DERIVED).
-/// The clip also controls macroscopic reversal travel; architecture section 5a records the
-/// unresolved unloading law rather than treating this as solely solver precision.
-const SOIL_SATURATION_SHEAR: f32 = 16.0;
-
-fn soil_mobilization(displacement: Vec3, shear_m: f32) -> Vec3 {
-    let length = displacement.length();
-    if length == 0.0 {
-        return Vec3::ZERO;
-    }
-    displacement / length * -(-length / shear_m).exp_m1()
-}
-
-/// Shared world displacement: soil accumulates vector slip for the exponential readout;
-/// rigid contact uses Dupont's elastic zone and Dahl return. Architecture section 5a owns
-/// the constitutive choice and its unresolved unloading. Each patch projects the shared
-/// displacement into its own tangent plane when reading force.
-fn advance_element_strain(j0: Vec3, sdot: Vec3, dt: f32, shear_m: f32, soil_share: f32) -> Vec3 {
+/// Dupont elastic zone with Dahl return, shared by every surface. Below breakaway and
+/// during unloading the state is elastic; plastic flow bounds recoverable shear to `shear_m`.
+/// Each patch projects this shared world vector into its own plane when reading force.
+fn advance_element_strain(j0: Vec3, sdot: Vec3, dt: f32, shear_m: f32) -> Vec3 {
     let speed = sdot.length();
-    let alpha = if soil_share > 0.0 || j0.dot(sdot) < 0.0 {
+    let alpha = if j0.dot(sdot) < 0.0 {
         0.0
     } else {
         let m = ((j0.length() / shear_m - grip_law().breakaway_share.value)
@@ -1380,13 +1353,8 @@ fn advance_element_strain(j0: Vec3, sdot: Vec3, dt: f32, shear_m: f32, soil_shar
     };
     let mut j1 = (j0 + sdot * dt) / (1.0 + alpha * (dt / shear_m) * speed);
     let j_len = j1.length();
-    let limit = if soil_share > 0.0 {
-        SOIL_SATURATION_SHEAR * shear_m
-    } else {
-        shear_m
-    };
-    if j_len > limit {
-        j1 *= limit / j_len;
+    if j_len > shear_m {
+        j1 *= shear_m / j_len;
     }
     j1
 }
@@ -1412,7 +1380,8 @@ fn forget_departed_elements(kept: &[bool], elements: &mut GripElements) {
 }
 
 /// The per-element isotropic shear regime (architecture section 5a; see [`GripElements`]).
-/// Each grounded element integrates its own world-space shear vector; membership and budgets
+/// Each grounded element advances its bounded, recoverable world-space shear once; every
+/// surface patch reads the same return law with its own capacity. Membership and budgets
 /// key on the ELASTIC load, never the damped actual load: the damped load carries the support
 /// damper's tick-scale transients, and feeding those into an integrating state amplified a
 /// marginal mm-scale Nyquist wobble into a full force limit cycle (measured: ±90 kN damped-load
@@ -1449,12 +1418,10 @@ fn update_grip_elements(
     let mut slips = vec![Vec3::ZERO; element_len];
     let mut counts = vec![0_usize; element_len];
     let mut compliances = vec![0.0; element_len];
-    let mut soils = vec![0.0; element_len];
     let mut advanced = vec![false; element_len];
     for c in cols {
         loads[c.element] += c.load_elastic;
         compliances[c.element] += c.shear_m * c.load_elastic;
-        soils[c.element] += c.soil_capacity_share * c.load_elastic;
         slips[c.element] += (c.long_dir * c.slip_long - c.lat_dir * c.slip_lat) * c.load_elastic;
         counts[c.element] += 1;
     }
@@ -1491,7 +1458,6 @@ fn update_grip_elements(
                     mean_slip,
                     dt,
                     compliances[c.element] / loads[c.element],
-                    soils[c.element] / loads[c.element],
                 );
             }
             // Below the enter bound the existing strain holds; each patch's force still scales
@@ -1509,9 +1475,7 @@ fn update_grip_elements(
         // contact's equivalent capacity/load coefficient μ.
         let d_coef =
             2.0 * GRIP_ELEMENT_DAMPING_RATIO / (c.shear_m * c.mu * super::derive::G).sqrt();
-        let rigid = (j1 / c.shear_m).clamp_length_max(1.0);
-        let soil = soil_mobilization(j1, c.shear_m);
-        let mut g = rigid.lerp(soil, c.soil_capacity_share) + sdot * d_coef;
+        let mut g = (j1 / c.shear_m).clamp_length_max(1.0) + sdot * d_coef;
         let g_len = g.length();
         if g_len > 1.0 {
             g /= g_len;
@@ -1562,14 +1526,9 @@ fn emit_contact_forces(
         let mut f_lat = 0.0;
         let mut traction = Vec3::ZERO;
         if c.has_plane && elements_mode {
-            // Each element's own capped strain+damping direction, scaled by ITS elastic load
-            // — isotropic, full μ in every direction. The kinetic regularizer is deliberately
-            // ABSENT: its former near-zero slope was a ~270 kN·s/m explicit
-            // damper per side that sits at the 64 Hz stability margin and rang the contact
-            // modes. Under sustained slide the Dahl state saturates to the strain cap — the
-            // saturated friction ellipse — so steady sliding converges; what changes is a
-            // physical relaxation lag (~C/K of slip distance) in force DIRECTION during fast
-            // slides, and fuller sub-saturation traction.
+            // Each contact spends its own isotropic capacity on recoverable shear and damping.
+            // No velocity-regularized kinetic term is added: its former near-zero slope was
+            // MEASURED about 270 kN s/m per side, marginal at the fixed step (ADR-0026).
             let grip_el = c.mu * c.load_elastic;
             let g = elem_g[idx];
             f_long = grip_el * g.x;
@@ -2888,6 +2847,210 @@ mod tests {
         }
     }
 
+    /// A skid may yield the ground, but cannot store its entire travel as a spring.
+    /// Drivers stopping or being pushed rely on recoverable travel being bounded by K.
+    /// FIXTURE: locked 2 m pad on shipped mud, 4 m/s entry; dirt shoved 1.2 m sideways.
+    #[test]
+    fn ground_reversal_returns_at_most_one_shear_distance() {
+        let mut rebounds = Vec::new();
+        for sideways in [false, true] {
+            let ground = crate::ground_types::GroundTypes::load_shipped()
+                .get(if sideways { "dirt" } else { "mud" })
+                .contact();
+            let oracle = GroundedFlat {
+                surface_y: 0.0,
+                ground,
+            };
+            let mut state = SideState::default();
+            let mut elements = GripElements::for_links(25);
+            let mut velocity = if sideways { 0.6 } else { 4.0 };
+            let mut distance = 0.0_f32;
+            let mut peak = 0.0_f32;
+            let mut reverse = 0.0_f32;
+            let mut mass = 0.0;
+            for tick in 0..64 * 20 {
+                let report = if sideways {
+                    let points = rect_loop(0.02);
+                    contact_side(
+                        &SideInput {
+                            loop_pts: &points,
+                            count: 25,
+                            plane_x: 0.0,
+                            columns: TEST_COLUMNS,
+                            travel: TravelField { knots: &[] },
+                        },
+                        state,
+                        Affine3A::IDENTITY,
+                        1.0 / 64.0,
+                        &rig_params(),
+                        &oracle,
+                        &RubbleBodies::default(),
+                        |_| Vec3::X * velocity,
+                        &mut elements,
+                    )
+                } else {
+                    grounded_tick(&oracle, &mut state, &mut elements, velocity)
+                };
+                if tick == 0 {
+                    mass = report.contacts.iter().map(|c| c.load_elastic).sum::<f32>()
+                        / super::super::derive::G;
+                }
+                let force: f32 = report
+                    .contacts
+                    .iter()
+                    .map(|c| {
+                        if sideways {
+                            c.traction.x
+                        } else {
+                            -c.traction.z
+                        }
+                    })
+                    .sum();
+                if !sideways || tick >= 128 {
+                    velocity += force / mass / 64.0;
+                }
+                distance += velocity / 64.0;
+                peak = peak.max(distance);
+                reverse = reverse.min(velocity);
+            }
+            let rollback = peak - distance;
+            println!(
+                "MEASURED fixed pad sideways={sideways}: peak={peak:.6} m rollback={rollback:.6} m reverse={reverse:.6} m/s"
+            );
+            rebounds.push((rollback, ground.traction.shear_m.max(GRIP_SHEAR_FLOOR_M)));
+        }
+        for (rollback, k) in rebounds {
+            // FIXTURE observation precision: f32 position accumulation permits 0.01% of K.
+            assert!(
+                rollback <= k * 1.0001,
+                "yielded ground returned a skid as a spring: {rollback} m"
+            );
+        }
+    }
+
+    /// Closed, sub-breakaway dither must not drain a parked element's holding force.
+    /// Drivers rely on zero plastic drift under the support solver's half-tick-rate wobble.
+    #[test]
+    fn ground_holding_force_survives_32_hz_dither() {
+        let k = GRIP_SHEAR_FLOOR_M;
+        let initial = Vec3::X * k * grip_law().breakaway_share.value / 2.0;
+        let mut state = initial;
+        // FIXTURE: 1 mm/s alternating slip, 64 Hz, 60 simulated seconds.
+        for tick in 0..64 * 60 {
+            let slip = Vec3::X * if tick % 2 == 0 { 0.001 } else { -0.001 };
+            state = advance_element_strain(state, slip, 1.0 / 64.0, k);
+        }
+        println!(
+            "MEASURED closed-dither holding share {} -> {}",
+            initial.x / k,
+            state.x / k
+        );
+        assert!(
+            (state - initial).length() < k * 0.001,
+            "closed small slip must retain static support, not ratchet: {state:?}"
+        );
+    }
+
+    /// Drivers load an elastic pad up to breakaway and slide at finite capacity thereafter.
+    /// The monotonic knee may change with its owned breakaway share; linear force readout stays.
+    #[test]
+    fn ground_loading_is_elastic_before_breakaway_and_bounded_after() {
+        let k = GRIP_SHEAR_FLOOR_M;
+        let mut state = Vec3::ZERO;
+        for quarter in 1..=8 {
+            for _ in 0..1024 {
+                state = advance_element_strain(state, Vec3::X * k, 1.0 / 4096.0, k);
+            }
+            let travel = quarter as f32 / 4.0;
+            assert!(state.x > 0.0 && state.x <= k);
+            if travel <= grip_law().breakaway_share.value {
+                assert!((state.x / k - travel).abs() < 0.0001);
+            }
+            println!(
+                "MEASURED loading at {} K: capacity share {}",
+                quarter as f32 / 4.0,
+                state.x / k
+            );
+        }
+    }
+
+    /// The Driver prices saturated sliding; this instrument reports the actual moment with
+    /// material advection, without correcting any gap. FIXTURE: 4.27 m pad, 1.4 m half tread.
+    #[test]
+    fn ground_turning_moment_with_advected_elements() {
+        let ground = crate::ground_types::GroundTypes::load_shipped()
+            .get("gravel")
+            .contact();
+        let oracle = GroundedFlat {
+            surface_y: 0.0,
+            ground,
+        };
+        let half = 4.27 / 2.0;
+        let points = vec![
+            Vec2::new(-half, 0.02),
+            Vec2::new(half, 0.02),
+            Vec2::new(half, 0.52),
+            Vec2::new(-half, 0.52),
+            Vec2::new(-half, 0.02),
+        ];
+        for yaw in [0.2, 0.6] {
+            let mut state = SideState {
+                speed: -yaw * 1.4,
+                ..Default::default()
+            };
+            let mut elements = GripElements::for_links(50);
+            let mut moment = 0.0;
+            let mut price = 0.0;
+            for tick in 0..64 * 20 {
+                let report = contact_side(
+                    &SideInput {
+                        loop_pts: &points,
+                        count: 50,
+                        plane_x: -1.4,
+                        columns: TEST_COLUMNS,
+                        travel: TravelField { knots: &[] },
+                    },
+                    state,
+                    Affine3A::IDENTITY,
+                    1.0 / 64.0,
+                    &rig_params(),
+                    &oracle,
+                    &RubbleBodies::default(),
+                    |p| Vec3::Y.cross(p) * yaw,
+                    &mut elements,
+                );
+                state.phase += f64::from(state.speed / 64.0);
+                if tick >= 64 * 15 {
+                    moment -= report
+                        .contacts
+                        .iter()
+                        .map(|c| c.point.cross(c.traction).y)
+                        .sum::<f32>();
+                    let weight = report.contacts.iter().map(|c| c.load_elastic).sum();
+                    price += super::super::load::observe(
+                        report.perceived_support.iter(),
+                        Vec3::NEG_Z,
+                        weight,
+                        None,
+                    )
+                    .turn_moment_nm;
+                }
+            }
+            println!(
+                "MEASURED turning yaw={yaw}: moment={:.6} Nm price={:.6} Nm share={:.6}",
+                moment / 320.0,
+                price / 320.0,
+                moment / price
+            );
+            // FIXTURE tolerance: finite pad advection and quadrature may leave a ten-percent
+            // gap from uniform sliding; long-skid memory must not erase most yaw resistance.
+            assert!(
+                moment / price > 0.9,
+                "advected sliding lost its resisting moment"
+            );
+        }
+    }
+
     /// FIXTURE: the same pad sliding on constitutively different surfaces. No terrain name
     /// selects its law and no vehicle's shipped number is an acceptance condition.
     fn sliding_on(ground: crate::ground_field::ContactGround) -> SideReport {
@@ -2960,6 +3123,11 @@ mod tests {
             "MEASURED firm pull {firm_pull:.3} N, loose {loose_pull:.3} N; DERIVED ratio {:.6}",
             strength(firm) / strength(loose)
         );
+        let base = crate::ground_types::GroundTypes::load_shipped()
+            .get(crate::terrain_blend::BASE_GROUND)
+            .contact();
+        let (_, base_pull) = pull(base);
+        println!("MEASURED shipped base-ground fixed-pad pull {base_pull:.3} N");
     }
 
     /// Paving supplies only pair friction. A mutant applying soil strength on every surface
@@ -3017,11 +3185,10 @@ mod tests {
         }
     }
 
-    /// Stored displacement must reach the contact force through the exponential readout and
-    /// the effective K. Players parking on soil rely on that compliance. A linear readout or
-    /// a force path ignoring the floor fails independently of the capacity tests.
+    /// Recoverable shear reads force linearly through effective K. Drivers rely on that
+    /// unloading stiffness; a nonlinear readout or ignored solver floor changes the return.
     #[test]
-    fn stored_soil_displacement_uses_the_effective_compliance_in_the_force_pass() {
+    fn recoverable_shear_reads_effective_compliance_in_the_force_pass() {
         // FIXTURE: a soil with zero cohesion and tan(phi)=0.5; two K values straddle the floor.
         let displacement = GRIP_SHEAR_FLOOR_M;
         for k in [GRIP_SHEAR_FLOOR_M / 2.0, GRIP_SHEAR_FLOOR_M * 2.0] {
@@ -3059,7 +3226,7 @@ mod tests {
                 |_| Vec3::ZERO,
                 &mut elements,
             );
-            let expected = 1.0 - (-displacement / k.max(GRIP_SHEAR_FLOOR_M)).exp();
+            let expected = displacement / k.max(GRIP_SHEAR_FLOOR_M);
             assert!(!report.contacts.is_empty());
             for c in report.contacts {
                 assert!((c.f_lat.abs() / (c.load_elastic * 0.5) - expected).abs() < 1e-6);
@@ -3067,18 +3234,6 @@ mod tests {
         }
     }
 
-    /// At one characteristic displacement the soil has mobilized 1-exp(-1) of its capacity,
-    /// not the full Coulomb budget. Drivers rely on K as a fact, independent of timestep.
-    #[test]
-    fn soil_shear_mobilizes_exponentially_over_displacement() {
-        let k = 0.1; // FIXTURE shear distance.
-        let mut j = Vec3::ZERO;
-        for _ in 0..16 {
-            j = advance_element_strain(j, Vec3::X * k, 1.0 / 16.0, k, 1.0);
-        }
-        assert!((soil_mobilization(j, k).x - (1.0 - (-1.0_f32).exp())).abs() < 1e-6);
-        assert_eq!(soil_mobilization(Vec3::ZERO, k), Vec3::ZERO);
-    }
     /// Driver grip is nominal-pressure strength. Spring stiffness is not a ground fact;
     /// changing it at fixed footprint must not change a paid gear decision's load.
     #[test]
@@ -3148,7 +3303,6 @@ mod tests {
             collider: None,
             mu: 0.5,
             shear_m: GRIP_SHEAR_FLOOR_M,
-            soil_capacity_share: 1.0,
             rolling: 0.0,
             #[cfg(feature = "bitprobe")]
             probe_index: 0,

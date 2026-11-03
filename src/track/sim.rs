@@ -201,7 +201,7 @@ impl TrackGripElements {
 
 /// Coarse diagnostic field digest used by [`TrackGripEffect`]. Strain axes are
 /// projected to signed logarithmic bins before FNV-1a. Four bins per octave at a
-/// 0.5 mm resolution distinguish long soil slides without coupling to solver compliance.
+/// 0.5 mm Resolution distinguish recoverable shear without coupling to solver compliance.
 /// Determinism traces retain raw-bit state.
 pub(crate) fn coarse_grip_digest(elements: &TrackGripElements) -> u32 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -2556,14 +2556,13 @@ mod tests {
         );
     }
 
-    /// A coarse digest still distinguishes displacement beyond the elastic solver floor;
-    /// diagnostics must not report every long soil skid as the same state.
+    /// Diagnostics distinguish recoverable shear states within the solver floor.
     #[test]
-    fn diagnostic_digest_distinguishes_long_soil_displacements() {
+    fn diagnostic_digest_distinguishes_recoverable_shear() {
         let mut elements = TrackGripElements::for_links(1);
-        elements.sides[0].strain[0] = Vec3::X * 0.2; // FIXTURE skid displacements, m.
+        elements.sides[0].strain[0] = Vec3::X * super::super::forces::GRIP_SHEAR_FLOOR_M * 0.2; // FIXTURE capacity shares.
         let first = coarse_grip_digest(&elements);
-        elements.sides[0].strain[0] = Vec3::X * 0.4;
+        elements.sides[0].strain[0] = Vec3::X * super::super::forces::GRIP_SHEAR_FLOOR_M * 0.4;
         assert_ne!(first, coarse_grip_digest(&elements));
     }
 }

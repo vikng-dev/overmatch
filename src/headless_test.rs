@@ -1012,21 +1012,21 @@ fn contact_law_shipped_ground_speeds() {
 
 /// The production app must publish the capacity its contact law uses while stopping.
 /// FIXTURE: the shipped vehicle on flat mud at 4 m/s, held service brakes, 20 simulated
-/// seconds. Rollback is measured, not accepted as a physical invariant (section 5a's open law).
+/// seconds. Drivers rely on recoverable soil travel being bounded by K after any skid.
 #[cfg(feature = "bitprobe")]
 #[test]
 fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
     use crate::track::sim::{TrackContacts, TrackGripEffect};
     use avian3d::prelude::{LinearVelocity, Position};
     let (mut app, tank) = booted_offline_sim();
+    let ground = crate::ground_types::GroundTypes::load_shipped()
+        .get("mud")
+        .contact();
     {
         let mut track = app
             .world_mut()
             .resource_mut::<crate::track::terrain::TrackField>();
         let field = track.field.take().unwrap();
-        let ground = crate::ground_types::GroundTypes::load_shipped()
-            .get("mud")
-            .contact();
         track.field =
             Some(field.with_ground(Some(crate::ground_field::GroundField::uniform(ground))));
     }
@@ -1090,6 +1090,82 @@ fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
     println!(
         "MEASURED full-app mud service stop: capacity={capacity:.3} N peak={peak:.6} m rollback={:.6} m reverse={reverse:.6} m/s",
         peak - last
+    );
+    assert!(
+        peak - last
+            <= ground
+                .traction
+                .shear_m
+                .max(crate::track::forces::GRIP_SHEAR_FLOOR_M),
+        "a stop must not return the skid as a spring: {} m",
+        peak - last
+    );
+}
+
+/// Parking on supported gravel must settle and retain position under the shipped support
+/// solver. A force-state return that leaks under dither makes drivers creep downhill.
+/// FIXTURE: an uninterrupted 20-degree plane, 60 simulated seconds, no input.
+#[test]
+fn contact_law_park_settles_without_late_creep() {
+    use avian3d::prelude::Position;
+    let angle = 20.0_f32.to_radians();
+    let extent = crate::terrain_grid::FIXTURE_EXTENT;
+    let height = extent.half_extent() * angle.tan();
+    let grid = crate::terrain_grid::HeightGrid::new(
+        vec![height, height, -height, -height].into(),
+        2,
+        extent,
+    );
+    let mut app = booted_sim_on(Some(grid));
+    start_fixed_clock(&mut app);
+    app.update();
+    let tank = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+        .single(app.world())
+        .expect("one controlled tank");
+    {
+        let mut track = app
+            .world_mut()
+            .resource_mut::<crate::track::terrain::TrackField>();
+        let field = track.field.take().expect("boot builds terrain");
+        let ground = crate::ground_types::GroundTypes::load_shipped()
+            .get("gravel")
+            .contact();
+        track.field =
+            Some(field.with_ground(Some(crate::ground_field::GroundField::uniform(ground))));
+    }
+    let rotation = Quat::from_rotation_x(angle);
+    let rest = app
+        .world()
+        .resource::<crate::track::rig_geom::RigGeom>()
+        .hull_rest_y;
+    let start = Vec3::new(100.0, 0.0, 0.0) + rotation * Vec3::Y * rest;
+    drive_load::place(&mut app, tank, start, rotation, 0.0, 1);
+    let mut settled = 0.0;
+    let mut last = 0.0;
+    let mut late_min = f32::INFINITY;
+    let mut late_max = f32::NEG_INFINITY;
+    for tick in 0..60 * FIXED_TICKS_PER_SECOND {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        last = (app.world().get::<Position>(tank).unwrap().0 - start).dot(rotation * Vec3::Z);
+        if tick == 10 * FIXED_TICKS_PER_SECOND - 1 {
+            settled = last;
+        }
+        if tick >= 59 * FIXED_TICKS_PER_SECOND {
+            late_min = late_min.min(last);
+            late_max = late_max.max(last);
+        }
+    }
+    println!(
+        "MEASURED gravel park 20 deg: settle10={settled:.8} m settle60={last:.8} m drift10to60={:.8} m late_range={:.8} m",
+        last - settled,
+        late_max - late_min
+    );
+    assert!(
+        late_max - late_min < crate::track::forces::GRIP_SHEAR_FLOOR_M / 100.0,
+        "a settled park must not keep creeping: {} m in the final second",
+        late_max - late_min
     );
 }
 

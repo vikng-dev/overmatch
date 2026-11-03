@@ -352,20 +352,18 @@ substance is not yet a ground the belt reads).
 A rigid surface uses the existing substance pair, `sqrt(mu_track * mu_surface)`.
 Soil uses Mohr-Coulomb strength over the contact footprint,
 
-`T_max = A*c + W*tan(phi)`; `T = T_max * (1 - exp(-|j|/K_eff))` along the vector displacement `j`.
+`T_max = A*c + W*tan(phi)`.
 
 `A` is supported belt length times strip width projected onto the struck surface; `W` is elastic
-normal load. The force pass stores capacity as `mu_equiv = T_max/W`, not as a
-claim that soil shear is steel sliding friction. The Driver instead sums footprint cohesion
-separately and applies the load-proportional terms to nominal normal pressure. The longitudinal component reacts into the belt.
-Janosi-Hanamoto uses characteristic displacement: at `|j| = K_eff` the capacity share is
-DERIVED `1-exp(-1) = 0.63212056`, not full strength. The solver's existing velocity damper remains,
-sized from initial shear stiffness and the elastic load's mass share; it is a Resolution term,
-not an extra soil-strength fact. Rigid surfaces retain their Dupont elastic zone and Dahl return.
-Soil accumulates tangent-plane vector displacement while the element contacts the ground;
-departure forgets it. Displacement is currently clipped at `16*K_eff`, where the omitted loading
-capacity share is DERIVED `exp(-16) = 1.125e-7`. The clip also controls macroscopic unloading;
-it is not solely a precision bound. The measured defect and owner decision are recorded below.
+normal load. The force pass stores capacity as `mu_equiv = T_max/W`, not as a claim that soil
+shear is steel sliding friction. The Driver sums footprint cohesion separately and applies
+load-proportional strength to nominal normal pressure. The longitudinal component reacts into
+the belt. Every surface uses the same recoverable force state `z`, with `F = T_max*z/K_eff`
+in its tangent plane, capped at its own capacity. Dupont's elastic zone retains holding force
+under closed small slips; Dahl return bounds `|z|` to `K_eff`, so additional skid travel is
+plastic. The existing velocity damper is sized from initial shear stiffness and elastic-load
+mass share; it remains a Resolution term, not additional soil strength. Definitive departure
+forgets the element's state. The bounded-return decision and A/B evidence are below.
 
 The soil facts are required and labelled: cohesion Pa, friction angle degrees and characteristic
 shear displacement m. The stamping note's section 2 reproduces NASA's Wong specimen table as
@@ -378,8 +376,8 @@ fit. None is a per-vehicle rule.
 Painted boundaries blend cohesion and `tan(phi)` by area share, so their maximum shear strengths
 blend linearly. Rigid capacity blends `sqrt(mu_surface)`, then squares the mean for the one
 geometric pair rule. Soil K is homogenized by soil area share before applying the solver floor.
-Each split material element advances its shared displacement once, with load-weighted slip and
-compliance; each surface patch reads its own capacity and displacement response.
+Each split material element advances its shared recoverable shear once, with load-weighted slip
+and compliance; every surface patch reads its own capacity and compliance through the same law.
 
 **Fact versus solver floor.** `K_eff = max(K_ground, K_floor)`. The code's `GRIP_SHEAR_FLOOR_M`
 is the Resolution floor, 0.075 m; it is no longer constitutive data in `grip.ron`. ADR-0026 records
@@ -707,8 +705,8 @@ from decoded weights. The final affected batch passed 208 tests (1 ignored), inc
 consumer, all force/ground/print tests, map publication, support-vector probes, curb climb,
 roll decay and the whole-tree guards. Workspace/all-target CI-feature clippy and fmt are green.
 The fixed-pad class witness gives MEASURED firm/loose pulls 14,404.124/11,034.170 N, ratio
-DERIVED 1.305411 from `A*c + W*tan(phi)`. Stored-displacement tests prove the exponential
-readout and both sides of the solver floor; paving tests prove the substance pair.
+DERIVED 1.305411 from `A*c + W*tan(phi)`. Recoverable-shear tests prove the linear force readout and both sides of the solver floor;
+paving tests prove the substance pair.
 The off-centre force fixture also covers a lower surface with clearance at the pressure centroid:
 refinement preserves support from its loaded neighbours. A probe's load-weighted mean normal
 multiplied by its total load reconstructs the sum of its patches' support vectors.
@@ -776,29 +774,25 @@ shipped mud, FIXTURE 4 m/s entry, 64 Hz, hull mass derived from elastic support 
 No unloading change is included in `driving: observe soil at nominal pressure and preserve patch shear (#146)`;
 the flat-contact force law is unchanged, so this lane has no improved after-stop measurement.
 
-The monotonic Janosi-Hanamoto curve does not specify unloading or a plastic set. Choosing
-one requires the owner's design decision, including mixed contacts. Options and costs:
+**Decision: one Dupont elastic-zone/Dahl force-state return for every contact.** Plain Dahl
+with `alpha = 1` preserves Janosi-Hanamoto's monotonic curve (`dz/dt = sdot - |sdot|*z/K`),
+but the controlled closed-slip witness loses holding force; the accepted elastic zone retains it.
+This deliberately changes the soil loading knee, using the existing labelled breakaway stand-in
+rather than adding history or another material switch. An elastic/plastic split with hardening
+was rejected because it needs extra per-element history and mixed-patch ownership rules;
+ground-owned shear was rejected because it needs spatial history and lifetime rules. Neither
+is needed to pass the stop, shove and parking measures. The `16 K` displacement clip and
+soil-share-selected return/readout are deleted; the losing A/B arm survives only in this record.
 
-- Elastic/plastic split with an unloading stiffness and hardening history: preserves the
-  monotonic curve and bounds recoverable travel, but adds per-element history, checkpoint/wire
-  admission and a rule for dissimilar patches sharing an element. A wire change bumps the protocol.
-- Force-state Dahl return with the soil curve's tangent: bounds reversal memory with existing
-  vector state and can read each patch's curve, but changes the accepted elastic zone and
-  cyclic/parking behavior. It needs an explicit hysteresis choice and new park/turn evidence.
-- Ground-owned shear rather than pad-owned memory: models what yielded ground retains, but
-  needs spatial history, ownership and lifetime rules beyond this contact law.
-
-MEASURED turning witness: FIXTURE uniform 4.27 m pad, 1.4 m half tread, moving material
+Baseline MEASURED turning witness before bounded return: FIXTURE uniform 4.27 m pad, 1.4 m half tread, moving material
 links at the pivot's belt speed on shipped gravel, steady final five seconds of a 20-second
 run at 64 Hz. At 0.2 rad/s the resisting moment was 11,346.383 N m against the Driver's
 30,332.969 N m price (37.406%); at 0.6 rad/s it was 19,460.770 against 30,374.113 N m
 (64.070%). This measures the force path and material advection, not full-body yaw. The Driver
-prices uniform saturated sliding; long-memory soil strain need not attain it. Steering on soil
-is therefore overpriced in this witness. Choosing a mobilization-aware prospective price
-requires a planned slip/dwell model; changing shear history shares the unloading decision above.
-Neither is hidden behind a correction factor in this lane.
+prices uniform saturated sliding; long-memory soil strain need not attain it. That baseline overprices steering. Bounded return closes most of the gap as measured below;
+the remaining gap is reported without a correction factor or a prospective slip/dwell model.
 
-The Driver now sums `A*c` as newtons over its footprint and applies the geometric mean of
+The Driver now sums `A*c` as newtons over its footprint and applies the length-weighted arithmetic mean of
 `tan(phi)` plus rigid pair shares to nominal normal weight. It never divides cohesion by
 spring load. MEASURED fixed-footprint stiffness-halving witness: 135,545.84 to 163,975.27 N
 before; 109,048.43 to 109,048.43 N after. The vanishing-patch gear witness keeps positive
@@ -833,7 +827,7 @@ first-patch projection defects were both red before their fixes. The schema-3 Py
 gate accepts below-capacity and zero-force/zero-capacity inputs, rejects over-capacity and
 nonzero-force/zero-capacity inputs; its script parses and runs with the pinned script dependency.
 
-**Feel and remaining review dispositions.** DERIVED parking under a uniform-pressure,
+**Historical loading-curve derivation.** Before bounded return, DERIVED parking under a uniform-pressure,
 constant equivalent-capacity approximation, `j = -K_eff*ln(1-tan(theta)/mu_equiv)`:
 at 20 degrees and 75 mm effective K, gravel at 0.712 W gives 53.684 mm; firm dirt at
 0.417 W gives 154.667 mm. These are single-plane loading derivations, not full-app park
@@ -847,7 +841,7 @@ representative firm and loose grounds would settle it; this lane does not tune t
 The passive pair changes apply to belts on rigid pieces as well as bump stops: DERIVED
 1.026158 to 0.624500 on the fixture brick. Soil straight-line speeds remain the table above;
 the ground/entry regression passed after nominal-pressure observation and data admission changed.
-The full physical park/steering feel remains a playtest question, not a claimed measurement here.
+Physical park/steering measures for bounded return follow; their feel remains a playtest judgment.
 
 Rigid friction now lives only inside a `Rigid` law. Soil cannot author an unused friction number.
 `RunningGear` reads the single labelled undeforming-support resistance in `grip.ron`;
@@ -858,16 +852,15 @@ print appearance magnitudes are admitted labelled data, preserving their values.
 
 Harness schema 3 records each contact's actual capacity; the analyzer no longer treats a
 base-pair `mu` as soil grip or derives a rigid bristle stiffness from it. The old spring-energy
-bound is removed: the soil unloading law is unresolved and capacity alone cannot establish
-recoverable energy. This loses that false energy guarantee; a new energy witness belongs to
-the owner's unloading decision. The force-capacity and finite-value gates remain.
+bound is removed: capacity alone cannot establish recoverable energy. The bounded-return
+witnesses below establish travel, not a contact-trace energy guarantee. The force-capacity and finite-value gates remain.
 
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
-| Claude P1; Codex P2 | skid displacement returns on reversal; saturation clip controls behavior | verified by red locked-pad stop; unloading choice exceeds the monotonic law | pending owner: options above |
-| Claude P3; Codex P2 | tiny soil share switches the whole element's return law | verified: `advance_element_strain` branches on positive soil share | pending with unloading/mixed-contact state |
+| Claude P1; Codex P2 | skid displacement returns on reversal; saturation clip controls behavior | verified red in fixed pad and full app; bounded force-state return | driving: bound recoverable ground shear on reversal (#146) |
+| Claude P3; Codex P2 | tiny soil share switches the whole element's return law | verified; soil-share branch and both readout paths removed | driving: bound recoverable ground shear on reversal (#146) |
 | both P2 | Driver divides cohesion by spring load | verified red; stiffness-halving and vanishing-patch gear witnesses green | driving: observe soil at nominal pressure and preserve patch shear (#146) |
-| Claude P2 | moving-belt soil scrub differs from uniform sliding price | verified by measured moment ratios above | pending owner: prospective mobilization or shear-history design |
+| Claude P2 | moving-belt soil scrub differs from uniform sliding price | verified; bounded return closes most of the gap, remaining gap reported below | driving: bound recoverable ground shear on reversal (#146) |
 | Codex P2 | first patch projects every patch's strain | verified red and green patch-order witness | driving: observe soil at nominal pressure and preserve patch shear (#146) |
 | Claude P2 | soil rows author unused friction | verified; refused by the law's enum | driving: make ground facts and stopping capacity explicit (#146) |
 | Claude P3 | duplicated 0.04 resistance and missing label admission | verified; one shared RunningGear source with fact-label admission | driving: make ground facts and stopping capacity explicit (#146) |
@@ -1045,3 +1038,71 @@ ships. (Grip and support have since settled further: per-element strain grip
   no hold at 0.386460 m). The shipped radius, 0.386441 m, sits ~30 µm **past** the cliff. The
   discontinuity is a contact-regime flip, not a tuning curve; which regimes it flips between,
   and whether the envelope law should be continuous across it, is open.
+
+### Bounded recoverable shear (#146)
+
+Subject: the game's driving model; game state only. The before tree is the lane's starting
+main. These are unattended headless measurements, with no captures or pricing. The force-law
+A/B used identical fixtures: baseline accumulated displacement, A plain Dahl on soil, B the
+shared elastic-zone return. B is the sole shipped path.
+
+| witness | baseline (MEASURED) | A: alpha = 1 (MEASURED) | B: kept law (MEASURED) |
+|---|---:|---:|---:|
+| fixed mud stop rollback, m | 1.199998 | 0.054364 | 0.075001 |
+| fixed mud peak reverse speed, m/s | 0.480283 | 0.226819 | 0.266221 |
+| full-app mud stop rollback, m | 1.198098 | 0.052179 | 0.073509 |
+| full-app peak reverse speed, m/s | 0.484893 | 0.213201 | 0.255145 |
+| dirt, 1.2 m sideways shove, rollback m | 1.200000 | 0.054553 | 0.074999 |
+| turning moment at 0.2 rad/s, N m | 11,346.383 | 29,230.885 | 29,081.803 |
+| turning share of Driver price at 0.2 rad/s | 37.4061% | 96.3667% | 95.8752% |
+| turning moment at 0.6 rad/s, N m | 19,460.770 | 29,660.137 | 29,464.182 |
+| turning share of Driver price at 0.6 rad/s | 64.0703% | 97.6494% | 97.0043% |
+| gravel 20-degree park settlement at 60 s, mm | 52.58075 | 67.38995 | 37.06981 |
+| park displacement from 10 to 60 s, mm | -0.00092 | 0.00137 | 0.00034 |
+| closed 32 Hz dither, held capacity share after 60 s | 0.25 | 0.11226496 | 0.25 |
+
+The fixed-pad travel assertion admits FIXTURE observation precision `0.0001 K` for f32
+position accumulation: its MEASURED 0.075001 m rebound is about one micrometre above the
+75 mm compliance. This is a test tolerance, not a force correction. The actual force state
+is bounded by K. Turning prices are MEASURED 30,332.969 and 30,374.113 N m in the two fixtures;
+B still leaves DERIVED gaps of 4.1248% and 2.9957%. No multiplier closes them.
+
+The dither witness holds the initial recoverable state at one quarter of capacity, imposing
+FIXTURE alternating 1 mm/s slip at 64 Hz for 60 simulated seconds. It is a controlled closed
+path, not a claim that the full app exhibits that amplitude: A's actual gravel park also
+settles. B keeps holding force under this disturbance without additional state. At FIXTURE
+one K of monotonic slip, fine-step loading gives MEASURED capacity shares 0.632055 for A and
+0.847668 for B. Thus B deliberately gives firmer initial bite and less parking settlement;
+it does not preserve the exact exponential knee. A player loses the metre-scale spring-back
+after a skid and gets resistance aligned with current sliding within roughly one K. Steady
+turning feels more resistant, with the residual price gap disclosed above. Ground facts,
+maximum strength, rolling resistance and the solver floor are unchanged.
+
+Straight-line entries use the existing final-second, 90-s instrument. MEASURED B speeds,
+from rest / rolling, m/s: concrete 10.650203 / 10.650212; dirt 10.569946 / 10.569968;
+gravel 10.610106 / 10.610108; mud 4.849178 / 4.849178; sand 4.874706 / 6.211272.
+Every gear is unchanged; the largest absolute change from the baseline table is DERIVED
+0.000013 m/s, within its 0.01 m/s convergence resolution. Gravel potential drawbar remains
+DERIVED 369.978–370.110 kN versus baseline 369.924–370.111 kN from final contact capacity
+minus rolling load. Fixed-pad firm/loose pulls remain MEASURED 14,404.124 / 11,034.170 N;
+their DERIVED ratio remains 1.305411. The shipped base-ground fixed-pad pull is MEASURED
+14,420.127 N before and after. The existing roll-kick witness stays green: MEASURED
+third-second RMS 0.00012356 rad/s, against baseline 0.00009436 and its 0.003 rad/s bound.
+
+`GripElements` retains the same vectors and dwell bytes. The removed material-share fields
+are private force-pass temporaries. `protocol::plugin` registers resolved belt motion, not
+`TrackGripElements`; clients do not integrate this contact law. No wire type or client-derived
+state changes, so PROTOCOL_REV remains unchanged. The network and wire-hash guards verify it.
+
+The reversal witnesses were red on the original law. A is red on the closed-dither witness;
+its loading curve and full-app park otherwise pass their measures. Restoring the exponential force readout is also red in
+`recoverable_shear_reads_effective_compliance_in_the_force_pass`. Fmt, workspace/all-target
+CI-feature clippy and the affected batch (`track::`, `ground_`, `headless_test`, `net::`,
+`doc_citations`, `ui_ascii`, `net_boundary`, `bake::`) are green: 746 passed, 5 intentionally
+ignored. The full library is run once before the final review-fix commit.
+
+The production-adapter fixed-pose service-stop instrument, which also integrates drivetrain
+motion, now reports MEASURED 0.075287 m rollback and 0.227759 m/s peak reverse speed, versus
+its historical 1.200275 m and 0.467284 m/s above. Its total hull motion exceeds K by DERIVED
+0.287 mm; it is distinct from the locked-pad recoverable-travel invariant and the full-app
+free-support stop. No extra correction is applied to that adapter.
