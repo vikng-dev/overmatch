@@ -3398,6 +3398,10 @@ struct Skid {
 /// the round's path. Marks are read in the face's frame: every bounce's speeds, shock and outgoing
 /// direction are relative to it, and the end velocity has `face` taken off.
 fn skid_on(face: Vec3, elsewhere: Option<Vec3>) -> Skid {
+    skid_from(face, elsewhere, 6.0)
+}
+
+fn skid_from(face: Vec3, elsewhere: Option<Vec3>, approach: f32) -> Skid {
     let mut app = recording_world(false);
     app.insert_resource(RetainSpentShells(true));
     let (root, _) = tank(
@@ -3430,7 +3434,7 @@ fn skid_on(face: Vec3, elsewhere: Option<Vec3>) -> Skid {
     let relative = Vec3::new(incidence.sin(), 0.0, -incidence.cos()) * SKID_SPEED;
     let velocity = relative + face;
     let strike = Vec3::Z * (SKID_FACE.z * 0.5);
-    let from = strike - relative.normalize() * 6.0;
+    let from = strike - relative.normalize() * approach;
     let mut fire = fixture_fire(
         &mut app,
         from,
@@ -3623,5 +3627,33 @@ fn an_instant_contact_burst_moves_with_its_carrier_before_delivery() {
             "the world contact, not the earlier frozen frame, owns the burst"
         );
         assert_eq!(fields.burst.as_ref().unwrap().origin, at);
+    }
+}
+
+/// The game's damage model: tick placement must not turn a valid skid into entry.
+/// Fixture: first touch 5 mm ahead, inside the DERIVED 9.66 mm reopening band for this disc.
+/// Still and moving faces need the same reached-contact identity; extending behind the spawn
+/// would rewind unpaid time. The owner's contact rebuild owns this finding (#260).
+#[test]
+#[ignore = "#260: tick-boundary first touch needs the contact-state rebuild"]
+fn a_tick_boundary_does_not_turn_a_skid_into_entry() {
+    let cases: Vec<_> = [Vec3::ZERO, Vec3::Z * 8.0]
+        .into_iter()
+        .map(|face| (face, skid_on(face, None), skid_from(face, None, 0.005)))
+        .collect();
+    for (face, reference, near) in &cases {
+        assert!(
+            near.velocity.is_some(),
+            "both frames were exercised: {cases:?}"
+        );
+        assert_eq!(
+            near.bounces.len(),
+            reference.bounces.len(),
+            "{face}: {near:?}"
+        );
+        assert!(
+            (near.velocity.unwrap() - reference.velocity.unwrap()).length() < 1.0,
+            "{face}: a tick boundary changes no strike's outgoing motion"
+        );
     }
 }

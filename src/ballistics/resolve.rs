@@ -351,10 +351,12 @@ fn skid_turn(
 /// The crossing law reads this flight as it reads any other, and a world in which something else
 /// moves reads what a still one reads: only the struck point's velocity enters. The stand-off is
 /// [`CONTACT_STAND_OFF`], unless the entrance reads a skid whose resting height lies behind that
-/// ([`to_resting_height`]): the flight then opens just before that height, so the turn lies ahead
-/// of it. The frozen scene stays this close to first touch because a third body arriving there is
+/// ([`to_resting_height`]): it opens just before that height when the retained approach permits.
+/// The cap at the flight's start can leave the turn behind it, so first-touch fallback can re-enter
+/// the face rather than continue the skid. The frozen scene stays close because a third body there is
 /// read at that moment; a corridor opened from the flight's own start would read such a body across
 /// an approach it never stood on.
+///
 #[expect(
     clippy::too_many_arguments,
     reason = "the flight's contact read spans the crossing's context, the round and the sweep's clock"
