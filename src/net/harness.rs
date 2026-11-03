@@ -21,7 +21,7 @@
 //! | `SPIKE_BURST_MS` | milliseconds; `0` | Periodic receive stall: every burst-window packet delivers at the window's end. |
 //! | `SPIKE_BURST_PERIOD_TICKS` | ticks; `0` | Burst recurrence period; both burst values set activates the seeded conditioner. |
 //! | `SPIKE_COST_TRACE` | path; off | Role-qualified fixed-tick cost JSONL. |
-//! | `SPIKE_WORKLOAD_READY` | path; off | Cost runner start file; scripts and cost warmup wait for every input slot. |
+//! | `SPIKE_WORKLOAD_READY` | path; off | Runner start file; scripts and cost warmup wait for every input slot. |
 //! | `SPIKE_COST_WARMUP` | ticks; `384` | Played ticks skipped before recording, from combat release. |
 //! | `SPIKE_FRAME_COST` | path; off | Role-qualified raw per-frame wall-clock JSONL (client). |
 //! | `SPIKE_JITTER_MS` | milliseconds; `0` | Receive-conditioner jitter. |

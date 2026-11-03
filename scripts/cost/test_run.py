@@ -1,6 +1,7 @@
 """The game's damage-model dev runner: failure statuses using fake processes, never game runs."""
 import os
 from pathlib import Path
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ RUNNER = Path(__file__).with_name("run.sh").resolve()
 
 
 class RunnerTests(unittest.TestCase):
-    def run_case(self, *scenarios, **switches):
+    def run_case(self, *scenarios, blocked_primary=False, **switches):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             binary = root / "bin"
@@ -29,9 +30,20 @@ exit 0
             for executable in (server, client):
                 executable.chmod(0o755)
             env = dict(os.environ, BIN=str(binary), OUT=str(root / "out"), **switches)
+            if blocked_primary:
+                (root / "out" / f"{scenarios[0]}.harness.ron").mkdir(parents=True)
             # Fake processes exercise the worker directly; they consume no game/build capacity.
-            return subprocess.run([str(RUNNER), "--holding-lock", *scenarios], env=env, text=True,
-                                  capture_output=True, timeout=10)
+            with subprocess.Popen([str(RUNNER), "--holding-lock", *scenarios], env=env, text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  start_new_session=True) as run:
+                try:
+                    stdout, stderr = run.communicate(timeout=10)
+                    return subprocess.CompletedProcess(run.args, run.returncode, stdout, stderr)
+                finally:
+                    try:
+                        os.killpg(run.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
 
     def test_success_requires_a_ready_server_and_successful_clients(self):
         # Automation may consume the traces only after the complete condition succeeds.
@@ -49,6 +61,11 @@ exit 0
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("primary client exited before admission", run.stderr)
         self.assertNotIn("server exited", run.stderr)
+
+    def test_harness_write_failure_cancels_a_client_already_waiting_at_the_barrier(self):
+        run = self.run_case("fire2", blocked_primary=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("fire2.harness.ron", run.stderr)
 
     def test_primary_client_failure_propagates(self):
         run = self.run_case("fire1", FAKE_CLIENT_FAIL="1")

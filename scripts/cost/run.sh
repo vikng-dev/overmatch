@@ -17,6 +17,7 @@ fi
 shift
 export OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+source "$REPO/scripts/lib/harness-start.zsh" || exit 1
 OUT="${OUT:-/tmp/mg-cost}"
 [[ "$OUT" == /* ]] || OUT="$PWD/$OUT"
 BIN="${BIN:-target/debug}"
@@ -78,30 +79,6 @@ start_client() {
   CLIENT_PID=$!
 }
 
-# Bound admission by the harness watchdog's startup allowance. The file is a tool barrier,
-# never a Battle phase: an ordinary player on the same server is already in combat.
-await_slots() {
-  local scenario="$1" poll
-  for poll in {1..75}; do # ASSUMED 15 s admission allowance, below the 20 s watchdog.
-    if ! kill -0 "$CA" 2>/dev/null; then
-      echo "$scenario FAILED: primary client exited before admission; see $OUT/$scenario.client.log" >&2
-      return 1
-    fi
-    if [[ -n "$CB" ]] && ! kill -0 "$CB" 2>/dev/null; then
-      echo "$scenario FAILED: second client exited before admission; see $OUT/${scenario}b.client.log" >&2
-      return 1
-    fi
-    if grep -q 'harness: input slot' "$OUT/$scenario.client.log" &&
-       { [[ -z "$CB" ]] || grep -q 'harness: input slot' "$OUT/${scenario}b.client.log"; }; then
-      touch "$READY" || return 1
-      return 0
-    fi
-    sleep 0.2
-  done
-  echo "$scenario FAILED: clients did not all take input slots before the tool barrier" >&2
-  return 1
-}
-
 failed=0
 for scenario in "${SCENARIOS[@]}"; do
   echo "== $scenario =="
@@ -128,7 +105,7 @@ for scenario in "${SCENARIOS[@]}"; do
   fi
   if start_client "$scenario" "$ticks" "$fields"; then CA=$CLIENT_PID
   else scenario_failed=1; fi
-  if [[ "$scenario_failed" -eq 0 ]] && ! await_slots "$scenario"; then
+  if [[ "$scenario_failed" -ne 0 ]] || ! await_harness_slots "$READY" "$CA" "$OUT/$scenario.client.log" "$CB" "$OUT/${scenario}b.client.log"; then
     failed=1
     cleanup
     continue

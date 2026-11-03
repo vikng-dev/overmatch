@@ -1,4 +1,5 @@
 #!/bin/zsh
+# Subject: the game's damage-model test tooling, game state only.
 # Pen cam delivery latency over the network: a dedicated server and two scripted clients parked
 # side by side, each firing its main gun and holding its machine guns into the other's engine bay,
 # every process tracing the shot lifecycle. `scripts/shot/pencam_latency.py` joins the traces.
@@ -14,32 +15,42 @@ set -eu
 setopt null_glob
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+source "$REPO/scripts/lib/harness-start.zsh"
+# Build in the queue, then hold one machine lock for the server and both clients.
+if [[ "${1:-}" != --holding-lock ]]; then
+  export OVERMATCH_CARGO_LOCK_WAIT_S=10800
+  (cd "$REPO" && scripts/serial-cargo build --locked --features dev_ui,bitprobe --bin overmatch --bin overmatch-server)
+  exec /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock "$0" --holding-lock "$@"
+fi
+shift
+export OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden
 LAT="${LAT:-0}"
 JIT="${JIT:-0}"
 SEED="${SEED:-1}"
 RUN_S="${RUN_S:-200}"
 OUT="${OUT:-/tmp/overmatch-pencam-latency-${LAT}-${JIT}}"
 BIN="${BIN:-target/debug}"
-SERVER="$REPO/$BIN/overmatch-server"
-CLIENT="$REPO/$BIN/overmatch"
+[[ "$BIN" == /* ]] || BIN="$REPO/$BIN"
+[[ "$OUT" == /* ]] || OUT="$PWD/$OUT"
+SERVER="$BIN/overmatch-server"
+CLIENT="$BIN/overmatch"
+READY="$OUT/workload.ready"
 # DERIVED: 64 Hz fixed ticks.
 TICKS=$((RUN_S * 64))
 
 mkdir -p "$OUT"
 cd "$REPO"
 
-# Incremental when unchanged, and prevents a stale binary from producing a convincing trace.
-cargo build --locked --bin overmatch --bin overmatch-server
-
-rm -f "$OUT"/*.jsonl "$OUT"/*.log "$OUT/summary.json"
+rm -f "$READY" "$OUT"/*.jsonl "$OUT"/*.log "$OUT/summary.json"
 
 SERVER_PID=""
 FIRST_PID=""
+SECOND_PID=""
 cleanup() {
-  [[ -n "$FIRST_PID" ]] && kill "$FIRST_PID" 2>/dev/null || true
-  [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
-  [[ -n "$FIRST_PID" ]] && wait "$FIRST_PID" 2>/dev/null || true
-  [[ -n "$SERVER_PID" ]] && wait "$SERVER_PID" 2>/dev/null || true
+  local pid
+  for pid in "$SECOND_PID" "$FIRST_PID" "$SERVER_PID"; do
+    [[ -z "$pid" ]] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
+  done
 }
 # A signal trap that RETURNS resumes the script in zsh — route INT/TERM through exit so the
 # EXIT trap does the cleanup exactly once and the script actually terminates.
@@ -49,7 +60,7 @@ trap 'exit 143' TERM
 
 # The flat patch (scripts/harness/flat-patch.ron); lane 1 spawns 8 m along +x from lane 0, both
 # facing −z.
-env OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" \
+env OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" \
   SPIKE_SHOT_TRACE="$OUT/server" BEVY_ASSET_ROOT="$REPO" \
   "$SERVER" >"$OUT/server.log" 2>&1 &
 SERVER_PID=$!
@@ -67,7 +78,7 @@ grep -q "listening" "$OUT/server.log"
 client() {
   printf '(drive: Fire(primary: true, secondary: true), fire_tick: %s, fire_interval: 256, aim: Point((%s)), range_m: 12, ticks: %s)\n' \
     "$3" "$2" "$4" >"$OUT/$1.harness.ron"
-  env OVERMATCH_WINDOW=hidden \
+  exec env SPIKE_WORKLOAD_READY="$READY" OVERMATCH_WINDOW=hidden \
     OVERMATCH_HARNESS="$OUT/$1.harness.ron" OVERMATCH_SERVER=127.0.0.1:5888 \
     SPIKE_LATENCY_MS="$LAT" SPIKE_JITTER_MS="$JIT" SPIKE_JITTER_SEED="$SEED" \
     SPIKE_SHOT_TRACE="$OUT/$1" BEVY_ASSET_ROOT="$REPO" \
@@ -80,7 +91,7 @@ client() {
 # lane on reconnect. The analyzer refuses such a run from the server trace's `link` rows (a
 # connect count other than one per client) and exits non-zero, which this script, its last
 # command, returns; a rerun is warm.
-# DERIVED: both scripts play from the same combat release (src/net/harness.rs); the first client
+# DERIVED: both scripts play from the shared tool barrier; the first client
 # runs 128 ticks longer so it is still present for the second's last rounds, and their primaries
 # are 128 ticks (half an interval) apart so the two main guns do not fire together.
 client a "8,1.2,2.2" 320 "$((TICKS + 128))" &
@@ -91,8 +102,11 @@ for _ in {1..150}; do
 done
 grep -q "client connected" "$OUT/server.log"
 
-client b "-8,0.8,-2.2" 448 "$TICKS"
-
+client b "-8,0.8,-2.2" 448 "$TICKS" &
+SECOND_PID=$!
+await_harness_slots "$READY" "$FIRST_PID" "$OUT/a.log" "$SECOND_PID" "$OUT/b.log" || exit 1
+wait "$SECOND_PID"
+SECOND_PID=""
 wait "$FIRST_PID"
 FIRST_PID=""
 kill "$SERVER_PID" 2>/dev/null || true
