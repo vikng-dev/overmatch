@@ -35,7 +35,7 @@ use super::shadow_proxy::{self, ProxySide, ProxyStep};
 use super::side::Side;
 use super::sim::TrackDrive;
 use super::terrain::TrackField;
-use super::wheels::{WHEEL_LIFT_RISE_OMEGA, WheelParams, wheel_lift_step, wheel_lift_target};
+use super::wheels::{WheelParams, wheel_lift_rise_omega, wheel_lift_step, wheel_lift_target};
 use super::wrap;
 
 /// Ordering owner for the track view's presented-pose read: after physics writeback (Avian has
@@ -45,6 +45,7 @@ use super::wrap;
 pub struct TrackViewSet;
 
 pub fn view_plugin(app: &mut App) {
+    wheel_lift_rise_omega();
     app.add_observer(rebind_on_reinstance);
     // The shoe template: one read of the glb's `Link` node, and the every-frame `Added<Name>` scan
     // that HIDES it (and `Link_Box`). Shared verbatim with the sandbox — the game rendered
@@ -808,7 +809,7 @@ fn drive_track_views(
             for wheel in &mut side.wheels {
                 let wparams = WheelParams {
                     reach: wheel.radius + gear.face_offset(),
-                    ease_omega: WHEEL_LIFT_RISE_OMEGA,
+                    ease_omega: wheel_lift_rise_omega(),
                     max_lift: blueprint.spec.track.suspension.bump_stop,
                     max_droop: gear.max_droop(Side::ALL[si]),
                     lateral_spans: &wheel.tread.spans,
@@ -1384,7 +1385,7 @@ mod tests {
         let affine = Affine3A::from_translation(Vec3::Y * 0.5);
         let params = WheelParams {
             reach: 0.5,
-            ease_omega: WHEEL_LIFT_RISE_OMEGA,
+            ease_omega: wheel_lift_rise_omega(),
             max_lift: 0.2,
             max_droop: 0.15,
             lateral_spans: &[(-0.08, 0.08)],

@@ -1049,4 +1049,63 @@ mod tests {
             assert_eq!(light.intensity, look::get().sky_intensity_cd_m2.0);
         }
     }
+    /// Mount the production world installer with a component-only Window and no winit or
+    /// GPU. The rendered material and PrintDepths must receive the exact simulation mask.
+    /// FIXTURE: a 2x2 asymmetric mask over a small flat grid, without map instances.
+    #[test]
+    fn world_installation_shares_the_simulation_mask_with_material_and_prints() {
+        let mut app = crate::headless_test::headless_shell();
+        let mut manifest = crate::map::load(&crate::assets::asset_root());
+        manifest.instances.clear();
+        manifest.extent.world_size_m = 64.0;
+        let rows = manifest.rows;
+        let grid = crate::terrain_grid::HeightGrid::new(vec![0.0; 81].into(), 9, manifest.extent);
+        let field = crate::ground_field::GroundField::fixture_mask(
+            UVec2::splat(2),
+            64.0,
+            vec![Vec3::X, Vec3::Y, Vec3::Z, Vec3::ZERO],
+        );
+        let expected = field.clone();
+        app.insert_resource(manifest)
+            .insert_resource(grid)
+            .add_plugins(plugin)
+            .add_systems(
+                Startup,
+                (move |mut commands: Commands| {
+                    commands.insert_resource(field.clone());
+                })
+                .after(crate::terrain_grid::decode_height_grid)
+                .before(spawn_environment),
+            );
+        app.world_mut().spawn(Window {
+            visible: false,
+            ..default()
+        });
+        crate::headless_test::finish_plugins(&mut app);
+        app.world_mut().run_schedule(Startup);
+        let materials = app
+            .world()
+            .resource::<Assets<crate::terrain_blend::TerrainMaterial>>();
+        let (_, material) = materials
+            .iter()
+            .next()
+            .expect("the world installer builds a terrain material");
+        let images = app.world().resource::<Assets<Image>>();
+        let image = images
+            .get(&material.extension.masks)
+            .expect("the material's mask image is installed");
+        let (size, bytes) = expected.mask_rgba(rows);
+        assert_eq!(image.texture_descriptor.size.width, size.x);
+        assert_eq!(image.texture_descriptor.size.height, size.y);
+        assert_eq!(image.data.as_ref().unwrap(), &bytes);
+        let depths = app.world().resource::<crate::track_prints::PrintDepths>();
+        for at in [
+            Vec2::new(-16.0, -16.0),
+            Vec2::new(16.0, -16.0),
+            Vec2::new(-16.0, 16.0),
+            Vec2::new(16.0, 16.0),
+        ] {
+            assert_eq!(depths.ground_weights(at), expected.weights_at(at));
+        }
+    }
 }

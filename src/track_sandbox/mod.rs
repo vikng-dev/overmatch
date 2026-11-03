@@ -301,6 +301,7 @@ pub(crate) struct Hull;
 struct FreeFlyCam;
 
 pub fn plugin(app: &mut App) {
+    crate::track::wheels::wheel_lift_rise_omega();
     // `spec` registers the `.tank.ron` loader; `bake` parses the Tiger glb into `TankBlueprint` at
     // Startup — the vehicle's single source of truth, shared verbatim with the game (which mounts
     // the same pair). Its resource only becomes VISIBLE in `Update`, which is what
@@ -522,7 +523,7 @@ fn mount_harness(app: &mut App, scenario: harness::Harness) {
 /// and the friction force it applied (world space — the force-vector layer).
 struct Contact {
     local: Vec3,
-    /// Actual damped load (what scaled the ellipse) — `load_elastic` is the spring-only part.
+    /// Actual damped support load; traction capacity reads elastic load instead.
     load: f32,
     load_elastic: f32,
     normal: Vec3,
@@ -530,6 +531,8 @@ struct Contact {
     slip_lat: f32,
     f_long: f32,
     f_lat: f32,
+    /// Emitted contact capacity before mobilization, N.
+    capacity_n: f32,
     traction: Vec3,
 }
 

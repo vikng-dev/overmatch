@@ -222,15 +222,12 @@ pub(super) fn harness_setup(
         .0
         .take()
         .expect("harness setup takes its startup-opened writer exactly once");
-    // Vehicle constants in the meta line come off the derived rig now, not from consts — an
-    // analyzer reading a capture still gets the exact geometry that produced it.
+    // Recorded geometry is the rig that produced the trace.
     let (half_tread, hull_rest_y, thickness) = (geom.plane_x, geom.hull_rest_y, geom.thickness);
-    // `mu` is the course ground's pair, the coefficient every field contact grips at.
-    let mu = rig.grip.on_ground();
     writeln!(
         writer,
         // Schema identifies the telemetry fields; view names the one current renderer.
-        "{{\"t\":\"meta\",\"schema\":2,\"view\":\"wrap\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"half_tread\":{half_tread},\"mu\":{mu},\"weight\":{:.0},\"hull_rest_y\":{hull_rest_y},\"thickness\":{thickness}}}",
+        "{{\"t\":\"meta\",\"schema\":3,\"view\":\"wrap\",\"pose\":\"{}\",\"slope_deg\":{},\"z\":{:.3},\"warmup\":{},\"ticks\":{},\"throttle\":{:.3},\"steer\":{:.3},\"t2\":{},\"throttle2\":{:.3},\"steer2\":{:.3},\"slew\":{},\"fixed_dt\":{},\"half_tread\":{half_tread},\"weight\":{:.0},\"hull_rest_y\":{hull_rest_y},\"thickness\":{thickness}}}",
         match harness.pose {
             None if harness.runway => "runway".into(),
             None => "lane".into(),
@@ -312,7 +309,7 @@ pub(super) fn harness_record(
     let side_cmd = shaped.0.side_commands();
     let total: f32 = contacts.all().map(|c| c.load).sum();
     // Per-side contact arrays: positional prefix [x,y,z,load,slip,ny] kept from schema 1,
-    // appended [load_elastic, slip_lat, f_long, f_lat].
+    // appended [load_elastic, slip_lat, f_long, f_lat, capacity_n].
     let side_rows = |side: Side| -> String {
         contacts
             .0
@@ -320,7 +317,7 @@ pub(super) fn harness_record(
             .iter()
             .map(|c| {
                 format!(
-                    "[{:.4},{:.4},{:.4},{:.0},{:.3},{:.4},{:.0},{:.3},{:.1},{:.1}]",
+                    "[{:.4},{:.4},{:.4},{:.0},{:.3},{:.4},{:.0},{:.3},{:.1},{:.1},{:.1}]",
                     c.local.x,
                     c.local.y,
                     c.local.z,
@@ -330,7 +327,8 @@ pub(super) fn harness_record(
                     c.load_elastic,
                     c.slip_lat,
                     c.f_long,
-                    c.f_lat
+                    c.f_lat,
+                    c.capacity_n
                 )
             })
             .collect::<Vec<_>>()

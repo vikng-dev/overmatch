@@ -71,32 +71,58 @@ use store::{
 };
 use upload::{PrintWrites, TileWrite};
 
-/// How far a sole's plane may clear the ground and still rest on it, m. ASSUMED: above the drawn
-/// belt's filter error over the oracle. With it a coasting hull lays 1.01 touchdowns per pitch per
-/// side (MEASURED, the track-print demo's mud run, 8.6 m of free rolling).
-const CONTACT_M: f32 = 0.03;
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrintAppearance {
+    contact_m: crate::provenance::Labelled<f32>,
+    pattern_range_m: crate::provenance::Labelled<f32>,
+    near_fade_m: crate::provenance::Labelled<f32>,
+    near_gone_px: crate::provenance::Labelled<f32>,
+    near_full_px: crate::provenance::Labelled<f32>,
+    relief_fade_share: crate::provenance::Labelled<f32>,
+}
 
-/// The clearance over which a sole's pattern falls from full depth to none, m. ASSUMED: a 3 cm
-/// grouser over its plate prints 20 % deeper than the plate, so the pattern reads inside every
-/// print while the whole footprint sinks as one strip; at a 15 cm print the relief is the shoe's
-/// own. Under it the fixture shoe's whole underside, 62 mm of relief (MEASURED, the bake's log),
-/// still prints.
-const PATTERN_RANGE_M: f32 = 0.15;
-
-/// How far inside the near store's window edge its prints fade in, m. ASSUMED.
-const NEAR_FADE_M: f32 = 4.0;
-
-/// Screen pixels per near-store texel at which the near store's normal is gone, and at which it is
-/// whole: below about a pixel a texel's gradient aliases. ASSUMED.
-const NEAR_GONE_PX: f32 = 1.0;
-const NEAR_FULL_PX: f32 = 2.0;
-
-/// The share of the relief distance over which parallax fades to lighting only. ASSUMED: a fifth,
-/// so the hand-over is a few metres wide at every distance setting.
-const RELIEF_FADE_SHARE: f32 = 0.2;
-
-/// Gravity for the ground pressure, m/s².
-const G: f32 = 9.81;
+fn print_appearance() -> &'static PrintAppearance {
+    static DATA: std::sync::LazyLock<PrintAppearance> = std::sync::LazyLock::new(|| {
+        const PATH: &str = "assets/terrain/track_prints.ron";
+        let data: PrintAppearance = crate::provenance::from_shipped_str(
+            PATH,
+            include_str!("../assets/terrain/track_prints.ron"),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        for (field, value) in [
+            ("contact_m", &data.contact_m),
+            ("pattern_range_m", &data.pattern_range_m),
+            ("near_fade_m", &data.near_fade_m),
+            ("relief_fade_share", &data.relief_fade_share),
+        ] {
+            assert!(
+                value.value.is_finite()
+                    && value.value > 0.0
+                    && matches!(value.label, crate::provenance::Provenance::Taste(_)),
+                "{PATH}: {field} must be finite, positive and Taste; state the track-print appearance magnitude"
+            );
+        }
+        for (field, value) in [
+            ("near_gone_px", &data.near_gone_px),
+            ("near_full_px", &data.near_full_px),
+        ] {
+            assert!(
+                value.value.is_finite()
+                    && value.value > 0.0
+                    && matches!(value.label, crate::provenance::Provenance::Resolution(_)),
+                "{PATH}: {field} must be finite, positive and Resolution; state the texel anti-aliasing bound"
+            );
+        }
+        assert!(
+            data.near_full_px.value > data.near_gone_px.value
+                && data.relief_fade_share.value <= 1.0,
+            "{PATH}: near_full_px must exceed near_gone_px and relief_fade_share must not exceed one; keep ordered fades"
+        );
+        data
+    });
+    &DATA
+}
 
 /// The prints' CPU half: the baked shoe, the stores and each tank's shoe memory, plus the GPU
 /// images and the material they are drawn through.
@@ -121,8 +147,8 @@ impl TrackPrints {
             world_image: images.world,
             material,
             law: PrintLaw {
-                pattern_range_m: PATTERN_RANGE_M,
-                contact_m: CONTACT_M,
+                pattern_range_m: print_appearance().pattern_range_m.value,
+                contact_m: print_appearance().contact_m.value,
             },
             shoes: Vec::new(),
             stores: PrintStores::new(world_size_m, WORLD_SIDE),
@@ -292,9 +318,9 @@ pub(crate) fn world_params(world_size_m: f32) -> Vec4 {
 pub(crate) fn law_params() -> Vec4 {
     Vec4::new(
         255.0 * KPA_PER_UNIT,
-        NEAR_FADE_M,
-        NEAR_GONE_PX,
-        NEAR_FULL_PX,
+        print_appearance().near_fade_m.value,
+        print_appearance().near_gone_px.value,
+        print_appearance().near_full_px.value,
     )
 }
 
@@ -305,7 +331,7 @@ pub(crate) fn relief_params(relief: TrackPrintRelief, range: TrackPrintRange) ->
     Vec4::new(
         f32::from(relief.level()),
         reach,
-        reach * RELIEF_FADE_SHARE,
+        reach * print_appearance().relief_fade_share.value,
         0.0,
     )
 }
@@ -314,7 +340,16 @@ pub(crate) fn relief_params(relief: TrackPrintRelief, range: TrackPrintRange) ->
 /// with `b` the shoe's width and `L` the length of track in contact. An average over the footprint
 /// (no load distribution), which is all the print's depth law reads.
 pub(crate) fn ground_pressure_kpa(mass_kg: f32, track_width_m: f32, contact_length_m: f32) -> f32 {
-    mass_kg * G / (2.0 * track_width_m * contact_length_m).max(1e-3) / 1000.0
+    assert!(
+        mass_kg.is_finite()
+            && mass_kg >= 0.0
+            && track_width_m.is_finite()
+            && track_width_m > 0.0
+            && contact_length_m.is_finite()
+            && contact_length_m > 0.0,
+        "ground pressure requires finite nonnegative mass and positive footprint dimensions from admitted construction"
+    );
+    mass_kg * crate::track::derive::G / (2.0 * track_width_m * contact_length_m) / 1000.0
 }
 
 /// The ground pressure of the tank whose running gear is `geom`, kPa: its mass from its spec, its
@@ -625,12 +660,13 @@ pub(crate) struct TrackPrintsSet;
 
 /// The prints' main-world systems and their render-world upload. Mounted by the track view.
 pub(crate) fn plugin(app: &mut App) {
+    print_appearance();
     app.add_plugins(upload::plugin);
     app.add_systems(
         Update,
-        (bake_shoes.run_if(|prints: Option<Res<TrackPrints>>| {
+        bake_shoes.run_if(|prints: Option<Res<TrackPrints>>| {
             prints.is_some_and(|prints| prints.shoes.is_empty())
-        }),),
+        }),
     );
     app.configure_sets(
         PostUpdate,
@@ -879,8 +915,8 @@ mod tests {
                 &entry,
                 &shoes,
                 &PrintLaw {
-                    pattern_range_m: PATTERN_RANGE_M,
-                    contact_m: CONTACT_M,
+                    pattern_range_m: print_appearance().pattern_range_m.value,
+                    contact_m: print_appearance().contact_m.value,
                 },
             );
             let texel = stores

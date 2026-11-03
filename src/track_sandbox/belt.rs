@@ -40,7 +40,7 @@ use crate::track::rubble::{
 };
 use crate::track::transmission::{self, TransmissionInput, TransmissionParams};
 use crate::track::wheels::{
-    WHEEL_LIFT_RISE_OMEGA, WheelParams, wheel_lift_step, wheel_lift_target,
+    WheelParams, wheel_lift_rise_omega, wheel_lift_step, wheel_lift_target,
 };
 use crate::track::wrap;
 
@@ -300,6 +300,7 @@ pub(super) fn apply_belt_support_field(
                 slip_lat: c.slip_lat,
                 f_long: c.f_long,
                 f_lat: c.f_lat,
+                capacity_n: c.mu * c.load_elastic,
                 traction: c.traction,
             });
         }
@@ -464,7 +465,7 @@ pub(super) fn articulate_wheels_field(
     for (wheel, tread, mut susp, mut transform) in &mut wheels {
         let params = WheelParams {
             reach: tread.0.radius + geom.thickness,
-            ease_omega: WHEEL_LIFT_RISE_OMEGA,
+            ease_omega: wheel_lift_rise_omega(),
             max_lift: suspension.0.bump_stop,
             max_droop: geom.side_droop_travel(wheel.side, &suspension.0).effective,
             lateral_spans: &tread.0.spans,

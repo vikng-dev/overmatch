@@ -154,6 +154,8 @@ pub struct TrackGrip {
 pub struct TrackGripEffect {
     /// Total world-space traction force on the hull (N).
     pub traction_force: Vec3,
+    /// Current contact capacity (N), before mobilization, for prospective stopping.
+    pub traction_capacity_n: f32,
     /// Total world-space traction torque about the hull center of mass (N*m).
     pub traction_torque: Vec3,
     /// Longitudinal ground reaction on `[left, right]` belts (N).
@@ -198,8 +200,9 @@ impl TrackGripElements {
 }
 
 /// Coarse diagnostic field digest used by [`TrackGripEffect`]. Strain axes are
-/// projected to signed 8-bit bins over the solver floor before FNV-1a; larger soil
-/// displacement saturates these diagnostic bins. Determinism traces retain raw-bit state.
+/// projected to signed logarithmic bins before FNV-1a. Four bins per octave at a
+/// 0.5 mm resolution distinguish long soil slides without coupling to solver compliance.
+/// Determinism traces retain raw-bit state.
 pub(crate) fn coarse_grip_digest(elements: &TrackGripElements) -> u32 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     let mut write = |byte: u8| {
@@ -213,7 +216,12 @@ pub(crate) fn coarse_grip_digest(elements: &TrackGripElements) -> u32 {
                 write(byte);
             }
             for axis in strain.to_array() {
-                let bin = (axis / super::forces::GRIP_SHEAR_FLOOR_M * 127.0)
+                // Resolution: diagnostic quantization, independent of constitutive stiffness.
+                const DIGEST_STEP_M: f32 = 0.0005;
+                const BINS_PER_OCTAVE: f32 = 4.0;
+                let bin = (axis.signum() * (axis.abs() / DIGEST_STEP_M).ln_1p()
+                    / std::f32::consts::LN_2
+                    * BINS_PER_OCTAVE)
                     .round()
                     .clamp(-127.0, 127.0) as i8;
                 write(bin.to_le_bytes()[0]);
@@ -298,13 +306,17 @@ impl TrackGear {
     }
 
     /// DERIVED full service-brake deceleration along the direction of motion (m/s^2).
-    /// The brakes and material pair bound force; hull mass plus both reflected belt inertias
+    /// The brakes and observed contact capacity bound force; hull mass plus both reflected belt inertias
     /// must be arrested. A nonpositive result names a grade these brakes cannot hold.
-    pub(crate) fn braking_deceleration(&self, grade_sine: f32, direction: f32) -> f32 {
+    pub(crate) fn braking_deceleration(
+        &self,
+        grade_sine: f32,
+        direction: f32,
+        contact_capacity_n: f32,
+    ) -> f32 {
         let grip = self.construction.grip();
         let weight = 2.0 * grip.side_weight;
-        let normal = weight * (1.0 - grade_sine * grade_sine).sqrt();
-        let available = (2.0 * self.trans.brake_capacity_n).min(grip.on_ground() * normal);
+        let available = (2.0 * self.trans.brake_capacity_n).min(contact_capacity_n);
         (available + direction * weight * grade_sine)
             / transmission::coupled_mass(&self.construction)
     }
@@ -954,6 +966,7 @@ fn apply_track_forces(
             effect.belt_reaction[si] = report.belt_reaction;
             for contact in &report.contacts {
                 effect.traction_force += contact.traction;
+                effect.traction_capacity_n += contact.mu * contact.load_elastic;
                 effect.traction_torque += (contact.point - center_of_mass).cross(contact.traction);
             }
             // Apply in report order — accumulation order is part of determinism.
@@ -2276,15 +2289,21 @@ mod tests {
         app.world_mut().run_schedule(Startup);
         app.world_mut().run_schedule(PreUpdate);
         let mut gear = app.world_mut().resource_mut::<TrackGear>();
-        let before = gear.braking_deceleration(0.1, -1.0);
+        let before = gear.braking_deceleration(0.1, -1.0, gear.construction.weight_n());
         let scale = 3.0; // Fixture scale, dimensionless.
         gear.params.inertia *= scale;
         gear.params.grip.as_mut().unwrap().side_weight *= scale;
         gear.construction =
             transmission::DriveConstruction::new(gear.params.grip.unwrap(), gear.params.inertia);
         gear.trans.brake_capacity_n *= scale;
-        assert!((gear.braking_deceleration(0.1, -1.0) - before).abs() < 1e-5);
-        assert!(gear.braking_deceleration(0.1, 1.0) > gear.braking_deceleration(0.1, -1.0));
+        assert!(
+            (gear.braking_deceleration(0.1, -1.0, gear.construction.weight_n()) - before).abs()
+                < 1e-5
+        );
+        assert!(
+            gear.braking_deceleration(0.1, 1.0, gear.construction.weight_n())
+                > gear.braking_deceleration(0.1, -1.0, gear.construction.weight_n())
+        );
     }
 
     /// The drive controller relies on construction reaching the actual brake predictor.
@@ -2304,7 +2323,7 @@ mod tests {
             let gear = app.world().resource::<TrackGear>();
             let mass = gear.params.grip.unwrap().side_weight * 2.0 / super::super::derive::G;
             let inertia = gear.params.inertia;
-            let decel = gear.braking_deceleration(0.0, 1.0);
+            let decel = gear.braking_deceleration(0.0, 1.0, gear.construction.weight_n());
             // DERIVED full-throttle, no-slip flat acceleration at the peak-torque operating
             // point in the highest gear: crank inertia is reflected separately through k^2.
             let k = gear.trans.gears_fwd.last().unwrap() / gear.trans.sprocket_radius;
@@ -2482,5 +2501,69 @@ mod tests {
             "MEASURED second-spec grade_n={} rolling_n={} grip_n={} speed_range=[{final_lo},{final_hi}] mass_kg={mass}",
             load.grade_n, load.rolling_n, load.grip_n
         );
+    }
+    /// Bot stopping must use the same capacity as the contact force pass, including soil
+    /// cohesion. FIXTURE: the shipped vehicle's adapter at flat support on mud, 4 m/s entry.
+    #[test]
+    fn service_stop_reads_soil_capacity_and_records_rollback() {
+        let mut hull = DrivenHull::new();
+        hull.drive_to(4.0);
+        let ground = crate::ground_types::GroundTypes::load_shipped()
+            .get("mud")
+            .contact();
+        {
+            let mut field = hull.app.world_mut().resource_mut::<TrackField>();
+            let oracle = field.field.take().unwrap();
+            field.field =
+                Some(oracle.with_ground(Some(crate::ground_field::GroundField::uniform(ground))));
+        }
+        hull.distance = 0.0;
+        let mut peak = 0.0_f32;
+        let mut reverse = 0.0_f32;
+        let mut capacity = 0.0_f32;
+        for _ in 0..64 * 20 {
+            hull.app
+                .world_mut()
+                .entity_mut(hull.root)
+                .insert(ParsedTankCommand::hold());
+            run_adapter(&mut hull.app, &[(hull.root, Vec3::NEG_Z * hull.speed)]);
+            let effect = *hull.app.world().get::<TrackGripEffect>(hull.root).unwrap();
+            let contacts = hull.app.world().get::<TrackContacts>(hull.root).unwrap();
+            let expected: f32 = contacts
+                .0
+                .iter()
+                .flatten()
+                .map(|c| c.mu * c.load_elastic)
+                .sum();
+            assert!((effect.traction_capacity_n - expected).abs() < 1.0);
+            capacity = expected;
+            let gear = hull.app.world().resource::<TrackGear>();
+            let available = 2.0 * gear.trans.brake_capacity_n;
+            let decel = gear.braking_deceleration(0.0, 1.0, effect.traction_capacity_n);
+            assert!(
+                (decel * transmission::coupled_mass(&gear.construction) - available.min(expected))
+                    .abs()
+                    < 1.0
+            );
+            hull.speed -= effect.traction_force.z / hull.mass / 64.0;
+            hull.distance += hull.speed / 64.0;
+            peak = peak.max(hull.distance);
+            reverse = reverse.min(hull.speed);
+        }
+        println!(
+            "MEASURED mud service stop: capacity={capacity:.3} N peak={peak:.6} m rollback={:.6} m reverse={reverse:.6} m/s",
+            peak - hull.distance
+        );
+    }
+
+    /// A coarse digest still distinguishes displacement beyond the elastic solver floor;
+    /// diagnostics must not report every long soil skid as the same state.
+    #[test]
+    fn diagnostic_digest_distinguishes_long_soil_displacements() {
+        let mut elements = TrackGripElements::for_links(1);
+        elements.sides[0].strain[0] = Vec3::X * 0.2; // FIXTURE skid displacements, m.
+        let first = coarse_grip_digest(&elements);
+        elements.sides[0].strain[0] = Vec3::X * 0.4;
+        assert_ne!(first, coarse_grip_digest(&elements));
     }
 }

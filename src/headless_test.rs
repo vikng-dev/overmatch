@@ -591,14 +591,7 @@ fn the_server_round_gate_catches_dressing_after_birth() {
     );
 }
 
-// --- Tiger transmission gates -------------------------------------------------------------------
-//
-// The process fix behind the phase-2.5 postmortem: every physics gate ran on the sandbox's T-34
-// lab vehicle, and vehicle-scaling defects (steering capacity vs footprint scrub) sailed through
-// on the smaller tank. These gates drive the REAL Tiger blueprint through the offline
-// composition — the same boot, spawn path, spec, and terrain the `--offline` feel session runs.
-// They are permanent `cargo test` members: the sandbox gates remain, but can never again be the
-// only physics evidence.
+// Full-app driving gates mount the shipped blueprint through the offline composition.
 
 /// [`booted_sim`] on the vehicle's declared transmission, clock started, tracks grounded and
 /// settled. Returns the sim and the controlled tank.
@@ -993,7 +986,6 @@ fn contact_law_shipped_ground_speeds() {
                 next_max <= margin,
                 "a sustainable better higher gear must be selected"
             );
-            // FIXTURE historical comparison: the base map previously gripped at 0.9.
             let contacts = &app.world().get::<TrackContacts>(tank).unwrap().0;
             let capacity: f32 = contacts
                 .iter()
@@ -1001,10 +993,9 @@ fn contact_law_shipped_ground_speeds() {
                 .map(|c| c.mu * c.load_elastic)
                 .sum();
             let supported_load: f32 = contacts.iter().flatten().map(|c| c.load_elastic).sum();
-            let net_pull = capacity - ground.rolling_resistance.value * weight;
+            let net_pull = capacity - ground.rolling_resistance.coefficient() * weight;
             println!(
-                "DERIVED ground={name} rolling={rolling} contact_capacity_n={capacity:.3} supported_elastic_n={supported_load:.3} net_drawbar_n={net_pull:.3} old_0_9_capacity_n={:.3}",
-                0.9 * weight
+                "DERIVED ground={name} rolling={rolling} contact_capacity_n={capacity:.3} supported_elastic_n={supported_load:.3} net_drawbar_n={net_pull:.3}"
             );
             outcomes.push((state.gear, mean));
         }
@@ -1017,6 +1008,89 @@ fn contact_law_shipped_ground_speeds() {
             }
         );
     }
+}
+
+/// The production app must publish the capacity its contact law uses while stopping.
+/// FIXTURE: the shipped vehicle on flat mud at 4 m/s, held service brakes, 20 simulated
+/// seconds. Rollback is measured, not accepted as a physical invariant (section 5a's open law).
+#[cfg(feature = "bitprobe")]
+#[test]
+fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
+    use crate::track::sim::{TrackContacts, TrackGripEffect};
+    use avian3d::prelude::{LinearVelocity, Position};
+    let (mut app, tank) = booted_offline_sim();
+    {
+        let mut track = app
+            .world_mut()
+            .resource_mut::<crate::track::terrain::TrackField>();
+        let field = track.field.take().unwrap();
+        let ground = crate::ground_types::GroundTypes::load_shipped()
+            .get("mud")
+            .contact();
+        track.field =
+            Some(field.with_ground(Some(crate::ground_field::GroundField::uniform(ground))));
+    }
+    let rest = app
+        .world()
+        .resource::<crate::track::rig_geom::RigGeom>()
+        .hull_rest_y;
+    let entry_gear = app
+        .world()
+        .resource::<crate::track::sim::TrackGear>()
+        .trans()
+        .gears_fwd
+        .len() as u8;
+    drive_load::place(
+        &mut app,
+        tank,
+        Vec3::new(100.0, rest, 0.0),
+        Quat::from_rotation_y(std::f32::consts::PI),
+        4.0,
+        entry_gear,
+    );
+    app.add_systems(
+        FixedUpdate,
+        (|mut commands: Query<&mut crate::command::ParsedTankCommand, With<Controlled>>| {
+            for mut command in &mut commands {
+                *command = crate::command::ParsedTankCommand::hold();
+            }
+        })
+        .after(crate::command::ParseCommands)
+        .before(crate::state::GameplaySet),
+    );
+    let mut peak = 0.0_f32;
+    let mut reverse = 0.0_f32;
+    let mut last = 0.0_f32;
+    let mut capacity = 0.0_f32;
+    for _ in 0..20 * FIXED_TICKS_PER_SECOND {
+        app.update();
+        let world = app.world();
+        last = world.get::<Position>(tank).unwrap().0.z;
+        peak = peak.max(last);
+        reverse = reverse.min(world.get::<LinearVelocity>(tank).unwrap().0.z);
+        let effect = world.get::<TrackGripEffect>(tank).unwrap();
+        let expected: f32 = world
+            .get::<TrackContacts>(tank)
+            .unwrap()
+            .0
+            .iter()
+            .flatten()
+            .map(|c| c.mu * c.load_elastic)
+            .sum();
+        assert!(
+            (effect.traction_capacity_n - expected).abs() < 1.0,
+            "published capacity must match the force pass"
+        );
+        capacity = expected;
+    }
+    assert!(
+        capacity > 0.0,
+        "the stopped fixture remains supported on its flat soil"
+    );
+    println!(
+        "MEASURED full-app mud service stop: capacity={capacity:.3} N peak={peak:.6} m rollback={:.6} m reverse={reverse:.6} m/s",
+        peak - last
+    );
 }
 
 /// A soft ground that a declared launch gear can out-pull must not strand the vehicle in

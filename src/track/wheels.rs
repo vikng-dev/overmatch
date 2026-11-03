@@ -19,7 +19,7 @@ use bevy::math::{Affine3A, Vec3};
 
 use super::oracle::DepthOracle;
 
-/// Probe stations along a road wheel's lower arc as (sin θ, cos θ) from straight down, every 5°
+/// Resolution: probe stations along a road wheel's lower arc as (sin θ, cos θ) from straight down, every 5°
 /// to ±50° — fixed samples, so the wheel's terrain read is deterministic like every other
 /// oracle consumer. Density matters: the lift target is FROZEN between an edge crossing two
 /// adjacent probes, then catches up in one step — 5° keeps that step under the honest
@@ -48,13 +48,27 @@ const WHEEL_ARC: [(f32, f32); 21] = [
     (0.766, 0.643),
 ];
 
-/// Ease frequency (rad/s) of a view wheel's RISE — settle ≈ 4.7/ω ≈ 100 ms.
-///
-/// The one rate in the track view that is TUNED rather than derived, and it lives here (rather than
-/// once per consumer) because it is a single playtest verdict: an instant rise is what a rigid wheel
-/// on a rigid obstacle physically does, it was tried, and Yan's 2026-07-17 A/B called it robotic
-/// (design `track-model/` HQ, step 22b (d)). See [`wheel_lift_step`].
-pub const WHEEL_LIFT_RISE_OMEGA: f32 = 45.0;
+/// Running-gear animation taste, shared by every wheel view. Admitted before view startup.
+pub fn wheel_lift_rise_omega() -> f32 {
+    static DATA: std::sync::LazyLock<crate::provenance::Labelled<f32>> = std::sync::LazyLock::new(
+        || {
+            const PATH: &str = "assets/driving/wheel_view.ron";
+            let value: crate::provenance::Labelled<f32> = crate::provenance::from_shipped_str(
+                PATH,
+                include_str!("../../assets/driving/wheel_view.ron"),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            assert!(
+                value.value.is_finite()
+                    && value.value > 0.0
+                    && matches!(value.label, crate::provenance::Provenance::Taste(_)),
+                "{PATH}: rise frequency must be positive, finite and Taste; state the running-gear animation's rise rate"
+            );
+            value
+        },
+    );
+    DATA.value
+}
 
 /// View wheel-lift parameters. `reach` is the wheel's ground surface (wheel radius + the track
 /// plate riding between it and the ground); the lateral stations are the shoe's physics
@@ -63,7 +77,7 @@ pub const WHEEL_LIFT_RISE_OMEGA: f32 = 45.0;
 /// may raise the wheel, and how far below rest it may drop.
 pub struct WheelParams<'a> {
     pub reach: f32,
-    /// Rise ease rate (rad/s) — [`WHEEL_LIFT_RISE_OMEGA`] for every production consumer.
+    /// Rise ease rate (rad/s) — [`wheel_lift_rise_omega`] for every production consumer.
     pub ease_omega: f32,
     pub max_lift: f32,
     /// How far BELOW the rest line the wheel may droop (m). REQUIRED to be the caller's real
@@ -110,7 +124,7 @@ pub fn wheel_lift_target<O: DepthOracle>(
 /// (`v' = (v + ω²·e·Δt) / (1 + ωΔt)²` — stable for any ωΔt, settles ≈ 4.7/ω), ballistic fall
 /// (an upward launch decelerates first). `dy`/`dvel` are the caller's stored state.
 ///
-/// The RISE rate ([`WHEEL_LIFT_RISE_OMEGA`]) is a playtest verdict, so it is NOT free to unify with
+/// The RISE rate ([`wheel_lift_rise_omega`]) is a playtest verdict, so it is NOT free to unify with
 /// the drawn belt's own instant-rise belly memory (`wrap::ConformEase`) on doctrinal grounds — even
 /// though the instant rise is the physically honest one. The asymmetry it leaves — belt up now,
 /// wheel up over ~100 ms — is bounded on the drawn side by `wrap::conformed_pts`' running-gear
@@ -125,7 +139,7 @@ pub fn wheel_lift_step(dy: &mut f32, dvel: &mut f32, target: f32, dt: f32, param
             / (1.0 + 2.0 * wdt + wdt * wdt);
         *dy = (*dy + *dvel * dt).min(target);
     } else {
-        *dvel -= 9.81 * dt;
+        *dvel -= super::derive::G * dt;
         *dy = (*dy + *dvel * dt).clamp(target, params.max_lift);
         if *dy <= target {
             *dy = target;
@@ -189,7 +203,7 @@ mod tests {
     fn params(max_droop: f32, max_lift: f32) -> WheelParams<'static> {
         WheelParams {
             reach: 0.4,
-            ease_omega: WHEEL_LIFT_RISE_OMEGA,
+            ease_omega: wheel_lift_rise_omega(),
             max_lift,
             max_droop,
             lateral_spans: &[(-0.08, 0.08)],

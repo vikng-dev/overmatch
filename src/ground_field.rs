@@ -53,7 +53,7 @@ impl ContactTraction {
 pub struct ContactGround {
     pub traction: ContactTraction,
     /// The friction coefficient the ground brings to the contact, one side's
-    /// ([`crate::ground_types::GroundType::friction`]).
+    /// ([`crate::ground_types::TractionLaw::Rigid`]).
     pub friction: f32,
     /// The ground's motion resistance coefficient on a moving track
     /// ([`crate::ground_types::GroundType::rolling_resistance`]).
@@ -305,7 +305,7 @@ impl GroundField {
                 // Geometric-mean pairs mix capacities: average sqrt(mu), then square.
                 (blend(|g| g.traction.rigid_share * g.friction.sqrt()) / rigid_share).powi(2)
             } else {
-                blend(|ground| ground.friction)
+                0.0 // No rigid capacity exists in a wholly soil contact.
             },
             rolling_resistance: blend(|ground| ground.rolling_resistance),
         }
@@ -389,13 +389,12 @@ mod tests {
         field.slots = [
             rigid(0.2),
             rigid(0.8),
-            soil(1000.0, 0.5, 0.01),
-            soil(3000.0, 0.7, 0.03),
+            soil(1000.0, 0.5, 0.1),
+            soil(3000.0, 0.7, 0.3),
         ];
         // Capacity expectations read weights from their owner; the test varies only constitutive mixing.
         field.paint = GroundField::fixture_mask(UVec2::ONE, 1.0, vec![Vec3::splat(0.2)]).paint;
         let actual_weights = field.weights_at(Vec2::ZERO);
-        assert!(actual_weights.is_finite());
         let mixed = field.ground_at(Vec2::ZERO);
         let area = 2.0;
         let load = 10_000.0;
@@ -411,6 +410,10 @@ mod tests {
             .map(|(&g, w)| capacity(g) * w)
             .sum();
         assert!((capacity(mixed) - expected).abs() < 1e-3);
+        let soil_share = actual_weights.z + actual_weights.w;
+        assert!(soil_share > 0.0 && soil_share < 1.0);
+        let expected_k = (actual_weights.z * 0.1 + actual_weights.w * 0.3) / soil_share;
+        assert!((mixed.traction.shear_m - expected_k).abs() < 1e-6);
     }
 
     /// THE SIM READS THE MASK WHERE THE VIEW DRAWS IT: the field's rows run the way the map

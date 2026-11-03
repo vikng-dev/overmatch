@@ -562,6 +562,7 @@ fn drive(
         &Position,
         &Rotation,
         &LinearVelocity,
+        &crate::track::sim::TrackGripEffect,
     )>,
 ) {
     let Some(plan) = plan else {
@@ -574,7 +575,7 @@ fn drive(
     let start = *runs.start.get_or_insert(now + SETTLE_S);
     let t = now - start;
     runs.tanks.resize(plan.tanks.len(), Run::default());
-    for (slot, mut command, position, rotation, velocity) in &mut tanks {
+    for (slot, mut command, position, rotation, velocity, grip) in &mut tanks {
         let script = plan
             .tanks
             .get(slot.0)
@@ -651,7 +652,7 @@ fn drive(
         let grade_sine = grade / (1.0 + grade * grade).sqrt();
         let stop = stopping_advance(
             speed,
-            gear.braking_deceleration(grade_sine, speed.signum()),
+            gear.braking_deceleration(grade_sine, speed.signum(), grip.traction_capacity_n),
             fixed_time.timestep().as_secs_f32(),
         );
         let timed_out = t - run.leg_since > LEG_TIMEOUT_S;

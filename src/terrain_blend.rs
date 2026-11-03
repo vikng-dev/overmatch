@@ -1,9 +1,9 @@
 //! The ground's surface BLEND: four material packs mixed per fragment by the map's author-painted
 //! weight masks, drawn through one [`TerrainMaterial`].
 //!
-//! VIEW ONLY (ADR-0014). Nothing here touches the height grid, the oracle or the collider — the
-//! ONE-SURFACE invariant ([`crate::terrain_grid`]) is about geometry, and this is about what that
-//! one surface looks like. The dedicated server never builds the material.
+//! Material construction is view only (ADR-0014); pack membership and painted weights also
+//! supply simulation ground facts through [`crate::ground_field`]. The height grid and collider
+//! remain one geometric surface. The dedicated server reads those facts without building a material.
 //!
 //! # The four packs
 //!

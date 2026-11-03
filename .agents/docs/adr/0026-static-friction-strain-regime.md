@@ -18,11 +18,12 @@ drivetrain bear the ground reaction at zero command + zero belt speed, closing t
 governor back-drive leak (0.74 m/s of a parked tank's ~1 m/s longitudinal creep was the
 belt itself being cranked backward through finite governor gain).
 
-Stiffness is DECLARED, not tuned: `μ·W/2` per side developed over one shear modulus —
-**Wong & Chiang's measured 75 mm for rubber track pads on firm ground**. A 20° park settles
-~28 mm before holding. When the ground-type mechanic lands, terrain owns this dial (firm
-soil ~10 mm, loose sand 25 mm). Supersedes the "per-element bristle someday" note in
-[[0025-belt-force-locomotion]]; the retired brush anchor ([[0006-static-friction-brush-anchor]])
+The superseded aggregate law developed `mu*W/2` linearly over one shear distance and
+CLAIMED approximately 28 mm of settling on a 20-degree park. That is not the current soil
+law or a measured bound for every ground. Soil now supplies cohesion, friction angle and a
+Janosi-Hanamoto loading curve; the 75 mm effective distance is a solver floor, not a universal
+material modulus. The current derivations and unresolved unloading are owned by track-model
+`architecture.md`, section 5a. The retired brush anchor ([[0006-static-friction-brush-anchor]])
 stays retired.
 
 ## What implementation falsified in the approved design (recorded honestly)

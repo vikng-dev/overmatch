@@ -854,7 +854,7 @@ mod tests {
     use crate::track::route::{SAG_CLIP_INSET, chord_inset, deepest_inside, on_circle};
     use crate::track::side::Side;
     use crate::track::wheels::{
-        WHEEL_LIFT_RISE_OMEGA, WheelParams, wheel_lift_step, wheel_lift_target,
+        WheelParams, wheel_lift_rise_omega, wheel_lift_step, wheel_lift_target,
     };
 
     /// The coarsest chord the taut walk's own arc discretisation lays on one circle: the longest
@@ -1353,7 +1353,7 @@ mod tests {
     ) -> WheelParams<'static> {
         WheelParams {
             reach: rig.wheel_pin_radius() + rig.model.pin_to_outer,
-            ease_omega: WHEEL_LIFT_RISE_OMEGA,
+            ease_omega: wheel_lift_rise_omega(),
             max_lift: tiger_spec().track.suspension.bump_stop,
             max_droop: rig.droop_travel(params).effective,
             lateral_spans: &[(-0.08, 0.08)],

@@ -355,15 +355,17 @@ Soil uses Mohr-Coulomb strength over the contact footprint,
 `T_max = A*c + W*tan(phi)`; `T = T_max * (1 - exp(-|j|/K_eff))` along the vector displacement `j`.
 
 `A` is supported belt length times strip width projected onto the struck surface; `W` is elastic
-normal load. The common force pipeline stores the capacity as `mu_equiv = T_max/W`, not as a
-claim that soil shear is steel sliding friction. The longitudinal component reacts into the belt.
+normal load. The force pass stores capacity as `mu_equiv = T_max/W`, not as a
+claim that soil shear is steel sliding friction. The Driver instead sums footprint cohesion
+separately and applies the load-proportional terms to nominal normal pressure. The longitudinal component reacts into the belt.
 Janosi-Hanamoto uses characteristic displacement: at `|j| = K_eff` the capacity share is
 DERIVED `1-exp(-1) = 0.63212056`, not full strength. The solver's existing velocity damper remains,
 sized from initial shear stiffness and the elastic load's mass share; it is a Resolution term,
 not an extra soil-strength fact. Rigid surfaces retain their Dupont elastic zone and Dahl return.
 Soil accumulates tangent-plane vector displacement while the element contacts the ground;
-departure forgets it. Resolution bounds that displacement at `16*K_eff`, where the omitted
-capacity share is DERIVED `exp(-16) = 1.125e-7`, about one f32-scale share.
+departure forgets it. Displacement is currently clipped at `16*K_eff`, where the omitted loading
+capacity share is DERIVED `exp(-16) = 1.125e-7`. The clip also controls macroscopic unloading;
+it is not solely a precision bound. The measured defect and owner decision are recorded below.
 
 The soil facts are required and labelled: cohesion Pa, friction angle degrees and characteristic
 shear displacement m. The stamping note's section 2 reproduces NASA's Wong specimen table as
@@ -400,12 +402,14 @@ for an unchanged modal-step bound its required K scales with `dt^2` (DERIVED). T
 keeps the 64 Hz rate. Paving has no soil K and uses the rigid-contact solver floor.
 
 `TrackSteel.friction` is now `0.6`, an `Unknown` steel sliding coefficient pending a dry sliding
-test; it no longer encodes grouser bite. With the shipped brick's `0.65`, its bump-stop/brick pair
+test; it no longer encodes grouser bite. With the shipped brick's `0.65`, both its belt/brick and bump-stop/brick pair
 is DERIVED `sqrt(0.6*0.65) = 0.624500`, replacing DERIVED `sqrt(1.62*0.65) = 1.026158`.
 The base ground's old pair `sqrt(1.62*0.5) = 0.9` is replaced by its soil capacity.
-The terrain's Avian collider still carries base-ground sliding friction for hull and loose-body
-solver contacts. Whole-vehicle braking estimates still use `GripParams::ground` as their declared
-base-pair stand-in; actual contact traction and Driver observation read soil capacity.
+The terrain's Avian collider carries `terrain_solver_friction`, an explicit data stand-in for
+solid-body contacts lacking a soil footprint, at the retained coefficient 0.5. Its bump-stop pair
+therefore changes from DERIVED 0.9 to `sqrt(0.6*0.5) = 0.547723`. It is independent of the track's
+soil strength. Scripted braking reads the capacity emitted by the actual contact pass, bounded
+by service-brake construction; `GripParams::ground` no longer estimates stopping.
 
 **A surface normal carries its own pressure share.** Where the station or pressure-centroid hit normals differ,
 `terrain_surface_patches` subdivides the profile to half `FIELD_ROUNDING` (DERIVED 0.015 m),
@@ -416,7 +420,7 @@ column's load, and a far wall behind a gap cannot carry load from the near lip. 
 orientation remains the existing documented stand-in outside this lane.
 
 **Rolling resistance.** A moving track loses `c_rr × N` to its ground against its travel, `c_rr`
-per ground in `ground_types.ron` (`rolling_resistance`, each `Unknown` with its CLAIMED range and
+per ground in `ground_types.ron` (`rolling_resistance: Total`, each `Unknown` with its CLAIMED range and
 what would settle it: the stamping note gives soil fits, not motion resistance) and `N` each
 terrain contact's normal load. The side's rolling load `Σ c_rr·N` fades linearly to zero below
 `forces::ROLLING_FADE_SPEED` = 0.25 m/s (`Resolution`, stability derivation at the constant), so a
@@ -805,6 +809,97 @@ separately at each patch's force readout; a low-load curb cannot erase a flat pa
 requires the force fixture initializer in `track/rubble.rs`, explicitly excluded from this lane.
 The test-only no-ground rigid path similarly has callers in the excluded rubble fixtures;
 its removal requires migrating those fixtures together rather than relocating the fallback.
+
+The full shipped offline composition confirms the rebound with a hull free to settle under
+Avian, not a fixed support pose. `headless_test::contact_law_service_stop_publishes_capacity_and_reports_rollback`
+uses the shipped fixture, flat mud, FIXTURE 4 m/s entry in its declared top gear, held service
+brakes, and 20 simulated seconds. MEASURED after the observation/plane fixes: 154,718.969 N
+capacity at rest, 2.992694 m peak advance, 1.198098 m rollback, peak reverse speed 0.484893 m/s.
+The initial red fixed-pad witness was 1.199998 m at 0.480283 m/s. These are different compositions;
+there is no unloading fix or claimed before/after improvement. The full-app result confirms
+the approximately 155 kN nominal estimate and the macroscopic recoil in the shipped physics.
+
+The production-adapter service-stop witness also integrates the vehicle's declared mass and
+holds service brakes through the real drivetrain. Its FIXTURE support is held at a fixed pose
+and carries less than nominal weight: MEASURED capacity 106,355.062 N, peak advance 4.382679 m,
+rollback 1.200275 m and peak reverse speed 0.467284 m/s over 20 simulated seconds. This is not
+the nominal approximately 155 kN capacity in the shipped-ground table. The braking estimate
+matches the contact pass's emitted capacity throughout; the rebound remains an unloading defect.
+
+Mutation verification rejected all four independent mutants in their named witnesses:
+angle `sin` instead of `tan`, omitted soil-share normalization of K, a default image bound as
+the material mask, and raw-curve-only crank-inertia admission. The original spring-load and
+first-patch projection defects were both red before their fixes. The schema-3 Python capacity
+gate accepts below-capacity and zero-force/zero-capacity inputs, rejects over-capacity and
+nonzero-force/zero-capacity inputs; its script parses and runs with the pinned script dependency.
+
+**Feel and remaining review dispositions.** DERIVED parking under a uniform-pressure,
+constant equivalent-capacity approximation, `j = -K_eff*ln(1-tan(theta)/mu_equiv)`:
+at 20 degrees and 75 mm effective K, gravel at 0.712 W gives 53.684 mm; firm dirt at
+0.417 W gives 154.667 mm. These are single-plane loading derivations, not full-app park
+measurements; cohesion/area redistribution and unloading can change the actual settlement.
+ADR-0026's approximately 28 mm claim is superseded. Turning is measured above. The shipped
+firm-dirt capacity (approximately 0.417 W) is below loose sand's (approximately 0.543 W).
+That ordering looks wrong to a player expecting firm ground to grip better. The facts remain
+`Unknown`: soil density/moisture and direct shear plus shear-displacement measurements on
+representative firm and loose grounds would settle it; this lane does not tune them to taste.
+
+The passive pair changes apply to belts on rigid pieces as well as bump stops: DERIVED
+1.026158 to 0.624500 on the fixture brick. Soil straight-line speeds remain the table above;
+the ground/entry regression passed after nominal-pressure observation and data admission changed.
+The full physical park/steering feel remains a playtest question, not a claimed measurement here.
+
+Rigid friction now lives only inside a `Rigid` law. Soil cannot author an unused friction number.
+`RunningGear` reads the single labelled undeforming-support resistance in `grip.ron`;
+`Total` includes it and supplies a ground's total resistance. The shared fact now refuses a taste.
+The windowed-world composition witness mounts the production installer, injects an asymmetric
+mask at the data edge, and reads the actual material image and PrintDepths. Wheel-rise and
+print appearance magnitudes are admitted labelled data, preserving their values.
+
+Harness schema 3 records each contact's actual capacity; the analyzer no longer treats a
+base-pair `mu` as soil grip or derives a rigid bristle stiffness from it. The old spring-energy
+bound is removed: the soil unloading law is unresolved and capacity alone cannot establish
+recoverable energy. This loses that false energy guarantee; a new energy witness belongs to
+the owner's unloading decision. The force-capacity and finite-value gates remain.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude P1; Codex P2 | skid displacement returns on reversal; saturation clip controls behavior | verified by red locked-pad stop; unloading choice exceeds the monotonic law | pending owner: options above |
+| Claude P3; Codex P2 | tiny soil share switches the whole element's return law | verified: `advance_element_strain` branches on positive soil share | pending with unloading/mixed-contact state |
+| both P2 | Driver divides cohesion by spring load | verified red; stiffness-halving and vanishing-patch gear witnesses green | driving: observe soil at nominal pressure and preserve patch shear (#146) |
+| Claude P2 | moving-belt soil scrub differs from uniform sliding price | verified by measured moment ratios above | pending owner: prospective mobilization or shear-history design |
+| Codex P2 | first patch projects every patch's strain | verified red and green patch-order witness | driving: observe soil at nominal pressure and preserve patch shear (#146) |
+| Claude P2 | soil rows author unused friction | verified; refused by the law's enum | driving: make ground facts and stopping capacity explicit (#146) |
+| Claude P3 | duplicated 0.04 resistance and missing label admission | verified; one shared RunningGear source with fact-label admission | driving: make ground facts and stopping capacity explicit (#146) |
+| both P3 | mask/terrain_blend/oracle/damping docs | verified against current consumers and force formula; docs corrected | driving: make ground facts and stopping capacity explicit (#146) |
+| Claude P3 | no-ground test-only arm | verified; excluded rubble tests still rely on it | pending fixture migration outside this lane |
+| Claude P3 | harness mu and analyzer stiffness/caps | verified; schema 3 publishes per-contact capacity, false energy inference removed | driving: make ground facts and stopping capacity explicit (#146) |
+| Claude P3 | angle-to-tan and mixed K test gaps; empty paving loop | verified; independent angle ratio, soil-normalized K and nonempty witnesses | driving: make ground facts and stopping capacity explicit (#146) |
+| Claude P3 | gravel template notes on other soils | verified; row notes now describe their own fact | driving: make ground facts and stopping capacity explicit (#146) |
+| Claude P3 | braking estimate diverges from contact capacity | verified; stop estimate consumes emitted capacity | driving: make ground facts and stopping capacity explicit (#146) |
+| Codex P2 | material/PrintDepths wiring unmounted | verified; production world installer mounted without an OS window | driving: make ground facts and stopping capacity explicit (#146) |
+| Claude P3 | pair changes, park, turning and firm/loose feel absent from record | verified; measured and derived evidence distinguished above | driving: make ground facts and stopping capacity explicit (#146) |
+| both P3 | ForceParams inertia / driving-09 | verified; excluded rubble initializer blocks removal | pending scoped fixture migration |
+| Codex P3 | wheel rise and print pattern tastes in Rust | verified; moved to admitted data | driving: make ground facts and stopping capacity explicit (#146) |
+| Claude P3 | edit-history labels, one-element tuple, diagnostic floor coupling | verified; comments/tuple cleaned, digest has its own logarithmic resolution | driving: make ground facts and stopping capacity explicit (#146) |
+
+Backlog destruction-05 and destruction-08 remain verified and open: this lane corrects the
+terrain_blend module's simulation-consumer prose, while pack membership/UV scale and blend
+appearance still require the broader shared surface-data migration named by those rows.
+The module doc change does not claim to close that work.
+
+Final gates for `driving: make ground facts and stopping capacity explicit (#146)`:
+MEASURED whole-library result 2,300 passed, 33 ignored (the on-demand measurement/pricing beds
+were not run), including driving, ground, full-app and net coverage. The separate whole-tree
+citation/UI/net-boundary/bake guards passed 44 tests; the focused ground/composition/capacity
+batch passed 18. CI-feature workspace/all-target clippy and `cargo fmt --all --check` passed.
+Python schema-3 syntax and the four synthetic capacity cases passed. The four deliberately
+mutated Rust witnesses were red, then restored. No frame/tick pricing or captures were taken.
+
+No replicated wire type changed: the new capacity is a local `TrackGripEffect` observation,
+not serialized state, so the protocol revision is unchanged. The harness's separate JSONL
+contract deliberately advances to schema 3. Unknown soil facts and presentation magnitudes
+were not tuned. Every gameplay choice and pending owner decision is recorded above.
 
 ## 6. Tiers and budget (codex G — numbers corrected)
 

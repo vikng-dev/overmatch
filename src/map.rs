@@ -181,7 +181,7 @@ impl MapManifest {
     }
 
     /// Asset-root-relative masks path: synchronously decoded for ground facts and loaded
-    /// through the asset server for rendering.
+    /// uploaded from that decode for rendering.
     pub(crate) fn masks_asset(&self) -> String {
         map_asset(&self.masks)
     }

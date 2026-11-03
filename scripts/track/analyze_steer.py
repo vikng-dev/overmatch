@@ -2,7 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["numpy"]
 # ///
-"""Steering-model gate report for track-sandbox harness captures (schema 2).
+"""Steering-model gate report for track-sandbox harness captures (schema 3).
 
 Consumes the JSONL a scripted `SANDBOX_HARNESS` run writes (src/track_sandbox/
 harness.rs) and verifies the belt drive model's invariants as numbers: instead
@@ -10,7 +10,7 @@ of eyeballing whether the tank "turns right about right", every run is checked
 against what
 the model (src/track/forces.rs + drive.rs) promises by construction.
 
-Each file self-describes via its `meta` row (schema:2 — slew, half_tread, mu,
+Each file self-describes via its `meta` row (schema:3 — slew, half_tread,
 plus the command script), so the analyzer needs
 no scenario flags: pivot / turn / slalom / straight are detected from the
 scripted commands.
@@ -18,17 +18,9 @@ scripted commands.
 HARD GATES (every run, every tick):
   - shaper      |Δshaped| per axis per tick ≤ slew/64, and shaped snaps exactly
                 to raw once within one step (drive.rs `approach` semantics).
-  - ellipse     per contact: (f_long/μ·L)² + (f_lat/μ·L)² ≤ 1 — the per-element
-                isotropic law caps each contact at a CIRCLE of radius μ·L in
-                every direction, where L is the ELASTIC support load (the strain
-                law scales by load_elastic; forces.rs caps the ellipse; tolerance
-                includes the JSONL print quantization: f at 0.05 N, load at
-                0.5 N).
-  - dissipation the bristle spring lags slip and legitimately returns stored
-                elastic energy, so the gate is NET — total friction work over the
-                run ≥ −(2·C_max²/2K), the most the two side springs can have
-                stored (C_max = per-side max Σ μ·load_elastic,
-                K = μ·weight/2/GRIP_SHEAR_MODULUS_M).
+  - ellipse     per contact: force magnitude cannot exceed the recorded constitutive
+                capacity. Capacity already includes soil cohesion and actual normal load;
+                JSONL force/capacity quantization is included in the tolerance.
   - finite      every numeric field in every row is finite.
 
 SCENARIO GATES (settled window = tick ≥ warmup+64, before t2, trimmed at
@@ -92,12 +84,7 @@ EXIT_SUPPORT_FRACTION = 0.3
 # JSONL print quantization (harness.rs `arr` / contact row formats): worst-case
 # half-ulp of the printed precision, folded into the ellipse tolerance.
 Q_FORCE = 0.05  # f_long / f_lat at 1 decimal
-Q_LOAD = 0.5  # load at 0 decimals
-# DERIVED mirror of assets/driving/grip.ron::shear_modulus_m for schema-2 captures;
-# per-side stiffness K = mu·W/2 / this.
-GRIP_SHEAR_MODULUS_M = 0.075
-
-
+Q_CAPACITY = 0.05  # capacity at 1 decimal
 # --- loading -----------------------------------------------------------------------------------
 def flatten_numeric(obj, out):
     """Collect every number reachable in a parsed JSON value (finiteness sweep)."""
@@ -129,8 +116,8 @@ def load_run(path: Path):
             # scan / vscan rows: terrain oracle validation, not steering — skip.
     if meta is None:
         raise ValueError(f"{path}: no meta row")
-    if meta.get("schema") != 2:
-        raise ValueError(f"{path}: expected schema 2, got {meta.get('schema')}")
+    if meta.get("schema") != 3:
+        raise ValueError(f"{path}: expected schema 3, got {meta.get('schema')}")
     if not rows:
         raise ValueError(f"{path}: no k rows")
 
@@ -150,22 +137,17 @@ def load_run(path: Path):
         "sup": np.array([r["sup"] for r in rows]),
         "ncontacts": np.array([[len(r["contacts"][0]), len(r["contacts"][1])] for r in rows]),
     }
-    # Flat contact table [load, slip, slip_lat, f_long, f_lat, load_elastic] across
+    # Flat contact table [load, slip, slip_lat, f_long, f_lat, load_elastic, capacity] across
     # the whole run (contact row layout:
-    # x,y,z,load,slip,normal_y,load_elastic,slip_lat,f_long,f_lat).
+    # x,y,z,load,slip,normal_y,load_elastic,slip_lat,f_long,f_lat,capacity).
     flat = []
-    side_elastic = np.zeros((n, 2))  # per-tick per-side sum of load_elastic
-    for i, r in enumerate(rows):
-        for s, side in enumerate(r["contacts"]):
+    for r in rows:
+        for side in r["contacts"]:
             for c in side:
-                flat.append((c[3], c[4], c[7], c[8], c[9], c[6]))
-                side_elastic[i, s] += c[6]
-    run["contacts"] = np.array(flat) if flat else np.zeros((0, 6))
-    run["side_elastic"] = side_elastic
+                flat.append((c[3], c[4], c[7], c[8], c[9], c[6], c[10]))
+    run["contacts"] = np.array(flat) if flat else np.zeros((0, 7))
 
-    # Per-element isotropic strain law: the per-contact cap is a CIRCLE at full mu
-    # in every direction. (Captures predating the settled law carry extra meta keys
-    # — lateral_ratio, grip, grip_mode; they are read-but-ignored.)
+    # Capacity is per contact; a base-ground pair cannot describe soil or mixed support.
 
     # Finiteness sweep over EVERY numeric field the rows carry (chain, wheels, all).
     nonfinite = 0
@@ -239,30 +221,27 @@ def check_hard_gates(run, gates):
         {"step": step, "max_step_excess": max_excess, "convergence_violations": conv_viol},
     )
 
-    # (2) Friction ellipse per contact (skip unloaded contacts; tolerance folds in
-    # the print quantization of f (±0.05 N) and load (±0.5 N) — which dominates e
-    # for feather-weight contacts, so max_e_loaded (load ≥ 100 N, quantization
-    # ≤ ~1%) is the headline number and raw max_e is quantization noise).
-    # The element strain law scales forces by the ELASTIC support load (contact
-    # col 5), so the per-contact cap is mu·load_elastic, isotropic (lat_ratio 1).
+    # (2) Force-capacity circle; skip unloaded contacts and allow serialized quantization.
+    # The force pass publishes its capacity independently of mobilization.
     c = run["contacts"]
-    load_col = 5
-    loaded = c[c[:, load_col] >= 1.0] if c.size else c
+    loaded = c[c[:, 5] >= 1.0] if c.size else c
+    zero = loaded[:, 6] <= 0.0
+    zero_viol = int(np.count_nonzero(zero & np.any(np.abs(loaded[:, 3:5]) > Q_FORCE, axis=1)))
+    loaded = loaded[~zero]
     if loaded.size:
-        load, f_long, f_lat = loaded[:, load_col], loaded[:, 3], loaded[:, 4]
-        grip = meta["mu"] * load
+        load, f_long, f_lat, grip = loaded[:, 5], loaded[:, 3], loaded[:, 4], loaded[:, 6]
         e = (f_long / grip) ** 2 + (f_lat / grip) ** 2
         slack = (
             (2.0 * np.abs(f_long) * Q_FORCE + Q_FORCE**2) / grip**2
             + (2.0 * np.abs(f_lat) * Q_FORCE + Q_FORCE**2) / grip**2
-            + 2.0 * e * Q_LOAD / load
+            + 2.0 * e * Q_CAPACITY / grip
         )
-        viol = int(np.count_nonzero(e > 1.0 + 1e-4 + slack))
+        viol = zero_viol + int(np.count_nonzero(e > 1.0 + 1e-4 + slack))
         emax = float(np.max(e))
         heavy = load >= 100.0
         emax_loaded = float(np.max(e[heavy])) if np.any(heavy) else 0.0
     else:
-        viol, emax, emax_loaded = 0, 0.0, 0.0
+        viol, emax, emax_loaded = zero_viol, 0.0, 0.0
     gate(
         gates,
         "ellipse",
@@ -270,28 +249,11 @@ def check_hard_gates(run, gates):
         {"contacts": int(loaded.shape[0]), "max_e_loaded": emax_loaded, "max_e": emax, "violations": viol},
     )
 
-    # (3) Dissipation. The bristle spring lags slip and legitimately RETURNS stored
-    # elastic energy (instantaneous f·slip < 0 moments are physical), so the gate is
-    # NET energy over the run: total friction work must not exceed what the springs
-    # can store, i.e. Σ (f_long·slip + (−f_lat)·slip_lat)·dt ≥ −E_store_bound with
-    # E_store_bound = 2 sides × C_max²/(2K), C_max = per-side max over the window of
-    # Σ mu·load_elastic, K = bristle stiffness mu·weight/2/GRIP_SHEAR_MODULUS_M.
-    dt = meta.get("fixed_dt", 1.0 / TICK_HZ)
-    if c.size:
-        net_e = float(np.sum((c[:, 3] * c[:, 1] - c[:, 4] * c[:, 2]) * dt))
-    else:
-        net_e = 0.0
-    c_max = meta["mu"] * float(np.max(run["side_elastic"])) if run["side_elastic"].size else 0.0
-    k_bristle = meta["mu"] * meta["weight"] / 2.0 / GRIP_SHEAR_MODULUS_M
-    e_bound = 2.0 * c_max**2 / (2.0 * k_bristle) if k_bristle > 0 else 0.0
-    gate(
-        gates,
-        "dissipation",
-        net_e >= -e_bound,
-        {"net_energy_j": net_e, "store_bound_j": e_bound, "c_max_n": c_max, "k_n_per_m": k_bristle},
-    )
+    # Capacity does not define recoverable soil energy. The unloading decision and its
+    # missing energy witness are recorded in architecture section 5a; no rigid-spring K
+    # or energy bound is inferred from this trace.
 
-    # (4) Finiteness.
+    # (3) Finiteness.
     gate(gates, "finite", run["nonfinite"] == 0, {"nonfinite_values": run["nonfinite"]})
 
 
@@ -569,7 +531,7 @@ def check_monotonicity(results):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("files", nargs="+", type=Path, help="harness JSONL captures (schema 2)")
+    ap.add_argument("files", nargs="+", type=Path, help="harness JSONL captures (schema 3)")
     ap.add_argument("--summary", type=Path, help="write the machine-readable summary JSON here")
     args = ap.parse_args()
 

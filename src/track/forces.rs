@@ -61,12 +61,24 @@ fn grip_law() -> &'static GripLaw {
         );
         assert!(
             data.rigid_rolling_resistance.value.is_finite()
-                && data.rigid_rolling_resistance.value >= 0.0,
-            "{PATH}: rigid_rolling_resistance must be finite and nonnegative; state the undeforming-support motion resistance"
+                && data.rigid_rolling_resistance.value >= 0.0
+                && matches!(
+                    data.rigid_rolling_resistance.label,
+                    crate::provenance::Provenance::Measured(_)
+                        | crate::provenance::Provenance::Derived(_)
+                        | crate::provenance::Provenance::Unknown(_)
+                        | crate::provenance::Provenance::Fixture(_)
+                ),
+            "{PATH}: rigid_rolling_resistance must be finite, nonnegative and a fact or Unknown; state the undeforming-support motion resistance"
         );
         data
     });
     &DATA
+}
+
+/// Shared running-gear resistance on undeforming support; ground totals already include it.
+pub(crate) fn rigid_rolling_resistance() -> f32 {
+    grip_law().rigid_rolling_resistance.value
 }
 
 /// Resolution floor (m) on shear compliance.
@@ -83,7 +95,8 @@ pub(crate) const GRIP_SHEAR_FLOOR_M: f32 = 0.075;
 /// `rolling load / band` on the belt, and explicit integration of a damper `c` on the belt's
 /// inertia `I` is monotone while `c·dt/I < 1` and stable while it is below 2. On the fixture tank on
 /// the shipped mud row: 0.15 × 279.6 kN / 0.25 m/s = 168 kN·s/m against `I/dt` = 4 750 kg × 64 Hz
-/// = 304 kN·s/m, 0.55 of it; with the grip damper's 143.5 kN·s/m the sum is 1.02 of it, inside 2
+/// = 304 kN·s/m, 0.55 of it. At the nominal mud capacity of about 0.277 W, the grip
+/// damper contributes DERIVED about 171.5 kN·s/m, making the sum about 1.12 of it, inside 2
 /// (DERIVED, fixture data). A tank crawling inside the band is below anything a player reads as
 /// motion.
 pub const ROLLING_FADE_SPEED: f32 = 0.25;
@@ -100,7 +113,7 @@ pub fn rolling_resistance(rolling_load: f32, speed: f32) -> f32 {
 pub struct GripParams {
     /// The track's side of every pair ([`crate::spec::TrackSpec::friction`]).
     pub track: Friction,
-    /// Base-pack sliding friction: the whole-vehicle braking estimate's stand-in.
+    /// Rigid-pair fixture friction and the passive terrain collider's solver stand-in.
     /// Actual contacts read ground facts through `ContactOracle::ground_at`; inline rigid
     /// fixtures may use this pair without a ground field.
     pub ground: Friction,
@@ -110,8 +123,7 @@ pub struct GripParams {
 }
 
 impl GripParams {
-    /// A tank's grip from its data: its track's substance, the terrain's base ground, at half
-    /// its weight.
+    /// Track substance, passive-terrain solver stand-in and nominal half-weight from data.
     pub(crate) fn of(spec: &crate::spec::TankSpec) -> Self {
         grip_law();
         Self {
@@ -127,7 +139,7 @@ impl GripParams {
         self.track.combine(surface).dynamic_coefficient
     }
 
-    /// The base-pair coefficient used by whole-vehicle braking estimates and rigid fixtures.
+    /// The base-pair coefficient used by rigid calibration fixtures.
     pub fn on_ground(&self) -> f32 {
         self.pair(self.ground)
     }
@@ -1302,7 +1314,7 @@ fn surface_under<O: TerrainOracle>(
         (None, _) => SurfaceGrip::rigid(0.0, 0.0),
         (Some(grip), Some(collider)) => SurfaceGrip::rigid(
             grip.pair(pieces.friction(collider)),
-            grip_law().rigid_rolling_resistance.value,
+            rigid_rolling_resistance(),
         ),
         (Some(grip), None) => match oracle.ground_at(p) {
             Some(ground) => {
@@ -1339,8 +1351,9 @@ fn surface_under<O: TerrainOracle>(
     }
 }
 
-/// Resolution: exp(-16) is about 1.1e-7 (DERIVED), one f32-scale share of the capacity.
-/// Bounding old sliding displacement here avoids unbounded memory without perceptible loss.
+/// Sliding displacement clip: exp(-16) omits about 1.1e-7 of loading capacity (DERIVED).
+/// The clip also controls macroscopic reversal travel; architecture section 5a records the
+/// unresolved unloading law rather than treating this as solely solver precision.
 const SOIL_SATURATION_SHEAR: f32 = 16.0;
 
 fn soil_mobilization(displacement: Vec3, shear_m: f32) -> Vec3 {
@@ -2965,6 +2978,7 @@ mod tests {
                 .grip
                 .unwrap()
                 .pair(crate::substances::contact_friction(friction));
+            assert!(!report.contacts.is_empty());
             for c in report.contacts {
                 assert!((c.f_lat.abs() / c.load_elastic - expected).abs() < 1e-5);
             }
