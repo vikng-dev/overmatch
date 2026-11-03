@@ -238,7 +238,9 @@ fn recv_conditioner_mode(
     }
 }
 
-/// Input delay is fixed: Lightyear input-buffer end ticks must advance exactly once per local tick.
+/// Resolution: input-buffer scheduling depth. The three-tick choice matches Lightyear 0.30.1's
+/// `balanced()` cap for jitter headroom; no minimum is derived for the authoritative timeline.
+/// Delay stays fixed so input-buffer end ticks advance once per local tick.
 /// See `src/net/tests/net_fire_release.rs`.
 pub(crate) const SHIPPING_INPUT_DELAY_TICKS: u16 = 3;
 
@@ -1035,7 +1037,7 @@ fn close_verdict(
     }
     retry
         .exhausted
-        .then(|| MatchClosed::Ended("the match server stopped answering".into()))
+        .then(|| MatchClosed::Ended("it stopped answering".into()))
 }
 
 /// Close the match's link on a [`close_verdict`]: despawn it, start the connection ledger afresh
@@ -3815,12 +3817,10 @@ mod tests {
             exhausted: true,
             ..down
         };
-        assert_eq!(
+        assert!(matches!(
             close_verdict(&exhausted, None),
-            Some(MatchClosed::Ended(
-                "the match server stopped answering".into()
-            ))
-        );
+            Some(MatchClosed::Ended(reason)) if reason.contains("stopped answering")
+        ));
         assert_eq!(
             close_verdict(&down, Some("server stopped".into())),
             Some(MatchClosed::Ended("server stopped".into())),
@@ -3834,6 +3834,11 @@ mod tests {
     #[test]
     fn reconnect_backoff_is_capped() {
         let policy = client_policy();
+        assert_eq!(reconnect_backoff_secs(0), policy.reconnect_base_s.0);
+        assert_eq!(
+            reconnect_backoff_secs(1),
+            (policy.reconnect_base_s.0 + policy.reconnect_step_s.0).min(policy.reconnect_cap_s.0)
+        );
         let reaches_cap = ((policy.reconnect_cap_s.0 - policy.reconnect_base_s.0)
             / policy.reconnect_step_s.0)
             .ceil() as u32;

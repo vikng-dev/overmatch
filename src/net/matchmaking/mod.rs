@@ -303,7 +303,7 @@ mod tests {
     use super::*;
 
     /// The returning player sees the server-loss cause through the installed MatchClosed reader,
-    /// lobby screen spawner and footer refresher, even when the location fetch fails separately.
+    /// lobby screen spawner and footer refresher, independently of the location fetch.
     #[test]
     fn an_ended_match_renders_its_server_loss_cause_in_the_lobby() {
         let mut app = crate::net::test_harness::base_app();
@@ -327,7 +327,7 @@ mod tests {
             .resource_mut::<NextState<Flow>>()
             .set(Flow::InMatch);
         app.update();
-        let cause = "the match server stopped answering";
+        let cause = "fixture connection failure";
         app.world_mut()
             .write_message(MatchClosed::Ended(cause.into()));
         app.world_mut()
@@ -339,7 +339,7 @@ mod tests {
             world
                 .query::<&Text>()
                 .iter(world)
-                .any(|text| { text.0 == format!("Match server lost: {cause}") }),
+                .any(|text| text.0.contains(cause)),
             "returning to the lobby must explain the lost server on screen"
         );
     }

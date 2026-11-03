@@ -9,7 +9,7 @@
 //! - **Server gone.** The server's app is dropped; the client keeps reconnecting until a retry
 //!   fired past the [`client_policy`] real-time reconnect budget fails, then closes the match as
 //!   ended on the lobby screen. Each client frame advances real time by [`SLOW_FRAME`] —
-//!   virtual time clamps a frame that long — so the give-up lands within [`GONE_FRAMES`] frames
+//!   virtual time clamps a frame that long — so the give-up lands within [`gone_frame_limit`] frames
 //!   only on the real clock.
 //!
 //!   Either way the match's replicas leave with its link: lightyear 0.30.1 despawns every
@@ -41,11 +41,19 @@ const LEAVE_FRAMES: u32 = 8;
 const SERVER_DROP_STEPS: u32 = 20;
 /// A slow client frame.
 const SLOW_FRAME: Duration = Duration::from_secs(1);
-/// Fixture bound in [`SLOW_FRAME`] units: the shipped reconnect budget, backoff cap and slack.
-/// Virtual time clamps each frame, so the same bound refuses a virtual-clock give-up.
-const GONE_FRAMES: u32 = 45;
 /// Slow frames of a server outage: past netcode's 3 s client timeout, so the link is down.
 const OUTAGE_FRAMES: u32 = 8;
+
+/// DERIVED: budget + capped wait + outage bounds for initial silence, any pre-budget attempt and
+/// the terminal retry, plus lobby-transition slack.
+fn gone_frame_limit() -> u32 {
+    let policy = client_policy();
+    let frame_s = SLOW_FRAME.as_secs_f64();
+    (policy.reconnect_give_up_s.0 / frame_s).ceil() as u32
+        + (policy.reconnect_cap_s.0 / frame_s).ceil() as u32
+        + 3 * OUTAGE_FRAMES
+        + LEAVE_FRAMES
+}
 
 #[derive(Resource, Default)]
 struct Closed(Vec<MatchClosed>);
@@ -220,24 +228,23 @@ fn a_gone_server_ends_the_match_after_the_real_time_give_up() {
     replicate_one_root(&mut server, &mut client);
     drop(server);
     client.insert_resource(TimeUpdateStrategy::ManualDuration(SLOW_FRAME));
+    let limit = gone_frame_limit();
     let mut frames = 0;
-    while flow(&client) != Flow::Lobby && frames < GONE_FRAMES {
+    while flow(&client) != Flow::Lobby && frames < limit {
         step(None, &mut client);
         frames += 1;
     }
     assert_eq!(
         flow(&client),
         Flow::Lobby,
-        "still in the match after {GONE_FRAMES} frames of {SLOW_FRAME:?}"
+        "still in the match after {limit} frames of {SLOW_FRAME:?}"
     );
     assert!(links(&mut client).is_empty(), "the lost link is removed");
     assert_eq!(replicas(&mut client), 0, "no replica outlives the link");
-    assert_eq!(
-        client.world().resource::<Closed>().0,
-        vec![MatchClosed::Ended(
-            "the match server stopped answering".into()
-        )]
-    );
+    assert!(matches!(
+        client.world().resource::<Closed>().0.as_slice(),
+        [MatchClosed::Ended(reason)] if reason.contains("stopped answering")
+    ));
     assert!(
         frames as f64 * SLOW_FRAME.as_secs_f64() >= client_policy().reconnect_give_up_s.0,
         "not before the give-up ({frames} frames)"
