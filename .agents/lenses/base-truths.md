@@ -32,6 +32,10 @@ Review test: would this line survive tank #2, house #2 and a new material unchan
   that hides a drift. Read its comment and its git history: "so that X does not …" where X is our
   own code is the signature. The finding names the defect it covers; the fix is that defect's
   truth, and the compensation goes with it.
+- **Retrospective calibration**: a data number, script gate or design argument whose only reason is
+  that it reproduces an earlier output: a unit "set against the retired 395 HP target", a gate on a
+  reference run's result, a design crediting "keeps today's numbers" or charging "every number
+  moves". Source it as a fact, state the outcome it aims at as a balance decision, or delete it.
 
 ## Not a finding
 
@@ -41,6 +45,7 @@ Review test: would this line survive tank #2, house #2 and a new material unchan
   exponent 3, π, or the 0.75 in 0.75·V/π. They are its algebra, not authored numbers with a job.
 - Labelled fixture data in tests asserting class invariants.
 - A generic law with a parameter the data sets for every asset of its class.
+- A `Unit` or `Taste` aimed at an outcome the owner chose, which names that outcome.
 
 ## Fix
 
