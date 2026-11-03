@@ -209,16 +209,18 @@ impl SettingsLook {
                 "author a finite overlap in [0, 1)",
             ));
         }
+        // DERIVED: Bevy 0.19.1 bloom::prepare_bloom_textures makes ilog2(dimension) - 1
+        // mips; compute_blend_factor divides by mip_count - 1, requiring at least two.
         if self
             .bloom_mip_dimensions
             .0
             .iter()
-            .any(|v| !v.is_power_of_two())
+            .any(|v| !v.is_power_of_two() || *v < 8)
             || self.bloom_mip_dimensions.0[0] > self.bloom_mip_dimensions.0[1]
         {
             return Err(refuse(
                 "bloom_mip_dimensions",
-                "author power-of-two dimensions in ascending quality order",
+                "author power-of-two dimensions of at least 8 in ascending quality order so Bevy bloom has at least two mips",
             ));
         }
         if self
@@ -470,6 +472,21 @@ mod tests {
         let mut data = decoded();
         data.track_print_ranges_m.0[0] = f32::INFINITY;
         refused(data, "track_print_ranges_m");
+    }
+
+    /// Bloom's final blend needs a nonzero maximum mip index, even on LOW.
+    #[test]
+    fn bloom_admission_requires_a_calculable_blend() {
+        // Fixture: Bevy 0.19.1 uses ilog2(dimension).max(2) - 1 mips;
+        // its final blend divides mip zero by mip_count - 1.
+        for dimension in [1, 2, 4] {
+            let mut data = decoded();
+            data.bloom_mip_dimensions.0 = [dimension, 512];
+            refused(data, "bloom_mip_dimensions");
+        }
+        let mut data = decoded();
+        data.bloom_mip_dimensions.0 = [8, 512];
+        data.validate().unwrap();
     }
 
     /// Valid retuning changes no schema or range invariant. This also exercises the parsed type
