@@ -287,9 +287,8 @@ impl MeshGeometry {
 pub(crate) struct TankGeometry {
     pub nodes: Vec<NodeGeometry>,
     pub by_name: HashMap<String, usize>,
-    /// Load-bearing stations in spec `roadwheels` declaration order: both wire ends derive their
-    /// `WheelIndex` slots from this order, never a name pattern and sort. Each node carries its
-    /// wheel mesh and is also a ballistic volume.
+    /// One `(node index, TrackSide)` per spec `roadwheels` entry, in declaration order, never
+    /// name-pattern sorted. Each station carries its wheel mesh and is also a ballistic volume.
     pub roadwheels: Vec<(usize, TrackSide)>,
     /// Spec `colliders` in declaration order for deterministic spawn; no wire-shared index derives
     /// from this list (each proxy yields convex hulls).
@@ -2169,8 +2168,8 @@ mod tests {
         );
     }
 
-    /// Spec findings must name existing files: the tracked GLB has a sibling sheet, whereas the
-    /// sim artifact (ADR-0035) uses an embedded sheet. Its finding must not invent a `.sim.tank.ron`.
+    /// Tracked spec findings name the sibling sheet, even when missing. The sim artifact embeds
+    /// its sheet (ADR-0035), so its finding names the artifact, never an invented `.sim.tank.ron`.
     #[test]
     fn a_finding_against_the_sim_artifact_names_the_sim_artifact() {
         let tracked = Path::new("assets/tiger_1/tiger_1.glb");

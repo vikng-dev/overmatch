@@ -4,7 +4,7 @@
         (forward_m: (42.0, Taste("Course trench distance down -Z.")), width_m: (5.0, Taste("Wider than the road-wheel span: end-wheel diagonals catch.")), label: "wide trench (pure diagonal bridge)"),
         (forward_m: (58.0, Taste("Course trench distance down -Z.")), width_m: (10.0, Taste("Wider than the whole footprint: nothing catches; drop-in and grind-out witness.")), label: "pit (swallows the whole rig - drop in, grind out)"),
     ],
-    washboards: ([(3.0, 0.8, 6, 0.12), (10.0, 1.5, 5, 0.18), (19.0, 2.5, 4, 0.22)], Taste("Course washboards: start distance along -Z, period, bump count and height in metres; increasing gaps span wheel bridging to individual bump travel.")),
+    washboards: ([(3.0, 0.8, 6, 0.12), (10.0, 1.5, 5, 0.18), (19.0, 2.5, 4, 0.22)], Taste("Course washboards, all before the first trench: start distance along -Z, period, bump count and height in metres; increasing gaps span wheel bridging to individual bump travel.")),
     lane_near_m: (20.0, Taste("Inspection course near Z extent, ahead of the flat reset.")),
     lane_far_m: (-110.0, Taste("Inspection course far Z extent, beyond the ramp.")),
     lane_width_m: (40.0, Taste("Course width leaves room to manoeuvre around obstacles.")),

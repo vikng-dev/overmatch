@@ -15,7 +15,7 @@
 //! warmup and span use those strategy seconds, not wall seconds.
 //!
 //! Uses [`JsonlSink`]/[`role_path`] like the other `SPIKE_*` recorders. The first `frame_ms` is 0
-//! (no previous row), safely inside discarded warmup, so it needs no special case. Unset means
+//! (no previous row): positive warmup discards it; `--warmup-s 0` keeps it. Unset means
 //! nothing registered and zero cost. Windowed roots only; headless servers present no frames.
 //!
 //! # Validity signals (the anti-fiction half)

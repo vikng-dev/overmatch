@@ -7,9 +7,9 @@
 //! and looped `buffer_start..buffer_end`. `Tick - Tick` is a signed `i32`, so whenever the buffer's
 //! `start_tick` led `end_tick` by ≥ 2 the difference went negative, the `as usize` sign-extended to
 //! ~2^64, and the loop became an unbounded allocating spin — the load-gated connect hang (silent
-//! wedge, RSS balloon, eventual SIGKILL). The strand itself is persistent because
-//! `InputBuffer::set_raw` refuses writes below `start_tick`, so a backward connect-window resync
-//! leaves the buffer ahead of the timeline forever.
+//! wedge, RSS balloon, eventual SIGKILL). `InputBuffer::set_raw` refuses writes below `start_tick`;
+//! lower writes alone cannot re-anchor it. Lightyear 0.30.1's installed `LocalTimelineShift`
+//! observer shifts both buffer indices (`lightyear_inputs` client.rs, `shift_input_buffer_ticks`).
 //!
 //! Lightyear 0.30 BOUNDS the encoder (`(end - start).saturating_add(1).max(0)` pre-sizing and a
 //! `tick <= end_tick` loop), so the call is now safe to make here — and the bounded reproduction
@@ -47,8 +47,8 @@ fn tick_subtraction_still_goes_negative() {
     );
 }
 
-/// Enabler #2: `set_raw` refuses writes below `start_tick`, which is what makes a stranded
-/// buffer PERSISTENT after a backward resync (the timeline drops, the buffer can't follow).
+/// `set_raw` alone refuses writes below `start_tick`. This does not model a timeline shift:
+/// Lightyear 0.30.1's installed observer moves both buffer indices (see module doc).
 #[test]
 fn set_raw_still_refuses_lower_ticks() {
     let mut buffer = TestBuffer::default();

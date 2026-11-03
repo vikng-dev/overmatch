@@ -1,4 +1,5 @@
 //! Shared wire registrations: components, messages, channels, inputs and physics codecs.
+//! If a component or input rides the wire, its registration lives here and nowhere else.
 //! Both endpoints must register identically; mismatches corrupt replication or refuse connection.
 //! The game's damage-model snapshots and shot facts carry game state only.
 

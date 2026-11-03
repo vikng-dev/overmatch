@@ -118,8 +118,8 @@ pub(crate) fn death_tint() -> impl Bundle {
     )
 }
 
-/// Overlay authority: owners declare presence every frame ([`Self::declare`]); consumers derive
-/// policy from it. `BTreeSet` uses priority `Ord`, making [`Self::top`] the greatest element.
+/// Overlay authority: owners declare absolute presence ([`Self::declare`]); the menu latches
+/// between Esc presses. Consumers derive policy; priority `Ord` makes [`Self::top`] greatest.
 #[derive(Resource, Default)]
 pub(crate) struct Overlays {
     active: BTreeSet<Overlay>,
@@ -307,8 +307,8 @@ fn spawn_menu_overlay(mut commands: Commands) {
     ));
 }
 
-/// Consume [`EscapeAction::Menu`] (kill-cam runs route Esc to skip instead). [`esc_menu_target`]
-/// declares presence in [`Overlays`]; [`input_blocked`]/cursor ownership handle the cursor separately.
+/// Consume [`EscapeAction::Menu`] (kill-cam runs route Esc to skip instead), declaring the menu
+/// presence selected by [`esc_menu_target`]. [`input_blocked`]/cursor ownership handle the cursor.
 /// Runs in [`OverlaySet::Toggle`] to read this frame's settled connect/death declarations.
 fn esc_toggle(action: Res<EscapeAction>, mut overlays: ResMut<Overlays>) {
     if *action != EscapeAction::Menu {
