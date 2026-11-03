@@ -1,152 +1,110 @@
-//! Per-frame wall-clock cost recorder (`SPIKE_FRAME_COST=<path>`): an env-gated JSONL log, one row
-//! per frame, `{t, frame_ms}` — plus the three validity signals the frame-budget sweep gates on
-//! (occlusion transitions, the presenting monitor, and the effective present mode, below).
+//! Per-frame wall-clock recorder (`SPIKE_FRAME_COST=<path>`): JSONL `{t, frame_ms, drawn}` rows,
+//! plus occlusion, monitor and surface rows and an effective-present-mode log for sweep validity.
 //!
-//! RAW deltas, deliberately never averaged in-process: the frame-budget sweep's product signal is
-//! tail stutter (p95/p99/worst frame), which any smoothing destroys — percentiles are
-//! `scripts/perf/analyze.py`'s job.
+//! Raw deltas preserve tail stutter (p95/p99/worst frame); `scripts/perf/analyze.py` computes percentiles.
 //!
-//! `frame_ms` is wall-clock: the time since the previous row, on a monotonic `Instant` the
-//! recorder takes itself in [`sample`]. It is not `Time<Real>`'s delta, the quantity bevy's own
-//! frame-time diagnostic reads (vendored bevy_diagnostic-0.19.1, `frame_time_diagnostics_plugin.rs`
-//! `diagnostic_system`): a manual `TimeUpdateStrategy` advances `Time<Real>` by its fixed step
-//! whatever the frame cost (vendored bevy_time-0.19.1/src/lib.rs, `time_system`), so under the
-//! armour sandbox's capture flight that delta is the flight's step on every frame. Under the
-//! default strategy both are the frame loop's period, read at different points of the frame
-//! (`Time<Real>` at the render world's `send_time`, this recorder in `Update`) — DERIVED from the
-//! source, not measured side by side.
+//! `frame_ms` uses [`sample`]'s monotonic `Instant`, not the `Time<Real>` delta read by bevy's
+//! diagnostic (vendored bevy_diagnostic-0.19.1, `frame_time_diagnostics_plugin.rs`, `diagnostic_system`).
+//! Manual `TimeUpdateStrategy` fixes that delta to the flight step regardless of cost, as in the
+//! armour sandbox (vendored bevy_time-0.19.1/src/lib.rs, `time_system`). DERIVED from source, not
+//! measured side by side: under the default strategy both read the loop period at different points
+//! (`Time<Real>` at the render world's `send_time`, this recorder in `Update`).
 //!
-//! `t` is `Time<Real>`'s elapsed seconds, the clock the pen cam stamps its log marks on
-//! (`scripts/perf/pencam_cost.py` joins the two). Under a manual strategy it counts that
-//! strategy's seconds, not wall seconds: an equal `t` is the same frame of a flight in every run,
-//! and the analyzer's warmup and span are measured in those seconds.
+//! `t` is `Time<Real>`'s elapsed seconds, shared with pen-cam marks (`scripts/perf/pencam_cost.py`
+//! joins them). Under manual time, equal `t` identifies the same flight frame across runs; analyzer
+//! warmup and span use those strategy seconds, not wall seconds.
 //!
-//! Rows go through the same [`JsonlSink`]/[`role_path`] discipline as the other `SPIKE_*`
-//! recorders. The first row's `frame_ms` is 0 by construction (no previous row); it lands inside
-//! the warmup window every analysis discards, so it is written rather than special-cased. Off
-//! (zero cost — nothing registered) unless the env var is set. Windowed roots only: the headless
-//! server presents no frames.
+//! Uses [`JsonlSink`]/[`role_path`] like the other `SPIKE_*` recorders. The first `frame_ms` is 0
+//! (no previous row), safely inside discarded warmup, so it needs no special case. Unset means
+//! nothing registered and zero cost. Windowed roots only; headless servers present no frames.
 //!
 //! # Validity signals (the anti-fiction half)
 //!
-//! A hidden or fully-occluded window's present returns `SurfaceError::Occluded`, nothing ever
-//! vsync-blocks, and the frame loop FREE-RUNS — frame rows keep flowing, every row-count
-//! gate passes, and the numbers are fiction. The rows alone cannot distinguish that state, so this
-//! recorder emits extra signals for `scripts/perf/run-frame-sweep.sh` and
-//! `scripts/perf/analyze.py` to gate on. The occlusion one is above; the display one has a section
-//! of its own, because a window can be perfectly visible and still measure the wrong machine:
+//! A hidden or fully occluded window's present returns `SurfaceError::Occluded`: no vsync block,
+//! so free-running rows pass row-count gates without measuring presentation. Visible windows can
+//! also measure the wrong display. `scripts/perf/run-frame-sweep.sh` and `scripts/perf/analyze.py`
+//! therefore gate on these additional signals:
 //!
-//! * **Occlusion transitions** — bevy delivers winit's occlusion notifications as the
-//!   `WindowOccluded` message (vendored bevy_window-0.19.0/src/event.rs: fires when a window is
-//!   minimized, hidden, or fully covered, carrying `occluded: bool`). Each transition is written
-//!   into the SAME stream as an `{t, occluded}` row (same clock as the frames it invalidates) and
-//!   logged with the stable token `frame_cost: presentation occluded=`. The analyzer fails any
-//!   stream whose occluded interval overlaps the post-warmup measurement window.
+//! * **Occlusion transitions:** `WindowOccluded` carries winit's `occluded: bool` when minimized,
+//!   hidden or fully covered (vendored bevy_window-0.19.0/src/event.rs). `{t, occluded}` rows share
+//!   the frames' stream and clock; logs use the stable token `frame_cost: presentation occluded=`.
+//!   Any occluded interval overlapping the post-warmup measurement window fails analysis.
 //!
-//!   While occluded, the recorder also asks for focus back once a second
-//!   ([`raise_when_occluded`]) — parking the window on the primary display moved it off an empty
-//!   external desktop and into the middle of the operator's own windows, so it now needs to insist.
+//!   [`raise_when_occluded`] requests focus once a second: primary-display parking can put the
+//!   window among the operator's windows instead of on an empty external desktop.
 //!
-//!   Scope, stated so nobody over-trusts it: this catches a window that becomes covered or
-//!   minimized DURING a run, which is the operator-error case. It is not the lever against a
-//!   window that was never shown at all — winit reports occlusion CHANGES, and a window created
-//!   invisible need never report one. That case is closed upstream, in the runner: a real sweep
-//!   refuses to start with the hidden-capture env exported and scrubs it from the child anyway.
+//!   This catches covering/minimizing during a run, not an invisible window that never emits an
+//!   occlusion change. The real-sweep runner refuses an exported hidden-capture env and scrubs it
+//!   from the child.
 //! * **The presenting monitor** — see [the section below](#the-presenting-monitor); a 60 Hz panel
 //!   paces every frame to a multiple of 16.67 ms while every other gate here still passes.
-//! * **The effective present mode** — `settings::normalize_vsync` can resolve an unsupported OFF
-//!   back to ON, and a failed capability probe leaves `AutoNoVsync` free to negotiate down to
-//!   `Fifo`; either way the frames become display-paced while the injected `video.ron` still says
-//!   "Off". Once the probe answers ([`PresentCaps::answered`]), one loud line states the
-//!   post-probe truth: `frame_cost: effective present mode Immediate, frame cap off` is the only
-//!   spelling the sweep's real mode accepts as proof the run was uncapped.
+//! * **Effective present mode:** `settings::normalize_vsync` can turn unsupported OFF into ON;
+//!   failed probes let `AutoNoVsync` negotiate `Fifo`. Both pace frames despite `video.ron` saying
+//!   "Off". After [`PresentCaps::answered`], real mode accepts only the log spelling
+//!   `frame_cost: effective present mode Immediate, frame cap off` as uncapped proof.
 //!
 //! # The presenting monitor
 //!
-//! A window presented on a 60 Hz panel is paced by macOS to multiples of 16.67 ms whatever present
-//! mode the app negotiated: every rung of a shadow ladder quantizes to the same ~60 fps, and the
-//! sweep is a fiction that LOOKS clean, because the present-mode line above reports what the APP
-//! ASKED FOR, not how the OS paced the surface it got. Measured on this machine, same binary and
-//! settings: shadows fully OFF read 16.632 ms on the 60 Hz external panel and 12.057 ms on the
-//! built-in 120 Hz ProMotion one. So the recorder does two things:
+//! macOS paces a 60 Hz panel in 16.67 ms multiples (DERIVED from refresh), whatever present mode
+//! the app requests: shadow-ladder rungs all quantize to ~60 fps despite an uncapped log line.
+//! MEASURED on this machine, same binary/settings, shadows OFF: 16.632 ms on the 60 Hz external
+//! panel versus 12.057 ms on the built-in 120 Hz ProMotion panel. The recorder therefore:
 //!
 //! * **parks** the primary window at [`PARK_AT`] once, at startup. The coordinate space is global
 //!   physical pixels whose origin is the top-left of the MAIN display (vendored
 //!   bevy_winit-0.19.0/src/winit_windows.rs, `winit_window_position`: `WindowPosition::At` is
 //!   handed to winit as a `PhysicalPosition` unchanged), so a small positive point lands on the
 //!   primary panel by construction whatever else is plugged in;
-//! * **records** which monitor is actually presenting, as `{t, monitor, refresh_mhz, primary}`
-//!   rows in the same stream and on the same clock as the frames — at first resolution and again
-//!   on every change, by polling winit's own `current_monitor()` (see [`record_monitor`], which
-//!   also records why bevy's `OnMonitor` relationship cannot serve here). The park is
-//!   best-effort; the ROW is the evidence, and `scripts/perf/analyze.py` fails any stream whose
-//!   measurement window is covered by a monitor below 100 000 mHz, is not covered by a monitor row
-//!   at all, or changes monitor mid-window.
+//! * **records** `{t, monitor, refresh_mhz, primary}` on first resolution and changes, sharing the
+//!   frames' stream and clock. [`record_monitor`] polls winit's `current_monitor()` and explains why
+//!   `OnMonitor` cannot serve. Parking is best-effort; analysis requires monitor-row coverage,
+//!   refresh of at least 100 000 mHz and no monitor change within the measurement window.
 //!
-//! The parking is deliberately NOT a gate here: a client that refuses to measure is a worse
-//! instrument than one that measures and states its own display provenance. Being wrong about the
-//! panel and being unable to say which panel are the same evidential state, and both fail in the
-//! analyzer — which is also why `refresh_mhz` is written as `null` rather than omitted when winit
-//! cannot answer (winit's `MonitorHandle::refresh_rate_millihertz` is an `Option`; on macOS it
-//! falls back to `CVDisplayLink` because `CGDisplayModeGetRefreshRate` reports 0 for the built-in
-//! panel — vendored winit-0.30.13/src/platform_impl/macos/monitor.rs).
+//! Keep recording if parking fails, to retain display provenance; unknown and wrong panels both
+//! fail analysis. Unknown `refresh_mhz` is explicitly `null`: `MonitorHandle::refresh_rate_millihertz`
+//! returns an `Option` (vendored winit-0.30.13/src/platform_impl/macos/monitor.rs). macOS falls back
+//! to `CVDisplayLink` because `CGDisplayModeGetRefreshRate` reports 0 for the built-in panel.
 //!
-//! Rows on CHANGE rather than per frame, polled once a second: the identity of the presenting
-//! panel is a step function, and a row per frame would drown the frame rows it is meant to
-//! qualify. The startup park itself can produce an early change row (winit creates the window
-//! before the first `Startup` run, so a window born on the external panel is recorded there and
-//! then again after the move) — which is why the analyzer's gate is scoped to the MEASUREMENT
-//! window, exactly like the occlusion gate: pre-warmup churn is provenance, not a failure.
+//! Poll once a second and emit changes: panel identity is a step function; per-frame monitor rows
+//! would drown frame data. winit creates the window before `Startup`, so parking can record the
+//! birth panel then a move. Like occlusion, only measurement-window churn fails; warmup is provenance.
 //!
 //! # The surface size
 //!
-//! The refresh gate above passes on a window that is presenting the wrong NUMBER OF PIXELS, and
-//! that is the second way this sweep reads as fiction. The two panels have different scale
-//! factors: the ARZOPA is 1.0 and the built-in is 2.0, and bevy's default window is 1280x720
-//! LOGICAL (vendored bevy_window-0.19.0/src/window.rs, `WindowResolution::default` — 1280x720
-//! physical at scale 1.0). Born on the external panel the window is therefore a 1280x720 surface;
-//! every dataset this sweep is compared against was captured on the built-in panel, where the same
-//! logical window is a 2560x1440 surface. That is FOUR TIMES the shaded pixels. MEASURED: m350-2
-//! read 4.19 ms here against 11.83 ms for identical code on the built-in panel — a ladder whose
-//! every rung is three times too fast, with a refresh gate that passes.
-//!
-//! So the recorder also pins and records the surface:
+//! Refresh alone cannot prove pixel count. Bevy's default is 1280x720 logical
+//! (vendored bevy_window-0.19.0/src/window.rs, `WindowResolution::default`: 1280x720 physical at
+//! scale 1.0). ARZOPA's scale 1.0 gives that surface; built-in scale 2.0 gives the reference
+//! datasets' 2560x1440, four times the pixels (DERIVED). MEASURED: m350-2 read 4.19 ms on the
+//! external panel versus 11.83 ms for identical code on the built-in: about three times too fast
+//! (DERIVED), despite passing refresh.
+//! The recorder also:
 //!
 //! * **pins** the window to [`SURFACE_LOGICAL`] logical pixels at startup, and re-asserts it
 //!   whenever the scale factor changes ([`hold_surface_pin`]). The logical size is the invariant
 //!   worth pinning: it is what every prior capture held fixed, and at the built-in panel's scale
 //!   factor it is exactly the 2560x1440 physical surface those captures measured;
-//! * **records** `{t, surface_w, surface_h}` rows — bevy's own `Window::physical_size`, which is
-//!   what the render app configures the surface to and what the camera reports as
-//!   `physical_target_size`, so the recorded number is the one that costs GPU time rather than a
-//!   number that merely correlates with it. `scripts/perf/analyze.py` fails any measurement window
-//!   not covered by a surface row, covered by one that is not 2560x1440, or that resizes mid-window.
+//! * **records** `{t, surface_w, surface_h}` from bevy's `Window::physical_size`, the renderer's
+//!   configured surface and camera's `physical_target_size`: the pixels that cost GPU time.
+//!   Analysis requires 2560x1440 surface-row coverage with no resize in the measurement window.
 //!
 //! # Drawn frames: the positive proof
 //!
-//! Every signal above is NEGATIVE: an occlusion message, a wrong monitor, a wrong surface. A window
-//! occluded from birth emits none of them, its surface is `Occluded`, bevy acquires no swapchain
-//! texture, `prepare_view_targets` gives the 3D camera no `ViewTarget`, and the camera is skipped: a
-//! frame loop with no render work whose rows pass every negative gate (MEASURED,
-//! `.agents/scratch/perf-2026-10-29/focus-gap-diagnosis.md`). So a render-world system counts the
-//! frames in which a `Camera3d` view holds a `ViewTarget` ([`count_drawn`]), and every frame row
-//! carries the running count as `drawn`; the analyzer fails a measurement window whose `drawn` does
-//! not advance on nearly every frame row. The count crosses worlds through an `Arc<AtomicU64>`.
-//! Pipelined rendering runs the render world a frame behind, so a row reads the count as of an
-//! earlier frame: that shifts the window by a frame and changes no rate.
+//! An occluded-from-birth window can pass negative gates while never acquiring a swapchain texture
+//! or `ViewTarget`; its camera is skipped. MEASURED diagnosis and alternatives:
+//! `.agents/scratch/perf-2026-10-29/focus-gap-diagnosis.md`.
+//! [`count_drawn`] counts render frames with a `Camera3d` `ViewTarget`; frame rows carry that
+//! running `drawn` count via `Arc<AtomicU64>`. Analysis requires advancement on nearly every row.
+//! Pipelined rendering puts the count a frame behind, shifting the window without changing its rate.
 //!
 //! # Offscreen mode (`OVERMATCH_WINDOW=offscreen`)
 //!
-//! Rendering cost measured without anyone's screen. The root hides the window (`crate::run_window`),
-//! and every window-targeting camera is pointed, from its first frame, at one image of
-//! [`SURFACE_LOGICAL`] logical pixels at scale factor [`OFFSCREEN_SCALE_FACTOR`]: 2560x1440
-//! physical, the visible harness's surface. Nothing is presented, so the presentation signals have
-//! no subject: the window is never parked, pinned, raised or asked for its monitor. The surface
-//! rows read the 3D camera's own target size and carry `offscreen: true`, which makes the analyzer
-//! skip the display and occlusion gates and keep the surface and drawn ones. MEASURED with the
-//! `OVERMATCH_CAPTURE`
-//! retarget this mode reuses: within 0.1 ms p50 of visible runs of the same binary at 2 tanks, and
-//! 0.7 ms at 30 (`focus-gap-diagnosis.md`). It omits the compositor's share of a visible frame.
+//! The root hides the window (`crate::run_window`); from its first frame, each window camera targets
+//! one image: [`SURFACE_LOGICAL`] × [`OFFSCREEN_SCALE_FACTOR`] = 2560x1440 physical, matching the
+//! visible harness. No presentation means no parking, pinning, raising or monitor queries.
+//! Surface rows use the 3D camera's target size and `offscreen: true`; analysis skips display and
+//! occlusion gates, retaining surface and drawn gates. MEASURED using the reused `OVERMATCH_CAPTURE`
+//! retarget: within 0.1 ms p50 of same-binary visible runs at 2 tanks, 0.7 ms at 30
+//! (`focus-gap-diagnosis.md`). Offscreen omits the compositor's share.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -164,29 +122,21 @@ use crate::run_window::RunWindow;
 use crate::settings::{PresentCaps, Settings};
 use crate::trace::{JsonlSink, role_path};
 
-/// Where the capture window is parked at startup, in GLOBAL physical pixels — see the module doc's
-/// presenting-monitor section. Small and positive so the window's top-left, and therefore the bulk
-/// of the window, sits on the main display, which owns the origin of this coordinate space.
+/// Startup park in global physical pixels; the module's presenting-monitor section owns its rationale.
 const PARK_AT: IVec2 = IVec2::new(120, 120);
 
-/// How often the presenting monitor and surface size are re-resolved. Both are step functions
-/// driven by human-scale events (a drag, a cable, a resize), so 1 Hz places any change well inside
-/// the second of frames it invalidates — and the analyzer rejects the whole condition either way.
+/// Resolution: 1 Hz polling bounds monitor/surface changes from human-scale drags, cables and
+/// resizes within a second of affected frames; analysis rejects the whole condition either way.
 const MONITOR_POLL_S: f64 = 1.0;
 
-/// The LOGICAL window size every frame-cost capture is pinned to — see the module doc's
-/// surface-size section. bevy's own default, stated explicitly because the default is only reached
-/// when nothing else has touched the window, and because the number that matters downstream is the
-/// PHYSICAL surface it becomes: 2560x1440 on the built-in panel's scale factor of 2, which is what
-/// `scripts/perf/analyze.py` gates on and what every dataset this sweep compares against measured.
+/// Explicit logical pin, independent of prior window edits; the module's surface-size section owns
+/// the default-size and physical-surface contract with `scripts/perf/analyze.py`.
 const SURFACE_LOGICAL: Vec2 = Vec2::new(1280.0, 720.0);
 
 /// The offscreen image's scale factor: the built-in panel's, so [`SURFACE_LOGICAL`] becomes the same
 /// 2560x1440 physical surface the visible harness gates on, and the UI lays out at the same size.
 const OFFSCREEN_SCALE_FACTOR: f32 = 2.0;
 
-/// Frames in which a `Camera3d` view held a `ViewTarget`, counted in the render world and read in
-/// the main one (module doc, drawn frames).
 #[derive(Resource, Clone, Default)]
 struct DrawnFrames(Arc<AtomicU64>);
 
@@ -200,9 +150,7 @@ struct Offscreen {
 #[derive(Resource)]
 struct FrameCost {
     sink: JsonlSink,
-    /// Latest presentation-occlusion state, as last reported by winit. Kept beside the sink rather
-    /// than in a `Local` because two systems need it: the one that RECORDS the transition and the
-    /// one that tries to undo it ([`raise_when_occluded`]).
+    /// Winit's latest occlusion state; shared rather than `Local` for recording and [`raise_when_occluded`].
     occluded: bool,
     /// When the previous frame row was sampled: the start of the next row's `frame_ms`.
     last_sample: Option<Instant>,
@@ -269,11 +217,10 @@ pub fn client_plugin(app: &mut App) {
         (
             sample,
             record_occlusion,
-            // After the recorder, so it acts on this frame's transition rather than last frame's.
+            // Act on this frame's occlusion transition.
             raise_when_occluded,
             record_monitor,
-            // Before the recorder, so a re-pin lands in the same frame it is decided rather than
-            // leaving one poll's worth of rows claiming the size it was about to correct.
+            // Re-pin before recording, avoiding a poll's worth of stale-size rows.
             hold_surface_pin,
             record_surface,
             report_present_mode,
@@ -282,8 +229,7 @@ pub fn client_plugin(app: &mut App) {
     );
 }
 
-/// Render world: count this frame as drawn when a `Camera3d` view holds a `ViewTarget` (module doc,
-/// drawn frames). After `prepare_view_targets`, which inserts or removes that component each frame.
+/// After `prepare_view_targets` inserts/removes `ViewTarget`; the module doc owns the drawn-frame gate.
 fn count_drawn(drawn: Res<DrawnFrames>, views: Query<(), (With<Camera3d>, With<ViewTarget>)>) {
     if !views.is_empty() {
         drawn.0.fetch_add(1, Ordering::Relaxed);
@@ -311,11 +257,8 @@ fn hold_offscreen_target(
     }
 }
 
-/// Move the primary window onto the primary display and pin its logical size, once, at startup —
-/// the two anti-fiction moves of the module doc (presenting monitor, surface size).
-///
-/// The root must hold its one primary window. The OS placement is reported by
-/// [`record_monitor`] and [`record_surface`]; operator moves are recorded rather than fought.
+/// Requires one primary window. [`record_monitor`]/[`record_surface`] report OS placement and
+/// operator moves rather than fighting them; see the module's monitor and surface contracts.
 fn park_and_pin(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
     let mut window = windows.single_mut().expect(
         "the frame-cost recorder is mounted on a windowed root with exactly one primary window",
@@ -324,19 +267,12 @@ fn park_and_pin(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
     window.resolution.set(SURFACE_LOGICAL.x, SURFACE_LOGICAL.y);
 }
 
-/// Re-assert the logical pin when the scale factor changes — the one event that silently breaks it.
-///
-/// `WindowResolution` stores a PHYSICAL size and a scale factor, and the two are updated by
-/// different winit events: `ScaleFactorChanged` writes the factor alone
-/// (`react_to_scale_factor_change`, vendored bevy_winit-0.19.0/src/state.rs) while the physical size
-/// only follows if a `Resized` arrives. So the moment the startup park carries the window from the
-/// scale-1.0 external panel to the scale-2.0 built-in one, a window pinned once at startup can be
-/// left claiming 1280x720 physical at scale 2 — half the logical size it was pinned to, a quarter of
-/// the pixels every comparable dataset was captured at, and nothing in the frame rows says so.
-///
-/// Triggered by the scale factor rather than by the size mismatch itself, deliberately: that is the
-/// event which invalidates the pin, so the re-assert is bounded by the number of monitor moves
-/// instead of becoming a resize request every second against an OS that may be refusing it.
+/// Re-pin on scale changes: `WindowResolution` stores physical size separately from scale.
+/// `ScaleFactorChanged` writes only scale (`react_to_scale_factor_change`, vendored
+/// bevy_winit-0.19.0/src/state.rs); size follows only on `Resized`. A scale-1.0 → 2.0 park can leave
+/// 1280x720 physical at scale 2: half the pinned logical size and a quarter of reference pixels
+/// (DERIVED). Trigger on scale, not size mismatch, to bound requests by monitor moves rather than
+/// retrying every second against an OS refusing resize.
 fn hold_surface_pin(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut pinned_at_scale: Local<Option<f32>>,
@@ -356,9 +292,8 @@ fn hold_surface_pin(
         return;
     }
     *pinned_at_scale = Some(scale);
-    // `set` is logical: it multiplies by the CURRENT scale factor, which is the whole point here.
-    // Guarded so a steady run never marks `Window` changed — every write to it costs bevy a pass
-    // through `changed_windows`, which talks to the OS.
+    // `set` multiplies logical size by current scale. Guard the write: changing `Window` makes
+    // bevy's `changed_windows` talk to the OS even in an otherwise steady run.
     let want = (SURFACE_LOGICAL * scale).as_uvec2();
     if window.resolution.physical_size() != want {
         info!(
@@ -375,23 +310,14 @@ fn hold_surface_pin(
     }
 }
 
-/// Raise the capture window while — and only while — it is OCCLUDED.
+/// Request focus only while occluded, at most once per poll, logging every request. Healthy captures
+/// never request focus; occluded ones free-run and fail analysis, so recovery avoids discarding a
+/// condition. Occlusion rows still invalidate it, leaving a trail if focus keeps being lost.
 ///
-/// Parking the window on the primary display fixed the refresh problem and created this one: on the
-/// external panel the window had an empty desktop to itself, and on the built-in one it lands in the
-/// middle of whatever the operator is running. MEASURED after the park landed: the window was
-/// covered 0.36 s after creation and stayed covered for the whole condition, so the sweep threw away
-/// a 75-second run at the occlusion gate — twice.
-///
-/// The trigger is occlusion, never a timer and never startup, and that is the whole design. A
-/// healthy capture never calls this, so the sweep does not become an app that grabs focus for a
-/// minute at a time; an occluded capture is already producing free-run fiction that the analyzer
-/// will reject, so at that moment the alternative to taking focus is not politeness, it is a
-/// discarded condition. This is the visible frame sweep, the opposite case to the hidden net-capture
-/// harness whose whole design is to never steal focus (`OVERMATCH_WINDOW=hidden`).
-///
-/// Bounded to one request per poll, and loud each time: a window that asks and keeps losing leaves a
-/// legible trail instead of an invisible fight, and the occlusion rows still fail the run.
+/// Primary-display parking can put the window among the operator's windows instead of on an empty
+/// external desktop. MEASURED: covered 0.36 s after creation through the whole condition; two
+/// 75-second runs discarded. This visible sweep differs from the hidden net-capture harness
+/// (`OVERMATCH_WINDOW=hidden`), which must never take focus.
 fn raise_when_occluded(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     cost: Res<FrameCost>,
@@ -406,26 +332,18 @@ fn raise_when_occluded(
     let mut window = windows.single_mut().expect(
         "the frame-cost recorder is mounted on a windowed root with exactly one primary window",
     );
-    // bevy turns this into `focus_window()` only on the false -> true EDGE (vendored
-    // bevy_winit-0.19.0/src/system.rs, `changed_windows`), which is exactly the shape wanted: while
-    // another app holds focus the field reads false, so each poll is one genuine request.
+    // Only false -> true calls `focus_window()` (vendored bevy_winit-0.19.0/src/system.rs,
+    // `changed_windows`); another app holding focus leaves false, allowing a new request per poll.
     if !window.focused {
         warn!("frame_cost: window occluded at t={t:.3}s — asking for focus back");
         window.focused = true;
     }
 }
 
-/// Append a `{t, surface_w, surface_h}` row whenever the physical surface size resolves or changes
-/// (see the module doc's surface-size section).
-///
-/// Reads bevy's `Window::physical_size` rather than winit's drawable, because bevy's number is the
-/// one with consequences: the render app configures the surface from it and the camera reports it as
-/// `physical_target_size` (which is what `render_scale`'s "the 3D main pass fills the … target" line
-/// prints). A row sourced from the OS could agree with the panel while the renderer quietly drew a
-/// quarter of it, which is the exact failure this gate exists to catch.
-///
-/// In offscreen mode there is no presented surface, so the row is the size of the 3D camera's target
-/// instead ([`offscreen_surface`]), marked `offscreen: true`.
+/// Surface-row state; see the module's surface-size contract. `render_scale` prints the same
+/// `physical_target_size` as "the 3D main pass fills the … target". Winit's drawable could agree
+/// with the panel while bevy rendered a quarter of it, so it cannot supply this evidence.
+/// Offscreen rows use [`offscreen_surface`] and carry `offscreen: true`.
 #[derive(Default)]
 struct SurfaceRecord {
     last: Option<UVec2>,
@@ -478,8 +396,7 @@ fn record_surface(
     if state.last == Some(size) {
         return;
     }
-    // A resize AFTER the first observation is the operator-error case (a dragged edge, a monitor
-    // move that re-scaled the surface) and is loud; the first observation is just provenance.
+    // First observation is provenance; warn on later resizes (dragged edges or monitor rescaling).
     if state.last.is_some() {
         warn!("{message} — CHANGED at t={t:.3}s");
     } else {
@@ -520,8 +437,7 @@ fn offscreen_surface(
     Some((size, message))
 }
 
-/// The presenting panel's identity, as recorded — the tuple the analyzer gates on, so "changed" is
-/// defined by exactly the fields a reader of the stream can see.
+/// Analyzer-visible monitor identity: only recorded fields define a change.
 #[derive(Clone, PartialEq, Eq)]
 struct MonitorFacts {
     name: Option<String>,
@@ -529,24 +445,15 @@ struct MonitorFacts {
     primary: bool,
 }
 
-/// Append a `{t, monitor, refresh_mhz, primary}` row whenever the window's presenting monitor
-/// resolves or changes (see the module doc's presenting-monitor section).
+/// Poll winit's `current_monitor()` for the module's presenting-monitor evidence, rather than
+/// `OnMonitor`: it uses the same call but only through `changed_windows`, filtered by
+/// `Changed<Window>` in `Last` (vendored bevy_winit-0.19.0/src/lib.rs and src/system.rs).
+/// A hands-off capture can write `Window` only at startup park, before mapping, get None, then
+/// never trigger another query. MEASURED: zero monitor rows for a whole condition, rejected by
+/// analysis. Polling avoids depending on query timing.
 ///
-/// Asks winit's `current_monitor()` directly, once a second, rather than reading bevy's `OnMonitor`
-/// relationship — which is the same underlying call, but arrives through a change-detection path
-/// that a capture never triggers. `changed_windows` is filtered by `Changed<Window>` and runs in
-/// `Last` (vendored bevy_winit-0.19.0/src/lib.rs and src/system.rs), so the relationship is
-/// evaluated only on frames where something WROTE to the `Window` component. On a hands-off capture
-/// that is the startup park and nothing else, and at that instant the freshly created window is not
-/// yet on a screen, so `current_monitor()` answers None and no relationship is inserted; the window
-/// then never changes again and bevy never asks a second time. MEASURED: zero monitor rows across a
-/// whole condition, which the analyzer correctly called invalid. Polling the OS ourselves removes
-/// the dependency on being asked at the right moment.
-///
-/// The window handle lives in a thread-local, so this is a non-send system exactly like
-/// `settings::observe_window_placement`. `current_monitor()` is None until the window is mapped, which
-/// costs a poll or two at startup and is why the analyzer treats an unresolved measurement window
-/// as INVALID rather than as unremarkable.
+/// The handle is thread-local, requiring non-send like `settings::observe_window_placement`.
+/// Mapping can take a poll or two; an unresolved measurement window remains invalid.
 fn record_monitor(
     _non_send_marker: bevy::ecs::system::NonSendMarker,
     mut cost: ResMut<FrameCost>,
@@ -567,8 +474,7 @@ fn record_monitor(
         let winit_window = winit_windows.get_window(entity)?;
         let current = winit_window.current_monitor()?;
         Some(MonitorFacts {
-            // The panel's own report, in millihertz — the quantity that paces presentation, as
-            // opposed to the present mode the app asked for.
+            // Panel-reported millihertz pace presentation, independently of the requested mode.
             refresh_mhz: current.refresh_rate_millihertz(),
             primary: winit_window.primary_monitor().as_ref() == Some(&current),
             name: current.name(),
@@ -580,8 +486,7 @@ fn record_monitor(
     if last.as_ref() == Some(&facts) {
         return;
     }
-    // A change AFTER the first resolution is the operator-error case (a dragged window, a display
-    // re-arrangement) and is loud; the first resolution is just provenance.
+    // First resolution is provenance; warn on later changes (window drags or display rearrangement).
     let name = facts.name.as_deref().unwrap_or("<unnamed>");
     let refresh = facts
         .refresh_mhz
@@ -607,9 +512,6 @@ fn record_monitor(
     *last = Some(facts);
 }
 
-/// Append this frame's `{t, frame_ms, drawn}` row: `frame_ms` is the wall-clock time since the
-/// previous row, never `Time<Real>`'s delta, and `drawn` the render world's running count of frames
-/// the 3D camera drew (module doc).
 fn sample(mut cost: ResMut<FrameCost>, time: Res<Time<Real>>, drawn: Res<DrawnFrames>) {
     let now = Instant::now();
     let frame_ms = cost
@@ -623,13 +525,8 @@ fn sample(mut cost: ResMut<FrameCost>, time: Res<Time<Real>>, drawn: Res<DrawnFr
     }));
 }
 
-/// Append an `{t, occluded}` row — and a loud log line — for every presentation-occlusion
-/// transition (see the module doc's validity-signals section).
-///
-/// `warn!` rather than `info!`, deliberately: an occluded window mid-capture means the measurement
-/// is already lost, and the operator should see that the moment it happens rather than when the
-/// analyzer rejects the stream. The timestamp is the same `Time<Real>` clock as the frame rows, so
-/// the analyzer can place the occluded interval against the frames it invalidates.
+/// Warn immediately: mid-capture occlusion invalidates measurement, and the operator should see it
+/// before analysis. Rows use the frames' `Time<Real>` clock to locate the invalid interval.
 fn record_occlusion(
     mut cost: ResMut<FrameCost>,
     time: Res<Time<Real>>,
@@ -647,14 +544,9 @@ fn record_occlusion(
     }
 }
 
-/// State the EFFECTIVE present mode and frame-cap once the capability probe answers — the sweep's
-/// proof that a run was truly uncapped, rather than silently normalized or negotiated back to a
-/// display-paced mode (see the module doc's validity-signals section).
-///
-/// A `Local` latch rather than a run condition: the probe answers once and never changes again
-/// (`settings::probe` writes its channel exactly once), so the line is emitted exactly once.
-/// The resources are `Option` so a root that mounts this recorder without the settings plugin
-/// (tests) simply never reports rather than failing to schedule.
+/// Post-probe evidence for the module's present-mode gate. A `Local` latch, not a run condition,
+/// matches `settings::probe`'s single channel write. Optional resources let roots without the
+/// settings plugin (tests) schedule this system without reporting.
 fn report_present_mode(
     mut reported: Local<bool>,
     settings: Option<Res<Settings>>,
@@ -689,10 +581,9 @@ mod tests {
 
     use super::*;
 
-    /// `frame_ms` is the wall-clock time between frames, whatever step the app clock takes: the
-    /// armour sandbox's capture flight steps `Time<Real>` a fixed 1/30 s a frame, and a frame-cost
-    /// gate run under it reads these rows. A recorder that reads `Time<Real>`'s delta writes the
-    /// step, which here is far longer than the frame.
+    /// Manual capture flights (e.g. a fixed 1/30 s step) must still report wall-clock `frame_ms`.
+    /// Reading `Time<Real>`'s delta would report the step, much longer here than the frame,
+    /// invalidating the frame-cost gate. Capture plans choose their step through `step_s`.
     #[test]
     fn frame_time_is_wall_clock_under_a_manual_time_step() {
         const STEP: Duration = Duration::from_secs(10);
