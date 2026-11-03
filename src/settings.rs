@@ -12,10 +12,10 @@
 //! Normalization spends a stored choice only on a positive capability report, never a failed probe
 //! ([`PresentCaps`]). A portable file can name a vsync rung this surface cannot present.
 //!
-//! The table is exhaustive: values express player intent or conclusive capability normalization.
-//!
 //! Only an explicit [`SaveSettings`] writes the file; saving on exit could launder an incidental
 //! resource value into the player's config.
+//!
+//! Setting labels reach `Text` and stay ASCII.
 //!
 //! # Forward compatibility
 //!
@@ -68,12 +68,10 @@ mod ui;
 #[cfg(test)]
 pub(crate) use ui::SettingsCard;
 
-/// The schema generation. See the module doc's policy: renames use `#[serde(alias)]` and do NOT
-/// bump this; only a field whose MEANING changed under the same name does.
+/// Bump only when a field changes meaning under the same name; see the module compatibility policy.
 const SETTINGS_VERSION: u32 = 1;
 
-/// The exact count named by `ShadowCascades::Three`, the ruler used by the measurements below.
-/// The default rung is authored in `assets/ui/settings.ron`.
+/// Exact count for `ShadowCascades::Three`; defaults live in `assets/ui/settings.ron`.
 ///
 /// MEASURED on an M4 (10 GPU cores, two idling Tigers, release, vsync off, 20 s settled windows):
 /// each cascade costs ~1.16 ms; the 1024 → 4096 map-size axis spans 0.27 ms; the 150 → 1000 m
@@ -99,7 +97,7 @@ const SETTINGS_VERSION: u32 = 1;
 /// | `bevy_camera` visibility + ranges | `TypeIdMap<Vec<Entity>>`, `Vec<(Entity, u32)>` | no (keyed / flat) |
 /// | `bevy_pbr` material + mesh instance queues | `Vec<Entity>`, `Vec<(Entity, …)>` | no (flat append) |
 ///
-/// So the cascade count is the ONLY value of this shape, and no other row can reach it:
+/// Other rows cannot reach a stale config-sized `Local`:
 ///
 /// * **MSAA** — `Msaa` is an `ExtractComponent`, re-extracted every frame; the one `Local` on its
 ///   path (`prepare_view_targets`' `main_texture_atomics`) is a HashMap *keyed by* a tuple
@@ -141,7 +139,7 @@ impl Default for ShadowCascades {
 }
 
 impl ShadowCascades {
-    /// The exact count named by each enum variant, independent of the authored default.
+    /// Independent of the authored default.
     pub(crate) const fn count(self) -> usize {
         match self {
             ShadowCascades::Two => 2,
@@ -150,7 +148,7 @@ impl ShadowCascades {
         }
     }
 
-    /// ASCII only — it reaches `Text`; quotes the count (see [`ShadowDistance::label`]).
+    /// quotes the count (see [`ShadowDistance::label`]).
     pub(crate) const fn label(self) -> &'static str {
         match self {
             ShadowCascades::Two => "2",
@@ -166,32 +164,26 @@ impl ShadowCascades {
     ];
 }
 
-/// How far directional shadows are drawn before they stop — the far bound of the last cascade, with
-/// the cascade COUNT its own row ([`ShadowCascades`]).
+/// Far bound of the last directional-shadow cascade, metres; count has its own row ([`ShadowCascades`]).
 ///
 /// Separate from [`ShadowResolution`] because their costs are independent: distance widens each
 /// cascade's area; resolution buys texels at fixed area. Coupled presets force players wanting
 /// reach to buy 4K maps too, and hide which axis causes a frame-rate complaint.
 ///
-/// Quality is coupled: a cascade's texel is `frustum_diameter / map_size`, so distance grows it and resolution shrinks
-/// it, and the artefact that texel size drives is not blur — it is **peter-panning**, the shadow
-/// sliding off the object that casts it. `bevy_pbr` offsets the shadow lookup by
-/// `shadow_normal_bias · √2 · cascade_texel` along the surface normal (see [`crate::world`]'s
-/// `SUN_SHADOW_NORMAL_BIAS`); DERIVED detachment is **3.68 × the cascade's texel**, in metres.
-/// Raising the distance without raising the resolution therefore buys far shadows that float:
+/// Quality couples them: `cascade_texel = frustum_diameter / map_size` drives peter-panning,
+/// shadows sliding off their casters, rather than blur. `bevy_pbr` offsets lookups along the normal
+/// by `shadow_normal_bias · √2 · cascade_texel` (see [`crate::world`]'s `SUN_SHADOW_NORMAL_BIAS`).
+/// DERIVED detachment: **3.68 × cascade_texel**, metres; more reach at fixed resolution floats shadows:
 ///
 /// | far cascade | texel | detachment |
 /// |---|---|---|
-/// | 150 m @ 2048 (the old default) | 12.4 cm | 0.46 m |
+/// | 150 m @ 2048 (reference) | 12.4 cm | 0.46 m |
 /// | **350 m @ 4096 (the default)** | **14.5 cm** | **0.53 m** |
 /// | 700 m @ 4096 | 29 cm | 1.06 m |
 /// | 1000 m @ 4096 (the top rung) | 41 cm | 1.5 m |
 /// | 1000 m @ 2048 | 82 cm | 3.0 m — **a whole Tiger** |
 ///
-/// That is why the distance default and the resolution default moved together, and it is the reason
-/// a player dragging this row to 1000 m on a 1024 map gets something visibly worse than the same
-/// row at 350 m. The rows stay separate because their COSTS are separable; the coupling is a fact
-/// about the picture that the labels cannot express, so it is written down here instead.
+/// Thus 1000 m at 1024 looks worse than 350 m: quality couples these rows even though cost does not.
 ///
 /// # Why the default is the floor rung
 ///
@@ -205,20 +197,14 @@ impl ShadowCascades {
 /// | 700 m | 15.38 ms | 5.12 |
 /// | 1000 m | 15.27 ms | 6.11 |
 ///
-/// Two things fall out. The cost SATURATES: 700 and 1000 m are 0.11 ms apart, inside the session's
-/// own 0.23 ms repeatability, because past ~700 m the cascade already encloses the whole 1 km map.
-/// And crispness degrades monotonically with reach — under a geometric split a longer envelope
-/// spreads the same texels over more world, so 1000 m is 1.7× blurrier than 350 m for 0.41 ms more.
-/// Every column therefore argues the same way, which is what makes this an easy default: shorter is
-/// cheaper AND crisper, right down to the point where it starts cutting real shadows off.
+/// MEASURED: cost saturates past ~700 m, enclosing the whole 1 km map: 700 and 1000 m differ by
+/// 0.11 ms, within the session's 0.23 ms repeatability. DERIVED: geometric splits spread fixed
+/// texels over more world; 1000 m is 1.7× blurrier than 350 m for 0.41 ms more. Shorter is cheaper
+/// and crisper until it cuts real shadows off.
 ///
-/// That point is the floor, and it is physics, not taste (see the migration note: a 17° sun over
-/// 100 m of relief ⇒ ~327 m of self-shadowing). 350 m is the first rung above it, and it is also the
-/// LAST one worth paying for: past it the envelope reaches into sky this world has nothing to cast
-/// into, so the extra metres buy reach nobody can see while costing texel density everybody can.
-/// The 150 m row is in the table to show what the floor is protecting — it is cheaper and crisper
-/// still, and it is exactly the setting whose cut-off shadows started this work. The longer rungs
-/// stay on the ladder for other hardware and other worlds, not as the recommendation.
+/// The physical floor and its derivation live in `.agents/docs/design/display/shadow-presets.md`.
+/// The 150 m control is cheaper and crisper but cuts real shadows off. Longer rungs serve other
+/// hardware and worlds; they are not the recommendation.
 ///
 /// `Off` remains provisional pending the 15v15 frame-headroom measurement: shadows carry gameplay
 /// information. The competitive-integrity decision lives in
@@ -230,35 +216,22 @@ impl ShadowCascades {
 /// The 350 m floor avoids cutting ridge shadows off partway through a valley. Legacy 100/150/300 m
 /// values all fall below it; Bevy's stock 150 m envelope is for character-scale scenes.
 ///
-/// **`M100`/`M150`/`M300` are gone as VARIANTS and survive as `#[serde(alias)]`s** on the nearest
-/// surviving rung, so an existing `video.ron` loads without error and lands on a real ladder
-/// position. Migrating beats keeping them representable-but-hidden: `ui::step_in` treats a current
-/// value it cannot find in `ORDER` as index 0, so an off-ladder rung would send the next press of
-/// the right arrow to `Off` — a stored value the page cannot walk out of is worse than a stored
-/// value the page silently rounds. All three land on `M350` (|300 − 350| = 50 beats |300 − 700| =
-/// 400), which does mean a player who chose 100 m for frame rate is moved UP; that is accepted
-/// because the same release drops a cascade, and the 150 → 350 m they are moved across costs
-/// ~0.30 ms (table above) against the ~1.16 ms that one fewer cascade gives back — see
-/// [`SHADOW_CASCADES`]. `M350` being the DEFAULT as well as the migration target means the common
-/// case is a file that lands where a fresh install would.
+/// `M100`/`M150`/`M300` are serde aliases for `M350`, never hidden variants: `ui::step_in` treats
+/// an off-`ORDER` value as index 0, so its next right-arrow press would land on `Off`. Rounding
+/// preserves a traversable ladder. DERIVED: all three are nearest `M350` (|300 − 350| = 50 versus
+/// |300 − 700| = 400). Moving a 100 m frame-rate choice upward is accepted: MEASURED, 150 → 350 m
+/// costs ~0.30 ms (table above), versus ~1.16 ms saved by the accompanying cascade reduction
+/// ([`SHADOW_CASCADES`]). The migration target is also the fresh-install default.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum ShadowDistance {
-    /// Nothing casts: [`apply_settings`] clears `DirectionalLight::shadow_maps_enabled`. This is the
-    /// whole shadow budget in one A/B, and the rung whose future is undecided (see the type doc).
+    /// Whole-shadow-budget A/B; its future is undecided (see the type doc).
     Off,
-    /// **The shipped default**, and the physical floor for this world's sun — see the migration note
-    /// above for the 3.27× that produces it, and for why the three retired rungs all land here.
-    /// Chosen over the longer rungs on the measurement in the type doc's envelope table: everything
-    /// past ~350 m reaches into sky this world cannot shadow, so the extra metres are paid for and
-    /// not seen.
+    /// Shipped default and physical floor; see the type doc for the derivation and migration.
     #[serde(alias = "M100", alias = "M150", alias = "M300")]
     M350,
     M700,
-    /// This is the rung at which a 1 km map casts whole and the draw volume stops growing —
-    /// MEASURED on that map: the cost curve saturates around
-    /// 700 m for exactly that reason (700 and 1000 m are within the session's own repeatability).
-    /// The type doc's envelope table makes this a top rung rather than the default. Only affordable together with [`ShadowResolution::X4096`] — at 2048 it
-    /// detaches a far shadow by a whole tank.
+    /// Top rung, not the default; the type doc owns the measured saturation and quality tradeoff.
+    /// Needs [`ShadowResolution::X4096`]: at 2048 a far shadow detaches by a whole tank.
     M1000,
 }
 
@@ -269,9 +242,7 @@ impl Default for ShadowDistance {
 }
 
 impl ShadowDistance {
-    /// The far bound of the last cascade, metres — `None` for [`ShadowDistance::Off`], which is not
-    /// a distance at all. Returning an `Option` rather than `0.0` is what keeps a caller from
-    /// building a degenerate zero-metre cascade config and calling it "off".
+    /// Metres; `None` for Off prevents a degenerate zero-metre cascade config.
     pub(crate) const fn distance_m(self) -> Option<f32> {
         match self {
             ShadowDistance::Off => None,
@@ -281,12 +252,12 @@ impl ShadowDistance {
         }
     }
 
-    /// Whether anything casts at all — the `DirectionalLight::shadow_maps_enabled` this maps to.
+    /// Maps to `DirectionalLight::shadow_maps_enabled`.
     pub(crate) const fn casts(self) -> bool {
         self.distance_m().is_some()
     }
 
-    /// ASCII only — it reaches `Text`. Metres, rather than LOW/MEDIUM/HIGH, let players compare the
+    /// Metres, rather than LOW/MEDIUM/HIGH, let players compare the
     /// cutoff with the sight picture.
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -297,11 +268,8 @@ impl ShadowDistance {
         }
     }
 
-    /// Ascending in cost, so the settings page's right arrow always moves toward more shadow.
-    ///
-    /// **Every representable value must appear here** — see the type doc's migration note for the
-    /// `step_in` dead-end that an off-ladder variant would create. `the_retired_distance_rungs_migrate`
-    /// pins it.
+    /// Ascending cost: right moves toward more shadow. Every variant must appear to avoid
+    /// `step_in`'s off-ladder dead end; `the_retired_distance_rungs_migrate` pins this.
     pub(crate) const ORDER: [ShadowDistance; 4] = [
         ShadowDistance::Off,
         ShadowDistance::M350,
@@ -323,10 +291,8 @@ pub(crate) enum ShadowResolution {
     /// Bevy's `DirectionalLightShadowMap::default().size`. DERIVED detachment: ~1.07 m at the
     /// shipped 350 m envelope and ~3 m at [`ShadowDistance::M1000`], making this a budget rung.
     X2048,
-    /// **The shipped default.** 0.27 ms for 4× the texels — the cheapest quality on this page, and
-    /// what holds far-shadow detachment to half a metre at the shipped envelope (see
-    /// [`ShadowDistance`]'s table). It is also what makes the longer rungs usable at all: without it
-    /// [`ShadowDistance::M1000`] would peter-pan by a whole tank.
+    /// Shipped default: MEASURED 0.27 ms for 4× the texels, this page's cheapest quality.
+    /// [`ShadowDistance`] owns the detachment table and the longer rungs' need for this resolution.
     X4096,
 }
 
@@ -347,7 +313,7 @@ impl ShadowResolution {
         }
     }
 
-    /// ASCII only — it reaches `Text`. Quotes texels, as [`ShadowDistance::label`] quotes metres.
+    /// Quotes texels, as [`ShadowDistance::label`] quotes metres.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             ShadowResolution::X1024 => "1024",
@@ -356,7 +322,6 @@ impl ShadowResolution {
         }
     }
 
-    /// Ascending in cost, like every other ladder here.
     pub(crate) const ORDER: [ShadowResolution; 3] = [
         ShadowResolution::X1024,
         ShadowResolution::X2048,
@@ -389,7 +354,6 @@ impl MsaaLevel {
         }
     }
 
-    /// ASCII only — it reaches `Text`.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             MsaaLevel::Off => "OFF",
@@ -429,7 +393,6 @@ impl Default for BloomLevel {
 }
 
 impl BloomLevel {
-    /// The `Bloom::max_mip_dimension` this rung applies.
     pub(crate) fn max_mip_dimension(self) -> u32 {
         match self {
             BloomLevel::Low => look::get().bloom_mip_dimensions.0[0],
@@ -437,7 +400,6 @@ impl BloomLevel {
         }
     }
 
-    /// ASCII only — it reaches `Text`.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             BloomLevel::Low => "LOW",
@@ -445,25 +407,20 @@ impl BloomLevel {
         }
     }
 
-    /// Ascending in cost, like every other ladder here.
     pub(crate) const ORDER: [BloomLevel; 2] = [BloomLevel::Low, BloomLevel::Normal];
 }
 
 /// The fraction of the window the 3D world is rendered at, before being upscaled to fill it. See
 /// [`crate::render_scale`] for the mechanism and its honest limits; this type is only the ladder.
 ///
-/// **Why a ladder and not a resolution list.** The research brief's central finding is that a
-/// resolution dropdown is the macOS blur trap: `CGDisplayCopyAllDisplayModes` returns modes for two
-/// different regions of the same panel in one unfilterable list, and shipped titles (Tomb Raider,
-/// No Man's Sky, Stray, Riven) pick the wrong one and get a squashed, resampled picture. We never
-/// enumerate modes, never mode-set a display, and let the drawable stay the window's real size — so
-/// we are immune to that class by construction, and the only thing left to expose is how much of
-/// that drawable the 3D pass fills. WoW's "Render Scale" is the same model.
+/// A resolution list risks macOS blur: `CGDisplayCopyAllDisplayModes` mixes two panel regions
+/// without a filter. Tomb Raider, No Man's Sky, Stray and Riven pick wrong modes and squash/resample
+/// the picture. We neither enumerate nor set modes: the drawable keeps the real window size,
+/// and this ladder controls only the 3D pass's share, like WoW's "Render Scale".
 ///
-/// **Why these five rungs.** 50% and 100% are exact: at half the panel resolution macOS's
-/// WindowServer quadruples pixels with no interpolation at all, so those two are the sharp ones. The
-/// three in between trade sharpness for fill rate through a bilinear filter, and exist because the
-/// jump from 100% to 50% is a very large step to be the only choice.
+/// 50% and 100% are sharp: at half panel resolution macOS WindowServer quadruples pixels without
+/// interpolation. Three intermediate bilinear rungs trade sharpness for fill rate, avoiding a
+/// single large jump from 100% to 50%.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum RenderScaleLevel {
     Percent50,
@@ -494,7 +451,6 @@ impl RenderScaleLevel {
         }
     }
 
-    /// ASCII only — it reaches `Text`.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             RenderScaleLevel::Percent50 => "50%",
@@ -515,17 +471,10 @@ impl RenderScaleLevel {
     ];
 }
 
-/// Whether frames are locked to the display refresh — a THREE-rung ladder since V2 added
-/// [`VsyncMode::Fast`].
-///
-/// # The v1→v2 field migration, recorded once
-///
-/// v1 shipped this as `vsync: bool` (later a two-rung enum bridged through
-/// `#[serde(from/into = "bool")]`), and `video.ron` files carrying `vsync: false` are on players'
-/// disks now. A `bool` has exactly two values, so the third rung CANNOT live under that field name —
-/// writing `vsync: Fast` would fail a v1 build's whole parse and reset every other setting with it.
-/// Per the module doc's policy this is therefore a NEW field, `vsync_mode` (see
-/// [`Settings::vsync`]), and [`SETTINGS_VERSION`] does not move:
+/// Presentation pacing, persisted as `vsync_mode` to preserve the v1 `vsync: bool` schema.
+/// A bool cannot encode FAST: writing `vsync: Fast` would fail the whole v1 parse and reset all
+/// settings. The module compatibility policy therefore requires a new key, without a
+/// [`SETTINGS_VERSION`] bump (see [`Settings::vsync`]).
 ///
 /// * **reading old files**: the retired `vsync: bool` key is still read through
 ///   [`Settings::legacy_vsync`] and absorbed by [`Settings::absorb_legacy_vsync`] — a player's
@@ -566,7 +515,6 @@ impl Default for VsyncMode {
 }
 
 impl VsyncMode {
-    /// ASCII only — it reaches `Text`.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             VsyncMode::Off => "OFF",
@@ -688,14 +636,10 @@ impl Default for WindowModeSetting {
 }
 
 impl WindowModeSetting {
-    /// The `Window::mode` this asks for on `monitor` — the ONE mapping, used at boot window
-    /// description, by `apply_settings` and by `observe_window_placement` alike.
-    ///
-    /// `monitor` is a MonitorSelection rather than a [`DisplaySelection`] because the two callers
-    /// derive it differently and must be free to: a running app resolves against the live monitor
-    /// list ([`DisplaySelection::monitor_on`]), while the boot roots may only name what window
-    /// CREATION can resolve ([`DisplaySelection::at_window_creation`]). `None` is "no opinion",
-    /// which for a borderless window means the display it is already on.
+    /// Shared by boot, `apply_settings` and `observe_window_placement`. Takes `MonitorSelection`
+    /// because runtime uses [`DisplaySelection::monitor_on`] but boot must use only what creation
+    /// can resolve ([`DisplaySelection::at_window_creation`]). `None` means no opinion: the current
+    /// display for borderless fullscreen.
     pub(crate) const fn to_window_mode(self, monitor: Option<MonitorSelection>) -> WindowMode {
         match self {
             WindowModeSetting::Windowed => WindowMode::Windowed,
@@ -706,7 +650,7 @@ impl WindowModeSetting {
         }
     }
 
-    /// The setting that DESCRIBES an observed OS state — the reflect-don't-fight direction.
+    /// Reflect OS state rather than commanding it.
     pub(crate) const fn from_fullscreen(fullscreen: bool) -> Self {
         if fullscreen {
             WindowModeSetting::Fullscreen
@@ -715,7 +659,6 @@ impl WindowModeSetting {
         }
     }
 
-    /// ASCII only — it reaches `Text`.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             WindowModeSetting::Windowed => "WINDOWED",
@@ -727,9 +670,8 @@ impl WindowModeSetting {
         [WindowModeSetting::Windowed, WindowModeSetting::Fullscreen];
 }
 
-/// Whether the online client draws its debug card (ping, jitter, frame rate, frame time, version)
-/// in a corner during a match. On by default during the beta, so a tester's report carries the
-/// numbers. Read only by `net::debug_hud`; the offline root has no card.
+/// Online debug card: ping, jitter, frame rate/time and version. Defaults on during beta so
+/// tester reports carry the numbers. Sole reader: `net::debug_hud`; offline has no card.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum DebugPanel {
     On,
@@ -745,7 +687,6 @@ impl Default for DebugPanel {
 impl DebugPanel {
     pub(crate) const ORDER: [DebugPanel; 2] = [DebugPanel::Off, DebugPanel::On];
 
-    /// ASCII only — it reaches `Text`.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             DebugPanel::On => "ON",
@@ -780,7 +721,6 @@ impl PenCamCorner {
         PenCamCorner::Off,
     ];
 
-    /// ASCII only — it reaches `Text`.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             PenCamCorner::All => "ALL",
@@ -817,7 +757,6 @@ impl Default for KillCam {
 impl KillCam {
     pub(crate) const ORDER: [KillCam; 2] = [KillCam::On, KillCam::Off];
 
-    /// ASCII only — it reaches `Text`.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             KillCam::On => "ON",
@@ -847,7 +786,6 @@ impl Default for ReduceMotion {
 impl ReduceMotion {
     pub(crate) const ORDER: [ReduceMotion; 2] = [ReduceMotion::Off, ReduceMotion::On];
 
-    /// ASCII only — it reaches `Text`.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             ReduceMotion::Off => "OFF",
@@ -885,7 +823,6 @@ impl TrackPrintRelief {
         TrackPrintRelief::SunShadow,
     ];
 
-    /// ASCII only — it reaches `Text`.
     pub(crate) const fn label(self) -> &'static str {
         match self {
             TrackPrintRelief::Lighting => "LIGHTING",
@@ -938,7 +875,6 @@ impl TrackPrintRange {
         look::get().track_print_ranges_m.0[index]
     }
 
-    /// ASCII only — it reaches `Text`.
     pub(crate) fn label(self) -> String {
         format!("{} M", self.metres())
     }
@@ -1000,14 +936,10 @@ impl TrackPrintRange {
 /// never writes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum DisplaySelection {
-    /// **The shipped default** — nothing is written, so the window manager places the window
-    /// exactly as it always has. The one rung that is not a decision, and the reason adding this
-    /// row changes no existing install's behaviour.
+    /// Shipped default: no placement write, preserving existing installs' window-manager placement.
     Auto,
-    /// The OS's own main display. The only rung that would ALSO resolve at window-creation time
-    /// (`select_monitor` takes `primary_monitor` as a direct argument rather than through the
-    /// not-yet-populated list), and the one a capture harness should reach for when it just wants
-    /// the built-in panel.
+    /// OS main display; capture harnesses use it for the built-in panel. Only this rung resolves
+    /// at creation: `select_monitor` takes `primary_monitor` directly, outside the unpopulated list.
     Primary,
     /// `MonitorSelection::Index(0)`. **One-based in the label, zero-based on the wire**: every
     /// desktop OS numbers displays from 1, and `Index` counts from 0.
@@ -1028,8 +960,7 @@ impl DisplaySelection {
     /// make a stored `Display3` unparseable and reset the whole video file.
     const INDEXED: usize = 3;
 
-    /// The monitor this rung names, or `None` for [`DisplaySelection::Auto`] — which is not a
-    /// monitor at all, and is what makes "do not manage the window's position" representable.
+    /// `None` for Auto means do not manage placement.
     pub(crate) const fn monitor(self) -> Option<MonitorSelection> {
         match self {
             DisplaySelection::Auto => None,
@@ -1040,8 +971,7 @@ impl DisplaySelection {
         }
     }
 
-    /// The zero-based index into the attached-monitor list this rung asks for, or `None` for the
-    /// two rungs that name no index.
+    /// Zero-based attached-monitor index; Auto and Primary name no index.
     const fn index(self) -> Option<usize> {
         match self {
             DisplaySelection::Auto | DisplaySelection::Primary => None,
@@ -1079,14 +1009,10 @@ impl DisplaySelection {
     /// writes into `Window::mode` and `Window::position` alike. `None` is "leave placement alone"
     /// ([`DisplaySelection::Auto`]).
     ///
-    /// **The primary rung is emitted as `MonitorSelection::Entity`, not `Primary`**, whenever bevy
-    /// has actually marked a monitor. That is a deliberate hardening rather than a rename, because
-    /// bevy's `PrimaryMonitor` marker is not a live fact — see [`AttachedDisplays::primary`] for how
-    /// it goes stale. `Entity` is resolved by `find_entity` against the monitor list
-    /// (bevy_winit-0.19.0/src/winit_windows.rs:523, `winit_monitors.rs:29-35`), so it answers
-    /// deterministically for any monitor that is still attached and never consults the
-    /// `primary_monitor()` that Wayland always answers `None` to. The bare `Primary` is emitted only
-    /// in the state where nothing has been learned at all, where it is the honest request.
+    /// Prefer `MonitorSelection::Entity` for a marked primary: [`AttachedDisplays::primary`] can be
+    /// stale, but `find_entity` resolves any attached monitor deterministically
+    /// (bevy_winit-0.19.0/src/winit_windows.rs:523, `winit_monitors.rs:29-35`), bypassing Wayland
+    /// `primary_monitor()`'s `None`. Emit bare `Primary` only while nothing is known.
     pub(crate) fn monitor_on(self, displays: AttachedDisplays) -> Option<MonitorSelection> {
         match self.resolve(displays) {
             DisplaySelection::Auto => None,
@@ -1133,11 +1059,9 @@ impl DisplaySelection {
     /// one — see that field for the hot-plug limitation and what [`DisplaySelection::monitor_on`]
     /// does about it.
     ///
-    /// **An EMPTY display list is the identity**, and that is the same tri-state discipline
-    /// [`PresentCaps`] is built around: no [`Monitor`] entities means the list has not been
-    /// synchronised yet (or there is no winit at all — every bare-`App` test), which is "we could
-    /// not learn", not "there are no displays". Falling back on that would let a headless frame
-    /// decide a player's row.
+    /// Empty lists preserve intent, like [`PresentCaps`]' unknown states: no [`Monitor`] entities
+    /// means unsynchronised or no winit (bare-`App` tests), never evidence of no displays. A
+    /// fallback would let a headless frame decide the player's row.
     pub(crate) fn resolve(self, displays: AttachedDisplays) -> Self {
         if displays.count == 0 {
             return self;
@@ -1160,12 +1084,8 @@ impl DisplaySelection {
         }
     }
 
-    /// The rung's name when nothing has been learned about the machine's monitors. ASCII only — it
-    /// reaches `Text`. One-based, per the variant docs.
-    ///
-    /// **This is the fallback, not the label a player normally reads.** A variant cannot name a
-    /// panel: `DISPLAY 2` says only where a rung sits in a list. Once bevy has synchronised the
-    /// monitors, [`displays::DisplayLadder`] names every rung from the display itself and only
+    /// One-based fallback labels before monitor synchronisation: `DISPLAY 2` names a list
+    /// position, not a panel. Afterwards [`displays::DisplayLadder`] supplies panel names; only
     /// [`DisplaySelection::Auto`] still renders from here.
     const fn label(self) -> &'static str {
         match self {
@@ -1193,16 +1113,11 @@ impl DisplaySelection {
     ];
 }
 
-/// What this machine's display list looks like RIGHT NOW — the fact
-/// [`DisplaySelection::resolve`] is resolved against, gathered once by [`read_displays`] so the two
-/// window writers cannot form different opinions of it.
-///
-/// Both fields are observations of bevy's own [`Monitor`] entities rather than platform guesses;
-/// see [`DisplaySelection::resolve`] for what each one decides.
+/// Snapshot of Bevy [`Monitor`] entities, gathered by [`read_displays`] so both window writers
+/// resolve against the same observations, never platform guesses. See [`DisplaySelection::resolve`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) struct AttachedDisplays {
-    /// How many displays are attached. **ZERO means "not synchronised yet"**, never "no displays" —
-    /// the tri-state discipline again.
+    /// Zero means not synchronised, never evidence of no displays.
     pub(crate) count: usize,
     /// Bevy's `PrimaryMonitor` entity, if still attached: the primary when it was first seen.
     ///
@@ -1237,14 +1152,11 @@ fn read_displays(
 ///
 /// [`LodPixelBudget`] carries the applied value; `geometry_lod` reads it.
 ///
-/// # The contract for whoever wires the consumer
+/// # Consumer contract
 ///
-/// Consumers recompute their `VisibilityRange` thresholds FROM this number when it changes — the
-/// budget is a screen-space quantity, so a threshold derived from it is only valid for the fov,
-/// resolution and render scale it was derived under. Recomputing is a HUMAN-RATE event (a settings
-/// row moved, a window resized, a render-scale rung changed), not a per-frame one: read
-/// [`LodPixelBudget`] behind `resource_changed` (plus whatever view-parameter change detection the
-/// consumer needs) and rebuild the ladder there, never in a per-entity loop.
+/// Rebuild `VisibilityRange` thresholds when the budget, fov, resolution or render scale changes:
+/// a screen-space threshold is valid only for those inputs. Gate on [`LodPixelBudget`]'s
+/// `resource_changed` plus view-parameter changes; rebuild at human rate, never per entity/frame.
 ///
 /// Stored on disk as the bare `f32` (`#[serde(transparent)]`), so `lod_pixel_budget: 2.0` is what a
 /// player finds in `video.ron`. A hand-edited value outside the ladder is honoured as written and
@@ -1310,13 +1222,12 @@ impl PixelBudget {
         self.0.clamp(Self::min(), Self::max())
     }
 
-    /// ASCII only — it reaches `Text`. Honest pixels, like every other value on this page.
+    /// Honest pixels, like every other value on this page.
     pub(crate) fn label(self) -> String {
         format!("{:.1} PX", self.pixels())
     }
 
-    /// The nearest slider stop for the current value. A hand-edited off-ladder value (1.2) resolves
-    /// to its nearest stop the moment the player TOUCHES the control, and not before.
+    /// Off-ladder edits (e.g. 1.2) snap only when the player touches the control.
     fn stop(self) -> u16 {
         (((self.pixels() - Self::min()) / Self::step_size()).round() as u16).min(Self::stops() - 1)
     }
@@ -1403,7 +1314,6 @@ impl FrameCap {
             .map(|fps| std::time::Duration::from_secs_f64(1.0 / f64::from(fps)))
     }
 
-    /// ASCII only — it reaches `Text`.
     pub(crate) fn label(self) -> String {
         match self.fps() {
             None => "OFF".to_string(),
@@ -1483,7 +1393,6 @@ impl UiScalePercent {
         f32::from(self.0.clamp(Self::min(), Self::max())) / 100.0
     }
 
-    /// ASCII only — it reaches `Text`.
     pub(crate) fn label(self) -> String {
         format!("{}%", self.0.clamp(Self::min(), Self::max()))
     }
@@ -1531,10 +1440,8 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
 
-/// The persisted player settings — and, as a `Resource`, the live truth the renderer is reconciled
-/// against by [`apply_settings`]. Nothing else may write `Msaa`, `CascadeShadowConfig`,
-/// `DirectionalLightShadowMap`, `Window::present_mode` or a battlefield camera's
-/// `Bloom::max_mip_dimension`.
+/// Persisted intent reconciled by [`apply_settings`], sole writer of `Msaa`, `CascadeShadowConfig`,
+/// `DirectionalLightShadowMap`, `Window::present_mode` and battlefield `Bloom::max_mip_dimension`.
 ///
 /// **The file is a SPARSE DIFF against the current defaults**, which is what the per-field
 /// `skip_serializing_if` buys. Writing every field would freeze today's defaults into every player's
@@ -1549,10 +1456,8 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
 pub(crate) struct Settings {
     /// See [`SETTINGS_VERSION`]. ALWAYS written — never given a `skip_serializing_if`.
     pub(crate) version: u32,
-    /// How far shadows are drawn, or [`ShadowDistance::Off`]. Together with `shadow_resolution` this
-    /// REPLACED a single coupled `shadows` preset; a `video.ron` still carrying `shadows:` hits
-    /// serde's unknown-field tolerance and lands both of these on their defaults, which is exactly
-    /// the module doc's stated remove-a-field policy and is why [`SETTINGS_VERSION`] did not move.
+    /// Legacy `shadows:` is unknown to serde: these two rows take defaults under the module
+    /// remove-a-field policy, without a [`SETTINGS_VERSION`] bump.
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) shadow_distance: ShadowDistance,
     #[serde(skip_serializing_if = "is_default")]
@@ -1566,8 +1471,7 @@ pub(crate) struct Settings {
     /// See [`BloomLevel`].
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) bloom: BloomLevel,
-    /// Persisted as `vsync_mode` — a NEW key, because the retired `vsync` key was a `bool` and the
-    /// ladder grew a third rung. See [`VsyncMode`]'s migration note.
+    /// See [`VsyncMode`] for why the persisted key differs from the legacy bool key.
     #[serde(rename = "vsync_mode", skip_serializing_if = "is_default")]
     pub(crate) vsync: VsyncMode,
     /// The retired v1 `vsync: bool` key — READ for back-compat, NEVER written. Folded into
@@ -1588,16 +1492,14 @@ pub(crate) struct Settings {
     /// [`crate::render_scale::RenderScale`], which the render app extracts.
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) render_scale: RenderScaleLevel,
-    /// Windowed / borderless fullscreen — see [`WindowModeSetting`], including the reflect-don't-
-    /// fight rule for OS-side toggles.
+    /// [`WindowModeSetting`] owns the reflect-don't-fight rule for OS toggles.
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) window_mode: WindowModeSetting,
     /// Which monitor the window is centred on — see [`DisplaySelection`], including why the boot
     /// window is NOT described with it and why an absent display is never written back.
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) display: DisplaySelection,
-    /// The LOD screen-space error budget in pixels — see [`PixelBudget`]. Applied by writing
-    /// [`LodPixelBudget`], which `geometry_lod` reads.
+    /// [`PixelBudget`], applied through [`LodPixelBudget`] for `geometry_lod`.
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) lod_pixel_budget: PixelBudget,
     /// The frame-rate cap, active only under [`VsyncMode::Off`] — see [`FrameCap`].
@@ -1672,7 +1574,7 @@ impl Settings {
     /// Split out so the window can be BUILT with it (before the surface is ever configured, with
     /// [`PresentCaps::Unprobed`]) and so [`apply_settings`] reuses the one mapping.
     ///
-    /// **The safety property, restated for the three-rung ladder.** On Metal, wgpu-hal's `Mailbox`
+    /// On Metal, wgpu-hal's `Mailbox`
     /// and `FifoRelaxed` reach an `unreachable!()` at surface-configure time — they PANIC if a
     /// surface is actually configured with them (wgpu-hal metal `adapter.rs`, `surface.rs`). This
     /// mapping therefore emits `Mailbox`/`Immediate` ONLY when the probe has positively reported
@@ -1734,8 +1636,7 @@ impl Settings {
 
 // --- applying -----------------------------------------------------------------------------------
 
-/// Request that the CURRENT [`Settings`] be written to disk — the ONLY thing that writes the file
-/// (see the module doc's writer table).
+/// The only request that writes current [`Settings`] to disk; see the module writer table.
 #[derive(Message)]
 pub(crate) struct SaveSettings;
 
@@ -1774,12 +1675,8 @@ pub(crate) fn load_at_boot(app: &mut App) -> Settings {
     settings
 }
 
-/// Which pause surface the settings page is the content of — the ONE thing the two windowed roots
-/// do differently, and therefore the one thing [`plugin`] takes as a parameter.
-///
-/// It is a parameter rather than a system each root remembers to add because forgetting the
-/// declarer is silent: the page mounts, never becomes visible, and nothing logs. Making the entry
-/// part of mounting the page makes that state **unrepresentable**.
+/// The roots' sole settings difference: which pause surface owns the page. Requiring this in
+/// [`plugin`] prevents mounting without an entry declarer, which would silently hide the page.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PageEntry {
     /// Single-player: the page is up exactly while `AppState::Paused`, which already owns the Esc
@@ -1806,8 +1703,7 @@ pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
             .init_resource::<store::StorePath>()
             // Omitting this required resource panics on the first reconcile; it cannot just skip a row.
             .init_resource::<LodPixelBudget>()
-            // The window-placement state both window writers share — see [`WindowPlacement`] for
-            // why an edge memory cannot be a `Local` here.
+            // Shared across window writers; [`WindowPlacement`] explains why `Local` cannot hold it.
             .init_resource::<WindowPlacement>()
             .add_message::<SaveSettings>()
             // `Startup` applies the loaded file to a world that has just spawned its camera and sun;
@@ -1823,9 +1719,7 @@ pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
                     // BEFORE the page (and therefore before this frame's edits): the observed OS
                     // state is this frame's baseline, which player input then overrides.
                     observe_window_placement.before(ui::DeclareSettingsPage),
-                    // Same shape, same reason, for the capability side: the probe's answer is the
-                    // baseline the page renders and the player then edits. Runs only on a caps
-                    // change, which after boot means exactly once — when the probe lands.
+                    // The probe answer is also a pre-edit baseline; after boot, caps change once.
                     normalize_vsync
                         .before(ApplySettings)
                         .before(ui::DeclareSettingsPage)
@@ -1840,8 +1734,7 @@ pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
                     save_on_request.after(ApplySettings),
                 ),
             )
-            // The frame-rate limiter runs LAST in the frame, after everything that could still do
-            // work — see `limiter` for the coarse-sleep-then-spin shape and its measurement.
+            // Limit after all frame work; `limiter` owns the sleep/spin shape and measurement.
             .add_systems(Last, limiter::limit_frame_rate);
         // Both declarers land in `DeclareSettingsPage`, which the page's input/refresh chain runs
         // `.after` — see that set's doc for the dropped-keypress bug the ordering exists to stop.
@@ -1895,8 +1788,7 @@ fn reconcile_shadow_config(config: &mut CascadeShadowConfig, rebuilt: CascadeSha
     }
 }
 
-/// Reconcile the rendering world to [`Settings`]. The ONE writer of every knob below, which is what
-/// makes "the page and the picture cannot disagree" true by construction rather than by discipline.
+/// Sole renderer-knob writer: reconcile the picture to [`Settings`].
 #[expect(
     clippy::too_many_arguments,
     reason = "the one writer of every rendering knob: each parameter is one knob's world target"
@@ -1919,16 +1811,14 @@ fn apply_settings(
     mut window: Query<&mut Window, With<PrimaryWindow>>,
     // Required: `plugin` mounts `render_scale::plugin` on every path to this system.
     mut render_scale: ResMut<crate::render_scale::RenderScale>,
-    // What the surface reported (or an unknown state, before/instead of that) — the gate on the
-    // uncapped modes.
+    // Gate concrete uncapped modes on a positive surface report.
     caps: Res<PresentCaps>,
     // bevy_ui's global multiplier. Present on every windowed root (it comes with `UiPlugin`); a
     // bare-`App` test must init it, same as the shadow map above.
     mut ui_scale: ResMut<UiScale>,
-    // Present exactly on a hidden capture run (see `CaptureWindowPinned`) — the window sub-block
-    // below must not run for it.
+    // Hidden runs preserve window fields; see `CaptureWindowPinned`.
     capture_pinned: Option<Res<CaptureWindowPinned>>,
-    // The applied half of the LOD budget row, read by `geometry_lod` — see `PixelBudget`.
+    // `PixelBudget` owns the `geometry_lod` consumer contract.
     mut lod_budget: ResMut<LodPixelBudget>,
     // The attached displays, as `bevy_winit::create_monitors` synchronised them. COUNTED, never
     // ordered: `MonitorSelection::Index` indexes bevy's own `WinitMonitors` vec, so this system
@@ -1936,8 +1826,7 @@ fn apply_settings(
     // primary (`read_displays`).
     monitors: Query<(), With<Monitor>>,
     primaries: Query<Entity, (With<Monitor>, With<PrimaryMonitor>)>,
-    // The placement state both window writers share — the position edge, and the round trip this
-    // system yields the mode to. NOT a `Local`: see [`WindowPlacement`].
+    // Shared position edge and mode-owning round trip; see [`WindowPlacement`].
     mut placement: ResMut<WindowPlacement>,
 ) {
     let msaa = settings.msaa.to_msaa();
@@ -1970,7 +1859,7 @@ fn apply_settings(
         // Off keeps the last valid config: nothing samples it while casting is disabled, and a
         // zero-metre rebuild degenerates. Pending counts apply when casting resumes; no repair is needed.
         if let Some(maximum_distance) = distance.distance_m() {
-            // Runtime count changes require bevy_light >= 0.19.1 (see `SHADOW_CASCADES`).
+            // `SHADOW_CASCADES` owns the upstream runtime-count requirement.
             // Split parameters are explicit: the stock 10 m first bound halves far-field crispness on a
             // 1 km map (`look::SettingsLook::shadow_first_cascade_far_bound_m`). Only `minimum_distance` remains Bevy's
             // default (0.1 m near clip), which no page row should move.
@@ -2060,7 +1949,6 @@ fn apply_settings(
         ui_scale.0 = factor;
     }
 
-    // Avoid marking the extracted resource changed on an unchanged value.
     render_scale.set_if_neq(crate::render_scale::RenderScale(
         settings.render_scale.fraction(),
     ));
@@ -2144,7 +2032,6 @@ enum RoundTrip {
 /// What the OS says about the window right now — the only input [`RoundTrip`] may sequence on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct ObservedPlacement {
-    /// Whether the OS has the window in fullscreen.
     fullscreen: bool,
     /// Whether the monitor the window is REALLY on is the one the display row resolves to. `None`
     /// is "could not be learned" — the tri-state discipline [`PresentCaps`] is built around, and it
@@ -2171,12 +2058,8 @@ enum PlacementStep {
 }
 
 impl RoundTrip {
-    /// Advance on this frame's observation and say what to write. The whole decision rule.
-    ///
-    /// `target` is the RESOLVED rung ([`DisplaySelection::resolve`]) rather than the stored one, so
-    /// an unreachable rung and the rung it falls back to are one attempt, not two — and a hot-plug
-    /// that changes what the stored rung resolves to is a genuinely new target, which is exactly
-    /// what it is.
+    /// `target` is resolved ([`DisplaySelection::resolve`]): an absent rung and its substitute
+    /// share one attempt; a hot-plug changing that resolution is a new target.
     fn step(
         &mut self,
         setting: WindowModeSetting,
@@ -2207,7 +2090,6 @@ impl RoundTrip {
                 *self = RoundTrip::Idle;
                 PlacementStep::Hold
             }
-            // The completed trip missed its target.
             Some(false) if *self == RoundTrip::Spent(target) => {
                 *self = RoundTrip::Stranded(target);
                 PlacementStep::Settle
@@ -2220,9 +2102,7 @@ impl RoundTrip {
         }
     }
 
-    /// Whether the window is in the transitional state the trip owns — the frames on which
-    /// [`apply_settings`] must yield `Window::mode` rather than re-assert the row's fullscreen over
-    /// a half-done trip.
+    /// [`apply_settings`] must yield mode during the transition or cancel the half-done trip.
     const fn owns_the_mode(self) -> bool {
         matches!(self, RoundTrip::Leaving)
     }
@@ -2232,57 +2112,37 @@ impl RoundTrip {
 /// both halves. The "observe external changes" half of the window-mode row, and the only owner of
 /// fullscreen monitor placement.
 ///
-/// On macOS the green traffic-light button
-/// toggles native fullscreen without bevy hearing about it: `Window::mode` goes stale, and a page
-/// that trusted it would either lie or fight the OS (writing the stale mode back would kick the
-/// player straight out of the fullscreen they just asked for).
+/// macOS's green button toggles native fullscreen without updating Bevy's `Window::mode`. Trusting
+/// that stale component would mislabel the row or undo the player's fullscreen request.
 ///
-/// **Edge-triggered, deliberately.** The system acts only when the observed state CHANGES between
-/// frames, never on a standing mismatch. A level-triggered version would fight winit's deferred
-/// transitions: while macOS animates into fullscreen, a commanded mode can sit "not yet real" for
-/// up to a second (winit parks it in `target_fullscreen`), and reconciling against that snapshot
-/// would revert the player's choice and then oscillate. An edge is only ever produced by the OS
-/// actually switching, so following edges follows truth.
+/// Reflect fullscreen edges only. During macOS's animation, winit can park a command in
+/// `target_fullscreen` for up to a second; reflecting the standing mismatch would revert the
+/// choice and oscillate. Only an observed OS switch produces an edge.
 ///
 /// Reaches winit through the same `WINIT_WINDOWS` thread-local + `NonSendMarker` pattern as
 /// `branding::set_window_icon` (the marker is load-bearing: off the main thread the thread-local
 /// is empty). Headless roots never mount this plugin; a windowed root before window creation just
 /// finds no winit window and returns.
 ///
-/// This is a second WRITER of the settings file (via [`SaveSettings`]) beyond the page — accepted
-/// because the green button IS player intent, exactly as deliberate as a row click, and a player
-/// who fullscreens the game expects it to come back fullscreen.
+/// Save green-button toggles: they express player intent, including fullscreen on next launch.
 ///
-/// NOT gated on [`CaptureWindowPinned`], deliberately, unlike [`apply_settings`]'s
-/// window sub-block: the first observation is a baseline, not an edge, so a hidden capture window
-/// booting `Windowed` writes nothing — and with the apply-side skip in place nothing ever commands
-/// that window fullscreen, so the OS edge this system needs cannot occur on a capture run. It
-/// therefore cannot spend the player's persisted fullscreen on a capture client's `Windowed` state.
-/// The round trip below is covered by the same fact from the other side: it arms only on a window
-/// the OS reports as ALREADY fullscreen, which a capture window never is.
+/// No [`CaptureWindowPinned`] gate is needed here: the first observation is a baseline, and
+/// [`apply_settings`] never commands a pinned Windowed window fullscreen. No fullscreen edge can
+/// spend the persisted choice, and [`RoundTrip`] cannot arm without observed fullscreen.
 ///
 /// # Why it resolves the DISPLAY row too
 ///
-/// This writer must produce the same `Window::mode` [`apply_settings`] would, monitor included,
-/// because there is one path on which its write is the LAST word: the player picks FULLSCREEN on
-/// the settings page, `apply_settings` writes `BorderlessFullscreen(Index(n))`, the OS completes
-/// the transition, and this system sees the edge — at which point the observed state already equals
-/// the stored one, so `Settings` is NOT written, so `apply_settings` (which runs on
-/// `resource_changed::<Settings>`) does not run again to correct anything. A `Current` written here
-/// would stand, and bevy would re-apply fullscreen on whatever monitor the window happened to be
-/// on. Hence the same [`read_displays`] + [`DisplaySelection::resolve`] the reconciler uses.
+/// Resolve mode and monitor identically to [`apply_settings`], through [`read_displays`] and
+/// [`DisplaySelection::resolve`]. After a page-requested fullscreen completes, the observed edge
+/// already agrees with Settings: there is no settings change to rerun the reconciler. Writing
+/// `Current` here would therefore stand, reapplying fullscreen on the window's incidental monitor.
 ///
 /// # Why it also watches WHICH monitor
 ///
-/// Tracking fullscreen-or-not alone is what let a disagreement stand forever: winit accepts a
-/// monitor change on an already-fullscreen window, commits it to its own state, and never moves the
-/// window ([`RoundTrip`]). Nothing downstream can notice, because every component and every cache
-/// then reads as correct. So the real monitor is observed beside the real fullscreen state, and the
-/// rule is one comparison against the row: while the row asks for fullscreen and the OS agrees the
-/// window is fullscreen, the monitor it is really on must be the one the row resolves to, or
-/// [`RoundTrip`] drives it there. Keyed on the DISAGREEMENT and not on the player touching the row,
-/// so boot, a hot-plug and a window winit has lost track of are all the same case — see
-/// [`RoundTrip`] for the three and for why the repair terminates.
+/// Fullscreen alone misses winit's swallowed monitor move: its state and every downstream cache
+/// look correct while the window stays elsewhere. Observe the real monitor too; while both row
+/// and OS say fullscreen, a target disagreement drives [`RoundTrip`]. Its doc owns the boot,
+/// hot-plug and lost-window cases and termination rule.
 ///
 /// The target is resolved through `bevy_winit`'s OWN `select_monitor`, so this comparison cannot
 /// drift from the monitor `changed_windows` would actually pick.
@@ -2314,11 +2174,8 @@ fn observe_window_placement(
             ObservedPlacement {
                 fullscreen: winit_window.fullscreen().is_some(),
                 on_target: target.and_then(|selection| {
-                    // The primary handle is not reachable from a system, and does not need to be:
-                    // `monitor_on` emits the bare `MonitorSelection::Primary` only where bevy has
-                    // marked no monitor at all, which is precisely the state in which nothing about
-                    // the target can be concluded. `select_monitor` answers `None` there, and an
-                    // unresolvable target is "could not learn", not a disagreement.
+                    // Systems cannot reach the primary handle. `monitor_on` emits bare Primary
+                    // only without a marker; `select_monitor` then returns None: unknown, not wrong.
                     let wanted = bevy::winit::select_monitor(
                         &winit_monitors,
                         None,
@@ -2371,10 +2228,8 @@ fn observe_window_placement(
         return;
     }
     let reflected = WindowModeSetting::from_fullscreen(observed.fullscreen);
-    // Keep `Window::mode` truthful FIRST, whatever the settings say: bevy's change detection can
-    // only express "leave fullscreen" later if the component actually says it is fullscreen now.
-    // The MONITOR in it is the settings row's, resolved exactly as `apply_settings` resolves it —
-    // see this function's doc for the path on which this write is the last word.
+    // Update mode first: Bevy can express a later fullscreen exit only from a fullscreen component.
+    // The function doc explains why this must include the same monitor as `apply_settings`.
     let mode = reflected.to_window_mode(target);
     if window.mode != mode {
         window.mode = mode;
@@ -2413,9 +2268,7 @@ fn save_on_request(
     }
 }
 
-/// Name where a superseded file was preserved, or say plainly that it was not. Never silently omits
-/// the fact: "we moved your file" and "we could not move your file" are different things to a player
-/// looking for it.
+/// Always name preservation success or failure: the player needs to know where to find the file.
 fn describe_kept(kept: Option<&std::path::Path>, subject: &str) -> String {
     kept.map_or_else(
         || format!("{subject} could NOT be preserved"),
@@ -2463,9 +2316,7 @@ fn report_store_load(report: Option<Res<StoreReport>>, path: Res<store::StorePat
 mod tests {
     use super::*;
 
-    /// Every capability state the app can actually be in: the two "nothing is known" ones — the
-    /// pre-probe boot state and a probe that could not ask — plus the four lists a surface can
-    /// report. Enumerated once, so a grid test cannot quietly stop covering a variant.
+    /// Boot, failed probe and every report shape, shared so grid tests cannot omit a state.
     fn every_caps_state() -> Vec<PresentCaps> {
         let mut states = vec![PresentCaps::Unprobed, PresentCaps::Unavailable];
         for immediate in [false, true] {
@@ -2524,10 +2375,8 @@ mod tests {
         }
     }
 
-    /// **The bloom row reaches the battlefield camera, and only it.** Its value is a field on a
-    /// camera component, so the seam is `apply_settings`' profile filter: a pen-cam inset keeps the
-    /// bloom it was built with, as it keeps its own MSAA. Every rung is also a value bevy accepts
-    /// as a mip-chain height — a power of two, so `ilog2` takes no rounding.
+    /// The profile filter must preserve inset bloom/MSAA while applying battlefield bloom.
+    /// Every rung must be a power-of-two mip height so Bevy's `ilog2` needs no rounding.
     #[test]
     fn the_bloom_row_reaches_the_battlefield_camera_only() {
         let mut app = App::new();
@@ -2652,11 +2501,9 @@ mod tests {
             .collect::<Vec<_>>();
         // The reference for the parameters the count rebuild must never move.
         let reference = CascadeShadowConfigBuilder::default().build();
-        // What the sun's config was last REBUILT with: the spawn value until the first casting
-        // frame, then whatever cascade row was live on the most recent casting frame. A count set
-        // while OFF is pending, not applied — that is the deliberate off-branch behaviour.
+        // Spawn count until casting begins, then the last applied count; Off leaves changes pending.
         let mut applied_count = CascadeShadowConfig::default().bounds.len();
-        // Two full laps, so every cell is also reached from the last cell of the previous lap.
+        // Two laps exercise the wraparound transition too.
         for (distance, resolution, cascades) in grid.iter().copied().chain(grid.iter().copied()) {
             {
                 let mut settings = app.world_mut().resource_mut::<Settings>();
@@ -2725,12 +2572,8 @@ mod tests {
         }
     }
 
-    /// **The Metal panic guard, capability-gated.** `Mailbox` and `FifoRelaxed` hit an
-    /// `unreachable!()` in wgpu-hal's Metal backend if a surface is CONFIGURED with them, and
-    /// `AutoVsync` names `FifoRelaxed` as its first fallback choice. The rule this pins, across the
-    /// WHOLE vsync × capability grid: a concrete uncapped mode (`Mailbox`/`Immediate`) may only be
-    /// produced when the probe positively reported it; every other cell answers `Fifo` or the
-    /// self-negotiating `AutoNoVsync`, and `AutoVsync`/`FifoRelaxed` are never produced at all.
+    /// Across vsync × capabilities, only positive reports permit concrete uncapped modes; otherwise
+    /// use Fifo or AutoNoVsync. [`Settings::present_mode`] owns the Metal panic and AutoVsync reason.
     #[test]
     fn present_modes_are_probe_gated_and_metal_safe() {
         for vsync in VsyncMode::ORDER {
@@ -2787,9 +2630,7 @@ mod tests {
         }
     }
 
-    /// Which rungs the page may OFFER, per capability state. FAST requires `Mailbox` specifically
-    /// (an Immediate-backed FAST would duplicate OFF on a Metal surface); OFF requires `Immediate`;
-    /// ON is unconditional; unprobed offers everything because there is nothing to gate on yet.
+    /// The page needs precisely the rungs [`PresentCaps::offers`] permits in every capability state.
     #[test]
     fn the_offered_rungs_follow_the_probe() {
         let offered = |caps: PresentCaps| -> Vec<VsyncMode> {
@@ -2825,9 +2666,8 @@ mod tests {
             }),
             vec![VsyncMode::On],
         );
-        // Everything reported (a typical Vulkan/X11 or Windows surface): every rung. With this the
-        // ladder is pinned for all four Reported shapes plus both non-answers — exhaustively HERE,
-        // which is what lets the probe test stick to the present-mode-list distillation.
+        // Vulkan/X11 or Windows may report everything. Exhaustive ladder coverage here lets probe
+        // tests focus on present-mode-list distillation.
         assert_eq!(
             offered(PresentCaps::Reported {
                 immediate: true,
@@ -2900,10 +2740,7 @@ mod tests {
         }
     }
 
-    /// The write-back half of the same finding: when the probe lands, the STORED rung follows the
-    /// effective one and the file is asked to follow it too (no phantom state on disk), while a
-    /// supported rung — and the whole pre-probe state, and every rung under a probe that could not
-    /// ask — is left alone.
+    /// Persist the effective rung on a conclusive probe; supported rungs and unknown states stay put.
     #[test]
     fn the_probe_arrival_writes_the_normalized_rung_back() {
         let app_with = |vsync: VsyncMode, caps: PresentCaps| {
@@ -2960,10 +2797,8 @@ mod tests {
             );
         }
 
-        // A surface that answered with a list carrying neither uncapped mode (`[Fifo]`) is a
-        // conclusive negative, and does normalise. An EMPTY list is not this — `probe` maps that to
-        // `Unavailable` before it can reach here (`probe::an_empty_capability_list_is_a_failed_
-        // query_not_an_answer`).
+        // `[Fifo]` conclusively excludes uncapped modes; an empty list instead becomes Unavailable
+        // (`probe::an_empty_capability_list_is_a_failed_query_not_an_answer`).
         let app = app_with(
             VsyncMode::Off,
             PresentCaps::Reported {
@@ -3081,9 +2916,7 @@ mod tests {
         assert_eq!(DisplaySelection::ORDER.len(), 2 + DisplaySelection::INDEXED);
     }
 
-    /// A machine with `count` displays, one of which bevy has marked as the primary. The entity is
-    /// a placeholder because these are PURE resolution tests — only its presence is read; the
-    /// app-level tests below use real spawned monitor entities.
+    /// Pure resolution fixture: only primary presence is read. App tests use spawned monitors.
     fn ranked(count: usize) -> AttachedDisplays {
         AttachedDisplays {
             count,
@@ -3100,11 +2933,8 @@ mod tests {
         }
     }
 
-    /// **A stored display that is not plugged in.** The fallback is read-side and PRIMARY, and the
-    /// unknown state — no `Monitor` entities synchronised — moves nothing, exactly as
-    /// [`PresentCaps`]'s two unknown states move nothing. That second half is the load-bearing one:
-    /// every bare-`App` test and every frame before `create_monitors` runs reports zero monitors,
-    /// and a fallback there would let a headless frame overwrite a player's row.
+    /// Absent stored displays resolve read-side to PRIMARY; unknown lists preserve intent.
+    /// [`DisplaySelection::resolve`] owns why zero monitors cannot overwrite the row.
     #[test]
     fn an_absent_display_falls_back_to_primary_and_an_unknown_count_never_does() {
         // A laptop with the external unplugged: one display attached.
@@ -3256,7 +3086,7 @@ mod tests {
             .init_resource::<LodPixelBudget>()
             .init_resource::<WindowPlacement>()
             .add_systems(Update, apply_settings);
-        // Step 1-2: the window exists, described with the boot mode, before any monitor does.
+        // Creation precedes monitor synchronisation.
         app.world_mut().spawn((
             Window {
                 mode: boot_mode,
@@ -3264,7 +3094,6 @@ mod tests {
             },
             PrimaryWindow,
         ));
-        // Step 3: the monitor list arrives afterwards.
         spawn_monitors(&mut app, monitors);
         app
     }
@@ -3416,10 +3245,8 @@ mod tests {
             "and it must never be the bare platform query, which is the no-op this all guards",
         );
 
-        // The mirror case — a marker that OUTLIVES the platform's ability to name a primary — is
-        // indistinguishable from the healthy one through the ECS, and that is exactly why the
-        // entity form is used: it resolves against the monitor list either way. Pinned as an
-        // invariant over every state this module can observe.
+        // A marker outliving the platform's primary answer looks healthy through ECS; Entity must
+        // resolve it either way, across every observable state.
         for count in 1..4 {
             for displays in [ranked(count), unranked(count)] {
                 let monitor = DisplaySelection::Primary.monitor_on(displays);
@@ -3440,9 +3267,8 @@ mod tests {
         );
     }
 
-    /// The display row must write fullscreen mode at boot and on a live change, then place the
-    /// window when fullscreen is left. Fullscreen ignores position; consuming placement there
-    /// would strand the window on exit.
+    /// The display row writes fullscreen mode at boot and on live changes. Fullscreen ignores
+    /// position; leaving changes the stored pair and triggers windowed placement.
     ///
     /// These component writes are necessary, not sufficient: macOS winit may swallow the monitor
     /// move. [`RoundTrip`] and its tests cover that mechanism.
@@ -3491,7 +3317,7 @@ mod tests {
              there is what stranded the window on the way back out",
         );
 
-        // LEAVING: the position edge must still be available, because it was never spent.
+        // Leaving changes the stored (mode, display) pair, triggering a new position edge.
         app.world_mut().resource_mut::<Settings>().window_mode = WindowModeSetting::Windowed;
         app.update();
         let (mode, position) = window_state(&mut app);
@@ -3503,13 +3329,8 @@ mod tests {
         );
     }
 
-    /// **The decision rule, exhaustively: only a window that REALLY disagrees with the row is moved.**
-    ///
-    /// The comparison is against observed reality, never against `Window::mode` — the whole defect
-    /// is that the component, bevy's cache and winit's own state all read as correct while the
-    /// window sits on the other panel (see [`RoundTrip`]). Both "could not learn" states are pinned
-    /// beside the two decidable ones, because an unresolvable target answering like a disagreement
-    /// would move a window on evidence nobody gathered.
+    /// Only observed disagreement may move the window. Unknown target and not-yet-fullscreen
+    /// states must not invent evidence; [`RoundTrip`] owns why component/cache equality is insufficient.
     #[test]
     fn the_round_trip_fires_only_where_the_window_really_disagrees_with_the_row() {
         let fullscreen = WindowModeSetting::Fullscreen;
@@ -3554,8 +3375,7 @@ mod tests {
             "a windowed row never drives a fullscreen transition",
         );
 
-        // A standing agreement leaves nothing behind — the machine is only ever armed by a real
-        // disagreement, so it cannot accumulate state across a session.
+        // Standing agreement must not accumulate state.
         let mut trip = RoundTrip::default();
         for _ in 0..64 {
             assert_eq!(
@@ -3684,9 +3504,7 @@ mod tests {
             "landing retires the trip, so a LATER disagreement is judged fresh",
         );
 
-        // A change requested MID-TRANSITION: the half-done trip is never interrupted, and the
-        // re-entry then honours whatever the row says at the moment it is written — so the newest
-        // choice wins without a second trip being stacked on the first.
+        // Mid-transition edits must win at re-entry without interrupting or stacking trips.
         let mut trip = RoundTrip::default();
         assert_eq!(
             trip.step(fullscreen, DisplaySelection::Display2, wrong),
@@ -3709,8 +3527,7 @@ mod tests {
             "the re-entry is what was actually written, so it is what the trip is spent on",
         );
 
-        // And the row leaving fullscreen mid-trip abandons it: the pending write would put back a
-        // fullscreen nobody is asking for any more.
+        // Leaving fullscreen mid-trip must cancel the pending re-entry.
         let mut trip = RoundTrip::default();
         assert_eq!(
             trip.step(fullscreen, target, wrong),
@@ -3865,7 +3682,7 @@ mod tests {
             "nothing in a round trip may write the row it is serving",
         );
 
-        // The edge the trip did not spend is still there when the player really leaves.
+        // A real row change to windowed creates a position edge; the trip leaves that row alone.
         app.world_mut().resource_mut::<Settings>().window_mode = WindowModeSetting::Windowed;
         app.update();
         assert_eq!(
@@ -3874,9 +3691,7 @@ mod tests {
         );
     }
 
-    /// The other half of the edge: once placed, the window STAYS where the player drags it. winit
-    /// rewrites `Window::position` to `At(..)` on every `Moved` event, so a level-triggered write
-    /// would re-centre the window every time any unrelated row moved.
+    /// Unrelated edits must preserve player drags; [`apply_settings`] owns why placement is edge-triggered.
     #[test]
     fn an_unrelated_row_never_re_centres_a_window_the_player_moved() {
         let mut app = window_app(
