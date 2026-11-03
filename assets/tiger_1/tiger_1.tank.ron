@@ -7,7 +7,7 @@ TankSpec(
     // The turret as the free body a cook-off launch makes of it: its mass (kg) and the full
     // dimensions (m) of the box standing in for its angular-inertia distribution. ASSUMED
     // round figures; no source read.
-    turret: ( mass: 8_000.0, inertia_extents: (3.0, 1.2, 2.4) ),
+    turret: ( node: Some("Turret_Yaw"), mass: 8_000.0, inertia_extents: (3.0, 1.2, 2.4) ),
     // Continuous track (track architecture §7). link_count 97 = the marker-derived window's
     // lowest SPRING-limited count (window 95..96 at ride_frequency 1.2 Hz): full suspension
     // travel with the minimum slack that permits it — playtest-confirmed 2026-07-24. The real
@@ -194,10 +194,10 @@ TankSpec(
         ),
     ),
     servos: {
-        "Turret_Yaw":      (role: Yaw,   max_speed: 34.0, accel: 70.0, travel: Continuous,                      requires: [Gunner]),
-        "Main_Gun_Pitch":  (role: Pitch, max_speed: 23.0, accel: 70.0, travel: Limited(min: -8.0,  max: 15.0),  requires: [Gunner]),
-        "Hull_MG_Yaw":     (role: Yaw,   max_speed: 45.0, accel: 90.0, travel: Limited(min: -30.0, max: 30.0),  requires: [BowGunner]),
-        "Hull_MG_Pitch":   (role: Pitch, max_speed: 45.0, accel: 90.0, travel: Limited(min: -10.0, max: 20.0),  requires: [BowGunner]),
+        "Turret_Yaw":      (role: Yaw,   drive: Hand(hand_rate: (34.0, Unknown("provisional hand rate; a handwheel ratio and operator turn-rate measurement would settle it"))), travel: Continuous,                      requires: [Gunner]),
+        "Main_Gun_Pitch":  (role: Pitch, drive: Hand(hand_rate: (23.0, Unknown("provisional hand rate; a handwheel ratio and operator turn-rate measurement would settle it"))), travel: Limited(min: -8.0,  max: 15.0),  requires: [Gunner]),
+        "Hull_MG_Yaw":     (role: Yaw,   drive: Hand(hand_rate: (45.0, Unknown("provisional hand rate; a handwheel ratio and operator turn-rate measurement would settle it"))), travel: Limited(min: -30.0, max: 30.0),  requires: [BowGunner]),
+        "Hull_MG_Pitch":   (role: Pitch, drive: Hand(hand_rate: (45.0, Unknown("provisional hand rate; a handwheel ratio and operator turn-rate measurement would settle it"))), travel: Limited(min: -10.0, max: 20.0),  requires: [BowGunner]),
     },
     // DECLARED ARMOUR (design §12). A node is a ballistic volume iff it is a key here, whatever
     // material it wears; a node wearing a registry substance and not keyed here is view geometry.

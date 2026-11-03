@@ -1140,16 +1140,24 @@ pub struct IdlerSpec {
     pub radius: SideValues,
 }
 
-/// The turret's rigid-body data for the free flight after a cook-off launch (the damage model's
-/// launched-turret consequence). Mirrors the hull's [`TankSpec::mass`] and
-/// [`TankSpec::inertia_extents`].
+/// The game's damage model (game state only): turret assembly and inertia data, shared by
+/// powered traverse and the detached rigid body. Dimensions follow the servo role axes.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TurretSpec {
+    /// Structural assembly root; None declares no detachable assembly, independently of optics.
+    #[serde(deserialize_with = "deserialize_assembly")]
+    pub node: Option<String>,
     /// Mass (kg) of the turret with everything it carries.
     pub mass: f32,
     /// Full box dimensions (x, y, z metres) approximating its angular-inertia distribution.
     pub inertia_extents: (f32, f32, f32),
+}
+
+fn deserialize_assembly<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(d)
 }
 
 /// One model node name per track side.
@@ -1279,6 +1287,8 @@ pub enum NodeRole {
     Weapon,
     /// A crew viewpoint anchor.
     View,
+    /// A structural assembly root, independent of aiming and optics.
+    Assembly,
 }
 
 /// One typed node reference: what the sim does with the node, the node's name, and the RON path
@@ -1301,7 +1311,7 @@ impl NodeRole {
     /// authored at unit scale or the sim and the view disagree about where the part is.
     pub(crate) fn rigid_pose(self) -> bool {
         match self {
-            Self::Servo | Self::Roadwheel | Self::Weapon | Self::View => true,
+            Self::Servo | Self::Roadwheel | Self::Weapon | Self::View | Self::Assembly => true,
             Self::Volume | Self::Collider | Self::ShadowProxy => false,
         }
     }
@@ -1615,6 +1625,9 @@ impl TankSpec {
                 at(NodeRole::View, &view.node, format!("views[{kind:?}].node"))
             }),
         );
+        if let Some(node) = &self.turret.node {
+            references.push(at(NodeRole::Assembly, node, "turret.node".into()));
+        }
         references.sort_unstable();
         references.dedup();
         references
@@ -1739,6 +1752,12 @@ impl TankSpec {
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!("{what} must be finite and > 0 (got {value})").into());
+            }
+        }
+        for role in [crate::tank::ServoRole::Yaw, crate::tank::ServoRole::Pitch] {
+            let inertia = crate::tank::axis_inertia(turret, role);
+            if !inertia.is_finite() || inertia <= 0.0 {
+                return Err("turret.mass/inertia_extents yield an unrepresentable axis inertia; author dimensions and mass with finite positive cuboid moments".into());
             }
         }
         // Four view nodes the belt binds by name: a blank or repeated one binds two roles to one
@@ -2032,22 +2051,18 @@ mod tests {
             "the torque curve ({first_rpm}..{last_rpm} rpm) must bracket governed_rpm ({})",
             engine.governed_rpm
         );
-        let peak_torque = engine
-            .torque_curve
-            .iter()
-            .fold(0.0f32, |peak, &(_, torque)| peak.max(torque));
-        // `torque_at` scales the whole curve: an all-zero curve is an engine that makes no
-        // torque at any rpm — a drivetrain that can never turn its own sprocket, under an
-        // idle governor whose recovery torque (`torque_at(idle_rpm)`) is zero too.
+        let params = spec
+            .track
+            .nominal_transmission_params(&spec.roadwheels)
+            .expect("transmission admission precedes aggregate checks");
+        let peak_torque = params.torque_at(params.peak_torque_rpm);
         assert!(
             peak_torque > 0.0,
-            "engine.torque_curve peaks at {peak_torque} N·m — a declared engine must make torque"
+            "engine.torque_curve must deliver positive torque under its governor"
         );
-        // The coupling clamps at the clutch capacity: below the engine's own peak, the clutch
-        // slips at every torque the engine can make and the crank never couples.
         assert!(
             engine.clutch_capacity_nm >= peak_torque,
-            "clutch_capacity_nm ({}) must carry the curve's peak torque ({peak_torque})",
+            "clutch_capacity_nm ({}) must carry the delivered peak torque ({peak_torque})",
             engine.clutch_capacity_nm
         );
         // The recording is a file reference, and the loader resolves it verbatim.
@@ -2156,7 +2171,7 @@ TankSpec(
     display_name: "Fixture",
     mass: 30_000.0,
     inertia_extents: (3.0, 2.0, 6.0),
-    turret: (mass: 5_000.0, inertia_extents: (2.0, 1.0, 2.0)),
+    turret: (node: Some("Turret_Yaw"), mass: 5_000.0, inertia_extents: (2.0, 1.0, 2.0)),
     track: (
         pin_plane_x: (left: -1.3, right: 1.3),
         substance: "TrackSteel",
@@ -2207,7 +2222,7 @@ TankSpec(
         ),
     ),
     servos: {
-        "Turret_Yaw": (role: Yaw, max_speed: 30.0, accel: 60.0, travel: Continuous, requires: [Gunner]),
+        "Turret_Yaw": (role: Yaw, drive: Hand(hand_rate: (30.0, Fixture("fixture hand rate"))), travel: Continuous, requires: [Gunner]),
     },
     volumes: {
         "Gunner": (crew: Gunner),
@@ -2968,6 +2983,17 @@ TankSpec(
         }
     }
 
+    /// Clutch admission is about delivered combustion torque, not a curve knot beyond fuel cut.
+    #[test]
+    fn a_post_cut_torque_knot_does_not_size_the_clutch() {
+        let mut spec = fixture();
+        // Fixture: 800 N m is delivered; the larger knot is past completed fuel cut.
+        let engine = &mut spec.track.powertrain.transmission.engine;
+        engine.torque_curve = vec![(600.0, 800.0), (2000.0, 800.0), (2600.0, 900.0)];
+        engine.clutch_capacity_nm = 850.0;
+        assert!(spec.validate().is_ok());
+    }
+
     /// The servo window contract (`ServoSpec::admission_fault`): the sim clamps to the window
     /// so one that is inverted or excludes the spawn angle 0 is refused
     /// at load, the same refusal `certify_asset` reports as `L2.SPEC`.
@@ -2978,7 +3004,7 @@ TankSpec(
             let mut spec = fixture();
             spec.servos.insert(
                 "Bad_Pitch".to_owned(),
-                ServoSpec::test_limited(ServoRole::Pitch, 10.0, 10.0, min, max),
+                ServoSpec::test_limited(ServoRole::Pitch, 10.0, min, max),
             );
             let err = spec.validate().unwrap_err().to_string();
             assert!(err.contains("Bad_Pitch"), "window ({min}, {max}): {err}");
@@ -2986,7 +3012,7 @@ TankSpec(
         let mut spec = fixture();
         spec.servos.insert(
             "Good_Pitch".to_owned(),
-            ServoSpec::test_limited(ServoRole::Pitch, 10.0, 10.0, -8.0, 15.0),
+            ServoSpec::test_limited(ServoRole::Pitch, 10.0, -8.0, 15.0),
         );
         assert!(spec.validate().is_ok());
     }

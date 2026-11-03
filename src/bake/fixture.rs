@@ -215,7 +215,7 @@ TankSpec(
     display_name: \"Fixture\",
     mass: 1.0,
     inertia_extents: (1.0, 1.0, 1.0),
-    turret: (mass: 1.0, inertia_extents: (1.0, 1.0, 1.0)),
+    turret: (node: None, mass: 1.0, inertia_extents: (1.0, 1.0, 1.0)),
     track: (
         pin_plane_x: (left: -1.3, right: 1.3),
         substance: \"TrackSteel\",

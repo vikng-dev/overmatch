@@ -14,7 +14,9 @@ use super::model::{
     TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate, WeaponGateState,
     WeaponIndex, WeaponLoad, WeaponLoads, WeaponState,
 };
-use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoRest, ServoRole, ServoSpec};
+use super::servo::{
+    RemoteServos, ServoCommand, ServoIndex, ServoMechanism, ServoRest, ServoRole, ServoSpec,
+};
 use super::view::{SimParts, bind_tank_view};
 use crate::Layer;
 use crate::bake::{TankBlueprint, TankGeometry};
@@ -285,6 +287,7 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         // Complete servo integrator inventory is data-built in the same spawn flush. The glb is a
         // view and never initializes replicated state.
         tank_servos(content.spec()),
+        ServoMechanism::from_spec(content.spec()),
         root_bundle,
     ));
     if let Some(scene) = presentation.scene_root() {
@@ -319,6 +322,7 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
             weapon_gate(content.spec()),
             weapon_loads(content.spec()),
             tank_servos(content.spec()),
+            ServoMechanism::from_spec(content.spec()),
             root_bundle,
         ))
         .id();
@@ -343,6 +347,7 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     root_commands
         .insert((
             presentation.root_bundle(),
+            ServoMechanism::from_spec(content.spec()),
             // Replicated authority state (EngineRpm, servo snapshots; the owner's TankTransmission,
             // DriveSignal, WeaponGate, WeaponLoads) arrived in the replication init snapshot. Do not
             // overwrite it with fresh spec-derived values.
@@ -443,10 +448,7 @@ fn resolve_rig_nodes<'a>(geometry: &'a TankGeometry, spec: &'a TankSpec) -> RigN
     let hull_index = resolve("Hull");
     let com_index = resolve("Center_Of_Mass");
 
-    // The gunner's chain feeds the rig's `turret`/`gun` (optic, camera, launched-turret): the
-    // declared Pitch node + the Yaw servo above it in the extracted topology
-    // (`bake::turret_node`) — the binder never guesses which of
-    // several yaw/pitch mounts is the main one.
+    // The sight selects the gun chain; turret construction independently declares its assembly root.
     let servo_nodes_with_role = |role: ServoRole| -> HashSet<usize> {
         servo_entries
             .iter()
@@ -485,7 +487,7 @@ fn resolve_rig_nodes<'a>(geometry: &'a TankGeometry, spec: &'a TankSpec) -> RigN
         Some(_) => {}
     }
     if turret_index.is_none() {
-        missing.push("<a Yaw servo above the Primary weapon's muzzle>".into());
+        missing.push("<a declared turret.node assembly root>".into());
     }
     // The declared lists resolved at extraction (a missing name fails there, naming it), so these
     // only restate the structural minimum the assembler needs.

@@ -399,10 +399,7 @@ mod tests {
                 .unwrap();
         let mut spec: TankSpec =
             crate::provenance::from_shipped_str(crate::tank::TANK_SPEC_PATH, &text).unwrap();
-        let servo = ron::from_str(
-            "(role: Yaw, max_speed: 1.0, accel: 1.0, travel: Continuous, requires: [])",
-        )
-        .unwrap();
+        let servo = crate::tank::ServoSpec::test_continuous(crate::tank::ServoRole::Yaw, 1.0);
         spec.servos = std::collections::HashMap::from([("fixture servo".to_owned(), servo)]);
         let mut world = World::new();
         let root = world.spawn(Transform::IDENTITY).id();

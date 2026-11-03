@@ -859,12 +859,9 @@ pub(crate) mod tests {
     /// it, so a drift changes only how hard the laws are pushed, never whether one can pass
     /// falsely.
     const DELIVERY_TICKS: usize = 3 + 1;
-    /// The seed vehicle's authored turret traverse (`assets/tiger_1/tiger_1.tank.ron`): the numbers
-    /// are the fixture's, never a law — every assertion below is stated as a formula over them.
+    /// Fixture hand rates: aiming tests exercise transport and reference frames, independently of engine power.
     const YAW_SPEED: f32 = 34.0;
-    const YAW_ACCEL: f32 = 70.0;
     const PITCH_SPEED: f32 = 23.0;
-    const PITCH_ACCEL: f32 = 70.0;
 
     /// The physics root's world position: far from the origin, so a hull frame composed with
     /// `transform_vector3` where it owes `transform_point3` (or the reverse) moves every number
@@ -976,9 +973,9 @@ pub(crate) mod tests {
             // gate resolves through; the authored requirement is empty, so effectiveness is full.
             world.spawn(VolumeOf(tank));
 
-            let mut mount = |servo: Entity, role: ServoRole, slot: usize, speed, accel| {
+            let mut mount = |servo: Entity, role: ServoRole, slot: usize, speed| {
                 world.entity_mut(servo).insert((
-                    ServoSpec::test_continuous(role, speed, accel),
+                    ServoSpec::test_continuous(role, speed),
                     ServoRest(Quat::IDENTITY),
                     ServoIndex(slot),
                     TankRoot(tank),
@@ -986,8 +983,8 @@ pub(crate) mod tests {
                     role,
                 ));
             };
-            mount(turret, ServoRole::Yaw, 0, YAW_SPEED, YAW_ACCEL);
-            mount(gun, ServoRole::Pitch, 1, PITCH_SPEED, PITCH_ACCEL);
+            mount(turret, ServoRole::Yaw, 0, YAW_SPEED);
+            mount(gun, ServoRole::Pitch, 1, PITCH_SPEED);
 
             Self {
                 world,
@@ -1290,31 +1287,15 @@ pub(crate) mod tests {
         );
     }
 
-    /// **The pivot residual is the servo's, and only the servo's.** The player HOLDS THE CROSSHAIR
-    /// on a target — an act, re-picked from the screen-centre ray every frame — while the hull
-    /// pivots at ω. The bore must trail by exactly what a rate-limited mount costs and by nothing
-    /// else, WHICHEVER WAY the hull turns.
-    ///
-    /// The mechanism's own floor is its braking envelope's fixed point: `drive_servos` commands
-    /// `v = sqrt(2·a·ε)`, so sustaining ω needs a standing error of `ω²/2a`, less the tick the
-    /// target moves before the mount answers. That floor is symmetric in ω. A transport that rotates
-    /// with the hull is not: it biases the lay by `ω·(delivery gap)` in the direction of the turn,
-    /// which partly CANCELS the mount's lag on one side and adds to it on the other — which is why
-    /// both directions are run, and why a single-direction measurement can flatter the bug.
-    ///
-    /// The lay follows the aiming view, and the player owns the view: third person's camera is
-    /// world-locked, so while the player is LOOKING at a place the gunner lays on that place,
-    /// rate-limited by the mount. That is ratified crew behaviour off live input, not a software
-    /// hold — the holds are `a_held_bearing_sweeps_the_gun_with_the_hull` (ADR-0038).
+    /// The game's damage model (game state only): a hand mount whose rate exceeds the hull pivot follows a world place
+    /// without steady lag. A transport which rotates the intention in flight instead introduces
+    /// ±ω*delivery delay, so both pivot directions must pass.
     #[test]
-    fn a_steady_pivot_leaves_only_the_mounts_rate_limited_lag() {
+    fn a_hand_mount_follows_a_world_place_through_either_pivot() {
         /// Hull yaw rate, degrees/second — a brisk neutral-steer pivot.
         const OMEGA: f32 = 10.0;
         let target = ROOT + Vec3::new(0.0, 0.0, -500.0);
 
-        // The braking envelope's standing error, one integrated step past the fixed point. It
-        // depends on |ω| alone: the mount does not care which way the hull went.
-        let lag = OMEGA * OMEGA / (2.0 * YAW_ACCEL) - OMEGA.abs() * TICK;
         let transport = OMEGA * DELIVERY_TICKS as f32 * TICK;
 
         for omega in [OMEGA, -OMEGA] {
@@ -1329,10 +1310,8 @@ pub(crate) mod tests {
             let hull = rig.hull_attitude();
             let residual = rig.bore_miss_deg(place, hull).0.abs();
             assert!(
-                (residual - lag).abs() < 0.05,
-                "at ω = {omega}°/s the standing lag must be the mount's own ω²/2a − |ω|·dt = \
-                 {lag:.3}°, got {residual:.3}°; an intention that rotates in flight biases it by \
-                 ±ω·delivery = {transport:.3}°, one way on each side",
+                residual < 0.05,
+                "at ω = {omega}°/s, within the fixture hand rate, residual {residual:.3}° must stay near zero; rotating intention in flight biases it by ±ω·delivery = {transport:.3}°",
             );
         }
     }

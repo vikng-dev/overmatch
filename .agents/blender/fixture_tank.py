@@ -62,7 +62,7 @@ TankSpec(
     display_name: "Testbed",
     mass: 1000.0,
     inertia_extents: (2.0, 1.0, 3.0),
-    turret: (mass: 100.0, inertia_extents: (1.0, 1.0, 1.0)),
+    turret: (node: None, mass: 100.0, inertia_extents: (1.0, 1.0, 1.0)),
     track: (
         pin_plane_x: (left: -1.0, right: 1.0),
         substance: "RHA",
@@ -77,7 +77,7 @@ TankSpec(
                 engine: (
                     idle_rpm: 600.0,
                     governed_rpm: 2000.0,
-                    crank_limit_rpm: (2400.0, Derived("nominal design do-not-exceed crank speed, beyond the completed fuel cut at 2100 rpm")),
+                    crank_limit_rpm: (2400.0, Unknown("provisional nominal crank ceiling; a design overspeed limit would settle it")),
                     rated_rpm: 2400.0,
                     cylinders: 1,
                     sound: None,
@@ -112,6 +112,7 @@ TankSpec(
             engage: 0.02,
         ),
     ),
+    // No actuators in this construction; servo rows select Hand or Powered and require labelled facts.
     servos: {},
     volumes: {
         "Wheel_L": (external: true),

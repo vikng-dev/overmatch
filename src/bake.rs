@@ -12,9 +12,9 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
-use crate::spec::{NodeReference, NodeRole, TankSpec, TankSpecHandle, ViewKind};
+use crate::spec::{NodeReference, NodeRole, TankSpec, TankSpecHandle};
 use crate::substances::SubstanceRegistry;
-use crate::tank::{ServoRole, SimParts, TrackSide, rig_world_pose};
+use crate::tank::{SimParts, TrackSide, rig_world_pose};
 
 mod embedding;
 #[cfg(test)]
@@ -407,23 +407,10 @@ impl TankBlueprint {
     }
 }
 
-/// The node a cook-off launches as its own body: the first Yaw servo at or above the Gunner view's
-/// node, the traverse of the gunner's chain. `None` when the sheet names no Gunner view, its node is
-/// not in the model, or no Yaw servo sits above it.
+/// The game's damage model: detachable construction is declared independently of optics.
+/// None names a sheet with no assembly or a missing node (reported by the reference gate).
 pub(crate) fn turret_node(geometry: &TankGeometry, spec: &TankSpec) -> Option<usize> {
-    let mut index = *geometry
-        .by_name
-        .get(&spec.views.get(&ViewKind::Gunner)?.node)?;
-    loop {
-        let yaw = spec
-            .servos
-            .get(&geometry.nodes[index].name)
-            .is_some_and(|servo| servo.role() == ServoRole::Yaw);
-        if yaw {
-            return Some(index);
-        }
-        index = geometry.nodes[index].parent?;
-    }
+    geometry.by_name.get(spec.turret.node.as_ref()?).copied()
 }
 
 /// The selected tank's sheet, embedded: named by the same selection (`assets::tank_file!`) as the
@@ -1867,6 +1854,7 @@ fn transform_bits_eq(a: &Transform, b: &Transform) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::ViewKind;
     use fixture::{CLOSED, Node, Primitive, pierced, solid};
 
     /// A registry substance, and a material name that is not one. Which two does not matter — what
@@ -1913,6 +1901,34 @@ mod tests {
             ],
             indices,
         )
+    }
+
+    /// The game's damage model: adding an independently traversing sight must not select the
+    /// body which receives assembly mass. Structural data is the sole owner of that identity.
+    #[test]
+    fn assembly_root_does_not_follow_optics() {
+        let (nodes, sheet) = sound_vehicle();
+        let sheet = sheet.replace("node: None, mass:", "node: Some(\"Hull\"), mass:");
+        let asset = fixture::write("assembly-root", &nodes, &sheet);
+        let mut spec: TankSpec = ron::from_str(&sheet).unwrap();
+        let geometry =
+            extract_tank_geometry(&asset.glb, &spec, &SubstanceRegistry::shipped()).unwrap();
+        let expected = geometry.by_name["Hull"];
+        assert_eq!(turret_node(&geometry, &spec), Some(expected));
+        // Fixture sight is elsewhere and need not have a servo ancestor.
+        spec.views.insert(
+            ViewKind::Gunner,
+            crate::spec::ViewSpec {
+                node: "Plate".into(),
+                optics: crate::spec::Optics::Unaided(60.0),
+                requires: Vec::new(),
+            },
+        );
+        spec.servos.insert(
+            "Plate".into(),
+            crate::tank::ServoSpec::test_continuous(crate::tank::ServoRole::Yaw, 1.0),
+        );
+        assert_eq!(turret_node(&geometry, &spec), Some(expected));
     }
 
     /// `spec` with `node` also declared main armour.
@@ -2389,7 +2405,7 @@ mod tests {
             &[("Station_L", "Left"), ("Station_R", "Right")],
             &["Plate"],
             &[],
-            r#"servos: {"Turret_Yaw": (role: Yaw, max_speed: 1.0, accel: 1.0, travel: Continuous,
+            r#"servos: {"Turret_Yaw": (role: Yaw, drive: Hand(hand_rate: (1.0, Fixture("fixture hand rate"))), travel: Continuous,
         requires: [])},
     weapons: {"Main": (
         trigger: Primary,

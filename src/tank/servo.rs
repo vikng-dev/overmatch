@@ -1,18 +1,106 @@
-//! Servo mechanism. Window contract (design `armor-penetration-and-damage.md` §13.5): a `Limited`
-//! travel is finite with `min <= 0 <= max`, certify refuses any other, and `drive_servos` keeps
-//! `current` inside it on every tick.
+//! Spawn-built servo mechanisms. `drive_servos` keeps limited travel inside its admitted window;
+//! sim angles and velocities use radians. Law and input provenance: design
+//! `armor-penetration-and-damage.md` §7c.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::model::{TankRoot, TankServos};
 use super::view::{ViewOf, ViewServo};
-use crate::damage::{Requirement, TankVolumes, VolumeFacets, evaluate, part_facts};
+use crate::damage::{
+    Part, Requirement, TankVolumes, VolumeFacets, evaluate, live_quality, part_facts,
+};
+use crate::provenance::Sourced;
+use crate::spec::{TankSpec, TurretSpec};
+use crate::track::sim::EngineRpm;
+use crate::track::transmission::{RPM_TO_RAD, TransmissionParams};
 
 #[derive(Clone, Copy, Deserialize)]
+#[serde(from = "TravelDegrees")]
 pub enum Travel {
     Limited { min: f32, max: f32 },
     Continuous,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+enum TravelDegrees {
+    Limited { min: f32, max: f32 },
+    Continuous,
+}
+
+impl From<TravelDegrees> for Travel {
+    fn from(value: TravelDegrees) -> Self {
+        match value {
+            TravelDegrees::Limited { min, max } => Self::Limited {
+                min: min.to_radians(),
+                max: max.to_radians(),
+            },
+            TravelDegrees::Continuous => Self::Continuous,
+        }
+    }
+}
+
+fn angular_rate<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Sourced<f32>, D::Error> {
+    let rate = Sourced::<f32>::deserialize(d)?.0;
+    let radians = rate.to_radians();
+    if !radians.is_finite() || radians <= 0.0 {
+        return Err(serde::de::Error::custom(
+            "hand_rate must be finite and positive in degrees/s and radians/s; author a representable rate",
+        ));
+    }
+    Ok(Sourced(radians))
+}
+
+/// Construction selects a motor law; all runtime angular quantities use radians.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+enum ServoDrive {
+    Hand {
+        #[serde(deserialize_with = "angular_rate")]
+        hand_rate: Sourced<f32>,
+    },
+    Powered {
+        power_share: Sourced<f32>,
+        stall_torque: Sourced<f32>,
+        bearing_friction: Sourced<f32>,
+        #[serde(deserialize_with = "angular_rate")]
+        hand_rate: Sourced<f32>,
+    },
+}
+
+/// Spawn-built construction, never loaded from a view asset or replicated as mechanism state.
+#[derive(Component)]
+pub(crate) struct ServoMechanism {
+    engine: TransmissionParams,
+    inertia: [f32; 2],
+}
+
+impl ServoMechanism {
+    pub(super) fn from_spec(spec: &TankSpec) -> Self {
+        Self {
+            engine: spec
+                .track
+                .nominal_transmission_params(&spec.roadwheels)
+                .expect("TankSpec admits the transmission before servo construction"),
+            inertia: [
+                axis_inertia(&spec.turret, ServoRole::Yaw),
+                axis_inertia(&spec.turret, ServoRole::Pitch),
+            ],
+        }
+    }
+}
+
+pub(crate) fn axis_inertia(turret: &TurretSpec, role: ServoRole) -> f32 {
+    let (x, y, z) = turret.inertia_extents;
+    // Uniform cuboid about its centre: I = m(a² + b²)/12, perpendicular to the axis.
+    turret.mass
+        * (z * z
+            + match role {
+                ServoRole::Yaw => x * x,
+                ServoRole::Pitch => y * y,
+            })
+        / 12.0
 }
 
 /// Aiming degree of freedom and its local rotation axis.
@@ -31,16 +119,13 @@ impl ServoRole {
     }
 }
 
-/// Authored one-axis motor limits. Specs use degrees; runtime state uses radians.
+/// One-axis mechanism; authored degrees are converted at deserialization.
 #[derive(Component, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServoSpec {
     /// Role-based binding and rotation-axis source.
     pub(super) role: ServoRole,
-    /// Max slew speed, degrees/second.
-    max_speed: f32,
-    /// Slew acceleration, degrees/second².
-    accel: f32,
+    drive: ServoDrive,
     travel: Travel,
     /// In the game's damage model (game state only), this requirement scales slew effectiveness.
     /// Required: an authored `[]` slews at full speed independently of the HP pools.
@@ -56,7 +141,7 @@ impl ServoSpec {
     /// Authored travel window converted to runtime radians; `None` means continuous rotation.
     pub fn travel_limits(&self) -> Option<(f32, f32)> {
         match self.travel {
-            Travel::Limited { min, max } => Some((min.to_radians(), max.to_radians())),
+            Travel::Limited { min, max } => Some((min, max)),
             Travel::Continuous => None,
         }
     }
@@ -65,11 +150,26 @@ impl ServoSpec {
     /// The contract: a `Limited` window is finite with `min <= 0 <= max` (a servo spawns at angle 0,
     /// so the window holds its own start), and `drive_servos` never lets `current` leave it.
     pub(crate) fn admission_fault(&self) -> Option<String> {
-        for (field, value) in [("max_speed", self.max_speed), ("accel", self.accel)] {
-            if !value.is_finite() || value <= 0.0 || value.to_radians() <= 0.0 {
-                return Some(format!(
-                    "{field} must be finite and positive in degrees and runtime radians; author a representable motor limit"
-                ));
+        if let ServoDrive::Powered {
+            power_share,
+            stall_torque,
+            bearing_friction,
+            ..
+        } = self.drive
+        {
+            for (field, value) in [
+                ("power_share", power_share.0),
+                ("stall_torque", stall_torque.0),
+                ("bearing_friction", bearing_friction.0),
+            ] {
+                if !value.is_finite() || value <= 0.0 {
+                    return Some(format!(
+                        "drive.Powered.{field} must be finite and positive; author a positive drive fact"
+                    ));
+                }
+            }
+            if power_share.0 > 1.0 || stall_torque.0 <= bearing_friction.0 {
+                return Some("drive.Powered needs power_share <= 1 and stall_torque > bearing_friction; correct the drive facts".into());
             }
         }
         let Travel::Limited { min, max } = self.travel else {
@@ -79,36 +179,32 @@ impl ServoSpec {
         (!(min.is_finite() && max.is_finite() && min <= 0.0 && max >= 0.0)).then(|| {
             format!(
                 "travel Limited(min: {min}, max: {max}) must be finite with min <= 0 <= max \
-                 (degrees): a servo spawns at angle 0, which the window must contain"
+                 (radians): a servo spawns at angle 0, which the window must contain"
             )
         })
     }
 
+    /// Fixture hand drive; test callers supply degrees at the same edge as authored data.
     #[cfg(test)]
-    pub(crate) fn test_limited(
-        role: ServoRole,
-        max_speed: f32,
-        accel: f32,
-        min: f32,
-        max: f32,
-    ) -> Self {
+    pub(crate) fn test_limited(role: ServoRole, rate: f32, min: f32, max: f32) -> Self {
         Self {
             role,
-            max_speed,
-            accel,
-            travel: Travel::Limited { min, max },
+            drive: ServoDrive::Hand {
+                hand_rate: Sourced(rate.to_radians()),
+            },
+            travel: Travel::Limited {
+                min: min.to_radians(),
+                max: max.to_radians(),
+            },
             requires: Vec::new(),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn test_continuous(role: ServoRole, max_speed: f32, accel: f32) -> Self {
+    pub(crate) fn test_continuous(role: ServoRole, rate: f32) -> Self {
         Self {
-            role,
-            max_speed,
-            accel,
             travel: Travel::Continuous,
-            requires: Vec::new(),
+            ..Self::test_limited(role, rate, 0.0, 0.0)
         }
     }
 }
@@ -245,6 +341,7 @@ pub(crate) fn drive_servos(
     mut remote_servos: Query<&mut RemoteServos>,
     tanks: Query<&TankVolumes>,
     facets: Query<VolumeFacets>,
+    mechanisms: Query<(&ServoMechanism, &EngineRpm)>,
     time: Res<Time>,
 ) {
     let dt = time.delta_secs();
@@ -277,62 +374,148 @@ pub(crate) fn drive_servos(
         // Preserve the prior fixed-step value for view interpolation.
         state.previous = state.current;
 
-        // Requirement effectiveness scales slew; zero freezes the mount.
+        // The game's damage model: requirements scale operator work; engine quality scales power.
         let volumes = tanks
             .get(root.0)
             .expect("an admitted tank with a servo carries its volume relationship target");
-        let slew = evaluate(&spec.requires, &part_facts(volumes, &facets).quality);
-
-        // Specs author degrees; runtime state and commands use radians.
-        let max_speed = spec.max_speed.to_radians() * slew;
-        let accel = spec.accel.to_radians();
-        let travel = match spec.travel {
-            Travel::Limited { min, max } => Travel::Limited {
-                min: min.to_radians(),
-                max: max.to_radians(),
-            },
-            Travel::Continuous => Travel::Continuous,
+        let facts = part_facts(volumes, &facets);
+        let slew = evaluate(&spec.requires, &facts.quality);
+        let (power, inertia) = match spec.drive {
+            ServoDrive::Hand { .. } => (0.0, 0.0),
+            ServoDrive::Powered { .. } => {
+                let (mechanism, rpm) = mechanisms.get(root.0)
+                    .expect("a powered servo's root has spawn-built construction and replicated crank speed");
+                // Missing Engine denotes an absent source in the game's damage model, hence no power.
+                let quality = live_quality(&facts.quality, Part::Engine);
+                let power =
+                    mechanism.engine.torque_at(rpm.rpm()) * rpm.rpm() * RPM_TO_RAD * quality;
+                let inertia = mechanism.inertia[match spec.role {
+                    ServoRole::Yaw => 0,
+                    ServoRole::Pitch => 1,
+                }];
+                (power, inertia)
+            }
         };
-
-        let error = match travel {
-            Travel::Limited { .. } => command.target - state.current,
-            Travel::Continuous => shortest_angle(command.target - state.current),
-        };
-
-        // Snap an overshooting step to prevent a discrete limit cycle around the target.
-        let step = state.velocity * dt;
-        if step.abs() >= error.abs() && error.abs() > 0.0 {
-            state.current += error;
-            if let Travel::Limited { min, max } = travel {
-                state.current = state.current.clamp(min, max);
-            }
-            state.velocity = 0.0;
-        } else {
-            // Braking envelope: v = sqrt(2a * distance), capped by authored speed.
-            let target_speed = (2.0 * accel * error.abs()).sqrt().min(max_speed);
-            let desired_velocity = error.signum() * target_speed;
-            let dv = accel * dt;
-            state.velocity += (desired_velocity - state.velocity).clamp(-dv, dv);
-
-            state.current += state.velocity * dt;
-            if let Travel::Limited { min, max } = travel {
-                state.current = state.current.clamp(min, max);
-            }
-        }
-
-        // Scale the deadband to one step's resolution instead of a fixed unreachable epsilon.
-        let settle = accel * dt * dt;
-        if error.abs() < settle && state.velocity.abs() < accel * dt {
-            state.velocity = 0.0;
-            if let Travel::Limited { min, max } = travel {
-                state.current = command.target.clamp(min, max);
-            }
-        }
+        advance_servo(state, spec, command.target, power, inertia, slew, dt);
 
         // The sim node always carries fixed-step truth; smoothing writes the view tree only.
         let rotation = servo_rotation(spec, rest, state.current);
         if transform.rotation != rotation {
             transform.rotation = rotation;
+        }
+    }
+}
+
+/// Implicit acceleration solves I Δω/Δt = min(Tstall, P/ω) - Tbearing.
+/// The positive quadratic root prevents a discrete step oscillating across the power equilibrium.
+fn powered_velocity(
+    speed: f32,
+    power: f32,
+    stall: f32,
+    friction: f32,
+    inertia: f32,
+    dt: f32,
+) -> f32 {
+    let (speed, power, stall, friction, inertia, dt) = (
+        f64::from(speed),
+        f64::from(power),
+        f64::from(stall),
+        f64::from(friction),
+        f64::from(inertia),
+        f64::from(dt),
+    );
+    let step = dt / inertia;
+    let stalled = speed + (stall - friction) * step;
+    if stalled * stall <= power {
+        stalled as f32
+    } else {
+        let b = speed - friction * step;
+        let c = power * step;
+        let root = (b * b + 4.0 * c).sqrt();
+        // Rationalize the root when b is negative to avoid subtracting equal magnitudes.
+        (if b >= 0.0 {
+            (b + root) / 2.0
+        } else {
+            2.0 * c / (root - b)
+        }) as f32
+    }
+}
+
+fn advance_servo(
+    state: &mut ServoState,
+    spec: &ServoSpec,
+    target: f32,
+    engine_power: f32,
+    inertia: f32,
+    slew: f32,
+    dt: f32,
+) {
+    assert!(
+        dt.is_finite() && dt >= 0.0 && engine_power.is_finite() && engine_power >= 0.0,
+        "servo time and available engine power are finite nonnegative simulation facts"
+    );
+    if dt == 0.0 {
+        // No elapsed simulation time, including a fresh test world.
+        return;
+    }
+    let error = match spec.travel {
+        Travel::Limited { min, max } => target.clamp(min, max) - state.current,
+        Travel::Continuous => shortest_angle(target - state.current),
+    };
+    let hand_rate = match spec.drive {
+        ServoDrive::Hand { hand_rate } | ServoDrive::Powered { hand_rate, .. } => hand_rate.0,
+    };
+    if slew == 0.0 {
+        state.velocity = 0.0;
+        return;
+    }
+    state.velocity = match spec.drive {
+        ServoDrive::Powered {
+            power_share,
+            stall_torque,
+            bearing_friction,
+            ..
+        } if engine_power > 0.0 => {
+            let power = engine_power * power_share.0 * slew;
+            let stall = stall_torque.0;
+            let friction = bearing_friction.0;
+            let speed = state.velocity.abs();
+            let torque = if speed * stall <= power {
+                stall
+            } else {
+                power / speed
+            };
+            // Opposing motor torque and bearing friction brake together. The current torque is
+            // a conservative bound: available motor torque increases as the mechanism slows.
+            let brake_accel = (torque + friction) / inertia;
+            // A position command limits requested speed, never the available stopping torque.
+            let desired = (2.0 * brake_accel * error.abs())
+                .sqrt()
+                .min(error.abs() / dt);
+            if state.velocity * error < 0.0 {
+                state.velocity.signum() * (speed - brake_accel * dt).max(0.0)
+            } else if speed > desired {
+                state.velocity.signum() * (speed - brake_accel * dt).max(desired)
+            } else {
+                error.signum()
+                    * powered_velocity(speed, power, stall, friction, inertia, dt).min(desired)
+            }
+        }
+        _ => {
+            if error == 0.0 {
+                0.0
+            } else {
+                error.signum() * (hand_rate * slew).min(error.abs() / dt)
+            }
+        }
+    };
+    state.current += state.velocity * dt;
+    if let Travel::Limited { min, max } = spec.travel {
+        let limited = state.current.clamp(min, max);
+        // A mechanical stop can absorb momentum; an aim command cannot.
+        if limited != state.current {
+            state.current = limited;
+            state.velocity = 0.0;
         }
     }
 }
@@ -376,11 +559,229 @@ pub fn shortest_angle(diff: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    // Fixture angles, rates, time steps and tolerances below exercise generic mechanism invariants.
     use std::time::Duration;
 
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
+
+    fn powered_spec(share: f32, stall: f32, friction: f32) -> ServoSpec {
+        // Fixture: a small powered mount with a one-degree/s hand drive.
+        ServoSpec {
+            drive: ServoDrive::Powered {
+                power_share: Sourced(share),
+                stall_torque: Sourced(stall),
+                bearing_friction: Sourced(friction),
+                hand_rate: Sourced(1f32.to_radians()),
+            },
+            ..ServoSpec::test_continuous(ServoRole::Yaw, 1.0)
+        }
+    }
+
+    fn powered_world(mass: f32, engine_share: f32) -> (World, Entity, Entity, Entity, f32) {
+        use crate::ballistics::ComponentHealth;
+        use crate::damage::{FunctionRole, VolumeOf};
+        // Fixture box and drive facts; no shipped vehicle output determines the assertions.
+        let turret = TurretSpec {
+            node: None,
+            mass,
+            inertia_extents: (2.0, 1.0, 2.0),
+        };
+        let mut mechanism = ServoMechanism::from_spec(crate::bake::selected_spec());
+        mechanism.inertia = [
+            axis_inertia(&turret, ServoRole::Yaw),
+            axis_inertia(&turret, ServoRole::Pitch),
+        ];
+        // Fixture engine inputs replace every engine field the servo reads; unused transmission
+        // construction comes from the admitted template and does not determine the expectations.
+        mechanism.engine.engine.torque_nm = vec![(600.0, 1000.0), (2400.0, 1000.0)];
+        mechanism.engine.engine.governed_rpm = 2400.0;
+        let rpm = EngineRpm(600);
+        let full_power = mechanism.engine.torque_at(rpm.rpm()) * rpm.rpm() * RPM_TO_RAD;
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        let root = world.spawn((TankServos::for_count(1), mechanism, rpm)).id();
+        let mut health = ComponentHealth::full(10);
+        health.set_held((health.capacity() as f32 * engine_share) as u32);
+        let engine = world
+            .spawn((FunctionRole::Engine, health, VolumeOf(root)))
+            .id();
+        let servo = world
+            .spawn((
+                Transform::default(),
+                powered_spec(0.001, 100.0, 20.0),
+                ServoRest(Quat::IDENTITY),
+                ServoCommand::default(),
+                ServoIndex(0),
+                TankRoot(root),
+            ))
+            .id();
+        (world, root, servo, engine, full_power)
+    }
+
+    fn tick_powered(world: &mut World, root: Entity, servo: Entity) -> ServoState {
+        // Fixture: a moving command maintains enough travel for the steady-speed law.
+        let current = world.get::<TankServos>(root).unwrap().states[0].current;
+        world.get_mut::<ServoCommand>(servo).unwrap().target = current + 2.9;
+        world
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_secs_f32(1.0 / 64.0));
+        world.run_system_once(drive_servos).unwrap();
+        world.get::<TankServos>(root).unwrap().states[0]
+    }
+
+    /// The game's damage model: authority reads the engine HP share every tick. An engine out
+    /// of action leaves only the operator's authored hand drive, including after powered motion.
+    #[test]
+    fn an_engine_out_of_action_selects_the_hand_rate() {
+        let (mut world, root, servo, engine, _) = powered_world(15.0, 1.0);
+        for _ in 0..512 {
+            tick_powered(&mut world, root, servo);
+        }
+        world
+            .get_mut::<crate::ballistics::ComponentHealth>(engine)
+            .unwrap()
+            .set_held(0);
+        let state = tick_powered(&mut world, root, servo);
+        let ServoDrive::Powered { hand_rate, .. } = world.get::<ServoSpec>(servo).unwrap().drive
+        else {
+            unreachable!()
+        };
+        assert_eq!(state.velocity, hand_rate.0);
+    }
+
+    /// The game's damage model: steady bearing work is P = Tfriction*ω. Authority consumers
+    /// rely on half engine quality producing half speed, rather than an alive/dead flag.
+    #[test]
+    fn engine_quality_scales_the_power_equilibrium() {
+        let mut speeds = Vec::new();
+        for quality in [1.0, 0.5] {
+            let (mut world, root, servo, _, power) = powered_world(15.0, quality);
+            for _ in 0..2048 {
+                tick_powered(&mut world, root, servo);
+            }
+            let state = world.get::<TankServos>(root).unwrap().states[0];
+            let ServoDrive::Powered {
+                power_share,
+                bearing_friction,
+                ..
+            } = world.get::<ServoSpec>(servo).unwrap().drive
+            else {
+                unreachable!()
+            };
+            let expected = power * power_share.0 * quality / bearing_friction.0;
+            assert!(
+                (state.velocity - expected).abs() < expected * 0.001,
+                "{} vs {expected}",
+                state.velocity
+            );
+            speeds.push(state.velocity);
+        }
+        eprintln!(
+            "MEASURED fixture steady rates: full={} rad/s, half={} rad/s",
+            speeds[0], speeds[1]
+        );
+        assert!((speeds[1] / speeds[0] - 0.5).abs() < 0.001);
+    }
+
+    /// Before the power knee, Δω = (Tstall - Tfriction)*dt/I. The mount's startup response
+    /// therefore halves when its declared mass doubles at fixed dimensions.
+    #[test]
+    fn declared_mass_sets_stall_acceleration() {
+        // Fixture masses; the independent cuboid derivation uses the fixture dimensions above.
+        let mut speeds = Vec::new();
+        for mass in [15.0, 30.0] {
+            let (mut world, root, servo, _, _) = powered_world(mass, 1.0);
+            let state = tick_powered(&mut world, root, servo);
+            let inertia = mass * (2.0 * 2.0 + 2.0 * 2.0) / 12.0;
+            let expected = (100.0 - 20.0) / inertia / 64.0;
+            assert!((state.velocity - expected).abs() < 1e-6);
+            speeds.push(state.velocity);
+        }
+        eprintln!(
+            "MEASURED fixture startup steps: base={} rad/s, doubled mass={} rad/s",
+            speeds[0], speeds[1]
+        );
+        assert_eq!(speeds[1], speeds[0] / 2.0);
+    }
+
+    /// Operator requirements gate both selected drive laws; no stored powered velocity may
+    /// carry an unavailable operator past the current pose in the game's damage model.
+    #[test]
+    fn an_unavailable_operator_stops_either_drive() {
+        for drive in [
+            powered_spec(0.01, 100.0, 20.0).drive,
+            ServoSpec::test_continuous(ServoRole::Yaw, 1.0).drive,
+        ] {
+            let (mut world, root, servo, _, _) = powered_world(15.0, 1.0);
+            // Fixture: Gunner is an absent source and the initial mechanism is moving.
+            world.get_mut::<TankServos>(root).unwrap().states[0] =
+                ServoState::test_new(0.0, 0.0, 0.5);
+            let mut spec = world.get_mut::<ServoSpec>(servo).unwrap();
+            spec.drive = drive;
+            spec.requires = vec![crate::damage::Group::Single(Part::Gunner)];
+            let state = tick_powered(&mut world, root, servo);
+            assert_eq!(state.current, 0.0);
+            assert_eq!(state.velocity, 0.0);
+        }
+    }
+
+    /// Operator throughput limits available work, not the drive's physical stall torque. A
+    /// partial operator must retain stall acceleration while reaching a proportional steady rate.
+    #[test]
+    fn operator_throughput_limits_power_without_changing_stall_torque() {
+        // Fixture engine work and drive facts; one-step speed stays below the power knee.
+        let power = 1000.0 * 600.0 * RPM_TO_RAD;
+        let spec = powered_spec(0.001, 100.0, 20.0);
+        for operator in [1.0, 0.5] {
+            let mut state = ServoState::default();
+            advance_servo(&mut state, &spec, 2.9, power, 10.0, operator, 1.0 / 64.0);
+            assert_eq!(state.velocity, (100.0 - 20.0) / 10.0 / 64.0);
+            for _ in 0..2048 {
+                let target = state.current + 2.9;
+                advance_servo(&mut state, &spec, target, power, 10.0, operator, 1.0 / 64.0);
+            }
+            let expected = power * 0.001 * operator / 20.0;
+            assert!((state.velocity - expected).abs() < expected * 0.001);
+        }
+    }
+
+    /// A commanded target is not a mechanical stop. A jumping aim intent cannot arrest inertia
+    /// faster than the available motor and bearing torque, even when it jumps onto the current pose.
+    #[test]
+    fn a_command_jump_preserves_momentum_until_the_drive_can_brake_it() {
+        // Fixture torque = 100 N m, bearing = 20 N m, I = 10 kg m²; Δω <= 12*dt rad/s.
+        let spec = powered_spec(1.0, 100.0, 20.0);
+        let dt = 1.0 / 64.0;
+        for target in [0.0, 0.001, -0.001] {
+            let mut state = ServoState::test_new(0.0, 0.0, 1.0);
+            advance_servo(&mut state, &spec, target, 1000.0, 10.0, 1.0, dt);
+            assert_eq!(state.velocity, 1.0 - 12.0 * dt);
+            assert!(state.current > target);
+        }
+    }
+
+    /// The controller must settle a constant command and reverse without a separate speed cap.
+    /// Available torque, rather than crossing the command angle, controls its velocity changes.
+    #[test]
+    fn a_powered_mount_settles_and_reverses_within_its_window() {
+        let mut spec = powered_spec(1.0, 100.0, 20.0);
+        // Fixture window, step and inertia; target changes include both mechanical limits.
+        spec.travel = Travel::Limited {
+            min: -1.0,
+            max: 1.0,
+        };
+        let mut state = ServoState::default();
+        for target in [0.5, -0.5, 2.0, -2.0, 0.0] {
+            for _ in 0..2048 {
+                advance_servo(&mut state, &spec, target, 1000.0, 10.0, 1.0, 1.0 / 64.0);
+                assert!((-1.0..=1.0).contains(&state.current));
+            }
+            assert!((state.current - target.clamp(-1.0, 1.0)).abs() < 1e-6);
+            assert!(state.velocity.abs() < 1e-6);
+        }
+    }
 
     /// Invariant: a `Limited` servo's `current` stays inside `travel_limits()` on every tick, for any
     /// start inside the window and any target, including one beyond either limit and one sweeping
@@ -388,7 +789,7 @@ mod tests {
     #[test]
     fn a_limited_servo_never_leaves_its_window() {
         let mut world = World::new();
-        let spec = ServoSpec::test_limited(ServoRole::Yaw, 90.0, 360.0, -20.0, 35.0);
+        let spec = ServoSpec::test_limited(ServoRole::Yaw, 90.0, -20.0, 35.0);
         let (lo, hi) = spec.travel_limits().unwrap();
         let dt = 1.0 / 64.0;
         world.insert_resource(Time::<()>::default());
@@ -448,15 +849,24 @@ mod tests {
         }
     }
 
-    /// Both limited and continuous motors must publish finite, positive runtime limits. A zero,
-    /// non-finite or underflowed rate would silently freeze or corrupt the integrator.
+    /// Admission protects the integrator from nonrepresentable hand rates and drive facts.
     #[test]
-    fn motor_limits_refuse_invalid_values_before_play() {
-        for value in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::from_bits(1)] {
-            let spec = ServoSpec::test_continuous(ServoRole::Yaw, value, 1.0);
-            assert!(spec.admission_fault().unwrap().contains("max_speed"));
-            let spec = ServoSpec::test_limited(ServoRole::Yaw, 1.0, value, -1.0, 1.0);
-            assert!(spec.admission_fault().unwrap().contains("accel"));
+    fn motor_facts_refuse_invalid_values_before_play() {
+        for value in ["0.0", "-1.0", "NaN", "inf", "1e-45"] {
+            let row = format!(
+                "(role: Yaw, drive: Hand(hand_rate: ({value}, Fixture(\"rate\"))), travel: Continuous, requires: [])"
+            );
+            assert!(ron::from_str::<ServoSpec>(&row).is_err());
+        }
+        // Fixture power-drive facts; each admitted drive must overcome its own bearing friction.
+        for (share, stall, friction) in [
+            (0.0, 10.0, 1.0),
+            (2.0, 10.0, 1.0),
+            (0.1, 1.0, 1.0),
+            (0.1, 10.0, 0.0),
+        ] {
+            let spec = powered_spec(share, stall, friction);
+            assert!(spec.admission_fault().is_some());
         }
     }
 
@@ -475,7 +885,7 @@ mod tests {
             .id();
         world.spawn((
             Transform::default(),
-            ServoSpec::test_continuous(ServoRole::Yaw, 1.0, 1.0),
+            ServoSpec::test_continuous(ServoRole::Yaw, 1.0),
             ServoRest(Quat::IDENTITY),
             ServoCommand::default(),
             ServoIndex(0),
@@ -518,9 +928,8 @@ mod tests {
     /// windows are refused; a continuous mount and a window holding 0 are not.
     #[test]
     fn the_window_contract_refuses_inverted_and_zero_excluding_travel() {
-        let fault = |min, max| {
-            ServoSpec::test_limited(ServoRole::Pitch, 1.0, 1.0, min, max).admission_fault()
-        };
+        let fault =
+            |min, max| ServoSpec::test_limited(ServoRole::Pitch, 1.0, min, max).admission_fault();
         assert!(fault(-10.0, 20.0).is_none());
         assert!(fault(0.0, 20.0).is_none());
         assert!(fault(-10.0, 0.0).is_none());
@@ -530,7 +939,7 @@ mod tests {
         assert!(fault(f32::NAN, 1.0).is_some());
         assert!(fault(-1.0, f32::INFINITY).is_some());
         assert!(
-            ServoSpec::test_continuous(ServoRole::Yaw, 1.0, 1.0)
+            ServoSpec::test_continuous(ServoRole::Yaw, 1.0)
                 .admission_fault()
                 .is_none()
         );
@@ -550,7 +959,7 @@ mod tests {
             .id();
         let servo = world
             .spawn((
-                ServoSpec::test_continuous(ServoRole::Yaw, 90.0, 180.0),
+                ServoSpec::test_continuous(ServoRole::Yaw, 90.0),
                 ServoRest(Quat::IDENTITY),
                 ServoIndex(0),
                 TankRoot(root),

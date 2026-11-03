@@ -19,6 +19,7 @@ mod shadow_proxy;
 mod spawn;
 mod view;
 
+pub(crate) use integrity::authored_attachment;
 #[cfg(test)]
 pub use model::WeaponState;
 pub(crate) use model::controlled_one;
@@ -33,10 +34,7 @@ pub use model::{
     WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound, WeaponTiming,
 };
 pub use scenario::{client_plugin, sp_spawn_plugin};
-pub(crate) use servo::RemoteServos;
-// The servo mechanism itself, for the aim regression net: `aim`'s transport tests converge real
-// servos at authored Tiger rates rather than asserting on a target angle.
-pub(crate) use integrity::authored_attachment;
+pub(crate) use servo::{RemoteServos, axis_inertia};
 pub use servo::{
     ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, servo_pose, shortest_angle,
 };
