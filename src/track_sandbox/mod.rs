@@ -376,7 +376,7 @@ fn mount_harness(app: &mut App, scenario: harness::Harness) {
 /// A live belt contact station for visualization: the station in **hull-local** space (so the dot
 /// rides the interpolated rig instead of jittering against the last fixed-tick pose), its load, the
 /// ground normal it pushes along, its longitudinal slip speed (m/s — colours the dot green→red),
-/// and the friction force it applied (world space — the force-vector layer).
+/// and the total grip plus rolling force it applied (world space — the force-vector layer).
 struct Contact {
     local: Vec3,
     /// Actual damped support load; traction capacity reads elastic load instead.
@@ -389,7 +389,7 @@ struct Contact {
     f_lat: f32,
     /// Emitted contact capacity before mobilization, N.
     capacity_n: f32,
-    traction: Vec3,
+    tangential_force: Vec3,
 }
 
 /// The belt contact stations found this tick, PER SIDE `[left, right]` (side identity matters
@@ -1620,10 +1620,10 @@ fn draw_contacts(
                 p + c.normal * (c.load * force_viz_scale()),
                 Color::srgb_from_array(scene().support_force_srgb.0),
             );
-            if c.traction.length_squared() > scene().traction_min_n_squared.0 {
+            if c.tangential_force.length_squared() > scene().traction_min_n_squared.0 {
                 gizmos.arrow(
                     p,
-                    p + c.traction * force_viz_scale(),
+                    p + c.tangential_force * force_viz_scale(),
                     Color::srgb_from_array(scene().traction_force_srgb.0),
                 );
             }

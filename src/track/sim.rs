@@ -152,13 +152,13 @@ pub struct TrackGrip {
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
 pub struct TrackGripEffect {
     /// Total world-space grip and rolling force on the hull (N).
-    pub traction_force: Vec3,
+    pub tangential_force: Vec3,
     /// Current contact capacity (N), before mobilization, for prospective stopping.
     pub traction_capacity_n: f32,
     /// Delivered world-space rolling force on the hull (N), for prospective stopping.
     pub rolling_force: Vec3,
     /// Total world-space grip and rolling torque about the hull center of mass (N*m).
-    pub traction_torque: Vec3,
+    pub tangential_torque: Vec3,
     /// Longitudinal ground reaction on `[left, right]` belts (N).
     pub belt_reaction: [f32; 2],
     /// Coarse, quantized digest of the complete element field. Diagnostic evidence only.
@@ -971,10 +971,10 @@ fn apply_track_forces(
             pieces.record_static_contacts(entity, &report.contacts, &mut transfers);
             effect.belt_reaction[si] = report.belt_reaction;
             for contact in &report.contacts {
-                effect.traction_force += contact.tangential_force();
+                effect.tangential_force += contact.tangential_force();
                 effect.rolling_force += contact.rolling_force;
                 effect.traction_capacity_n += contact.mu * contact.load_elastic;
-                effect.traction_torque +=
+                effect.tangential_torque +=
                     (contact.point - center_of_mass).cross(contact.tangential_force());
             }
             // Apply in report order — accumulation order is part of determinism.
@@ -1176,7 +1176,7 @@ mod tests {
             .unwrap();
             bits.extend(carried.into_iter().map(u64::from));
             let effect = world.get::<TrackGripEffect>(root).unwrap();
-            for v in [effect.traction_force, effect.traction_torque] {
+            for v in [effect.tangential_force, effect.tangential_torque] {
                 bits.extend(v.to_array().map(|x| u64::from(x.to_bits())));
             }
             bits.extend(effect.belt_reaction.map(|x| u64::from(x.to_bits())));
@@ -1804,7 +1804,7 @@ mod tests {
                 .world()
                 .get::<TrackGripEffect>(self.root)
                 .unwrap()
-                .traction_force
+                .tangential_force
                 .z;
             self.speed += (-traction + grade) / self.mass / 64.0;
             self.distance += self.speed / 64.0;
@@ -2059,8 +2059,8 @@ mod tests {
             let effect = hull.app.world().get::<TrackGripEffect>(hull.root).unwrap();
             // Fixture yaw inertia is the 30,000 kg m² authored by fixture_tank. Translation
             // uses the same data-derived mass as the free longitudinal hull fixture.
-            yaw += effect.traction_torque.y / 30_000.0 / 64.0;
-            velocity += effect.traction_force / hull.mass / 64.0;
+            yaw += effect.tangential_torque.y / 30_000.0 / 64.0;
+            velocity += effect.tangential_force / hull.mass / 64.0;
             angle += yaw / 64.0;
             position += velocity / 64.0;
         }
@@ -2741,16 +2741,16 @@ mod tests {
                 );
                 assert!(
                     (decel * transmission::coupled_mass(&gear.construction)
-                        - effect.traction_force.z)
+                        - effect.tangential_force.z)
                         .abs()
                         < 2.0,
                     "forecast {} N must match delivered {} N, rolling {rolling} N",
                     decel * transmission::coupled_mass(&gear.construction),
-                    effect.traction_force.z
+                    effect.tangential_force.z
                 );
                 saturated = true;
             }
-            hull.speed -= effect.traction_force.z / hull.mass / 64.0;
+            hull.speed -= effect.tangential_force.z / hull.mass / 64.0;
             hull.distance += hull.speed / 64.0;
             peak = peak.max(hull.distance);
             reverse = reverse.min(hull.speed);

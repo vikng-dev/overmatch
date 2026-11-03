@@ -200,12 +200,12 @@ const POSE_FIELDS: &[(&str, &str)] = &[
     ("grip.left.lat", "f32"),
     ("grip.right.long", "f32"),
     ("grip.right.lat", "f32"),
-    ("effect.traction_force.x", "f32"),
-    ("effect.traction_force.y", "f32"),
-    ("effect.traction_force.z", "f32"),
-    ("effect.traction_torque.x", "f32"),
-    ("effect.traction_torque.y", "f32"),
-    ("effect.traction_torque.z", "f32"),
+    ("effect.tangential_force.x", "f32"),
+    ("effect.tangential_force.y", "f32"),
+    ("effect.tangential_force.z", "f32"),
+    ("effect.tangential_torque.x", "f32"),
+    ("effect.tangential_torque.y", "f32"),
+    ("effect.tangential_torque.z", "f32"),
     ("effect.reaction_left", "f32"),
     ("effect.reaction_right", "f32"),
     ("effect.field_digest", "u32"),
@@ -890,8 +890,8 @@ fn pose_payload(world: &World, tank: Entity) -> Vec<u32> {
             f32_word(&mut output, value);
         }
     }
-    vec3_words(&mut output, effect.traction_force);
-    vec3_words(&mut output, effect.traction_torque);
+    vec3_words(&mut output, effect.tangential_force);
+    vec3_words(&mut output, effect.tangential_torque);
     f32_word(&mut output, effect.belt_reaction[0]);
     f32_word(&mut output, effect.belt_reaction[1]);
     output.push(effect.field_digest);

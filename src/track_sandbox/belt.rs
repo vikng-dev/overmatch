@@ -91,7 +91,7 @@ impl PinBelt {
 ///   searching it, so there is nothing to tie-break;
 /// - stations are signed (clearance below zero), so the profile's closed-form clipping still
 ///   finds the lift-off point between stations;
-/// - support + traction applied at the profile centroid on the terrain surface
+/// - support + total tangent force applied at the profile centroid on the terrain surface
 ///   (`+ out·(t/2 − pen_c)`), so the lever arm includes the shoe.
 #[expect(
     clippy::too_many_arguments,
@@ -301,7 +301,7 @@ pub(super) fn apply_belt_support_field(
                 f_long: c.f_long,
                 f_lat: c.f_lat,
                 capacity_n: c.mu * c.load_elastic,
-                traction: c.tangential_force(),
+                tangential_force: c.tangential_force(),
             });
         }
         *dynamics.engine.get_mut(side) = tr.forces[si];

@@ -2,7 +2,7 @@
 //!
 //! Debug helpers, compiled into every build, the packaged network client included. Press `G` to
 //! toggle the debug gizmos: belt-contact force arrows (cyan = support load along the contact
-//! normal, orange = traction) plus Avian's collider wireframes. A
+//! normal, orange = grip plus rolling) plus Avian's collider wireframes. A
 //! see-through tank is the pen cam's x-ray (`X`, `damage_cam::pen_cam::game`), not a debug key.
 //!
 //! Mounted by BOTH client compositions — `ClientPlugin` (single-player) and `NetClientPlugin`
@@ -75,9 +75,8 @@ fn configure_physics_gizmos(mut store: ResMut<GizmoConfigStore>) {
     gizmos.raycast_normal_color = None;
 }
 
-/// Draw each belt contact's forces: cyan = the ACTUAL applied support load (damped; what
-/// scaled the friction ellipse) along the contact's inward normal, orange = traction. Reads the sim's per-tick contact telemetry ([`TrackContacts`],
-/// world points at the tick pose) — a live load/traction readout of the phase-B belt model.
+/// Draw delivered support in cyan and total grip plus rolling in orange, as in the sandbox.
+/// Reads per-tick contact telemetry ([`TrackContacts`], world points at the tick pose).
 fn draw_wheel_forces(tanks: Query<&TrackContacts>, mut gizmos: Gizmos) {
     for contacts in &tanks {
         for side in &contacts.0 {
@@ -86,8 +85,9 @@ fn draw_wheel_forces(tanks: Query<&TrackContacts>, mut gizmos: Gizmos) {
                     let tip = c.point + c.normal * (c.load * FORCE_VIZ_SCALE);
                     gizmos.arrow(c.point, tip, Color::srgb(0.1, 0.9, 1.0));
                 }
-                if c.traction != Vec3::ZERO {
-                    let tip = c.point + c.traction * FORCE_VIZ_SCALE;
+                let tangential = c.tangential_force();
+                if tangential != Vec3::ZERO {
+                    let tip = c.point + tangential * FORCE_VIZ_SCALE;
                     gizmos.arrow(c.point, tip, Color::srgb(1.0, 0.55, 0.1));
                 }
             }
