@@ -1154,6 +1154,7 @@ pub struct TurretSpec {
     pub inertia_extents: (f32, f32, f32),
 }
 
+// A required declaration may contain None; omitting the field must not invent that construction.
 fn deserialize_assembly<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Option<String>, D::Error> {

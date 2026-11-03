@@ -377,7 +377,7 @@ struct RigNodes<'a> {
     gunner_pitch: usize,
     hull: usize,
     center_of_mass: usize,
-    /// The Yaw servo above [`Self::gunner_pitch`] in the extracted topology.
+    /// Structural assembly root declared by `TurretSpec::node`, independently of the optic chain.
     turret: usize,
     /// The single `Primary` weapon's muzzle — the rig's main bore.
     primary_muzzle: usize,

@@ -1368,7 +1368,7 @@ resolved task throughput **Drive rate**, independently of holds and current cont
 Net sprocket force also depends on crank speed, gearing, drag and absolute clutch capacity.
 Module rows and simulation read one held-share function: the integer ratio is computed before
 narrowing, and a reduced ratio that rounds to whole is held at the adjacent f32 below whole.
-Servo slew keeps its rate scale. Automatic cyclic cadence, fire eligibility and sight access
+Servo operator work and engine-powered motion follow §7c. Automatic cyclic cadence, fire eligibility and sight access
 keep their mechanism or on/off gates. The panel reports actual weapon deadlines and explicit
 load pauses; the sight-derived Gunner percentage has no rate consumer.
 
@@ -1432,6 +1432,109 @@ topology-B occupant split + `competence` (behaviour-preserving), and the swap me
 tap-target; layer toggles moved to `F1`–`F3`). The sandbox readout shows **scalar effectiveness**
 per capability (`Load 60%` when backfilled), not a boolean. GUI-verified. Slice-2 core is complete;
 remaining work is deferred refinements (§9) and the eventual game-side (non-sandbox) crew UI.
+
+### 7c. Engine-powered servo drive (#257)
+
+Subject: the game's tank internals and damage model, game state only. Crew are HP pools
+at stations; an engine reduced or out of action changes available power, not aiming intent.
+`ServoSpec.drive` declares `Powered` or `Hand`; node names select neither law nor limits.
+This section owns the servo narrative. The tank sheet owns the facts and their provenance.
+
+**Inputs and law.** At the current public crank rpm, `TransmissionParams::torque_at`
+interpolates the declared `track.powertrain.transmission.engine.torque_curve`, including
+its fuel-governor cut. `EngineRpm` is published from `TankTransmission`; the servo reads
+that replicated whole-rpm value, not a second engine-power figure. For engine quality
+`qe`, operator requirement effectiveness `qo`, declared power share `s`, stall torque
+`Ts` and running bearing friction `Tf`:
+
+```
+Pengine = qe * torque_at(rpm) * rpm * (2*pi/60)
+Pservo  = qo * s * Pengine
+Tmotor  = min(Ts, Pservo / abs(omega))
+I * domega/dt = commanded_motor_torque - Tf * sign(omega)
+```
+
+The zero-speed limit of motor torque is `Ts`; no division by zero is taken. Operator
+throughput scales available work, never the physical stall-torque fact.
+A target controller can request less torque or reverse it to brake. Acceleration uses an
+implicit positive quadratic root in the power-limited region, avoiding numerical oscillation
+across the work equilibrium. Braking uses opposing motor torque plus bearing friction;
+a changed command cannot erase velocity. A declared mechanical travel stop absorbs momentum.
+With no available engine power, `qo * hand_rate` drives the mount; zero operator effectiveness
+holds it. `Hand` construction always uses that operator-scaled rate.
+
+The uniform cuboid law supplies the moments about the declared role axes:
+`Iyaw = m*(x*x + z*z)/12`, `Ipitch = m*(y*y + z*z)/12`, with full extents in metres,
+mass in kg and moments in kg m². `ServoMechanism` holds the immutable construction in the
+spawn batch; the view asset supplies none of it. Hand rates and travel convert degrees to
+radians once at deserialization. Admission refuses invalid drive facts and unrepresentable
+moments before play, naming the field and repair.
+
+At sustained demand, with admitted `Ts > Tf`, the steady rate is **DERIVED** from bearing work:
+`omega_inf = Pservo/Tf`. Initial acceleration is **DERIVED** as `(Ts - Tf)/I` when power
+is positive. There is no separate authored speed or acceleration cap. The motor's declared share is an availability budget;
+accessory work is not yet fed back as a load into the crank solver.
+
+**Authored facts.** The yaw row declares share 0.01, stall torque 16,000 N m, running friction
+8,000 N m and hand rate 1 degree/s. Pitch declares share 0.002, stall torque 5,000 N m,
+friction 2,500 N m and hand rate 0.5 degree/s. Every drive fact is `Unknown`: the sheet names
+the pump/motor service data or bench measurement which would settle it. The turret's provisional
+8,000 kg and full extents (3, 1.2, 2.4) m are also unknown facts, not measurements. Hull MG
+mounts declare hand construction and provisional 45 degree/s rates.
+
+**DERIVED consequences of those provisional facts**, at full engine and operator quality:
+`Iyaw = 9,840 kg m²`, `Ipitch = 4,800 kg m²`. The declared curve supplies 81.681 kW at idle
+600 rpm and 441.394 kW at governed 2,500 rpm. The rated 3,000 rpm anchor is not substituted
+for the live crank speed.
+
+| Axis | Steady at idle (degree/s) | Steady at governed (degree/s) | Initial acceleration (degree/s²) | Governed time to 95% (s) | Previous authored speed / acceleration |
+|---|---:|---:|---:|---:|---|
+| Yaw | 5.850 | 31.6125 | 46.5819 | 1.5966 | 34 degree/s / 70 degree/s² |
+| Pitch | 3.744 | 20.2320 | 29.8416 | 1.5950 | 23 degree/s / 70 degree/s² |
+
+These times integrate the continuous law, not frame or tick cost. Exact full rate is an
+asymptote: its time is infinite. For `k = Pservo/Ts` and a requested rate `v > k`,
+the time is **DERIVED** as:
+
+```
+t(k) = I*k/(Ts - Tf)
+t(v) = t(k) + I/(Tf*Tf) * [Pservo*ln((Pservo-Tf*k)/(Pservo-Tf*v)) - Tf*(v-k)]
+```
+
+Below the knee, `t(v) = I*v/(Ts-Tf)`. The table uses `v = 0.95*omega_inf`.
+The previous linear limits reached full yaw rate in **DERIVED** 34/70 = 0.4857 s and pitch
+rate in 23/70 = 0.3286 s; they were tuning values, not measured operating envelopes.
+
+The large idle-rate and acceleration differences are retained. Missing construction/law inputs
+are the pump pressure/flow regulation map, elevation's own moving-assembly inertia, and its
+gravity/counterbalance torque. Pitch currently uses the whole declared turret cuboid about X;
+that approximation is not a claim about the elevation assembly's measured moment. A measured
+operating envelope and those inputs must settle the gaps; neither mass nor physical constants
+are rescaled to recover the previous limits. Crank accessory-load feedback is a separate missing
+coupling, with the drivetrain implementation unchanged.
+
+**Evidence and wire contract.** MEASURED in generic inline fixtures: full/half engine quality
+produces 3.141581/1.5707935 rad/s steady rates; doubling declared mass at fixed extents changes
+the first-step velocity from 0.125 to 0.0625 rad/s. An engine out of action selects the authored
+hand rate, an unavailable operator holds either drive, and a command jump preserves momentum.
+Limited travel, reversal and arrival have class-invariant tests. Aiming transport tests use hand
+construction and assert zero steady lag within their declared rate, replacing the removed
+fixed-acceleration envelope expectation.
+
+The powered-data and final-law lane gates passed 788 tests with 12 existing ignores: tank, spec, damage,
+`net::`, `headless_test`, `pen_cam`, `field_casts`, and the doc/UI/net-boundary/bake guards.
+The wire definition pin passes: `ServoState` and public `ServoAngles` are unchanged;
+`TankServos` remains authoritative mechanism state and `RemoteServos` the client-local chase.
+`ServoMechanism` is immutable local construction. PROTOCOL_REV stays 82.
+
+Ratchet dispositions: `load-07` is fixed by required explicit `turret.node` construction,
+independent of optic ancestry (`None` explicitly declares no assembly); assembly membership
+follows that authored root's hierarchy and its role receives the unit-scale gate.
+`driving-07` was already admitted in production: the stale shipped-sheet test asserted against
+raw post-cut torque, and now reads delivered peak torque; a generic regression preserves
+post-cut admission. `driving-10` is fixed by labelling the nominal fixture crank ceiling
+`Unknown`, without inventing derivation inputs. The Blender fixture includes an explicit
+powered actuator frame and passes the same generic spec admission.
 
 ## 8. Catastrophic & environmental
 
