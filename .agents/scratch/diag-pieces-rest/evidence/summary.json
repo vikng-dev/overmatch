@@ -1,0 +1,813 @@
+{
+  "method": "MEASURED server stats period p50 medians; DERIVED log timestamp bracket midpoints and speed=Hz/64",
+  "baseline": {
+    "periods": 30,
+    "awake": 0.0,
+    "asleep": 0.0,
+    "speed": 0.998,
+    "tick_ms": 3.865,
+    "physics_ms": 0.478,
+    "send_ms": 0.344,
+    "rss_mb": 204.1
+  },
+  "shots": [
+    {
+      "shot": 1,
+      "type": "initial APHE",
+      "fire_tick": 13381,
+      "arrival_utc": "2026-11-03T14:36:02.169733+00:00",
+      "stats": {
+        "periods": 4,
+        "awake": 0.0,
+        "asleep": 0.0,
+        "speed": 0.999,
+        "tick_ms": 3.84,
+        "physics_ms": 0.48,
+        "send_ms": 0.332,
+        "rss_mb": 204.3
+      }
+    },
+    {
+      "shot": 2,
+      "type": "HE",
+      "fire_tick": 13701,
+      "arrival_utc": "2026-11-03T14:36:07.167302+00:00",
+      "stats": {
+        "periods": 4,
+        "awake": 0.0,
+        "asleep": 0.0,
+        "speed": 0.998,
+        "tick_ms": 3.739,
+        "physics_ms": 0.487,
+        "send_ms": 0.326,
+        "rss_mb": 204.5
+      }
+    },
+    {
+      "shot": 3,
+      "type": "HE",
+      "fire_tick": 14021,
+      "arrival_utc": "2026-11-03T14:36:12.168300+00:00",
+      "stats": {
+        "periods": 4,
+        "awake": 0.0,
+        "asleep": 0.0,
+        "speed": 0.998,
+        "tick_ms": 3.86,
+        "physics_ms": 0.494,
+        "send_ms": 0.359,
+        "rss_mb": 204.5
+      }
+    },
+    {
+      "shot": 4,
+      "type": "HE",
+      "fire_tick": 14341,
+      "arrival_utc": "2026-11-03T14:36:17.167695+00:00",
+      "stats": {
+        "periods": 4,
+        "awake": 2.5,
+        "asleep": 2.5,
+        "speed": 0.911,
+        "tick_ms": 4.249,
+        "physics_ms": 0.573,
+        "send_ms": 0.344,
+        "rss_mb": 210.55
+      }
+    },
+    {
+      "shot": 5,
+      "type": "HE",
+      "fire_tick": 14661,
+      "arrival_utc": "2026-11-03T14:36:22.364038+00:00",
+      "stats": {
+        "periods": 4,
+        "awake": 2.0,
+        "asleep": 5.0,
+        "speed": 0.999,
+        "tick_ms": 5.413,
+        "physics_ms": 0.67,
+        "send_ms": 0.354,
+        "rss_mb": 210.6
+      }
+    },
+    {
+      "shot": 6,
+      "type": "HE",
+      "fire_tick": 14981,
+      "arrival_utc": "2026-11-03T14:36:27.363075+00:00",
+      "stats": {
+        "periods": 4,
+        "awake": 2.0,
+        "asleep": 5.0,
+        "speed": 0.999,
+        "tick_ms": 5.23,
+        "physics_ms": 0.688,
+        "send_ms": 0.345,
+        "rss_mb": 210.6
+      }
+    },
+    {
+      "shot": 7,
+      "type": "HE",
+      "fire_tick": 15301,
+      "arrival_utc": "2026-11-03T14:36:32.364267+00:00",
+      "stats": {
+        "periods": 4,
+        "awake": 2.0,
+        "asleep": 5.0,
+        "speed": 1.0,
+        "tick_ms": 5.442,
+        "physics_ms": 0.714,
+        "send_ms": 0.392,
+        "rss_mb": 210.6
+      }
+    },
+    {
+      "shot": 8,
+      "type": "HE",
+      "fire_tick": 15621,
+      "arrival_utc": "2026-11-03T14:36:37.368866+00:00",
+      "stats": {
+        "periods": 4,
+        "awake": 1.0,
+        "asleep": 6.0,
+        "speed": 0.999,
+        "tick_ms": 4.864,
+        "physics_ms": 0.66,
+        "send_ms": 0.348,
+        "rss_mb": 210.6
+      }
+    },
+    {
+      "shot": 9,
+      "type": "HE",
+      "fire_tick": 15941,
+      "arrival_utc": "2026-11-03T14:36:42.372085+00:00",
+      "stats": {
+        "periods": 4,
+        "awake": 1.0,
+        "asleep": 6.0,
+        "speed": 1.0,
+        "tick_ms": 4.834,
+        "physics_ms": 0.622,
+        "send_ms": 0.357,
+        "rss_mb": 210.6
+      }
+    },
+    {
+      "shot": 10,
+      "type": "HE",
+      "fire_tick": 16261,
+      "arrival_utc": "2026-11-03T14:36:47.376648+00:00",
+      "stats": {
+        "periods": 4,
+        "awake": 1.0,
+        "asleep": 6.0,
+        "speed": 0.999,
+        "tick_ms": 4.816,
+        "physics_ms": 0.637,
+        "send_ms": 0.351,
+        "rss_mb": 210.6
+      }
+    },
+    {
+      "shot": 11,
+      "type": "HE",
+      "fire_tick": 16569,
+      "arrival_utc": "2026-11-03T14:36:52.190209+00:00",
+      "stats": {
+        "periods": 2,
+        "awake": 1.0,
+        "asleep": 6.0,
+        "speed": 0.997,
+        "tick_ms": 4.889,
+        "physics_ms": 0.629,
+        "send_ms": 0.377,
+        "rss_mb": 210.6
+      }
+    },
+    {
+      "shot": 12,
+      "type": "HE",
+      "fire_tick": 16889,
+      "arrival_utc": "2026-11-03T14:36:57.191942+00:00",
+      "stats": {
+        "periods": 4,
+        "awake": 1.0,
+        "asleep": 6.0,
+        "speed": 0.998,
+        "tick_ms": 4.933,
+        "physics_ms": 0.651,
+        "send_ms": 0.362,
+        "rss_mb": 210.6
+      }
+    }
+  ],
+  "empty_1m": {
+    "periods": 30,
+    "awake": 1.0,
+    "asleep": 6.0,
+    "speed": 0.998,
+    "tick_ms": 3.6,
+    "physics_ms": 0.485,
+    "send_ms": 0.207,
+    "rss_mb": 210.6
+  },
+  "empty_10m": {
+    "periods": 30,
+    "awake": 0.0,
+    "asleep": 7.0,
+    "speed": 0.998,
+    "tick_ms": 2.596,
+    "physics_ms": 0.362,
+    "send_ms": 0.182,
+    "rss_mb": 210.6
+  },
+  "empty_observed_s": 634.4785330295563,
+  "same_opening": {
+    "max_pieces": 35,
+    "empty_pile": {
+      "periods": 30,
+      "awake": 1.0,
+      "asleep": 34.0,
+      "speed": 0.998,
+      "tick_ms": 4.337,
+      "physics_ms": 1.112,
+      "send_ms": 0.21,
+      "rss_mb": 217.0
+    },
+    "last": {
+      "periods": 30,
+      "awake": 0.0,
+      "asleep": 0.0,
+      "speed": 0.998,
+      "tick_ms": 2.679,
+      "physics_ms": 0.331,
+      "send_ms": 0.194,
+      "rss_mb": 278.1
+    }
+  },
+  "local": {
+    "1000-force_frozen_wake.log": {
+      "baseline": {
+        "awake": 935,
+        "asleep": 65,
+        "tick_us": 7705.375,
+        "physics_us": 7409.542,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      },
+      "after": {
+        "awake": 0,
+        "asleep": 1000,
+        "tick_us": 1099.875,
+        "physics_us": 847.375,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      },
+      "late": {
+        "awake": 0,
+        "asleep": 1000,
+        "tick_us": 1100.833,
+        "physics_us": 848.167,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      }
+    },
+    "1000-force_sleep_vel.log": {
+      "baseline": {
+        "awake": 935,
+        "asleep": 65,
+        "tick_us": 7762.542,
+        "physics_us": 7459.958,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      },
+      "after": {
+        "awake": 934,
+        "asleep": 66,
+        "tick_us": 8501.084,
+        "physics_us": 8206.917,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      },
+      "late": {
+        "awake": 937,
+        "asleep": 63,
+        "tick_us": 8569.625,
+        "physics_us": 8273.334,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      }
+    },
+    "fixture1000-force.log": {
+      "baseline": {
+        "awake": 935,
+        "asleep": 65,
+        "tick_us": 7710.167,
+        "physics_us": 7411.583,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      },
+      "after": {
+        "awake": 932,
+        "asleep": 68,
+        "tick_us": 8530.916,
+        "physics_us": 8229.541,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      },
+      "late": {
+        "awake": 938,
+        "asleep": 62,
+        "tick_us": 8557.042,
+        "physics_us": 8252.75,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      }
+    },
+    "fixture1000-threshold.log": {
+      "baseline": {
+        "awake": 935,
+        "asleep": 65,
+        "tick_us": 8287.25,
+        "physics_us": 7921.375,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      },
+      "after": {
+        "awake": 930,
+        "asleep": 70,
+        "tick_us": 7786.25,
+        "physics_us": 7478.708,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      },
+      "late": {
+        "awake": 928,
+        "asleep": 72,
+        "tick_us": 8084.5,
+        "physics_us": 7689.833,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      }
+    },
+    "fixture20-force.log": {
+      "baseline": {
+        "awake": 5,
+        "asleep": 15,
+        "tick_us": 325.125,
+        "physics_us": 149.083,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      },
+      "after": {
+        "awake": 0,
+        "asleep": 20,
+        "tick_us": 204.25,
+        "physics_us": 35.041,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      },
+      "late": {
+        "awake": 0,
+        "asleep": 20,
+        "tick_us": 203.5,
+        "physics_us": 34.875,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      }
+    },
+    "native-angular1.log": {
+      "baseline": {
+        "awake": 141,
+        "asleep": 36,
+        "tick_us": 41228.375,
+        "physics_us": 3138.583,
+        "weigh_calls": 9048,
+        "weigh_us": 2231401.435
+      },
+      "after": {
+        "awake": 149,
+        "asleep": 39,
+        "tick_us": 43753.167,
+        "physics_us": 3411.625,
+        "weigh_calls": 9654,
+        "weigh_us": 2338110.103
+      }
+    },
+    "native-force.log": {
+      "baseline": {
+        "awake": 141,
+        "asleep": 36,
+        "tick_us": 41218.917,
+        "physics_us": 3110.25,
+        "weigh_calls": 9048,
+        "weigh_us": 2234161.215
+      },
+      "after": {
+        "awake": 99,
+        "asleep": 81,
+        "tick_us": 28571.833,
+        "physics_us": 2421.625,
+        "weigh_calls": 6449,
+        "weigh_us": 1510704.098
+      },
+      "late": {
+        "awake": 56,
+        "asleep": 130,
+        "tick_us": 19049.875,
+        "physics_us": 1537.375,
+        "weigh_calls": 3633,
+        "weigh_us": 1010301.98
+      }
+    },
+    "native-force_frozen_wake.log": {
+      "baseline": {
+        "awake": 141,
+        "asleep": 36,
+        "tick_us": 41170.291,
+        "physics_us": 3183.333,
+        "weigh_calls": 9048,
+        "weigh_us": 2217796.373
+      },
+      "after": {
+        "awake": 0,
+        "asleep": 180,
+        "tick_us": 970.292,
+        "physics_us": 342.583,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      },
+      "late": {
+        "awake": 0,
+        "asleep": 180,
+        "tick_us": 968.541,
+        "physics_us": 341.625,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      }
+    },
+    "native-threshold.log": {
+      "baseline": {
+        "awake": 141,
+        "asleep": 36,
+        "tick_us": 40848.75,
+        "physics_us": 3108.583,
+        "weigh_calls": 9048,
+        "weigh_us": 2218288.248
+      },
+      "after": {
+        "awake": 148,
+        "asleep": 40,
+        "tick_us": 42384.625,
+        "physics_us": 3244.375,
+        "weigh_calls": 9467,
+        "weigh_us": 2286075.262
+      },
+      "late": {
+        "awake": 97,
+        "asleep": 98,
+        "tick_us": 28561.708,
+        "physics_us": 2197.708,
+        "weigh_calls": 6226,
+        "weigh_us": 1541335.416
+      }
+    }
+  },
+  "artifact_root": "target/diag-pieces-rest/",
+  "large_logs": [
+    "target/diag-pieces-rest/fixture1000-force.log",
+    "target/diag-pieces-rest/remote-he.log",
+    "target/diag-pieces-rest/fixture1000-threshold.log",
+    "target/diag-pieces-rest/1000-force_sleep_vel.log",
+    "target/diag-pieces-rest/remote-spread.log",
+    "target/diag-pieces-rest/native-force_frozen_wake.log",
+    "target/diag-pieces-rest/remote-spread-final.log",
+    "target/diag-pieces-rest/native-threshold.log",
+    "target/diag-pieces-rest/native-angular1.log",
+    "target/diag-pieces-rest/native-force.log",
+    "target/diag-pieces-rest/1000-force_frozen_wake.log"
+  ],
+  "labels": {
+    "all_stats": "MEASURED on the named host/profile; speed and timestamp brackets DERIVED",
+    "local_calls": "MEASURED calls in 64 fixed updates, one simulated second",
+    "intervention_at": "DERIVED 50 simulated seconds (3,200 fixed updates)"
+  },
+  "wake_proof": {
+    "native-angular1": {
+      "pre": {
+        "summary_medians": {
+          "awake": 141,
+          "asleep": 36,
+          "tick_us": 41228.375,
+          "physics_us": 3138.583,
+          "weigh_calls": 9048,
+          "weigh_us": 2231401.435
+        },
+        "wake_totals": {
+          "contact": 160,
+          "force": 0,
+          "game": 0,
+          "position": 0,
+          "rotation": 0,
+          "velocity": 0,
+          "timer": 0,
+          "woken_bodies": 1900,
+          "slept_bodies": 69
+        },
+        "periods": 11
+      },
+      "post": {
+        "summary_medians": {
+          "awake": 149,
+          "asleep": 39,
+          "tick_us": 43753.167,
+          "physics_us": 3411.625,
+          "weigh_calls": 9654,
+          "weigh_us": 2338110.103
+        },
+        "wake_totals": {
+          "contact": 222,
+          "force": 0,
+          "game": 0,
+          "position": 0,
+          "rotation": 0,
+          "velocity": 0,
+          "timer": 0,
+          "woken_bodies": 3482,
+          "slept_bodies": 1568
+        },
+        "periods": 11
+      },
+      "last": {
+        "action": "threshold",
+        "asleep": 126,
+        "awake": 64,
+        "kind": "native",
+        "physics_us": 1862.4589999999998,
+        "tick": 4992,
+        "tick_us": 20179.834,
+        "wall_s": 158.347732959,
+        "weigh_calls": 4104,
+        "weigh_us": 1070442.64
+      }
+    },
+    "1000-force_sleep_vel": {
+      "pre": {
+        "summary_medians": {
+          "awake": 935,
+          "asleep": 65,
+          "tick_us": 7762.5419999999995,
+          "physics_us": 7459.958,
+          "weigh_calls": 0,
+          "weigh_us": 0.0
+        },
+        "wake_totals": {
+          "contact": 668,
+          "force": 0,
+          "game": 0,
+          "position": 0,
+          "rotation": 0,
+          "velocity": 0,
+          "timer": 0,
+          "woken_bodies": 37077,
+          "slept_bodies": 55
+        },
+        "periods": 11
+      },
+      "post": {
+        "summary_medians": {
+          "awake": 934,
+          "asleep": 66,
+          "tick_us": 8501.084,
+          "physics_us": 8206.917,
+          "weigh_calls": 0,
+          "weigh_us": 0.0
+        },
+        "wake_totals": {
+          "contact": 670,
+          "force": 0,
+          "game": 0,
+          "position": 0,
+          "rotation": 0,
+          "velocity": 0,
+          "timer": 0,
+          "woken_bodies": 36148,
+          "slept_bodies": 987
+        },
+        "periods": 11
+      },
+      "late": {
+        "summary_medians": {
+          "awake": 937,
+          "asleep": 63,
+          "tick_us": 8569.625,
+          "physics_us": 8273.334,
+          "weigh_calls": 0,
+          "weigh_us": 0.0
+        },
+        "wake_totals": {
+          "contact": 1427,
+          "force": 0,
+          "game": 0,
+          "position": 0,
+          "rotation": 0,
+          "velocity": 0,
+          "timer": 0,
+          "woken_bodies": 51936,
+          "slept_bodies": 96
+        },
+        "periods": 11
+      },
+      "last": {
+        "action": "force_sleep_vel",
+        "asleep": 63,
+        "awake": 937,
+        "kind": "1000",
+        "physics_us": 8240.584,
+        "tick": 6400,
+        "tick_us": 8543.042000000001,
+        "wall_s": 52.31656125,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      }
+    },
+    "1000-force_frozen_wake": {
+      "pre": {
+        "summary_medians": {
+          "awake": 935,
+          "asleep": 65,
+          "tick_us": 7705.375,
+          "physics_us": 7409.5419999999995,
+          "weigh_calls": 0,
+          "weigh_us": 0.0
+        },
+        "wake_totals": {
+          "contact": 668,
+          "force": 0,
+          "game": 0,
+          "position": 0,
+          "rotation": 0,
+          "velocity": 0,
+          "timer": 0,
+          "woken_bodies": 37077,
+          "slept_bodies": 55
+        },
+        "periods": 11
+      },
+      "post": {
+        "summary_medians": {
+          "awake": 0,
+          "asleep": 1000,
+          "tick_us": 1099.875,
+          "physics_us": 847.375,
+          "weigh_calls": 0,
+          "weigh_us": 0.0
+        },
+        "wake_totals": {
+          "contact": 0,
+          "force": 0,
+          "game": 0,
+          "position": 0,
+          "rotation": 0,
+          "velocity": 0,
+          "timer": 0,
+          "woken_bodies": 0,
+          "slept_bodies": 934
+        },
+        "periods": 11
+      },
+      "late": {
+        "summary_medians": {
+          "awake": 0,
+          "asleep": 1000,
+          "tick_us": 1100.833,
+          "physics_us": 848.167,
+          "weigh_calls": 0,
+          "weigh_us": 0.0
+        },
+        "wake_totals": {
+          "contact": 0,
+          "force": 0,
+          "game": 0,
+          "position": 0,
+          "rotation": 0,
+          "velocity": 0,
+          "timer": 0,
+          "woken_bodies": 0,
+          "slept_bodies": 0
+        },
+        "periods": 11
+      },
+      "last": {
+        "action": "force_frozen_wake",
+        "asleep": 1000,
+        "awake": 0,
+        "kind": "1000",
+        "physics_us": 847.792,
+        "tick": 6400,
+        "tick_us": 1100.75,
+        "wall_s": 28.054244625,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      }
+    },
+    "native-force_frozen_wake": {
+      "pre": {
+        "summary_medians": {
+          "awake": 141,
+          "asleep": 36,
+          "tick_us": 41170.291,
+          "physics_us": 3183.333,
+          "weigh_calls": 9048,
+          "weigh_us": 2217796.373
+        },
+        "wake_totals": {
+          "contact": 160,
+          "force": 0,
+          "game": 0,
+          "position": 0,
+          "rotation": 0,
+          "velocity": 0,
+          "timer": 0,
+          "woken_bodies": 1900,
+          "slept_bodies": 69
+        },
+        "periods": 11
+      },
+      "post": {
+        "summary_medians": {
+          "awake": 0,
+          "asleep": 180,
+          "tick_us": 970.292,
+          "physics_us": 342.58299999999997,
+          "weigh_calls": 0,
+          "weigh_us": 0.0
+        },
+        "wake_totals": {
+          "contact": 0,
+          "force": 0,
+          "game": 0,
+          "position": 0,
+          "rotation": 0,
+          "velocity": 0,
+          "timer": 0,
+          "woken_bodies": 0,
+          "slept_bodies": 140
+        },
+        "periods": 11
+      },
+      "late": {
+        "summary_medians": {
+          "awake": 0,
+          "asleep": 180,
+          "tick_us": 968.5409999999999,
+          "physics_us": 341.625,
+          "weigh_calls": 0,
+          "weigh_us": 0.0
+        },
+        "wake_totals": {
+          "contact": 0,
+          "force": 0,
+          "game": 0,
+          "position": 0,
+          "rotation": 0,
+          "velocity": 0,
+          "timer": 0,
+          "woken_bodies": 0,
+          "slept_bodies": 0
+        },
+        "periods": 11
+      },
+      "last": {
+        "action": "force_frozen_wake",
+        "asleep": 180,
+        "awake": 0,
+        "kind": "native",
+        "physics_us": 341.625,
+        "tick": 6400,
+        "tick_us": 964.125,
+        "wall_s": 109.652682292,
+        "weigh_calls": 0,
+        "weigh_us": 0.0
+      }
+    }
+  },
+  "status": {
+    "server_panic_or_exit": false,
+    "profile_deployments_remaining": 0,
+    "native_angular1": "stopped after observation; negative diagnostic, not a completed test",
+    "same_opening_final_pull": "HTTP 429; previous successful 15-second snapshot retained",
+    "spawning_overlap": "DERIVED exact fixture bounding width < lattice pitch, height < vertical pitch; no tank, building, or ground overlap required"
+  },
+  "owner_log": {
+    "path": "/Users/Yan/github/vikng-dev/overmatch/.agents/scratch/owner-play-2026-11-03/second-match-server.log",
+    "MEASURED_empty_markers": 365,
+    "MEASURED_first": "2026-11-03T12:50:19.901402Z",
+    "MEASURED_last": "2026-11-03T13:27:22.975204Z",
+    "DERIVED_speed_median": 0.3323028897640824,
+    "method": "2 simulated seconds divided by successive empty-server SIM-EVIDENCE wall timestamp gaps"
+  }
+}

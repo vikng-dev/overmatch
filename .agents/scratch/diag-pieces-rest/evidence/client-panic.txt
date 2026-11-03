@@ -1,0 +1,38 @@
+Subject: the video game's networking and damage-model input, game state only.
+
+2026-11-03T14:24:22.407017Z  INFO overmatch::net::sync_margin: net: input sync margins floor+coverage 207.88 t, deadband 0.00 t (arrival(q50-min=0.0ms qp-min=195.6ms n=7717))
+2026-11-03T14:24:22.994489Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE track_sides_grounded=0/0 (0 simulated of 1 tanks)
+2026-11-03T14:24:22.994546Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE 13229v0 turret_angle=Some(-0.1822952) weapon_gate=Some([WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 0 }])
+2026-11-03T14:24:23.680422Z  INFO overmatch::net::harness: [DEBUG-rest] game environment replicated loads=Some(WeaponLoads { weapons: [WeaponLoad { loaded: 0, selected: 0, fuze_modes: [] }, WeaponLoad { loaded: 0, selected: 0, fuze_modes: [] }, WeaponLoad { loaded: 1, selected: 1, fuze_modes: [] }] })
+2026-11-03T14:24:23.680502Z  INFO overmatch::net::harness: [DEBUG-rest] game environment fire attempt=8 script_tick=8320
+2026-11-03T14:24:24.995836Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE track_sides_grounded=0/0 (0 simulated of 1 tanks)
+2026-11-03T14:24:24.995919Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE 13229v0 turret_angle=Some(-0.1822952) weapon_gate=Some([WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 0 }])
+2026-11-03T14:24:26.997528Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE track_sides_grounded=0/0 (0 simulated of 1 tanks)
+2026-11-03T14:24:26.997580Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE 13229v0 turret_angle=Some(-0.1822952) weapon_gate=Some([WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Loading { ready_tick: SimTick(33545), since: SimTick(33353), work: LoadWork { share: LoadShare(9223372036854775808), rate: LoadRate(1.0), base: TickSpan(192) } }, belt_remaining: 0 }])
+2026-11-03T14:24:27.298444Z  WARN overmatch::net::fire_presentation: net: 13229v0 weapon 2 round consumed locally at tick 33353 was never consumed by the server (state silent through tick 33372, wait 18t) — presented reload healed from the last arrived gate (healed 5)
+2026-11-03T14:24:28.999015Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE track_sides_grounded=0/0 (0 simulated of 1 tanks)
+2026-11-03T14:24:28.999075Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE 13229v0 turret_angle=Some(-0.1822952) weapon_gate=Some([WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 0 }])
+2026-11-03T14:24:31.001790Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE track_sides_grounded=0/0 (0 simulated of 1 tanks)
+2026-11-03T14:24:31.001824Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE 13229v0 turret_angle=Some(-0.1822952) weapon_gate=Some([WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 0 }])
+2026-11-03T14:24:33.002709Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE track_sides_grounded=0/0 (0 simulated of 1 tanks)
+2026-11-03T14:24:33.002759Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE 13229v0 turret_angle=Some(-0.1822952) weapon_gate=Some([WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 0 }])
+2026-11-03T14:24:33.682273Z  INFO overmatch::net::harness: [DEBUG-rest] game environment replicated loads=Some(WeaponLoads { weapons: [WeaponLoad { loaded: 0, selected: 0, fuze_modes: [] }, WeaponLoad { loaded: 0, selected: 0, fuze_modes: [] }, WeaponLoad { loaded: 1, selected: 1, fuze_modes: [] }] })
+2026-11-03T14:24:33.682347Z  INFO overmatch::net::harness: [DEBUG-rest] game environment fire attempt=9 script_tick=8960
+2026-11-03T14:24:34.112474Z  INFO overmatch::net::sync_margin: net: input sync margins floor+coverage 207.75 t, deadband 0.00 t (arrival(q50-min=0.0ms qp-min=196.3ms n=8466))
+2026-11-03T14:24:35.005352Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE track_sides_grounded=0/0 (0 simulated of 1 tanks)
+2026-11-03T14:24:35.005413Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE 13229v0 turret_angle=Some(-0.1822952) weapon_gate=Some([WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 0 }])
+2026-11-03T14:24:37.007343Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE track_sides_grounded=0/0 (0 simulated of 1 tanks)
+2026-11-03T14:24:37.007387Z  INFO overmatch::net::diagnostics: net: SIM-EVIDENCE 13229v0 turret_angle=Some(-0.1822952) weapon_gate=Some([WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 150 }, WeaponGateState { timing: Ready, belt_remaining: 0 }])
+2026-11-03T14:24:37.298730Z  WARN overmatch::net::fire_presentation: net: 13229v0 weapon 2 round consumed locally at tick 33993 was never consumed by the server (state silent through tick 34012, wait 18t) — presented reload healed from the last arrived gate (healed 6)
+2026-11-03T14:24:37.437153Z  INFO overmatch::net::sync_margin: net: input sync margins floor+coverage 207.62 t, deadband 0.00 t (arrival(q50-min=0.0ms qp-min=196.0ms n=8679))
+2026-11-03T14:24:38.175367Z  INFO overmatch::net::sync_margin: net: input sync margins floor+coverage 207.49 t, deadband 0.00 t (arrival(q50-min=0.0ms qp-min=196.0ms n=8726))
+2026-11-03T14:24:38.407547Z  INFO overmatch::net::sync_margin: net: input sync margins floor+coverage 207.36 t, deadband 0.00 t (arrival(q50-min=0.0ms qp-min=195.9ms n=8741))
+2026-11-03T14:24:38.577188Z  INFO overmatch::net::sync_margin: net: input sync margins floor+coverage 207.20 t, deadband 0.00 t (arrival(q50-min=0.0ms qp-min=195.9ms n=8752))
+2026-11-03T14:24:38.655347Z  INFO overmatch::net::sync_margin: net: input sync margins floor+coverage 206.67 t, deadband 0.00 t (arrival(q50-min=0.0ms qp-min=195.9ms n=8757))
+2026-11-03T14:24:38.673609Z  INFO overmatch::net::sync_margin: net: input sync margins floor+coverage 71.48 t, deadband 0.00 t (arrival(q50-min=0.0ms qp-min=195.9ms n=8758))
+
+thread 'Compute Task Pool (0)' (111818568) panicked at src/net/client.rs:1369:13:
+input-buffer start Tick(34113) exceeds encoder end Tick(34062): timeline shifts move buffer indices with the local tick, and shipping input delay is fixed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Encountered a panic in system `overmatch::net::client::assert_input_buffer_ranges`!
+Encountered a panic in system `bevy_app::main_schedule::Main::run_main`!

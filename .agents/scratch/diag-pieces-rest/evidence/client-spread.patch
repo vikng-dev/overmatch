@@ -1,0 +1,69 @@
+diff --git a/src/net/harness.rs b/src/net/harness.rs
+index 4d189c5d..71610abc 100644
+--- a/src/net/harness.rs
++++ b/src/net/harness.rs
+@@ -464,6 +464,10 @@ fn release_stamp(client_tick: u32, now: Duration, time: &Time<Real>) -> String {
+ /// each tick. Whole-state snapshot per tick, no devices.
+ pub(crate) fn buffer_input(
+     mut sim: ResMut<SimulateInput>,
++    roots: Query<&avian3d::prelude::Position, With<crate::tank::Controlled>>,
++    buildings: Query<&Transform, With<crate::buildings::BuildingBody>>,
++    mut target: Local<Option<Vec3>>,
++    loads: Query<&crate::tank::WeaponLoads, With<crate::tank::Controlled>>,
+     time: Res<Time<Real>>,
+     timeline: Res<LocalTimeline>,
+     sync: Res<LocalTimelineSync>,
+@@ -508,6 +512,53 @@ pub(crate) fn buffer_input(
+     }
+     let t = sim.ticks;
+     sim.write(t, &mut state.0);
++    // [DEBUG-rest] Game environment destruction: repeated HE inputs, temporary client driver.
++    if let Ok(position) = roots.single() {
++        let goal = *target.get_or_insert_with(|| {
++            let building = buildings
++                .iter()
++                .min_by(|a, b| {
++                    a.translation
++                        .distance_squared(position.0)
++                        .total_cmp(&b.translation.distance_squared(position.0))
++                })
++                .expect("the shipped map has a building");
++            let goal = building.translation + Vec3::Y * 1.5;
++            info!(
++                "[DEBUG-rest] game environment tank={:?} goal={goal:?}",
++                position.0
++            );
++            goal
++        });
++        state.0.aim = Some(AimIntent::World(
++            goal + Vec3::X
++                * (match (t / 320) % 4 {
++                    0 => -3.0,
++                    1 => -1.0,
++                    2 => 1.0,
++                    _ => 3.0,
++                })
++                + Vec3::Y * (((t / 1280) % 3) as f32),
++        ));
++        state.0.range = goal.distance(position.0);
++        state.0.select_round = (t == 640).then_some(crate::command::RoundSelect {
++            weapon: 2,
++            step: crate::command::RoundStep::Next,
++        });
++        state.0.fire_primary = (1920..5441).contains(&t) && t % 320 < 32;
++        state.0.fire_secondary = false;
++        if state.0.fire_primary && t.is_multiple_of(320) {
++            info!(
++                "[DEBUG-rest] game environment replicated loads={:?}",
++                loads.iter().next()
++            );
++            info!(
++                "[DEBUG-rest] game environment fire attempt={} script_tick={t}",
++                (t - 1920) / 320 + 1
++            );
++        }
++    }
++
+     if (state.0.fire_primary || state.0.fire_secondary)
+         && let ScriptClock::Released {
+             first_fire_logged, ..
