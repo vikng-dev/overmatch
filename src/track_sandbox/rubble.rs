@@ -6,7 +6,7 @@
 //! Gizmos, always on (they draw only where a contact presses on a body): a dot on the contact,
 //! cyan on a static body and red on a dynamic one, with a line to the body it pressed; the impulse
 //! a dynamic body took draws as an orange arrow of its mean force over the tick at
-//! [`FORCE_VIZ_SCALE`]. The field casts layer (`9`) shows the field; the contact dots show
+//! [`force_viz_scale`]. The field casts layer (`9`) shows the field; the contact dots show
 //! the footprint contacts.
 
 use avian3d::prelude::{ColliderDensity, Position, RigidBody, Rotation};
@@ -18,7 +18,7 @@ use crate::debris::DebrisPiece;
 use crate::track::rubble::footprint_radius;
 
 use super::belt::EnvelopeLaw;
-use super::{CONTACT_PROBE, FORCE_VIZ_SCALE, RigGeom, Side, belt_loop};
+use super::{RigGeom, Side, belt_loop, contact_probe, force_viz_scale};
 
 /// The building asset the yard is cut from.
 const HOUSE: &str = "house_1";
@@ -75,7 +75,7 @@ pub(super) fn footprint_sphere(geom: &RigGeom, envelope: &EnvelopeLaw) -> f32 {
         column,
         geom.model.pin_to_outer,
         travel.max(envelope.free_travel),
-        CONTACT_PROBE,
+        contact_probe(),
     )
 }
 
@@ -232,7 +232,7 @@ pub(super) fn draw_rubble(
         if dynamic {
             gizmos.arrow(
                 touch.point,
-                touch.point + touch.reaction * FORCE_VIZ_SCALE,
+                touch.point + touch.reaction * force_viz_scale(),
                 Color::srgb(1.0, 0.5, 0.1),
             );
         }

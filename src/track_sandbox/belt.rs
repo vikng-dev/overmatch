@@ -44,7 +44,7 @@ use crate::track::wheels::{
 };
 use crate::track::wrap;
 
-/// The sandbox's terrain resource: the track core's [`BlockField`], probed at [`CONTACT_PROBE`]
+/// The sandbox's terrain resource: the track core's [`BlockField`], probed at [`contact_probe`]
 /// reach by every call site.
 #[derive(Resource, Default)]
 pub(super) struct TerrainField(pub(super) BlockField);
@@ -401,7 +401,7 @@ pub(super) fn calibrate_envelope(
         geom.link_count,
         geom.model.pin_to_outer,
         engage_depth,
-        CONTACT_PROBE,
+        contact_probe(),
         weight_n,
         travel.effective,
         sus.ride_frequency,
@@ -427,7 +427,7 @@ fn force_params(geom: &RigGeom, rig: &RigSpec, envelope: &EnvelopeLaw) -> ForceP
         support_stiffness_per_m: envelope.stiffness_per_m,
         support_damping_per_m: envelope.damping_per_m,
         engage_depth: rig.engage_depth,
-        probe_reach: CONTACT_PROBE,
+        probe_reach: contact_probe(),
 
         inertia: rig.belt_inertia,
         grip: Some(rig.grip),
@@ -469,7 +469,7 @@ pub(super) fn articulate_wheels_field(
             max_lift: suspension.0.bump_stop,
             max_droop: geom.side_droop_travel(wheel.side, &suspension.0).effective,
             lateral_spans: &tread.0.spans,
-            probe_reach: CONTACT_PROBE,
+            probe_reach: contact_probe(),
         };
         let params = &params;
         let target = wheel_lift_target(oracle, &affine, down, susp.pivot_local, params);
@@ -592,7 +592,7 @@ pub(super) fn conform_belts_field(
         count: pin_belt.count,
         pitch: geom.pitch,
         thickness: geom.thickness,
-        probe_reach: CONTACT_PROBE,
+        probe_reach: contact_probe(),
         // The sandbox draws the `-` reference layer, so it asks the wrap to build it.
         reference: true,
         sides: Side::ALL.map(|side| wrap::WrapSideInput {
@@ -722,11 +722,11 @@ pub(super) fn draw_sample_points(
                 for s in [ca + face_a, (ca + cb) / 2.0 + face_m, cb + face_b] {
                     // Orange into the terrain field, grey when clear. Body contacts come from
                     // the footprint pass and have their own contact dots.
-                    let depth = oracle.depth_along(s, out, CONTACT_PROBE);
+                    let depth = oracle.depth_along(s, out, contact_probe());
                     let color = if depth > 0.0 {
-                        TRACTION_FORCE_COLOR
+                        Color::srgb_from_array(scene().traction_force_srgb.0)
                     } else {
-                        CAST_COLOR
+                        Color::srgb_from_array(scene().cast_srgb.0)
                     };
                     gizmos.sphere(Isometry3d::from_translation(s), 0.015, color);
                 }
@@ -878,7 +878,7 @@ mod tests {
             support_stiffness_per_m: law.stiffness_per_m,
             support_damping_per_m: law.damping_per_m,
             engage_depth: engage,
-            probe_reach: CONTACT_PROBE,
+            probe_reach: contact_probe(),
 
             inertia: 1.0,
             grip: None,

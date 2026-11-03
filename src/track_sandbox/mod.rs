@@ -61,7 +61,9 @@ pub(crate) use crate::track::rig_geom;
 // Text readouts belong to `panel`.
 pub(crate) mod suspension_viz;
 
+mod data;
 mod panel;
+use data::scene;
 
 use belt::{
     BeltPhase, PinBelt, RigTransmission, TerrainField, ViewPerf, WrapMemory,
@@ -104,54 +106,13 @@ struct RigSpec {
     grip: crate::track::forces::GripParams,
 }
 
-/// Trenches down the −Z lane, each `(centre z, width)`, nearest→farthest. Narrow: some road wheels
-/// still catch the lips. Wide (> the road-wheel span): all road wheels float, only the sprocket/idler
-/// diagonals catch — the pure bridging case. Pit (> the whole track footprint): nothing can catch —
-/// the rig drops in; the drop-in / grind-out case.
-const TRENCHES: [(f32, f32); 3] = [(30.0, 2.2), (42.0, 5.0), (58.0, 10.0)];
-/// Washboard sets `(start z, period, bumps, height)` of increasing coarseness, all before the first
-/// trench. Bump thickness is `period / 3`, so the gaps grow with the period: the fine set's gaps are
-/// narrower than a road wheel (the belt/wheels *bridge* them), the coarse sets' gaps are wider (the
-/// wheels drop in and ride over each bump) — the resolve-vs-bridge spectrum in one drive.
-const WASHBOARDS: [(f32, f32, usize, f32); 3] = [
-    (3.0, 0.8, 6, 0.12),
-    (10.0, 1.5, 5, 0.18),
-    (19.0, 2.5, 4, 0.22),
-];
-/// Lane extent (Z) of the ground: from `LANE_NEAR` in front of spawn out to `LANE_FAR`.
-const LANE_NEAR: f32 = 20.0;
-const LANE_FAR: f32 = -110.0;
-/// Lane width (X) of the ground slabs — wide enough to manoeuvre, turn, and drive around obstacles.
-const LANE_W: f32 = 40.0;
-/// Width (X) of the raised obstacles (washboards, step, ramp): a sub-lane, so there is open flat
-/// ground on both sides to steer around them and to compare against.
-const OBSTACLE_W: f32 = 16.0;
-/// Top of the trench floors: a hard bottom below belt reach, so a *failed* bridge rests the rig in
-/// the ditch instead of dropping into a bottomless gap.
-const TRENCH_FLOOR_Y: f32 = -1.2;
-
-/// Slope test pad (harness `pose=slope_*`): a DERIVED 20° incline parked OFF-lane at +X, large enough
-/// to hold any hull orientation through a CLAIMED 30 s parked-hold capture. Authored unconditionally —
-/// the lab course costs nothing and interactive drives can visit it.
-pub(super) const SLOPE_PAD_DEG: f32 = 20.0;
-const SLOPE_PAD_CENTER: Vec3 = Vec3::new(34.0, 0.0, -20.0);
-const SLOPE_PAD_SIZE: f32 = 24.0;
-const SLOPE_PAD_THICK: f32 = 2.0;
-
-/// Off-lane +X runway/turn pad: DERIVED 400 m of straight run from `RUNWAY_SIZE` for top-speed
-/// measurements and full turning circles; the main lane is too obstacle-dense. Its z-extent stays
-/// inside the lane's z-range to preserve broadphase grid shape and capture candidate iteration.
-/// Slope-pad captures reject it by x-AABB comparison (MEASURED byte-identical capture output).
-const RUNWAY_CENTER: Vec3 = Vec3::new(260.0, 0.0, -45.0);
-const RUNWAY_SIZE: (f32, f32) = (400.0, 120.0);
-/// The `pose=runway` spawn: near the pad's −X end, facing +X down the long axis.
-pub(super) const RUNWAY_SPAWN: Vec3 = Vec3::new(70.0, 0.0, -45.0);
-
-/// The pad's top-face centre + its tilt rotation — the harness spawns slope poses from this.
+/// The pad's top-face centre and tilt; harness slope poses share this construction.
 pub(super) fn slope_pad_pose() -> (Vec3, Quat) {
-    let rot = Quat::from_rotation_x(SLOPE_PAD_DEG.to_radians());
+    let data = scene();
+    let rot = Quat::from_rotation_x(data.slope_pad_deg.0.to_radians());
     (
-        SLOPE_PAD_CENTER + rot * Vec3::Y * (SLOPE_PAD_THICK / 2.0),
+        Vec3::from_array(data.slope_pad_center_m.0)
+            + rot * Vec3::Y * (data.slope_pad_thickness_m.0 / 2.0),
         rot,
     )
 }
@@ -161,13 +122,12 @@ pub(super) fn slope_pad_pose() -> (Vec3, Quat) {
 // authored loop minus taut perimeter (`RigGeom::window`), not an extra budget.
 /// Downward ray length used to find ground just beneath each station (m); also the sink at which
 /// support saturates.
-const CONTACT_PROBE: f32 = 0.5;
+fn contact_probe() -> f32 {
+    scene().contact_probe_m.0
+}
 
 // Vehicle data supplies the drivetrain envelope; `track::forces` derives wheelspin, skid,
 // engine braking, hill hold and top speed from belt/ground slip. Friction is the material pair.
-/// Slip speed (m/s) that makes contact dots fully red. Display scale only; friction comes from
-/// the material pair in [`RigSpec::grip`] and the shared force law.
-const SLIP_SATURATION: f32 = 0.4;
 
 // The belt alone supplies ground support/traction across gaps; wheels carry no force.
 // Authored collision proxies handle walls and failed bridges (see `report_collision_proxies`).
@@ -246,6 +206,7 @@ pub(crate) struct Hull;
 struct FreeFlyCam;
 
 pub fn plugin(app: &mut App) {
+    scene(); // Refuse tool data before building or spawning the inspection scene.
     crate::track::wheels::wheel_lift_rise_omega();
     // Fingerprint the sim artifact before bake reads it and resolve the shoe's certified chain.
     app.add_plugins((
@@ -651,31 +612,33 @@ fn draw_taut_reference(mut gizmos: Gizmos, reference: Res<TautReference>, viz: R
         if pts.len() < 2 {
             continue;
         }
-        gizmos.linestrip(pts.iter().copied().chain(pts.first().copied()), REF_COLOR);
+        gizmos.linestrip(
+            pts.iter().copied().chain(pts.first().copied()),
+            Color::srgb_from_array(scene().reference_srgb.0),
+        );
     }
 }
 
-/// Which reset spot `R` will drop the rig at next (index into [`RESET_SPOTS`]).
+/// Which reset spot `R` will drop the rig at next (index into [`reset_spots`]).
 #[derive(Resource, Default)]
 struct ResetSpot(usize);
 
-/// The `R` drop spots: a quick tour of the test cases. `z` is the lane position; all drop at the
-/// resting ride height.
-const RESET_SPOTS: [(f32, f32, &str); 5] = [
-    (0.0, 0.0, "flat ground"),
-    (0.0, -TRENCHES[0].0, "narrow trench"),
-    (0.0, -TRENCHES[1].0, "wide trench (pure diagonal bridge)"),
-    (
-        0.0,
-        -TRENCHES[2].0,
-        "pit (swallows the whole rig - drop in, grind out)",
-    ),
-    (
+/// Reset witnesses follow the declared trenches; adding one needs no Rust index or label.
+fn reset_spots() -> Vec<(f32, f32, &'static str)> {
+    let mut spots = vec![(0.0, 0.0, "flat ground")];
+    spots.extend(
+        scene()
+            .trenches
+            .iter()
+            .map(|trench| (0.0, -trench.forward_m.0, trench.label.as_str())),
+    );
+    spots.push((
         rubble::RUBBLE_SPOT.x,
         rubble::RUBBLE_SPOT.y,
         "rubble yard (brick pile ahead, wall section on the left)",
-    ),
-];
+    ));
+    spots
+}
 
 /// Unshaped throttle/steer in [-1, 1] from arrows (WASD stays with the camera) or harness.
 /// The fixed-tick adapter uses the game's [`crate::track::drive::shape_drive`], including slew
@@ -742,7 +705,8 @@ fn spawn_camera(mut commands: Commands) {
     commands
         .spawn((
             Camera3d::default(),
-            Transform::from_xyz(11.0, 3.5, 3.0).looking_at(Vec3::new(0.0, 0.8, 0.0), Vec3::Y),
+            Transform::from_translation(Vec3::from_array(scene().camera_eye_m.0))
+                .looking_at(Vec3::from_array(scene().camera_target_m.0), Vec3::Y),
             FreeFlyCam,
             // `view` and belt selection use this camera. The overlay shares its pose and
             // carries no PlayerView: it is not another world view.
@@ -784,16 +748,17 @@ fn spawn_environment(
 ) {
     commands.spawn((
         DirectionalLight {
-            illuminance: 10_000.0,
+            illuminance: scene().light_lux.0,
             shadow_maps_enabled: true,
             ..default()
         },
-        Transform::from_xyz(4.0, 9.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(Vec3::from_array(scene().light_eye_m.0))
+            .looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
     let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
-    let ground_mat = materials.add(Color::srgb(0.32, 0.42, 0.28));
-    let obstacle_mat = materials.add(Color::srgb(0.44, 0.37, 0.27));
+    let ground_mat = materials.add(Color::srgb_from_array(scene().ground_srgb.0));
+    let obstacle_mat = materials.add(Color::srgb_from_array(scene().obstacle_srgb.0));
 
     // Every block also lands in the analytic terrain field (the belt's oracle) — colliders and
     // field are built from the same transforms, so the two representations cannot drift.
@@ -826,51 +791,70 @@ fn spawn_environment(
         block(
             commands,
             field,
-            Transform::from_xyz(0.0, -0.5, (z_hi + z_lo) / 2.0).with_scale(Vec3::new(
-                LANE_W,
-                1.0,
-                z_hi - z_lo,
-            )),
+            Transform::from_xyz(0.0, -scene().slab_thickness_m.0 / 2.0, (z_hi + z_lo) / 2.0)
+                .with_scale(Vec3::new(
+                    scene().lane_width_m.0,
+                    scene().slab_thickness_m.0,
+                    z_hi - z_lo,
+                )),
             &ground_mat,
         );
     };
 
-    // Walk trench gaps nearest→farthest; floors follow `TRENCH_FLOOR_Y`.
-    let mut cursor = LANE_NEAR;
-    for (tz, tw) in TRENCHES {
+    // Walk declared trench gaps nearest→farthest, including their hard floors.
+    let mut cursor = scene().lane_near_m.0;
+    for trench in &scene().trenches {
+        let (tz, tw) = (trench.forward_m.0, trench.width_m.0);
         let near_lip = -(tz - tw / 2.0);
         let far_lip = -(tz + tw / 2.0);
         ground(&mut commands, &mut field, cursor, near_lip);
         block(
             &mut commands,
             &mut field,
-            Transform::from_xyz(0.0, TRENCH_FLOOR_Y - 0.5, -tz)
-                .with_scale(Vec3::new(LANE_W, 1.0, tw)),
+            Transform::from_xyz(
+                0.0,
+                scene().trench_floor_y_m.0 - scene().slab_thickness_m.0 / 2.0,
+                -tz,
+            )
+            .with_scale(Vec3::new(
+                scene().lane_width_m.0,
+                scene().slab_thickness_m.0,
+                tw,
+            )),
             &ground_mat,
         );
         cursor = far_lip;
     }
-    ground(&mut commands, &mut field, cursor, LANE_FAR);
+    ground(&mut commands, &mut field, cursor, scene().lane_far_m.0);
 
-    // A step / curb (DERIVED top at y=0.45 m), past the trenches: a hard vertical edge to climb.
+    // The declared curb provides a hard vertical climbing edge beyond the trenches.
     block(
         &mut commands,
         &mut field,
-        Transform::from_xyz(0.0, 0.225, -72.0).with_scale(Vec3::new(OBSTACLE_W, 0.45, 4.0)),
+        Transform::from_xyz(0.0, scene().step_height_m.0 / 2.0, scene().step_z_m.0).with_scale(
+            Vec3::new(
+                scene().obstacle_width_m.0,
+                scene().step_height_m.0,
+                scene().step_depth_m.0,
+            ),
+        ),
         &obstacle_mat,
     );
 
-    // A DERIVED 20° ramp beyond the step (flush entry, crest with a drop) to check climb + envelope over a
-    // slope. DERIVED low-edge top sunk ~1 m under the ground plane so the approach is step-free.
-    let (run, thick, deg) = (10.0_f32, 2.0_f32, 20.0_f32);
+    // The declared ramp checks climb/envelope, with a sunk entry and a drop after its crest.
+    let (run, thick, deg) = (
+        scene().ramp_run_m.0,
+        scene().ramp_thickness_m.0,
+        scene().ramp_deg.0,
+    );
     let (sin, cos) = deg.to_radians().sin_cos();
-    let center_y = -1.0 - (thick / 2.0) * cos + (run / 2.0) * sin;
+    let center_y = scene().ramp_entry_y_m.0 - (thick / 2.0) * cos + (run / 2.0) * sin;
     block(
         &mut commands,
         &mut field,
-        Transform::from_xyz(0.0, center_y, -88.0)
+        Transform::from_xyz(0.0, center_y, scene().ramp_z_m.0)
             .with_rotation(Quat::from_rotation_x(deg.to_radians()))
-            .with_scale(Vec3::new(OBSTACLE_W, thick, run)),
+            .with_scale(Vec3::new(scene().obstacle_width_m.0, thick, run)),
         &obstacle_mat,
     );
 
@@ -878,33 +862,45 @@ fn spawn_environment(
     block(
         &mut commands,
         &mut field,
-        Transform::from_translation(SLOPE_PAD_CENTER)
-            .with_rotation(Quat::from_rotation_x(SLOPE_PAD_DEG.to_radians()))
-            .with_scale(Vec3::new(SLOPE_PAD_SIZE, SLOPE_PAD_THICK, SLOPE_PAD_SIZE)),
+        Transform::from_translation(Vec3::from_array(scene().slope_pad_center_m.0))
+            .with_rotation(Quat::from_rotation_x(scene().slope_pad_deg.0.to_radians()))
+            .with_scale(Vec3::new(
+                scene().slope_pad_size_m.0,
+                scene().slope_pad_thickness_m.0,
+                scene().slope_pad_size_m.0,
+            )),
         &obstacle_mat,
     );
 
-    // The runway/turn pad (see `RUNWAY_CENTER`), top face at y = 0 like the lane slabs.
+    // The runway/turn pad shares the lane's ground datum.
     block(
         &mut commands,
         &mut field,
-        Transform::from_xyz(RUNWAY_CENTER.x, -0.5, RUNWAY_CENTER.z).with_scale(Vec3::new(
-            RUNWAY_SIZE.0,
-            1.0,
-            RUNWAY_SIZE.1,
+        Transform::from_xyz(
+            scene().runway_center_m.0[0],
+            -scene().slab_thickness_m.0 / 2.0,
+            scene().runway_center_m.0[2],
+        )
+        .with_scale(Vec3::new(
+            scene().runway_size_m.0[0],
+            scene().slab_thickness_m.0,
+            scene().runway_size_m.0[1],
         )),
         &ground_mat,
     );
 
-    for (start, period, bumps, height) in WASHBOARDS {
-        let thickness = period / 3.0;
+    for &(start, period, bumps, height) in &scene().washboards.0 {
+        let thickness = period / scene().washboard_thickness_divisor.0;
         for i in 0..bumps {
             let z = -(start + i as f32 * period);
             block(
                 &mut commands,
                 &mut field,
-                Transform::from_xyz(0.0, height / 2.0, z)
-                    .with_scale(Vec3::new(OBSTACLE_W, height, thickness)),
+                Transform::from_xyz(0.0, height / 2.0, z).with_scale(Vec3::new(
+                    scene().obstacle_width_m.0,
+                    height,
+                    thickness,
+                )),
                 &obstacle_mat,
             );
         }
@@ -1284,7 +1280,7 @@ impl BeltState<'_> {
 #[derive(Resource, Default)]
 struct ResetRequested(bool);
 
-/// `R` or [`ResetRequested`] cycles [`RESET_SPOTS`], dropping the rig at rest.
+/// `R` or [`ResetRequested`] cycles [`reset_spots`], dropping the rig at rest.
 #[expect(
     clippy::too_many_arguments,
     reason = "a reset spanning input, the hull, belt, drive, transmission, rig and wheels"
@@ -1310,8 +1306,9 @@ fn reset_rig(
         return;
     }
     requested.0 = false;
-    let (x, z, label) = RESET_SPOTS[spot.0];
-    spot.0 = (spot.0 + 1) % RESET_SPOTS.len();
+    let spots = reset_spots();
+    let (x, z, label) = spots[spot.0];
+    spot.0 = (spot.0 + 1) % spots.len();
     let (mut transform, mut lin, mut ang) = hull
         .single_mut()
         .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
@@ -1523,19 +1520,25 @@ fn draw_rig_gizmos(
     if viz.hubs {
         for (wheel, gt) in &wheels {
             let color = match wheel.kind {
-                WheelKind::Road => HUB_COLOR,
-                WheelKind::Sprocket | WheelKind::Idler => DRIVE_HUB_COLOR,
+                WheelKind::Road => Color::srgb_from_array(scene().hub_srgb.0),
+                WheelKind::Sprocket | WheelKind::Idler => {
+                    Color::srgb_from_array(scene().drive_hub_srgb.0)
+                }
             };
-            gizmos.sphere(Isometry3d::from_translation(gt.translation()), 0.05, color);
+            gizmos.sphere(
+                Isometry3d::from_translation(gt.translation()),
+                scene().hub_radius_m.0,
+                color,
+            );
         }
     }
 
     for side in Side::ALL {
         if viz.belt_line {
             let mut world = belts.get(side).iter().map(|s| s.world);
-            gizmos.linestrip(world.clone(), BELT_COLOR);
+            gizmos.linestrip(world.clone(), Color::srgb_from_array(scene().belt_srgb.0));
             if let (Some(a), Some(b)) = (world.next_back(), world.next()) {
-                gizmos.line(a, b, BELT_COLOR);
+                gizmos.line(a, b, Color::srgb_from_array(scene().belt_srgb.0));
             }
         }
 
@@ -1565,7 +1568,7 @@ fn draw_rig_gizmos(
             .collect();
         gizmos.linestrip(
             outer.iter().copied().chain(outer.first().copied()),
-            BELT_OUTER_COLOR,
+            Color::srgb_from_array(scene().belt_outer_srgb.0),
         );
     }
 }
@@ -1593,24 +1596,33 @@ fn draw_contacts(
         let p = hull.transform_point(c.local);
         // elastic load / k ≈ the station's penetration (m) — a stable size cue (the damped
         // actual load would add velocity-driven size flicker).
-        let r = 0.03 + (c.load_elastic / k).clamp(0.0, 0.1);
+        let r = scene().dot_min_radius_m.0
+            + (c.load_elastic / k).clamp(0.0, scene().dot_max_growth_m.0);
         if viz.dots {
-            // Slip fraction 0→1 grades green to red at the display scale `SLIP_SATURATION`.
-            let t = (c.slip.abs() / SLIP_SATURATION).clamp(0.0, 1.0);
-            let color = Color::srgb(t, 1.0 - 0.7 * t, 0.2);
+            // Slip fraction 0→1 grades green to red at the display scale `scene().slip_saturation_mps.0`.
+            let t = (c.slip.abs() / scene().slip_saturation_mps.0).clamp(0.0, 1.0);
+            let color = Color::srgb(t, 1.0 - scene().slip_green_fall.0 * t, scene().slip_blue.0);
             gizmos.sphere(Isometry3d::from_translation(p), r, color);
         }
         if viz.normals {
-            gizmos.line(p, p + c.normal * (0.15 + r), NORMAL_COLOR);
+            gizmos.line(
+                p,
+                p + c.normal * (scene().normal_stub_m.0 + r),
+                Color::srgb_from_array(scene().normal_srgb.0),
+            );
         }
         if viz.forces {
             gizmos.arrow(
                 p,
-                p + c.normal * (c.load * FORCE_VIZ_SCALE),
-                SUPPORT_FORCE_COLOR,
+                p + c.normal * (c.load * force_viz_scale()),
+                Color::srgb_from_array(scene().support_force_srgb.0),
             );
-            if c.traction.length_squared() > 1.0 {
-                gizmos.arrow(p, p + c.traction * FORCE_VIZ_SCALE, TRACTION_FORCE_COLOR);
+            if c.traction.length_squared() > scene().traction_min_n_squared.0 {
+                gizmos.arrow(
+                    p,
+                    p + c.traction * force_viz_scale(),
+                    Color::srgb_from_array(scene().traction_force_srgb.0),
+                );
             }
         }
     }
@@ -1656,24 +1668,10 @@ fn belt_loop(circles: &[(Vec2, f32)]) -> Vec<Vec2> {
     pts
 }
 
-const HUB_COLOR: Color = Color::srgb(1.0, 0.85, 0.2);
-const DRIVE_HUB_COLOR: Color = Color::srgb(1.0, 0.45, 0.15);
-const BELT_COLOR: Color = Color::srgb(0.2, 0.9, 1.0);
-/// The outer-face companion line: dimmer/darker than the pin line, so the two parallel curves
-/// read as inner vs ground face at a glance.
-const BELT_OUTER_COLOR: Color = Color::srgb(0.1, 0.45, 0.55);
-const NORMAL_COLOR: Color = Color::srgb(1.0, 0.9, 0.2);
-/// Support-force arrows: magenta, apart from every geometry colour.
-const SUPPORT_FORCE_COLOR: Color = Color::srgb(0.95, 0.3, 0.9);
-/// Traction (friction) force arrows: orange, the game's drive-force convention.
-const TRACTION_FORCE_COLOR: Color = Color::srgb(1.0, 0.6, 0.1);
-/// Collocation-station dots: neutral grey-white when clear of terrain.
-const CAST_COLOR: Color = Color::srgb(0.85, 0.85, 0.9);
-/// Taut reference loop: dim violet.
-const REF_COLOR: Color = Color::srgb(0.7, 0.5, 1.0);
-/// Metres of arrow per newton: DERIVED 20 kN per 1 m. CLAIMED typical rest support: ~6 kN
-/// per station over ~45 grounded stations.
-const FORCE_VIZ_SCALE: f32 = 1.0 / 20_000.0;
+/// Diagnostic metres per newton; the declared taste scales physical force.
+fn force_viz_scale() -> f32 {
+    1.0 / scene().force_n_per_m.0
+}
 
 /// Panel keyboard/pointer focus, written each frame under `dev_ui`. [`panel_capturing`] gates
 /// camera/drive input so slider drags and text edits cannot leak into the sim.

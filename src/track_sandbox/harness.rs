@@ -209,10 +209,12 @@ pub(super) fn harness_setup(
         }
         // Runway pad: at rest height facing +X down the 400 m axis (the −Z hull forward
         // yawed −90°).
-        None if harness.runway => {
-            Transform::from_xyz(RUNWAY_SPAWN.x, geom.hull_rest_y, RUNWAY_SPAWN.z)
-                .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2))
-        }
+        None if harness.runway => Transform::from_xyz(
+            scene().runway_spawn_m.0[0],
+            geom.hull_rest_y,
+            scene().runway_spawn_m.0[2],
+        )
+        .with_rotation(Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2)),
         None => Transform::from_xyz(harness.x, geom.hull_rest_y, harness.z),
     };
     lin.0 = Vec3::ZERO;
@@ -234,7 +236,7 @@ pub(super) fn harness_setup(
             Some(yaw) => format!("slope_yaw{yaw:.3}"),
         },
         if harness.pose.is_some() {
-            SLOPE_PAD_DEG
+            scene().slope_pad_deg.0
         } else {
             0.0
         },
