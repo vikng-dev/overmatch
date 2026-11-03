@@ -290,10 +290,12 @@ pub(crate) fn default_plugins() -> bevy::app::PluginGroupBuilder {
 ///
 /// # Failures
 ///
-/// Invalid `OVERMATCH_WINDOW` refuses startup; `headless` panics (`run_window::mount` requires
-/// a windowed root).
+/// Malformed or headless `OVERMATCH_WINDOW` refuses startup before constructing the window,
+/// naming the variable and supported modes.
 pub fn windowed_runtime(app: &mut App, window: Window) {
-    let mode = run_window::RunWindow::of_run(run_window::RunWindow::Visible);
+    let mode = run_window::RunWindow::of_run(run_window::RunWindow::Visible)
+        .windowed()
+        .unwrap_or_else(refuse_start);
     app.add_plugins(default_plugins().set(WindowPlugin {
         primary_window: Some(window),
         ..default()

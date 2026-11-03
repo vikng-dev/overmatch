@@ -428,11 +428,9 @@ pub fn run() {
         RunWindow::Visible
     });
     let headless = window == RunWindow::Headless;
-    assert!(
-        simulate || !headless,
-        "OVERMATCH_WINDOW=headless: only a scripted client (OVERMATCH_HARNESS) runs without a \
-         window"
-    );
+    if !simulate && headless {
+        harness::refuse_start::<()>(crate::run_window::WindowModeError::HeadlessWindowedRoot);
+    }
 
     let mut app = App::new();
     if headless {

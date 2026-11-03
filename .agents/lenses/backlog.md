@@ -36,7 +36,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | net-15 | P3 | `src/net/resync.rs::hold_unknown_history` | base-truths: Compensation | Unknown retained history is treated as removal, then repaired by restoring components and maintaining markers. | Represent unknown history separately in interpolation's presence decision; delete removal-and-restoration repairs. | ratchet |
 | net-16 | P3 | `src/net/debris_stress.rs::FRAGMENT_HULL` | base-truths: Bare number in code | The operator-run stress scenario constructs fragment geometry, density, release layout and velocities from Rust constants. | Move construction and physical parameters into required provenance-bearing scenario data. | ratchet |
 | net-17 | P3 | `src/net/hit_feel.rs::CUE_RETAIN` | base-truths: Bare number in code | Confirmation-marker and flash decay consume embedded retention and cutoff tastes. | Move them into required presentation data naming their effect families. | ratchet |
-| net-18 | P2 | `src/lib.rs::windowed_runtime`; `src/run_window.rs::mount` | error-handling: Outside input reaching a panic | Operator input `OVERMATCH_WINDOW=headless` parses successfully, then panics on a windowed root instead of refusing startup as outside input. | Refuse incompatible modes with a typed startup error at the windowed-root edge, naming the variable and supported modes. | ratchet |
 
 ## view
 

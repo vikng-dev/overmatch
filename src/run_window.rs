@@ -32,6 +32,49 @@ pub(crate) enum RunWindow {
     Visible,
 }
 
+/// Operator-selected mode errors, handled visibly at the composition root.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WindowModeError {
+    InvalidMode(String),
+    HeadlessWindowedRoot,
+}
+
+impl std::fmt::Display for WindowModeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidMode(value) => write!(
+                f,
+                "{VARIABLE}: {value:?} is not one of headless, hidden, offscreen or visible"
+            ),
+            Self::HeadlessWindowedRoot => write!(
+                f,
+                "{VARIABLE}=headless: this root requires hidden, offscreen or visible; headless needs a scripted client (OVERMATCH_HARNESS)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WindowModeError {}
+
+/// A mode admitted for a root that constructs a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WindowedRun {
+    Hidden,
+    Offscreen,
+    Visible,
+}
+
+impl WindowedRun {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Hidden => RunWindow::Hidden,
+            Self::Offscreen => RunWindow::Offscreen,
+            Self::Visible => RunWindow::Visible,
+        }
+        .name()
+    }
+}
+
 impl RunWindow {
     const ALL: [Self; 4] = [Self::Headless, Self::Hidden, Self::Offscreen, Self::Visible];
 
@@ -45,28 +88,28 @@ impl RunWindow {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, String> {
+    fn parse(value: &str) -> Result<Self, WindowModeError> {
         Self::ALL
             .into_iter()
             .find(|mode| mode.name() == value)
-            .ok_or_else(|| {
-                format!("{value:?} is not one of headless, hidden, offscreen or visible")
-            })
+            .ok_or_else(|| WindowModeError::InvalidMode(value.to_owned()))
     }
 
-    /// This run's mode: [`VARIABLE`]'s, or `default` when it is unset.
-    ///
-    /// # Panics
-    ///
-    /// When the variable holds anything but one of the four names (module doc).
+    /// Parse the operator mode once, visibly refusing malformed input; use `default` when unset.
     pub(crate) fn of_run(default: Self) -> Self {
         crate::env_value(VARIABLE)
             .unwrap_or_else(crate::refuse_start)
-            .map(|value| {
-                Self::parse(&value)
-                    .unwrap_or_else(|error| crate::refuse_start(format!("{VARIABLE}: {error}")))
-            })
+            .map(|value| Self::parse(&value).unwrap_or_else(crate::refuse_start))
             .unwrap_or(default)
+    }
+
+    pub(crate) fn windowed(self) -> Result<WindowedRun, WindowModeError> {
+        match self {
+            Self::Headless => Err(WindowModeError::HeadlessWindowedRoot),
+            Self::Hidden => Ok(WindowedRun::Hidden),
+            Self::Offscreen => Ok(WindowedRun::Offscreen),
+            Self::Visible => Ok(WindowedRun::Visible),
+        }
     }
 }
 
@@ -85,22 +128,13 @@ pub(crate) fn primary_or_headless<T>(
     }
 }
 
-/// Apply `mode` on a windowed root (`crate::windowed_runtime`), after `crate::default_plugins` has
-/// spawned the primary window and before winit creates it.
-///
-/// # Panics
-///
-/// On [`RunWindow::Headless`]: this root draws a window, and only the scripted client has a root
-/// without one. On a hidden mode with no single primary window ([`hide`]).
-pub(crate) fn mount(app: &mut App, mode: RunWindow) {
+/// Apply an admitted windowed mode after the primary window spawns, before winit creates it.
+/// Hidden modes require exactly one primary window (`hide`); violating that is a construction bug.
+pub(crate) fn mount(app: &mut App, mode: WindowedRun) {
     info!("window: {}", mode.name());
     match mode {
-        RunWindow::Visible => {}
-        RunWindow::Hidden | RunWindow::Offscreen => hide(app),
-        RunWindow::Headless => panic!(
-            "{VARIABLE}=headless: this root draws a window; only the scripted client \
-             (`net::client::run`) runs headless"
-        ),
+        WindowedRun::Visible => {}
+        WindowedRun::Hidden | WindowedRun::Offscreen => hide(app),
     }
 }
 
@@ -172,9 +206,31 @@ mod tests {
         for bad in ["", "Hidden", "windowed", "1", "off", " hidden"] {
             let error = RunWindow::parse(bad).expect_err("not a mode");
             assert!(
-                error.contains("headless, hidden, offscreen or visible"),
+                error
+                    .to_string()
+                    .contains("headless, hidden, offscreen or visible"),
                 "{error}"
             );
+        }
+    }
+
+    /// Windowed admission excludes Headless; refusal names supported modes and the scripted root.
+    #[test]
+    fn headless_is_refused_for_windowed_roots() {
+        let error = RunWindow::Headless.windowed().unwrap_err();
+        assert_eq!(error, WindowModeError::HeadlessWindowedRoot);
+        let message = error.to_string();
+        for required in [
+            VARIABLE,
+            "hidden",
+            "offscreen",
+            "visible",
+            "OVERMATCH_HARNESS",
+        ] {
+            assert!(message.contains(required), "{message}");
+        }
+        for mode in [RunWindow::Hidden, RunWindow::Offscreen, RunWindow::Visible] {
+            assert_eq!(mode.windowed().unwrap().name(), mode.name());
         }
     }
 
@@ -200,7 +256,7 @@ mod tests {
                     PrimaryWindow,
                 ))
                 .id();
-            mount(&mut app, mode);
+            mount(&mut app, mode.windowed().unwrap());
             // What a later `AudioPlugin` build writes. Only `PreStartup` runs: `Startup` holds the
             // macOS activation revocation, which needs the process's main thread.
             app.insert_resource(GlobalVolume::new(Volume::Linear(1.0)));
@@ -230,7 +286,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a window spawned later would be created visible")]
     fn a_hidden_run_with_no_primary_window_refuses_to_boot() {
-        mount(&mut App::new(), RunWindow::Hidden);
+        mount(&mut App::new(), WindowedRun::Hidden);
     }
 
     /// A VISIBLE RUN IS LEFT AS THE ROOT DESCRIBED IT: the player's own window and its sound.
@@ -241,7 +297,7 @@ mod tests {
             .world_mut()
             .spawn((Window::default(), PrimaryWindow))
             .id();
-        mount(&mut app, RunWindow::Visible);
+        mount(&mut app, WindowedRun::Visible);
         assert!(
             app.world()
                 .get::<Window>(window)
