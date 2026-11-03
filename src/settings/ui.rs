@@ -1763,7 +1763,28 @@ mod tests {
             for row in Row::ORDER {
                 for direction in [-1, 1] {
                     let mut walked = settings;
-                    for _ in 0..64 {
+                    let stops = match row {
+                        Row::Preset => Preset::ORDER.len(),
+                        Row::RenderScale => RenderScaleLevel::ORDER.len(),
+                        Row::LodPixelBudget => usize::from(PixelBudget::stops()),
+                        Row::ShadowDistance => ShadowDistance::ORDER.len(),
+                        Row::ShadowResolution => ShadowResolution::ORDER.len(),
+                        Row::ShadowCascades => ShadowCascades::ORDER.len(),
+                        Row::Msaa => MsaaLevel::ORDER.len(),
+                        Row::Bloom => BloomLevel::ORDER.len(),
+                        Row::TrackPrints => TrackPrintRelief::ORDER.len(),
+                        Row::TrackPrintRange => TrackPrintRange::ORDER.len(),
+                        Row::WindowMode => WindowModeSetting::ORDER.len(),
+                        Row::Display => crate::settings::DisplaySelection::ORDER.len(),
+                        Row::VSync => VsyncMode::ORDER.len(),
+                        Row::FrameCap => usize::from(FrameCap::stops()),
+                        Row::UiScale => usize::from(UiScalePercent::stops()),
+                        Row::PenCamCorner => PenCamCorner::ORDER.len(),
+                        Row::KillCam => KillCam::ORDER.len(),
+                        Row::ReduceMotion => ReduceMotion::ORDER.len(),
+                        Row::DebugPanel => DebugPanel::ORDER.len(),
+                    };
+                    for _ in 0..stops {
                         row.step(&mut walked, direction, ALL_RUNGS, &unlearned());
                     }
                     let saturated = walked;
