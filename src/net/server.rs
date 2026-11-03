@@ -99,6 +99,7 @@ pub fn run() {
         eprintln!("overmatch-server: fatal: {err}");
         std::process::exit(2);
     }
+    super::he_stress::install_server(&mut app).unwrap_or_else(harness::refuse_start);
     app.add_plugins(physics::physics_plugins());
     app.add_plugins(SimPlugin);
     app.add_plugins(crate::trace::server_plugin);

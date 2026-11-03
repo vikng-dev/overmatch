@@ -92,5 +92,20 @@ print(code, end='')
         self.assertEqual(len([c for c in self.calls() if c["method"] == "POST"]), 1)
 
 
+    def test_bad_he_refuses_before_any_deploy(self):
+        for recipe in ["2:0", "2:NaN", "2:1_0", "2:١", "4294967296:1"]:
+            with self.subTest(recipe=recipe):
+                run = self.deploy("--he", recipe)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("--he wants", run.stderr)
+                self.assertEqual(self.calls(), [])
+
+    def test_he_is_emitted_for_the_non_hosted_operator(self):
+        run = self.deploy("--he", "2:0.5")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        variables = [c for c in self.calls() if c["method"] == "POST"][-1]["body"]["env_vars"]
+        self.assertIn({"key": "OVERMATCH_HE_STRESS", "value": "2:0.5", "is_hidden": False}, variables)
+
+
 if __name__ == "__main__":
     unittest.main()

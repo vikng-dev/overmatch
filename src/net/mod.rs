@@ -36,6 +36,7 @@ mod fire_presentation;
 /// Read-only starvation and resync instruments at the interpolation buffer's edge.
 mod frontier;
 mod harness;
+mod he_stress;
 pub(crate) use harness::{env_flag, env_parse, env_text, env_value, refuse_start};
 mod hit_feel;
 /// The dedicated server's hosted mode: settings from the Worker, heartbeats, capacity, empty exit.

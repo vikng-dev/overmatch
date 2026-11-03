@@ -14,7 +14,7 @@
 #   scripts/edgegap/session.sh stop-all-profile                   # every `profile-` deployment, then 0 left
 #
 # Subcommands (stdout carries only the machine-readable answer; progress goes to stderr):
-#   deploy <version> [--city C]... [--bots N] [--stats-s S] [--debris V] [--env K=V]... [--max-min M]
+#   deploy <version> [--city C]... [--bots N] [--stats-s S] [--debris V] [--he V] [--env K=V]... [--max-min M]
 #       POST /v1/deploy with a `profile-<utc>-<hex>` tag and a city filter, falling back through the
 #       cities (default: Singapore Tokyo Mumbai, or $EDGEGAP_CITIES) on a refusal or an ERROR
 #       deployment, until one turns READY. Arms the watchdog the moment an id exists. Prints the id.
@@ -23,6 +23,8 @@
 #                   server without the lever ignores it.
 #       --debris V  sets OVERMATCH_DEBRIS_STRESS to V, `<pieces>:<period_s>` (src/net/debris_stress.rs);
 #                   `off` or absent: unset. A server older than the lever ignores it.
+#       --he V      game destruction: OVERMATCH_HE_STRESS=<bursts>:<period_s>, no client/tank.
+#                   Requires an image carrying the HE instrument; older images ignore it.
 #       --env K=V   any other server env var.
 #       --max-min M the watchdog's limit in minutes (default 90, or $EDGEGAP_PROFILE_MAX_MIN).
 #   status <id> [--json]    one line: phase, ip:port, city, seconds since READY, Edgegap max_duration.
@@ -407,15 +409,16 @@ find_by_tag() {
 }
 
 cmd_deploy() {
-  local version="${1:?usage: deploy <version> [--city C]... [--bots N] [--stats-s S] [--debris V] [--env K=V]... [--max-min M]}"
+  local version="${1:?usage: deploy <version> [--city C]... [--bots N] [--stats-s S] [--debris V] [--he V] [--env K=V]... [--max-min M]}"
   shift
-  local cities=() envs=() bots=0 stats_s=1 debris=off max_min="${EDGEGAP_PROFILE_MAX_MIN:-90}" ready_wait="${EDGEGAP_READY_WAIT_S:-120}"
+  local cities=() envs=() bots=0 stats_s=1 debris=off he=off max_min="${EDGEGAP_PROFILE_MAX_MIN:-90}" ready_wait="${EDGEGAP_READY_WAIT_S:-120}"
   while (($# > 0)); do
     case "$1" in
       --city) cities+=("${2:?--city needs a name}"); shift 2 ;;
       --bots) bots="${2:?--bots needs a count}"; shift 2 ;;
       --stats-s) stats_s="${2:?--stats-s needs seconds}"; shift 2 ;;
       --debris) debris="${2:?--debris needs a value or off}"; shift 2 ;;
+      --he) he="${2:?--he needs <bursts>:<period_s> or off}"; shift 2 ;;
       --env) envs+=("${2:?--env needs K=V}"); shift 2 ;;
       --max-min) max_min="${2:?--max-min needs minutes}"; shift 2 ;;
       *) die "deploy: unknown argument '$1'" ;;
@@ -431,6 +434,23 @@ cmd_deploy() {
   # ERROR: refused here instead.
   [[ "$debris" == off || "$debris" =~ ^[0-9]+:[0-9]+(\.[0-9]+)?$ ]] ||
     die "--debris wants <pieces>:<period_s> or off, got '$debris'"
+  # Validate the operator recipe before any request; the server still owns its typed parser.
+  python3 - "$he" <<'HE' || die "--he wants <bursts>:<finite positive period_s> or off"
+import math, re, sys
+value = sys.argv[1].strip()
+if value.lower() in ("", "off", "false"):
+    sys.exit(0)
+try:
+    count, period = value.split(":")
+    if not (count.strip().isascii() and count.strip().isdigit()
+            and 0 <= int(count) <= 2**32 - 1
+            and re.fullmatch(r"\+?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", period.strip())
+            and math.isfinite(float(period)) and float(period) > 0):
+        sys.exit(1)
+except ValueError:
+    sys.exit(1)
+HE
+  [[ "$he" == off ]] || envs+=("OVERMATCH_HE_STRESS=$he")
   ((bots > 0)) && envs+=("OVERMATCH_BOT=$bots")
   ((stats_s > 0)) && envs+=("OVERMATCH_SERVER_STATS_S=$stats_s")
   [[ "$debris" != off ]] && envs+=("OVERMATCH_DEBRIS_STRESS=$debris")
