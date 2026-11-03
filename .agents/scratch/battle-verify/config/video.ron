@@ -1,0 +1,2 @@
+// Fixture capture configuration: existing player settings, no performance recorder.
+(version: 1, vsync_mode: Off, frame_cap: 30, debug_panel: Off)
