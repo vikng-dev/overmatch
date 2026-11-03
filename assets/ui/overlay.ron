@@ -1,0 +1,3 @@
+(
+    menu_scrim_srgba: ((0, 0, 0, 153), Taste("Esc menu scrim effect: translucent black keeps the live world visible; 8-bit sRGBA.")),
+)
