@@ -71,6 +71,13 @@ impl Ladder<f32> {
     }
 }
 impl Ladder<u16> {
+    /// Nearest admitted stop, with upper ties. Admission bounds the result to u16;
+    /// the rounding sum can exceed it even when both endpoints fit.
+    pub(super) fn nearest_stop(&self, value: u16) -> u16 {
+        let offset = u32::from(value.clamp(self.min.0, self.max.0) - self.min.0);
+        ((offset + u32::from(self.step.0) / 2) / u32::from(self.step.0)) as u16
+    }
+
     pub(super) fn stops(&self) -> u16 {
         1 + (self.max.0 - self.min.0) / self.step.0
     }
@@ -487,6 +494,24 @@ mod tests {
         let mut data = decoded();
         data.bloom_mip_dimensions.0 = [8, 512];
         data.validate().unwrap();
+    }
+
+    /// Slider rounding must preserve every admitted ladder, including full-width endpoints.
+    #[test]
+    fn integer_stops_round_without_overflow() {
+        let mut data = decoded();
+        // Fixture: the rounding sum exceeds u16 while the ladder and its defaults are valid.
+        for ladder in [&mut data.frame_cap, &mut data.ui_scale] {
+            ladder.min.0 = 1;
+            ladder.max.0 = u16::MAX;
+            ladder.step.0 = u16::MAX - 1;
+        }
+        data.validate().unwrap();
+        for ladder in [&data.frame_cap, &data.ui_scale] {
+            for (value, stop) in [(1, 0), (32767, 0), (32768, 1), (65535, 1)] {
+                assert_eq!(ladder.nearest_stop(value), stop);
+            }
+        }
     }
 
     /// Valid retuning changes no schema or range invariant. This also exercises the parsed type

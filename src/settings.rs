@@ -1417,7 +1417,7 @@ impl FrameCap {
     fn stop(self) -> u16 {
         match self.fps() {
             None => 0,
-            Some(fps) => 1 + (fps - Self::min_fps() + Self::step_fps() / 2) / Self::step_fps(),
+            Some(fps) => 1 + look::get().frame_cap.nearest_stop(fps),
         }
     }
 
@@ -1489,8 +1489,7 @@ impl UiScalePercent {
     }
 
     fn stop(self) -> u16 {
-        (self.0.clamp(Self::min(), Self::max()) - Self::min() + Self::step_size() / 2)
-            / Self::step_size()
+        look::get().ui_scale.nearest_stop(self.0)
     }
 
     fn from_stop(stop: u16) -> Self {
