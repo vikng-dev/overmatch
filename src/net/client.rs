@@ -39,6 +39,9 @@ use crate::tank::{
 use crate::ui_font::UiFonts;
 use crate::{CombatantId, NetClientPlugin, ShotId, SimPlugin};
 
+mod policy;
+use policy::client_policy;
+
 const SERVER_PORT: u16 = 5888;
 const LOCAL_SERVER: &str = "127.0.0.1:5888";
 /// The matchmaking Worker's base URL baked in at build time (the release workflow sets
@@ -237,9 +240,14 @@ fn recv_conditioner_mode(
 /// See `src/net/tests/net_fire_release.rs`.
 pub(crate) const SHIPPING_INPUT_DELAY_TICKS: u16 = 3;
 
-/// Return an RTT-independent fixed input delay.
+/// Lightyear 0.30.1 saturates effective RTT ticks at `u16::MAX`. Cover that domain without
+/// overflowing its prediction-allowance sum; the client runs no gameplay prediction (ADR-0037).
 pub(crate) fn shipping_input_delay() -> InputDelayConfig {
-    InputDelayConfig::fixed_input_delay(SHIPPING_INPUT_DELAY_TICKS)
+    InputDelayConfig {
+        minimum_input_delay_ticks: SHIPPING_INPUT_DELAY_TICKS,
+        maximum_input_delay_before_prediction: SHIPPING_INPUT_DELAY_TICKS,
+        maximum_predicted_ticks: u16::MAX - SHIPPING_INPUT_DELAY_TICKS,
+    }
 }
 
 /// Where the client link goes: a server resolved once at startup, or a Worker whose Join menu
@@ -419,6 +427,7 @@ fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, 
 }
 
 pub fn run() {
+    client_policy();
     let script = harness::script();
     let simulate = script.is_some();
     // A scripted client is GPU-less unless the run asks for a window; a player's always has one.
@@ -538,9 +547,9 @@ pub fn run() {
         ..default()
     };
     info!(
-        "client: input delay = fixed_input_delay({SHIPPING_INPUT_DELAY_TICKS}) — CONSTANT by \
-         design (~{:.0}ms)",
-        f64::from(SHIPPING_INPUT_DELAY_TICKS) * 1000.0 / 64.0
+        "client: input delay = {SHIPPING_INPUT_DELAY_TICKS} ticks — CONSTANT by design \
+         (DERIVED {:.1}ms)",
+        f64::from(SHIPPING_INPUT_DELAY_TICKS) * tick_duration.as_secs_f64() * 1000.0
     );
     if template.seeded.is_some() {
         app.add_systems(
@@ -720,8 +729,8 @@ struct ConnectRetry {
     down_since: Option<f64>,
     /// When the last retry `Connect` fired.
     last_attempt_at: Option<f64>,
-    /// A retry fired at least [`RECONNECT_GIVE_UP_S`] after `down_since` has failed: the match is
-    /// given up. Cleared on `Connected`.
+    /// A retry fired past the [`client_policy`] reconnect budget has failed. A hitch still
+    /// permits an attempt on resume; `Connected` clears exhaustion.
     exhausted: bool,
     /// An authenticated refusal is terminal and supplies the visible cause.
     refusal: Option<JoinRefusal>,
@@ -730,33 +739,12 @@ struct ConnectRetry {
     tank_seen: bool,
 }
 
-/// Real-time reconnect budget: give up only after a retry fired this long after disconnection
-/// fails. A suspend/hitch therefore still permits one attempt on resume. TUNED: twice the
-/// Worker's 15 s heartbeat deadline for dropping silent servers (`decisions.md`, "Reconnect give-up").
-const RECONNECT_GIVE_UP_S: f64 = 30.0;
-
-/// Retry backoff, seconds; `attempts == 0` is the first retry. Mild growth avoids hammering a
-/// down server while noticing a newly started one within seconds; capped by [`RECONNECT_BACKOFF_CAP`].
+/// Retry growth and cap are required client policy data; direct links retry indefinitely.
 fn reconnect_backoff_secs(attempts: u32) -> f64 {
-    const BASE: f64 = 1.0;
-    const STEP: f64 = 0.5;
-    (BASE + STEP * f64::from(attempts)).min(RECONNECT_BACKOFF_CAP)
+    let policy = client_policy();
+    (policy.reconnect_base_s.0 + policy.reconnect_step_s.0 * f64::from(attempts))
+        .min(policy.reconnect_cap_s.0)
 }
-
-/// The ceiling on [`reconnect_backoff_secs`] — a client that has been retrying for a while still
-/// re-checks for a server at least this often. In direct mode retries are indefinite (no attempt
-/// cap): the primary workflow is "launch the client, then the server", where the wait can exceed
-/// any small cap, and a mid-game drop keeps reconnecting while the window is open. Matchmaking mode
-/// closes a link that never connects, or a match down for [`RECONNECT_GIVE_UP_S`]
-/// ([`close_verdict`]).
-const RECONNECT_BACKOFF_CAP: f64 = 5.0;
-
-/// Failed-attempt threshold for the combined server-down/build-or-asset-mismatch hint.
-/// A skewed wire/map/construction tag drops the undecryptable token (`protocol::protocol_id`);
-/// the client sees `ConnectionRequestTimedOut`, identical to an unreachable server
-/// (vendored `lightyear_netcode` client.rs `update_state`). The count warrants naming both
-/// possibilities, not diagnosing a build mismatch or claiming server startup has finished.
-const MISMATCH_HINT_AFTER_ATTEMPTS: u32 = 3;
 
 /// Frame-rate first-connect/retry driver over the single link's markers.
 ///
@@ -832,7 +820,7 @@ fn drive_connection(
     }
 
     if let (Some(down), Some(attempted)) = (retry.down_since, retry.last_attempt_at)
-        && attempted - down >= RECONNECT_GIVE_UP_S
+        && attempted - down >= client_policy().reconnect_give_up_s.0
     {
         retry.exhausted = true;
     }
@@ -846,7 +834,7 @@ fn drive_connection(
             retry.next_retry_at = None;
             retry.last_attempt_at = Some(now);
             commands.trigger(Connect { entity });
-            // Dev breadcrumb only; `MISMATCH_HINT_AFTER_ATTEMPTS` owns why timeouts are ambiguous.
+            // Dev breadcrumb only; `client_policy` owns the ambiguous-timeout hint threshold.
             let reason = disconnected
                 .map_or_else(|| "no reason reported".to_owned(), |d| d.reason.to_string());
             info!(
@@ -1018,10 +1006,8 @@ fn finish_leaving(
     }
 }
 
-/// Whether, and how, the match's link is closed this frame: the server reported gone (`gone`), a
-/// link that never connected after [`MISMATCH_HINT_AFTER_ATTEMPTS`] attempts, or a once-connected
-/// link whose reconnects are exhausted ([`RECONNECT_GIVE_UP_S`]). A link that connected once is the
-/// match's: its close is the match's end; one that never connected is a failed join.
+/// Close on a server-gone report, the [`client_policy`] failed-join threshold, or exhausted
+/// reconnects. A once-connected link ends the match; one that never connected is a failed join.
 fn close_verdict(
     retry: &ConnectRetry,
     gone: Option<String>,
@@ -1043,7 +1029,7 @@ fn close_verdict(
         });
     }
     if !retry.connected_once {
-        return (retry.attempts >= MISMATCH_HINT_AFTER_ATTEMPTS)
+        return (retry.attempts >= client_policy().mismatch_hint_after_attempts.0)
             .then(|| MatchClosed::Unreachable("could not reach the match server".into()));
     }
     retry
@@ -1151,11 +1137,11 @@ fn screen_label(retry: &ConnectRetry) -> String {
 }
 
 /// The joining screen's label after `attempts` failed connects. Past
-/// [`MISMATCH_HINT_AFTER_ATTEMPTS`] it names both causes a refusal can have (see that constant):
+/// the [`client_policy`] failed-attempt threshold it names both causes a timeout can have:
 /// only a session that has never connected can be a build mismatch, and this screen is only ever
 /// shown to one.
 fn joining_label(attempts: u32) -> String {
-    if attempts >= MISMATCH_HINT_AFTER_ATTEMPTS {
+    if attempts >= client_policy().mismatch_hint_after_attempts.0 {
         "CAN'T CONNECT — server down or client/server build or asset mismatch\n\
          (update the client or redeploy the server)"
             .to_string()
@@ -2595,28 +2581,57 @@ mod tests {
         }
     }
 
-    /// Constant delay protects Lightyear's `Δend_tick == 1`: adaptive delay can strand a stale
-    /// pressed input or fabricate `SameAsPrecedent`, keeping automatic fire active after release
-    /// (`src/net/tests/net_fire_release.rs`). Test config shape because lightyear_sync's
-    /// `input_delay_ticks()` is private: equal minimum/maximum returns n for RTT ≤ n and then
-    /// `maximum_input_delay_before_prediction == n` through `maximum_predicted_ticks + n`;
-    /// beyond that (DERIVED ~1.6 s ping at 64 Hz) delay still grows.
-    /// Adaptive delay requires fixing re-authorship of sent buffer ticks, not deleting this guard
-    /// (`upstream/lightyear-absent-anchor-input-freeze.md`).
+    /// Exercise private `input_delay_ticks` through its public config-insert observer. Native
+    /// encoding needs the same delay before and after even a saturated RTT; restoring the
+    /// upstream `fixed_input_delay` helper makes the high-latency cases fail.
     #[test]
     fn input_delay_is_constant() {
-        let config = shipping_input_delay();
-        assert_eq!(
-            config.minimum_input_delay_ticks, config.maximum_input_delay_before_prediction,
-            "the shipping input delay must be RTT-INDEPENDENT (minimum == maximum). An adaptive \
-             delay makes lightyear's input-buffer write tick stall or jump, which strands stale \
-             PRESSED inputs on the server and fabricates SameAsPrecedent ones on both ends — the \
-             MG-fires-after-release leak. See SHIPPING_INPUT_DELAY_TICKS.",
-        );
-        assert_eq!(
-            config.minimum_input_delay_ticks, SHIPPING_INPUT_DELAY_TICKS,
-            "shipping input delay changed — intended?",
-        );
+        let tick = crate::net::test_harness::TICK;
+        let margin = SyncConfig::default().jitter_margin(Duration::ZERO, tick);
+        // Fixture: cross the old allowance and u16 saturation, then reach the largest effective
+        // RTT Duration can hold. Upstream adds its margin before the saturating tick cast.
+        for (rtt, jitter) in [
+            (Duration::ZERO, Duration::ZERO),
+            (Duration::from_secs(4), Duration::from_secs(3)),
+            (tick * u32::from(u16::MAX - 1), Duration::ZERO),
+            (tick * u32::from(u16::MAX), Duration::ZERO),
+            (Duration::from_secs(1_000_000_000), Duration::from_secs(3)),
+            (Duration::MAX - margin, Duration::ZERO),
+            (Duration::ZERO, Duration::MAX / 8),
+        ] {
+            let mut app = input_delay_app(rtt, jitter);
+            assert_eq!(
+                app.world().resource::<LocalTimelineSync>().input_delay(),
+                SHIPPING_INPUT_DELAY_TICKS,
+                "RTT {rtt:?}, jitter {jitter:?} must not change native-input write ticks",
+            );
+            app.world_mut().trigger(LocalTimelineShift { delta: -1 });
+            assert_eq!(
+                app.world().resource::<LocalTimelineSync>().input_delay(),
+                SHIPPING_INPUT_DELAY_TICKS,
+                "timeline-shift recomputation must preserve the delay",
+            );
+        }
+    }
+
+    fn input_delay_app(rtt: Duration, jitter: Duration) -> App {
+        use lightyear::connection::network_topology::{NetworkTopology, NetworkingMetadata};
+
+        let mut app = crate::net::test_harness::base_app();
+        app.add_plugins(ClientPlugins {
+            tick_duration: crate::net::test_harness::TICK,
+        });
+        super::super::protocol::plugin(&mut app);
+        let mut link = Link::default();
+        link.stats.rtt = rtt;
+        link.stats.jitter = jitter;
+        let client = app.world_mut().spawn((Client, link)).id();
+        app.world_mut().resource_mut::<NetworkingMetadata>().mode = NetworkTopology::Client(client);
+        app.insert_resource(InputTimelineConfig::new(
+            SyncConfig::default(),
+            shipping_input_delay(),
+        ));
+        app
     }
 
     /// A buffer holding one (absent) slot at `start`, with a remote high-water mark beside it.
@@ -2671,20 +2686,13 @@ mod tests {
     /// snapshots and allow the next write. A local clearing repair cannot make this test pass.
     #[test]
     fn native_timeline_shift_preserves_the_input_buffer() {
-        let mut app = crate::net::test_harness::base_app();
-        app.add_plugins(ClientPlugins {
-            tick_duration: crate::net::test_harness::TICK,
-        });
-        super::super::protocol::plugin(&mut app);
-        app.insert_resource(InputTimelineConfig::new(
-            SyncConfig::default(),
-            shipping_input_delay(),
-        ));
+        // Fixture: effective RTT exceeds the upstream helper's finite prediction allowance.
+        let mut app = input_delay_app(Duration::from_secs(4), Duration::from_secs(3));
         // Fixture timeline 313 shifts to 20; use the shipped delay for buffered indices.
         app.world_mut()
             .resource_mut::<LocalTimeline>()
             .apply_delta(313);
-        let delay = i32::from(SHIPPING_INPUT_DELAY_TICKS);
+        let delay = i32::from(app.world().resource::<LocalTimelineSync>().input_delay());
         let mut buffer = NativeBuffer::<TankCommand>::default();
         let held = ActionState(TankCommand {
             throttle: 0.75,
@@ -2697,7 +2705,12 @@ mod tests {
             .world_mut()
             .spawn((InputMarker::<TankCommand>::default(), buffer))
             .id();
-        app.world_mut().spawn(Client);
+        // The recovered link recomputes delay during the same backward shift. With the
+        // upstream helper this shrinks delay while the retained start moves only by delta.
+        let mut links = app.world_mut().query::<&mut Link>();
+        for mut link in links.iter_mut(app.world_mut()) {
+            link.stats = default();
+        }
         app.world_mut().trigger(LocalTimelineShift { delta: -293 });
         assert_eq!(app.world().resource::<LocalTimeline>().tick(), Tick(20));
         app.world_mut()
@@ -3767,8 +3780,12 @@ mod tests {
             "same tank+tick, other weapon = distinct shot"
         );
 
-        // DERIVED: 30 combatants x two weapons x ceil(750 RPM x MAX_COSMETIC_CATCH_UP_TICKS / 64 Hz).
-        let accepted_horizon: u32 = 30 * 2 * 20;
+        // Fixture traffic envelope: 30 players, two weapons each, at most 750 RPM per weapon.
+        // DERIVED count from the catch-up owner's window and the shipped timestep.
+        let ticks_per_second = 1.0 / crate::net::test_harness::TICK.as_secs_f64();
+        let per_weapon = (750.0 / 60.0 * f64::from(MAX_COSMETIC_CATCH_UP_TICKS) / ticks_per_second)
+            .ceil() as u32;
+        let accepted_horizon = 30 * 2 * per_weapon;
         for fire_tick in 1..=accepted_horizon {
             assert!(seen.mark_new(shot(fire_tick)));
         }
@@ -3796,14 +3813,14 @@ mod tests {
         use super::super::matchmaking::MatchClosed;
         let joining = ConnectRetry {
             initiated: true,
-            attempts: MISMATCH_HINT_AFTER_ATTEMPTS - 1,
+            attempts: client_policy().mismatch_hint_after_attempts.0 - 1,
             ..default()
         };
         assert_eq!(close_verdict(&joining, None), None);
         assert_eq!(
             close_verdict(
                 &ConnectRetry {
-                    attempts: MISMATCH_HINT_AFTER_ATTEMPTS,
+                    attempts: client_policy().mismatch_hint_after_attempts.0,
                     ..joining
                 },
                 None
@@ -3823,7 +3840,7 @@ mod tests {
             connected_once: true,
             attempts: 40,
             down_since: Some(10.0),
-            last_attempt_at: Some(10.0 + 10.0 * RECONNECT_GIVE_UP_S),
+            last_attempt_at: Some(10.0 + 10.0 * client_policy().reconnect_give_up_s.0),
             ..default()
         };
         assert_eq!(
@@ -3850,14 +3867,24 @@ mod tests {
 
     /// The backoff never exceeds the cap, no matter how many attempts have piled up — an
     /// indefinitely-retrying client still re-checks for a server at least that often. Also asserts
-    /// monotonic growth so a broken BASE/STEP schedule can't hide behind a still-correct cap.
+    /// monotonic growth so a broken schedule cannot hide behind a still-correct cap.
     #[test]
     fn reconnect_backoff_is_capped() {
-        assert_eq!(reconnect_backoff_secs(100), RECONNECT_BACKOFF_CAP);
-        assert_eq!(reconnect_backoff_secs(u32::MAX), RECONNECT_BACKOFF_CAP);
+        let policy = client_policy();
+        let reaches_cap = ((policy.reconnect_cap_s.0 - policy.reconnect_base_s.0)
+            / policy.reconnect_step_s.0)
+            .ceil() as u32;
+        assert_eq!(
+            reconnect_backoff_secs(reaches_cap),
+            policy.reconnect_cap_s.0
+        );
+        assert_eq!(
+            reconnect_backoff_secs(u32::MAX),
+            client_policy().reconnect_cap_s.0
+        );
         for n in 0..20 {
             assert!(reconnect_backoff_secs(n) <= reconnect_backoff_secs(n + 1));
-            assert!(reconnect_backoff_secs(n) <= RECONNECT_BACKOFF_CAP);
+            assert!(reconnect_backoff_secs(n) <= client_policy().reconnect_cap_s.0);
         }
     }
 }

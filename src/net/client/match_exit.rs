@@ -7,8 +7,8 @@
 //!   inside netcode's timeout, so the disconnect was delivered — the link is removed, and the
 //!   client is on the lobby screen with [`MatchClosed::Left`].
 //! - **Server gone.** The server's app is dropped; the client keeps reconnecting until a retry
-//!   fired [`RECONNECT_GIVE_UP_S`] of real time after the drop fails, then closes the match as
-//!   ended and is on the lobby screen. Each client frame advances real time by [`SLOW_FRAME`] —
+//!   fired past the [`client_policy`] real-time reconnect budget fails, then closes the match as
+//!   ended on the lobby screen. Each client frame advances real time by [`SLOW_FRAME`] —
 //!   virtual time clamps a frame that long — so the give-up lands within [`GONE_FRAMES`] frames
 //!   only on the real clock.
 //!
@@ -41,9 +41,8 @@ const LEAVE_FRAMES: u32 = 8;
 const SERVER_DROP_STEPS: u32 = 20;
 /// A slow client frame.
 const SLOW_FRAME: Duration = Duration::from_secs(1);
-/// Frames of [`SLOW_FRAME`] within which the give-up must land: [`RECONNECT_GIVE_UP_S`] of real
-/// time plus the 5 s backoff cap and slack. On virtual time (its 250 ms clamp per frame) the same
-/// give-up takes 120 frames.
+/// Fixture bound in [`SLOW_FRAME`] units: the shipped reconnect budget, backoff cap and slack.
+/// Virtual time clamps each frame, so the same bound refuses a virtual-clock give-up.
 const GONE_FRAMES: u32 = 45;
 /// One frame of a suspended or hitched client, twice the give-up.
 const LONG_STALL: Duration = Duration::from_secs(60);
@@ -242,7 +241,7 @@ fn a_gone_server_ends_the_match_after_the_real_time_give_up() {
         )]
     );
     assert!(
-        frames as f64 * SLOW_FRAME.as_secs_f64() >= RECONNECT_GIVE_UP_S,
+        frames as f64 * SLOW_FRAME.as_secs_f64() >= client_policy().reconnect_give_up_s.0,
         "not before the give-up ({frames} frames)"
     );
 }

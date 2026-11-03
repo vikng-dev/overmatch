@@ -1,0 +1,7 @@
+(
+    reconnect_give_up_s: (30.0, Taste("connection UX: retry a dropped match for twice the Worker's 15-second heartbeat deadline before ending it")),
+    reconnect_base_s: (1.0, Taste("connection UX: initial retry wait avoids hammering a down server")),
+    reconnect_step_s: (0.5, Taste("connection UX: mild retry growth while a server recovers")),
+    reconnect_cap_s: (5.0, Taste("connection UX: keep checking a down server at least this often; direct links retry indefinitely")),
+    mismatch_hint_after_attempts: (3, Taste("joining UX: after repeated timeouts name both server-down and build-or-asset-mismatch causes; an undecryptable token times out like an unreachable server")),
+)
