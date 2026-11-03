@@ -1226,8 +1226,8 @@ mod tests {
         }
     }
 
-    /// Independently rederive ECS thresholds from rung, budget, view and radius. Literal metre
-    /// wiring or an unpropagated budget change must fail.
+    /// Independently rederive `ranges` thresholds from rung, budget, view and radius; literal metre
+    /// thresholds or an unpropagated budget change there must fail. This does not test ECS spawning.
     #[test]
     fn wired_thresholds_are_the_derivation() {
         let lod = build(&shipped_grid());

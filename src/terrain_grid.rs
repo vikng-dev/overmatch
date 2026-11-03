@@ -142,7 +142,7 @@ pub struct ForceFlatWorld;
 /// over a surface at 0, reproduced over terrain as the footprint's max ground height plus this.
 pub(crate) const SPAWN_CLEARANCE_M: f32 = 2.0;
 
-/// Spawn footprint half-side (m): a fixed square, independent of hull construction or yaw.
+/// Spawn footprint half-side (m): a fixed axis-aligned square, independent of hull construction or yaw.
 /// DERIVED coverage: 10 m × 10 m; larger hulls need a construction-derived footprint.
 /// Sample its maximum, not its centre: MEASURED centre-only placement buried uphill axles 1.65 m.
 pub(crate) const SPAWN_FOOTPRINT_HALF_M: f32 = 5.0;
@@ -285,7 +285,7 @@ impl HeightGrid {
         }
     }
 
-    /// Conservative maximum height (m) over the square of half-side `half` at world `(x, z)`.
+    /// Conservative maximum height (m) over the axis-aligned square of half-side `half` at world `(x, z)`.
     /// Spawn placement must clear uphill gear, not only the centre (see [`SPAWN_FOOTPRINT_HALF_M`]).
     /// Take every node of every touched cell: piecewise-linear extrema occur at nodes, so their
     /// enclosing rectangle bounds the square's surface maximum. Pure and deterministic.
@@ -1245,7 +1245,8 @@ pub(crate) mod tests {
 
     /// CI must catch missing maps, LFS pointers, PNG/JPG single-mip regressions (MEASURED 30 fps),
     /// and missing `basis-universal` support; `world::report_failed_terrain_map` runs only with a
-    /// window. All three bound maps need mipmapped KTX2 headers; the albedo also uses Bevy's loader.
+    /// window. All three bound maps need mipmapped KTX2 headers; albedo represents their shared
+    /// transcode law through Bevy's loader.
     /// Transcode target follows flags, not the host GPU: `CompressedImageFormats::BC` chooses BC7,
     /// Apple Silicon uses ASTC 4x4 (`get_transcoded_formats`), both 8 bpp. Albedo requests sRGB as
     /// `world::MapEncoding` does.

@@ -742,7 +742,7 @@ fn hide_link_template(mut commands: Commands, fresh: Query<(Entity, &Name), Adde
 
 /// Bind once, latching on [`LinkTemplate`]. Retry while scene or mesh assets load; once a pin
 /// exists, the startup template gate guarantees a complete instance, so missing pieces refuse.
-/// Scan globally: `Link` is a scene-root sibling of the hull, and both tools spawn one template.
+/// Scan globally: `Link` is a scene-root sibling of the hull; multiple instances share the resource.
 /// Reads the mesh, material and pins, verifies scale, and builds mirrors and canonical frames.
 #[expect(
     clippy::too_many_arguments,
@@ -1164,7 +1164,7 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
 /// the primitive's own material `needs_tangents` (normal or clearcoat-normal texture), whereas
 /// these bare reductions use glTF's default material. The bound shoe wears [`LINK_MATERIAL`]'s
 /// MEASURED three maps, including a normal map. Bevy PBR requires `VERTEX_TANGENTS` to use it;
-/// without tangents it silently changes lighting as well as the certified silhouette.
+/// Without tangents, normal-map lighting is silently lost; geometry is unchanged.
 ///
 /// Generate once on the authored shoe; [`mirrored_mesh`] reflects analytically (`T' = M T`,
 /// `w' = −w`). Generating again after reflection would cost twice and ask mikktspace to rederive
@@ -2275,7 +2275,7 @@ mod tests {
     ///
     /// Needle cleanup removes slivers (one triangle each in L1/L2/L3: MEASURED
     /// 855/581/315 → 854/580/314), and baking makes tangents inspectable before shipping.
-    /// Either alone leaves runtime generation deciding lighting. The manifest's
+    /// Cleanup prevents defective tangents; baking alone can preserve them. The manifest's
     /// `tangent_default_verts: 0` did not prevent Bevy defaulting a vertex: `scripts/lod/measure.py`
     /// counts vertices whose faces all have zero UV area, which none of that vertex's faces did.
     /// Source-data numeric checks cannot certify the runtime solver: test shipped bytes through
