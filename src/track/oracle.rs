@@ -63,8 +63,8 @@ pub trait ContactOracle {
     /// The ground under world point `point` (its XZ): what the track law's grip and rolling
     /// resistance read per terrain contact (`track::forces::contact_side`). `None` is an oracle
     /// that states no ground: production accepts it only for support-only calibration; a
-    /// force-bearing production contact refuses it. Inline tests retain an explicit rigid-pair
-    /// fixture path when no ground is supplied.
+    /// force-bearing production contact refuses it. Inline tests retain an explicit
+    /// calibration grip coefficient when no ground is supplied.
     fn ground_at(&self, _point: Vec3) -> Option<ContactGround> {
         None
     }

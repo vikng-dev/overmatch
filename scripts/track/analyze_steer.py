@@ -19,7 +19,7 @@ HARD GATES (every run, every tick):
   - shaper      |Δshaped| per axis per tick ≤ slew/64, and shaped snaps exactly
                 to raw once within one step (drive.rs `approach` semantics).
   - ellipse     per contact: force magnitude cannot exceed the recorded constitutive
-                capacity. Capacity already includes soil cohesion and actual normal load;
+                capacity. Capacity is the contact coefficient times elastic normal load;
                 JSONL force/capacity quantization is included in the tolerance.
   - finite      every numeric field in every row is finite.
 
@@ -221,7 +221,7 @@ def check_hard_gates(run, gates):
         {"step": step, "max_step_excess": max_excess, "convergence_violations": conv_viol},
     )
 
-    # (2) Force-capacity circle for every contact, including cohesion at zero normal load.
+    # (2) Force-capacity circle for every contact; zero elastic load carries no grip.
     # The force pass publishes its capacity independently of mobilization.
     c = run["contacts"]
     loaded = c

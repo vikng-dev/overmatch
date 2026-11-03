@@ -410,15 +410,29 @@ When `r_ground = hard`, rolling is exactly `hard` at every pressure.
 `GripParams::nominal_pressure_kpa` is derived once during spawn construction: weight divided
 by both tracks' nominal footprint, using the admitted shoe width and mean road-wheel-centre
 span from `RigGeom`. It is independent of instantaneous patch load, support stiffness, damping,
-pitch and contacts. A fixture halving mass at fixed footprint halves this pressure. The law
-is a linear pressure proxy for compaction, omitting real sinkage, track-length effects and
+pitch and contacts. Each side's finite positive station span is admitted by `RigGeom::validate`
+during startup collider construction, before body spawning; the refusal names the sheet,
+`roadwheels` and the repair. A structural tooling sheet may retain one wheel per side, but
+such a construction cannot enter play. No spec field or footprint definition changes.
+A fixture halving mass at fixed footprint halves this pressure. The law is a linear pressure proxy for compaction, omitting real sinkage, track-length effects and
 sinking over time; it changes neither ride height nor cosmetic prints. No per-tank number
-or bog rule is introduced. When rolling exceeds μ, maximum grip cannot sustain translation:
+or bog rule is introduced. When rolling exceeds μ, maximum grip cannot sustain translation outside the rolling fade:
 DERIVED the crossover is `p_ref (μ-hard)/(r_ground-hard)` for a ground above `hard`.
 
-Physical rolling load remains `Σ rolling(p) N`, with the existing normal-load reader and
-`ROLLING_FADE_SPEED` regularization unchanged. Solid recipients read `hard` alone. The Driver
-uses the same already-evaluated coefficient, with full potential rolling cost at rest.
+Rolling acts on the hull at each contact, opposite its longitudinal motion relative to the
+support: `F_rr = -long_dir rolling(p) N clamp(v_contact / ROLLING_FADE_SPEED, -1, 1)`.
+It is separate from the belt reaction, which sums only longitudinal grip. The engine therefore
+feels drag through traction; above the fade, steady straight pull is
+`min(engine pull, μ N) - rolling(p) N`. An arbitrarily strong engine cannot overcome drag above
+grip. Inside the fade a crawl remains possible, with equilibrium speed
+`ROLLING_FADE_SPEED min(engine pull, μ N) / (rolling(p) N)` on uniform flat support.
+A spinning belt on a stationary hull creates no rolling drag. Solid recipients read `hard`.
+The Driver reads the same coefficient, pricing the full drag needed to leave the fade.
+
+The fade regularizes a hull damper, not a belt damper. DERIVED for a supported scalar hull:
+`c dt / M = rolling(p) g dt / ROLLING_FADE_SPEED`; explicit integration is monotone below one
+and stable below two. This replaces the retired belt-inertia slope calculation; it is not a
+certificate for every coupled contact mode or arbitrarily large pressure.
 
 **Driver observation and measured force resolution.** `track::load::observe` supplies the
 unfiltered `TransmissionInput::perceived_load`: `L = W sin(theta) + c_rr W cos(theta) +
@@ -713,11 +727,11 @@ a playtest judgment.
 
 The following is the shipped fixture under the current law, not a reconstruction of the earlier
 scheduler baseline. Speeds are MEASURED final-second means after 90 simulated seconds. Capacity
-is DERIVED from the final contact pass, `sum(mu_equiv * elastic_load)`, and potential drawbar is
-that capacity minus nominal `c_rr * W`. These are traction limits, not delivered engine force.
+is DERIVED from the final contact pass, `sum(mu_equiv * elastic_load)`, and capacity less nominal drag is
+that capacity minus nominal `c_rr * W`. These are force budgets, not delivered engine force. In this historical run rolling acted only on the belt, so the difference was not a delivered hull-force limit.
 The two entry protocols give the capacity/drawbar ranges below. No frame/tick pricing was taken.
 
-| ground | contact capacity (kN, DERIVED) | potential drawbar (kN, DERIVED) | from rest (MEASURED) | rolling entry (MEASURED) |
+| ground | contact capacity (kN, DERIVED) | capacity less nominal drag (kN, DERIVED) | from rest (MEASURED) | rolling entry (MEASURED) |
 |---|---:|---:|---|---|
 | concrete | 335.470–335.485 | 313.103–313.118 | F8, 10.650203 m/s | F8, 10.650212 m/s |
 | dirt | 233.367–233.369 | 199.817–199.818 | F8, 10.569947 m/s | F8, 10.569968 m/s |
@@ -726,9 +740,9 @@ The two entry protocols give the capacity/drawbar ranges below. No frame/tick pr
 | sand | 303.745–303.755 | 236.645–236.655 | F6, 4.874707 m/s | F7, 6.211259 m/s |
 
 The shipped map's base pack is gravel. At the fixture's DERIVED nominal weight 559.170 kN,
-the previous 0.9 grip gave DERIVED 503.253 kN traction capacity and 475.295 kN potential drawbar
+the previous 0.9 grip gave DERIVED 503.253 kN traction capacity and 475.295 kN capacity less nominal drag
 with its 0.05 motion resistance. The current law's base-ground samples instead give about
-398 kN capacity and 370 kN potential drawbar, equivalent to about 0.712 of weight before motion
+398 kN capacity and 370 kN capacity less nominal drag, equivalent to about 0.712 of weight before motion
 resistance. Sand retains an entry-dependent sustainable gear split under the current Driver;
 the test proves both equilibria rather than demanding the same gear.
 
@@ -902,8 +916,8 @@ law; direct grip and arithmetic mixture witnesses replace them. The ground-speci
 witness retired because no ground selects K; common-compliance readout supplies its live
 evidence. Terrain-pair assertions retired; direct-ground pull and solid-recipient pair tests
 cover their separate consumers. The former one-ground late-creep threshold had no derivation;
-the slope matrix now owns holding/sliding, and the full-app park prints settlement while
-requiring supported contacts. `ForceParams::inertia` is deleted: `DriveConstruction` owns
+the slope matrix now owns holding/sliding, and the full-app slope matrix uses the shipped brakes and transmission on tilted ground, checking
+holding below both limits and motion above the lower one. `ForceParams::inertia` is deleted: `DriveConstruction` owns
 inertia, and arithmetic tests hold their own inline fixture construction.
 
 `rig_geom` owns the nominal-footprint pressure derivation; the sim stores its result at spawn,
@@ -916,8 +930,9 @@ arithmetic fixture uses Fixture inertia 6 kg m² (previously 4), above its DERIV
 5 kg m² minimum. Bake/spec inline fixtures and the Blender fixture use 4 kg m²; their former
 3/3/2 kg m² values did not resolve the idle catch. Shipped construction is unchanged. Released pivot testing requires monotonic
 arrest without reversal, rather than the unsupported 32-tick/0.01-speed observation window.
-The sandbox outer companion reads measured `pin_to_outer`. Loose-piece rise is bounded by
-piece height plus suspension travel; the piece ceiling follows all available fixture energy.
+The sandbox outer companion reads measured `pin_to_outer`. Loose-piece rise and peak piece motion are observations; the supported-on-piece and footprint
+checks supply the composition evidence. The former rise/energy ceilings could not detect the
+claimed defect and are removed.
 These close driving-05/06/09/15/16/17 and dev-23 after verification against source.
 
 Authored-number census (DERIVED by field/control count; inline Fixture numbers excluded):
@@ -950,7 +965,7 @@ bounded-return record, not a fresh baseline run; new numbers are MEASURED by the
 The construction pressure is DERIVED about 107.014 kPa from the same force/pressure law; the
 89.5 kPa seed is not the construction's current pressure. New flat rolling loads are DERIVED
 22.3668/35.7387/29.0527/95.9121/75.8543 kN on concrete/dirt/gravel/mud/sand; full-app observer
-residuals stay inside the independently declared precision. Final-contact potential drawbar is
+residuals stay inside the independently declared precision. Final-contact capacity less nominal drag is
 DERIVED capacity minus rolling load: gravel 369.092–369.151 kN, compared with the historical
 369.978–370.110 kN observation. The fixed 20 kN pad's gravel pull is MEASURED 14,239.974 N,
 versus historical 14,420.127 N; half load gives 7,119.987 N. Fixed-pad pulls on
@@ -968,8 +983,9 @@ The pressure-heavy inline construction is DERIVED by doubling its ground's drag/
 MEASURED mass 28,851.293 kg, pressure 54.166676 kPa, crossover 27.083336 kPa, potential rolling
 158.498 kN versus grip 84.909 kN and maximum sustainable curve pull 132.701 kN. Its late speed is MEASURED
 .20931806 m/s, inside the retained .25 m/s rolling fade. This is a limited crawl, not evidence of
-exact immobilization: a rolling law that fades to zero at rest admits it. The fixture test states
-that limited claim. Changing the fade or belt integration remains outside this lane.
+exact immobilization: a rolling law that fades to zero at rest admits it. That historical fixture was engine-limited and did not distinguish grip from engine. The
+current pressure-heavy witness separates the two limits and derives each crawl from its
+limiting force. The fade magnitude and belt integration are unchanged.
 The force-pad slope matrix stops below `atan(μ)` at both fixture pressures (MEASURED late speed
 at most 0.0000062 m/s), and accelerates above it; its printed settlement is not a pass target.
 The 32 Hz dither retains MEASURED .25 of capacity; recoil and shear-return form are unchanged.
@@ -981,6 +997,102 @@ instrument. After the stricter admission exposed inline fixture inertia, all 93 
 and whole-tree guard tests passed with the corrected sheets. Blender fixture Python syntax
 passes; Blender's asset-generation suite was not run locally. No captures, pricing, push or
 external issue comments were made.
+
+### Hull drag and grip verification (#198)
+
+Rolling opposes longitudinal hull motion relative to each support; spinning a stationary
+belt creates none. Grip remains independently bounded by `μ N`, and the belt reacts only
+to longitudinal grip. The pressure witness checks the emitted hull force against contact
+telemetry and the shared Driver coefficient. Its three constructions distinguish grip
+limitation, engine limitation and an affordable launch. The engine-limited fixture has a
+flat net torque curve so its expected pull does not depend on an observed crank RPM.
+
+The full-app matrix mounts the shipped simulation, brakes and transmission on tilted
+geometry. It parks at nine tenths of the lower static limit, checks late velocity and
+travel after 60 simulated seconds, and observes motion above that limit for 8 seconds.
+The sliding horizon is bounded by the finite plane even under free gravitational
+acceleration; leaving the plane is not a sliding-law failure. Angles and brake strength
+are read from ground and vehicle owners, never from a previous run.
+
+| Ground | Grip limit (degrees, DERIVED) | Brake limit (degrees, DERIVED) | Binding limit | Late held speed (m/s, MEASURED) | Above-limit late travel in one second (m, MEASURED) |
+|---|---:|---:|---|---:|---:|
+| concrete | 30.963758 | 31.000736 | ground | .00000031 | 2.598096 |
+| dirt | 22.684929 | 31.000736 | ground | .00000037 | .186064 |
+| gravel | 35.450867 | 31.000736 | brake | .00000078 | 10.897297 |
+| mud | 15.482733 | 31.000736 | ground | .00000008 | .043254 |
+| sand | 28.501959 | 31.000736 | ground | .00000070 | .123698 |
+
+Common-K readers no longer carry a per-contact copy or load-weighted constant. The
+vanishing-patch downshift test is retired: an identical-coefficient patch supplied no
+counterexample after cohesion left. Nominal observation and mixed-ground tests retain the
+live evidence. Loose-piece rise and peak piece motion are printed; actual piece support
+and the settled footprint supply the composition evidence, without the vacuous rise and
+energy ceilings. Arithmetic drivetrain fixtures carry a required grip construction and
+a separate terrain coefficient; the track-material slot no longer supplies terrain grip.
+
+Inertia admission probes lie between the with/without-term bounds. DERIVED from the compact
+fixture: minimum J is 1.806957 kg m², versus 1.297850 without idle catch and 1.790493 without
+viscous drag. A flat high-RPM fixture isolates fuel-cut loss reconstruction: minimum
+1.708171 kg m², versus 1.210126 without that term. These inputs isolate each term rather
+than asking an inertia below every bound to witness all of them.
+
+
+MEASURED fixed-footprint delivery (inline fixtures; full potential drag is priced by the Driver):
+
+| Limiter | Pressure (kPa) | Engine pull (kN) | Grip (kN) | Drag (kN) | Late speed (m/s) | Launch pick |
+|---|---:|---:|---:|---:|---:|---|
+| grip | 40.000000 | 132.701 | 62.702 | 88.619 | .17688680 | none |
+| engine, flat curve | 60.000004 | 99.526 | 282.160 | 193.123 | .12878303–.12885873 | none |
+| affordable launch | 15.000001 | 132.701 | 23.513 | 14.422 | 6.87054539–6.87082577 | F2 |
+
+The grip-limited crawl is DERIVED `.25 × .3 / .424 = .17688679 m/s`; its engine exceeds drag.
+The engine-limited crawl is DERIVED from the flat curve's pull and potential drag, about
+.12884 m/s; its grip exceeds drag. MEASURED mean late force is .0057 N and -.0019 N,
+respectively: neither keeps gaining speed. Replacing faded drag by its full potential at
+those same states gives MEASURED deficits 25.915 kN and 93.598 kN, agreeing with no launch
+pick. The affordable construction accelerates through the fade.
+
+At the fixed pad's MEASURED 20 kN normal load, full-pressure grip pulls on
+concrete/dirt/gravel/mud/sand remain MEASURED 12.000/8.360/14.240/5.540/10.860 kN;
+half load gives half each pull. These are observations of `μ N`, not retained speed targets.
+The declutched coast distances are MEASURED 12.632 m and 4.187 m, versus DERIVED 12.662 m
+and 4.178 m from the two fixture grounds and coupled hull/belt mass. The locked-pad mud
+stop from Fixture 4 m/s reaches MEASURED 1.823313 m, returns .074999 m, and peaks in reverse
+at .165683 m/s. The constrained adapter's separate mud stop reaches MEASURED 2.927493 m,
+returns .075154 m and reverses at .149379 m/s; it is not a whole-app tank measurement.
+
+
+MEASURED shipped full-app ground speeds after hull drag, rest / rolling entry in m/s:
+
+| Ground | Rest entry | Rolling entry | Final gear rest / rolling |
+|---|---:|---:|---|
+| concrete | 10.634736 | 10.634741 | F8 / F8 |
+| dirt | 10.521238 | 10.521238 | F8 / F8 |
+| gravel | 10.584840 | 10.584842 | F8 / F8 |
+| mud | 3.233301 | 4.358446 | F5 / F6 |
+| sand | 4.828499 | 4.828491 | F6 / F6 |
+
+These replace the earlier direct-grip observations as the current force-path report; no
+previous speed or gear is a pass condition. The full-app mud service stop from Fixture
+4 m/s reaches MEASURED 1.871824 m, returns .064541 m, and peaks in reverse at .235267 m/s,
+with final capacity 154.890 kN. The loose-piece witness reports MEASURED hull rise .076588 m,
+peak piece centre .050000 m and peak speed .153281 m/s; its Fixture piece height is .1 m.
+
+The neutral pivot is MEASURED .1286 rad/s, against its DERIVED .1884 rad/s kinematic ceiling;
+its opposing belts are MEASURED ±.288 m/s. These are reported outcomes, not retained targets.
+
+Final gates for `driving: make rolling drag compete with grip (#198)` and
+`driving: admit positive running-gear footprints before spawn (#198)`: MEASURED targeted
+driving/ground result 222 passed; full headless plus citation/UI/net-boundary/bake guards
+76 passed, 4 on-demand measurement/pricing beds ignored. CI-feature workspace/all-target
+clippy, `cargo fmt --all --check`, diff whitespace and steering-analyzer syntax pass.
+No captures or frame/tick pricing were taken. The original strong-engine regression was
+red before the force change, sustaining MEASURED 1.331203 m/s outside the fade.
+
+Review dispositions live in `.agents/scratch/fix-law-grip-review.md`. Authored-number census
+remains 20, or 22 including the held lip controls (DERIVED, inline Fixture numbers excluded).
+Neither published ground data nor a serialized wire type changes; protocol revision stays 83.
+Backlog load-27..32 and net-21..22 remain reserved to the turret chain by the lane brief.
 
 ## 6. Tiers and budget (codex G — numbers corrected)
 
@@ -1170,7 +1282,7 @@ Straight-line entries use the existing final-second, 90-s instrument. MEASURED B
 from rest / rolling, m/s: concrete 10.650203 / 10.650212; dirt 10.569946 / 10.569968;
 gravel 10.610106 / 10.610108; mud 4.849178 / 4.849178; sand 4.874706 / 6.211272.
 Every gear is unchanged; the largest absolute change from the baseline table is DERIVED
-0.000013 m/s, within its 0.01 m/s convergence resolution. Gravel potential drawbar remains
+0.000013 m/s, within its 0.01 m/s convergence resolution. Gravel capacity less nominal drag remains
 DERIVED 369.978–370.110 kN versus baseline 369.924–370.111 kN from final contact capacity
 minus rolling load. Fixed-pad firm/loose pulls remain MEASURED 14,404.124 / 11,034.170 N;
 their DERIVED ratio remains 1.305411. The shipped base-ground fixed-pad pull is MEASURED

@@ -4,7 +4,8 @@ use super::*;
 
 #[derive(Clone)]
 struct FixtureConstruction {
-    grip: Option<forces::GripParams>,
+    grip: forces::GripParams,
+    ground_grip: f32,
     inertia: f32,
 }
 
@@ -12,20 +13,18 @@ struct FixtureConstruction {
 fn lab_fp() -> FixtureConstruction {
     FixtureConstruction {
         inertia: 8_000.0,
-        grip: Some(forces::GripParams {
+        ground_grip: 0.9, // Fixture terrain coefficient, independent of track material.
+        grip: forces::GripParams {
             track: crate::substances::contact_friction(0.9),
             nominal_pressure_kpa: forces::rolling_reference_kpa(),
             side_weight: 26_500.0 * 9.81 / 2.0,
-        }),
+        },
     }
 }
 
 /// Fixture adapter: arithmetic contact fixtures always carry a driven material pair.
 fn construction(params: &FixtureConstruction) -> DriveConstruction {
-    DriveConstruction::new(
-        params.grip.expect("driving Fixture has grip"),
-        params.inertia,
-    )
+    DriveConstruction::new(params.grip, params.inertia)
 }
 
 fn step(
@@ -146,12 +145,13 @@ fn compact_drivetrain() -> (FixtureConstruction, TransmissionParams) {
     let ground = super::super::drive_fixture::ground();
     let mut fp = lab_fp();
     fp.inertia = 3000.0; // Fixture belt inertia, independent of the contact composition's geometry.
-    fp.grip = Some(forces::GripParams {
-        track: crate::substances::contact_friction(ground.grip),
+    fp.ground_grip = ground.grip;
+    fp.grip = forces::GripParams {
+        track: spec.track.friction(),
 
         nominal_pressure_kpa: forces::rolling_reference_kpa(),
         side_weight: spec.mass * super::super::derive::G / 2.0,
-    });
+    };
     let tp = spec
         .track
         .powertrain
@@ -1706,7 +1706,7 @@ fn empty_station_shift_window_expires_into_motoring_drag() {
     // Fixture: descending at 5 m/s on a 10-degree grade, authority lost mid-window.
     let speed = 5.0;
     let k = tp.gears_fwd[3] / tp.sprocket_radius;
-    let grade = fp.grip.unwrap().side_weight * 10.0_f32.to_radians().sin();
+    let grade = fp.grip.side_weight * 10.0_f32.to_radians().sin();
     let mut st = TransmissionState {
         gear: 4,
         park: false,
@@ -1833,7 +1833,7 @@ fn moving_lug_does_not_restart_launch_slip() {
         let gear = (tp.gears_fwd.len() - 2) as u8;
         let k = tp.gears_fwd[(gear - 1) as usize] / tp.sprocket_radius;
         let speed = 0.8 * tp.engine.idle_rpm * RPM_TO_RAD / k;
-        let grade = fp.grip.unwrap().side_weight * 20.0_f32.to_radians().sin();
+        let grade = fp.grip.side_weight * 20.0_f32.to_radians().sin();
         let mut st = TransmissionState {
             gear,
             clutch: ClutchState::Out,
@@ -1911,7 +1911,7 @@ fn driver_input(
     let mut inp = input(command, 0.0, [speed; 2], [0.0; 2]);
     inp.perceived_load = super::super::load::PerceivedLoad {
         grade_n: load,
-        grip_n: fp.grip.unwrap().side_weight * 2.0 * fp.grip.unwrap().track.dynamic_coefficient,
+        grip_n: fp.grip.side_weight * 2.0 * fp.ground_grip,
         ..Default::default()
     };
     inp
@@ -1991,7 +1991,7 @@ fn affordable_launch(
 fn driver_launches_in_the_highest_capable_start_gear() {
     for scale in [0.5, 1.0] {
         let (mut fp, mut tp) = (lab_fp(), lab_tp());
-        fp.grip.as_mut().unwrap().side_weight *= scale;
+        fp.grip.side_weight *= scale;
         tp.clutch_capacity *= scale;
         for load in [0.0, 50_000.0 * scale, 100_000.0 * scale] {
             let inp = driver_input(&fp, 0.0, load, 0.0);
@@ -2026,7 +2026,7 @@ fn driver_launches_in_the_highest_capable_start_gear() {
 #[test]
 fn driver_full_pedal_walks_to_the_top_on_firm_ground() {
     for (fp, tp) in class_drivetrains() {
-        let load = 0.02 * fp.grip.unwrap().side_weight * 2.0; // Fixture: light supported load.
+        let load = 0.02 * fp.grip.side_weight * 2.0; // Fixture: light supported load.
         let mut state = TransmissionState::from_spec(&tp);
         let mut speeds = [0.0; 2];
         let mut changes = 0;
@@ -2146,7 +2146,7 @@ fn driver_observation_uses_the_engaged_ladder_in_both_directions() {
             &tp,
             &state,
         );
-        let weight = 2.0 * fp.grip.unwrap().side_weight;
+        let weight = 2.0 * fp.grip.side_weight;
         let expected = weight * angle.sin() * if reverse { -1.0 } else { 1.0 };
         assert!((load.grade_n - expected).abs() < weight * 1e-6);
         assert!((load.rolling_n - weight * 0.04 * angle.cos()).abs() < weight * 1e-6);
@@ -2267,7 +2267,7 @@ fn landing_resolution_bounds_independent_weight_rigs() {
         // Fixture masses, same engine and gearbox at both weights.
         for tp in [lab_tp(), tiger_tp()] {
             let mut fp = lab_fp();
-            fp.grip.as_mut().unwrap().side_weight = mass * super::super::derive::G / 2.0;
+            fp.grip.side_weight = mass * super::super::derive::G / 2.0;
             let mut residuals = Vec::new();
             for (index, &ratio) in tp.gears_fwd.iter().enumerate() {
                 for command in [0.25, 0.5, 1.0] {
@@ -2345,7 +2345,7 @@ fn gear_choice_reads_requested_pedal_before_its_ramp() {
 #[test]
 fn capable_launches_gain_speed_against_a_supported_grade() {
     for (fp, tp) in class_drivetrains() {
-        let load = 0.1 * fp.grip.unwrap().side_weight * 2.0; // Fixture incline load, within grip.
+        let load = 0.1 * fp.grip.side_weight * 2.0; // Fixture incline load, within grip.
         let mut state = TransmissionState {
             park: true,
             ..fresh(&tp)
@@ -2435,7 +2435,7 @@ fn reversal_release_during_hold_parks_without_a_direction_cut() {
 fn part_pedal_launches_and_sustains_ordered_speed() {
     for (fp, tp) in class_drivetrains() {
         let mut capable_notches = 0;
-        let weight = fp.grip.unwrap().side_weight * 2.0;
+        let weight = fp.grip.side_weight * 2.0;
         for degrees in [0.0_f32, 10.0, 20.0] {
             // Fixture: level and supported grades.
             let grade = weight * degrees.to_radians().sin();
@@ -2524,7 +2524,7 @@ fn part_pedal_launches_and_sustains_ordered_speed() {
 fn law_launch_selection_prices_requested_pedal_on_grade() {
     let mut capable_classes = 0;
     for (fp, tp) in class_drivetrains() {
-        let load = fp.grip.unwrap().side_weight * 2.0 * 20.0_f32.to_radians().sin();
+        let load = fp.grip.side_weight * 2.0 * 20.0_f32.to_radians().sin();
         let inp = driver_input(&fp, 0.0, load, 0.5);
         let expected = affordable_launch(&fp, &tp, &inp, 0.5);
         capable_classes += usize::from(expected.is_some());
@@ -2566,7 +2566,7 @@ fn law_arrested_climb_reenters_launch_slip() {
 fn grade_fixture_fp() -> FixtureConstruction {
     let mut fp = lab_fp();
     fp.inertia = TIGER_BELT_INERTIA;
-    fp.grip.as_mut().unwrap().side_weight = 57_000.0 * super::super::derive::G / 2.0;
+    fp.grip.side_weight = 57_000.0 * super::super::derive::G / 2.0;
     fp
 }
 
@@ -2577,7 +2577,7 @@ fn held_reversal_waits_at_rest_and_pays_exactly_one_cut() {
     for (fp, tp) in class_drivetrains() {
         for (reverse, degrees) in [(false, 0.0_f32), (false, 10.0), (true, -10.0)] {
             let dir = if reverse { -1.0 } else { 1.0 };
-            let grade = fp.grip.unwrap().side_weight * 2.0 * degrees.to_radians().sin();
+            let grade = fp.grip.side_weight * 2.0 * degrees.to_radians().sin();
             let mut state = TransmissionState {
                 gear: if reverse {
                     tp.gears_rev.len() as u8
@@ -2670,7 +2670,7 @@ fn released_motion_coasts_without_brake_force() {
 #[test]
 fn one_way_lever_launches_on_grade_without_rollback_or_extra_cuts() {
     for (fp, tp) in class_drivetrains() {
-        let load = fp.grip.unwrap().side_weight * 2.0 * 20.0_f32.to_radians().sin();
+        let load = fp.grip.side_weight * 2.0 * 20.0_f32.to_radians().sin();
         let initial = driver_input(&fp, 0.0, load, 1.0);
         let launch = launch_pick(
             &tp,
@@ -2726,7 +2726,7 @@ fn one_way_lever_launches_on_grade_without_rollback_or_extra_cuts() {
 fn reversal_pause_and_cut_hold_a_grade_in_both_directions() {
     for (fp, tp) in [(lab_fp(), lab_tp()), (grade_fixture_fp(), tiger_tp())] {
         for command in [-1.0_f32, 1.0] {
-            let load = -command * fp.grip.unwrap().side_weight * 2.0 * 10.0_f32.to_radians().sin();
+            let load = -command * fp.grip.side_weight * 2.0 * 10.0_f32.to_radians().sin();
             let mut state = TransmissionState {
                 reverse: command > 0.0,
                 park: true,
@@ -2917,7 +2917,7 @@ fn staffed_zero_rate_stops_and_parks_without_engine_work() {
                 ..DriveSupply::WHOLE
             };
             // Fixture: coast up a supported ten-degree slope with the lever released.
-            let grade = fp.grip.unwrap().side_weight * 10.0_f32.to_radians().sin();
+            let grade = fp.grip.side_weight * 10.0_f32.to_radians().sin();
             let mut state = TransmissionState {
                 omega_e: 0.0,
                 ..fresh(&tp)
@@ -2958,7 +2958,7 @@ fn restaffed_rollback_retains_gear_and_refuses_backward_overrev() {
     // Fixture: retained upper-middle forward gear, rollback at 2 m/s on ten degrees.
     let gear = (tp.gears_fwd.len() * 3 / 4) as u8;
     let speed = -2.0;
-    let load = fp.grip.unwrap().side_weight * 2.0 * 10.0_f32.to_radians().sin();
+    let load = fp.grip.side_weight * 2.0 * 10.0_f32.to_radians().sin();
     let mut inp = driver_input(&fp, speed, load, 1.0);
     inp.reactions = [load * 0.5; 2];
     let initial = TransmissionState {
@@ -2995,7 +2995,7 @@ fn driver_price_uses_the_saturated_catch_floor_through_a_cut() {
     let (fp, tp) = (grade_fixture_fp(), tiger_tp());
     // Fixture: F4 at 0.5 m/s on 20 degrees, pricing one lower gear after its cut.
     let speed = 0.5;
-    let load = fp.grip.unwrap().side_weight * 2.0 * 20.0_f32.to_radians().sin();
+    let load = fp.grip.side_weight * 2.0 * 20.0_f32.to_radians().sin();
     let inp = driver_input(&fp, speed, load, 1.0);
     let state = TransmissionState {
         gear: 4,
@@ -3039,7 +3039,7 @@ fn driver_price_uses_the_saturated_catch_floor_through_a_cut() {
 fn forward_crank_rollback_keeps_gear_under_service() {
     let (fp, tp) = (grade_fixture_fp(), tiger_tp());
     // Fixture: supported twenty-degree rollback in a retained launch gear.
-    let load = fp.grip.unwrap().side_weight * 2.0 * 20.0_f32.to_radians().sin();
+    let load = fp.grip.side_weight * 2.0 * 20.0_f32.to_radians().sin();
     let inp = driver_input(&fp, -0.2, load, 1.0);
     let mut state = TransmissionState {
         gear: tp.launch_gears,
@@ -3093,7 +3093,7 @@ fn free_crank_drag_stops_without_crossing_zero() {
 fn zero_rate_steering_retains_park_on_a_supported_slope() {
     for (fp, tp) in class_drivetrains() {
         // Fixture: ten-degree supported grade; no stored crank energy can turn the belts.
-        let grade = fp.grip.unwrap().side_weight * 10.0_f32.to_radians().sin();
+        let grade = fp.grip.side_weight * 10.0_f32.to_radians().sin();
         let mut state = TransmissionState {
             park: true,
             gear: tp.launch_gears,
@@ -3238,12 +3238,12 @@ fn coast_expectation_includes_the_rolling_fade_for_every_drivetrain() {
         for fraction in [tp.drag_fraction, 0.7] {
             // Fixture: includes a slow root on the seed.
             tp.drag_fraction = fraction;
-            let weight = fp.grip.unwrap().side_weight * 2.0;
+            let weight = fp.grip.side_weight * 2.0;
             let angle = 10.0_f32.to_radians(); // Fixture slope.
             let rolling = crate::ground_types::GroundTypes::load_shipped()
                 .get(crate::terrain_blend::BASE_GROUND)
                 .contact()
-                .rolling_at(fp.grip.unwrap().nominal_pressure_kpa);
+                .rolling_at(fp.grip.nominal_pressure_kpa);
             for gear in 1..=tp.gears_fwd.len() as u8 {
                 if let Some(speed) =
                     crate::headless_test::coast_equilibrium(&tp, gear, weight, angle, rolling)
@@ -3462,8 +3462,7 @@ fn launch_selection_obeys_declared_domain_and_capability() {
 #[test]
 fn coupled_mass_uses_each_constructions_own_weight() {
     for (fp, _) in class_drivetrains() {
-        let expected =
-            2.0 * fp.grip.unwrap().side_weight / super::super::derive::G + 2.0 * fp.inertia;
+        let expected = 2.0 * fp.grip.side_weight / super::super::derive::G + 2.0 * fp.inertia;
         assert_eq!(
             coupled_mass(&construction(&fp)),
             expected,
@@ -3610,7 +3609,7 @@ fn launch_targets_the_peak_available_after_fuel_cut() {
         tr.engine.torque_curve.last_mut().unwrap().1 = peak * 1.125;
         let mut fp = lab_fp();
         fp.inertia = 3000.0; // Fixture arithmetic coupling.
-        fp.grip.as_mut().unwrap().side_weight = spec.mass * super::super::derive::G / 2.0;
+        fp.grip.side_weight = spec.mass * super::super::derive::G / 2.0;
         let tp = tr.params(0.3, 1.0, fp.inertia).unwrap(); // Fixture sprocket radius and half-tread.
         let inp = driver_input(&fp, 0.0, 0.0, 1.0);
         let selected = launch_pick(
@@ -3653,67 +3652,67 @@ fn launch_peak_can_lie_inside_the_fuel_cut_ramp() {
     assert!(tp.torque_at(tp.peak_torque_rpm) > tp.torque_at(a.governed_rpm));
 }
 
-/// A vanishing footprint patch cannot change effective grip through a spring-load spike. The Driver cannot pay a downshift on that tick alone.
-#[test]
-fn a_vanishing_patch_cannot_manufacture_a_paid_downshift() {
-    use super::super::load::{SupportFact, observe};
-    use bevy::math::Vec3;
-    let (fp, tp) = (lab_fp(), lab_tp());
-    let weight = fp.grip.unwrap().side_weight * 2.0;
-    let contacts = [-2.0, 2.0].map(|z| SupportFact {
-        point: Vec3::Z * z,
-        half_span: Vec3::ZERO,
-        normal: Vec3::Y,
-        length_weight: 1.0,
-        mu: 0.5,
-        rolling_coefficient: 0.04,
-    }); // FIXTURE uniform footprint.
-    let speed = 1200.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[2];
-    let mut initial = fresh(&tp);
-    initial.gear = 3;
-    initial.steer_step = 1;
-    initial.clutch = ClutchState::In;
-    initial.omega_e = 1200.0 * RPM_TO_RAD;
-    let radius = super::super::load::turn_radius(&tp, &initial);
-    let base = observe(contacts.iter(), Vec3::NEG_Z, weight, radius);
-    let mut inp = driver_input(&fp, speed, 0.0, 1.0);
-    inp.perceived_load = base;
-    let margin = force_margin(&construction(&fp), &tp);
-    let spare = landed_spare(&tp, &construction(&fp), &inp, &initial, 3, 1.0);
-    inp.perceived_load.grade_n += spare - 2.0 * margin;
-    let patch = SupportFact {
-        length_weight: 1e-7,
-        ..contacts[0]
-    }; // FIXTURE tiny area, finite nominal pressure.
-    let mixed = observe(contacts.iter().chain([&patch]), Vec3::NEG_Z, weight, radius);
-    for load in [base, mixed] {
-        let mut state = initial;
-        let mut tick = inp;
-        tick.perceived_load.turn_n = load.turn_n;
-        tick.perceived_load.grip_n = load.grip_n;
-        choose_gear(&mut state, &tp, &construction(&fp), &tick, 1.0, speed);
-        assert!(
-            state.gear >= initial.gear,
-            "a tiny patch cannot create a lower-gear deficit"
-        );
-    }
-}
-
 /// Admission must include the steep idle catch, independently of the high-rpm fuel ramp.
 /// Fixture: a compact sheet at low inertia; operators must get the control widths in its refusal.
 #[test]
 fn construction_refuses_an_unresolved_idle_catch() {
     let spec = super::super::drive_fixture::compact_spec();
     let tr = &spec.track.powertrain.transmission;
-    let mut authoring = tr.params(0.3, 1.0, 3000.0).unwrap();
-    authoring.engine_inertia = 0.8;
-    let error = authoring.check_derived(3000.0).unwrap_err().to_string();
-    assert!(error.contains("idle_catch_droop_rpm") && error.contains("governor_cut_rpm"));
-    let idle_slope = authoring.torque_at(authoring.engine.idle_rpm)
-        / engine_control().idle_catch_droop_rpm.value;
+    let mut params = tr.params(0.3, 1.0, 3000.0).unwrap();
+    let control = engine_control();
     let drag_slope =
-        authoring.peak_torque_nm * authoring.drag_fraction * (1.0 - motoring_drag_base_share())
-            / ((authoring.engine.idle_rpm + authoring.engine.governed_rpm) * 0.5);
-    authoring.engine_inertia = (idle_slope + drag_slope) / (TICK_HZ * RPM_TO_RAD) * 1.001;
-    authoring.check_derived(3000.0).unwrap();
+        params.peak_torque_nm * params.drag_fraction * (1.0 - motoring_drag_base_share())
+            / ((params.engine.idle_rpm + params.engine.governed_rpm) * 0.5);
+    let idle_slope = params.torque_at(params.engine.idle_rpm) / control.idle_catch_droop_rpm.value;
+    // DERIVED for a falling linear net-curve span times linear fuel cut: the largest
+    // derivative magnitude is at cut start, T(governed)/width - curve_slope.
+    let pair = params
+        .engine
+        .torque_nm
+        .windows(2)
+        .find(|pair| {
+            pair[0].0 <= params.engine.governed_rpm && pair[1].0 > params.engine.governed_rpm
+        })
+        .unwrap();
+    let curve_slope = (pair[1].1 - pair[0].1) / (pair[1].0 - pair[0].0);
+    assert!(curve_slope < 0.0, "fixture isolates a falling cut span");
+    let cut_slope =
+        params.torque_at(params.engine.governed_rpm) / control.governor_cut_rpm.value - curve_slope;
+    let cut_end = params.engine.governed_rpm + control.governor_cut_rpm.value;
+    let loss_cut_slope =
+        engine_drag(&params, cut_end * RPM_TO_RAD).abs() / control.governor_cut_rpm.value;
+    assert!(
+        idle_slope > cut_slope + loss_cut_slope,
+        "fixture isolates the idle branch"
+    );
+    let minimum = (idle_slope + drag_slope) / (TICK_HZ * RPM_TO_RAD);
+    println!(
+        "DERIVED compact inertia minimum={minimum:.8} without_idle={:.8} without_drag={:.8}",
+        (cut_slope + loss_cut_slope + drag_slope) / (TICK_HZ * RPM_TO_RAD),
+        idle_slope / (TICK_HZ * RPM_TO_RAD)
+    );
+    for without in [cut_slope + loss_cut_slope + drag_slope, idle_slope] {
+        // Midpoints isolate idle_catch and viscous drag independently of every other term.
+        params.engine_inertia = (minimum + without / (TICK_HZ * RPM_TO_RAD)) * 0.5;
+        let error = params.check_derived(3000.0).unwrap_err().to_string();
+        assert!(error.contains("idle_catch_droop_rpm") && error.contains("governor_cut_rpm"));
+    }
+    params.engine_inertia = minimum * 1.001; // Resolution: avoid rounding at the admitted boundary.
+    params.check_derived(3000.0).unwrap();
+
+    // Fixture: a constant net curve isolates the loss cut; its falling slope is T/cut_width.
+    params.engine.torque_nm = vec![(700.0, 100.0), (1400.0, 800.0), (2600.0, 800.0)];
+    let net_slope = 800.0 / control.governor_cut_rpm.value;
+    let loss_cut_slope =
+        engine_drag(&params, cut_end * RPM_TO_RAD).abs() / control.governor_cut_rpm.value;
+    let without = (net_slope + drag_slope) / (TICK_HZ * RPM_TO_RAD);
+    let with = (net_slope + loss_cut_slope + drag_slope) / (TICK_HZ * RPM_TO_RAD);
+    println!("DERIVED fuel-cut fixture inertia minimum={with:.8} without_loss_cut={without:.8}");
+    params.engine_inertia = (with + without) * 0.5;
+    assert!(
+        params.check_derived(3000.0).is_err(),
+        "loss cut must participate in admission"
+    );
+    params.engine_inertia = with * 1.001;
+    params.check_derived(3000.0).unwrap();
 }

@@ -1072,7 +1072,7 @@ fn gear_force(
 
 /// Highest declared launch gear affordable at requested pedal. Released park preselects
 /// at full pedal; a live request reprices before actuator travel, with no paid drive cut.
-fn launch_pick(
+pub(super) fn launch_pick(
     tp: &TransmissionParams,
     fp: &DriveConstruction,
     supply: DriveSupply,

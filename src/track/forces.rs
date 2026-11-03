@@ -8,7 +8,7 @@
 //! Support uses the struck surface normal. Shear lies in its tangent plane and reads the
 //! surface's constitutive facts. Membership and shear capacity use elastic load, so transient
 //! support damping cannot erase stationary strain. Each material element advances once even
-//! when its footprint crosses several surfaces; the slip and compliance are load-weighted.
+//! when its footprint crosses several surfaces; slip is load-weighted and compliance is shared.
 //!
 //! `SideInput::travel` is the droop profile: zero at unsprung ends, full at road wheels.
 //! An empty profile is a rest-anchored calibration pad. Construction and simulation share
@@ -108,23 +108,19 @@ pub(crate) fn ground_rolling_resistance(reference: f32, nominal_pressure_kpa: f3
 /// stiffness varies as 1/K, so 5 mm raises omega*dt to about 1.05, where the coupled
 /// experiment rang at half the tick rate. This is a conservative measured-mode floor,
 /// not a proof of the sharp coupled-system stability boundary.
-/// Architecture section 5a owns the common compliance and its measured binding grounds.
+/// Architecture section 5a owns the shared compliance and its player-visible recoverable travel.
 pub(crate) const GRIP_SHEAR_FLOOR_M: f32 = 0.075;
 
-/// The belt speed (m/s) below which rolling resistance fades linearly to zero, so a tank at rest
-/// takes none. `Resolution`: a Coulomb resistance flips sign at zero speed, a step the 64 Hz
-/// explicit belt integration rings on. Spread over this band it is a damper of slope
-/// `rolling load / band` on the belt, and explicit integration of a damper `c` on the belt's
-/// inertia `I` is monotone while `c·dt/I < 1` and stable while it is below 2. On the fixture tank on
-/// the shipped mud row: 0.15 × 279.6 kN / 0.25 m/s = 168 kN·s/m against `I/dt` = 4 750 kg × 64 Hz
-/// = 304 kN·s/m, 0.55 of it. At the nominal mud capacity of about 0.277 W, the grip
-/// damper contributes DERIVED about 171.5 kN·s/m, making the sum about 1.12 of it, inside 2
-/// (DERIVED, fixture data). Inside the band, the reduced drag can admit a pressure-limited
-/// crawl; it does not establish immobility.
+/// Hull contact-point speed (m/s, relative to support) below which rolling fades to zero.
+/// Resolution: regularize the sign change of Coulomb drag in the explicit hull step.
+/// DERIVED for uniform support: c*dt/M = rolling*g*dt/band, monotone below one and stable
+/// below two. No rolling damper acts directly on belt inertia. At 64 Hz and rolling .1715
+/// the ratio is about .105 (DERIVED); this is no certificate for arbitrary pressure or
+/// coupled modes. The fade admits a crawl at band*min(engine pull, grip)/rolling_load.
 pub const ROLLING_FADE_SPEED: f32 = 0.25;
 
-/// A side's rolling resistance (N, along the belt's travel, the sign of `speed`): the rolling load
-/// `Σ c_rr · N` over its terrain contacts, faded over [`ROLLING_FADE_SPEED`] to zero at rest.
+/// One patch's signed rolling resistance (N), opposing hull travel relative to its support.
+/// Coefficient times normal load fades over [`ROLLING_FADE_SPEED`] to zero at rest.
 pub fn rolling_resistance(rolling_load: f32, speed: f32) -> f32 {
     rolling_load * (speed / ROLLING_FADE_SPEED).clamp(-1.0, 1.0)
 }
@@ -419,16 +415,25 @@ pub struct BeltContact {
     pub f_lat: f32,
     pub normal: Vec3,
     pub traction: Vec3,
+    /// Ground motion resistance on the hull, separate from grip and belt reaction (N).
+    pub rolling_force: Vec3,
     /// The belt surface's world velocity at the contact (m/s): the hull's velocity there less
     /// the pre-tick belt speed along the drive direction (the hull's velocity alone where the
     /// contact has no tangent plane).
     pub belt_velocity: Vec3,
     /// The collider under the contact, `None` for the terrain field.
     pub collider: Option<Entity>,
-    /// Equivalent capacity/load coefficient: soil shear strength or the rigid material pair
+    /// Capacity/load coefficient: direct terrain grip or the solid-recipient material pair
     /// ([`GripParams::pair`]). The piece's reaction is clamped by the same coefficient
     /// (`track::rubble::piece_impulses`). Zero on a support-only rig, which grips nothing.
     pub mu: f32,
+}
+
+impl BeltContact {
+    /// Total tangent force delivered to the hull and passed to the support's reaction law.
+    pub fn tangential_force(&self) -> Vec3 {
+        self.traction + self.rolling_force
+    }
 }
 
 /// What one side's tick produced.
@@ -437,10 +442,9 @@ pub struct SideReport {
     pub state: SideState,
     pub apps: Vec<ForceApp>,
     pub contacts: Vec<BeltContact>,
-    /// Ground reaction summed into belt dynamics (N): Σ f_long plus [`Self::rolling_resistance`].
+    /// Longitudinal grip reaction summed into belt dynamics (N): sum of f_long.
     pub belt_reaction: f32,
-    /// The side's rolling resistance this tick (N, [`rolling_resistance`]), inside
-    /// [`Self::belt_reaction`]: telemetry of the term.
+    /// Signed sum of patch rolling resistance on the hull (N), excluded from belt reaction.
     pub rolling_resistance: f32,
     /// Terrain/construction facts before dynamic support damping; Driver observation only.
     pub perceived_support: Vec<super::load::SupportFact>,
@@ -589,18 +593,17 @@ pub fn contact_side<O: TerrainOracle>(
         ),
         None => Vec::new(),
     };
-    let (elem_sum, belt_reaction, rolling_load) =
+    let (elem_sum, belt_reaction, rolling) =
         emit_contact_forces(&mut report, &cols, &elem_g, elements_mode);
 
     // The grip slot carries the summed element force (long, lat) — telemetry only (the
     // element state is authoritative and lives with the caller). Belt dynamics (the joint
     // transmission) integrate AFTER this pass — `state.speed`/
     // `state.phase` are returned untouched, the pre-tick truth the phase advection and the
-    // transmission both key on. The ground's rolling resistance reacts on the belt beside the
-    // grip's, at the pre-tick belt speed, so the transmission's `I·v̇ = Q − R` carries it.
+    // transmission both key on. Only grip reacts on the belt; rolling acts on the hull.
     report.state.grip = elem_sum;
-    report.rolling_resistance = rolling_resistance(rolling_load, state.speed);
-    report.belt_reaction = belt_reaction + report.rolling_resistance;
+    report.rolling_resistance = rolling;
+    report.belt_reaction = belt_reaction;
     report
 }
 
@@ -628,7 +631,7 @@ struct ColumnContact {
     collider: Option<Entity>,
     /// [`BeltContact::mu`].
     mu: f32,
-    shear_m: f32,
+    travel_speed: f32,
     /// Motion resistance coefficient: ground total or undeforming-support running-gear loss.
     rolling: f32,
     #[cfg(feature = "bitprobe")]
@@ -1238,7 +1241,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                     belt_velocity,
                     collider,
                     mu: surface.mu,
-                    shear_m: GRIP_SHEAR_FLOOR_M,
+                    travel_speed: vel.dot(long_dir),
                     rolling: surface.rolling,
                     #[cfg(feature = "bitprobe")]
                     probe_index,
@@ -1401,11 +1404,9 @@ fn update_grip_elements(
     let mut loads = vec![0.0; element_len];
     let mut slips = vec![Vec3::ZERO; element_len];
     let mut counts = vec![0_usize; element_len];
-    let mut compliances = vec![0.0; element_len];
     let mut advanced = vec![false; element_len];
     for c in cols {
         loads[c.element] += c.load_elastic;
-        compliances[c.element] += c.shear_m * c.load_elastic;
         slips[c.element] += (c.long_dir * c.slip_long - c.lat_dir * c.slip_lat) * c.load_elastic;
         counts[c.element] += 1;
     }
@@ -1441,7 +1442,7 @@ fn update_grip_elements(
                     elements.strain[c.element],
                     mean_slip,
                     dt,
-                    compliances[c.element] / loads[c.element],
+                    GRIP_SHEAR_FLOOR_M,
                 );
             }
             // Below the enter bound the existing strain holds; each patch's force still scales
@@ -1457,9 +1458,9 @@ fn update_grip_elements(
         // The damping partner, normalized per unit budget: σ1 = 2ζ√(σ0·m) with the element's
         // stiffness σ0 = μN/K and mass share m = N/g, at the LuGre-canonical ζ and this
         // contact's equivalent capacity/load coefficient μ.
-        let d_coef =
-            2.0 * GRIP_ELEMENT_DAMPING_RATIO / (c.shear_m * c.mu * super::derive::G).sqrt();
-        let mut g = (j1 / c.shear_m).clamp_length_max(1.0) + sdot * d_coef;
+        let d_coef = 2.0 * GRIP_ELEMENT_DAMPING_RATIO
+            / (GRIP_SHEAR_FLOOR_M * c.mu * super::derive::G).sqrt();
+        let mut g = (j1 / GRIP_SHEAR_FLOOR_M).clamp_length_max(1.0) + sdot * d_coef;
         let g_len = g.length();
         if g_len > 1.0 {
             g /= g_len;
@@ -1486,9 +1487,8 @@ fn update_grip_elements(
     elem_g
 }
 
-/// PASS 2 — emit forces in the original per-contact order: support, then traction. Fills the
-/// report's application list and contact telemetry, and returns `(summed element force, summed
-/// longitudinal ground reaction)`.
+/// Emit support then total tangent force per contact. Returns summed grip, longitudinal
+/// belt reaction and signed hull rolling resistance, each in N.
 fn emit_contact_forces(
     report: &mut SideReport,
     cols: &[ColumnContact],
@@ -1497,14 +1497,13 @@ fn emit_contact_forces(
 ) -> (Vec2, f32, f32) {
     let mut elem_sum = Vec2::ZERO;
     let mut belt_reaction = 0.0;
-    let mut rolling_load = 0.0;
+    let mut rolling_sum = 0.0;
     for (idx, c) in cols.iter().enumerate() {
         report.apps.push(ForceApp {
             force: c.normal * c.load,
             point: c.p,
             collider: c.collider,
         });
-        rolling_load += c.rolling * c.load;
 
         let mut f_long = 0.0;
         let mut f_lat = 0.0;
@@ -1519,12 +1518,21 @@ fn emit_contact_forces(
             f_lat = grip_el * g.y;
             elem_sum += Vec2::new(f_long, f_lat);
             traction = c.long_dir * f_long + c.lat_dir * f_lat;
+            belt_reaction += f_long;
+        }
+        let rolling = if c.has_plane {
+            rolling_resistance(c.rolling * c.load, c.travel_speed)
+        } else {
+            0.0 // No longitudinal tangent exists on this contact.
+        };
+        let rolling_force = -c.long_dir * rolling;
+        rolling_sum += rolling;
+        if c.has_plane && elements_mode {
             report.apps.push(ForceApp {
-                force: traction,
+                force: traction + rolling_force,
                 point: c.p,
                 collider: c.collider,
             });
-            belt_reaction += f_long;
         }
 
         report.contacts.push(BeltContact {
@@ -1539,6 +1547,7 @@ fn emit_contact_forces(
             f_lat,
             normal: c.normal,
             traction,
+            rolling_force,
             belt_velocity: c.belt_velocity,
             collider: c.collider,
             mu: c.mu,
@@ -1553,7 +1562,7 @@ fn emit_contact_forces(
             output.f_lat += f_lat;
         }
     }
-    (elem_sum, belt_reaction, rolling_load)
+    (elem_sum, belt_reaction, rolling_sum)
 }
 
 #[cfg(test)]
@@ -2796,7 +2805,11 @@ mod tests {
                 }
                 load_sum += load;
                 ticks += 1.0;
-                let push: f32 = report.contacts.iter().map(|c| -c.traction.z).sum();
+                let push: f32 = report
+                    .contacts
+                    .iter()
+                    .map(|c| -c.tangential_force().z)
+                    .sum();
                 hull += push / mass * dt;
                 state.speed -= report.belt_reaction / inertia * dt;
                 state.phase += f64::from(state.speed * dt);
@@ -2834,7 +2847,6 @@ mod tests {
     /// FIXTURE: locked 2 m pad on shipped mud, 4 m/s entry; dirt shoved 1.2 m sideways.
     #[test]
     fn ground_reversal_returns_at_most_one_shear_distance() {
-        let mut rebounds = Vec::new();
         for sideways in [false, true] {
             let ground = crate::ground_types::GroundTypes::load_shipped()
                 .get(if sideways { "dirt" } else { "mud" })
@@ -2882,9 +2894,9 @@ mod tests {
                     .iter()
                     .map(|c| {
                         if sideways {
-                            c.traction.x
+                            c.tangential_force().x
                         } else {
-                            -c.traction.z
+                            -c.tangential_force().z
                         }
                     })
                     .sum();
@@ -2904,9 +2916,7 @@ mod tests {
             println!(
                 "MEASURED fixed pad sideways={sideways}: peak={peak:.6} m rollback={rollback:.6} m reverse={reverse:.6} m/s"
             );
-            rebounds.push((rollback, GRIP_SHEAR_FLOOR_M));
-        }
-        for (rollback, k) in rebounds {
+            let k = GRIP_SHEAR_FLOOR_M;
             // FIXTURE observation precision: f32 position accumulation permits 0.01% of K.
             assert!(
                 rollback <= k * 1.0001,
@@ -3148,8 +3158,10 @@ mod tests {
                     let pull = mass * super::super::derive::G * angle.sin();
                     let capacity = ground.grip.value * normal;
                     assert_eq!(pull > capacity, sign > 0.0);
+                    // Fixture: nonzero entry energy mu*m*g*K/32 exercises arrest before parking.
                     let (mut velocity, mut distance, mut late_distance) = (
-                        0.25 * (super::super::derive::G * GRIP_SHEAR_FLOOR_M).sqrt(),
+                        0.25 * (ground.grip.value * super::super::derive::G * GRIP_SHEAR_FLOOR_M)
+                            .sqrt(),
                         0.0_f32,
                         0.0_f32,
                     );
@@ -3200,6 +3212,41 @@ mod tests {
         }
     }
 
+    /// Rolling follows hull travel, not belt spin; grip alone reacts on the belt. A spinning
+    /// stationary rig and a coasting hull therefore read different rolling loads. Fixture pad.
+    #[test]
+    fn rolling_reads_hull_motion_independently_of_belt_spin() {
+        let ground = crate::ground_field::ContactGround {
+            grip: 0.9,
+            rolling_resistance: 0.1,
+        };
+        let oracle = GroundedFlat {
+            surface_y: 0.0,
+            ground,
+        };
+        for belt_speed in [-2.0, 0.0, 2.0] {
+            for hull_speed in [-ROLLING_FADE_SPEED, 0.0, ROLLING_FADE_SPEED] {
+                let mut state = SideState {
+                    speed: belt_speed,
+                    ..Default::default()
+                };
+                let report = grounded_tick(
+                    &oracle,
+                    &mut state,
+                    &mut GripElements::for_links(25),
+                    hull_speed,
+                );
+                let load: f32 = report.contacts.iter().map(|c| c.load).sum();
+                let expected = ground.rolling_resistance * load * (hull_speed / ROLLING_FADE_SPEED);
+                assert!((report.rolling_resistance - expected).abs() < load * 1e-6);
+                let reaction: f32 = report.contacts.iter().map(|c| c.f_long).sum();
+                assert_eq!(report.belt_reaction, reaction);
+                let hull_force: f32 = report.apps.iter().map(|a| -a.force.z).sum();
+                assert!((hull_force - (reaction - expected)).abs() < load * 1e-6);
+            }
+        }
+    }
+
     /// Pressure-dependent drag is read by the contact pass and by the Driver from the same
     /// spawn pressure; changing patch stiffness cannot change that pressure. Fixture pad.
     #[test]
@@ -3245,12 +3292,24 @@ mod tests {
                     &params,
                     &oracle,
                     &RubbleBodies::default(),
-                    |_| Vec3::ZERO,
+                    |_| Vec3::NEG_Z * ROLLING_FADE_SPEED,
                     &mut GripElements::for_links(input.count),
                 );
                 let normal: f32 = report.contacts.iter().map(|c| c.load).sum();
                 assert!(normal > 0.0);
                 assert!((report.rolling_resistance - expected * normal).abs() < normal * 1e-6);
+                let grip_reaction: f32 = report.contacts.iter().map(|c| c.f_long).sum();
+                assert_eq!(
+                    report.belt_reaction, grip_reaction,
+                    "rolling must not directly load the belt"
+                );
+                let emitted: Vec3 = report.apps.iter().map(|a| a.force).sum();
+                let reconstructed: Vec3 = report
+                    .contacts
+                    .iter()
+                    .map(|c| c.normal * c.load + c.tangential_force())
+                    .sum();
+                assert!((emitted - reconstructed).length() < normal * 1e-6);
                 let weight = params.grip.unwrap().side_weight * 2.0;
                 let forecast = super::super::load::observe(
                     report.perceived_support.iter(),
@@ -3266,7 +3325,7 @@ mod tests {
             assert_eq!(ground_rolling_resistance(hard, pressure), hard);
         }
         // Fixture heavy ground: r=hard+.2 at reference, mu=hard+.3. DERIVED threshold from r(p)=mu;
-        // at twice the threshold drag exceeds grip, so no engine can sustain translation.
+        // at twice the threshold drag exceeds grip, so no engine can leave the rolling fade.
         let (rolling, mu) = (hard + 0.2, hard + 0.3);
         let threshold = reference * (mu - hard) / (rolling - hard);
         assert!(ground_rolling_resistance(rolling, threshold / 2.0) < mu);
@@ -3394,7 +3453,7 @@ mod tests {
             belt_velocity: Vec3::ZERO,
             collider: None,
             mu: 0.5,
-            shear_m: GRIP_SHEAR_FLOOR_M,
+            travel_speed: 0.0,
             rolling: 0.0,
             #[cfg(feature = "bitprobe")]
             probe_index: 0,

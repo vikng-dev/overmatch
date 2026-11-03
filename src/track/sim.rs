@@ -147,16 +147,15 @@ pub struct TrackGrip {
     pub sides: [[f32; 2]; 2],
 }
 
-/// Local per-tick rigid-body/belt effect of track traction. The force and torque already include
-/// every per-element damping contribution because they are accumulated from the final emitted
-/// traction applications.
+/// Local per-tick hull/belt effect of ground contact. Hull force and torque include grip,
+/// element damping and rolling drag; belt reaction carries grip alone.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
 pub struct TrackGripEffect {
-    /// Total world-space traction force on the hull (N).
+    /// Total world-space grip and rolling force on the hull (N).
     pub traction_force: Vec3,
     /// Current contact capacity (N), before mobilization, for prospective stopping.
     pub traction_capacity_n: f32,
-    /// Total world-space traction torque about the hull center of mass (N*m).
+    /// Total world-space grip and rolling torque about the hull center of mass (N*m).
     pub traction_torque: Vec3,
     /// Longitudinal ground reaction on `[left, right]` belts (N).
     pub belt_reaction: [f32; 2],
@@ -966,9 +965,10 @@ fn apply_track_forces(
             pieces.record_static_contacts(entity, &report.contacts, &mut transfers);
             effect.belt_reaction[si] = report.belt_reaction;
             for contact in &report.contacts {
-                effect.traction_force += contact.traction;
+                effect.traction_force += contact.tangential_force();
                 effect.traction_capacity_n += contact.mu * contact.load_elastic;
-                effect.traction_torque += (contact.point - center_of_mass).cross(contact.traction);
+                effect.traction_torque +=
+                    (contact.point - center_of_mass).cross(contact.tangential_force());
             }
             // Apply in report order — accumulation order is part of determinism.
             for app in &report.apps {
@@ -1237,7 +1237,7 @@ mod tests {
             .iter()
             .flatten()
             .filter(|c| c.collider == Some(roots[0]))
-            .map(|c| c.normal * c.load + c.traction)
+            .map(|c| c.normal * c.load + c.tangential_force())
             .sum();
         assert!(applied.y > 0.0, "the upper belt bears on the lower hull");
         let impulse = applied * app.world().resource::<Time>().delta_secs();
@@ -1295,7 +1295,7 @@ mod tests {
                 .filter(|c| c.collider == Some(lower))
                 .map(|c| {
                     (
-                        c.normal * c.load + c.traction,
+                        c.normal * c.load + c.tangential_force(),
                         c.point,
                         c.normal,
                         c.stiffness,
@@ -2501,11 +2501,12 @@ mod tests {
             load.grade_n, load.rolling_n, load.grip_n
         );
     }
-    /// A pressure-heavy fixture cannot sustain travel beyond the retained rolling fade when
-    /// pressure drag exceeds both grip and available engine pull. The Driver must see the same
-    /// deficit. Fixture ground: mu=.3, rolling=1 at the common reference pressure; fixed footprint.
+    /// A strong engine cannot drive through drag above grip. Inside the numerical fade,
+    /// crawl follows the smaller of engine pull and grip; an affordable launch leaves it.
+    /// Fixture: compact drivetrain and fixed footprint, varied pressure and ground grip.
     #[test]
     fn a_pressure_heavy_construction_stalls_in_the_rolling_fade() {
+        use super::super::forces::ROLLING_FADE_SPEED;
         use super::super::oracle::{BlockField, TerrainBlock};
         let construct = |spec: crate::spec::TankSpec| {
             spec.validate().unwrap();
@@ -2516,15 +2517,6 @@ mod tests {
             app.world_mut().run_schedule(PreUpdate);
             app
         };
-        let ground = crate::ground_field::ContactGround {
-            grip: 0.3,
-            rolling_resistance: 1.0,
-        };
-        let hard = super::super::forces::rigid_rolling_resistance();
-        let reference = super::super::forces::rolling_reference_kpa();
-        let crossover = reference * (ground.grip - hard) / (ground.rolling_resistance - hard);
-        let target_pressure = 2.0 * crossover; // Fixture: twice the derived drag/grip crossover.
-        let mut spec = super::super::drive_fixture::compact_spec();
         let baseline = construct(super::super::drive_fixture::compact_spec());
         let baseline_pressure = baseline
             .world()
@@ -2533,89 +2525,154 @@ mod tests {
             .grip
             .unwrap()
             .nominal_pressure_kpa;
-        spec.mass *= target_pressure / baseline_pressure;
         drop(baseline);
-        let mass = spec.mass;
-        let app = construct(spec);
-        let gear = app.world().resource::<TrackGear>();
-        let pressure = gear.params.grip.unwrap().nominal_pressure_kpa;
-        assert!((pressure - target_pressure).abs() < target_pressure * 1e-6);
-        let rest = app
-            .world()
-            .resource::<super::super::rig_geom::RigGeom>()
-            .hull_rest_y;
-        let field = BlockField::new(vec![TerrainBlock::new(
-            Vec3::NEG_Y * 0.5,
-            Quat::IDENTITY,
-            Vec3::new(10_000.0, 1.0, 10_000.0),
-        )])
-        .with_ground(Some(crate::ground_field::GroundField::uniform(ground)));
-        let mut drive = TrackDrive::default();
-        let mut signal = DriveSignal::default();
-        let mut grip = TrackGrip::default();
-        let mut elements = TrackGripElements::for_links(gear.count);
-        let mut state = TransmissionState::from_spec(&gear.trans);
-        let pieces = RubbleBodies::default();
-        let (mut speed, mut distance, mut late_speed) = (0.0_f32, 0.0_f32, 0.0_f32);
-        let mut load = super::super::load::PerceivedLoad::default();
-        let dt = 1.0 / 64.0; // Fixture fixed step.
-        for tick in 0..64 * 60 {
-            let (reports, _) = belt_tick(
-                gear,
-                &field,
-                &pieces,
-                DriveTarget {
-                    intent: DriveIntent::Axes(DriveAxes {
-                        throttle: 1.0,
-                        steer: 0.0,
-                    }),
-                    supply: DriveSupply::WHOLE,
-                },
-                Affine3A::from_translation(Vec3::Y * rest + Vec3::NEG_Z * distance),
-                dt,
-                |_| Vec3::NEG_Z * speed,
-                BeltRig {
-                    drive: &mut drive,
-                    signal: &mut signal,
-                    grip: &mut grip,
-                    elements: &mut elements,
-                    transmission: &mut state,
-                },
-            );
-            load = super::super::load::observe_rig(
-                reports.iter().flat_map(|r| r.perceived_support.iter()),
-                Vec3::NEG_Z,
-                &gear.construction,
-                &gear.trans,
-                &state,
-            );
-            let force: f32 = reports
-                .iter()
-                .flat_map(|r| &r.apps)
-                .map(|a| -a.force.z)
-                .sum();
-            speed += force / mass * dt;
-            distance += speed * dt;
-            if tick >= 64 * 59 {
-                late_speed = late_speed.max(speed.abs());
+        // Fixture: grip-limited, engine-limited and affordable full-drag travel, respectively.
+        for (case, pressure, mu) in [
+            ("grip", 40.0, 0.3),
+            ("engine", 60.0, 0.9),
+            ("launch", 15.0, 0.3),
+        ] {
+            let ground = crate::ground_field::ContactGround {
+                grip: mu,
+                rolling_resistance: 1.0,
+            };
+            let mut spec = super::super::drive_fixture::compact_spec();
+            if case == "engine" {
+                // Fixture: a flat net curve makes available pull independent of crank RPM.
+                let curve = &mut spec.track.powertrain.transmission.engine.torque_curve;
+                let torque = curve[0].1;
+                for point in curve {
+                    point.1 = torque;
+                }
             }
+            spec.mass *= pressure / baseline_pressure;
+            let mass = spec.mass;
+            let app = construct(spec);
+            let gear = app.world().resource::<TrackGear>();
+            let pressure = gear.params.grip.unwrap().nominal_pressure_kpa;
+            let rest = app
+                .world()
+                .resource::<super::super::rig_geom::RigGeom>()
+                .hull_rest_y;
+            let field = BlockField::new(vec![TerrainBlock::new(
+                Vec3::NEG_Y * 0.5,
+                Quat::IDENTITY,
+                Vec3::new(10_000.0, 1.0, 10_000.0),
+            )])
+            .with_ground(Some(crate::ground_field::GroundField::uniform(ground)));
+            let mut drive = TrackDrive::default();
+            let mut signal = DriveSignal::default();
+            let mut grip = TrackGrip::default();
+            let mut elements = TrackGripElements::for_links(gear.count);
+            let mut state = TransmissionState::from_spec(&gear.trans);
+            let pieces = RubbleBodies::default();
+            let dt = 1.0 / 64.0; // Fixture fixed step.
+            let (mut speed, mut distance) = (ROLLING_FADE_SPEED, 0.0_f32);
+            drive.sides.iter_mut().for_each(|side| side.speed = speed);
+            let mut load = super::super::load::PerceivedLoad::default();
+            let mut late_min = f32::INFINITY;
+            let mut late_max = f32::NEG_INFINITY;
+            let mut late_force = 0.0;
+            let mut full_drag_force = 0.0;
+            for tick in 0..64 * 60 {
+                let (reports, _) = belt_tick(
+                    gear,
+                    &field,
+                    &pieces,
+                    DriveTarget {
+                        intent: DriveIntent::Axes(DriveAxes {
+                            throttle: 1.0,
+                            steer: 0.0,
+                        }),
+                        supply: DriveSupply::WHOLE,
+                    },
+                    Affine3A::from_translation(Vec3::Y * rest + Vec3::NEG_Z * distance),
+                    dt,
+                    |_| Vec3::NEG_Z * speed,
+                    BeltRig {
+                        drive: &mut drive,
+                        signal: &mut signal,
+                        grip: &mut grip,
+                        elements: &mut elements,
+                        transmission: &mut state,
+                    },
+                );
+                load = super::super::load::observe_rig(
+                    reports.iter().flat_map(|r| r.perceived_support.iter()),
+                    Vec3::NEG_Z,
+                    &gear.construction,
+                    &gear.trans,
+                    &state,
+                );
+                let force: f32 = reports
+                    .iter()
+                    .flat_map(|r| &r.apps)
+                    .map(|a| -a.force.z)
+                    .sum();
+                if tick >= 64 * 59 {
+                    late_min = late_min.min(speed);
+                    late_max = late_max.max(speed);
+                    late_force += force / 64.0;
+                    // DERIVED remove actual faded drag and apply the full potential at this
+                    // same force state: a refused launch cannot deliver sustained surplus.
+                    let rolling: f32 = reports.iter().map(|r| r.rolling_resistance).sum();
+                    full_drag_force += (force + rolling - load.rolling_n) / 64.0;
+                }
+                speed += force / mass * dt;
+                distance += speed * dt;
+            }
+            let engine_pull = gear.trans.peak_torque_nm.min(gear.trans.clutch_capacity)
+                * gear.trans.gears_fwd.iter().copied().fold(0.0_f32, f32::max)
+                / gear.trans.sprocket_radius;
+            let pick = transmission::launch_pick(
+                &gear.trans,
+                &gear.construction,
+                DriveSupply::WHOLE,
+                false,
+                load,
+                0,
+                1.0,
+            );
+            // Resolution: f32 support quadrature/force accumulation, 0.1% of the limiting force.
+            let force_precision = engine_pull.min(load.grip_n) * 1e-3;
+            match case {
+                "grip" | "engine" => {
+                    if case == "grip" {
+                        assert!(engine_pull > load.rolling_n && load.rolling_n > load.grip_n);
+                    } else {
+                        assert!(load.grip_n > load.rolling_n && load.rolling_n > engine_pull);
+                    }
+                    assert!(pick.is_none(), "full drag is unaffordable");
+                    assert!(
+                        full_drag_force < -force_precision,
+                        "a refused launch must have no full-drag surplus"
+                    );
+                    let expected =
+                        ROLLING_FADE_SPEED * engine_pull.min(load.grip_n) / load.rolling_n;
+                    assert!(
+                        (late_min - expected).abs() < ROLLING_FADE_SPEED * 1e-3
+                            && (late_max - expected).abs() < ROLLING_FADE_SPEED * 1e-3,
+                        "{case}: crawl [{late_min}, {late_max}] must follow limiting force, expected {expected}"
+                    );
+                    assert!(
+                        late_force.abs() < force_precision,
+                        "the crawl must stop gaining speed"
+                    );
+                }
+                "launch" => {
+                    assert!(pick.is_some(), "a capable declared gear must exist");
+                    assert!(
+                        late_min > ROLLING_FADE_SPEED,
+                        "an affordable launch must deliver through full drag"
+                    );
+                }
+                _ => unreachable!("all fixture cases are declared inline"),
+            }
+            println!(
+                "MEASURED pressure case={case} mass_kg={mass:.3} pressure_kpa={pressure:.6} drag_n={:.3} grip_n={:.3} engine_pull_n={engine_pull:.3} late_speed=[{late_min:.8},{late_max:.8}] late_force_n={late_force:.4} full_drag_force_n={full_drag_force:.4} launch={pick:?}",
+                load.rolling_n, load.grip_n
+            );
         }
-        assert!(load.rolling_n > load.grip_n);
-        let engine_pull = gear.trans.peak_torque_nm.min(gear.trans.clutch_capacity)
-            * gear.trans.gears_fwd.iter().copied().fold(0.0_f32, f32::max)
-            / gear.trans.sprocket_radius;
-        assert!(
-            load.rolling_n > engine_pull,
-            "the fixture must have a derived engine deficit too"
-        );
-        assert!(
-            late_speed < super::super::forces::ROLLING_FADE_SPEED,
-            "pressure-heavy travel must stay inside the numerical fade: {late_speed}"
-        );
-        println!(
-            "MEASURED pressure-heavy fixture: mass_kg={mass:.3} pressure_kpa={pressure:.6} crossover_kpa={crossover:.6} drag_n={} grip_n={} engine_pull_n={engine_pull:.3} late_speed_m_s={late_speed:.8}",
-            load.rolling_n, load.grip_n
-        );
     }
 
     /// Bot stopping must use the same capacity as the contact force pass. FIXTURE: the shipped vehicle's adapter at flat support on mud, 4 m/s entry.

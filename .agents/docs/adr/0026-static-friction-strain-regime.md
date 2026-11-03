@@ -20,9 +20,9 @@ belt itself being cranked backward through finite governor gain).
 
 The superseded aggregate law developed `mu*W/2` linearly over one shear distance and
 CLAIMED approximately 28 mm of settling on a 20-degree park. That is not the current soil
-law or a measured bound for every ground. Soil now supplies cohesion, friction angle and a
-bounded recoverable shear with the shared elastic-zone/Dahl return; the 75 mm effective
-distance is a solver floor, not a universal material modulus. The current loading-knee choice,
+law or a measured bound for every ground. Each ground supplies one grip coefficient; bounded recoverable shear uses the shared
+elastic-zone/Dahl return. The common shear distance is held at the explicit solver floor,
+not a universal material modulus. The current loading-knee choice,
 reversal and parking measures are owned by track-model
 `architecture.md`, section 5a. The retired brush anchor ([[0006-static-friction-brush-anchor]])
 stays retired.

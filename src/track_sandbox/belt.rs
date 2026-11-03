@@ -301,7 +301,7 @@ pub(super) fn apply_belt_support_field(
                 f_long: c.f_long,
                 f_lat: c.f_lat,
                 capacity_n: c.mu * c.load_elastic,
-                traction: c.traction,
+                traction: c.tangential_force(),
             });
         }
         *dynamics.engine.get_mut(side) = tr.forces[si];
@@ -786,6 +786,7 @@ mod tests {
                         f_long: 0.0,
                         f_lat: 0.0,
                         traction: Vec3::ZERO,
+                        rolling_force: Vec3::ZERO,
                         belt_velocity: Vec3::NEG_Y * 0.2,
                         collider: Some(plank),
                         mu: 0.9,

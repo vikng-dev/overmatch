@@ -935,9 +935,9 @@ pub(crate) struct Push {
 }
 
 /// The force the belt law applied to its source through `contact` (N): the support along the
-/// normal and the traction. A recipient held by its own laws takes its opposite.
+/// normal and both tangent contributions. A recipient held by its own laws takes its opposite.
 fn source_force(contact: &BeltContact) -> Vec3 {
-    contact.normal * contact.load + contact.traction
+    contact.normal * contact.load + contact.tangential_force()
 }
 
 /// The explicit spring/damper stability limit. RESOLUTION: symplectic Euler with explicit
@@ -985,9 +985,9 @@ pub(crate) fn piece_impulses<'c>(
             contact.normal.x.to_bits(),
             contact.normal.y.to_bits(),
             contact.normal.z.to_bits(),
-            contact.traction.x.to_bits(),
-            contact.traction.y.to_bits(),
-            contact.traction.z.to_bits(),
+            contact.tangential_force().x.to_bits(),
+            contact.tangential_force().y.to_bits(),
+            contact.tangential_force().z.to_bits(),
             contact.belt_velocity.x.to_bits(),
             contact.belt_velocity.y.to_bits(),
             contact.belt_velocity.z.to_bits(),
@@ -1018,8 +1018,8 @@ pub(crate) fn piece_impulses<'c>(
 }
 
 /// The impulse one contact puts on `body` (module doc): the push, then the drag sized against the
-/// pushed piece. `contact.normal` points from the piece to the belt and the traction is the
-/// belt's force on the hull, so the piece's side runs along `-normal` and `-traction`. The drag's
+/// pushed piece. `contact.normal` points from the piece to the belt; the piece's side runs
+/// along `-normal` and opposite the hull's total tangent force. The drag's
 /// Coulomb bound is the contact's own pair ([`BeltContact::mu`]).
 fn contact_impulse(body: &PieceBody, contact: &BeltContact, dt: f32) -> Vec3 {
     let (point, normal) = (contact.point, contact.normal);
@@ -1035,7 +1035,7 @@ fn contact_impulse(body: &PieceBody, contact: &BeltContact, dt: f32) -> Vec3 {
         0.0
     };
     let push = -normal * load_j.min(stop);
-    let Ok(dir) = Dir3::new(-contact.traction) else {
+    let Ok(dir) = Dir3::new(-contact.tangential_force()) else {
         return push;
     };
     // How far the pushed piece lags the belt surface along the drag.
@@ -1045,7 +1045,7 @@ fn contact_impulse(body: &PieceBody, contact: &BeltContact, dt: f32) -> Vec3 {
     } else {
         0.0
     };
-    let drag = (contact.traction.length() * dt)
+    let drag = (contact.tangential_force().length() * dt)
         .min(contact.mu * load_j)
         .min(catch_up);
     push + *dir * drag
@@ -1767,6 +1767,7 @@ mod tests {
             f_lat: 0.0,
             normal: Vec3::Y,
             traction: Vec3::ZERO,
+            rolling_force: Vec3::ZERO,
             belt_velocity: Vec3::ZERO,
             collider: Some(collider),
             mu: 0.9,
@@ -2168,6 +2169,7 @@ mod tests {
                 f_lat: 0.0,
                 normal,
                 traction: tangent,
+                rolling_force: tangent * 0.1, // Fixture: a separate ground-drag contribution.
                 belt_velocity: rng.vec(3.0),
                 collider: None,
                 mu: rng.range(0.0, 1.2),
@@ -2188,7 +2190,7 @@ mod tests {
                 "case {case}: outside the cone"
             );
             assert!(
-                tangent_j <= contact.traction.length() * DT + tol,
+                tangent_j <= contact.tangential_force().length() * DT + tol,
                 "case {case}"
             );
 
@@ -2208,7 +2210,7 @@ mod tests {
                     pushed.dot(normal),
                 );
             }
-            if let Ok(dir) = Dir3::new(-contact.traction)
+            if let Ok(dir) = Dir3::new(-contact.tangential_force())
                 && impulse.dot(*dir) > tol
             {
                 assert!(
@@ -2230,7 +2232,9 @@ mod tests {
             }
             if tangent_j > tol && tangent_j > mu * contact.load * DT * 0.999 {
                 by_cone += 1;
-            } else if tangent_j > tol && tangent_j < contact.traction.length() * DT * 0.999 {
+            } else if tangent_j > tol
+                && tangent_j < contact.tangential_force().length() * DT * 0.999
+            {
                 by_lag += 1;
             }
         }

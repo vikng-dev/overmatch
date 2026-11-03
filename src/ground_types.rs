@@ -423,13 +423,17 @@ mod tests {
 
     /// A minimal table text: every ground a terrain pack names, each with every field
     /// authored, the first one (`gravel`, the base pack's) carrying `gravel` in place of its block.
-    /// FIXTURE DATA: the numbers are round and stand for no ground.
+    /// Fixture placeholders stand for no ground; rolling reads the shared hard datum so a new
+    /// measurement cannot invalidate an otherwise valid fixture.
     fn table_text(gravel: &str) -> String {
-        let block = "grip: (0.5, Fixture(\"fixture\")), print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
-                     roughness_gain: 1.0), rolling_resistance: (0.05, \
+        let hard = crate::track::forces::rigid_rolling_resistance();
+        let block = format!(
+            "grip: (0.5, Fixture(\"fixture\")), print: (softness_mm_per_kpa: 0.5, depth_cap_mm: 50.0, darkening: 0.2, \
+                     roughness_gain: 1.0), rolling_resistance: ({hard}, \
                      Fixture(\"fixture\")), dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3)), \
                      strike: (lifted: (0.5, Fixture(\"fixture\")), sparks: (false, \
-                     Fixture(\"fixture\")))";
+                     Fixture(\"fixture\")))"
+        );
         format!(
             "(terrain_solver_friction: (0.5, Fixture(\"fixture\")), types: {{\"gravel\": ({gravel}), \"dirt\": ({block}), \"sand\": ({block}), \
              \"mud\": ({block})}})"
@@ -513,7 +517,8 @@ mod tests {
         let dust = "dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3)), strike: (lifted: (0.5, \
                     Fixture(\"fixture\")), sparks: (false, Fixture(\"fixture\")))";
         let bare_dust = "dust: (erodibility: 0.5, colour_srgb: (0.5, 0.4, 0.3))";
-        let rolling = "rolling_resistance: (0.05, Fixture(\"fixture\"))";
+        let hard = crate::track::forces::rigid_rolling_resistance();
+        let rolling = format!("rolling_resistance: ({hard}, Fixture(\"fixture\"))");
         let with_strike =
             |strike: &str| format!("{block}, {rolling}, {bare_dust}, strike: ({strike})");
         for (missing, gravel) in [
@@ -539,7 +544,7 @@ mod tests {
             ("rolling_resistance", format!("{block}, {dust}")),
             (
                 "provenance",
-                format!("{block}, rolling_resistance: 0.05, {dust}"),
+                format!("{block}, rolling_resistance: {hard}, {dust}"),
             ),
             (
                 "dust",
@@ -634,8 +639,21 @@ mod tests {
                  Fixture(\"fixture\")))"
             )
         };
+        let hard = crate::track::forces::rigid_rolling_resistance();
+        let below_hard = if hard > 0.0 { hard / 2.0 } else { -1.0 }.to_string();
+        let hard = hard.to_string();
         let ok = [
-            "0.5", "50.0", "0.2", "1.0", "0.5", "0.05", "0.5", "0.5", "0.4", "0.3", "0.5",
+            "0.5",
+            "50.0",
+            "0.2",
+            "1.0",
+            "0.5",
+            hard.as_str(),
+            "0.5",
+            "0.5",
+            "0.4",
+            "0.3",
+            "0.5",
         ];
         let fields = [
             "print.softness_mm_per_kpa",
@@ -656,7 +674,7 @@ mod tests {
             &["-0.1", "1.1", "NaN"],
             &["0.0", "-1.0", "inf", "NaN"],
             &["-0.1", "inf", "-inf", "NaN"],
-            &["-0.01", "0.02", "inf", "NaN"],
+            &["-0.01", below_hard.as_str(), "inf", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["-0.1", "1.1", "NaN"],
             &["-0.1", "1.1", "NaN"],
