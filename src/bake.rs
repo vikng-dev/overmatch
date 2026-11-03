@@ -996,6 +996,10 @@ fn spec_subject_for(glb: &Path) -> Subject {
 ///
 /// The pair is named by the model alone: the spec sheet is its sibling `<id>.tank.ron`.
 pub fn verify_asset(glb: &Path, registry: Option<&Path>) -> Vec<Finding> {
+    crate::provenance::with_shipped_policy(|| verify_asset_in_policy(glb, registry))
+}
+
+fn verify_asset_in_policy(glb: &Path, registry: Option<&Path>) -> Vec<Finding> {
     let registry = match registry_at(registry) {
         Ok(registry) => registry,
         Err(findings) => return findings,
@@ -1039,6 +1043,13 @@ pub fn verify_asset(glb: &Path, registry: Option<&Path>) -> Vec<Finding> {
 ///
 /// Parse failures use the consumer contract's `L2.SPEC` report, keeping one refusal vocabulary.
 pub fn canon_lists(spec_path: &Path, registry: Option<&Path>) -> Result<String, Vec<Finding>> {
+    crate::provenance::with_shipped_policy(|| canon_lists_in_policy(spec_path, registry))
+}
+
+fn canon_lists_in_policy(
+    spec_path: &Path,
+    registry: Option<&Path>,
+) -> Result<String, Vec<Finding>> {
     let refused = |evidence: String, repair: &str| {
         vec![Finding::new(
             &L2_SPEC,
@@ -1784,6 +1795,13 @@ mod tests {
     const SUBSTANCE: &str = "RHA";
     const ART: &str = "Mat_Decor";
 
+    const REGISTRY_FIXTURE: &str = r#"SubstanceRegistry(substances: {"Cheese": Hard(resistance: Reference, visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))),
+                debris_half_angle_deg: (26.2, Fixture("fixture")),
+                facts: Some((density: (1000.0, Fixture("fixture")),
+                    flow_strength: (1.0e6, Fixture("fixture")),
+                    youngs_modulus: (1.0e9, Fixture("fixture")),
+                    poisson_ratio: (0.4, Fixture("fixture")))))})"#;
+
     /// The gate at scale 1 — the case every synthetic fixture below is about.
     fn gate(node: &str, primitive: &MeshGeometry) -> Result<Vec<u32>, Vec<Finding>> {
         manifold_gate(node, 0, primitive, Vec3::ONE).map(|certificate| certificate.shells.to_vec())
@@ -1899,10 +1917,62 @@ mod tests {
         (nodes, spec)
     }
 
-    /// Write a synthetic trio and put it through the whole contract, exactly as the CLI and CI do.
+    /// Synthetic trios use the shared L2 reader with inline-fixture admission; shipped readers refuse it.
     fn verify(id: &str, nodes: &[Node], spec: &str) -> Vec<Finding> {
         let asset = fixture::write(id, nodes, spec);
-        verify_asset(&asset.glb, None)
+        verify_asset_in_policy(&asset.glb, None)
+    }
+
+    /// CLI verification and Blender canon must refuse Fixture provenance in every build. Inline
+    /// synthetic readers stay separate; public refusals must restore their caller's admission policy.
+    #[test]
+    fn shipped_file_readers_refuse_fixture_provenance() {
+        let (nodes, spec) = sound_vehicle();
+        let asset = fixture::write("shipped-provenance", &nodes, &spec);
+        let sheet = spec_ron_name(&asset.glb);
+        let sheet_path = Path::new(&sheet);
+
+        let findings = verify_asset(&asset.glb, None);
+        assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
+        let report = render(&findings);
+        assert!(report.contains(&sheet), "{report}");
+        assert!(
+            report.contains("Fixture provenance is test-only"),
+            "{report}"
+        );
+        assert!(report.contains("replace this field's label"), "{report}");
+        let findings = canon_lists(sheet_path, None).expect_err("canon reads a shipped sheet");
+        assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
+        assert!(render(&findings).contains("Fixture provenance is test-only"));
+
+        assert!(verify_asset_in_policy(&asset.glb, None).is_empty());
+        canon_lists_in_policy(sheet_path, None).expect("the inline fixture policy is restored");
+
+        let registry = asset.glb.with_file_name("materials.ron");
+        std::fs::write(&registry, REGISTRY_FIXTURE).expect("the fixture registry is writable");
+        let findings = verify_asset(&asset.glb, Some(&registry));
+        assert_eq!(
+            refusals(&findings),
+            ["door.registry"],
+            "{}",
+            render(&findings)
+        );
+        let report = render(&findings);
+        assert!(report.contains(&*registry.to_string_lossy()), "{report}");
+        assert!(
+            report.contains("Fixture provenance is test-only"),
+            "{report}"
+        );
+        std::fs::write(sheet_path, TANK_SPEC_RON).expect("the fixture sheet is writable");
+        canon_lists(sheet_path, None).expect("a shipped sheet still produces canon");
+        let findings = canon_lists(sheet_path, Some(&registry))
+            .expect_err("canon must refuse Fixture provenance in its supplied registry");
+        assert_eq!(
+            refusals(&findings),
+            ["door.registry"],
+            "{}",
+            render(&findings)
+        );
     }
 
     /// Verification reads the revision's registry with its trio: the binary's registry could
@@ -1923,21 +1993,12 @@ mod tests {
             .expect("the shipped registry is readable"),
         )
         .expect("the fixture registry is writable");
-        let findings = verify_asset(&asset.glb, Some(&elsewhere));
+        let findings = verify_asset_in_policy(&asset.glb, Some(&elsewhere));
         assert!(findings.is_empty(), "{}", render(&findings));
 
         // Different registry keys leave both plate and collider substances unresolved.
-        std::fs::write(
-            &elsewhere,
-            r#"SubstanceRegistry(substances: {"Cheese": Hard(resistance: Reference, visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))),
-                debris_half_angle_deg: (26.2, Fixture("fixture")),
-                facts: Some((density: (1000.0, Fixture("fixture")),
-                    flow_strength: (1.0e6, Fixture("fixture")),
-                    youngs_modulus: (1.0e9, Fixture("fixture")),
-                    poisson_ratio: (0.4, Fixture("fixture")))))})"#,
-        )
-        .expect("the fixture registry is writable");
-        let findings = verify_asset(&asset.glb, Some(&elsewhere));
+        std::fs::write(&elsewhere, REGISTRY_FIXTURE).expect("the fixture registry is writable");
+        let findings = verify_asset_in_policy(&asset.glb, Some(&elsewhere));
         assert_eq!(
             refusals(&findings)
                 .into_iter()
@@ -1949,7 +2010,7 @@ mod tests {
 
         // A missing registry is a door refusal, not a model finding or embedded-registry fallback.
         std::fs::remove_file(&elsewhere).expect("the fixture registry is removable");
-        let findings = verify_asset(&asset.glb, Some(&elsewhere));
+        let findings = verify_asset_in_policy(&asset.glb, Some(&elsewhere));
         assert_eq!(
             refusals(&findings),
             ["door.registry"],
@@ -1959,8 +2020,9 @@ mod tests {
         assert!(has_error(&findings));
         assert_eq!(findings[0].check.stage, Stage::Door);
 
-        let refused = canon_lists(Path::new(&spec_ron_name(&asset.glb)), Some(&elsewhere))
-            .expect_err("the canon lists are stated in the registry too");
+        let refused =
+            canon_lists_in_policy(Path::new(&spec_ron_name(&asset.glb)), Some(&elsewhere))
+                .expect_err("the canon lists are stated in the registry too");
         assert_eq!(
             refusals(&refused),
             ["door.registry"],
@@ -2259,7 +2321,10 @@ mod tests {
         // The missing sibling sheet is the same refusal: an asset is a trio.
         let asset = fixture::write("orphan", &nodes, "");
         std::fs::remove_file(spec_ron_name(&asset.glb)).expect("the sheet is removable");
-        assert_eq!(refusals(&verify_asset(&asset.glb, None)), ["L2.SPEC"]);
+        assert_eq!(
+            refusals(&verify_asset_in_policy(&asset.glb, None)),
+            ["L2.SPEC"]
+        );
     }
 
     /// The game's damage model: a tank file below the crew floor refuses at the asset door,
@@ -2275,7 +2340,7 @@ mod tests {
             // A removed map entry leaves its comma; an empty entry is not RON.
             sheet = sheet.replace(", ,", ",").replace(", }", " }");
             let asset = fixture::write(&format!("crew-floor-{count}"), &nodes, &sheet);
-            let findings = verify_asset(&asset.glb, None);
+            let findings = verify_asset_in_policy(&asset.glb, None);
             let report = render(&findings);
             assert_eq!(refusals(&findings), ["L2.SPEC"], "{report}");
             assert!(
@@ -2317,8 +2382,8 @@ mod tests {
         requires: []), Commander: (node: "Sight", optics: Unaided(60.0), requires: [])},"#,
         );
         let asset = fixture::write("canon", &nodes, &declared);
-        let json =
-            canon_lists(Path::new(&spec_ron_name(&asset.glb)), None).expect("the sheet parses");
+        let json = canon_lists_in_policy(Path::new(&spec_ron_name(&asset.glb)), None)
+            .expect("the sheet parses");
         let document: serde_json::Value = serde_json::from_str(&json).expect("one JSON document");
 
         let references: Vec<(&str, &str)> = document["node_references"]
@@ -2368,7 +2433,7 @@ mod tests {
 
         // A sheet that does not parse is the consumer contract's own refusal, not a second one.
         let broken = fixture::write("canon-unparsable", &nodes, "TankSpec(mass: ");
-        let findings = canon_lists(Path::new(&spec_ron_name(&broken.glb)), None)
+        let findings = canon_lists_in_policy(Path::new(&spec_ron_name(&broken.glb)), None)
             .expect_err("an unparsable sheet has no canon");
         assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
     }
@@ -2380,7 +2445,8 @@ mod tests {
         let (nodes, spec) = sound_vehicle();
         let canon = |id: &str, sheet: &str| {
             let asset = fixture::write(id, &nodes, sheet);
-            canon_lists(Path::new(&spec_ron_name(&asset.glb)), None).expect("the sheet parses")
+            canon_lists_in_policy(Path::new(&spec_ron_name(&asset.glb)), None)
+                .expect("the sheet parses")
         };
         let base = canon("projection-base", &spec);
         let renamed = spec.replace("display_name: \"Fixture\"", "display_name: \"Renamed\"");
