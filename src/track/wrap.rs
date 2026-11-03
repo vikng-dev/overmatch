@@ -21,6 +21,7 @@
 
 use bevy::math::{Affine3A, Vec2, Vec3};
 
+use super::derive::G;
 use super::forces::phase_decompose;
 use super::oracle::DepthOracle;
 use super::route::{
@@ -28,30 +29,22 @@ use super::route::{
     slack, taut_lower_run,
 };
 
-/// Gravity (m/s²) for the wrap-feel BALLISTIC laws — the SAME value
-/// [`wheel_lift_step`](super::wheels::wheel_lift_step) falls the view wheels at, so the belt memory
-/// can never settle at a different rate than the wheels it spans. There are no per-tier time
-/// constants: every fall is this one gravity, which makes the feel parameter-free and scale-correct
-/// (a deep drop takes longer than a lip, by g·t² alone).
-const WRAP_FEEL_G: f32 = 9.81;
-/// Damping ratio for the slack spring — the project-canonical `ζ = 0.5` (the same value the static
-/// grip bristle uses). Deliberately a global constant, NOT a per-tank dial: a free damping knob is
-/// not a physical input.
+/// Resolution: half-critical damping controls ringing in the cosmetic slack spring.
 const WRAP_FEEL_ZETA: f32 = 0.5;
-/// Sag-depth floor (m) for the slack spring's DERIVED frequency `ω = √(g / sag_depth)` — a hanging
+/// Resolution: sag-depth floor (m) for the slack spring's DERIVED frequency `ω = √(g / sag_depth)` — a hanging
 /// span's pendulum rate. That rate blows up as the span goes taut (sag → 0), so the depth is floored
 /// here: a near-taut return run springs at a fast-but-finite rate instead of an infinitely stiff one.
 const SLACK_SAG_FLOOR: f32 = 0.02;
-/// Hull-frame z-grid cell size (m) for the belly-memory ease. Coarser than [`BELT_DRAW_SPACING`]
+/// Resolution: hull-frame z-grid cell size (m) for the belly-memory ease. Coarser than [`BELT_DRAW_SPACING`]
 /// on purpose: every interior cell is then guaranteed at least one dense station each frame, so a
 /// cell that receives no station simply HOLDS its value (it never falls toward a phantom zero).
 const CONFORM_EASE_CELL: f32 = 0.15;
-/// Arc-length spacing (m) of the dense bottom-run resample the terrain conform probes on: fine
+/// Resolution: arc-length spacing (m) of the dense bottom-run resample the terrain conform probes on: fine
 /// enough that a bump between two wheels is sampled so the conform can raise the line onto it (a
 /// tangent segment between wheels is one long edge — conforming only its endpoints would let a
 /// board mid-segment go unsampled and the belt cut through it).
 const BELT_DRAW_SPACING: f32 = 0.1;
-/// A station carries z-keyed belly memory only if its hull-frame outward normal points genuinely
+/// Resolution: a station carries z-keyed belly memory only if its hull-frame outward normal points genuinely
 /// DOWN — `out.y < −this`. The belly bottom run is the only z-MONOTONE span; the sprocket/idler end
 /// arcs fold z back on themselves, so a lower-branch board depth keyed by z would otherwise leak
 /// onto the upper branch (a different normal, a different budget). Excluding the arcs' sideways/up
@@ -371,8 +364,8 @@ impl ConformEase {
             } else {
                 // fall: EXACT constant-g kinematics toward the lower target (frame-rate invariant) —
                 // advance position with the OLD velocity + ½g·dt², then the velocity. Lands on it.
-                self.nodes[j] += self.vel[j] * dt - 0.5 * WRAP_FEEL_G * dt * dt;
-                self.vel[j] -= WRAP_FEEL_G * dt;
+                self.nodes[j] += self.vel[j] * dt - 0.5 * G * dt * dt;
+                self.vel[j] -= G * dt;
                 if self.nodes[j] <= target[j] {
                     self.nodes[j] = target[j];
                     self.vel[j] = 0.0;
@@ -450,7 +443,7 @@ impl SlackSpring {
     /// slack, at the drape's own [`sag_depth`] floored by [`SLACK_SAG_FLOOR`] so a near-taut run
     /// stays finite.
     fn omega(chord: f32, excess: f32) -> f32 {
-        (WRAP_FEEL_G / sag_depth(chord, excess).max(SLACK_SAG_FLOOR)).sqrt()
+        (G / sag_depth(chord, excess).max(SLACK_SAG_FLOOR)).sqrt()
     }
 
     /// Frames of `dt` after which a step input is settled to under 1 %: five damping time constants
