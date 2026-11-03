@@ -3194,6 +3194,24 @@ fn steer_detents_use_one_threshold_from_every_history() {
     }
 }
 
+/// Keyboard steering enters wide on its first notch and tight only on its last, so the
+/// player can retain a wide turn at any intermediate notch in either direction.
+#[test]
+fn steering_notches_select_wide_until_the_last_selects_tight() {
+    let feel = super::super::drive::drive_feel();
+    for sign in [-1.0, 1.0] {
+        let mut state = fresh(&lab_tp());
+        for index in 1..=feel.notch_count.0 {
+            let lever = sign * f32::from(index) / f32::from(feel.notch_count.0);
+            update_steer_detent(&mut state, lever);
+            assert_eq!(
+                state.steer_step,
+                if index == feel.notch_count.0 { 2 } else { 1 }
+            );
+        }
+    }
+}
+
 /// Admission follows algebraic domains and representability, not a vehicle class's scale.
 /// Fixture extremes retain finite coupled arithmetic across different physical scales.
 #[test]

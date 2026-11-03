@@ -503,8 +503,8 @@ mod tests {
         assert_eq!(marks.iter(&world).count(), 2);
         for (axis, node) in marks.iter(&world) {
             let expected = match axis {
-                NotchMark::Throttle => crate::track::drive::drive_feel().notch_step.0,
-                NotchMark::Steer => -crate::track::drive::drive_feel().notch_step.0,
+                NotchMark::Throttle => crate::track::drive::drive_feel().notch_step(),
+                NotchMark::Steer => -crate::track::drive::drive_feel().notch_step(),
             }; // Fixture tap.
             assert_eq!(node.left, Val::Px(notch_left(expected)));
         }

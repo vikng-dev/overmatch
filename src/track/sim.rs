@@ -2251,7 +2251,7 @@ mod tests {
             .world_mut()
             .entity_mut(hull.driver)
             .insert(crate::damage::Dead);
-        let notch = super::super::drive::drive_feel().notch_step.0;
+        let notch = super::super::drive::drive_feel().notch_step();
         for _ in 0..64 {
             hull.tick(notch, 0.0);
         }

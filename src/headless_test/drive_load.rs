@@ -913,10 +913,9 @@ fn empty_driver_station_coast_and_rollback() {
 fn shipped_notches_launch_and_sustain_ordered_speed() {
     for degrees in [0.0_f32, 10.0] {
         let mut last = 0.0;
-        let step = crate::track::drive::drive_feel().notch_step.0;
-        for pedal in std::iter::successors(Some(step), |pedal| {
-            (*pedal < 1.0).then(|| (*pedal + step).min(1.0))
-        }) {
+        let count = crate::track::drive::drive_feel().notch_count.0;
+        for index in 1..=count {
+            let pedal = f32::from(index) / f32::from(count);
             let angle = degrees.to_radians();
             let extent = crate::terrain_grid::FIXTURE_EXTENT;
             let height = extent.half_extent() * angle.tan();

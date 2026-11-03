@@ -39,7 +39,7 @@ pub enum DriveIntent {
 #[serde(deny_unknown_fields)]
 pub(crate) struct DriveFeel {
     pub(crate) tap_window_s: crate::provenance::Sourced<f64>,
-    pub(crate) notch_step: crate::provenance::Sourced<f32>,
+    pub(crate) notch_count: crate::provenance::Sourced<u8>,
     pub(crate) rise_per_second: crate::provenance::Sourced<f32>,
     pub(crate) wide_on: crate::provenance::Sourced<f32>,
     pub(crate) tight_on: crate::provenance::Sourced<f32>,
@@ -52,8 +52,8 @@ impl DriveFeel {
             "assets/input/drive.ron: tap_window_s must be finite and positive; author the tap/hold boundary"
         );
         assert!(
-            self.notch_step.0.is_finite() && self.notch_step.0 > 0.0 && self.notch_step.0 <= 1.0,
-            "assets/input/drive.ron: notch_step must be in (0, 1]; author a bounded lever step"
+            self.notch_count.0 > 0,
+            "assets/input/drive.ron: notch_count must be positive; author the number of equal lever notches"
         );
         assert!(
             self.rise_per_second.0.is_finite() && self.rise_per_second.0 > 0.0,
@@ -63,41 +63,25 @@ impl DriveFeel {
             0.0 < self.wide_on.0 && self.wide_on.0 < self.tight_on.0 && self.tight_on.0 < 1.0,
             "assets/input/drive.ron: author ordered wide_on < tight_on within (0, 1)"
         );
-        for notch in self.reachable_notches() {
+        for index in 1..self.notch_count.0 {
+            let notch = f32::from(index) / f32::from(self.notch_count.0);
             assert!(
-                notch.abs() != self.wide_on.0 && notch.abs() != self.tight_on.0,
-                "assets/input/drive.ron: detent threshold rests on a notch; move wide_on, tight_on or notch_step between lever positions"
+                notch != self.wide_on.0 && notch != self.tight_on.0,
+                "assets/input/drive.ron: detent threshold rests on a notch; move wide_on or tight_on between lever positions"
             );
         }
     }
 
-    /// The client and admission use the same binary32 tap, including endpoint clamping.
-    pub(crate) fn tap_notch(&self, current: f32, positive: bool) -> f32 {
-        let sign = if positive { 1.0 } else { -1.0 };
-        (current + sign * self.notch_step.0).clamp(-1.0, 1.0)
+    #[cfg(test)]
+    pub(crate) fn notch_step(&self) -> f32 {
+        1.0 / f32::from(self.notch_count.0)
     }
 
-    fn reachable_notches(&self) -> Vec<f32> {
-        // Resolution: bound admission's memory and transition work. Finer lever lattices are
-        // refused rather than making startup enumerate an unbounded number of binary32 states.
-        const MAX_NOTCH_STATES: usize = 4096;
-        let mut states = vec![-1.0_f32, 0.0, 1.0];
-        let mut seen: std::collections::HashSet<_> = states.iter().map(|n| n.to_bits()).collect();
-        let mut cursor = 0;
-        while cursor < states.len() {
-            for positive in [false, true] {
-                let next = self.tap_notch(states[cursor], positive);
-                if seen.insert(next.to_bits()) {
-                    assert!(
-                        states.len() < MAX_NOTCH_STATES,
-                        "assets/input/drive.ron: notch_step exceeds the reachable-state admission budget; author a coarser binary-exact lever step"
-                    );
-                    states.push(next);
-                }
-            }
-            cursor += 1;
-        }
-        states
+    /// Step on the integer lattice so rounding never accumulates between taps.
+    pub(crate) fn tap_notch(&self, current: f32, positive: bool) -> f32 {
+        let count = f32::from(self.notch_count.0);
+        let sign = if positive { 1.0 } else { -1.0 };
+        ((current * count).round() + sign).clamp(-count, count) / count
     }
 }
 
@@ -107,7 +91,7 @@ pub(crate) fn drive_feel() -> &'static DriveFeel {
             "assets/input/drive.ron",
             include_str!("../../assets/input/drive.ron"),
         )
-        .expect("assets/input/drive.ron: author tap_window_s, notch_step, rise_per_second, wide_on and tight_on with provenance");
+        .expect("assets/input/drive.ron: author tap_window_s, notch_count, rise_per_second, wide_on and tight_on with provenance");
         data.validate();
         data
     });
@@ -270,7 +254,7 @@ mod tests {
         assert_eq!(cmds, [1.0, -1.0]);
     }
 
-    /// Fixture: binary quarter-step notches, with wide exactly on the first notch.
+    /// Fixture: wide rests exactly on the first of three equal notches.
     /// Admission keeps stationary lever values away from detent thresholds.
     #[test]
     #[should_panic(expected = "detent threshold rests on a notch")]
@@ -280,9 +264,8 @@ mod tests {
             include_str!("../../assets/input/drive.ron"),
         )
         .unwrap();
-        feel.notch_step.0 = 0.25;
-        feel.wide_on.0 = 0.25;
-        feel.tight_on.0 = 0.625;
+        feel.notch_count.0 = 3;
+        feel.wide_on.0 = feel.notch_step();
         feel.validate();
     }
 
@@ -300,28 +283,41 @@ mod tests {
         feel.validate();
     }
 
-    /// Fixture: decimal taps reach 13 binary32 states, including tight_on after a decrement
-    /// from one. Admission must enumerate that exact resting detent.
+    /// Command gathering must reach either full axis in exactly the authored count of taps,
+    /// with every intermediate value on the same lattice that admission checks.
     #[test]
-    fn decimal_taps_enumerate_rounding_paths_and_refuse_threshold_collisions() {
+    fn authored_notch_count_reaches_full_without_accumulated_roundoff() {
         let mut feel: DriveFeel = crate::provenance::from_shipped_str(
             "assets/input/drive.ron",
             include_str!("../../assets/input/drive.ron"),
         )
         .unwrap();
-        feel.notch_step.0 = 0.4;
-        feel.wide_on.0 = 0.15;
-        feel.tight_on.0 = 0.6;
-        let states = feel.reachable_notches();
-        assert_eq!(states.len(), 13);
-        assert_eq!(feel.tap_notch(1.0, false), feel.tight_on.0);
-        for state in &states {
+        for count in [1, 3, 7, u8::MAX] {
+            // Fixture: integral and fractional lattices.
+            feel.notch_count.0 = count;
             for positive in [false, true] {
-                assert!(states.contains(&feel.tap_notch(*state, positive)));
+                let sign = if positive { 1.0 } else { -1.0 };
+                let mut value = 0.0;
+                for index in 1..=count {
+                    value = feel.tap_notch(value, positive);
+                    assert_eq!(value, sign * f32::from(index) / f32::from(count));
+                }
+                assert_eq!(value, sign);
+                assert_eq!(feel.tap_notch(value, positive), sign);
             }
         }
-        assert!(std::panic::catch_unwind(|| feel.validate()).is_err());
-        feel.tight_on.0 = 0.65; // Fixture: between reachable states.
+    }
+
+    /// A zero count cannot define a lever step; refuse it before command gathering divides.
+    #[test]
+    #[should_panic(expected = "notch_count must be positive")]
+    fn zero_notch_count_is_refused_before_play() {
+        let mut feel: DriveFeel = crate::provenance::from_shipped_str(
+            "assets/input/drive.ron",
+            include_str!("../../assets/input/drive.ron"),
+        )
+        .unwrap();
+        feel.notch_count.0 = 0; // Fixture: invalid count.
         feel.validate();
     }
 }

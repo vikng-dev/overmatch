@@ -1,8 +1,8 @@
 // Shared player keyboard feel; no vehicle-specific parameters.
 (
     tap_window_s: (0.15, Taste("keyboard feel: duration separating a persistent notch tap from a full-axis hold")),
-    notch_step: (0.25, Taste("keyboard feel: signed lever increment for each short press")),
+    notch_count: (3, Taste("keyboard feel: equal lever notches from neutral to full on each side")),
     wide_on: (0.15, Taste("steering feel: wide detent engages between neutral and the first notch")),
-    tight_on: (0.65, Taste("steering feel: tight detent engages between the second and third notches")),
+    tight_on: (0.8, Taste("steering feel: tight detent engages between the second and third notches")),
     rise_per_second: (4.0, Taste("keyboard feel: pedal travel per second for notch changes, holds and release")),
 )

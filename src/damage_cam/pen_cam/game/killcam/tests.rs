@@ -761,7 +761,7 @@ fn let_go(app: &mut App) {
 /// from the first frame of the new life.
 #[test]
 fn the_death_flow_owns_the_device() {
-    let first_notch = crate::track::drive::drive_feel().notch_step.0;
+    let first_notch = crate::track::drive::drive_feel().notch_step();
     for replay in [
         ButtonBinding::Key(KeyCode::Space),
         ButtonBinding::Mouse(MouseButton::Left),

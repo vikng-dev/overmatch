@@ -401,7 +401,8 @@ fn a_dead_tank_files_only_the_neutral_command() {
     }
 
     // A live status: the reset lever starts at its first notch on every tick of this frame.
-    // Fixture: 0.25 is the shipped keyboard notch; old cruise must not survive the death flow.
+    // Old cruise must not survive the death flow.
+    let first_notch = crate::track::drive::drive_feel().notch_step();
     client
         .world_mut()
         .entity_mut(tank)
@@ -413,7 +414,7 @@ fn a_dead_tank_files_only_the_neutral_command() {
     );
     for (tick, command) in &respawned {
         assert!(
-            live(command, 0.25),
+            live(command, first_notch),
             "the new life's tick {tick} filed {command:?}"
         );
     }
@@ -427,13 +428,13 @@ fn a_dead_tank_files_only_the_neutral_command() {
     }
     for (tick, command) in restored_on(&client, &ticks(&respawned)) {
         assert!(
-            live(&command, 0.25),
+            live(&command, first_notch),
             "the new life's tick {tick} restored {command:?}"
         );
     }
     for (tick, command) in received_on(&server, &ticks(&respawned)) {
         assert!(
-            live(&command, 0.25),
+            live(&command, first_notch),
             "the server received {command:?} for the new life's tick {tick}"
         );
     }
@@ -460,15 +461,18 @@ fn every_tick_of_a_frame_files_the_devices_command() {
     let mut keys = client.world_mut().resource_mut::<ButtonInput<KeyCode>>();
     keys.release(KeyCode::KeyW);
     keys.press(KeyCode::KeyS);
-    // Fixture: the new negative press starts at -0.25 during its tap window; the wire must
-    // retain that frame's value even after the device's later hold reaches -1.
+    // The wire retains the new press's first notch after the device reaches a full hold.
+    let first_notch = -crate::track::drive::drive_feel().notch_step();
     let reversed = step(&mut server, &mut client);
     assert!(
         reversed.len() > 1,
         "the reversing frame runs several ticks: {reversed:?}"
     );
     for (tick, command) in &reversed {
-        assert_eq!(command.throttle, -0.25, "tick {tick} filed {command:?}");
+        assert_eq!(
+            command.throttle, first_notch,
+            "tick {tick} filed {command:?}"
+        );
     }
 
     client
@@ -493,11 +497,14 @@ fn every_tick_of_a_frame_files_the_devices_command() {
         step(&mut server, &mut client);
     }
     for (tick, command) in restored_on(&client, &ticks(&reversed)) {
-        assert_eq!(command.throttle, -0.25, "tick {tick} restored {command:?}");
+        assert_eq!(
+            command.throttle, first_notch,
+            "tick {tick} restored {command:?}"
+        );
     }
     for (tick, command) in received_on(&server, &ticks(&reversed)) {
         assert_eq!(
-            command.throttle, -0.25,
+            command.throttle, first_notch,
             "the server received {command:?} for tick {tick}"
         );
     }

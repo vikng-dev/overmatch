@@ -1079,12 +1079,36 @@ mod tests {
         }
     }
 
+    /// Each axis reaches full in the authored number of taps; fractional steps cannot leave
+    /// either direction short of full, and each released notch persists for the Driver.
+    #[test]
+    fn authored_tap_count_reaches_full_on_both_signed_axes() {
+        let feel = crate::track::drive::drive_feel();
+        for (key, throttle, sign) in [
+            (KeyCode::KeyW, true, 1.0),
+            (KeyCode::KeyS, true, -1.0),
+            (KeyCode::KeyD, false, 1.0),
+            (KeyCode::KeyA, false, -1.0),
+        ] {
+            let mut script = DriveKeys::new();
+            let axis =
+                |v: crate::track::drive::DriveAxes| if throttle { v.throttle } else { v.steer };
+            for index in 1..=feel.notch_count.0 {
+                let expected = sign * f32::from(index) / f32::from(feel.notch_count.0);
+                assert_eq!(axis(script.tap(key)), expected);
+                assert_eq!(axis(script.gather(feel.tap_window_s.0)), expected);
+            }
+            assert_eq!(axis(script.gather(0.0)), sign);
+            assert_eq!(axis(script.tap(key)), sign);
+        }
+    }
+
     /// The Driver consumes a signed persistent lever, not a direction key. Stepping down from
     /// cruise must not request opposing intent during the tap window, on either axis.
     #[test]
     fn taps_step_both_signed_levers_without_flashing_opposing_intent() {
         let feel = crate::track::drive::drive_feel();
-        // Fixture: two increments start at +50%; three decrements cross neutral to -25%.
+        // Fixture: two increments, then enough decrements to cross neutral.
         for (positive, negative, throttle) in [
             (KeyCode::KeyW, KeyCode::KeyS, true),
             (KeyCode::KeyD, KeyCode::KeyA, false),
@@ -1092,12 +1116,12 @@ mod tests {
             let mut script = DriveKeys::new();
             let axis =
                 |v: crate::track::drive::DriveAxes| if throttle { v.throttle } else { v.steer };
-            let step = feel.notch_step.0;
+            let step = feel.notch_step();
             assert_eq!(axis(script.tap(positive)), step);
             let mut expected = (2.0 * step).min(1.0);
             assert_eq!(axis(script.tap(positive)), expected);
-            for _ in 0..3 {
-                expected = (expected - step).max(-1.0);
+            for index in 1..=3 {
+                expected = (2.0 - index as f32) / f32::from(feel.notch_count.0);
                 script.press(negative);
                 assert_eq!(axis(script.gather(0.0)), expected);
                 assert_eq!(axis(script.gather(feel.tap_window_s.0 / 2.0)), expected);
@@ -1162,7 +1186,7 @@ mod tests {
     /// previous notch here would leave the player's vehicle cruising or turning after release.
     #[test]
     fn a_hold_overrides_and_release_clears_each_notch() {
-        let step = crate::track::drive::drive_feel().notch_step.0;
+        let step = crate::track::drive::drive_feel().notch_step();
         let window = crate::track::drive::drive_feel().tap_window_s.0;
         for key in [KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD] {
             let mut script = DriveKeys::new();
@@ -1197,7 +1221,7 @@ mod tests {
         use crate::track::drive::{DriveAxes, drive_feel, shape_drive};
         let feel = drive_feel();
         let expected_s =
-            feel.tap_window_s.0 + f64::from((1.0 - feel.notch_step.0) / feel.rise_per_second.0);
+            feel.tap_window_s.0 + f64::from((1.0 - feel.notch_step()) / feel.rise_per_second.0);
         let dt = 1.0 / 256.0; // Fixture: binary-exact sampling bounds the derived full time to one sample.
         let mut script = DriveKeys::new();
         script.press(KeyCode::KeyW);
@@ -1242,7 +1266,7 @@ mod tests {
         }; // Fixture: forward cruise.
         assert_eq!(
             target.throttle,
-            (2.0 * drive_feel().notch_step.0).min(1.0) - drive_feel().notch_step.0
+            (2.0 * drive_feel().notch_step()).min(1.0) - drive_feel().notch_step()
         );
         let held = script.gather(drive_feel().tap_window_s.0);
         assert_eq!(held.throttle, -1.0);
@@ -1253,7 +1277,7 @@ mod tests {
     /// bounded wire axis must survive repeated taps, a chord, and a change of controlled body.
     #[test]
     fn subframe_taps_clamp_and_opposite_keys_or_possession_cancel_the_lever() {
-        let step = crate::track::drive::drive_feel().notch_step.0;
+        let step = crate::track::drive::drive_feel().notch_step();
         let mut script = DriveKeys::new();
         script.press(KeyCode::KeyW);
         script.release(KeyCode::KeyW);
@@ -1506,7 +1530,7 @@ mod tests {
                 && alive
                     .iter()
                     .all(|command| command.throttle
-                        == crate::track::drive::drive_feel().notch_step.0),
+                        == crate::track::drive::drive_feel().notch_step()),
             "alive, every tick reads the gathered command: {alive:?}"
         );
 
@@ -1516,7 +1540,7 @@ mod tests {
         assert_eq!(reads.len(), TICKS_PER_FRAME as usize, "{reads:?}");
         assert_eq!(
             reads[0].throttle,
-            crate::track::drive::drive_feel().notch_step.0,
+            crate::track::drive::drive_feel().notch_step(),
             "the latching tick read its command before the knockout: {reads:?}"
         );
         assert!(
