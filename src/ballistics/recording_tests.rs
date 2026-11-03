@@ -3559,3 +3559,69 @@ fn a_moving_face_decides_a_skid_in_its_own_frame() {
         );
     }
 }
+
+/// The game's damage model: an instant contact burst reaches the moving face's world position.
+/// The burst mark, fragment field and environment blast share that point. Fixture speeds include
+/// a spent round carried almost alongside a fast face; a small relative speed amplifies stand-off
+/// seconds. Mutant: apply the carrier correction only after recording and throwing the burst.
+#[test]
+fn an_instant_contact_burst_moves_with_its_carrier_before_delivery() {
+    for (relative_speed, carrier_speed) in
+        [(773.0, 15.0), (100.0, 15.0), (1.0, 100.0), (0.1, 100.0)]
+    {
+        let mut app = recording_world(false);
+        app.insert_resource(RetainSpentShells(true));
+        let (hull, _) = tank(
+            &mut app,
+            Vec3::ZERO,
+            0.0,
+            Vec3::ZERO,
+            &[("face", SKID_FACE, Vec3::ZERO, Kind::Plate)],
+        );
+        settle(&mut app);
+        app.world_mut()
+            .entity_mut(hull)
+            .insert(LinearVelocity(Vec3::Z * carrier_speed));
+        let seconds = TICK.as_secs_f32() * 0.75;
+        let birth = Vec3::Z * (SKID_FACE.z * 0.5 + relative_speed * seconds);
+        let velocity = Vec3::Z * (carrier_speed - relative_speed);
+        let inputs = burst::BurstInputs {
+            trigger: crate::rounds::fuze::Trigger::Impact { sensitivity_n: 0.0 },
+            delay: 0.0,
+            ..burst::fixture_inputs()
+        };
+        let burst = burst::Burst::derived(FIXTURE_88, burst::FIXTURE_STEEL, &inputs).unwrap();
+        let mut fire = fixture_fire(
+            &mut app,
+            birth,
+            Dir3::new(velocity).unwrap(),
+            FireMechanism::Single,
+            None,
+            Some(burst),
+        );
+        fire.speed = velocity.length();
+        fire.drag_k = 0.0;
+        app.world_mut().trigger(fire);
+        run(&mut app, 1);
+        let mut shells = app.world_mut().query::<(&PenetrationMarks, &SpallMarks)>();
+        let (marks, fields) = shells.single(app.world()).unwrap();
+        let at = marks
+            .log
+            .iter()
+            .find_map(|mark| match mark {
+                ArmourMark::Burst { at, .. } => Some(*at),
+                _ => None,
+            })
+            .expect("the fixture functions at contact");
+        let expected = SKID_FACE.z * 0.5 + carrier_speed * seconds;
+        let error = (at.z - expected).abs();
+
+        // Fixture slack: the incoming disc's gravity tilt puts its first rim under 0.1 mm ahead
+        // of its axis; f32 pose/cast rounding fits within another 0.1 mm.
+        assert!(
+            error < 0.0002,
+            "the world contact, not the earlier frozen frame, owns the burst"
+        );
+        assert_eq!(fields.burst.as_ref().unwrap().origin, at);
+    }
+}

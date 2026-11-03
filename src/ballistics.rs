@@ -3039,6 +3039,7 @@ fn march_shell_step(
                 &mut flight,
                 &mut budget,
                 at,
+                None,
                 health,
             );
             damage_dealt += removed;
@@ -3114,7 +3115,6 @@ fn march_shell_step(
         let moving = world.contact_motion.take();
         world.sweep.set(None);
         let mut carrier = Vec3::ZERO;
-        let mut short = 0.0;
         if let Some(moving) = moving {
             world.moment.set(Some(moving.fraction));
             // The game's damage model clocks contact by fraction even when world speed is zero:
@@ -3135,7 +3135,7 @@ fn march_shell_step(
                 .unwrap_or_else(|error| error.panic())
             });
             // Seconds of the way to first touch the opened flight still has to fly, in its frame.
-            short = opened
+            let short = opened
                 .as_ref()
                 .map_or(0.0, |(opened, stand_off)| stand_off / opened.speed);
             let flown = (contact - flight.speed * short).max(0.0);
@@ -3171,6 +3171,7 @@ fn march_shell_step(
             &mut flight,
             &mut budget,
             contact,
+            moving,
             health,
         ) {
             damage_dealt += removed;
@@ -3179,8 +3180,6 @@ fn march_shell_step(
                 stopped = true;
                 break;
             }
-            // The burst flew the stand-off in the struck body's frame; the world path carries it too.
-            flight.fly(carrier * short);
             let velocity = flight.direction * flight.speed + carrier;
             if let Ok(direction) = Dir3::new(velocity) {
                 flight.frame = flight.frame.transport(*flight.direction, *direction);
@@ -3538,6 +3537,10 @@ fn decide_playback(
 /// ([`resolve::entry_force`]) and functions on it ([`burst::Fuze::entered`]). A delay that runs out
 /// by the contact bursts there, before the crossing ([`burst_ahead`]). Returns, when it burst,
 /// whether the round ended and the pool units removed; `None` leaves the crossing to the walk.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the reached contact supplies its frame and clock to burst delivery"
+)]
 fn function_on_contact(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
@@ -3545,6 +3548,7 @@ fn function_on_contact(
     flight: &mut resolve::Flight,
     budget: &mut resolve::Budget,
     contact: f32,
+    moving: Option<motion::ContactMotion>,
     health: &mut Query<&mut ComponentHealth>,
 ) -> Option<(bool, u64)> {
     let burst::Fuze::Unarmed(burst::Burst {
@@ -3570,7 +3574,7 @@ fn function_on_contact(
         .entered(force, flight.speed, owner, contact);
     shell.projectile.fuze.due_within(contact)?;
     Some(burst_ahead(
-        shell, context, not_own, flight, budget, contact, health,
+        shell, context, not_own, flight, budget, contact, moving, health,
     ))
 }
 
@@ -3652,6 +3656,10 @@ fn follow_crossing(
 /// AUTHORITY: fly the round `metres` of open path, where its fuze runs out, with the witness pass
 /// over that leg, and burst there at the flight's speed ([`burst_here`]). Returns whether the round
 /// ended, and the pool units removed.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a contact burst carries the struck frame to its world endpoint"
+)]
 fn burst_ahead(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
@@ -3659,6 +3667,7 @@ fn burst_ahead(
     flight: &mut resolve::Flight,
     budget: &mut resolve::Budget,
     metres: f32,
+    moving: Option<motion::ContactMotion>,
     health: &mut Query<&mut ComponentHealth>,
 ) -> (bool, u64) {
     let radius = resolve::disc_radius(shell.projectile.body().caliber);
@@ -3670,7 +3679,14 @@ fn burst_ahead(
     );
     let wounded = wound_legs(shell, context, admit, &[leg], flight.speed, health);
     flight.fly(flight.direction * metres);
-    budget.fly(f64::from(metres / flight.speed));
+    let seconds = metres / flight.speed;
+    if let Some(moving) = moving {
+        // The game's damage model: the burst belongs to the reached world contact. Carrier
+        // displacement is bounded by |velocity| times the remaining tick, not by a fixed length.
+        flight.fly(moving.velocity * seconds);
+        context.world.moment.set(Some(moving.fraction));
+    }
+    budget.fly(f64::from(seconds));
     let (ended, removed) = burst_here(shell, context, flight, flight.speed, health);
     (ended, wounded + removed)
 }
