@@ -5,7 +5,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::model::{TankRoot, TankServos};
+use super::model::{Controlled, TankRoot, TankServos};
 use super::view::{ViewOf, ViewServo};
 use crate::damage::{
     Part, Requirement, TankVolumes, VolumeFacets, evaluate, live_quality, part_facts,
@@ -128,7 +128,7 @@ pub struct ServoSpec {
     drive: ServoDrive,
     travel: Travel,
     /// In the game's damage model (game state only), this requirement scales slew effectiveness.
-    /// Required: an authored `[]` slews at full speed independently of the HP pools.
+    /// Required: `[]` supplies full operator work; powered work still depends on the engine.
     pub(crate) requires: Requirement,
 }
 
@@ -233,9 +233,8 @@ pub struct ServoRest(pub Quat);
 #[derive(Component, Clone, Copy)]
 pub struct ServoIndex(pub usize);
 
-/// Client-local mechanism state for a replicated remote tank — permanent on replicas. Public
-/// [`ServoAngles`](crate::net::protocol::ServoAngles) is the remote target stream; [`TankServos`]
-/// is the server/single-player integrator and never reaches a client.
+/// Client-local presentation state, permanent on replicas. Non-owners consume published angles;
+/// the controlled tank integrates its own ahead-running aim. [`TankServos`] remains authoritative.
 #[derive(Component, Clone, PartialEq, Debug, Default)]
 pub(crate) struct RemoteServos(pub Vec<ServoState>);
 
@@ -339,7 +338,7 @@ pub(crate) fn drive_servos(
     )>,
     mut servos: Query<&mut TankServos>,
     mut remote_servos: Query<&mut RemoteServos>,
-    tanks: Query<&TankVolumes>,
+    tanks: Query<(&TankVolumes, Has<Controlled>)>,
     facets: Query<VolumeFacets>,
     mechanisms: Query<(&ServoMechanism, &EngineRpm)>,
     time: Res<Time>,
@@ -349,6 +348,7 @@ pub(crate) fn drive_servos(
         // Absence of RemoteServos selects the authority integrator; a missing selected state
         // or slot is a broken spawn bundle, never a reason to freeze a mechanism silently.
         let mut remote = remote_servos.get_mut(root.0).ok();
+        let is_remote = remote.is_some();
         let mut authoritative = if remote.is_none() {
             Some(
                 servos
@@ -374,29 +374,37 @@ pub(crate) fn drive_servos(
         // Preserve the prior fixed-step value for view interpolation.
         state.previous = state.current;
 
-        // The game's damage model: requirements scale operator work; engine quality scales power.
-        let volumes = tanks
+        let (volumes, controlled) = tanks
             .get(root.0)
             .expect("an admitted tank with a servo carries its volume relationship target");
-        let facts = part_facts(volumes, &facets);
-        let slew = evaluate(&spec.requires, &facts.quality);
-        let (power, inertia) = match spec.drive {
-            ServoDrive::Hand { .. } => (0.0, 0.0),
-            ServoDrive::Powered { .. } => {
-                let (mechanism, rpm) = mechanisms.get(root.0)
+        if is_remote && !controlled {
+            // A published angle is resolved truth, not an aim command with momentum to simulate.
+            state.current = command.target;
+            state.velocity = 0.0;
+        } else {
+            // The game's damage model: requirements scale operator work; engine quality scales power.
+            let facts = part_facts(volumes, &facets);
+            let slew = evaluate(&spec.requires, &facts.quality);
+            let (power, inertia) = match spec.drive {
+                ServoDrive::Hand { .. } => (0.0, 0.0),
+                ServoDrive::Powered { .. } => {
+                    let (mechanism, rpm) = mechanisms.get(root.0)
                     .expect("a powered servo's root has spawn-built construction and replicated crank speed");
-                // Missing Engine denotes an absent source in the game's damage model, hence no power.
-                let quality = live_quality(&facts.quality, Part::Engine);
-                let power =
-                    mechanism.engine.torque_at(rpm.rpm()) * rpm.rpm() * RPM_TO_RAD * quality;
-                let inertia = mechanism.inertia[match spec.role {
-                    ServoRole::Yaw => 0,
-                    ServoRole::Pitch => 1,
-                }];
-                (power, inertia)
-            }
-        };
-        advance_servo(state, spec, command.target, power, inertia, slew, dt);
+                    // Missing Engine denotes an absent source in the game's damage model, hence no power.
+                    let quality = live_quality(&facts.quality, Part::Engine);
+                    // Accessory capacity saturates at the governed budget; fuel cut does not stop
+                    // a turning crank. The missing pump map is stated in design section 7c.
+                    let crank = rpm.rpm().min(mechanism.engine.engine.governed_rpm);
+                    let power = mechanism.engine.torque_at(crank) * crank * RPM_TO_RAD * quality;
+                    let inertia = mechanism.inertia[match spec.role {
+                        ServoRole::Yaw => 0,
+                        ServoRole::Pitch => 1,
+                    }];
+                    (power, inertia)
+                }
+            };
+            advance_servo(state, spec, command.target, power, inertia, slew, dt);
+        }
 
         // The sim node always carries fixed-step truth; smoothing writes the view tree only.
         let rotation = servo_rotation(spec, rest, state.current);
@@ -408,6 +416,7 @@ pub(crate) fn drive_servos(
 
 /// Implicit acceleration solves I Δω/Δt = min(Tstall, P/ω) - Tbearing.
 /// The positive quadratic root prevents a discrete step oscillating across the power equilibrium.
+/// Infinite stall torque denotes hand work, whose torque curve is not declared.
 fn powered_velocity(
     speed: f32,
     power: f32,
@@ -475,23 +484,34 @@ fn advance_servo(
             stall_torque,
             bearing_friction,
             ..
-        } if engine_power > 0.0 => {
-            let power = engine_power * power_share.0 * slew;
-            let stall = stall_torque.0;
+        } => {
             let friction = bearing_friction.0;
+            let motor_power = engine_power * power_share.0 * slew;
+            // Hand rate names sustained motion against the same bearing: P = Tf*ω.
+            // No handwheel torque curve is supplied; do not borrow the powered motor's stall.
+            let hand_power = hand_rate * slew * friction;
+            let hand = hand_power > motor_power;
+            let (power, stall) = if hand {
+                (hand_power, f32::INFINITY)
+            } else {
+                (motor_power, stall_torque.0)
+            };
             let speed = state.velocity.abs();
-            let torque = if speed * stall <= power {
+            let braking_torque = if hand {
+                // Hand work can cease; only bearing friction is known to brake this path.
+                0.0
+            } else if speed * stall <= power {
                 stall
             } else {
                 power / speed
             };
-            // Opposing motor torque and bearing friction brake together. The current torque is
-            // a conservative bound: available motor torque increases as the mechanism slows.
-            let brake_accel = (torque + friction) / inertia;
-            // A position command limits requested speed, never the available stopping torque.
-            let desired = (2.0 * brake_accel * error.abs())
-                .sqrt()
-                .min(error.abs() / dt);
+            // Current torque is a lower bound on braking as speed falls. Reserve this tick's
+            // travel as well as v²/(2a): v*dt + v²/(2a) <= |error|. Rationalize near arrival.
+            let brake_accel = (braking_torque + friction) / inertia;
+            let step = f64::from(brake_accel) * f64::from(dt);
+            let work = 2.0 * f64::from(brake_accel) * f64::from(error.abs());
+            let desired =
+                ((work / ((step * step + work).sqrt() + step)) as f32).min(error.abs() / dt);
             if state.velocity * error < 0.0 {
                 state.velocity.signum() * (speed - brake_accel * dt).max(0.0)
             } else if speed > desired {
@@ -501,7 +521,7 @@ fn advance_servo(
                     * powered_velocity(speed, power, stall, friction, inertia, dt).min(desired)
             }
         }
-        _ => {
+        ServoDrive::Hand { .. } => {
             if error == 0.0 {
                 0.0
             } else {
@@ -634,21 +654,162 @@ mod tests {
     /// The game's damage model: authority reads the engine HP share every tick. An engine out
     /// of action leaves only the operator's authored hand drive, including after powered motion.
     #[test]
-    fn an_engine_out_of_action_selects_the_hand_rate() {
+    fn an_engine_out_of_action_brakes_to_the_hand_rate() {
         let (mut world, root, servo, engine, _) = powered_world(15.0, 1.0);
         for _ in 0..512 {
             tick_powered(&mut world, root, servo);
         }
+        let before = world.get::<TankServos>(root).unwrap().states[0];
         world
             .get_mut::<crate::ballistics::ComponentHealth>(engine)
             .unwrap()
             .set_held(0);
         let state = tick_powered(&mut world, root, servo);
-        let ServoDrive::Powered { hand_rate, .. } = world.get::<ServoSpec>(servo).unwrap().drive
+        let ServoDrive::Powered {
+            hand_rate,
+            bearing_friction,
+            ..
+        } = world.get::<ServoSpec>(servo).unwrap().drive
         else {
             unreachable!()
         };
-        assert_eq!(state.velocity, hand_rate.0);
+        // Bearing friction alone is a lower bound on coast-down time; hand work can only
+        // reduce that braking, never erase the stored momentum in the game's damage model.
+        let inertia = world.get::<ServoMechanism>(root).unwrap().inertia[0];
+        assert!(state.velocity >= before.velocity - bearing_friction.0 / inertia / 64.0);
+        for _ in 0..4096 {
+            tick_powered(&mut world, root, servo);
+        }
+        let state = world.get::<TankServos>(root).unwrap().states[0];
+        assert!((state.velocity - hand_rate.0).abs() < hand_rate.0 * 0.001);
+    }
+
+    /// The game's damage model: the best available path sets bearing work. Authority must
+    /// keep turning above the governor cut and must never be slower with a reduced engine.
+    #[test]
+    fn crank_speed_and_quality_select_the_best_available_work() {
+        // Fixture flat curve: 1000 N m, governed at 2400 rpm; no engine-control width is assumed.
+        for (rpm, quality) in [
+            (0, 1.0),
+            (600, 0.001),
+            (2400, 1.0),
+            (2600, 1.0),
+            (3000, 1.0),
+        ] {
+            let (mut world, root, servo, _, _) = powered_world(15.0, quality);
+            // Fixture share keeps steady speed below the controller's stopping envelope at
+            // the shortest-arc command's finite lead; this test isolates available work.
+            let share = 0.0001;
+            let ServoDrive::Powered { power_share, .. } =
+                &mut world.get_mut::<ServoSpec>(servo).unwrap().drive
+            else {
+                unreachable!()
+            };
+            *power_share = Sourced(share);
+            world.get_mut::<EngineRpm>(root).unwrap().0 = rpm;
+            for _ in 0..4096 {
+                tick_powered(&mut world, root, servo);
+            }
+            let expected = (1000.0 * f32::from(rpm).min(2400.0) * RPM_TO_RAD * quality * share
+                / 20.0)
+                .max(1f32.to_radians());
+            let state = world.get::<TankServos>(root).unwrap().states[0];
+            assert!(
+                (state.velocity - expected).abs() < expected * 0.001,
+                "rpm={rpm}, quality={quality}: {} vs {expected}",
+                state.velocity
+            );
+        }
+    }
+
+    /// A non-owner replica presents published truth even when local engine/operator facts
+    /// in the game's damage model are stale. Presentation must invent no momentum past it.
+    #[test]
+    fn a_replica_consumes_truth_instead_of_simulating_a_second_drive() {
+        let (mut world, root, servo, _, _) = powered_world(15.0, 1.0);
+        world
+            .entity_mut(root)
+            .insert(RemoteServos(vec![ServoState::test_new(0.0, 0.0, 0.55)]));
+        world.get_mut::<ServoSpec>(servo).unwrap().requires =
+            vec![crate::damage::Group::Single(Part::Gunner)];
+        for target in [0.01, 0.01, -0.02] {
+            world.get_mut::<ServoCommand>(servo).unwrap().target = target;
+            world
+                .resource_mut::<Time<()>>()
+                .advance_by(Duration::from_secs_f32(1.0 / 64.0));
+            world.run_system_once(drive_servos).unwrap();
+            let state = world.get::<RemoteServos>(root).unwrap().0[0];
+            assert_eq!(state.current, target);
+            assert_eq!(state.velocity, 0.0);
+        }
+    }
+
+    /// The controlled replica's ahead-running input is still a command. Its exception to
+    /// published-angle presentation must retain the drive law and leave authority state alone.
+    #[test]
+    fn the_controlled_replica_integrates_its_own_aim() {
+        let (mut world, root, servo, _, _) = powered_world(15.0, 1.0);
+        world
+            .entity_mut(root)
+            .insert((super::super::model::Controlled, RemoteServos::for_count(1)));
+        world.get_mut::<ServoCommand>(servo).unwrap().target = 0.5;
+        world
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_secs_f32(1.0 / 64.0));
+        world.run_system_once(drive_servos).unwrap();
+        let state = world.get::<RemoteServos>(root).unwrap().0[0];
+        assert!(state.current > 0.0 && state.current < 0.5);
+        assert!(state.velocity > 0.0);
+        assert_eq!(
+            world.get::<TankServos>(root).unwrap().states[0],
+            ServoState::default()
+        );
+    }
+
+    /// At unchanged supply, aim consumers rely on monotone arrival within float angle
+    /// resolution. A command jump retains the separate momentum contract.
+    #[test]
+    fn a_constant_target_is_approached_within_angle_resolution() {
+        // Fixture drive, inertia, target and solver steps, spanning the stall/power knee.
+        let spec = powered_spec(1.0, 100.0, 20.0);
+        for dt in [1.0 / 32.0, 1.0 / 64.0, 1.0 / 128.0] {
+            for power in [1.0, 10.0, 1000.0] {
+                for target in [-0.5_f32, 0.5] {
+                    let mut state = ServoState::default();
+                    // Fixture allowance: subtraction, velocity rounding, product and addition
+                    // each contribute at most one relative f32 epsilon at this angle scale.
+                    let roundoff = 4.0 * f32::EPSILON * target.abs();
+                    for _ in 0..8192 {
+                        let previous = state.current;
+                        advance_servo(&mut state, &spec, target, power, 10.0, 1.0, dt);
+                        assert!(
+                            state.current * target.signum() <= target.abs() + roundoff,
+                            "crossed {target}: {}",
+                            state.current
+                        );
+                        assert!((state.current - previous) * target.signum() >= -roundoff);
+                    }
+                    assert!((state.current - target).abs() < 1e-6);
+                }
+            }
+        }
+    }
+
+    /// A travel stop absorbs momentum. Removing its velocity reset must leave this red,
+    /// independently of a later controller tick that could hide the missed collision.
+    #[test]
+    fn a_mechanical_stop_absorbs_velocity_on_impact() {
+        let mut spec = powered_spec(1.0, 100.0, 20.0);
+        spec.travel = Travel::Limited {
+            min: -0.5,
+            max: 0.5,
+        };
+        for direction in [-1.0, 1.0] {
+            let mut state = ServoState::test_new(direction * 0.499, 0.0, direction);
+            advance_servo(&mut state, &spec, direction, 1000.0, 10.0, 1.0, 1.0 / 64.0);
+            assert_eq!(state.current, direction * 0.5);
+            assert_eq!(state.velocity, 0.0);
+        }
     }
 
     /// The game's damage model: steady bearing work is P = Tfriction*ω. Authority consumers
@@ -824,8 +985,8 @@ mod tests {
             for tick in 0..3000 {
                 // First half: random targets beyond both limits, re-rolled every other tick.
                 // Then a target sweeping at the servo's full slew speed past the window. Last, targets
-                // held a hair past one limit then the other (0.5 to 5 mrad), so the servo arrives
-                // at the limit still moving and the overshoot-snap branch fires on a target beyond it.
+                // held just beyond alternating limits (Fixture: 0.5 to 5 mrad), exercising
+                // target admission at both ends of the mechanical window.
                 let target = if tick < 1000 {
                     (next() - 0.5) * 6.0
                 } else if tick < 2000 {

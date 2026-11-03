@@ -1440,28 +1440,48 @@ at stations; an engine reduced or out of action changes available power, not aim
 `ServoSpec.drive` declares `Powered` or `Hand`; node names select neither law nor limits.
 This section owns the servo narrative. The tank sheet owns the facts and their provenance.
 
-**Inputs and law.** At the current public crank rpm, `TransmissionParams::torque_at`
-interpolates the declared `track.powertrain.transmission.engine.torque_curve`, including
-its fuel-governor cut. `EngineRpm` is published from `TankTransmission`; the servo reads
-that replicated whole-rpm value, not a second engine-power figure. For engine quality
-`qe`, operator requirement effectiveness `qo`, declared power share `s`, stall torque
-`Ts` and running bearing friction `Tf`:
+**Inputs and law.** `EngineRpm` is published from `TankTransmission`; the drive reads that
+whole-rpm crank magnitude. Accessory capacity uses `TransmissionParams::torque_at` at
+`r = min(rpm, governed_rpm)`, before the governor's fuel cut. Above the governor, capacity
+holds the governed power budget: the crank still turns, and a fuel cut is not a lost drive.
+The curve contains higher-rpm engine anchors, but gives no accessory pump regulation map;
+without that map, neither a capability collapse nor an extra high-rpm gain is justified.
+This saturation is a provisional capacity model, not measured pump behavior.
+For engine quality `qe`, operator requirement effectiveness `qo`, declared power share `s`,
+motor stall torque `Ts`, running bearing friction `Tf` and sustained hand rate `vh`:
 
 ```
-Pengine = qe * torque_at(rpm) * rpm * (2*pi/60)
-Pservo  = qo * s * Pengine
-Tmotor  = min(Ts, Pservo / abs(omega))
-I * domega/dt = commanded_motor_torque - Tf * sign(omega)
+Pengine = qe * torque_at(r) * r * (2*pi/60)
+Pmotor  = qo * s * Pengine
+Phand   = qo * vh * Tf
+Pdrive  = max(Pmotor, Phand)
+I * domega/dt = commanded_drive_torque - Tf * sign(omega)
 ```
 
-The zero-speed limit of motor torque is `Ts`; no division by zero is taken. Operator
-throughput scales available work, never the physical stall-torque fact.
-A target controller can request less torque or reverse it to brake. Acceleration uses an
-implicit positive quadratic root in the power-limited region, avoiding numerical oscillation
-across the work equilibrium. Braking uses opposing motor torque plus bearing friction;
-a changed command cannot erase velocity. A declared mechanical travel stop absorbs momentum.
-With no available engine power, `qo * hand_rate` drives the mount; zero operator effectiveness
-holds it. `Hand` construction always uses that operator-scaled rate.
+The faster sustained path wins; the two sources are not added. With the motor selected,
+`Tdrive = min(Ts, Pdrive/abs(omega))`, with zero-speed limit `Ts`. With hand work selected,
+`Tdrive = Pdrive/abs(omega)`: the authored hand rate determines sustained bearing work,
+but no handwheel torque curve is declared. The implicit positive quadratic root solves
+acceleration without evaluating a division at zero, including hand startup. Its uncapped
+hand startup remains an approximation awaiting handwheel torque data; the hydraulic motor's
+stall fact is not assigned to the handwheel. Operator throughput scales work, never `Ts`.
+
+Braking uses reversed motor torque plus bearing friction on the motor path, and bearing
+friction alone when hand work ceases. A path change preserves velocity and approaches the
+new work equilibrium; it never installs a different rate in one tick. To approach a fixed
+command monotonically within float angle resolution, from rest at unchanged supply, requested
+speed reserves both this
+tick's travel and subsequent stopping distance: `v*dt + v*v/(2*a) <= abs(error)`, where `a`
+is the current available braking acceleration. A command or supply jump can still leave
+insufficient stopping distance; neither erases momentum. A mechanical stop absorbs it.
+Zero operator effectiveness holds the mount. `Hand` construction has no declared inertia
+and retains its kinematic, operator-scaled hand rate.
+
+The game's damage model: a Driver out of action on a stopped tank no longer supplies the
+Driver-operated idle catch (`idle_catch_capacity` reads `DriveSupply::served_task_rate`).
+The crank runs down under construction drag (`crank_free_torque`), reducing powered traverse
+to hand work even with engine and Gunner whole. The missing independent foot actuation is a
+`StandIn` in the driving model; this drive consumes its resulting crank speed unchanged.
 
 The uniform cuboid law supplies the moments about the declared role axes:
 `Iyaw = m*(x*x + z*z)/12`, `Ipitch = m*(y*y + z*z)/12`, with full extents in metres,
@@ -1471,8 +1491,9 @@ radians once at deserialization. Admission refuses invalid drive facts and unrep
 moments before play, naming the field and repair.
 
 At sustained demand, with admitted `Ts > Tf`, the steady rate is **DERIVED** from bearing work:
-`omega_inf = Pservo/Tf`. Initial acceleration is **DERIVED** as `(Ts - Tf)/I` when power
-is positive. There is no separate authored speed or acceleration cap. The motor's declared share is an availability budget;
+`omega_inf = max(Pmotor/Tf, qo*vh)`. On the motor path, initial acceleration is **DERIVED**
+as `(Ts - Tf)/I`. There is no separate authored speed or acceleration cap. The motor's
+declared share is an availability budget;
 accessory work is not yet fed back as a load into the crank solver.
 
 **Authored facts.** The yaw row declares share 0.01, stall torque 16,000 N m, running friction
@@ -1485,7 +1506,10 @@ mounts declare hand construction and provisional 45 degree/s rates.
 **DERIVED consequences of those provisional facts**, at full engine and operator quality:
 `Iyaw = 9,840 kg m²`, `Ipitch = 4,800 kg m²`. The declared curve supplies 81.681 kW at idle
 600 rpm and 441.394 kW at governed 2,500 rpm. The rated 3,000 rpm anchor is not substituted
-for the live crank speed.
+for the live crank speed. At 2,600 and 3,000 rpm the saturated accessory budget gives the
+same **DERIVED** rates as at governed rpm: yaw 31.6125 degree/s and pitch 20.2320 degree/s.
+At idle and engine quality 0.1, hand work wins: **DERIVED** yaw 1 degree/s and pitch
+0.5 degree/s, rather than the motor-only 0.585 and 0.3744 degree/s.
 
 | Axis | Steady at idle (degree/s) | Steady at governed (degree/s) | Initial acceleration (degree/s²) | Governed time to 95% (s) | Previous authored speed / acceleration |
 |---|---:|---:|---:|---:|---|
@@ -1493,12 +1517,12 @@ for the live crank speed.
 | Pitch | 3.744 | 20.2320 | 29.8416 | 1.5950 | 23 degree/s / 70 degree/s² |
 
 These times integrate the continuous law, not frame or tick cost. Exact full rate is an
-asymptote: its time is infinite. For `k = Pservo/Ts` and a requested rate `v > k`,
+asymptote: its time is infinite. On the motor path, for `k = Pmotor/Ts` and a requested rate `v > k`,
 the time is **DERIVED** as:
 
 ```
 t(k) = I*k/(Ts - Tf)
-t(v) = t(k) + I/(Tf*Tf) * [Pservo*ln((Pservo-Tf*k)/(Pservo-Tf*v)) - Tf*(v-k)]
+t(v) = t(k) + I/(Tf*Tf) * [Pmotor*ln((Pmotor-Tf*k)/(Pmotor-Tf*v)) - Tf*(v-k)]
 ```
 
 Below the knee, `t(v) = I*v/(Ts-Tf)`. The table uses `v = 0.95*omega_inf`.
@@ -1513,19 +1537,23 @@ operating envelope and those inputs must settle the gaps; neither mass nor physi
 are rescaled to recover the previous limits. Crank accessory-load feedback is a separate missing
 coupling, with the drivetrain implementation unchanged.
 
-**Evidence and wire contract.** MEASURED in generic inline fixtures: full/half engine quality
-produces 3.141581/1.5707935 rad/s steady rates; doubling declared mass at fixed extents changes
-the first-step velocity from 0.125 to 0.0625 rad/s. An engine out of action selects the authored
-hand rate, an unavailable operator holds either drive, and a command jump preserves momentum.
-Limited travel, reversal and arrival have class-invariant tests. Aiming transport tests use hand
-construction and assert zero steady lag within their declared rate, replacing the removed
-fixed-acceleration envelope expectation.
+**Evidence and wire contract.** Generic inline fixtures derive steady rate from bearing work,
+startup from torque and cuboid inertia, and coast-down bounds from friction. They cover a
+reduced engine, a stopped crank, above-governor rpm, path transitions, target jumps, monotone
+arrival at fixed supply, reversal and travel-stop momentum absorption. No expected rate is
+copied from a run.
 
-The powered-data and final-law lane gates passed 788 tests with 12 existing ignores: tank, spec, damage,
-`net::`, `headless_test`, `pen_cam`, `field_casts`, and the doc/UI/net-boundary/bake guards.
-The wire definition pin passes: `ServoState` and public `ServoAngles` are unchanged;
-`TankServos` remains authoritative mechanism state and `RemoteServos` the client-local chase.
-`ServoMechanism` is immutable local construction. PROTOCOL_REV stays 82.
+Non-owner replicas consume published `ServoAngles` directly; a resolved angle is not a
+second drive's target and cannot acquire local momentum. `apply_servo_angles` excludes the
+controlled tank, whose ahead-running aim still integrates through `drive_servos` (under
+review in #187). That own-client path reads stale replicated `EngineRpm`: `publish_engine_rpm`
+only writes dynamic bodies, while client replicas are static. Its available power can therefore
+lag the authority's crank; no deterministic own-client/authority agreement is claimed.
+View interpolation still blends previous and current angles on the view node only.
+
+`ServoState` and public `ServoAngles` are unchanged; `TankServos` remains authoritative state,
+`RemoteServos` holds client presentation state, and `ServoMechanism` is immutable local
+construction. PROTOCOL_REV stays 82.
 
 Ratchet dispositions: `load-07` is fixed by required explicit `turret.node` construction,
 independent of optic ancestry (`None` explicitly declares no assembly); assembly membership

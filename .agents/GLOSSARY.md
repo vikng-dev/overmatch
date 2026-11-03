@@ -145,7 +145,7 @@ _Avoid_: collision mesh, physics glb (it is the same bytes as the view artifact'
 ## Gunnery
 
 **Servo**:
-A 1-DOF *kinematic* rotational motor with a trapezoidal motion profile, slewing turret yaw / gun pitch toward a commanded angle. Not a physics joint — we drive it ourselves.
+A one-axis rotational drive slewing a mount toward a commanded angle, by engine power or hand work. Its travel and construction determine how it moves.
 
 **Recoil**:
 The barrel's rearward kick on firing and its damped spring back to battery — a 1-DOF translational motor, the bore-axis cousin of the Servo.

@@ -1099,7 +1099,7 @@ pub(crate) fn plugin(app: &mut App) {
     // Immutable spawn identity: which of its combatant's lives a root is, so a record of a shot
     // against an earlier life is never read against this one.
     app.component::<CombatantLife>().replicate();
-    // Plain replication, no interpolation: consumers chase the raw angle through the servo
+    // Plain replication, no interpolation: non-owners consume the resolved angle through the servo
     // mechanism (see the type).
     app.component::<ServoAngles>().replicate();
     // Owner-private atomic combat snapshot; public life state is `NetTankStatus`.
