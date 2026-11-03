@@ -2161,43 +2161,63 @@ mod tests {
     }
 
     /// The game's damage model: bots and players are combatants under the same mode wait.
-    /// The bot's old life survives until the opening, then exactly one replacement keeps its id.
+    /// Each old life survives until the opening, then exactly one replacement keeps its id. Repeated
+    /// lives catch a hidden limit; a second mode wait catches a wait compiled into the bot path.
     #[test]
     fn a_bot_respawns_at_its_scored_opening_and_never_before() {
-        let mut app = placement_app();
-        app.insert_resource(BotCount(1))
-            .add_systems(Update, (spawn_bots, respawn_dead_bots).chain());
-        app.update();
-        let root = app
-            .world_mut()
-            .query_filtered::<Entity, With<Bot>>()
-            .single(app.world())
-            .expect("one fixture bot");
-        let combatant = *app
-            .world()
-            .get::<CombatantId>(root)
-            .expect("spawn identity");
-        knock_out(&mut app, root);
-        advance(&mut app, shipped_wait().ticks() - 1);
-        app.update();
-        assert!(
-            app.world().get_entity(root).is_ok(),
-            "no bot respawn before the opening"
-        );
-        advance(&mut app, 1);
-        app.update();
-        assert!(
-            app.world().get_entity(root).is_err(),
-            "the old life is swept at the opening"
-        );
-        let (fresh, id, life) = app
-            .world_mut()
-            .query_filtered::<(Entity, &CombatantId, &CombatantLife), With<Bot>>()
-            .single(app.world())
-            .expect("exactly one replacement bot");
-        assert_ne!(fresh, root);
-        assert_eq!(*id, combatant);
-        assert_eq!(*life, CombatantLife(1));
+        for (label, mode) in [
+            ("shipped", BattleMode::shipped()),
+            (
+                "fixture",
+                BattleMode::parse(include_str!("fixtures/battle-short.ron")),
+            ),
+        ] {
+            let wait = RespawnWait::new(mode.respawn_wait, TICK);
+            let mut app = placement_app();
+            app.insert_resource(wait)
+                .insert_resource(BotCount(1))
+                .add_systems(Update, (spawn_bots, respawn_dead_bots).chain());
+            app.update();
+            let mut root = app
+                .world_mut()
+                .query_filtered::<Entity, With<Bot>>()
+                .single(app.world())
+                .expect("one fixture bot");
+            let combatant = *app
+                .world()
+                .get::<CombatantId>(root)
+                .expect("spawn identity");
+            for replacement in 1..=3 {
+                // Fixture repetitions, beyond a two-respawn limit.
+                knock_out(&mut app, root);
+                advance(&mut app, wait.ticks() - 1);
+                app.update();
+                assert!(
+                    app.world().get_entity(root).is_ok(),
+                    "no bot respawn before the opening"
+                );
+                advance(&mut app, 1);
+                app.update();
+                assert!(
+                    app.world().get_entity(root).is_err(),
+                    "the old life is swept at the opening"
+                );
+                let (fresh, id, life) = app
+                    .world_mut()
+                    .query_filtered::<(Entity, &CombatantId, &CombatantLife), With<Bot>>()
+                    .single(app.world())
+                    .expect("exactly one replacement bot");
+                assert_ne!(fresh, root);
+                assert_eq!(*id, combatant);
+                assert_eq!(*life, CombatantLife(replacement));
+                root = fresh;
+            }
+            let respawns = app.world().get::<CombatantLife>(root).unwrap().0;
+            println!(
+                "MEASURED headless bot probe: mode={label}, respawns={respawns}, early_respawns=0; mode_wait_s={} (mode data)",
+                mode.respawn_wait.as_secs_f32()
+            );
+        }
     }
 
     /// The game's damage model: automatic joins and respawns share the minimum, ignore knocked-out

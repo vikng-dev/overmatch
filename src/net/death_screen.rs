@@ -514,6 +514,77 @@ fn apply_death_status_line(
 mod tests {
     use super::*;
 
+    /// The game's damage model: a player's R prompt and request follow the same opening as the
+    /// authority, including across tick wrap. A missing UI or input gate permits an early request;
+    /// a late gate hides an allowed request. Fixture identities and starting ticks.
+    #[test]
+    fn the_respawn_prompt_and_key_follow_the_authority_opening() {
+        use super::super::battle_mode::BattleMode;
+        use super::super::score::{Respawn, RespawnGate, RespawnWait, Standing};
+        use crate::sim_tick::{SimTick, TickSpan};
+        use bevy::ecs::system::RunSystemOnce;
+
+        let timestep = crate::sim_tick::sim_timestep();
+        let wait = RespawnWait::new(BattleMode::shipped().respawn_wait, timestep).ticks();
+        assert!(wait > 0, "the chosen mode waits before allowing respawn");
+        let (who, life) = (CombatantId(1), CombatantLife(2));
+        for start in [0, u32::MAX - wait / 2] {
+            for elapsed in [0, wait - 1, wait, wait + 1] {
+                let mut world = World::new();
+                world.insert_resource(Time::<()>::default());
+                let mut fixed = Time::<Fixed>::default();
+                fixed.set_timestep(timestep);
+                world.insert_resource(fixed);
+                world.insert_resource(ShotClock(SimTick::new(start).after(TickSpan::of(elapsed))));
+                world.insert_resource(ButtonInput::<KeyCode>::default());
+                world.insert_resource(Overlays::default());
+                world.resource_mut::<Overlays>().declare_in_match(true);
+                world.insert_resource(UiFonts {
+                    hud: Handle::default(),
+                    body: Handle::default(),
+                });
+                world.insert_resource(AwaitingRespawn::default());
+                world.spawn((
+                    Scoreboard(vec![Standing {
+                        combatant: who,
+                        knockouts: 0,
+                        losses: 1,
+                        respawn: Respawn::Opens {
+                            life,
+                            tick: SimTick::new(start).after(TickSpan::of(wait)),
+                        },
+                    }]),
+                    BattleState::combat_fixture(),
+                ));
+                let own = world
+                    .spawn((
+                        Controlled,
+                        TankKnockedOut {
+                            reason: crate::damage::KnockoutReason::CrewLoss,
+                        },
+                        TankCommand::default(),
+                        who,
+                        life,
+                    ))
+                    .id();
+                let accepted = world
+                    .run_system_once(move |gate: RespawnGate| {
+                        gate.opening(who, life) == Opening::Open
+                    })
+                    .unwrap();
+                assert_eq!(accepted, elapsed >= wait);
+                world.run_system_once(toggle_death_screen).unwrap();
+                let prompt = world.query::<&Text>().single(&world).unwrap();
+                assert_eq!(prompt.0.contains("press R to respawn"), accepted);
+                world
+                    .resource_mut::<ButtonInput<KeyCode>>()
+                    .press(RESPAWN_KEY);
+                world.run_system_once(request_respawn).unwrap();
+                assert_eq!(world.get::<TankCommand>(own).unwrap().respawn, accepted);
+            }
+        }
+    }
+
     /// The game's damage model: results cancel an in-flight respawn immediately and suppress a
     /// new request even if the old knocked-out replica has not despawned. Players must see results
     /// rather than a timeout-length respawn wait. Fixture clocks leave the timeout in the future.
