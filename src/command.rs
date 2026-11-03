@@ -156,7 +156,7 @@ impl std::ops::Deref for ParsedTankCommand {
 impl ParsedTankCommand {
     /// The command of a tank whose player commands nothing: every level and edge idle, no aim, so
     /// its servos keep their targets, and the brakes held, so it brakes to a stop and stays parked
-    /// (`track::drive::DriveTarget::Brake`).
+    /// (`track::drive::DriveIntent::Brake`).
     pub(crate) fn hold() -> Self {
         Self {
             held: true,

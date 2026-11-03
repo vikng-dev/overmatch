@@ -12,7 +12,7 @@
 use bevy::ecs::error::BevyError;
 
 use super::drive::DriveIntent;
-use super::forces::ForceParams;
+use super::forces::GripParams;
 
 #[cfg(feature = "bitprobe")]
 use crate::bitprobe::TransmissionProbe;
@@ -176,9 +176,8 @@ pub struct TransmissionParams {
     /// Each ladder declares its own radii.
     pub steer_kappa: Vec<(f32, f32)>,
     pub reverse_steer_kappa: Vec<(f32, f32)>,
-    /// The authored per-forward-gear `(R_tight, R_wide)` table (m), retained verbatim for
-    /// presentation. The sim law consumes [`Self::steer_kappa`]; retaining the source table keeps
-    /// the HUD from re-deriving and rounding away the authored radii.
+    /// Authored per-forward-gear `(R_tight, R_wide)` (m), used by load observation,
+    /// candidate pricing and the HUD. The steering constraint uses [`Self::steer_kappa`].
     pub steer_radii_m: Vec<(f32, f32)>,
     pub reverse_steer_radii_m: Vec<(f32, f32)>,
     /// Steering-member force capacity PER OUTPUT (N). The steering member drives the two
@@ -698,7 +697,7 @@ pub struct TransmissionState {
     /// reversal pause/cut and without intent; launch carries only the rollback shortfall.
     /// A breached lever retains its dynamic brake capacity.
     pub park: bool,
-    /// Engine crank speed ω_e (rad/s) — stage B's crank state. Initialized explicitly from
+    /// Engine crank speed ω_e (rad/s). Initialized explicitly from
     /// vehicle data by [`Self::from_spec`]; the regenerative tick path has no in-band sentinel.
     pub omega_e: f32,
     /// Main clutch's physical regime, replicated with the crank and gear.
@@ -782,7 +781,7 @@ impl TransmissionState {
 /// relation lives here, beside the adapter that integrates on it).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DriveReadout {
-    /// Engine rpm — the crank state ω_e DIRECTLY (stage B: the state IS the display), including
+    /// Engine rpm from crank state ω_e, including
     /// sub-idle lugging and, in the game's damage model, a crank at rest when combustion
     /// cannot sustain idle (`crank_guards`).
     pub rpm: f32,
@@ -792,9 +791,9 @@ pub struct DriveReadout {
 
 /// Read the drivetrain operating point THROUGH THE LAW: the engaged gear from
 /// [`TransmissionState`] against the active ladder, and the engine rpm from the CRANK STATE
-/// ω_e (stage B — no belt-derived re-derivation: the crank slips against the shaft at
+/// ω_e: the crank slips against the shaft at
 /// launch, rev-matches through shifts, and can turn backward when back-driven; the display shows
-/// exactly that state). Pure (no ECS), so the HUD and any legend share one implementation.
+/// exactly that state. Pure (no ECS), so the HUD and any legend share one implementation.
 pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout {
     let ladder: &[f32] = if st.reverse {
         &tp.gears_rev
@@ -941,6 +940,7 @@ fn idle_catch_capacity(tp: &TransmissionParams, supply: DriveSupply) -> f32 {
 /// or the commanded launch speed while slipping, bounded by clutch and contact grip.
 /// A cut cannot reverse a free crank, so pricing uses the saturated catch floor.
 /// This shared price does not select a gear or change delivery.
+#[cfg(any(test, feature = "bitprobe"))]
 pub(crate) fn price_driver_force(
     tp: &TransmissionParams,
     supply: DriveSupply,
@@ -1000,34 +1000,32 @@ fn candidate_load(
 /// the Driver or observer without grip construction.
 #[derive(Clone, Copy)]
 pub(crate) struct DriveConstruction {
-    weight_n: f32,
+    grip: GripParams,
     belt_inertia: f32,
 }
 
 impl DriveConstruction {
-    pub(crate) fn new(params: &ForceParams) -> Self {
-        let grip = params
-            .grip
-            .expect("a drivetrain requires grip construction");
-        Self {
-            weight_n: 2.0 * grip.side_weight,
-            belt_inertia: params.inertia,
-        }
+    pub(crate) fn new(grip: GripParams, belt_inertia: f32) -> Self {
+        Self { grip, belt_inertia }
     }
 
     pub(crate) fn weight_n(self) -> f32 {
-        self.weight_n
+        2.0 * self.grip.side_weight
+    }
+
+    pub(crate) fn grip(self) -> GripParams {
+        self.grip
     }
 }
 
 /// Coupled translation mass (kg): nominal hull mass and both belt inertias.
 pub(crate) fn coupled_mass(fp: &DriveConstruction) -> f32 {
-    let hull = fp.weight_n / super::derive::G;
+    let hull = fp.weight_n() / super::derive::G;
     hull + 2.0 * fp.belt_inertia
 }
 
 fn force_margin(fp: &DriveConstruction, tp: &TransmissionParams) -> f32 {
-    super::load::DriverResolution::load().margin_n(fp.weight_n, tp)
+    super::load::DriverResolution::load().margin_n(fp.weight_n(), tp)
 }
 
 /// A coupled crank accelerates with the vehicle: J*k^2 adds reflected mass. Solving
@@ -1328,8 +1326,8 @@ fn swap_ladder_direction(
     }
 }
 
-/// Controls for one mechanical tick. Only the Driver resolves staffing and task work;
-/// physical laws receive its fuel request, brake regime and construction rest.
+/// Driver decisions for one mechanical tick. The physical laws also read served task
+/// throughput when turning these requests into fuel and mechanical capacity.
 struct Controls {
     input: TransmissionInput,
     command: f32,
@@ -1583,7 +1581,7 @@ fn crank_free_torque(
 /// half of `F_s`; see [`TransmissionParams::steer_capacity_n`].
 fn steering_force(
     tp: &TransmissionParams,
-    fp: &ForceParams,
+    fp: &DriveConstruction,
     st: &TransmissionState,
     inp: &TransmissionInput,
     m: f32,
@@ -1604,8 +1602,9 @@ fn steering_force(
     let steer_capacity = inp.supply.transmission_condition * tp.steer_capacity_n;
     let f_s_max = 2.0 * steer_capacity;
     let r_d = (inp.reactions[0] - inp.reactions[1]) / 2.0;
-    let servo =
-        |target_d: f32| (2.0 * ((target_d - d) * fp.inertia / dt + r_d)).clamp(-f_s_max, f_s_max);
+    let servo = |target_d: f32| {
+        (2.0 * ((target_d - d) * fp.belt_inertia / dt + r_d)).clamp(-f_s_max, f_s_max)
+    };
     // The steering detent (`st.steer_step`) was already updated for THIS tick
     // before gear selection — one detent truth per tick; this law only
     // consumes it.
@@ -1645,9 +1644,9 @@ fn steering_force(
             let g_now = jl * vl + jr * vr;
             let denom = jl * jl + jr * jr;
             let lambda_max = steer_capacity / jl.abs().max(jr.abs());
-            let l = (-(g_now * fp.inertia / dt + jl * a_l + jr * a_r) / denom)
+            let l = (-(g_now * fp.belt_inertia / dt + jl * a_l + jr * a_r) / denom)
                 .clamp(-lambda_max, lambda_max);
-            let m_next = m + (a_l + l * jl + a_r + l * jr) / (2.0 * fp.inertia) * dt;
+            let m_next = m + (a_l + l * jl + a_r + l * jr) / (2.0 * fp.belt_inertia) * dt;
             (l, [jl, jr], m_next)
         };
         let b0 = if m > 0.0 {
@@ -1702,7 +1701,7 @@ struct EngineWork {
 
 fn engine_work(
     tp: &TransmissionParams,
-    fp: &ForceParams,
+    fp: &DriveConstruction,
     inp: &TransmissionInput,
     crank: CrankTick,
     motor: [f32; 2],
@@ -1718,7 +1717,7 @@ fn engine_work(
     let sides_at = |scale: f32| {
         [0, 1].map(|i| {
             let force = motor[i] * scale;
-            let next = inp.speeds[i] + (force - inp.reactions[i]) * inp.dt / fp.inertia;
+            let next = inp.speeds[i] + (force - inp.reactions[i]) * inp.dt / fp.belt_inertia;
             force * (inp.speeds[i] + next) * 0.5 * inp.dt
         })
     };
@@ -1761,7 +1760,7 @@ fn engine_work(
 fn apply_brake_stop_forces(
     q: &mut [f32; 2],
     tp: &TransmissionParams,
-    fp: &ForceParams,
+    fp: &DriveConstruction,
     st: &TransmissionState,
     controls: &Controls,
 ) {
@@ -1774,7 +1773,7 @@ fn apply_brake_stop_forces(
             continue;
         }
         let cap = brake_capacity_for_regime(tp, lever, service, inp.speeds[i]);
-        let stop = inp.reactions[i] - *qi - inp.speeds[i] * fp.inertia / inp.dt;
+        let stop = inp.reactions[i] - *qi - inp.speeds[i] * fp.belt_inertia / inp.dt;
         let brake = if one_way && !service {
             controls.command.signum() * (stop * controls.command.signum()).clamp(0.0, cap)
         } else {
@@ -1789,7 +1788,7 @@ fn apply_brake_stop_forces(
 fn apply_ceiling_brakes(
     q: &mut [f32; 2],
     tp: &TransmissionParams,
-    fp: &ForceParams,
+    fp: &DriveConstruction,
     st: &TransmissionState,
     controls: &Controls,
     crank: CrankTick,
@@ -1806,11 +1805,11 @@ fn apply_ceiling_brakes(
     }
     let mean = (inp.speeds[0] + inp.speeds[1]) * 0.5;
     let direction = if st.reverse { -1.0 } else { 1.0 };
-    let next =
-        mean + (q[0] + q[1] - inp.reactions[0] - inp.reactions[1]) * inp.dt / (2.0 * fp.inertia);
+    let next = mean
+        + (q[0] + q[1] - inp.reactions[0] - inp.reactions[1]) * inp.dt / (2.0 * fp.belt_inertia);
     let ceiling = tp.engine.crank_limit_rpm * RPM_TO_RAD / crank.k;
     let overspeed = (next * direction - ceiling).max(0.0);
-    let brake = (overspeed * fp.inertia / inp.dt).min(tp.brake_capacity_n);
+    let brake = (overspeed * fp.belt_inertia / inp.dt).min(tp.brake_capacity_n);
     for force in q {
         *force -= direction * brake;
     }
@@ -1954,13 +1953,12 @@ fn advance_shift_window(st: &mut TransmissionState) -> bool {
 
 /// Advance the joint drivetrain one fixed tick and integrate both belt speeds: the m/d
 /// superimposed model documented at module level.
-pub fn step(
-    fp: &ForceParams,
+pub(crate) fn step(
+    fp: &DriveConstruction,
     tp: &TransmissionParams,
     st: &mut TransmissionState,
     inp: &TransmissionInput,
 ) -> TransmissionReport {
-    let construction = DriveConstruction::new(fp);
     let dt = inp.dt;
     let [vl, vr] = inp.speeds;
     let m = (vl + vr) / 2.0;
@@ -1968,7 +1966,7 @@ pub fn step(
     #[cfg(feature = "bitprobe")]
     let mut bitprobe = input_probe(st, inp, m, d);
 
-    let controls = driver(&construction, tp, st, inp);
+    let controls = driver(fp, tp, st, inp);
     let inp = &controls.input;
     let Controls {
         dir,
@@ -2005,10 +2003,9 @@ pub fn step(
         &mut bitprobe,
     );
 
-    // The engine force on the mean belt axis: the coupling's transmitted torque reflected
-    // through the gear (in place of the old f_p + f_drag — drag reaches the belt only
-    // through the coupling now). Declutched, the belt gets NOTHING from the engine.
-    let i_m = 2.0 * fp.inertia;
+    // Mean-axis force is clutch torque reflected through the gear. An open main clutch
+    // transmits neither propulsion nor engine drag; steering work is charged separately.
+    let i_m = 2.0 * fp.belt_inertia;
     let (omega_floor, omega_over) = crank_guards(tp, inp, st, propulsive, tau_free);
     let crank = CrankTick {
         omega_e,
@@ -2072,8 +2069,8 @@ pub fn step(
 
     // --- Integrate both sides simultaneously: I·v̇ = Q − R (the reaction ALWAYS applies).
     let next = [
-        inp.speeds[0] + (q[0] - inp.reactions[0]) / fp.inertia * dt,
-        inp.speeds[1] + (q[1] - inp.reactions[1]) / fp.inertia * dt,
+        inp.speeds[0] + (q[0] - inp.reactions[0]) / fp.belt_inertia * dt,
+        inp.speeds[1] + (q[1] - inp.reactions[1]) / fp.belt_inertia * dt,
     ];
 
     settle_crank(

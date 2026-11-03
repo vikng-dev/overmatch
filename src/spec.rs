@@ -1026,14 +1026,12 @@ pub struct EngineSpec {
     /// crank speed (`track::transmission::engine_drag` — pumping/friction losses rise with
     /// speed). Engine data, required: each sheet states its value and its provenance.
     pub drag_fraction: f32,
-    /// Crank + flywheel + main-clutch rotational inertia J (kg·m²) — the stage-B engine
+    /// Crank + flywheel + main-clutch rotational inertia J (kg·m²) — the engine
     /// crank state integrates against this. A declared transmission must declare its crank
     /// (no default): the coupling law divides by it every tick.
     pub inertia_kgm2: f32,
     /// Main clutch torque capacity (N·m) — the largest torque the engaged coupling
     /// transmits before slipping (≈ 1.3 × peak engine torque by the usual sizing rule).
-    /// The stage-B coupling clamp; a torque-converter characteristic replaces the clamp
-    /// for modern automatics later.
     pub clutch_capacity_nm: f32,
 }
 
@@ -1079,10 +1077,9 @@ pub struct SteeringSpec {
     pub capacity: f32,
     /// Inner→outer recirculation efficiency η.
     pub recirculation: f32,
-    // `neutral_fraction` DELETED: it was an unprovenanced
-    // authored feel scalar; the L600 neutral turn now uses the DERIVED
-    // `neutral_d_full = κ_tight(F1) × v1_governed` directly (the radii table's own
-    // gear-independent invariant makes that the correct emergent pivot scale).
+    // Neutral differential speed derives from first-gear construction:
+    // `neutral_d_full = κ_tight(F1) × v1_governed`. An authored share would replace
+    // the radii/speed relationship with an unprovenanced feel scalar.
 }
 
 /// The ride model: three numbers, everything else derives. Spring rate `k = m·(2πf)²`,

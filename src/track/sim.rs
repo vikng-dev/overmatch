@@ -139,13 +139,9 @@ impl EngineRpm {
     }
 }
 
-/// Per-side summed element grip force (N), `[left, right] × [longitudinal, lateral]` —
-/// derived telemetry over [`TrackGripElements`] (the authoritative state). Generalized
-/// forces, NOT world anchors. Hashed into the determinism trace (`hblt`).
-///
-/// Off the wire as of REV 15: rolling derived telemetry back from ordinary replication would
-/// create the forbidden correction-free loop when the undisclosed [`TrackGripElements`]
-/// differ. [`TrackGripEffect`] is the reconciliation effect summary.
+/// Per-side summed element grip force (N), `[left, right] × [longitudinal, lateral]`.
+/// Derived telemetry over [`TrackGripElements`], hashed into the determinism trace (`hblt`).
+/// These are generalized forces, not world anchors or replicated state.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct TrackGrip {
     pub sides: [[f32; 2]; 2],
@@ -180,17 +176,9 @@ pub(crate) fn apply_explicit_impulse(mut forces: ForcesItem<'_, '_>, impulse: Ve
 #[derive(Component, Default)]
 pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
 
-/// The per-element grip state, `[left, right]` (one [`GripElements`] per side): one world-space
-/// shear vector + loss dwell per material link × lateral column. REV 15 transmits one exact
-/// owner-private initialization snapshot, then restores this component from local rollback history;
-/// sparse exact checkpoints provide later authoritative convergence.
-///
-/// Constructed at tank spawn with both slabs pre-sized `link_count * 3`
-/// ([`Self::for_links`], called by the authoritative/shared root construction path) — the
-/// REV-15 fixed-size invariant: `contact_side` never resizes at runtime, because a runtime
-/// rebuild silently erases strain a rollback replay would then trust. Attached to EVERY tank
-/// authority root. A predicted joining replica waits for that exact fixed-size snapshot before its
-/// body attaches; interpolated remotes neither receive nor simulate the private field.
+/// Simulation per-element shear and loss dwell, one field per side. Constructed at spawn
+/// with `link_count * 3` entries per side; `contact_side` preserves that membership so a
+/// runtime rebuild cannot silently erase accumulated strain. Clients render the server stream.
 #[derive(Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[require(TrackGripEffect)]
 pub struct TrackGripElements {
@@ -209,9 +197,9 @@ impl TrackGripElements {
     }
 }
 
-/// Coarse field digest used by [`TrackGripEffect`] and the replicated anchor. Strain axes are
+/// Coarse diagnostic field digest used by [`TrackGripEffect`]. Strain axes are
 /// projected to signed 8-bit bins across the force law's exact `[-K, K]` range before FNV-1a. This
-/// deliberately ignores sub-bin float noise; the exact checkpoint/hash path remains raw-bit exact.
+/// deliberately ignores sub-bin float noise; determinism traces retain raw-bit state.
 pub(crate) fn coarse_grip_digest(elements: &TrackGripElements) -> u32 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     let mut write = |byte: u8| {
@@ -254,6 +242,7 @@ pub struct TrackGear {
     /// per-side because the shoe is not centred on its pins (~17 mm outboard on the Tiger).
     columns: [[(f32, f32); 3]; 2],
     params: ForceParams,
+    construction: transmission::DriveConstruction,
     /// DERIVED bound over both sides' complete support slabs, in body-local metres.
     rubble_radius: f32,
     /// The declared joint transmission tables, derived against the measured geometry.
@@ -270,7 +259,7 @@ impl TrackGear {
     /// Coupled translation mass for a torque-cut landing: hull plus both belt inertias (kg).
     #[cfg(all(test, feature = "bitprobe"))]
     pub(crate) fn landing_mass(&self) -> f32 {
-        transmission::coupled_mass(&transmission::DriveConstruction::new(&self.params))
+        transmission::coupled_mass(&self.construction)
     }
 
     #[cfg(all(test, feature = "bitprobe"))]
@@ -282,7 +271,7 @@ impl TrackGear {
     ) -> f32 {
         transmission::landed_spare(
             &self.trans,
-            &transmission::DriveConstruction::new(&self.params),
+            &self.construction,
             &TransmissionInput {
                 supply: transmission::DriveSupply::WHOLE,
                 intent: DriveIntent::Axes(DriveAxes {
@@ -312,15 +301,12 @@ impl TrackGear {
     /// The brakes and material pair bound force; hull mass plus both reflected belt inertias
     /// must be arrested. A nonpositive result names a grade these brakes cannot hold.
     pub(crate) fn braking_deceleration(&self, grade_sine: f32, direction: f32) -> f32 {
-        let grip = self
-            .params
-            .grip
-            .expect("admitted running gear has a material-pair contact law");
+        let grip = self.construction.grip();
         let weight = 2.0 * grip.side_weight;
-        let mass = weight / super::derive::G;
         let normal = weight * (1.0 - grade_sine * grade_sine).sqrt();
         let available = (2.0 * self.trans.brake_capacity_n).min(grip.on_ground() * normal);
-        (available + direction * weight * grade_sine) / (mass + 2.0 * self.params.inertia)
+        (available + direction * weight * grade_sine)
+            / transmission::coupled_mass(&self.construction)
     }
 
     /// The chain-clamped droop (m): the maximum wheel-travel knot — how far below its rest line a
@@ -374,7 +360,7 @@ impl TrackGear {
         out.f32("force.engage_depth", p.engage_depth);
         out.f32("force.probe_reach", p.probe_reach);
         out.f32("force.inertia", p.inertia);
-        let grip = p.grip.expect("the game's running gear grips");
+        let grip = self.construction.grip();
         out.f32("force.grip.track", grip.track.dynamic_coefficient);
         out.f32("force.grip.ground", grip.ground.dynamic_coefficient);
         out.f32("force.grip.side_weight", grip.side_weight);
@@ -584,6 +570,11 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         .map(|(_, t)| *t)
         .fold(0.0_f32, f32::max);
     let rubble_radius = footprint_radius(pin_radius, column, geom.model.pin_to_outer, travel, 0.5);
+    let inertia = spec
+        .reflected_inertia(&blueprint.spec.roadwheels, geom.wrap_radii())
+        .expect("running-gear admission certified the construction inertia");
+    let grip = GripParams::of(&blueprint.spec);
+    let construction = transmission::DriveConstruction::new(grip, inertia);
     commands.insert_resource(TrackGear {
         loop_pts,
         count: spec.link_count,
@@ -592,6 +583,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         columns,
         trans,
         rubble_radius,
+        construction,
         params: ForceParams {
             // The contact-envelope suspension: measured face datum, free length at the
             // droop envelope, spring/damper calibrated above — the authored rest pose is
@@ -604,10 +596,8 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             engage_depth: spec.suspension.engage,
             probe_reach: 0.5,
 
-            inertia: spec
-                .reflected_inertia(&blueprint.spec.roadwheels, geom.wrap_radii())
-                .expect("running-gear admission certified the construction inertia"),
-            grip: Some(GripParams::of(&blueprint.spec)),
+            inertia,
+            grip: Some(grip),
         },
     });
 
@@ -708,7 +698,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
         reports[si] = report;
     }
     let tr = transmission::step(
-        &gear.params,
+        &gear.construction,
         &gear.trans,
         rig.transmission,
         &TransmissionInput {
@@ -724,7 +714,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
                     .iter()
                     .flat_map(|report| report.perceived_support.iter()),
                 affine.transform_vector3(Vec3::NEG_Z),
-                &gear.params,
+                &gear.construction,
                 &gear.trans,
                 rig.transmission,
             ),
@@ -2290,6 +2280,8 @@ mod tests {
         let scale = 3.0; // Fixture scale, dimensionless.
         gear.params.inertia *= scale;
         gear.params.grip.as_mut().unwrap().side_weight *= scale;
+        gear.construction =
+            transmission::DriveConstruction::new(gear.params.grip.unwrap(), gear.params.inertia);
         gear.trans.brake_capacity_n *= scale;
         assert!((gear.braking_deceleration(0.1, -1.0) - before).abs() < 1e-5);
         assert!(gear.braking_deceleration(0.1, 1.0) > gear.braking_deceleration(0.1, -1.0));
@@ -2441,7 +2433,7 @@ mod tests {
             load = super::super::load::observe_rig(
                 supports,
                 forward,
-                &gear.params,
+                &gear.construction,
                 &gear.trans,
                 &transmission,
             );

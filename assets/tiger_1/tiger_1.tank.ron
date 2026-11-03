@@ -91,7 +91,7 @@ TankSpec(
                     // of rated torque mid-band — INFERRED (no HL230 motoring curve
                     // reachable).
                     drag_fraction: 0.25,
-                    // Crank + flywheel + main-clutch inertia J (kg·m²), the stage-B
+                    // Crank + flywheel + main-clutch inertia J (kg·m²), the
                     // engine crank state. INFERRED by engine-class scaling (no HL230
                     // flywheel datum reachable): large multi-cylinder tank diesels/petrols
                     // land in a 2.5–6 kg·m² band, flywheel-dominant (a ~0.5 m, ~50–80 kg
@@ -141,24 +141,18 @@ TankSpec(
                     // gearing rule's per-track datum (≈ μ·W/2, same as `force`). The
                     // member drives the two outputs DIFFERENTIALLY, so the belt-difference
                     // axis F_s is bounded by 2× this: 500 kN → 745 kN·m of yaw moment
-                    // against the ~478 kN·m footprint scrub — breakaway ratio 1.56, the
-                    // mirror of the force-cap fix above (T-34 lab: 1.33). Reading this
-                    // datum as the F_s bound itself gave 373 kN·m < scrub — the measured
-                    // "Tiger unable to steer in place" (2026-07-18). INFERRED sizing, no
-                    // published steering-member torque rating reachable.
+                    // against DERIVED ~478 kN·m footprint scrub: breakaway ratio 1.56.
+                    // Treating capacity as the total difference-axis bound instead yields
+                    // DERIVED 373 kN·m, below scrub. INFERRED sizing; no published
+                    // steering-member torque rating reachable.
                     capacity: 250_000.0,
-                    // `neutral_fraction` DELETED (fix 3, 2026-07-19): the 0.75 was an
-                    // INFERRED feel scalar with no source. The marginal brake-gated
-                    // neutral turn now uses the DERIVED datum directly:
-                    // neutral_d_full = κ_tight(F1) × v1_governed = 0.2885 m/s (with the
-                    // marker-measured half_tread 1.5312) — the radii table's own invariant
-                    // (κ_tight(g) × v(g) ≈ 0.346 m/s @ 3000 rpm in EVERY gear) makes that
-                    // the correct emergent value for a fixed-radius box.
+                    // Neutral differential speed is DERIVED from first-gear construction:
+                    // neutral_d_full = κ_tight(F1) × v1_governed. An authored share would
+                    // replace this radii/speed relationship with an unprovenanced feel scalar.
                     // Mechanical recirculation efficiency ~0.9 — INFERRED.
                     recirculation: 0.9,
                 ),
-                // Per-side brake capacity at the sprocket, DUAL-anchored (fix-4 +
-                // review round):
+                // Per-side brake capacity at the sprocket, with two DERIVED anchors:
                 //   (1) the settled 20° park-hold capability (ADR-0026 records 20°
                 //       holds; the test course has 20° ramps): W·sin 20°/2 =
                 //       57 000 × 9.81 × 0.342 / 2 ≈ 95.6 kN/side — 96 kN holds it
@@ -166,9 +160,9 @@ TankSpec(
                 //   (2) 192 kN total = 0.343 g service decel — inside the 0.2–0.35 g
                 //       historical band for WWII heavy tanks (even modern heavy trucks
                 //       certify ~0.5 g).
-                // Replaces the circular grip-limit sizing (250 kN was sized against
+                // Rejected grip-limit sizing is circular: 250 kN sized against
                 // μ·W/2 — the very friction it was meant to be tested by — and implied
-                // 2.9 MW through two 1940s Argus discs at speed: energy-impossible).
+                // DERIVED 2.9 MW through two 1940s Argus discs at speed: energy-impossible.
                 // The dynamic datum still governs every moving slide and service-brake stop;
                 // static breakaway is authored separately below.
                 brake_force: 96_000.0,

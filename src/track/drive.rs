@@ -60,8 +60,8 @@ impl DriveFeel {
             "assets/input/drive.ron: rise_per_second must be finite and positive; author the keyboard rise rate"
         );
         assert!(
-            0.0 < self.wide_on.0 && self.wide_on.0 < self.tight_on.0 && self.tight_on.0 <= 1.0,
-            "assets/input/drive.ron: author ordered wide_on < tight_on within (0, 1]"
+            0.0 < self.wide_on.0 && self.wide_on.0 < self.tight_on.0 && self.tight_on.0 < 1.0,
+            "assets/input/drive.ron: author ordered wide_on < tight_on within (0, 1)"
         );
         for notch in self.reachable_notches() {
             assert!(
@@ -107,7 +107,7 @@ pub(crate) fn drive_feel() -> &'static DriveFeel {
             "assets/input/drive.ron",
             include_str!("../../assets/input/drive.ron"),
         )
-        .expect("assets/input/drive.ron: author tap_window_s, notch_step and rise_per_second with provenance");
+        .expect("assets/input/drive.ron: author tap_window_s, notch_step, rise_per_second, wide_on and tight_on with provenance");
         data.validate();
         data
     });
@@ -286,8 +286,22 @@ mod tests {
         feel.validate();
     }
 
+    /// Endpoint thresholds are outside the detent domain; refusal must name that domain
+    /// before checking the reachable notch lattice.
+    #[test]
+    #[should_panic(expected = "author ordered wide_on < tight_on within (0, 1)")]
+    fn endpoint_threshold_is_refused_at_the_domain_gate() {
+        let mut feel: DriveFeel = crate::provenance::from_shipped_str(
+            "assets/input/drive.ron",
+            include_str!("../../assets/input/drive.ron"),
+        )
+        .unwrap();
+        feel.tight_on.0 = 1.0; // Fixture: the always-reachable full-lever endpoint.
+        feel.validate();
+    }
+
     /// Fixture: decimal taps reach 13 binary32 states, including tight_on after a decrement
-    /// from one. The old inverse-division check missed this exact resting detent.
+    /// from one. Admission must enumerate that exact resting detent.
     #[test]
     fn decimal_taps_enumerate_rounding_paths_and_refuse_threshold_collisions() {
         let mut feel: DriveFeel = crate::provenance::from_shipped_str(

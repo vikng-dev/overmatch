@@ -129,9 +129,9 @@ and compared byte-for-byte; the shared whole-library gate then passed. No mutant
 | Codex | Pivot witness never pivots | Verified; actual steering-work mutant red, restored green | driving: exercise steering work in the unfueled pivot witness (#146) |
 | Claude + Codex | Small rows, item 6 | Verified by source; unfinished at the hour boundary | — |
 
-## Item 6: verified, still outstanding
+## Item 6 at the initial hour boundary
 
-These rows were not dismissed as non-defects. They remain for the next green step.
+These rows were open at the initial hour boundary. The resumed disposition below supersedes this table.
 
 | finding | live evidence / needed change |
 |---|---|
@@ -146,7 +146,7 @@ These rows were not dismissed as non-defects. They remain for the next green ste
 | `price_driver_force` default-build residue | Static caller check confirms non-test use only by the bitprobe trace; its compile guard is still absent. |
 | `TrackGripElements` doc | Still describes removed initialization replication and rollback/checkpoint paths. |
 
-## Decisions, feel and disposition
+## Initial hour decisions, feel and disposition
 
 - Keep one required, provenanced crank limit independent of torque sampling. Preserve the
   shipped 3000 rpm value; the inline lab moves to completed fuel cut at 1900 rpm.
@@ -170,7 +170,7 @@ library and shipped driving witnesses pass; there was no visual playtest or capt
 construction with a raw torque peak beyond fuel cut no longer loses a capable launch. Curve
 redigitization no longer forces an inertia change or moves the crank ceiling.
 
-Judgment: **the full owner's bar does not clear yet**. Items 1–5 are complete; checked grip,
+Judgment at the initial hour boundary: **the full owner's bar does not clear yet**. Items 1–5 are complete; checked grip,
 non-vacuous test evidence and the stale interface/history prose in item 6 still stand in the way.
 No new owner gameplay decision is needed to complete those already-authorized rows.
 
@@ -180,3 +180,79 @@ Final gates: formatting, CI clippy, 44 whole-tree guards and 2,266 library tests
 tests are ignored measurement/opt-in cases. Asset guards also passed in the first step. No push,
 merge, issue comment, capture, pricing run or visible window occurred. All lane-run processes
 terminated. The bay stays on its lane branch for the orchestrator; it is not released here.
+
+## Item 6 resumed: complete source disposition
+
+MEASURED resume start: 2026-11-03 00:42:38 UTC; forty-minute boundary: 01:22:38 UTC.
+Commit subject S: `driving: close the remaining drivetrain review rows (#146)`. Every row was verified; none was dismissed as not a defect.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Claude | `Controls staffing doc` | Verified: engine_torques, idle_catch_capacity and belt_tick also read served work/staffing. Corrected the exclusive-Driver claim. | S |
+| Claude | `TransmissionParams::steer_radii_m doc` | Verified: candidate_load and load::turn_radius price physical load from these radii. Named all consumers. | S |
+| Claude | `DriveConstruction / braking_deceleration optional grip` | Verified repeated Option extraction. Solver and observer now require DriveConstruction; TrackGear retains it from admitted grip/inertia at construction. Braking reads it directly. | S |
+| Claude | `ParsedTankCommand::hold doc` | Verified DriveTarget is a struct. The doc now names DriveIntent::Brake. | S |
+| Claude | `DriveFeel domain and parse diagnostic` | Verified executed endpoint red: 1.0 reached notch refusal instead of the domain gate. The first gate now requires tight_on < 1; parse diagnostics name all five fields. | S |
+| Claude | `Edit-history comments` | Verified the named drive/transmission/spec/sheet comments and nine test labels. Recast them as current invariants, preserving counterexamples and capacity rationale. Removed stale neutral geometry figures and the unsupported universal-table claim. | S |
+| Claude | `part_pedal_launches_and_sustains_ordered_speed` | Verified capability could disable travel/order/settling assertions for an entire class. Each class must now exercise at least one capable partial-pedal notch. | S |
+| Claude | `launch_selection_obeys_declared_domain_and_capability` | Verified the same vacuity. Added per-class capable-notch evidence. The separate crank/cap price oracle now runs on all three class fixtures. | S |
+| Claude | `driver_launches_in_the_highest_capable_start_gear` | Verified selector-controlled if-let absence. An independent affordability enumeration now supplies the expected highest gear and retained-gear outcome. Executed refusing-selector mutant goes red: None versus Some(4). | S |
+| Claude | `law_launch_selection_prices_requested_pedal_on_grade` | Verified the else assertion followed from its condition. Compare against independently priced highest affordable gear, including no-capable outcome, and require an exercised capable incline case. | S |
+| Claude | `driver_full_pedal_walks_to_the_top_on_firm_ground` | Verified universal prose over three fixtures. Narrowed the claim to each class fixture under its affordable light load. | S |
+| Claude | `paid_shift_disconnects_for_exactly_its_declared_window` | Verified the double negative. Corrected the prose; its authored-window assertions already express the intended invariant. | S |
+| Claude | `price_driver_force default-build residue` | Verified the sole non-test caller is bitprobe force_probe. Compile this diagnostic/test price only for those users; the production gear-force law is unchanged. | S |
+| Codex | `TrackGripElements doc` | Verified the protocol no longer sends its initialization/checkpoints or predicts the hull. The doc now states simulation strain membership, construction at spawn and server-stream rendering. Corrected adjacent telemetry/digest claims too. | S |
+
+MEASURED reds: the endpoint regression failed with the old notch-collision message, and the
+production mutant making every finite-weight launch return None failed the independent F4
+expectation. The saved production source was restored byte-for-byte before the final fixes.
+The new endpoint gate, highest-gear, grade, price and both capable-notch witnesses all passed.
+No mutant remains.
+
+MEASURED gates: formatting and CI clippy passed twice, including the exact final Rust source.
+The targeted matrix ran 630 tests: 621 passed, eight ignored, one obsolete panic test failed.
+That sole failure expected the removed per-tick optional-grip check; it now exercised only the
+Fixture adapter, because the production solver accepts required grip construction. Deleted that
+old-path test rather than recreating a runtime check for an unrepresentable input. All retained
+assertions, including headless driving, command/UI, spec, whole-tree and asset guards, passed.
+Production source did not change after that matrix; only this obsolete test was removed.
+
+Validation limitation: a fresh full matrix replay was canceled while queued after final clippy
+passed. Its focused correction (track, command/UI, spec and whole-tree/asset guards) then waited
+nearly eight minutes without starting and was canceled to finish inside the owner's forty-minute
+window. There is no successful post-deletion test-process replay. The retained assertions have
+executed green, and final-source all-target clippy compiled the remaining tests. The orchestrator
+owns the whole-library gate on main; this resumed session did not run the whole library.
+
+Decisions:
+- Retain typed driving construction from admitted grip and inertia. Contact-only ForceParams
+  keeps its legitimate optional grip; the arithmetic tests keep a Fixture-only adapter. The
+  sandbox copies already-required RigSpec fields, without reparsing an Option each tick.
+- Require per-class non-vacuity and use an independent highest-affordable enumeration. Pin the
+  shared price against crank torque and both caps across all three class fixtures. A labelled
+  four-epsilon f32 margin covers torque-first versus force-first cap conversion only.
+- Refuse the endpoint at its earliest domain gate. Accepted shipped inputs stay identical;
+  name all five feel fields in parse diagnostics. Delete the obsolete runtime-panic test.
+- Keep current rationale while removing edit labels. Neutral steering prose names first-gear
+  construction, without stale geometry values or a generic gear-invariance claim. Spec/sheet
+  edits are comments only; update the Blender fixture's admission comment in the same commit.
+- Keep the diagnostic force-price entry point only for tests and bitprobe. No alternate
+  production implementation or new switch was introduced.
+- Add no Driver/Slip predicate, no coexistence mechanism and no change to reserved owner calls.
+  The match still owns one blueprint/construction. No wire inventory changes, deliberately no
+  PROTOCOL_REV bump. No new Bevy/Avian API call was written.
+- Reuse the already executed headless results after deleting only an obsolete test. Report the
+  canceled correction honestly rather than claiming a successful fresh process. No backlog row
+  names an edited file; none was removed without verification.
+
+Players should stop or start feeling nothing from item 6: shipped authored values are identical
+when comments/whitespace are removed, and the mechanical equations and arithmetic association
+are unchanged. Required construction retains the same grip/inertia bits; braking uses the same
+coupled-mass expression. Shipped headless witnesses passed. No visual playtest was claimed.
+
+Judgment: the remaining source now clears the owner's laws-and-data bar in my judgment. Every
+item-6 defect is fixed, without a gameplay overhaul. The fresh correction replay remains a
+validation limitation, not a deferred code finding; it must not be reported as a green process.
+The separately tracked match-wide blueprint and reserved calls remain outside this lane.
+
+MEASURED resumed record finalized: 2026-11-03 01:21:22 UTC. No push, merge, issue comment, capture or visible window. All lane-run processes stopped.

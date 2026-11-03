@@ -101,9 +101,7 @@ pub(super) fn apply_belt_support_field(
     // Tick-truth Position/Rotation, NEVER GlobalTransform: the render pose updates once per
     // FRAME, so on a multi-tick frame the second tick would probe terrain against a stale
     // hull — phantom slip/penetration that the grip state INTEGRATES into real force
-    // oscillation (measured: period-2 load alternation, 212↔32 kN, with a perfectly smooth
-    // hull). This was the sandbox model's "one game-illegal habit" (architecture v3 §0) — now
-    // retired; the sim core and the game adapter always agreed on tick truth.
+    // oscillation (MEASURED: period-2 load alternation, 212↔32 kN, with a smooth hull).
     mut hull: Query<
         (
             Entity,
@@ -161,6 +159,7 @@ pub(super) fn apply_belt_support_field(
     let side_commands = shaped.0.side_commands();
 
     let params = force_params(&geom, &rig_spec, &envelope);
+    let construction = transmission::DriveConstruction::new(rig_spec.grip, rig_spec.belt_inertia);
     // The piece query cannot read the hull (the hull query holds its `Forces`), so the hull's own
     // colliders never enter the gather; the identity rule is the self-support exclusion.
     let near: Vec<Entity> = rubble
@@ -225,14 +224,14 @@ pub(super) fn apply_belt_support_field(
             .iter()
             .flat_map(|report| report.perceived_support.iter()),
         affine.transform_vector3(Vec3::NEG_Z),
-        &params,
+        &construction,
         &transmission.0,
         &trans_state.0,
     );
 
     // Phase 2 — ONE joint drivetrain solve on the vehicle's declared tables.
     let tr = transmission::step(
-        &params,
+        &construction,
         &transmission.0,
         &mut trans_state.0,
         &TransmissionInput {

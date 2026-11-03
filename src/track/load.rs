@@ -101,11 +101,11 @@ pub fn turn_radius(tp: &TransmissionParams, state: &TransmissionState) -> Option
 pub(crate) fn observe_rig<'a>(
     contacts: impl Iterator<Item = &'a SupportFact> + Clone,
     forward: Vec3,
-    fp: &super::forces::ForceParams,
+    fp: &super::transmission::DriveConstruction,
     tp: &TransmissionParams,
     state: &TransmissionState,
 ) -> PerceivedLoad {
-    let weight = super::transmission::DriveConstruction::new(fp).weight_n();
+    let weight = fp.weight_n();
     observe(
         contacts,
         forward * if state.reverse { -1.0 } else { 1.0 },
