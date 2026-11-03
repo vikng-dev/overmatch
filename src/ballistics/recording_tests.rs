@@ -655,7 +655,7 @@ fn a_round_into_a_husk_records_nothing_with_or_without_its_turret() {
 /// An armed round's record stays open while the fuze the struck tank armed runs, though the round
 /// is clear of the tank: it holds the burst wherever the delay ends, while its nose piece flies on.
 /// The fixture 88 at 800 m/s arms in the 50 mm plate and, on a 50 ms delay (fixture data), flies
-/// clear of the tank before its delay ends; the arming threshold reads the plate's charged work.
+/// clear of the tank before its delay ends; the arming threshold reads material-weighted real chord.
 /// The fixture tank's mass leaves it in place under the hit's impulse. A mutant that
 /// finishes the record once the round is clear, or drops the burst's field from the shell's logs,
 /// fails here.
@@ -670,12 +670,9 @@ fn an_armed_round_keeps_its_record_open_until_it_bursts() {
         &plated(DEEP, Kind::Crew(DEEP)),
     );
     settle(&mut app);
-    let capacity = crate::physical_laws::PhysicalLaws::shipped()
-        .plate_capacity
-        .charge(f64::from(THIN) / f64::from(FIXTURE_88.caliber));
     let inputs = burst::BurstInputs {
         trigger: crate::rounds::fuze::Trigger::SpendExit {
-            arming_spend: THIN * STEEL * capacity as f32 * 0.5,
+            arming_spend: THIN * STEEL * 0.5,
         },
         delay: 0.05,
         ..burst::fixture_inputs()

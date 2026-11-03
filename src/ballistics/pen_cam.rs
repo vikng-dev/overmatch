@@ -1666,12 +1666,9 @@ fn the_muzzle_is_read_before_the_globals_catch_up() {
 /// The fixture 88 carrying a burst ([`burst::fixture_inputs`]).
 fn fixture_burst() -> burst::Burst {
     let mut inputs = burst::fixture_inputs();
-    // Fixture threshold: the thin front must arm independently of authored capacity parameters.
-    let capacity = physical_laws::PhysicalLaws::shipped()
-        .plate_capacity
-        .charge(f64::from(THIN) / f64::from(FIXTURE_88.caliber));
+    // Fixture threshold: half the front's material-weighted real chord.
     inputs.trigger = crate::rounds::fuze::Trigger::SpendExit {
-        arming_spend: THIN * 1000.0 * capacity as f32 * 0.5,
+        arming_spend: THIN * STEEL * 0.5,
     };
     burst::Burst::derived(FIXTURE_88, burst::FIXTURE_STEEL, &inputs)
         .expect("the fixture burst derives")
@@ -1727,7 +1724,7 @@ const BURST_TOLERANCE: f32 = 1.0e-3;
 /// an inert round of the derived nose mass and the round's calibre and nose, nothing else of the
 /// round. A mutant that counts the delay from the entrance, flies the nose at the whole round's
 /// mass, or ends the round at a burst in flight fails here. The fixture trigger is below the
-/// thin plate's charged work.
+/// thin plate's material-weighted real chord.
 #[test]
 fn an_armed_round_bursts_its_delay_past_the_arming_exit() {
     let burst = fixture_burst();
@@ -1768,9 +1765,9 @@ fn an_armed_round_bursts_its_delay_past_the_arming_exit() {
     assert!(fired.at.z < at.z, "the nose flies on past the burst");
 }
 
-/// A body whose spend is under the threshold leaves the round unarmed, and a round without a burst
-/// never bursts: either flies on through the plate as a solid shot. A mutant that arms on any
-/// exit, or bursts an inert fuze, fails here. The 20 mm plate spends 20 reference-mm across, under
+/// The game's damage model: a body below the plate-met threshold leaves the round unarmed; an inert round
+/// never bursts. Either flies on through the plate as a solid shot. A mutant that arms on any
+/// exit, or bursts an inert fuze, fails here. The 20 mm plate meets 20 material-weighted reference-mm, under
 /// the fixture threshold (fixture data).
 #[test]
 fn an_unarmed_or_inert_round_flies_on_as_a_solid_shot() {
@@ -1780,18 +1777,11 @@ fn an_unarmed_or_inert_round_flies_on_as_a_solid_shot() {
         (THIN, burst::Fuze::Inert),
     ] {
         let fired = fire_fused(&[plate("front", thickness, 0.0, Kind::Main)], fuze);
-        let spent: f32 = fired
-            .log
-            .iter()
-            .filter_map(|mark| match mark {
-                ArmourMark::Crossing { volumes, .. } => {
-                    Some(volumes.iter().map(|volume| volume.cost).sum::<f32>())
-                }
-                _ => None,
-            })
-            .sum();
-        if fuze != burst::Fuze::Inert {
-            assert!(spent < 35.0, "the fixture spends {spent}");
+        if let burst::Fuze::Unarmed(burst) = fuze {
+            let crate::rounds::fuze::Trigger::SpendExit { arming_spend } = burst.trigger else {
+                panic!("the fixture uses a plate-met fuze");
+            };
+            assert!(thickness * STEEL < arming_spend);
         }
         assert_eq!(bursts(&fired.log), [], "{thickness} m plate");
         let (_, _, left) = fired.flying.expect("the round flies on");
@@ -1928,7 +1918,7 @@ fn an_armed_round_at_rest_bursts_where_it_rests() {
             Some(CrossingEnd::Rest { at }) => *at,
             other => panic!("the back plate stops the round: {other:?}"),
         };
-        // Read this construction's front work: an attached backing changes its capacity share.
+        // This construction's resolved work supplies the speed at the arming exit.
         let (front, entry_speed) = fired
             .log
             .iter()

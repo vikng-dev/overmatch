@@ -4,7 +4,7 @@
 use serde::Deserialize;
 
 /// Global StandIn parameters; no round or vehicle owns a fitted capacity number.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PlateCapacity {
     shear_slope: f64,

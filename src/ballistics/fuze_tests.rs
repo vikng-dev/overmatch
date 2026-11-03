@@ -1,6 +1,6 @@
 //! The game's damage model: the fuze in the march. An `Impact` fuze functions at contact with any
 //! solid body, the ground included, and bursts its mode's delay of flight later; the `SpendExit`
-//! fuze arms from resisted work at a body exit.
+//! fuze arms from material-weighted plate chord at a body exit.
 use super::march_tests::{flat_grid, spawn_round, world_with_plate};
 use super::*;
 use crate::rounds::fuze::Trigger;
@@ -51,6 +51,45 @@ fn slab_of(substance: &str) -> App {
 fn advance(app: &mut App) {
     for _ in 0..16 {
         app.update();
+    }
+}
+
+/// The game's damage model: fuze authors specify plate met, independently of the potency
+/// share. Reading charged work instead leaves these thin plates unarmed, differently by calibre.
+/// Fixture data: two replica-scaled bodies and plates on either side of a 35 reference-mm gate.
+#[test]
+fn the_same_plate_arms_both_calibres_independently_of_thin_work() {
+    for scale in [1.0_f32, 2.0] {
+        let body = RoundBody {
+            caliber: march_tests::FIXTURE_88.caliber * scale,
+            mass: march_tests::FIXTURE_88.mass * scale.powi(3),
+            ..march_tests::FIXTURE_88
+        };
+        for thickness in [0.034, 0.036, 0.05] {
+            let mut app = world_with_plate(Vec3::new(3.0, 3.0, thickness), PLATE);
+            app.insert_resource(RetainSpentShells(true));
+            let mut inputs = burst::fixture_inputs();
+            inputs.trigger = Trigger::SpendExit { arming_spend: 35.0 };
+            let burst = burst::Burst::derived(body, burst::FIXTURE_STEEL, &inputs).unwrap();
+            let shell = spawn_round(&mut app, body, ORIGIN, Vec3::NEG_Z * SPEED);
+            app.world_mut().get_mut::<Projectile>(shell).unwrap().fuze =
+                burst::Fuze::of(Some(burst));
+            advance(&mut app);
+            let burst_count = app
+                .world()
+                .get::<PenetrationMarks>(shell)
+                .unwrap()
+                .log
+                .iter()
+                .filter(|mark| matches!(mark, ArmourMark::Burst { .. }))
+                .count();
+            assert_eq!(
+                burst_count,
+                usize::from(thickness > 0.035),
+                "plate {thickness} m, calibre {} m",
+                body.caliber
+            );
+        }
     }
 }
 

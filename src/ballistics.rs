@@ -3594,7 +3594,7 @@ fn advance_fuze(fuze: &mut burst::Fuze, decision: &resolve::Decision) {
                 let at = bite.path_to(source.position).max(flown);
                 fuze.flown(at - flown);
                 flown = at;
-                fuze.exited(source.spend, source.exit_speed, bite.owner);
+                fuze.exited(source.plate_met, source.exit_speed, bite.owner);
             }
             fuze.flown((bite.travel - flown).max(0.0));
         }
@@ -4440,7 +4440,7 @@ mod tests {
                 face: None,
                 direction: Vec3::NEG_Z,
                 exited: Vec::new(),
-                spend: 0.0,
+                plate_met: 0.0,
                 emitted: 2_700_000.0 * (spall_cone::cone_energy().debris_share() * ratio),
                 debris_ratio: 2.4,
                 strength_ratio: ratio,
@@ -4524,7 +4524,9 @@ mod tests {
                 caliber: 3.0 * 0.0254,
                 nose_factor,
             };
-            for ratio in [0.1_f32, 0.2, 0.24, 0.25, 0.3, 0.5, 0.65, 1.0] {
+            for ratio in [
+                0.1_f32, 0.2, 0.24, 0.25, 0.3, 0.5, 0.65, 0.7, 0.75, 0.9, 0.99, 1.0,
+            ] {
                 let depth = body.caliber * ratio * 1000.0;
                 let speed = speed_for(body, depth);
                 let f = speed / 0.3048 * 15.0_f32.sqrt() / (0.25 * (ratio * 0.25).sqrt());
@@ -4557,7 +4559,8 @@ mod tests {
 
     /// The game's damage model: plate and ammunition authors rely on rising limit speed,
     /// a continuous one-calibre join, unchanged bulk and preserved mass/nose/calibre ordering.
-    /// Mutants: omit the thin share, apply it above one calibre, or reverse thickness/calibre.
+    /// Mutants: apply the thin share above one calibre or reverse thickness/calibre.
+    /// This composes the inverse law; the walk tests own its production wiring.
     /// Fixture thickness sweep; every shipped round supplies its own body and hit-nose proxy.
     #[test]
     fn plate_limit_speeds_keep_bulk_and_round_ordering() {

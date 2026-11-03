@@ -18,7 +18,9 @@ use bevy::prelude::*;
 
 use std::sync::Arc;
 
-use super::picture::{Lay, PICTURE_FIELDS, PictureJobs, Pictures, RecordAtlas, ViewPictures};
+use super::picture::{
+    Lay, PictureJobs, Pictures, RecordAtlas, ViewPictures, require_field_capacity,
+};
 use super::potency::Potency;
 use super::timeline::CornerKind;
 use crate::ballistics::spall_cone::{self, FieldDescriptor};
@@ -559,6 +561,7 @@ impl Plan {
                 .map(|c| cone(c, &line, b.sideways_mps, burst_unit))
         });
         let cones: Vec<Cone> = spall.chain(burst_field).collect();
+        require_field_capacity(cones.len());
         let mass = report.projectile.mass_kg;
         // A nose piece flies on only from a burst in flight: one at rest has no flight to fly on.
         let burst = report.burst.as_ref().map(|b| BurstPlan {
@@ -697,7 +700,8 @@ impl Plan {
     /// [`Self::cones`]' order, from [`Self::bodies`], at the corner's sightings of the record
     /// ([`super::stage::field_sightings`]).
     pub fn lay(&self) -> Lay {
-        let cones: Vec<Cone> = self.cones.iter().take(PICTURE_FIELDS).cloned().collect();
+        require_field_capacity(self.cones.len());
+        let cones = self.cones.clone();
         let bodies = self.bodies.clone();
         let sightings = if cones.is_empty() {
             Vec::new()

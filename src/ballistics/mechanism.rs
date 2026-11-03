@@ -34,7 +34,8 @@ pub(crate) trait Mechanism {
         limits: &Limits,
     ) -> Advance<Self::State>;
 
-    /// Reference-mm `state` can still defeat: the readout, never the currency.
+    /// The game's damage model: remaining bulk-work readout in reference-mm, never a plate
+    /// thickness or the currency advanced through material.
     fn reference_mm(&self, state: Self::State) -> f64;
 
     /// The round's speed (m/s) in `state`.

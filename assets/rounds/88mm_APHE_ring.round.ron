@@ -22,8 +22,8 @@
     // CLAIMED construction: TM53 p.448: Bd.Z. 5103 or 5103/1, base fuze.
     // Placement is not an input to the current game fuze law.
     fuze: Some((
-        trigger: (SpendExit(arming_spend: 35.0), Unknown("UNVERIFIED, CLAIMED: the reference-mm the
-            round spends in one body to arm the fuze, read as the 35 mm of plate of about 115 kg per
+        trigger: (SpendExit(arming_spend: 35.0), Unknown("UNVERIFIED, CLAIMED: the material-weighted reference-mm of real chord the
+            round meets in one body to arm the fuze, independent of potency work, read as the 35 mm of plate of about 115 kg per
             square mm the Bd.Z. 5127 arms on, perforated at normal impact, values for 1000 m (L.Dv.
             487, March 1943, page 487_21). L.Dv. 487 could not be located again, and no other source
             read gives a plate thickness for the 5103 or the 5127. Settled by a sourced arming plate

@@ -185,14 +185,31 @@ The shear branch makes thin-plate work proportional to thickness squared. The op
 limits the middle of the series; the power branch returns continuously to bulk. This is an
 **empirical StandIn**, not a sourced physical account of plate opening.
 `assets/ballistics/physical_laws.ron` supplies **StandIn** `a = 1.35`, `b = 0.49`, `p = 1.5`:
-`a` fits the low-thickness F band; `b` fits middle work; `p` fits the upper sub-calibre rows while
-preserving calibre ordering. Inverting the shipped bulk law on the comparison's F values gives
-the work shares these three branches approximate. No per-round or per-tank number is added.
+`a` fits the x = 0.10, 0.20, 0.25 and 0.30 low-thickness F band; `b` fits the one
+x = 0.50 by-eye row; `p` fits the one x = 0.65 printed row while preserving calibre ordering.
+The x = 0.24 interpolation checks the fit but is not an independent row. Each parameter stands
+in for the missing material-and-construction law of integrated plate-opening work; that law
+would replace the fitted curve. Any positive `p` makes the continuous join; its magnitude sets
+the return shape, not the existence of the join. Inverting the shipped bulk law on the
+comparison's F values gives the work shares these three branches approximate. No per-round or per-tank number is added.
 Parameters are required and admitted before play: a >= 1, b in (0, 1), p in (0, 2), all finite.
 The exponent bound follows from area proportional to calibre squared: `g(x)/x²` must decrease
 with x so widening at fixed mass cannot lower the limit. Each branch, and their min/max,
-preserves that ordering. Capacity reads geometric thickness; softening a thick body cannot turn
-it into a thin plate.
+preserves that ordering. Potency capacity reads geometric thickness; softening a thick body cannot
+turn it into a thin plate (`thick_soft_bodies_do_not_become_thin_plates`). Skid pressure instead
+reads steel-equivalent thickness (§4); the two readers do not share an x.
+
+**Unresolved construction fact.** `DiscEvent::normal_thickness` currently sums positive-factor
+occupied layers of the entire welded run. A temporary driver regression compared a **Fixture**
+50 mm steel plate followed by a 200 mm soft box, normal to an 88 mm round. It failed:
+**MEASURED** share **1.0** when touching versus **0.49** with a gap twice `weld_perp`.
+The welded ratio is **2.84091 (DERIVED)** from (50 + 200)/88; the separated plate ratio is
+**0.56818 (DERIVED)**. The topology weld therefore changes potency without an authored bond.
+The missing truth is which layers are bonded to resist opening as one plate, including their
+interfaces and load transfer. `VolumeSpec` declares roles and substances, not that construction.
+Material strength, body role and a small geometric gap cannot supply it. This item stops pending
+that data and its generic opening law; no hard/soft classifier or per-body exception is added.
+The temporary red diagnostic is removed rather than accepted as a passing invariant.
 
 Rejected: `min(a x, b + (1-b) x^6)` fits the F band but violates that class invariant. With the
 15 lb, 1-crh fixture on 76.2 mm plate, widening from 76.2 to 77.724 mm lowers its limit from
@@ -214,12 +231,27 @@ fixture limits **24.40 / 73.49 / 186.81 / 457.87 m/s (DERIVED)** at x = 0.10 / 0
 1.00. Treating its normalized plug work as a chord share, `g = sqrt(x/s)`, gives
 **97.39 / 188.53 / 330.53 / 573.07 m/s (DERIVED)**. Both miss the ±1,000 F band; the latter
 misses by about **+7,500 / +3,300 / +2,400 / +7,500 F (DERIVED)** on those rows. Its neutral
-point is `s = 1.607022 (DERIVED)`, whereas potency here must be neutral at one calibre. Sharing
-one value would require a reader-specific normalization and, physically, a relation between
-integrated opening work and contact holding pressure that the reached record does not supply.
-The skid stand-in therefore **stays**, unchanged, with its existing reason; the potency fit does
-not claim to retire it. A shared physical work/pressure relation and the bulk mismatch remain
-for the owner. No search outside the repo was made and **no numeric M79 source series was reached**.
+point is `s = 1.607022 (DERIVED)`, whereas potency here must be neutral at one calibre.
+
+The local [cap-contact source note](../../scratch/research/cap-contact-sources-2026-11-02.md),
+§5, does propose a work-to-holding-pressure candidate: `R_BL = ρ_e V_BL²`, giving
+`cos² θc / sin θc = (V_BL/v)²`. It is the note's derived form, not a reached paper's formula.
+Using its **ASSUMED** `ρ_e = 5,933 kg/m³` and this fit's normal limits gives the following
+**DERIVED** pressures; the existing skid column evaluates `contact_resistance` on the same
+reference steel at normal geometric ratios (where the two thickness definitions agree):
+
+| x | Candidate `ρ_e V_BL²`, GPa | Existing skid stand-in, GPa |
+|---|---:|---:|
+| 0.10 | 0.0304 | 0.0576 |
+| 0.50 | 0.5671 | 0.6441 |
+| 1.00 | 2.5340 | 1.8217 |
+
+The blocker is the bulk law's real miss at x = 1: its **MEASURED** limit **653.524536 m/s**
+against **499.74 m/s (DERIVED from the source F)** would raise candidate holding pressure there.
+A relation is available to test; absence of a relation is not the reason to stop. The skid
+stand-in **stays unchanged** while that bulk mismatch is unresolved. This fit neither refits
+bulk nor establishes a shared physical work/pressure law. No numeric M79 source series was
+reached beyond the comparison rows already recorded here.
 
 The ignored `measure_plate_limit_speeds` tool uses a **Fixture** body of 15 lb and 3 in and the
 two existing steel hit-nose proxies (1-crh and hemisphere). NPG 1125 Fig. 3 provides **BY EYE**
@@ -249,6 +281,25 @@ at x = 0.10 / 0.24 / 0.50 / 1.00. Across the seven genuinely sub-calibre rows, t
 residual is **821.2 (DERIVED)** with that proxy; both proxies remain in the by-eye band. This
 comparison does not establish M79's nose, deformation or a cross-material opening law.
 
+**The unsupported return interval.** There is no firing row at 0.65 < x < 1. The unchanged
+fit climbs from **366.625885** to **653.524536 m/s (MEASURED)** between those endpoints, while
+the record's endpoint speeds are **367.21** and **499.74 m/s (DERIVED)**. The following interior
+values are **MEASURED** by `measure_plate_limit_speeds`; F is **DERIVED** from each speed:
+
+| x | Game limit, m/s | Game F |
+|---|---:|---:|
+| 0.70 | 403.869 | 49,069.5 |
+| 0.75 | 442.271 | 51,913.3 |
+| 0.90 | 564.914 | 60,531.6 |
+| 0.99 | 644.394 | 65,834.7 |
+
+Solving the unchanged formula gives **x = 0.73044 (DERIVED)** where game F reaches **50,800**,
+the upper recorded endpoint. Thus 0.73044 < x < 1 reads above the entire recorded endpoint F
+range; no interior measurement establishes the actual residual. Continuity does not establish
+agreement: the normalized work's slope falls from **2.5 to 1 (DERIVED)** at the join. No refit
+is made. The 7.9 mm illustration below also sits in this unsupported interval, at x = 0.90;
+it demonstrates the game's outcome, not agreement with a firing row.
+
 **Where the player sees it (MEASURED normal-reference-plate limits).** A 7.9 mm AP round at
 **475 m/s** now perforates **7.11 mm**: its limit falls from **496.706665** to **454.956970 m/s**.
 A spent 88 mm AP at **400 m/s** now perforates **44 mm**, whose limit falls from **454.887787**
@@ -256,12 +307,21 @@ to **313.509369 m/s**; at **100 m/s** it now perforates **8.8 mm**, whose limit 
 **198.544815** to **72.571091 m/s**. These are labelled illustrations from shipped round data,
 not pass conditions. Fast rounds through already-defeated thin plate retain more speed.
 
-**Recorded consequences (MEASURED).** Original aims and scenario identifiers stay. Nine records
-regenerate; the other seven remain unchanged. Counts below are skids / armour crossings / spall
-fields, excluding a burst field. Only s16 changes verdict: less work in the wheel and near side
-lets the armed round enter the compartment and burst in flight rather than stop and burst inside
-the near plate. Its nose piece stops in the opposite side; its stable identifier keeps demo links
-resolving and its caption describes the new shot.
+**Arming has one job.** `SpendExit` reads material-weighted real chord in one reached body,
+`sum(chord × resistance factor / disc samples)`, independently of capacity and slope work shares.
+A normal reference plate therefore arms at the same thickness for every calibre. The march
+regression crosses both sides of a **Fixture** 35 reference-mm threshold with two replica-scaled
+calibres; reading charged work fails at the 36 mm fixture. At the shipped threshold, charging the
+thin share would move the 88 mm arming plate to **60.85788 mm (DERIVED)** from `t g(t/88) = 35`.
+That coupling is removed; plate met is not a potency or dose readout.
+
+**Recorded consequences (MEASURED).** Original aims stay. The table compares the law before the
+thin share with its current outcome, including independent plate-met arming. Nine records differ;
+the other seven do not. Counts are skids / armour crossings / spall fields, excluding a burst field.
+Only s16 changes verdict. It is named `s16_side_burst`: the wheel arms it, the later wheel and near
+hull exits restart the delay, and it bursts in flight before the transmission. The nose piece stops
+in the transmission. Compared with the first thin-share recordings, only s16's report changes;
+the other fifteen reports are identical.
 
 | Changed record | Before counts | After counts | Verdict and visible change |
 |---|---:|---:|---|
@@ -269,53 +329,42 @@ resolving and its caption describes the new shot.
 | s4_spaced_then_stopped | 0 / 5 / 4 | 0 / 5 / 4 | NonPen; still stops in the near side after the wheel |
 | s5_oblique_through | 1 / 3 / 1 | 0 / 1 / 1 | Penetration; later ammunition-box skid disappears, its HP pool still empties |
 | s6_overpen | 0 / 2 / 2 | 0 / 2 / 2 | Penetration; retained speed changes, no pool dose |
-| s7_engine_shadow | 0 / 1 / 1 | 0 / 1 / 1 | Penetration; engine dose unchanged, weaker field behind it |
+| s7_engine_shadow | 0 / 1 / 1 | 0 / 1 / 1 | Penetration; engine HP loss unchanged, deposited doses change |
 | s10_gun_barrel_struck | 0 / 0 / 2 | 0 / 0 / 2 | Damaged; barrel reduced instead of knocked out |
 | s13_ring_through_crew | 0 / 2 / 1 | 0 / 2 / 1 | Penetration; nose's rear-plate rest and timing change |
 | s15_unarmed_overpen | 0 / 2 / 2 | 0 / 2 / 2 | Penetration; stays unarmed, retained speed changes |
-| s16_restart_at_rest | 0 / 3 / 2 | 0 / 4 / 4 | NonPen → Penetration; burst at 98.42526 m/s inside the compartment |
+| s16_side_burst | 0 / 3 / 2 | 0 / 3 / 3 | NonPen → Penetration; burst at 452.53116 m/s before the transmission |
 
 MEASURED pool-unit losses (1,000 pool units per HP): s7's two ammunition pools take
-**11,857 / 9,523**, formerly **13,584 / 10,910**; the engine still takes **336,000**. The s10
-barrel takes **83,015**, formerly **250,000**. The s16 burst now reaches ammunition, station and
-module pools instead of having its field stopped by the near plate; the complete receiver list
-lives in its regenerated record. The s5 ammunition pool still takes **72,000**. No other scenario's
+**11,857 / 9,523**, formerly **13,584 / 10,910**; the engine still takes **336,000**, capped by
+its HP pool. Its deposited line dose changes **267.971 → 362.683 HP** and field dose
+**268.852 → 234.678 HP**; equal HP loss does not mean equal dose. The s10
+barrel takes **83,015**, formerly **250,000**. The s16 burst at
+**(-0.29620838, 0.69904494, -0.78999996) m** now reaches two ammunition pools,
+the loader and the transmission. Relative to the first thin-share recording, the bow gunner
+receives no field dose and the first right ammunition pool's HP pool now empties; the complete
+receiver list lives in the record. The s5 ammunition pool still takes **72,000**. No other scenario's
 pool-unit loss changes. Four field-shot outputs change (`driver`, `rear`, `left-mid`,
 `turret-left`); all inputs and the other **2,005** records stay unchanged. The **2,009** record
 pin is **0x15eb25370bef2b50 (MEASURED)**.
 
-The five-field moving-burst record reaches the pen cam atlas budget. Its generic **Resolution**
-capacity is now **eight fields**, bounding atlas allocation and shader work while allowing
-multi-exit bursts; Rust/WGSL counts move together. This is a view resource budget, not a physical
-pass condition. The body-drawing proof supplies a stationary-burst variant at the terminal path
-node instead of requiring a scenario verdict to supply one. No camera-plane solver is changed.
-The shader guard retains every captured algorithm fingerprint while normalizing only the checked
-field count, tail storage extent and neutral search-array padding. Count agreement is checked
-separately; shading-bound and neutral-value mutants still trip the fingerprints. No shader math,
-colour or band law changes and no new fingerprint is claimed to come from a capture. No captures
-were taken; any visual review belongs to the owner's batched capture session.
+The view's **Resolution** budget is **eight fields**, bounding atlas allocation and shader work;
+Rust/WGSL counts agree. s16 currently throws **four fields (MEASURED)** including the burst.
+The live view refuses a record past the budget at plan construction and at direct atlas/shader
+packing; it never silently discards an excess field. No camera-plane solver or shader math changes.
 
-The asset-specific burst snapshot is deleted; generic fuze timing, field-origin and receiver tests
-own those contracts. Armed fixtures derive thresholds from their own plate's charged work. The
-rest-delay proof reads each construction's front work instead of carrying a speed from a different
-backing. Contact delivery distinguishes real endpoints from charged readout chords. The executed
-bulk mutant changes the unchanged neutral arm to g = 1.01 at x >= 1 and fails its equality check;
-restoring it passes. Firing rows remain outside pass conditions. No backlog row names an edited
-file. `PROTOCOL_REV` is **81**, deliberately separating clients deriving the presented shell march
-from this resolved-work meaning; wire layouts do not change. No switch, per-round field or
-vehicle-specific rule is added.
+The library has no at-rest burst. `a_burst_draws_only_what_flies_on` supplies an at-rest variant
+at the terminal path node and proves that presentation draws no onward nose piece; it is not a
+recorded at-rest scenario. `an_armed_round_at_rest_bursts_where_it_rests` separately exercises
+simulation timing and rest bursts on generic constructions. Firing rows remain comparisons,
+not test pass conditions. `plate_limit_speeds_keep_bulk_and_round_ordering` proves the composed
+inverse law; `the_thin_plate_work_share_reaches_the_resolved_crossing` proves its production
+wiring, and `the_walk_reads_its_supplied_capacity_law` rejects a hidden global-law read.
 
-Final verification (**MEASURED**): formatting and CI workspace/all-target clippy with
-`dev_ui,bitprobe` pass. The final targeted batch passes **654 tests**, including all **44**
-whole-tree guards; **12** measurement/pricing tools are ignored. The final whole library passes
-**2,255**, fails **zero**, with **30** ignored tools/beds. The earlier whole-library attempts
-exposed the view resource bound and scenario-dependent rest coverage; the calibre review exposed
-the rejected return curve. All are resolved in the final run. The source guard's captured
-fingerprints are unchanged; its resource-only normalization and shading-change mutants pass.
-All binaries used unattended, muted headless settings under one machine lock, with compilation
-through `serial-cargo`; final related gates were grouped under one lock without nesting locks.
-No capture, pricing run, web search, issue comment or push was taken. The closing validation
-extended beyond the requested **60-minute** wall-clock budget; no further lane item was started.
+Protocol revision 81 remains an issued compatibility checkpoint, not a necessary client-derivation
+split. `integrate_projectiles` returns for `ClientReplica`; replicas sample authority-exported
+spans with the unchanged `speed_between`. Neither the work correction nor scenario rerecording
+changes that reading or the wire layout, so this correction adds no protocol revision.
 
 ## 4. Boundary interaction — contact and the straight bite
 
@@ -594,7 +643,7 @@ of every shipped record, the picture's CPU mirror (`Casters::reach`: the GPU's n
 and horizon, computed on the CPU) ends where the record's direction does to within 10⁻⁴ m
 (MEASURED: 1,728 directions in 21 fields): a direction stops at the first hard body it enters. No readback checks the GPU's
 picture against it. **The record wins**: a field whose
-recorded directions all ended at its origin (s16's burst at rest inside armour) is drawn nowhere,
+recorded directions all ended at its origin is drawn nowhere,
 whatever its picture would hold. A point reads its field from the four texels about its
 direction, each testing the point against its own reach, the results weighted bilinearly: a
 reach is never interpolated across a shadow's edge, so behind a body the field reads the same
@@ -767,15 +816,15 @@ burst block (in the round file, `assets/rounds/<key>.round.ron`) is inert; a sub
 
 **The trigger.** The shell's fuze is built at spawn from its round's burst block (ADR-0014) and
 advanced by the authority's march alone; a replica's march decides no crossing, so its fuze never
-arms. It arms when the round leaves a body (§5, **Which steps throw**) whose spend reaches the
-arming threshold: the reference-mm spent in that one body, never a sum over bodies. The delay is
+arms. It arms when the round leaves a body (§5, **Which steps throw**) whose material-weighted
+real chord reaches the reference-mm arming threshold, never a sum over bodies or potency work. The delay is
 counted as path from that exit: the burst lies `v × delay` metres past it, `v` the exit speed, so
 the speed the round loses in the air over the delay is not counted (DERIVED). Every body exit
-after that restarts a delay still running from that exit at its speed, whatever that body's spend,
+after that restarts a delay still running from that exit at its speed, whatever that body's plate met,
 and so does a bounce off a face; a bounce never arms. The count runs over every metre the round flies: open
 air, a corridor found clear, the gaps between a crossing's bodies, the approach to a body it stops
 in. A round no body arms flies as a solid shot, bit for bit. The shipped burst rounds arm at 35
-reference-mm (MEASURED as 35 mm of plate at normal impact: L.Dv. 487, March 1943, page 487_21,
+reference-mm (CLAIMED, unverified as 35 mm of plate at normal impact: L.Dv. 487, March 1943, page 487_21,
 which also states the restart) and burst 1.5 ms after the exit (DERIVED: the midpoint of the 1–2 ms
 that page gives the Bd.Z. 5127; it is the Pzgr. 39/1's and 39/43's fuze, and no time is found for
 the Pzgr. 39's own Bd.Z. 5103), so the burst lies 0.38 m past an exit at 250 m/s, 0.6 m at 400 m/s
@@ -891,15 +940,13 @@ first field that dosed it, a plate cone's or the burst's, reaches it.
 
 **Scenarios** (`assets/dev/pen_cam/`, fixture data; each record's `shows` says what it shows).
 s13 flies s1's line with the burst round: the upper front plate arms the fuze, and the round bursts
-0.37 m past its exit at 244.6 m/s, short of the driver's station. The band's dose empties the HP
-pools of the bow gunner, the transmission and two ammunition racks, and the nose piece flies on
-through the driver's station to the rear plate. The plate's cone knocks out the driver, as in s1,
-which empties no other HP pool and leaves the gunner and the commander reduced. s15 flies s6's
-line with the burst round: no body holds the arming spend, so its record is s6's. s16 flies s4's
-line with the burst round: the road wheel arms the fuze, its rubber and far disc restart the delay,
-and the round stops 21.5 mm into the lower hull side and bursts at rest there, a flat band with no
-nose piece to fly on; every direction starts inside that plate, which stops it, so the field doses
-nothing (MEASURED, from the records).
+0.318 m past its exit at 211.70023 m/s, short of the driver's station. The record empties the HP
+pools of the bow gunner, driver, gunner, transmission and one right ammunition pool; the commander,
+two left ammunition pools, engine and breech are reduced. The nose piece flies through the driver's
+station to the rear plate (MEASURED, from the record). s15 flies s6's line with the burst round:
+no body meets the arming threshold, so it stays a solid shot. s16 (`s16_side_burst`) is the moving
+side-burst comparison in §3b, which owns its current account. The library has no at-rest burst;
+the simulation and presentation class proofs cover that state separately (§3b).
 
 **Class invariants** (tests hold them for any round and tank; fixture numbers are fixture data).
 The fuze arms only at the threshold; the delay runs from the exit and restarts at a later body or
@@ -1405,8 +1452,8 @@ remaining work is deferred refinements (§9) and the eventual game-side (non-san
   (plug vs debris) selects the failure mode.
 - Contact proxies: density, speed, calibre, material factor and normal steel-equivalent thickness
   set the pressure-contact limit (§4a); deformation and shatter still need a law.
-  Thin-plate potency uses the empirical work fit in §3b; a shared work/holding-pressure law and
-  the one-calibre bulk-limit mismatch remain unresolved.
+  Thin-plate potency uses the empirical work fit in §3b; the one-calibre bulk-limit mismatch
+  blocks the proposed shared-pressure form, and bonded-plate membership is not authored.
 - HE: fuse minimum-thickness trigger + delay + dense wide cone (penetration-independent).
 - Numeric magnitudes (contact presets and material factors): labelled data (§4a, `materials.ron`).
 - Data homes: ballistic-volume geometry on the model (watertight); material factor + shell specs in

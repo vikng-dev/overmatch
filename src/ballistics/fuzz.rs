@@ -100,8 +100,8 @@ impl ProbeRound {
         }
     }
 
-    /// Reference-mm this round can defeat at its reference speed — the shipped [`super::capability`]
-    /// law, never a table.
+    /// The game's damage model: bulk-work readout at the reference speed, in reference-mm,
+    /// from the shipped [`super::capability`] law, never a plate thickness.
     pub fn capability(&self) -> f32 {
         capability(self.body(), self.speed)
     }

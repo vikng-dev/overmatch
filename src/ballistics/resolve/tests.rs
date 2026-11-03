@@ -1872,7 +1872,7 @@ fn two_subquantum_fields_reach_one_pool_unit_together() {
                     face: None,
                     direction: Vec3::NEG_Y,
                     exited: Vec::new(),
-                    spend: 0.0,
+                    plate_met: 0.0,
                     emitted: (0.0003 / crate::ballistics::spall_cone::cone_unit().hp_per_joule())
                         as f32,
                     debris_ratio: 2.4,

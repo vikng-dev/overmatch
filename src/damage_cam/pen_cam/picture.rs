@@ -60,6 +60,14 @@ use crate::damage_cam::shapes::HardBodies;
 
 /// Resolution: eight field slots bound atlas and shader work while allowing multi-exit bursts.
 pub const PICTURE_FIELDS: usize = 8;
+/// The game's damage-model view has one fixed atlas/shader field budget. A live record outside
+/// it is an internal invariant failure, never permission to hide fields from the player.
+pub(super) fn require_field_capacity(count: usize) {
+    assert!(
+        count <= PICTURE_FIELDS,
+        "the game's damage-model view field capacity is {PICTURE_FIELDS}, record has {count}; expand the atlas and shader budget together"
+    );
+}
 /// A field's face lanes in the look's uniform: two for each face of the cube (`look::pack`).
 pub const FACE_LANES: usize = 12;
 /// The near plane (m along a face's forward): a caster face nearer the origin is not drawn.
@@ -599,7 +607,7 @@ fn skyline(sizes: &[UVec2], order: &[usize], width: u32) -> (Vec<UVec2>, UVec2) 
     (places, extent)
 }
 
-/// A record's pictures: the first [`PICTURE_FIELDS`] of its fields, each face placed in one
+/// A record's pictures: every field, within [`PICTURE_FIELDS`], each face placed in one
 /// atlas of `size` texels, rendered from `casters` the first time a frame asks
 /// ([`Self::image`]).
 #[derive(Debug)]
@@ -624,7 +632,7 @@ impl Pictures {
         sightings: &[(Transform, Projection)],
         details: &[UVec2],
     ) -> Self {
-        let cones = &cones[..cones.len().min(PICTURE_FIELDS)];
+        require_field_capacity(cones.len());
         let cells: Vec<Cells> = cones.iter().map(Picture::cells).collect();
         let mut pitches: Vec<f32> = cones
             .iter()
@@ -2104,5 +2112,13 @@ pub(super) mod tests {
         }
         let (own, _) = a.drawn().expect("the corner draws the pictures");
         assert_eq!(own.details, vec![small], "a view's ask kept after it went");
+    }
+    /// The game's damage-model view must refuse a live record beyond the atlas budget.
+    /// Mutant: truncate the fields before atlas layout.
+    #[test]
+    #[should_panic(expected = "field capacity")]
+    fn pictures_refuse_fields_past_the_view_budget() {
+        let cones: Vec<_> = (0..=PICTURE_FIELDS).map(|_| sphere(|_, _| 1.0)).collect();
+        Pictures::of(&cones, None, &[], &[]);
     }
 }

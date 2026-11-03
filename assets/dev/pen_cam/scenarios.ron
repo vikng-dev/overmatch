@@ -139,7 +139,7 @@
     ),
     (
         name: "s15_unarmed_overpen",
-        shows: "s6's line fired with the 88's burst round: neither the deck nor the floor holds the 35 reference-mm that arms the fuze, so the round flies through as s6's solid shot does, its record s6's but for the round",
+        shows: "The game's damage model: s6's line fired with the 88's burst round: neither the deck nor the floor meets the 35 material-weighted reference-mm that arms the fuze, so the round flies through as s6's solid shot does, its record s6's but for the round",
         weapon: "MainGun",
         round: "88mm_APHE_ring",
         from: (1.2, 5.0, 2.4),
@@ -147,8 +147,8 @@
         verdict: Penetration,
     ),
     (
-        name: "s16_restart_at_rest",
-        shows: "s4's line 10 cm lower with the burst round: the wheel arms its fuze, the round crosses the near hull side and transmission, and bursts in flight inside the compartment; its field reaches stations and modules, and the nose piece stops in the opposite hull side",
+        name: "s16_side_burst",
+        shows: "The game's damage model: s4's line 10 cm lower with the burst round: the wheel arms its fuze, later body exits restart it, and the round bursts in flight before the transmission; its field reaches two ammunition pools, the loader and the transmission, where the nose piece stops",
         weapon: "MainGun",
         round: "88mm_APHE_ring",
         from: (-5.0, 0.7, -0.79),

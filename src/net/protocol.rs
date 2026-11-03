@@ -274,8 +274,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// overmatch verdict from what a crossing records.
 /// REV 80 (the game's environment destruction model): sorted tree carrier cuts partition
 /// moving construction; later seams can split and a stump can open a lower cut.
-/// REV 81 (#263, the game's damage model): thin-plate capacity changes resolved stretches,
-/// their work and presented shell march; the skid-pressure stand-in remains independent.
+/// REV 81 (#263, the game's damage model): compatibility checkpoint for the plate-capacity
+/// rollout. Wire layouts and client derivation are unchanged; the authority exports resolved paths.
 /// REV 82 (the game's spawn flow): respawn admission and map-pick refusal are independent owner-private facts.
 pub const PROTOCOL_REV: u32 = 82;
 

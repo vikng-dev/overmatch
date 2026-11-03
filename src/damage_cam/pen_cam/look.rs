@@ -63,7 +63,7 @@ use bevy::window::{PrimaryWindow, WindowRef};
 use super::material::Blend;
 #[cfg(test)]
 use super::picture::Seen;
-use super::picture::{FACE_LANES, PICTURE_FIELDS};
+use super::picture::{FACE_LANES, PICTURE_FIELDS, require_field_capacity};
 use super::plan::{BoxPlan, Cone};
 #[cfg(test)]
 use super::potency::soft_step;
@@ -756,7 +756,7 @@ pub struct FieldPrint {
     pub law: Vec4,
 }
 
-/// The first [`FIELDS`] of `prints` in the fields' lanes, [`PRINT_LANES`] a field, and how many:
+/// Every print in the fields' lanes, [`PRINT_LANES`] a field, within [`FIELDS`], and how many:
 /// the origin (world) and half-angle; the unit axis (world) and the front (m); `u` and the inner
 /// edge; `v` and the picture's pitch; the emission its strength `S` gives, `S / Ω`
 /// ([`Potency::emission`], `Ω` its support's solid angle) in world units (squared metres, whose
@@ -766,6 +766,7 @@ pub struct FieldPrint {
 /// and its picture's faces, each face's crop and place in the record's atlas
 /// ([`super::picture::Picture::lanes`]).
 fn pack(prints: &[FieldPrint], potency: &Potency) -> ([Vec4; PRINT_LANES * FIELDS], usize) {
+    require_field_capacity(prints.len());
     let mut lanes = [Vec4::ZERO; PRINT_LANES * FIELDS];
     for (print, lane) in prints.iter().zip(lanes.chunks_mut(PRINT_LANES)) {
         lane[0] = print.origin.extend(print.half_angle);
@@ -782,7 +783,7 @@ fn pack(prints: &[FieldPrint], potency: &Potency) -> ([Vec4; PRINT_LANES * FIELD
         lane[5] = print.law;
         lane[6..].copy_from_slice(&print.faces);
     }
-    (lanes, prints.len().min(FIELDS))
+    (lanes, prints.len())
 }
 
 /// Field `field`'s law as the look evaluates it (`pen_cam_look.wgsl`, `law`), thrown in `strata`
@@ -1073,10 +1074,10 @@ pub fn peak(
     far: f32,
     intensity: impl Fn(f32) -> f32,
 ) -> f32 {
+    require_field_capacity(prints.len());
     let done = potency.mid * BAND_WINDOW_OCTAVES.exp2();
     let stretches: Vec<(f32, f32, &FieldPrint)> = prints
         .iter()
-        .take(FIELDS)
         .filter_map(|print| {
             let (lo, hi) = stretch(print, eye, dir)?;
             let (lo, hi) = (lo.max(near), hi.min(far));
@@ -1244,9 +1245,9 @@ pub fn stretch(print: &FieldPrint, eye: Vec3, dir: Vec3) -> Option<(f32, f32)> {
 /// The box (record frame, low and high corners) about every field of `cones` out to its longest
 /// reach, which the volume is drawn on; `None` where no field reaches.
 pub fn field_bounds(cones: &[Cone]) -> Option<(Vec3, Vec3)> {
+    require_field_capacity(cones.len());
     cones
         .iter()
-        .take(FIELDS)
         .map(|cone| (cone.origin, cone.max_reach()))
         .filter(|&(_, longest)| longest > 0.0)
         .map(|(origin, longest)| (origin - longest, origin + longest))
@@ -1499,8 +1500,7 @@ mod tests {
     const PITCH: f32 = 4.0e-3;
 
     /// Every record's fields fit the look: none throws more than [`FIELDS`], its spall cones and
-    /// its burst's field together, past which [`pack`] drops a field and the atlas holds no
-    /// picture for it, so the volume does not draw it.
+    /// its burst's field together. Live overflow is an explicit view invariant failure.
     #[test]
     fn every_record_fits_the_look() {
         for (name, report) in super::super::plan::tests::records() {
@@ -1510,6 +1510,15 @@ mod tests {
                 "{name} throws {fields} fields, past FIELDS = {FIELDS}"
             );
         }
+    }
+
+    /// The game's damage-model view must refuse an unrepresentable live field count.
+    /// A truncating pack silently hides a server field from the player.
+    #[test]
+    #[should_panic(expected = "field capacity")]
+    fn packing_more_fields_than_the_shader_can_read_is_a_bug() {
+        let prints: Vec<_> = (0..=FIELDS).map(|_| fixture_print()).collect();
+        pack(&prints, &Potency::bound());
     }
 
     /// A pen cam shader, read from the shipped assets.

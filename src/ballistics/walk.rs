@@ -440,6 +440,8 @@ pub struct WalkLaws {
     pub rha_reference: f32,
     /// Coulomb coefficient of a round's contact with a face ([`Begin::Held`]).
     pub contact_friction: f32,
+    /// The game's damage-model work share supplied to this walk.
+    pub(crate) plate_capacity: super::plate_capacity::PlateCapacity,
 }
 
 impl Default for WalkLaws {
@@ -467,6 +469,7 @@ impl Default for WalkLaws {
             reference: SubstanceRegistry::shipped_static().reference_facts(),
             rha_reference: crate::substances::REFERENCE_FACTOR,
             contact_friction: super::physical_laws::PhysicalLaws::shipped().contact_friction,
+            plate_capacity: super::physical_laws::PhysicalLaws::shipped().plate_capacity,
         }
     }
 }
@@ -1924,7 +1927,7 @@ pub struct ExitMember {
 /// which no layer resists less than the one before it. It EXITS where the next medium resists less
 /// — the next layer has a lower factor, or the run ends in air — and the next body starts there. A
 /// step to an equal or higher factor continues the body, whatever the substances: plates of equal
-/// factor in contact are one body, and a body's spend is everything crossed since the run began or
+/// factor in contact are one body, and a body's plate met covers everything since the run began or
 /// the last exit. Members are grouped by the substances of the body (every substance crossed in
 /// it), by whether the exit is genuine, and by their ordinal among such exits on their own ray;
 /// longitudinal position cannot be the key, since on an oblique slab the ring's exits are spread by
@@ -1954,11 +1957,10 @@ pub struct SpallSource {
     /// only an unreached member leaves is not among them: the round never left it, and a direction
     /// starting inside it enters it there.
     pub exited: Vec<Entity>,
-    /// Reference-mm the mechanism spent across this body: its readout drop over the body's
-    /// stretches, each stretch's drop shared among the samples by the factor each was resisted by,
-    /// summed over the reached members. A readout (a burst fuze arms on it), not the cone's
-    /// strength.
-    pub spend: f32,
+    /// The game's damage model: disc-mean reference-mm of material met across this body,
+    /// integrating real chord times resistance factor. The fuze reads this geometry, independently
+    /// of the potency law's capacity and slope work shares.
+    pub plate_met: f32,
     /// Outgoing joules read from the addressed exchanges, never recomputed from the loss.
     pub emitted: f32,
     /// `λ`, the field law's ratio of the cone thrown here: the debris ratio of the body's last layer
@@ -2153,7 +2155,8 @@ impl DiscEvent {
             * axis.dot(self.entry_normal).abs().clamp(0.0, 1.0)
     }
 
-    /// The game's damage model: covered normal geometric thickness, independent of strength.
+    /// The game's damage model: covered normal occupied thickness of the welded run.
+    /// Bonded-plate membership is not authored; design doc §3b names that unresolved limitation.
     fn normal_thickness(&self, axis: Vec3) -> f64 {
         assert!(
             self.coverage > 0.0,
@@ -2186,9 +2189,7 @@ impl DiscEvent {
     ) -> f64 {
         let cosine = axis.dot(self.entry_normal).abs().clamp(0.0, 1.0);
         let thickness = self.normal_thickness(axis);
-        let capacity = super::physical_laws::PhysicalLaws::shipped()
-            .plate_capacity
-            .charge(thickness / f64::from(caliber));
+        let capacity = laws.plate_capacity.charge(thickness / f64::from(caliber));
         capacity
             * super::mechanism::slope_charge(
                 cosine,
@@ -3554,6 +3555,7 @@ struct Stretch<S> {
     after: S,
     /// `(sample, factor)` for every sample in the encounter ([`overlap_factor`]).
     resisted: Vec<(usize, f32)>,
+    disc: usize,
     /// `(volume, sample, joules)`: the energy the round lost in each volume along each sample over
     /// the encounter ([`Effect::Line`]).
     lines: Vec<(Entity, usize, f64)>,
@@ -3607,6 +3609,7 @@ fn advance_through<M: Mechanism>(
         }
         let stop = advance.control == Control::Stop;
         stretches.push(Stretch {
+            disc: encounter.disc,
             start: encounter.start,
             end: if stop {
                 encounter.start + advance.consumed
@@ -3648,7 +3651,7 @@ fn advance_through<M: Mechanism>(
 /// throws nothing. Body boundaries are run ends or factor drops on their sample, each a change of
 /// substance set, so they are interfaces and every stretch lies wholly inside or wholly outside a
 /// member's body: a stretch belongs to it
-/// when its midpoint does. The readout drop is shared by resisted sample factors; the energy
+/// when its midpoint does. Plate met integrates real chord and sample resistance; the energy
 /// partition reads the independently addressed work in each stretch.
 ///
 /// Also returns, per `(stretch index, sample)` inside a reached body, the share of the energy lost
@@ -3661,13 +3664,6 @@ fn spall_sources<M: Mechanism>(
     stop: Option<f64>,
     direction: Vec3,
 ) -> (Vec<SpallSource>, BTreeMap<(usize, usize), (f64, usize)>) {
-    // Each stretch's reference-mm readout drop over the whole disc.
-    let disc_drops: Vec<f64> = stretches
-        .iter()
-        .map(|stretch| {
-            mechanism.reference_mm(stretch.before) - mechanism.reference_mm(stretch.after)
-        })
-        .collect();
     let mut out = Vec::new();
     let mut carried_out = BTreeMap::new();
     for exit in exits {
@@ -3679,24 +3675,22 @@ fn spall_sources<M: Mechanism>(
         if reached.is_empty() {
             continue;
         }
-        let mut spend = 0.0f64;
+        let mut plate_met = 0.0f64;
         let mut covered = Vec::new();
         for member in &reached {
-            for (index, (stretch, drop)) in stretches.iter().zip(&disc_drops).enumerate() {
+            for (index, stretch) in stretches.iter().enumerate() {
                 let mid = 0.5 * (stretch.start + stretch.end);
                 if !(member.start <= mid && mid < member.end) {
                     continue;
                 }
                 covered.push((index, member.sample));
-                let total: f64 = stretch.resisted.iter().map(|(_, f)| *f as f64).sum();
                 let own = stretch
                     .resisted
                     .iter()
                     .find(|(sample, _)| *sample == member.sample)
-                    .map_or(0.0, |(_, f)| *f as f64);
-                if total > 0.0 {
-                    spend += drop * own / total;
-                }
+                    .expect("the game's damage-model reached exit sample is present throughout its body")
+                    .1;
+                plate_met += (stretch.end - stretch.start) * f64::from(own) / stretch.disc as f64;
             }
         }
         let last = reached
@@ -3727,13 +3721,14 @@ fn spall_sources<M: Mechanism>(
             face,
             direction,
             exited: exited.into_iter().collect(),
-            spend: spend as f32,
+            plate_met: plate_met as f32,
             emitted: 0.0,
             debris_ratio: reached
                 .iter()
                 .map(|member| (member.rear_factor, member.debris_ratio))
                 .max_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)))
-                .map_or(0.0, |(_, ratio)| ratio),
+                .expect("the game's damage-model reached body has at least one exit member")
+                .1,
             strength_ratio: exit_strength_ratio(
                 reached
                     .iter()

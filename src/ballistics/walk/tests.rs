@@ -1308,6 +1308,7 @@ fn a_wholly_emitted_exchange_retains_zero_without_subtractive_roundoff() {
             before: (),
             after: (),
             resisted: vec![(0, REFERENCE_FACTOR)],
+            disc: 1,
             lines: vec![(address, 0, energy)],
         })
         .collect();
@@ -1747,8 +1748,8 @@ fn capability_exhausted_midway_stops_the_round_and_clips_damage() {
 }
 
 /// An exit the round reaches throws even when the round stops in a later body of the same
-/// crossing; the body it stops inside throws nothing. The source's spend is the mechanism's
-/// readout drop across the body it left. Fixture: 20 mm of steel in contact with two metres of a
+/// crossing; the body it stops inside throws nothing. The source's plate met is its material-weighted
+/// real chord, independent of potency work. Fixture: 20 mm of steel in contact with two metres of a
 /// 150-factor block, which the round cannot cross.
 #[test]
 fn exits_before_a_stop_throw_and_the_stopped_body_throws_nothing() {
@@ -1768,10 +1769,14 @@ fn exits_before_a_stop_throw_and_the_stopped_body_throws_nothing() {
     let source = &plan.spall[0];
     assert!(source.face.is_none(), "an internal step has no face");
     // DERIVED: 20 mm head-on at 1000 per metre.
-    assert!((source.spend - 20.0).abs() < 0.05, "{}", source.spend);
+    assert!(
+        (source.plate_met - 20.0).abs() < 0.05,
+        "{}",
+        source.plate_met
+    );
     let (round, state) = solid(AP_88_CAPABILITY);
     assert!(source.exit_speed < state.speed as f32 && source.exit_speed > 0.0);
-    let left = super::super::speed_for(round.body(), AP_88_CAPABILITY - source.spend);
+    let left = super::super::speed_for(round.body(), AP_88_CAPABILITY - source.plate_met);
     assert!(
         (source.exit_speed / left - 1.0).abs() < 1.0e-3,
         "{}",
@@ -1803,8 +1808,8 @@ fn each_source_carries_its_exit_speed_and_the_last_is_the_residual() {
     assert_eq!(crew.exit_speed, plan.state.speed as f32);
     assert!(plate.face.is_none() && crew.face.is_some());
     // DERIVED: 100 mm at 1000 per metre, then 300 mm at 10 per metre.
-    assert!((plate.spend - 100.0).abs() < 0.1, "{}", plate.spend);
-    assert!((crew.spend - 3.0).abs() < 0.01, "{}", crew.spend);
+    assert!((plate.plate_met - 100.0).abs() < 0.1, "{}", plate.plate_met);
+    assert!((crew.plate_met - 3.0).abs() < 0.01, "{}", crew.plate_met);
     let face = crew.face.unwrap();
     assert!(
         face.dot(crew.direction) > 0.0,
@@ -1876,7 +1881,7 @@ fn a_softer_exit_reduces_debris_and_reference_strength_caps_the_share() {
 /// equal-factor substances throws exactly one spall cone, at the far face, as strong as the one
 /// 100 mm of either throws.
 #[test]
-fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
+fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_plate_met() {
     let rha = SubstanceId::fixture(1000.0);
     let probe = SubstanceId::probe();
     let pair = substance_table(&[(1, rha, 1000.0), (2, probe, 1000.0)]);
@@ -1899,7 +1904,7 @@ fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
             panic!("one cone: {whole:?}");
         };
         assert_eq!(cone.strength(), plate.strength());
-        assert_eq!(cone.spend, plate.spend);
+        assert_eq!(cone.plate_met, plate.plate_met);
         assert_eq!(cone.exit_speed, plate.exit_speed);
     }
 }
@@ -2021,7 +2026,7 @@ fn the_cone_ratio_is_the_rear_layers_substance() {
 }
 
 /// Only a step into softer material or air throws; a step into harder or equal material continues
-/// the body, so the cone at the next softer step carries the spend of everything since the last
+/// the body, so the cone at the next softer step carries the plate met since the last
 /// throw. Fixture stacks, 50 mm plates in contact, head-on.
 #[test]
 fn only_a_softer_step_throws() {
@@ -2054,8 +2059,8 @@ fn only_a_softer_step_throws() {
     assert!(steel.face.is_none() && crew.face.is_some());
     assert!(steel.exit_speed > crew.exit_speed && steel.exit_speed < entry);
     // DERIVED: 100 mm at 1000 per metre, then 300 mm at 10 per metre.
-    assert!((steel.spend - 100.0).abs() < 0.1, "{}", steel.spend);
-    assert!((crew.spend - 3.0).abs() < 0.01, "{}", crew.spend);
+    assert!((steel.plate_met - 100.0).abs() < 0.1, "{}", steel.plate_met);
+    assert!((crew.plate_met - 3.0).abs() < 0.01, "{}", crew.plate_met);
 
     // Soft, then hard: no throw at the step up; one cone at the far face summing both plates.
     let soft_hard = spall_through(
@@ -2070,7 +2075,7 @@ fn only_a_softer_step_throws() {
     };
     assert!(cone.face.is_some());
     // DERIVED: 50 mm at 900 per metre plus 50 mm at 1000 per metre.
-    assert!((cone.spend - 95.0).abs() < 0.1, "{}", cone.spend);
+    assert!((cone.plate_met - 95.0).abs() < 0.1, "{}", cone.plate_met);
 
     // Hard, softer, hard: a throw at the step down, then one at the far face for what followed it.
     let dip = spall_through(
@@ -2087,8 +2092,8 @@ fn only_a_softer_step_throws() {
     assert!(first.face.is_none() && last.face.is_some());
     assert!(first.exit_speed > last.exit_speed && first.exit_speed < entry);
     // DERIVED: 50 mm at 1000 per metre; then 50 mm at 900 plus 50 mm at 1000.
-    assert!((first.spend - 50.0).abs() < 0.1, "{}", first.spend);
-    assert!((last.spend - 95.0).abs() < 0.1, "{}", last.spend);
+    assert!((first.plate_met - 50.0).abs() < 0.1, "{}", first.plate_met);
+    assert!((last.plate_met - 95.0).abs() < 0.1, "{}", last.plate_met);
 }
 
 /// Enough capability and the same stack perforates: full cost spent, the crewman charged for HIS
@@ -4600,5 +4605,31 @@ fn thick_soft_bodies_do_not_become_thin_plates() {
                 .resistance_charge,
             1.0
         );
+    }
+}
+
+/// The game's damage model: the driver must use the capacity law its caller supplies.
+/// A hidden shipped-law lookup ignores these valid fixture fits and breaks that seam.
+#[test]
+fn the_walk_reads_its_supplied_capacity_law() {
+    let slabs = [Slab::at(1, 0, 0.5, -AXIS, AP_88.caliber * 0.25)];
+    for shear_slope in [1.0, 2.0] {
+        // Fixture fits.
+        let laws = WalkLaws {
+            plate_capacity: ron::from_str(&format!(
+                "(shear_slope: {shear_slope}, opening_share: 0.8, return_power: 1.0)"
+            ))
+            .unwrap(),
+            ..WalkLaws::default()
+        };
+        laws.plate_capacity.validate("fixture").unwrap();
+        let walked = walk_disc(
+            &entrance_disc(&slabs, 2.0),
+            &table(&[(1, laws.rha_reference)]),
+            &laws,
+        )
+        .unwrap();
+        let request = transit_request(&walked, &AP_88, &laws);
+        assert!((request.entrance.resistance_charge - shear_slope * 0.25).abs() < 1.0e-6);
     }
 }

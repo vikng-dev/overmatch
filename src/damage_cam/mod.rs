@@ -237,7 +237,7 @@ pub enum PlateClass {
 }
 
 /// The game's damage model: an armour contact's charged chord and reference-mm cost.
-/// Entry and exit hold the real geometry; the chord readout includes the slope charge.
+/// Entry and exit hold the real geometry; the chord readout includes capacity and slope work shares.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Plate {
     pub name: String,

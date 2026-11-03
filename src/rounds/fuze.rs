@@ -12,7 +12,8 @@ use serde::Deserialize;
 /// What functions the fuze.
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
 pub(crate) enum Trigger {
-    /// Functions on leaving a body the round spent at least `arming_spend` reference-mm in; a
+    /// The game's damage model: functions on leaving a body with at least `arming_spend`
+    /// material-weighted reference-mm of real chord, independently of potency work; a
     /// body met before the burst restarts the delay.
     SpendExit { arming_spend: f32 },
     /// Functions at contact with a body whose resisting force on the round reaches

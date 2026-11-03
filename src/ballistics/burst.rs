@@ -284,12 +284,13 @@ impl Fuze {
         }
     }
 
-    /// The round left a body it spent `spend` reference-mm across, at `speed`, the body owned by
-    /// `tank`. An unarmed `SpendExit` fuze arms when `spend` reaches its threshold; an armed one
-    /// whose delay still runs restarts whatever the spend. Either way the burst then lies
+    /// The game's damage model: the round left a body with `plate_met` material-weighted
+    /// reference-mm of real chord, at `speed`, the body owned by
+    /// `tank`. An unarmed `SpendExit` fuze arms when `plate_met` reaches its threshold; an armed one
+    /// whose delay still runs restarts whatever the plate met. Either way the burst then lies
     /// `speed × delay` metres of path past this exit. A delay that has run out is not restarted,
     /// and an exit neither arms nor restarts an `Impact` fuze.
-    pub(crate) fn exited(&mut self, spend: f32, speed: f32, tank: Option<Entity>) {
+    pub(crate) fn exited(&mut self, plate_met: f32, speed: f32, tank: Option<Entity>) {
         let burst = match *self {
             Self::Inert => return,
             Self::Unarmed(burst) | Self::Armed { burst, .. }
@@ -298,7 +299,7 @@ impl Fuze {
                 return;
             }
             Self::Unarmed(burst) => match burst.trigger {
-                Trigger::SpendExit { arming_spend } if spend < arming_spend => return,
+                Trigger::SpendExit { arming_spend } if plate_met < arming_spend => return,
                 _ => burst,
             },
             Self::Armed { remaining, .. } if remaining <= 0.0 => return,
@@ -588,9 +589,9 @@ mod tests {
         assert!(Burst::derived(round, STEEL, &inputs).is_err());
     }
 
-    /// The fuze arms when one body's spend reaches the threshold and not below it, and the burst
+    /// The game's damage model: the fuze arms when one body's plate met reaches the threshold, and the burst
     /// then lies `speed × delay` of path past that body's exit: the march reads both to place the
-    /// burst. A spend just under the threshold leaves the round a solid shot, and a round without
+    /// burst. Plate met just under the threshold leaves the round a solid shot, and a round without
     /// a burst never arms.
     #[test]
     fn the_fuze_arms_at_the_threshold() {
@@ -608,7 +609,7 @@ mod tests {
     }
 
     /// The delay runs down with the path flown, and a body met before it ends restarts it from
-    /// that body's exit at that exit's speed, whatever its spend; so does a bounce. An unarmed
+    /// that body's exit at that exit's speed, whatever its plate met; so does a bounce. An unarmed
     /// fuze is not armed by a bounce.
     #[test]
     fn a_body_met_restarts_the_delay() {
@@ -635,7 +636,7 @@ mod tests {
     }
 
     /// A delay run out to zero or below is due where the round stands, and no later exit or bounce
-    /// restarts it or takes its tank, whatever the spend: the march bursts the round where the
+    /// restarts it or takes its tank, whatever the plate met: the march bursts the round where the
     /// crossing hands the flight back, through the tank that last restarted it. A mutant that
     /// restarts a due delay fails here.
     #[test]
