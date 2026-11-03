@@ -33,10 +33,10 @@
 //! support is an explicit penalty spring and damper read at the tick-start pose. A dynamic body
 //! the explicit step integrates them against stably ([`explicit_recipients`]: the connected
 //! system of its source and the source's other recipients, by every patch's stiffness, damping
-//! and both bodies' inertia) takes the whole opposite reaction, `−(normal × load + traction) ×
-//! dt`, whatever it is and whether or not it closes: a hull under another tank's belt, a heavy
-//! slab. Any other is a *piece*: the explicit spring would drive it past the belt within the
-//! step, so Avian alone resolves what holds it and its side is clamped, deliberately asymmetric
+//! and both bodies' inertia) takes the whole opposite reaction,
+//! `−(normal × load + grip + rolling) × dt`, whether or not it closes: a hull under another
+//! tank's belt, a heavy slab. Any other is a *piece*: the explicit spring would drive it past the
+//! belt within the step, so Avian alone resolves what holds it and its side is clamped, deliberately asymmetric
 //! with the belt's support force: a resting piece takes no normal impulse. That clamp does not
 //! conserve the belt-piece pair's momentum.
 //! - *The tank's side* is the track law: a piece supports and grips the tank as ground does, with
@@ -46,7 +46,7 @@
 //!   family avian's own solver belongs to), one pass over all sources' contacts in canonical
 //!   geometry order, each sized after the impulses before it. The push, along the normal: the support reaction's
 //!   impulse `load × dt`, at most what stops the piece closing on the belt. Then the drag, along
-//!   the traction reaction's direction: its impulse, at most Coulomb's `μ × load × dt` (the
+//!   the total tangent reaction's direction: its impulse, at most Coulomb's `μ × load × dt` (the
 //!   normal force the belt presses with over the tick, whether or not the piece is closing, so a
 //!   parked or pivoting hull still drags what it stands on; μ the contact's own pair, the track's
 //!   friction on the piece's ([`super::forces::BeltContact::mu`]), the same coefficient that
@@ -2117,13 +2117,40 @@ mod tests {
         }
     }
 
+    /// Both recipient routes must include rolling in the source reaction. The clamped fixture
+    /// is force-limited, so neither Coulomb nor catch-up can hide a dropped component.
+    /// FIXTURE: 100 kg at its COM, closing at 1 m/s normally and moving along both tangent axes;
+    /// 100 N support, 8 N grip and perpendicular 6 N rolling, no angular coupling.
+    #[test]
+    fn recipient_reactions_include_rolling_distinct_from_grip() {
+        let mut contact = press(Vec3::ZERO, Entity::PLACEHOLDER, 100.0);
+        contact.traction = Vec3::X * 8.0;
+        contact.rolling_force = Vec3::Z * 6.0;
+        let body = PieceBody {
+            entity: Entity::PLACEHOLDER,
+            com: Vec3::ZERO,
+            inv_mass: Vec3::splat(1.0 / 100.0),
+            inv_inertia: Mat3::ZERO,
+            linear: Vec3::new(2.0, 1.0, 3.0),
+            angular: Vec3::ZERO,
+        };
+        let expected = Vec3::new(8.0, 100.0, 6.0);
+        let whole = source_force(&contact);
+        let clamped = contact_impulse(&body, &contact, DT);
+        // Resolution: f32 direction normalization and impulse arithmetic.
+        assert!(
+            (whole - expected).length() < 1e-5 && (clamped + expected * DT).length() < 1e-5,
+            "recipient force {whole:?}, clamped impulse {clamped:?}; expected {expected:?} N and its opposite times dt"
+        );
+    }
+
     /// THE IMPULSE ON A PIECE NEVER DRIVES IT PAST THE BELT, AND ITS TANGENTIAL PART NEVER
     /// EXCEEDS COULOMB'S μ × load × dt: the clamp is what keeps a light piece from being flung, and
     /// the belt's normal force over the tick is what the friction reads, so over 4000 fixture
     /// contacts (pieces of 5 kg to 3 t with skewed inertia, off-centre contacts, any normal,
-    /// traction and belt velocity) the normal impulse lies in `[0, load·dt]`, the tangential one
-    /// within `|traction|·dt` and `μ·load·dt`; the push alone leaves the piece still closing on the
-    /// belt or level with it along the normal, and the whole impulse leaves it still behind the
+    /// grip, rolling and belt velocity) the normal impulse lies in `[0, load·dt]`, the tangential
+    /// one within `|grip + rolling|·dt` and `μ·load·dt`; the push alone leaves the piece still
+    /// closing on the belt or level with it along the normal, and the whole impulse leaves it behind the
     /// belt surface or level with it along the drag. A clamp sized without the inertia coupling,
     /// a drag sized against the unpushed piece, a cap on the wrong side, or a friction bound off
     /// the clamped normal impulse (which drags nothing under a hull that is not closing) fails
@@ -2570,45 +2597,60 @@ mod tests {
         }
     }
 
-    /// A MOVING PIECE SETS CONTACT SLIP. The belt's damping and grip must see relative motion,
-    /// so a carried surface differs from static ground even when their shapes are identical.
+    /// Moving support sets both slip and rolling. Driving relies on common hull/support
+    /// translation producing no drag, and a moving support dragging a stationary hull.
+    /// FIXTURE: support translates at twice the fade band; hull carried with it or stationary.
     #[test]
-    fn the_slip_on_a_piece_is_measured_against_the_piece() {
+    fn the_slip_and_rolling_on_a_piece_are_measured_against_the_piece() {
         let mut app = physics();
         let carried = piece_box(&mut app, Vec3::new(0.0, 0.2, 0.0), Vec3::new(0.4, 0.4, 4.0));
         app.update();
-        let hull_vel = Vec3::new(0.0, 0.0, -0.3);
+        let piece_velocity = Vec3::NEG_Z * (2.0 * super::super::forces::ROLLING_FADE_SPEED);
         app.world_mut()
             .get_mut::<LinearVelocity>(carried)
             .unwrap()
-            .0 = hull_vel;
-        let slips = app
-            .world_mut()
-            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                let near = rubble.near(Vec3::ZERO, 4.0);
-                let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
-                let report = pad_pass(
-                    &ground(),
-                    &pieces,
-                    Affine3A::from_translation(Vec3::Y * 0.4),
-                    SideState {
-                        speed: 0.4,
-                        ..Default::default()
-                    },
-                    hull_vel,
-                    &mut GripElements::for_links(30),
-                );
-                report
+            .0 = piece_velocity;
+        for hull_velocity in [piece_velocity, Vec3::ZERO] {
+            let contacts = app
+                .world_mut()
+                .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                    let near = rubble.near(Vec3::ZERO, 4.0);
+                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                    pad_pass(
+                        &ground(),
+                        &pieces,
+                        Affine3A::from_translation(Vec3::Y * 0.4),
+                        SideState {
+                            speed: 0.4,
+                            ..Default::default()
+                        },
+                        hull_velocity,
+                        &mut GripElements::for_links(30),
+                    )
                     .contacts
                     .into_iter()
-                    .filter(|c| c.collider.is_some() && c.normal.y > 0.99)
-                    .map(|c| c.slip)
+                    .filter(|c| c.collider == Some(carried) && c.normal.y > 0.99)
                     .collect::<Vec<_>>()
-            })
-            .unwrap();
-        assert!(!slips.is_empty());
-        for slip in slips {
-            assert!((slip - 0.4).abs() < 1e-5, "slip {slip}");
+                })
+                .unwrap();
+            assert!(!contacts.is_empty());
+            let relative = hull_velocity - piece_velocity;
+            // Resolution: f32 contact-frame projection and force assembly.
+            for contact in contacts {
+                assert!((contact.slip - (0.4 + relative.z)).abs() < 1e-5);
+                let expected = if relative == Vec3::ZERO {
+                    Vec3::ZERO
+                } else {
+                    // Relative motion exceeds the owned fade band: full rigid-support drag.
+                    assert!(relative.z > super::super::forces::ROLLING_FADE_SPEED);
+                    Vec3::NEG_Z * super::super::forces::rigid_rolling_resistance() * contact.load
+                };
+                assert!(
+                    (contact.rolling_force - expected).length() < contact.load * 1e-5,
+                    "support-relative rolling {:?}, expected {expected:?}",
+                    contact.rolling_force
+                );
+            }
         }
     }
 

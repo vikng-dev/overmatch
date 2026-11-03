@@ -1,7 +1,7 @@
 //! Belt support, per-element shear and ground reaction for one track side.
 //!
 //! `contact_side` takes the pose, point velocities, terrain oracle and tick-start piece
-//! snapshot; it returns forces in support/traction order and a longitudinal belt reaction.
+//! snapshot; it returns support then total tangent forces and a longitudinal belt reaction.
 //! The caller applies those forces, advances the drivetrain, then advects material phase.
 //! All loads are N, distances m, velocities m/s; strain belongs to material links and columns.
 //!
@@ -2766,8 +2766,8 @@ mod tests {
     /// with its hull decelerates as one body at `a = c_rr·N/(M + I)` down to the fade band and
     /// decays inside it, so it coasts `d = (v₀² + V²)/(2a)`. The driving feel of every ground and
     /// the coast-down distances the design doc derives rely on it. A law that ignored the
-    /// contact's ground, read one ground everywhere, pushed a resting belt, or entered the belt's
-    /// balance with the wrong sign or at the wrong load fails here.
+    /// contact's ground, read one ground everywhere, or applied hull drag with the wrong sign
+    /// or load fails here. Grip transmits the declutched belt's inertia to the slowing hull.
     ///
     /// FIXTURE DATA: the rig's 2 m pad 5 mm into flat ground, its 500 kg belt, a hull whose weight
     /// is the pad's support load, from 3 m/s, on two grounds of rolling resistance 0.05 and 0.15
