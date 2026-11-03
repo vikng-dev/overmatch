@@ -2132,22 +2132,35 @@ mod tests {
         );
     }
 
-    /// Discover every shipped asset through the real gate: adding a vehicle adds no test-code row.
+    /// Discover every shipped asset through the real gate; a synthetic origin-axle vehicle shares
+    /// the assertions so they cannot impose a coordinate-origin restriction on future construction.
     #[test]
     fn every_shipped_asset_passes_the_consumer_contract() {
-        let shipped = fixture::shipped_assets();
+        let mut shipped = fixture::shipped_assets();
         assert!(
             !shipped.is_empty(),
             "no `assets/<id>/<id>.glb` beside an `<id>.tank.ron` was discovered at all"
         );
-        for model in shipped {
-            let findings = verify_asset(&model, None);
+        for model in &shipped {
+            let findings = verify_asset(model, None);
             assert!(
                 findings.is_empty(),
-                "{} does not pass the consumer contract:\n{}",
+                "{}: {}",
                 model.display(),
                 render(&findings)
             );
+        }
+        // Fixture: authored station frames may be at the model origin; mesh shape cannot establish
+        // axle alignment. Certification already checks every declared rigid frame's unit scale.
+        let (nodes, spec) = sound_vehicle();
+        let at_origin = fixture::write("origin-axles", &nodes, &spec);
+        let asset = certify_asset(&at_origin.glb, &spec, &SubstanceRegistry::shipped())
+            .expect("the origin-axle fixture certifies");
+        assert!(asset.geometry.roadwheels.iter().all(|&(index, _)| {
+            asset.geometry.nodes[index].root_position.to_array() == [0.0; 3]
+        }));
+        shipped.push(at_origin.glb.clone());
+        for model in shipped {
             let spec_ron =
                 std::fs::read_to_string(spec_ron_name(&model)).expect("the sheet is readable");
             let asset = certify_asset(&model, &spec_ron, &SubstanceRegistry::shipped())
@@ -2185,17 +2198,6 @@ mod tests {
                         volume.name
                     );
                 }
-            }
-            // A station driven by a local rotation spins about its own origin. One left at the
-            // model root orbits the tank instead, and reads as `(0, 0, 0)` to anything that takes
-            // the origin for the axle centre.
-            for &(index, _) in &geometry.roadwheels {
-                let station = &geometry.nodes[index];
-                assert!(
-                    station.root_position.length() > 1.0e-4,
-                    "roadwheel `{}` has no authored origin — set the object origin to the axle",
-                    station.name
-                );
             }
         }
     }
