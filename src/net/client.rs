@@ -211,9 +211,9 @@ enum RecvConditionerMode {
     Seeded(u64),
 }
 
-/// Preserve the existing receive path unless all seeded-jitter prerequisites are explicit — or a
-/// burst is configured, which is deterministic by construction (epoch-phase, no RNG) and therefore
-/// activates the seeded conditioner on its own with every unset knob at zero.
+/// A burst selects deterministic epoch-phase conditioning (no RNG), defaulting unset knobs to
+/// zero. Otherwise seeded conditioning needs explicit seed, positive latency and jitter;
+/// latency alone uses stock conditioning, and zero latency disables it.
 fn recv_conditioner_mode(
     latency_ms: u64,
     jitter_ms: u64,
@@ -352,24 +352,18 @@ fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, 
             source,
         },
     };
-    // A client id is unique across machines, so it is a random u64 and never a PID: netcode does
-    // NOT enforce client-id uniqueness, so a duplicate id silently OVERWRITES the server's
-    // `PeerId → Entity` mapping, and ownership routing resolves by RAW id value — `ControlledBy` and
-    // `NetworkingMetadata::peer_map` both key on the value, not on which machine sent it. Two
-    // clients sharing an id collide: the server misroutes `ControlledBy`, and an opponent's tank
-    // arrives on the wrong client carrying `Controlled` (turret desync, one client driving both
-    // tanks, input contention). `RandomState::new()` is seeded from OS randomness on every call, so
-    // a fresh hasher's `finish()` yields a random u64 with NO new dependency. Stable for the
-    // session and fresh per launch, so a restarted client cannot collide with its own previous
-    // session inside the server's disconnect timeout.
+    // Random u64, never PID: netcode permits duplicate ids, which overwrite `PeerId → Entity`
+    // and misroute raw-id ownership (`ControlledBy` / `NetworkingMetadata::peer_map`), yielding
+    // turret desync, input contention or one client driving both tanks. OS-seeded `RandomState`
+    // supplies a fresh id per launch without another dependency; it stays fixed for the session
+    // and avoids deterministic collisions with a previous session's disconnect timeout.
     let client_id = std::hash::RandomState::new().build_hasher().finish();
-    // Optional receive conditioning for local diagnostics — OFF by default: any non-zero default
-    // delays every inbound packet, and with it HUD Ping, on a real server. Set `SPIKE_LATENCY_MS` /
-    // `SPIKE_JITTER_MS` explicitly when you want a fake path.
+    // Operator diagnostics (`SPIKE_LATENCY_MS` / `SPIKE_JITTER_MS`), off by default so real
+    // packets and HUD Ping take no artificial delay.
     let latency_ms: u64 = harness::env_parse("SPIKE_LATENCY_MS")?.unwrap_or(0);
     let jitter_ms: u64 = harness::env_parse("SPIKE_JITTER_MS")?.unwrap_or(0);
     let jitter_seed: Option<u64> = harness::env_parse("SPIKE_JITTER_SEED")?;
-    // The periodic burst (both values set = armed): `60 / 33` reproduces the measured field link.
+    // Both burst knobs arm it; MEASURED field-link reproduction: `60 / 33`.
     let burst_ms: u64 = harness::env_parse("SPIKE_BURST_MS")?.unwrap_or(0);
     let burst_period_ticks: u32 = harness::env_parse("SPIKE_BURST_PERIOD_TICKS")?.unwrap_or(0);
     let burst = harness::Burst::parse(burst_ms, burst_period_ticks, tick_duration)?;
@@ -449,55 +443,43 @@ pub fn run() {
         app.insert_resource(harness::SimulateInput::new(
             script.expect("a headless client runs a script"),
         ));
-        // UPSTREAM WORKAROUND, same as every other GPU-less boot of the tank glb: without it,
-        // bevy_image 0.19 PANICS transcoding the Tiger's mipped UASTC KTX2 textures under
-        // `CompressedImageFormats::NONE`, and `tank::spawn` then aborts on the required view
-        // artifact — MEASURED here 2026-08-16 against a packaged client. Canonical mechanism
-        // comment + retirement tripwire: the identical insertion in `headless_test`.
+        // bevy_image 0.19 panics transcoding mipped UASTC KTX2 under `CompressedImageFormats::NONE`,
+        // then required-view loading aborts (MEASURED with a packaged client). `headless_test`
+        // owns the mechanism and retirement tripwire for this shared GPU-less workaround.
         app.insert_resource(bevy::image::CompressedImageFormatSupport(
             bevy::image::CompressedImageFormats::ASTC_LDR,
         ));
     } else {
-        // Read the player's settings BEFORE the window is described — see `load_at_boot`, which
-        // also inserts the values and the boot report into the app.
+        // `load_at_boot` inserts settings and the boot report before window construction.
         let settings = crate::settings::load_at_boot(&mut app);
-        // The windowed runtime reads `OVERMATCH_WINDOW` itself, visible when unset. It reads the
-        // `window` above: a run reaches this branch only by naming a windowed mode or, unscripted,
-        // by leaving the variable unset.
+        // `windowed_runtime` reads the same mode, defaulting to visible for unscripted runs.
         crate::windowed_runtime(
             &mut app,
             Window {
                 // `Unprobed` on purpose: the capability probe needs a surface, which needs
                 // this window — the mapping self-negotiates until the probe lands.
                 present_mode: settings.present_mode(crate::settings::PresentCaps::Unprobed),
-                // Described at creation so a persisted fullscreen boots fullscreen instead
-                // of flashing a window first. The monitor is `at_window_creation`'s and NOT
-                // the stored rung: naming an indexed display here would be cached
-                // unresolved by bevy and would make the `Startup` correction
-                // unrepresentable — see `settings::DisplaySelection`. A hidden run keeps it a
-                // plain window (`run_window`).
+                // Apply persisted fullscreen at creation to avoid a window flash.
+                // `at_window_creation` avoids Bevy caching an unresolved indexed display and
+                // blocking Startup correction (`settings::DisplaySelection`). Hidden runs
+                // stay plain windows (`run_window`).
                 mode: settings
                     .window_mode
                     .to_window_mode(settings.display.at_window_creation()),
                 ..default()
             },
         );
-        // Never drop below the 64 Hz tick: the default `WinitSettings::game()` throttles an
-        // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed client
-        // drifts behind the server and resyncs on refocus (lightyear #1113's jitter class).
+        // `WinitSettings::game()` throttles unfocused windows to 60 Hz, below the 64 Hz tick;
+        // clients drift behind and resync on refocus (lightyear #1113's jitter class). Hidden
+        // clients also use `continuous()`: MEASURED warm-cache four-run catch-up p50 7–8 ticks,
+        // fact lag 7, matching visible clients. Cost: free-running CPU, since an invisible
+        // surface's `SurfaceError::Occluded` skips the vsync block.
         //
-        // `continuous()` holds for HIDDEN capture clients too. `UpdateMode::reactive(1/120)`
-        // was tried here (2026-07-31) and the capture degraded badly — the target received 78
-        // of ~980 fire_rx events, fire catch-up p50 34 ticks (baseline 8, max 65 vs ~13), fact
-        // lag p50 27 (baseline 7) — BUT that measurement is CONFOUNDED: it was the first run
-        // after a fresh build, i.e. a COLD Metal shader cache, which was later shown to stall
-        // clients all by itself (>10 s pipeline compilation after connect, keepalive death,
-        // reconnects burning lanes — clean on the warm rerun). Verdict: reactive is UNPROVEN
-        // either way; `continuous()` is kept because it is measured-good on a warm cache (four
-        // clean runs, catch-up p50 7-8, lag 7, metric-identical to the visible baseline) and is
-        // the smaller delta. The accepted cost is free-running CPU on capture runs (the
-        // invisible surface's `SurfaceError::Occluded` skips the vsync block). Anyone re-trying
-        // reactive must A/B it on a WARM cache.
+        // Rejected as unproven: `UpdateMode::reactive(1/120)`. MEASURED 78 of ~980 fire_rx
+        // events, catch-up p50 34 (baseline 8), max 65 (~13), fact lag p50 27 (7). Confound:
+        // cold Metal shader cache, independently observed to stall >10 s compiling pipelines
+        // after connect, lose keepalive and reconnect repeatedly; warm reruns were clean.
+        // `continuous()` is the measured-good smaller delta; any reactive A/B needs a warm cache.
         app.insert_resource(bevy::winit::WinitSettings::continuous());
         if let Some(script) = script {
             app.insert_resource(harness::SimulateInput::new(script));
@@ -510,27 +492,19 @@ pub fn run() {
     app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(super::plugin);
     app.add_plugins(physics::physics_plugins());
-    // The own-fire presentation ledger (client only): the arriving gate snapshot is a legality
-    // report, not permission to draw. This layer holds the gate the local cadence left, reconciles
-    // the snapshot forward, and feeds `shooting::fire` the consumables this client authored rather
-    // than the attested echo.
+    // `fire_presentation` owns local cadence; arriving gates report legality, and
+    // `shooting::fire` receives locally authored consumables rather than the attested echo.
     app.add_plugins(super::fire_presentation::plugin);
-    // The real sim — same `SimPlugin` the server mounts: cosmetic shells, servos, and the recoil
-    // microsim run against the actual driving/aim/shooting systems, not a stub.
+    // Shared server/offline systems drive cosmetic shells, servos and recoil here too.
     app.add_plugins(SimPlugin);
     // Server-authoritative combat: replicas fly shells cosmetically but never deposit HP or apply
     // hit impulse. Private crew detail and public life state arrive independently from the server;
     // the client never runs `DamageConsequences` to decide either one.
     app.insert_resource(crate::ClientReplica);
-    // Windowed: the game's real presentation + device gather. Its writers fill the
-    // `Controlled` tank's `TankCommand` at render rate; `feed_action_state` (below) hands the
-    // frame's `command::DeviceCommand` to lightyear each tick. Headless simulate mode keeps writing
-    // `ActionState` directly instead (`buffer_input`) — no devices, no window, no presentation.
-    // Mounted for a windowed scripted client too: the device writers it brings fill `TankCommand`
-    // at render rate, but in simulate mode the reverse bridge overwrites that whole struct from the
-    // scripted `ActionState` every tick before any sim system reads it — the script rules, the
-    // presentation stack (camera, HUD, real rendering) still runs, which is exactly the diagnostic
-    // point.
+    // Windowed clients mount presentation/device gather; `feed_action_state` files render-rate
+    // `DeviceCommand` each tick. Scripts own `ActionState` instead, even when windowed: the
+    // reverse bridge overwrites device-written `TankCommand` before sim readers, retaining real
+    // camera/HUD/rendering for diagnostics. Headless scripts mount no presentation or devices.
     if !headless {
         app.add_plugins(NetClientPlugin);
     }
@@ -588,10 +562,8 @@ pub fn run() {
         super::sync_margin::install(&mut app, sync_config, input_delay, interpolation);
     // Read-only buffer-edge starvation and timeline-resync instruments.
     super::frontier::install(&mut app);
-    // Both timeline configs are app-global resources. Inserted AFTER `ClientPlugins`, so
-    // lightyear's `On<Insert, InputTimelineConfig>` observer exists and seeds the input delay
-    // from `input_delay` at once rather than at the first timeline shift. Inputs are stamped and
-    // sent on this timeline regardless of any predicted view.
+    // App-global configs follow `ClientPlugins`: its `On<Insert, InputTimelineConfig>` observer
+    // seeds delay immediately, before stamping/sending, rather than at the first timeline shift.
     app.insert_resource(InputTimelineConfig::new(sync_config, input_delay));
     // Every replica — the own hull included — rides the interpolation buffer behind the server
     // estimate, so it is also the dominant own-input latency term. `net::interp_delay` owns the
@@ -632,9 +604,8 @@ pub fn run() {
     }
     app.insert_resource(template);
     app.add_systems(Startup, load_tank_assets);
-    // The connect screens (joining, and "RECONNECTING…" in a match) are windowed presentation only —
-    // headless automation has no window to draw it, and verifies the state machine via the log
-    // lines `drive_connection` emits instead. Mounted on the same condition as `NetClientPlugin`.
+    // Connect screens share `NetClientPlugin`'s window gate; headless automation observes
+    // `drive_connection` logs instead.
     if !headless {
         app.add_plugins(connect_screen_plugin)
             // The screen is derived after this frame's connection state and before any owner
@@ -653,10 +624,7 @@ pub fn run() {
         app.add_systems(Update, harness::simulate_watchdog)
             .add_systems(
                 FixedPreUpdate,
-                // `stamp_input_tick` chained AFTER the writer: it stamps whatever command the writer
-                // just placed, and must be the last word before lightyear buffers it.
-                // `record_own_intent` chains after the stamp: the client's own copy of what it
-                // filed is keyed by the tick the stamp names.
+                // Writer → stamp → tick-keyed own copy, before Lightyear buffers input.
                 (
                     harness::buffer_input,
                     stamp_input_tick,
@@ -671,14 +639,10 @@ pub fn run() {
     install_input_buffer_guard(&mut app);
     install_input_send_cadence(&mut app);
 
-    // The Esc menu, the alt-tab focus watcher, and the ONE cursor owner live in the overlay
-    // authority (`crate::overlay::plugin`, mounted by `NetClientPlugin` on the same windowed
-    // condition): presence declared into `Overlays`, the cursor moved solely by
-    // `overlay::cursor_owner` from the `input_blocked` license, and the initial grab handled there
-    // too. `gate_player_input`'s "captured cursor = license" gate opens on `grab_mode ==
-    // Locked`, which the cursor owner drives. Headless simulate mounts no overlay authority (no window);
-    // `feed_action_state` stays out of a scripted client (the scripted `buffer_input` owns the wire), so the
-    // authority's command-idling never fights the script.
+    // `NetClientPlugin` mounts the windowed overlay authority: Esc/focus presence →
+    // `overlay::input_blocked` → sole `cursor_owner` and `PlayerInputSet`'s locked-cursor gate,
+    // including initial grab. Headless scripts have no overlay authority; scripted clients
+    // omit `feed_action_state`, so overlay idling cannot fight `harness::buffer_input`.
 
     app.run();
 }
@@ -704,20 +668,8 @@ pub(super) fn install_replica_consumers(app: &mut App) {
                 diagnostics::log_sim_evidence,
             ),
         );
-    // Remote-barrel recoil (the "derive the consequence" half of the opponent-fire seam). Split
-    // across two clocks ON PURPOSE — see the verification finding in `receive_fire_events`:
-    //   - `receive_fire_events` (Update, above) DRAINS the receiver at render rate and captures each
-    //     shot's CAUSE (shooter + weapon slot) into `PendingRecoilKicks`. It must stay render-rate:
-    //     lightyear clears an undrained `MessageReceiver` in `Last` EVERY frame, so a drain on the
-    //     fixed clock would silently lose every `FireEvent` that arrives on a 0-fixed-tick frame
-    //     (the majority of frames whenever render rate exceeds the 64 Hz tick, and ~all of them in
-    //     the headless harness) — a systematic client-side drop, not the network loss the channel is
-    //     built to tolerate.
-    //   - `apply_pending_recoil_kicks` (here, FixedUpdate) DERIVES the spring kick from this client's
-    //     OWN local spec and writes it into `TankSim` on the sim clock, `.before(GameplaySet)` so
-    //     `shooting::apply_recoil` (in `GameplaySet`) springs it the same tick. `TankSim` is
-    //     fixed-clock sim truth; writing it from Update would be a render→sim leak (non-deterministic
-    //     across 0/1/2-tick frames).
+    // `receive_fire_events` owns render-rate drain; `apply_pending_recoil_kicks` owns fixed-clock
+    // TankSim writes. Each documents why its clock cannot change.
     app.init_resource::<PendingRecoilKicks>();
     // Client-only shot dedup, deferred fire resolution, private-receipt dedup, and sanctioned
     // outcomes. The ballistics march reads `SanctionedShots` optionally everywhere else.
@@ -742,14 +694,10 @@ pub(super) fn install_replica_consumers(app: &mut App) {
         FixedUpdate,
         apply_pending_recoil_kicks
             .before(GameplaySet)
-            // Gate on `Playing` to match its consumer: `shooting::apply_recoil` lives in
-            // `GameplaySet` (Playing-only), so the applier that WRITES the kick and the system that
-            // SPRINGS it must agree on when they may run — otherwise a `FireEvent` draining outside
-            // `Playing` writes a kick into `TankSim` that `apply_recoil` never releases.
+            // Match `shooting::apply_recoil`'s Playing gate or kicks could accumulate unreleased.
             .run_if(in_state(AppState::Playing)),
     );
-    // The server's spawn decision, read off the markers that actually arrived. Unconditional: which
-    // clock the own hull moves on is the first thing any capture of this session must state.
+    // Log the arrived role unconditionally: captures must identify the own hull's clock.
     app.add_systems(Update, log_local_tank_role);
 }
 
@@ -757,9 +705,8 @@ pub(super) fn install_replica_consumers(app: &mut App) {
 /// headless harness drives it too), so it is init'd unconditionally.
 #[derive(Resource, Default)]
 struct ConnectRetry {
-    /// The first `Connect` has been triggered (tank assets finished loading). Until then the retry
-    /// driver stays idle: the client entity carries `Disconnected` from spawn (netcode's `#[require]`
-    /// default), which is the pre-connect resting state — NOT a failure to retry.
+    /// First `Connect` triggered after assets load. Spawn-time `Disconnected` is pre-connect
+    /// rest, not a failed attempt to retry.
     initiated: bool,
     /// We reached `Connected` at least once on this link. Distinguishes "never connected yet" (the
     /// joining screen) from "was in game, lost the link" (the match with `RECONNECTING…` over it).
@@ -767,10 +714,9 @@ struct ConnectRetry {
     /// Connect attempts that have already failed and been retried — drives the `(retry N)` suffix
     /// and the backoff schedule. Reset to 0 on a successful `Connected`.
     attempts: u32,
-    /// Real-time deadline (`Time<Real>::elapsed_secs_f64`) for the next retry `Connect`. Armed the
-    /// frame we first observe the failed/`Disconnected` state, cleared the frame we fire the retry.
-    /// Every time in this ledger is real time: virtual time pauses, scales and clamps a long
-    /// frame's delta, and the give-up below compares against these.
+    /// Next retry deadline (`Time<Real>::elapsed_secs_f64`); armed on observed failure, cleared
+    /// on retry. All ledger times are real: virtual time pauses/scales/clamps long frames,
+    /// while give-up must compare elapsed wall time.
     next_retry_at: Option<f64>,
     /// When a once-connected link was first seen down; cleared on `Connected`.
     down_since: Option<f64>,
@@ -786,19 +732,13 @@ struct ConnectRetry {
     tank_seen: bool,
 }
 
-/// Seconds of real time a once-connected matchmaking link keeps reconnecting before the client
-/// gives the match up and returns to the lobby: the match ends when a retry fired at least this
-/// long after the link went down fails. Measured over attempts, not across a stall — a client
-/// whose frames stopped for longer (a suspend, a hitch) still tries once on resume, and a live
-/// server takes it back. TUNED: twice the Worker's 15 s heartbeat deadline, after which the
-/// Worker has dropped a silent server (`decisions.md`, "Reconnect give-up").
+/// Real-time reconnect budget: give up only after a retry fired this long after disconnection
+/// fails. A suspend/hitch therefore still permits one attempt on resume. TUNED: twice the
+/// Worker's 15 s heartbeat deadline for dropping silent servers (`decisions.md`, "Reconnect give-up").
 const RECONNECT_GIVE_UP_S: f64 = 30.0;
 
-/// Backoff before the next reconnect attempt, in seconds. `attempts` is how many connect attempts
-/// have already failed (0 = the first retry, right after the initial attempt fell over). A short,
-/// mildly-growing delay capped at [`RECONNECT_BACKOFF_CAP`]: long enough not to hammer a truly-down
-/// server, short enough that a server started mid-retry is picked up within a couple seconds. Pure
-/// so the schedule is unit-testable without a running app.
+/// Retry backoff, seconds; `attempts == 0` is the first retry. Mild growth avoids hammering a
+/// down server while noticing a newly started one within seconds; capped by [`RECONNECT_BACKOFF_CAP`].
 fn reconnect_backoff_secs(attempts: u32) -> f64 {
     const BASE: f64 = 1.0;
     const STEP: f64 = 0.5;
@@ -813,36 +753,23 @@ fn reconnect_backoff_secs(attempts: u32) -> f64 {
 /// ([`close_verdict`]).
 const RECONNECT_BACKOFF_CAP: f64 = 5.0;
 
-/// After this many failed connect attempts the status overlay stops saying only "CONNECTING…" and
-/// adds the version-mismatch hint. WHY a count and not a specific "PROTOCOL MISMATCH" line: a
-/// fingerprint-skewed peer — a different wire manifest, map OR tank construction — is refused by netcode
-/// dropping the undecryptable connect token silently (see `net::protocol::protocol_id`), which the
-/// client observes as
-/// `ConnectionRequestTimedOut` — byte-for-byte the same terminal state as a down/unreachable server
-/// (verified against vendored `lightyear_netcode` client.rs `update_state`). The two are transport-
-/// indistinguishable, so the honest message names BOTH causes. The attempt threshold is a
-/// presentation policy: repeated timeouts warrant showing the possibilities, not a diagnosis
-/// that startup has finished or that the build is definitely wrong.
+/// Failed-attempt threshold for the combined server-down/build-or-asset-mismatch hint.
+/// A skewed wire/map/construction tag drops the undecryptable token (`protocol::protocol_id`);
+/// the client sees `ConnectionRequestTimedOut`, identical to an unreachable server
+/// (vendored `lightyear_netcode` client.rs `update_state`). The count warrants naming both
+/// possibilities, not diagnosing a build mismatch or claiming server startup has finished.
 const MISMATCH_HINT_AFTER_ATTEMPTS: u32 = 3;
 
-/// The connection state machine, run every frame in every mode. It owns both the FIRST connect
-/// (asset-gated) and every retry after a failed or dropped link, reading the connection state off
-/// the single client entity's lightyear markers:
-///   - **`Connected`** — the link is up. Clear the retry ledger (so a LATER drop starts a fresh
-///     backoff) and latch `connected_once` (so that later drop presents as `RECONNECTING…`, not a
-///     first connect). Nothing else to do; possession + the game HUD take over.
-///   - **not yet initiated** — gate the first `Connect` on the tank assets, exactly as the old
-///     asset-gate did: the sim body spawns whole from extracted data the moment the replicated root
-///     lands, and preloading keeps view pop-in to ~a frame. (No local ground spawn: `SimPlugin` →
-///     `world::plugin` builds the real terrain on both sides; the track force probes sample it.)
-///   - **`Connecting`** — a connect is in flight (netcode `SendingConnectionRequest`/
-///     `ChallengeResponse`); wait it out.
-///   - **authenticated denial** — retain its typed cause for the visible label and stop retries.
-///   - **`Disconnected` after initiating** — the attempt failed (timeout / link drop) and
-///     netcode inserted `Disconnected`. Arm a backoff, then fire a fresh `Connect` when it elapses.
-///     A fresh `Connect` re-runs netcode's handshake on the same link: while the entity is still
-///     `Linked` (a transient netcode disconnect), lightyear's UDP `LinkStart` skips it, so the retry
-///     reuses the source socket. The client_id stays the session-stable one.
+/// Frame-rate first-connect/retry driver over the single link's markers.
+///
+/// * `Connected`: clear retry ledger, latch `connected_once`; later loss shows RECONNECTING.
+/// * Uninitiated: await tank assets so the replicated root assembles whole from extracted data
+///   with view pop-in of CLAIMED ~one frame. `SimPlugin` / `world::plugin` supplies real terrain
+///   on both peers for track probes; no local ground spawn.
+/// * `Connecting`: await netcode's SendingConnectionRequest/ChallengeResponse.
+/// * Authenticated denial: retain the typed cause for the label, stop retries.
+/// * Failed/disconnected: back off, then trigger `Connect` on the same link/client id. A transient
+///   disconnect can remain `Linked`; UDP `LinkStart` then skips it, reusing the source socket.
 fn drive_connection(
     real: Res<Time<Real>>,
     assets: Res<PendingTankAssets>,
@@ -902,15 +829,10 @@ fn drive_connection(
         return;
     }
 
-    // A connect is in flight — leave the timer alone and wait for it to resolve to Connected or
-    // fall back to Disconnected.
     if connecting {
         return;
     }
 
-    // Initiated, not connected, not connecting => the attempt failed and netcode inserted
-    // `Disconnected`. A failed retry fired past the give-up exhausts the match; otherwise retry on
-    // a backoff.
     if let (Some(down), Some(attempted)) = (retry.down_since, retry.last_attempt_at)
         && attempted - down >= RECONNECT_GIVE_UP_S
     {
@@ -926,10 +848,7 @@ fn drive_connection(
             retry.next_retry_at = None;
             retry.last_attempt_at = Some(now);
             commands.trigger(Connect { entity });
-            // Log netcode's terminal reason for the breadcrumb it gives (`ConnectionRequestTimedOut`
-            // vs `ConnectionDenied` etc.). It does NOT distinguish a fingerprint mismatch from an
-            // unreachable server — both time out — so the overlay shows the combined hint after
-            // `MISMATCH_HINT_AFTER_ATTEMPTS`; this is purely for a dev reading the console.
+            // Dev breadcrumb only; `MISMATCH_HINT_AFTER_ATTEMPTS` owns why timeouts are ambiguous.
             let reason = disconnected
                 .map_or_else(|| "no reason reported".to_owned(), |d| d.reason.to_string());
             info!(
@@ -1068,7 +987,6 @@ struct Leaving {
     seen: bool,
 }
 
-/// The player asked to leave: disconnect the link and mark it [`Leaving`].
 fn start_leaving(
     mut leave: MessageReader<super::matchmaking::LeaveMatch>,
     links: Query<Entity, (With<NetcodeClient>, Without<Leaving>)>,
@@ -1187,7 +1105,7 @@ pub(super) fn connect_screen_plugin(app: &mut App) {
         );
 }
 
-/// The joining screen's label, and the failed-attempt count it renders.
+/// Joining-screen marker; label content comes from `ConnectRetry`.
 #[derive(Component)]
 struct JoiningText;
 
@@ -1250,7 +1168,6 @@ fn joining_label(attempts: u32) -> String {
     }
 }
 
-/// Rewrite the loading screen's label when the state it renders changes.
 fn update_joining_screen(retry: Res<ConnectRetry>, mut text: Query<&mut Text, With<JoiningText>>) {
     let label = screen_label(&retry);
     for mut text in &mut text {
@@ -1513,11 +1430,8 @@ fn log_local_tank_role(
     info!("client: own tank {entity} drives INTERPOLATED (server stream)");
 }
 
-/// Barrel recoil kicks awaiting the sim clock: `(shooter root, weapon slot)` per opponent shot,
-/// captured at render rate by [`receive_fire_events`] and consumed on the fixed clock by
-/// [`apply_pending_recoil_kicks`]. The queue is the seam between the render-rate message drain (which
-/// must stay render-rate — lightyear clears an undrained receiver every frame in `Last`) and the
-/// fixed-clock `TankSim` write (which must be on the sim clock — see [`apply_pending_recoil_kicks`]).
+/// `(shooter root, weapon slot)` causes from render-rate [`receive_fire_events`] to
+/// fixed-clock [`apply_pending_recoil_kicks`]. Those systems own the drain/write clock constraints.
 #[derive(Resource, Default)]
 pub(super) struct PendingRecoilKicks(Vec<(Entity, usize)>);
 
@@ -1528,7 +1442,6 @@ impl PendingRecoilKicks {
         self.0.push((shooter, weapon));
     }
 
-    /// Test-only inspection of the queued causes.
     #[cfg(test)]
     pub(super) fn queued(&self) -> &[(Entity, usize)] {
         &self.0
@@ -1589,9 +1502,8 @@ impl ReceivedFire {
     }
 }
 
-/// Why this client refuses an authority fire fact. The tank data is in the handshake tag
-/// (`protocol::protocol_id`), so a peer that completed it holds the same weapons, rounds and fuze
-/// modes: each refusal is a malformed outside fact, logged and dropped, never deferred.
+/// The game's damage model: handshake-matched tank data fixes weapons, rounds and fuze modes
+/// (`protocol::protocol_id`). These are malformed outside facts: logged/dropped, never deferred.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FireRefusal {
     /// The origin is not finite.
@@ -1713,13 +1625,9 @@ impl SeenDamage {
     }
 }
 
-/// The link ended: every estimator and ledger keyed to that server's tick clock starts empty for
-/// the next connection. A new server's timeline starts behind the old one's, so a carried-over
-/// newest tick would reject the new server's arrivals ([`ArrivalDelay`](super::sync_margin::ArrivalDelay))
-/// and this client's newly authored inputs ([`AuthoredIntent`](super::fire_presentation::AuthoredIntent)),
-/// and a pending trigger edge would replay onto the next tank; the impulse ticks
-/// ([`ImpulseTicks`](super::frontier::ImpulseTicks)) would classify the new server's gaps by
-/// the old server's ticks.
+/// Reset server-clocked state on link end: an earlier new-server tick must not be rejected by
+/// `sync_margin::ArrivalDelay` or `fire_presentation::AuthoredIntent`; pending edges must not
+/// replay on the next tank, nor `frontier::ImpulseTicks` classify gaps using old-server ticks.
 fn reset_link_state(
     _ended: On<Remove, Connected>,
     mut arrival: ResMut<super::sync_margin::ArrivalDelay>,
@@ -1749,7 +1657,7 @@ fn retire_link_shells(
 /// INVARIANT: Lightyear does not carry message-channel backlog across connections. Clearing these
 /// client-only ledgers therefore cannot discard an in-flight fact from the new connection, and it
 /// prevents a later server connection that reuses match-local ids from colliding with the previous
-/// link. A connection spanning multiple Battles is forbidden until `ShotId` carries a Battle epoch.
+/// link. `ShotId` must remain unique for the connection, including across Battles.
 fn reset_shot_receive_state(
     _connected: On<Add, Connected>,
     mut recoil: ResMut<PendingRecoilKicks>,
@@ -1767,7 +1675,7 @@ fn reset_shot_receive_state(
     *sanctioned = default();
 }
 
-/// The four public fire-fact channels [`receive_fire_events`] drains.
+/// Public batch, fire and outcome receivers drained by [`receive_fire_events`].
 #[derive(SystemParam)]
 pub(super) struct FireInbox<'w, 's> {
     batch_receivers: Query<'w, 's, &'static mut MessageReceiver<FireVisualBatch>>,
@@ -1775,9 +1683,7 @@ pub(super) struct FireInbox<'w, 's> {
     outcome_receivers: Query<'w, 's, &'static mut MessageReceiver<FlightOutcome>>,
 }
 
-/// The client's fire-presentation books that [`receive_fire_events`] writes: recoil kicks owed to
-/// the fixed clock, the shot dedup cache, announcements held for the interpolation cursor, fire
-/// visuals awaiting their shooter root, and the sanctioned-outcome buffer.
+/// The game's damage-model presentation ledgers and path cursor, written by [`receive_fire_events`].
 #[derive(SystemParam)]
 pub(super) struct FireLedgers<'w> {
     pending: ResMut<'w, PendingRecoilKicks>,
@@ -1801,20 +1707,15 @@ pub(super) struct FireLedgers<'w> {
 /// `TankSim` recoil write crosses to the fixed clock.
 pub(super) fn receive_fire_events(
     inbox: FireInbox,
-    // A fire's shooter root and its weapon's round must resolve before a cosmetic shell exists.
     shooters: FireShooters,
-    // Fast-forward remote shells to this client's current tick.
     timeline: Res<LocalTimeline>,
     // The release clock: the fractional interpolation cursor every held announcement compares its
     // fire tick against. Synced-only — a pre-sync client has no interpolated motion to fuse with,
     // so its events present at arrival.
     cursor: Option<Res<InterpolationTimeline>>,
     ledgers: FireLedgers,
-    // Nested: the optional lifecycle recorder for wire arrivals/dedup results, the impulse
-    // ledger for the buffer-edge gap∧impulse coincidence instrument (a fire announcement marks
-    // the tick the shooter's hull surged), and the own-fire ledger + counters for swallowing a
-    // late echo the fallback already presented. A tuple param keeps the system within clippy's
-    // `too_many_arguments` limit.
+    // Fire ticks feed the gap∧impulse instrument; own ledgers swallow already-recovered echoes.
+    // Tuple grouping keeps the system within clippy's argument limit.
     (mut shot_trace, mut impulses, mut own_ledgers, mut own_diag): (
         Option<ResMut<crate::shot_trace::ShotTrace>>,
         ResMut<super::frontier::ImpulseTicks>,
@@ -2081,10 +1982,8 @@ impl FireShooters<'_, '_> {
     }
 }
 
-/// The release half of the cursor hold: pop every fire whose tick the cursor has crossed and
-/// present it. A fire [`FireShooters::resolve`] cannot resolve defers to [`PendingFireEvents`],
-/// which owns the replica-race case (and its TTL) exactly as it did when presentation was at
-/// arrival. `None` cursor = release everything (pre-sync fallback: arrival presentation).
+/// Release at cursor crossing, deferring unresolved shooters to [`PendingFireEvents`]
+/// and its replica-race TTL. No pre-sync cursor means release all at arrival.
 #[expect(
     clippy::too_many_arguments,
     reason = "one release boundary owns cursor crossing and shooter resolution"
@@ -2245,9 +2144,7 @@ fn spawn_reconstructed_fire(
             pending_recoil,
             commands,
         ),
-        // ARRIVAL clock — the surviving arrival-assigned presentation site: a pre-sync client has
-        // no cursor (the queue released everything at arrival), so the shot ages against the local
-        // timeline exactly as it did before the cursor existed.
+        // Pre-sync arrival presentation has no cursor; age against the local timeline.
         None => fire_catch_up_ticks(event.fire_tick, now).inspect(|&catch_up_ticks| {
             super::fire_presentation::present_shot_at_age(
                 catch_up_ticks,
@@ -2332,35 +2229,21 @@ fn consume_damage_confirm(
     }
 }
 
-/// Age the observer's server-sanctioned bounce buffer each fixed tick and evict entries past a shell's
-/// lifetime — the `net::client` half of the buffer's ring discipline (the ballistics march only READS
-/// it). Fixed clock so expiry is measured in sim time, matching the shells that consume it; the buffer
-/// lives only on the client, so this is the sole ager.
+/// The game's damage model: sole ager of the client-only sanctioned-path buffer, which the
+/// ballistics march only reads. Fixed-clock expiry matches its cosmetic shells' sim-time lifetime.
 pub(super) fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time: Res<Time>) {
     sanctioned.age(time.delta_secs());
 }
 
-/// LOCAL/ARRIVAL-clock shell age: ticks from `fire` to the local present `now`
-/// (`LocalTimeline::tick()`). Two call sites only — the consume-time validity bar (a fire whose
-/// tick is absurd against the local present is dropped before it is held), and the pre-sync
-/// arrival-presentation fallback in [`spawn_reconstructed_fire`]. A CURSOR-released shot never
-/// ages through this: its age is the seam's `cursor − released_tick`
-/// (`net::fire_presentation::present_released_shot`). `Some(n)` fast-forwards `n` ticks (`n == 0`
-/// = spawn at the muzzle and fly normally); `None` REJECTS the shot as absurd (the caller skips
-/// the tracer AND the recoil).
+/// The game's damage model: local/arrival age for ingress validity and pre-sync presentation
+/// (`spawn_reconstructed_fire`). Cursor releases use `fire_presentation::present_released_shot`
+/// instead. `None` skips tracer and recoil; `Some(0)` spawns at the muzzle without rewinding.
 ///
-/// Bounded by construction: lightyear's `Tick` is a MONOTONIC `u32` that does not wrap, and
-/// `Sub<Tick>` returns the signed difference saturated to the `i32` range — never a naive `u32`
-/// subtraction that would underflow. The network publication boundary refuses timeline
-/// exhaustion, so no privately wrapped gameplay tick enters this numerically ordered domain.
-/// Outside-input ticks remain bounded by these arms, as the saturation test pins.
-///   - elapsed < 0: the fire tick is AHEAD of our current tick. The server fires at a tick ≤ its
-///     own now, and the local (input) timeline runs ahead of the server, so this only happens on
-///     clock skew or a malicious tick — don't rewind; spawn at the muzzle (`Some(0)`).
-///   - 0 ≤ elapsed ≤ [`MAX_COSMETIC_CATCH_UP_TICKS`]: fast-forward that many ticks (the normal
-///     case is DERIVED approximately 10).
-///   - elapsed > [`MAX_COSMETIC_CATCH_UP_TICKS`]: absurd / stale nonsense — reject
-///     (`None`), no loop.
+/// Lightyear's monotonic u32 `Tick` difference saturates to i32, so outside-input extremes stay
+/// bounded; network publication refuses timeline exhaustion rather than privately wrapping.
+/// Ahead-of-local fire ticks (clock skew or malicious input) yield zero; elapsed ticks through
+/// [`MAX_COSMETIC_CATCH_UP_TICKS`] fast-forward (normal case DERIVED approximately 10); older
+/// ticks refuse without a catch-up loop. The local input timeline normally leads server time.
 fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
     let elapsed = now - fire;
     if elapsed < 0 {
@@ -2370,37 +2253,22 @@ fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
     (elapsed <= MAX_COSMETIC_CATCH_UP_TICKS).then_some(elapsed)
 }
 
-/// Kick each opponent shot's barrel recoil spring, on the SIM clock — the "derive the consequence"
-/// half of remote recoil. Drains [`PendingRecoilKicks`] (captured at render rate by
-/// [`receive_fire_events`]) and, for each `(shooter, slot)`, finds the firing weapon on THIS client's
-/// own local rig and hands `(sim, slot, weapon)` to the shared [`crate::shooting::kick_recoil`] — the
-/// SAME model `shooting::fire` uses for a locally-fired shot (barrel + recoil gate included), so the
-/// shooter's own recoil and every opponent's view of that shot can't diverge. Nothing about the
-/// impulse rides the wire — only which weapon fired; each machine derives the identical kick from its
-/// shared RON spec (the muzzle carries the `Weapon` config, keyed by `WeaponIndex`).
-/// `shooting::apply_recoil` then springs the barrel back home from this velocity.
+/// The game's damage-model presentation: derive barrel kicks from local `Weapon` specs via
+/// `shooting::kick_recoil`, shared with local fire (barrel/recoil gates included). Wire facts
+/// carry only shooter/slot; `WeaponIndex` selects the muzzle's spec, and `apply_recoil` springs
+/// the velocity home. Fused own echoes use this queue too; local fire applied no barrel kick.
 ///
-/// Scheduled `FixedUpdate`, `.before(GameplaySet)` so `apply_recoil` (in the set) sees the kick the
-/// same tick; gated `in_state(Playing)` to match that consumer (see the registration). `TankSim` is
-/// fixed-clock sim truth — a render-rate write would be a render→sim leak, non-deterministic across
-/// 0/1/2-tick frames.
-///
-/// Public fire facts reach the shooter too: under fused own fire the echo carries the own barrel
-/// kick through this same queue (the local fire tick applied none).
-///
-/// A kick is enqueued only for a shot bound against the shooter's assembled rig (or its own
-/// recovered round), so a missing muzzle or root here is the shooter despawned between the
-/// render-rate enqueue and this tick (knocked out and removed, or its link ended): skipped.
-/// `kick_recoil` owns the rest (a recoil-less weapon such as a coax).
+/// `FixedUpdate`, before `GameplaySet`, with `apply_recoil`'s Playing gate: kicks spring in the
+/// same tick. Render-rate TankSim writes would vary across 0/1/2-tick frames.
+/// Queued causes already resolved an assembled rig (or a recovered own shot); missing muzzle/root
+/// means despawn between enqueue and tick (knocked out/removed or link ended), so skip.
+/// `kick_recoil` owns legitimate recoil-less weapons such as a coax.
 fn apply_pending_recoil_kicks(
     mut pending: ResMut<PendingRecoilKicks>,
     muzzles: Query<(&WeaponIndex, &Weapon, &TankRoot), With<Muzzle>>,
     mut sims: Query<&mut TankSim>,
 ) {
     for (shooter, slot) in pending.0.drain(..) {
-        // Find the firing weapon on THIS machine's local rig, keyed by the slot; `kick_recoil` owns
-        // the rest of the decision (barrel + recoil present, slot valid) so it can't diverge from
-        // `shooting::fire`. A missing muzzle is a shooter despawned since the enqueue — skip.
         let Some((_, weapon, _)) = muzzles
             .iter()
             .find(|(index, _, root)| root.0 == shooter && index.0 == slot)
@@ -2428,15 +2296,11 @@ pub(super) fn install_device_feed(app: &mut App) {
     );
 }
 
-/// Windowed input path: file the frame's device command ([`DeviceCommand`]: what the game's own
-/// client writers — `gather_commands`, `commit_aim`, `drive_gunner_aim`, the range dial, the crew
-/// bar — wrote at render rate, neutral while the death flow owns the device) into the `Controlled`
-/// tank's `ActionState` slot each tick, where the input plugin buffers it for the wire; a slot
-/// without `Controlled` files the default command. Every tick of the frame files the device's
-/// levels; its edges are cleared after the first, so each edge is filed on exactly one tick. The
-/// reverse bridge (net::protocol) hands the buffered command back to the sim as `TankCommand`,
-/// which is never read here. When input is blocked = a default command: the tank coasts to a stop
-/// instead of holding the last input, and clicks in the menu don't fire.
+/// File render-rate [`DeviceCommand`] into each tick's controlled `ActionState`; unowned slots
+/// or blocked input file idle so tanks coast and menu clicks do not fire. Device writers include
+/// drive/aim/range/crew UI; death flow neutralizes their device. Levels repeat across the frame,
+/// edges clear after its first tick. The reverse protocol bridge returns buffered input to
+/// `TankCommand`, never read here.
 fn feed_action_state(
     overlays: Res<crate::overlay::Overlays>,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -2446,13 +2310,9 @@ fn feed_action_state(
         With<InputMarker<TankCommand>>,
     >,
 ) {
-    // The ONE license, `overlay::input_blocked` — the same authority that feeds the cursor owner and
-    // (via the released cursor + `state::cursor_locked`) gates `PlayerInputSet`. Blocked (menu / connect
-    // screen up, or window unfocused) → send a default command, so the moment we stop reading devices
-    // the tank coasts to a stop instead of holding the last input forever. Because the identical
-    // derivation also releases the cursor, every system that could latch anything into the command
-    // (drive gather, aim commit, respawn request) is already frozen whenever this zeroing is active —
-    // no second inference to keep in sync.
+    // `overlay::input_blocked` also releases the cursor and gates `PlayerInputSet` through
+    // `state::cursor_locked`: drive/aim/respawn cannot latch while this idles commands, with
+    // no second inference to synchronize (menu/connect screen or unfocused window).
     let focused = match windows.single() {
         Ok(window) => window.focused,
         // The primary window has closed at exit: no device has focus, so file idle commands.
@@ -2472,28 +2332,15 @@ fn feed_action_state(
     device.0.clear_edges();
 }
 
-/// Stamp `TankCommand::for_tick` — **the one place input provenance is created**, and the reason the
-/// sim can ever trust a command it reads out of an input buffer.
+/// Sole input-provenance writer: stamp Lightyear's filing tick, `local_tick + input_delay`,
+/// using `LocalTimelineSync::input_delay()` exactly as `buffer_action_state` does.
+/// `InputSystems::WriteClientInputs` chains after `feed_action_state` / `harness::buffer_input`
+/// and before `BufferClientInputs`. Pre-sync buffering is gated by `SyncedLocalTimeline`,
+/// so a pre-sync stamp never reaches the wire.
 ///
-/// Runs in `InputSystems::WriteClientInputs`, chained AFTER whichever writer filled the
-/// `ActionState` this tick (`feed_action_state` windowed, `harness::buffer_input` headless), and
-/// therefore BEFORE lightyear's `buffer_action_state` (`InputSystems::BufferClientInputs`, which
-/// lightyear orders strictly after `WriteClientInputs`). It stamps the command with `local_tick +
-/// input_delay` — computed EXACTLY as `buffer_action_state` computes the slot it is about to file
-/// the command into — so the stamp names the tick the command will be READ back on, on this client
-/// and on the server alike.
-///
-/// From here the stamp is inert: it rides the `InputBuffer`, the wire, and the server's
-/// `InputBuffer` without ever being rewritten. `net::protocol`'s bridge compares it against
-/// the tick actually being simulated, and any command lightyear inherited, repeated, fabricated or
-/// froze necessarily names a DIFFERENT tick. That is the whole mechanism — see
-/// `bridge_action_state_to_tank_command` for the four ways it happens and
-/// `TankCommand::fail_consumables_closed` for what we refuse to do about them.
-///
-/// The delay is lightyear's own `LocalTimelineSync::input_delay()` — the one its
-/// `buffer_action_state` files the command under — so the stamp and the buffer slot cannot name
-/// different ticks. Pre-sync the buffer is not written at all (lightyear gates it on
-/// `SyncedLocalTimeline`), so a pre-sync stamp never reaches the wire.
+/// The stamp stays inert through both buffers and the wire. `net::protocol` attests the actual
+/// simulated tick; inherited/repeated/fabricated/frozen input retains a different tick. See
+/// `bridge_action_state_to_tank_command` and `TankCommand::fail_consumables_closed`.
 pub(super) fn stamp_input_tick(
     timeline: Res<LocalTimeline>,
     sync: Res<LocalTimelineSync>,
@@ -2514,10 +2361,8 @@ mod hosted_e2e;
 #[cfg(test)]
 mod match_exit;
 
-/// `apply_pending_recoil_kicks` derives a remote shot's barrel recoil from the LOCAL spec — these
-/// exercise that derivation directly against a minimal rig. An external integration test can't reach
-/// the sim types (`crate::tank` is a private module — `TankSim`/`Weapon`/`WeaponIndex` are not
-/// externally nameable), so the honest test lives here in-crate, over real ECS state.
+/// In-crate ECS tests can reach private `tank` types (`TankSim` / `Weapon` / `WeaponIndex`)
+/// unavailable to external integration tests. Recoil probes exercise the local-spec derivation.
 #[cfg(test)]
 mod tests {
     /// The loading screen's consumers need the own tank presented, which its bound view states;
@@ -2783,26 +2628,14 @@ mod tests {
         }
     }
 
-    /// TRIPWIRE — **the shipping input delay must be CONSTANT.**
-    ///
-    /// This fails the moment someone swaps [`shipping_input_delay`] back to an ADAPTIVE config
-    /// (`InputDelayConfig::balanced()`, or any config whose minimum and maximum differ), which is
-    /// exactly the change that reintroduces the MG release leak — a delay that wobbles breaks
-    /// lightyear's `Δend_tick == 1` assumption and either strands a stale PRESSED input on the
-    /// server or fabricates a `SameAsPrecedent` one on both ends. See [`SHIPPING_INPUT_DELAY_TICKS`]
-    /// for the full mechanism and `src/net/tests/net_fire_release.rs` for it driven over real
-    /// lightyear.
-    ///
-    /// The assertion is on the config's SHAPE rather than on a swept `input_delay_ticks()` because
-    /// that function is private to `lightyear_sync`. `minimum == maximum` is precisely its
-    /// RTT-independence condition: with `min == max == n`, `rtt_ticks <= n` returns `n`, and every
-    /// remaining branch returns `maximum_input_delay_before_prediction == n` for any `rtt_ticks <=
-    /// maximum_predicted_ticks + n`. Only past that (~1.6 s of ping at 64 Hz — long past playable)
-    /// does it grow again.
-    ///
-    /// If you genuinely need adaptive input delay back, the fix is NOT to delete this test: it is to
-    /// make lightyear's client stop re-authoring a buffer tick it has already sent (upstream write-up
-    /// in `upstream/lightyear-absent-anchor-input-freeze.md`).
+    /// Constant delay protects Lightyear's `Δend_tick == 1`: adaptive delay can strand a stale
+    /// pressed input or fabricate `SameAsPrecedent`, keeping automatic fire active after release
+    /// (`src/net/tests/net_fire_release.rs`). Test config shape because lightyear_sync's
+    /// `input_delay_ticks()` is private: equal minimum/maximum returns n for RTT ≤ n and then
+    /// `maximum_input_delay_before_prediction == n` through `maximum_predicted_ticks + n`;
+    /// beyond that (DERIVED ~1.6 s ping at 64 Hz) delay still grows.
+    /// Adaptive delay requires fixing re-authorship of sent buffer ticks, not deleting this guard
+    /// (`upstream/lightyear-absent-anchor-input-freeze.md`).
     #[test]
     fn input_delay_is_constant() {
         let config = shipping_input_delay();
@@ -2836,10 +2669,8 @@ mod tests {
         buffer
     }
 
-    /// Exercise the installed PostUpdate guard alone: this App deliberately does not install
-    /// `ClientPlugins`, so `PrepareInputMessage` and its unsafe native encoder are absent. The
-    /// schedule run still proves the guard's real system query updates the metric as well as the
-    /// buffer, rather than only proving the extracted helper in isolation.
+    /// Installed PostUpdate guard, deliberately without `ClientPlugins`/native encoding: prove
+    /// its real query clears buffers and counts them, not just its helper's return value.
     #[test]
     fn installed_input_buffer_guard_clears_only_inverted_ranges_and_counts_them() {
         let mut app = App::new();
@@ -2938,8 +2769,7 @@ mod tests {
             "a frame with no new tick stages nothing"
         );
 
-        // The resync, as lightyear's sync applies it between this frame's staging and the next
-        // (lightyear's own observer moves `LocalTimeline` by the delta).
+        // Lightyear's observer shifts `LocalTimeline` between staging frames.
         app.world_mut().trigger(LocalTimelineShift { delta: 20 });
         assert_eq!(app.world().resource::<LocalTimeline>().tick(), Tick(120));
         set_delay(&mut app, 3);
@@ -3504,7 +3334,7 @@ mod tests {
         let event = fire_event(root, 7, 100);
         let shot = event.shot_id();
 
-        // Arrival: predicted present 108, cursor 93.5 — the fire tick is 6.5 ticks ahead.
+        // Fixture: local present 108, cursor 93.5; DERIVED fire-tick lead 6.5 ticks.
         consume_and_release(world, event, Tick(108), Some((Tick(93), 0.5)));
         for _ in 0..3 {
             release_at(world, Tick(108), Some((Tick(93), 0.5)));
@@ -3538,13 +3368,12 @@ mod tests {
         );
     }
 
-    /// CERTIFICATION — the released burst, over the production consume/release gates: a 750-rpm
-    /// MG belt plus cannon rounds arrive ahead of the cursor and release as it sweeps. The
-    /// counters must agree — bang = flash = tracer = consumed rounds — and every round must
-    /// spawn younger than one tick (`catch_up_ticks` 0), which bounds its tracer's spawn
-    /// distance from the muzzle to `catch_up · v · Δt = 0 m`, strictly under one tick of shell
-    /// flight (`v · Δt` = 12.5 m at 800 m/s). The one named shot-skip class — a redundant
-    /// transport copy of an already-presented shot — is probed and presents nothing.
+    /// The game's damage-model presentation: fixture burst through production consume/release
+    /// gates, observing reconstructed `FireShell` events. DERIVED 768 rpm at 64 Hz (one every
+    /// five ticks), plus sparse shots. Each event must be unique, tracer-enabled and under the
+    /// flash age gate. Age zero gives DERIVED `catch_up · v · Δt = 0 m` muzzle offset, under
+    /// one flight tick (DERIVED 12.5 m at 800 m/s, 64 Hz). Redundant copies emit nothing;
+    /// actual sound/flash/tracer consumers are not mounted.
     #[test]
     fn released_burst_presents_every_consumed_round_exactly_once() {
         use crate::ballistics::STALE_FIRE_TICKS;
@@ -3729,7 +3558,7 @@ mod tests {
 
     /// REPLICATION DEBT DEFERS, A MALFORMED FACT DOES NOT: a fire whose root has replicated but
     /// whose rig has not attached (no muzzle yet) waits in [`PendingFireEvents`] and presents once
-    /// the rig arrives; a fire whose bore is not a unit direction is refused at the message edge
+    /// the rig arrives; a bore without a finite nonzero direction is refused at the message edge
     /// and never held. Mutants: refusing the rig-pending fire loses an opponent's shot on every
     /// join; holding the malformed bore carries an unparsed fact into presentation.
     #[test]
@@ -4027,7 +3856,6 @@ mod tests {
     fn reconnect_backoff_is_capped() {
         assert_eq!(reconnect_backoff_secs(100), RECONNECT_BACKOFF_CAP);
         assert_eq!(reconnect_backoff_secs(u32::MAX), RECONNECT_BACKOFF_CAP);
-        // Monotonic non-decreasing up to the cap.
         for n in 0..20 {
             assert!(reconnect_backoff_secs(n) <= reconnect_backoff_secs(n + 1));
             assert!(reconnect_backoff_secs(n) <= RECONNECT_BACKOFF_CAP);
