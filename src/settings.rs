@@ -418,8 +418,7 @@ impl BloomLevel {
 /// the picture. We neither enumerate nor set modes: the drawable keeps the real window size,
 /// and this ladder controls only the 3D pass's share, like WoW's "Render Scale".
 ///
-/// 50% and 100% are sharp: at half panel resolution macOS WindowServer quadruples pixels without
-/// interpolation. Three intermediate bilinear rungs trade sharpness for fill rate, avoiding a
+/// Below 100%, bilinear upscaling trades sharpness for fill rate. Intermediate rungs avoid a
 /// single large jump from 100% to 50%.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub(crate) enum RenderScaleLevel {

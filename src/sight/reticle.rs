@@ -124,8 +124,8 @@ pub(super) fn plugin(app: &mut App) {
 /// Mount the same projection schedule in the client and the headless layout fixture.
 fn mount_placement(app: &mut App) {
     // Reproject after camera placement and transform propagation: graticule and camera read the
-    // same VIEW gun GlobalTransform. Mouse intent and `interpolate_servos` both run in Update,
-    // keeping every input at render rate without aliasing.
+    // same VIEW gun GlobalTransform. Gunner intent commits before the fixed loop;
+    // `interpolate_servos` presents servo angles in Update.
     app.add_systems(
         PostUpdate,
         (
