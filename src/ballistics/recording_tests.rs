@@ -871,6 +871,297 @@ fn a_round_from_a_knocks_out_b_crediting_a_a_knockout_and_b_a_loss() {
     );
 }
 
+/// The game's damage model: independent marker insertions and attributed facts from the shipped
+/// consequence/recorder plugins. Combatant identities and the wait below are fixture data.
+#[derive(Resource, Default)]
+struct KnockoutFacts {
+    transitions: Vec<Entity>,
+    attributed: Vec<(Entity, crate::damage::KnockoutCause)>,
+}
+
+fn scoring_world() -> (App, Entity, Entity) {
+    use crate::net::score::{RespawnWait, Scoreboard};
+    use crate::{CombatantId, CombatantLife};
+
+    let mut app = recording_world(false);
+    crate::net::score::mount(&mut app, RespawnWait::new(Duration::from_secs(1), TICK));
+    app.init_resource::<crate::ShotClock>()
+        .init_resource::<KnockoutFacts>()
+        .add_observer(
+            |add: On<Add, TankKnockedOut>, mut facts: ResMut<KnockoutFacts>| {
+                facts.transitions.push(add.entity);
+            },
+        )
+        .add_observer(
+            |event: On<crate::damage::TankKnockout>, mut facts: ResMut<KnockoutFacts>| {
+                facts.attributed.push((event.tank, event.cause));
+            },
+        );
+    let board = app
+        .world_mut()
+        .spawn((
+            Scoreboard::default(),
+            crate::net::battle::BattleState::combat_fixture(),
+        ))
+        .id();
+    let shooter = app
+        .world_mut()
+        .spawn((CombatantId(1), CombatantLife(0)))
+        .id();
+    app.world_mut().spawn((CombatantId(3), CombatantLife(0)));
+    (app, board, shooter)
+}
+
+/// The game's damage model: scoring fixtures use the shipped crew representation (ADR-0040),
+/// so a round's crew line rate decides their dose independently of hard-body energy loss.
+fn scoring_witnesses(app: &mut App, boxes: &[Entity]) {
+    for &volume in boxes {
+        if app.world().get::<CrewStation>(volume).is_some() {
+            app.world_mut()
+                .entity_mut(volume)
+                .remove::<BallisticVolume>()
+                .insert((
+                    WitnessVolume {
+                        substance: "fixture".to_owned(),
+                    },
+                    WitnessSurface,
+                    CollisionLayers::new([Layer::Witness], LayerMask::NONE),
+                ));
+        }
+    }
+}
+
+/// The game's damage model: the scoreboard must credit automatic fire even though the pen cam
+/// records none of it. A fixture machine-gun round crosses an unarmoured crew box; the round's
+/// own dose decides the knockout through the production march and consequence chain.
+#[test]
+fn an_unrecorded_machine_gun_round_credits_its_shooter() {
+    use crate::net::score::Scoreboard;
+    use crate::{CombatantId, CombatantLife, ShotId};
+
+    let (mut app, board, _) = scoring_world();
+    let (root, boxes) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[("crew", Vec3::ONE, Vec3::ZERO, Kind::Crew(ONE))],
+    );
+    app.world_mut()
+        .entity_mut(root)
+        .insert((CombatantId(2), CombatantLife(0)));
+    scoring_witnesses(&mut app, &boxes);
+    settle(&mut app);
+    let shot = ShotId {
+        combatant: CombatantId(1),
+        weapon: 1,
+        fire_tick: 1,
+    };
+    let body = super::march_tests::FIXTURE_MG;
+    let mut fire = fixture_fire(
+        &mut app,
+        Vec3::new(0.0, 0.0, 30.0),
+        Dir3::NEG_Z,
+        FireMechanism::Automatic,
+        Some(shot),
+        None,
+    );
+    fire.caliber = body.caliber;
+    fire.mass = body.mass;
+    fire.nose_factor = body.nose_factor;
+    fire.penetrator_caliber = body.caliber;
+    fire.penetrator_mass = body.mass;
+    fire.drag_k = fixture_drag_k(body.caliber, body.mass);
+    app.world_mut().trigger(fire);
+    assert!(
+        run(&mut app, 8).is_empty(),
+        "automatic fire opens no pen cam record"
+    );
+    let facts = app.world().resource::<KnockoutFacts>();
+    assert_eq!(facts.transitions, [root]);
+    assert_eq!(
+        facts.attributed,
+        [(root, crate::damage::KnockoutCause::Round(shot))]
+    );
+    let standings = &app.world().get::<Scoreboard>(board).unwrap().0;
+    assert_eq!(
+        standings
+            .iter()
+            .find(|s| s.combatant == CombatantId(1))
+            .unwrap()
+            .knockouts,
+        1
+    );
+    assert_eq!(
+        standings
+            .iter()
+            .find(|s| s.combatant == CombatantId(2))
+            .unwrap()
+            .losses,
+        1
+    );
+}
+
+/// The game's damage model: a later round can cause a cook-off on a crew-loss husk, but the
+/// scoreboard and pen cam must retain the first round's one knockout. The offset ammunition
+/// box is fixture geometry keeping the two deciding depositions in separate shots.
+#[test]
+fn a_later_cookoff_on_a_crew_loss_husk_cannot_credit_a_second_knockout() {
+    use crate::net::score::Scoreboard;
+    use crate::{CombatantId, CombatantLife, ShotId};
+
+    let (mut app, board, _) = scoring_world();
+    let mut volumes = plated(ONE, Kind::Ammo(ONE));
+    volumes[2].2.x = 4.0;
+    let (root, boxes) = tank(&mut app, Vec3::ZERO, 0.0, Vec3::ZERO, &volumes);
+    app.world_mut()
+        .entity_mut(root)
+        .insert((CombatantId(2), CombatantLife(0)));
+    scoring_witnesses(&mut app, &boxes);
+    settle(&mut app);
+    let shot = ShotId {
+        combatant: CombatantId(1),
+        weapon: 0,
+        fire_tick: 1,
+    };
+    fire_along(
+        &mut app,
+        Vec3::new(0.0, 0.0, 30.0),
+        Dir3::NEG_Z,
+        FireMechanism::Single,
+        Some(shot),
+    );
+    let records = run(&mut app, 8);
+    assert_eq!(
+        app.world().get::<TankKnockedOut>(root).unwrap().reason,
+        KnockoutReason::CrewLoss
+    );
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].report.killed, Some(KnockoutReason::CrewLoss));
+    assert!(
+        hp(&app, boxes[2]) > 0,
+        "the first shot leaves ammunition in action"
+    );
+    let before = app.world().get::<Scoreboard>(board).unwrap().clone();
+    fire_along(
+        &mut app,
+        Vec3::new(4.0, 0.0, 30.0),
+        Dir3::NEG_Z,
+        FireMechanism::Single,
+        Some(ShotId {
+            combatant: CombatantId(3),
+            fire_tick: 2,
+            ..shot
+        }),
+    );
+    assert!(
+        run(&mut app, 8).is_empty(),
+        "a husk opens no second pen cam record"
+    );
+    assert!(
+        app.world()
+            .get::<crate::damage::CookedOff>(boxes[2])
+            .is_some(),
+        "the later real round must actually cause a cook-off"
+    );
+    assert_eq!(*app.world().get::<Scoreboard>(board).unwrap(), before);
+    let facts = app.world().resource::<KnockoutFacts>();
+    assert_eq!(facts.transitions, [root]);
+    assert_eq!(
+        facts.attributed,
+        [(root, crate::damage::KnockoutCause::Round(shot))]
+    );
+}
+
+/// The game's damage model: score belongs to combatants across lives. Respawning a shooter
+/// while its real round is in flight must preserve its credit, and replacing the knocked-out
+/// victim must retain that earlier credit when a different combatant decides its next knockout.
+#[test]
+fn respawns_preserve_in_flight_and_earlier_credits() {
+    use crate::net::score::Scoreboard;
+    use crate::{CombatantId, CombatantLife, ShotId};
+
+    let (mut app, board, shooter) = scoring_world();
+    let target = |app: &mut App, life| {
+        let (root, boxes) = tank(
+            app,
+            Vec3::ZERO,
+            0.0,
+            Vec3::ZERO,
+            &[("crew", Vec3::ONE, Vec3::ZERO, Kind::Crew(ONE))],
+        );
+        app.world_mut()
+            .entity_mut(root)
+            .insert((CombatantId(2), CombatantLife(life)));
+        scoring_witnesses(app, &boxes);
+        root
+    };
+    let root = target(&mut app, 0);
+    settle(&mut app);
+    let shot = ShotId {
+        combatant: CombatantId(1),
+        weapon: 0,
+        fire_tick: 1,
+    };
+    let mut fire = fixture_fire(
+        &mut app,
+        Vec3::new(0.0, 0.0, 30.0),
+        Dir3::NEG_Z,
+        FireMechanism::Single,
+        Some(shot),
+        None,
+    );
+    fire.shooter.as_mut().unwrap().tank = shooter;
+    app.world_mut().trigger(fire);
+    app.world_mut().despawn(shooter);
+    app.world_mut().spawn((CombatantId(1), CombatantLife(1)));
+    run(&mut app, 8);
+    assert!(app.world().get::<TankKnockedOut>(root).is_some());
+    let before = app.world().get::<Scoreboard>(board).unwrap().clone();
+    assert_eq!(
+        before
+            .0
+            .iter()
+            .find(|s| s.combatant == CombatantId(1))
+            .unwrap()
+            .knockouts,
+        1
+    );
+    app.world_mut().despawn(root);
+    let fresh = target(&mut app, 1);
+    settle(&mut app);
+    assert_eq!(*app.world().get::<Scoreboard>(board).unwrap(), before);
+    fire_along(
+        &mut app,
+        Vec3::new(0.0, 0.0, 30.0),
+        Dir3::NEG_Z,
+        FireMechanism::Single,
+        Some(ShotId {
+            combatant: CombatantId(3),
+            fire_tick: 2,
+            ..shot
+        }),
+    );
+    run(&mut app, 8);
+    assert!(app.world().get::<TankKnockedOut>(fresh).is_some());
+    let standings = &app.world().get::<Scoreboard>(board).unwrap().0;
+    assert_eq!(
+        standings.len(),
+        3,
+        "replacement lives do not open duplicate standings"
+    );
+    for (who, knockouts, losses) in [(1, 1, 0), (2, 0, 2), (3, 1, 0)] {
+        let standing = standings
+            .iter()
+            .find(|s| s.combatant == CombatantId(who))
+            .unwrap();
+        assert_eq!((standing.knockouts, standing.losses), (knockouts, losses));
+    }
+    let facts = app.world().resource::<KnockoutFacts>();
+    assert_eq!(facts.transitions.len(), 2);
+    assert_eq!(facts.attributed.len(), 2);
+}
+
 /// Automatic fire is not recorded, though it struck and dosed the tank.
 #[test]
 fn automatic_fire_records_nothing() {

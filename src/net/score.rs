@@ -210,6 +210,7 @@ pub(super) fn install_server(app: &mut App, wait: RespawnWait, first: BattleStat
 pub(crate) fn mount(app: &mut App, wait: RespawnWait) {
     app.insert_resource(wait)
         .add_observer(open_standing)
+        .add_observer(log_knockout_transition)
         .add_observer(score_knockout);
 }
 
@@ -225,18 +226,46 @@ fn spawn_scoreboard(mut commands: Commands, battle: BattleState) {
 /// A first combat spawn opens its standing; a fill-up spawn waits for the combat boundary.
 fn open_standing(
     add: On<Add, CombatantId>,
-    combatants: Query<&CombatantId>,
+    combatants: Query<(&CombatantId, &CombatantLife)>,
+    clock: Res<ShotClock>,
     mut boards: Query<(&mut Scoreboard, &BattleState)>,
 ) {
-    let combatant = *combatants
+    let (&combatant, &life) = combatants
         .get(add.entity)
-        .expect("an added CombatantId is on its entity");
+        .expect("a server combatant is born with its identity and life in one bundle");
+    debug!(
+        "server: combatant {} life {} spawned tank {} at tick {}",
+        combatant.0,
+        life.0,
+        add.entity,
+        clock.0.raw()
+    );
     let (mut board, battle) = boards
         .single_mut()
         .expect("server startup spawns exactly one scoreboard before any combatant spawns");
     if battle.is_combat() {
         board.enter_combat(combatant);
     }
+}
+
+/// The game's damage model: the marker's insertion is independent evidence against which an
+/// operator can count scored facts, including a transition outside combat that scores nothing.
+fn log_knockout_transition(
+    add: On<Add, TankKnockedOut>,
+    tanks: Query<(&CombatantId, &CombatantLife, &TankKnockedOut)>,
+    clock: Res<ShotClock>,
+) {
+    let (combatant, life, knocked_out) = tanks
+        .get(add.entity)
+        .expect("every server tank is born with its combatant identity and life");
+    debug!(
+        "server: knockout transition combatant {} life {} tank {} at tick {} reason {:?}",
+        combatant.0,
+        life.0,
+        add.entity,
+        clock.0.raw(),
+        knocked_out.reason
+    );
 }
 
 /// Whether a knocked-out tank's turret left it. A separate fact from the knockout's kind: today
@@ -342,7 +371,12 @@ fn score_knockout(
         }
         Credit::NoShooter | Credit::OwnRound => {}
     }
-    info!("{line}");
+    info!(
+        "{line}, tank {} at tick {}, cause {:?}",
+        knockout.tank,
+        clock.0.raw(),
+        knockout.cause
+    );
 }
 
 #[cfg(test)]
@@ -456,6 +490,7 @@ mod tests {
     #[test]
     fn standings_start_at_combat_participation_and_outlive_its_tanks() {
         let mut app = App::new();
+        app.init_resource::<ShotClock>();
         mount(
             &mut app,
             RespawnWait::new(Duration::from_secs(1), Duration::from_millis(10)),
@@ -464,7 +499,10 @@ mod tests {
             .world_mut()
             .spawn((Scoreboard::default(), BattleState::default()))
             .id();
-        let waiting = app.world_mut().spawn(CombatantId(1)).id();
+        let waiting = app
+            .world_mut()
+            .spawn((CombatantId(1), CombatantLife(0)))
+            .id();
         assert!(
             app.world().get::<Scoreboard>(board).unwrap().0.is_empty(),
             "waiting alone is not combat participation"
@@ -475,13 +513,16 @@ mod tests {
             BattleOutcome::NoContest
         );
         *app.world_mut().get_mut::<BattleState>(board).unwrap() = BattleState::combat_fixture();
-        let fighter = app.world_mut().spawn(CombatantId(2)).id();
+        let fighter = app
+            .world_mut()
+            .spawn((CombatantId(2), CombatantLife(0)))
+            .id();
         assert_eq!(
             app.world().get::<Scoreboard>(board).unwrap().outcome(),
             BattleOutcome::Winner(CombatantId(2))
         );
         app.world_mut().despawn(fighter);
-        app.world_mut().spawn(CombatantId(2));
+        app.world_mut().spawn((CombatantId(2), CombatantLife(1)));
         let standings = &app.world().get::<Scoreboard>(board).unwrap().0;
         assert_eq!(
             standings.len(),
