@@ -1025,10 +1025,11 @@ are read from ground and vehicle owners, never from a previous run.
 Common-K readers no longer carry a per-contact copy or load-weighted constant. The
 vanishing-patch downshift test is retired: an identical-coefficient patch supplied no
 counterexample after cohesion left. Nominal observation and mixed-ground tests retain the
-live evidence. Loose-piece rise and peak piece motion are printed; actual piece support
-and the settled footprint supply the composition evidence, without the vacuous rise and
-energy ceilings. Arithmetic drivetrain fixtures carry a required grip construction and
-a separate terrain coefficient; the track-material slot no longer supplies terrain grip.
+live evidence. The loose-piece witness requires positive hull lift and settled piece
+support within the footprint. It makes no recipient-motion claim; lift magnitude remains
+an observation. Arithmetic
+drivetrain fixtures carry a required grip construction and a separate terrain coefficient;
+the track-material slot no longer supplies terrain grip.
 
 Inertia admission probes lie between the with/without-term bounds. DERIVED from the compact
 fixture: minimum J is 1.806957 kg m², versus 1.297850 without idle catch and 1.790493 without

@@ -1682,13 +1682,13 @@ fn a_parked_tank_loads_fixed_structure_through_its_belt() {
     );
 }
 
-/// THE GAME'S BUOYANCY CARRIES A DRIVING TANK ONTO LOOSE PIECES. A sandbox-only adapter, sparse
-/// rubble probes or a missing game-side reaction fails this gate or the footprint/clamp gates in
-/// `track::rubble`. The pieces lie between the rigid side slices: neither the slices nor the
-/// compression stops may supply their lift. FIXTURE DATA: two long pieces, height 0.1 m, each
+/// Belt support lifts a driving hull onto loose pieces and carries it after stopping.
+/// This witnesses the hull's support path; recipient impulse delivery is outside its claim.
+/// The pieces lie between the rigid side slices: neither the slices nor the compression stops
+/// may supply their lift. FIXTURE DATA: two long pieces, height 0.1 m, each
 /// one eighth of the hull's mass; dimensions and positions otherwise come from its running gear.
-/// Rise and piece motion are observations; actual piece support and the settled footprint
-/// witness the production reaction path.
+/// Positive lift and settled piece support follow from the raised support partition;
+/// the lift magnitude remains an observation.
 #[test]
 fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
     use crate::track::side::Side;
@@ -1752,8 +1752,6 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
             .id()
     });
     let mut carried = false;
-    let mut max_piece_y = height / 2.0;
-    let mut max_piece_speed = 0.0_f32;
     let mut arrived = false;
     for _ in 0..(20 * FIXED_TICKS_PER_SECOND) {
         // Full requested power gives this support fixture its declared launch capability.
@@ -1768,11 +1766,6 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
             .any(|c| {
                 c.collider.is_some_and(|e| pieces.contains(&e)) && c.normal.y > 0.5 && c.load > 0.0
             });
-        for piece in pieces {
-            max_piece_y = max_piece_y.max(world.get::<Position>(piece).unwrap().0.y);
-            max_piece_speed =
-                max_piece_speed.max(world.get::<LinearVelocity>(piece).unwrap().0.length());
-        }
         if world.get::<Position>(tank).unwrap().0.z > front + span {
             arrived = true;
             break;
@@ -1785,11 +1778,6 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
         let moving_forward = app.world().get::<LinearVelocity>(tank).unwrap().0.z
             > crate::track::transmission::PARK_ENGAGE_SPEED;
         drive_tick(&mut app, tank, if moving_forward { -1.0 } else { 0.0 }, 0.0);
-        for piece in pieces {
-            max_piece_y = max_piece_y.max(app.world().get::<Position>(piece).unwrap().0.y);
-            max_piece_speed =
-                max_piece_speed.max(app.world().get::<LinearVelocity>(piece).unwrap().0.length());
-        }
     }
     let settled = app.world().get::<Position>(tank).unwrap().0;
     assert!(
@@ -1808,12 +1796,28 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
         dimensions[Side::Right.index()].1 / (columns[2].0 - columns[0].0).abs()
     };
     println!(
-        "MEASURED driven hull rise {rise:.6} m over {height} m pieces; peak piece centre {max_piece_y:.6} m, peak speed {max_piece_speed:.6} m/s; DERIVED coverage share {share:.4}, share-law rise {:.6} m",
+        "MEASURED driven hull rise {rise:.6} m over {height} m pieces; DERIVED coverage share {share:.4}, share-law rise {:.6} m",
         share * height
     );
     assert!(
         carried,
         "the game's track reports never carried the tank on a loose piece"
+    );
+    // Resolution: 0.1% of the raised surface's height excludes position roundoff.
+    assert!(rise > height * 1e-3, "raised support must lift the hull");
+    let piece_support: f32 = app
+        .world()
+        .get::<TrackContacts>(tank)
+        .unwrap()
+        .0
+        .iter()
+        .flatten()
+        .filter(|c| c.collider.is_some_and(|e| pieces.contains(&e)))
+        .map(|c| c.normal.y * c.load)
+        .sum();
+    assert!(
+        piece_support > 0.0,
+        "the settled hull must still load the pieces"
     );
 }
 
