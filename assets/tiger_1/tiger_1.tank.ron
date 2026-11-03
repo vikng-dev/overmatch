@@ -4,9 +4,10 @@ TankSpec(
     display_name: "Tiger I",
     mass: 57_000.0,
     inertia_extents: (3.0, 2.0, 6.3),
-    // The turret as the free body a cook-off launch makes of it: its mass (kg) and the full
-    // dimensions (m) of the box standing in for its angular-inertia distribution. ASSUMED
-    // round figures; no source read.
+    // The game's damage model (game state only): assembly mass in kg and full inertia-box
+    // extents in m. Unknown provisional mass and dimensions; assembly weighing and moment
+    // measurements would settle them. Servo law and derivation: design
+    // armor-penetration-and-damage.md section 7c.
     turret: ( node: Some("Turret_Yaw"), mass: 8_000.0, inertia_extents: (3.0, 1.2, 2.4) ),
     // Continuous track (track architecture §7). link_count 97 = the marker-derived window's
     // lowest SPRING-limited count (window 95..96 at ride_frequency 1.2 Hz): full suspension
@@ -193,11 +194,43 @@ TankSpec(
             engage: 0.02,
         ),
     ),
+    // Law, limitations and DERIVED rate comparisons live in design
+    // armor-penetration-and-damage.md section 7c. No drive fact below is a measured datum.
     servos: {
-        "Turret_Yaw":      (role: Yaw,   drive: Hand(hand_rate: (34.0, Unknown("provisional hand rate; a handwheel ratio and operator turn-rate measurement would settle it"))), travel: Continuous,                      requires: [Gunner]),
-        "Main_Gun_Pitch":  (role: Pitch, drive: Hand(hand_rate: (23.0, Unknown("provisional hand rate; a handwheel ratio and operator turn-rate measurement would settle it"))), travel: Limited(min: -8.0,  max: 15.0),  requires: [Gunner]),
-        "Hull_MG_Yaw":     (role: Yaw,   drive: Hand(hand_rate: (45.0, Unknown("provisional hand rate; a handwheel ratio and operator turn-rate measurement would settle it"))), travel: Limited(min: -30.0, max: 30.0),  requires: [BowGunner]),
-        "Hull_MG_Pitch":   (role: Pitch, drive: Hand(hand_rate: (45.0, Unknown("provisional hand rate; a handwheel ratio and operator turn-rate measurement would settle it"))), travel: Limited(min: -10.0, max: 20.0),  requires: [BowGunner]),
+        "Turret_Yaw": (
+            role: Yaw,
+            drive: Powered(
+                power_share: (0.01, Unknown("provisional crank-power share; traverse pump pressure, flow and efficiency versus crank rpm would settle it")),
+                stall_torque: (16_000.0, Unknown("provisional output N m; hydraulic motor stall pressure, displacement and reduction data would settle it")),
+                bearing_friction: (8_000.0, Unknown("provisional running N m; unpowered assembly bearing-drag measurements would settle it")),
+                hand_rate: (1.0, Unknown("provisional degrees/s; handwheel ratio and sustained operator turn-rate measurements would settle it")),
+            ),
+            travel: Continuous,
+            requires: [Gunner],
+        ),
+        "Main_Gun_Pitch": (
+            role: Pitch,
+            drive: Powered(
+                power_share: (0.002, Unknown("provisional crank-power share; elevation-drive pressure, flow and efficiency data would settle it")),
+                stall_torque: (5_000.0, Unknown("provisional output N m; elevation-drive stall torque and reduction data would settle it")),
+                bearing_friction: (2_500.0, Unknown("provisional running N m; unpowered elevation bearing-drag measurements would settle it")),
+                hand_rate: (0.5, Unknown("provisional degrees/s; elevation handwheel ratio and operator turn-rate measurements would settle it")),
+            ),
+            travel: Limited(min: -8.0, max: 15.0),
+            requires: [Gunner],
+        ),
+        "Hull_MG_Yaw": (
+            role: Yaw,
+            drive: Hand(hand_rate: (45.0, Unknown("provisional degrees/s; operator ball-mount sweep measurements would settle it"))),
+            travel: Limited(min: -30.0, max: 30.0),
+            requires: [BowGunner],
+        ),
+        "Hull_MG_Pitch": (
+            role: Pitch,
+            drive: Hand(hand_rate: (45.0, Unknown("provisional degrees/s; operator ball-mount sweep measurements would settle it"))),
+            travel: Limited(min: -10.0, max: 20.0),
+            requires: [BowGunner],
+        ),
     },
     // DECLARED ARMOUR (design §12). A node is a ballistic volume iff it is a key here, whatever
     // material it wears; a node wearing a registry substance and not keyed here is view geometry.

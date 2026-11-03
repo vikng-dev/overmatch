@@ -112,8 +112,19 @@ TankSpec(
             engage: 0.02,
         ),
     ),
-    // No actuators in this construction; servo rows select Hand or Powered and require labelled facts.
-    servos: {},
+    servos: {
+        "Drive_Test": (
+            role: Yaw,
+            drive: Powered(
+                power_share: (0.01, Unknown("provisional nominal pump share; pump design data would settle it")),
+                stall_torque: (100.0, Unknown("provisional nominal motor N m; motor design data would settle it")),
+                bearing_friction: (10.0, Unknown("provisional nominal bearing N m; bearing-drag measurements would settle it")),
+                hand_rate: (1.0, Unknown("provisional nominal degrees/s; handwheel design data would settle it")),
+            ),
+            travel: Continuous,
+            requires: [],
+        ),
+    },
     volumes: {
         "Wheel_L": (external: true),
         "Wheel_R": (external: true),
@@ -241,6 +252,8 @@ def build(directory, library, defect):
                  painted("Paint_Olive", directory))
     place(scene, "Hull_Collider", cube("Hull_Collider"), (0.0, 0.0, 1.0),
           bpy.data.materials.new("Mat_Collider"))
+    # An explicit actuator frame exercises the same Powered schema as shipped construction.
+    scene.collection.objects.link(bpy.data.objects.new("Drive_Test", None))
     # An open shell is what the consumer contract refuses on the RAW candidate: no source law
     # measures watertightness, so this defect passes L1 and stops the chain before the encode.
     wheel_faces = CUBE_FACES[:-1] if defect == "open-wheel" else CUBE_FACES
