@@ -730,9 +730,8 @@ fn refresh_save_notice(
     }
 }
 
-/// The fixed-height box the hint is drawn into: always exactly two lines tall, whether the selected
-/// row's hint fills one line or two, so walking the selection never moves the rows above it. See
-/// [`super::look::PageLook::hint_slot_height_px`].
+/// The hint box reserves the authored minimum height and grows with longer text.
+/// See [`super::look::PageLook::hint_slot_height_px`].
 #[derive(Component)]
 struct HintSlot;
 
