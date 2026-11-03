@@ -372,11 +372,9 @@ pub struct RayCorridor {
 pub struct WalkLaws {
     /// SEED domain — absolute floor (m) under which two `t` name the same boundary at a restart.
     ///
-    /// It relates a RESTART to a face, and nothing else: a corridor restarts at a `t` read on one
-    /// ray (a sample's hand-off, a perforation's resume point) while the faces near it are
-    /// re-measured from the new corridor's own origin, so the two agree only to rounding. It decides
-    /// which side of the restart owns a face ([`RayWalk::inside_at`], `collect::admit`). It has no
-    /// part in pairing, which is topological.
+    /// It relates a RESTART to a face, and nothing else: it decides which side of a restart owns a
+    /// face within rounding of it ([`RayWalk::inside_at`], `collect::admit`), both on one line
+    /// (`resolve::certified_samples`). It has no part in pairing, which is topological.
     pub topology_abs: f32,
     /// SEED domain — relative term, so a corridor anchored far downrange (where f32 spacing is
     /// coarser) still recognises its own restart.
@@ -487,8 +485,10 @@ pub enum WalkError {
     BadCorridor { sample: usize, reason: &'static str },
     /// An exit face for a shell the walk is not inside: a dropped entry, an inverted winding, or
     /// an undeclared start-inside. NOT repaired by inventing an interval from the corridor origin.
-    /// Closed shells alternate along any ray but one exactly in a face's plane: the in-plane
-    /// triangle claims nothing and each rim neighbour claims its edge alone.
+    /// Closed shells alternate along one line in one arithmetic, from a membership read on that
+    /// line (`resolve::certified_samples`), with two exceptions: a ray exactly in a face's plane,
+    /// whose in-plane triangle claims nothing while each rim neighbour claims its edge alone, and a
+    /// ray through a saddle vertex, whose mixed fan `canonical_crossings` drops as tangent.
     UnexpectedExit {
         sample: usize,
         key: ShellKey,
@@ -553,7 +553,7 @@ impl WalkError {
                 "the adapter constructs finite corridors on a unit direction"
             }
             Self::UnexpectedExit { .. } => {
-                "certified closed shells alternate from established membership"
+                "certified closed shells alternate along a line, from membership read on that line"
             }
             Self::UnexpectedEntry { .. } => {
                 "certified embedded shells alternate without self-overlap"
@@ -2226,26 +2226,6 @@ impl DiscWalk {
     /// k — the sample count the disc aggregates over.
     pub fn samples(&self) -> usize {
         self.walks.len()
-    }
-
-    /// The seed state a corridor RESUMED at progress `t` would need — the lookup [`begin`] makes at
-    /// each sample's hand-off, here at one progress for every sample.
-    ///
-    /// This is what lets the march step out of one crossing and into the next without ever inferring
-    /// its own interior state: a shell that perforates an outer plate while a ring sample is already
-    /// inside a volume behind it resumes KNOWING that, because the ray it would have to guess about
-    /// is one this walk already covered.
-    pub fn resume_at(&self, t: f64, laws: &WalkLaws) -> Vec<SampleSeed> {
-        self.walks
-            .iter()
-            .enumerate()
-            .map(|(sample, walk)| SampleSeed {
-                sample,
-                offset: self.offsets[sample],
-                t,
-                inside: walk.inside_at(t, laws),
-            })
-            .collect()
     }
 
     /// The events this walk's first crossing is made of, ascending: the first event, then every

@@ -2719,14 +2719,8 @@ impl Range {
         self.app.update();
     }
 
-    /// Fly `headings` from `muzzle` together and read how many shells touched armour; a panic in the
-    /// march gives its message and how many flights it leaves counted, the rest lost with the world.
-    fn follow(
-        &mut self,
-        round: &crate::rounds::Round,
-        muzzle: Vec3,
-        headings: &[Dir3],
-    ) -> Result<usize, (String, usize)> {
+    /// Fire `headings` from `muzzle` together: each shell spawns when the world next flushes.
+    fn fire(&mut self, round: &crate::rounds::Round, muzzle: Vec3, headings: &[Dir3]) {
         for &heading in headings {
             let fire = FireShell::of_round(
                 round,
@@ -2740,6 +2734,25 @@ impl Range {
             );
             self.app.world_mut().trigger(fire);
         }
+    }
+
+    /// Fly `headings` from `muzzle` together and read how many shells touched armour; a panic in the
+    /// march gives its message and how many flights it leaves counted, the rest lost with the world.
+    fn follow(
+        &mut self,
+        round: &crate::rounds::Round,
+        muzzle: Vec3,
+        headings: &[Dir3],
+    ) -> Result<usize, (String, usize)> {
+        self.fire(round, muzzle, headings);
+        // A trigger queues its spawn: unflushed, the first flying count reads none and the volley
+        // flies at wherever the next stance stands the hull.
+        self.app.world_mut().flush();
+        self.fly_out(headings.len())
+    }
+
+    /// Follow every flying shell out, `fired` of them the latest: see [`Self::follow`].
+    fn fly_out(&mut self, fired: usize) -> Result<usize, (String, usize)> {
         for _ in 0..REACH_TICKS {
             let world = self.app.world_mut();
             let flying = world
@@ -2762,7 +2775,7 @@ impl Range {
                         .map(|text| (*text).to_owned())
                 })
                 .unwrap_or_else(|| "a panic with no message".to_owned());
-            return Err((message, headings.len() - flying + 1));
+            return Err((message, fired.saturating_sub(flying) + 1));
         }
         let world = self.app.world_mut();
         let shells: Vec<Entity> = world
@@ -3047,6 +3060,91 @@ const ONCE_FATAL: &[(&str, [f32; 3], [f32; 3])] = &[
         [36.176228, 163.79178, -86.54535],
     ),
 ];
+
+/// One volley's aim at a stance. Fixture data.
+struct RecordedVolley {
+    at: [f32; 3],
+    rotation: [f32; 4],
+    muzzle: [f32; 3],
+    headings: [[f32; 3]; 12],
+}
+
+/// Two volleys flown together on the shipped ground, the first still in the air as the hull stands
+/// at the second's stance. Their impulses leave the hull at a pose where a ring sample of the last
+/// perforation runs 4.07 m inside one plate at 9e-5 rad to its face (MEASURED by trace). Fixture data.
+const ALONG_A_LONG_FACE: [RecordedVolley; 2] = [
+    RecordedVolley {
+        at: [-1.5183538, 36.70495, -180.25223],
+        rotation: [0.0034697661, 0.48154163, 0.029967407, -0.8759039],
+        muzzle: [36.78557, 36.34161, -134.06073],
+        headings: [
+            [-0.64335775, 0.005794236, -0.76554376],
+            [-0.66728973, 0.012387606, -0.74469525],
+            [-0.6376797, 0.023199372, -0.7699522],
+            [-0.6241195, 0.020292642, -0.7810653],
+            [-0.6712373, 0.019244406, -0.74099267],
+            [-0.67460257, 0.014795419, -0.7380328],
+            [-0.66419727, 0.021979976, -0.74723417],
+            [-0.65703243, 0.009313175, -0.7538048],
+            [-0.62830156, 0.014898684, -0.77782726],
+            [-0.64511967, 0.020812515, -0.76379806],
+            [-0.64966846, 0.023592759, -0.75985146],
+            [-0.67275816, 0.012579845, -0.7397556],
+        ],
+    },
+    RecordedVolley {
+        at: [48.706726, 40.30744, -334.5015],
+        rotation: [-0.005675448, 0.92951214, 0.019321507, -0.3682411],
+        muzzle: [76.51184, 40.35389, -281.1534],
+        headings: [
+            [-0.44125313, 0.013708162, -0.89727795],
+            [-0.48371413, 0.0037529282, -0.87521803],
+            [-0.45352304, 0.008243437, -0.89120644],
+            [-0.46396488, 0.0014238217, -0.88585246],
+            [-0.4147112, 0.003760295, -0.9099453],
+            [-0.46606296, 0.012775306, -0.8846593],
+            [-0.48613906, 0.0042797127, -0.873871],
+            [-0.42873996, 0.009915315, -0.9033735],
+            [-0.45848405, 0.004900111, -0.8886891],
+            [-0.43908447, 0.0066684755, -0.89842105],
+            [-0.49822277, 0.009318875, -0.866999],
+            [-0.4645049, 0.013368636, -0.8854697],
+        ],
+    },
+];
+
+/// The game's damage model: a corridor's membership is the parity of crossings behind its start on
+/// its own line, so a perforation's next corridor never meets an exit with nothing open, however
+/// nearly its ray runs along a long face. A panic ends the server's whole match. Mutant: the next
+/// starts' membership looked up on the rays the crossing walked.
+#[test]
+fn a_volley_along_a_long_face_flies_out() {
+    let round = crate::guns::GunRegistry::shipped()
+        .fired_rounds()
+        .find(|(gun, key, _)| format!("{gun} {key}") == "kwk36_l56 88mm_AP")
+        .expect("the arm ships")
+        .2;
+    let ground = crate::terrain_grid::tests::shipped_grid();
+    let mut range = Range::on(RigidBody::Kinematic, Some(ground));
+    for volley in &ALONG_A_LONG_FACE {
+        range.stand(Stance {
+            at: Vec3::from(volley.at),
+            rotation: Quat::from_array(volley.rotation),
+            velocity: Vec3::ZERO,
+            spin: Vec3::ZERO,
+        });
+        let headings: Vec<Dir3> = volley
+            .headings
+            .iter()
+            .map(|&heading| Dir3::new_unchecked(Vec3::from(heading)))
+            .collect();
+        range.fire(&round, Vec3::from(volley.muzzle), &headings);
+    }
+    let touched = range
+        .fly_out(ALONG_A_LONG_FACE.len() * 12)
+        .unwrap_or_else(|(message, _)| panic!("{message}"));
+    assert!(touched > 0, "the volley no longer touches the hull");
+}
 
 /// The game's damage model: no shot ends the process through the march, on the aims that once did:
 /// line rounds whose start stood under their resting height over a face, and discs whose rim stayed

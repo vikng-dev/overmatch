@@ -590,7 +590,7 @@ fn a_substance_has_one_factor_and_a_volume_one_entry() {
 /// The game's damage model cannot turn a walk contradiction into a stopped round. The live
 /// adapter's fatal boundary must panic with the shell-alternation invariant, in every build.
 #[test]
-#[should_panic(expected = "certified closed shells alternate from established membership")]
+#[should_panic(expected = "certified closed shells alternate along a line")]
 fn a_walk_contradiction_panics_at_the_gameplay_boundary() {
     let volumes = table(&[(1, 1000.0)]);
     walk_ray(
@@ -4232,7 +4232,17 @@ fn a_crossing_resolves_the_same_however_far_its_entrance_was_walked() {
             panic!("the {length} m walk: the edged plate is perforated")
         };
         let resume = t + super::super::MARCH_EPS;
-        let starts = transit.resume_at(f64::from(resume), &laws);
+        let starts: Vec<SampleSeed> = transit
+            .walks
+            .iter()
+            .enumerate()
+            .map(|(sample, walk)| SampleSeed {
+                sample,
+                offset: transit.offsets[sample],
+                t: f64::from(resume),
+                inside: walk.inside_at(f64::from(resume), &laws),
+            })
+            .collect();
         let next = walk_disc(
             &resumed_disc(&request, resume, &starts, 2.0, |sample| {
                 fixture.met(sample, &[fixture.behind])

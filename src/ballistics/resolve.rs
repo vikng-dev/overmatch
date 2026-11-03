@@ -12,9 +12,9 @@
 //! tick's travel budget: it collects from first contact, and if the walk reports
 //! [`WalkError::IncompleteCorridor`] it extends and re-collects through the finite loaded geometry.
 //! It never synthesizes the missing exit or imposes a policy length on a material crossing. This
-//! keeps continuation state out of the resolver — the only thing that survives a crossing is which
-//! primitives the disc is still inside, and that is a lookup on rays already walked
-//! ([`DiscWalk::resume_at`]), never an inference.
+//! keeps continuation state out of the resolver — the only thing that survives a crossing is where
+//! the samples stand, and what they are inside there is read on the line the next corridor sweeps
+//! ([`next_starts`]), never an inference.
 //!
 //! # One mechanism, decided before it is applied
 //!
@@ -170,10 +170,11 @@ pub(crate) fn disc_radius(caliber: f32) -> f32 {
 /// sample's offset is its place on that circle, within the disc radius in the plane square to the
 /// heading, plus its own contact cursor along the axis: how far its ray has swept past the axis start.
 /// A perforation's cursors are its stagger along an oblique plate, each start one nudge past the
-/// exit along that sample's ray; a fresh disc and a slide's disc have none. `seeds[i].inside` is what
-/// that ray's walk says the sample is inside there. A fresh disc placed at birth or after a catch-up
-/// has no swept membership: [`Flight::born`] and [`Flight::settle`] read it with [`certified`]; a
-/// skid's starts ([`Interior::unread`]) are read by [`Flight::settle`] the same way. A disc laid on
+/// exit along that sample's ray; a fresh disc and a slide's disc have none. `seeds[i].inside` is the
+/// parity of crossings behind that start on the line a corridor from it casts ([`certified_samples`]).
+/// A fresh disc placed at birth or after a catch-up has no swept membership: [`Flight::born`] and
+/// [`Flight::settle`] read it with [`certified`]; a skid's starts ([`Interior::unread`]) are read by
+/// [`Flight::settle`] the same way. A disc laid on
 /// an axis start a sweep reached uses [`Interior::laid`]; relative discovery reads material newly
 /// holding that start at its next scene boundary. A tick's gravity bend leaves the starts where the
 /// sweep reached them, because moving one takes it off the ray that certified it: a cursor then
@@ -710,6 +711,35 @@ pub(crate) fn certified_samples(
         origin,
         seeds,
     })
+}
+
+/// The game's damage model: the starts of the corridor after `walked`, its axis start at `origin` in
+/// `walked`'s anchor, each sample's membership read on the line that corridor casts.
+///
+/// `walked`'s own rays are other lines: the next corridor re-forms its origin, and rounding across a
+/// ray that runs nearly along a face moves the crossing by that rounding over the angle's sine
+/// (MEASURED: 1.3 mm on a 9e-5 rad ray, past the 1 mm nudge past an exit). A membership looked up on
+/// them can read a sample as past a face its own line has yet to cross, and the corridor then meets
+/// an exit with nothing open ([`WalkError::UnexpectedExit`]).
+fn next_starts(
+    context: &ResolveContext<'_, '_, '_>,
+    not_own: &dyn Fn(Entity) -> bool,
+    walked: &DiscWalk,
+    origin: Vec3,
+    axis: Dir3,
+) -> Result<Interior, WalkError> {
+    certified_samples(
+        context,
+        not_own,
+        AxisStart {
+            anchor: walked.anchor,
+            origin,
+        },
+        axis,
+        walked.frame,
+        walked.radius,
+        walked.offsets.clone(),
+    )
 }
 
 /// The colliders one field throw can reach, read from the broad phase once for all of its
@@ -1380,8 +1410,7 @@ pub(crate) enum Decision {
         resume: Vec3,
         /// Metres from the axis start to `resume`: the examined corridor.
         travel: f32,
-        /// Each sample at the far end of its own examined ray, with what its walk says it is inside
-        /// there.
+        /// Each sample at the far end of its own examined ray ([`next_starts`]).
         continuation: Interior,
         /// The examined corridor as the round flew it.
         leg: Leg,
@@ -1806,14 +1835,11 @@ pub(crate) fn decide(
     match walk::begin(&entrance, &shot, &context.laws)? {
         Begin::Miss => {
             let examined = contact + ENTRANCE_SPAN;
+            let origin = start + dir * examined;
             Ok(Decision::Clear {
-                resume: anchor + (start + dir * examined),
+                resume: anchor + origin,
                 travel: examined,
-                continuation: Interior {
-                    anchor,
-                    origin: start + dir * examined,
-                    seeds: entrance.resume_at(examined as f64, &context.laws),
-                },
+                continuation: next_starts(context, not_own, &entrance, origin, dir)?,
                 leg: Leg::new(anchor + start, dir, examined, &entrance.offsets)
                     .with_presence(&entrance),
             })
@@ -1896,18 +1922,9 @@ pub(crate) fn decide(
                 .material
                 .feedback;
             Ok(Decision::Bite(Box::new(bite(
-                &transit,
-                plan,
-                feedback,
-                mass,
-                body.mass,
-                from,
-                dir,
-                &entrance,
-                speed,
-                owner,
-                &context.laws,
-            ))))
+                context, not_own, &transit, plan, feedback, mass, body.mass, from, dir, &entrance,
+                speed, owner,
+            )?)))
         }
     }
 }
@@ -1918,6 +1935,8 @@ pub(crate) fn decide(
     reason = "private kernel of `decide`; every argument is crossing state already in hand"
 )]
 fn bite(
+    context: &ResolveContext<'_, '_, '_>,
+    not_own: &dyn Fn(Entity) -> bool,
     transit: &DiscWalk,
     plan: walk::ResolutionPlan<super::mechanism::SolidShotState>,
     feedback: crate::substances::SurfaceFeedback,
@@ -1932,8 +1951,7 @@ fn bite(
     // m/s at the entrance.
     speed_in: f32,
     owner: impl Fn(Entity) -> Option<Entity>,
-    laws: &WalkLaws,
-) -> Bite {
+) -> Result<Bite, WalkError> {
     let mut deposits = plan.deposits;
     // THE BOUNDARY. Everything the walk reports is anchor-relative. What leaves for presentation and
     // physics — the entrance, the exit, the embed point, spall sources, the resume point — is
@@ -2003,27 +2021,22 @@ fn bite(
         }
         Outcome::Perforated { exit, t, .. } => {
             let residual = plan.state.speed as f32;
-            // Read at the point the NEXT corridor will actually start from — the flight resumes one
-            // nudge past the exit it is leaving, and a seed taken one nudge earlier describes a plate
-            // the round has already cleared.
+            // The flight resumes one nudge past the exit it is leaving.
             let resume = t + MARCH_EPS;
+            let origin = transit.origin + transit.axis * resume;
             (
                 BiteEnd::Perforated {
                     exit: world(exit),
-                    resume: world(transit.origin + transit.axis * resume),
+                    resume: world(origin),
                     direction: incoming,
                     speed: residual,
-                    continuation: Interior {
-                        anchor: transit.anchor,
-                        origin: transit.origin + transit.axis * resume,
-                        seeds: transit.resume_at(resume as f64, laws),
-                    },
+                    continuation: next_starts(context, not_own, transit, origin, incoming)?,
                 },
                 resume,
             )
         }
     };
-    Bite {
+    Ok(Bite {
         feedback,
         entrance,
         incoming,
@@ -2053,7 +2066,7 @@ fn bite(
             Leg::new(world(transit.origin), incoming, flown, &transit.offsets)
                 .with_presence(transit),
         ],
-    }
+    })
 }
 
 /// How far the line got through each volume it put a chord into: the axis points where the disc's
@@ -2205,11 +2218,7 @@ pub(crate) fn clear_path(
         decision: Decision::Clear {
             resume: interior.anchor + origin,
             travel,
-            continuation: Interior {
-                anchor: interior.anchor,
-                origin,
-                seeds: walked.resume_at(f64::from(travel), &context.laws),
-            },
+            continuation: next_starts(context, admit, &walked, origin, flight.direction)?,
             leg: Leg::new(
                 interior.world_origin(),
                 flight.direction,

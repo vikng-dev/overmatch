@@ -118,9 +118,10 @@ pub(crate) struct Corridor<'a> {
     /// boundary is counted exactly once — only because that reach covers everything the seed
     /// declined to own and every re-measurement error; see there.
     pub seeded: &'a [ShellKey],
-    /// Progress along the ray the seed was READ on ([`super::walk::SampleSeed::t`]), or `None` for a
-    /// corridor no seed hands off to. It is the scale [`super::walk::RayWalk::inside_at`] judged
-    /// "at the restart" at, which [`sitting_reach`] has to match.
+    /// Progress along the probe the seed was READ on ([`super::walk::SampleSeed::t`]), the line this
+    /// corridor casts, or `None` for a corridor no seed hands off to. It is the scale
+    /// [`super::walk::RayWalk::inside_at`] judged "at the restart" at, which [`sitting_reach`] has
+    /// to match.
     pub handoff: Option<f64>,
     /// Shared with the walk so the collector and the core agree about when two `t` name the same
     /// face — a second opinion about that is how an entry gets counted twice or not at all. Read
@@ -289,7 +290,8 @@ pub(super) fn collect_collider(
 ///   continuation keeps its anchor while an immutable crossing is decided. The contact adapter
 ///   bounds each corridor; a chain can reach farther, so the ceiling below is still required.
 ///
-/// A corridor with no hand-off carries only the second band.
+/// A corridor with no hand-off carries only the second band. Neither covers a membership read on
+/// another line (`resolve::next_starts`).
 ///
 /// # The ceiling
 ///
