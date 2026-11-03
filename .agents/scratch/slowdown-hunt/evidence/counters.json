@@ -1,0 +1,64 @@
+{
+  "counter-shell": {
+    "kind": "MEASURED dev opt1; recurring contact window",
+    "seconds": 47.294453708,
+    "calls": {
+      "apply": 3027,
+      "laws": 111975,
+      "strike": 111975,
+      "structural": 111975,
+      "weigh": 111975,
+      "fall": 111975,
+      "loose_groups": 675888,
+      "incident": 112975,
+      "held": 602646,
+      "in_group_frames": 112976
+    },
+    "changed": {
+      "apply": 0,
+      "laws": 1,
+      "strike": 0,
+      "structural": 0,
+      "weigh": 1,
+      "fall": 0,
+      "loose_groups": 0,
+      "incident": 0,
+      "held": 0,
+      "in_group_frames": 0
+    },
+    "contact": 111975,
+    "field": 0,
+    "splits": 1
+  },
+  "counter-ram": {
+    "kind": "MEASURED dev opt1; recurring contact window",
+    "seconds": 30.277144084,
+    "calls": {
+      "apply": 1938,
+      "laws": 116129,
+      "strike": 116129,
+      "structural": 116129,
+      "weigh": 116129,
+      "fall": 116129,
+      "loose_groups": 702658,
+      "incident": 117600,
+      "held": 118006,
+      "in_group_frames": 117600
+    },
+    "changed": {
+      "apply": 0,
+      "laws": 0,
+      "strike": 0,
+      "structural": 0,
+      "weigh": 0,
+      "fall": 0,
+      "loose_groups": 0,
+      "incident": 0,
+      "held": 0,
+      "in_group_frames": 0
+    },
+    "contact": 116129,
+    "field": 0,
+    "splits": 0
+  }
+}

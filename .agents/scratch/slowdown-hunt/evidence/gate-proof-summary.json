@@ -1,0 +1,11 @@
+{
+  "profile": "edit; original and candidate called on cloned identical state and inputs; warm original SectionCache retained",
+  "calls": 269428,
+  "old_ns": 78714153818,
+  "new_ns": 52529356051,
+  "no_live_joint_calls": 155624,
+  "old_no_live_joint_ns": 24908834425,
+  "new_no_live_joint_ns": 298655357,
+  "verdict_mismatches": 0,
+  "fixture_tests": 87
+}

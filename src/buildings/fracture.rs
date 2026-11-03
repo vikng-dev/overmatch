@@ -2107,6 +2107,10 @@ pub(crate) fn weigh(
     sections: &mut SectionCache,
 ) -> Weighed {
     let mut weighed = Weighed::default();
+    // With no live joint, no section or rest can fail and no support path has an edge.
+    if !structure.joints.iter().any(|joint| state.live(joint)) {
+        return weighed;
+    }
     let mut groups = loose_groups(structure, state);
     let mut framed = inputs.framed(structure, state);
     let loads = &framed;

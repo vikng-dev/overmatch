@@ -1,0 +1,593 @@
+diff --git a/src/buildings/breakage.rs b/src/buildings/breakage.rs
+index 4eb78481..657654b9 100644
+--- a/src/buildings/breakage.rs
++++ b/src/buildings/breakage.rs
+@@ -1232,6 +1232,7 @@ pub(crate) fn resolved_line_loads(
+ /// AUTHORITY: run the tick's deposits through the laws (module doc), record every change and spawn
+ /// a body per loose group.
+ fn apply_deposits(mut p: DepositParam) {
++    let _hunt = diag_hunt::Span::new(0);
+     if p.queue.0.is_empty() {
+         return;
+     }
+@@ -1347,6 +1348,12 @@ fn apply_deposits(mut p: DepositParam) {
+                 .chain(resting.iter().copied())
+                 .collect();
+             let spin = construction_spin(&p.bodies, root, frame, moving.is_some());
++            if !taken.contacts.is_empty() {
++                diag_hunt::CONTACT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            }
++            if !taken.lines.is_empty() || !taken.field.is_empty() || !taken.blast.is_empty() {
++                diag_hunt::FIELD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            }
+             let mut changes = run_laws(&kind.layout.element_of, live, &loads, holes, spin);
+             // A moving group is already a body: a field's blow moves it directly, at the point
+             // it struck, except where it turned its chunk to dust and went into crushing it
+@@ -1388,6 +1395,7 @@ fn apply_deposits(mut p: DepositParam) {
+                         live.state.fate[c] = Fate::Standing;
+                     }
+                 } else {
++                    diag_hunt::SPLIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                     let children: Vec<_> = groups
+                         .into_iter()
+                         .map(|group| {
+@@ -1420,6 +1428,7 @@ fn apply_deposits(mut p: DepositParam) {
+                 }
+             }
+             if !changes.events.is_empty() {
++                diag_hunt::changed(1, true);
+                 breakage.set_changed();
+             }
+         }
+@@ -1766,6 +1775,7 @@ pub(crate) fn run_laws(
+     mut holes: Vec<(usize, Hole)>,
+     spin: Vec3,
+ ) -> Changes {
++    let _hunt = diag_hunt::Span::new(1);
+     let struck = fracture::strike(&live.structure, &mut live.state, loads);
+     holes.retain(|&(c, hole)| {
+         let kept = live.state.standing(c) && live.holes[c].len() < HOLES_PER_CHUNK;
+@@ -2366,3 +2376,82 @@ pub(crate) fn sim_plugin(app: &mut App) {
+ 
+ #[cfg(test)]
+ mod tests;
++
++// [DEBUG-hunt] Temporary video-game environment destruction counters.
++pub(crate) mod diag_hunt {
++    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
++    pub const N: usize = 10;
++    pub static CALLS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
++    pub static NS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
++    pub static CHANGED: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
++    pub static CONTACT: AtomicU64 = AtomicU64::new(0);
++    pub static FIELD: AtomicU64 = AtomicU64::new(0);
++    pub static SPLIT: AtomicU64 = AtomicU64::new(0);
++    pub struct Span(usize, std::time::Instant);
++    impl Span {
++        pub fn new(i: usize) -> Self {
++            CALLS[i].fetch_add(1, Relaxed);
++            Self(i, std::time::Instant::now())
++        }
++    }
++    impl Drop for Span {
++        fn drop(&mut self) {
++            NS[self.0].fetch_add(self.1.elapsed().as_nanos() as u64, Relaxed);
++        }
++    }
++    pub fn changed(i: usize, changed: bool) {
++        CHANGED[i].fetch_add(u64::from(changed), Relaxed);
++    }
++    pub fn snapshot() -> serde_json::Value {
++        serde_json::json!({"names":["apply","laws","strike","structural","weigh","fall","loose_groups","incident","held","in_group_frames"],
++        "calls":CALLS.each_ref().map(|c|c.swap(0,Relaxed)), "ns":NS.each_ref().map(|c|c.swap(0,Relaxed)),
++        "changed":CHANGED.each_ref().map(|c|c.swap(0,Relaxed)),
++        "contact_runs":CONTACT.swap(0,Relaxed),"field_runs":FIELD.swap(0,Relaxed),"splits":SPLIT.swap(0,Relaxed)})
++    }
++}
++
++// [DEBUG-hunt] Real server rubble census; no interventions.
++pub(crate) fn diag_server(
++    mut last: Local<Option<std::time::Instant>>,
++    mut elapsed: Local<u64>,
++    bodies: Query<
++        (
++            Entity,
++            &LinearVelocity,
++            &AngularVelocity,
++            &avian3d::prelude::SleepTimer,
++            &avian3d::dynamics::solver::islands::BodyIslandNode,
++            Has<avian3d::prelude::Sleeping>,
++            Has<avian3d::prelude::SleepingDisabled>,
++        ),
++        With<crate::debris::DebrisPiece>,
++    >,
++    islands: Res<avian3d::dynamics::solver::islands::PhysicsIslands>,
++    buildings: Query<Entity, With<super::BuildingBody>>,
++    mut commands: Commands,
++) {
++    let now = std::time::Instant::now();
++    let previous = last.get_or_insert(now);
++    if now.duration_since(*previous).as_secs_f64() < 1.0 {
++        return;
++    }
++    let seconds = now.duration_since(*previous).as_secs_f64();
++    *previous = now;
++    *elapsed += 1;
++    if *elapsed == 20 && std::env::var("DIAG_REMOVE_BUILDINGS").is_ok() {
++        println!(
++            "[DEBUG-hunt] removing {} standing buildings",
++            buildings.iter().count()
++        );
++        for root in &buildings {
++            commands.entity(root).despawn();
++        }
++    }
++    let mut result = diag_hunt::snapshot();
++    result["period_s"] = seconds.into();
++    if (*elapsed).is_multiple_of(10) {
++        result["bodies"]=serde_json::json!(bodies.iter().map(|(e,l,a,t,i,s,d)|serde_json::json!({"e":format!("{e:?}"),"v":l.length(),"w":a.length(),"timer":t.0,"island":i.island_id().0,"sleep":s,"disabled":d})).collect::<Vec<_>>());
++        result["islands"]=serde_json::json!(islands.iter().map(|i|serde_json::json!({"id":i.id().0,"bodies":i.body_count(),"sleep":i.is_sleeping(),"removed":i.constraints_removed()})).collect::<Vec<_>>());
++    }
++    println!("[DEBUG-hunt] {result}");
++}
+diff --git a/src/buildings/breakage/tests.rs b/src/buildings/breakage/tests.rs
+index 65ac3b25..bd4e31f0 100644
+--- a/src/buildings/breakage/tests.rs
++++ b/src/buildings/breakage/tests.rs
+@@ -4318,3 +4318,126 @@ fn a_ballistic_sensor_does_not_add_a_second_occupied_mass() {
+         "the no-sensor control must expose the duplicate mass: {added} of {extra}"
+     );
+ }
++
++// [DEBUG-rest] Throwaway diagnostic of the game's environment destruction: same pile before
++// and after an intervention. Observations, not an emergent-output regression test.
++#[derive(Resource)]
++struct DiagPhase {
++    start: std::time::Instant,
++    us: f64,
++}
++fn diag_open(mut phase: ResMut<DiagPhase>) {
++    phase.start = std::time::Instant::now();
++}
++fn diag_close(mut phase: ResMut<DiagPhase>) {
++    phase.us = phase.start.elapsed().as_secs_f64() * 1e6;
++}
++
++#[test]
++fn diag_pieces_rest() {
++    use avian3d::dynamics::solver::islands::{BodyIslandNode, PhysicsIslands};
++    use std::sync::atomic::Ordering::Relaxed;
++    let kind = std::env::var("DIAG_KIND").unwrap_or("native".into());
++    let action = std::env::var("DIAG_ACTION").unwrap_or("force".into());
++    avian3d::diag_rest::SKIP_FROZEN_WAKE
++        .store(action == "guard" || action == "guard_threshold", Relaxed);
++    let (mut app, root) = composed(false);
++    app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
++    app.insert_resource(DiagPhase {
++        start: std::time::Instant::now(),
++        us: 0.0,
++    });
++    app.add_systems(
++        PhysicsSchedule,
++        (
++            diag_open.in_set(PhysicsStepSystems::First),
++            diag_close.in_set(PhysicsStepSystems::Last),
++        ),
++    );
++    app.world_mut().spawn((
++        RigidBody::Static,
++        Position(Vec3::new(0.0, -0.5, 0.0)),
++        Collider::cuboid(200.0, 1.0, 200.0),
++        CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
++    ));
++    if kind != "native" {
++        app.world_mut().entity_mut(root).despawn();
++        crate::net::debris_stress::diag_fixture(app.world_mut(), kind.parse().unwrap());
++    }
++    if action == "guard" {
++        avian3d::diag_rest::SKIP_FROZEN_WAKE.store(true, Relaxed);
++    }
++    if action == "timer" {
++        app.insert_resource(TimeToSleep(0.1));
++    }
++    let mut tick_us = Vec::new();
++    let mut physics_us = Vec::new();
++    let wall = std::time::Instant::now();
++    for tick in 0..(64
++        * std::env::var("DIAG_SECONDS")
++            .unwrap_or("120".into())
++            .parse::<u32>()
++            .unwrap())
++    {
++        if kind == "native" && [64, 384, 704, 1024].contains(&tick) {
++            let i = [64, 384, 704, 1024]
++                .iter()
++                .position(|t| *t == tick)
++                .unwrap();
++            let offset = [
++                Vec3::new(3.0, 0.5, 0.0),
++                Vec3::new(-3.0, 0.5, 0.0),
++                Vec3::new(0.0, 0.5, 4.0),
++                Vec3::new(0.0, 0.5, -4.0),
++            ][i];
++            set_off(&mut app, offset, Blast::of(16e6, 0.1, 1e-6));
++        }
++        if action == "threshold" || action == "guard_threshold" {
++            let world = app.world_mut();
++            let mut query =
++                world.query_filtered::<&mut SleepThreshold, With<crate::debris::DebrisPiece>>();
++            for mut threshold in query.iter_mut(world) {
++                threshold.angular = 1.0;
++            }
++        }
++        if action == "guard_threshold" {
++            avian3d::diag_rest::SKIP_FROZEN_WAKE.store(true, Relaxed);
++        }
++        let start = std::time::Instant::now();
++        app.update();
++        tick_us.push(start.elapsed().as_secs_f64() * 1e6);
++        physics_us.push(app.world().resource::<DiagPhase>().us);
++        if tick % 64 == 63 {
++            let world = app.world_mut();
++            let bodies: Vec<_> = world.query::<(Entity,Has<crate::debris::DebrisPiece>,&LinearVelocity,&AngularVelocity,&SleepTimer,&BodyIslandNode,Has<Sleeping>,Has<SleepingDisabled>,&Position)>().iter(world)
++                .map(|(e,p,l,a,t,i,s,d,pos)| serde_json::json!({"e":format!("{e:?}"),"piece":p,"v":l.length(),"w":a.length(),"timer":t.0,"island":i.island_id().0,"sleep":s,"disabled":d,"position":pos.0.to_array()})).collect();
++            let awake = bodies
++                .iter()
++                .filter(|b| b["piece"] == true && b["sleep"] == false)
++                .count();
++            let asleep = bodies
++                .iter()
++                .filter(|b| b["piece"] == true && b["sleep"] == true)
++                .count();
++            tick_us.sort_by(f64::total_cmp);
++            physics_us.sort_by(f64::total_cmp);
++            let islands:Vec<_> = world.resource::<PhysicsIslands>().iter().map(|i|serde_json::json!({"id":i.id().0,"bodies":i.body_count(),"sleep":i.is_sleeping(),"removed":i.constraints_removed()})).collect();
++            println!(
++                "[DEBUG-rest] summary {}",
++                serde_json::json!({"kind":kind,"action":action,"tick":tick+1,"wall_s":wall.elapsed().as_secs_f64(),"awake":awake,"asleep":asleep,"tick_us":tick_us[tick_us.len()/2],"physics_us":physics_us[physics_us.len()/2],"weigh_calls":diag_hunt::CALLS[4].swap(0,Relaxed),"weigh_us":diag_hunt::NS[4].swap(0,Relaxed) as f64/1e3})
++            );
++            println!(
++                "[DEBUG-rest] wake {}",
++                serde_json::json!({"tick":tick+1,"contact":avian3d::diag_rest::CONTACT.swap(0,Relaxed),"force":avian3d::diag_rest::FORCE.swap(0,Relaxed),"position":avian3d::diag_rest::POSITION.swap(0,Relaxed),"rotation":avian3d::diag_rest::ROTATION.swap(0,Relaxed),"velocity":avian3d::diag_rest::VELOCITY.swap(0,Relaxed),"timer":avian3d::diag_rest::TIMER.swap(0,Relaxed),"woken_bodies":avian3d::diag_rest::WOKEN.swap(0,Relaxed),"slept_bodies":avian3d::diag_rest::SLEPT.swap(0,Relaxed),"game":avian3d::diag_rest::GAME.swap(0,Relaxed)})
++            );
++            if tick % 640 == 639 {
++                println!(
++                    "[DEBUG-rest] bodies {}",
++                    serde_json::json!({"tick":tick+1,"kind":kind,"bodies":bodies,"islands":islands})
++                );
++            }
++            tick_us.clear();
++            physics_us.clear();
++        }
++    }
++}
+diff --git a/src/buildings/fracture.rs b/src/buildings/fracture.rs
+index b471e341..7f08654c 100644
+--- a/src/buildings/fracture.rs
++++ b/src/buildings/fracture.rs
+@@ -1064,6 +1064,7 @@ pub(crate) fn crack(structure: &Structure, state: &mut WallState, loads: &[Load]
+ /// the joint graph and the burial only: no float enters, so every peer that holds the same fates
+ /// and cracks finds the same groups.
+ pub(crate) fn loose_groups(structure: &Structure, state: &WallState) -> Vec<Vec<usize>> {
++    let _hunt = super::breakage::diag_hunt::Span::new(6);
+     let count = structure.chunks.len();
+     let mut neighbours = vec![Vec::new(); count];
+     let mut grounded: Vec<bool> = structure.chunks.iter().map(|chunk| chunk.buried).collect();
+@@ -1141,6 +1142,7 @@ pub(crate) struct Struck {
+ /// [`fall`]), so a check that must see the cracks before support (the structural one) runs
+ /// between.
+ pub(crate) fn strike(structure: &Structure, state: &mut WallState, loads: &[Load]) -> Struck {
++    let _hunt = super::breakage::diag_hunt::Span::new(2);
+     let mut struck = Struck::default();
+     for load in loads.iter().filter(|load| load.crushed > 0.0) {
+         if wear(structure, state, load.chunk, load.crushed) {
+@@ -1154,11 +1156,16 @@ pub(crate) fn strike(structure: &Structure, state: &mut WallState, loads: &[Load
+     struck.worn.retain(|chunk| state.standing(*chunk));
+     struck.dusted.sort_unstable();
+     struck.cracked = crack(structure, state, loads);
++    super::breakage::diag_hunt::changed(
++        2,
++        !struck.worn.is_empty() || !struck.dusted.is_empty() || !struck.cracked.is_empty(),
++    );
+     struck
+ }
+ 
+ /// Every loose group falls: its chunks' fate becomes [`Fate::Fallen`]. Returns the groups.
+ pub(crate) fn fall(structure: &Structure, state: &mut WallState) -> Vec<Vec<usize>> {
++    let _hunt = super::breakage::diag_hunt::Span::new(5);
+     let groups = loose_groups(structure, state);
+     for &chunk in groups.iter().flatten() {
+         state.fate[chunk] = Fate::Fallen;
+@@ -1381,6 +1388,7 @@ pub(crate) fn in_group_frames(
+     loads: &[Load],
+     spin: Vec3,
+ ) -> Vec<Load> {
++    let _hunt = super::breakage::diag_hunt::Span::new(9);
+     let mut framed = loads.to_vec();
+     for group in loose_groups(structure, state) {
+         let sources: Vec<_> = loads
+@@ -1495,6 +1503,7 @@ fn held(
+     (neighbours, anchors, buried): &Graph,
+     steps: &mut usize,
+ ) -> Option<Vec<usize>> {
++    let _hunt = super::breakage::diag_hunt::Span::new(8);
+     let outside = |joint: &usize| cut.binary_search(joint).is_err();
+     let mut seen = vec![false; neighbours.len()];
+     seen[start] = true;
+@@ -1712,6 +1721,7 @@ pub(crate) fn structural(
+     inputs: GroupLoads<'_>,
+     sections: &mut SectionCache,
+ ) -> Vec<Failure> {
++    let _hunt = super::breakage::diag_hunt::Span::new(3);
+     let mut failures = Vec::new();
+     if !inputs.sources.iter().any(|load| load.blow != Vec3::ZERO) {
+         return failures;
+@@ -1810,6 +1820,7 @@ pub(crate) fn structural(
+         }
+         failures.push(failure);
+     }
++    super::breakage::diag_hunt::changed(3, !failures.is_empty());
+     failures
+ }
+ 
+@@ -2106,6 +2117,7 @@ pub(crate) fn weigh(
+     unloaded: &[usize],
+     sections: &mut SectionCache,
+ ) -> Weighed {
++    let _hunt = super::breakage::diag_hunt::Span::new(4);
+     let mut weighed = Weighed::default();
+     let mut groups = loose_groups(structure, state);
+     let mut framed = inputs.framed(structure, state);
+@@ -2284,6 +2296,7 @@ pub(crate) fn weigh(
+         touched.dedup();
+         weighed.failures.push(failure);
+     }
++    super::breakage::diag_hunt::changed(4, !weighed.failures.is_empty());
+     weighed
+ }
+ 
+@@ -3051,6 +3064,7 @@ fn section_pulse(
+ 
+ /// Each chunk's joints, the anchors too, in joint order.
+ fn incident(structure: &Structure) -> Vec<Vec<usize>> {
++    let _hunt = super::breakage::diag_hunt::Span::new(7);
+     let mut incident = vec![Vec::new(); structure.chunks.len()];
+     for (index, joint) in structure.joints.iter().enumerate() {
+         incident[joint.a].push(index);
+diff --git a/src/net/debris_stress.rs b/src/net/debris_stress.rs
+index 6b43b4b6..9ca81ab8 100644
+--- a/src/net/debris_stress.rs
++++ b/src/net/debris_stress.rs
+@@ -860,3 +860,26 @@ mod tests {
+         assert!(breach(anchor, Quat::IDENTITY, 1.0, radius, 10, 0, |_| None).is_empty());
+     }
+ }
++
++// [DEBUG-rest] Exact production stress geometry and release, without a tank or network.
++#[cfg(test)]
++pub(crate) fn diag_fixture(world: &mut World, count: u32) {
++    for release in breach(Vec3::ZERO, Quat::IDENTITY, 1.0, 3.0, count, 0, |_| {
++        Some(0.0)
++    }) {
++        world.spawn((
++            DebrisPiece,
++            Position(release.position),
++            Rotation(release.rotation),
++            RigidBody::Dynamic,
++            fragment_collider(),
++            ColliderDensity(DENSITY_KG_M3),
++            CollisionLayers::new(
++                [Layer::Debris],
++                [Layer::Terrain, Layer::Vehicle, Layer::Debris],
++            ),
++            LinearVelocity(release.velocity),
++            AngularVelocity(release.spin),
++        ));
++    }
++}
+diff --git a/src/net/mod.rs b/src/net/mod.rs
+index b70cb4c4..3fd620fa 100644
+--- a/src/net/mod.rs
++++ b/src/net/mod.rs
+@@ -24,7 +24,7 @@ mod death_screen;
+ pub(crate) use death_screen::{mount_bare as mount_death_screen, shows_died};
+ /// The debris stress lever (`OVERMATCH_DEBRIS_STRESS`): server-simulated wall fragments, asleep at
+ /// rest, their poses replicated, drawn by clients.
+-mod debris_stress;
++pub(crate) mod debris_stress;
+ mod debug_hud;
+ /// The destruction ledger: tree state transitions on one globally visible entity.
+ mod destruction;
+diff --git a/src/net/server.rs b/src/net/server.rs
+index 0986b974..ee462617 100644
+--- a/src/net/server.rs
++++ b/src/net/server.rs
+@@ -177,6 +177,11 @@ pub fn run() {
+         hosting.install(&mut app);
+     }
+ 
++    app.add_systems(Last, crate::buildings::breakage::diag_server);
++    avian3d::diag_rest::SKIP_FROZEN_WAKE.store(
++        std::env::var("DIAG_GUARD").as_deref() == Ok("1"),
++        std::sync::atomic::Ordering::Relaxed,
++    );
+     app.run();
+     if let Some(hosting) = hosting {
+         hosting.finish();
+diff --git a/vendor/avian3d-0.7.0-child-pose/src/collision/narrow_phase/system_param.rs b/vendor/avian3d-0.7.0-child-pose/src/collision/narrow_phase/system_param.rs
+index 6134e6f0..9a376d0b 100644
+--- a/vendor/avian3d-0.7.0-child-pose/src/collision/narrow_phase/system_param.rs
++++ b/vendor/avian3d-0.7.0-child-pose/src/collision/narrow_phase/system_param.rs
+@@ -44,6 +44,7 @@ struct ColliderQuery<C: AnyCollider> {
+ 
+ #[derive(QueryData)]
+ struct RigidBodyQuery {
++    sleeping: Has<Sleeping>,
+     entity: Entity,
+     rb: Read<RigidBody>,
+     position: Read<Position>,
+@@ -246,6 +247,14 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
+ 
+                         // Link the contact pair to an island.
+                         if let Some(islands) = &mut self.islands {
++                            let has_awake_body = [contact_edge.body1, contact_edge.body2]
++                                .into_iter()
++                                .flatten()
++                                .any(|body| {
++                                    self.body_query
++                                        .get(body)
++                                        .is_ok_and(|body| !body.sleeping && !body.rb.is_static())
++                                });
+                             let island = islands.add_contact(
+                                 contact_id,
+                                 &mut self.body_islands,
+@@ -255,8 +264,13 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
+ 
+                             if let Some(island) = island
+                                 && island.is_sleeping
++                                && !(crate::diag_rest::SKIP_FROZEN_WAKE
++                                    .load(std::sync::atomic::Ordering::Relaxed)
++                                    && !has_awake_body)
+                             {
+                                 // Wake up the island if it was previously sleeping.
++                                crate::diag_rest::CONTACT
++                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                 islands_to_wake.push(island.id);
+                             }
+                         }
+@@ -545,8 +559,22 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
+                             body.rb.is_static(),
+                             collider1.position.0 - body.position.0,
+                             body.rotation * body.center_of_mass.0,
+-                            body.linear_velocity.0,
+-                            body.angular_velocity.0,
++                            if body.sleeping
++                                && crate::diag_rest::ZERO_SLEEP_VELOCITY
++                                    .load(std::sync::atomic::Ordering::Relaxed)
++                            {
++                                default()
++                            } else {
++                                body.linear_velocity.0
++                            },
++                            if body.sleeping
++                                && crate::diag_rest::ZERO_SLEEP_VELOCITY
++                                    .load(std::sync::atomic::Ordering::Relaxed)
++                            {
++                                default()
++                            } else {
++                                body.angular_velocity.0
++                            },
+                             body.friction,
+                             body.collision_margin,
+                             body.speculative_margin,
+@@ -569,8 +597,22 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
+                             body.rb.is_static(),
+                             collider2.position.0 - body.position.0,
+                             body.rotation * body.center_of_mass.0,
+-                            body.linear_velocity.0,
+-                            body.angular_velocity.0,
++                            if body.sleeping
++                                && crate::diag_rest::ZERO_SLEEP_VELOCITY
++                                    .load(std::sync::atomic::Ordering::Relaxed)
++                            {
++                                default()
++                            } else {
++                                body.linear_velocity.0
++                            },
++                            if body.sleeping
++                                && crate::diag_rest::ZERO_SLEEP_VELOCITY
++                                    .load(std::sync::atomic::Ordering::Relaxed)
++                            {
++                                default()
++                            } else {
++                                body.angular_velocity.0
++                            },
+                             body.friction,
+                             body.collision_margin,
+                             body.speculative_margin,
+diff --git a/vendor/avian3d-0.7.0-child-pose/src/dynamics/rigid_body/forces/query_data.rs b/vendor/avian3d-0.7.0-child-pose/src/dynamics/rigid_body/forces/query_data.rs
+index 72b28bee..99d35b1f 100644
+--- a/vendor/avian3d-0.7.0-child-pose/src/dynamics/rigid_body/forces/query_data.rs
++++ b/vendor/avian3d-0.7.0-child-pose/src/dynamics/rigid_body/forces/query_data.rs
+@@ -687,6 +687,7 @@ impl WriteRigidBodyForcesInternal for ForcesItem<'_, '_> {
+     fn try_wake_up(&mut self) -> bool {
+         // Wake up the body. Return `true` to indicate that the body is awake.
+         if let Some(sleep_timer) = &mut self.sleep_timer {
++            crate::diag_rest::FORCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+             sleep_timer.0 = 0.0;
+         }
+         true
+diff --git a/vendor/avian3d-0.7.0-child-pose/src/dynamics/solver/islands/sleeping.rs b/vendor/avian3d-0.7.0-child-pose/src/dynamics/solver/islands/sleeping.rs
+index 3d5b07ae..9c5001b1 100644
+--- a/vendor/avian3d-0.7.0-child-pose/src/dynamics/solver/islands/sleeping.rs
++++ b/vendor/avian3d-0.7.0-child-pose/src/dynamics/solver/islands/sleeping.rs
+@@ -377,6 +377,10 @@ impl Command for SleepIslands {
+                         return;
+                     }
+ 
++                    crate::diag_rest::SLEPT.fetch_add(
++                        island.body_count as u64,
++                        std::sync::atomic::Ordering::Relaxed,
++                    );
+                     island.is_sleeping = true;
+ 
+                     let mut body = island.head_body;
+@@ -489,6 +493,10 @@ impl Command for WakeIslands {
+                         continue;
+                     }
+ 
++                    crate::diag_rest::WOKEN.fetch_add(
++                        island.body_count as u64,
++                        std::sync::atomic::Ordering::Relaxed,
++                    );
+                     island.is_sleeping = false;
+ 
+                     let mut body = island.head_body;
+@@ -604,6 +612,21 @@ fn wake_on_changed(
+             || is_changed_after_tick(ang_vel, last_physics_tick.0, this_run)
+             || is_changed_after_tick(sleep_timer, last_physics_tick.0, this_run)
+         {
++            use std::sync::atomic::Ordering::Relaxed;
++            if is_changed_after_tick(pos, last_physics_tick.0, this_run) {
++                crate::diag_rest::POSITION.fetch_add(1, Relaxed);
++            }
++            if is_changed_after_tick(rot, last_physics_tick.0, this_run) {
++                crate::diag_rest::ROTATION.fetch_add(1, Relaxed);
++            }
++            if is_changed_after_tick(lin_vel, last_physics_tick.0, this_run)
++                || is_changed_after_tick(ang_vel, last_physics_tick.0, this_run)
++            {
++                crate::diag_rest::VELOCITY.fetch_add(1, Relaxed);
++            }
++            if is_changed_after_tick(sleep_timer, last_physics_tick.0, this_run) {
++                crate::diag_rest::TIMER.fetch_add(1, Relaxed);
++            }
+             awake_island_bit_vec.set_and_grow(body_island.island_id.0 as usize);
+         }
+     }
+diff --git a/vendor/avian3d-0.7.0-child-pose/src/lib.rs b/vendor/avian3d-0.7.0-child-pose/src/lib.rs
+index 66d5a1d8..109aad86 100644
+--- a/vendor/avian3d-0.7.0-child-pose/src/lib.rs
++++ b/vendor/avian3d-0.7.0-child-pose/src/lib.rs
+@@ -850,3 +850,21 @@ where
+         builder
+     }
+ }
++
++// [DEBUG-rest] Temporary counters for the game's environment-rest diagnostic.
++pub mod diag_rest {
++    pub static SKIP_FROZEN_WAKE: std::sync::atomic::AtomicBool =
++        std::sync::atomic::AtomicBool::new(true);
++    pub static ZERO_SLEEP_VELOCITY: std::sync::atomic::AtomicBool =
++        std::sync::atomic::AtomicBool::new(false);
++    use std::sync::atomic::AtomicU64;
++    pub static CONTACT: AtomicU64 = AtomicU64::new(0);
++    pub static FORCE: AtomicU64 = AtomicU64::new(0);
++    pub static POSITION: AtomicU64 = AtomicU64::new(0);
++    pub static ROTATION: AtomicU64 = AtomicU64::new(0);
++    pub static VELOCITY: AtomicU64 = AtomicU64::new(0);
++    pub static TIMER: AtomicU64 = AtomicU64::new(0);
++    pub static WOKEN: AtomicU64 = AtomicU64::new(0);
++    pub static SLEPT: AtomicU64 = AtomicU64::new(0);
++    pub static GAME: AtomicU64 = AtomicU64::new(0);
++}
