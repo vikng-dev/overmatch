@@ -146,7 +146,7 @@ impl ServoSpec {
         }
     }
 
-    /// Why this servo's authored limits violate admission, or `None` when they hold.
+    /// Why this servo's drive facts or travel violate admission, or `None` when they hold.
     /// The contract: a `Limited` window is finite with `min <= 0 <= max` (a servo spawns at angle 0,
     /// so the window holds its own start), and `drive_servos` never lets `current` leave it.
     pub(crate) fn admission_fault(&self) -> Option<String> {
@@ -154,7 +154,7 @@ impl ServoSpec {
             power_share,
             stall_torque,
             bearing_friction,
-            ..
+            hand_rate,
         } = self.drive
         {
             for (field, value) in [
@@ -170,6 +170,10 @@ impl ServoSpec {
             }
             if power_share.0 > 1.0 || stall_torque.0 <= bearing_friction.0 {
                 return Some("drive.Powered needs power_share <= 1 and stall_torque > bearing_friction; correct the drive facts".into());
+            }
+            let hand_work = hand_rate.0 * bearing_friction.0;
+            if !hand_work.is_finite() || hand_work <= 0.0 {
+                return Some("drive.Powered.hand_rate * bearing_friction must yield finite positive hand work; author representable rate and friction facts".into());
             }
         }
         let Travel::Limited { min, max } = self.travel else {
@@ -1012,7 +1016,7 @@ mod tests {
 
     /// Admission protects the integrator from nonrepresentable hand rates and drive facts.
     #[test]
-    fn motor_facts_refuse_invalid_values_before_play() {
+    fn drive_facts_refuse_invalid_values_before_play() {
         for value in ["0.0", "-1.0", "NaN", "inf", "1e-45"] {
             let row = format!(
                 "(role: Yaw, drive: Hand(hand_rate: ({value}, Fixture(\"rate\"))), travel: Continuous, requires: [])"
@@ -1028,6 +1032,16 @@ mod tests {
         ] {
             let spec = powered_spec(share, stall, friction);
             assert!(spec.admission_fault().is_some());
+        }
+        // Fixture individually representable facts whose derived hand work over/underflows.
+        for (rate, friction) in [(1e30, 1e20), (1e-20, 1e-30)] {
+            let mut spec = powered_spec(1.0, 2.0 * friction, friction);
+            let ServoDrive::Powered { hand_rate, .. } = &mut spec.drive else {
+                unreachable!()
+            };
+            *hand_rate = Sourced(rate);
+            let fault = spec.admission_fault().unwrap();
+            assert!(fault.contains("hand_rate") && fault.contains("bearing_friction"));
         }
     }
 

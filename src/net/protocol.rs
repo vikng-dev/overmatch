@@ -2545,7 +2545,7 @@ mod tests {
             },
             TankCommand {
                 aim: Some(AimIntent::HullLocal(Vec3::splat(
-                    crate::aim::AIM_LIMIT * 2.0,
+                    *crate::aim::AIM_LIMIT * 2.0,
                 ))),
                 ..default()
             },

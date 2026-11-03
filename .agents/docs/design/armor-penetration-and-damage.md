@@ -1487,8 +1487,8 @@ The uniform cuboid law supplies the moments about the declared role axes:
 `Iyaw = m*(x*x + z*z)/12`, `Ipitch = m*(y*y + z*z)/12`, with full extents in metres,
 mass in kg and moments in kg m². `ServoMechanism` holds the immutable construction in the
 spawn batch; the view asset supplies none of it. Hand rates and travel convert degrees to
-radians once at deserialization. Admission refuses invalid drive facts and unrepresentable
-moments before play, naming the field and repair.
+radians once at deserialization. Admission refuses invalid drive facts, unrepresentable hand work
+and unrepresentable moments before play, naming the field and repair.
 
 At sustained demand, with admitted `Ts > Tf`, the steady rate is **DERIVED** from bearing work:
 `omega_inf = max(Pmotor/Tf, qo*vh)`. On the motor path, initial acceleration is **DERIVED**

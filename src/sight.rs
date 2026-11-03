@@ -539,7 +539,7 @@ pub(crate) fn drive_gunner_aim(
     let distance = aim_distance(
         &spatial,
         Ray3d::new(mount_world, dir_world),
-        MAX_RANGE,
+        *MAX_RANGE,
         tank,
         &volumes,
         &parents,

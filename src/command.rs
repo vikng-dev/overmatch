@@ -188,7 +188,7 @@ impl TryFrom<AimIntent> for ParsedAimIntent {
     type Error = CommandError;
     fn try_from(intent: AimIntent) -> Result<Self, Self::Error> {
         let point = intent.point();
-        if !point.is_finite() || point.abs().max_element() > crate::aim::AIM_LIMIT {
+        if !point.is_finite() || point.abs().max_element() > *crate::aim::AIM_LIMIT {
             return Err(CommandError::Aim);
         }
         Ok(Self(intent))
@@ -905,8 +905,8 @@ mod tests {
             f32::NAN,
             f32::INFINITY,
             f32::NEG_INFINITY,
-            crate::aim::AIM_LIMIT * 1.01,
-            -crate::aim::AIM_LIMIT * 1.01,
+            *crate::aim::AIM_LIMIT * 1.01,
+            -*crate::aim::AIM_LIMIT * 1.01,
         ] {
             for framed in [AimIntent::World, AimIntent::HullLocal] {
                 let command = TankCommand {
@@ -921,7 +921,7 @@ mod tests {
         }
         for level in [-1.0, 0.0, 1.0] {
             for framed in [AimIntent::World, AimIntent::HullLocal] {
-                let point = Vec3::splat(crate::aim::AIM_LIMIT);
+                let point = Vec3::splat(*crate::aim::AIM_LIMIT);
                 let command = TankCommand {
                     throttle: level,
                     steer: level,

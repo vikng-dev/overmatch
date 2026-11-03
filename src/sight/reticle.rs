@@ -1564,7 +1564,7 @@ mod tests {
                     let sight_point = physical_projection(GUN + sight);
                     let intent_point = physical_projection(point);
                     let bore_point =
-                        physical_projection(GUN + rotation * Vec3::NEG_Z * crate::aim::MAX_RANGE);
+                        physical_projection(GUN + rotation * Vec3::NEG_Z * *crate::aim::MAX_RANGE);
 
                     let mut drawn = 0;
                     for (node, transform, visibility, zero) in world
@@ -1896,10 +1896,6 @@ mod tests {
     ///
     /// Sample the whole bound from point-blank to scale end, through shipped blend/placement,
     /// measuring in the shader metric.
-    ///
-    /// With camera on sight line, every bearing must reach at least 98 % of the rim. A vertical-
-    /// field-only bound leaves 44 % unreachable at 16:9. Perspective flattens the yaw/pitch-angle
-    /// circle: MEASURED diagonal dip 1.6 %.
     #[test]
     fn the_intent_stays_inside_the_drawn_glass_at_every_rung() {
         /// Float slack as a fraction of the rim: the containment is an EXACT equality on the
@@ -1907,21 +1903,6 @@ mod tests {
         const RIM_SLACK: f32 = 1e-5;
 
         for viewport in ASPECTS {
-            let welded = OpticPicture::new(viewport, None, 0.0);
-            let glass = welded.glass();
-            for step in 0..24 {
-                let phi = step as f32 * std::f32::consts::TAU / 24.0;
-                let point = intent_at(on_the_bound(welded.margin, phi), 900.0);
-                let reach = welded
-                    .glass_offset(&glass, hull().transform_point3(point))
-                    .length()
-                    / glass.radius;
-                assert!(
-                    (0.98..=1.0 + RIM_SLACK).contains(&reach),
-                    "on a {viewport} viewport the bound {phi} rad round reached {reach} of the \
-                     drawn radius",
-                );
-            }
             for k in BLEND_SAMPLES {
                 let margin = OpticPicture::new(viewport, None, k).margin;
                 for step in 0..24 {

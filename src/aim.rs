@@ -7,6 +7,8 @@
 //! [`AimIntent::World`]; hull-anchored optic/free-aim picks travel as [`AimIntent::HullLocal`].
 //! The mode-agnostic servo bridge converts either in the hull frame of the consuming tick.
 
+use std::sync::LazyLock;
+
 use avian3d::prelude::{LayerMask, Position, Rotation, SpatialQuery, SpatialQueryFilter};
 use bevy::ecs::entity::EntityHashMap;
 use bevy::math::Affine3A;
@@ -16,7 +18,7 @@ use bevy::ui::UiSystems;
 use crate::Layer;
 use crate::camera::GunnerCameraPlaced;
 use crate::command::{AimIntent, ParsedTankCommand, TankCommand, TankDeviceSet};
-use crate::damage::{ControlledTank, VolumeOf, hit_ancestor};
+use crate::damage::{VolumeOf, hit_ancestor};
 use crate::firecontrol::{RangeTable, lob};
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::sight::{SightMode, SightToggled, in_third_person};
@@ -26,15 +28,49 @@ use crate::tank::{
 };
 use crate::view::PlayerView;
 
-/// Maximum engagement range; rays that hit nothing fall back to a point this far out. Shared by
-/// every aim ray — the third-person pick, the bore dot, and the optic's resolve
-/// (`sight::drive_gunner_aim`) — so "the sky" is one far point in all of them.
-pub(crate) const MAX_RANGE: f32 = 10_000.0;
+const AIM_RANGE_FILE: &str = "assets/aim.ron";
+const AIM_RANGE_DATA: &str = include_str!("../assets/aim.ron");
 
-/// DERIVED per-axis input bound (`command::ParsedTankCommand`): world's diagonal
-/// ([`crate::world::VIEW_CAST_MAX_M`]) + [`MAX_RANGE`] sky fallback bounds all legitimate picks
-/// with headroom, while keeping poisoned inputs below f32 hull-composition overflow magnitudes.
-pub(crate) const AIM_LIMIT: f32 = crate::world::VIEW_CAST_MAX_M + MAX_RANGE;
+/// Shared sky fallback, admitted before play so every aim ray names the same far point.
+pub(crate) static MAX_RANGE: LazyLock<f32> = LazyLock::new(|| {
+    AimRange::parse(AIM_RANGE_DATA)
+        .unwrap_or_else(|error| panic!("{error}"))
+        .sky_fallback_m
+        .0
+});
+
+/// DERIVED per-axis input bound: world cast envelope plus authored sky fallback.
+/// Admission keeps squared differences of points in this envelope representable.
+pub(crate) static AIM_LIMIT: LazyLock<f32> =
+    LazyLock::new(|| crate::world::VIEW_CAST_MAX_M + *MAX_RANGE);
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AimRange {
+    sky_fallback_m: crate::provenance::Sourced<f32>,
+}
+
+impl AimRange {
+    fn parse(text: &str) -> Result<Self, String> {
+        let data: Self = crate::provenance::from_shipped_str(AIM_RANGE_FILE, text)?;
+        data.validate()?;
+        Ok(data)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let range = self.sky_fallback_m.0;
+        let limit = crate::world::VIEW_CAST_MAX_M + range;
+        // Two endpoints may differ by twice the per-axis bound; squared length sums three axes.
+        let difference = 2.0 * f64::from(limit);
+        if !range.is_finite() || range <= 0.0 || 3.0 * difference * difference > f64::from(f32::MAX)
+        {
+            return Err(format!(
+                "{AIM_RANGE_FILE}: sky_fallback_m: author a finite positive distance small enough for squared aim-point differences to fit f32"
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Distance along an aim ray to the first surface a shell would meet: terrain or a tank's ballistic
 /// volumes — the same `Terrain | Armor` mask the live shell marches against
@@ -94,6 +130,7 @@ struct BoreIndicator;
 struct AimIndicator;
 
 pub fn sim_plugin(app: &mut App) {
+    LazyLock::force(&MAX_RANGE);
     // In `GameplaySet`, so `drive_servos` (`.after(GameplaySet)`) integrates the fresh targets
     // the same tick. Mode-agnostic and per-tank.
     app.add_systems(FixedUpdate, drive_aim_servos.in_set(GameplaySet));
@@ -129,13 +166,9 @@ impl CommittedAim {
     /// Re-author the held bearing through this frame's hull pose (ADR-0038). Fixed hull-local
     /// storage sweeps the world point as the hull turns, so stopping picks cannot stabilize aim
     /// (ADR-0001), and fresh world naming avoids delivery-age rotation.
-    /// No composable hull pose: send HullLocal unchanged; re-authorship must continue to prevent
-    /// recirculation, and this frame rides the tank rather than freezing a world spot.
-    pub(crate) fn as_intent(&self, tank: Entity, hull: Option<Affine3A>) -> Option<AimIntent> {
-        self.get(tank).map(|held| match hull {
-            Some(hull) => AimIntent::World(hull.transform_point3(held)),
-            None => AimIntent::HullLocal(held),
-        })
+    pub(crate) fn as_intent(&self, tank: Entity, hull: Affine3A) -> Option<AimIntent> {
+        self.get(tank)
+            .map(|held| AimIntent::World(hull.transform_point3(held)))
     }
 
     /// The active mode commits/rekeys to `tank`, adopting possession on its first write.
@@ -265,21 +298,28 @@ fn update_centre_reticle(
     });
 }
 
-/// The hull's tick-truth pose as an affine — `rig_world_pose` (never `GlobalTransform`: see its
-/// doc), composed and checked finite, so a poisoned pose frame reaches neither the shared memory nor
-/// the wire. `None` when the chain will not compose or the result is not finite.
+/// A controlled, bound hull has a finite tick-truth frame in its root's hierarchy.
+/// `GlobalTransform` belongs to presentation and cannot supply aim memory's frame.
 fn hull_frame(
     hull: Entity,
     tank: Entity,
     poses: &Query<(&Position, &Rotation)>,
     parents: &Query<&ChildOf>,
     locals: &Query<&Transform>,
-) -> Option<Affine3A> {
-    let (position, rotation) = poses.get(tank).ok()?;
-    let (hull_position, hull_rotation) =
-        rig_world_pose(hull, tank, position.0, rotation.0, parents, locals)?;
+) -> Affine3A {
+    let (position, rotation) = poses
+        .get(tank)
+        .expect("a controlled tank with a bound rig carries its physics pose");
+    let (hull_position, hull_rotation) = rig_world_pose(
+        hull, tank, position.0, rotation.0, parents, locals,
+    )
+    .expect("a controlled hull remains in its root hierarchy with complete local transforms");
     let affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
-    (affine.matrix3.is_finite() && affine.translation.is_finite()).then_some(affine)
+    assert!(
+        affine.matrix3.is_finite() && affine.translation.is_finite(),
+        "a controlled hull frame is finite before aim commitment"
+    );
+    affine
 }
 
 /// Pick a world point through screen centre (orbit camera is world-locked, ADR-0038), storing
@@ -295,7 +335,7 @@ fn commit_aim(
     spatial: SpatialQuery,
     camera_query: Query<(&Camera, &GlobalTransform), With<PlayerView>>,
     window: Query<&Window>,
-    controlled: ControlledTank,
+    controlled: Query<(Entity, &Rig), With<Controlled>>,
     poses: Query<(&Position, &Rotation)>,
     volumes: Query<&VolumeOf>,
     parents: Query<&ChildOf>,
@@ -303,15 +343,23 @@ fn commit_aim(
     mut tank_commands: Query<&mut TankCommand>,
     mut committed: ResMut<CommittedAim>,
 ) {
-    let (Some(tank), Some(rig)) = (controlled.entity(), controlled.rig()) else {
+    // No local possession is legitimate before spawn and between controlled tanks.
+    let Some((tank, rig)) = crate::tank::controlled_one(controlled.single()) else {
         return;
     };
     let hull = hull_frame(rig.hull, tank, &poses, &parents, &locals);
+    let to_local = hull.inverse();
+    assert!(
+        to_local.matrix3.is_finite() && to_local.translation.is_finite(),
+        "a controlled hull frame is invertible before aim commitment"
+    );
+    let mut command = tank_commands
+        .get_mut(tank)
+        .expect("a controlled tank carries its command state from spawn");
 
     // Free-look holds memory; an empty/new-tank key is the legitimate pre-first-commit state.
     if mouse.pressed(MouseButton::Right) {
         if let Some(aim) = committed.as_intent(tank, hull)
-            && let Ok(mut command) = tank_commands.get_mut(tank)
             // Skip equal writes; restore a bridge-overwritten aim before PostUpdate HUD and
             // next tick's input sample, without at-rest change-detection churn.
             && command.aim != Some(aim)
@@ -327,26 +375,28 @@ fn commit_aim(
     let window = window
         .single()
         .expect("the player input composition has exactly one window");
-    let Ok(ray) = camera.viewport_to_world(cam_transform, window.size() / 2.0) else {
-        return;
+    let ray = match camera.viewport_to_world(cam_transform, window.size() / 2.0) {
+        Ok(ray) => ray,
+        // The camera's target may not have been computed on its first frame.
+        Err(bevy::camera::ViewportConversionError::NoViewportSize) => return,
+        Err(error) => panic!("an aim camera with a viewport produces a finite ray: {error}"),
     };
+    assert!(
+        ray.origin.is_finite(),
+        "an active aim camera has a finite ray origin"
+    );
 
     let point = ray.get_point(aim_distance(
-        &spatial, ray, MAX_RANGE, tank, &volumes, &parents,
+        &spatial, ray, *MAX_RANGE, tank, &volumes, &parents,
     ));
 
     // Store raw sight-line intent; servo-time lob raises the bore above its amber HUD point.
-    // Without a composable hull frame, still author the pick but retain the last measured bearing.
     let aim = Some(AimIntent::World(point));
-    if let Ok(mut command) = tank_commands.get_mut(tank)
-        // A parked player can re-pick the same point; skip equal writes as in the hold arm.
-        && command.aim != aim
-    {
+    // A parked player can re-pick the same point; skip equal writes as in the hold arm.
+    if command.aim != aim {
         command.aim = aim;
     }
-    if let Some(hull) = hull {
-        committed.set(tank, hull.inverse().transform_point3(point));
-    }
+    committed.set(tank, to_local.transform_point3(point));
 }
 
 /// Lay every tank's yaw/pitch servos from one intention, each at its own composed pose.
@@ -502,7 +552,7 @@ fn update_bore_indicator(
     };
     let ray = Ray3d::new(muzzle.translation(), direction);
     let point = ray.get_point(aim_distance(
-        &spatial, ray, MAX_RANGE, tank, &volumes, &parents,
+        &spatial, ray, *MAX_RANGE, tank, &volumes, &parents,
     ));
 
     place_indicator(
@@ -573,6 +623,62 @@ fn update_aim_indicator(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// Input parsing and all aim views share one admitted envelope; malformed authored range
+    /// must be refused before play rather than overflow a point difference downstream.
+    #[test]
+    fn aim_range_is_required_and_its_derived_envelope_is_representable() {
+        let data = AimRange::parse(AIM_RANGE_DATA).unwrap();
+        assert_eq!(
+            *AIM_LIMIT,
+            crate::world::VIEW_CAST_MAX_M + data.sky_fallback_m.0
+        );
+        let error = AimRange::parse("()").unwrap_err();
+        assert!(error.contains(AIM_RANGE_FILE) && error.contains("sky_fallback_m"));
+        // Fixture malformed distances, including a finite value whose squared envelope overflows.
+        for range in [0.0, -1.0, f32::NAN, f32::INFINITY, 1e30] {
+            let data = AimRange {
+                sky_fallback_m: crate::provenance::Sourced(range),
+            };
+            let error = data.validate().unwrap_err();
+            assert!(error.contains(AIM_RANGE_FILE) && error.contains("sky_fallback_m"));
+        }
+        let error = AimRange::parse(&AIM_RANGE_DATA.replace("Taste(", "Fixture(")).unwrap_err();
+        assert!(
+            error.contains(AIM_RANGE_FILE) && error.contains("Fixture provenance is test-only")
+        );
+    }
+
+    /// Aim authorship must expose an internal pose failure before emitting a pick or retaining
+    /// an older bearing. A missing local possession is handled before this bound-rig invariant.
+    #[test]
+    #[should_panic(expected = "a controlled hull frame is finite before aim commitment")]
+    fn aim_commit_refuses_a_nonfinite_hull_frame() {
+        let mut rig = AimRig::new();
+        rig.world.get_mut::<Position>(rig.tank).unwrap().0 = Vec3::splat(f32::NAN);
+        rig.run(commit_aim);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "a controlled hull remains in its root hierarchy with complete local transforms"
+    )]
+    fn aim_commit_refuses_a_broken_hull_hierarchy() {
+        let mut rig = AimRig::new();
+        rig.world.entity_mut(rig.hull).remove::<ChildOf>();
+        rig.run(commit_aim);
+    }
+
+    /// Viewport conversion checks direction, but its finite-origin invariant belongs to the
+    /// camera's owner. A poisoned origin must reach neither aim memory nor the input stream.
+    #[test]
+    #[should_panic(expected = "an active aim camera has a finite ray origin")]
+    fn aim_commit_refuses_a_nonfinite_camera_origin() {
+        let mut rig = AimRig::new();
+        *rig.world.get_mut::<GlobalTransform>(rig.camera).unwrap() =
+            GlobalTransform::from(Transform::from_translation(Vec3::splat(f32::NAN)));
+        rig.run(commit_aim);
+    }
+
     /// Marker authors own diameter and colour; the spawner must not retain a Rust taste.
     #[test]
     fn hud_marker_sizes_and_colours_come_from_sight_data() {
@@ -1144,7 +1250,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// The game's damage model (game state only): a hand mount whose rate exceeds the hull pivot follows a world place
+    /// A hand mount whose rate exceeds the hull pivot follows a world place
     /// without steady lag. A transport which rotates the intention in flight instead introduces
     /// ±ω*delivery delay, so both pivot directions must pass.
     #[test]
