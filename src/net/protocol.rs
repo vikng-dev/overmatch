@@ -1,7 +1,6 @@
-//! The wire contract: everything both sides must register identically. lightyear requires the same
-//! protocol registration on client and server (replicated components, the input protocol, the avian
-//! prediction/rollback registration) — mismatch here desyncs or fails the connection. If a component
-//! or input rides the wire, its registration lives here and nowhere else.
+//! Shared wire registrations: components, messages, channels, inputs and physics codecs.
+//! Both endpoints must register identically; mismatches corrupt replication or refuse connection.
+//! The game's damage-model snapshots and shot facts carry game state only.
 
 use avian3d::prelude::{LinearVelocity, Position, RigidBody, Rotation};
 use bevy::ecs::entity::{EntityMapper, MapEntities};
@@ -31,9 +30,6 @@ use crate::track::sim::{
 };
 use crate::{CombatantId, CombatantLife, ShotId};
 
-// ---------------------------------------------------------------------------
-// Protocol compatibility guard
-// ---------------------------------------------------------------------------
 // Replicon registration order is wire compatibility. Both netcode endpoints must use
 // `protocol_id()` — the compile-time `PROTOCOL_FINGERPRINT` plus the runtime map digest — as their
 // netcode `protocol_id`; ADR-0018 and the manifest-pinning tests own the compatibility guard.
@@ -290,36 +286,21 @@ pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
     env!("CARGO_PKG_VERSION"),
 );
 
-/// THE HANDSHAKE TAG both endpoints hand netcode: [`PROTOCOL_FINGERPRINT`] — the compile-time wire
-/// manifest — folded with the digest of the WORLD this process will build
-/// ([`crate::map::content_digest`]).
+/// Handshake tag: [`PROTOCOL_FINGERPRINT`] plus runtime map, embedded material registry,
+/// tank construction and armament digests (ADR-0018). Map terrain/scatter are DERIVED on each
+/// peer from files beside the binary; stale files (including half-pulled LFS objects) must
+/// refuse before divergent belt contacts, spawn heights or hull collisions reach play. Netcode encrypts the connect token under this
+/// tag: a token under another tag cannot decrypt, so the server drops the request.
 ///
-/// The map is content shipped beside the binary, not inside it, and its terrain and scatter are
-/// DERIVED on both ends rather than replicated. Without this term a same-build server and client
-/// over different map files (a stale checkout, a half-pulled LFS object) complete the handshake and
-/// then integrate
-/// different ground: belt contacts, spawn heights and hull collisions all diverge, and the first
-/// symptom is a rollback storm nobody can trace to a file. With it the refusal lands at the
-/// connect: netcode encrypts the connect token under `protocol_id` (ADR-0018), so a client holding
-/// another map mints a token the server cannot decrypt and the request is dropped.
+/// Embedded `materials.ron` determines every hard body's resistance but is invisible to the
+/// map digest and type manifest. The construction digest includes the embedded tank sheet and
+/// adjacent sim artifact, which decide the weapon, stowage and health-volume indices.
 ///
-/// The embedded substance registry (`materials.ron`) is folded too: every hard body's resistance
-/// — a tank's plates, a tree's trunk — resolves through it at load, so two builds embedding
-/// different registries integrate different walks over identical assets. The map digest cannot
-/// see it (the registry ships inside the binary, not beside it), and the pinned wire manifest
-/// does not (no type moves), so it enters here.
+/// The game's damage model binds fuze modes and round facts from embedded round-type, round and
+/// gun registries. Their keys and bytes enter too: handshake-matched receivers can refuse an
+/// unresolvable index as malformed input rather than waiting for data skew to resolve.
 ///
-/// The tank's construction is folded too ([`crate::bake::construction_digest`]): the embedded
-/// sheet and the sim artifact beside the binary decide every weapon slot, stowage list and
-/// health-bearing volume a fact or snapshot indexes.
-///
-/// The game's damage model also reads the embedded round-type, round and gun registries. The
-/// tank sheet names their keys; the registries supply fuze modes and the bound round's facts.
-/// All their keys and bytes enter the tag too, so a completed handshake indexes the same data.
-/// A receiver can refuse an unresolvable fact as malformed input rather than waiting on skew.
-///
-/// Computed once per process. The map's files cannot change under a running peer, and the heightmap
-/// is tens of megabytes.
+/// Cached per process: map files must stay fixed while running, and the heightmap is tens of MB.
 pub fn protocol_id() -> u64 {
     static ID: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *ID.get_or_init(|| {
@@ -337,8 +318,6 @@ pub fn protocol_id() -> u64 {
     })
 }
 
-/// [`PROTOCOL_FINGERPRINT`] folded with the world's content digest, the embedded registry and the
-/// tank's construction and armament digests.
 fn handshake_tag(
     map_digest: u64,
     materials: &[u8],
@@ -373,11 +352,8 @@ fn armaments_digest(round_types: &str, rounds: &[(&str, &str)], guns: &[(&str, &
     tag
 }
 
-/// Fold the VERSION-INDEPENDENT wire manifest: surface, own-type graph, wire dependencies, and
-/// protocol revision. This is the portion a real wire skew moves, and it is what the pin tripwire
-/// guards. The crate version is deliberately NOT folded here, so a routine release bump does not
-/// force a re-pin — it still enters the runtime [`PROTOCOL_FINGERPRINT`] below (version-exact
-/// handshakes), just not this pinned invariant.
+/// Version-independent manifest prefix pinned by the tripwire. Routine crate-version bumps
+/// need no re-pin; they still change [`PROTOCOL_FINGERPRINT`] and refuse skewed handshakes.
 const fn wire_manifest_fingerprint(
     wire_surface_hash: u64,
     wire_types_hash: u64,
@@ -396,9 +372,8 @@ const fn wire_manifest_fingerprint(
     fingerprint_field(hash, b"protocol_rev", &protocol_rev.to_le_bytes())
 }
 
-/// Derive a handshake tag from the pinned wire manifest PLUS the crate version. The version is
-/// folded LAST onto [`wire_manifest_fingerprint`], so this value is byte-identical to the
-/// pre-split single fold — the split only exposes the version-independent prefix for pinning.
+/// Fold the crate version last, preserving the single-fold byte order while exposing a
+/// version-independent prefix for pinning.
 const fn protocol_fingerprint_for(
     wire_surface_hash: u64,
     wire_types_hash: u64,
@@ -462,7 +437,6 @@ pub struct VolumeSnapshot {
 /// never predicts those facts.
 #[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct NetCrew {
-    /// Every health-bearing volume in [`health_bearing_volumes`] order: HP + (for seats) occupancy.
     pub volumes: Vec<VolumeSnapshot>,
     /// The in-flight backfill swap, if any: `(source seat, target seat, seconds remaining)`.
     pub swap: Option<(CrewStation, CrewStation, f32)>,
@@ -472,12 +446,9 @@ pub struct NetCrew {
 #[derive(Component, Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct LaunchedTurretPose(pub Option<(Vec3, Quat)>);
 
-/// A client's REQUEST to place its own next respawn at a world XZ (the spawn map). It is a request,
-/// not a fact: the authority validates the bounds, resolves the ground height itself, and retains
-/// the last accepted point for that client's subsequent respawns — the client never names a Y and never teleports.
-///
-/// It carries no entity or combatant reference: the authority keys the override by the SENDING LINK
-/// (the same key `CombatantIds`/`ControlledBy` use), so a forged id cannot move another player.
+/// Request a persistent respawn XZ, never an immediate teleport or client-chosen Y. The authority
+/// validates bounds/standing geometry, resolves ground height and retains the last accepted point.
+/// It keys by sending link (`CombatantIds`/`ControlledBy`), so no forged id can move another player.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct SetSpawnPoint {
     /// World X, metres. Server-clamped to the playable square.
@@ -511,13 +482,11 @@ pub struct FireEvent {
     /// The fired round's fuze mode, its index in that round's authored fuze modes (0 for an inert
     /// round); receipt binds the round in it and refuses an index the fuze does not list.
     pub fuze_mode: u8,
-    /// Authority tick used to derive the stable `ShotId` and fast-forward the cosmetic shell to the
-    /// receiver's predicted present. The receiver bounds its accepted age.
+    /// Authority tick for stable `ShotId` and cosmetic catch-up. The receiver bounds accepted age.
     pub fire_tick: Tick,
 }
 
 impl FireEvent {
-    /// Stable identity derived from the wire fields.
     pub fn shot_id(&self) -> ShotId {
         ShotId {
             combatant: self.combatant,
@@ -638,20 +607,14 @@ pub struct DamageChannel;
 /// explanation is ordered by its shot, encounter and ticks, never by arrival.
 pub struct ShotExplanationChannel;
 
-/// Ordered-reliable client-to-authority lane for spawn-placement requests ([`SetSpawnPoint`]). Its
-/// own lane rather than a shared one: a lost spawn choice must not be repaired by, or delay, grip
-/// resync. Ordered because the authority resolves the requests by keeping the last one it received,
-/// so delivery order IS the decision (see the registration in [`plugin`]).
+/// Dedicated ordered-reliable spawn requests: loss must not delay unrelated traffic.
+/// The authority keeps the last received choice, so order must preserve clicks A-then-B;
+/// unordered delivery could settle on the stale A. Low rate makes head-of-line blocking negligible.
 pub struct SpawnChannel;
 
-/// The tank's health-bearing volumes in `TankVolumes` order — the SINGLE definition of which volumes
-/// (and in what order) [`NetCrew`] snapshots, so publish and apply can never drift out of alignment
-/// (index `i` addresses the same volume on both ends). `has_health` is the caller's query membership
-/// test, so this serves both the immutable (publish) and mutable (apply) `ComponentHealth` query.
-///
-/// `pub(crate)` so the view-layer hit-feel cue (`net::hit_feel`) can map a `NetCrew` index back to
-/// its volume entity through the SAME ordered filter both wire ends use — a bearing for the hit
-/// direction reads off that volume's world pose. One filter, one order, no drift.
+/// The game's damage model: one `TankVolumes` filter/order for publishing and applying
+/// [`NetCrew`] and mapping its indices to world-space hit-feel cues (`net::hit_feel`).
+/// `has_health` accepts either query's membership test, including mutable `ComponentHealth`.
 pub(crate) fn health_bearing_volumes(
     volumes: &TankVolumes,
     has_health: impl Fn(Entity) -> bool,
@@ -671,19 +634,16 @@ struct VolumeSnapshotSource {
     dead: Option<&'static Dead>,
 }
 
-/// Authority side: collect the tank's atomic combat snapshot — every health-bearing volume's HP plus
-/// each crew seat's occupancy/aliveness, in the shared [`health_bearing_volumes`] order — into the
-/// replicated [`NetCrew`], and stamp any in-flight [`PendingSwap`] as station pairs.
-/// `FixedPostUpdate` (after the damage chain has run this tick), `Without<Remote>` = authority-only in
-/// shared code (every client tank carries `Remote` — see `publish_servo_angles`). The collect order
-/// is exactly the apply order in [`apply_net_crew`].
+/// The game's damage model: publish atomic HP/occupancy/swap/repair state in
+/// [`health_bearing_volumes`] order after the tick's damage chain (`FixedPostUpdate`).
+/// `Without<Remote>` excludes every client tank; role markers do not establish provenance
+/// (see [`publish_servo_angles`]). Swap stations replace local seat entities on the wire.
 fn publish_net_crew(
     mut tanks: Query<(&TankVolumes, Option<&PendingSwap>, &mut NetCrew), Without<Remote>>,
     sources: Query<VolumeSnapshotSource>,
     stations: Query<&CrewStation>,
 ) {
     for (volumes, pending, net) in &mut tanks {
-        // Every bearer is a `sources` member by the filter, so each `get` holds.
         let snapshot = || {
             health_bearing_volumes(volumes, |v| sources.contains(v)).map(|v| {
                 let src = sources
@@ -709,8 +669,7 @@ fn publish_net_crew(
             };
             Some((a, b, ps.remaining))
         });
-        // Compared in place and written only on a difference: no change-detection churn (nor
-        // replication resends) while at rest, and no snapshot built to find that out.
+        // Compare without allocating a snapshot or triggering at-rest replication resends.
         if net.swap == swap && net.volumes.iter().copied().eq(snapshot()) {
             continue;
         }
@@ -750,7 +709,6 @@ fn apply_net_crew(
     mut commands: Commands,
 ) {
     for (tank_volumes, net) in &tanks {
-        // The health-bearing volumes in publish order (the SAME shared filter the server used).
         let bearers: Vec<Entity> =
             health_bearing_volumes(tank_volumes, |v| volumes.contains(v)).collect();
         // The rig assembles every health-bearing volume from data in one flush, and the handshake
@@ -817,17 +775,11 @@ fn apply_net_crew(
     }
 }
 
-/// Client side: mirror the replicated [`NetCrew::swap`] into a LOCAL, cosmetic [`PendingSwap`] on each
-/// `Remote` tank, resolving the wire's station pair back to this tank's seat entities. This is the net
-/// half of ADR-0016 for the swap timer — replicate the cause (the server's in-flight swap), derive the
-/// view state — and it keeps the crew bar (`crew_ui`) a pure SIM-layer view: it reads `PendingSwap`
-/// exactly as in single-player, never naming the netcode (the `src/net/tests/net_boundary.rs`
-/// contract).
-///
-/// Safe precisely because the deciding swap systems are authority-only: on a net client
-/// `damage::apply_crew_swap_commands` and `damage::tick_swaps` are gated off (`Without` `ClientReplica`),
-/// so this synthesized `PendingSwap` is never ticked or completed locally — it is a display datum only,
-/// re-derived from the authoritative snapshot every tick (so a cancel/complete on the server clears it).
+/// The game's damage model: derive cosmetic [`PendingSwap`] seat entities from
+/// [`NetCrew::swap`] (ADR-0016), keeping `crew_ui` independent of netcode
+/// (`src/net/tests/net_boundary.rs`). `damage::apply_crew_swap_commands` / `damage::tick_swaps`
+/// exclude `ClientReplica`, so this timer is never ticked or completed locally. Each fixed tick
+/// mirrors the authority, including cancellation/completion.
 fn mirror_swap_from_net_crew(
     mut tanks: Query<
         (
@@ -855,7 +807,6 @@ fn mirror_swap_from_net_crew(
                     continue;
                 };
                 match pending {
-                    // The same swap ticking down: its countdown, in place.
                     Some(mut pending) if pending.a == a && pending.b == b => {
                         if pending.remaining != remaining {
                             pending.remaining = remaining;
@@ -868,7 +819,6 @@ fn mirror_swap_from_net_crew(
                     }
                 }
             }
-            // No swap in flight on the authority: drop any leftover display datum.
             None => {
                 if pending.is_some() {
                     commands.entity(tank).remove::<PendingSwap>();
@@ -899,12 +849,10 @@ fn network_gameplay_tick(tick: Tick) -> Result<crate::sim_tick::SimTick, Network
     }
 }
 
-/// The network composition's one clock publication. `LocalTimeline` is incremented by lightyear
-/// in `FixedFirst` (lightyear_core's `increment_local_tick`); it is published before every
-/// `GameplaySet` reader of the same fixed tick, so `shooting::fire` stamps its `ShotId` and
-/// `shot_transport::queue_fire` ships that tick as the one the clients catch up from. The
-/// ordering is the whole guarantee: a reader ordered before the publication would read the
-/// previous tick, and nothing downstream compares against the timeline again.
+/// Publish `LocalTimeline` after lightyear_core's `increment_local_tick` (`FixedFirst`) and
+/// before every same-tick `GameplaySet` reader. The game's damage model uses this tick for
+/// `shooting::fire`'s `ShotId` and `shot_transport::queue_fire`'s catch-up origin; downstream
+/// readers trust the publication without comparing the timeline again.
 pub(super) fn install_shot_clock(app: &mut App) {
     app.insert_resource(crate::PublishedWeaponClock);
     app.init_resource::<crate::ShotClock>();
@@ -925,11 +873,9 @@ pub(super) fn publish_shot_clock(
     weapon_clock.0 = tick;
 }
 
-/// Authority side: mirror the live `ServoState` angles onto the replicated root component.
-/// `FixedPostUpdate`, so it reads what `drive_servos` (FixedUpdate, after `GameplaySet`) just
-/// stepped. `Without<Remote>` makes it authority-only in shared code: every client-side tank
-/// arrived by replication and carries `Remote` (the `Predicted`/`Interpolated` markers can NOT
-/// discriminate here — the server carries both).
+/// Publish angles in `FixedPostUpdate`, after `drive_servos` (`FixedUpdate`, after `GameplaySet`).
+/// `Without<Remote>` excludes every client tank. `Predicted`/`Interpolated` cannot distinguish
+/// authority: the server carries both.
 fn publish_servo_angles(
     mut tanks: Query<(&Rig, &TankServos, &mut ServoAngles), Without<Remote>>,
     servo_slots: Query<&ServoIndex>,
@@ -952,17 +898,11 @@ fn publish_servo_angles(
     }
 }
 
-/// Client side, remote (interpolated) tanks: feed the replicated angles to the local servos as
-/// targets — the mechanism does the rest (see [`ServoAngles`]). In `GameplaySet` so it shares the
-/// Playing gate with the rest of the sim; `drive_servos` orders itself after the whole set, so the
-/// targets land before the mechanism steps.
-///
-/// `ServoCommand.target` has exactly one writer per tank, and the filter is what enforces it.
-/// `drive_aim_servos` (also in the set, unordered against this) writes it for every tank whose
-/// `TankCommand.aim` is `Some`, i.e. every tank holding an input slot. `Without<GameControlled>`
-/// excludes that tank here — by the OWNER marker, which rides `ControlledBy`. Every
-/// other remote's `TankCommand` stays default (no input slot, and the bridge below skips
-/// non-simulated tanks), so `aim` is `None` and `drive_aim_servos` never touches its servos.
+/// Feed non-owner remote servos in `GameplaySet` (Playing-gated, before `drive_servos`).
+/// `Without<GameControlled>` gives `ServoCommand.target` one writer: the owner's
+/// `drive_aim_servos`, unordered against this system, follows its input slot's `TankCommand.aim`.
+/// Other remotes hold default commands with `aim: None`; the input bridge skips non-simulated
+/// tanks, so `drive_aim_servos` leaves them alone. `ControlledBy` supplies the owner marker.
 fn apply_servo_angles(
     tanks: Query<(&ServoAngles, &Rig), (With<Remote>, Without<GameControlled>)>,
     mut servos: Query<&mut ServoCommand>,
@@ -979,13 +919,10 @@ fn apply_servo_angles(
     }
 }
 
-/// Authority side: mirror the launched turret's live avian world pose onto the replicated root
-/// datum. `FixedPostUpdate` (after `launch_turrets_on_cookoff` has made the turret a free body and
-/// the solver has stepped it), `Without<Remote>` = authority-only (every client tank carries
-/// `Remote`). The join key is `Rig.turret` — the same turret `Entity` the authority launched; once
-/// it carries `LaunchedTurret` the second query resolves it, and we publish `Some(pose)`. Before
-/// launch the turret isn't a free body (no launched match) so the datum stays its `None` default.
-/// `set_if_neq` so a resting turret stops churning change-detection.
+/// The game's damage model: publish the launched turret's solver pose in `FixedPostUpdate`,
+/// after `launch_turrets_on_cookoff` and physics. `Rig.turret` joins the root to its free body;
+/// before launch, no `LaunchedTurret` matches and the datum stays `None`. `Without<Remote>`
+/// excludes clients; `set_if_neq` avoids at-rest replication churn.
 fn publish_launched_turret_pose(
     mut tanks: Query<(&Rig, &mut LaunchedTurretPose), Without<Remote>>,
     launched: Query<(&Position, &Rotation), With<LaunchedTurret>>,
@@ -1033,14 +970,11 @@ fn apply_launched_turret_pose(
             continue;
         };
         if launched.contains(rig.turret) {
-            // Already detached: move the free turret to the authoritative pose.
             if let Ok((mut p, mut r)) = poses.get_mut(rig.turret) {
                 p.set_if_neq(Position(position));
                 r.set_if_neq(Rotation(rotation));
             }
         } else {
-            // One-time detach: fires exactly once because the `LaunchedTurret` insert (below) makes
-            // the `launched.contains` guard true for every subsequent tick.
             commands
                 .entity(rig.turret)
                 .remove::<(ChildOf, ServoCommand, ServoIndex, ServoSpec)>()
@@ -1054,13 +988,10 @@ fn apply_launched_turret_pose(
     }
 }
 
-/// CURSOR-clock source for the track view (the per-channel clock map): an interpolated hull
-/// renders at the interpolation cursor, so the belt speed/phase its track view draws must be
-/// sampled on the same clock — component-wise linear, the belt phase in f64 along the shorter way
-/// round [`crate::track::sim::BELT_PHASE_WRAP_M`] (the wire wraps it, so two consecutive samples
-/// can straddle a wrap). Client-side presentation only: registering interpolation adds no wire
-/// type, mode, or direction (the wire-surface pins prove it), and a simulated hull carries no
-/// `Interpolated` marker, so its sim-written component is untouched.
+/// Cursor-time belt state for cursor-rendered hulls: linear speed and f64 phase along the
+/// shorter path across [`crate::track::sim::BELT_PHASE_WRAP_M`]. Interpolation adds no wire type,
+/// mode or direction (wire-surface pins guard this); simulated hulls lack `Interpolated`,
+/// leaving their sim-written state untouched.
 pub(crate) fn track_drive_lerp(start: TrackDrive, end: TrackDrive, t: f32) -> TrackDrive {
     let side = |a: TrackDriveSide, b: TrackDriveSide| TrackDriveSide {
         speed: a.speed + (b.speed - a.speed) * t,
@@ -1083,16 +1014,10 @@ pub(crate) fn drive_signal_lerp(start: DriveSignal, end: DriveSignal, t: f32) ->
     }
 }
 
-/// Ordered wire registrations. Keep this list aligned with [`plugin`]; its pinned hash is a direct
-/// handshake-fingerprint input. House process also bumps [`PROTOCOL_REV`] for release bookkeeping.
-///
-/// A CHANNEL is listed as `Name|Mode|Direction`, because a channel's identity on the wire is not its
-/// type name alone: the delivery MODE (ordering/reliability) and the DIRECTION are the lane's
-/// contract, and changing either — `UnorderedReliable` to `OrderedReliable`, `ClientToServer` to
-/// `ServerToClient` — renames nothing. Without them in the manifest, two ends built with different
-/// channel config would shake hands and then disagree about how a lane delivers. Everything else
-/// (components, messages, the input protocol) is identified by type name alone; what those types
-/// SERIALIZE is covered separately by [`WIRE_TYPES_HASH`].
+/// Ordered registrations, bound to [`plugin`] and [`WIRE_SURFACE_HASH`]. Channels include
+/// `Name|Mode|Direction`: changing reliability/order or direction renames no type but changes
+/// delivery semantics. Other entries name types; [`WIRE_TYPES_HASH`] covers their serialization.
+/// Every wire change also bumps [`PROTOCOL_REV`] for release bookkeeping.
 #[cfg(test)]
 const WIRE_SURFACE: &[&str] = &[
     // Plain-replicated markers/snapshots — `app.component::<_>().replicate()`, in order:
@@ -1143,42 +1068,14 @@ const WIRE_SURFACE: &[&str] = &[
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
 const WIRE_SURFACE_HASH: u64 = 0x5afa185f66009321;
 
-// ---------------------------------------------------------------------------
-// Deep wire-surface coverage (field-level + external-dep skew)
-// ---------------------------------------------------------------------------
-//
-// [`WIRE_SURFACE`] pins the ordered SET OF TYPES that ride the wire; the `plugin_registrations_match_
-// wire_surface` tripwire binds that list to the actual `plugin` registration block, and the
-// `wire_surface_is_pinned` tripwire pins the list's hash. Together those catch a type ADDED, REMOVED,
-// RENAMED, or REORDERED — and, for channels, a delivery MODE or DIRECTION changed, since a channel
-// rides the list annotated as `Name|Mode|Direction` (see [`WIRE_SURFACE`]).
-// They do NOT catch a change to what a type SERIALIZES: adding a field to
-// `VolumeSnapshot`/`CrewSnapshot`/`NetCrew` renames no registered type, so the surface hash stays put
-// while the two ends misdeserialize each other — the exact silent skew the guard exists to refuse.
-//
-// COVERAGE MODEL, in two halves that together cover every byte on the wire:
-//   * OWN types (defined in this crate) — covered by [`WIRE_TYPES_HASH`]: the `wire_types_are_pinned`
-//     tripwire source-scans each wire-facing struct/enum's DEFINITION TEXT (comments/whitespace
-//     stripped, so a doc or reformat edit is invisible; a field/variant/type change is not) and hashes
-//     the lot. This is the whole `WIRE_SURFACE` own-type graph, followed through embeds: `NetCrew`
-//     carries `VolumeSnapshot` which carries `CrewSnapshot`, `TankTransmission` carries
-//     `TransmissionState`/`ClutchState`, `WeaponGate` carries `WeaponGateState`, `WeaponLoads`
-//     carries `WeaponLoad`, `TankCommand` (src/command.rs) carries `CrewSwap` and `RoundSelect`
-//     (which carries `RoundStep`), and both
-//     `CrewSnapshot` and `CrewSwap` carry `CrewStation` (src/damage.rs).
-//     A component whose bytes a CODEC decides rather than its serde derive (`wire_quant`'s rule
-//     functions) is covered by that codec's whole source, comments and whitespace stripped, folded
-//     into the same hash (the test module's `WIRE_CODEC_SOURCES`): a step, range or layout change
-//     there moves it.
-//   * EXTERNAL types (avian `Position`/`Rotation`/`LinearVelocity`, whose bytes the
-//     `wire_quant` codecs write from their fields, plus lightyear's own wire framing) — their source
-//     is not in this tree to scan, so they are covered by DEP VERSION:
-//     [`WIRE_DEP_AVIAN3D`]/[`WIRE_DEP_LIGHTYEAR`] pin the resolved `Cargo.lock` versions, so a bump of
-//     either dep (which can silently change how those types serialize or how lightyear frames them)
-//     also trips a tripwire and changes the fingerprint when re-pinned.
-//
-// Every pinned value is folded directly into the fingerprint. Failure messages also request a
-// `PROTOCOL_REV` bump for release bookkeeping, but compatibility safety does not rely on that step.
+// Wire coverage: `plugin_registrations_match_wire_surface` binds registration order and channel
+// semantics to `WIRE_SURFACE`; `wire_surface_is_pinned` binds that list to the handshake. Neither
+// sees field-only changes. `WIRE_TYPES_HASH` therefore pins normalized own-type definitions and
+// embedded types (`WIRE_TYPE_DEFS`), plus whole custom codecs (`WIRE_CODEC_SOURCES`), stripping
+// comments/whitespace. Codec steps, ranges and layouts matter as much as serde fields.
+// External Avian fields and Lightyear framing are covered by resolved Cargo.lock versions
+// (`WIRE_DEP_AVIAN3D` / `WIRE_DEP_LIGHTYEAR`), since their source is not scanned here. Every pin
+// enters the fingerprint directly; compatibility safety does not rely on remembering a REV bump.
 
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
@@ -1198,7 +1095,6 @@ pub(crate) fn plugin(app: &mut App) {
     app.init_resource::<crate::ballistics::PathClock>();
     app.component::<NetTank>().replicate();
     app.component::<NetBot>().replicate();
-    // Immutable spawn identity.
     app.component::<CombatantId>().replicate();
     // Immutable spawn identity: which of its combatant's lives a root is, so a record of a shot
     // against an earlier life is never read against this one.
@@ -1266,11 +1162,7 @@ pub(crate) fn plugin(app: &mut App) {
         ..default()
     })
     .add_direction(NetworkDirection::ServerToClient);
-    // Spawn placement is a rare, decisive choice: reliable so one click always lands, and ORDERED
-    // because the authority keeps only the LAST request per client. Under an unordered lane, rapid
-    // clicks A-then-B can be delivered B-then-A and the authority would settle on the stale A —
-    // the click the player visibly overrode. Ordering is what makes "last received" mean "last
-    // clicked"; the lane is low-rate enough that head-of-line blocking costs nothing.
+    // `SpawnChannel` owns the reliability/order constraint.
     app.add_channel::<SpawnChannel>(ChannelSettings {
         mode: ChannelMode::OrderedReliable(ReliableSettings::default()),
         ..default()
@@ -1338,10 +1230,7 @@ pub(crate) fn plugin(app: &mut App) {
     super::resync::retain_stream::<Rotation>(app);
     app.component::<LinearVelocity>()
         .replicate_with(super::wire_quant::linear_velocity_fns());
-    // The tracked drivetrain (phase B): velocity-like continuous sim state, replicated for the
-    // remote track view through `wire_quant`'s belt codec. Interpolated like Position/Rotation so
-    // a cursor-rendered hull's track view reads cursor-time belt speed/phase, never the
-    // arrival-fresh value that visibly leads the hull.
+    // `track_drive_lerp` keeps the remote belt view on the hull's cursor clock.
     app.component::<TrackDrive>()
         .replicate_with(super::wire_quant::track_drive_fns())
         .add_interpolation_with(track_drive_lerp);
@@ -1443,11 +1332,9 @@ fn bridge_action_state_to_tank_command(
     refused.retain(|entity, _| tanks.contains(*entity));
 }
 
-/// The bridge's per-tank rule: a whole-struct copy (matches `ActionState`'s "absolute snapshot per
-/// tick" contract), except that a CONSUMABLE commits ONLY on a tick this command can ATTEST it was
-/// authored for. `for_tick` was stamped by `net::client`'s `stamp_input_tick` with the tick
-/// lightyear files the command under; anything lightyear inherited, repeated, fabricated or froze
-/// carries some OTHER tick's stamp. Fail closed — never a detector, always a proof.
+/// Copy the absolute `ActionState` snapshot, committing consumables only when `for_tick`
+/// attests this tick. `net::client::stamp_input_tick` stamps Lightyear's filing tick; inherited,
+/// repeated, fabricated or frozen values retain another tick's stamp. Proof, never detection.
 pub(super) fn attest(command: TankCommand, tick: Tick) -> Result<ParsedTankCommand, CommandError> {
     ParsedTankCommand::try_from(command).map(|command| command.attest(tick.0))
 }
@@ -1848,12 +1735,8 @@ mod tests {
         hash
     }
 
-    /// THE TRIPWIRE. The wire surface must equal its pinned snapshot. When this fails, the replicated
-    /// component/message/channel/input set changed — re-pin [`WIRE_SURFACE_HASH`] to the value this
-    /// prints and, by house process, bump [`PROTOCOL_REV`] in the same diff. The required re-pin is
-    /// itself a fingerprint input, so mismatched builds refuse at the netcode handshake (both ends'
-    /// `protocol_id` =
-    /// [`PROTOCOL_FINGERPRINT`]).
+    /// Registration changes require a re-pin plus [`PROTOCOL_REV`] bump. The pin directly
+    /// changes the handshake; [`protocol_id`] also includes content digests.
     #[test]
     fn wire_surface_is_pinned() {
         let actual = hash_wire_surface();
@@ -1863,14 +1746,9 @@ mod tests {
         );
     }
 
-    // --- Source-scan tripwires --------------------------------------------------------------------
-    //
-    // These read this crate's own source (via `CARGO_MANIFEST_DIR`) and grep it, the same SOURCE-SCAN
-    // pattern `src/net/tests/net_boundary.rs` uses to enforce an architectural contract. They are
-    // honest-but-simple line/substring scanners, NOT a Rust parser — resilient to reformatting, and
-    // biased toward FALSE TRIPS (which merely force a harmless re-pin) over false passes (which
-    // would let a wire skew through). Comments/whitespace are stripped first so prose and layout
-    // edits never trip them.
+    // Source-scan tripwires (`CARGO_MANIFEST_DIR`), like `net_boundary`: line/substring scanners,
+    // not Rust parsers. Strip comments/whitespace to ignore prose/layout; prefer harmless false
+    // trips requiring a re-pin over false passes admitting wire skew.
 
     /// Read a repo-relative source file (or `Cargo.lock`) for a scan.
     fn read_source(rel: &str) -> String {
@@ -1904,7 +1782,6 @@ mod tests {
                 out.push_str("  ");
                 rest = &rest[2..];
             } else if rest.starts_with("//") {
-                // Blank to end of line (keep the newline).
                 let end = rest.find('\n').unwrap_or(rest.len());
                 for _ in 0..end {
                     out.push(' ');
@@ -2021,12 +1898,9 @@ mod tests {
         out
     }
 
-    /// FINDING 1 TRIPWIRE. The types `plugin` actually registers must equal [`WIRE_SURFACE`], in order.
-    /// This is what stops the hand list from silently diverging from the code: add / remove / reorder a
-    /// registration in `plugin` (e.g. `app.component::<NetSmoke>().replicate()`) WITHOUT editing
-    /// `WIRE_SURFACE` and this fails. Updating the list then trips `wire_surface_is_pinned`; its
-    /// required re-pin moves the handshake directly. House process pairs that re-pin with a
-    /// `PROTOCOL_REV` bump, but the refusal does not rely on remembering it.
+    /// Bind [`WIRE_SURFACE`] to actual registrations, including channel mode/direction. Editing
+    /// only `plugin` fails here; updating the list trips `wire_surface_is_pinned`, whose re-pin
+    /// changes the handshake even without the required [`PROTOCOL_REV`] bump.
     #[test]
     fn plugin_registrations_match_wire_surface() {
         let src = read_source("src/net/protocol.rs");
@@ -2044,18 +1918,9 @@ mod tests {
         );
     }
 
-    /// The own wire-facing types whose DEFINITION TEXT rides [`WIRE_TYPES_HASH`], each as
-    /// `(source file, type name)`. This is the `WIRE_SURFACE` own-type graph followed through its
-    /// embeds (see the coverage-model block by the const): protocol types, the public status in
-    /// `disclosure.rs`, `WeaponGate`/`WeaponGateState`/`WeaponLoads`/`WeaponLoad` from
-    /// `tank/model.rs`, `TankCommand`/`AimIntent`/`CrewSwap`/`RoundSelect`/`RoundStep` from
-    /// `command.rs`, `CrewStation` and `KnockoutReason`
-    /// from `damage.rs`, and the shot explanation's graph from `damage_cam/wire.rs`,
-    /// `damage_cam/mod.rs` and, for a cone's field descriptor, `ballistics/spall_cone.rs`.
-    /// External wire types (avian/lightyear) are covered by dependency version. An embedded ENUM
-    /// earns its own row: postcard encodes the variant as its declaration index, so reordering
-    /// variants changes what the bytes mean without touching one character of the type that embeds
-    /// it.
+    /// Own wire-type graph as `(source, name)`, including embedded types. External types use
+    /// dependency pins. Each embedded enum needs a row: postcard encodes declaration indices,
+    /// so reordered variants change meaning without changing the embedding definition.
     const WIRE_TYPE_DEFS: &[(&str, &str)] = &[
         ("src/net/protocol.rs", "NetTank"),
         ("src/track/sim.rs", "TrackDrive"),
@@ -2349,10 +2214,8 @@ mod tests {
             .to_string()
     }
 
-    /// FINDING 2 TRIPWIRE. A field-level serde change to an own wire type (a field added to
-    /// `VolumeSnapshot`/`CrewSnapshot`/`NetCrew`, etc.) renames no registered type, so `WIRE_SURFACE`
-    /// and its hash stay green. This pins every own wire definition and the external wire-dependency
-    /// versions, so either kind of change requires a re-pin that moves the handshake fingerprint.
+    /// Field/variant/derive changes can leave [`WIRE_SURFACE`] unchanged. Pin own definitions
+    /// and external dependency versions so either change requires a handshake-changing re-pin.
     #[test]
     fn wire_types_are_pinned() {
         let actual = hash_wire_types();
@@ -2501,12 +2364,8 @@ mod tests {
         }
     }
 
-    /// THE WORLD AND THE TANK ARE PART OF THE HANDSHAKE. The tag both endpoints hand netcode is
-    /// not the wire manifest alone: the map's content digest and the tank's construction digest
-    /// are folded onto it, so a same-build peer that loaded different terrain or another tank's
-    /// data mints a token the other end cannot decrypt (ADR-0018) instead of connecting and then
-    /// integrating different ground or indexing weapons and volumes it does not hold. The fire and
-    /// crew receivers refuse an unresolvable index as malformed input on that guarantee.
+    /// Same-build peers with different world/construction data must refuse at connect (ADR-0018).
+    /// The game's damage model relies on this when refusing unresolved weapon/volume indices.
     #[test]
     fn the_map_content_reaches_the_handshake_tag() {
         assert_ne!(
@@ -2722,17 +2581,12 @@ mod tests {
         }
     }
 
-    /// UNATTESTED tick: the `ActionState` carries a command authored for an older tick, or the
-    /// unstamped default (`for_tick == 0`, before any input message lands). This is what EVERY way
-    /// lightyear can hand back a value that is not this tick's input looks like at the seam —
-    /// hold-last extrapolation, a `SameAsPrecedent` gap-fill, a stale un-overwritable entry, or an
-    /// `Absent`-frozen `ActionState` (lightyear's `update_action_state` skips the apply, so the
-    /// frozen value is re-presented every tick for as long as the freeze lasts). The bridge carries
-    /// the MOVEMENT levels and ABSOLUTES through (hold-last is CORRECT for those — a starved stream
-    /// keeping the last drive and lay is the right guess, and neither commits anything
-    /// irreversible), and fails every CONSUMABLE closed at EVERY lag: a tolerance window of any
-    /// width would re-latch a frozen click (one unrequested 88 round per reload) or cycle the MG
-    /// after release. Attestation does not care WHY the value is stale.
+    /// The game's damage model: every stale input form must fail consumables closed at every lag
+    /// while holding movement levels and aim/range absolutes. These include hold-last,
+    /// `SameAsPrecedent` gap-fill, stale un-overwritable entries and `Absent` freezing
+    /// (`update_action_state` skips application). A tolerance window would re-latch a frozen
+    /// click each reload or keep automatic fire cycling after release; provenance needs no
+    /// diagnosis of why input is stale.
     #[test]
     fn unattested_tick_keeps_movement_levels_fails_consumables_closed() {
         let held = TankCommand {
@@ -2757,8 +2611,8 @@ mod tests {
             .spawn((ActionState(held), TankCommand::default()))
             .id();
 
-        // Authored for tick 5 and stepped at lags 1..=256 — four seconds at 64 Hz, more than a
-        // full 88 reload cycle — then the unstamped default once the tick has moved.
+        // Fixture: authored at tick 5, lags 1..=256 (DERIVED four seconds at 64 Hz), plus
+        // an unstamped default after the clock moves. No reload mechanism is mounted.
         let rows = (6..262).map(|now| (5, now)).chain([(0, 7)]);
         for (authored, now) in rows {
             world.insert_resource(timeline_at(now));
@@ -2820,31 +2674,18 @@ mod tests {
         );
     }
 
-    /// **The `for_tick` wire cost, measured — not modelled.** lightyear serializes an
-    /// `InputMessage` with postcard (`lightyear_serde`'s `default_serialize`), so this encodes a real
-    /// `NativeStateSequence<TankCommand>` — the exact `states` payload of one input message — with
-    /// the exact same encoding.
+    /// MEASURED input-state payload cost using real `NativeStateSequence<TankCommand>` postcard
+    /// encoding (`lightyear_serde::default_serialize`), excluding packet framing. `for_tick`
+    /// changes each tick and defeats `SameAsPrecedent`: at `packet_redundancy: 5`, an idle stream
+    /// needs five full commands instead of one plus four one-byte repeat markers. Aiming already
+    /// changes every slot, so the stamp adds only its own bytes there. Both regimes print below.
     ///
-    /// The honest downside of provenance: `for_tick` changes EVERY tick, so it defeats
-    /// `Compressed::SameAsPrecedent` run-compression. A message that used to be one full command plus
-    /// four one-byte "same as the last one" markers becomes five full commands
-    /// (`packet_redundancy: 5`).
-    ///
-    /// This prints both regimes so the cost is on the record rather than assumed. It asserts only a
-    /// CEILING, so it fails loudly if `TankCommand` ever grows fat enough to make the input stream a
-    /// real bandwidth problem — at which point the mitigation is to shrink the ATTESTED payload (a
-    /// fire-fields-only sub-struct carrying the full stamp), not to drop attestation and not to
-    /// narrow the stamp: inputs hold their last value under starvation, so a wrapping stamp
-    /// re-attests a held command once per wrap (a `u8` every 256 ticks, DERIVED 4 s at 64 Hz) and
-    /// re-latches its fire edges.
-    ///
-    /// Context for the number: this is UPSTREAM traffic only (client → server), and the client
-    /// sends at most one input message per tick (`net::client::install_input_send_cadence`), so
-    /// bytes per message × the tick rate is the steady upstream rate at any frame rate (states
-    /// payload only; packet framing is extra). The comparison is also somewhat theoretical — the
-    /// `for_tick` stamp alone differs every tick (`net::client::stamp_input_tick`), so
-    /// run-compression is dead in the shipping configuration whatever `aim` does. It only ever paid off unstamped, for a tank sitting
-    /// perfectly still doing nothing, which is exactly when nobody cares about bandwidth.
+    /// The ceiling guards bandwidth growth. Shrink the attested payload (a fire-only substruct
+    /// with full stamp) rather than removing/narrowing provenance: a held input re-attests at
+    /// stamp wrap (`u8`: 256 ticks, DERIVED 4 s at 64 Hz), re-latching edges. At most one message
+    /// per tick (`net::client::install_input_send_cadence`) makes payload bytes × tick rate the
+    /// steady client→server payload rate regardless of frame rate. Unstamped compression pays
+    /// only for unchanged commands; shipping stamps defeat it even without aim movement.
     #[test]
     fn input_message_wire_cost() {
         use lightyear::prelude::input::native::NativeStateSequence;
@@ -2867,8 +2708,7 @@ mod tests {
                 .len()
         }
 
-        // A player holding the trigger, perfectly still: the ONLY thing that changes tick to tick is
-        // the stamp. This is the worst case for compression, i.e. the best case for the old wire.
+        // Fixed-command fixture: only the stamp changes, maximizing its compression penalty.
         let held = |tick: i32, stamped: bool| {
             ActionState(TankCommand {
                 throttle: 1.0,
@@ -2882,9 +2722,8 @@ mod tests {
 
         let mut unstamped = NativeBuffer::<TankCommand>::default();
         let mut stamped = NativeBuffer::<TankCommand>::default();
-        // REALISTIC tick values: postcard VARINT-encodes integers, so a `for_tick` of
-        // 100 costs one byte while a real mid-session tick (100_000 ≈ 26 min in at 64 Hz) costs
-        // several. Measuring at tick 100 would flatter the stamp.
+        // Postcard varints: tick 100 costs one byte; fixture tick 100_000 (DERIVED ≈26 min at
+        // 64 Hz) costs several. Low ticks would understate stamp cost.
         const T0: i32 = 100_000;
         for tick in T0..T0 + 10 {
             unstamped.set(Tick(tick as u32), held(tick, false));
@@ -2902,8 +2741,7 @@ mod tests {
             (delta * MESSAGES_PER_S) as f64 / 1024.0,
         );
 
-        // The REALISTIC regime: the player is aiming, so the `aim` point already differs every tick
-        // and every slot was ALREADY a full command. The stamp adds only its own bytes.
+        // Moving-aim fixture: commands already differ each tick; only stamp bytes are extra.
         let aiming = |tick: i32, stamped: bool| {
             ActionState(TankCommand {
                 throttle: 1.0,
@@ -3056,16 +2894,11 @@ mod tests {
         assert_eq!(*world.get::<ComponentHealth>(volume).unwrap(), initial);
     }
 
-    /// The crew-swap false-death tripwire (the corruption this slice ends). Builds the exact
-    /// post-corruption local state the OLD client path produced on a `Remote` tank — swap A↔B, seat
-    /// A (Gunner) LEFT holding the dead occupant and seat B (Loader) LEFT holding the live one after
-    /// the client-side flip, `apply_net_health` then re-asserting HP `[full, 0]` by index and
-    /// `kill_crew` latching `Dead` onto the seat now holding the live man — while the authority
-    /// snapshot still says seat A is the live Gunner and seat B the dead Loader.
-    ///
-    /// `apply_net_crew` (the fix) must HEAL it: it re-derives HP, occupancy (`home`), and `Dead` from
-    /// the authoritative snapshot every tick, so the live crewman ends alive. Public knockout state
-    /// is deliberately outside this private-snapshot system.
+    /// The game's damage model: a new authoritative snapshot must replace mismatched local
+    /// seat pools, occupant homes and `Dead` markers atomically. Fixture: local seats hold swapped
+    /// homes and both `Dead` markers, while authority has a full Gunner pool and a knocked-out
+    /// Loader. Local swapping followed by index-based HP application and latched knockout markers
+    /// would mismatch occupant and pool. Public knockout state is outside this system.
     #[test]
     fn crew_swap_does_not_false_kill_on_replica() {
         use crate::ballistics::ComponentHealth;
@@ -3076,9 +2909,8 @@ mod tests {
 
         let mut world = World::new();
 
-        // The `Remote` tank root carrying the AUTHORITATIVE (server) snapshot, still pre-swap: seat A
-        // is the live Gunner (full HP), seat B the dead Loader (0 HP). `swap == None` (the server has
-        // not applied any flip). `TankVolumes` is populated by the `VolumeOf` relationship below.
+        // The game's damage-model fixture: authority has full Gunner / empty Loader pools, no
+        // pending swap. `VolumeOf` populates `TankVolumes` in seat spawn order.
         let root = world
             .spawn((
                 Remote,
@@ -3106,9 +2938,7 @@ mod tests {
             ))
             .id();
 
-        // Seat A in `TankVolumes` order (spawned first). Its LOCAL state is the corruption: the
-        // client-side flip moved the dead Loader-occupant here (`home = Loader`, `Dead`) and
-        // `apply_net_health` wrote its index-0 HP (full) back on — the exact mismatched leftover.
+        // The game's damage-model fixture: seat A has full HP but the wrong home and `Dead`.
         let seat_a = world
             .spawn((
                 CrewStation::Gunner,
@@ -3121,9 +2951,7 @@ mod tests {
             ))
             .id();
 
-        // Seat B (spawned second → index 1). The flip moved the LIVE Gunner-occupant here, then
-        // `apply_net_health` wrote index-1 HP (0) onto it and `kill_crew` LATCHED `Dead` — the live
-        // man wrongly killed. `home = Gunner` is the live occupant the flip stranded here.
+        // The game's damage-model fixture: seat B has empty HP and `Dead`, but the wrong home.
         let seat_b = world
             .spawn((
                 CrewStation::Loader,
@@ -3138,7 +2966,6 @@ mod tests {
 
         world.run_system_once(apply_net_crew).unwrap();
 
-        // Seat A is the live Gunner again: HP restored, occupant home restored, `Dead` cleared.
         assert_eq!(
             world.get::<ComponentHealth>(seat_a).unwrap().held(),
             FULL,
@@ -3154,7 +2981,6 @@ mod tests {
             "the LIVE crewman must not end up dead — the false-death corruption is healed",
         );
 
-        // Seat B stays the authoritative dead Loader (0 HP, dead) — the fix does not resurrect it.
         assert_eq!(
             world.get::<Crewman>(seat_b).unwrap().home,
             CrewStation::Loader,
