@@ -216,7 +216,7 @@ impl SettingsLook {
                 "author a finite overlap in [0, 1)",
             ));
         }
-        // DERIVED: Bevy 0.19.1 bloom::prepare_bloom_textures makes ilog2(dimension) - 1
+        // DERIVED: Bevy 0.19.1 bloom::prepare_bloom_textures uses ilog2(dimension).max(2) - 1
         // mips; compute_blend_factor divides by mip_count - 1, requiring at least two.
         if self
             .bloom_mip_dimensions
@@ -290,7 +290,16 @@ impl SettingsLook {
                 "author scalar defaults inside their offered ranges, or zero for an uncapped frame rate",
             ));
         }
-        for preset in &self.presets {
+        for (index, preset) in self.presets.iter().enumerate() {
+            if self.presets[..index]
+                .iter()
+                .any(|other| other.0 == preset.0)
+            {
+                return Err(refuse(
+                    "presets",
+                    "author pairwise distinct driven values so each tier has one label",
+                ));
+            }
             if !(self.pixel_budget.min.0..=self.pixel_budget.max.0)
                 .contains(&preset.0.lod_pixel_budget.0)
             {
@@ -510,6 +519,19 @@ mod tests {
         for ladder in [&data.frame_cap, &data.ui_scale] {
             for (value, stop) in [(1, 0), (32767, 0), (32768, 1), (65535, 1)] {
                 assert_eq!(ladder.nearest_stop(value), stop);
+            }
+        }
+    }
+
+    /// Recognition must have one label per table; admission reads the candidate, never LOOK.
+    #[test]
+    fn preset_admission_requires_distinct_tables() {
+        let count = decoded().presets.len();
+        for a in 0..count {
+            for b in a + 1..count {
+                let mut data = decoded();
+                data.presets[b].0 = data.presets[a].0;
+                refused(data, "presets");
             }
         }
     }
