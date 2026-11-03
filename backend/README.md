@@ -87,10 +87,13 @@ Crash text has the same byte cap, redaction and retention as logs. Authenticated
 correct a known session that already started or completed stopping. A failed crash write fails the
 request after stop/ticket cleanup; the registry retains the crash reason for its stop retry. Existing end requests
 without `crash` keep their current behaviour. The server preserves default panic output, captures
-the panicking thread's backtrace without requiring `RUST_BACKTRACE`, and waits at most 15 seconds
-for the report helper (Resolution: permit the deployed provider log-fetch deadline plus archive
-writes). This wait keeps the container alive for log capture; then the hook terminates the process
-with the panic exit status, even for a background-thread panic or a failed report.
+the panicking thread's backtrace without requiring `RUST_BACKTRACE`. A prestarted watchdog arms
+before default output, capture, locks or allocation: its whole-hook deadline is 15 seconds, observed
+at 10 ms resolution (Resolution: allow provider capture without spinning while healthy). It uses
+`_exit(101)` to bypass runtime cleanup and blocked output. Completed failed sends attempt one
+failure line; the deadline itself performs no logging. Normal shutdown waits for an armed panic;
+only the first panic sends, and it terminates promptly after the reply. Blocked default output can
+consume the budget before any report is sent. The normal wait keeps the container alive for capture.
 Every mark, fetch and write is bounded by
 `PROVIDER_TIMEOUT_S`; handled failures warn, record a diagnostic when D1 answers, and still stop. The cron
 deletes successful and failed captures after `SERVER_LOG_RETENTION_DAYS` (operator choice: 14 days),
@@ -121,12 +124,13 @@ deletes logs on deployment stop (`session.sh`'s `cmd_logs` contract). A process 
 prove whether Edgegap still serves them; the Worker tries and records a 404 or other failure. A
 deployment that disappears without a following Worker stop, an unattributed orphan, or a capture
 that fails cannot leave a recoverable log. Failed and interrupted captures are never retried;
-concurrent stops can overtake a still-running capture. D1 failure can also lose the diagnostic itself.
+Registry stop callers join the same in-flight attempt until capture and stop finish; a killed
+invocation still follows the durable marker's existing retry policy. D1 failure can also lose the diagnostic itself.
 
 **Orphan sweep.** Every minute (`triggers.crons`) the Worker lists every Edgegap deployment (all
 pages, hard bound 100 pages) and stops each one tagged `om-<hex>` that no live claim owns. Ownership is the
 Registry's, never D1's: the deployment's status names its version, which with the tag gives the
-server id, and the version's Registry keeps it only if that row is `starting`/`ready` with this
+server id, and the version's Registry keeps it only if that row is `starting`/`ready`/`stopping` with this
 deployment id or none yet. One live claim keeps a deployment whatever its other tags. A deployment
 whose status names no valid version is never stopped by the sweep: it is logged, counted
 "unattributed" on `/admin`, and left to Edgegap's `max_duration`. A

@@ -20,9 +20,9 @@ use core::time::Duration;
 use std::backtrace::Backtrace;
 use std::ffi::OsString;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -37,8 +37,60 @@ use super::admission::JoinAdmission;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Resolution: allow the Worker's deployed log-fetch timeout plus time for archive writes.
-/// The hook waits at most this long for symbolication and HTTP together; it never joins the helper.
+/// The whole hook shares this deadline, including default output, capture, HTTP and failure logging.
 const PANIC_REPORT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Resolution: observe the deadline within 10 ms without spinning while the server is healthy.
+const PANIC_WATCH_INTERVAL: Duration = Duration::from_millis(10);
+
+static PANIC_DEADLINE: OnceLock<PanicDeadline> = OnceLock::new();
+
+struct PanicDeadline {
+    epoch: Instant,
+    at_ns: AtomicU64,
+}
+
+impl PanicDeadline {
+    fn arm(&self) -> bool {
+        // Saturating the clock representation can only shorten the deadline, never postpone exit.
+        let at = self
+            .epoch
+            .elapsed()
+            .saturating_add(PANIC_REPORT_TIMEOUT)
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64;
+        self.at_ns
+            .compare_exchange(0, at, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn watch(&self) {
+        loop {
+            let at = self.at_ns.load(Ordering::Acquire);
+            if at != 0 && self.epoch.elapsed().as_nanos() >= u128::from(at) {
+                panic_exit();
+            }
+            std::thread::sleep(PANIC_WATCH_INTERVAL);
+        }
+    }
+}
+
+/// No allocation, output, unwinding or Rust/C exit handlers may delay a fatal hosted panic.
+fn panic_exit() -> ! {
+    // SAFETY: `_exit` has no preconditions and immediately terminates the process with the
+    // conventional Rust panic status. Bypassing cleanup avoids stdout/stderr locks and OS dialogs.
+    unsafe { libc::_exit(101) }
+}
+
+fn await_panic_exit() {
+    // Reporter-only fixtures have no installed hook. A shipped hosted process installs it first.
+    while PANIC_DEADLINE
+        .get()
+        .is_some_and(|deadline| deadline.at_ns.load(Ordering::Acquire) != 0)
+    {
+        std::thread::park_timeout(PANIC_WATCH_INTERVAL);
+    }
+}
 
 /// The largest `OVERMATCH_CAPACITY` accepted: lightyear netcode's own default client ceiling, 256 in
 /// 0.30.1.
@@ -301,6 +353,13 @@ impl Api {
 /// Backtrace capture stays on the panicking thread; symbolication and HTTP use a fresh helper,
 /// independent of heartbeat locks and of any async runtime the panicking thread occupies.
 pub(super) fn install_panic_hook(config: &HostedConfig) -> std::io::Result<()> {
+    let deadline = PANIC_DEADLINE.get_or_init(|| PanicDeadline {
+        epoch: Instant::now(),
+        at_ns: AtomicU64::new(0),
+    });
+    std::thread::Builder::new()
+        .name("hosting-panic-deadline".into())
+        .spawn(move || deadline.watch())?;
     let api = Api::new(config, PANIC_REPORT_TIMEOUT);
     let (send, receive) = mpsc::channel::<(String, Backtrace, mpsc::Sender<bool>)>();
     std::thread::Builder::new()
@@ -324,37 +383,28 @@ pub(super) fn install_panic_hook(config: &HostedConfig) -> std::io::Result<()> {
             }
         })?;
     let previous = std::panic::take_hook();
-    let sent = AtomicBool::new(false);
-    let failure_logged = std::sync::Once::new();
     std::panic::set_hook(Box::new(move |info| {
-        let failed = || {
-            failure_logged.call_once(|| {
-                // stderr can be closed during a crash; a failed write must not panic again.
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "hosting: panic report failed or timed out"
-                );
-            });
-        };
+        // The atomic arm precedes output, allocation, locks, stack walking and network work.
+        let first = deadline.arm();
         previous(info);
-        if sent.swap(true, Ordering::Relaxed) {
-            // A second panicking thread must not end the process ahead of the first report.
-            // The first hook exits sooner; this wait is bounded even if that thread is stuck.
-            std::thread::sleep(PANIC_REPORT_TIMEOUT);
-            failed();
-            std::process::exit(101);
+        if !first {
+            await_panic_exit();
+            return;
         }
         let (reply, answer) = mpsc::channel();
         let report = (info.to_string(), Backtrace::force_capture(), reply);
         // Await the reply while the container still exists: /end reads its log before stopping it.
+        // The watchdog owns the deadline even when any operation here blocks indefinitely.
         if send.send(report).is_err()
             || !matches!(answer.recv_timeout(PANIC_REPORT_TIMEOUT), Ok(true))
         {
-            failed();
+            let _ = writeln!(
+                std::io::stderr(),
+                "hosting: panic report failed or timed out"
+            );
         }
-        // Rust can unwind an isolated task without ending the process. Every hosted panic is
-        // fatal, including a failed report; use the panic exit status without an OS crash dialog.
-        std::process::exit(101);
+        // An isolated task panic must end the process as soon as its report completes.
+        panic_exit();
     }));
     Ok(())
 }
@@ -527,6 +577,7 @@ impl Hosted {
     /// answered 410. One attempt, bounded by [`HTTP_TIMEOUT`]; a server that fails to report its end
     /// is dropped by the Worker's heartbeat deadline instead.
     pub(super) fn finish(self) {
+        await_panic_exit();
         // A send error means the reporter has already returned.
         let _ = self.control.send(Control::Stop);
         if self.reporter.join().is_err() {
@@ -538,15 +589,17 @@ impl Hosted {
         } else {
             decided.map_or(Some("shutdown".to_owned()), ExitReason::end_reason)
         };
-        let Some(reason) = reason else {
+        if let Some(reason) = reason {
+            match self.api.end(&reason) {
+                Ok(Answer::Accepted) => info!("hosting: reported end ({reason})"),
+                Ok(answer) => warn!("hosting: end ({reason}) answered {answer:?}"),
+                Err(err) => warn!("hosting: end ({reason}) failed: {err}"),
+            }
+        } else {
             info!("hosting: exiting without an end call (the Worker no longer knows this server)");
-            return;
-        };
-        match self.api.end(&reason) {
-            Ok(Answer::Accepted) => info!("hosting: reported end ({reason})"),
-            Ok(answer) => warn!("hosting: end ({reason}) answered {answer:?}"),
-            Err(err) => warn!("hosting: end ({reason}) failed: {err}"),
         }
+        // A panic can arm while shutdown waits for heartbeat/end HTTP; it owns process exit now.
+        await_panic_exit();
     }
 }
 
@@ -804,48 +857,54 @@ mod tests {
             std::thread::spawn(move || {
                 for (index, stream) in listener.incoming().enumerate() {
                     let Ok(mut stream) = stream else { return };
-                    let mut reader = BufReader::new(stream.try_clone().unwrap());
-                    let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
-                    let mut parts = line.split_whitespace();
-                    let method = parts.next().unwrap_or_default().to_owned();
-                    let path = parts.next().unwrap_or_default().to_owned();
-                    let mut headers = BTreeMap::new();
-                    loop {
-                        let mut header = String::new();
-                        reader.read_line(&mut header).unwrap();
-                        let header = header.trim_end();
-                        if header.is_empty() {
-                            break;
-                        }
-                        let (name, value) = header.split_once(':').unwrap();
-                        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
-                    }
-                    let length = headers
-                        .get("content-length")
-                        .map_or(0, |n| n.parse::<usize>().unwrap());
-                    let mut body = vec![0; length];
-                    reader.read_exact(&mut body).unwrap();
+                    let sender = sender.clone();
+                    let gate = gate.take();
                     let status = statuses[index.min(statuses.len() - 1)];
-                    let request = Seen {
-                        method,
-                        path,
-                        headers,
-                        body: serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
-                    };
-                    let held = gate.is_some();
-                    if let Some(gate) = gate.take() {
-                        sender.send(request.clone()).unwrap();
-                        gate.recv_timeout(PANIC_REPORT_TIMEOUT).unwrap();
-                    }
-                    write!(
-                        stream,
-                        "HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                    )
-                    .unwrap();
-                    if !held && sender.send(request).is_err() {
-                        return;
-                    }
+                    std::thread::spawn(move || {
+                        let mut reader = BufReader::new(stream.try_clone().unwrap());
+                        let mut line = String::new();
+                        reader.read_line(&mut line).unwrap();
+                        let mut parts = line.split_whitespace();
+                        let method = parts.next().unwrap_or_default().to_owned();
+                        let path = parts.next().unwrap_or_default().to_owned();
+                        let mut headers = BTreeMap::new();
+                        loop {
+                            let mut header = String::new();
+                            reader.read_line(&mut header).unwrap();
+                            let header = header.trim_end();
+                            if header.is_empty() {
+                                break;
+                            }
+                            let (name, value) = header.split_once(':').unwrap();
+                            headers
+                                .insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+                        }
+                        let length = headers
+                            .get("content-length")
+                            .map_or(0, |n| n.parse::<usize>().unwrap());
+                        let mut body = vec![0; length];
+                        reader.read_exact(&mut body).unwrap();
+                        let request = Seen {
+                            method,
+                            path,
+                            headers,
+                            body: serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+                        };
+                        let held = gate.is_some();
+                        if let Some(gate) = gate {
+                            sender.send(request.clone()).unwrap();
+                            gate.recv_timeout(PANIC_REPORT_TIMEOUT).unwrap();
+                        }
+                        write!(
+                            stream,
+                            "HTTP/1.1 {status} X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        )
+                        .unwrap();
+                        if !held {
+                            // The observational channel closes when the parent test has finished.
+                            let _ = sender.send(request);
+                        }
+                    });
                 }
             });
             Self { base, seen }
@@ -899,10 +958,66 @@ mod tests {
         install_panic_hook(&config).unwrap();
         std::thread::spawn(|| panic!("hosted panic fixture A"));
         std::thread::spawn(|| panic!("hosted panic fixture B"));
-        // An isolated thread panic must still terminate the server, even if the Worker fails.
+        // Keep the fixture alive while its parents check concurrent reporting.
         loop {
             std::thread::park();
         }
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture: exactly one isolated panic"]
+    fn single_panic_child() {
+        let config = HostedConfig::from_env().unwrap().unwrap();
+        install_panic_hook(&config).unwrap();
+        std::thread::spawn(|| panic!("single hosted panic fixture"));
+        loop {
+            std::thread::park();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "subprocess fixture: an undrained stderr pipe"]
+    fn blocked_stderr_child() {
+        let config = HostedConfig::from_env().unwrap().unwrap();
+        install_panic_hook(&config).unwrap();
+        // Fixture writes saturate the actual pipe before the default hook can write to it.
+        let bytes = [b'x'; 4096];
+        // SAFETY: stderr is an open inherited pipe; the buffer is valid for every write. Restoring
+        // its original descriptor flags makes the subsequent panic output block on that full pipe.
+        unsafe {
+            let flags = libc::fcntl(libc::STDERR_FILENO, libc::F_GETFL);
+            assert_ne!(flags, -1);
+            assert_ne!(
+                libc::fcntl(libc::STDERR_FILENO, libc::F_SETFL, flags | libc::O_NONBLOCK),
+                -1
+            );
+            while libc::write(libc::STDERR_FILENO, bytes.as_ptr().cast(), bytes.len()) >= 0 {}
+            assert_eq!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            assert_ne!(libc::fcntl(libc::STDERR_FILENO, libc::F_SETFL, flags), -1);
+        }
+        panic!("stderr must not hold a crashing process alive");
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture: heartbeat retirement during a panic"]
+    fn shutdown_during_panic_child() {
+        let config = HostedConfig::from_env().unwrap().unwrap();
+        install_panic_hook(&config).unwrap();
+        let hosting = Hosted::start(&config).unwrap();
+        std::thread::spawn(|| panic!("shutdown race panic fixture"));
+        let mut command = [0];
+        std::io::stdin().read_exact(&mut command).unwrap();
+        hosting.control.send(Control::Listening).unwrap();
+        while !hosting.reporter.is_finished() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        hosting.finish();
+        // The shipped main also treats a successful return as process success.
+        std::process::exit(0);
     }
 
     #[test]
@@ -920,14 +1035,21 @@ mod tests {
             .env("OVERMATCH_UNATTENDED", "1")
             .env("OVERMATCH_WINDOW", "headless")
             .env("OVERMATCH_MUTE", "1")
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
         command.spawn().unwrap()
     }
 
-    fn wait_for_panic_child(mut child: std::process::Child) -> std::process::Output {
-        // Fixture allowance covers process startup and shutdown outside the hook's own bound.
-        let deadline = Instant::now() + PANIC_REPORT_TIMEOUT + Duration::from_secs(5);
+    fn wait_for_panic_child(child: std::process::Child) -> std::process::Output {
+        wait_for_child_within(child, PANIC_REPORT_TIMEOUT + Duration::from_secs(5))
+    }
+
+    fn wait_for_child_within(
+        mut child: std::process::Child,
+        allowance: Duration,
+    ) -> std::process::Output {
+        let deadline = Instant::now() + allowance;
         loop {
             if child.try_wait().unwrap().is_some() {
                 let output = child.wait_with_output().unwrap();
@@ -942,11 +1064,57 @@ mod tests {
                 let output = child.wait_with_output().unwrap();
                 panic!(
                     "panic reporting hung the process: {}",
-                    String::from_utf8_lossy(&output.stderr)
+                    String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(512)])
                 );
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// The operator's panic deadline includes default output blocked behind a full stderr pipe.
+    #[cfg(unix)]
+    #[test]
+    fn panic_deadline_covers_a_full_undrained_stderr_pipe() {
+        let _child = PANIC_CHILD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let worker = FakeWorker::start(vec![204]);
+        let output = wait_for_panic_child(panic_child(
+            &worker,
+            "net::hosting::tests::blocked_stderr_child",
+        ));
+        assert_eq!(output.status.code(), Some(101));
+    }
+
+    /// The first panic must exit after its reply; a second panic or deadline must not mask its exit.
+    #[test]
+    fn single_panic_exits_after_its_report_without_waiting_for_the_watchdog() {
+        let _child = PANIC_CHILD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let worker = FakeWorker::start(vec![204]);
+        let child = panic_child(&worker, "net::hosting::tests::single_panic_child");
+        assert!(worker.next().path.ends_with("/end"));
+        // Fixture allowance is shorter than the panic deadline, exposing a missing first exit.
+        let output = wait_for_child_within(child, Duration::from_secs(2));
+        assert_eq!(output.status.code(), Some(101));
+    }
+
+    /// A real heartbeat 410 may retire the app while its panic report still awaits log capture.
+    #[test]
+    fn clean_finish_waits_for_an_inflight_panic_and_cannot_return_success() {
+        let _child = PANIC_CHILD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (release, gate) = mpsc::channel();
+        let worker = FakeWorker::with_reply_gate(vec![204, 410], Some(gate));
+        let mut child = panic_child(&worker, "net::hosting::tests::shutdown_during_panic_child");
+        assert!(worker.next().path.ends_with("/end"));
+        child.stdin.as_mut().unwrap().write_all(b"x").unwrap();
+        assert!(worker.next().path.ends_with("/heartbeat"));
+        std::thread::sleep(Duration::from_millis(100));
+        let alive_until_reply = child.try_wait().unwrap().is_none();
+        release.send(()).unwrap();
+        let output = wait_for_child_within(child, Duration::from_secs(2));
+        assert!(
+            alive_until_reply,
+            "clean shutdown cut off the panic report before the Worker replied"
+        );
+        assert_eq!(output.status.code(), Some(101));
     }
 
     /// The operator needs the first panic's payload and source even when another thread panics.
@@ -1012,7 +1180,7 @@ mod tests {
                 .matches("hosting: panic report failed or timed out")
                 .count(),
             1,
-            "a failed report logs once even when two panic deadlines race"
+            "an HTTP refusal logs once despite concurrent panics"
         );
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let (_send, seen) = mpsc::channel();
@@ -1028,11 +1196,9 @@ mod tests {
         ));
         assert!(start.elapsed() < PANIC_REPORT_TIMEOUT + Duration::from_secs(5));
         assert_eq!(
-            String::from_utf8_lossy(&output.stderr)
-                .matches("hosting: panic report failed or timed out")
-                .count(),
-            1,
-            "a failed report logs once even when two panic deadlines race"
+            output.status.code(),
+            Some(101),
+            "the watchdog owns a stalled report's exit"
         );
     }
 

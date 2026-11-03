@@ -1,23 +1,25 @@
 # Hosted server panic evidence
 
-The hosted entry installs a fatal panic hook before app construction; local servers keep their hook.
-It preserves default output and reports the first panic's message, file/line/column and forced backtrace.
-Resolution: the report helper gets a 15-second wait, including symbolication and HTTP.
-Concurrent panics send once; either deadline can log the single failure line before exit.
-The hook terminates even an isolated-thread panic when the Worker fails; no gameplay protocol change.
+The shipped hosted entry installs the fatal hook before app construction; local servers keep their hook.
+The first panic preserves default output and sends its message, file/line/column and forced backtrace.
+Resolution: one whole-hook deadline is 15 seconds, observed by a prestarted watchdog every 10 ms.
+It arms before output/capture/locks/allocation; `_exit(101)` bypasses runtime cleanup and blocked stdio.
+Normal shutdown waits for an armed panic; secondary panics send nothing and cannot shorten its budget.
+Completed failed sends attempt one failure line; the emergency deadline itself performs no I/O.
 
-The existing authenticated `/end` accepts optional crash text. Migration `0004_server_crashes.sql`
-stores it independently of log capture/deployment discovery, using the log sanitiser and byte cap.
-The session reason is `the server crashed`, outcome `failed`; older end requests keep their behaviour.
+The authenticated `/end` accepts optional crash text; migration `0004_server_crashes.sql` archives it
+independently of deployment discovery/log capture, using the log sanitiser, byte cap and retention.
+Session reason: `the server crashed`, outcome `failed`; older end requests retain their behaviour.
+Concurrent Registry stop callers join one deployment attempt through capture and confirmed stop.
+Stopping claims remain owned, so the orphan sweep cannot bypass their active capture.
 Apply the migration and deploy the Worker before the next game build; this lane deploys nothing.
 
-Read crash text and the container-log tail with the joined D1 command in `backend/README.md`.
-If log capture has no row yet, query `server_crashes` by `server_id`; its retention follows log retention.
-Lost: non-panic exits (OS kill/OOM/native faults), network/D1 failures, redacted/cut text, and late log lines.
-A report deadline can expire before provider log capture finishes; crash text is saved before that fetch.
-DERIVED: the shipped stripped release lacks most Rust frame names; panic source location remains.
-The profile is unchanged. README records the server-only symbol-retention change and its unmeasured size cost.
+Read both texts with the joined D1 command in `backend/README.md`; query `server_crashes` by `server_id`
+when no log row exists. Lost: OS kill/OOM/native faults, network/D1 failure, redacted/cut text, late logs,
+and a report/output prevented by blocked default output or the whole-hook deadline.
+DERIVED: release stripping removes most Rust frame names; panic source location remains. Profile unchanged;
+README records the server-only symbol-retention change and its unmeasured size cost.
 
-MEASURED: 66 targeted/guard Rust tests passed; the two ignored child fixtures run through parent tests.
-MEASURED: removing the shipped hook installation makes the entry-point test fail: no Worker request.
-Gates passed: per-file rustfmt, workspace fmt check, CI clippy, backend typecheck and 111 backend tests.
+MEASURED: original full-pipe, clean-finish and concurrent-stop/sweep regressions failed, then passed.
+MEASURED: deleting only the first fatal exit failed the single-panic test after its 2 s allowance.
+MEASURED: 69 Rust checks and 113 backend tests passed; per-file/workspace fmt, CI clippy and typecheck passed.

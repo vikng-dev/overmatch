@@ -7,8 +7,8 @@
 //   is the only thing that stops two joins starting two servers. Concurrent joins see it and attach.
 // - A server is joinable ("ready") only when Edgegap has reported its address AND it has sent a
 //   heartbeat: Edgegap says the container runs, the heartbeat says the game serves.
-// - Nothing lives only in memory; every field survives eviction. After any `await`, rows are re-read
-//   before they are acted on, and transitions are guarded by `WHERE state = …`.
+// - Lifecycle state survives eviction in SQLite; only active stop join handles are volatile.
+//   After any `await`, rows are re-read before use; transitions are guarded by `WHERE state = …`.
 // - The alarm is idempotent (delivery is at-least-once) and is always set to the earliest deadline;
 //   with no rows left it is cleared and the object goes idle. It makes every due transition and
 //   persists every row's next attempt time synchronously, re-arms itself, and only then does the
@@ -160,6 +160,8 @@ export class Registry extends DurableObject<Env> {
 	private readonly sql: SqlStorage;
 	private readonly cfg: Config;
 	private readonly provider: Provider;
+	// Volatile join handles serialize active attempts; durable rows/markers still own retries after eviction.
+	private readonly stops = new Map<string, Promise<void>>();
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -301,14 +303,14 @@ export class Registry extends DurableObject<Env> {
 
 	// ---- orphan sweep -------------------------------------------------------------------------
 
-	/** Of the listed deployments, the ones this registry still runs: the claim's row is `starting` or
-	 *  `ready` and its deployment id is the listed one or not yet known (deploy in flight or of
-	 *  unknown outcome, which `reconcile` settles by tag). Every other one is the sweep's to stop. */
+	/** A stop awaiting confirmation stays owned: the sweep must not bypass its active log capture.
+	 *  An unknown deployment id is still a claim (deploy in flight or reconciled later by tag).
+	 *  Ended/absent rows and a row naming a different deployment leave it to the sweep. */
 	liveDeployments(claims: { serverId: string; deploymentId: string }[]): string[] {
 		return claims
 			.filter(({ serverId, deploymentId }) => {
 				const s = this.server(serverId);
-				return !!s && live(s) && (s.deployment_id === null || s.deployment_id === deploymentId);
+				return !!s && s.state !== "ended" && (s.deployment_id === null || s.deployment_id === deploymentId);
 			})
 			.map((c) => c.deploymentId);
 	}
@@ -711,9 +713,22 @@ export class Registry extends DurableObject<Env> {
 			if (this.fateUnknown(s, now)) await this.reconcile(serverId);
 			return;
 		}
-		this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", now + this.cfg.statusPollMs, serverId);
+		const active = this.stops.get(s.deployment_id);
+		if (active) return active;
+		// No await between lookup and publication: concurrent end/alarm calls join this attempt.
+		const attempt = this.stopDeployment(serverId, s.deployment_id);
+		this.stops.set(s.deployment_id, attempt);
 		try {
-			await stopWithEvidence(this.env, this.provider, serverId, s.deployment_id, this.cfg.providerTimeoutMs);
+			await attempt;
+		} finally {
+			this.stops.delete(s.deployment_id);
+		}
+	}
+
+	private async stopDeployment(serverId: string, deploymentId: string): Promise<void> {
+		this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", Date.now() + this.cfg.statusPollMs, serverId);
+		try {
+			await stopWithEvidence(this.env, this.provider, serverId, deploymentId, this.cfg.providerTimeoutMs);
 		} catch (err) {
 			console.error("stop failed, will retry", serverId, diag(err));
 			return;

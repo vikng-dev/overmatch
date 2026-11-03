@@ -87,6 +87,17 @@ export class FakeEdgegap {
 	logStatus = 200;
 	logResponse: (() => Response) | null = null;
 	hangLogs = new Set<string>();
+	private logGate: Promise<void> | null = null;
+
+	holdLogs(): () => void {
+		let release!: () => void;
+		this.logGate = new Promise((resolve) => { release = resolve; });
+		return () => {
+			this.logGate = null;
+			release();
+		};
+	}
+
 	/** When set, status answers carry no `app_version`. */
 	omitVersion = false;
 	/** Deployment ids whose every stop call answers 503. */
@@ -219,6 +230,7 @@ export class FakeEdgegap {
 		}
 		let m = /^\/v1\/deployment\/(.+)\/container-logs$/.exec(url.pathname);
 		if (req.method === "GET" && m) {
+			if (this.logGate) await this.logGate;
 			if (this.hangLogs.has(m[1])) return new Promise<Response>(() => {});
 			const d = this.deployments.get(m[1]);
 			if (!d || d.status === "Status.TERMINATED") return Response.json({ message: "not found" }, { status: 404 });

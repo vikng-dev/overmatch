@@ -74,6 +74,49 @@ describe("stopped match servers leave evidence for the operator", () => {
 		}
 	});
 
+	it("joins an active log capture so a concurrent crash cannot stop its container early", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp();
+		const release = edgegap.holdLogs();
+		edgegap.logBody = { logs: "captured before the sole stop" };
+		const ending = call("POST", `/v1/servers/${s.id}/end`, { reason: "shutdown" }, { authorization: `Bearer ${s.secret}` });
+		await vi.waitFor(() => expect(edgegap.count("GET", `/v1/deployment/${s.deploymentId}/container-logs`)).toBe(1));
+		const crashing = call("POST", `/v1/servers/${s.id}/end`, { crash: "concurrent panic fixture" }, { authorization: `Bearer ${s.secret}` });
+		let beforeRelease: number;
+		try {
+			// Fixture window is below the provider's deadline; an unjoined stop completes in it.
+			await Promise.race([crashing, new Promise((resolve) => setTimeout(resolve, config(env).providerTimeoutMs / 4))]);
+			beforeRelease = edgegap.count("DELETE", `/v1/stop/${s.deploymentId}`);
+		} finally {
+			release();
+		}
+		expect((await ending).status).toBe(204);
+		expect((await crashing).status).toBe(204);
+		expect(beforeRelease).toBe(0);
+		expect(edgegap.count("DELETE", `/v1/stop/${s.deploymentId}`)).toBe(1);
+		expect((await archive(s.deploymentId))!.log).toBe("captured before the sole stop");
+	});
+
+	it("leaves the registry's active capture to its sole stop owner during an orphan sweep", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp();
+		const release = edgegap.holdLogs();
+		const ending = end(s);
+		let sweepStops: number;
+		let beforeRelease: number;
+		try {
+			await vi.waitFor(() => expect(edgegap.count("GET", `/v1/deployment/${s.deploymentId}/container-logs`)).toBe(1));
+			sweepStops = (await sweep(env)).stopped;
+			beforeRelease = edgegap.count("DELETE", `/v1/stop/${s.deploymentId}`);
+		} finally {
+			release();
+			await ending;
+		}
+		expect(sweepStops).toBe(0);
+		expect(beforeRelease).toBe(0);
+		expect(edgegap.count("DELETE", `/v1/stop/${s.deploymentId}`)).toBe(1);
+	});
+
 	it("fails a lost crash write visibly while still stopping and replacing waiting join tickets", async () => {
 		await join({ version: V, locations: ["Paris", "Frankfurt"], pings: {} });
 		const s = launched();
