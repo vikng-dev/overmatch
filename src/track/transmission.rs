@@ -466,9 +466,22 @@ impl TransmissionParams {
                 b.abs().max((b + 2.0 * c * span.width_rpm).abs())
             })
             .fold(0.0_f64, f64::max);
-        let minimum_inertia = slope / (f64::from(TICK_HZ) * f64::from(RPM_TO_RAD));
+        // The idle catch is another falling branch; construction losses add their viscous
+        // slope when the pedal does not compensate them. Full task rate bounds the catch.
+        let idle_slope = f64::from(self.torque_at(self.engine.idle_rpm))
+            / f64::from(engine_control().idle_catch_droop_rpm.value);
+        let drag_slope = f64::from(
+            self.peak_torque_nm * self.drag_fraction * (1.0 - motoring_drag_base_share()),
+        ) / f64::from((self.engine.idle_rpm + self.engine.governed_rpm) * 0.5);
+        // Fuel cut removes reconstructed losses as well as net curve torque. Across any
+        // pedal share, the falling gross branch is bounded by the net slope plus that loss cut.
+        let cut_end = self.engine.governed_rpm + engine_control().governor_cut_rpm.value;
+        let loss_cut_slope = f64::from(engine_drag(self, cut_end * RPM_TO_RAD).abs())
+            / f64::from(engine_control().governor_cut_rpm.value);
+        let minimum_inertia = ((slope + loss_cut_slope).max(idle_slope) + drag_slope)
+            / (f64::from(TICK_HZ) * f64::from(RPM_TO_RAD));
         if !minimum_inertia.is_finite() || f64::from(self.engine_inertia) < minimum_inertia {
-            return Err("engine.inertia_kgm2 / torque_curve: fixed-tick torque slope is unresolved; correct the curve or crank inertia from construction data, or increase solver tick resolution".into());
+            return Err("engine.inertia_kgm2 / torque_curve: fixed-tick torque slope is unresolved (torque_curve with governor_cut_rpm, idle_catch_droop_rpm and motoring drag); correct the curve or crank inertia from construction data, widen the named assets/driving/engine.ron control widths, or increase solver tick resolution".into());
         }
         let fail = |field: &str| {
             BevyError::from(format!(
@@ -1001,7 +1014,7 @@ fn candidate_load(
 #[derive(Clone, Copy)]
 pub(crate) struct DriveConstruction {
     grip: GripParams,
-    belt_inertia: f32,
+    pub(crate) belt_inertia: f32,
 }
 
 impl DriveConstruction {

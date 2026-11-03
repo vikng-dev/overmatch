@@ -29,35 +29,20 @@ use crate::ground_types::GroundTypes;
 use crate::terrain_blend::{BASE_GROUND, BLEND_LAYERS};
 use crate::terrain_grid::RowOrder;
 
-/// Area-weighted constitutive facts. A painted boundary mixes capacities, not law names.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ContactTraction {
-    pub cohesion_pa: f32,
-    pub tan_phi: f32,
-    pub shear_m: f32,
-    pub rigid_share: f32,
-}
-
-impl ContactTraction {
-    pub const RIGID: Self = Self {
-        cohesion_pa: 0.0,
-        tan_phi: 0.0,
-        shear_m: 0.0,
-        rigid_share: 1.0,
-    };
-}
-
-/// What the ground under a track contact brings to the track law, blended over the packs at the
-/// contact's point.
+/// Effective ground coefficients at a contact; rolling is quoted at the global reference pressure.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContactGround {
-    pub traction: ContactTraction,
-    /// The friction coefficient the ground brings to the contact, one side's
-    /// ([`crate::ground_types::TractionLaw::Rigid`]).
-    pub friction: f32,
-    /// The ground's motion resistance coefficient on a moving track
-    /// ([`crate::ground_types::GroundType::rolling_resistance`]).
+    pub grip: f32,
     pub rolling_resistance: f32,
+}
+
+impl ContactGround {
+    pub(crate) fn rolling_at(self, nominal_pressure_kpa: f32) -> f32 {
+        crate::track::forces::ground_rolling_resistance(
+            self.rolling_resistance,
+            nominal_pressure_kpa,
+        )
+    }
 }
 
 /// Which ground is under each point of the world, sim side: the four packs' grounds and, on a
@@ -288,26 +273,10 @@ impl GroundField {
         let blend = |of: fn(&ContactGround) -> f32| {
             weights.dot(Vec4::from_array(self.slots.each_ref().map(of)))
         };
-        let soil_share = blend(|g| 1.0 - g.traction.rigid_share);
-        let rigid_share = blend(|g| g.traction.rigid_share);
+        // Capacity-preserving arithmetic mixing: both laws are linear in these coefficients.
         ContactGround {
-            traction: ContactTraction {
-                cohesion_pa: blend(|g| g.traction.cohesion_pa),
-                tan_phi: blend(|g| g.traction.tan_phi),
-                shear_m: if soil_share > 0.0 {
-                    blend(|g| g.traction.shear_m * (1.0 - g.traction.rigid_share)) / soil_share
-                } else {
-                    0.0
-                },
-                rigid_share,
-            },
-            friction: if rigid_share > 0.0 {
-                // Geometric-mean pairs mix capacities: average sqrt(mu), then square.
-                (blend(|g| g.traction.rigid_share * g.friction.sqrt()) / rigid_share).powi(2)
-            } else {
-                0.0 // No rigid capacity exists in a wholly soil contact.
-            },
-            rolling_resistance: blend(|ground| ground.rolling_resistance),
+            grip: blend(|g| g.grip),
+            rolling_resistance: blend(|g| g.rolling_resistance),
         }
     }
 }
@@ -365,55 +334,35 @@ mod tests {
         assert_eq!(flat.ground_at(Vec2::new(15.0, 15.0)), row(BASE_GROUND));
     }
 
-    /// Painted boundaries mix pressure capacities. A mutant interpolating angles or raw
-    /// rigid coefficients instead of strengths moves traction away from the visual mixture.
+    /// Arithmetic mixtures preserve both grip capacity and pressure-dependent drag.
+    /// Drivers crossing a painted boundary rely on the same law on either side. Fixture rows.
     #[test]
-    fn painted_boundaries_mix_soil_strength_and_rigid_pair_capacities() {
-        // FIXTURE: two cohesive soils and two rigid surfaces under a mixed mask.
-        let rigid = |friction| ContactGround {
-            friction,
-            rolling_resistance: 0.0,
-            traction: ContactTraction::RIGID,
-        };
-        let soil = |c, tangent, k| ContactGround {
-            friction: 0.0,
-            rolling_resistance: 0.0,
-            traction: ContactTraction {
-                cohesion_pa: c,
-                tan_phi: tangent,
-                shear_m: k,
-                rigid_share: 0.0,
-            },
-        };
+    fn painted_boundaries_preserve_capacity_and_pressure_drag() {
         let mut field = fixture(2, 1.0, |_, _| [0, 0, 0]);
-        field.slots = [
-            rigid(0.2),
-            rigid(0.8),
-            soil(1000.0, 0.5, 0.1),
-            soil(3000.0, 0.7, 0.3),
-        ];
-        // Capacity expectations read weights from their owner; the test varies only constitutive mixing.
+        field.slots = [0.2, 0.4, 0.6, 0.8].map(|grip| ContactGround {
+            grip,
+            rolling_resistance: grip / 2.0,
+        });
         field.paint = GroundField::fixture_mask(UVec2::ONE, 1.0, vec![Vec3::splat(0.2)]).paint;
-        let actual_weights = field.weights_at(Vec2::ZERO);
+        let weights = field.weights_at(Vec2::ZERO).to_array();
+        assert!(weights.iter().all(|w| *w > 0.0));
         let mixed = field.ground_at(Vec2::ZERO);
-        let area = 2.0;
-        let load = 10_000.0;
-        let track = 0.6_f32;
-        let capacity = |g: ContactGround| {
-            area * g.traction.cohesion_pa
-                + load * (g.traction.tan_phi + g.traction.rigid_share * (track * g.friction).sqrt())
-        };
-        let expected: f32 = field
-            .slots
-            .iter()
-            .zip(actual_weights.to_array())
-            .map(|(&g, w)| capacity(g) * w)
-            .sum();
-        assert!((capacity(mixed) - expected).abs() < 1e-3);
-        let soil_share = actual_weights.z + actual_weights.w;
-        assert!(soil_share > 0.0 && soil_share < 1.0);
-        let expected_k = (actual_weights.z * 0.1 + actual_weights.w * 0.3) / soil_share;
-        assert!((mixed.traction.shear_m - expected_k).abs() < 1e-6);
+        for pressure in [50.0, 100.0, 200.0] {
+            let expected_grip: f32 = field
+                .slots
+                .iter()
+                .zip(weights)
+                .map(|(g, w)| g.grip * w)
+                .sum();
+            let expected_drag: f32 = field
+                .slots
+                .iter()
+                .zip(weights)
+                .map(|(g, w)| g.rolling_at(pressure) * w)
+                .sum();
+            assert!((mixed.grip - expected_grip).abs() < 1e-6);
+            assert!((mixed.rolling_at(pressure) - expected_drag).abs() < 1e-6);
+        }
     }
 
     /// THE SIM READS THE MASK WHERE THE VIEW DRAWS IT: the field's rows run the way the map

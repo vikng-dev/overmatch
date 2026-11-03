@@ -322,7 +322,7 @@ Surface material is the force oracle's second query: `ContactOracle::ground_at(p
 requires both depth and contact contracts. The view's lowered `Sunk` implements only depth and
 cannot supply simulation support. A published `TerrainMap` requires its decoded `GroundField`:
 `build_track_field` refuses a composition missing it. Calibration runs support only. Bare inline force fixtures may explicitly state no ground
-and use their own rigid pair with no motion resistance; that fixture path is test-only and a
+and use effective fixture grip with no motion resistance; that fixture path is test-only and a
 force-bearing production contact without ground facts panics.
 
 **Which ground, deterministically, from data.** `ground_field::GroundField` is decoded once at
@@ -348,66 +348,45 @@ substance is not yet a ground the belt reads).
   shares this immutable field. The renderer uploads its decoded texels in the manifest row order,
   rather than loading or decoding the mask again; the row-fold test checks upload bytes too.
 
-**Traction is selected by data.** Each `ground_types.ron` row declares `Rigid` or `Soil`.
-A rigid surface uses the existing substance pair, `sqrt(mu_track * mu_surface)`.
-Soil uses Mohr-Coulomb strength over the contact footprint,
+**One grip number per ground.** Every required ground row holds effective grip `μ` and
+reference-pressure rolling resistance `r_ground`, both labelled facts or `Unknown`. Terrain
+capacity is `μ N`, where `N` remains the existing elastic normal load. It has no area term,
+soil/rigid selection, terrain material-pair multiplier or ground-specific compliance.
+`TrackSteel.friction` still supplies solid-recipient pairs (rubble and structures), using
+`sqrt(mu_track * mu_recipient)`. The passive terrain collider's `terrain_solver_friction`
+remains the independent Avian stand-in for solid-body contacts without a track footprint.
 
-`T_max = A*c + W*tan(phi)`.
+The seeds below are DERIVED from the previous shipped proxies at 89.5 kPa, rounded to three
+decimal places. They remain `Unknown`: none measures this map's representative ground/track
+pair. A track-pull and holding-limit test on each representative ground would settle grip;
+pressure-varied declutched coast-down tests would settle rolling. Preserving a previous run's
+output is not their justification. The proxy limitations are explicit pending better facts.
 
-`A` is supported belt length times strip width projected onto the struck surface; `W` is elastic
-normal load. The force pass stores capacity as `mu_equiv = T_max/W`, not as a claim that soil
-shear is steel sliding friction. The Driver sums footprint cohesion separately and applies
-load-proportional strength to nominal normal pressure. The longitudinal component reacts into
-the belt. Every surface uses the same recoverable force state `z`, with `F = T_max*z/K_eff`
-in its tangent plane, capped at its own capacity. Dupont's elastic zone retains holding force
-under closed small slips; Dahl return bounds `|z|` to `K_eff`, so additional skid travel is
-plastic. The existing velocity damper is sized from initial shear stiffness and elastic-load
-mass share; it remains a Resolution term, not additional soil strength. Definitive departure
-forgets the element's state. The bounded-return decision and A/B evidence are below.
+| Ground | Grip μ (DERIVED, Unknown) | Grip proxy derivation at 89.5 kPa | Rolling seed at 89.5 kPa (CLAIMED, Unknown) | Rolling at Unit 100 kPa (DERIVED, Unknown) |
+|---|---:|---|---:|---:|
+| concrete | .600 | sqrt(.6 × .6) | .04 | .040000000 |
+| dirt | .418 | tan(20°) + 4830 / 89500 | .06 | .062346369 |
+| mud | .277 | tan(13°) + 4140 / 89500 | .15 | .162905028 |
+| gravel | .712 | tan(35°) + 1040 / 89500 | .05 | .051173184 |
+| sand | .543 | tan(28°) + 1040 / 89500 | .12 | .129385475 |
 
-The soil facts are required and labelled: cohesion Pa, friction angle degrees and characteristic
-shear displacement m. The stamping note's section 2 reproduces NASA's Wong specimen table as
-CLAIMED, not measurements of this map. Consequently every shipped soil fact is `Unknown`,
-naming its proxy and the direct shear/shear-displacement test that would settle it. Dirt uses the
-sandy-loam specimen; mud the clayey-soil specimen; loose sand the dry-sand specimen. Gravel's
-35-degree angle and dry-sand cohesion proxy are explicitly provisional, with no measured gravel
-fit. None is a per-vehicle rule.
+The soil proxies were CLAIMED specimen fits reproduced in the stamping note, not measured map
+soils: sandy loam for dirt, clayey soil for mud, dry loose sand for sand; gravel's angle and
+sand cohesion proxy were provisional. Concrete's sliding coefficients were assumed. The
+rolling seeds were recalled tracked-vehicle ranges without a checked source. Their uncertainty
+survives the conversion. At half pressure, grip per weight no longer gains a cohesion bonus:
+the model gives up the prior DERIVED 11.4/14.3/1.6/2.1% capacity on dirt/mud/gravel/sand
+(rounded proxy comparison), until construction and ground facts justify a sinking model.
 
-Painted boundaries blend cohesion and `tan(phi)` by area share, so their maximum shear strengths
-blend linearly. Rigid capacity blends `sqrt(mu_surface)`, then squares the mean for the one
-geometric pair rule. Soil K is homogenized by soil area share before applying the solver floor.
-Each split material element advances its shared recoverable shear once, with load-weighted slip
-and compliance; every surface patch reads its own capacity and compliance through the same law.
-
-**Fact versus solver floor.** `K_eff = max(K_ground, K_floor)`. The code's `GRIP_SHEAR_FLOOR_M`
-is the Resolution floor, 0.075 m; it is no longer constitutive data in `grip.ron`. ADR-0026 records
-MEASURED coupled roll/yaw cycling at the old 5 mm target and an admitted soft mode with
-DERIVED `omega*dt ~ 0.27` at 75 mm and 64 Hz. Since stiffness scales as `1/K`, reducing K to 5 mm
-raises that modal step to DERIVED `0.27*sqrt(75/5) ~ 1.05`. This is an empirical conservative floor,
-not a sharp analytical stability boundary for the coupled support system. The stiffness of a
-particular soil can be smaller, but its initial slope cannot exceed this solver resolution.
-
-| soil row | K fact (m, Unknown proxy) | K effective at 64 Hz (m, DERIVED) | floor binds |
-|---|---:|---:|---|
-| dirt | 0.010 | 0.075 | yes |
-| gravel | 0.010 | 0.075 | yes |
-| mud | 0.006 | 0.075 | yes |
-| sand | 0.025 | 0.075 | yes |
-
-**The floor binds every shipped soil.** Felt differences currently come from strengths and motion
-resistance. A higher physics rate could admit a lower floor after the coupled modes are verified:
-for an unchanged modal-step bound its required K scales with `dt^2` (DERIVED). The present change
-keeps the 64 Hz rate. Paving has no soil K and uses the rigid-contact solver floor.
-
-`TrackSteel.friction` is now `0.6`, an `Unknown` steel sliding coefficient pending a dry sliding
-test; it no longer encodes grouser bite. With the shipped brick's `0.65`, both its belt/brick and bump-stop/brick pair
-is DERIVED `sqrt(0.6*0.65) = 0.624500`, replacing DERIVED `sqrt(1.62*0.65) = 1.026158`.
-The base ground's old pair `sqrt(1.62*0.5) = 0.9` is replaced by its soil capacity.
-The terrain's Avian collider carries `terrain_solver_friction`, an explicit data stand-in for
-solid-body contacts lacking a soil footprint, at the retained coefficient 0.5. Its bump-stop pair
-therefore changes from DERIVED 0.9 to `sqrt(0.6*0.5) = 0.547723`. It is independent of the track's
-soil strength. Scripted braking reads the capacity emitted by the actual contact pass, bounded
-by service-brake construction; `GripParams::ground` no longer estimates stopping.
+**Capacity-preserving arithmetic mixing.** Painted weights mix `μ` and `r_ground` directly.
+Both capacity and the pressure-drag law are linear in these coefficients, so a mixture's
+capacity and drag equal the same weighted sum of its constituents at any common pressure.
+There is one rule across every ground; angles, cohesion, rigid shares and soil K have no
+readers or schema fields. Every patch still projects the shared recoverable state into its
+own surface plane. `GRIP_SHEAR_FLOOR_M` is unchanged at 0.075 m: the deleted ground-specific
+K proxies (10/6/10/25 mm) all lay below it and never selected effective compliance.
+The retained shear law, damping, membership, dwell, breakaway and belt stepping are unchanged.
+Their decisions and measured bounds are recorded under “Bounded recoverable shear”.
 
 **A surface normal carries its own pressure share.** Where the station or pressure-centroid hit normals differ,
 `terrain_surface_patches` subdivides the profile to half `FIELD_ROUNDING` (DERIVED 0.015 m),
@@ -417,24 +396,34 @@ a miss or a buried origin supplies no support. Thus a rounded lip cannot rotate 
 column's load, and a far wall behind a gap cannot carry load from the near lip. Piece overlap
 orientation remains the existing documented stand-in outside this lane.
 
-**Rolling resistance.** A moving track loses `c_rr × N` to its ground against its travel, `c_rr`
-per ground in `ground_types.ron` (`rolling_resistance: Total`, each `Unknown` with its CLAIMED range and
-what would settle it: the stamping note gives soil fits, not motion resistance) and `N` each
-terrain contact's normal load. The side's rolling load `Σ c_rr·N` fades linearly to zero below
-`forces::ROLLING_FADE_SPEED` = 0.25 m/s (`Resolution`, stability derivation at the constant), so a
-tank at rest takes none, and joins the side's ground reaction `R` at the pre-tick belt speed: the
-transmission's `I·v̇ = Q − R` carries it, and every reader of `R` (the brake's stop force, the
-clutch coupling) sees it as load. The Driver separately forecasts a cut from its geometric
-load L and the coupled hull/belt mass, with no reaction decay. An undeforming piece still
-loads the track's running gear: `grip.ron::rigid_rolling_resistance` states its `Unknown` motion
-resistance, currently 0.04 from the CLAIMED rigid-support range. Ground rows state total motion
-resistance including that share, so the rigid-support term is not added to them again. This
-replaces the unsupported body-category rule that every piece had zero rolling resistance.
+**Rolling resistance read against construction pressure.**
+
+`rolling(p) = hard + (r_ground - hard) p / p_ref`.
+
+`grip.ron::rigid_rolling_resistance` owns the global hard-support datum `hard` (Unknown .04).
+`grip.ron::rolling_reference_kpa` owns `p_ref`, a Unit of 100 kPa: a round common scale,
+independent of any vehicle. Each row is restated by
+`r_100 = .04 + (r_89.5 - .04) × 100 / 89.5`; its provenance shows this arithmetic.
+Rows must be finite, fact-labelled and at least `hard`, so drag is nondecreasing with pressure.
+When `r_ground = hard`, rolling is exactly `hard` at every pressure.
+
+`GripParams::nominal_pressure_kpa` is derived once during spawn construction: weight divided
+by both tracks' nominal footprint, using the admitted shoe width and mean road-wheel-centre
+span from `RigGeom`. It is independent of instantaneous patch load, support stiffness, damping,
+pitch and contacts. A fixture halving mass at fixed footprint halves this pressure. The law
+is a linear pressure proxy for compaction, omitting real sinkage, track-length effects and
+sinking over time; it changes neither ride height nor cosmetic prints. No per-tank number
+or bog rule is introduced. When rolling exceeds μ, maximum grip cannot sustain translation:
+DERIVED the crossover is `p_ref (μ-hard)/(r_ground-hard)` for a ground above `hard`.
+
+Physical rolling load remains `Σ rolling(p) N`, with the existing normal-load reader and
+`ROLLING_FADE_SPEED` regularization unchanged. Solid recipients read `hard` alone. The Driver
+uses the same already-evaluated coefficient, with full potential rolling cost at rest.
 
 **Driver observation and measured force resolution.** `track::load::observe` supplies the
 unfiltered `TransmissionInput::perceived_load`: `L = W sin(theta) + c_rr W cos(theta) +
 mu_t W cos(theta) length / (4 R_g)` along the engaged ladder. Nominal weight is vehicle data; normals,
-paired friction and rolling coefficients are the contact pass's own geometric/material facts,
+effective grip and pressure-evaluated rolling coefficients are the contact pass's own facts,
 collected before the normal damper can unload a patch. Uniform pressure weights patches by
 supported length and collocation-column share. The projected support tangent supplies grade;
 the footprint span and current detent radius supply the turn term. Rolling is the full potential
@@ -455,6 +444,10 @@ The [brake-law record](../../../scratch/research/law-drive-4-brake-2026-11-02.md
 The protective upshift is absent: the existing clutch over-rev slip guard bounds crank speed
 and retains motoring drag while the Driver holds overrun gear. Service braking at the ceiling
 belongs to the next ceiling law. The bitprobe records load, price and delivered force.
+
+**Historical drivetrain and soil-law measurements.** The following record predates direct
+μ and pressure drag. Its figures are observations of those laws, not acceptance conditions
+for the current coefficients. New measurements belong to the lane report below.
 
 MEASURED by `headless_test::drive_load` after one-rack fueling and `ClutchState` launch slip.
 The instrument waits for the post-tick crank to settle within one rpm of its Slip target or In
@@ -697,7 +690,7 @@ change to keep it below clippy's function-length limit. No wire type changes.
 | Claude (law-ground-1c review), July lip question | rounding was claimed to keep the depth gradient continuous across every lip | verified false at silhouettes; actual normals and bounded normal closing remove that inference, while true wall/top changes remain for playtest | driving: record surface contact traces and entry-dependent speeds (#146) |
 | Claude (law-ground-1c review), slip-witness question | changing the scripted slip witness from 0.3 to 0.2 m/s weakened a physical bound | not a defect: it is a coverage witness, half the 0.4 m/s saturation scale; the corrected traction frame removes the tilted-run artifact. The replay remains green | transmission: keep the ground's rolling resistance whole through a shift window (#146) |
 
-**Current soil-law verification.** The broad batch over driving, ground, prints, `headless_test`,
+**Historical soil-law verification (retired constitutive data).** The broad batch over driving, ground, prints, `headless_test`,
 `net::` and whole-tree guards passed 733 tests, with 6 intentionally ignored manual measurement
 or hosted-service cases. The expanded consumer batch passed 831 tests and exposed one stale VFX
 opacity assertion: a mask byte cannot represent an exact half. That assertion now derives lift
@@ -705,8 +698,8 @@ from decoded weights. The final affected batch passed 208 tests (1 ignored), inc
 consumer, all force/ground/print tests, map publication, support-vector probes, curb climb,
 roll decay and the whole-tree guards. Workspace/all-target CI-feature clippy and fmt are green.
 The fixed-pad class witness gives MEASURED firm/loose pulls 14,404.124/11,034.170 N, ratio
-DERIVED 1.305411 from `A*c + W*tan(phi)`. Recoverable-shear tests prove the linear force readout and both sides of the solver floor;
-paving tests prove the substance pair.
+DERIVED 1.305411 from `A*c + W*tan(phi)`. The retained force-pass witness proves linear common-compliance readout; solid-recipient tests
+prove the substance pair. Ground-specific K and paving-pair witnesses retired with their laws.
 The off-centre force fixture also covers a lower surface with clearance at the pressure centroid:
 refinement preserves support from its loaded neighbours. A probe's load-weighted mean normal
 multiplied by its total load reconstructs the sum of its patches' support vectors.
@@ -764,7 +757,7 @@ No wire layout changed, so PROTOCOL_REV is unchanged.
 which keeps its job and note through a load and writes them back, so the panel's whole-table save
 keeps every value's source (`ground_types::tests::a_saved_table_reads_back_unchanged`).
 
-### Ground review: measured gaps and bounded fixes
+### Historical soil-law review: measured gaps and bounded fixes
 
 The stop witness used the production `contact_side` path: a fixed flat pad, locked belt,
 shipped mud, FIXTURE 4 m/s entry, 64 Hz, hull mass derived from elastic support divided by g,
@@ -843,7 +836,7 @@ The passive pair changes apply to belts on rigid pieces as well as bump stops: D
 the ground/entry regression passed after nominal-pressure observation and data admission changed.
 Physical park/steering measures for bounded return follow; their feel remains a playtest judgment.
 
-Rigid friction now lives only inside a `Rigid` law. Soil cannot author an unused friction number.
+In that historical schema, rigid friction lived only inside a `Rigid` law. Soil cannot author an unused friction number.
 `RunningGear` reads the single labelled undeforming-support resistance in `grip.ron`;
 `Total` includes it and supplies a ground's total resistance. The shared fact now refuses a taste.
 The windowed-world composition witness mounts the production installer, injects an asymmetric
@@ -893,6 +886,101 @@ No replicated wire type changed: the new capacity is a local `TrackGripEffect` o
 not serialized state, so the protocol revision is unchanged. The harness's separate JSONL
 contract deliberately advances to schema 3. Unknown soil facts and presentation magnitudes
 were not tuned. Every gameplay choice and pending owner decision is recorded above.
+
+### Direct-grip and pressure-drag verification (#198)
+
+The force-pad matrix derives slope demand from fixture weight and angle, exercises every
+shipped ground at full and half normal load, and checks both sides of `atan(μ)`. Settlement
+is printed, not pinned. Saturated pull is independently `μ N`; an unrelated track-material
+coefficient cannot change it. The existing closed 32 Hz dither and reversal witnesses retain
+the unchanged shear law's evidence. Linear compliance readout uses sub-breakaway fixture
+strains, rather than a removed per-ground K. Painted blends preserve capacity and drag.
+The Driver stiffness witness independently derives grip and rolling load from ground data.
+
+Retired evidence: the soil-angle conversion and mixed soil/rigid tests belonged to the removed
+law; direct grip and arithmetic mixture witnesses replace them. The ground-specific K
+witness retired because no ground selects K; common-compliance readout supplies its live
+evidence. Terrain-pair assertions retired; direct-ground pull and solid-recipient pair tests
+cover their separate consumers. The former one-ground late-creep threshold had no derivation;
+the slope matrix now owns holding/sliding, and the full-app park prints settlement while
+requiring supported contacts. `ForceParams::inertia` is deleted: `DriveConstruction` owns
+inertia, and arithmetic tests hold their own inline fixture construction.
+
+`rig_geom` owns the nominal-footprint pressure derivation; the sim stores its result at spawn,
+and prints reuse that physical construction fact. The pressure helper's formula is unchanged.
+
+The inertia-owner removal also closes the transmission admission ratchet: idle-catch slope,
+viscous drag and fuel-cut loss reconstruction join the net-curve slope bound. The refusal names
+both `idle_catch_droop_rpm` and `governor_cut_rpm` in `assets/driving/engine.ron`. The shared
+arithmetic fixture uses Fixture inertia 6 kg m² (previously 4), above its DERIVED approximately
+5 kg m² minimum. Bake/spec inline fixtures and the Blender fixture use 4 kg m²; their former
+3/3/2 kg m² values did not resolve the idle catch. Shipped construction is unchanged. Released pivot testing requires monotonic
+arrest without reversal, rather than the unsupported 32-tick/0.01-speed observation window.
+The sandbox outer companion reads measured `pin_to_outer`. Loose-piece rise is bounded by
+piece height plus suspension travel; the piece ceiling follows all available fixture energy.
+These close driving-05/06/09/15/16/17 and dev-23 after verification against source.
+
+Authored-number census (DERIVED by field/control count; inline Fixture numbers excluded):
+
+| Scope | Before | After |
+|---|---:|---:|
+| Ground-specific traction/compliance facts | 13 | 5 |
+| Ground rolling plus shared hard datum | 5 | 6 |
+| Common pressure Unit | 0 | 1 |
+| Track friction | 1 | 1 |
+| Retained K, damping, fade, enter, leave, dwell, breakaway | 7 | 7 |
+| Total | 26 | 20 |
+| Including the two retained lip-resolution controls | 28 | 22 |
+
+Published ground data changed, so protocol revision advances to 83; serialized wire layouts
+are unchanged. The protocol pins and whole-tree guards verify that distinction.
+
+**Measured outcomes, direct grip and pressure drag.** Previous numbers below are the historical
+bounded-return record, not a fresh baseline run; new numbers are MEASURED by the same shipped-ground
+90-second instrument. Its numerical stability checks passed; no former speed or gear is a target.
+
+| Ground | Previous rest / rolling speed (m/s, MEASURED record) | New rest / rolling speed (m/s, MEASURED) | New gears rest / rolling |
+|---|---:|---:|---|
+| concrete | 10.650203 / 10.650212 | 10.650203 / 10.650212 | F8 / F8 |
+| dirt | 10.569946 / 10.569968 | 10.554222 / 10.554258 | F8 / F8 |
+| gravel | 10.610106 / 10.610108 | 10.602253 / 10.602253 | F8 / F8 |
+| mud | 4.849178 / 4.849178 | 3.291137 / 4.430107 | F5 / F6 |
+| sand | 4.874706 / 6.211272 | 4.861387 / 4.861388 | F6 / F6 |
+
+The construction pressure is DERIVED about 107.014 kPa from the same force/pressure law; the
+89.5 kPa seed is not the construction's current pressure. New flat rolling loads are DERIVED
+22.3668/35.7387/29.0527/95.9121/75.8543 kN on concrete/dirt/gravel/mud/sand; full-app observer
+residuals stay inside the independently declared precision. Final-contact potential drawbar is
+DERIVED capacity minus rolling load: gravel 369.092–369.151 kN, compared with the historical
+369.978–370.110 kN observation. The fixed 20 kN pad's gravel pull is MEASURED 14,239.974 N,
+versus historical 14,420.127 N; half load gives 7,119.987 N. Fixed-pad pulls on
+concrete/dirt/mud/sand are MEASURED 11,999.979/8,359.983/5,539.989/10,859.979 N.
+
+Full-app gravel parking at 20 degrees is MEASURED 37.06952 mm after 60 simulated seconds,
+versus historical 37.06981 mm. Third-second roll RMS is MEASURED 0.00006974 rad/s,
+versus historical 0.00012356 rad/s; peak side-load swing is 29.983 kN and alternation .03158.
+Full-app mud service-stop rollback is MEASURED .073596 m (historical .073509 m), reverse speed
+.255585 m/s (historical .255145 m/s), and final capacity 154.890 kN. The fixed adapter stop
+reports MEASURED .075056 m rollback and .218844 m/s reverse speed; these are observations,
+not assertions that total adapter motion equals common shear compliance.
+
+The pressure-heavy inline construction is DERIVED by doubling its ground's drag/grip crossover:
+MEASURED mass 28,851.293 kg, pressure 54.166676 kPa, crossover 27.083336 kPa, potential rolling
+158.498 kN versus grip 84.909 kN and maximum sustainable curve pull 132.701 kN. Its late speed is MEASURED
+.20931806 m/s, inside the retained .25 m/s rolling fade. This is a limited crawl, not evidence of
+exact immobilization: a rolling law that fades to zero at rest admits it. The fixture test states
+that limited claim. Changing the fade or belt integration remains outside this lane.
+The force-pad slope matrix stops below `atan(μ)` at both fixture pressures (MEASURED late speed
+at most 0.0000062 m/s), and accelerates above it; its printed settlement is not a pass target.
+The 32 Hz dither retains MEASURED .25 of capacity; recoil and shear-return form are unchanged.
+
+Final gates: `cargo fmt --all --check` and CI-feature workspace/all-target clippy pass.
+The final core/interface/spec/guard batch passes 474 tests, with 2 intentionally ignored;
+the full-app portion of the affected batch passes, as does the separate shipped-ground speed
+instrument. After the stricter admission exposed inline fixture inertia, all 93 spec, bake
+and whole-tree guard tests passed with the corrected sheets. Blender fixture Python syntax
+passes; Blender's asset-generation suite was not run locally. No captures, pricing, push or
+external issue comments were made.
 
 ## 6. Tiers and budget (codex G — numbers corrected)
 

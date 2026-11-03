@@ -371,10 +371,10 @@ impl TrackGear {
         out.f32("force.support_damping_per_m", p.support_damping_per_m);
         out.f32("force.engage_depth", p.engage_depth);
         out.f32("force.probe_reach", p.probe_reach);
-        out.f32("force.inertia", p.inertia);
+        out.f32("force.inertia", self.construction.belt_inertia);
         let grip = self.construction.grip();
         out.f32("force.grip.track", grip.track.dynamic_coefficient);
-        out.f32("force.grip.ground", grip.ground.dynamic_coefficient);
+        out.f32("force.grip.nominal_pressure_kpa", grip.nominal_pressure_kpa);
         out.f32("force.grip.side_weight", grip.side_weight);
 
         let tp = &self.trans;
@@ -585,7 +585,10 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     let inertia = spec
         .reflected_inertia(&blueprint.spec.roadwheels, geom.wrap_radii())
         .expect("running-gear admission certified the construction inertia");
-    let grip = GripParams::of(&blueprint.spec);
+    let grip = GripParams::of(
+        &blueprint.spec,
+        crate::track::rig_geom::tank_ground_pressure_kpa(&geom),
+    );
     let construction = transmission::DriveConstruction::new(grip, inertia);
     commands.insert_resource(TrackGear {
         loop_pts,
@@ -608,7 +611,6 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             engage_depth: spec.suspension.engage,
             probe_reach: 0.5,
 
-            inertia,
             grip: Some(grip),
         },
     });
@@ -2290,10 +2292,12 @@ mod tests {
         let mut gear = app.world_mut().resource_mut::<TrackGear>();
         let before = gear.braking_deceleration(0.1, -1.0, gear.construction.weight_n());
         let scale = 3.0; // Fixture scale, dimensionless.
-        gear.params.inertia *= scale;
+        gear.construction.belt_inertia *= scale;
         gear.params.grip.as_mut().unwrap().side_weight *= scale;
-        gear.construction =
-            transmission::DriveConstruction::new(gear.params.grip.unwrap(), gear.params.inertia);
+        gear.construction = transmission::DriveConstruction::new(
+            gear.params.grip.unwrap(),
+            gear.construction.belt_inertia,
+        );
         gear.trans.brake_capacity_n *= scale;
         assert!(
             (gear.braking_deceleration(0.1, -1.0, gear.construction.weight_n()) - before).abs()
@@ -2321,7 +2325,7 @@ mod tests {
             app.world_mut().run_schedule(PreUpdate);
             let gear = app.world().resource::<TrackGear>();
             let mass = gear.params.grip.unwrap().side_weight * 2.0 / super::super::derive::G;
-            let inertia = gear.params.inertia;
+            let inertia = gear.construction.belt_inertia;
             let decel = gear.braking_deceleration(0.0, 1.0, gear.construction.weight_n());
             // DERIVED full-throttle, no-slip flat acceleration at the peak-torque operating
             // point in the highest gear: crank inertia is reflected separately through k^2.
@@ -2456,11 +2460,7 @@ mod tests {
                 &transmission,
             );
             assert!(load.grip_n > 0.0);
-            let expected_mu = gear
-                .params
-                .grip
-                .unwrap()
-                .pair(crate::substances::contact_friction(ground().friction));
+            let expected_mu = ground().grip;
             assert!(
                 reports
                     .iter()
@@ -2501,10 +2501,126 @@ mod tests {
             load.grade_n, load.rolling_n, load.grip_n
         );
     }
-    /// Bot stopping must use the same capacity as the contact force pass, including soil
-    /// cohesion. FIXTURE: the shipped vehicle's adapter at flat support on mud, 4 m/s entry.
+    /// A pressure-heavy fixture cannot sustain travel beyond the retained rolling fade when
+    /// pressure drag exceeds both grip and available engine pull. The Driver must see the same
+    /// deficit. Fixture ground: mu=.3, rolling=1 at the common reference pressure; fixed footprint.
     #[test]
-    fn service_stop_reads_soil_capacity_and_records_rollback() {
+    fn a_pressure_heavy_construction_stalls_in_the_rolling_fade() {
+        use super::super::oracle::{BlockField, TerrainBlock};
+        let construct = |spec: crate::spec::TankSpec| {
+            spec.validate().unwrap();
+            let mut app = App::new();
+            app.add_plugins((crate::bake::plugin, sim_plugin));
+            app.world_mut().run_schedule(Startup);
+            app.world_mut().resource_mut::<TankBlueprint>().spec = std::sync::Arc::new(spec);
+            app.world_mut().run_schedule(PreUpdate);
+            app
+        };
+        let ground = crate::ground_field::ContactGround {
+            grip: 0.3,
+            rolling_resistance: 1.0,
+        };
+        let hard = super::super::forces::rigid_rolling_resistance();
+        let reference = super::super::forces::rolling_reference_kpa();
+        let crossover = reference * (ground.grip - hard) / (ground.rolling_resistance - hard);
+        let target_pressure = 2.0 * crossover; // Fixture: twice the derived drag/grip crossover.
+        let mut spec = super::super::drive_fixture::compact_spec();
+        let baseline = construct(super::super::drive_fixture::compact_spec());
+        let baseline_pressure = baseline
+            .world()
+            .resource::<TrackGear>()
+            .params
+            .grip
+            .unwrap()
+            .nominal_pressure_kpa;
+        spec.mass *= target_pressure / baseline_pressure;
+        drop(baseline);
+        let mass = spec.mass;
+        let app = construct(spec);
+        let gear = app.world().resource::<TrackGear>();
+        let pressure = gear.params.grip.unwrap().nominal_pressure_kpa;
+        assert!((pressure - target_pressure).abs() < target_pressure * 1e-6);
+        let rest = app
+            .world()
+            .resource::<super::super::rig_geom::RigGeom>()
+            .hull_rest_y;
+        let field = BlockField::new(vec![TerrainBlock::new(
+            Vec3::NEG_Y * 0.5,
+            Quat::IDENTITY,
+            Vec3::new(10_000.0, 1.0, 10_000.0),
+        )])
+        .with_ground(Some(crate::ground_field::GroundField::uniform(ground)));
+        let mut drive = TrackDrive::default();
+        let mut signal = DriveSignal::default();
+        let mut grip = TrackGrip::default();
+        let mut elements = TrackGripElements::for_links(gear.count);
+        let mut state = TransmissionState::from_spec(&gear.trans);
+        let pieces = RubbleBodies::default();
+        let (mut speed, mut distance, mut late_speed) = (0.0_f32, 0.0_f32, 0.0_f32);
+        let mut load = super::super::load::PerceivedLoad::default();
+        let dt = 1.0 / 64.0; // Fixture fixed step.
+        for tick in 0..64 * 60 {
+            let (reports, _) = belt_tick(
+                gear,
+                &field,
+                &pieces,
+                DriveTarget {
+                    intent: DriveIntent::Axes(DriveAxes {
+                        throttle: 1.0,
+                        steer: 0.0,
+                    }),
+                    supply: DriveSupply::WHOLE,
+                },
+                Affine3A::from_translation(Vec3::Y * rest + Vec3::NEG_Z * distance),
+                dt,
+                |_| Vec3::NEG_Z * speed,
+                BeltRig {
+                    drive: &mut drive,
+                    signal: &mut signal,
+                    grip: &mut grip,
+                    elements: &mut elements,
+                    transmission: &mut state,
+                },
+            );
+            load = super::super::load::observe_rig(
+                reports.iter().flat_map(|r| r.perceived_support.iter()),
+                Vec3::NEG_Z,
+                &gear.construction,
+                &gear.trans,
+                &state,
+            );
+            let force: f32 = reports
+                .iter()
+                .flat_map(|r| &r.apps)
+                .map(|a| -a.force.z)
+                .sum();
+            speed += force / mass * dt;
+            distance += speed * dt;
+            if tick >= 64 * 59 {
+                late_speed = late_speed.max(speed.abs());
+            }
+        }
+        assert!(load.rolling_n > load.grip_n);
+        let engine_pull = gear.trans.peak_torque_nm.min(gear.trans.clutch_capacity)
+            * gear.trans.gears_fwd.iter().copied().fold(0.0_f32, f32::max)
+            / gear.trans.sprocket_radius;
+        assert!(
+            load.rolling_n > engine_pull,
+            "the fixture must have a derived engine deficit too"
+        );
+        assert!(
+            late_speed < super::super::forces::ROLLING_FADE_SPEED,
+            "pressure-heavy travel must stay inside the numerical fade: {late_speed}"
+        );
+        println!(
+            "MEASURED pressure-heavy fixture: mass_kg={mass:.3} pressure_kpa={pressure:.6} crossover_kpa={crossover:.6} drag_n={} grip_n={} engine_pull_n={engine_pull:.3} late_speed_m_s={late_speed:.8}",
+            load.rolling_n, load.grip_n
+        );
+    }
+
+    /// Bot stopping must use the same capacity as the contact force pass. FIXTURE: the shipped vehicle's adapter at flat support on mud, 4 m/s entry.
+    #[test]
+    fn service_stop_reads_contact_capacity_and_records_rollback() {
         let mut hull = DrivenHull::new();
         hull.drive_to(4.0);
         let ground = crate::ground_types::GroundTypes::load_shipped()

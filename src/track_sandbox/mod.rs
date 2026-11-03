@@ -101,8 +101,8 @@ struct RigSpec {
     /// speed ([`crate::spec::TrackSpec::reflected_inertia`]). The engine crank stays on the
     /// engine side of the clutch.
     belt_inertia: f32,
-    /// The track's material pair with the course and its pieces, from the tank's data: its track
-    /// substance on the game's base ground, the friction every course block carries.
+    /// Solid-recipient track friction and nominal pressure from construction; terrain supplies
+    /// effective grip through the ground field.
     grip: crate::track::forces::GripParams,
 }
 
@@ -984,7 +984,10 @@ fn build_rig(
         belt_inertia: track
             .reflected_inertia(&spec.roadwheels, geom.wrap_radii())
             .expect("running-gear admission certified its construction inertia"),
-        grip: crate::track::forces::GripParams::of(spec),
+        grip: crate::track::forces::GripParams::of(
+            spec,
+            crate::track::rig_geom::tank_ground_pressure_kpa(&geom),
+        ),
     });
 
     commands.insert_resource(belt::calibrate_envelope(
@@ -1542,7 +1545,7 @@ fn draw_rig_gizmos(
             }
         }
 
-        // Offset the pin line by outward normal × t/2 (normal from neighbour tangents).
+        // The outward normal follows neighbour tangents; construction owns the face offset.
         // The dimmer outer-face companion exposes shoe thickness: dark on ground, wheels on light.
         if !viz.outer {
             continue;
@@ -1562,7 +1565,7 @@ fn draw_rig_gizmos(
                 let tan2 = (samples[(i + 1) % n].local - samples[(i + n - 1) % n].local)
                     .try_normalize().expect("ConformedBelts samples a positive-pitch closed route with distinct neighbouring stations");
                 let out2 = Vec2::new(tan2.y, -tan2.x);
-                let p = samples[i].local + out2 * (geom.thickness / 2.0);
+                let p = samples[i].local + out2 * geom.model.pin_to_outer;
                 affine.transform_point3(Vec3::new(track_x, p.y, p.x))
             })
             .collect();

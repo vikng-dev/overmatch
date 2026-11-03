@@ -1,29 +1,27 @@
 use super::super::drive::DriveAxes;
 use super::super::forces;
-use super::super::forces::ForceParams;
 use super::*;
 
-/// Fixture: contact grip and reflected belt inertia for the arithmetic drivetrain.
-fn lab_fp() -> ForceParams {
-    ForceParams {
-        face_offset: 0.02,
-        free_travel: 0.0,
-        support_stiffness_per_m: 680_000.0,
-        support_damping_per_m: 80_000.0,
-        engage_depth: 0.02,
-        probe_reach: 0.5,
+#[derive(Clone)]
+struct FixtureConstruction {
+    grip: Option<forces::GripParams>,
+    inertia: f32,
+}
 
+/// Fixture: contact grip and reflected belt inertia for the arithmetic drivetrain.
+fn lab_fp() -> FixtureConstruction {
+    FixtureConstruction {
         inertia: 8_000.0,
         grip: Some(forces::GripParams {
             track: crate::substances::contact_friction(0.9),
-            ground: crate::substances::contact_friction(0.9),
+            nominal_pressure_kpa: forces::rolling_reference_kpa(),
             side_weight: 26_500.0 * 9.81 / 2.0,
         }),
     }
 }
 
 /// Fixture adapter: arithmetic contact fixtures always carry a driven material pair.
-fn construction(params: &ForceParams) -> DriveConstruction {
+fn construction(params: &FixtureConstruction) -> DriveConstruction {
     DriveConstruction::new(
         params.grip.expect("driving Fixture has grip"),
         params.inertia,
@@ -31,7 +29,7 @@ fn construction(params: &ForceParams) -> DriveConstruction {
 }
 
 fn step(
-    fp: &ForceParams,
+    fp: &FixtureConstruction,
     tp: &TransmissionParams,
     state: &mut TransmissionState,
     input: &TransmissionInput,
@@ -70,9 +68,9 @@ fn lab_tp() -> TransmissionParams {
         brake_capacity_n: 120_000.0,
         brake_static_factor: 1.6,
         drag_fraction: 0.25,
-        // Fixture crank: same class band as the vehicle authoring (J mid-band,
-        // clutch ≈ 1.3 × the 2200 N·m peak).
-        engine_inertia_kgm2: 4.0,
+        // Fixture: six kg m² resolves this curve's idle catch (DERIVED minimum about five).
+        // Clutch capacity is about 1.3 times the fixture peak torque.
+        engine_inertia_kgm2: 6.0,
         clutch_capacity_nm: 2860.0,
         belt_inertia: 8_000.0,
         shift_secs: 0.31,
@@ -143,14 +141,15 @@ fn tiger_tp() -> TransmissionParams {
 }
 
 /// Fixture: a lighter three-speed drivetrain with its own curve, ratios and capacities.
-fn compact_drivetrain() -> (ForceParams, TransmissionParams) {
+fn compact_drivetrain() -> (FixtureConstruction, TransmissionParams) {
     let spec = super::super::drive_fixture::compact_spec();
     let ground = super::super::drive_fixture::ground();
     let mut fp = lab_fp();
     fp.inertia = 3000.0; // Fixture belt inertia, independent of the contact composition's geometry.
     fp.grip = Some(forces::GripParams {
-        track: crate::substances::contact_friction(ground.friction),
-        ground: crate::substances::contact_friction(ground.friction),
+        track: crate::substances::contact_friction(ground.grip),
+
+        nominal_pressure_kpa: forces::rolling_reference_kpa(),
         side_weight: spec.mass * super::super::derive::G / 2.0,
     });
     let tp = spec
@@ -162,7 +161,7 @@ fn compact_drivetrain() -> (ForceParams, TransmissionParams) {
     (fp, tp)
 }
 
-fn class_drivetrains() -> [(ForceParams, TransmissionParams); 3] {
+fn class_drivetrains() -> [(FixtureConstruction, TransmissionParams); 3] {
     [
         (lab_fp(), lab_tp()),
         (grade_fixture_fp(), tiger_tp()),
@@ -344,16 +343,22 @@ fn steer_release_arrests_pivot() {
     }
     let d0 = (speeds[0] - speeds[1]) / 2.0;
     assert!(d0 > 0.1, "the pivot must actually be turning (d = {d0})");
-    // Release the steer: d must decay to ~0 within a bounded window.
-    for _ in 0..32 {
+    // Fixture observation budget: one simulated minute for monotonic arrest without reversal.
+    let mut previous = d0;
+    for _ in 0..64 * 60 {
         let rep = step(&fp, &tp, &mut st, &input(0.0, 0.0, speeds, [0.0, 0.0]));
         speeds = rep.next_speeds;
+        let difference = (speeds[0] - speeds[1]) / 2.0;
+        assert!(
+            difference >= 0.0 && difference <= previous,
+            "released pivot must decay without reversal"
+        );
+        if difference == 0.0 {
+            return;
+        }
+        previous = difference;
     }
-    let d1 = (speeds[0] - speeds[1]) / 2.0;
-    assert!(
-        d1.abs() < 0.01,
-        "released steer must arrest the pivot (d {d0} -> {d1})"
-    );
+    panic!("released pivot must reach rest");
 }
 
 /// The L600 constraint converges to the geared ratio: under sustained throttle + tight
@@ -1897,11 +1902,16 @@ fn part_pedal_preserves_the_net_curve_blend() {
 
 /// Fixture support observation for Driver-policy tests: nominal weight and ground law are
 /// independent of dynamic belt reactions, so acceleration cannot manufacture a gear change.
-fn driver_input(fp: &ForceParams, speed: f32, load: f32, command: f32) -> TransmissionInput {
+fn driver_input(
+    fp: &FixtureConstruction,
+    speed: f32,
+    load: f32,
+    command: f32,
+) -> TransmissionInput {
     let mut inp = input(command, 0.0, [speed; 2], [0.0; 2]);
     inp.perceived_load = super::super::load::PerceivedLoad {
         grade_n: load,
-        grip_n: fp.grip.unwrap().side_weight * 2.0 * fp.grip.unwrap().on_ground(),
+        grip_n: fp.grip.unwrap().side_weight * 2.0 * fp.grip.unwrap().track.dynamic_coefficient,
         ..Default::default()
     };
     inp
@@ -1954,7 +1964,7 @@ fn driver_lower_gear_requires_a_deficit_or_lug_and_overrun_holds() {
 /// Fixture oracle: enumerate the declared straight-launch domain using the separately pinned
 /// crank/cap force price. This never consults the selector under test.
 fn affordable_launch(
-    fp: &ForceParams,
+    fp: &FixtureConstruction,
     tp: &TransmissionParams,
     inp: &TransmissionInput,
     command: f32,
@@ -2124,7 +2134,6 @@ fn driver_observation_uses_the_engaged_ladder_in_both_directions() {
         normal: rotation * bevy::math::Vec3::Y,
         length_weight: 2.0,
         mu: 0.7,
-        cohesion_n: 0.0,
         rolling_coefficient: 0.04,
     };
     for reverse in [false, true] {
@@ -2554,7 +2563,7 @@ fn law_arrested_climb_reenters_launch_slip() {
 }
 
 /// Fixture: nominal 57-tonne construction and its derived 4,750 kg reflected belt.
-fn grade_fixture_fp() -> ForceParams {
+fn grade_fixture_fp() -> FixtureConstruction {
     let mut fp = lab_fp();
     fp.inertia = TIGER_BELT_INERTIA;
     fp.grip.as_mut().unwrap().side_weight = 57_000.0 * super::super::derive::G / 2.0;
@@ -3196,8 +3205,10 @@ fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
     a.rated_rpm = 40000.0;
     a.torque_nm = &[(25000.0, 200000.0), (40000.0, 150000.0)];
     a.brake_static_factor = 3.0;
-    a.engine_inertia_kgm2 =
-        200000.0 / (TICK_HZ * engine_control().governor_cut_rpm.value * RPM_TO_RAD);
+    a.engine_inertia_kgm2 = (200000.0 / engine_control().idle_catch_droop_rpm.value
+        + 200000.0 * a.drag_fraction * (1.0 - motoring_drag_base_share()) / 32500.0)
+        / (TICK_HZ * RPM_TO_RAD)
+        * 1.001;
     a.clutch_capacity_nm = 100000.0;
     a.belt_inertia = 0.5;
     a.shift_secs = 3.5;
@@ -3205,8 +3216,10 @@ fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
     a.engine_inertia_kgm2 = 0.01;
     a.clutch_capacity_nm = 50.0;
     assert!(TransmissionParams::from_authoring(&a).is_err());
-    a.engine_inertia_kgm2 =
-        200000.0 / (TICK_HZ * engine_control().governor_cut_rpm.value * RPM_TO_RAD);
+    a.engine_inertia_kgm2 = (200000.0 / engine_control().idle_catch_droop_rpm.value
+        + 200000.0 * a.drag_fraction * (1.0 - motoring_drag_base_share()) / 32500.0)
+        / (TICK_HZ * RPM_TO_RAD)
+        * 1.001;
     a.shift_secs = (f32::from(u8::MAX) + 1.0) / TICK_HZ;
     assert!(TransmissionParams::from_authoring(&a).is_err());
     a.shift_secs = 0.0;
@@ -3230,7 +3243,7 @@ fn coast_expectation_includes_the_rolling_fade_for_every_drivetrain() {
             let rolling = crate::ground_types::GroundTypes::load_shipped()
                 .get(crate::terrain_blend::BASE_GROUND)
                 .contact()
-                .rolling_resistance;
+                .rolling_at(fp.grip.unwrap().nominal_pressure_kpa);
             for gear in 1..=tp.gears_fwd.len() as u8 {
                 if let Some(speed) =
                     crate::headless_test::coast_equilibrium(&tp, gear, weight, angle, rolling)
@@ -3640,10 +3653,9 @@ fn launch_peak_can_lie_inside_the_fuel_cut_ramp() {
     assert!(tp.torque_at(tp.peak_torque_rpm) > tp.torque_at(a.governed_rpm));
 }
 
-/// A vanishing footprint patch contributes vanishing cohesive force, never an inverse
-/// spring-load spike. The Driver cannot pay a downshift on that tick alone.
+/// A vanishing footprint patch cannot change effective grip through a spring-load spike. The Driver cannot pay a downshift on that tick alone.
 #[test]
-fn a_vanishing_soil_patch_cannot_manufacture_a_paid_downshift() {
+fn a_vanishing_patch_cannot_manufacture_a_paid_downshift() {
     use super::super::load::{SupportFact, observe};
     use bevy::math::Vec3;
     let (fp, tp) = (lab_fp(), lab_tp());
@@ -3654,7 +3666,6 @@ fn a_vanishing_soil_patch_cannot_manufacture_a_paid_downshift() {
         normal: Vec3::Y,
         length_weight: 1.0,
         mu: 0.5,
-        cohesion_n: 1000.0,
         rolling_coefficient: 0.04,
     }); // FIXTURE uniform footprint.
     let speed = 1200.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[2];
@@ -3672,7 +3683,6 @@ fn a_vanishing_soil_patch_cannot_manufacture_a_paid_downshift() {
     inp.perceived_load.grade_n += spare - 2.0 * margin;
     let patch = SupportFact {
         length_weight: 1e-7,
-        cohesion_n: 1e-4,
         ..contacts[0]
     }; // FIXTURE tiny area, finite nominal pressure.
     let mixed = observe(contacts.iter().chain([&patch]), Vec3::NEG_Z, weight, radius);
@@ -3687,4 +3697,23 @@ fn a_vanishing_soil_patch_cannot_manufacture_a_paid_downshift() {
             "a tiny patch cannot create a lower-gear deficit"
         );
     }
+}
+
+/// Admission must include the steep idle catch, independently of the high-rpm fuel ramp.
+/// Fixture: a compact sheet at low inertia; operators must get the control widths in its refusal.
+#[test]
+fn construction_refuses_an_unresolved_idle_catch() {
+    let spec = super::super::drive_fixture::compact_spec();
+    let tr = &spec.track.powertrain.transmission;
+    let mut authoring = tr.params(0.3, 1.0, 3000.0).unwrap();
+    authoring.engine_inertia = 0.8;
+    let error = authoring.check_derived(3000.0).unwrap_err().to_string();
+    assert!(error.contains("idle_catch_droop_rpm") && error.contains("governor_cut_rpm"));
+    let idle_slope = authoring.torque_at(authoring.engine.idle_rpm)
+        / engine_control().idle_catch_droop_rpm.value;
+    let drag_slope =
+        authoring.peak_torque_nm * authoring.drag_fraction * (1.0 - motoring_drag_base_share())
+            / ((authoring.engine.idle_rpm + authoring.engine.governed_rpm) * 0.5);
+    authoring.engine_inertia = (idle_slope + drag_slope) / (TICK_HZ * RPM_TO_RAD) * 1.001;
+    authoring.check_derived(3000.0).unwrap();
 }

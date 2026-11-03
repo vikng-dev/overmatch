@@ -1,4 +1,5 @@
 (
     rigid_rolling_resistance: (0.04, Unknown("track running-gear motion resistance on an undeforming support; CLAIMED 0.03-0.05 range for tracked vehicles on paving, not independently read; settle with a declutched coast-down on rigid support. Ground rows state total motion resistance including this share")),
+    rolling_reference_kpa: (100.0, Unit("common ground rolling-pressure scale, kPa: a round standard independent of any vehicle; excess drag scales with pressure relative to it")),
     breakaway_share: (0.5, StandIn("Dupont elastic-zone share pending measured presliding curves; spring below this budget share, smooth plastic flow above")),
 )

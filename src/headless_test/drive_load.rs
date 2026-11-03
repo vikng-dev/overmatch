@@ -356,7 +356,7 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
                     launch_tick.map(|ticks| ticks as f32 / FIXED_TICKS_PER_SECOND as f32)
                 );
             }
-            let expected = ground.contact().rolling_resistance * weight;
+            let expected = ground.contact().rolling_at(nominal_pressure(&app)) * weight;
             measurements.report(
                 &format!("{name} rolling={rolling}"),
                 expected,
@@ -444,8 +444,8 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
                 .fold(f32::NEG_INFINITY, f32::max);
             let mu = report.bitprobe.grip_limit_n / weight;
             let expected_turn = mu * weight * (hi - lo) / (4.0 * radius);
-            let actual_turn =
-                report.bitprobe.perceived_load_n - ground.contact().rolling_resistance * weight;
+            let actual_turn = report.bitprobe.perceived_load_n
+                - ground.contact().rolling_at(nominal_pressure(&app)) * weight;
             assert!(
                 (actual_turn - expected_turn).abs() < weight * 1e-5,
                 "the shipped turn must charge its full uniform-pressure moment: {actual_turn} vs {expected_turn}"
@@ -493,7 +493,7 @@ fn perceived_load_and_landing_gaps_on_the_course() {
         let rolling = crate::ground_types::GroundTypes::load_shipped()
             .get(crate::terrain_blend::BASE_GROUND)
             .contact()
-            .rolling_resistance;
+            .rolling_at(nominal_pressure(&app));
         let expected = weight * (angle.sin() + rolling * angle.cos());
         let mut measurements = Measurements::default();
         for _ in 0..64 {
@@ -694,7 +694,7 @@ fn perceived_load_during_a_rearward_shot_uphill() {
             let rolling = crate::ground_types::GroundTypes::load_shipped()
                 .get(crate::terrain_blend::BASE_GROUND)
                 .contact()
-                .rolling_resistance;
+                .rolling_at(nominal_pressure(&app));
             let expected = weight * (angle.sin() + rolling * angle.cos());
             assert!(
                 (load - expected).abs() < weight * 1e-4,
@@ -804,7 +804,7 @@ fn empty_driver_station_coast_and_rollback() {
             let rolling = crate::ground_types::GroundTypes::load_shipped()
                 .get(crate::terrain_blend::BASE_GROUND)
                 .contact()
-                .rolling_resistance;
+                .rolling_at(nominal_pressure(&app));
             let equilibrium = coast_equilibrium(tp, gear, weight, angle, rolling);
             place(&mut app, tank, position, rotation, 5.0, gear);
             app.world_mut()

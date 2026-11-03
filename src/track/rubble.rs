@@ -2046,52 +2046,12 @@ mod tests {
         (mus, report.contacts.iter().map(|c| c.f_lat.abs()).sum())
     }
 
-    /// THE BELT GRIPS BY THE MATERIAL PAIR IT MEETS, ON GROUND AND ON PIECES BY ONE RULE (#238).
-    /// One pad sliding sideways on two ground types takes saturated grip in the ratio of the pairs
-    /// the data gives, each `√(μ_track · μ_ground)` (`substances::PAIR_RULE`); over a piece it
-    /// takes the track's pair with the piece's row, and the piece's reaction is clamped by that
-    /// same coefficient. Driving feel and every piece reaction rely on it. A law gripping at one coefficient everywhere, reading one side's row alone, or
-    /// leaving a piece's patch on the ground's pair fails here.
-    ///
-    /// FIXTURE DATA: a 0.7 track on 0.2 and 0.8 fields, the pad, a 0.3 piece, a 5 m/s sideways
-    /// slide from zero strain. The class invariant does not require shipped grounds to differ or
-    /// a selected vehicle to have nonzero friction.
+    /// Solid recipients retain track/material pair grip in both belt and recipient reactions.
+    /// Fixture: a 0.7 track sliding sideways over a 0.3 piece; ground grip has its own witness.
     #[test]
-    fn the_belt_grips_by_the_material_pair_on_ground_and_pieces() {
+    fn the_belt_grips_solid_recipients_by_the_material_pair() {
         let track = contact_friction(0.7);
-        let (least, most) = (0.2, 0.8);
         let slide = Vec3::new(5.0, 0.0, 0.0);
-        let on_ground = |friction: f32| {
-            let grip = GripParams {
-                ground: contact_friction(friction),
-                ..pad_grip(track)
-            };
-            let report = pad_pass_gripping(
-                grip,
-                &ground(),
-                &RubbleBodies::default(),
-                Affine3A::IDENTITY,
-                SideState::default(),
-                slide,
-                &mut GripElements::for_links(30),
-            );
-            (grip.on_ground(), sliding_grip(&report))
-        };
-        let (pair_least, (mus_least, total_least)) = on_ground(least);
-        let (pair_most, (mus_most, total_most)) = on_ground(most);
-        for (mus, pair) in [(&mus_least, pair_least), (&mus_most, pair_most)] {
-            for mu in mus {
-                assert!((mu - pair).abs() < 1e-4 * pair, "grip {mu}, pair {pair}");
-            }
-        }
-        let ratio = total_most / total_least;
-        let expected = pair_most / pair_least;
-        println!(
-            "MEASURED sliding grip {total_least:.1} N and {total_most:.1} N, ratio {ratio:.6}; \
-             DERIVED pair ratio {expected:.6}"
-        );
-        assert!((ratio - expected).abs() < 1e-4 * expected);
-
         let row = 0.3;
         let mut app = physics();
         let piece = piece_box(
@@ -2124,10 +2084,6 @@ mod tests {
             })
             .expect("the piece pass runs");
         let pair = grip.pair(contact_friction(row));
-        assert!(
-            pair < grip.on_ground(),
-            "the fixture piece must grip apart from the ground"
-        );
         for mu in report.0.iter().chain(&mus) {
             assert!(
                 (mu - pair).abs() < 1e-4 * pair,
@@ -2294,7 +2250,7 @@ mod tests {
     fn pad_grip(track: Friction) -> GripParams {
         GripParams {
             track,
-            ground: contact_friction(0.9),
+            nominal_pressure_kpa: super::super::forces::rolling_reference_kpa(),
             side_weight: 30_000.0 * 9.81 / 2.0,
         }
     }
@@ -2346,7 +2302,6 @@ mod tests {
             engage_depth: 0.002,
             probe_reach: 0.5,
 
-            inertia: 500.0,
             grip: Some(grip),
         };
         contact_side(

@@ -5,9 +5,8 @@
 //   depth_cap_mm         the deepest print this ground takes, mm
 //   darkening            the share of albedo a print takes away, 0..1
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
-//   traction.friction    rigid surfaces only: their labelled sliding coefficient
-//   traction             rigid friction or labelled soil cohesion, friction angle and shear distance
-//   rolling_resistance   the ground's motion resistance coefficient on a moving track, labelled
+//   grip                 effective track capacity / normal load, labelled
+//   rolling_resistance   total motion resistance at grip.ron rolling_reference_kpa, labelled
 //   dust.erodibility     the share of a gun's muzzle dust cloud this ground lifts, 0..1
 //   dust.colour_srgb     the lifted soil's albedo, sRGB, each channel 0..1
 //   strike.lifted        the share of a round's strike read this ground throws, 0..1, labelled
@@ -15,26 +14,25 @@
 //
 // Every print value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt
 // and gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
-// Rigid traction owns its labelled sliding coefficient; soil owns only its strength facts.
 // terrain_solver_friction is the explicit Avian solid-body stand-in, not track grip.
-// RunningGear reads grip.ron's shared undeforming-support resistance; Total includes it.
+// Track laws and row derivations: .agents/docs/design/track-model/architecture.md section 5a.
 // Each strike value carries its own label and note. Every erodibility is ASSUMED, no source read: ordered by hand, loose dry dirt
 // and sand giving the whole cloud, gravel most of it, wet mud and intact paving little. Each
 // pack's dust colour is DERIVED: the mean of the pack's shipped full-resolution albedo slice
 // (`coast_sand_rocks_02_diff.ktx2`, `blend_diff.ktx2`), MEASURED; concrete names no pack, and its
 // light grey is ASSUMED.
 (
-    terrain_solver_friction: (0.5, StandIn("Avian solid-body contacts expose no soil contact footprint; retained base-terrain sliding coefficient pending an area-aware solid-body/soil contact law; the track reads each row's own traction law")),
+    terrain_solver_friction: (0.5, StandIn("Avian solid-body contacts expose no soil contact footprint; retained base-terrain sliding coefficient pending an area-aware solid-body/soil contact law; the track reads each row's effective grip")),
     types: {
         "concrete": (
-            traction: Rigid(friction: (0.6, Unknown("rigid paving sliding coefficient; ASSUMED retained coefficient pending a dry sliding-pair test"))),
+            grip: (0.600, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED sqrt(0.6*0.6) = 0.600; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
             print: (
                 softness_mm_per_kpa: 0.0,
                 depth_cap_mm: 0.0,
                 darkening: 0.05,
                 roughness_gain: 1.0,
             ),
-            rolling_resistance: RunningGear,
+            rolling_resistance: (0.040000000, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED 0.04 + (0.04 - 0.04)*100/89.5 = 0.040000000 at Unit 100 kPa, from the CLAIMED 0.04 seed at 89.5 kPa; no coast-down measured on representative ground; settle with pressure-varied coast-down tests")),
             dust: (
                 erodibility: 0.1,
                 colour_srgb: (0.62, 0.61, 0.58),
@@ -45,18 +43,14 @@
             ),
         ),
         "dirt": (
-            traction: Soil(
-                cohesion_pa: (4830.0, Unknown("sandy loam, moisture 11%: CLAIMED specimen fit from NASA tire-ground overview Table 1 reproduced in track-prints-ground-stamping section 2; no map soil specimen measured; settle with a direct shear test")),
-                friction_angle_deg: (20.0, Unknown("sandy loam, moisture 11%: CLAIMED specimen proxy from ground-stamping section 2; settle with a direct shear test")),
-                shear_deformation_m: (0.01, Unknown("sandy loam, moisture 11%: CLAIMED characteristic shear distance, clay 6 mm, firm soil 10 mm, loose sand 25 mm; settle with a shear-displacement curve on the map soil")),
-            ),
+            grip: (0.418, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED tan(20 deg) + 4830/89500, rounded to .418; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
             print: (
                 softness_mm_per_kpa: 0.5,
                 depth_cap_mm: 70.0,
                 darkening: 0.2,
                 roughness_gain: 0.9,
             ),
-            rolling_resistance: Total((0.06, Unknown("the ground-stamping note gives soil fits but no motion resistance; a tracked vehicle on firm dry soil is CLAIMED at 0.05-0.08 (recalled from Wong, Theory of Ground Vehicles, the tracked-vehicle motion resistance table, not read for this value); settle by reading that table or by a coast-down of a tracked vehicle on this ground"))),
+            rolling_resistance: (0.062346369, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED 0.04 + (0.06 - 0.04)*100/89.5 = 0.062346369 at Unit 100 kPa, from the CLAIMED 0.06 seed at 89.5 kPa; no coast-down measured on representative ground; settle with pressure-varied coast-down tests")),
             dust: (
                 erodibility: 1.0,
                 colour_srgb: (0.48, 0.39, 0.31),
@@ -67,18 +61,14 @@
             ),
         ),
         "gravel": (
-            traction: Soil(
-                cohesion_pa: (1040.0, Unknown("compacted granular ground; angle provisional, dry-sand cohesion proxy: CLAIMED specimen fit from NASA tire-ground overview Table 1 reproduced in track-prints-ground-stamping section 2; no map soil specimen measured; settle with a direct shear test")),
-                friction_angle_deg: (35.0, Unknown("compacted granular ground; angle provisional, dry-sand cohesion proxy: CLAIMED specimen proxy from ground-stamping section 2; gravel angle is provisional, no gravel fit supplied; settle with a direct shear test")),
-                shear_deformation_m: (0.01, Unknown("compacted granular ground; angle provisional, dry-sand cohesion proxy: CLAIMED characteristic shear distance, clay 6 mm, firm soil 10 mm, loose sand 25 mm; settle with a shear-displacement curve on the map soil")),
-            ),
+            grip: (0.712, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED tan(35 deg) + 1040/89500, rounded to .712; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
             print: (
                 softness_mm_per_kpa: 0.45,
                 depth_cap_mm: 60.0,
                 darkening: 0.2,
                 roughness_gain: 1.0,
             ),
-            rolling_resistance: Total((0.05, Unknown("the ground-stamping note gives soil fits but no motion resistance; a tracked vehicle on a compacted gravel or dirt road is CLAIMED at 0.04-0.07 (recalled from Wong, Theory of Ground Vehicles, the tracked-vehicle motion resistance table, not read for this value); settle by reading that table or by a coast-down of a tracked vehicle on this ground"))),
+            rolling_resistance: (0.051173184, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED 0.04 + (0.05 - 0.04)*100/89.5 = 0.051173184 at Unit 100 kPa, from the CLAIMED 0.05 seed at 89.5 kPa; no coast-down measured on representative ground; settle with pressure-varied coast-down tests")),
             dust: (
                 erodibility: 0.8,
                 colour_srgb: (0.3, 0.28, 0.19),
@@ -89,18 +79,14 @@
             ),
         ),
         "mud": (
-            traction: Soil(
-                cohesion_pa: (4140.0, Unknown("clayey soil, moisture 38%: CLAIMED specimen fit from NASA tire-ground overview Table 1 reproduced in track-prints-ground-stamping section 2; no map soil specimen measured; settle with a direct shear test")),
-                friction_angle_deg: (13.0, Unknown("clayey soil, moisture 38%: CLAIMED specimen proxy from ground-stamping section 2; settle with a direct shear test")),
-                shear_deformation_m: (0.006, Unknown("clayey soil, moisture 38%: CLAIMED characteristic shear distance, clay 6 mm, firm soil 10 mm, loose sand 25 mm; settle with a shear-displacement curve on the map soil")),
-            ),
+            grip: (0.277, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED tan(13 deg) + 4140/89500, rounded to .277; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
             print: (
                 softness_mm_per_kpa: 1.6,
                 depth_cap_mm: 150.0,
                 darkening: 0.3,
                 roughness_gain: 0.6,
             ),
-            rolling_resistance: Total((0.15, Unknown("the ground-stamping note gives soil fits but no motion resistance; a tracked vehicle on wet cohesive soil is CLAIMED at 0.12-0.20 and more (recalled from Wong, Theory of Ground Vehicles, the tracked-vehicle motion resistance table, not read for this value); settle by reading that table or by a coast-down of a tracked vehicle on this ground"))),
+            rolling_resistance: (0.162905028, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED 0.04 + (0.15 - 0.04)*100/89.5 = 0.162905028 at Unit 100 kPa, from the CLAIMED 0.15 seed at 89.5 kPa; no coast-down measured on representative ground; settle with pressure-varied coast-down tests")),
             dust: (
                 erodibility: 0.3,
                 colour_srgb: (0.25, 0.23, 0.22),
@@ -111,18 +97,14 @@
             ),
         ),
         "sand": (
-            traction: Soil(
-                cohesion_pa: (1040.0, Unknown("dry loose sand: CLAIMED specimen fit from NASA tire-ground overview Table 1 reproduced in track-prints-ground-stamping section 2; no map soil specimen measured; settle with a direct shear test")),
-                friction_angle_deg: (28.0, Unknown("dry loose sand: CLAIMED specimen proxy from ground-stamping section 2; settle with a direct shear test")),
-                shear_deformation_m: (0.025, Unknown("dry loose sand: CLAIMED characteristic shear distance, clay 6 mm, firm soil 10 mm, loose sand 25 mm; settle with a shear-displacement curve on the map soil")),
-            ),
+            grip: (0.543, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED tan(28 deg) + 1040/89500, rounded to .543; shipped proxies at 89.5 kPa, no representative ground/track pull measured; settle with a track-pull and holding-limit test on this ground")),
             print: (
                 softness_mm_per_kpa: 0.8,
                 depth_cap_mm: 120.0,
                 darkening: 0.12,
                 roughness_gain: 0.9,
             ),
-            rolling_resistance: Total((0.12, Unknown("the ground-stamping note gives soil fits but no motion resistance; a tracked vehicle on loose dry sand is CLAIMED at 0.10-0.15 (recalled from Wong, Theory of Ground Vehicles, the tracked-vehicle motion resistance table, not read for this value); settle by reading that table or by a coast-down of a tracked vehicle on this ground"))),
+            rolling_resistance: (0.129385475, Unknown(".agents/docs/design/track-model/architecture.md section 5a: DERIVED 0.04 + (0.12 - 0.04)*100/89.5 = 0.129385475 at Unit 100 kPa, from the CLAIMED 0.12 seed at 89.5 kPa; no coast-down measured on representative ground; settle with pressure-varied coast-down tests")),
             dust: (
                 erodibility: 1.0,
                 colour_srgb: (0.27, 0.24, 0.19),

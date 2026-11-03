@@ -43,6 +43,9 @@ mod store;
 pub(crate) mod tuning;
 mod upload;
 
+#[cfg(test)]
+use crate::track::rig_geom::ground_pressure_kpa;
+pub(crate) use crate::track::rig_geom::tank_ground_pressure_kpa;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -334,38 +337,6 @@ pub(crate) fn relief_params(relief: TrackPrintRelief, range: TrackPrintRange) ->
         reach * print_appearance().relief_fade_share.value,
         0.0,
     )
-}
-
-/// A tank's ground pressure, kPa: its weight over the area its two tracks bear on, `m·g / (2·b·L)`
-/// with `b` the shoe's width and `L` the length of track in contact. An average over the footprint
-/// (no load distribution), which is all the print's depth law reads.
-pub(crate) fn ground_pressure_kpa(mass_kg: f32, track_width_m: f32, contact_length_m: f32) -> f32 {
-    assert!(
-        mass_kg.is_finite()
-            && mass_kg >= 0.0
-            && track_width_m.is_finite()
-            && track_width_m > 0.0
-            && contact_length_m.is_finite()
-            && contact_length_m > 0.0,
-        "ground pressure requires finite nonnegative mass and positive footprint dimensions from admitted construction"
-    );
-    mass_kg * crate::track::derive::G / (2.0 * track_width_m * contact_length_m) / 1000.0
-}
-
-/// The ground pressure of the tank whose running gear is `geom`, kPa: its mass from its spec, its
-/// shoe width measured off its model, its contact length the span of its road-wheel centres.
-pub(crate) fn tank_ground_pressure_kpa(geom: &RigGeom) -> f32 {
-    let span = |side: Side| {
-        let wheels = geom.road_wheels.get(side);
-        let (low, high) = wheels
-            .iter()
-            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), w| {
-                (lo.min(w.z), hi.max(w.z))
-            });
-        (high - low).max(0.0)
-    };
-    let length = 0.5 * (span(Side::Left) + span(Side::Right));
-    ground_pressure_kpa(geom.model.mass, geom.model.width, length)
 }
 
 /// Bake the shoe once the template has bound. Binding certifies the shoe before it publishes the

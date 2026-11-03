@@ -273,7 +273,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 81 (#263, the game's damage model): compatibility checkpoint for the plate-capacity
 /// rollout. Wire layouts and client derivation are unchanged; the authority exports resolved paths.
 /// REV 82 (the game's spawn flow): respawn admission and map-pick refusal are independent owner-private facts.
-pub const PROTOCOL_REV: u32 = 82;
+/// REV 83 (#198, driving model): direct ground grip and nominal-pressure rolling resistance.
+pub const PROTOCOL_REV: u32 = 83;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.

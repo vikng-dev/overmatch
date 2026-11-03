@@ -185,6 +185,36 @@ impl std::fmt::Display for RigFault {
 }
 impl std::error::Error for RigFault {}
 
+/// Nominal weight over both tracks' footprint, kPa. Construction is admitted before spawn.
+pub(crate) fn ground_pressure_kpa(mass_kg: f32, track_width_m: f32, contact_length_m: f32) -> f32 {
+    assert!(
+        mass_kg.is_finite()
+            && mass_kg >= 0.0
+            && track_width_m.is_finite()
+            && track_width_m > 0.0
+            && contact_length_m.is_finite()
+            && contact_length_m > 0.0,
+        "ground pressure requires finite nonnegative mass and positive footprint dimensions from admitted construction"
+    );
+    mass_kg * crate::track::derive::G / (2.0 * track_width_m * contact_length_m) / 1000.0
+}
+
+/// Nominal footprint uses shoe width and the mean span of both road-wheel centre sets.
+/// The sim stores this pressure at spawn; view-only prints consume the same construction.
+pub(crate) fn tank_ground_pressure_kpa(geom: &RigGeom) -> f32 {
+    let span = |side: Side| {
+        let wheels = geom.road_wheels.get(side);
+        let (low, high) = wheels
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), w| {
+                (lo.min(w.z), hi.max(w.z))
+            });
+        (high - low).max(0.0)
+    };
+    let length = 0.5 * (span(Side::Left) + span(Side::Right));
+    ground_pressure_kpa(geom.model.mass, geom.model.width, length)
+}
+
 impl RigGeom {
     /// Derive a side's whole running gear from the blueprint + its glb. `teeth` and `link_count` are
     /// the two authored counts the caller owns (the sandbox tunes `link_count` against

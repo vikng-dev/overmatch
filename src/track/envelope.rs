@@ -135,7 +135,6 @@ pub(crate) fn calibrate(
         engage_depth,
         probe_reach,
 
-        inertia: 1.0,
         grip: None,
     };
     // Rest height over flat ground: the loop's pin belly sits `face_offset` above y = 0, so

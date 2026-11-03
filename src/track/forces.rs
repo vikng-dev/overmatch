@@ -38,6 +38,7 @@ use crate::bitprobe::{ContactInputProbe, ElementOutputProbe};
 #[serde(deny_unknown_fields)]
 struct GripLaw {
     rigid_rolling_resistance: crate::provenance::Labelled<f32>,
+    rolling_reference_kpa: crate::provenance::Labelled<f32>,
     breakaway_share: crate::provenance::Labelled<f32>,
 }
 
@@ -71,6 +72,15 @@ fn grip_law() -> &'static GripLaw {
                 ),
             "{PATH}: rigid_rolling_resistance must be finite, nonnegative and a fact or Unknown; state the undeforming-support motion resistance"
         );
+        assert!(
+            data.rolling_reference_kpa.value.is_finite()
+                && data.rolling_reference_kpa.value > 0.0
+                && matches!(
+                    data.rolling_reference_kpa.label,
+                    crate::provenance::Provenance::Unit(_)
+                ),
+            "{PATH}: rolling_reference_kpa must be finite, positive and Unit; declare the common pressure scale"
+        );
         data
     });
     &DATA
@@ -81,12 +91,24 @@ pub(crate) fn rigid_rolling_resistance() -> f32 {
     grip_law().rigid_rolling_resistance.value
 }
 
+/// Common pressure scale for the ground rows, independent of vehicle construction.
+pub(crate) fn rolling_reference_kpa() -> f32 {
+    grip_law().rolling_reference_kpa.value
+}
+
+/// Pressure drag proxy: the hard-support share is pressure-independent; the ground's excess
+/// scales with nominal construction pressure. Architecture section 5a owns its limitations.
+pub(crate) fn ground_rolling_resistance(reference: f32, nominal_pressure_kpa: f32) -> f32 {
+    let hard = rigid_rolling_resistance();
+    hard + (reference - hard) * nominal_pressure_kpa / rolling_reference_kpa()
+}
+
 /// Resolution floor (m) on shear compliance.
 /// DERIVED: ADR-0026's coupled mode has omega*dt about 0.27 at 75 mm and 64 Hz;
 /// stiffness varies as 1/K, so 5 mm raises omega*dt to about 1.05, where the coupled
 /// experiment rang at half the tick rate. This is a conservative measured-mode floor,
 /// not a proof of the sharp coupled-system stability boundary.
-/// Soil K remains a separate fact; architecture section 5a owns its binding grounds.
+/// Architecture section 5a owns the common compliance and its measured binding grounds.
 pub(crate) const GRIP_SHEAR_FLOOR_M: f32 = 0.075;
 
 /// The belt speed (m/s) below which rolling resistance fades linearly to zero, so a tank at rest
@@ -97,8 +119,8 @@ pub(crate) const GRIP_SHEAR_FLOOR_M: f32 = 0.075;
 /// the shipped mud row: 0.15 × 279.6 kN / 0.25 m/s = 168 kN·s/m against `I/dt` = 4 750 kg × 64 Hz
 /// = 304 kN·s/m, 0.55 of it. At the nominal mud capacity of about 0.277 W, the grip
 /// damper contributes DERIVED about 171.5 kN·s/m, making the sum about 1.12 of it, inside 2
-/// (DERIVED, fixture data). A tank crawling inside the band is below anything a player reads as
-/// motion.
+/// (DERIVED, fixture data). Inside the band, the reduced drag can admit a pressure-limited
+/// crawl; it does not establish immobility.
 pub const ROLLING_FADE_SPEED: f32 = 0.25;
 
 /// A side's rolling resistance (N, along the belt's travel, the sign of `speed`): the rolling load
@@ -111,24 +133,26 @@ pub fn rolling_resistance(rolling_load: f32, speed: f32) -> f32 {
 /// Absent from [`ForceParams::grip`], the law runs support only.
 #[derive(Clone, Copy, Debug)]
 pub struct GripParams {
-    /// The track's side of every pair ([`crate::spec::TrackSpec::friction`]).
+    /// The track's side of solid-recipient pairs ([`crate::spec::TrackSpec::friction`]).
     pub track: Friction,
-    /// Rigid-pair fixture friction and the passive terrain collider's solver stand-in.
-    /// Actual contacts read ground facts through `ContactOracle::ground_at`; inline rigid
-    /// fixtures may use this pair without a ground field.
-    pub ground: Friction,
+    /// Weight over nominal two-track footprint, kPa, derived once from spawn construction.
+    pub nominal_pressure_kpa: f32,
     /// Nominal weight on one side (N), half the vehicle's: the scale of the element membership
     /// bounds and the vehicle share of the transmission's shift-landing inertia.
     pub side_weight: f32,
 }
 
 impl GripParams {
-    /// Track substance, passive-terrain solver stand-in and nominal half-weight from data.
-    pub(crate) fn of(spec: &crate::spec::TankSpec) -> Self {
+    /// Solid-recipient track friction, nominal pressure and half-weight from spawn data.
+    pub(crate) fn of(spec: &crate::spec::TankSpec, nominal_pressure_kpa: f32) -> Self {
+        assert!(
+            nominal_pressure_kpa.is_finite() && nominal_pressure_kpa > 0.0,
+            "admitted spawn construction supplies positive finite nominal ground pressure"
+        );
         grip_law();
         Self {
             track: spec.track.friction(),
-            ground: crate::ground_types::GroundTypes::load_shipped().terrain_friction(),
+            nominal_pressure_kpa,
             side_weight: spec.mass * super::derive::G / 2.0,
         }
     }
@@ -137,11 +161,6 @@ impl GripParams {
     /// (`substances::PAIR_RULE`), combined as avian's narrow phase combines a pair.
     pub fn pair(&self, surface: Friction) -> f32 {
         self.track.combine(surface).dynamic_coefficient
-    }
-
-    /// The base-pair coefficient used by rigid calibration fixtures.
-    pub fn on_ground(&self) -> f32 {
-        self.pair(self.ground)
     }
 }
 
@@ -250,9 +269,7 @@ pub struct ForceParams {
     /// station or zero-travel return-run origins start too deep (buried-origin saturation).
     pub probe_reach: f32,
 
-    /// DERIVED per-side belt translation and wheel rotation reflected at belt speed (kg).
-    pub inertia: f32,
-    /// The traction law's inputs. Soil strength or a rigid material pair sets the
+    /// The traction law's inputs. Ground grip or a solid-recipient material pair sets the
     /// element's isotropic capacity; turning resistance
     /// emerges from footprint geometry, not from an authored lateral share. `None` runs support
     /// only, with no traction or belt hold: the envelope calibration measures penetration area
@@ -443,7 +460,7 @@ impl SideReport {
         (point, normal): (Vec3, Vec3),
         half_span: Vec3,
         length_weight: f32,
-        (mu, cohesion_n, rolling_coefficient): (f32, f32, f32),
+        (mu, rolling_coefficient): (f32, f32),
         (collider, out): (Option<Entity>, Vec3),
         pieces: &RubbleBodies,
     ) {
@@ -460,7 +477,6 @@ impl SideReport {
             half_span,
             length_weight,
             mu,
-            cohesion_n,
             rolling_coefficient,
         });
     }
@@ -1187,22 +1203,12 @@ fn collect_column_contacts<O: TerrainOracle>(
                     (p, normal),
                     (load, load_elastic),
                 );
-                let surface = surface_under(
-                    params.grip,
-                    collider,
-                    p,
-                    (
-                        contact_len * (lateral.1 - lateral.0) * weight * normal.dot(out).abs(),
-                        load_elastic,
-                    ),
-                    oracle,
-                    pieces,
-                );
+                let surface = surface_under(params.grip, collider, p, oracle, pieces);
                 report.observe_support(
                     (p, normal),
                     axis * (contact_len / 2.0),
                     weight * contact_len,
-                    (surface.nominal_mu, surface.cohesion_n, surface.rolling),
+                    (surface.mu, surface.rolling),
                     (collider, out),
                     pieces,
                 );
@@ -1232,7 +1238,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                     belt_velocity,
                     collider,
                     mu: surface.mu,
-                    shear_m: surface.shear_m,
+                    shear_m: GRIP_SHEAR_FLOOR_M,
                     rolling: surface.rolling,
                     #[cfg(feature = "bitprobe")]
                     probe_index,
@@ -1269,63 +1275,41 @@ fn patch_contact<O: TerrainOracle>(
     }
 }
 
-/// Dynamic capacity and nominal-pressure facts share a surface query. Only the force pass
-/// divides cohesion by elastic load; the Driver sums the footprint's cohesion in newtons.
+/// Contact capacity and the Driver read the same coefficients, independent of support elasticity.
 struct SurfaceGrip {
     mu: f32,
-    nominal_mu: f32,
-    cohesion_n: f32,
     rolling: f32,
-    shear_m: f32,
-}
-
-impl SurfaceGrip {
-    fn rigid(mu: f32, rolling: f32) -> Self {
-        Self {
-            mu,
-            nominal_mu: mu,
-            cohesion_n: 0.0,
-            rolling,
-            shear_m: GRIP_SHEAR_FLOOR_M,
-        }
-    }
 }
 
 fn surface_under<O: TerrainOracle>(
     grip: Option<GripParams>,
     collider: Option<Entity>,
     p: Vec3,
-    (area, load): (f32, f32),
     oracle: &O,
     pieces: &RubbleBodies,
 ) -> SurfaceGrip {
     match (grip, collider) {
-        (None, _) => SurfaceGrip::rigid(0.0, 0.0),
-        (Some(grip), Some(collider)) => SurfaceGrip::rigid(
-            grip.pair(pieces.friction(collider)),
-            rigid_rolling_resistance(),
-        ),
+        (None, _) => SurfaceGrip {
+            mu: 0.0,
+            rolling: 0.0,
+        },
+        (Some(grip), Some(collider)) => SurfaceGrip {
+            mu: grip.pair(pieces.friction(collider)),
+            rolling: rigid_rolling_resistance(),
+        },
         (Some(grip), None) => match oracle.ground_at(p) {
-            Some(ground) => {
-                let law = ground.traction;
-                let cohesion_n = area * law.cohesion_pa;
-                let cohesion = if load > 0.0 { cohesion_n / load } else { 0.0 };
-                let nominal_mu = law.rigid_share
-                    * grip.pair(crate::substances::contact_friction(ground.friction))
-                    + law.tan_phi;
-                let total = nominal_mu + cohesion;
-                SurfaceGrip {
-                    mu: total,
-                    nominal_mu,
-                    cohesion_n,
-                    rolling: ground.rolling_resistance,
-                    shear_m: law.shear_m.max(GRIP_SHEAR_FLOOR_M),
-                }
-            }
+            Some(ground) => SurfaceGrip {
+                mu: ground.grip,
+                rolling: ground.rolling_at(grip.nominal_pressure_kpa),
+            },
             None => {
                 #[cfg(test)]
                 {
-                    SurfaceGrip::rigid(grip.on_ground(), 0.0)
+                    // Fixture: no-field calibration pads have effective grip 0.9 and no rolling load.
+                    SurfaceGrip {
+                        mu: 0.9,
+                        rolling: 0.0,
+                    }
                 }
                 #[cfg(not(test))]
                 {
@@ -1696,10 +1680,9 @@ mod tests {
             engage_depth: 0.002,
             probe_reach: 0.5,
 
-            inertia: 500.0,
             grip: Some(GripParams {
                 track: crate::substances::contact_friction(0.9),
-                ground: crate::substances::contact_friction(0.9),
+                nominal_pressure_kpa: rolling_reference_kpa(),
                 side_weight: 30_000.0 * 9.81 / 2.0,
             }),
         }
@@ -2786,13 +2769,12 @@ mod tests {
             let oracle = GroundedFlat {
                 surface_y: 0.0,
                 ground: crate::ground_field::ContactGround {
-                    traction: crate::ground_field::ContactTraction::RIGID,
-                    friction: 0.9,
+                    grip: 0.9,
                     rolling_resistance: c_rr,
                 },
             };
             let dt = 1.0 / 64.0;
-            let inertia = rig_params().inertia;
+            let inertia = 500.0; // Fixture reflected belt inertia, kg.
             let v0 = 3.0;
             let mut state = SideState {
                 speed: v0,
@@ -2922,7 +2904,7 @@ mod tests {
             println!(
                 "MEASURED fixed pad sideways={sideways}: peak={peak:.6} m rollback={rollback:.6} m reverse={reverse:.6} m/s"
             );
-            rebounds.push((rollback, ground.traction.shear_m.max(GRIP_SHEAR_FLOOR_M)));
+            rebounds.push((rollback, GRIP_SHEAR_FLOOR_M));
         }
         for (rollback, k) in rebounds {
             // FIXTURE observation precision: f32 position accumulation permits 0.01% of K.
@@ -3056,158 +3038,252 @@ mod tests {
         }
     }
 
-    /// FIXTURE: the same pad sliding on constitutively different surfaces. No terrain name
-    /// selects its law and no vehicle's shipped number is an acceptance condition.
-    fn sliding_on(ground: crate::ground_field::ContactGround) -> SideReport {
-        let oracle = GroundedFlat {
-            surface_y: 0.0,
-            ground,
-        };
-        let loop_pts = rect_loop(0.02);
-        let input = SideInput {
-            loop_pts: &loop_pts,
-            count: 25,
-            plane_x: 0.0,
-            columns: TEST_COLUMNS,
-            travel: TravelField { knots: &[] },
-        };
-        let mut elems = GripElements::for_links(input.count);
-        let mut report = SideReport::default();
-        for _ in 0..256 {
-            report = contact_side(
-                &input,
-                SideState::default(),
-                Affine3A::IDENTITY,
-                1.0 / 64.0,
-                &rig_params(),
-                &oracle,
-                &RubbleBodies::default(),
-                |_| Vec3::new(2.0, 0.0, 0.0),
-                &mut elems,
-            );
-        }
-        report
-    }
-
-    /// Drivers rely on soil strength, not the steel/ground sliding pair. A mutant dropping
-    /// cohesion or using the pair fails the independently derived firm/loose pull ratio.
-    /// FIXTURE: 1 kPa cohesion, angles 35 and 28 degrees, K 10 and 25 mm, with an intentionally
-    /// unrelated sliding coefficient; 2 m of supported pad, 0.2 m total width, 5 mm compression.
+    /// Every ground supplies mu*N at either fixture load. Drivers must get no area or
+    /// track-material multiplier on terrain. Fixture: a fixed sliding pad, full/half pressure.
     #[test]
-    fn the_same_vehicle_pulls_by_its_soils_strength_ratio() {
-        let soil = |angle: f32, k| crate::ground_field::ContactGround {
-            friction: 0.01,
-            rolling_resistance: 0.0,
-            traction: crate::ground_field::ContactTraction {
-                cohesion_pa: 1000.0,
-                tan_phi: angle.to_radians().tan(),
-                shear_m: k,
-                rigid_share: 0.0,
-            },
-        };
-        let pull = |ground| {
-            let report = sliding_on(ground);
-            let load: f32 = report.contacts.iter().map(|c| c.load_elastic).sum();
-            let force: f32 = report.contacts.iter().map(|c| c.f_lat.abs()).sum();
-            (load, force)
-        };
-        let firm = soil(35.0, 0.010);
-        let loose = soil(28.0, 0.025);
-        let (load, firm_pull) = pull(firm);
-        let (loose_load, loose_pull) = pull(loose);
-        let area = 2.0 * (TEST_COLUMNS[2].0 - TEST_COLUMNS[0].0);
-        let strength = |g: crate::ground_field::ContactGround| {
-            area * g.traction.cohesion_pa + load * g.traction.tan_phi
-        };
-        assert!((loose_load - load).abs() < 1e-3);
-        assert!((firm_pull - strength(firm)).abs() < 1e-4 * firm_pull);
-        assert!((loose_pull - strength(loose)).abs() < 1e-4 * loose_pull);
-        assert!((firm_pull / loose_pull - strength(firm) / strength(loose)).abs() < 1e-4);
-        assert!(firm_pull > loose_pull);
-        println!(
-            "MEASURED firm pull {firm_pull:.3} N, loose {loose_pull:.3} N; DERIVED ratio {:.6}",
-            strength(firm) / strength(loose)
-        );
-        let base = crate::ground_types::GroundTypes::load_shipped()
-            .get(crate::terrain_blend::BASE_GROUND)
-            .contact();
-        let (_, base_pull) = pull(base);
-        println!("MEASURED shipped base-ground fixed-pad pull {base_pull:.3} N");
-    }
-
-    /// Paving supplies only pair friction. A mutant applying soil strength on every surface
-    /// fails; a permitted ground friction edit changes its own derived budget.
-    #[test]
-    fn paving_traction_is_the_substance_pair() {
-        // FIXTURE ground coefficients, independent of the shipped table's tuning.
-        for friction in [0.2, 0.8] {
-            let ground = crate::ground_field::ContactGround {
-                friction,
-                rolling_resistance: 0.0,
-                traction: crate::ground_field::ContactTraction::RIGID,
-            };
-            let report = sliding_on(ground);
-            let expected = rig_params()
-                .grip
-                .unwrap()
-                .pair(crate::substances::contact_friction(friction));
-            assert!(!report.contacts.is_empty());
-            for c in report.contacts {
-                assert!((c.f_lat.abs() / c.load_elastic - expected).abs() < 1e-5);
+    fn every_ground_delivers_its_grip_times_load_at_both_pressures() {
+        for (name, ground) in crate::ground_types::GroundTypes::load_shipped().types {
+            for scale in [1.0, 0.5] {
+                let mut params = rig_params();
+                params.support_stiffness_per_m *= scale;
+                params.grip.as_mut().unwrap().nominal_pressure_kpa *= scale;
+                // Deliberately unrelated track coefficient: it belongs only to solid recipients.
+                params.grip.as_mut().unwrap().track = crate::substances::contact_friction(0.01);
+                let oracle = GroundedFlat {
+                    surface_y: 0.0,
+                    ground: ground.contact(),
+                };
+                let loop_pts = rect_loop(0.02);
+                let input = SideInput {
+                    loop_pts: &loop_pts,
+                    count: 25,
+                    plane_x: 0.0,
+                    columns: TEST_COLUMNS,
+                    travel: TravelField { knots: &[] },
+                };
+                let mut elements = GripElements::for_links(input.count);
+                let mut report = SideReport::default();
+                for _ in 0..256 {
+                    report = contact_side(
+                        &input,
+                        SideState::default(),
+                        Affine3A::IDENTITY,
+                        1.0 / 64.0,
+                        &params,
+                        &oracle,
+                        &RubbleBodies::default(),
+                        |_| Vec3::X * 2.0,
+                        &mut elements,
+                    );
+                }
+                assert!(!report.contacts.is_empty());
+                let load: f32 = report.contacts.iter().map(|c| c.load_elastic).sum();
+                let pull: f32 = report.contacts.iter().map(|c| c.f_lat.abs()).sum();
+                assert!(
+                    (pull - ground.grip.value * load).abs() < load * 1e-5,
+                    "{name} scale={scale}"
+                );
+                assert!(report.contacts.iter().all(|c| c.mu == ground.grip.value));
+                println!(
+                    "MEASURED fixed-pad {name} pressure_scale={scale} load_n={load:.3} pull_n={pull:.3}"
+                );
             }
         }
     }
 
-    /// Soil compliance and solver resolution have distinct owners. Both a small and a large
-    /// authored K must reach the contact update; ignoring K or ignoring the floor fails.
+    /// Below atan(mu), a braked fixture stops and stays; above it gravity exceeds every
+    /// contact's capacity and sliding accelerates. Fixture mass follows the normal support
+    /// at full/half pressure; the pad is constrained to a plane and belts are locked.
     #[test]
-    fn soil_compliance_reads_its_fact_above_the_solver_floor() {
-        let grip = rig_params().grip;
-        for k in [GRIP_SHEAR_FLOOR_M / 2.0, GRIP_SHEAR_FLOOR_M * 2.0] {
-            // FIXTURE distances straddling the floor.
-            let oracle = GroundedFlat {
-                surface_y: 0.0,
-                ground: crate::ground_field::ContactGround {
-                    friction: 0.5,
-                    rolling_resistance: 0.0,
-                    traction: crate::ground_field::ContactTraction {
-                        cohesion_pa: 1000.0,
-                        tan_phi: 0.5,
-                        shear_m: k,
-                        rigid_share: 0.0,
-                    },
-                },
-            };
-            let surface = surface_under(
-                grip,
-                None,
-                Vec3::ZERO,
-                (0.1, 1000.0),
-                &oracle,
-                &RubbleBodies::default(),
-            );
-            assert_eq!(surface.shear_m, k.max(GRIP_SHEAR_FLOOR_M));
+    fn every_ground_holds_below_its_slope_limit_and_slides_above_at_both_pressures() {
+        let dt = 1.0 / 64.0; // Fixture fixed step, matching the shipped contact integration.
+        for (name, ground) in crate::ground_types::GroundTypes::load_shipped().types {
+            for scale in [1.0, 0.5] {
+                for sign in [-1.0, 1.0] {
+                    let limit = ground.grip.value.atan();
+                    if limit == 0.0 && sign < 0.0 {
+                        continue; // Zero grip has no positive holding-slope interval.
+                    }
+                    let margin = if sign < 0.0 {
+                        limit / 2.0
+                    } else {
+                        (std::f32::consts::FRAC_PI_2 - limit) / 2.0
+                    };
+                    let angle = limit + sign * 1.0_f32.to_radians().min(margin);
+                    let mut params = rig_params();
+                    params.support_stiffness_per_m *= scale * angle.cos();
+                    let oracle = GroundedFlat {
+                        surface_y: 0.0,
+                        ground: ground.contact(),
+                    };
+                    let loop_pts = rect_loop(0.02);
+                    let input = SideInput {
+                        loop_pts: &loop_pts,
+                        count: 25,
+                        plane_x: 0.0,
+                        columns: TEST_COLUMNS,
+                        travel: TravelField { knots: &[] },
+                    };
+                    let pieces = RubbleBodies::default();
+                    let mut elements = GripElements::for_links(input.count);
+                    let first = contact_side(
+                        &input,
+                        SideState::default(),
+                        Affine3A::IDENTITY,
+                        dt,
+                        &params,
+                        &oracle,
+                        &pieces,
+                        |_| Vec3::ZERO,
+                        &mut elements,
+                    );
+                    let normal: f32 = first.contacts.iter().map(|c| c.load_elastic).sum();
+                    let mass = normal / (super::super::derive::G * angle.cos());
+                    let width = TEST_COLUMNS[2].0 - TEST_COLUMNS[0].0;
+                    let length = 2.0; // Fixture bottom run.
+                    let grip = params.grip.as_mut().unwrap();
+                    grip.side_weight = mass * super::super::derive::G;
+                    grip.nominal_pressure_kpa =
+                        2.0 * grip.side_weight / (2.0 * width * length) / 1000.0;
+                    let pull = mass * super::super::derive::G * angle.sin();
+                    let capacity = ground.grip.value * normal;
+                    assert_eq!(pull > capacity, sign > 0.0);
+                    let (mut velocity, mut distance, mut late_distance) = (
+                        0.25 * (super::super::derive::G * GRIP_SHEAR_FLOOR_M).sqrt(),
+                        0.0_f32,
+                        0.0_f32,
+                    );
+                    let mut late_speed = 0.0_f32;
+                    for tick in 0..64 * 60 {
+                        let report = contact_side(
+                            &input,
+                            SideState::default(),
+                            Affine3A::IDENTITY,
+                            dt,
+                            &params,
+                            &oracle,
+                            &pieces,
+                            |_| Vec3::X * velocity,
+                            &mut elements,
+                        );
+                        let resistance: f32 = report.apps.iter().map(|a| a.force.x).sum();
+                        velocity += (pull + resistance) / mass * dt;
+                        distance += velocity * dt;
+                        if tick >= 64 * 59 {
+                            late_distance += velocity * dt;
+                            late_speed = late_speed.max(velocity.abs());
+                        }
+                    }
+                    // Resolution: f32 force summation leaves at most this relative residual;
+                    // one minute of that residual bounds velocity and final-second travel.
+                    let roundoff_speed = capacity / mass * 1e-5 * 60.0;
+                    if sign < 0.0 {
+                        assert!(
+                            late_speed < roundoff_speed,
+                            "{name} scale={scale} speed={late_speed}"
+                        );
+                        assert!(late_distance.abs() < roundoff_speed, "{name} keeps moving");
+                    } else {
+                        let minimum_speed = (pull - capacity) / mass * 60.0;
+                        assert!(
+                            velocity >= minimum_speed * (1.0 - 1e-4),
+                            "{name} must slide"
+                        );
+                    }
+                    println!(
+                        "MEASURED fixed-pad slope {name} pressure_scale={scale} above={} angle_deg={:.4} settle_m={distance:.7} late_travel_m={late_distance:.7} speed_m_s={velocity:.7}",
+                        sign > 0.0,
+                        angle.to_degrees()
+                    );
+                }
+            }
         }
     }
 
-    /// Recoverable shear reads force linearly through effective K. Drivers rely on that
-    /// unloading stiffness; a nonlinear readout or ignored solver floor changes the return.
+    /// Pressure-dependent drag is read by the contact pass and by the Driver from the same
+    /// spawn pressure; changing patch stiffness cannot change that pressure. Fixture pad.
+    #[test]
+    fn pressure_drag_reaches_both_contacts_and_driver() {
+        let hard = rigid_rolling_resistance();
+        let reference = rolling_reference_kpa();
+        for (name, ground) in crate::ground_types::GroundTypes::load_shipped().types {
+            let mut previous = hard;
+            for pressure in [reference / 2.0, reference, reference * 2.0] {
+                let expected =
+                    hard + (ground.rolling_resistance.value - hard) * pressure / reference;
+                let mut params = rig_params();
+                params.grip.as_mut().unwrap().nominal_pressure_kpa = pressure;
+                let oracle = GroundedFlat {
+                    surface_y: 0.0,
+                    ground: ground.contact(),
+                };
+                let surface = surface_under(
+                    params.grip,
+                    None,
+                    Vec3::ZERO,
+                    &oracle,
+                    &RubbleBodies::default(),
+                );
+                assert_eq!(surface.rolling, expected, "{name}");
+                assert!(surface.rolling >= previous);
+                let loop_pts = rect_loop(0.02);
+                let input = SideInput {
+                    loop_pts: &loop_pts,
+                    count: 25,
+                    plane_x: 0.0,
+                    columns: TEST_COLUMNS,
+                    travel: TravelField { knots: &[] },
+                };
+                let report = contact_side(
+                    &input,
+                    SideState {
+                        speed: ROLLING_FADE_SPEED,
+                        ..Default::default()
+                    },
+                    Affine3A::IDENTITY,
+                    1.0 / 64.0,
+                    &params,
+                    &oracle,
+                    &RubbleBodies::default(),
+                    |_| Vec3::ZERO,
+                    &mut GripElements::for_links(input.count),
+                );
+                let normal: f32 = report.contacts.iter().map(|c| c.load).sum();
+                assert!(normal > 0.0);
+                assert!((report.rolling_resistance - expected * normal).abs() < normal * 1e-6);
+                let weight = params.grip.unwrap().side_weight * 2.0;
+                let forecast = super::super::load::observe(
+                    report.perceived_support.iter(),
+                    Vec3::NEG_Z,
+                    weight,
+                    None,
+                );
+                assert!((forecast.rolling_n - expected * weight).abs() < weight * 1e-6);
+                previous = surface.rolling;
+            }
+        }
+        for pressure in [0.0, reference / 2.0, reference * 10.0] {
+            assert_eq!(ground_rolling_resistance(hard, pressure), hard);
+        }
+        // Fixture heavy ground: r=hard+.2 at reference, mu=hard+.3. DERIVED threshold from r(p)=mu;
+        // at twice the threshold drag exceeds grip, so no engine can sustain translation.
+        let (rolling, mu) = (hard + 0.2, hard + 0.3);
+        let threshold = reference * (mu - hard) / (rolling - hard);
+        assert!(ground_rolling_resistance(rolling, threshold / 2.0) < mu);
+        assert!(ground_rolling_resistance(rolling, threshold * 2.0) > mu);
+    }
+
+    /// The retained shear law reads its common compliance linearly below breakaway.
+    /// Fixture displacements stay inside the elastic zone, so the readout cannot saturate.
     #[test]
     fn recoverable_shear_reads_effective_compliance_in_the_force_pass() {
-        // FIXTURE: a soil with zero cohesion and tan(phi)=0.5; two K values straddle the floor.
-        let displacement = GRIP_SHEAR_FLOOR_M;
-        for k in [GRIP_SHEAR_FLOOR_M / 2.0, GRIP_SHEAR_FLOOR_M * 2.0] {
+        for fraction in [0.25, 0.5] {
+            let share = grip_law().breakaway_share.value * fraction;
             let oracle = GroundedFlat {
                 surface_y: 0.0,
                 ground: crate::ground_field::ContactGround {
-                    friction: 0.01,
-                    rolling_resistance: 0.0,
-                    traction: crate::ground_field::ContactTraction {
-                        cohesion_pa: 0.0,
-                        tan_phi: 0.5,
-                        shear_m: k,
-                        rigid_share: 0.0,
-                    },
+                    grip: 0.5,
+                    rolling_resistance: rigid_rolling_resistance(),
                 },
             };
             let loop_pts = rect_loop(0.02);
@@ -3219,7 +3295,7 @@ mod tests {
                 travel: TravelField { knots: &[] },
             };
             let mut elements = GripElements::for_links(input.count);
-            elements.strain.fill(Vec3::X * displacement);
+            elements.strain.fill(Vec3::X * (GRIP_SHEAR_FLOOR_M * share));
             let report = contact_side(
                 &input,
                 SideState::default(),
@@ -3231,10 +3307,11 @@ mod tests {
                 |_| Vec3::ZERO,
                 &mut elements,
             );
-            let expected = displacement / k.max(GRIP_SHEAR_FLOOR_M);
             assert!(!report.contacts.is_empty());
             for c in report.contacts {
-                assert!((c.f_lat.abs() / (c.load_elastic * 0.5) - expected).abs() < 1e-6);
+                assert!(
+                    (c.f_lat.abs() / (c.load_elastic * oracle.ground.grip) - share).abs() < 1e-6
+                );
             }
         }
     }
@@ -3242,7 +3319,7 @@ mod tests {
     /// Driver grip is nominal-pressure strength. Spring stiffness is not a ground fact;
     /// changing it at fixed footprint must not change a paid gear decision's load.
     #[test]
-    fn driver_soil_observation_does_not_read_spring_load() {
+    fn driver_observation_does_not_read_spring_load() {
         let oracle = GroundedFlat {
             surface_y: 0.0,
             ground: crate::ground_types::GroundTypes::load_shipped()
@@ -3283,6 +3360,16 @@ mod tests {
             "MEASURED observer grip: {} -> {} N",
             observed[0].grip_n, observed[1].grip_n
         );
+        let weight = params.grip.unwrap().side_weight * 2.0;
+        let expected_grip = oracle.ground.grip * weight;
+        let expected_rolling = oracle
+            .ground
+            .rolling_at(params.grip.unwrap().nominal_pressure_kpa)
+            * weight;
+        for observed in &observed {
+            assert!((observed.grip_n - expected_grip).abs() < weight * 1e-6);
+            assert!((observed.rolling_n - expected_rolling).abs() < weight * 1e-6);
+        }
         assert_eq!(observed[0].grip_n, observed[1].grip_n);
         assert_eq!(observed[0].turn_n, observed[1].turn_n);
     }

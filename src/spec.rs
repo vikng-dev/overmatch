@@ -2252,7 +2252,7 @@ TankSpec(
                     sound: (clip: "sfx/engine/fixture_loop.ogg", clip_pop_hz: 40.0),
                     torque_curve: [(700.0, 1000.0), (2000.0, 1200.0), (2400.0, 1100.0)],
                     drag_fraction: 0.25,
-                    inertia_kgm2: 3.0,
+                    inertia_kgm2: 4.0,
                     clutch_capacity_nm: 1600.0,
                 ),
                 gearbox: (

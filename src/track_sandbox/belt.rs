@@ -429,7 +429,6 @@ fn force_params(geom: &RigGeom, rig: &RigSpec, envelope: &EnvelopeLaw) -> ForceP
         engage_depth: rig.engage_depth,
         probe_reach: contact_probe(),
 
-        inertia: rig.belt_inertia,
         grip: Some(rig.grip),
     }
 }
@@ -880,7 +879,6 @@ mod tests {
             engage_depth: engage,
             probe_reach: contact_probe(),
 
-            inertia: 1.0,
             grip: None,
         };
         let affine = bevy::math::Affine3A::from_translation(Vec3::new(0.0, geom.hull_rest_y, 0.0));

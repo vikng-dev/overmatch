@@ -85,7 +85,7 @@ TankSpec(
                     torque_curve: [(700.0, 1000.0), (2000.0, 1200.0), (2400.0, 1100.0)],
                     drag_fraction: 0.25,
                     // Synthetic crank admission uses the delivered torque slope, including fuel cut.
-                    inertia_kgm2: 2.0,
+                    inertia_kgm2: 4.0,
                     clutch_capacity_nm: 1600.0,
                 ),
                 gearbox: (

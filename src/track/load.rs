@@ -64,10 +64,8 @@ pub struct SupportFact {
     pub half_span: Vec3,
     pub normal: Vec3,
     pub length_weight: f32,
-    /// Load-proportional strength: rigid pair share plus soil tan(phi).
+    /// Effective ground grip or solid-recipient pair coefficient.
     pub mu: f32,
-    /// Footprint area times soil cohesion, N; independent of suspension load.
-    pub cohesion_n: f32,
     pub rolling_coefficient: f32,
 }
 
@@ -118,7 +116,7 @@ pub(crate) fn observe_rig<'a>(
 }
 
 /// `L = W sin(theta) + c_rr W cos(theta) + T_nominal length/(4 radius)`.
-/// Nominal capacity sums footprint cohesion and the load-proportional strength at nominal pressure.
+/// Nominal capacity is effective grip times nominal normal weight.
 /// The uniform-pressure footprint model weights patches by their geometric length and column
 /// share; actual spring/damper loads never weight the observation. Forward is projected into
 /// the support plane, so hull pitch alone cannot manufacture a grade. The footprint's span is
@@ -157,7 +155,7 @@ pub fn observe<'a>(
         .map(|c| c.mu * c.length_weight)
         .sum::<f32>()
         / length_weight;
-    let grip = mu * weight * normal.y + contacts.clone().map(|c| c.cohesion_n).sum::<f32>();
+    let grip = mu * weight * normal.y;
     let (min, max) = contacts
         .flat_map(|c| {
             [
@@ -192,7 +190,7 @@ mod tests {
             half_span: Vec3::ZERO,
             length_weight: 1.0,
             mu: 0.7,
-            cohesion_n: 0.0,
+
             rolling_coefficient: rolling,
         })
     }
@@ -277,7 +275,7 @@ mod tests {
             normal: rot * Vec3::Y,
             length_weight: 4.0,
             mu: 0.7,
-            cohesion_n: 0.0,
+
             rolling_coefficient: 0.05,
         };
         let actual = observe([contact].iter(), rot * Vec3::NEG_Z, 560_000.0, Some(10.0));
