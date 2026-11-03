@@ -106,9 +106,10 @@ pub struct WrapSideOutput {
     pub reference: Vec<Vec2>,
     /// Drawn spacing (m): [`WrapInput::pitch`] × uniform strain, as resampled by [`station_params`].
     /// It equals material pitch only when drawn and material lengths match. Polygon bounds must
-    /// charge this spacing. MEASURED over the drawn-belt travel sweep: strain 1.0002 at full droop
+    /// charge this spacing. MEASURED reference geometry (25.56 mm pin offset): strain 1.0002 at full droop
     /// to 1.0020 at the bump stop; substituting material pitch moved the tightest budget by 0.03 mm
-    /// against a 0.35 mm margin, flipping no assertion. The choice follows geometry, not a failing case.
+    /// against a 0.35 mm margin, flipping no assertion. Current fixture: MEASURED strain 1.0013 at
+    /// full droop, 1.0000 at bump, 0.9999..1.0024 over the whole sweep. The choice follows geometry.
     pub spacing: f32,
 }
 
@@ -230,7 +231,7 @@ fn finish_side(
 /// Shares gravity with the wheels, though their discrete integrators differ. Wheels
 /// rise over a MEASURED playtested ~100 ms ([`wheel_lift_step`](super::wheels::wheel_lift_step)); the belt
 /// snaps, reaching crests a few frames earlier. [`conformed_pts`] bounds that asymmetry rather
-/// than unifying rates: MEASURED crest-sweep margin changes 0.23 mm with the clamp, versus
+/// than unifying rates: MEASURED reference crest-sweep margin changes 0.23 mm with the clamp, versus
 /// 112.78 mm for removing the clamp.
 #[derive(Default)]
 struct ConformEase {
@@ -857,11 +858,11 @@ mod tests {
     }
 
     /// Straight drawn links inset a circular `tread + pin_to_inner` route; [`pin_polygon_budget`]
-    /// bounds that geometry. Wrong radius base (MEASURED ~26 mm), flipped pin offset (MEASURED
+    /// bounds that geometry. Reference-geometry wrong radius base (MEASURED ~26 mm), flipped pin offset (MEASURED
     /// ~51 mm), or template scale must exceed the bound; the sweep prints its tightest case.
     ///
     /// Producer-relative budgets alone widen when discretisation coarsens. Require both cut and
-    /// budget below `pin_to_inner` (MEASURED seed 25.56 mm from glb `Link_Box`, via `marker_model`):
+    /// budget below `pin_to_inner`, measured from glb `Link_Box` via `marker_model`:
     /// deeper than the shoe's inner face cannot be a polygon inset. Producers are
     /// [`BELT_DRAW_SPACING`], `sag_clip_chord`, `route::ARC_SEGMENTS` and drawn link spacing.
     ///
@@ -869,11 +870,12 @@ mod tests {
     /// `PHASE_STEPS` spans one material pitch, the full modulo period of [`station_params`]. Carry
     /// one [`WrapState`] so pose changes excite the spring, then wait its own
     /// [`SlackSpring::settle_frames`] window. Empty terrain seeds belly memory at its zero target.
-    /// MEASURED settled: tightest spare 0.43 mm, wheel 0 at 8.01/8.44 mm; loosest budget 13.89 mm,
+    /// MEASURED reference geometry: tightest settled spare 0.43 mm, wheel 0 at 8.01/8.44 mm; loosest budget 13.89 mm,
     /// deepest cut 13.11 mm, both just over half the 25.56 mm physical ceiling.
     /// Transient overshoot is accepted ([`SlackSpring`]), measured rather than asserted: MEASURED
     /// worst spare 0.42 mm on the same wheel. A positive `cut − budget` means revisit the artifact,
-    /// never raise the bound.
+    /// never raise the bound. MEASURED current fixture: 24.64 mm pin offset, 0.46 mm settled spare
+    /// (wheel 7, 7.72/8.18 mm), 0.42 mm transient spare; loosest budget 13.89 mm, deepest cut 13.06 mm.
     ///
     /// Sandbox `-` reference deviation requires the reference drape to ride every end circle.
     /// Assert only [`close_loop`]'s appended return tail: a lower-run-dominated whole-loop bound
@@ -1176,14 +1178,15 @@ mod tests {
     /// wheels take MEASURED ~100 ms. A hull pinned at rest height makes the ridge exceed bump travel,
     /// asking for conform the bottomed wheels cannot follow.
     ///
-    /// MEASURED worst `belt-above-rim − budget` (mm):
+    /// MEASURED reference geometry, worst `belt-above-rim − budget` (mm):
     /// | Clamp | Eased rise | Instant rise |
     /// |---|---:|---:|
     /// | absent | +112.78 | +106.53 |
     /// | present | -0.56 | -0.33 |
     /// The 0.23 mm rate effect with the clamp does not justify discarding the playtested wheel
     /// ease (`wheels::wheel_lift_step`). The unclamped result agrees with MEASURED +121 mm crest
-    /// screenshots. This gate covers temporal lag; the static gate below isolates geometry.
+    /// screenshots. MEASURED current fixture: -0.36 mm with clamp/eased rise. This gate covers
+    /// temporal lag; the static gate below isolates geometry.
     #[test]
     fn a_swept_crest_never_lifts_the_drawn_belt_above_a_wheel() {
         let rig = tiger_rig();
@@ -1265,10 +1268,10 @@ mod tests {
     }
 
     /// Isolate geometry from temporal lag: snapped wheels and fresh [`WrapState`] each frame.
-    /// MEASURED worst `belt-above-rim − budget`: +35.39 mm unclamped, −1.22 mm clamped; extra swept
+    /// MEASURED reference geometry: worst `belt-above-rim − budget` +35.39 mm unclamped, −1.22 mm clamped; extra swept
     /// error comes from filters. Also compare the same pose over ridge and empty terrain: ridge
     /// conform must raise the belly between wheels. Disabling conform would pass every upper bound
-    /// while drawing through the crest.
+    /// while drawing through the crest. MEASURED current fixture: −1.35 mm clamped.
     #[test]
     fn a_static_crest_never_lifts_the_drawn_belt_above_a_wheel() {
         let rig = tiger_rig();
