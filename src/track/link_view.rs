@@ -1,27 +1,17 @@
 //! The TRACK-LINK RENDER LAYER: the tank's own shoe mesh, instanced onto the belt — shared by the
 //! game's [`super::view`] and the sandbox's `track_sandbox::link_view` adapter.
 //!
-//! Everything upstream of here draws the track as a LINE — the conformed pin line, the reference
-//! loop, the cast routes. A line is the right thing to reason about and the wrong thing to look at:
-//! you cannot see a shoe overhang a board edge, and you cannot see the belt articulate. This module
-//! lays the real shoe — the authored mesh as the tank build certifies it, rung 0 of the `Link#0`
-//! chain in `assets/tiger_1/tiger_1.lod.json` — on the same stations the physics already walks,
-//! so the model is
-//! judged on actual track. It is the ONE home for that: the game shipped procedural `Cuboid` boxes
-//! until 2026-07-26 while the sandbox instanced the real shoe, which is two answers to "what does
-//! this tank's track look like".
+//! Instances the authored rung-0 shoe on the view's pitch-resampled belt stations, so overhang
+//! and articulation are visible. Shared placement keeps the game and sandbox on the same mesh;
+//! procedural `Cuboid` shoes would give them different answers.
 //!
 //! # Where the shoe comes from
 //!
-//! The Tiger glb ships a TEMPLATE link that is not part of the tank: a `Link` node (whose mesh is
-//! named `Link` too — the name-scan ambiguity the node resolution in [`bind_link_template`] guards
-//! against) carrying `Pin_Start` / `Pin_End` marker empties and the `Link_Box` volume
-//! [`super::marker_model`] measures the shoe's faces from. It sits off to one side of the right
-//! sprocket and — because `Link_Box` carries no material — renders as a solid white box beside the
-//! tank. [`hide_link_template`] hides both; [`bind_link_template`] reads the mesh, its MATERIAL and
-//! the markers off the same nodes and hands them to the consumers' pools. Both systems run in BOTH
-//! binaries: the game used to hide neither, so every game session drew a stray white box and a loose
-//! shoe parked beside the hull.
+//! The template `Link` node shares its name with its mesh, requiring structural resolution in
+//! [`bind_link_template`]. It carries `Pin_Start` / `Pin_End` and the `Link_Box` volume used by
+//! [`super::marker_model`]. Beside the right sprocket, the material-free box renders white.
+//! [`hide_link_template`] hides both in both binaries; binding reads their mesh, material and
+//! markers for the consumers' pools.
 //!
 //! # The shoe's LOOK is authored, not coded
 //!
@@ -36,16 +26,13 @@
 //! therefore reads a material and never builds one; re-texturing the track is a blend edit plus a
 //! re-export.
 //!
-//! # The SCALE CONTRACT: the template is authored at 1.0, and that is verified, not carried
+//! # Scale contract
 //!
-//! The link used to ship under a 0.8079178 uniform scale, which every consumer had to carry through
-//! its placement math. That is a working-around: a number typed into (or threaded through) the
-//! renderer to compensate for the asset, invisible to anyone reading either. The artist re-exported
-//! with the scale APPLIED, so [`bind_link_template`] now VERIFIES instead — the composed world scale
-//! of `Link` and of `Link_Box` must be 1.0 within [`SCALE_TOLERANCE`] — and [`refuse_scaled`]
-//! aborts, naming the node and the measured scale, if it is not. Same policy as
-//! [`super::marker_model`]'s marker read: a broken export fails loudly at bind time rather than
-//! rendering a 23.8 %-oversized track that looks almost right.
+//! [`bind_link_template`] verifies composed world scales of `Link` and `Link_Box` against unit
+//! scale within [`SCALE_TOLERANCE`]; [`refuse_scaled`] names the node, scale and fix on failure.
+//! As in [`super::marker_model`], export faults refuse at bind rather than carrying a compensating
+//! scale in placement math. Counterexample: a MEASURED 0.8079178 authored scale left unapplied
+//! produces a DERIVED 23.8 % oversize when ignored.
 //!
 //! # The placement rule: anchor on the PINS, never on the link's origin
 //!
@@ -72,23 +59,17 @@
 //! [`super::route`]'s one shared builder for both. Articulation over a washboard and scrolling under
 //! drive both fall out for free: the stations articulate, and the resample carries the belt phase.
 //!
-//! The RETURN run is the one deliberate exception, and it is worth knowing about before chasing a
-//! "the shoes don't match the route" bug that is not one. The drawn drape is pushed out of EVERY
-//! circle ([`super::route::SagClip::EveryCircle`]) — including the sprocket and the idler it leaves
-//! at a tangent point — and the sim route's drape is not. That is not an oversight in either
-//! direction: unclipped, the drawn shoes sink tens of millimetres into the end wheels under any
-//! slack at all (very visible on a textured link), while clipping the SIM route lengthens it by
-//! millimetres the belt never budgeted, and that phantom strain slides a latched 20° hill hold. The
-//! view can absorb the extra length (`wrap::station_params` reads the drawn polyline as a uniform
-//! strain); the sim cannot.
+//! The return run deliberately differs: [`super::route::SagClip::EveryCircle`] clips the view's
+//! drape against all circles, including its tangent sprocket and idler; the sim drape is unclipped.
+//! Without clipping, drawn shoes sink tens of millimetres into end wheels under slack. Clipping
+//! the sim adds unbudgeted millimetres of length: phantom strain slides a latched 20° hill hold.
+//! The view absorbs that length as uniform strain (`wrap::station_params`); the sim cannot.
 //!
 //! # The frame table: one record per MATERIAL link
 //!
-//! A belt publishes where every link lies this frame in its [`BeltFrames`]: record `m` is the span
-//! (two drawn pin joints) material link `m` lies across. The GPU draws every shoe of the side from
-//! that table ([`super::belt_draw`]), the prints stamp from it, and the rung selector measures from
-//! it; there is no per-link entity. The CPU readers take each link's pose from the table, where it
-//! is computed once, when its span changes ([`BeltFrames::pose`]).
+//! [`BeltFrames`] record `m` is material link `m`'s span between drawn pin joints. The GPU
+//! ([`super::belt_draw`]), prints and rung selector share it; links have no individual entities.
+//! CPU readers share [`BeltFrames::pose`], computed only when the span changes.
 //!
 //! # The link↔station map ROTATES with the belt phase
 //!
@@ -170,10 +151,8 @@
 //! time and refuses the bind if it cannot. Otherwise a swap would change the LIGHTING as well as the
 //! silhouette, and the certified deviations bound the silhouette alone.
 //!
-//! One narrowing, recorded in ADR-0035: a mesh handle cannot differ per view, so a belt makes ONE
-//! selection for all of them — the DECLARED player view's (`view::PlayerView`), the same one fact
-//! both LOD ladders select through. Which view a rung is for is a domain question, so it is
-//! answered by a declaration and never by counting the cameras that happen to exist.
+//! A mesh handle cannot differ per view (ADR-0035): both LOD ladders select for the declared
+//! [`PlayerView`]. Counting cameras cannot determine whose view a rung serves.
 //!
 //! Whether a swap LOOKS like a swap is the one thing the geometric bound cannot answer;
 //! [`crate::lod_showcase`] is the instrument for judging it by eye, and pins a belt's rung through
@@ -193,23 +172,17 @@ use super::forces::{material_link, phase_decompose};
 use super::rig_geom::RigGeom;
 use super::side::{PerSide, Side};
 
-/// Register the template systems. Mounted by BOTH consumers (the game's `view_plugin` and the
-/// sandbox's `link_view` adapter) — one binary each, so the systems never double-register.
+/// Mounted once per binary by the game's `view_plugin` or the sandbox's `link_view` adapter.
 pub(crate) fn template_plugin(app: &mut App) {
-    // The belt's GPU draw: its material, the repeated meshes and the table upload.
     app.add_plugins(super::belt_draw::plugin);
     app.add_systems(Startup, require_shoe_template);
     app.add_systems(
         Update,
         (
-            // Cheap and always on: an `Added<Name>` scan, so a glb hot-reload re-hides the template
-            // it re-instantiates.
+            // `Added<Name>` also re-hides templates reinstantiated by hot reload.
             hide_link_template,
-            // Latched on its own resource — one read of the template nodes, ever. THE BIND WAITS
-            // FOR THE VIEW: the switch metres it derives are the profile projected through the
-            // certificate, and there is no profile until the declared view has been read once
-            // (`crate::view`: no default view). A frame without it is a frame with no shoes yet,
-            // not a frame of shoes bound against a guess.
+            // Bind once, after the declared view supplies a profile for certified switch metres.
+            // Until then there are no shoes; binding against a guessed view would be wrong.
             bind_link_template
                 // Template switch distances must use this frame's composed view profile,
                 // including a newly applied pixel budget or capture target height.
@@ -217,44 +190,32 @@ pub(crate) fn template_plugin(app: &mut App) {
                 .run_if(resource_exists::<RigGeom>)
                 .run_if(resource_exists::<ViewProfile>)
                 .run_if(not(resource_exists::<LinkTemplate>)),
-            // The ladder's metres are derived, so they follow the view profile — which moves on
-            // human-rate events only (a resize, an optic toggle, a budget row). After the composer
-            // that writes the profile, the same edge `geometry_lod::adapt_bands` carries: without
-            // it a resize or an optic toggle is one frame of stale metres.
+            // As with `geometry_lod::adapt_bands`, order after the profile composer to avoid a
+            // frame of stale metres on resize, optic toggle or pixel-budget changes.
             adapt_shoe_switches
                 .run_if(resource_exists::<LinkTemplate>)
                 .run_if(resource_exists_and_changed::<ViewProfile>)
                 .after(crate::geometry_lod::compose_view_profile),
         ),
     );
-    // THE SELECTOR READS THIS FRAME'S POSES. The camera is placed in `PostUpdate` and the hull
-    // arrives from `PhysicsSystems::Writeback` there too, so an `Update` selector selects on last
-    // frame's camera and last frame's tank — the skew the `VisibilityRange` path it replaced never
-    // had (bevy selects inside `PostUpdate`'s `CheckVisibility`). `GunnerCameraPlaced` for the same
-    // reason the HUD reprojection orders after it: the optic camera writes its own `GlobalTransform`
-    // downstream of propagation.
+    // Select on this frame's poses: camera placement and `PhysicsSystems::Writeback` run in
+    // `PostUpdate`. `GunnerCameraPlaced` writes its GlobalTransform after propagation, so order
+    // after it too, as HUD reprojection does. Bevy's `CheckVisibility` also runs in `PostUpdate`.
     app.add_systems(
         PostUpdate,
         select_belt_rungs
             .in_set(ShoeRungSelected)
             .run_if(resource_exists::<LinkTemplate>)
-            // "No view yet" is SCHEDULING, not a value the selector has to encode: a composition
-            // declares its player view in `Startup`, and the frames before that are frames this
-            // selector is not in. What is left inside it is a bug, and reports as one. "NEVER
-            // declared" is not this gate's silence either — `view::plugin`, which every consumer of
-            // this module mounts, refuses that one after startup.
+            // Before Startup declares a view there is no selection. `view::plugin` refuses a
+            // composition that never declares one; contradictions inside the selector are bugs.
             .run_if(any_with_component::<PlayerView>)
-            // AN INSTRUMENT DRAWS WHAT IT MEASURES (see `geometry_lod::SourceDetailOnly`): where
-            // the composition has declared source detail there is no selection to make, and a belt
-            // stays on the authored shoe it spawns with.
+            // `geometry_lod::SourceDetailOnly` instruments retain the authored spawn mesh.
             .run_if(not(
                 resource_exists::<crate::geometry_lod::SourceDetailOnly>,
             ))
             .after(TransformSystems::Propagate)
             .after(crate::camera::GunnerCameraPlaced)
-            // A rung built here is added to `Assets<Mesh>`; its `Added` event must flush this
-            // frame, or the render world has no mesh for the handle the belt now draws and skips
-            // the belt for a frame.
+            // Flush new rung meshes' Added events this frame or render skips the belt for a frame.
             .before(AssetEventSystems),
     );
 }
@@ -277,16 +238,8 @@ const PIN_END_NODE: &str = "Pin_End";
 /// glb's own primitive rather than by name.
 const LINK_MATERIAL: &str = "Mat_Track_Link";
 
-// ---------------------------------------------------------------------------------------------
-// THE CHAIN COMES FROM THE CERTIFICATE
-// ---------------------------------------------------------------------------------------------
-//
-// Nothing in this module is a measurement any more. `assets/tiger_1/tiger_1.lod.json` carries the
-// shoe's bounding radius and its rungs' certified deviations; [`crate::geometry_lod`] derives the
-// metres against the live view profile and owns the one writer that keeps them current. The
-// hand-transcribed chain table this module used to carry — five constants, a projection and four
-// rows of measured millimetres — is deleted with ADR-0035: the certificate is the single seam
-// ADR-0033 §8 demanded.
+// The certificate owns shoe radius and rung deviations; `crate::geometry_lod` derives switch
+// metres against the live view profile (ADR-0035, the single seam required by ADR-0033 §8).
 
 /// The glTF MESH the shoe primitive belongs to. Mesh and node share the name on this model, and
 /// the certificate keys a chain on `<meshName>#<primitiveIndex>`, so the shoe's chain is `Link#0`.
@@ -299,33 +252,23 @@ pub(crate) fn shoe_chain_key() -> String {
     crate::geometry_lod::chain_key(LINK_MESH, 0)
 }
 
-/// How far the template's composed world scale may sit from 1.0 before the bind refuses. A hair for
-/// the `f32` round trip through the export, and four orders of magnitude below the 0.808 the model
-/// used to carry — so it catches a re-export that forgets to apply the scale, and nothing else.
+/// Resolution: tolerate the export's `f32` round trip around unit scale. DERIVED: this is about
+/// 192 times smaller than the unit-scale error of the MEASURED 0.8079178 export counterexample.
 const SCALE_TOLERANCE: f32 = 1e-3;
 
 /// Everything needed to instance one shoe, read once off the template.
 #[derive(Resource)]
 pub(crate) struct LinkTemplate {
-    /// Per side: the authored shoe on the right, its genuine mirror on the left (see the module
-    /// doc — a negative-X scale would be a winding flip, not a mirror).
+    /// Authored right shoe and baked left mirror; see [`mirrored_mesh`] for the winding constraint.
     mesh: PerSide<Handle<Mesh>>,
-    /// The reduced levels, in CERTIFICATE order and always the same length as the chain's rungs
-    /// (the bind refuses rather than binding a short chain, which would leave a distance band with
-    /// no shoe in it). Per side: the same shoe reduced, mirrored by the same construction. ONE
-    /// handle per side per level for the whole session — every belt's repeated mesh is built from
-    /// it ([`super::belt_draw::BeltMeshes`]).
+    /// Certificate order, exactly the chain's rung count: a short bind would leave an empty band.
+    /// One mirrored pair per level per session, shared by [`super::belt_draw::BeltMeshes`].
     lods: Vec<PerSide<Handle<Mesh>>>,
-    /// One material for every link, read off the glb's own shoe primitive — the artist's
-    /// [`LINK_MATERIAL`], never a `StandardMaterial` built here. The look is therefore changed by
-    /// re-exporting the blend, not by editing this file.
+    /// The glb primitive's [`LINK_MATERIAL`]; retexture by re-exporting the blend.
     material: Handle<StandardMaterial>,
     /// Per side: mesh space → the canonical pin frame.
     frame: PerSide<LinkFrame>,
-    /// The shoe's CERTIFICATE RECORD — bounding radius and certified deviations — or `None` when
-    /// the certificate names the shoe no chain (one level, owning every distance). The switch
-    /// metres are derived from it against the live view profile, so [`adapt_shoe_switches`] needs
-    /// nothing else to re-derive them.
+    /// Radius and deviations for [`adapt_shoe_switches`]. No chain means source detail everywhere.
     chain: Option<Chain>,
     /// Where each rung takes over, nearest first: `switches[i]` is the distance beyond which rung
     /// `i + 1` is drawn. Always `lods.len()` long, and empty when the shoe earned no rung.
@@ -360,7 +303,6 @@ impl LinkTemplate {
         self.lods.len() + 1
     }
 
-    /// The shoe's material, the glb's own.
     pub(crate) fn material(&self) -> &Handle<StandardMaterial> {
         &self.material
     }
@@ -385,9 +327,7 @@ impl LinkTemplate {
         }
     }
 
-    /// The chain's levels and thresholds as one log-line phrase — `"4 reduced levels, LOD1 beyond
-    /// 56 m, LOD2 beyond 127 m, ..."`. Lives here so a consumer's rig-bound line reports whatever
-    /// the chain currently is, rather than naming one threshold a re-cut would silently falsify.
+    /// Derive the log phrase from the chain, so a re-cut cannot silently falsify a quoted threshold.
     pub(crate) fn chain_summary(&self) -> String {
         let levels = self
             .switches
@@ -544,7 +484,6 @@ impl BeltFrames {
         self.poses.resize(count, parked);
     }
 
-    /// The pose of a link of this belt lying across `span`.
     fn pose_of(&self, span: LinkSpan) -> Affine3A {
         link_transform(&self.frame, self.lateral_x, span.a, span.b).compute_affine()
     }
@@ -791,13 +730,8 @@ fn verify_template_document(document: &gltf::Document, path: &str) {
     );
 }
 
-/// Hide the glb's template link the moment it appears.
-///
-/// `Added<Name>` rather than a one-shot latch: hiding is idempotent and costs a filtered scan of
-/// newly-named entities, so a hot-reload that re-instantiates the scene re-hides the fresh copy
-/// instead of leaving the white marker box floating beside the sprocket again. Hiding `Link` also
-/// covers everything under it (`Link_Box` is its child) — the box is named anyway, because "hide the
-/// template" should not depend on the artist's parenting.
+/// `Added<Name>` re-hides reinstantiated templates on hot reload. Name both `Link` and `Link_Box`
+/// rather than relying on parenting to hide the material-free white box.
 fn hide_link_template(mut commands: Commands, fresh: Query<(Entity, &Name), Added<Name>>) {
     for (entity, name) in &fresh {
         if matches!(name.as_str(), LINK_NODE | LINK_BOX_NODE) {
@@ -806,15 +740,10 @@ fn hide_link_template(mut commands: Commands, fresh: Query<(Entity, &Name), Adde
     }
 }
 
-/// Read the template ONCE: the shoe mesh and the two pin markers — then verify the scale contract,
-/// build the mirrored mesh, the shared material, and both sides' canonical frames.
-///
-/// It retries every frame until the glb scene has landed (the scene load is async and the rig build
-/// does not wait for it), and latches on inserting [`LinkTemplate`]. Once a pin marker exists its
-/// whole instance does (the startup template gate refuses incomplete exports), so every missing
-/// piece after that is a broken export and refuses; only assets still loading wait. The name scan is global rather
-/// than a walk from a root because `Link` is a SCENE ROOT — a sibling of the hull node, not a
-/// descendant of it — and both tools spawn exactly one template.
+/// Bind once, latching on [`LinkTemplate`]. Retry while scene or mesh assets load; once a pin
+/// exists, the startup template gate guarantees a complete instance, so missing pieces refuse.
+/// Scan globally: `Link` is a scene-root sibling of the hull, and both tools spawn one template.
+/// Reads the mesh, material and pins, verifies scale, and builds mirrors and canonical frames.
 #[expect(
     clippy::too_many_arguments,
     reason = "reads the template once: names, hierarchy, transforms, meshes, materials, LOD chains, view profile and rig"
@@ -828,10 +757,8 @@ fn bind_link_template(
     meshes_of: Query<&Mesh3d>,
     materials_of: Query<&MeshMaterial3d<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    // The reduced shoes are RUNG MESH RECORDS in the tank's own view glb, resolved by
-    // `geometry_lod` from the certificate. No sidecar glb, no node to find, nothing to hide — and
-    // no measurement to transcribe: the bands come out of the same derivation every scene
-    // primitive's do.
+    // Bare rung mesh records in the view glb, resolved from the certificate by `geometry_lod`.
+    // No sidecar or scene node; bands share scene primitives' derivation.
     chains: Option<Res<crate::geometry_lod::GeometryLodChains>>,
     view: Res<crate::view::ViewProfile>,
     geom: Res<RigGeom>,
@@ -854,12 +781,9 @@ fn bind_link_template(
              the other; re-export the shoe template with both pin markers"
         ),
     };
-    // The `Link` NODE is resolved structurally — the pin markers' nearest ancestor wearing the
-    // name — never by the name alone: bevy names a mesh PRIMITIVE child after its node too, so a
-    // scene instance carries TWO entities named `Link` (the node, and its Mesh3d child). Which one
-    // a global name scan lands on is spawn-order luck; the game composition landed on the mesh
-    // child (childless), so the bind starved forever while the sandbox happened to work. Anchoring
-    // on the pins also keeps the whole read within ONE instance when several tanks are live.
+    // Resolve the pins' nearest `Link` ancestor: bevy also names its mesh-primitive child `Link`.
+    // A global name match can land on that childless mesh and starve binding, depending on spawn
+    // order. Pin ancestry also keeps this read inside one instance when several tanks are live.
     let mut link = None;
     let mut current = pin_start;
     while let Ok(child_of) = parents.get(current) {
@@ -886,8 +810,7 @@ fn bind_link_template(
     };
     let (pin_start, pin_end) = (marker(pin_start), marker(pin_end));
 
-    // THE SCALE CONTRACT, checked before anything is built from these nodes: the template must be
-    // authored at unit scale, so the placement math below is the geometry and nothing else.
+    // Verify unit scale before deriving geometry from these nodes.
     verify_unit_scale(
         LINK_NODE,
         composed_scale(link_entity, &parents, &transforms),
@@ -899,11 +822,8 @@ fn bind_link_template(
         );
     }
 
-    // The shoe mesh hangs on a PRIMITIVE child of the node (bevy_gltf spawns one child per
-    // primitive; the game's world-serialized instance names that child `Link` too — see the node
-    // resolution above). Direct children only, then the node itself: `Link_Box` is also a child of
-    // `Link` and carries its own primitive one level further down, so a descendant search could
-    // pick up the marker box instead.
+    // Search direct primitive children, then the node itself. A descendant search could bind
+    // `Link_Box`'s primitive, one level deeper. See the name ambiguity above.
     let (shoe_entity, source) = children
         .get(link_entity)
         .ok()
@@ -927,10 +847,8 @@ fn bind_link_template(
         return;
     };
 
-    // The look is the ARTIST'S, read off the same primitive the mesh came from. A shoe that arrives
-    // without a material would render default-white on all 194 instances, and a fallback built here
-    // would silently re-introduce the code-side steel this module just stopped owning — so a broken
-    // export refuses at bind time, the same policy as the scale contract above.
+    // Missing material would render every shoe default-white. Refuse the export rather than
+    // inventing code-side steel; the artist owns the look, as the export owns scale.
     let material = materials_of.get(shoe_entity).unwrap_or_else(|_| {
         panic!(
             "track links: the `{LINK_NODE}` shoe primitive carries no material; re-export the glb \
@@ -940,22 +858,11 @@ fn bind_link_template(
     let triangles = shoe.indices().map_or(0, Indices::len) / 3;
     let mirrored = mirrored_mesh(shoe);
 
-    // The reduced shoes, tangent-generated and mirrored by [`lod_shoe_meshes`] — every level has to
-    // be a reflection of the others for the same reason the two sides do, and reusing
-    // `mirrored_mesh` is what keeps that true without a second answer to "how is a shoe mirrored".
-    //
-    // The CHAIN is resolved from the shoe primitive's own MESH ASSET, which is the identity a
-    // certificate chain is per (shared meshes share a chain), and the key the lookup lands on is
-    // checked against [`shoe_chain_key`] — a wrong join would mirror some other part's rungs onto
-    // the belt, so it refuses: the certificate and the view disagree about which part is the shoe.
-    //
-    // AN ABSENT CHAIN IS NOT A REFUSAL. A re-cut that earns the shoe no rung is legitimate (the
-    // build's own coverage owns that question), and the law is source detail, silently — so the
-    // template binds with NO reduced levels and the belt draws its base shoe everywhere. Refusing
-    // the bind instead would take the whole track off every tank. A resolved chain, in contrast, is
-    // taken WHOLE: a template holding fewer levels than the certificate names would leave a
-    // distance band with no shoe drawn in it at all, so a rung record still loading starves the
-    // bind exactly like the base shoe does.
+    // `lod_shoe_meshes` supplies tangents and uses the base shoe's mirror construction.
+    // Resolve by primitive mesh asset (shared meshes share a chain), then verify `shoe_chain_key`:
+    // a wrong join would put another part's rungs on the belt.
+    // No certified chain is legitimate: source detail owns every distance. A present chain must
+    // bind whole or leave an empty distance band, so a loading rung waits like a loading base shoe.
     // `geometry_lod` has not resolved the certificate's chains yet.
     let Some(chains) = chains else {
         return;
@@ -979,15 +886,10 @@ fn bind_link_template(
         };
         tris.push(shoe.indices().map_or(0, Indices::len) / 3);
         match lod_shoe_meshes(shoe) {
-            // BOTH sides are derived assets here, unlike the base shoe (whose right side is the
-            // glTF's own handle): the mirror is built in this process, so neither side is the
-            // loaded rung record any more. The rung handles live in `GeometryLodChains`, which is
-            // what keeps the records from unloading.
+            // Both sides are derived; `GeometryLodChains` retains the loaded rung handles.
             Ok(pair) => lods.push(pair.map(|shoe| meshes.add(shoe))),
-            // Same policy as the missing-material refusal above: a reduced shoe wears the base
-            // shoe's NORMAL-MAPPED material, and bevy's PBR shader silently skips normal mapping
-            // on a mesh with no tangents. Binding an untangented level would ship a band across
-            // the battlefield where every track flattens out.
+            // Like the base shoe, every rung wears the normal-mapped material; see
+            // `lod_shoe_meshes` for why missing tangents would flatten its lighting silently.
             Err(err) => panic!(
                 "track links: the shoe's rung {} cannot be given tangents ({err}); it renders \
                  under the normal-mapped `{LINK_MATERIAL}`, so rebuild the rung with UVs, normals \
@@ -996,15 +898,12 @@ fn bind_link_template(
             ),
         }
     }
-    // No switch at all when the shoe earned no rung: the base shoe owns every distance.
     let switches = chain.map_or_else(Vec::new, |chain| chain.chain().switches(*view));
 
     let mesh = PerSide::new(meshes.add(mirrored), source.0.clone());
 
-    // The one lateral datum the markers cannot carry: how far outboard of the PIN PLANE the shoe's
-    // centre is authored. `RigGeom` measures both (off `Link_Box` and off the pin markers), so this
-    // stays a difference of two measurements rather than a number typed in here — and with the
-    // template at unit scale it is already in the mesh's own units.
+    // Pins cannot locate the shoe laterally. `RigGeom` measures its outboard bias from `Link_Box`
+    // and the pin plane; at unit scale that difference is already in mesh units.
     let shoe_offset = geom.shoe_center_offset();
     let frame = frames(pin_start, pin_end, shoe_offset);
 
@@ -1023,14 +922,8 @@ fn bind_link_template(
             |chain| format!("chain `{}`", chain.key()),
         ),
     );
-    // The LOD's whole ledger, one line per level: the band it owns, how much geometry it saves
-    // against the base shoe, and the two mesh assets every instance of it in the session shares
-    // (per side — the left is the mirror).
-    //
-    // The band is reported WITH THE ARITHMETIC BEHIND IT — the level's certified deviation and the
-    // view profile the metres were derived against — so a capture log carries the claim as well as
-    // the number, and a stream captured against a re-cut asset says outright whether its thresholds
-    // still follow from its meshes.
+    // Log each level's band, savings and shared per-side mesh assets with its derivation inputs
+    // (deviation and view profile), so captures of a re-cut asset can check the threshold claim.
     let deviations: &[Rung] = chain.map_or(&[], |chain| &chain.chain().rungs);
     for (index, (rung, tier)) in deviations.iter().zip(lods.iter()).enumerate() {
         info!(
@@ -1108,14 +1001,9 @@ fn verify_unit_scale(node: &str, scale: Vec3) {
     }
 }
 
-/// Abort because a track-template node is not authored at unit scale.
-///
-/// **Why a panic.** A carried scale is the shape of bug that hides: the track renders, it looks
-/// almost right, and it is 23.8 % oversized — the exact failure the old `LinkTemplate.scale`
-/// plumbing existed to paper over, in every consumer, forever. The rule (Yan, 2026-07-26) is that
-/// scale is never worked around: either the export applies it or the tool says so, once, with the
-/// number and the fix in the message. Same policy as [`super::marker_model`]'s marker read, which
-/// already aborts both binaries on a broken export.
+/// Refuse unapplied scale, as [`super::marker_model`] refuses broken markers. Carrying a
+/// compensating scale in consumers hides export faults: the MEASURED 0.8079178 counterexample
+/// produces a DERIVED 23.8 % oversize if ignored. Report the node, scale and asset fix instead.
 fn refuse_scaled(node: &str, scale: Vec3) -> ! {
     panic!(
         "track links: the template node `{node}` carries a composed world scale of \
@@ -1232,14 +1120,10 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
             }
         }
     }
-    // Every normal-mapped shoe needs tangents, authored in the export or supplied by the loader
-    // and [`lod_shoe_meshes`]. A tangent is `dP/du` with `w` recording the
-    // bitangent's
-    // handedness, so under the reflection `M = diag(-1, 1, 1)` — which leaves the UVs untouched —
-    // `T` transforms exactly like a position, `T' = M T`. The `w` flip is what keeps the BITANGENT
-    // a reflection too: `B = (N × T) w`, and a determinant-(−1) map obeys `M a × M b = −M (a × b)`,
-    // so `(N' × T') w' = −M (N × T) w'` equals `M B` only when `w' = −w`. Miss it and every
-    // normal-mapped detail on the left track lights as if lit from the opposite side.
+    // Tangents are authored or supplied by the loader / `lod_shoe_meshes`. Reflection
+    // `M = diag(-1, 1, 1)` preserves UVs, so `T = dP/du` becomes `T' = M T`.
+    // For `B = (N × T) w`, `M a × M b = −M (a × b)` implies `w' = −w` to get `B' = M B`.
+    // Missing that sign lights left-track normal-map details from the opposite side.
     if let Some(VertexAttributeValues::Float32x4(values)) =
         mesh.attribute_mut(Mesh::ATTRIBUTE_TANGENT)
     {
@@ -1273,42 +1157,18 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
     mesh
 }
 
-/// One reduced shoe as the two mesh assets the pool binds — `[left, right]` — both carrying
-/// TANGENTS. Serves EVERY certified rung: the levels differ in triangle count and in
-/// nothing else that matters here, so a second copy of this per level would be a second place for
-/// the handedness algebra below to go wrong.
+/// One reduced shoe as `[left, right]`, both with tangents, for every certified rung.
 ///
-/// # The tangents are READ, and the generation is the fallback that must never fire
+/// `scripts/lod/generate.py` bakes mikktspace tangents; shipped-byte tests guard that contract.
+/// For an export without them, generate before mirroring: `bevy_gltf` 0.19 only generates when
+/// the primitive's own material `needs_tangents` (normal or clearcoat-normal texture), whereas
+/// these bare reductions use glTF's default material. The bound shoe wears [`LINK_MATERIAL`]'s
+/// MEASURED three maps, including a normal map. Bevy PBR requires `VERTEX_TANGENTS` to use it;
+/// without tangents it silently changes lighting as well as the certified silhouette.
 ///
-/// The shipped levels now BAKE `TANGENT` (`scripts/lod/generate.py` runs mikktspace before export,
-/// and the gate below reads the SHIPPED BYTES), so this function's generation branch is dead on the
-/// assets as they ship — which is the point of the branch, not an argument for deleting it.
-///
-/// It exists because of what `bevy_gltf` 0.19 does NOT do. Its own mikktspace pass runs only when a
-/// primitive's OWN material wants tangents (`needs_tangents`: a normal texture, or a clearcoat
-/// normal texture), and these primitives carry NO glTF material at all — being bare machine
-/// reductions with no look of their own, they resolve to the glTF default material, which wants
-/// nothing. So an untangented reduced primitive would arrive with NO `ATTRIBUTE_TANGENT` and bevy
-/// would not notice.
-///
-/// That would be harmless if the shoe were unlit steel, but every reduced instance renders under the
-/// base shoe's [`LINK_MATERIAL`], whose three MEASURED maps include a NORMAL map. bevy's PBR shader
-/// keys normal mapping on the `VERTEX_TANGENTS` shader def and simply drops the map when the mesh
-/// has no tangents — no warning, no error. Every swap in the chain would then change
-/// the LIGHTING as well as the silhouette, which is not what the distance was argued from. So an
-/// export that stopped baking tangents degrades to a runtime mikktspace pass instead of to flat
-/// lighting, and `no_defaulted_tangent_touches_a_triangle_a_player_can_resolve` is what says the
-/// shipped bytes are not relying on it.
-///
-/// # Generate BEFORE mirroring, never after
-///
-/// mikktspace is run ONCE, on the shoe as authored, and [`mirrored_mesh`] carries the result across
-/// the reflection analytically (`T' = M T`, `w' = −w` — the algebra is written out there). Doing it
-/// the other way round means a second mikktspace run over a reflected, rewound mesh, trusting it to
-/// re-derive the handedness the reflection implies; this way the handedness is a two-line identity
-/// that a test can check per vertex, it costs half the work, and there is still exactly ONE answer
-/// to "how is a shoe mirrored". A re-export that starts shipping tangents (or a material) is honored
-/// as-is: the generation is skipped and the artist's tangents are the ones that get mirrored.
+/// Generate once on the authored shoe; [`mirrored_mesh`] reflects analytically (`T' = M T`,
+/// `w' = −w`). Generating again after reflection would cost twice and ask mikktspace to rederive
+/// handedness instead of testing that identity per vertex. Existing authored tangents are kept.
 fn lod_shoe_meshes(source: &Mesh) -> Result<PerSide<Mesh>, GenerateTangentsError> {
     let mut right = source.clone();
     if !right.contains_attribute(Mesh::ATTRIBUTE_TANGENT) {
@@ -1360,32 +1220,18 @@ fn rung_at(switches: &[f32], distance_m: f32) -> usize {
     switches.partition_point(|&switch| switch <= distance_m)
 }
 
-/// Write each belt's rung mesh, when it changes.
+/// Select from the declared [`PlayerView`]'s eye to the nearest shoe mesh origin, transformed
+/// by this frame's belt `GlobalTransform`. The whole belt draws that rung conservatively: every
+/// other shoe earns a coarser-or-equal rung. Parked, unfitted links read a kilometre away.
 ///
-/// Steady state is one scan per belt and NO write.
+/// ADR-0035 permits one mesh handle per belt for all views. As with `view::track_view_facts`,
+/// resolve the declaration, never the nearest of all cameras: a mirror, spotter or texture pass
+/// must not retune player LOD. [`template_plugin`] gates on a view existing, so a declaration
+/// that fails to resolve here is a contradiction reported as [`ViewError`], never a silent hold.
 ///
-/// THE SELECTION DISTANCE IS THE BELT'S NEAREST SHOE — this frame's table, each link's mesh origin
-/// carried through the belt's own `GlobalTransform`, the same point a per-shoe range would be
-/// measured to. Every other shoe is further from the eye, so the rung it earns on its own is
-/// coarser-or-equal and drawing it at the nearest shoe's rung is conservative; the whole side then
-/// carries one rung in one draw. A parked link (no fit yet) reads a kilometre away.
-///
-/// MEASURED FROM THE DECLARED PLAYER VIEW (`view::PlayerView`) — the same one fact
-/// `view::track_view_facts` takes its projection from, read here for its eye position. A mesh
-/// handle cannot differ per view (ADR-0035's amendment), so this selection is made for a VIEW, and
-/// which view that is is DECLARED rather than discovered: scanning the cameras that happen to exist
-/// and taking the nearest answered a domain question ("whose view is this rung for?") with a fact
-/// about the world's shape, so a mirror, spotter or render-to-texture pass silently re-tuned every
-/// belt in the game. Such a camera is not a player view and now cannot be mistaken for one.
-///
-/// The declaration failing to resolve is a REFUSAL, never a silent hold — the system is scheduled
-/// behind the view existing (see [`template_plugin`]), so what reaches it is a contradiction in the
-/// declaration itself and reports as one ([`ViewError`]).
-///
-/// The mesh is looked up by the table's count as well as the rung, so a belt whose count changed
-/// (the sandbox's live knob) takes its new count's mesh at an unchanged rung. A rung no belt of
-/// that count has drawn yet is built here, on the frame it is first selected
-/// ([`super::belt_draw::BeltMeshes::rung_or_build`]).
+/// Steady state scans once per belt and writes nothing. Look up by count as well as rung for the
+/// sandbox's live count knob; [`super::belt_draw::BeltMeshes::rung_or_build`] builds a new
+/// count/rung combination on its first selected frame.
 fn select_belt_rungs(
     template: Res<LinkTemplate>,
     mut cache: ResMut<super::belt_draw::BeltMeshes>,
@@ -1393,10 +1239,8 @@ fn select_belt_rungs(
     views: Query<&GlobalTransform, With<PlayerView>>,
     mut belts: Query<(&ShoeBelt, &BeltFrames, &GlobalTransform, &mut Mesh3d)>,
 ) -> Result<(), BevyError> {
-    // `single()` answers a QUERY-SHAPE question; the count restates its failure as the domain fact.
-    // The rows ARE the declarations — `PlayerView` requires the camera that carries this pose — so
-    // the number this reports is the number `view::track_view_facts` would report about the same
-    // world, and neither can resolve a declaration the other refuses.
+    // `PlayerView` requires its camera and pose: count declarations exactly as
+    // `view::track_view_facts` does, so neither reader can resolve what the other refuses.
     let Ok(eye) = views.single() else {
         return Err(ViewError::resolving(views.iter().count()).into());
     };
@@ -1496,15 +1340,9 @@ mod tests {
         assert!(std::panic::catch_unwind(|| verify(&broken)).is_err());
     }
 
-    /// A FIXTURE template, re-measured from `tiger_1.glb` on 2026-07-26 (the export that APPLIED the
-    /// link scale): the two pin markers in `Link`-local space — which, the node now carrying unit
-    /// scale, are also metres — and the shoe centre's outboard bias from the pin plane
-    /// (`link_center_x - plane_x`).
-    ///
-    /// These are INPUTS to the pure placement math, not assertions about the shipped file. A
-    /// re-export that moves a marker changes what the tools draw, and must not turn this suite red:
-    /// the geometry the model actually carries is `marker_model`'s to pin, and every number below is
-    /// read live at runtime ([`bind_link_template`]).
+    /// FIXTURE, MEASURED 2026-07-26 from the unit-scale `tiger_1.glb`: pin markers in mesh-local metres and
+    /// shoe bias `link_center_x - plane_x`. Pure-placement inputs, not shipped-asset assertions;
+    /// `marker_model` owns that geometry, and [`bind_link_template`] reads it live on re-export.
     const PIN_START: Vec3 = Vec3::new(0.017_796_993, -0.026_107_691, 0.058_478_355);
     const PIN_END: Vec3 = Vec3::new(0.018_031_836, -0.026_122_428, -0.071_948_05);
     const SHOE_OUTBOARD: f32 = 0.016_85;
@@ -1535,11 +1373,8 @@ mod tests {
             .expect("the shipped certificate names the shoe's chain")
     }
 
-    /// A template whose mesh handles are ALL DISTINCT — two per side for the base plus two per
-    /// certified rung — so a test can tell which one landed on which belt. Built from a bare
-    /// `Assets<Mesh>` rather than an `AssetPlugin` app: the only thing under test is which handle
-    /// the belt writes where. The SWITCHES are the shipped chain's, derived exactly as the bind
-    /// derives them.
+    /// Distinct mesh handles per side and rung expose wrong selections. No `AssetPlugin` is
+    /// needed: only handle writes are under test. Switches use the shipped chain as binding does.
     fn fixture_template(assets: &mut Assets<Mesh>) -> LinkTemplate {
         let mut fresh = || {
             assets.add(Mesh::new(
@@ -1640,13 +1475,9 @@ mod tests {
             .id()
     }
 
-    /// Where the fixture's belts stand. NOT the world origin, and reached through a PARENT: the belt
-    /// contract is `Transform::IDENTITY`, so with the anchor at the origin a belt's local frame and
-    /// the world are the same and a selector reading the table without the belt's global pose passes
-    /// every test — while in the game it would select every tank on the map at its distance to
-    /// `(0, 0, 0)`. The anchor is TURNED a quarter about up, carrying the belt's `+z` onto world
-    /// `+x`, where the camera stands ([`look_from`]): a belt's links lie along its `z`, and an
-    /// unrotated parent would hide a selector that skips the rotation.
+    /// FIXTURE displaced parent, turned a quarter about up (`+z` → world `+x`, toward
+    /// [`look_from`]). An origin anchor hides missing global translation; an unrotated one hides
+    /// missing rotation when the selector transforms the belt's table.
     const ANCHOR: Vec3 = Vec3::new(-137.0, 4.5, 61.0);
 
     fn anchor_pose() -> Transform {
@@ -1705,15 +1536,10 @@ mod tests {
         spawn_table(app.world_mut(), side, parent, frames, rung0)
     }
 
-    /// THE TILING LAW, reproduced by hand: exactly one rung owns every distance, and a boundary
-    /// belongs to the rung that TAKES OVER there.
-    ///
-    /// Charged against bevy's own predicate rather than against a table — `is_visible_at_all` is
-    /// `distance >= start_margin.start && distance < end_margin.end` (`bevy_camera` 0.19
-    /// `visibility/range.rs`), the HALF-OPEN `[start, end)` reading [`rung_at`] now has to
-    /// reproduce without it. The probes hit each boundary ITSELF, not just a hair either side: an
-    /// inclusive-on-both-ends reading would double-draw there and an exclusive-on-both would leave
-    /// the belt with no shoe at all.
+    /// Exactly one rung owns each distance; boundaries belong to the coarser rung taking over.
+    /// Compare [`rung_at`] to `bevy_camera` 0.19 `visibility/range.rs::is_visible_at_all`:
+    /// `distance >= start_margin.start && distance < end_margin.end`. Probe boundaries themselves
+    /// to catch double ownership (both ends inclusive) or missing shoes (both exclusive).
     #[test]
     fn every_distance_is_owned_by_exactly_one_shoe_rung() {
         let chain = shoe_chain();
@@ -1886,19 +1712,9 @@ mod tests {
         }
     }
 
-    /// A SECOND CAMERA IS NOT A SECOND VIEW, and the declared one is the one the belt selects on.
-    ///
-    /// Two failures live here, and the declaration removes both. The `Single<&GlobalTransform,
-    /// With<Camera3d>>` this file once carried failed param validation on TWO matches exactly as it
-    /// did on zero, and a failed validation is SKIPPED — no log, no panic — so the track sandbox
-    /// (a fly cam and its overlay child) never selected at all. Scanning every camera and taking
-    /// the NEAREST, which replaced it, still answered a domain question ("whose view is this rung
-    /// for?") out of the shape of the world: an overlay child sitting on the belt, a mirror or a
-    /// render-to-texture pass then re-tuned every belt in the game for a view no player has.
-    ///
-    /// So: the overlay camera stands ON the belt while the declared view stands well past the
-    /// switch, and the belt must draw the DECLARED view's coarse rung. Under the nearest-camera
-    /// rule this asserted the opposite.
+    /// Belts select for the declared view even with an overlay on the belt and the view beyond
+    /// the switch. A `Single<..., With<Camera3d>>` silently skips on two cameras; choosing the
+    /// nearest of all cameras lets overlays, mirrors or texture passes retune player LOD.
     #[test]
     fn a_second_camera_is_not_a_second_view() {
         let mut assets = Assets::<Mesh>::default();
@@ -1947,17 +1763,9 @@ mod tests {
         );
     }
 
-    /// EVERY WAY THE DECLARATION CAN BE WRONG REACHES THIS SELECTOR AS A REPORT, and leaves the
-    /// belt exactly as it was.
-    ///
-    /// The mutant is the original defect itself, in the file ADR-0035's amendment is about: `let
-    /// Ok(eye) = views.single() else { return Ok(()) }`. It passes every other test here, because a
-    /// belt that never reselected is indistinguishable from one whose rung did not change.
-    ///
-    /// The two-declaration case is the second: the count this reports is the number of
-    /// DECLARATIONS, which is the same number `view::track_view_facts` reports about the same world
-    /// — the marker requires the camera that carries both the pose read here and the field read
-    /// there, so no declaration can resolve for one reader and not the other.
+    /// An unresolved declaration reports and leaves the belt unchanged. A silent `return Ok(())`
+    /// passes the other tests: no selection looks like an unchanged rung. Count declarations as
+    /// `view::track_view_facts` does; required camera/pose components prevent disagreeing readers.
     #[test]
     fn a_selector_that_cannot_resolve_the_view_reports_rather_than_holding() {
         use bevy::ecs::system::RunSystemOnce;
@@ -2018,9 +1826,8 @@ mod tests {
         );
     }
 
-    /// THE STEADY STATE WRITES NOTHING. The whole design rests on it: a frame on which no belt
-    /// changed rung must cost one READ of each belt's table and not one component write — no
-    /// `Mesh3d` churn to re-extract, no `ShoeBelt` change to re-run anything downstream.
+    /// Unchanged rungs write neither `Mesh3d` nor `ShoeBelt`: downstream readers must not re-extract
+    /// or rerun for an unmoved belt or a camera move within its band.
     #[test]
     fn an_unmoved_belt_writes_no_handle() {
         #[derive(Resource, Default)]
@@ -2337,27 +2144,12 @@ mod tests {
         }
     }
 
-    /// One SHIPPED reduced shoe read straight off disk, EXACTLY as `bevy_gltf` would present it —
-    /// every attribute the primitive actually carries, TANGENT included, and nothing invented here.
-    ///
-    /// The two assertions on the way past are the premises the bind rests on, and they now point in
-    /// OPPOSITE directions:
-    ///
-    ///   * TANGENT must be PRESENT. The generator bakes it (`scripts/lod/generate.py` passes
-    ///     `export_tangents`), and NOTHING UPSTREAM CHECKS THAT ANY MORE — ADR 0036 §4 retired the
-    ///     lane's tangent gates along with the rendered-difference gate they served, and the
-    ///     certificate ADR 0035 ships records no tangent field at all. That makes this
-    ///     assertion the only remaining guard: a re-export that stopped baking would silently fall
-    ///     back to [`lod_shoe_meshes`]' runtime mikktspace — a safety net, not a plan, and
-    ///     precisely the path that used to produce defaulted tangents on real geometry. Reading the
-    ///     attribute through rather than regenerating it is what makes the gates below charge
-    ///     against the BYTES THAT SHIP.
-    ///   * MATERIAL must be ABSENT, unchanged: a material-free primitive is what keeps `bevy_gltf`
-    ///     from running a mikktspace pass of its own over what the exporter already solved, and it
-    ///     is what lets every level share the base shoe's [`LINK_MATERIAL`].
-    ///
-    /// Returns the mesh those accessors describe, ready to push through [`lod_shoe_meshes`] — the
-    /// same call `bind_link_template` makes.
+    /// Read the shipped attributes unchanged, then use the real [`lod_shoe_meshes`] bind path.
+    /// `scripts/lod/generate.py` exports TANGENT; the certificate has no tangent field and ADR-0036
+    /// §4 retires upstream tangent gates, so this is the remaining guard against runtime
+    /// mikktspace (which can default tangents on real geometry). Checking regenerated attributes
+    /// would certify different bytes. No material: keep bevy_gltf from generating tangents and
+    /// share the base shoe's [`LINK_MATERIAL`] at every rung.
     fn shipped_reduced_shoe(glb: &str) -> Mesh {
         let path = crate::geometry_lod::certificate::member_path(
             &crate::assets::asset_root(),
@@ -2467,23 +2259,12 @@ mod tests {
     /// they light a streak of wrong normal under the normal-mapped [`LINK_MATERIAL`] with no
     /// silhouette change and no error message anywhere.
     ///
-    /// # What this gate guards NOW
+    /// The shipped TANGENT accessor must exist ([`shipped_reduced_shoe`]); binding must leave the
+    /// right tangents unchanged and reflect the left analytically. A runtime pass would certify
+    /// a different mesh. No defaulted tangent is allowed, even below a pixel: report pixel size
+    /// to explain visibility, never to decide admission.
     ///
-    /// Three things, and the first two are the reason the third can be absolute:
-    ///
-    ///   1. **The shipped bytes CARRY tangents.** `scripts/lod/generate.py` bakes `TANGENT` into
-    ///      every level glb (and into `tiger_1.glb`'s own `Link`). [`shipped_reduced_shoe`] refuses
-    ///      a primitive without the accessor, so a re-export that stopped baking fails here rather
-    ///      than quietly falling back.
-    ///   2. **Bevy generates NOTHING.** [`lod_shoe_meshes`]' mikktspace branch is skipped when the
-    ///      attribute is present, so the right-hand mesh must be the glb's tangents unchanged and
-    ///      the left must be their exact analytic reflection. Asserted below: a runtime pass
-    ///      creeping back in is a different mesh being certified from the one that ships.
-    ///   3. **Not one defaulted tangent, anywhere.** Not "none big enough to resolve" — NONE. The
-    ///      pixel arithmetic is kept in the report as the thing that explains why a future one
-    ///      matters, not as the bar it has to clear.
-    ///
-    /// # It was RED for four asset generations, and what fixed it
+    /// # MEASURED asset counterexamples
     ///
     /// | asset | tris | worst defaulted triangle | switches at | px there |
     /// |---|---|---|---|---|
@@ -2492,18 +2273,13 @@ mod tests {
     /// | pipeline v2 `rung1`, tangents generated at BIND | 855 | 50.16 mm | 55.9 m | **16.15** |
     /// | pipeline v2 `rung1`, tangents BAKED at export | 854 | none | 55.9 m | — |
     ///
-    /// Two things had to be true at once, which is why three regenerations did not clear it. The
-    /// needle cleanup removed the sliver (one triangle out of each of L1/L2/L3 — the counts moved
-    /// 855/581/315 → 854/580/314), and baking the tangents moved the mikktspace pass to where the
-    /// mesh can be inspected and certified before it ships. Either alone leaves a runtime generator
-    /// deciding, per load, what the lighting looks like.
-    ///
-    /// The middle row is also the record of a real gap between two gates, worth keeping: the
-    /// retired manifest gate certified `tangent_default_verts: 0` for that asset and BEVY still
-    /// defaulted one vertex, because `scripts/lod/measure.py` counts a vertex whose faces ALL have
-    /// zero UV area and none of those faces did. A numeric gate on the source data is not a gate on
-    /// what the runtime's own solver returns. That is why this test reads the SHIPPED bytes through
-    /// the REAL bind path, and why it stays that way now that it is green.
+    /// Needle cleanup removes slivers (one triangle each in L1/L2/L3: MEASURED
+    /// 855/581/315 → 854/580/314), and baking makes tangents inspectable before shipping.
+    /// Either alone leaves runtime generation deciding lighting. The manifest's
+    /// `tangent_default_verts: 0` did not prevent Bevy defaulting a vertex: `scripts/lod/measure.py`
+    /// counts vertices whose faces all have zero UV area, which none of that vertex's faces did.
+    /// Source-data numeric checks cannot certify the runtime solver: test shipped bytes through
+    /// the real bind path.
     ///
     /// If this ever goes red again the FIX IS AN ASSET (or the generator's cleanup), not a number.
     /// If it has to be parked, park it as `#[ignore = "..."]` naming what it waits on — never by
@@ -2524,11 +2300,7 @@ mod tests {
             let shoe = shipped_reduced_shoe(glb);
             let bound =
                 lod_shoe_meshes(&shoe).unwrap_or_else(|e| panic!("{glb} must take tangents: {e}"));
-            // BEVY GENERATED NOTHING. With TANGENT present `lod_shoe_meshes` clones instead of
-            // solving, so the right-hand mesh must carry the glb's own tangents unchanged. If a
-            // runtime mikktspace pass ever creeps back in, everything below certifies a mesh that
-            // is not the one shipping — and it would do so silently, because a generated frame is
-            // usually fine and only sometimes is not.
+            // Certify shipped bytes, not a runtime re-solve; see the test's bind invariant.
             let (shipped, ..) = bound_attributes(&shoe, &format!("shipped {glb}"));
             let (right, ..) = bound_attributes(bound.get(Side::Right), &format!("bound {glb}"));
             assert_eq!(
@@ -2856,14 +2628,11 @@ mod tests {
         }
     }
 
-    /// THE SCALE CONTRACT: a template that is not authored at unit scale aborts, and the message
-    /// carries the whole diagnosis — the node, the measured scale, and the fix. Driven through
-    /// [`verify_unit_scale`] directly because the shipped glb is correct (the test below asserts
-    /// that), and inventing a scaled asset would test the fixture rather than the policy.
+    /// Unit-scale refusal names the node, measured scale and fix. Call [`verify_unit_scale`]
+    /// directly: the shipped asset passes, and a synthetic scaled asset would test its fixture.
     #[test]
     fn a_scaled_template_aborts_and_names_the_number() {
-        // The scale the model used to ship with — the exact case the old carried-scale plumbing
-        // existed for.
+        // MEASURED fixture: the unapplied-scale counterexample.
         let payload = std::panic::catch_unwind(|| {
             verify_unit_scale(LINK_NODE, Vec3::splat(0.807_917_8));
         })
@@ -2875,7 +2644,7 @@ mod tests {
         assert!(text.contains(LINK_NODE), "must name the node: {text}");
         assert!(text.contains("0.8079178"), "must print the scale: {text}");
         assert!(text.contains("Apply"), "must say how to fix it: {text}");
-        // Unit scale, and a hair either side of it, pass.
+        // Nonfinite scale refuses; unit scale and deviations within tolerance pass.
         assert!(std::panic::catch_unwind(|| verify_unit_scale(LINK_NODE, Vec3::NAN)).is_err());
         verify_unit_scale(LINK_NODE, Vec3::ONE);
         verify_unit_scale(LINK_BOX_NODE, Vec3::splat(1.0 - SCALE_TOLERANCE * 0.5));
