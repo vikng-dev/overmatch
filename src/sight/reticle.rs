@@ -1,10 +1,8 @@
 //! Gunner sight presentation: the HUD widgets that draw the sight picture.
 //! Crew status is the game's damage-model state: HP pools at stations.
 //!
-//! Everything here is view-layer — it reads the sight's state (mode, the shared
-//! [`aim::CommittedAim`], the dialed [`Ranging`]) and the rendered camera pose, and writes only UI
-//! nodes. It never authors a gun command, so the seam against [`super`]'s aim law is clean: this
-//! module could be deleted and the tank would still shoot where it was told.
+//! Reads mode, [`aim::CommittedAim`], dialed [`Ranging`] and rendered camera pose; writes only UI
+//! nodes, never gun commands. Removing this layer cannot change [`super`]'s aim law.
 //!
 //! The interface is [`plugin`] (mount the whole layer) plus [`Toast`], the one widget the input half
 //! needs to raise ("X unavailable" on a refused view switch).
@@ -44,16 +42,14 @@ struct IntentReticle;
 #[derive(Component)]
 struct ViewDeathOverlay;
 
-/// The prompt text inside the [`ViewDeathOverlay`] — its own (child) entity, so the overlay's
-/// `Visibility` (on the parent) and this `Text` are written separately.
+/// Child text is separate from [`ViewDeathOverlay`]'s parent visibility.
 #[derive(Component)]
 struct ViewDeathText;
 
 /// A brief on-screen message — used when a view switch is *refused* (the target view's crewman is
 /// down), so the silent Lshift no-op gets a reason. Ticks down in `update_toast`.
 ///
-/// The whole interface is [`Toast::show`]: the input half raises a message, this module owns when it
-/// appears and for how long. Fields stay private so the lifetime rule has one home.
+/// [`Toast::show`] is the sole interface; private fields keep timing owned here.
 #[derive(Resource, Default)]
 pub(super) struct Toast {
     message: String,
@@ -75,8 +71,7 @@ struct ToastText;
 #[derive(Component)]
 struct RangeReadout;
 
-/// The ranging reticle's horizontal reference line — the graticule's ZERO mark, placed on the gun's
-/// sight line. The range scale slides behind it; the graduation it crosses is the dialed range.
+/// Horizontal zero mark on the gun's sight line; the scale slides behind it at the dialed graduation.
 #[derive(Component)]
 struct ReticleLine;
 
@@ -94,8 +89,7 @@ pub(super) fn plugin(app: &mut App) {
     crate::sight::look::get();
     app.insert_resource(GraticuleLook::load())
         .init_match_resource::<Toast>()
-        // The optic surround is the sight's one custom-shaded widget: a full-screen node whose
-        // fragment punches the glass out of it.
+        // [`OpticMaskMaterial`] owns the custom-shaded glass cutout.
         .add_plugins(UiMaterialPlugin::<OpticMaskMaterial>::default())
         .add_systems(Startup, spawn_view_death_overlay)
         .add_systems(
@@ -111,20 +105,15 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                // On the net client this DECLARES `Overlay::ViewDead` (+ its prompt text) and leaves
-                // the visibility swap to the shared `overlay::apply_overlay_visibility` reconciler — so
-                // its declaration joins the `Declare` phase and its apply reads the fully-reconciled
-                // set (the ordering fix). In single-player (no `Overlays`) it still sets visibility
-                // itself. `Declare` is unconfigured in single-player, so it imposes nothing there.
+                // Declare before shared visibility reconciliation on net; SP writes visibility
+                // directly and leaves Declare unconfigured. See `update_view_death_overlay`.
                 update_view_death_overlay.in_set(overlay::OverlaySet::Declare),
                 update_toast,
                 update_range_readout,
             )
                 .chain()
-                // After `super::toggle_sight`, so a refused switch this frame shows its reason. Only
-                // that toggle is player input (gated on the cursor); the overlay, toast, and range
-                // readout are presentation and keep updating with the cursor free — hence no
-                // `PlayerInputSet` here.
+                // Show this frame's refusal after `super::toggle_sight`. Only the toggle is input;
+                // overlay/toast/range keep updating with a free cursor, outside `PlayerInputSet`.
                 .after(super::toggle_sight)
                 .in_set(GameplaySet)
                 .in_set(InMatchSystems),
@@ -134,12 +123,9 @@ pub(super) fn plugin(app: &mut App) {
 
 /// Mount the same projection schedule in the client and the headless layout fixture.
 fn mount_placement(app: &mut App) {
-    // Both reprojections run after the camera's pose is final for the frame, and after
-    // propagation: the graticule anchors on the VIEW gun's own `GlobalTransform` as well as
-    // reprojecting through the camera. Every input is render-rate — the mouse (`intent`,
-    // Update) and that VIEW gun pose (blended by `interpolate_servos` in Update, and what the
-    // gunner camera itself is placed from) — so the reprojections are clean by construction, no
-    // aliasing.
+    // Reproject after camera placement and transform propagation: graticule and camera read the
+    // same VIEW gun GlobalTransform. Mouse intent and `interpolate_servos` both run in Update,
+    // keeping every input at render rate without aliasing.
     app.add_systems(
         PostUpdate,
         (
@@ -182,12 +168,10 @@ fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
         .spawn((
             ViewDeathOverlay,
-            // `OverlayNode(ViewDead)` stamps the one-scrim contract's lowest z via its hook (in BOTH
-            // single-player and net — the hook always runs): the view-death black sits BELOW the death
-            // screen, so whole-crew death (Death latched) can never let this opaque black occlude "YOU
-            // DIED" — the spawn-order bug this redesign fixes. On the net client the marker ALSO hands
-            // this node's visibility to `overlay::apply_overlay_visibility`, which hard-suppresses it
-            // whenever a higher overlay owns the scrim; the z is the belt to that brace.
+            // Game damage-model UI: the hook's lowest scrim z in SP/net keeps black below "YOU DIED"
+            // when every crew station is out of action and Death is latched, regardless of spawn order.
+            // On net, the marker delegates visibility to `overlay::apply_overlay_visibility`,
+            // which suppresses black under higher scrim owners.
             overlay::OverlayNode(Overlay::ViewDead),
             Node {
                 width: Val::Percent(100.0),
@@ -216,8 +200,7 @@ fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
         });
 }
 
-/// The refusal-toast text node: a centred banner in the upper third, hidden until a refused switch
-/// raises it. Its own entity carries both `Text` and `Visibility`, so `update_toast` writes one query.
+/// Centred upper-third refusal banner, hidden until raised. Text and visibility share one entity/query.
 fn spawn_toast(mut commands: Commands, fonts: Res<UiFonts>) {
     let look = crate::sight::look::get();
     commands
@@ -299,11 +282,9 @@ fn update_range_readout(
     }
 }
 
-/// Spawn the ranging reticle: the zero mark and the authored graduation pool, numbered in hundreds
-/// of metres. Every mark is absolutely positioned — the whole graticule is
-/// placed against the gun's sight line each frame ([`update_ranging_reticle`]), which is not screen
-/// centre at the authored sight blend. All hidden until shown in the optic; a mark's height is written
-/// where it is placed ([`place_mark`]).
+/// Zero mark and authored pool, numbered in hundreds of metres. [`update_ranging_reticle`]
+/// absolutely positions them on the gun's sight line (off-centre at the authored blend) and shows
+/// them only in the optic; [`place_mark`] supplies height.
 fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>, look: Res<GraticuleLook>) {
     let colour = look.colour();
     commands.spawn((
@@ -387,11 +368,9 @@ fn place_mark(
     }
 }
 
-/// Slide the range scale so each graduation sits at `θ(dialed) − θ(range)` above the gun's SIGHT
-/// LINE: the dialed range lands on the [`ReticleLine`], nearer ranges above it, farther below, the
-/// whole graticule riding with the gun as it lays and as range is dialed out. Hidden outside the
-/// optic. Reads the laid weapon's table — the main gun for now — which is the per-ammo ballistic
-/// scale.
+/// Each graduation sits `θ(dialed) − θ(range)` above the gun's sight line: dialed on [`ReticleLine`],
+/// nearer above, farther below, following gun lay and range. Hidden outside the optic. Reads the
+/// laid weapon's per-ammo range table (currently the main gun).
 ///
 /// **The graticule is anchored to the gun, not to the camera.** Its zero is the sight line
 /// (`super::sight_line`: the gun's lay minus the dialed superelevation), which is the line the shell
@@ -400,11 +379,9 @@ fn place_mark(
 /// line. The anchor coincides with screen centre only at a blend of `0`; at the authored sight blend
 /// the camera rides toward the intent and the scale correctly lags with the gun.
 ///
-/// The sight line is read off the VIEW gun node — the render-smoothed chain (`interpolate_servos`,
-/// `Update`), the same node the optic camera bolts to and the same discipline the bore dot follows
-/// (`aim::update_bore_indicator`): the sim chain steps at tick rate and the graticule would stutter
-/// against the rendered view. Reprojected after the gunner camera has placed itself this frame, so
-/// mark and view share one pose.
+/// Read the render-smoothed VIEW gun (`interpolate_servos`, Update), as the optic camera and
+/// `aim::update_bore_indicator` do: tick-rate sim poses would stutter against the view.
+/// [`mount_placement`] orders reprojection after camera placement so marks and view share one pose.
 #[expect(
     clippy::too_many_arguments,
     reason = "a system spanning sight mode, ranging, the controlled gun, range tables, the camera and two UI elements"
@@ -435,8 +412,8 @@ fn update_ranging_reticle(
     let (camera, cam_transform) = camera
         .single()
         .expect("the client constructs exactly one player camera before entering a match");
-    // Everything the graticule needs or nothing at all: outside the optic, before the rig / range
-    // table / view gun bind, or with no viewport to project into, every mark hides together.
+    // Outside the optic, before rig/view-gun bind, or without a viewport, all marks hide together.
+    // The muzzle must receive its range table at spawn; a missing table is a bug.
     let mark = (*mode == SightMode::Gunner)
         .then(|| {
             let rig = crate::tank::controlled_one(controlled.single())?;
@@ -447,16 +424,14 @@ fn update_ranging_reticle(
                 .get(ViewNode::resolve(view_nodes.get(rig.gun).ok(), rig.gun))
                 .ok()?;
             let viewport = camera.logical_viewport_rect()?;
-            // The hairline is drawn in physical pixels and `world_to_viewport` answers in the
-            // camera's logical ones. The UI and the player's view share one render target (the
-            // window, or a capture's image), so these physical pixels are the UI's too.
+            // Convert camera-logical projection to physical hairlines. UI and view share the
+            // window/capture target, so physical pixels agree.
             let to_physical = camera
                 .target_scaling_factor()
                 .expect("a camera with a logical viewport has the target scale it divided by");
             let dialed = table.superelevation(ranging.range);
             let sight = sight_line(gun.rotation(), dialed);
-            // The sight's own origin, which every gunner camera is parked at, so a mark's bearing is
-            // all that decides its screen place.
+            // Camera and sight share this origin: bearing alone decides placement.
             let origin = gun.translation();
             // Marks stack about the CAMERA's right axis, so the scale reads screen-vertical whatever
             // the hull's roll.
@@ -477,8 +452,7 @@ fn update_ranging_reticle(
         })
         .flatten();
 
-    // The zero mark, on the sight line itself: `θ(dialed) − θ(dialed)` is zero by construction, so
-    // the line and the dialed graduation are one place and the graticule cannot come apart.
+    // `θ(dialed) − θ(dialed) = 0`: zero mark and dialed graduation cannot separate.
     let (mut node, mut visibility, target) = line
         .single_mut()
         .expect("entering a match spawns exactly one ranging zero mark");
@@ -524,9 +498,8 @@ struct OpticMaskParams {
     surround: Vec4,
 }
 
-/// The optic surround: a full-screen node whose fragment shader punches the glass out of it, so the
-/// hole is a true circle at any centre and any aspect ratio (which is why it is a shader and not a
-/// stack of rectangles — the centre leaves the node's own centre at every blend but `0`).
+/// Shader cutout stays circular at any aspect/centre. Rectangles cannot: every blend but `0`
+/// moves the glass off the node's centre.
 #[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
 struct OpticMaskMaterial {
     #[uniform(0)]
@@ -539,14 +512,12 @@ impl UiMaterial for OpticMaskMaterial {
     }
 }
 
-/// Marks the one full-screen mask node, so [`update_optic_mask`] can find its material and its
-/// visibility.
+/// Identifies material and visibility for [`update_optic_mask`].
 #[derive(Component)]
 struct OpticMask;
 
-/// Spawn the optic surround on entering a match, hidden. It sits on the overlay ladder's own sight-furniture rung
-/// (`overlay::Overlay::SIGHT_FURNITURE_Z`), below the graticule and the intent cursor it surrounds
-/// and below every overlay that has to cover the sight picture whole.
+/// Hidden match-entry surround at `overlay::Overlay::SIGHT_FURNITURE_Z`: below graticule, intent
+/// cursor and overlays that cover the sight picture.
 fn spawn_optic_mask(mut commands: Commands, mut materials: ResMut<Assets<OpticMaskMaterial>>) {
     commands.spawn((
         FlowScoped(Flow::InMatch),
@@ -583,38 +554,30 @@ struct OpticGlass {
     feather: f32,
 }
 
-/// Where the optic's glass lands on screen, measured through the camera's ACTUAL projection.
+/// Project the gun's sight line: camera/viewport-centred only at blend `0`. At the authored blend
+/// the glass slides as the gun lags. Pass off-rect centres unclamped: their visible arcs are correct;
+/// clamping would drag the glass off the sight line.
 ///
-/// The centre is the gun's `sight` line reprojected — neither the viewport's centre nor the camera
-/// axis, which coincide with it only at a blend of `0`; at the authored sight blend the glass
-/// slides as the gun lags, which is the whole point of the blend. It may land OUTSIDE the rect and is
-/// passed through unclamped: the visible arc is still the right arc, and clamping would drag the
-/// glass off the sight line. Only a sight line BEHIND the camera has no answer, and
-/// `world_to_viewport` reports exactly that case (it answers off-rect coordinates for anything in
-/// front) — there the mask stands down rather than drawing at a garbage coordinate.
+/// Projection errors hide the mask. `world_to_viewport` permits off-rect X/Y but also rejects clip
+/// depth, missing viewport and invalid projection data, not just points behind the camera
+/// (bevy_camera-0.19.1/src/camera.rs:539-559, `world_to_viewport_core`).
 ///
-/// The rim is pure viewport ([`mask_rim`]), and the cursor's bound is the same fraction of the same
-/// axis carried through this same projection, so the reachable circle IS the drawn glass at any
-/// aspect. `fov` is the field the optic frames, the bound's other term.
+/// [`mask_rim`] uses only the viewport; cursor reach projects the same fraction of the same axis,
+/// so its circle matches the glass at every aspect. The optic FOV supplies the bound's other term.
 fn optic_glass(
     camera: &Camera,
     cam_transform: &GlobalTransform,
     sight: Vec3,
 ) -> Option<OpticGlass> {
     let viewport = camera.logical_viewport_size()?;
-    // Height is the unit every measurement below is in, so a viewport without one has no answer —
-    // the same stand-down a sight line behind the camera gets, rather than a NaN radius (a target
-    // resized to nothing, which a minimized window is).
+    // Height is the unit: a zero-height/minimised target has no radius, rather than a NaN.
     if viewport.y <= 0.0 {
         return None;
     }
     let eye = cam_transform.translation();
-    // Sample the ray a whole eye-distance out rather than one metre out. The projection is
-    // scale-invariant along a ray, so the reach names no bearing of its own — but f32 spacing at
-    // the eye's own magnitude is what quantizes `eye + dir`, and a unit step off a mount standing
-    // a kilometre from the world origin loses enough of the direction to move the measured centre
-    // a fifth of a pixel. Scaling the step with the eye holds that error at one f32 epsilon of
-    // angle anywhere on the map.
+    // Projection is scale-invariant along a ray, but f32 spacing quantizes `eye + dir`. MEASURED:
+    // a one-metre step a kilometre from origin shifts the centre a fifth of a pixel. Sampling a
+    // whole eye-distance out holds angular error to one f32 epsilon anywhere on the map.
     let reach = eye.length().max(1.0);
     let centre = camera
         .world_to_viewport(cam_transform, eye + sight * reach)
@@ -630,9 +593,8 @@ fn optic_glass(
 /// Put the glass on the gun's sight line and show the surround; hidden outside the optic, and
 /// whenever the sight picture has no place on screen at all.
 ///
-/// Reads the same VIEW gun node and the same [`sight_line`] the graticule and the optic camera do,
-/// after the camera has placed itself this frame — the mask, the zero mark and the view are one
-/// pose, so the glass cannot drift against the marks inside it.
+/// Uses the graticule/camera's VIEW gun and [`sight_line`]; [`mount_placement`] orders it after
+/// camera placement so glass, zero mark and view cannot drift.
 #[expect(
     clippy::too_many_arguments,
     reason = "a system spanning sight mode, ranging, the controlled gun, range tables, the camera and the mask material"
@@ -679,16 +641,13 @@ fn update_optic_mask(
     visibility.set_if_neq(Visibility::Visible);
 }
 
-/// Place the intent cursor at the reprojection of the committed aim point — a resolved point on
-/// the world in BOTH regimes (a third-person commit resumed on entry, or the optic's own resolve),
-/// so its true screen position is exact at any range; no bearing-only shortcut, which would place a
-/// near floor aim too high by the mount parallax. As the gun (and so the camera/sight line) catches
-/// up, this drifts back to screen centre; hidden outside gunner view.
+/// Reproject the committed world point at any range, resumed from third person or resolved in the optic.
+/// A bearing-only shortcut puts near-floor aim too high by mount parallax. The cursor returns to
+/// centre as gun/camera catch up; hidden outside gunner view.
 ///
-/// Reads the shared [`aim::CommittedAim`] (republished by `super::drive_gunner_aim` earlier this frame
-/// in `BeforeFixedMainLoop`) and the gunner camera's pose (which reads the VIEW gun's
-/// `GlobalTransform`, blended by `interpolate_servos` in `Update`) — a pure function of the committed
-/// intent and the camera, no aliasing.
+/// Reads [`aim::CommittedAim`] republished by `super::drive_gunner_aim` in BeforeFixedMainLoop
+/// and camera pose from the VIEW gun GlobalTransform (`interpolate_servos`, Update). Both inputs
+/// are from this frame, without aliasing.
 fn update_intent_reticle(
     mode: Res<SightMode>,
     committed: Res<CommittedAim>,
@@ -759,13 +718,10 @@ impl KillCamView<'_, '_> {
 /// the player to press Lshift to switch to the other view if its crewman is available; if both
 /// view stations are out of action, the prompt says so.
 ///
-/// On the NET client this participates in the overlay authority: it runs in
-/// [`overlay::OverlaySet::Declare`] and only DECLARES `Overlay::ViewDead` presence (+ refreshes the
-/// prompt text), leaving the visibility swap to the shared `overlay::apply_overlay_visibility`
-/// reconciler that runs AFTER `Declare`. That split is the ordering fix: the one-scrim decision reads a
-/// fully-declared set, so this black is suppressed entirely whenever a higher overlay (the death screen
-/// above all, but also the menu / connect screen) owns the scrim. In single-player the `Overlays`
-/// resource is absent and this system sets visibility itself: station out of action → black + prompt.
+/// Net declares `Overlay::ViewDead` and refreshes text in [`overlay::OverlaySet::Declare`];
+/// `overlay::apply_overlay_visibility` then reads the complete set, suppressing this black under
+/// death, menu or connect scrims. SP has no `Overlays`; in the game's damage model an out-of-action
+/// station shows black + prompt directly.
 ///
 /// Where the kill cam is mounted ([`KillCamGate`]), a knocked-out tank's view is the kill cam's and
 /// then its death screen's: no black.
@@ -790,15 +746,9 @@ fn update_view_death_overlay(
     let crewman_down =
         has_controlled && !kill_cam.owns() && !view_available(&controlled, &views, active_view);
 
-    // Net client: DECLARE presence only; the shared reconciler owns visibility from the fully-declared
-    // set (suppressed under any higher overlay). We must not also write `Visibility` here — that would
-    // double-write it and read a not-yet-reconciled set.
-    //
-    // The declaration is deliberately made BEFORE the node lookup below and gated on nothing: presence
-    // is a fact about the crew, not about the view hierarchy. Were it to sit behind the lookup, a frame
-    // that failed to find the node would skip `declare` entirely and the set would LATCH the previous
-    // answer rather than clear it — `declare` is absolute, so it must be reached unconditionally to
-    // self-heal.
+    // Net only declares; a visibility write here would double-write from an unreconciled set.
+    // Declare before node lookup: presence follows the game's damage-model state, not view hierarchy.
+    // Skipping this absolute declaration would latch the previous answer instead of clearing it.
     let single_player = match overlays {
         Some(mut overlays) => {
             overlays.declare(Overlay::ViewDead, crewman_down);
@@ -815,8 +765,7 @@ fn update_view_death_overlay(
         .single_mut()
         .expect("the view-death overlay spawns exactly one prompt");
 
-    // Refresh the prompt whenever the active crewman is down (identical in both modes); a hidden node's
-    // stale text is harmless and re-derived here before it can be shown again.
+    // Refresh before showing in either mode; stale hidden text is harmless.
     if crewman_down {
         let other_available = view_available(&controlled, &views, other_view);
         let prompt = if other_available {
@@ -1000,20 +949,20 @@ mod tests {
 
     /// The fixture's viewport, in px.
     const VIEWPORT: UVec2 = UVec2::new(1280, 720);
-    /// The instrument every fixture below looks through — fixture data, a middling gunnery sight.
+    /// Fixture instrument: a middling gunnery sight.
     const OPTICS: Optics = Optics::Magnified {
         magnification: 2.5,
         field_deg: 25.0,
     };
-    /// The field it frames (rad), through the one conversion the client uses: one milliradian of lay
-    /// is a pixel here, so a mark placed on the bore instead of the sight line lands tens out.
+    /// Fixture FOV, rad, through the client conversion. DERIVED on-axis at 720 px / 25°:
+    /// 1 mrad is ~1.62 px; DIALED's 6.4 mrad bore/sight gap is ~10.4 px.
     const FOV: f32 = OPTICS.vertical_fov();
     /// Where the gun node stands: far from the world origin, so a placement that composes the wrong
     /// frame moves instead of cancelling.
     const GUN: Vec3 = Vec3::new(137.0, 4.6, -512.0);
     /// The dialed range (m) — on a graduation, so the zero mark and one tick must coincide.
     const DIALED: f32 = 800.0;
-    /// Angular tolerance (rad) for a law asserted through the projection round trip: ~0.6 px here.
+    /// Angular tolerance, rad. DERIVED on-axis: EPS × 720 / (2 tan(FOV/2)) ≈ 0.16 px.
     const EPS: f32 = 1e-4;
 
     fn fixture_look() -> GraticuleLook {
@@ -1034,8 +983,7 @@ mod tests {
         RangeTable::test_rows(&[(0.0, 0.0), (1000.0, 0.008), (4000.0, 0.045)])
     }
 
-    /// The angle between two directions, via `atan2` on the cross/dot pair — never `acos` of a dot
-    /// product, which loses most of the f32 mantissa near 1, and these are angles that should be 0.
+    /// `acos(dot)` loses f32 precision near 1; these directions should differ by zero.
     fn angle_between(a: Vec3, b: Vec3) -> f32 {
         a.cross(b).length().atan2(a.dot(b))
     }
@@ -1047,16 +995,14 @@ mod tests {
         }
     }
 
-    /// The sight picture as the client draws it: the production graduation spawner with inline spacing, a gun node laid where
-    /// the test puts it, and a camera the test poses where the blend would put it (on the sight line
-    /// at `k = 0`, off it above). Nothing here re-implements the placement law — the shipped system
-    /// runs.
+    /// Production graduation spawn/placement with fixture spacing, gun lay and camera blend pose
+    /// (on the sight line at `k = 0`, off it above); no reimplemented placement law.
     struct SightPicture {
         world: World,
         camera: Entity,
         gun: Entity,
         line: Entity,
-        /// The spawned graduation pool, as `(entity, range)`.
+        /// Graduation entities paired with range.
         ticks: Vec<(Entity, f32)>,
     }
 
@@ -1092,8 +1038,7 @@ mod tests {
                         },
                         ..default()
                     },
-                    // The harness's ONE declared view (`view::PlayerView`) — what every reticle
-                    // system resolves the player's camera through.
+                    // Reticle systems resolve cameras through `view::PlayerView`.
                     PlayerView,
                     GlobalTransform::default(),
                 ))
@@ -1189,8 +1134,7 @@ mod tests {
                 .rotation()
         }
 
-        /// The superelevation the dialed range asks for — the fixture's table, read through the
-        /// shipped lookup.
+        /// Dialed superelevation through the shipped table lookup.
         fn dialed_lob(&self) -> f32 {
             table().superelevation(DIALED)
         }
@@ -1204,13 +1148,12 @@ mod tests {
             self.gun_rotation() * Vec3::NEG_Z
         }
 
-        /// The screen point the zero mark is centred on, or `None` where it is hidden — the
-        /// graticule's only other state.
+        /// Zero-mark screen centre; `None` means hidden.
         fn zero_mark(&self) -> Option<Vec2> {
             self.placed(self.line)
         }
 
-        /// The graduations, as `(range, mark)` pairs.
+        /// `(range, screen mark)` pairs.
         fn graduations(&self) -> Vec<(f32, Option<Vec2>)> {
             self.ticks
                 .iter()
@@ -1243,8 +1186,7 @@ mod tests {
             Some(centre * ui_scale / camera_scale)
         }
 
-        /// The bearing a screen point names, read back through the camera — so every law below is
-        /// stated in angles the sight owns, not in pixel offsets.
+        /// Read back through the camera so tests assert sight angles rather than pixel offsets.
         fn bearing(&self, screen: Vec2) -> Vec3 {
             let camera = self.world.get::<Camera>(self.camera).expect("a camera");
             let transform = self
@@ -1258,20 +1200,16 @@ mod tests {
                 .into()
         }
 
-        /// How far `dir` stands above the camera's forward IN THE PLANE THE GRATICULE STACKS IN
-        /// (about the camera's right axis). A rotation about that axis turns the camera-local
-        /// `(y, −z)` pair rigidly, so this reads back the placement angle exactly, wherever the
-        /// sight line sits on the screen.
+        /// Elevation in the graticule plane, about camera right. That rotation rigidly turns
+        /// camera-local `(y, −z)`, reading placement angle exactly at any screen position.
         fn elevation(&self, dir: Vec3) -> f32 {
             let local = self.camera_rotation().inverse() * dir;
             local.y.atan2(-local.z)
         }
     }
 
-    /// **The ruling: the range bar rides the GUN, not the view.** Hold the camera still — above
-    /// `k = 0` it tracks the player's intent, not the gun — and elevate the gun. Every mark must
-    /// travel by exactly the lay change; a graticule anchored to the camera's forward axis (the
-    /// behaviour this replaces) does not move at all.
+    /// With camera fixed on intent (`k > 0`), marks must travel by the gun's lay change. A
+    /// camera-forward anchor would not move.
     #[test]
     fn the_graticule_travels_with_the_gun() {
         /// How far the gun elevates between the two frames (rad) — inside the optic's half-FOV, so
@@ -1297,13 +1235,9 @@ mod tests {
         );
     }
 
-    /// **The zero mark names the SIGHT LINE, and the bore stands a superelevation above it.** The
-    /// sight line is what the shell arcs back down onto at the dialed range, so it is where the
-    /// dialed graduation belongs; the green bore dot is the barrel axis and sits θ higher by design.
-    /// Pinning the bar's centre on the bore would put every mark that whole angle high.
-    ///
-    /// Measured with the camera OFF the sight line (any `k` above 0), so a camera-anchored
-    /// placement cannot pass by coincidence.
+    /// Zero/dialed marks must name the sight line; the bore dot stays θ higher. The
+    /// [`update_ranging_reticle`] doc owns why. Measure with camera off that line (`k > 0`) so
+    /// camera anchoring cannot pass by coincidence.
     #[test]
     fn the_zero_mark_is_the_sight_line_a_superelevation_below_the_bore() {
         let mut picture = SightPicture::new(Quat::from_rotation_y(0.03));
@@ -1340,9 +1274,7 @@ mod tests {
         );
     }
 
-    /// **The scale's spacing is the range table's own.** Each graduation stands `θ(dialed) − θ(its
-    /// range)` above the sight line: nearer ranges above the zero mark, farther below, the spacing
-    /// tightening exactly as the lob does.
+    /// Assert [`update_ranging_reticle`]'s table-derived spacing and nearer-above/farther-below rule.
     #[test]
     fn every_graduation_stands_at_its_superelevation_difference() {
         let mut picture =
@@ -1483,15 +1415,11 @@ mod tests {
         assert_eq!(labels, 3, "each major interval has one numbered graduation");
     }
 
-    /// **Every mark is a hairline: one physical row, at every scale, on the sight line.** The
-    /// owner's sight picture asks for marks one device pixel thick. Measured on bevy's own layout
-    /// headless (`crate::gpu_less_default_plugins`: taffy and its pixel rounding run as shipped), in
-    /// a window at each scale factor below and at each `UiScale` rung, with the gun laid through
-    /// sub-pixel steps so the marks land at many fractions of a pixel. Every drawn mark must lay out
-    /// exactly one physical pixel tall with its top edge on the physical grid, and the zero mark's
-    /// row must hold the sight line's physical projection to within half a pixel on both axes.
-    /// The intent cursor, bore dot and held aim dot must also centre on their own physical
-    /// projections in the same frame, so the player sees one consistent coordinate system.
+    /// The owner's one-device-pixel hairline fixture must occupy one physical row on-grid, with zero-mark centre
+    /// within half a pixel of the sight projection on both axes. MEASURED through Bevy's headless
+    /// taffy rounding (`crate::gpu_less_default_plugins`), across window/UI scales and subpixel lay
+    /// steps. Intent cursor, bore dot and held aim dot must centre on their own projections in
+    /// that same frame: one coordinate system for the player.
     ///
     /// Mutants: a thickness in `Val::Px` (two rows at 2x, none or two at a fractional scale); the
     /// window's scale without `UiScale`; a camera-logical point written to `Val::Px` unconverted
@@ -1698,9 +1626,8 @@ mod tests {
         }
     }
 
-    /// The optic surround's fixture: a hull far from the origin AND off the level, so a placement
-    /// that composed the wrong frame — or dropped the hull's translation — moves instead of
-    /// cancelling. Fixture data, never a law.
+    /// Fixture hull far from origin and off-level: wrong-frame composition or dropped translation
+    /// must move the projection instead of cancelling. Never a law.
     const HULL_ORIGIN: Vec3 = Vec3::new(137.0, 4.6, -512.0);
     const HULL_ATTITUDE: Vec3 = Vec3::new(0.7, 0.11, 0.23);
     /// The gun mount in the hull's frame: the elevation pivot, well above the hull origin, so a
@@ -1722,8 +1649,7 @@ mod tests {
         )
     }
 
-    /// The gun node's world attitude: the hull's, carried through the turret's yaw and the gun's
-    /// elevation — the chain whose −Z is the bore and whose +X is the trunnion.
+    /// Hull → turret yaw → gun elevation; world attitude with bore −Z and trunnion +X.
     fn gun_rotation() -> Quat {
         Quat::from_mat3a(
             &(hull().matrix3
@@ -1744,9 +1670,8 @@ mod tests {
         MOUNT + hull_local_dir(yaw + offset.x, pitch + offset.y) * range
     }
 
-    /// The optic as the client assembles it at one blend setting: the shipped
-    /// `camera::blended_look` places the camera on the gun's sight line and the committed intent,
-    /// and the shipped [`optic_glass`] places the glass. Nothing here re-implements either.
+    /// Shipped `camera::blended_look` blends sight/committed intent; shipped [`optic_glass`] places
+    /// the glass. Neither law is reimplemented.
     struct OpticPicture {
         camera: Camera,
         pose: GlobalTransform,
@@ -1761,9 +1686,8 @@ mod tests {
             Self::through(OPTICS, viewport, intent, k)
         }
 
-        /// The same picture seen through an arbitrary instrument — the camera's projection and the
-        /// sight's bound both come off the one authored `optics` and the one viewport, exactly as
-        /// the client derives them, so a test can change the instrument and nothing else.
+        /// Derive projection and sight bound from one `optics` and viewport, as the client does;
+        /// tests can vary only the instrument.
         fn through(optics: Optics, viewport: UVec2, intent: Option<Vec3>, k: f32) -> Self {
             let fov = optics.vertical_fov();
             let aspect = viewport.x as f32 / viewport.y as f32;
@@ -1815,9 +1739,7 @@ mod tests {
             (uv - glass.centre) * Vec2::new(self.viewport.x / self.viewport.y, 1.0)
         }
 
-        /// The inverse: the bearing named by a point `offset` glass-units from the glass centre —
-        /// the shader's metric run backwards through the same projection, so every law below is
-        /// stated in angles the sight owns rather than in pixels.
+        /// Invert the shader metric/projection so tests assert sight angles rather than pixels.
         fn bearing_at(&self, glass: &OpticGlass, offset: Vec2) -> Vec3 {
             let uv = glass.centre + offset / Vec2::new(self.viewport.x / self.viewport.y, 1.0);
             self.camera
@@ -1828,9 +1750,8 @@ mod tests {
         }
     }
 
-    /// The viewports every mask law below is measured at: 16:9, an ultrawide where a circle off the
-    /// width dwarfs the screen it is drawn on, 4:3, a PORTRAIT one where the larger axis is the
-    /// height, and a square. Fixture data, never a law.
+    /// Fixture viewports: 16:9, ultrawide (width-based circles dwarf it), 4:3, portrait (height is
+    /// larger) and square. Never a law.
     const ASPECTS: [UVec2; 5] = [
         UVec2::new(1280, 720),
         UVec2::new(2560, 1080),
@@ -1845,10 +1766,8 @@ mod tests {
         Vec2::from_angle(phi) * margin
     }
 
-    /// **The drawn rim spans the viewport's LARGER axis, whichever axis that is.** Its radius is
-    /// pure viewport — no angle enters it — so the one thing that can go wrong is asking the width
-    /// for the answer and calling it the larger axis. On a portrait viewport the two differ by the
-    /// aspect, and the width basis draws a circle the cursor's own reach would swallow.
+    /// Rim radius uses only the larger viewport axis. Width alone differs by the aspect in
+    /// portrait, drawing a circle smaller than cursor reach.
     #[test]
     fn the_rim_spans_the_larger_axis_whichever_axis_that_is() {
         for viewport in ASPECTS {
@@ -1898,10 +1817,8 @@ mod tests {
         }
     }
 
-    /// **The rim's feather stays representable at its own radius.** The shader smoothsteps across
-    /// `radius ± feather`, which is undefined where the two edges collapse onto one float, and
-    /// blank where the gradient reaches the centre. Both ends are checked at every aspect, plus the
-    /// unplaced seed the mask spawns holding.
+    /// `radius ± feather` must remain distinct floats and stop short of the centre, or smoothstep
+    /// is undefined/blank. Check every aspect and the unplaced material seed.
     #[test]
     fn the_rim_keeps_its_feather_representable() {
         let representable = |radius: f32, feather: f32| {
@@ -1929,11 +1846,9 @@ mod tests {
         );
     }
 
-    /// **The glass is cut around the GUN, not around the screen.** Its centre is the sight line
-    /// reprojected: welded to the camera axis only at `k = 0`, and with the camera locked to an
-    /// intent held out at the bound, displaced by that whole reach, which puts screen centre most
-    /// of the way to the rim. A cutout pinned to the node's centre passes the first case and fails
-    /// the second.
+    /// Glass centre follows the sight line: camera-aligned at `k = 0`, a whole bound behind a
+    /// camera locked on boundary intent (screen centre near the rim). A node-centred cutout would
+    /// pass only the first case.
     #[test]
     fn the_cutout_tracks_the_sight_line_not_the_screen_centre() {
         let welded = OpticPicture::new(VIEWPORT, Some(intent_at(Vec2::ZERO, 900.0)), 0.0);
@@ -1979,15 +1894,12 @@ mod tests {
     /// intent near the vertical bound sits past the screen edge with the gun's own elevation stop
     /// the thing that binds first.
     ///
-    /// Driven on the bound itself, all the way round it, at ranges from point-blank to the range
-    /// scale's end, through the shipped blend and the shipped placement, and measured in the
-    /// shader's own metric.
+    /// Sample the whole bound from point-blank to scale end, through shipped blend/placement,
+    /// measuring in the shader metric.
     ///
-    /// The bound also FILLS the glass: with the camera on the sight line it reaches at least 98 % of
-    /// the rim at every bearing. A bound off the vertical field alone would leave 44 % of the glass
-    /// unreachable at 16:9. The dip is the bound's own shape: a circle in the sight's yaw/pitch
-    /// ANGLES, which the perspective divide maps to a slightly flattened curve on screen, MEASURED
-    /// at 1.6 % on the diagonals.
+    /// With camera on sight line, every bearing must reach at least 98 % of the rim. A vertical-
+    /// field-only bound leaves 44 % unreachable at 16:9. Perspective flattens the yaw/pitch-angle
+    /// circle: MEASURED diagonal dip 1.6 %.
     #[test]
     fn the_intent_stays_inside_the_drawn_glass_at_every_rung() {
         /// Float slack as a fraction of the rim: the containment is an EXACT equality on the
