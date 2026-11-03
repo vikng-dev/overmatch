@@ -15,6 +15,43 @@ pub(super) fn sweep_launched_turret_on_root_despawn(
     }
 }
 
+/// The game's damage model: an assembly leaving the tank loses its aim controllers throughout
+/// its subtree. Its held local poses remain valid rig data, including when a view arrives later.
+pub(super) fn stop_detached_assembly_servos(
+    add: On<Add, crate::damage::LaunchedTurret>,
+    servos: Query<
+        (Entity, &Transform, Option<&super::view::ViewNode>),
+        (
+            With<super::servo::ServoSpec>,
+            With<super::servo::ServoCommand>,
+        ),
+    >,
+    parents: Query<&ChildOf>,
+    mut commands: Commands,
+) {
+    for (servo, pose, view) in &servos {
+        let mut node = servo;
+        loop {
+            if node == add.entity {
+                commands
+                    .entity(servo)
+                    .remove::<super::servo::ServoCommand>();
+                if let Some(view) = view {
+                    commands
+                        .entity(view.0)
+                        .remove::<super::view::ViewServo>()
+                        .insert(*pose);
+                }
+                break;
+            }
+            let Ok(parent) = parents.get(node) else {
+                break;
+            };
+            node = parent.parent();
+        }
+    }
+}
+
 /// Exact local pose for an authored child collider. ADR-0015 requires the observers below because
 /// Lightyear-Avian can add [`ApplyPosToTransform`] to non-body children and feed render propagation
 /// back into simulation. Remove this shield when upstream excludes such children or exposes an
@@ -54,4 +91,64 @@ pub(super) fn shield_late_authored_marker(
 /// Construct the live and recorded poses from one value so the shield cannot restore stale data.
 pub(crate) fn authored_attachment(transform: Transform) -> impl Bundle {
     (transform, AuthoredLocalTransform(transform))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tank::view::{ViewNode, ViewServo};
+    use crate::tank::{ServoCommand, ServoRole, ServoSpec};
+
+    /// A detached two-part assembly must not retain commands which need a chain to its old tank.
+    /// The shipped installer must also freeze bound views; unrelated mounts keep their commands.
+    #[test]
+    fn a_detached_assembly_stops_every_descendant_controller() {
+        let mut app = App::new();
+        app.add_plugins(crate::tank::sim_plugin);
+        let world = app.world_mut();
+        let tank = world.spawn_empty().id();
+        let assembly = world.spawn(ChildOf(tank)).id();
+        let pose = Transform::from_rotation(Quat::from_rotation_y(0.4)); // Fixture held bearing.
+        let view = world.spawn((ViewServo, Transform::IDENTITY)).id();
+        let yaw = world
+            .spawn((
+                ChildOf(assembly),
+                pose,
+                ViewNode(view),
+                ServoCommand::default(),
+                ServoSpec::test_continuous(ServoRole::Yaw, 1.0),
+            ))
+            .id();
+        let pitch = world
+            .spawn((
+                ChildOf(yaw),
+                Transform::IDENTITY,
+                ServoCommand::default(),
+                ServoSpec::test_continuous(ServoRole::Pitch, 1.0),
+            ))
+            .id();
+        let other = world
+            .spawn((
+                ChildOf(tank),
+                Transform::IDENTITY,
+                ServoCommand::default(),
+                ServoSpec::test_continuous(ServoRole::Yaw, 1.0),
+            ))
+            .id();
+        world
+            .entity_mut(assembly)
+            .remove::<ChildOf>()
+            .insert(crate::damage::LaunchedTurret);
+        world.flush();
+        for node in [yaw, pitch] {
+            assert!(world.get::<ServoCommand>(node).is_none());
+            assert!(
+                world.get::<ServoSpec>(node).is_some(),
+                "held construction remains available"
+            );
+        }
+        assert!(world.get::<ServoCommand>(other).is_some());
+        assert!(world.get::<ViewServo>(view).is_none());
+        assert_eq!(world.get::<Transform>(view).unwrap(), &pose);
+    }
 }

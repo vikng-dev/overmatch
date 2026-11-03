@@ -22,7 +22,6 @@ mod view;
 pub(crate) use integrity::authored_attachment;
 #[cfg(test)]
 pub use model::WeaponState;
-pub(crate) use model::controlled_one;
 pub(crate) use model::rig_world_pose;
 #[allow(
     unused_imports,
@@ -33,13 +32,14 @@ pub use model::{
     TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate, WeaponGateState,
     WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound, WeaponTiming,
 };
+pub(crate) use model::{GunnerYaw, controlled_one};
 pub use scenario::{client_plugin, sp_spawn_plugin};
-pub(crate) use servo::{RemoteServos, axis_inertia};
+pub(crate) use servo::{RemoteServos, ServoRest, axis_inertia, servo_aim_frame};
 pub use servo::{
     ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, servo_pose, shortest_angle,
 };
 #[cfg(test)]
-pub(crate) use servo::{ServoRest, drive_servos, restore_servo_truth};
+pub(crate) use servo::{drive_servos, restore_servo_truth};
 pub(crate) use spawn::TANK_SPEC_PATH;
 #[cfg(feature = "dev_ui")]
 pub(crate) use spawn::TankPresentation;
@@ -60,6 +60,7 @@ pub fn sim_plugin(app: &mut App) {
     app.add_observer(integrity::shield_authored_collider_transform);
     app.add_observer(integrity::shield_late_authored_marker);
     app.add_observer(integrity::sweep_launched_turret_on_root_despawn);
+    app.add_observer(integrity::stop_detached_assembly_servos);
     app.add_systems(
         FixedUpdate,
         servo::restore_servo_truth

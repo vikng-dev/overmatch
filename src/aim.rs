@@ -7,6 +7,9 @@
 //! [`AimIntent::World`]; hull-anchored optic/free-aim picks travel as [`AimIntent::HullLocal`].
 //! The mode-agnostic servo bridge converts either in the hull frame of the consuming tick.
 
+mod data;
+pub(crate) use data::INPUT_RON;
+
 use std::sync::LazyLock;
 
 use avian3d::prelude::{LayerMask, Position, Rotation, SpatialQuery, SpatialQueryFilter};
@@ -28,49 +31,16 @@ use crate::tank::{
 };
 use crate::view::PlayerView;
 
-const AIM_RANGE_FILE: &str = "assets/aim.ron";
-const AIM_RANGE_DATA: &str = include_str!("../assets/aim.ron");
+/// Maximum engagement range; rays that hit nothing fall back to a point this far out. Shared by
+/// every aim ray — the third-person pick, the bore dot, and the optic's resolve
+/// (`sight::drive_gunner_aim`) — so "the sky" is one far point in all of them.
+pub(crate) static MAX_RANGE: LazyLock<f32> = LazyLock::new(|| *data::RANGE);
 
-/// Shared sky fallback, admitted before play so every aim ray names the same far point.
-pub(crate) static MAX_RANGE: LazyLock<f32> = LazyLock::new(|| {
-    AimRange::parse(AIM_RANGE_DATA)
-        .unwrap_or_else(|error| panic!("{error}"))
-        .sky_fallback_m
-        .0
-});
-
-/// DERIVED per-axis input bound: world cast envelope plus authored sky fallback.
-/// Admission keeps squared differences of points in this envelope representable.
+/// DERIVED per-axis input bound (`command::ParsedTankCommand`): world's diagonal
+/// ([`crate::world::VIEW_CAST_MAX_M`]) + [`MAX_RANGE`] sky fallback bounds all legitimate picks
+/// with headroom, while keeping poisoned inputs below f32 hull-composition overflow magnitudes.
 pub(crate) static AIM_LIMIT: LazyLock<f32> =
     LazyLock::new(|| crate::world::VIEW_CAST_MAX_M + *MAX_RANGE);
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AimRange {
-    sky_fallback_m: crate::provenance::Sourced<f32>,
-}
-
-impl AimRange {
-    fn parse(text: &str) -> Result<Self, String> {
-        let data: Self = crate::provenance::from_shipped_str(AIM_RANGE_FILE, text)?;
-        data.validate()?;
-        Ok(data)
-    }
-
-    fn validate(&self) -> Result<(), String> {
-        let range = self.sky_fallback_m.0;
-        let limit = crate::world::VIEW_CAST_MAX_M + range;
-        // Two endpoints may differ by twice the per-axis bound; squared length sums three axes.
-        let difference = 2.0 * f64::from(limit);
-        if !range.is_finite() || range <= 0.0 || 3.0 * difference * difference > f64::from(f32::MAX)
-        {
-            return Err(format!(
-                "{AIM_RANGE_FILE}: sky_fallback_m: author a finite positive distance small enough for squared aim-point differences to fit f32"
-            ));
-        }
-        Ok(())
-    }
-}
 
 /// Distance along an aim ray to the first surface a shell would meet: terrain or a tank's ballistic
 /// volumes — the same `Terrain | Armor` mask the live shell marches against
@@ -408,7 +378,13 @@ fn commit_aim(
 fn drive_aim_servos(
     tanks: Query<(Entity, &ParsedTankCommand, &Rig, &Position, &Rotation), With<Tank>>,
     tables: Query<&RangeTable>,
-    mut servos: Query<(Entity, &mut ServoCommand, &ServoRole, &TankRoot)>,
+    mut servos: Query<(
+        Entity,
+        &mut ServoCommand,
+        &ServoRole,
+        &TankRoot,
+        Option<&crate::tank::ServoRest>,
+    )>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
     mut laid: Local<EntityHashMap<LaidTank>>,
@@ -439,27 +415,26 @@ fn drive_aim_servos(
             tank,
             LaidTank {
                 point,
-                to_local,
                 position: position.0,
                 rotation: rotation.0,
             },
         );
     }
     // No entry means no committed aim for this root: retain the servo's target.
-    for (servo, mut servo_command, role, root) in &mut servos {
+    for (servo, mut servo_command, role, root, rest) in &mut servos {
         let Some(tank) = laid.get(&root.0) else {
             continue;
         };
-        let (servo_position, _) = rig_world_pose(
+        let (servo_position, frame) = crate::tank::servo_aim_frame(
             servo,
             root.0,
             tank.position,
             tank.rotation,
+            rest.expect("a registered servo carries its spawn-built rest rotation"),
             &parents,
             &locals,
-        )
-        .expect("a registered servo's hierarchy reaches its root through nodes with a Transform");
-        let dir = tank.to_local.transform_vector3(tank.point - servo_position);
+        );
+        let dir = frame.inverse() * (tank.point - servo_position);
         servo_command.target = match role {
             ServoRole::Yaw => (-dir.x).atan2(-dir.z),
             ServoRole::Pitch => dir.y.atan2((dir.x * dir.x + dir.z * dir.z).sqrt()),
@@ -468,10 +443,9 @@ fn drive_aim_servos(
 }
 
 /// One tank's laid frame for the servo pass of `drive_aim_servos`: the lobbed world point, the
-/// inverse hull frame and the tick-truth root pose its servos compose against.
+/// tick-truth root pose its servos compose against.
 struct LaidTank {
     point: Vec3,
-    to_local: Affine3A,
     position: Vec3,
     rotation: Quat,
 }
@@ -623,31 +597,6 @@ fn update_aim_indicator(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    /// Input parsing and all aim views share one admitted envelope; malformed authored range
-    /// must be refused before play rather than overflow a point difference downstream.
-    #[test]
-    fn aim_range_is_required_and_its_derived_envelope_is_representable() {
-        let data = AimRange::parse(AIM_RANGE_DATA).unwrap();
-        assert_eq!(
-            *AIM_LIMIT,
-            crate::world::VIEW_CAST_MAX_M + data.sky_fallback_m.0
-        );
-        let error = AimRange::parse("()").unwrap_err();
-        assert!(error.contains(AIM_RANGE_FILE) && error.contains("sky_fallback_m"));
-        // Fixture malformed distances, including a finite value whose squared envelope overflows.
-        for range in [0.0, -1.0, f32::NAN, f32::INFINITY, 1e30] {
-            let data = AimRange {
-                sky_fallback_m: crate::provenance::Sourced(range),
-            };
-            let error = data.validate().unwrap_err();
-            assert!(error.contains(AIM_RANGE_FILE) && error.contains("sky_fallback_m"));
-        }
-        let error = AimRange::parse(&AIM_RANGE_DATA.replace("Taste(", "Fixture(")).unwrap_err();
-        assert!(
-            error.contains(AIM_RANGE_FILE) && error.contains("Fixture provenance is test-only")
-        );
-    }
-
     /// Aim authorship must expose an internal pose failure before emitting a pick or retaining
     /// an older bearing. A missing local possession is handled before this bound-rig invariant.
     #[test]
@@ -804,55 +753,6 @@ pub(crate) mod tests {
         [("bore", bore), ("aim", aim.translation)]
     }
 
-    /// Reference per-tank scan: every servo is visited for every tank, against the same parsed
-    /// input and hull-pose invariants as the production pass.
-    fn drive_aim_servos_scan(
-        tanks: Query<(Entity, &ParsedTankCommand, &Rig, &Position, &Rotation), With<Tank>>,
-        tables: Query<&RangeTable>,
-        mut servos: Query<(Entity, &mut ServoCommand, &ServoRole, &TankRoot)>,
-        parents: Query<&ChildOf>,
-        locals: Query<&Transform>,
-    ) {
-        for (tank, command, rig, position, rotation) in &tanks {
-            let Some(intent) = command.aim() else {
-                continue; // no commitment yet — servos hold
-            };
-            let (hull_position, hull_rotation) = rig_world_pose(
-                rig.hull, tank, position.0, rotation.0, &parents, &locals,
-            )
-            .expect("an assembled tank rig's hull pose composes from its spawn-time hierarchy");
-            let hull_affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
-            let to_local = hull_affine.inverse();
-            assert!(
-                to_local.matrix3.is_finite() && to_local.translation.is_finite(),
-                "an authority hull pose is finite and invertible before laying servos"
-            );
-
-            let theta = tables
-                .get(rig.muzzle)
-                .expect(
-                    "the assembled primary muzzle has its range table from spawn-time weapon data",
-                )
-                .superelevation(command.range);
-            let point = hull_affine.transform_point3(lob(intent.in_hull(&to_local), theta));
-            for (servo, mut servo_command, role, root) in &mut servos {
-                if root.0 != tank {
-                    continue;
-                }
-                let Some((servo_position, _)) =
-                    rig_world_pose(servo, tank, position.0, rotation.0, &parents, &locals)
-                else {
-                    continue;
-                };
-                let dir = to_local.transform_vector3(point - servo_position);
-                servo_command.target = match role {
-                    ServoRole::Yaw => (-dir.x).atan2(-dir.z),
-                    ServoRole::Pitch => dir.y.atan2((dir.x * dir.x + dir.z * dir.z).sqrt()),
-                };
-            }
-        }
-    }
-
     /// Fixture: fixed integration step, seconds.
     const TICK: f32 = 1.0 / 64.0;
     /// Fixture gap, ticks: shipping delay (`net::client::SHIPPING_INPUT_DELAY_TICKS`, 3) plus
@@ -956,6 +856,7 @@ pub(crate) mod tests {
                         muzzle,
                     },
                     TankServos::for_count(2),
+                    crate::tank::GunnerYaw(turret),
                 ))
                 .id();
             world.entity_mut(hull).insert(ChildOf(tank));
@@ -1250,6 +1151,38 @@ pub(crate) mod tests {
         );
     }
 
+    /// A yaw command is relative to its actual parent frame, including an independently turned
+    /// structural yaw. Otherwise the sight repeats its parent's turn and cannot converge.
+    #[test]
+    fn nested_yaws_receive_parent_local_targets() {
+        let mut rig = AimRig::new();
+        // Fixture: parent is already at 0.4 rad; the desired hull bearing is 0.9 rad.
+        let parent_yaw = 0.4;
+        rig.world.get_mut::<Transform>(rig.turret).unwrap().rotation =
+            Quat::from_rotation_y(parent_yaw);
+        let sight = rig
+            .world
+            .spawn((
+                Transform::IDENTITY,
+                ChildOf(rig.turret),
+                ServoRole::Yaw,
+                TankRoot(rig.tank),
+                ServoRest(Quat::IDENTITY),
+                ServoCommand::default(),
+            ))
+            .id();
+        rig.world.entity_mut(rig.gun).insert(ChildOf(sight));
+        let hull_origin = rig.pose_of(rig.hull, rig.tank).0;
+        let desired = 0.9_f32;
+        let point = hull_origin + crate::sight::hull_local_dir(desired, -SUPERELEVATION) * 1000.0;
+        rig.world.get_mut::<TankCommand>(rig.tank).unwrap().aim = Some(AimIntent::World(point));
+        rig.run(drive_aim_servos);
+        assert!(
+            (rig.world.get::<ServoCommand>(sight).unwrap().target - (desired - parent_yaw)).abs()
+                < 1e-5
+        );
+    }
+
     /// A hand mount whose rate exceeds the hull pivot follows a world place
     /// without steady lag. A transport which rotates the intention in flight instead introduces
     /// ±ω*delivery delay, so both pivot directions must pass.
@@ -1519,101 +1452,5 @@ pub(crate) mod tests {
             None,
             "the old tank's key is gone once rekeyed"
         );
-    }
-
-    /// Build `tanks` tanks with distinct poses, ranges and nested servo chains, two holding.
-    /// Their servos are interleaved so no tank's servos are contiguous.
-    fn multi_tank_world(tanks: usize) -> (World, Vec<Entity>) {
-        let mut world = World::new();
-        let mut servos = Vec::new();
-        let mut chains = Vec::new();
-        for i in 0..tanks {
-            let f = i as f32;
-            let hull = world
-                .spawn(Transform::from_translation(Vec3::new(0.3 * f, 0.8, -0.4)))
-                .id();
-            let turret = world
-                .spawn(Transform::from_rotation(Quat::from_rotation_y(0.1 * f)))
-                .id();
-            let gun = world
-                .spawn(Transform::from_translation(Vec3::new(0.0, 0.5 + f, 1.0)))
-                .id();
-            let muzzle = world
-                .spawn((
-                    Transform::IDENTITY,
-                    RangeTable::test_fixed(0.01 * (f + 1.0)),
-                ))
-                .id();
-            let aim = match i {
-                1 | 2 => None,
-                _ => Some(AimIntent::World(Vec3::new(
-                    40.0 + 13.0 * f,
-                    2.0 * f,
-                    -90.0 + 7.0 * f,
-                ))),
-            };
-            let tank = world
-                .spawn((
-                    Tank,
-                    TankCommand {
-                        aim,
-                        range: 300.0 + 50.0 * f,
-                        ..default()
-                    },
-                    Position(Vec3::new(137.0 + 11.0 * f, 4.0, -512.0 + 3.0 * f)),
-                    Rotation(Quat::from_euler(
-                        EulerRot::YXZ,
-                        0.7 * f,
-                        0.05 * f,
-                        -0.03 * f,
-                    )),
-                    Rig {
-                        hull,
-                        turret,
-                        gun,
-                        muzzle,
-                    },
-                ))
-                .id();
-            world.entity_mut(hull).insert(ChildOf(tank));
-            world.entity_mut(turret).insert(ChildOf(hull));
-            world.entity_mut(gun).insert(ChildOf(turret));
-            world.entity_mut(muzzle).insert(ChildOf(gun));
-            chains.push((tank, turret, gun));
-        }
-        for (tank, turret, gun) in &chains {
-            servos.push((*tank, *turret, ServoRole::Yaw));
-            servos.push((*tank, *gun, ServoRole::Pitch));
-        }
-        servos.sort_by_key(|(_, _, role)| matches!(role, ServoRole::Pitch));
-        for (tank, node, role) in &servos {
-            world
-                .entity_mut(*node)
-                .insert((TankRoot(*tank), ServoCommand { target: 9.0 }, *role));
-        }
-        let nodes = servos.iter().map(|(_, n, _)| *n).collect();
-        world
-            .run_system_once(crate::command::parse_commands)
-            .unwrap();
-        (world, nodes)
-    }
-
-    /// For the same parsed input and hull poses, the production pass writes the same servo
-    /// targets, bit for bit, as the reference scan: only the visiting order differs. Tanks with no commitment leave their
-    /// servos' prior target; malformed aims cannot be constructed as parsed input.
-    #[test]
-    fn servo_pass_matches_the_per_tank_scan_bit_for_bit() {
-        let (mut fast, nodes) = multi_tank_world(5);
-        let (mut scan, _) = multi_tank_world(5);
-        fast.run_system_once(drive_aim_servos).unwrap();
-        scan.run_system_once(drive_aim_servos_scan).unwrap();
-        let mut laid = 0;
-        for node in nodes {
-            let a = fast.get::<ServoCommand>(node).unwrap().target.to_bits();
-            let b = scan.get::<ServoCommand>(node).unwrap().target.to_bits();
-            assert_eq!(a, b);
-            laid += usize::from(a != 9.0_f32.to_bits());
-        }
-        assert_eq!(laid, 6, "three tanks lay both servos; two hold");
     }
 }

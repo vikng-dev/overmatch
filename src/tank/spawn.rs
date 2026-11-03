@@ -10,9 +10,9 @@ use bevy::prelude::*;
 
 use super::integrity::authored_attachment;
 use super::model::{
-    EngineSound, Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim,
-    TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate, WeaponGateState,
-    WeaponIndex, WeaponLoad, WeaponLoads, WeaponState,
+    EngineSound, Gun, GunBarrel, GunnerYaw, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot,
+    TankServos, TankSim, TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate,
+    WeaponGateState, WeaponIndex, WeaponLoad, WeaponLoads, WeaponState,
 };
 use super::servo::{
     RemoteServos, ServoCommand, ServoIndex, ServoMechanism, ServoRest, ServoRole, ServoSpec,
@@ -375,6 +375,7 @@ struct RigNodes<'a> {
     volume_nodes: Vec<(&'a str, Option<&'a VolumeSpec>, usize)>,
     /// The gunner view's node — the main mount's Pitch servo, anchor of the gun chain.
     gunner_pitch: usize,
+    gunner_yaw: usize,
     hull: usize,
     center_of_mass: usize,
     /// Structural assembly root declared by `TurretSpec::node`, independently of the optic chain.
@@ -445,6 +446,7 @@ fn resolve_rig_nodes<'a>(geometry: &'a TankGeometry, spec: &'a TankSpec) -> RigN
         .views
         .get(&ViewKind::Gunner)
         .and_then(|view| resolve(&view.node));
+    let gunner_yaw = spec.gunner_yaw.as_deref().and_then(&mut resolve);
     let hull_index = resolve("Hull");
     let com_index = resolve("Center_Of_Mass");
 
@@ -515,6 +517,7 @@ fn resolve_rig_nodes<'a>(geometry: &'a TankGeometry, spec: &'a TankSpec) -> RigN
             .collect(),
         volume_nodes,
         gunner_pitch: checked(gunner_pitch),
+        gunner_yaw: checked(gunner_yaw),
         hull: checked(hull_index),
         center_of_mass: checked(com_index),
         turret: checked(turret_index),
@@ -982,7 +985,10 @@ fn insert_root_components(
         NoAutoCenterOfMass,
         CenterOfMass(geometry.nodes[com_index].root_position),
         // Per-tank capability requirements (design §7b) — read by `track::sim::drive_target`.
-        TankCapabilities::new(spec.capabilities.clone(), spec.drive_controls.clone()),
+        TankCapabilities {
+            requirements: spec.capabilities.clone(),
+            drive_controls: spec.drive_controls.clone(),
+        },
         // Per-view FOV + gating requirement (camera FOV, view-death gate).
         TankViews {
             gunner: authored_view(spec, ViewKind::Gunner),
@@ -1062,18 +1068,20 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     let hull = entity_at(nodes.hull);
     let gun = entity_at(nodes.gunner_pitch);
     let turret = entity_at(nodes.turret);
+    let yaw = entity_at(nodes.gunner_yaw);
     let muzzle = entity_at(nodes.primary_muzzle);
     commands.entity(hull).insert(Hull);
     commands.entity(gun).insert(Gun);
-    let (tx, ty, tz) = spec.turret.inertia_extents;
+    let (tx, ty, tz) = spec.turret.inertia_extents.0;
     commands.entity(turret).insert((
         Turret,
         TurretBody {
-            mass: spec.turret.mass,
+            mass: spec.turret.mass.0,
             inertia_extents: Vec3::new(tx, ty, tz),
         },
     ));
 
+    commands.entity(root).insert(GunnerYaw(yaw));
     insert_root_components(
         commands,
         root,
@@ -1111,6 +1119,51 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
 mod proxy_tests {
     use super::*;
     use crate::bake::MeshGeometry;
+
+    /// A structural node and a yaw actuator are distinct roles. Complete construction
+    /// must resolve the sheet's handles separately even when the shipped fixture shares them.
+    #[test]
+    fn rig_resolution_keeps_assembly_and_gunner_yaw_separate() {
+        let mut spec: TankSpec = crate::provenance::from_shipped_str(
+            TANK_SPEC_PATH,
+            include_str!(concat!(
+                "../../assets/",
+                crate::assets::tank_file!(".tank.ron")
+            )),
+        )
+        .unwrap();
+        let mut geometry = crate::bake::extract_tank_geometry(
+            &crate::assets::asset_root().join(crate::assets::tank_file!(".sim.glb")),
+            &spec,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .unwrap();
+        // Fixture construction adds an independent assembly, without assuming the selected
+        // vehicle's hull or any existing node is separate from its declared yaw.
+        let name = "FixtureAssembly";
+        assert!(!geometry.by_name.contains_key(name));
+        geometry.by_name.insert(name.into(), geometry.nodes.len());
+        geometry.nodes.push(crate::bake::NodeGeometry {
+            name: name.into(),
+            parent: Some(geometry.by_name["Hull"]),
+            transform: Transform::IDENTITY,
+            root_position: Vec3::ZERO,
+            root_rotation: Quat::IDENTITY,
+            root_scale: Vec3::ONE,
+            primitives: Vec::new(),
+        });
+        spec.turret.node = Some(name.into());
+        let nodes = resolve_rig_nodes(&geometry, &spec);
+        assert_eq!(
+            nodes.turret,
+            geometry.by_name[spec.turret.node.as_ref().unwrap()]
+        );
+        assert_eq!(
+            nodes.gunner_yaw,
+            geometry.by_name[spec.gunner_yaw.as_ref().unwrap()]
+        );
+        assert_ne!(nodes.turret, nodes.gunner_yaw);
+    }
 
     /// Spawn clearance must enclose constructed points at any rotation, including mirrored and
     /// nonuniform scale. Fixtures vary translation, scale and orientation independently; omitting

@@ -314,6 +314,7 @@ pub fn protocol_id() -> u64 {
                 crate::armaments_index::ROUND_FILES,
                 crate::armaments_index::GUN_FILES,
             ),
+            crate::aim::INPUT_RON.as_bytes(),
         )
     })
 }
@@ -323,6 +324,7 @@ fn handshake_tag(
     materials: &[u8],
     tank_digest: u64,
     armaments_digest: u64,
+    aim_input: &[u8],
 ) -> u64 {
     let tag = fingerprint_field(
         PROTOCOL_FINGERPRINT,
@@ -331,7 +333,8 @@ fn handshake_tag(
     );
     let tag = fingerprint_field(tag, b"materials_ron", materials);
     let tag = fingerprint_field(tag, b"tank_construction", &tank_digest.to_le_bytes());
-    fingerprint_field(tag, b"armaments", &armaments_digest.to_le_bytes())
+    let tag = fingerprint_field(tag, b"armaments", &armaments_digest.to_le_bytes());
+    fingerprint_field(tag, b"aim_input", aim_input)
 }
 
 /// The game's damage model: fingerprint every embedded armament key and source, in the index's
@@ -877,45 +880,68 @@ pub(super) fn publish_shot_clock(
 /// `Without<Remote>` excludes every client tank. `Predicted`/`Interpolated` cannot distinguish
 /// authority: the server carries both.
 fn publish_servo_angles(
-    mut tanks: Query<(&Rig, &TankServos, &mut ServoAngles), Without<Remote>>,
+    mut tanks: Query<
+        (
+            &Rig,
+            Option<&crate::tank::GunnerYaw>,
+            &TankServos,
+            &mut ServoAngles,
+        ),
+        Without<Remote>,
+    >,
     servo_slots: Query<&ServoIndex>,
+    launched: Query<(), With<LaunchedTurret>>,
 ) {
-    for (rig, servos, mut angles) in &mut tanks {
-        let angle = |servo| {
-            servo_slots
-                .get(servo)
-                .ok()
-                .and_then(|slot| servos.states.get(slot.0))
-                .map(crate::tank::ServoState::current)
-        };
-        // A launched turret has left its servo slot (`launch_turrets_on_cookoff` removes its
-        // `ServoIndex`): no angle to publish, and `LaunchedTurretPose` carries its pose instead.
-        let (Some(turret), Some(gun)) = (angle(rig.turret), angle(rig.gun)) else {
+    for (rig, yaw, servos, mut angles) in &mut tanks {
+        // The game's damage model: a detached assembly follows LaunchedTurretPose, not aim angles.
+        if launched.contains(rig.turret) {
             continue;
+        }
+        let angle = |servo| {
+            let slot = servo_slots
+                .get(servo)
+                .expect("complete spawn gives every attached aim servo its index");
+            servos
+                .states
+                .get(slot.0)
+                .expect("complete spawn gives every aim servo a mechanism slot")
+                .current()
         };
-        // `set_if_neq`: no change-detection churn (and no replication resends) while at rest.
-        angles.set_if_neq(ServoAngles { turret, gun });
+        angles.set_if_neq(ServoAngles {
+            turret: angle(
+                yaw.expect("a complete player rig carries its Gunner yaw handle")
+                    .0,
+            ),
+            gun: angle(rig.gun),
+        });
     }
 }
 
-/// Feed non-owner remote servos in `GameplaySet` (Playing-gated, before `drive_servos`).
-/// `Without<GameControlled>` gives `ServoCommand.target` one writer: the owner's
-/// `drive_aim_servos`, unordered against this system, follows its input slot's `TankCommand.aim`.
-/// Other remotes hold default commands with `aim: None`; the input bridge skips non-simulated
-/// tanks, so `drive_aim_servos` leaves them alone. `ControlledBy` supplies the owner marker.
+/// Feed non-owner remote aim handles; the owner's command remains the local input writer's.
 fn apply_servo_angles(
-    tanks: Query<(&ServoAngles, &Rig), (With<Remote>, Without<GameControlled>)>,
+    tanks: Query<
+        (&ServoAngles, &Rig, Option<&crate::tank::GunnerYaw>),
+        (With<Remote>, Without<GameControlled>),
+    >,
     mut servos: Query<&mut ServoCommand>,
+    launched: Query<(), With<LaunchedTurret>>,
 ) {
-    for (angles, rig) in &tanks {
-        // A turret without its command is launched (`apply_launched_turret_pose` removed it):
-        // it follows `LaunchedTurretPose`, not these angles.
-        if let Ok(mut turret) = servos.get_mut(rig.turret) {
-            turret.target = angles.turret;
+    for (angles, rig, yaw) in &tanks {
+        // The game's damage model: launched construction follows its authoritative body pose.
+        if launched.contains(rig.turret) {
+            continue;
         }
-        if let Ok(mut gun) = servos.get_mut(rig.gun) {
-            gun.target = angles.gun;
-        }
+        servos
+            .get_mut(
+                yaw.expect("a complete player rig carries its Gunner yaw handle")
+                    .0,
+            )
+            .expect("complete spawn gives every attached Gunner yaw servo its command")
+            .target = angles.turret;
+        servos
+            .get_mut(rig.gun)
+            .expect("complete spawn gives every attached Gunner pitch servo its command")
+            .target = angles.gun;
     }
 }
 
@@ -1437,6 +1463,7 @@ mod tests {
             Rig {
                 hull: root,
                 turret,
+
                 gun: turret,
                 muzzle: turret,
             },
@@ -1641,6 +1668,43 @@ mod tests {
         );
     }
 
+    /// An assembly need not be a servo. The remote angle stream must read the declared aim
+    /// handles, and a launched assembly must stop publishing even when its yaw is a child.
+    #[test]
+    fn public_angles_address_yaw_independently_of_the_assembly() {
+        let mut world = World::new();
+        let assembly = world.spawn_empty().id();
+        let yaw = world.spawn(ServoIndex(0)).id();
+        let pitch = world.spawn(ServoIndex(1)).id();
+        // Fixture live bearings; the interface publishes each slot without integrating a law.
+        let root = world
+            .spawn((
+                Rig {
+                    hull: assembly,
+                    turret: assembly,
+                    gun: pitch,
+                    muzzle: pitch,
+                },
+                crate::tank::GunnerYaw(yaw),
+                TankServos {
+                    states: vec![
+                        crate::tank::ServoState::test_new(0.7, 0.7, 0.0),
+                        crate::tank::ServoState::test_new(-0.2, -0.2, 0.0),
+                    ],
+                },
+                ServoAngles::default(),
+            ))
+            .id();
+        world.run_system_once(publish_servo_angles).unwrap();
+        let angles = world.get::<ServoAngles>(root).unwrap();
+        assert_eq!((angles.turret, angles.gun), (0.7, -0.2));
+        world.entity_mut(assembly).insert(LaunchedTurret);
+        world.entity_mut(yaw).remove::<ServoIndex>();
+        world.run_system_once(publish_servo_angles).unwrap();
+        let angles = world.get::<ServoAngles>(root).unwrap();
+        assert_eq!((angles.turret, angles.gun), (0.7, -0.2));
+    }
+
     /// The public `ServoAngles` drive every remote tank's servo targets, but the owner's belong to
     /// `aim::drive_aim_servos` alone. The OWN tank is `Remote` like every replicated tank, so only
     /// the owner marker keeps this pump off it — mutate `Without<GameControlled>` away and the
@@ -1648,12 +1712,14 @@ mod tests {
     #[test]
     fn public_servo_angles_skip_the_tank_that_holds_the_input_slot() {
         fn spawn_tank(world: &mut World, owned: bool) -> (Entity, Entity) {
-            let turret = world.spawn(ServoCommand::default()).id();
+            let turret = world.spawn_empty().id();
+            let yaw = world.spawn(ServoCommand::default()).id();
             let gun = world.spawn(ServoCommand::default()).id();
             let hull = world.spawn_empty().id();
             let muzzle = world.spawn_empty().id();
             let mut root = world.spawn((
                 Remote,
+                crate::tank::GunnerYaw(yaw),
                 ServoAngles {
                     turret: 0.75,
                     gun: -0.2,
@@ -1668,7 +1734,7 @@ mod tests {
             if owned {
                 root.insert(GameControlled);
             }
-            (turret, gun)
+            (yaw, gun)
         }
         let mut world = World::new();
         let (remote_turret, remote_gun) = spawn_tank(&mut world, false);
@@ -2390,7 +2456,15 @@ mod tests {
             crate::armaments_index::ROUND_FILES,
             crate::armaments_index::GUN_FILES,
         );
-        let tag = |digest: u64| handshake_tag(digest, registry.as_bytes(), tank, armaments);
+        let tag = |digest: u64| {
+            handshake_tag(
+                digest,
+                registry.as_bytes(),
+                tank,
+                armaments,
+                crate::aim::INPUT_RON.as_bytes(),
+            )
+        };
         assert_ne!(tag(1), tag(2), "a different map must be a different tag");
         assert_eq!(
             tag(crate::map::content_digest(&root)),
@@ -2398,9 +2472,26 @@ mod tests {
             "the tag must be the fold of THIS process's map, registry and tank",
         );
         assert_ne!(
-            handshake_tag(1, registry.as_bytes(), tank ^ 1, armaments),
+            handshake_tag(
+                1,
+                registry.as_bytes(),
+                tank ^ 1,
+                armaments,
+                crate::aim::INPUT_RON.as_bytes()
+            ),
             tag(1),
             "another tank construction over the same world: a different tag",
+        );
+        assert_ne!(
+            handshake_tag(
+                1,
+                registry.as_bytes(),
+                tank,
+                armaments,
+                b"changed aim construction"
+            ),
+            tag(1),
+            "input admission policy must agree before peers connect",
         );
         let edited = registry.replacen("26.2", "26.3", 1);
         assert_ne!(
@@ -2408,7 +2499,13 @@ mod tests {
             "the fixture edit must land on a registry value"
         );
         assert_ne!(
-            handshake_tag(1, edited.as_bytes(), tank, armaments),
+            handshake_tag(
+                1,
+                edited.as_bytes(),
+                tank,
+                armaments,
+                crate::aim::INPUT_RON.as_bytes()
+            ),
             tag(1),
             "a registry value moved under identical assets: a different tag",
         );
@@ -2497,7 +2594,7 @@ mod tests {
         let rounds = [("round", "round source")];
         let guns = [("gun", "gun source")];
         let base = armaments_digest("round types", &rounds, &guns);
-        let tag = |digest| handshake_tag(1, b"materials", 2, digest);
+        let tag = |digest| handshake_tag(1, b"materials", 2, digest, b"aim input");
         for changed in [
             armaments_digest("changed types", &rounds, &guns),
             armaments_digest("round types", &[("round", "changed source")], &guns),

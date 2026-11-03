@@ -192,7 +192,7 @@ pub enum FunctionRole {
 /// A gameplay verb the tank can perform (design §7b). Closed enum — consuming systems (driving,
 /// shooting, cameras) reference variants directly. Adding one is a variant, its entry in
 /// [`Self::ALL`] and one consuming system. The *requirements* for each capability are per-tank RON data
-/// ([`TankCapabilities`]); each consumer reads its requirement through [`resolve`].
+/// ([`TankCapabilities`]); each consumer reads its requirement through [`evaluate`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 pub enum Capability {
     Drive,
@@ -311,7 +311,9 @@ impl ControlStaffing {
 }
 
 impl TankCapabilities {
-    pub fn new(
+    /// Fixture setup for the tests of capability consumers.
+    #[cfg(test)]
+    pub(crate) fn new(
         requirements: std::collections::HashMap<Capability, Requirement>,
         drive_controls: ControlStaffing,
     ) -> Self {
@@ -602,52 +604,28 @@ pub fn module_share(health: &ComponentHealth) -> f32 {
     }
 }
 
-/// The game's damage model: a complete authored path and its evaluated contribution.
-/// `index` addresses the member in its group; a Single group has one member.
-#[derive(Debug)]
-pub struct ResolvedMember<'a> {
-    pub index: usize,
-    pub parts: &'a [Part],
-    pub rate: f32,
-}
-
-/// The game's damage model: Pool retains every contribution; Backup retains its selected
-/// complete alternative, including an unavailable path whose rate is zero.
-#[derive(Debug)]
-pub struct ResolvedGroup<'a> {
-    pub rate: f32,
-    pub contributors: Vec<ResolvedMember<'a>>,
-}
-
-/// The game's damage model: task throughput beside the complete paths that supplied it.
-#[derive(Debug)]
-pub struct ResolvedRequirement<'a> {
-    pub rate: f32,
-    pub groups: Vec<ResolvedGroup<'a>>,
-}
-
-pub fn resolve<'a>(
-    requirement: &'a Requirement,
-    quality: &std::collections::HashMap<Part, f32>,
-) -> ResolvedRequirement<'a> {
-    let groups: Vec<_> = requirement
-        .iter()
-        .map(|group| combine_group(group, quality))
-        .collect();
-    let mut result = ResolvedRequirement { rate: 1.0, groups };
-    result.rate = result
-        .groups
-        .iter()
-        .map(|group| group.rate)
-        .fold(1.0, f32::min);
-    result
-}
-
-/// The pure combine core (design §7b): member coefficient times its parts' qualities;
-/// group Single / Pool capped-sum / Backup best whole path; minimum across groups.
-/// An absent part supplies no quality.
+/// The game's damage model: complete member contributions combine by capped sum (Pool),
+/// best alternative (Backup), then minimum across required groups. An empty requirement is
+/// unconditional; an absent part is an unavailable source.
 pub fn evaluate(requirement: &Requirement, quality: &std::collections::HashMap<Part, f32>) -> f32 {
-    resolve(requirement, quality).rate
+    requirement
+        .iter()
+        .map(|group| match group {
+            Group::Single(part) => live_quality(quality, *part),
+            Group::Graded(GradedGroup::Pool(members)) => members
+                .iter()
+                .map(|member| member_quality(member, |part| live_quality(quality, part)))
+                .sum::<f32>()
+                .min(1.0),
+            Group::Graded(GradedGroup::Backup(members)) => members
+                .iter()
+                .map(|member| member_quality(member, |part| live_quality(quality, part)))
+                .reduce(f32::max)
+                .expect(
+                    "TankSpec::validate refuses empty Backup member lists in every requirement",
+                ),
+        })
+        .fold(1.0, f32::min)
 }
 
 pub(crate) fn live_quality(quality: &std::collections::HashMap<Part, f32>, part: Part) -> f32 {
@@ -659,77 +637,7 @@ fn member_quality(member: &Member, quality: impl Fn(Part) -> f32) -> f32 {
     member.1.iter().fold(member.0, |q, p| q * quality(*p))
 }
 
-fn combine_group<'a>(
-    group: &'a Group,
-    quality: &std::collections::HashMap<Part, f32>,
-) -> ResolvedGroup<'a> {
-    let member = |index, parts, rate| ResolvedMember { index, parts, rate };
-    match group {
-        Group::Single(part) => {
-            let rate = live_quality(quality, *part);
-            ResolvedGroup {
-                rate,
-                contributors: vec![member(0, std::slice::from_ref(part), rate)],
-            }
-        }
-        Group::Graded(GradedGroup::Pool(members)) => {
-            let contributors: Vec<_> = members
-                .iter()
-                .enumerate()
-                .map(|(index, m)| {
-                    member(
-                        index,
-                        m.1.as_slice(),
-                        member_quality(m, |part| live_quality(quality, part)),
-                    )
-                })
-                .collect();
-            let mut result = ResolvedGroup {
-                rate: 0.0,
-                contributors,
-            };
-            result.rate = result
-                .contributors
-                .iter()
-                .map(|member| member.rate)
-                .sum::<f32>()
-                .min(1.0);
-            result
-        }
-        Group::Graded(GradedGroup::Backup(members)) => {
-            let selected = members
-                .iter()
-                .enumerate()
-                .map(|(index, m)| {
-                    member(
-                        index,
-                        m.1.as_slice(),
-                        member_quality(m, |part| live_quality(quality, part)),
-                    )
-                })
-                .max_by(|a, b| {
-                    let canonical = |parts: &[Part]| {
-                        let mut parts = parts.to_vec();
-                        parts.sort_unstable();
-                        parts
-                    };
-                    a.rate
-                        .total_cmp(&b.rate)
-                        .then_with(|| members[a.index].0.total_cmp(&members[b.index].0))
-                        .then_with(|| canonical(a.parts).cmp(&canonical(b.parts)))
-                })
-                .expect(
-                    "TankSpec::validate refuses empty Backup member lists in every requirement",
-                );
-            ResolvedGroup {
-                rate: selected.rate,
-                contributors: vec![selected],
-            }
-        }
-    }
-}
-
-/// Whether an arbitrary tank *meets* a requirement (effectiveness > 0) — the per-tank analog of
+/// Whether an arbitrary tank supplies a positive task rate — the per-tank analog of
 /// [`ControlledTank::meets`], for sim systems that iterate every tank (a weapon's `fire`
 /// gate in `shooting`; loading consumes a rate). No volumes yet (spec still binding) → not met.
 pub fn requirement_met(
@@ -777,7 +685,7 @@ impl ControlledTank<'_, '_> {
         self.tank.single().ok().map(|(_, rig, ..)| rig)
     }
 
-    /// Whether the controlled tank *meets* an arbitrary requirement (effectiveness > 0) — for the
+    /// Whether the controlled tank supplies a positive task rate — for the
     /// per-weapon / per-part gates (a weapon's `fire` or sight access) that aren't tank-wide capabilities.
     /// An empty requirement is vacuously met. `None` controlled → not met.
     pub fn meets(&self, requirement: &Requirement) -> bool {
@@ -833,18 +741,10 @@ fn launch_turrets_on_cookoff(
             if !is_descendant_of(turret, tank, &parents) {
                 continue;
             }
-            // Detached, the turret is the root avian composes its armour colliders' scale from
-            // (`ColliderTransform`), and the collector refuses armour at any scale but a bit-exact
-            // 1 (`ballistics::collect`). So it carries unit scale, never one read back out of the
-            // world matrix: decomposing a rotated `GlobalTransform` rounds each column's length and
-            // can perturb a unit scale. Unit scale is what the hierarchy composes, bit for bit:
-            // the turret is the gunner chain's Yaw servo (`tank::spawn::resolve_rig_nodes`);
-            // `bake::certify_asset` refuses an asset unless every servo node and each of its
-            // ancestors is authored at scale exactly 1 (`L2.UNIT_SCALE` in
-            // `bake::declared_roles_resolve`); the sim nodes are spawned with those authored
-            // transforms (`tank::spawn::spawn_node_entities`) under a root asserted at unit scale
-            // (`tank::spawn::assemble_tank_body`); and the servos write rotation only
-            // (`tank::servo::drive_servos`, `tank::servo::restore_servo_truth`).
+            // The game's damage model: the detached assembly is a unit-scale body. The
+            // Assembly reference gate certifies its entire authored chain at unit scale;
+            // decomposing a rotated world matrix can still round column lengths away from one.
+            // Preserve that certified scale instead of reading it back from the world matrix.
             let mut pose = global.compute_transform();
             pose.scale = Vec3::ONE;
             let up = Vec3::from(global.up());
@@ -1105,42 +1005,31 @@ mod tests {
         assert!(ControlStaffing::NotRequired.permits(&[].into()));
     }
 
-    /// The game's damage model: equivalent Backup alternatives retain a canonical complete
-    /// path while control authority remains the separately authored staffing fact.
+    /// The game's damage model: unavailable complete alternatives stay unavailable regardless of
+    /// ordering. Task consumers cannot combine the available half of each path into one operator.
     #[test]
-    fn backup_zero_score_ties_do_not_decide_authority() {
-        use super::{ControlStaffing, CrewStation, resolve};
-        // Fixture: both complete paths unavailable, with one staffed operator.
+    fn unavailable_backup_members_stay_unavailable_under_permutation() {
+        // Fixture: complementary unavailable dependencies on complete paths.
         let mut members = vec![
             (1.0, vec![Part::Driver, Part::Engine]),
             (1.0, vec![Part::Commander, Part::Transmission]),
         ];
         let quality = q(&[(Part::Driver, 1.0), (Part::Transmission, 1.0)]);
-        let controls = ControlStaffing::Any(vec![vec![CrewStation::Driver]]);
         for _ in 0..2 {
             let req = vec![Group::Graded(GradedGroup::Backup(members.clone()))];
-            let result = resolve(&req, &quality);
-            assert_eq!(result.rate, 0.0);
-            let selected = &result.groups[0].contributors[0];
-            assert_eq!(selected.parts, &[Part::Driver, Part::Engine]);
-            assert_eq!(selected.parts, members[selected.index].1);
-            assert!(controls.permits(&[CrewStation::Driver].into()));
+            assert_eq!(evaluate(&req, &quality), 0.0);
             members.reverse();
         }
     }
 
-    /// The game's damage model: a resolution gives consumers the selected complete
-    /// alternative and every cooperative contribution beside the rate, preserving member identity.
+    /// The game's damage model: each complete path supplies its coefficient times its parts;
+    /// task consumers receive the best alternative or cooperative sum, bounded by other groups.
     #[test]
-    fn resolved_paths_retain_selection_and_cooperative_contributors() {
-        // Fixture: unequal complete alternatives, reused as cooperative paths in another group.
+    fn graded_task_rates_combine_complete_member_work() {
+        // Fixture coefficients and independent part qualities.
         let members = vec![
             (0.8, vec![Part::Driver, Part::Engine]),
             (0.5, vec![Part::Commander, Part::Transmission]),
-        ];
-        let req = vec![
-            Group::Graded(GradedGroup::Backup(members.clone())),
-            Group::Graded(GradedGroup::Pool(members.clone())),
         ];
         let quality = q(&[
             (Part::Driver, 0.6),
@@ -1148,22 +1037,19 @@ mod tests {
             (Part::Commander, 1.0),
             (Part::Transmission, 1.0),
         ]);
-        let result = super::resolve(&req, &quality);
-        assert_eq!(result.rate, 0.5);
-        let selected = &result.groups[0].contributors;
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].index, 1);
-        assert_eq!(selected[0].parts, members[1].1);
-        assert_eq!(selected[0].rate, 0.5);
-        let cooperative = &result.groups[1].contributors;
-        assert_eq!(cooperative.len(), members.len());
-        for (index, member) in cooperative.iter().enumerate() {
-            assert_eq!(member.index, index);
-            assert_eq!(member.parts, members[index].1);
-        }
-        assert!((cooperative[0].rate - 0.24).abs() < 1e-6);
-        assert_eq!(cooperative[1].rate, 0.5);
-        assert!((result.groups[1].rate - 0.74).abs() < 1e-6);
+        let first = members[0].0 * quality[&Part::Driver] * quality[&Part::Engine];
+        let second = members[1].0 * quality[&Part::Commander] * quality[&Part::Transmission];
+        let backup = Group::Graded(GradedGroup::Backup(members.clone()));
+        let pool = Group::Graded(GradedGroup::Pool(members));
+        assert_eq!(evaluate(&vec![backup.clone()], &quality), first.max(second));
+        assert_eq!(
+            evaluate(&vec![pool.clone()], &quality),
+            (first + second).min(1.0)
+        );
+        assert_eq!(
+            evaluate(&vec![backup, pool], &quality),
+            first.max(second).min(first + second)
+        );
     }
 
     /// The game's damage model: cooperative contributors cannot borrow one another's
@@ -1176,14 +1062,7 @@ mod tests {
             (1.0, vec![Part::Commander, Part::Transmission]),
         ]))];
         let quality = q(&[(Part::Commander, 1.0), (Part::Engine, 1.0)]);
-        let result = super::resolve(&req, &quality);
-        assert_eq!(result.rate, 0.0);
-        assert!(
-            result.groups[0]
-                .contributors
-                .iter()
-                .all(|member| member.rate == 0.0)
-        );
+        assert_eq!(evaluate(&req, &quality), 0.0);
     }
 
     #[test]

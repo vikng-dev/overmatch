@@ -1556,11 +1556,16 @@ View interpolation still blends previous and current angles on the view node onl
 construction. PROTOCOL_REV stays 82.
 
 Ratchet dispositions: `load-07` is fixed by required explicit `turret.node` construction,
-independent of optic ancestry (`None` explicitly declares no assembly); assembly membership
-follows that authored root's hierarchy and its role receives the unit-scale gate.
+independent of optic ancestry; `None` is refused before play because complete rigs require that
+handle. Required `gunner_yaw` selects the Gunner's Yaw servo separately, resolved into `GunnerYaw`
+at spawn; the Gunner view names a declared Pitch servo below it. Sight input and the angle stream
+read that yaw handle. Aim targets and optic working angles use its actual parent/rest frame,
+so an upstream yaw is applied once. Assembly membership follows the authored structural hierarchy, whose role
+receives the unit-scale gate. Mass and inertia extents carry `Sourced` provenance, with shipped
+`Fixture` labels refused in every build.
 `driving-07` was already admitted in production: the stale shipped-sheet test asserted against
-raw post-cut torque, and now reads delivered peak torque; a generic regression preserves
-post-cut admission. `driving-10` is fixed by labelling the nominal fixture crank ceiling
+raw post-cut torque, and now reads delivered peak torque. The vacuous post-cut admission test
+is removed: validation has no clutch-versus-peak relation, and a small slipping clutch is legal. `driving-10` is fixed by labelling the nominal fixture crank ceiling
 `Unknown`, without inventing derivation inputs. The Blender fixture includes an explicit
 powered actuator frame and passes the same generic spec admission.
 

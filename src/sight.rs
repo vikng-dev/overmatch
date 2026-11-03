@@ -22,8 +22,8 @@ use crate::render_policy::{CameraProfile, VisualScope};
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
-    Controlled, RemoteServos, ServoIndex, ServoSpec, Tank, TankServos, TankViews, rig_world_pose,
-    shortest_angle,
+    Controlled, GunnerYaw, RemoteServos, ServoIndex, ServoRest, ServoSpec, Tank, TankServos,
+    TankViews, rig_world_pose, shortest_angle,
 };
 use crate::view::PlayerView;
 
@@ -85,7 +85,7 @@ pub fn yaw_pitch_of(dir: Vec3) -> (f32, f32) {
     )
 }
 
-/// Per-frame yaw/pitch working form of the committed aim point.
+/// Per-frame yaw/pitch working form of the committed aim point in the Gunner yaw rest frame.
 ///
 /// Invariant: decompose `point - mount`, never the hull origin, to keep the optic and servo target
 /// at the same parallax origin. [`CommittedAim`] remains the sole persistent state.
@@ -96,7 +96,7 @@ struct GunnerIntent {
 }
 
 impl GunnerIntent {
-    /// Intent as a unit direction in hull-local space.
+    /// Intent as a unit direction in the Gunner yaw rest frame.
     fn local_dir(&self) -> Vec3 {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
@@ -104,7 +104,7 @@ impl GunnerIntent {
     }
 
     /// Inverse of [`local_dir`](Self::local_dir); callers provide the mount-relative direction.
-    fn from_hull_local_dir(dir: Vec3) -> Self {
+    fn from_local_dir(dir: Vec3) -> Self {
         Self {
             yaw: (-dir.x).atan2(-dir.z),
             pitch: dir.y.atan2((dir.x * dir.x + dir.z * dir.z).sqrt()),
@@ -320,6 +320,8 @@ fn resume_commit(committed_point: Option<Vec3>, moved: bool, resolved: Vec3) -> 
 #[derive(SystemParam)]
 pub(crate) struct LiveServos<'w, 's> {
     slots: Query<'w, 's, &'static ServoIndex>,
+    yaws: Query<'w, 's, &'static GunnerYaw>,
+    rests: Query<'w, 's, &'static ServoRest>,
     states: Query<'w, 's, &'static TankServos>,
     remote: Query<'w, 's, &'static RemoteServos>,
 }
@@ -426,8 +428,13 @@ pub(crate) fn drive_gunner_aim(
     let sensitivity = look::get().mouse_sensitivity_per_fov.0 * fov;
 
     // The margin below clamps intent against the gun's live lay — see [`LiveServos::angle`].
-    let t_current = servos.angle(tank, rig.turret);
-    let g_current = servos.angle(tank, rig.gun);
+    let yaw = servos
+        .yaws
+        .get(tank)
+        .expect("a complete player rig carries its separately resolved Gunner yaw handle")
+        .0;
+    let yaw_angle = servos.angle(tank, yaw);
+    let pitch_angle = servos.angle(tank, rig.gun);
 
     // Superelevation for the dialed range; the gun's live pitch carries it, so the sight line (which
     // the intent tracks) is the gun's lay minus the lob. One binding for that scalar: the seed and
@@ -437,7 +444,6 @@ pub(crate) fn drive_gunner_aim(
         .get(rig.muzzle)
         .expect("the primary muzzle receives its range table at complete spawn")
         .superelevation(ranging.range);
-    let sight_now = g_current - theta;
 
     // The sight's origin: the gun mount (elevation pivot), from the SAME physics-truth chain
     // `aim::drive_aim_servos` lays from (`rig_world_pose`, never `GlobalTransform`), so the
@@ -471,6 +477,39 @@ pub(crate) fn drive_gunner_aim(
         "a complete rig has finite hull and gun-mount poses"
     );
 
+    // Work in the yaw's angle-zero frame. Upstream articulation turns this whole frame once;
+    // its turn must not be counted again as this servo's parent-local command.
+    let (_, yaw_frame) = crate::tank::servo_aim_frame(
+        yaw,
+        tank,
+        root_position.0,
+        root_rotation.0,
+        servos
+            .rests
+            .get(yaw)
+            .expect("a declared Gunner yaw has its spawn-built rest"),
+        &parents,
+        &locals,
+    );
+    let (_, pitch_frame) = crate::tank::servo_aim_frame(
+        rig.gun,
+        tank,
+        root_position.0,
+        root_rotation.0,
+        servos
+            .rests
+            .get(rig.gun)
+            .expect("a declared Gunner pitch has its spawn-built rest"),
+        &parents,
+        &locals,
+    );
+    let current = GunnerIntent::from_local_dir(
+        yaw_frame.inverse() * pitch_frame * Quat::from_rotation_x(pitch_angle) * Vec3::NEG_Z,
+    );
+    let (t_current, g_current) = (current.yaw, current.pitch);
+    let sight_now = g_current - theta;
+    let hull_to_aim = yaw_frame.inverse() * hull_rotation;
+
     // Resume the one committed intention into yaw/pitch — the shared `CommittedAim`, whether it was
     // set by the commander commit (`aim::commit_aim`) or by this system's own last resolve. The
     // bearing is `point − mount`, from the sight's origin (see `GunnerIntent`) — decomposing the
@@ -481,7 +520,7 @@ pub(crate) fn drive_gunner_aim(
     // commander aim is simply continued, only an absent commitment falls back to the lay. Seed from
     // the sight line (lay − lob), not the raised bore, or the view jumps θ on handover.
     let mut intent = committed_point
-        .map(|point| GunnerIntent::from_hull_local_dir(point - mount_local))
+        .map(|point| GunnerIntent::from_local_dir(hull_to_aim * (point - mount_local)))
         .unwrap_or(GunnerIntent {
             yaw: t_current,
             pitch: sight_now,
@@ -490,22 +529,20 @@ pub(crate) fn drive_gunner_aim(
     intent.yaw -= motion.delta.x * sensitivity;
     intent.pitch -= motion.delta.y * sensitivity;
 
-    // Bound 1 — mechanical travel. The pitch (elevation) servo's limits are on the *lay*; the intent
-    // is the *sight line* = lay − θ, so shift the window down by the lob. The Tiger's turret is
-    // `Continuous` (yaw passes through); a limited-traverse turret would clamp yaw directly (no lob
-    // on yaw). Clamping the absolute intent here — before the circular clamp — guarantees the final
-    // intent is reachable, so the reticle always has an angle it can settle onto.
+    // Mechanical windows are parent-local lay limits. Express them in the working frame and
+    // lower pitch by the lob before applying the optic margin.
     let pitch_limits = sight_pitch_limits(
         servo_specs
             .get(rig.gun)
             .expect("the rig gun is a declared pitch servo at spawn")
             .travel_limits(),
-        theta,
+        theta - (g_current - pitch_angle),
     );
     let yaw_limits = servo_specs
-        .get(rig.turret)
-        .expect("the rig turret is a declared yaw servo at spawn")
-        .travel_limits();
+        .get(yaw)
+        .expect("the Gunner yaw handle names a declared Yaw servo at spawn")
+        .travel_limits()
+        .map(|(min, max)| (min + t_current - yaw_angle, max + t_current - yaw_angle));
     intent.pitch = clamp_to_travel(intent.pitch, pitch_limits);
     intent.yaw = clamp_to_travel(intent.yaw, yaw_limits);
 
@@ -534,7 +571,7 @@ pub(crate) fn drive_gunner_aim(
     // `drive_aim_servos` lobs it by the superelevation, raising the bore above the line of sight,
     // so this stays the intention.
     let dir_local = intent.local_dir();
-    let dir_world = Dir3::new(hull_rotation * dir_local)
+    let dir_world = Dir3::new(yaw_frame * dir_local)
         .expect("finite rig rotation and bounded intent define a nonzero world direction");
     let distance = aim_distance(
         &spatial,
@@ -544,7 +581,7 @@ pub(crate) fn drive_gunner_aim(
         &volumes,
         &parents,
     );
-    let resolved = mount_local + dir_local * distance;
+    let resolved = mount_local + hull_to_aim.inverse() * dir_local * distance;
 
     // Publish. [`resume_commit`] is the full decision (its no-motion arm was short-circuited at the
     // top of the system, before the pose work); reaching here means the OWNING transition — mouse
@@ -565,6 +602,111 @@ pub(crate) fn drive_gunner_aim(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Optic input must use the separately declared yaw's live angle and travel, whether the
+    /// structural assembly has no servo or a different one. Offset sight origins must round-trip.
+    #[test]
+    fn optic_input_uses_the_gunner_yaw_instead_of_the_assembly() {
+        use crate::tank::{Rig, ServoRole, ServoState};
+        use avian3d::collider_tree::ColliderTrees;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.init_resource::<AccumulatedMouseMotion>();
+        world.init_resource::<CommittedAim>();
+        world.init_resource::<Ranging>();
+        world.init_resource::<ColliderTrees>();
+        // Fixture bearings, offset sight and range. This probes input/clamping, not integration.
+        let (bearing, offset) = (0.7, Vec3::new(1.0, 2.0, 3.0));
+        let tank = world
+            .spawn((
+                Tank,
+                Controlled,
+                Position(Vec3::ZERO),
+                Rotation::default(),
+                TankServos {
+                    states: vec![
+                        ServoState::test_new(-1.0, -1.0, 0.0),
+                        ServoState::test_new(bearing, bearing, 0.0),
+                        ServoState::default(),
+                    ],
+                },
+            ))
+            .id();
+        let hull = world.spawn((Transform::IDENTITY, ChildOf(tank))).id();
+        let assembly = world.spawn((Transform::IDENTITY, ChildOf(hull))).id();
+        let yaw = world
+            .spawn((
+                Transform::from_translation(offset).with_rotation(Quat::from_rotation_y(bearing)),
+                ChildOf(assembly),
+                ServoIndex(1),
+                ServoRest(Quat::IDENTITY),
+                ServoSpec::test_continuous(ServoRole::Yaw, 1.0),
+            ))
+            .id();
+        let gun = world
+            .spawn((
+                Transform::IDENTITY,
+                ChildOf(yaw),
+                ServoIndex(2),
+                ServoRest(Quat::IDENTITY),
+                ServoSpec::test_limited(ServoRole::Pitch, 1.0, -30.0, 30.0),
+            ))
+            .id();
+        let muzzle = world
+            .spawn((
+                Transform::IDENTITY,
+                ChildOf(gun),
+                RangeTable::test_fixed(0.0),
+            ))
+            .id();
+        world.entity_mut(tank).insert((
+            Rig {
+                hull,
+                turret: assembly,
+                gun,
+                muzzle,
+            },
+            GunnerYaw(yaw),
+        ));
+        for assembly_has_servo in [false, true] {
+            if assembly_has_servo {
+                world.get_mut::<Transform>(assembly).unwrap().rotation =
+                    Quat::from_rotation_y(-1.0);
+                world.entity_mut(assembly).insert((
+                    ServoIndex(0),
+                    ServoSpec::test_limited(ServoRole::Yaw, 1.0, -90.0, 0.0),
+                ));
+            }
+            world.insert_resource(CommittedAim::default());
+            world.run_system_once(drive_gunner_aim).unwrap();
+            let point = world.resource::<CommittedAim>().get(tank).unwrap();
+            let base = if assembly_has_servo { -1.0 } else { 0.0 };
+            let mount = Quat::from_rotation_y(base) * offset;
+            let dir = point - mount;
+            let actual = (-dir.x).atan2(-dir.z);
+            assert!(
+                (actual - (base + bearing)).abs() < 1e-5,
+                "{actual} versus {}",
+                base + bearing
+            );
+            // A large input must stop at this optic's margin about its own yaw, not the assembly's.
+            world.resource_mut::<AccumulatedMouseMotion>().delta = Vec2::new(
+                -1.0 / (look::get().mouse_sensitivity_per_fov.0 * GUNNER_FOV_FALLBACK),
+                0.0,
+            );
+            world.run_system_once(drive_gunner_aim).unwrap();
+            let dir = world.resource::<CommittedAim>().get(tank).unwrap() - mount;
+            let actual = (-dir.x).atan2(-dir.z);
+            let expected =
+                base + bearing + optic_margin(GUNNER_FOV_FALLBACK, OPTIC_ASPECT_FALLBACK);
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "{actual} versus {expected}"
+            );
+            world.resource_mut::<AccumulatedMouseMotion>().delta = Vec2::ZERO;
+        }
+    }
 
     /// Optic intent follows the replica's live lay. A malformed replica vector must fail rather
     /// than silently borrowing the authority vector's different angle for the same slot.
@@ -818,7 +960,7 @@ mod tests {
                     pitch: pitch_deg.to_radians(),
                 };
                 let dir = intent.local_dir();
-                let back = GunnerIntent::from_hull_local_dir(dir);
+                let back = GunnerIntent::from_local_dir(dir);
                 assert!(
                     (shortest_angle(back.yaw - intent.yaw)).abs() < 1e-5,
                     "yaw round-trip at ({yaw_deg}, {pitch_deg})"
@@ -828,7 +970,7 @@ mod tests {
                     "pitch round-trip at ({yaw_deg}, {pitch_deg})"
                 );
                 // Scale-invariant: a far committed point decodes to the same angles as the unit dir.
-                let far = GunnerIntent::from_hull_local_dir(dir * 10_000.0);
+                let far = GunnerIntent::from_local_dir(dir * 10_000.0);
                 assert!((shortest_angle(far.yaw - intent.yaw)).abs() < 1e-5);
                 assert!((far.pitch - intent.pitch).abs() < 1e-5);
             }

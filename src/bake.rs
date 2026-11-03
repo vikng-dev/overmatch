@@ -391,7 +391,7 @@ impl TankBlueprint {
 }
 
 /// The game's damage model: detachable construction is declared independently of optics.
-/// None names a sheet with no assembly or a missing node (reported by the reference gate).
+/// A missing node is reported by the reference gate; admission refuses an absent declaration.
 pub(crate) fn turret_node(geometry: &TankGeometry, spec: &TankSpec) -> Option<usize> {
     geometry.by_name.get(spec.turret.node.as_ref()?).copied()
 }
@@ -1262,12 +1262,64 @@ pub(crate) fn extract_tank_geometry(
         .map(|finding| finding.subject.name.clone())
         .collect();
     findings.extend(declared_roles_resolve(&geometry, spec, &refused_at_capture));
+    findings.extend(aim_chain_contract(path, &geometry, spec));
     findings.extend(collider_substances(spec, registry));
     findings.extend(witness_roles(&geometry, spec));
     if report::has_error(&findings) {
         return Err(sorted(findings));
     }
     Ok(geometry)
+}
+
+/// Playable handles must resolve before spawn. The structural assembly is independent of the
+/// Gunner chain; yaw must be above pitch so a parent-local yaw actually turns that sight.
+fn aim_chain_contract(path: &Path, geometry: &TankGeometry, spec: &TankSpec) -> Vec<Finding> {
+    let Some(view) = spec.views.get(&crate::spec::ViewKind::Gunner) else {
+        return Vec::new(); // Unarmed tooling sheets have no player rig.
+    };
+    let refuse = |field: &str, evidence: String, repair: &str| {
+        Finding::new(
+            &L2_SPEC,
+            spec_subject_for(path).element(field),
+            evidence,
+            repair,
+        )
+    };
+    let mut findings = Vec::new();
+    for name in ["Hull", "Center_Of_Mass"] {
+        if !geometry.by_name.contains_key(name) {
+            findings.push(refuse(
+                name,
+                "required rig node is absent".into(),
+                "export the named rig node before spawning this playable sheet",
+            ));
+        }
+    }
+    let yaw = spec
+        .gunner_yaw
+        .as_ref()
+        .expect("TankSpec admits a Gunner yaw declaration");
+    if let (Some(&yaw), Some(&pitch)) =
+        (geometry.by_name.get(yaw), geometry.by_name.get(&view.node))
+    {
+        let mut walk = geometry.nodes[pitch].parent;
+        let mut found = false;
+        while let Some(index) = walk {
+            if index == yaw {
+                found = true;
+                break;
+            }
+            walk = geometry.nodes[index].parent;
+        }
+        if !found {
+            findings.push(refuse(
+                "gunner_yaw / views[Gunner].node",
+                "the declared yaw is not an ancestor of the Gunner pitch servo".into(),
+                "parent the Gunner pitch under its declared yaw, or select its actual yaw servo",
+            ));
+        }
+    }
+    findings
 }
 
 /// Each declared collider whose substance the registry cannot give a contact friction: a name it
@@ -1846,7 +1898,6 @@ mod tests {
     #[test]
     fn assembly_root_does_not_follow_optics() {
         let (nodes, sheet) = sound_vehicle();
-        let sheet = sheet.replace("node: None, mass:", "node: Some(\"Hull\"), mass:");
         let asset = fixture::write("assembly-root", &nodes, &sheet);
         let mut spec: TankSpec = ron::from_str(&sheet).unwrap();
         let geometry =
@@ -1867,6 +1918,93 @@ mod tests {
             crate::tank::ServoSpec::test_continuous(crate::tank::ServoRole::Yaw, 1.0),
         );
         assert_eq!(turret_node(&geometry, &spec), Some(expected));
+    }
+
+    /// The certified sheet selects assembly and aim handles separately. A two-part turret and
+    /// an independent sight yaw are admitted; wrong roles, ancestry and absent assemblies stop
+    /// at L2.SPEC instead of a complete spawn or the player's first optic input.
+    #[test]
+    fn certification_separates_assembly_from_the_gunner_chain() {
+        let (mut nodes, sheet) = sound_vehicle();
+        nodes.extend([
+            Node::new("Center_Of_Mass").child_of("Hull"),
+            Node::new("Assembly").child_of("Hull"),
+            Node::new("BodyYaw").child_of("Assembly"),
+            Node::new("SightYaw").child_of("BodyYaw"),
+            Node::new("SightPitch").child_of("SightYaw"),
+        ]);
+        let sheet = sheet.replace("node: Some(\"Hull\"), mass:", "node: Some(\"Assembly\"), mass:")
+            .replace("gunner_yaw: None", "gunner_yaw: Some(\"SightYaw\")")
+            .replace("servos: {}, weapons: {}, views: {},", r#"
+                servos: {
+                    "BodyYaw": (role: Yaw, drive: Hand(hand_rate: (1.0, Fixture("rate"))), travel: Continuous, requires: []),
+                    "SightYaw": (role: Yaw, drive: Hand(hand_rate: (2.0, Fixture("rate"))), travel: Continuous, requires: []),
+                    "SightPitch": (role: Pitch, drive: Hand(hand_rate: (3.0, Fixture("rate"))), travel: Continuous, requires: []),
+                }, weapons: {}, views: {
+                    Gunner: (node: "SightPitch", optics: Unaided(60.0), requires: []),
+                },"#);
+        let asset = fixture::write("independent-sight", &nodes, &sheet);
+        let registry = SubstanceRegistry::shipped();
+        let certified = certify_asset(&asset.glb, &sheet, &registry)
+            .expect("independent construction certifies");
+        let geometry = &certified.geometry;
+        assert_eq!(
+            turret_node(geometry, &certified.spec),
+            Some(geometry.by_name["Assembly"])
+        );
+        for (old, new, field) in [
+            (
+                "node: Some(\"Assembly\"), mass:",
+                "node: None, mass:",
+                "turret.node",
+            ),
+            (
+                "gunner_yaw: Some(\"SightYaw\")",
+                "gunner_yaw: None",
+                "gunner_yaw",
+            ),
+            (
+                "gunner_yaw: Some(\"SightYaw\")",
+                "gunner_yaw: Some(\"SightPitch\")",
+                "Yaw servo",
+            ),
+            (
+                "gunner_yaw: Some(\"SightYaw\")",
+                "gunner_yaw: Some(\"Hull\")",
+                "Yaw servo",
+            ),
+        ] {
+            let report = render(
+                &certify_asset(&asset.glb, &sheet.replace(old, new), &registry)
+                    .err()
+                    .expect("invalid rig sheet is refused"),
+            );
+            assert!(
+                report.contains(".tank.ron")
+                    && report.contains("L2.SPEC")
+                    && report.contains(field),
+                "{report}"
+            );
+        }
+        let unrelated = sheet.replace(
+            "gunner_yaw: Some(\"SightYaw\")",
+            "gunner_yaw: Some(\"BodyYaw\")",
+        );
+        let index = nodes
+            .iter()
+            .position(|node| node.name == "SightPitch")
+            .unwrap();
+        nodes[index].parent = Some("Hull".into());
+        let asset = fixture::write("unrelated-sight", &nodes, &unrelated);
+        let report = render(
+            &certify_asset(&asset.glb, &unrelated, &registry)
+                .err()
+                .expect("yaw must turn its declared sight"),
+        );
+        assert!(
+            report.contains("gunner_yaw") && report.contains("ancestor"),
+            "{report}"
+        );
     }
 
     /// `spec` with `node` also declared main armour.
@@ -2367,7 +2505,7 @@ mod tests {
             &["Plate"],
             &[],
             r#"servos: {"Turret_Yaw": (role: Yaw, drive: Hand(hand_rate: (1.0, Fixture("fixture hand rate"))), travel: Continuous,
-        requires: [])},
+        requires: []), "Sight": (role: Pitch, drive: Hand(hand_rate: (1.0, Fixture("fixture pitch rate"))), travel: Continuous, requires: [])},
     weapons: {"Main": (
         trigger: Primary,
         muzzle: "Muzzle",
@@ -2383,6 +2521,7 @@ mod tests {
     views: {Gunner: (node: "Sight", optics: Magnified(magnification: 2.0, field_deg: 30.0),
         requires: []), Commander: (node: "Sight", optics: Unaided(60.0), requires: [])},"#,
         );
+        let declared = declared.replace("gunner_yaw: None", "gunner_yaw: Some(\"Turret_Yaw\")");
         let asset = fixture::write("canon", &nodes, &declared);
         let json = canon_lists_in_policy(Path::new(&spec_ron_name(&asset.glb)), None)
             .expect("the sheet parses");
@@ -2403,6 +2542,8 @@ mod tests {
         assert_eq!(
             references,
             [
+                ("servos", "Sight"),
+                ("gunner_yaw", "Turret_Yaw"),
                 ("servos", "Turret_Yaw"),
                 ("volumes", "Fixture_Engine"),
                 ("volumes", "Fixture_SeatA"),
@@ -2416,6 +2557,7 @@ mod tests {
                 ("weapons[\"Main\"].barrel", "Recoil"),
                 ("views[Commander].node", "Sight"),
                 ("views[Gunner].node", "Sight"),
+                ("turret.node", "Hull"),
             ]
         );
 

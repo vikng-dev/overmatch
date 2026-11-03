@@ -92,9 +92,9 @@ impl ServoMechanism {
 }
 
 pub(crate) fn axis_inertia(turret: &TurretSpec, role: ServoRole) -> f32 {
-    let (x, y, z) = turret.inertia_extents;
+    let (x, y, z) = turret.inertia_extents.0;
     // Uniform cuboid about its centre: I = m(a² + b²)/12, perpendicular to the axis.
-    turret.mass
+    turret.mass.0
         * (z * z
             + match role {
                 ServoRole::Yaw => x * x,
@@ -182,8 +182,10 @@ impl ServoSpec {
         // Written as a negated conjunction so NaN fails it too.
         (!(min.is_finite() && max.is_finite() && min <= 0.0 && max >= 0.0)).then(|| {
             format!(
-                "travel Limited(min: {min}, max: {max}) must be finite with min <= 0 <= max \
-                 (radians): a servo spawns at angle 0, which the window must contain"
+                "travel Limited(min: {}, max: {}) must be finite with min <= 0 <= max \
+                 (degrees): a servo spawns at angle 0, which the window must contain",
+                min.to_degrees(),
+                max.to_degrees()
             )
         })
     }
@@ -281,6 +283,30 @@ impl ServoState {
 /// sim, the pen cam record's playback and every view of a record pose a servo with.
 pub fn servo_pose(role: ServoRole, rest: Quat, angle: f32) -> Quat {
     rest * Quat::from_axis_angle(role.axis(), angle)
+}
+
+/// World-space origin and angle-zero orientation for a servo's parent-local command. Current
+/// ancestor turns belong to the frame; this servo's current rotation does not.
+pub(crate) fn servo_aim_frame<F: bevy::ecs::query::QueryFilter>(
+    servo: Entity,
+    root: Entity,
+    root_position: Vec3,
+    root_rotation: Quat,
+    rest: &ServoRest,
+    parents: &Query<&ChildOf>,
+    locals: &Query<&Transform, F>,
+) -> (Vec3, Quat) {
+    let parent = parents
+        .get(servo)
+        .expect("a registered servo has its authored parent")
+        .parent();
+    let (position, rotation) =
+        super::model::rig_world_pose(parent, root, root_position, root_rotation, parents, locals)
+            .expect("a registered servo's parent chain reaches its root");
+    let local = locals
+        .get(servo)
+        .expect("a registered servo has its authored local transform");
+    (position + rotation * local.translation, rotation * rest.0)
 }
 
 fn servo_rotation(spec: &ServoSpec, rest: &ServoRest, angle: f32) -> Quat {
@@ -609,8 +635,8 @@ mod tests {
         // Fixture box and drive facts; no shipped vehicle output determines the assertions.
         let turret = TurretSpec {
             node: None,
-            mass,
-            inertia_extents: (2.0, 1.0, 2.0),
+            mass: Sourced(mass),
+            inertia_extents: Sourced((2.0, 1.0, 2.0)),
         };
         let mut mechanism = ServoMechanism::from_spec(crate::bake::selected_spec());
         mechanism.inertia = [
@@ -1012,6 +1038,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Travel refusals must quote the authored unit so an artist can repair the sheet directly.
+    #[test]
+    fn a_travel_refusal_reports_authored_degrees() {
+        let spec = ServoSpec::test_limited(ServoRole::Pitch, 1.0, 90.0, 180.0);
+        let err = spec.admission_fault().unwrap();
+        assert!(
+            err.contains("min: 90") && err.contains("max: 180") && err.contains("degrees"),
+            "{err}"
+        );
     }
 
     /// Admission protects the integrator from nonrepresentable hand rates and drive facts.

@@ -8,7 +8,12 @@ TankSpec(
     // extents in m. Unknown provisional mass and dimensions; assembly weighing and moment
     // measurements would settle them. Servo law and derivation: design
     // armor-penetration-and-damage.md section 7c.
-    turret: ( node: Some("Turret_Yaw"), mass: 8_000.0, inertia_extents: (3.0, 1.2, 2.4) ),
+    turret: (
+        node: Some("Turret_Yaw"),
+        mass: (8_000.0, Unknown("provisional assembly kg; weighing the complete assembly would settle it")),
+        inertia_extents: ((3.0, 1.2, 2.4), Unknown("provisional full inertia-box metres; assembly moment measurements would settle them")),
+    ),
+    gunner_yaw: Some("Turret_Yaw"),
     // Continuous track (track architecture §7). link_count 97 = the marker-derived window's
     // lowest SPRING-limited count (window 95..96 at ride_frequency 1.2 Hz): full suspension
     // travel with the minimum slack that permits it — playtest-confirmed 2026-07-24. The real

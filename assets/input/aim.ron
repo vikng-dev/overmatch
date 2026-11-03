@@ -1,0 +1,2 @@
+// The finite point used when an aim ray reaches no surface.
+(sky_range_m: (10_000.0, StandIn("aiming: a finite sky point stands in for a direction at infinity; shared by input, the bore dot and optic resolve")))

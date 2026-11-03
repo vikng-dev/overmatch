@@ -62,7 +62,8 @@ TankSpec(
     display_name: "Testbed",
     mass: 1000.0,
     inertia_extents: (2.0, 1.0, 3.0),
-    turret: (node: None, mass: 100.0, inertia_extents: (1.0, 1.0, 1.0)),
+    turret: (node: Some("Hull"), mass: (100.0, Derived("nominal cuboid design: 100 kg/m^3 density x 1 m^3 volume = 100 kg")), inertia_extents: ((1.0, 1.0, 1.0), Derived("nominal uniform one-metre cube"))),
+    gunner_yaw: None,
     track: (
         pin_plane_x: (left: -1.0, right: 1.0),
         substance: "RHA",

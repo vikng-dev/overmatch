@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
 use super::model::GunBarrel;
-use super::servo::ServoSpec;
+use super::servo::{ServoCommand, ServoSpec};
 use crate::render_policy::VisualScope;
 
 /// Name-keyed sim part table used to attach a separately loaded view tree.
@@ -51,8 +51,7 @@ pub fn bind_tank_view(
     parents: Query<&ChildOf>,
     names: Query<&Name>,
     meshes: Query<(), With<Mesh3d>>,
-    servos: Query<(), With<ServoSpec>>,
-    barrels: Query<(), With<GunBarrel>>,
+    servos: Query<(), (With<ServoSpec>, With<ServoCommand>)>,
     launched: Query<(), With<crate::damage::LaunchedTurret>>,
     transforms: Query<&Transform>,
     mut commands: Commands,
@@ -120,7 +119,7 @@ pub fn bind_tank_view(
         commands.entity(entity).insert(ViewOf(sim));
         commands.entity(sim).insert(ViewNode(entity));
         // Avoid flashing authored rest pose when presentation attaches mid-motion.
-        if (servos.contains(sim) || barrels.contains(sim))
+        if articulated(name)
             && let Ok(&pose) = transforms.get(sim)
         {
             commands.entity(entity).insert(pose);

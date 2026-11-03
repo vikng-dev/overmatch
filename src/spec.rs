@@ -222,7 +222,7 @@ pub struct ColliderSpec {
 
 /// Which fire input a weapon answers to (design: LMB = the main gun, Spacebar = the MGs). Pure fire
 /// routing — it has *no* bearing on aiming or traverse (servos are weapon-agnostic). The `Primary`
-/// weapon also supplies the rig's main-bore handles (its chain → `Rig.turret`/`gun`/`muzzle`).
+/// weapon supplies `Rig.muzzle`; the Gunner view and `gunner_yaw` select the aim handles.
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     Primary,
@@ -1140,22 +1140,39 @@ pub struct IdlerSpec {
     pub radius: SideValues,
 }
 
-/// The game's damage model (game state only): turret assembly and inertia data, shared by
-/// powered traverse and the detached rigid body. Dimensions follow the servo role axes.
+/// The game's damage model (game state only): detachable assembly mass and inertia-box data.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TurretSpec {
-    /// Structural assembly root; None declares no detachable assembly, independently of optics.
-    #[serde(deserialize_with = "deserialize_assembly")]
+    /// Structural assembly root, independently of optics; admission refuses None.
+    #[serde(deserialize_with = "deserialize_optional_node")]
     pub node: Option<String>,
     /// Mass (kg) of the turret with everything it carries.
-    pub mass: f32,
+    #[serde(deserialize_with = "assembly_mass")]
+    pub(crate) mass: Sourced<f32>,
     /// Full box dimensions (x, y, z metres) approximating its angular-inertia distribution.
-    pub inertia_extents: (f32, f32, f32),
+    #[serde(deserialize_with = "assembly_extents")]
+    pub(crate) inertia_extents: Sourced<(f32, f32, f32)>,
+}
+
+fn assembly_mass<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Sourced<f32>, D::Error> {
+    Sourced::deserialize(d).map_err(|error| {
+        serde::de::Error::custom(format!(
+            "turret.mass: {error}; author (kg, provenance(\"source or reason\"))"
+        ))
+    })
+}
+
+fn assembly_extents<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Sourced<(f32, f32, f32)>, D::Error> {
+    Sourced::deserialize(d).map_err(|error| serde::de::Error::custom(format!(
+        "turret.inertia_extents: {error}; author ((x, y, z), provenance(\"source or reason\")) in metres"
+    )))
 }
 
 // A required declaration may contain None; omitting the field must not invent that construction.
-fn deserialize_assembly<'de, D: serde::Deserializer<'de>>(
+fn deserialize_optional_node<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Option<String>, D::Error> {
     Option::<String>::deserialize(d)
@@ -1222,6 +1239,10 @@ pub struct TankSpec {
     /// The turret as a free body once a cook-off blows it off: its own mass and inertia box, which
     /// the hull's `mass` / `inertia_extents` do not describe.
     pub turret: TurretSpec,
+    /// Gunner yaw servo, independently of the detachable assembly. None is for unarmed tooling
+    /// sheets with no Gunner view; playable rigs must name a declared Yaw servo.
+    #[serde(deserialize_with = "deserialize_optional_node")]
+    pub gunner_yaw: Option<String>,
     /// Continuous-track running gear, material loop, powertrain, and contact law — the
     /// locomotion spec (phase B: the track model IS the driving sim) and the track view's
     /// per-vehicle data.
@@ -1351,6 +1372,39 @@ impl TankSpec {
             if !self.track.sprocket.tooth_tip_rad.get(side).is_finite() {
                 return Err(format!("track.sprocket.tooth_tip_rad.{side:?} must be finite; author the rest tooth datum in hull-side-plane radians").into());
             }
+        }
+        Ok(())
+    }
+
+    /// Structural and aim handles are separate declarations; every player view has both axes.
+    fn check_rig(&self) -> Result<(), String> {
+        if self
+            .turret
+            .node
+            .as_ref()
+            .is_none_or(|node| node.trim().is_empty())
+        {
+            return Err("turret.node must name the structural assembly root; author Some(\"node name\") independently of the Gunner yaw servo".into());
+        }
+        if let Some(view) = self.views.get(&ViewKind::Gunner) {
+            let yaw = self.gunner_yaw.as_deref().ok_or(
+                "gunner_yaw is required by views[Gunner]; author Some(\"Yaw servo node\")",
+            )?;
+            if self.servos.get(yaw).map(ServoSpec::role) != Some(crate::tank::ServoRole::Yaw) {
+                return Err(format!(
+                    "gunner_yaw `{yaw}` must name a declared Yaw servo; select the Gunner's yaw row in servos"
+                ));
+            }
+            if self.servos.get(&view.node).map(ServoSpec::role)
+                != Some(crate::tank::ServoRole::Pitch)
+            {
+                return Err(format!(
+                    "views[Gunner].node `{}` must name a declared Pitch servo; select the Gunner's pitch row in servos",
+                    view.node
+                ));
+            }
+        } else if self.gunner_yaw.is_some() {
+            return Err("gunner_yaw names no user without views[Gunner]; author that view or None for an unarmed tooling sheet".into());
         }
         Ok(())
     }
@@ -1626,6 +1680,9 @@ impl TankSpec {
                 at(NodeRole::View, &view.node, format!("views[{kind:?}].node"))
             }),
         );
+        if let Some(node) = &self.gunner_yaw {
+            references.push(at(NodeRole::Servo, node, "gunner_yaw".into()));
+        }
         if let Some(node) = &self.turret.node {
             references.push(at(NodeRole::Assembly, node, "turret.node".into()));
         }
@@ -1739,6 +1796,7 @@ impl TankSpec {
             return Err("track.sprocket.teeth must be >= 3 to form a pin polygon".into());
         }
         let turret = &self.turret;
+        self.check_rig()?;
         // The hull's and the turret's body data: `Mass` and the cuboid `AngularInertia` are built
         // from these at spawn, and a zero or NaN one is a body the solver cannot integrate.
         for (what, value) in [
@@ -1746,10 +1804,10 @@ impl TankSpec {
             ("inertia_extents.0", self.inertia_extents.0),
             ("inertia_extents.1", self.inertia_extents.1),
             ("inertia_extents.2", self.inertia_extents.2),
-            ("turret.mass", turret.mass),
-            ("turret.inertia_extents.0", turret.inertia_extents.0),
-            ("turret.inertia_extents.1", turret.inertia_extents.1),
-            ("turret.inertia_extents.2", turret.inertia_extents.2),
+            ("turret.mass", turret.mass.0),
+            ("turret.inertia_extents.0", turret.inertia_extents.0.0),
+            ("turret.inertia_extents.1", turret.inertia_extents.0.1),
+            ("turret.inertia_extents.2", turret.inertia_extents.0.2),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!("{what} must be finite and > 0 (got {value})").into());
@@ -2172,7 +2230,8 @@ TankSpec(
     display_name: "Fixture",
     mass: 30_000.0,
     inertia_extents: (3.0, 2.0, 6.0),
-    turret: (node: Some("Turret_Yaw"), mass: 5_000.0, inertia_extents: (2.0, 1.0, 2.0)),
+    turret: (node: Some("Turret_Yaw"), mass: (5_000.0, Fixture("fixture assembly mass")), inertia_extents: ((2.0, 1.0, 2.0), Fixture("fixture assembly box"))),
+    gunner_yaw: Some("Turret_Yaw"),
     track: (
         pin_plane_x: (left: -1.3, right: 1.3),
         substance: "TrackSteel",
@@ -2224,6 +2283,7 @@ TankSpec(
     ),
     servos: {
         "Turret_Yaw": (role: Yaw, drive: Hand(hand_rate: (30.0, Fixture("fixture hand rate"))), travel: Continuous, requires: [Gunner]),
+        "Cannon_Sight": (role: Pitch, drive: Hand(hand_rate: (10.0, Fixture("fixture pitch rate"))), travel: Limited(min: -10.0, max: 20.0), requires: [Gunner]),
     },
     volumes: {
         "Gunner": (crew: Gunner),
@@ -2984,15 +3044,95 @@ TankSpec(
         }
     }
 
-    /// Clutch admission is about delivered combustion torque, not a curve knot beyond fuel cut.
+    /// A certified sheet must provide the structural handle that every complete spawn needs.
     #[test]
-    fn a_post_cut_torque_knot_does_not_size_the_clutch() {
+    fn validate_refuses_an_absent_turret_assembly_before_spawn() {
         let mut spec = fixture();
-        // Fixture: 800 N m is delivered; the larger knot is past completed fuel cut.
-        let engine = &mut spec.track.powertrain.transmission.engine;
-        engine.torque_curve = vec![(600.0, 800.0), (2000.0, 800.0), (2600.0, 900.0)];
-        engine.clutch_capacity_nm = 850.0;
-        assert!(spec.validate().is_ok());
+        spec.turret.node = None;
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("turret.node") && err.contains("author"),
+            "{err}"
+        );
+    }
+
+    /// The optic and angle stream need declared servo roles, independently of assembly identity.
+    #[test]
+    fn validate_requires_the_gunner_aim_handles() {
+        let mut spec = fixture();
+        spec.gunner_yaw = None;
+        assert!(
+            spec.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("gunner_yaw")
+        );
+        let mut spec = fixture();
+        spec.gunner_yaw = Some("Cannon_Sight".into());
+        assert!(
+            spec.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("Yaw servo")
+        );
+        let mut spec = fixture();
+        spec.views.get_mut(&ViewKind::Gunner).unwrap().node = "Turret_Yaw".into();
+        assert!(
+            spec.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("Pitch servo")
+        );
+    }
+
+    /// Finite positive body fields can still overflow or underflow the cuboid moments. The
+    /// powered integrator and detached body must never receive an unrepresentable axis moment.
+    #[test]
+    fn validate_refuses_unrepresentable_axis_inertia() {
+        // Fixture boxes isolate yaw and pitch in turn; squares overflow or underflow in f32.
+        for extents in [
+            (f32::MAX, 1.0, 1.0),
+            (1.0, f32::MAX, 1.0),
+            (f32::MIN_POSITIVE, 1.0, f32::MIN_POSITIVE),
+            (1.0, f32::MIN_POSITIVE, f32::MIN_POSITIVE),
+        ] {
+            let mut spec = fixture();
+            spec.turret.mass = Sourced(1.0);
+            spec.turret.inertia_extents = Sourced(extents);
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(err.contains("axis inertia"), "{extents:?}: {err}");
+        }
+    }
+
+    /// Assembly facts cross the same provenance boundary as every other sourced fact, including
+    /// refusal of test-only labels on shipped files in the test build itself.
+    #[test]
+    fn turret_body_facts_require_shippable_provenance() {
+        for (mass, extents) in [
+            ("1.0", "((1.0, 1.0, 1.0), Derived(\"box\"))"),
+            ("(1.0, Derived(\"mass\"))", "(1.0, 1.0, 1.0)"),
+            (
+                "(1.0, Fixture(\"mass\"))",
+                "((1.0, 1.0, 1.0), Derived(\"box\"))",
+            ),
+            (
+                "(1.0, Derived(\"mass\"))",
+                "((1.0, 1.0, 1.0), Fixture(\"box\"))",
+            ),
+        ] {
+            let text =
+                format!("(node: Some(\"Assembly\"), mass: {mass}, inertia_extents: {extents})");
+            let err =
+                crate::provenance::from_shipped_str::<TurretSpec>("construction.tank.ron", &text)
+                    .err()
+                    .expect("bare and test-only assembly facts are refused");
+            assert!(
+                err.contains("construction.tank.ron")
+                    && err.contains("turret.")
+                    && err.contains("author"),
+                "{err}"
+            );
+        }
     }
 
     /// The servo window contract (`ServoSpec::admission_fault`): the sim clamps to the window

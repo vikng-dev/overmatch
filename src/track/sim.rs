@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::bake::TankBlueprint;
 use crate::command::ParsedTankCommand;
 use crate::damage::{
-    Capability, TankCapabilities, TankVolumes, VolumeFacets, live_quality, part_facts, resolve,
+    Capability, TankCapabilities, TankVolumes, VolumeFacets, evaluate, live_quality, part_facts,
 };
 use crate::state::{GameplaySet, SimPhase};
 use crate::tank::Tank;
@@ -793,10 +793,9 @@ fn supply_from_parts(
     quality: &std::collections::HashMap<crate::damage::Part, f32>,
     staffed: &std::collections::HashSet<crate::damage::CrewStation>,
 ) -> DriveSupply {
-    let task = resolve(caps.requirement(Capability::Drive), quality);
     DriveSupply {
         control_authority: caps.drive_controls.permits(staffed),
-        task_rate: task.rate,
+        task_rate: evaluate(caps.requirement(Capability::Drive), quality),
         engine_condition: live_quality(quality, crate::damage::Part::Engine),
         transmission_condition: live_quality(quality, crate::damage::Part::Transmission),
     }

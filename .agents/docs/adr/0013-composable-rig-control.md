@@ -1,5 +1,7 @@
 # Composable rig control: servos ⊥ weapons ⊥ views, pure servos, layered gates
 
+Subject: the game's damage model and rig controls; game state only.
+
 With a tank's parts now enumerable ([[0012-spec-driven-rig-binder]]), the control layer is decomposed into three **orthogonal** concerns, each its own RON section, so a variant composes them freely:
 
 - **Traverse** = `servos` — 1-DOF role-keyed motors; the model hierarchy composes nested mounts.
@@ -16,11 +18,11 @@ A consequence forced this shape: **superelevation cannot live in the servo.** It
 
 ## Layered capability gates
 
-The old single global capability map (Drive / Traverse / Fire / Load / GunnerSight / CommanderView) is dissolved into per-concern gates, all evaluated against the same part-quality vocabulary (`design/armor-penetration-and-damage.md` §7b; `part_qualities` resolved once per tank, then `evaluate` over Group / Part / Pool / Backup):
+The old single global capability map (Drive / Traverse / Fire / Load / GunnerSight / CommanderView) is dissolved into per-concern gates, all evaluated against the same part-quality vocabulary (`design/armor-penetration-and-damage.md` §7b; `part_facts` resolves station and function quality per tank, then `evaluate` over Group / Part / Pool / Backup):
 
-- per-**servo** `requires` — the slew gate (a dead gunner freezes the turret; a future traverse motor would slow it).
+- per-**servo** `requires` — the slew gate (a knocked-out gunner freezes the turret; a future traverse motor would slow it).
 - per-**weapon** `fire` / `load` — independent gates (the loader can *fire* the coax but not lay it; the breech + barrel gate the main gun).
-- per-**view** `requires` — the view-death gate (a dead gunner blacks the optic; a dead commander closes third-person).
+- per-**view** `requires` — the view-death gate (a knocked-out gunner blacks the optic; a knocked-out commander closes third-person).
 - the global `Capability` map keeps **only tank-wide verbs** — currently just `Drive`.
 
 "Operator" dissolved: the eligible crew are simply the `Part`s named in each gate, with `Pool` / `Backup` expressing multi-crew redundancy.
