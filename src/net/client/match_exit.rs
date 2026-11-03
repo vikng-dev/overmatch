@@ -29,7 +29,7 @@ use lightyear::connection::client_of::ClientOf;
 
 use super::*;
 use crate::flow::Flow;
-use crate::net::matchmaking::{LeaveMatch, MatchClosed, MatchReady, ReadyMatch};
+use crate::net::matchmaking::{LeaveMatch, MatchClosed, ReadyMatch};
 use crate::net::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
 
 const CONNECT_STEPS: u32 = 2_000;
@@ -141,10 +141,13 @@ fn in_match() -> (App, App) {
     }
     assert_eq!(flow(&client), Flow::Lobby, "no link: the lobby");
 
-    client.world_mut().write_message(MatchReady(ReadyMatch {
-        addr: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
-        key: [0; 32],
-    }));
+    crate::net::matchmaking::ready_fixture(
+        client.world_mut(),
+        ReadyMatch {
+            addr: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
+            key: [0; 32],
+        },
+    );
     step(Some(&mut server), &mut client);
     let link = *links(&mut client)
         .first()
@@ -221,8 +224,11 @@ fn leave_match_disconnects_drops_the_link_and_returns_to_the_lobby() {
     );
 }
 
+/// A returning player must be told that the match's server was lost. Drive the shipped client
+/// lifecycle from a real server disappearing through its produced reason to the lobby's Text;
+/// retaining only the reason must not hide what was lost.
 #[test]
-fn a_gone_server_ends_the_match_after_the_real_time_give_up() {
+fn an_ended_match_tells_the_player_its_server_was_lost() {
     let _udp = lock_real_udp_test();
     let (mut server, mut client) = in_match();
     replicate_one_root(&mut server, &mut client);
@@ -241,10 +247,18 @@ fn a_gone_server_ends_the_match_after_the_real_time_give_up() {
     );
     assert!(links(&mut client).is_empty(), "the lost link is removed");
     assert_eq!(replicas(&mut client), 0, "no replica outlives the link");
-    assert!(matches!(
-        client.world().resource::<Closed>().0.as_slice(),
-        [MatchClosed::Ended(reason)] if reason.contains("stopped answering")
-    ));
+    let [MatchClosed::Ended(reason)] = client.world().resource::<Closed>().0.as_slice() else {
+        panic!("losing a connected server must end the match with its cause");
+    };
+    let reason = reason.clone();
+    let world = client.world_mut();
+    assert!(
+        world.query::<&Text>().iter(world).any(|text| {
+            let message = text.0.to_ascii_lowercase();
+            message.contains("match server lost") && text.0.contains(&reason)
+        }),
+        "the lobby must tell the returning player their match server was lost and why"
+    );
     assert!(
         frames as f64 * SLOW_FRAME.as_secs_f64() >= client_policy().reconnect_give_up_s.0,
         "not before the give-up ({frames} frames)"
