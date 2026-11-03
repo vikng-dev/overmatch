@@ -3625,3 +3625,72 @@ fn a_steep_torque_branch_is_refused_by_its_slope() {
         "{error}"
     );
 }
+
+/// A raw peak beyond fuel cut is unavailable to launch. Both classes must select a capable
+/// gear inside their declared launch domain instead of retaining an out-of-domain cruise gear.
+#[test]
+fn launch_targets_the_peak_available_after_fuel_cut() {
+    for mut spec in [
+        super::super::drive_fixture::compact_spec(),
+        super::super::rig_geom::tiger_spec(),
+    ] {
+        let tr = &mut spec.track.powertrain.transmission;
+        let peak = tr
+            .engine
+            .torque_curve
+            .iter()
+            .map(|point| point.1)
+            .fold(0.0_f32, f32::max);
+        // Fixture: compact's tail becomes 900 N m at 2600 rpm, beyond its 2200 rpm governor.
+        tr.engine.torque_curve.last_mut().unwrap().1 = peak * 1.125;
+        let mut fp = lab_fp();
+        fp.inertia = 3000.0; // Fixture arithmetic coupling.
+        fp.grip.as_mut().unwrap().side_weight = spec.mass * super::super::derive::G / 2.0;
+        let tp = tr.params(0.3, 1.0, fp.inertia).unwrap(); // Fixture sprocket radius and half-tread.
+        let inp = driver_input(&fp, 0.0, 0.0, 1.0);
+        let selected = launch_pick(
+            &tp,
+            &DriveConstruction::new(&fp),
+            inp.supply,
+            false,
+            inp.perceived_load,
+            0,
+            1.0,
+        )
+        .expect("fuel-governed peak must select a capable launch");
+        assert!(selected <= tp.launch_gears);
+        assert!(tp.torque_at(tp.launch_omega(1.0) / RPM_TO_RAD) > 0.0);
+        let mut state = TransmissionState {
+            gear: tp.gears_fwd.len() as u8,
+            park: true,
+            ..fresh(&tp)
+        };
+        choose_gear(
+            &mut state,
+            &tp,
+            &DriveConstruction::new(&fp),
+            &inp,
+            1.0,
+            0.0,
+        );
+        assert_eq!(state.gear, selected);
+    }
+}
+
+/// The launch target follows the interior maximum of raw torque times fuel cut, not a knot
+/// or a clamp to governed rpm. Fixture: (100 + 9*x)*(1 - x/100) on the fuel ramp.
+#[test]
+fn launch_peak_can_lie_inside_the_fuel_cut_ramp() {
+    let mut a = tiger_authoring();
+    a.governed_rpm = 1000.0;
+    a.torque_nm = &[
+        (800.0, 100.0),
+        (1000.0, 100.0),
+        (1100.0, 1000.0),
+        (3000.0, 1000.0),
+    ];
+    let tp = TransmissionParams::from_authoring(&a).unwrap();
+    let expected = 1000.0 + 8.0 / 0.18; // DERIVED vertex of 100 + 8*x - 0.09*x^2.
+    assert!((tp.peak_torque_rpm - expected).abs() < 0.01); // Resolution: f32 rpm interpolation.
+    assert!(tp.torque_at(tp.peak_torque_rpm) > tp.torque_at(a.governed_rpm));
+}

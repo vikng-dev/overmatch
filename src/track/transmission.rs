@@ -153,6 +153,7 @@ pub struct EngineParams {
 
 /// Delivered-torque polynomial in local rpm, after splitting at curve and fuel-cut knots.
 struct TorqueSpan {
+    start_rpm: f64,
     width_rpm: f64,
     torque: [f64; 3],
 }
@@ -211,8 +212,9 @@ pub struct TransmissionParams {
     pub clutch_capacity: f32,
     /// DERIVED torque-interruption ticks from authored `shift_secs`.
     pub shift_ticks: u8,
-    /// Derived at construction: the torque curve's peak (the low-speed rev target).
+    /// DERIVED rpm of maximum fuel-governed torque: the launch and steering rev target.
     pub peak_torque_rpm: f32,
+    /// Raw curve peak torque, the declared motoring-drag anchor.
     pub peak_torque_nm: f32,
 }
 
@@ -405,13 +407,11 @@ impl TransmissionParams {
             .iter()
             .map(|&(tight, wide)| (a.half_tread_m / tight, a.half_tread_m / wide))
             .collect();
-        let (peak_torque_rpm, peak_torque_nm) =
-            a.torque_nm
-                .iter()
-                .copied()
-                .fold((a.idle_rpm, 0.0f32), |best, (rpm, t)| {
-                    if t > best.1 { (rpm, t) } else { best }
-                });
+        let peak_torque_nm = a
+            .torque_nm
+            .iter()
+            .map(|point| point.1)
+            .fold(0.0_f32, f32::max);
         let reverse_steer_kappa = a
             .reverse_steer_radii_m
             .iter()
@@ -420,7 +420,7 @@ impl TransmissionParams {
         // Genuine neutral-steer scale: 1st gear tight curvature × 1st gear governed speed.
         let v1_governed = a.forward_speeds_kmh[0] / 3.6 * (a.governed_rpm / a.rated_rpm);
         let neutral_d_full = steer_kappa[0].0 * v1_governed;
-        let derived = Self {
+        let mut derived = Self {
             engine: EngineParams {
                 idle_rpm: a.idle_rpm,
                 governed_rpm: a.governed_rpm,
@@ -445,9 +445,10 @@ impl TransmissionParams {
             engine_inertia: a.engine_inertia_kgm2,
             clutch_capacity: a.clutch_capacity_nm,
             shift_ticks: (a.shift_secs * TICK_HZ).round() as u8,
-            peak_torque_rpm,
+            peak_torque_rpm: a.idle_rpm,
             peak_torque_nm,
         };
+        derived.peak_torque_rpm = derived.delivered_peak_rpm();
         derived.check_derived(a.belt_inertia)?;
         Ok(derived)
     }
@@ -601,6 +602,7 @@ impl TransmissionParams {
                 let cut = f64::from(self.fuel_cut(start));
                 let cut_slope = (f64::from(self.fuel_cut(end)) - cut) / width;
                 TorqueSpan {
+                    start_rpm: f64::from(start),
                     width_rpm: width,
                     torque: [
                         raw * cut,
@@ -610,6 +612,38 @@ impl TransmissionParams {
                 }
             })
             .collect()
+    }
+
+    /// A fuel-ramp span can peak between knots. Check its endpoints and quadratic vertex;
+    /// ties retain the lowest rpm at or above idle, without requesting unavailable fuel.
+    fn delivered_peak_rpm(&self) -> f32 {
+        let idle = f64::from(self.engine.idle_rpm);
+        self.torque_spans()
+            .into_iter()
+            .filter(|span| span.start_rpm + span.width_rpm >= idle)
+            .fold(
+                (idle, f64::from(self.torque_at(self.engine.idle_rpm))),
+                |best, span| {
+                    let lo = (idle - span.start_rpm).clamp(0.0, span.width_rpm);
+                    let [a, b, c] = span.torque;
+                    let vertex = if c < 0.0 {
+                        (-b / (2.0 * c)).clamp(lo, span.width_rpm)
+                    } else {
+                        lo
+                    };
+                    [lo, span.width_rpm, vertex]
+                        .into_iter()
+                        .fold(best, |best, x| {
+                            let torque = a + x * (b + c * x);
+                            if torque > best.1 {
+                                (span.start_rpm + x, torque)
+                            } else {
+                                best
+                            }
+                        })
+                },
+            )
+            .0 as f32
     }
 
     fn fuel_cut(&self, rpm: f32) -> f32 {

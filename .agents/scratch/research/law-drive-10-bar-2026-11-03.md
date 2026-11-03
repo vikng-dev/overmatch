@@ -60,3 +60,29 @@ at very large authored rpm cannot admit fuel still flowing at the limit.
 
 MEASURED inertia gate: formatting, CI clippy and 437 targeted module/source-guard tests passed,
 with four ignored. The collinear-knot regression is green, and the steep branch is refused.
+
+## Launch target and shared final gates
+
+Commit: `driving: target the torque peak available after fuel cut (#146)`.
+
+MEASURED reds: the post-cut raw-peak regression returned no capable launch on the seed-class
+fixture, then on the compact-first fixture. Compact's tail was 900 N m at 2600 rpm with its
+2200 rpm governor, exactly the reported construction. The fixed target searches the same
+fuel-governed polynomial spans used for inertia admission, including each concave span's
+interior vertex. Ties retain the lowest rpm at or above idle. A separate analytic Fixture
+checks a peak inside the fuel ramp, so clamping the raw peak to governed speed is insufficient.
+Both class constructions now select within their own launch domains and replace an initial
+cruise gear. The raw peak N m remains the motoring-drag anchor; only the deliverable peak's rpm
+owns launch and steering rev targets. Shipped peak rpm is unchanged.
+
+MEASURED focused baseline: all three launch/interior-peak/pivot regressions passed. The final
+formatting, CI clippy, whole-tree guards and whole-library run are shared across independent
+items 3, 4 and 5, then each item is committed separately once that final tree is green. Queue
+waits count toward the hour; sharing the final gates avoids repeating the same headless suite.
+
+MEASURED shared final gate: formatting and CI clippy passed, all 44 whole-tree guards passed,
+and the whole library passed 2,266 tests with 29 ignored. The whole-library run includes the
+required track, headless, command and crew-UI tests. No wire type changed; `PROTOCOL_REV` stays
+unchanged. No backlog row names any edited file. The final source was read against error
+handling, branching, base truths, testing and brevity; the explicitly outstanding item-6 rows
+below prevent a claim that the whole drivetrain clears the bar.
