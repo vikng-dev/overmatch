@@ -2,178 +2,146 @@
 
 Subject: the game's Battle flow and damage-model knockout credit, game state only.
 
-**Results reached; the no-crash playtest gate remains open.** The authority named
-PLAYER 19 the winner and announced the next fill-up. The client then panicked before a
-next-fill-up still was saved. **Issue #243 cannot close.** No source, mode, balance, gate or
-runtime lever changed in this lane.
+**Passed: results and the next fill-up are visible, correct and crash-free in this recipe.**
+Both processes remained alive for at least MEASURED 75 wall seconds after the next fill-up
+began, then were deliberately terminated. **Issue #243 can close.** Only this report changes;
+no source, mode, balance, gate or runtime lever changed.
 
-## Full Battle, MEASURED
+## Recipe and repeat
 
-Lane `battle-verify-2`, bay-3, on the source step `scratch: the Battle verification's runner and
-report (#243)`. One loopback authority and one hidden, silent, unattended client on Kalinovo,
-with the shipped `assets/modes/battle.ron` and 30 fixture bots. The fixture video settings remained
-cap 30, debug panel off. Both binaries built once through `scripts/serial-cargo`; the run held one
-machine lock. No frame/tick cost recorder was armed. The prepared runner, audit and capture plan
-were copied to `target/battle-verify/`, changing only their root/output paths.
+Lane `battle-verify-3`, bay-1, on `ui: source matchmaking styles from required overlay data`,
+including `net: keep client input delay fixed across RTT saturation (#243)`.
+MEASURED: both binaries built once through `scripts/serial-cargo`, with `dev_ui,bitprobe`.
+Each run held one machine lock: one loopback authority, one hidden, silent, unattended client,
+Kalinovo, the shipped `assets/modes/battle.ron`, and 30 fixture bots. Fixture video settings
+remained cap 30 and debug panel off. No frame/tick cost recorder was armed.
 
-MEASURED UTC times and authority ticks (`server.log`):
+The copied runner under `target/battle-verify/` stops after 75 seconds of the next fill-up
+instead of the inherited 12-second stop; its watchdog remains 2700 seconds. The copied capture
+plan's horizon was extended to that watchdog. These are fixture bounds, not game settings.
+MEASURED: the first run completed from 19:59:25.342175 to 20:16:59.632983 UTC on 2026-11-03,
+without a panic. Its inherited app-second 900-to-1000 capture gap missed results, which lasted
+from 20:15:28.759005 to 20:15:43.760477. Its next-fill-up still shows `BATTLE STARTS IN 0:36`.
 
-| Phase | UTC | Tick | Log line |
+Decision: complete that run, then repeat with only five-second still cues added across the gap.
+The repeat below supplies the complete visual evidence; its artifacts live in
+`target/battle-verify/repeat/`. MEASURED repeat start: 20:21:01.521184 UTC; cleanup complete:
+20:38:35.869085 UTC, 75.936 wall seconds after the next fill-up's authority announcement.
+The runner observed both processes alive for at least 75 wall seconds after that announcement.
+Both processes exited by deliberate SIGTERM, status -15; neither panicked or observably stalled.
+All UTC times in this report are MEASURED on 2026-11-03.
+
+## Results and next fill-up, MEASURED
+
+| Phase | UTC | Tick | `repeat/server.log` line |
 |---|---|---:|---:|
-| Timed fill-up | 11:20:40.526539 | 306 | 141 |
-| Combat | 11:21:40.322324 | 4146 | 1105 |
-| Late join closed | 11:32:39.538728 | 42546 | 10851 |
-| Results, Winner(CombatantId(19)) | 11:40:50.025188 | 61746 | 15668 |
-| Next fill-up | 11:41:04.795311 | 62706 | 15677 |
+| Timed fill-up | 20:21:05.147918 | 176 | 78 |
+| Combat | 20:22:04.948927 | 4016 | 79 |
+| Late join closed | 20:32:04.929148 | 42416 | 451 |
+| Results, Winner(CombatantId(20)) | 20:37:04.929325 | 61616 | 552 |
+| Next fill-up | 20:37:19.933077 | 62576 | 553 |
+| Next combat | 20:38:20.087232 | 66416 | 621 |
 
-All times above are MEASURED on 2026-11-03. The runner started at 11:20:34.759635 UTC and
-finished cleanup at 11:41:07.266291 UTC. The server remained alive until deliberate SIGTERM;
-the client exited 101 after one panic. Both logs advanced through the transition: no process
-stall was observed, although authority-clock progress fell behind wall time.
+Personally inspected the retained stills:
 
-Personally inspected stills, retained outside git under `target/battle-verify/`:
+- [Results table](../../../target/battle-verify/repeat/cycle-00965.0000s.png): `RESULTS 0:11`,
+  `BATTLE 1 — WINNER: PLAYER 20`, with PLAYER 20 marked `WINNER`.
+- [Next fill-up clock](../../../target/battle-verify/repeat/cycle-00980.0000s.png):
+  `BATTLE STARTS IN 0:56`, the results table gone and fresh tanks present.
 
-- [Initial fill-up](../../../target/battle-verify/cycle-00030.0000s.png): `BATTLE STARTS IN 0:31`.
-- [Scored combat Tab board](../../../target/battle-verify/cycle-00150.0000s.png): `13:31`, all
-  31 rows readable.
-- [Results](../../../target/battle-verify/cycle-01205.0000s.png): `RESULTS 0:12`,
-  `BATTLE 1 — WINNER: PLAYER 19`; winner row has 12 knockouts and five losses.
-- [Last saved still](../../../target/battle-verify/cycle-01215.0000s.png): `RESULTS 0:02`, same table.
-
-MEASURED: the results winner, every row's score, ordering and shared ranks agree with the
-99 authority score facts, independently accumulated in `analysis.json`. No draw occurred.
-The authority's next-fill-up log exists; **no next-fill-up clock still exists**. The last saved
-still is still results. The earlier fixed-cue gap did not miss results in this run.
-
-## Crash diagnosis
-
-MEASURED in `client.log`, lines 43183–43195: `assert_input_buffer_ranges` panicked at
-11:41:05.910600 UTC's following frame:
-
-```text
-input-buffer start Tick(73918) exceeds encoder end Tick(73838)
-```
-
-The input slot for the next tank was claimed at MEASURED 11:41:05.291228 UTC (line 42804).
-DERIVED: the rejected interval is inverted by 80 ticks. The guard prevented the upstream encoder
-from mislabelling future input; deleting it or clearing the buffer would conceal the failure.
-
-Source-backed mechanism: `shipping_input_delay` calls Lightyear's `fixed_input_delay`, whose
-implementation is only fixed while effective RTT plus jitter margin fits its prediction allowance.
-In lightyear_sync 0.30.1, `InputDelayConfig::input_delay_ticks` returns effective RTT ticks minus
-that allowance above the bound. `InputTimelineConfig::recompute_input_delay_on_local_timeline_shift`
-can therefore shrink the delay, while lightyear_inputs 0.30.1's `receive_local_timeline_shift`
-moves buffer starts, remote marks and staged-message ends only by the timeline delta. The encoder
-end also includes the recomputed delay. A retained buffer can consequently start after that end.
-`native_timeline_shift_preserves_the_input_buffer` covers a fixed delay; the cadence test
-`a_resync_that_shrinks_the_input_delay_still_stages_the_next_tick` does not assert the encoder range.
-
-MEASURED corroboration: the client logged input-sync floor-plus-coverage of 11169.87 ticks at
-11:41:05.845882 UTC (line 43113), then 11140.04 at 11:41:05.910600 UTC (line 43180), immediately
-before the panic. This is far outside the helper's DERIVED 103-tick fixed-delay region
-(its 100-tick prediction allowance plus the shipped three-tick delay). The run did not trace
-actual input-delay recomputations or timeline deltas, so their exact before/after values are
-unmeasured. This is the identified unsafe delay-change mechanism, not a claim to have replayed
-that exact transition in isolation.
-
-Decision: retain the crash as a finding. A safe correction must establish an actually fixed delay
-contract or preserve authored input across delay changes; no verified one-change correction was
-established here. No source fix or rerun was made. The separate slowdown was read from logs only.
+MEASURED: all 31 results rows are readable. I transcribed every row and compared it with
+scores independently accumulated from the authority's 113 score facts in `repeat/analysis.json`:
+every knockout count, loss count, order and shared rank agrees. PLAYER 20 has 11 knockouts and
+seven losses; PLAYER 18 also has 11 knockouts but eight losses. The authority's unique winner
+and the screen agree. The fill-up clock agrees with the announced phase and its 60-second
+span; the client survives through the following combat release. No draw occurred.
 
 ## Whole-Battle audit, MEASURED
 
-`target/battle-verify/audit.py` passed against the complete authority log and current data owners;
-`audit.json` retains its output:
+The copied `audit.py` passed unchanged assertions against each complete run and current data
+owners. All knockout facts in each run belong to its completed first Battle; there were no
+additional knockout facts during the observed opening of its second combat.
 
-| Check | Observation |
-|---|---:|
-| Independent marker transitions | 99 |
-| Score/loss entries | 99 |
-| Shooter credits | 99 |
-| Marker and score keys | Equal, including Battle, combatant, life, entity and tick |
-| Repeated combatant/life marker keys | 0 |
-| Completed combat respawns | 99 |
-| Respawn wait range | 640–655 authority ticks |
-| Server panics | 0 |
-| Client panics | 1 |
-| Client interpolation-resync warning lines | 1013 |
-| Results / next-fill-up authority phases | Both observed |
+| Check | Repeat with results still | First run |
+|---|---:|---:|
+| Independent marker transitions | 113 | 139 |
+| Score/loss entries | 113 | 139 |
+| Shooter credits | 113 | 139 |
+| Marker and score keys | Equal | Equal |
+| Repeated combatant/life marker keys | 0 | 0 |
+| Completed combat respawns | 113 | 136 |
+| Respawn wait range, authority ticks | 640–644 | 640–642 |
+| Server / client panics | 0 / 0 | 0 / 0 |
+| Client interpolation-resync warning lines | 4 | 6 |
+| Results / next-fill-up authority phases | Both | Both |
 
-DERIVED required wait: 640 ticks, the shipped ten-second wait divided by the server's timestep,
-rounded up. Every observed respawn followed its prior-life knockout and met that wait.
-MEASURED distinct waits: 640, 641, 642, 643, 644, 645, 646, 648, 649, 650, 652, 653, 655 ticks.
-MEASURED diagnostics: three server ERROR lines (one headless render-app message, two late-input
-corrections); one client ERROR line from winit during panic teardown. The Rust panic was the
-failure; there was no evidence of a preceding process stall.
+DERIVED required wait: 640 ticks, from the shipped ten-second wait and `server::TICK`.
+MEASURED repeat waits: 640, 642 and 644 ticks. Every observed respawn followed its prior-life
+knockout and met the required wait. Marker/score equality includes Battle, combatant, life,
+entity and tick. Full outputs are `audit.json` and `repeat/audit.json`.
 
-## Authority clock against wall clock
+MEASURED repeat diagnostics: four authority `server_late_input_mismatch` ERROR lines
+(`repeat/server.log` lines 80, 268, 617 and 622), no client ERROR lines, and 59 client cosmetic
+path-capacity warnings. The first run has seven authority ERROR lines, no client ERROR lines,
+and 74 cosmetic path-capacity warnings. These observations remain in the logs; no check was
+loosened and no correction, warning or resync was suppressed.
 
-All values below come from existing timestamped logs; no pricing instrumentation ran.
-MEASURED origin: the timed fill-up at tick 306. DERIVED nominal scale: 64 ticks per second from
-`server::TICK`. The table samples the nearest logged fact to each wall minute and gives its
-actual MEASURED wall offset and log line. Direct phase/spawn/score ticks are exact; other tick
-ranges are DERIVED from one diagnostics batch's logged `Loading { since, ready_tick }` windows:
-maximum start through minimum deadline minus one. `protocol::publish_shot_clock` publishes the
-same tick to both clocks, and `shooting::tick_weapon_gate` matures due deadlines before Update
-diagnostics. The ranges expose uncertainty instead of interpolating quiet score-log gaps.
+## Authority clock against wall clock: Mac reading
 
-Authority seconds are DERIVED by subtracting the origin tick and dividing by the nominal scale.
-The last column is the DERIVED interval progress ratio against the preceding row, with both
-endpoint ranges propagated. Knockouts are MEASURED cumulative score-log entries at the sample.
+MEASURED host: Apple M4, 10 available cores, compute/async-compute/IO pools 10/1/1. This is a
+**Mac reading, not a two-core reading**. No two-core lever was used. This reads existing log
+facts and timestamps; it measures no frame or tick cost and attributes no performance cause.
 
-| Wall minute | Wall sample s, MEASURED | Authority tick, exact or DERIVED bound | Authority s, DERIVED | Progress / wall, DERIVED | Knockouts, MEASURED | Server log line |
-|---:|---:|---:|---:|---:|---:|---:|
-| 0 | 0.000 | 306 | 0.000 | — | 0 | 141 |
-| 1 | 59.796 | 4146 | 60.000 | 1.003–1.003 | 0 | 1105 |
-| 2 | 119.519 | 7927–7985 | 119.078–119.984 | 0.989–1.004 | 26 | 2157 |
-| 3 | 180.030 | 11806–11890 | 179.688–181.000 | 0.987–1.023 | 47 | 3201 |
-| 4 | 240.855 | 15607–15644 | 239.078–239.656 | 0.955–0.986 | 58 | 4173 |
-| 5 | 300.252 | 19327–19384 | 297.203–298.094 | 0.969–0.994 | 65 | 5125 |
-| 6 | 360.268 | 23163–23228 | 357.141–358.156 | 0.984–1.016 | 72 | 6087 |
-| 7 | 420.449 | 26941–26960 | 416.172–416.469 | 0.964–0.986 | 75 | 6995 |
-| 8 | 480.502 | 30461 | 471.172 | 0.911–0.916 | 80 | 7873 |
-| 9 | 540.606 | 33671–33673 | 521.328–521.359 | 0.835–0.835 | 84 | 8663 |
-| 10 | 599.221 | 36296–36358 | 562.344–563.312 | 0.699–0.716 | 87 | 9313 |
-| 11 | 660.151 | 39682–39745 | 615.250–616.234 | 0.852–0.884 | 93 | 10135 |
-| 12 | 719.030 | 42506–42548 | 659.375–660.031 | 0.733–0.761 | 95 | 10852 |
-| 13 | 779.665 | 45484–45505 | 705.906–706.234 | 0.757–0.773 | 95 | 11588 |
-| 14 | 840.981 | 48432–48466 | 751.969–752.500 | 0.746–0.760 | 98 | 12334 |
-| 15 | 899.435 | 50050–50113 | 777.250–778.234 | 0.423–0.449 | 99 | 12756 |
-| 16 | 958.688 | 51970–52033 | 807.250–808.234 | 0.490–0.523 | 99 | 13236 |
-| 17 | 1020.520 | 54060–54068 | 839.906–840.031 | 0.512–0.530 | 99 | 13748 |
-| 18 | 1081.104 | 56472–56530 | 877.594–878.500 | 0.620–0.637 | 99 | 14356 |
-| 19 | 1140.831 | 59027–59060 | 917.516–918.031 | 0.653–0.677 | 99 | 14996 |
-| 20 | 1200.535 | 61461–61522 | 955.547–956.500 | 0.628–0.653 | 99 | 15604 |
+MEASURED origin: timed fill-up at tick 176, 20:21:05.147918 UTC. DERIVED nominal scale:
+64 ticks per second from `server::TICK`. For each wall minute, the table takes the nearest
+exact authority phase, spawn or score fact and shows its actual timestamp offset. It does not
+interpolate to the minute. DERIVED largest sample offset from its requested minute: 15.007 s.
+The older periodic diagnostic dumps were removed by `diagnostics: remove unread server and
+client log dumps`; no recorder or additional logging lever was armed to replace them.
 
-MEASURED/DERIVED end points: results at 1209.499 wall seconds and exactly 960 authority seconds;
-next fill-up at 1224.269 wall seconds and exactly 975 authority seconds. Combat's 900 authority
-seconds took MEASURED 1149.703 wall seconds, DERIVED mean progress 0.783 of real time. Results'
-15 authority seconds took MEASURED 14.770 wall seconds.
+Authority seconds are DERIVED as `(tick - 176) / 64`; progress/wall is the authority-second
+difference divided by the actual timestamp difference from the preceding row. Log lines are
+in `target/battle-verify/repeat/server.log`.
 
-The slowdown is gradual: the first full interval whose upper bound is below 1.0 is the sample
-near wall minute four (0.955–0.986), with a clearer decline by minute eight (0.911–0.916).
-The lowest completed minute interval is near minute fifteen (0.423–0.449). The late intervals
-recover to approximately 0.63–0.68 before results. These are clock-progress ratios, not tick costs.
+| Wall minute | Actual wall s, MEASURED | Tick, MEASURED | Authority s, DERIVED | Progress / wall, DERIVED | Log line |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 0.000 | 176 | 0.000 | — | 78 |
+| 1 | 59.801 | 4016 | 60.000 | 1.0033 | 79 |
+| 2 | 118.890 | 7796 | 119.062 | 0.9996 | 189 |
+| 3 | 178.968 | 11639 | 179.109 | 0.9995 | 282 |
+| 4 | 240.922 | 15606 | 241.094 | 1.0005 | 328 |
+| 5 | 302.907 | 19572 | 303.062 | 0.9997 | 359 |
+| 6 | 359.757 | 23211 | 359.922 | 1.0002 | 382 |
+| 7 | 435.007 | 28027 | 435.172 | 1.0000 | 399 |
+| 8 | 482.043 | 31039 | 482.234 | 1.0006 | 415 |
+| 9 | 537.891 | 34614 | 538.094 | 1.0002 | 426 |
+| 10 | 602.165 | 38727 | 602.359 | 0.9999 | 431 |
+| 11 | 659.781 | 42416 | 660.000 | 1.0004 | 451 |
+| 12 | 724.210 | 46533 | 724.328 | 0.9984 | 483 |
+| 13 | 780.017 | 50110 | 780.219 | 1.0015 | 499 |
+| 14 | 829.134 | 53253 | 829.328 | 0.9998 | 515 |
+| 15 | 901.088 | 57858 | 901.281 | 1.0000 | 530 |
+| 16 | 959.781 | 61616 | 960.000 | 1.0004 | 552 |
+| 17 | 1034.939 | 66416 | 1035.000 | 0.9979 | 621 |
 
-What grew alongside it, MEASURED: cumulative knockouts rose from 58 near minute four to 80 near
-minute eight and 99 near minute fifteen, then stayed at 99 through results. Every combat
-`SIM-EVIDENCE` tank census was 31 simulated of 31 observed; results logged zero, next fill-up 31.
-The log supplies no independent live wreck, loose-debris or crater census. Cumulative cook-offs
-are not a live wreck count. No debris/crater growth or causal cost attribution is claimed.
-The continuing slowdown after the knockout count stopped growing is preserved in the table;
-results' clock recovery coincides with the logged zero-tank census. A causal explanation of that
-slowdown needs a separate investigation; this lane made no pricing run or performance change.
+MEASURED phase intervals: combat's exactly DERIVED 900 authority seconds took 899.980 wall
+seconds (DERIVED mean progress 1.00002); results' 15 authority seconds took 15.004 wall seconds.
+The next fill-up's 60 authority seconds took 60.154 wall seconds. The first run's combat took
+900.025 wall seconds and results took 15.001 wall seconds. Both runs' full minute tables and
+source samples remain in their `clock-table.md` and `analysis.json` artifacts. No sustained
+clock slowdown like the prior report's run is observed here; this is an observation, not a gate.
 
 ## Knockout mix, MEASURED
 
-The game's damage model recorded **96 cook-offs and three crew-loss knockouts** over the full
-Battle. This is an observation, with no tuning or explanation attached.
+The game's damage model recorded **109 cook-offs and four crew-loss knockouts** in the repeat's
+completed Battle. The first completed Battle recorded **135 cook-offs and four crew-loss
+knockouts**. Reported as observed, with no tuning or explanation attached.
 
 ## Checks and disposition
 
-MEASURED: formatting (`cargo fmt --all --check`) and CI clippy
-(`scripts/serial-cargo clippy --locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`)
-passed. The targeted/guard run passed 79 tests with no failures or ignored cases:
+MEASURED PASS: `cargo fmt --all --check`; CI clippy with `--locked --workspace --all-targets
+--features dev_ui,bitprobe -- -D warnings`; and the targeted/guard run below, 79 passed,
+none failed or ignored:
 
 ```sh
 scripts/serial-cargo test --lib --features dev_ui,bitprobe -- \
@@ -181,18 +149,12 @@ scripts/serial-cargo test --lib --features dev_ui,bitprobe -- \
   doc_citations ui_ascii net_boundary bake::
 ```
 
-This includes the Battle/HUD, score, native-input guard/delay tests and all required whole-tree
-guards. Logs are `target/battle-verify/fmt.log`, `clippy.log` and `tests.log`. Both application
-binaries built successfully; the linker warned about compact-unwind section size. The unchanged
-source passes these tests despite the reproduced live transition crash; they do not clear that
-playtest gate. `git diff --check` passed; the report was reviewed against all five lenses and no
-backlog row names it.
+Logs: `target/battle-verify/{build,fmt,clippy,tests}.log`. The binary build succeeded with the
+linker's compact-unwind section-size warning. `git diff --check` passed. The report was checked
+against all five lenses; no backlog row names it. No source fix was needed.
 
-#230's previously completed attribution acceptance remains supported by this full-Battle audit.
-#243's results table and winner are now observed and agree with the authority. Its next-fill-up
-view remains unobserved because of the client panic, so **#243 cannot close**, and the owner's
-no-crash full-round playtest gate remains open.
-
-All game processes started by this lane were terminated. Logs, stills, copied runners and
-analysis outputs remain only in `target/battle-verify/` in bay-3; nothing heavy is committed.
-No merge, push, issue comment or bay release occurred.
+#243's results table, authoritative winner and next-fill-up clock are now observed and agree;
+its hidden-window acceptance and this recipe's no-crash full-Battle gate pass. #243 can close.
+All lane-started game processes are stopped. Logs, stills, copied runners and analyses remain
+only under this bay's `target/battle-verify/`; only this report is committed. No merge, push,
+issue comment or bay release occurred.
