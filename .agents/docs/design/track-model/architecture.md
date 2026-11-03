@@ -1106,3 +1106,36 @@ motion, now reports MEASURED 0.075287 m rollback and 0.227759 m/s peak reverse s
 its historical 1.200275 m and 0.467284 m/s above. Its total hull motion exceeds K by DERIVED
 0.287 mm; it is distinct from the locked-pad recoverable-travel invariant and the full-app
 free-support stop. No extra correction is applied to that adapter.
+
+### Ground review verification, completed
+
+Subject: the game's driving model; game state only.
+
+| reviewer | finding | verified / not a defect | fixed in (subject) |
+|---|---|---|---|
+| Codex fix-ground-2 P2 | analyzer omitted low-load contacts from capacity checks | verified red: zero normal load, 10 N capacity and 100 N force passed; every contact is now checked | driving: check low-load traction and live stopping capacity (#146) |
+| Codex fix-ground-2 P2 | scripted stopping caller lacked a capacity-wiring witness | verified: the new test executes `battle::drive`; replacing live capacity with the brake budget makes it fail reversal | driving: check low-load traction and live stopping capacity (#146) |
+| Codex fix-ground-2 P3 | wrap duplicated gravity | verified: wrap and wheels now read `derive::G`; remaining cosmetic solver constants name their Resolution jobs | driving: share gravity between belt wrap and wheels (#146) |
+| Codex fix-ground-2 P3 | Driver prose said geometric mean | verified: `load::observe` weights coefficients arithmetically by contact length; prose corrected | driving: bound recoverable ground shear on reversal (#146) |
+
+The analyzer's FIXTURE inputs reject over-capacity force at zero normal load and nonzero force
+at zero capacity; below-capacity and zero-force/zero-capacity cases pass. The caller witness
+keeps one lane pose and construction, varies reported capacity, and reads coupled mass and
+command transition from their owners. Its approach speed is bounded so both stopping points
+fit any declared brake strength. The stop witnesses also require rest before reading rebound,
+so zero traction cannot masquerade as bounded return.
+
+Mutation verification: the original displacement law is red on fixed-pad and full-app reversal;
+plain Dahl is red on closed dither; restoring the nonlinear force readout is red on effective
+compliance; bypassing reported capacity with the brake budget is red in the actual scripted
+driver; the original analyzer's low-load filter accepts the forbidden force fixture. Every
+mutant is absent from the committed code.
+
+Final verification: fmt and CI-feature workspace/all-target clippy are green. The affected
+batch passes 746 tests (5 intentionally ignored); wrap/caller/doc-citation verification passes
+7 tests. The required whole-library run passes 2,311 tests, with 33 intentionally ignored and
+no failures. The final test-only fixture robustness and stop-premise changes pass 47 targeted tests,
+including the whole-tree guards; no further simulation behavior changes follow that
+whole-library run. All runs are unattended, headless and muted under the machine lock. No
+captures, pricing, pushes, wire changes or excluded-module edits were made. Backlog driving-09
+and the no-ground rubble fixtures remain explicitly outside this lane, as recorded above.

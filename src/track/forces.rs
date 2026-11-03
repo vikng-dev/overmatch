@@ -2913,6 +2913,11 @@ mod tests {
                 peak = peak.max(distance);
                 reverse = reverse.min(velocity);
             }
+            // FIXTURE rest observation: below 1 mm/s before comparing recovered travel.
+            assert!(
+                velocity.abs() < 0.001,
+                "the pad must stop before its rebound is read"
+            );
             let rollback = peak - distance;
             println!(
                 "MEASURED fixed pad sideways={sideways}: peak={peak:.6} m rollback={rollback:.6} m reverse={reverse:.6} m/s"

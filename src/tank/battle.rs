@@ -1178,6 +1178,72 @@ mod ownership_tests {
         assert_eq!(stopping_advance(1.0, -0.1, fixed_dt), f32::INFINITY);
     }
 
+    /// The game's driving model: the scripted driver must use live contact capacity when
+    /// choosing reversal. Replacing that argument with a rigid pair or brake budget fails.
+    /// FIXTURE: one slab-lane pose between two capacities' stopping points. Approach speed
+    /// fits the lane at any declared brake strength and command slew.
+    #[cfg(feature = "bitprobe")]
+    #[test]
+    fn scripted_reversal_reads_live_contact_capacity() {
+        use crate::track::sim::{TrackGear, TrackGripEffect};
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        app.add_plugins((crate::bake::plugin, crate::track::sim::sim_plugin))
+            .init_resource::<Time<Virtual>>()
+            .init_resource::<Time<Fixed>>();
+        app.world_mut().run_schedule(Startup);
+        app.world_mut().run_schedule(PreUpdate);
+        let plan = Plan::new(SEED);
+        let lane = plan.tanks[0].lane;
+        let gear = app.world().resource::<TrackGear>();
+        let mass = gear.landing_mass();
+        let available = 2.0 * gear.trans().brake_capacity_n;
+        let capacities = [available * 0.1, available * 0.4]; // FIXTURE brake-limited shares.
+        let dt = app
+            .world()
+            .resource::<Time<Fixed>>()
+            .timestep()
+            .as_secs_f32();
+        let transition = dt + 1.0 / crate::track::drive::drive_feel().rise_per_second.0;
+        // FIXTURE: stopping and command-transition travel each fit a quarter lane.
+        let speed = 1.0_f32
+            .min((capacities[0] * lane.length() / (2.0 * mass)).sqrt())
+            .min(lane.length() / (4.0 * transition));
+        let stops =
+            capacities.map(|capacity| speed * speed * mass / (2.0 * capacity) + speed * transition);
+        let remaining = (stops[0] + stops[1]) / 2.0;
+        let axis = lane.axis();
+        let point = lane.front - axis * remaining;
+        app.insert_resource(plan);
+        for (capacity, expected_throttle) in capacities.into_iter().zip([-1.0, 1.0]) {
+            app.insert_resource(Runs {
+                start: Some(0.0),
+                tanks: Vec::new(),
+            });
+            let tank = app
+                .world_mut()
+                .spawn((
+                    BattleSlot(0),
+                    TankCommand::default(),
+                    Position(Vec3::new(point.x, 0.0, point.y)),
+                    Rotation(lane.spawn_turn()),
+                    LinearVelocity(Vec3::new(axis.x, 0.0, axis.y) * speed),
+                    TrackGripEffect {
+                        traction_capacity_n: capacity,
+                        ..Default::default()
+                    },
+                ))
+                .id();
+            app.world_mut().run_system_once(drive).unwrap();
+            assert_eq!(
+                app.world().get::<TankCommand>(tank).unwrap().throttle,
+                expected_throttle,
+                "the caller must price the reported {capacity} N capacity"
+            );
+            app.world_mut().despawn(tank);
+        }
+    }
+
     /// In the game's damage model, evidence follows the struck volume's owner even when the
     /// face is far from that owner's origin; a nearby environment face stays environment.
     #[test]

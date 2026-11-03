@@ -221,10 +221,10 @@ def check_hard_gates(run, gates):
         {"step": step, "max_step_excess": max_excess, "convergence_violations": conv_viol},
     )
 
-    # (2) Force-capacity circle; skip unloaded contacts and allow serialized quantization.
+    # (2) Force-capacity circle for every contact, including cohesion at zero normal load.
     # The force pass publishes its capacity independently of mobilization.
     c = run["contacts"]
-    loaded = c[c[:, 5] >= 1.0] if c.size else c
+    loaded = c
     zero = loaded[:, 6] <= 0.0
     zero_viol = int(np.count_nonzero(zero & np.any(np.abs(loaded[:, 3:5]) > Q_FORCE, axis=1)))
     loaded = loaded[~zero]
@@ -249,9 +249,8 @@ def check_hard_gates(run, gates):
         {"contacts": int(loaded.shape[0]), "max_e_loaded": emax_loaded, "max_e": emax, "violations": viol},
     )
 
-    # Capacity does not define recoverable soil energy. The unloading decision and its
-    # missing energy witness are recorded in architecture section 5a; no rigid-spring K
-    # or energy bound is inferred from this trace.
+    # Capacity alone does not define recoverable energy; section 5a's travel witnesses
+    # are separate from this trace's force-capacity gate.
 
     # (3) Finiteness.
     gate(gates, "finite", run["nonfinite"] == 0, {"nonfinite_values": run["nonfinite"]})

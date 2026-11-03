@@ -1083,6 +1083,11 @@ fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
         );
         capacity = expected;
     }
+    // FIXTURE rest observation: below 1 mm/s before comparing recovered travel.
+    assert!(
+        app.world().get::<LinearVelocity>(tank).unwrap().0.z.abs() < 0.001,
+        "the hull must stop before its rebound is read"
+    );
     assert!(
         capacity > 0.0,
         "the stopped fixture remains supported on its flat soil"
