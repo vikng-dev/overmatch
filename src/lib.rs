@@ -881,7 +881,7 @@ impl Plugin for NetClientPlugin {
 }
 
 /// Physics for offline game/sandboxes: default interpolation eases only opted-in
-/// [`eased_dynamic_body`] bodies. Unmoving bodies take no easing writes.
+/// [`eased_dynamic_body`] bodies. Bodies without easing markers take no easing writes.
 /// Rejected `PhysicsInterpolationPlugin::interpolate_all()` rewrites static-body transforms
 /// each fixed step/frame, re-propagating hierarchies and re-extracting hidden meshes
 /// (`.agents/scratch/perf-2026-10-29/bookkeeping-diagnosis.md`).

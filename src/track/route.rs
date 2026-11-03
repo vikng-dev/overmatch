@@ -7,8 +7,8 @@
 //! through `wrap::station_params`. Shared builders do not imply identical return polylines.
 //!
 //! Hull-local side plane: `(z, y)` `Vec2`s, CCW (lower front→rear, return rear→front), outward
-//! normal `(tan.y, −tan.x)`. Circles use pin-line radii (wheel radius + half track thickness),
-//! ordered front→rear.
+//! normal `(tan.y, −tan.x)`. Circles use pin-line radii: contact radius + measured
+//! `pin_to_inner`, except the sprocket polygon derived from pitch and tooth count; ordered front→rear.
 
 use bevy::math::Vec2;
 
@@ -305,7 +305,7 @@ fn ride_bracket(from: Vec2, to: Vec2, h: f32, c: Vec2, r: f32) -> Option<(f32, f
 ///
 /// # What the emitted polyline guarantees about the circles it rides
 ///
-/// [`SagClip::EveryCircle`] bounds every drawn segment's cut by [`SAG_CLIP_INSET`]:
+/// [`SagClip::EveryCircle`] refines ride chords toward [`SAG_CLIP_INSET`]:
 ///
 /// * inside [`ride_bracket`], walk the hemisphere at chords ≤ [`sag_clip_chord`]. Emitting
 ///   `max(parabola, hemispheres)` can only raise a segment off any circle;
@@ -316,13 +316,15 @@ fn ride_bracket(from: Vec2, to: Vec2, h: f32, c: Vec2, r: f32) -> Option<(f32, f
 /// subdivide steps; merging/overlaps cannot lengthen them.
 ///
 /// A penetration running off the span domain clamps its ride to an endpoint, possibly its deepest
-/// point. The ownership rule below makes every non-owning circle lift that endpoint, so even an
-/// off-domain ride starts on the circle rather than inside it.
+/// point. Circles not passing the radial endpoint test below lift that endpoint. The test also
+/// exempts lower-pole contacts: their adjoining segments can exceed the bound (driving-12 in
+/// `.agents/lenses/backlog.md`). This is not a universal clearance guarantee.
 ///
 /// # Who may hand a span endpoint through unclipped
 ///
-/// [`SagClip::EveryCircle`] passes an endpoint verbatim only through the circle it sits on
-/// ([`SPAN_END_ON_CIRCLE`]). Test position, not index: promoted subspan ends sit on road wheels.
+/// [`SagClip::EveryCircle`] skips endpoint projection for each circle whose circumference
+/// contains it within [`SPAN_END_ON_CIRCLE`]. This radial test does not establish support ownership;
+/// promoted subspan ends can sit on road wheels.
 /// Tangent points/promoted tops must join the preceding run exactly; recomputing
 /// `c.y + √(r² − dz²)` could round away a ULP from the exact input.
 /// All other circles clip it: a blanket exemption leaves off-domain penetration's deepest point
@@ -436,8 +438,8 @@ fn sag_span_at(
 /// Step in angle, not x: equal x steps give unbounded chords near vertical `c.x ± r`.
 /// [`wrap_joint_angle`] supplies the chord/angle relation shared with sprocket meshing and bounds
 /// work by `π / step`, requiring no cap. Merging circles only subdivides steps, preserving bounds.
-/// Dedup bracket ends coincident with uniform samples/span ends; re-pin 0/1 because callers pass
-/// endpoints through unclipped.
+/// Dedup bracket ends coincident with uniform samples/span ends; re-pin 0/1 so endpoint
+/// projection and the radial exemption test start from the exact span ends.
 fn sag_samples(
     from: Vec2,
     to: Vec2,
@@ -480,7 +482,7 @@ fn sag_samples(
     // ends/uniform samples). Microns-apart ends are distinct shape; merging drops their ride.
     // Remaining sub-micron segments are cheap: `resample` skips degenerates, `polyline_len` sums.
     ts.dedup_by(|a, b| *a <= b.next_up());
-    // A neighbouring release abscissa may win dedup; restore exact endpoints for unclipped joins.
+    // A neighbouring release abscissa may win dedup; restore exact span-end parameters.
     ts[0] = 0.0;
     *ts.last_mut().expect("the uniform samples are never empty") = 1.0;
     ts
@@ -510,7 +512,7 @@ pub fn external_tangent(c0: Vec2, r0: f32, c1: Vec2, r1: f32, side_sign: f32) ->
 }
 
 /// Resolution: fixed chords per [`arc`]. Cut depth depends on sweep angle: a road wheel's few
-/// degrees cost microns; an end circle's CLAIMED ~165° costs a link length.
+/// degrees cost microns; DERIVED at a 165° sweep, ten chords cut by `r·(1−cos(8.25°)) ≈ 0.01035r`.
 /// `wrap` clearance and `rig_geom` enclosure budgets derive from this chord via [`chord_inset`].
 pub const ARC_SEGMENTS: usize = 10;
 
@@ -851,7 +853,8 @@ mod tests {
     /// the start (`c.x <= lo`) avoids promotion, while its x-range still covers the start and
     /// its lower centre puts the endpoint inside by `r − |off|`: MEASURED 47.2 mm, 47× budget.
     /// The same endpoint sits on its idler owner; the far endpoint sits on its sprocket owner,
-    /// whose penetration runs off the opposite domain end. Both exemptions must survive.
+    /// whose penetration runs off the opposite domain end. These top endpoints do not distinguish
+    /// owner exemption from projection, which returns the same tops.
     /// Compute the blanket-exemption counterfactual by restoring the first point: clip decisions
     /// do not affect the abscissa set, so this reconstructs that drawing exactly.
     #[test]
@@ -933,7 +936,7 @@ mod tests {
             (lifted.distance(rogue.0) - rogue.1).abs() <= SPAN_END_ON_CIRCLE,
             "the lifted start is not on the rogue wheel's hemisphere: {lifted:?}"
         );
-        // The owning far circle must still preserve its exact tangent point.
+        // The far endpoint stays within the radial tolerance of its tangent point.
         let far = *pts.last().expect("the drape is never empty");
         assert!(
             far.distance(to) <= SPAN_END_ON_CIRCLE,

@@ -998,8 +998,8 @@ fn build_rig(
         track.suspension.engage,
     ));
 
-    // Use the game's validated transmission seam and MEASURED chord-exact sprocket pitch
-    // radius (`geom.rest`'s first circle) + half-tread (`geom.plane_x`). The rejected τ-arc
+    // Use the game's validated transmission seam and DERIVED chord-exact sprocket pitch
+    // radius (from pin pitch and tooth count) (`geom.rest`'s first circle) + half-tread (`geom.plane_x`). The rejected τ-arc
     // radius `pitch·teeth/τ` is feel-neutral (reductions derive against it, so it cancels),
     // but does not represent the pin polygon.
     let transmission = RigTransmission(
@@ -1395,9 +1395,10 @@ fn tune_rig_counts(
     }
 }
 
-/// Commit count intent in order: rebuild [`RigGeom`] without re-reading the glb
-/// ([`RigGeom::rebuild`]), then [`PinBelt`] (pitch × link_count length, link_count stations),
-/// construction inertia/transmission, and loop-indexed state via [`BeltState::reseat`]. Geometry keeps length, sprocket circle, ride height and window
+/// Rebuild [`RigGeom`] without re-reading the glb ([`RigGeom::rebuild`]); validate construction,
+/// then update inertia/transmission, geometry, [`PinBelt`] (pitch × link_count length,
+/// link_count stations), and loop-indexed state via [`BeltState::reseat`].
+/// Geometry keeps length, sprocket circle, ride height and window
 /// verdict coherent; grip slabs must match the loop and never resize in the force law.
 /// Skip the initial insert and matching/unchanged counts to avoid per-frame rebuilds.
 /// [`refresh_envelope`] / [`refresh_track_colliders`] consume the geometry change.
