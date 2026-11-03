@@ -15,20 +15,15 @@
       "in_group_frames": 112976
     },
     "changed": {
-      "apply": 0,
       "laws": 1,
       "strike": 0,
       "structural": 0,
-      "weigh": 1,
-      "fall": 0,
-      "loose_groups": 0,
-      "incident": 0,
-      "held": 0,
-      "in_group_frames": 0
+      "weigh": 1
     },
     "contact": 111975,
     "field": 0,
-    "splits": 1
+    "splits": 1,
+    "changed_definition": "laws: persistent events after moving Fall events removed; splits counted separately. strike: wear/dust/crack. structural/weigh: nonempty failures. Other changed slots were not instrumented; fall writes transient fates which the caller restores for unchanged moving owners."
   },
   "counter-ram": {
     "kind": "MEASURED dev opt1; recurring contact window",
@@ -46,19 +41,14 @@
       "in_group_frames": 117600
     },
     "changed": {
-      "apply": 0,
       "laws": 0,
       "strike": 0,
       "structural": 0,
-      "weigh": 0,
-      "fall": 0,
-      "loose_groups": 0,
-      "incident": 0,
-      "held": 0,
-      "in_group_frames": 0
+      "weigh": 0
     },
     "contact": 116129,
     "field": 0,
-    "splits": 0
+    "splits": 0,
+    "changed_definition": "laws: persistent events after moving Fall events removed; splits counted separately. strike: wear/dust/crack. structural/weigh: nonempty failures. Other changed slots were not instrumented; fall writes transient fates which the caller restores for unchanged moving owners."
   }
 }

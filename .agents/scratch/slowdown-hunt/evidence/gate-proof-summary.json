@@ -7,5 +7,6 @@
   "old_no_live_joint_ns": 24908834425,
   "new_no_live_joint_ns": 298655357,
   "verdict_mismatches": 0,
-  "fixture_tests": 87
+  "fixture_tests": 87,
+  "timing_order": "Original then candidate; original SectionCache retained warm across calls. Candidate can benefit from cache order; these are edit-profile mechanism timings, not release prices."
 }

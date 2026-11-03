@@ -973,6 +973,517 @@
           }
         }
       ]
+    },
+    "shell-after": {
+      "label": "shell-after",
+      "profile": "profiling-symbols",
+      "tail": {
+        "periods": 20,
+        "awake": 40.5,
+        "asleep": 12.5,
+        "tick_ms": 5.1411,
+        "physics_ms": 0.769,
+        "send_ms": 0.0582,
+        "hz": 63.95,
+        "cpu_pct": 53.3,
+        "entities": 14469.0
+      },
+      "samples": [
+        {
+          "window_s": [
+            25.08529029181227,
+            29.08529029181227
+          ],
+          "stats": {
+            "periods": 5,
+            "awake": 45,
+            "asleep": 7,
+            "tick_ms": 5.4042,
+            "physics_ms": 0.8467,
+            "send_ms": 0.055,
+            "hz": 63.9,
+            "cpu_pct": 48.5,
+            "entities": 14466
+          },
+          "profile": {
+            "counts": {
+              "total_thread_samples": 48240,
+              "wait_samples": 46677,
+              "active_samples": 1563,
+              "scheduler": 1561,
+              "solver": 93,
+              "contact_transfer": 29,
+              "narrow_phase": 158,
+              "scheduler_self": 199,
+              "child_pose": 36,
+              "aabb": 38,
+              "apply_deposits": 793,
+              "weigh": 685,
+              "held": 83,
+              "incident": 98,
+              "loose_groups": 202,
+              "collider_propagation": 54,
+              "transforms": 42,
+              "structural": 3
+            },
+            "inclusive_pct": {
+              "scheduler": 99.87,
+              "solver": 5.95,
+              "contact_transfer": 1.86,
+              "narrow_phase": 10.11,
+              "scheduler_self": 12.73,
+              "child_pose": 2.3,
+              "aabb": 2.43,
+              "apply_deposits": 50.74,
+              "weigh": 43.83,
+              "held": 5.31,
+              "incident": 6.27,
+              "loose_groups": 12.92,
+              "collider_propagation": 3.45,
+              "transforms": 2.69,
+              "structural": 0.19
+            },
+            "top_self": [
+              [
+                "overmatch::buildings::fracture::weigh",
+                109
+              ],
+              [
+                "__psynch_cvsignal",
+                105
+              ],
+              [
+                "overmatch::buildings::fracture::loose_groups",
+                100
+              ],
+              [
+                "overmatch::buildings::fracture::held",
+                69
+              ],
+              [
+                "_xzm_free",
+                49
+              ],
+              [
+                "core::slice::sort::unstable::quicksort::quicksort::<usize, <usize as core::cmp::PartialOrd>::lt>",
+                46
+              ],
+              [
+                "_platform_memset",
+                34
+              ],
+              [
+                "<avian3d::collision::collider::collider_transform::plugin::ChildColliderPoses>::update",
+                34
+              ],
+              [
+                "overmatch::buildings::fracture::ring_groups",
+                33
+              ],
+              [
+                "overmatch::buildings::fracture::ring",
+                29
+              ],
+              [
+                "<avian3d::dynamics::solver::contact::ContactConstraint>::solve",
+                28
+              ],
+              [
+                "_platform_memmove",
+                26
+              ],
+              [
+                "avian3d::collision::collider::collider_transform::plugin::propagate_collider_transforms_recursive",
+                26
+              ],
+              [
+                "_xzm_xzone_malloc",
+                25
+              ],
+              [
+                "xzm_realloc",
+                24
+              ]
+            ]
+          }
+        },
+        {
+          "window_s": [
+            45.05705287493765,
+            49.05705287493765
+          ],
+          "stats": {
+            "periods": 5,
+            "awake": 44,
+            "asleep": 9,
+            "tick_ms": 5.4444,
+            "physics_ms": 0.7878,
+            "send_ms": 0.0541,
+            "hz": 63.9,
+            "cpu_pct": 47.7,
+            "entities": 14469
+          },
+          "profile": {
+            "counts": {
+              "total_thread_samples": 48600,
+              "wait_samples": 47121,
+              "active_samples": 1479,
+              "scheduler": 1478,
+              "solver": 60,
+              "scheduler_self": 196,
+              "narrow_phase": 115,
+              "child_pose": 24,
+              "aabb": 40,
+              "contact_transfer": 13,
+              "transforms": 39,
+              "apply_deposits": 826,
+              "weigh": 714,
+              "held": 104,
+              "incident": 104,
+              "loose_groups": 178,
+              "structural": 21,
+              "collider_propagation": 46
+            },
+            "inclusive_pct": {
+              "scheduler": 99.93,
+              "solver": 4.06,
+              "scheduler_self": 13.25,
+              "narrow_phase": 7.78,
+              "child_pose": 1.62,
+              "aabb": 2.7,
+              "contact_transfer": 0.88,
+              "transforms": 2.64,
+              "apply_deposits": 55.85,
+              "weigh": 48.28,
+              "held": 7.03,
+              "incident": 7.03,
+              "loose_groups": 12.04,
+              "structural": 1.42,
+              "collider_propagation": 3.11
+            },
+            "top_self": [
+              [
+                "overmatch::buildings::fracture::weigh",
+                164
+              ],
+              [
+                "__psynch_cvsignal",
+                102
+              ],
+              [
+                "overmatch::buildings::fracture::loose_groups",
+                100
+              ],
+              [
+                "core::slice::sort::unstable::quicksort::quicksort::<usize, <usize as core::cmp::PartialOrd>::lt>",
+                88
+              ],
+              [
+                "overmatch::buildings::fracture::held",
+                82
+              ],
+              [
+                "_xzm_free",
+                48
+              ],
+              [
+                "avian3d::collision::collider::collider_transform::plugin::propagate_collider_transforms_recursive",
+                31
+              ],
+              [
+                "<&mut overmatch::ballistics::motion::snapshot as core::ops::function::FnMut<(bevy_ecs::change_detection::params::ResMut<overmatch::ballistics::motion::ColliderMotion>, bevy_ecs::system::query::Query<(bevy_ecs::entity::Entity, &avian3d::physics_transform::transform::Position, &avian3d::physics_transform::transform::Rotation, bevy_ecs::change_detection::params::Ref<avian3d::collision::collider::parry::Collider>, core::option::Option<&avian3d::collision::collider::collider_hierarchy::ColliderOf>, core::option::Option<&avian3d::collision::collider::collider_transform::ColliderTransform>)>, bevy_ecs::system::query::Query<bevy_ecs::entity::Entity, (bevy_ecs::query::filter::With<avian3d::collision::collider::parry::Collider>, bevy_ecs::query::filter::Or<(bevy_ecs::query::filter::Changed<avian3d::physics_transform::transform::Position>, bevy_ecs::query::filter::Changed<avian3d::physics_transform::transform::Rotation>, bevy_ecs::query::filter::Changed<avian3d::collision::collider::parry::Collider>, bevy_ecs::query::filter::Changed<avian3d::collision::collider::collider_hierarchy::ColliderOf>, bevy_ecs::query::filter::Changed<avian3d::collision::collider::collider_transform::ColliderTransform>)>)>, bevy_ecs::system::query::Query<(&avian3d::physics_transform::transform::Position, &avian3d::physics_transform::transform::Rotation)>, bevy_ecs::system::query::Query<(bevy_ecs::entity::Entity, &avian3d::physics_transform::transform::Position, &avian3d::physics_transform::transform::Rotation), bevy_ecs::query::filter::With<avian3d::dynamics::rigid_body::RigidBody>>, bevy_ecs::system::query::Query<bevy_ecs::entity::Entity, (bevy_ecs::query::filter::With<avian3d::dynamics::rigid_body::RigidBody>, bevy_ecs::query::filter::Or<(bevy_ecs::query::filter::Changed<avian3d::physics_transform::transform::Position>, bevy_ecs::query::filter::Changed<avian3d::physics_transform::transform::Rotation>, bevy_ecs::query::filter::Added<avian3d::dynamics::rigid_body::RigidBody>)>)>, (bevy_ecs::message::message_reader::MessageReader<avian3d::collision::collider::collider_transform::plugin::Reenabled>, bevy_ecs::system::query::Query<&avian3d::collision::collider::collider_hierarchy::RigidBodyColliders>))>>::call_mut",
+                29
+              ],
+              [
+                "<alloc::vec::Vec<usize> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<usize, core::iter::adapters::filter::Filter<core::ops::range::Range<usize>, overmatch::buildings::fracture::loose_groups::{closure#2}>>>::from_iter",
+                24
+              ],
+              [
+                "<bevy_ecs::query::iter::QueryIter<bevy_ecs::entity::Entity, bevy_ecs::query::filter::Or<(bevy_ecs::query::filter::Changed<bevy_transform::components::transform::Transform>, bevy_ecs::query::filter::Changed<bevy_ecs::hierarchy::ChildOf>, bevy_ecs::query::filter::Added<bevy_transform::components::global_transform::GlobalTransform>)>>>::fold_over_storage_range::<(bevy_utils::buffered_channel::BufferedSender<bevy_ecs::entity::Entity>, bevy_utils::buffered_channel::BufferedSender<bevy_ecs::entity::Entity>), <bevy_ecs::query::par_iter::QueryParIter<bevy_ecs::entity::Entity, bevy_ecs::query::filter::Or<(bevy_ecs::query::filter::Changed<bevy_transform::components::transform::Transform>, bevy_ecs::query::filter::Changed<bevy_ecs::hierarchy::ChildOf>, bevy_ecs::query::filter::Added<bevy_transform::components::global_transform::GlobalTransform>)>>>::for_each_init<bevy_transform::systems::mark_dirty_trees::{closure#0}::{closure#2}::{closure#1}, bevy_transform::systems::mark_dirty_trees::{closure#0}::{closure#2}::{closure#0}, (bevy_utils::buffered_channel::BufferedSender<bevy_ecs::entity::Entity>, bevy_utils::buffered_channel::BufferedSender<bevy_ecs::entity::Entity>)>::{closure#0}>",
+                24
+              ],
+              [
+                "_xzm_xzone_malloc",
+                21
+              ],
+              [
+                "<avian3d::collision::collider::collider_transform::plugin::ChildColliderPoses>::update",
+                21
+              ],
+              [
+                "_platform_memmove",
+                21
+              ],
+              [
+                "<alloc::raw_vec::RawVecInner>::finish_grow",
+                20
+              ],
+              [
+                "_platform_memset",
+                19
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    "ram-after": {
+      "label": "ram-after",
+      "profile": "profiling-symbols",
+      "tail": {
+        "periods": 20,
+        "awake": 67.0,
+        "asleep": 63.0,
+        "tick_ms": 4.464,
+        "physics_ms": 1.0107,
+        "send_ms": 0.0683,
+        "hz": 63.85,
+        "cpu_pct": 50.7,
+        "entities": 13925.0
+      },
+      "samples": [
+        {
+          "window_s": [
+            82.04383233282715,
+            86.04383233282715
+          ],
+          "stats": {
+            "periods": 5,
+            "awake": 68,
+            "asleep": 62,
+            "tick_ms": 4.4228,
+            "physics_ms": 1.0683,
+            "send_ms": 0.0614,
+            "hz": 63.9,
+            "cpu_pct": 42.8,
+            "entities": 13925
+          },
+          "profile": {
+            "counts": {
+              "total_thread_samples": 47805,
+              "wait_samples": 46347,
+              "active_samples": 1458,
+              "solver": 136,
+              "scheduler": 1456,
+              "scheduler_self": 363,
+              "narrow_phase": 122,
+              "contact_transfer": 34,
+              "child_pose": 27,
+              "aabb": 20,
+              "apply_deposits": 507,
+              "weigh": 359,
+              "loose_groups": 220,
+              "incident": 60,
+              "transforms": 54,
+              "collider_propagation": 47,
+              "held": 27,
+              "structural": 19
+            },
+            "inclusive_pct": {
+              "solver": 9.33,
+              "scheduler": 99.86,
+              "scheduler_self": 24.9,
+              "narrow_phase": 8.37,
+              "contact_transfer": 2.33,
+              "child_pose": 1.85,
+              "aabb": 1.37,
+              "apply_deposits": 34.77,
+              "weigh": 24.62,
+              "loose_groups": 15.09,
+              "incident": 4.12,
+              "transforms": 3.7,
+              "collider_propagation": 3.22,
+              "held": 1.85,
+              "structural": 1.3
+            },
+            "top_self": [
+              [
+                "std::sys::backtrace::__rust_begin_short_backtrace::<<bevy_tasks::task_pool::TaskPool>::new_internal::{closure#0}::{closure#0}, ()>",
+                123
+              ],
+              [
+                "__psynch_cvsignal",
+                119
+              ],
+              [
+                "overmatch::buildings::fracture::loose_groups",
+                94
+              ],
+              [
+                "overmatch::buildings::fracture::weigh",
+                66
+              ],
+              [
+                "<avian3d::dynamics::solver::contact::ContactConstraint>::solve",
+                55
+              ],
+              [
+                "_xzm_free",
+                55
+              ],
+              [
+                "<async_executor::State>::notify",
+                29
+              ],
+              [
+                "<avian3d::collision::collider::collider_transform::plugin::ChildColliderPoses>::update",
+                24
+              ],
+              [
+                "avian3d::collision::collider::collider_transform::plugin::propagate_collider_transforms_recursive",
+                24
+              ],
+              [
+                "<bevy_ecs::query::iter::QueryIter<bevy_ecs::entity::Entity, bevy_ecs::query::filter::Or<(bevy_ecs::query::filter::Changed<bevy_transform::components::transform::Transform>, bevy_ecs::query::filter::Changed<bevy_ecs::hierarchy::ChildOf>, bevy_ecs::query::filter::Added<bevy_transform::components::global_transform::GlobalTransform>)>>>::fold_over_storage_range::<(bevy_utils::buffered_channel::BufferedSender<bevy_ecs::entity::Entity>, bevy_utils::buffered_channel::BufferedSender<bevy_ecs::entity::Entity>), <bevy_ecs::query::par_iter::QueryParIter<bevy_ecs::entity::Entity, bevy_ecs::query::filter::Or<(bevy_ecs::query::filter::Changed<bevy_transform::components::transform::Transform>, bevy_ecs::query::filter::Changed<bevy_ecs::hierarchy::ChildOf>, bevy_ecs::query::filter::Added<bevy_transform::components::global_transform::GlobalTransform>)>>>::for_each_init<bevy_transform::systems::mark_dirty_trees::{closure#0}::{closure#2}::{closure#1}, bevy_transform::systems::mark_dirty_trees::{closure#0}::{closure#2}::{closure#0}, (bevy_utils::buffered_channel::BufferedSender<bevy_ecs::entity::Entity>, bevy_utils::buffered_channel::BufferedSender<bevy_ecs::entity::Entity>)>::{closure#0}>",
+                22
+              ],
+              [
+                "<concurrent_queue::ConcurrentQueue<async_task::runnable::Runnable>>::pop",
+                22
+              ],
+              [
+                "core::slice::sort::unstable::quicksort::quicksort::<usize, <usize as core::cmp::PartialOrd>::lt>",
+                20
+              ],
+              [
+                "overmatch::buildings::fracture::held",
+                20
+              ],
+              [
+                "xzm_realloc",
+                19
+              ],
+              [
+                "<bevy_ecs::schedule::executor::multi_threaded::Context>::tick_executor",
+                19
+              ]
+            ]
+          }
+        },
+        {
+          "window_s": [
+            105.04653700022027,
+            109.04653700022027
+          ],
+          "stats": {
+            "periods": 5,
+            "awake": 69,
+            "asleep": 61,
+            "tick_ms": 4.3969,
+            "physics_ms": 1.1094,
+            "send_ms": 0.0623,
+            "hz": 63.9,
+            "cpu_pct": 43.8,
+            "entities": 13925
+          },
+          "profile": {
+            "counts": {
+              "total_thread_samples": 47985,
+              "wait_samples": 46547,
+              "active_samples": 1438,
+              "scheduler": 1434,
+              "solver": 142,
+              "scheduler_self": 248,
+              "narrow_phase": 133,
+              "contact_transfer": 21,
+              "aabb": 32,
+              "child_pose": 26,
+              "apply_deposits": 524,
+              "weigh": 384,
+              "incident": 53,
+              "held": 26,
+              "loose_groups": 230,
+              "structural": 16,
+              "transforms": 75,
+              "collider_propagation": 65
+            },
+            "inclusive_pct": {
+              "scheduler": 99.72,
+              "solver": 9.87,
+              "scheduler_self": 17.25,
+              "narrow_phase": 9.25,
+              "contact_transfer": 1.46,
+              "aabb": 2.23,
+              "child_pose": 1.81,
+              "apply_deposits": 36.44,
+              "weigh": 26.7,
+              "incident": 3.69,
+              "held": 1.81,
+              "loose_groups": 15.99,
+              "structural": 1.11,
+              "transforms": 5.22,
+              "collider_propagation": 4.52
+            },
+            "top_self": [
+              [
+                "__psynch_cvsignal",
+                123
+              ],
+              [
+                "overmatch::buildings::fracture::loose_groups",
+                83
+              ],
+              [
+                "overmatch::buildings::fracture::weigh",
+                64
+              ],
+              [
+                "<avian3d::dynamics::solver::contact::ContactConstraint>::solve",
+                61
+              ],
+              [
+                "_xzm_free",
+                54
+              ],
+              [
+                "avian3d::collision::collider::collider_transform::plugin::propagate_collider_transforms_recursive",
+                36
+              ],
+              [
+                "_platform_memset",
+                29
+              ],
+              [
+                "core::slice::sort::unstable::quicksort::quicksort::<usize, <usize as core::cmp::PartialOrd>::lt>",
+                28
+              ],
+              [
+                "overmatch::buildings::fracture::loose_groups::{closure#1}",
+                27
+              ],
+              [
+                "<concurrent_queue::ConcurrentQueue<async_task::runnable::Runnable>>::pop",
+                27
+              ],
+              [
+                "<avian3d::collision::collider::collider_transform::plugin::ChildColliderPoses>::update",
+                26
+              ],
+              [
+                "<bevy_ecs::query::par_iter::QueryParIter<(bevy_ecs::entity::Entity, bevy_ecs::change_detection::params::Ref<bevy_transform::components::transform::Transform>, &bevy_ecs::hierarchy::Children), (bevy_ecs::query::filter::Without<bevy_ecs::hierarchy::ChildOf>, bevy_ecs::query::filter::With<avian3d::ancestor_marker::AncestorMarker<avian3d::collision::collider::backend::ColliderMarker>>)>>::for_each_init::<<bevy_ecs::query::par_iter::QueryParIter<(bevy_ecs::entity::Entity, bevy_ecs::change_detection::params::Ref<bevy_transform::components::transform::Transform>, &bevy_ecs::hierarchy::Children), (bevy_ecs::query::filter::Without<bevy_ecs::hierarchy::ChildOf>, bevy_ecs::query::filter::With<avian3d::ancestor_marker::AncestorMarker<avian3d::collision::collider::backend::ColliderMarker>>)>>::for_each<avian3d::collision::collider::collider_transform::plugin::propagate_collider_transforms::{closure#0}>::{closure#1}, <bevy_ecs::query::par_iter::QueryParIter<(bevy_ecs::entity::Entity, bevy_ecs::change_detection::params::Ref<bevy_transform::components::transform::Transform>, &bevy_ecs::hierarchy::Children), (bevy_ecs::query::filter::Without<bevy_ecs::hierarchy::ChildOf>, bevy_ecs::query::filter::With<avian3d::ancestor_marker::AncestorMarker<avian3d::collision::collider::backend::ColliderMarker>>)>>::for_each<avian3d::collision::collider::collider_transform::plugin::propagate_collider_transforms::{closure#0}>::{closure#0}, ()>::{closure#0}",
+                26
+              ],
+              [
+                "<bevy_ecs::query::iter::QueryIter<bevy_ecs::entity::Entity, bevy_ecs::query::filter::Or<(bevy_ecs::query::filter::Changed<bevy_transform::components::transform::Transform>, bevy_ecs::query::filter::Changed<bevy_ecs::hierarchy::ChildOf>, bevy_ecs::query::filter::Added<bevy_transform::components::global_transform::GlobalTransform>)>>>::fold_over_storage_range::<(bevy_utils::buffered_channel::BufferedSender<bevy_ecs::entity::Entity>, bevy_utils::buffered_channel::BufferedSender<bevy_ecs::entity::Entity>), <bevy_ecs::query::par_iter::QueryParIter<bevy_ecs::entity::Entity, bevy_ecs::query::filter::Or<(bevy_ecs::query::filter::Changed<bevy_transform::components::transform::Transform>, bevy_ecs::query::filter::Changed<bevy_ecs::hierarchy::ChildOf>, bevy_ecs::query::filter::Added<bevy_transform::components::global_transform::GlobalTransform>)>>>::for_each_init<bevy_transform::systems::mark_dirty_trees::{closure#0}::{closure#2}::{closure#1}, bevy_transform::systems::mark_dirty_trees::{closure#0}::{closure#2}::{closure#0}, (bevy_utils::buffered_channel::BufferedSender<bevy_ecs::entity::Entity>, bevy_utils::buffered_channel::BufferedSender<bevy_ecs::entity::Entity>)>::{closure#0}>",
+                23
+              ],
+              [
+                "core::ptr::drop_glue::<async_task::task::Task<core::result::Result<(), alloc::boxed::Box<dyn core::any::Any + core::marker::Send>>>>",
+                22
+              ],
+              [
+                "_platform_memmove",
+                20
+              ]
+            ]
+          }
+        }
+      ]
     }
+  },
+  "strip_check": {
+    "kind": "MEASURED baseline Mach-O executable __text before and after strip -S",
+    "bytes": 74458200,
+    "sha256_both": "f2fa0e524fe4299bddd24b5c0b8c0ddf26235daf5ee240e610a5065d78ca52d9"
   }
 }
