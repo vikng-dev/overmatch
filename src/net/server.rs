@@ -2171,7 +2171,16 @@ mod tests {
         let mut app = placement_app();
         let client_id = PeerId::Netcode(1);
         let link = app.world_mut().spawn((RemoteId(client_id), Connected)).id();
-        let blocker = app.world_mut().spawn((NetTank, Position(Vec3::ZERO))).id();
+        // Fixture identity: every server tank that can be knocked out is born with one.
+        let blocker = app
+            .world_mut()
+            .spawn((
+                NetTank,
+                Position(Vec3::ZERO),
+                CombatantId(99),
+                CombatantLife(0),
+            ))
+            .id();
         app.world_mut()
             .resource_mut::<PendingClients>()
             .0
