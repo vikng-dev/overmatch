@@ -891,6 +891,69 @@ mod tests {
         }
     }
 
+    /// The game's damage-model player sees named omissions on the shipped corner path,
+    /// after network admission. Mutants: discard the note, or leave its node hidden.
+    #[test]
+    fn a_live_ninth_field_is_named_in_the_corner() {
+        let (mut app, _) = corner_app(Settings::default());
+        let mut report = report("s1_through_crew");
+        let field = report.spall[0].clone();
+        // Fixture: nine admitted fields, the last strongest.
+        report.spall = (0..=super::super::picture::PICTURE_FIELDS)
+            .map(|i| {
+                let mut field = field.clone();
+                let scale = if i == 0 {
+                    0.5
+                } else if i == super::super::picture::PICTURE_FIELDS {
+                    2.0
+                } else {
+                    1.0
+                };
+                field.strength *= scale;
+                for fragment in &mut field.fragments {
+                    fragment.strength *= scale;
+                }
+                field
+            })
+            .collect();
+        let vocabulary = vocabulary(&report);
+        let record = recorded(
+            &report,
+            SHOOTER,
+            1200,
+            TankLife {
+                combatant: STRUCK,
+                life: CombatantLife(0),
+            },
+        );
+        let explanation = BuiltExplanation::build(&vocabulary, &record)
+            .unwrap()
+            .projections()
+            .into_iter()
+            .find(|(_, e)| e.audience == Audience::Shooter)
+            .unwrap()
+            .1;
+        stage_ready(&mut app, &report);
+        receive(&mut app, explanation, &vocabulary);
+        let mut named = false;
+        for _ in 0..(1.0 / STEP_S) as usize {
+            step(&mut app);
+            let world = app.world_mut();
+            named |= world
+                .query::<(&Text, &Visibility)>()
+                .iter(world)
+                .any(|(text, visibility)| {
+                    text.0
+                        .contains("omitted: spall 1. Dose includes all fields.")
+                        && *visibility == Visibility::Inherited
+                });
+        }
+        assert!(
+            named,
+            "an admitted ninth field must be named on the player's corner"
+        );
+    }
+
     /// `Off` opens nothing; `Through only` opens the penetration and not the non-penetration.
     #[test]
     fn the_setting_admits_by_verdict() {

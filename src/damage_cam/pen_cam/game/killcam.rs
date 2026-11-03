@@ -130,6 +130,7 @@ struct Killing {
     killer: Killer,
     /// Muzzle to impact (m), where the record has the muzzle.
     range_m: Option<f32>,
+    field_note: String,
 }
 
 impl Killing {
@@ -162,6 +163,7 @@ impl Killing {
             after_s: since,
             killer: Killer::of_vehicle(vehicle, &report.round),
             range_m,
+            field_note: Plan::new(report, &Default::default()).field_note(),
         }
     }
 }
@@ -960,7 +962,11 @@ fn hud(
                 timeline::verdict_color(CornerKind::of(record.stored.report.impact.verdict));
             background.0 = color.with_alpha(enter);
         }
-        let lines = card_lines(&record.killer, record.range_m);
+        let mut lines = card_lines(&record.killer, record.range_m);
+        if !record.field_note.is_empty() {
+            lines[2].push('\n');
+            lines[2].push_str(&record.field_note);
+        }
         for (index, mut text, mut color) in &mut card_text {
             let line = match index.0 {
                 0 => "KNOCKED OUT BY",

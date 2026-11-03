@@ -1441,7 +1441,7 @@ impl<'a> Playing<'a> {
         visibility.set_if_neq(Visibility::Inherited);
     }
 
-    /// Every field in world space under the record frame `hull`: its origin, its picture's frame,
+    /// Selected fields in world space under the record frame `hull`: its origin, its picture's frame,
     /// pitch and faces, its strength and law, and its front run out from the origin, or under
     /// reduce motion its longest reach once it is thrown and negative before. The volume
     /// ([`Self::fields`]) and the painting ([`look::paint_fields`], [`Self::fill`]) read the same.
@@ -1454,12 +1454,12 @@ impl<'a> Playing<'a> {
             let v = linear * v;
             v / v.length().max(1e-6)
         };
-        let prints = plan
-            .cones
+        let prints = pictures
+            .indices
             .iter()
             .zip(&pictures.fields)
-            .enumerate()
-            .map(|(index, (cone, picture))| {
+            .map(|(&index, picture)| {
+                let cone = &plan.cones[index];
                 let scale = (linear * picture.axis).length();
                 let front = if self.reduce {
                     if c >= cone_start(plan, kind, index, true) {
@@ -2095,8 +2095,8 @@ mod tests {
     use super::super::hud::ASPECT;
     use super::super::material::Blend;
     use super::super::picture::tests::DETAIL;
+    use super::super::plan::LEG_EPS_M;
     use super::super::plan::tests::Library;
-    use super::super::plan::{LEAD_M, LEG_EPS_M};
     use super::super::timeline::Condition;
     use super::*;
     use crate::damage_cam::shapes::{TankAsset, TankShapes};
@@ -3602,7 +3602,11 @@ mod tests {
                     .expect("the record's pictures, written");
                 assert_eq!(
                     pictures.fields.len(),
-                    record.plan.cones.len(),
+                    record
+                        .plan
+                        .cones
+                        .len()
+                        .min(super::super::picture::PICTURE_FIELDS),
                     "{}",
                     record.stem
                 );
@@ -3616,7 +3620,8 @@ mod tests {
                         pose.transform_point(Vec3::from(aabb.min())),
                         pose.transform_point(Vec3::from(aabb.max())),
                     );
-                    for cone in &record.plan.cones {
+                    for &index in &pictures.indices {
+                        let cone = &record.plan.cones[index];
                         let reach = Vec3::splat(cone.max_reach());
                         assert!(
                             (cone.origin - reach).cmpge(lo - 1e-4).all()
@@ -4763,7 +4768,7 @@ mod tests {
             let contact = Vec3::from(report.path[1].point);
             let approach = contact - Vec3::from(report.path[0].point);
             let speed = approach.length() / (report.path[1].t - report.path[0].t);
-            let lead = base.reach(LEAD_M);
+            let lead = base.reach(crate::vfx::diagram().lead_m);
             let cut = |share: f32| {
                 let mut report = report.clone();
                 let l = share * lead;

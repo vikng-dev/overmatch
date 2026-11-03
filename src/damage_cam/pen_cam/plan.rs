@@ -18,9 +18,7 @@ use bevy::prelude::*;
 
 use std::sync::Arc;
 
-use super::picture::{
-    Lay, PictureJobs, Pictures, RecordAtlas, ViewPictures, require_field_capacity,
-};
+use super::picture::{Lay, PictureJobs, Pictures, RecordAtlas, ViewPictures, pictured_fields};
 use super::potency::Potency;
 use super::timeline::CornerKind;
 use crate::ballistics::spall_cone::{self, FieldDescriptor};
@@ -29,25 +27,11 @@ use crate::damage_cam::{
     ConsequenceState, PenetrationReport, PlateClass, Role, RoundEnd, SpallCone,
 };
 
-/// The line is drawn from this far (m) before first contact. TUNED: a diagram choice.
-pub const LEAD_M: f32 = 1.5;
-/// A path that leaves the tank is drawn this far (m) past the point it left. TUNED: a diagram
-/// choice.
-pub const RUN_OUT_M: f32 = 1.5;
-/// Two arc lengths this close (m) name the same point of the line: a node's arc against the arc
-/// [`Polyline::arc_of`] finds for that node. DERIVED: arc lengths are f32 sums of legs under 100 m,
+/// Resolution: two arc lengths this close (m) name the same line point: a node's arc against
+/// [`Polyline::arc_of`] for that node. DERIVED: arc lengths are f32 sums of legs under 100 m,
 /// so their rounding is under 1e-5 m; nodes are at least 1e-6 m apart ([`polyline`] merges closer
 /// ones) and a leg shorter than this is never one a tracer flies.
 pub const LEG_EPS_M: f32 = 1.0e-4;
-/// Every length the corner draws or frames around the round, [`LEAD_M`] and [`RUN_OUT_M`]
-/// included, is at most this many calibres ([`Plan::reach`]), so a small round is framed as tightly
-/// as its size asks: 0.16 m for a 7.9 mm round, while an 88 mm round's 1.76 m leaves every metre
-/// figure in force (DERIVED from the TUNED 20).
-pub const REACH_CALIBRES: f32 = 20.0;
-/// The line's brightness never falls below this: a diagram rule for legibility, not physics.
-/// TUNED.
-pub const LINE_FLOOR: f32 = 0.35;
-
 /// The record, prepared for drawing.
 pub struct Plan {
     /// The frame a view draws the plan in.
@@ -513,7 +497,7 @@ impl Plan {
         let contact = Vec3::from(report.impact.point);
         let contact_arc = line.arc_of(contact);
         let calibre = report.projectile.caliber_mm * 1.0e-3;
-        let reach = |metres: f32| metres.min(REACH_CALIBRES * calibre);
+        let reach = |metres: f32| metres.min(crate::vfx::diagram().reach_calibres * calibre);
         let left_at = match &report.end {
             RoundEnd::Rest { .. } => None,
             RoundEnd::Left { at } => {
@@ -523,7 +507,7 @@ impl Plan {
         };
         let end_arc = match left_at {
             None => line.length(),
-            Some((_, arc)) => (arc + reach(RUN_OUT_M)).min(line.length()),
+            Some((_, arc)) => (arc + reach(crate::vfx::diagram().run_out_m)).min(line.length()),
         };
         let crossings = report
             .plates
@@ -561,7 +545,6 @@ impl Plan {
                 .map(|c| cone(c, &line, b.sideways_mps, burst_unit))
         });
         let cones: Vec<Cone> = spall.chain(burst_field).collect();
-        require_field_capacity(cones.len());
         let mass = report.projectile.mass_kg;
         // A nose piece flies on only from a burst in flight: one at rest has no flight to fly on.
         let burst = report.burst.as_ref().map(|b| BurstPlan {
@@ -641,7 +624,7 @@ impl Plan {
             verdict_kind: CornerKind::of(verdict),
             calibre,
             body,
-            start_arc: (contact_arc - reach(LEAD_M)).max(0.0),
+            start_arc: (contact_arc - reach(crate::vfx::diagram().lead_m)).max(0.0),
             contact_arc,
             end_arc,
             left_at,
@@ -696,11 +679,34 @@ impl Plan {
         }
     }
 
-    /// How the fields' depth pictures are laid out at the details asked ([`Pictures::of`]): in
+    /// The game's damage-model picture names every omitted field; the shot's dose still includes it.
+    pub fn field_note(&self) -> String {
+        let selected = pictured_fields(&self.cones);
+        if selected.len() == self.cones.len() {
+            return String::new();
+        }
+        let omitted = (0..self.cones.len())
+            .filter(|i| !selected.contains(i))
+            .map(|i| {
+                if self.burst.as_ref().and_then(|burst| burst.cone) == Some(i) {
+                    "burst".to_owned()
+                } else {
+                    format!("spall {}", i + 1)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "Picture: {} of {} fields; omitted: {omitted}. Dose includes all fields.",
+            selected.len(),
+            self.cones.len()
+        )
+    }
+
+    /// How selected fields' depth pictures are laid out at the details asked ([`Pictures::of`]): in
     /// [`Self::cones`]' order, from [`Self::bodies`], at the corner's sightings of the record
     /// ([`super::stage::field_sightings`]).
     pub fn lay(&self) -> Lay {
-        require_field_capacity(self.cones.len());
         let cones = self.cones.clone();
         let bodies = self.bodies.clone();
         let sightings = if cones.is_empty() {
@@ -748,9 +754,9 @@ impl Plan {
         self.left_at.is_some()
     }
 
-    /// `metres`, or [`REACH_CALIBRES`] calibres if that is shorter.
+    /// Framing lengths are capped at the presentation data's reach in calibres.
     pub fn reach(&self, metres: f32) -> f32 {
-        metres.min(REACH_CALIBRES * self.calibre)
+        metres.min(crate::vfx::diagram().reach_calibres * self.calibre)
     }
 
     /// The line's brightness at arc length `s`: remaining capability over initial, floored.
@@ -758,10 +764,14 @@ impl Plan {
         let line = &self.line;
         for i in 1..line.points.len() {
             if s <= line.arc[i] {
-                return line.energy[i].max(LINE_FLOOR);
+                return line.energy[i].max(crate::vfx::diagram().line_floor);
             }
         }
-        line.energy.last().copied().unwrap_or(1.0).max(LINE_FLOOR)
+        line.energy
+            .last()
+            .copied()
+            .unwrap_or(1.0)
+            .max(crate::vfx::diagram().line_floor)
     }
 
     /// The points the corner's camera frames: the drawn line's span and every crossing, the

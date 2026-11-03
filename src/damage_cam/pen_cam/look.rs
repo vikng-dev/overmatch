@@ -63,7 +63,7 @@ use bevy::window::{PrimaryWindow, WindowRef};
 use super::material::Blend;
 #[cfg(test)]
 use super::picture::Seen;
-use super::picture::{FACE_LANES, PICTURE_FIELDS, require_field_capacity};
+use super::picture::{FACE_LANES, PICTURE_FIELDS, pictured_fields, require_field_capacity};
 use super::plan::{BoxPlan, Cone};
 #[cfg(test)]
 use super::potency::soft_step;
@@ -141,8 +141,7 @@ const BASE_COMPONENT_FACE_SHARE: f32 = 1.0;
 const FOOTPRINT_FILL_ALPHA: f32 = 0.6;
 const FOOTPRINT_REACH_SLACK_M: f32 = 0.01;
 /// The most fields the look draws: the pictures' ([`PICTURE_FIELDS`]). `pen_cam_look.wgsl`'s
-/// arrays hold this many fields' lanes and [`pack`] drops what lies past it, so every record's
-/// fields must fit it (`every_record_fits_the_look`).
+/// arrays hold only the potency-selected fields' lanes; the full record still owns dose and timing.
 const FIELDS: usize = PICTURE_FIELDS;
 /// One field's lanes ([`pack`]): six of its own and its picture's faces'.
 const PRINT_LANES: usize = 6 + FACE_LANES;
@@ -1242,12 +1241,12 @@ pub fn stretch(print: &FieldPrint, eye: Vec3, dir: Vec3) -> Option<(f32, f32)> {
     (lo < hi).then_some((lo, hi))
 }
 
-/// The box (record frame, low and high corners) about every field of `cones` out to its longest
+/// The box (record frame, low and high corners) about the selected fields out to their longest
 /// reach, which the volume is drawn on; `None` where no field reaches.
 pub fn field_bounds(cones: &[Cone]) -> Option<(Vec3, Vec3)> {
-    require_field_capacity(cones.len());
-    cones
-        .iter()
+    pictured_fields(cones)
+        .into_iter()
+        .map(|index| &cones[index])
         .map(|cone| (cone.origin, cone.max_reach()))
         .filter(|&(_, longest)| longest > 0.0)
         .map(|(origin, longest)| (origin - longest, origin + longest))
@@ -1498,28 +1497,6 @@ mod tests {
 
     /// A fixture picture's pitch (rad a texel): about a quarter degree. Fixture data.
     const PITCH: f32 = 4.0e-3;
-
-    /// Every record's fields fit the look: none throws more than [`FIELDS`], its spall cones and
-    /// its burst's field together. Live overflow is an explicit view invariant failure.
-    #[test]
-    fn every_record_fits_the_look() {
-        for (name, report) in super::super::plan::tests::records() {
-            let fields = report.fields().count();
-            assert!(
-                fields <= FIELDS,
-                "{name} throws {fields} fields, past FIELDS = {FIELDS}"
-            );
-        }
-    }
-
-    /// The game's damage-model view must refuse an unrepresentable live field count.
-    /// A truncating pack silently hides a server field from the player.
-    #[test]
-    #[should_panic(expected = "field capacity")]
-    fn packing_more_fields_than_the_shader_can_read_is_a_bug() {
-        let prints: Vec<_> = (0..=FIELDS).map(|_| fixture_print()).collect();
-        pack(&prints, &Potency::bound());
-    }
 
     /// A pen cam shader, read from the shipped assets.
     fn shader(file: &str) -> String {
@@ -2484,7 +2461,8 @@ mod tests {
             let shapes = super::super::plan::tests::shapes(&report);
             let plan = super::super::plan::Plan::new(&report, &shapes);
             let pictures = plan.lay()(&[DETAIL]);
-            for (k, (cone, picture)) in plan.cones.iter().zip(&pictures.fields).enumerate() {
+            for (&k, picture) in pictures.indices.iter().zip(&pictures.fields) {
+                let cone = &plan.cones[k];
                 if !cone.rays.is_empty() {
                     continue;
                 }

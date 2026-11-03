@@ -5,8 +5,8 @@
 //! 384–640 px, on [`Overlay::PEN_CAM_CORNER_Z`]. The stage camera renders into an image the corner
 //! shows, so the corner can fade and scale as a whole; a replacement crossfades from the last frame
 //! of the old image while the camera draws the new record into the other one. The corner draws no
-//! text: the glyphs are rasterized shapes. It is sized from the default UI camera, the one its node
-//! lays out on.
+//! text except its field omission note; the verdict glyphs are rasterized shapes. The default UI
+//! camera sizes it.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
@@ -47,6 +47,9 @@ pub(super) struct Accent;
 
 #[derive(Component)]
 pub(super) struct Hairline;
+
+#[derive(Component)]
+pub(super) struct FieldNote;
 
 #[derive(Component)]
 pub(super) struct Glyph;
@@ -150,6 +153,24 @@ pub fn spawn_corner(commands: &mut Commands, images: &mut Assets<Image>) {
                     height: Val::Px(GLYPH_PX),
                     ..default()
                 },
+            ));
+            corner.spawn((
+                FieldNote,
+                Text::new(""),
+                TextFont {
+                    font_size: FontSize::Px(crate::vfx::diagram().field_note_px),
+                    ..default()
+                },
+                TextColor(crate::ui_font::TEXT),
+                BackgroundColor(crate::ui_font::PANEL_BG),
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: Val::Px(GLYPH_INSET_PX),
+                    left: Val::Px(GLYPH_INSET_PX),
+                    right: Val::Px(GLYPH_INSET_PX),
+                    ..default()
+                },
+                Visibility::Hidden,
             ));
             corner.spawn((
                 Hairline,
@@ -311,8 +332,14 @@ pub fn layout(
 pub fn animate(
     corner: Res<super::Corner>,
     target: Res<CornerImages>,
+    exhibits: Res<super::Exhibits>,
+    fonts: Option<Res<crate::ui_font::UiFonts>>,
+    mut notes: Query<
+        (&mut Text, &mut TextFont, &mut TextColor, &mut Visibility),
+        (With<FieldNote>, Without<CornerRoot>),
+    >,
     glyphs: Res<Glyphs>,
-    mut root: Query<(&mut Visibility, &mut UiTransform), With<CornerRoot>>,
+    mut root: Query<(&mut Visibility, &mut UiTransform), (With<CornerRoot>, Without<FieldNote>)>,
     mut images: Query<(&CornerImage, &mut ImageNode), Without<Glyph>>,
     mut accent: Query<(&mut Node, &mut BackgroundColor), (With<Accent>, Without<Hairline>)>,
     mut hairline: Query<(&mut Node, &mut BackgroundColor), (With<Hairline>, Without<Accent>)>,
@@ -329,6 +356,24 @@ pub fn animate(
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
+    let note = exhibits.0[showing.record].plan.field_note();
+    let (mut text, mut font, mut color, mut note_visibility) = notes
+        .single_mut()
+        .expect("the game's damage-model corner spawns exactly one field note");
+    text.set_if_neq(Text::new(&note));
+    // Headless layout harnesses have no font resources or text renderer.
+    if let Some(fonts) = fonts {
+        let wanted = fonts.body.clone().into();
+        if font.font != wanted {
+            font.font = wanted;
+        }
+    }
+    color.0 = crate::ui_font::TEXT.with_alpha(showing.opacity);
+    note_visibility.set_if_neq(if note.is_empty() {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    });
     visibility.set_if_neq(Visibility::Inherited);
     let scale = Vec2::splat(showing.scale);
     if transform.scale != scale {

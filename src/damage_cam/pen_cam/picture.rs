@@ -60,12 +60,26 @@ use crate::damage_cam::shapes::HardBodies;
 
 /// Resolution: eight field slots bound atlas and shader work while allowing multi-exit bursts.
 pub const PICTURE_FIELDS: usize = 8;
-/// The game's damage-model view has one fixed atlas/shader field budget. A live record outside
-/// it is an internal invariant failure, never permission to hide fields from the player.
+/// The game's damage-model view ranks by emitted HP potency (`S/2`, hence by `S`),
+/// ties by record index, then lays the selected fields in record order. Dose is untouched.
+pub(super) fn pictured_fields(cones: &[Cone]) -> Vec<usize> {
+    let mut indices: Vec<_> = (0..cones.len()).collect();
+    indices.sort_by(|&a, &b| {
+        cones[b]
+            .strength
+            .total_cmp(&cones[a].strength)
+            .then(a.cmp(&b))
+    });
+    indices.truncate(PICTURE_FIELDS);
+    indices.sort_unstable();
+    indices
+}
+
+/// Only selected picture fields reach the shader; overflow here is a view construction bug.
 pub(super) fn require_field_capacity(count: usize) {
     assert!(
         count <= PICTURE_FIELDS,
-        "the game's damage-model view field capacity is {PICTURE_FIELDS}, record has {count}; expand the atlas and shader budget together"
+        "selected picture fields exceed the atlas/shader budget"
     );
 }
 /// A field's face lanes in the look's uniform: two for each face of the cube (`look::pack`).
@@ -607,11 +621,13 @@ fn skyline(sizes: &[UVec2], order: &[usize], width: u32) -> (Vec<UVec2>, UVec2) 
     (places, extent)
 }
 
-/// A record's pictures: every field, within [`PICTURE_FIELDS`], each face placed in one
+/// A record's pictures: the fields selected by [`pictured_fields`], each face placed in one
 /// atlas of `size` texels, rendered from `casters` the first time a frame asks
 /// ([`Self::image`]).
 #[derive(Debug)]
 pub struct Pictures {
+    /// Original plan indices, paired with `fields`; timing always uses the full plan.
+    pub indices: Vec<usize>,
     pub fields: Vec<Picture>,
     pub size: UVec2,
     /// The details the pitches were derived at, ascending ([`Self::of`]).
@@ -632,8 +648,9 @@ impl Pictures {
         sightings: &[(Transform, Projection)],
         details: &[UVec2],
     ) -> Self {
-        require_field_capacity(cones.len());
-        let cells: Vec<Cells> = cones.iter().map(Picture::cells).collect();
+        let indices = pictured_fields(cones);
+        let cones: Vec<_> = indices.iter().map(|&index| &cones[index]).collect();
+        let cells: Vec<Cells> = cones.iter().map(|cone| Picture::cells(cone)).collect();
         let mut pitches: Vec<f32> = cones
             .iter()
             .map(|cone| {
@@ -666,6 +683,7 @@ impl Pictures {
                     crop.place = place;
                 }
                 return Self {
+                    indices,
                     fields,
                     size,
                     details,
@@ -1554,7 +1572,13 @@ pub(super) mod tests {
                 .iter()
                 .map(|picture| picture.pitch)
                 .collect();
-            cones.extend(plan.cones.into_iter().zip(pitches));
+            cones.extend(
+                pictures
+                    .indices
+                    .iter()
+                    .map(|&index| plan.cones[index].clone())
+                    .zip(pitches),
+            );
         }
         let mut checked = 0;
         for (cone, pitch) in &cones {
@@ -2113,12 +2137,102 @@ pub(super) mod tests {
         let (own, _) = a.drawn().expect("the corner draws the pictures");
         assert_eq!(own.details, vec![small], "a view's ask kept after it went");
     }
-    /// The game's damage-model view must refuse a live record beyond the atlas budget.
-    /// Mutant: truncate the fields before atlas layout.
+    /// The game's damage-model view keeps the greatest HP potency, whether spall or burst;
+    /// players get named omissions and unchanged dose. Mutants: first eight; an empty note.
     #[test]
-    #[should_panic(expected = "field capacity")]
-    fn pictures_refuse_fields_past_the_view_budget() {
-        let cones: Vec<_> = (0..=PICTURE_FIELDS).map(|_| sphere(|_, _| 1.0)).collect();
-        Pictures::of(&cones, None, &[], &[]);
+    fn nine_live_fields_draw_the_most_potent_without_changing_dose() {
+        let records = super::super::plan::tests::records();
+        println!(
+            "MEASURED recorded library maximum: {} fields",
+            records
+                .iter()
+                .map(|(_, r)| r.fields().count())
+                .max()
+                .unwrap()
+        );
+        let base = &records.iter().find(|(_, r)| !r.spall.is_empty()).unwrap().1;
+        let burst = records
+            .iter()
+            .find_map(|(_, r)| r.burst.as_ref().filter(|b| b.field.is_some()))
+            .unwrap();
+        // Fixture cases: a strong late spall, strong late burst, weak late burst and equal spall.
+        for (is_burst, last_strength, equal) in [
+            (false, 10.0, false),
+            (true, 10.0, false),
+            (true, 0.0, false),
+            (false, 1.0, true),
+        ] {
+            let mut report = base.clone();
+            report.burst = None;
+            report.spall = (0..=PICTURE_FIELDS)
+                .map(|i| {
+                    let mut field = base.spall[0].clone();
+                    field.strength = if i == PICTURE_FIELDS {
+                        last_strength
+                    } else if equal {
+                        1.0
+                    } else {
+                        (i + 1) as f32
+                    };
+                    field.origin[0] = i as f32;
+                    field
+                })
+                .collect();
+            if is_burst {
+                let mut burst = burst.clone();
+                burst.field = report.spall.pop();
+                report.burst = Some(burst);
+            }
+            let plan = super::super::plan::Plan::new(&report, &Default::default());
+            let pictures = Pictures::of(&plan.cones, None, &[], &[]);
+            assert_eq!(pictures.fields.len(), PICTURE_FIELDS);
+            let expected: Vec<_> = if last_strength > PICTURE_FIELDS as f32 {
+                (1..=PICTURE_FIELDS).collect()
+            } else {
+                (0..PICTURE_FIELDS).collect()
+            };
+            assert_eq!(pictures.indices, expected);
+            let origins: Vec<_> = pictures
+                .fields
+                .iter()
+                .map(|p| p.origin.x as usize)
+                .collect();
+            assert_eq!(origins, expected);
+            let atlas = (Arc::new(pictures), Handle::default());
+            let prints = super::super::stage::Playing::new(&plan, plan.kind, f32::MAX, false)
+                .drawing(Some(&atlas))
+                .prints(&GlobalTransform::IDENTITY)
+                .unwrap();
+            assert_eq!(
+                prints.iter().map(|p| p.strength).collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|&i| plan.cones[i].strength)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(plan.lay()(&[]).indices, expected);
+            let note = plan.field_note();
+            let omitted = if expected[0] == 1 {
+                "spall 1"
+            } else if is_burst {
+                "burst"
+            } else {
+                "spall 9"
+            };
+            assert!(note.contains(&format!("omitted: {omitted}.")), "{note}");
+            assert!(note.contains("Dose includes all fields."), "{note}");
+            assert_eq!(plan.cones.len(), report.fields().count());
+            for b in &plan.boxes {
+                if let Some(dose) = report.doses.iter().find(|d| d.volume == b.name) {
+                    assert_eq!(b.field, dose.field);
+                    assert_eq!(b.line, dose.line);
+                }
+            }
+        }
+        assert!(
+            super::super::plan::Plan::new(base, &Default::default())
+                .field_note()
+                .is_empty()
+        );
     }
 }

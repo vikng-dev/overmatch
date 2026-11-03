@@ -1,5 +1,12 @@
 // The game's damage-model presentation, game state only. Required fields; no defaults.
 (
+    diagram: (
+        lead_m: (1.5, Taste("damage-model diagram: ASSUMED metres of incoming line before contact")),
+        run_out_m: (1.5, Taste("damage-model diagram: ASSUMED metres of outgoing line beyond the tank")),
+        reach_calibres: (20.0, Taste("damage-model diagram: ASSUMED framing reach in calibres")),
+        line_floor: (0.35, Taste("damage-model diagram: ASSUMED minimum line brightness for legibility")),
+        field_note_px: (16.0, Taste("damage-model diagram: ASSUMED omission note font size in logical pixels")),
+    ),
     impact: (
         debris_gravity: ((0.0, -9.81, 0.0), Derived("conventional standard gravity 9.80665 m/s2, rounded to 9.81; downward world Y")),
         dust_lifetime: ((0.5, 0.8), Taste("impact effects: ASSUMED how long a small read's powder hangs (s); never adjusted for viewer distance")),

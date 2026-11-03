@@ -104,9 +104,9 @@ fn count_pair(value: &(u32, u32)) -> Result<(), &'static str> {
 
 // The macro keeps each field's type, required provenance and admission check together.
 macro_rules! look_table {
-    ($name:ident { $($field:ident: $ty:ty => $check:ident,)* }) => {
+    ($vis:vis $name:ident { $($field:ident: $ty:ty => $check:ident,)* }) => {
         #[derive(Debug)]
-        pub(super) struct $name { $(pub(super) $field: $ty,)* }
+        $vis struct $name { $($vis $field: $ty,)* }
         impl<'de> Deserialize<'de> for $name {
             fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
                 #[derive(Deserialize)]
@@ -122,7 +122,7 @@ macro_rules! look_table {
     };
 }
 
-look_table! { ImpactLook {
+look_table! { pub(super) ImpactLook {
     debris_gravity: Vec3 => finite,
     dust_lifetime: (f32, f32) => sampled_pair,
     dust_size: (f32, f32) => positive_pair,
@@ -225,7 +225,7 @@ pub(super) fn impact() -> &'static ImpactLook {
     &load().impact
 }
 
-look_table! { MuzzleLook {
+look_table! { pub(super) MuzzleLook {
     blast_erosion: f32 => fraction,
     smoke_frame_rate: f32 => nonnegative,
     smoke_spin_max: f32 => nonnegative,
@@ -258,7 +258,7 @@ pub(super) fn muzzle() -> &'static MuzzleLook {
     &load().muzzle
 }
 
-look_table! { TrailLook {
+look_table! { pub(super) TrailLook {
     luma: (f32, f32) => finite,
     red: f32 => finite,
     green: (f32, f32) => finite,
@@ -275,7 +275,7 @@ pub(super) fn trail() -> &'static TrailLook {
     &load().trail
 }
 
-look_table! { MarksLook {
+look_table! { pub(super) MarksLook {
     depth_fade_m: f32 => positive,
     hole_core: f32 => finite,
     dent_bowl: f32 => finite,
@@ -375,6 +375,17 @@ pub(super) fn marks() -> &'static MarksLook {
     &load().marks
 }
 
+look_table! { pub(crate) DiagramLook {
+    lead_m: f32 => nonnegative,
+    run_out_m: f32 => nonnegative,
+    reach_calibres: f32 => positive,
+    line_floor: f32 => fraction,
+    field_note_px: f32 => positive,
+}}
+pub(crate) fn diagram() -> &'static DiagramLook {
+    &load().diagram
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct VfxLook {
@@ -382,6 +393,7 @@ pub(super) struct VfxLook {
     muzzle: MuzzleLook,
     trail: TrailLook,
     marks: MarksLook,
+    diagram: DiagramLook,
 }
 
 pub(super) fn load() -> &'static VfxLook {
@@ -418,6 +430,21 @@ mod tests {
     #[test]
     fn presentation_is_required_and_checked_before_play() {
         parse(DATA).unwrap();
+        for field in [
+            "lead_m",
+            "run_out_m",
+            "reach_calibres",
+            "line_floor",
+            "field_note_px",
+        ] {
+            let missing = DATA
+                .lines()
+                .filter(|line| !line.trim_start().starts_with(&format!("{field}:")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let error = parse(&missing).unwrap_err();
+            assert!(error.contains(FILE) && error.contains(field), "{error}");
+        }
         let missing = DATA
             .lines()
             .filter(|line| !line.trim_start().starts_with("dust_size:"))

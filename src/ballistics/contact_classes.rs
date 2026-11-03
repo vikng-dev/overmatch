@@ -2657,6 +2657,7 @@ const REACH_SLOPE_SPAN: f32 = 2.0;
 struct Reach {
     flights: usize,
     touched: usize,
+    max_fields: usize,
     panics: BTreeMap<String, usize>,
 }
 
@@ -2743,7 +2744,7 @@ impl Range {
         round: &crate::rounds::Round,
         muzzle: Vec3,
         headings: &[Dir3],
-    ) -> Result<usize, (String, usize)> {
+    ) -> Result<(usize, usize), (String, usize)> {
         self.fire(round, muzzle, headings);
         // A trigger queues its spawn: unflushed, the first flying count reads none and the volley
         // flies at wherever the next stance stands the hull.
@@ -2752,7 +2753,7 @@ impl Range {
     }
 
     /// Follow every flying shell out, `fired` of them the latest: see [`Self::follow`].
-    fn fly_out(&mut self, fired: usize) -> Result<usize, (String, usize)> {
+    fn fly_out(&mut self, fired: usize) -> Result<(usize, usize), (String, usize)> {
         for _ in 0..REACH_TICKS {
             let world = self.app.world_mut();
             let flying = world
@@ -2783,7 +2784,12 @@ impl Range {
             .iter(world)
             .collect();
         let mut touched = 0;
+        let mut max_fields = 0;
         for shell in shells {
+            if let Some(fields) = world.get::<SpallMarks>(shell) {
+                max_fields =
+                    max_fields.max(fields.cones.len() + usize::from(fields.burst.is_some()));
+            }
             if world
                 .get::<PenetrationMarks>(shell)
                 .is_some_and(|marks| !marks.log.is_empty())
@@ -2795,7 +2801,7 @@ impl Range {
         for mut health in world.query::<&mut ComponentHealth>().iter_mut(world) {
             health.refill();
         }
-        Ok(touched)
+        Ok((touched, max_fields))
     }
 
     /// Stand the hull on `ground` at a drawn spot, yaw and the slope there, still or under way, and
@@ -2887,7 +2893,8 @@ impl Range {
             })
             .collect();
         match self.follow(round, muzzle, &headings) {
-            Ok(touched) => {
+            Ok((touched, max_fields)) => {
+                reach.max_fields = reach.max_fields.max(max_fields);
                 reach.flights += shots;
                 reach.touched += touched;
             }
@@ -2929,8 +2936,38 @@ fn panic_reach_on_shipped_ground() {
             }
             let hull = if moving { "moving" } else { "still" };
             println!(
+                "MEASURED maximum fields: {} ({gun}/{key}, {hull}, {} flights)",
+                reach.max_fields, reach.flights
+            );
+            println!(
                 "REACH\t{slice}\t{gun}\t{key}\t{hull}\t{}\t{}\t{:?}",
                 reach.flights, reach.touched, reach.panics
+            );
+        }
+    }
+}
+
+/// The game's damage model: a cheap field-count sample, one real-muzzle volley per fired round
+/// and motion arm. Counts are measurements, never pass conditions or per-shot limits.
+#[test]
+#[ignore = "a field-count measurement, run on demand"]
+fn field_counts_from_real_muzzles() {
+    let ground = crate::terrain_grid::tests::shipped_grid();
+    let registry = crate::guns::GunRegistry::shipped();
+    let mut seed = SEED;
+    let mut range = Range::on(RigidBody::Kinematic, Some(ground.clone()));
+    for (gun, key, round) in registry.fired_rounds() {
+        let shots = if round.flying.caliber < resolve::DISC_MIN_CALIBER {
+            REACH_LINE.1
+        } else {
+            REACH_DISC.1
+        };
+        for moving in [false, true] {
+            let mut reach = Reach::default();
+            range.volley(&round, moving, shots, &ground, &mut seed, &mut reach);
+            println!(
+                "MEASURED field sample: {gun}/{key} moving={moving} flights={} touched={} max_fields={} panics={:?}",
+                reach.flights, reach.touched, reach.max_fields, reach.panics
             );
         }
     }
@@ -3140,7 +3177,7 @@ fn a_volley_along_a_long_face_flies_out() {
             .collect();
         range.fire(&round, Vec3::from(volley.muzzle), &headings);
     }
-    let touched = range
+    let (touched, _) = range
         .fly_out(ALONG_A_LONG_FACE.len() * 12)
         .unwrap_or_else(|(message, _)| panic!("{message}"));
     assert!(touched > 0, "the volley no longer touches the hull");

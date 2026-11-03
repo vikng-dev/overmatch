@@ -61,6 +61,8 @@ const BARLOW_TEXT_FILES: &[&str] = &[
     "src/settings/preset.rs",
     "src/sight/reticle.rs",
     "src/damage_cam/pen_cam/killcam.rs",
+    "src/damage_cam/pen_cam/hud.rs",
+    "src/damage_cam/pen_cam/plan.rs",
     "src/damage_cam/pen_cam/game/killcam.rs",
     "src/state.rs",
     "src/ui_font.rs",
