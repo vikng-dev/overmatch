@@ -19,6 +19,9 @@ class RunnerTests(unittest.TestCase):
             client = binary / "overmatch"
             client.write_text('''#!/bin/sh
 [ "$OVERMATCH_UNATTENDED" = 1 ] && [ "$OVERMATCH_WINDOW" = headless ] || exit 90
+[ "${FAKE_ADMISSION_FAIL:-0}" = 0 ] || exit 9
+echo 'harness: input slot'
+while [ ! -f "$SPIKE_WORKLOAD_READY" ]; do sleep 0.01; done
 [ "${FAKE_CLIENT_FAIL:-0}" = 0 ] || exit 7
 case "$OVERMATCH_HARNESS" in *fire2b*) [ "${FAKE_SECOND_FAIL:-0}" = 0 ] || exit 8 ;; esac
 exit 0
@@ -40,6 +43,12 @@ exit 0
         run = self.run_case("idle1", FAKE_NO_LISTEN="1")
         self.assertNotEqual(run.returncode, 0)
         self.assertIn("server did not become ready", run.stderr)
+
+    def test_client_failure_before_admission_is_reported(self):
+        run = self.run_case("fire1", FAKE_ADMISSION_FAIL="1")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("primary client exited before admission", run.stderr)
+        self.assertNotIn("server exited", run.stderr)
 
     def test_primary_client_failure_propagates(self):
         run = self.run_case("fire1", FAKE_CLIENT_FAIL="1")

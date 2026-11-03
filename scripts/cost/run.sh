@@ -83,8 +83,14 @@ start_client() {
 await_slots() {
   local scenario="$1" poll
   for poll in {1..75}; do # ASSUMED 15 s admission allowance, below the 20 s watchdog.
-    kill -0 "$CA" 2>/dev/null || return 1
-    if [[ -n "$CB" ]]; then kill -0 "$CB" 2>/dev/null || return 1; fi
+    if ! kill -0 "$CA" 2>/dev/null; then
+      echo "$scenario FAILED: primary client exited before admission; see $OUT/$scenario.client.log" >&2
+      return 1
+    fi
+    if [[ -n "$CB" ]] && ! kill -0 "$CB" 2>/dev/null; then
+      echo "$scenario FAILED: second client exited before admission; see $OUT/${scenario}b.client.log" >&2
+      return 1
+    fi
     if grep -q 'harness: input slot' "$OUT/$scenario.client.log" &&
        { [[ -z "$CB" ]] || grep -q 'harness: input slot' "$OUT/${scenario}b.client.log"; }; then
       touch "$READY" || return 1
@@ -123,8 +129,9 @@ for scenario in "${SCENARIOS[@]}"; do
   if start_client "$scenario" "$ticks" "$fields"; then CA=$CLIENT_PID
   else scenario_failed=1; fi
   if [[ "$scenario_failed" -eq 0 ]] && ! await_slots "$scenario"; then
-    scenario_failed=1
+    failed=1
     cleanup
+    continue
   fi
   if [[ -n "$CA" ]]; then
     if ! wait "$CA"; then
