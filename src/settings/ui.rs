@@ -1809,8 +1809,10 @@ mod tests {
             immediate: true,
             mailbox: false,
         };
-        let mut settings = Settings::default();
-        assert_eq!(settings.vsync, VsyncMode::On);
+        let mut settings = Settings {
+            vsync: VsyncMode::On,
+            ..default()
+        };
         Row::VSync.step(&mut settings, -1, metal, &unlearned());
         assert_eq!(
             settings.vsync,
@@ -1820,7 +1822,10 @@ mod tests {
         Row::VSync.step(&mut settings, 1, metal, &unlearned());
         assert_eq!(settings.vsync, VsyncMode::On);
 
-        let mut settings = Settings::default();
+        let mut settings = Settings {
+            vsync: VsyncMode::On,
+            ..default()
+        };
         Row::VSync.step(&mut settings, -1, ALL_RUNGS, &unlearned());
         assert_eq!(settings.vsync, VsyncMode::Fast, "unprobed offers all rungs");
         Row::VSync.step(&mut settings, -1, ALL_RUNGS, &unlearned());
