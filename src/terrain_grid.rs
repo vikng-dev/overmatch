@@ -84,53 +84,6 @@ pub(crate) fn world_extent(grid: Option<&HeightGrid>) -> TerrainExtent {
     grid.map_or(FIXTURE_EXTENT, HeightGrid::extent)
 }
 
-/// Import-time Gaussian smoothing width, in source pixels; `0.0` = pass-through (the current
-/// setting — the shipped map is the author's 16-bit export, whose ~1.5 mm quantization steps
-/// need no de-terracing).
-///
-/// Why it exists: an 8-BIT source quantizes height in `height_span_m`/255 steps (±half a step)
-/// — terracing at real obstacle scale for the suspension. The separable Gaussian
-/// ([`gaussian_smooth`]) removes that BOUNDED quantization noise at the cost of rounding real
-/// terrain features smaller than ~the kernel radius (3σ = 18 px, whose ground size follows the
-/// map's own metres per pixel — the width is in PIXELS, so it shrinks with the world). Set this
-/// back to [`SMOOTH_KERNEL_SIGMA`] if an 8-bit map ever ships again.
-///
-/// Determinism: the blur is pure f32 arithmetic in a fixed order over identical bytes, so every
-/// peer computes the same grid bit-for-bit. The kernel weights are EMBEDDED CONSTANTS
-/// ([`SMOOTH_KERNEL`]) rather than `exp()` calls — libm's `exp` is not bit-identical across
-/// platforms, and the grid feeds the deterministic belt sim. No threading, no reduction
-/// reordering.
-pub(crate) const SMOOTH_SIGMA_PX: f32 = 0.0;
-
-/// The σ (px) the embedded [`SMOOTH_KERNEL`] table was generated for. When smoothing is active,
-/// `SMOOTH_SIGMA_PX` must equal this (or the table must be regenerated); [`grid_from_png`]
-/// refuses a mismatch.
-pub(crate) const SMOOTH_KERNEL_SIGMA: f32 = 6.0;
-
-/// Normalized Gaussian half-kernel for [`SMOOTH_KERNEL_SIGMA`] = 6.0, radius 3σ = 18,
-/// edge-clamped at use. `SMOOTH_KERNEL[k]` is the weight at offset ±k; `w[0] + 2·Σ w[1..] = 1`.
-const SMOOTH_KERNEL: [f32; 19] = [
-    0.066_625_13,     // k = 0
-    0.065_706_18,     // k = 1
-    0.063_024_68,     // k = 2
-    0.058_796_473,    // k = 3
-    0.053_349_235,    // k = 4
-    0.047_080_535,    // k = 5
-    0.040_410_185,    // k = 6
-    0.033_734_677,    // k = 7
-    0.027_390_411,    // k = 8
-    0.021_630_013,    // k = 9
-    0.016_613_124,    // k = 10
-    0.012_410_294,    // k = 11
-    0.009_016_731,    // k = 12
-    0.006_371_657_5,  // k = 13
-    0.004_379_172,    // k = 14
-    0.002_927_304,    // k = 15
-    0.001_903_180_3,  // k = 16
-    0.001_203_450_7,  // k = 17
-    0.000_740_138_36, // k = 18
-];
-
 /// Resolution: cap samples per side for parry's cost; the full 4096² decode is too heavy.
 /// Every consumer shares this downsample (module invariant). DERIVED spacing: 1500 / 1024 ≈
 /// 1.465 m on the shipped world; other map extents change spacing, not sample count.
@@ -227,8 +180,8 @@ pub(crate) fn spawn_pos(grid: Option<&HeightGrid>, xz: Vec2) -> Vec3 {
 
 /// The decoded height grid: heights in METERS as f32 (row-major, row = z, column = x), already
 /// bit-depth-normalized (8-bit `v` → `v / 255`, 16-bit → `v / 65535`, then scaled and offset by the
-/// grid's own [`TerrainExtent`]) and import-smoothed ([`SMOOTH_SIGMA_PX`]) — every consumer reads
-/// THIS one truth, so the sim, collider, and visuals cannot diverge. Shared via `Arc` so the
+/// grid's own [`TerrainExtent`]) — every consumer reads this truth, so sim, collider and visuals
+/// cannot diverge. Shared via `Arc` so the
 /// oracle's copy inside [`crate::track::terrain::TrackField`] is free.
 ///
 /// Mapping (the single convention every consumer uses): sample `(i, j)` sits at
@@ -624,19 +577,17 @@ pub(crate) fn decode_height_grid(
     let grid = grid_from_png(&bytes, extent, rows)
         .unwrap_or_else(|err| panic!("terrain: {} failed to decode: {err}", path.display()));
     info!(
-        "terrain: height grid {size}x{size} decoded ({world} m span, {lo}..{hi} m, smoothing σ = {sigma} px)",
+        "terrain: height grid {size}x{size} decoded ({world} m span, {lo}..{hi} m)",
         size = grid.size(),
         world = extent.world_size_m,
         lo = extent.height_offset_m,
         hi = extent.height_offset_m + extent.height_span_m,
-        sigma = SMOOTH_SIGMA_PX,
     );
     commands.insert_resource(grid);
 }
 
-/// PNG bytes + the extent and row order the map declares → [`HeightGrid`]: decode,
-/// bit-depth-normalize, orient, and (when [`SMOOTH_SIGMA_PX`] is active) smooth. Pure, so the
-/// tests decode the shipped asset through it (`tests::shipped_grid`); a Git-LFS pointer shipping
+/// PNG bytes + declared extent and row order → [`HeightGrid`]: decode, bit-depth-normalize
+/// and orient. Pure, so tests decode the shipped asset through it (`tests::shipped_grid`); a Git-LFS pointer shipping
 /// in place of the map fails `map::tests::shipped_map_ships_a_valid_manifest` in CI instead of at
 /// boot.
 pub(crate) fn grid_from_png(
@@ -689,18 +640,6 @@ pub(crate) fn grid_from_png(
         RowOrder::TowardPositiveZ => samples,
         RowOrder::TowardNegativeZ => flip_rows(&samples, width as usize),
     };
-    // The import-time de-terracing pass (see `SMOOTH_SIGMA_PX`; currently 0.0 = pass-through
-    // for the 16-bit source): when active, smoothed BEFORE the resource exists, so the oracle,
-    // collider, mesh, and spawn queries all read one smoothed truth.
-    let samples = if SMOOTH_SIGMA_PX > 0.0 {
-        assert_eq!(
-            SMOOTH_SIGMA_PX, SMOOTH_KERNEL_SIGMA,
-            "terrain: SMOOTH_SIGMA_PX changed without regenerating SMOOTH_KERNEL"
-        );
-        gaussian_smooth(&samples, width as usize)
-    } else {
-        samples
-    };
     let grid = HeightGrid::new(samples.into(), width, extent);
     // Publish only this one resample. At-or-below-resolution maps (including tiny tests) pass
     // through unchanged.
@@ -738,45 +677,6 @@ pub(crate) fn downsample(grid: &HeightGrid, target: u32) -> HeightGrid {
         }
     }
     HeightGrid::new(samples.into(), target, grid.extent())
-}
-
-/// Separable, edge-clamped Gaussian blur over a square grid — the [`SMOOTH_SIGMA_PX`]
-/// de-terracing pass. Pure f32 arithmetic in a fixed accumulation order per output (center tap,
-/// then symmetric pairs outward), sequential, so identical input bytes give bit-identical
-/// output on every peer. The vertical pass runs as transpose → row pass → transpose:
-/// transposition moves values without arithmetic and every output keeps the exact same tap
-/// order, so the result is bit-identical to the naive strided pass (verified: identical
-/// checksum) at ~3× the speed — ~0.45 s for the 4096² grid at `-O` (measured, Apple Silicon).
-pub(crate) fn gaussian_smooth(samples: &[f32], size: usize) -> Vec<f32> {
-    let pass_rows = |src: &[f32]| -> Vec<f32> {
-        let mut out = vec![0.0f32; src.len()];
-        for j in 0..size {
-            let row = &src[j * size..(j + 1) * size];
-            let orow = &mut out[j * size..(j + 1) * size];
-            for i in 0..size {
-                let mut acc = row[i] * SMOOTH_KERNEL[0];
-                for (k, w) in SMOOTH_KERNEL.iter().enumerate().skip(1) {
-                    let lo = i.saturating_sub(k);
-                    let hi = (i + k).min(size - 1);
-                    acc += (row[lo] + row[hi]) * w;
-                }
-                orow[i] = acc;
-            }
-        }
-        out
-    };
-    let transpose = |src: &[f32]| -> Vec<f32> {
-        let mut out = vec![0.0f32; src.len()];
-        for j in 0..size {
-            for i in 0..size {
-                out[i * size + j] = src[j * size + i];
-            }
-        }
-        out
-    };
-    // Horizontal (along x), then vertical (along z) via the transpose sandwich.
-    let horizontal = pass_rows(samples);
-    transpose(&pass_rows(&transpose(&horizontal)))
 }
 
 /// Static heightfield over the grid's full `[-half_extent, +half_extent]` square, using its own

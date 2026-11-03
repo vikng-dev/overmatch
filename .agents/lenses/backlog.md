@@ -73,7 +73,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 |---|---|---|---|---|---|---|
 | destruction-04 | P2 | `src/buildings/attachments.rs::Attachments::from_ron` | error-handling: Missing load gate | Positive finite `f64` values such as `1e100` and `1e-100` become infinity or zero when cast to simulation `f32`. | Validate and retain converted simulation values at admission, naming attachment, field and repair. | ratchet |
 | destruction-05 | P2 | `src/terrain_blend.rs::BLEND_LAYERS`, `BASE_GROUND`; `src/terrain_grid.rs` base-pack selection | base-truths: Named asset in logic | Replacing a texture pack's scale or ground material requires Rust edits; otherwise rendering and contact properties retain the previous pack's facts. | Declare pack identity, dimensions and ground membership in shared validated surface data. | ratchet |
-| destruction-07 | P3 | `src/terrain_grid.rs::grid_from_png`, `SMOOTH_SIGMA_PX` | code-branching: Kept alternative without a user | A fixed-zero smoothing setting preserves dormant Gaussian code for a hypothetical return to another map format. | Delete the dormant branch, constants, kernel and live-path documentation. | ratchet |
 | destruction-08 | P3 | `src/terrain_blend.rs::AO_BIAS` and blend appearance constants | base-truths: Bare number in code | AO bias, blend width and macro-tint settings are visual choices compiled into Rust. | Move them into required terrain `Taste` data with admission checks. | ratchet |
 
 ## ballistics
