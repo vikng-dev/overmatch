@@ -1174,11 +1174,6 @@ fn a_round_that_strikes_a_tank_again_records_each_encounter() {
             wide("ammo", -46.0, Kind::Ammo(ONE)),
         ],
     );
-    // Held in place: its soft volumes weigh next to nothing, so the first hit's impulse would throw
-    // it out of the returning round's path.
-    app.world_mut()
-        .entity_mut(struck)
-        .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
     tank(
         &mut app,
         Vec3::new(6.0, 0.0, -6.0 / 15.0_f32.to_radians().tan()),
@@ -3395,8 +3390,8 @@ struct Skid {
 
 /// A drag-free fixture 88 meets [`SKID_FACE`], at rest or moving at `face`, with the relative
 /// velocity [`SKID_SPEED`] at [`SKID_INCIDENCE_DEG`]; `elsewhere` is the velocity of a body far off
-/// the round's path. Marks are read in the face's frame: every bounce's speeds, shock and outgoing
-/// direction are relative to it, and the end velocity has `face` taken off.
+/// the round's path. Incoming speed and shock are relative to the face; outgoing speed and
+/// direction are world values. The end velocity has `face` taken off.
 fn skid_on(face: Vec3, elsewhere: Option<Vec3>) -> Skid {
     skid_from(face, elsewhere, 6.0)
 }

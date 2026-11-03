@@ -301,9 +301,13 @@ pub(crate) const REST_CLEARANCE: f32 = MARCH_EPS;
 /// the first-touched sample reads a reached face, never material at its start.
 const CONTACT_STAND_OFF: f32 = MARCH_EPS;
 
-/// Metres along `axis` from `start` to the resting height above `read`'s face: negative when the
-/// axis already stands below it, as it does at a disc's first touch (DERIVED: the rim reaches a flat
-/// face with the axis `r sin θ` above it, under the resting height `r`, `θ` the incidence).
+/// The game's damage model: a sliding body's axis rests one physical radius above a face.
+fn resting_height(body: super::RoundBody) -> f32 {
+    body.caliber * 0.5
+}
+
+/// Metres along `axis` to the clearance above the resting height; negative below it.
+/// DERIVED: at first touch a flat face leaves a disc's axis at r sin θ, below its resting radius r.
 fn to_resting_height(start: Vec3, axis: Dir3, read: &walk::EntranceRead, rest: f32) -> f32 {
     let into = axis.dot(read.normal);
     let height = (start - read.position).dot(read.normal) * -into.signum();
@@ -357,6 +361,10 @@ fn skid_turn(
 /// read at that moment; a corridor opened from the flight's own start would read such a body across
 /// an approach it never stood on.
 ///
+/// The frame transports to the relative heading, but the retained offsets remain square to the
+/// world heading. DERIVED bound for tilt δ: axial rim stagger ≤ r sin δ and projected width loses
+/// at most 1 − cos δ. At r = 44 mm, relative speed 100 m/s and transverse carrier speed 15 m/s,
+/// δ = atan(15/100) = 8.53°, stagger ≤ 6.53 mm, width loss 1.11%. The contact rebuild owns this tilt.
 #[expect(
     clippy::too_many_arguments,
     reason = "the flight's contact read spans the crossing's context, the round and the sweep's clock"
@@ -439,7 +447,7 @@ pub(super) fn at_first_touch(
     else {
         return Ok((opened, stand_off));
     };
-    let ahead = to_resting_height(interior.origin, axis, &read, body.caliber * 0.5);
+    let ahead = to_resting_height(interior.origin, axis, &read, resting_height(body));
     if ahead > 0.0 {
         return Ok((opened, stand_off));
     }
@@ -1833,7 +1841,7 @@ pub(crate) fn decide(
             approach: way_in,
         })
     };
-    let rest = body.caliber * 0.5;
+    let rest = resting_height(body);
 
     match walk::begin(&entrance, &shot, &context.laws)? {
         Begin::Miss => {

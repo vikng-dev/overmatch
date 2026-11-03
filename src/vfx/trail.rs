@@ -1015,8 +1015,6 @@ mod tests {
         assert_eq!(b_age, a_age / 2.0);
     }
 
-    /// Capture discipline: the spacing filter drops close points, the arc accumulates only over
-    /// captured ones, and the hard cap evicts oldest-first.
     /// The game's damage-model view: a skid owes its trail a station past the axis node it names,
     /// and its strike stands off every node, as a real skid's does (fixture: 45 mm). The shot
     /// analyzer's render receipts rely on it. Mutant: joining the mark to the path by coordinate
@@ -1058,6 +1056,8 @@ mod tests {
         );
     }
 
+    /// Capture discipline: spacing drops close points, arc counts captured ones, and the cap
+    /// evicts oldest-first.
     #[test]
     fn capture_respects_spacing_and_cap() {
         let mut rng = ViewRng::seeded(3);
