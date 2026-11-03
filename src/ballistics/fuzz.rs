@@ -19,8 +19,8 @@
 //! Every number the fuzzer reports comes back out of the shipped resolution path: the corridor is
 //! built by `resolve::build_corridor` (the march's own kernel), the field integral and the events by
 //! [`walk::walk_ray`]/[`walk::walk_disc`], and ADMISSION by [`drive`] — the runtime's own crossing
-//! state machine ([`resolve::decide`] and [`resolve::Flight::follow`]: entrance rules,
-//! transit, stop, bounce, continuation), observed with no consequence applied. A gate that
+//! state machine ([`resolve::at_first_touch`], [`resolve::decide`] and [`resolve::Flight::follow`]:
+//! entrance rules, transit, stop, bounce, continuation), observed with no consequence applied. A gate that
 //! re-derives the law it is gating cannot fail. The one survey number computed here is the
 //! straight-axis prefix integral ([`Report::min_reach`]), which is reported and never admits.
 //!
@@ -679,8 +679,8 @@ pub(super) struct DriveFailure {
 
 /// Fly `body` at `speed` from `origin` along `direction` for at most `length` metres of travel,
 /// deciding every crossing exactly as the runtime march does — the same surface cuts
-/// ([`super::next_surface`]), the same [`resolve::decide`], the same [`Flight::follow`], the same
-/// continuation drain — and applying nothing. Straight flight between crossings: the gate fires
+/// ([`super::next_surface`]), the same [`resolve::at_first_touch`] and [`resolve::decide`],
+/// the same [`Flight::follow`] and continuation drain — and applying nothing. Straight flight between crossings: the gate fires
 /// geometric lines, without gravity or drag.
 ///
 /// The probe round fires from the tank's own frame of reference, so nothing is excluded as its own.
@@ -763,7 +763,35 @@ pub(super) fn drive(
                 break;
             }
             Ahead::Held => 0.0,
-            Ahead::Armor(hit) => hit.distance,
+            Ahead::Armor(hit) => {
+                let touch = context.world.contact_motion.take().expect(
+                    "the game's damage model: an armour sweep supplies its first-touch frame",
+                );
+                let seconds = hit.distance / flight.speed;
+                let (opened, stand_off) = resolve::at_first_touch(
+                    context,
+                    &|_| true,
+                    &round,
+                    preset,
+                    &flight,
+                    touch,
+                    seconds,
+                    budget.remaining() as f32,
+                )
+                .map_err(|error| fail(error, &flight))?;
+                let short = stand_off / opened.speed;
+                let flown = (hit.distance - flight.speed * short).max(0.0);
+                let approach = resolve::Leg::new(
+                    flight.sweep_origin(),
+                    flight.direction,
+                    flown,
+                    &flight.sample_offsets(radius),
+                );
+                wounded(&[approach], &flight, &mut out)?;
+                budget.fly(f64::from((seconds - short).max(0.0)));
+                flight = opened;
+                stand_off
+            }
         };
         let decision = resolve::decide(
             context,

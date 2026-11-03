@@ -2234,7 +2234,12 @@ fn a_step_in_a_slides_path_is_met_from_where_the_last_leg_ended() {
     };
     assert_eq!(struck, step);
     let leg = &second.legs()[0];
-    assert!(leg.from.distance(bounce.resume) < 1.0e-4, "{}", leg.from);
+    let approach = leg.from - bounce.resume;
+    assert!(approach.dot(*bounce.direction) >= 0.0, "{approach}");
+    assert!(
+        approach.cross(*bounce.direction).length() < 1.0e-4,
+        "the open approach follows the slide without lifting over the step: {approach}"
+    );
     assert!(
         leg.axis.dot(*bounce.direction) > 1.0 - 1.0e-5,
         "the next leg flies the slide"
@@ -3721,4 +3726,33 @@ fn a_chain_of_rim_contacts_converges_on_the_face() {
     }
     let left = heading.dot(*normal).abs();
     assert!(left < 1.0e-6, "the heading stands {left} rad off the face");
+}
+
+/// The game's damage model: the gate opens a newly reached face through the live entry path.
+/// A full-coverage skid keeps its along-face speed, which the armour gate's admission relies on.
+/// Fixture: an 88-class disc, 773 m/s, 75-degree incidence, thick steel. Mutant: no reopening in
+/// `at_first_touch` turns this first strike into terminal rest.
+#[test]
+fn the_gate_keeps_a_first_touch_skid_in_flight() {
+    let mut app = world_with_trimesh_plates(&[]);
+    tilted_plate(&mut app, 0.3, 75.0_f32.to_radians(), 1.0, STEEL);
+    for _ in 0..8 {
+        app.update();
+    }
+    let flown = driven(&mut app, FIXTURE_88, 773.0);
+    let Decision::Bounce(bounce) = &flown.decisions[0] else {
+        panic!("the fixture must skid: {:?}", flown.decisions);
+    };
+    let (incoming, _) = first_tick(FIXTURE_88, 773.0);
+    let expected = incoming * 75.0_f32.to_radians().sin();
+    assert!((bounce.speed - expected).abs() < 0.1, "{bounce:?}");
+    assert!(bounce.continuation.is_some(), "a new skid flies on");
+    assert!(
+        !flown
+            .decisions
+            .iter()
+            .any(|decision| matches!(decision, Decision::Bite(_))),
+        "a skid leaves the face without an invented entry: {:?}",
+        flown.decisions
+    );
 }

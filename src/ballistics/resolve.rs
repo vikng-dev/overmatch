@@ -18,8 +18,9 @@
 //!
 //! # One mechanism, decided before it is applied
 //!
-//! [`decide`] resolves a crossing from a [`Flight`] — the round's position, direction, speed,
-//! CURRENT sampling frame and continuation — into a typed [`Decision`] with nothing mutated.
+//! [`at_first_touch`] opens a reached face; [`decide`] resolves its crossing from a [`Flight`] —
+//! the round's position, direction, speed, current sampling frame and continuation — into a typed
+//! [`Decision`] with nothing mutated.
 //! Timed playback carries the runtime consequences out of it (HP, impulses, marks, fields, events), and
 //! [`Flight::follow`] advances the flight to where the next crossing starts. The runtime march and
 //! the §13.6 gate (`fuzz`) both drive successive crossings through exactly this state machine; the
