@@ -145,6 +145,8 @@ fn driver_actuation() -> &'static DriverActuation {
 pub struct EngineParams {
     pub idle_rpm: f32,
     pub governed_rpm: f32,
+    /// Declared do-not-exceed crank speed, independent of torque-curve sampling.
+    pub crank_limit_rpm: f32,
     /// `(rpm, N·m)` authoring points, ascending rpm.
     pub torque_nm: Vec<(f32, f32)>,
 }
@@ -214,6 +216,8 @@ pub struct TransmissionParams {
 pub struct TransmissionAuthoring<'a> {
     pub idle_rpm: f32,
     pub governed_rpm: f32,
+    /// Declared do-not-exceed crank speed, independent of torque-curve sampling.
+    pub crank_limit_rpm: f32,
     /// The rpm the per-gear speeds are anchored at.
     pub rated_rpm: f32,
     pub torque_nm: &'a [(f32, f32)],
@@ -388,6 +392,19 @@ impl TransmissionParams {
             }
         }
 
+        // The curve brackets operation; its end-clamped tail does not define the crank limit.
+        if a.idle_rpm >= a.governed_rpm
+            || a.governed_rpm > a.rated_rpm
+            || a.torque_nm[0].0 >= a.governed_rpm
+            || a.torque_nm[a.torque_nm.len() - 1].0 < a.governed_rpm
+        {
+            return Err("engine.torque_curve / governed_rpm / rated_rpm: bracket the governor with curve data and keep idle < governed <= rated".into());
+        }
+        if !a.crank_limit_rpm.is_finite()
+            || a.crank_limit_rpm < a.governed_rpm + engine_control().governor_cut_rpm.value
+        {
+            return Err("engine.crank_limit_rpm: must be finite and at or beyond completed fuel cut (governed_rpm + governor_cut_rpm); raise the limit or lower governed_rpm so fuel is shut off at the limit".into());
+        }
         let omega_rated = a.rated_rpm * RPM_TO_RAD;
         let gear = |v_kmh: &f32| omega_rated * a.sprocket_radius_m / (v_kmh / 3.6);
         let gears_fwd: Vec<f32> = a.forward_speeds_kmh.iter().map(gear).collect();
@@ -416,6 +433,7 @@ impl TransmissionParams {
             engine: EngineParams {
                 idle_rpm: a.idle_rpm,
                 governed_rpm: a.governed_rpm,
+                crank_limit_rpm: a.crank_limit_rpm,
                 torque_nm: a.torque_nm.to_vec(),
             },
             gears_fwd,
@@ -472,9 +490,10 @@ impl TransmissionParams {
             }
         }
         // A virtual free tick may add at most one admitted fuel-cut width to the guarded crank.
-        let free_bound =
-            (self.max_curve_rpm() + overrev_margin_rpm() + engine_control().governor_cut_rpm.value)
-                * RPM_TO_RAD;
+        let free_bound = (self.engine.crank_limit_rpm
+            + overrev_margin_rpm()
+            + engine_control().governor_cut_rpm.value)
+            * RPM_TO_RAD;
         let energy_bound = 0.5 * self.engine_inertia * free_bound * free_bound;
         if !energy_bound.is_finite() || energy_bound <= 0.0 {
             return Err(fail(
@@ -571,16 +590,11 @@ impl TransmissionParams {
             .copied()
             .fold(0.0, f32::max);
         self.engine_inertia
-            * (self.max_curve_rpm() + overrev_margin_rpm())
+            * (self.engine.crank_limit_rpm + overrev_margin_rpm())
             * RPM_TO_RAD
             * TICK_HZ
             * ratio
             / self.sprocket_radius
-    }
-
-    /// Last authored curve rpm: the landing ceiling; the clutch guard adds its slip band.
-    pub fn max_curve_rpm(&self) -> f32 {
-        self.engine.torque_nm[self.engine.torque_nm.len() - 1].0
     }
 }
 
@@ -1038,7 +1052,7 @@ pub(crate) fn landed_spare(
     if candidate > state.gear && landing * ratio / tp.sprocket_radius < floor {
         return f32::NEG_INFINITY;
     }
-    if (landing * ratio / tp.sprocket_radius / RPM_TO_RAD).abs() > tp.max_curve_rpm() {
+    if (landing * ratio / tp.sprocket_radius / RPM_TO_RAD).abs() > tp.engine.crank_limit_rpm {
         return f32::NEG_INFINITY;
     }
     gear_force(
@@ -1710,7 +1724,7 @@ fn apply_ceiling_brakes(
         || st.clutch == ClutchState::Out
         || controls.service
         || st.park
-        || crank.omega_e < tp.max_curve_rpm() * RPM_TO_RAD
+        || crank.omega_e < tp.engine.crank_limit_rpm * RPM_TO_RAD
     {
         return;
     }
@@ -1718,7 +1732,7 @@ fn apply_ceiling_brakes(
     let direction = if st.reverse { -1.0 } else { 1.0 };
     let next =
         mean + (q[0] + q[1] - inp.reactions[0] - inp.reactions[1]) * inp.dt / (2.0 * fp.inertia);
-    let ceiling = tp.max_curve_rpm() * RPM_TO_RAD / crank.k;
+    let ceiling = tp.engine.crank_limit_rpm * RPM_TO_RAD / crank.k;
     let overspeed = (next * direction - ceiling).max(0.0);
     let brake = (overspeed * fp.inertia / inp.dt).min(tp.brake_capacity_n);
     for force in q {
@@ -1790,7 +1804,7 @@ fn crank_guards(
     propulsive: f32,
     tau_free: f32,
 ) -> (f32, f32) {
-    let over = (tp.max_curve_rpm() + overrev_margin_rpm()) * RPM_TO_RAD;
+    let over = (tp.engine.crank_limit_rpm + overrev_margin_rpm()) * RPM_TO_RAD;
     let floor = if st.clutch == ClutchState::Slip && tau_free > 0.0 {
         tp.launch_omega(propulsive)
     } else {

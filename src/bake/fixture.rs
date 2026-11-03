@@ -230,6 +230,7 @@ TankSpec(
                 engine: (
                     idle_rpm: 600.0,
                     governed_rpm: 2000.0,
+                    crank_limit_rpm: (2400.0, Fixture(\"fixture crank limit\")),
                     rated_rpm: 2400.0,
                     cylinders: 1,
                     torque_curve: [(700.0, 1000.0), (2000.0, 1200.0), (2400.0, 1100.0)],

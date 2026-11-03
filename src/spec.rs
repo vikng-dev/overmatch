@@ -973,6 +973,7 @@ impl TransmissionSpec {
         TransmissionParams::from_authoring(&TransmissionAuthoring {
             idle_rpm: engine.idle_rpm,
             governed_rpm: engine.governed_rpm,
+            crank_limit_rpm: engine.crank_limit_rpm.0,
             rated_rpm: engine.rated_rpm,
             torque_nm: &engine.torque_curve,
             forward_speeds_kmh: &gearbox.forward_speeds_kmh,
@@ -1005,6 +1006,9 @@ pub struct EngineSpec {
     pub idle_rpm: f32,
     /// Fuel-governor rpm — the fleet operating condition (Tiger: 2500 from Nov 1943).
     pub governed_rpm: f32,
+    /// Do-not-exceed crank speed, at or beyond completed fuel cut. The torque curve brackets
+    /// governed speed but may end before or after this limit; its tail remains end-clamped.
+    pub(crate) crank_limit_rpm: Sourced<f32>,
     /// Cylinder count (Tiger: the HL230 P45 is a V-12). Engine data like the rpm band beside it;
     /// the audio law reads it as the four-stroke firing rate `rpm × cylinders / 2 / 60`.
     pub cylinders: u32,
@@ -2170,6 +2174,7 @@ TankSpec(
                 engine: (
                     idle_rpm: 600.0,
                     governed_rpm: 2000.0,
+                    crank_limit_rpm: (2400.0, Fixture("fixture crank limit")),
                     rated_rpm: 2400.0,
                     cylinders: 6,
                     sound: (clip: "sfx/engine/fixture_loop.ogg", clip_pop_hz: 40.0),

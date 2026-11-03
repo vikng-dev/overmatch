@@ -77,6 +77,7 @@ TankSpec(
                 engine: (
                     idle_rpm: 600.0,
                     governed_rpm: 2000.0,
+                    crank_limit_rpm: (2400.0, Derived("nominal design do-not-exceed crank speed, beyond the completed fuel cut at 2100 rpm")),
                     rated_rpm: 2400.0,
                     cylinders: 1,
                     sound: None,

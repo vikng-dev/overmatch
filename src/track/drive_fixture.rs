@@ -8,6 +8,7 @@ pub(crate) fn compact_spec() -> crate::spec::TankSpec {
     let tr = &mut spec.track.powertrain.transmission;
     tr.engine.idle_rpm = 700.0;
     tr.engine.governed_rpm = 2200.0;
+    tr.engine.crank_limit_rpm = crate::provenance::Sourced(2600.0); // Fixture limit.
     tr.engine.rated_rpm = 2200.0;
     tr.engine.torque_curve = vec![
         (700.0, 600.0),

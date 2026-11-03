@@ -36,7 +36,7 @@ pub(crate) fn coast_equilibrium(
     let torque = anchor * (base + (1.0 - base) * omega / mid);
     (speed.is_finite()
         && speed > 0.0
-        && omega < (tp.max_curve_rpm() + overrev_margin_rpm()) * RPM_TO_RAD
+        && omega < (tp.engine.crank_limit_rpm + overrev_margin_rpm()) * RPM_TO_RAD
         && torque < tp.clutch_capacity
         && torque <= tp.engine_inertia * omega * FIXED_TICKS_PER_SECOND as f32)
         .then_some(speed)
@@ -789,7 +789,7 @@ fn empty_driver_station_coast_and_rollback() {
             } else {
                 (tp.gears_fwd.len() * 3 / 4).max(1) as u8
             };
-            let guard = (tp.max_curve_rpm() + overrev_margin_rpm()) * RPM_TO_RAD;
+            let guard = (tp.engine.crank_limit_rpm + overrev_margin_rpm()) * RPM_TO_RAD;
             let weight =
                 app.world().resource::<TankBlueprint>().spec.mass * crate::track::derive::G;
             let rolling = crate::ground_types::GroundTypes::load_shipped()

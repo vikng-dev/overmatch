@@ -382,6 +382,10 @@ impl TrackGear {
         let tp = &self.trans;
         out.f32("transmission.engine.idle_rpm", tp.engine.idle_rpm);
         out.f32("transmission.engine.governed_rpm", tp.engine.governed_rpm);
+        out.f32(
+            "transmission.engine.crank_limit_rpm",
+            tp.engine.crank_limit_rpm,
+        );
         for (index, (rpm, torque)) in tp.engine.torque_nm.iter().copied().enumerate() {
             out.f32(&format!("transmission.engine.torque[{index}].rpm"), rpm);
             out.f32(
@@ -2380,7 +2384,7 @@ mod tests {
             gear.params.grip.unwrap().side_weight * 2.0,
             mass * super::super::derive::G
         );
-        assert!(gear.trans.max_curve_rpm() > gear.trans.engine.governed_rpm);
+        assert!(gear.trans.engine.crank_limit_rpm > gear.trans.engine.governed_rpm);
         let angle = 10.0_f32.to_radians(); // Fixture: supported, loaded travel.
         let rotation = Quat::from_rotation_x(angle);
         let forward = rotation * Vec3::NEG_Z;

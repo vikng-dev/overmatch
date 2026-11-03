@@ -26,6 +26,7 @@ fn lab_tp() -> TransmissionParams {
     TransmissionParams::from_authoring(&TransmissionAuthoring {
         idle_rpm: 600.0,
         governed_rpm: 1800.0,
+        crank_limit_rpm: 1900.0, // Fixture: completed fuel cut.
         rated_rpm: 1800.0,
         torque_nm: &[
             (600.0, 1650.0),
@@ -79,6 +80,7 @@ fn tiger_authoring() -> TransmissionAuthoring<'static> {
     TransmissionAuthoring {
         idle_rpm: 600.0,
         governed_rpm: 2500.0,
+        crank_limit_rpm: 3000.0,
         rated_rpm: 3000.0,
         torque_nm: &[
             (800.0, 1300.0),
@@ -1593,17 +1595,18 @@ fn transmission_bottleneck_reduces_the_one_drive_task_rate() {
 fn one_fuel_rack_never_exceeds_the_full_load_curve() {
     for tp in [lab_tp(), tiger_tp()] {
         for fraction in 0..=100 {
-            let rpm = (tp.max_curve_rpm() + engine_control().governor_cut_rpm.value)
+            let rpm = (tp.engine.crank_limit_rpm + engine_control().governor_cut_rpm.value)
                 * fraction as f32
                 / 100.0;
+            let omega = rpm * RPM_TO_RAD;
+            let actual_rpm = omega / RPM_TO_RAD;
             for command in [0.0, 0.25, 0.5, 0.75, 1.0] {
-                let [fuel, catch, drag] =
-                    engine_torques(&tp, DriveSupply::WHOLE, rpm * RPM_TO_RAD, command);
+                let [fuel, catch, drag] = engine_torques(&tp, DriveSupply::WHOLE, omega, command);
                 assert!(
-                    fuel + catch - drag <= tp.torque_at(rpm) + 1e-3,
+                    fuel + catch - drag <= tp.torque_at(actual_rpm) + 1e-3,
                     "rpm={rpm} command={command}: net {} exceeds curve {}",
                     fuel + catch - drag,
-                    tp.torque_at(rpm)
+                    tp.torque_at(actual_rpm)
                 );
             }
         }
@@ -1909,7 +1912,7 @@ fn driver_lower_gear_requires_a_deficit_or_lug_and_overrun_holds() {
     for command in [0.0, 0.01] {
         state.gear = 3;
         state.shift_ticks = 0;
-        state.omega_e = (tp.max_curve_rpm() + overrev_margin_rpm()) * RPM_TO_RAD;
+        state.omega_e = (tp.engine.crank_limit_rpm + overrev_margin_rpm()) * RPM_TO_RAD;
         let inp = driver_input(&fp, speed * 2.0, 10_000.0, command);
         choose_gear(
             &mut state,
@@ -2185,7 +2188,7 @@ fn overrun_slip_guard_bounds_crank_at_top_gear() {
     for tp in [lab_tp(), tiger_tp()] {
         let top = tp.gears_rev.len() as u8;
         let ratio = tp.gears_rev[usize::from(top - 1)];
-        let guard = (tp.max_curve_rpm() + overrev_margin_rpm()) * RPM_TO_RAD;
+        let guard = (tp.engine.crank_limit_rpm + overrev_margin_rpm()) * RPM_TO_RAD;
         let speed = -2.0 * guard * tp.sprocket_radius / ratio;
         let mut state = fresh(&tp);
         state.gear = top;
@@ -2830,7 +2833,7 @@ fn ceiling_brake_requires_a_driver_and_holds_the_current_gear() {
             let gear = ladder.len().saturating_sub(1).max(1) as u8;
             let ratio = ladder[usize::from(gear - 1)];
             let k = ratio / tp.sprocket_radius;
-            let ceiling = tp.max_curve_rpm() * RPM_TO_RAD / k;
+            let ceiling = tp.engine.crank_limit_rpm * RPM_TO_RAD / k;
             let speed = dir * ceiling;
             let mut inp = input(
                 dir * 0.25, // Fixture: requested drive remains below drag, so C2 must hold.
@@ -2850,7 +2853,7 @@ fn ceiling_brake_requires_a_driver_and_holds_the_current_gear() {
                 reverse,
                 park: false,
                 clutch: ClutchState::In,
-                omega_e: tp.max_curve_rpm() * RPM_TO_RAD,
+                omega_e: tp.engine.crank_limit_rpm * RPM_TO_RAD,
                 ..fresh(&tp)
             };
             let initial = state;
@@ -3177,14 +3180,14 @@ fn zero_rate_staffed_descent_keeps_the_crank_ceiling_with_brakes() {
         // construction-scaled share of service capacity, so both staffing cases differ.
         let gear = (tp.gears_fwd.len() * 3 / 4).max(1) as u8;
         let k = tp.gears_fwd[usize::from(gear - 1)] / tp.sprocket_radius;
-        let ceiling = tp.max_curve_rpm() * RPM_TO_RAD / k;
-        let grade = engine_drag(&tp, tp.max_curve_rpm() * RPM_TO_RAD) * k * 0.5
+        let ceiling = tp.engine.crank_limit_rpm * RPM_TO_RAD / k;
+        let grade = engine_drag(&tp, tp.engine.crank_limit_rpm * RPM_TO_RAD) * k * 0.5
             + tp.brake_capacity_n * 0.25;
         let state = TransmissionState {
             gear,
             park: false,
             clutch: ClutchState::In,
-            omega_e: tp.max_curve_rpm() * RPM_TO_RAD,
+            omega_e: tp.engine.crank_limit_rpm * RPM_TO_RAD,
             ..fresh(&tp)
         };
         let mut inp = input(0.0, 0.0, [ceiling; 2], [-grade; 2]);
@@ -3255,6 +3258,7 @@ fn construction_admits_finite_scales_and_refuses_unrepresentable_arithmetic() {
     let mut a = tiger_authoring();
     a.idle_rpm = 25000.0;
     a.governed_rpm = 40000.0;
+    a.crank_limit_rpm = 40100.0; // Fixture: completed fuel cut.
     a.rated_rpm = 40000.0;
     a.torque_nm = &[(25000.0, 200000.0), (40000.0, 150000.0)];
     a.brake_static_factor = 3.0;
@@ -3433,6 +3437,7 @@ fn overflowing_crank_energy_is_refused_before_play() {
     // Fixture: finite inertia and angular speed whose energy overflows f32, with tiny reductions.
     a.idle_rpm = 1e7;
     a.governed_rpm = 1e8;
+    a.crank_limit_rpm = 2e8; // Fixture: finite crank whose energy overflows.
     a.rated_rpm = 1e8;
     a.torque_nm = &[(1e7, 1.0), (1e8, 1.0)];
     a.engine_inertia_kgm2 = 1e25;
@@ -3500,4 +3505,85 @@ fn coupled_mass_uses_each_constructions_own_weight() {
             "landing mass belongs to this construction"
         );
     }
+}
+
+/// A curve extension at its end-clamped torque changes no delivered torque or crank limit.
+/// Driver landing, ceiling brakes, over-rev and force roundoff must retain their envelope.
+#[test]
+fn a_curve_tail_does_not_move_the_crank_envelope() {
+    let original = tiger_authoring();
+    let base = TransmissionParams::from_authoring(&original).unwrap();
+    let mut curve = original.torque_nm.to_vec();
+    let &(rpm, torque) = curve.last().unwrap();
+    curve.push((rpm + 500.0, torque)); // Fixture: extend the end-clamped tail.
+    let extended = TransmissionParams::from_authoring(&TransmissionAuthoring {
+        torque_nm: &curve,
+        ..original
+    })
+    .unwrap();
+    for rpm in [600.0, 2100.0, 2500.0, 3000.0, 3500.0] {
+        // Fixture samples.
+        assert_eq!(base.torque_at(rpm), extended.torque_at(rpm));
+    }
+    assert_eq!(base.engine.crank_limit_rpm, extended.engine.crank_limit_rpm);
+    assert_eq!(base.roundoff_force_scale(), extended.roundoff_force_scale());
+    let fp = grade_fixture_fp();
+    let construction = DriveConstruction::new(&fp);
+    let gear = base.gears_fwd.len() as u8;
+    let k = base.gears_fwd[usize::from(gear - 1)] / base.sprocket_radius;
+    let omega = base.engine.crank_limit_rpm * RPM_TO_RAD;
+    let mut state = TransmissionState {
+        gear,
+        clutch: ClutchState::In,
+        omega_e: omega,
+        ..fresh(&base)
+    };
+    let inp = driver_input(&fp, omega / k, 0.0, 0.0);
+    let guards = crank_guards(&base, &inp, &state, 0.0, 0.0);
+    assert_eq!(guards, crank_guards(&extended, &inp, &state, 0.0, 0.0));
+    let controls = driver(&construction, &base, &mut state, &inp);
+    let crank = CrankTick {
+        omega_e: omega,
+        tau_free: 0.0,
+        k,
+        dir: 1.0,
+        omega_floor: guards.0,
+        omega_over: guards.1,
+        dt: inp.dt,
+    };
+    let brake_forces = |tp: &TransmissionParams| {
+        let mut q = [10_000.0; 2]; // Fixture: force that would accelerate past the limit.
+        apply_ceiling_brakes(&mut q, tp, &fp, &state, &controls, crank);
+        q
+    };
+    assert_eq!(brake_forces(&base), brake_forces(&extended));
+    assert!(
+        brake_forces(&base)[0] < 10_000.0,
+        "the witness reaches ceiling braking"
+    );
+    let fast = driver_input(&fp, (omega + 10.0) / k, 0.0, 1.0); // Fixture: over ceiling.
+    assert_eq!(
+        landed_spare(&base, &construction, &fast, &state, gear, 1.0),
+        f32::NEG_INFINITY
+    );
+    assert_eq!(
+        landed_spare(&extended, &construction, &fast, &state, gear, 1.0),
+        f32::NEG_INFINITY
+    );
+}
+
+/// Admission refuses a live fuel rack at the do-not-exceed limit before any Driver can brake it.
+#[test]
+fn the_crank_limit_requires_completed_fuel_cut() {
+    let mut a = tiger_authoring();
+    a.crank_limit_rpm = a.governed_rpm;
+    let error = TransmissionParams::from_authoring(&a)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("engine.crank_limit_rpm") && error.contains("fuel cut"),
+        "{error}"
+    );
+    a.crank_limit_rpm += engine_control().governor_cut_rpm.value;
+    assert!(TransmissionParams::from_authoring(&a).is_ok());
 }

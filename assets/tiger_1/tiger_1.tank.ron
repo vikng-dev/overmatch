@@ -69,6 +69,7 @@ TankSpec(
                     // speed anchors are quoted @ 3000 [ANCHOR].
                     idle_rpm: 600.0,
                     governed_rpm: 2500.0,
+                    crank_limit_rpm: (3000.0, Measured("Tigerfibel p.38: tachometer instruction never over 3000 rpm; independent of the torque curve")),
                     rated_rpm: 3000.0,
                     // V-12 [ANCHOR]. Four-stroke, so the crank fires 6 times per revolution:
                     // 60 Hz at idle, 250 Hz at the governor.
