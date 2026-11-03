@@ -91,6 +91,7 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | ballistics-22 | P3 | `src/damage.rs::requirement_met`; `ControlledTank::meets`; ADR-0013 | brevity: Repeated why | Prose still says "(effectiveness > 0)" and ADR-0013 still names `part_qualities` after the name was deleted. | Restate against the task rate. | ratchet |
 | ballistics-23 | P2 | `src/ballistics/contact_classes.rs::a_volley_along_a_long_face_flies_out` | testing: Vacuous witness | The replay asserts a touch, not the line and membership disagreement, so a mesh re-export can drop the condition and the old lookup could pass. | Assert the replay reaches the disagreement; a re-export then goes red rather than vacuous. | ratchet |
 | ballistics-24 | P3 | `.agents/scratch/research/walk-panics-2026-11-03.md` Reach | base-truths: Claim beyond the evidence | "No flight that did not panic changed": runs go unpaired after a panic, and agreement omits a changed `SampleSeed.t`, which `sitting_reach` reads. | Pair flights by seed, compare `t`, or narrow the claim. | ratchet |
+| ballistics-25 | P3 | `src/ballistics/recording_tests.rs::an_instant_contact_burst_moves_with_its_carrier_before_delivery` | testing: Claim beyond the witness | In the game's damage model, the comment says the burst mark, fragment field and environment blast share one point; the blast starts 0.18 m behind the tip, and the test does not mount environment delivery. | State the offset and what the test mounts, or mount it. Waits for the contact walk's design. | ratchet |
 
 ## driving
 
