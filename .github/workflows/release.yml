@@ -437,8 +437,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # The smoke runner, scripts/lib/battle-mode.sh and non-LFS assets/modes/battle.ron come
-      # from the checkout. Binaries and their runtime assets under test arrive as artifacts.
+      # The smoke runner comes from the checkout; binaries and runtime assets arrive as artifacts.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -509,8 +508,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      # The smoke runner, scripts/lib/battle-mode.sh and non-LFS assets/modes/battle.ron come
-      # from the checkout. Binaries and their runtime assets under test arrive as artifacts.
+      # The smoke runner comes from the checkout; binaries and runtime assets arrive as artifacts.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false

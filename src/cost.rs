@@ -19,6 +19,44 @@ use crate::state::MatchCommands;
 use crate::tank::Tank;
 use crate::trace::{JsonlSink, role_path};
 
+/// The cost runner's shared start file. `scripts/cost/run.sh` creates it only after every
+/// scripted client holds an input slot; scripts and recorders wait without delaying the Battle.
+#[derive(Debug, Default)]
+pub(crate) enum WorkloadStart {
+    #[default]
+    Ready,
+    WaitingForFile(std::path::PathBuf),
+}
+
+impl WorkloadStart {
+    pub(crate) fn from_env() -> Self {
+        match crate::env_value("SPIKE_WORKLOAD_READY").unwrap_or_else(crate::refuse_start) {
+            Some(path) => Self::WaitingForFile(path.into()),
+            None => Self::Ready,
+        }
+    }
+
+    pub(crate) fn ready(&mut self) -> bool {
+        let Self::WaitingForFile(path) = self else {
+            return true;
+        };
+        match path.try_exists() {
+            Ok(false) => false,
+            Ok(true) => {
+                *self = Self::Ready;
+                true
+            }
+            Err(error) => {
+                eprintln!(
+                    "SPIKE_WORKLOAD_READY: cannot inspect {}: {error}",
+                    path.display()
+                );
+                std::process::exit(2);
+            }
+        }
+    }
+}
+
 /// The fixed-tick timer, present only while some consumer has armed it.
 #[derive(Resource, Default)]
 pub(crate) struct TickClock {
@@ -97,6 +135,7 @@ struct CostTrace {
     tick: u64,
     /// Played ticks to skip before writing rows.
     warmup: u64,
+    start: WorkloadStart,
 }
 
 /// Open the role-qualified sink and register recorder systems when tracing is armed.
@@ -118,6 +157,7 @@ fn install(app: &mut App, role: &'static str) -> bool {
         sink,
         tick: 0,
         warmup,
+        start: WorkloadStart::from_env(),
     });
     arm_tick_clock(app);
     app.add_systems(Startup, write_meta);
@@ -142,8 +182,8 @@ fn write_meta(mut cost: ResMut<CostTrace>, fixed: Res<Time<Fixed>>, role: Res<Co
 struct CostRole(&'static str);
 
 /// `FixedLast`, after the clock closes: sample counts and write the row past warmup. A held tick
-/// (the match's fill-up or results, [`MatchCommands::Held`]) is neither counted nor written: the
-/// workload under measurement starts at combat release, so the percentile tables hold no held
+/// (the empty server or results, [`MatchCommands::Held`]) is neither counted nor written: the
+/// workload under measurement starts at combat release and any runner signal, so tables hold no held
 /// ticks. Both recorder compositions install the match-command publication.
 fn write_tick(
     mut cost: ResMut<CostTrace>,
@@ -156,7 +196,7 @@ fn write_tick(
     let Some(closed) = clock.closed() else {
         return;
     };
-    if *match_commands == MatchCommands::Held {
+    if *match_commands == MatchCommands::Held || !cost.start.ready() {
         return;
     }
     let tick = cost.tick;
@@ -212,6 +252,7 @@ mod tests {
             sink: JsonlSink::create(&path).unwrap(),
             tick: 0,
             warmup: 1,
+            start: WorkloadStart::default(),
         });
         world.insert_resource(TickClock {
             closed: Some(TickCost {
@@ -228,10 +269,21 @@ mod tests {
         assert_eq!(
             world.resource::<CostTrace>().tick,
             0,
-            "held fill-up never spends warmup"
+            "waiting never spends warmup"
         );
         world.insert_resource(MatchCommands::Live);
+        let ready = path.with_extension("ready");
+        assert!(!ready.exists(), "fixture start file must be absent");
+        world.resource_mut::<CostTrace>().start = WorkloadStart::WaitingForFile(ready.clone());
         world.run_system_once(write_tick).unwrap();
+        assert_eq!(
+            world.resource::<CostTrace>().tick,
+            0,
+            "a live partial cohort spends no warmup"
+        );
+        std::fs::write(&ready, "").unwrap();
+        world.run_system_once(write_tick).unwrap();
+        std::fs::remove_file(ready).unwrap();
         world.run_system_once(write_tick).unwrap();
         assert_eq!(world.resource::<CostTrace>().tick, 2);
         world.insert_resource(MatchCommands::Held);

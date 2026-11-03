@@ -14,7 +14,6 @@ struct Written {
     target_distance_m: f32,
     minimum_distance_m: f32,
     respawn_wait_s: f32,
-    fill_up_s: f32,
     combat_s: f32,
     late_join_s: f32,
     results_s: f32,
@@ -26,7 +25,6 @@ pub(super) struct BattleMode {
     pub(super) spawn: SpawnRule,
     /// From a tank's knockout until its player's respawn opens.
     pub(super) respawn_wait: Duration,
-    pub(super) fill_up: Duration,
     pub(super) combat: Duration,
     pub(super) late_join: Duration,
     pub(super) results: Duration,
@@ -60,7 +58,6 @@ impl BattleMode {
             duration
         };
         let respawn_wait = seconds("respawn_wait_s", written.respawn_wait_s, true);
-        let fill_up = seconds("fill_up_s", written.fill_up_s, false);
         let combat = seconds("combat_s", written.combat_s, false);
         let late_join = seconds("late_join_s", written.late_join_s, true);
         let results = seconds("results_s", written.results_s, false);
@@ -74,7 +71,6 @@ impl BattleMode {
                 minimum_distance_m: written.minimum_distance_m,
             },
             respawn_wait,
-            fill_up,
             combat,
             late_join,
             results,
@@ -100,7 +96,6 @@ mod tests {
             ("target_distance_m", "40.0", "inf"),
             ("respawn_wait_s", "0.125", "-1.0"),
             ("respawn_wait_s", "0.125", "NaN"),
-            ("fill_up_s", "0.25", "0.0"),
             ("combat_s", "1.0", "0.0"),
             ("combat_s", "1.0", "inf"),
             ("late_join_s", "0.5", "2.0"),

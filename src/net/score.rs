@@ -223,7 +223,7 @@ fn spawn_scoreboard(mut commands: Commands, battle: BattleState) {
     ));
 }
 
-/// A first combat spawn opens its standing; a fill-up spawn waits for the combat boundary.
+/// A first combat spawn opens its standing; a spawn while waiting for a player waits for combat.
 fn open_standing(
     add: On<Add, CombatantId>,
     combatants: Query<(&CombatantId, &CombatantLife)>,
@@ -484,7 +484,7 @@ mod tests {
         );
     }
 
-    /// The game's damage model: results must exclude a player who only waited in fill-up,
+    /// The game's damage model: results must exclude a combatant placed before the first player arrived,
     /// while a combat participant's standing survives disconnect and respawn. ASSUMED fixture
     /// identities and respawn wait; phase membership is the invariant.
     #[test]
@@ -532,8 +532,8 @@ mod tests {
         assert_eq!(standings[0].combatant, CombatantId(2));
     }
 
-    /// The game's damage model: only combat can change score. Fill-up and results ignore a
-    /// knockout fact; the result and the retained table stay consistent until the next fill-up.
+    /// The game's damage model: only combat can change score. Waiting and results ignore a
+    /// knockout fact; the result and the retained table stay consistent until the next Battle.
     #[test]
     fn nothing_scores_outside_combat() {
         use super::super::battle::{BattlePhase, LateJoin};

@@ -80,7 +80,7 @@ fn follow_battle(world: &mut World) {
     world.resource_mut::<BuiltWorld>().0 = Some(identity);
 }
 
-/// Called in the same command flush as the authority's next fill-up. New ledger entities start
+/// Called in the same command flush as the authority's next Battle. New ledger entities start
 /// new diff histories, so no acknowledged append cursor can span two worlds.
 pub(super) fn start_next(world: &mut World, number: u32) {
     let old: Vec<_> = world

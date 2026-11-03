@@ -76,7 +76,7 @@ pub fn cursor_locked(cursor: Query<&CursorOptions, With<PrimaryWindow>>) -> bool
     primary_window(cursor.single()).is_none_or(|c| c.grab_mode == CursorGrabMode::Locked)
 }
 
-/// Whether the match plays every command or holds it (fill-up, results), published each fixed
+/// Whether the match plays every command or holds it (waiting, results), published each fixed
 /// tick by the netcode layer from its replicated Battle (`net::battle::hold_commands`), on both
 /// endpoints. A composition without a Battle never inserts it: offline play and the sandboxes
 /// hold nothing. Instruments that measure played ticks (`cost::write_tick`) open their window at

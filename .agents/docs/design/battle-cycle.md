@@ -5,47 +5,36 @@ The owner chose the provisional mode in #220; #240 supplies its authority clock.
 
 ## Boundary decisions
 
-- The first fill-up is idle until the first authenticated player connects. Once
-  started, it runs to its deadline even if that player leaves. Later fill-ups
-  start immediately when players remain connected; otherwise they wait too.
-- Tanks exist from fill-up through combat. A connected player gets a tank as soon
-  as the Battle can place one: on joining during a fill-up, and at the start of every
-  fill-up for players already connected, into the world that boundary rebuilds. Each
-  is a fresh life through the automatic map spawn rule, held until combat starts
-  (see The hold); combat starts in the fill-up's tanks. Late joins during open combat
-  use the same rule. Bots follow it too. The operator's harness instruments retain
-  their declared placement.
-- A connection after late join closes is refused at the handshake
-  (`JoinRefusal::BattleClosed`) until the next fill-up reopens admission. A direct
-  client's loading screen shows that cause and stops retrying; a matchmaking client
-  returns to its lobby with it.
-- Only combat scores. A standing opens when a combatant first enters combat: for
-  an existing tank at combat release, or a spawn during combat. A fill-up-only
-  connection never enters the results. A combatant's standing remains after disconnect, so leaving
-  cannot erase its result. Combat runs its full duration regardless of occupancy,
-  losses or score. The hosting empty timeout cannot interrupt combat; an expired
-  empty timeout can retire the server once combat finishes.
-- At results, the server chooses a unique winner, a draw among tied best standings,
-  or no contest for an empty board. It removes tanks and flying rounds, including
-  detached turrets through the existing root-removal observer. The score freezes.
-- The next fill-up increments the Battle number, empties the score and clears
-  spawn-map picks; its spawns wait for combat before opening zero standings. Connected
-  links stay; their combatant identities remain unique for the server lifetime and
-  their life counters continue across Battles.
-- Every Battle starts with a fresh battlefield. The next fill-up reconstructs the
-  map, so connected players see intact scenery while the next Battle fills.
+- An empty server is `BattlePhase::WaitingForPlayer`, with no deadline. The first
+  authenticated connection starts combat on that authority tick (#271). This is the
+  same connected-link arrival that previously started the fill-up clock.
+- A joining player gets one tank as soon as placement permits. Bots can already be
+  present while the server waits; the first player releases them too. Late joins
+  during open combat use the same placement rule. Instrument placement remains explicit.
+- Connections after late join closes are refused at the handshake
+  (`JoinRefusal::BattleClosed`) until the next Battle reopens admission. The joining
+  screen shows that cause; matchmaking returns to its lobby with it.
+- Only combat scores. Existing bots enter the score at combat start; combat spawns
+  open standings immediately. Standings survive disconnect and respawn. Combat runs
+  its full duration regardless of occupancy or score. The hosting empty timeout may
+  retire an empty server after combat finishes, never during it.
+- Results select the authority's winner, draw or no contest, remove tanks and flying
+  rounds, and freeze the score. Connected links remain.
+- The results deadline increments the Battle number, resets score and spawn picks,
+  rebuilds the world and queues every connected player for a fresh life. With anyone
+  connected, that tick is already combat. Otherwise the new Battle waits for a player.
+  Combatant identities and life counters retain their server lifetime.
 
-All phase durations are required mode data in `assets/modes/battle.ron`. The
-owner's chosen durations are CLAIMED from #220: fill-up 60 s, combat 900 s,
-late join 600 s from combat start, results 15 s. Durations round up to authority
-whole ticks and fit a wrapped signed deadline comparison. Clients receive
-`BattleState` with the phase, exact deadline, Battle number and authoritative
-result. They never advance a phase or select the result locally.
+Durations remain required mode data in `assets/modes/battle.ron`: combat, late join
+and results. The owner's choices are CLAIMED from #220; #271 removes the timed
+fill-up, its data and its admission check. Tick conversion rounds up and refuses
+spans outside the wrapped signed comparison horizon. Clients receive the authority's
+phase, deadlines, Battle number and outcome; they never advance a phase locally.
 
 ## Fresh-world construction
 
-The next fill-up is the world boundary. Results retain the completed battlefield;
-fill-up increments the replicated `BattleState.number` and reconstructs the mutable
+The next Battle is the world boundary. Results retain the completed battlefield;
+the results deadline increments the replicated `BattleState.number` and reconstructs the mutable
 world in the same authority command flush. Clients derive the same construction
 from that replicated number before their fixed loop or record consumers run. No
 countdown or reset message advances a client world.
@@ -95,7 +84,7 @@ session lifetime.
 
 ## The hold
 
-Until combat starts a player controls only the camera. `net::battle::hold_commands`
+Before the combat snapshot, commands are held behind the loading screen. `net::battle::hold_commands`
 replaces every tank's command with `ParsedTankCommand::hold` while the replicated phase
 is not combat. It runs where commands are applied: after the input bridge and a bot's
 command writer, before every gameplay consumer. So drive, turret, gun, fire and every
@@ -118,7 +107,7 @@ nothing.
 
 | Phase | Heartbeat | Handshake |
 |---|---|---|
-| Idle or running fill-up | `open` | accepts below configured capacity |
+| Waiting for a player | `open` | accepts below configured capacity |
 | Combat, late join open | `open` | accepts below configured capacity |
 | Combat, late join closed | `closed` | refuses `JoinRefusal::BattleClosed` |
 | Results | `closed` | refuses `JoinRefusal::BattleClosed` |
@@ -139,7 +128,7 @@ The lane performs no deployment.
 
 The minimum distance is never relaxed. A crowded automatic join or requested
 respawn waits and retries; a phase boundary clears pending placement, and the
-next fill-up places all connected players from an empty combatant field.
+next Battle places all connected players from an empty combatant field.
 
 The owner receives typed `RespawnState`, scoped by `CombatDisclosure`; no UI text travels on the
 wire. `RespawnState::waiting` means the request remains pending and retries automatically. The death
@@ -171,8 +160,7 @@ waiter cannot remain blocked across the next fresh fill-up layout.
 ## Match UI
 
 `net::battle_hud` shows the replicated phase and score only. A clock line stays on screen:
-the wait for a first player, the time until combat, the time left in combat, the time left in
-results. The scoreboard lists rank, name, knockouts and losses in `rank` order; tied standings
+the time left in combat and results. An empty-server snapshot shows no match UI. The scoreboard lists rank, name, knockouts and losses in `rank` order; tied standings
 share a place. It shows while Tab is held in combat and without a key through results, where its
 title names the authority's winner (also marked on its row), the draw or no contest. It hides
 whenever an input-capturing overlay is latched and otherwise draws above the death banner.
@@ -189,10 +177,11 @@ the wire, so a row reads `PLAYER <combatant id>`. The own row is unmarked, so th
 same through results, when the client holds no tank and so no replicated fact naming its own
 combatant.
 
-Until this link's own tank has a presented pose, a complete local body and a bound view, an opaque loading screen
-covers the view (`Flow::Joining`): LOADING… through the asset load and the wait for the tank,
-CONNECTING… through connect attempts, and a refusal's cause once refused. A tank that later
-leaves (results, a respawn) keeps the match on screen.
+An opaque loading screen covers the view (`Flow::Joining`) until this link's own tank has a
+presented pose, a complete local body, a bound view and a combat or results snapshot. It shows
+LOADING… through asset and tank loading, CONNECTING… through connect attempts, or the refusal's
+cause. Loading leads directly into combat, without a countdown or intermediate waiting screen.
+A tank that later leaves (results, a respawn) keeps the match on screen.
 
 ## Verification
 
@@ -200,18 +189,18 @@ The short-duration mode file `src/net/fixtures/battle-short.ron` drives the same
 clock installation and protocol over real loopback UDP without a renderer. The
 probe reads the replicated deadlines and score, checks the matching heartbeat
 states, observes a rendered typed refusal, and keeps the first player connected
-into the next fill-up. A separate challenge-crossing probe closes admission
+into the next Battle. A separate challenge-crossing probe closes admission
 between the request and response. Score and deadline-wrap tests pin the boundary
 invariants. The server spawn tests exercise complete tanks and replacement lives: a player
-present at a fill-up holds a tank, combat starts in it, results sweep it and the next fill-up
-hands every connected player a fresh one. The hold test drives the production cycle and hold:
-every command is idle with the brakes held through the fill-up, and live on combat's first tick.
+starts combat on its arrival tick, results sweep its tank and the next Battle gives every
+connected player a fresh life immediately. The hold test drives the production clock and hold:
+every command is held on an empty server and live on the first arrival's tick.
 The transmission's brake-hold test brings a rolling tank to a parked rest where a released
 command coasts.
 
 The world-cycle regression uses a mixed map fixture through the startup scatter
 construction. During combat a wall chunk is freed and a tree falls; the authority,
-connected client, combat late joiner and next-fill-up joiner must recover startup
+connected client, combat late joiner and next-Battle joiner must recover startup
 counts and map identities in the next Battle. A separate arrival-order regression
 holds old and future ledgers across the replicated transition and verifies that
 neither is consumed against the wrong construction. The print-store regression
@@ -228,6 +217,50 @@ synchronized tick, and the released script separately. Every measurement window 
 release too: the cost recorder counts and writes only played ticks (`state::MatchCommands`, the
 hold the netcode layer publishes to the sim), and the frame-stream runners take the harness's
 `released` line as their window origin.
+
+## Scripted workloads after immediate start
+
+The harness waits only for its own input slot, a combat snapshot and timeline synchronization.
+Its launch watchdog is finite and never extended by a replicated phase; completion has its own
+script-length bound. The archive smoke and connect batch derive outer deadlines from loading
+allowances and script length alone. The fill-up-only shell helper and its tests are deleted.
+
+`scripts/cost/run.sh` creates `SPIKE_WORKLOAD_READY` only after all scripted clients hold input
+slots. Both their script clocks and the server/client cost recorders wait for this file; warmup
+cannot include partial-cohort ticks. The pen-camera cost runner uses the same tool barrier for
+its two scripts. No tool can delay the Battle. The online cost runner starts warmup from the
+measured frame-stream span when all load clients have slots; the debris stress runner starts
+warmup after every client reaches synchronized combat. These latter scripts outlast admission
+and their requested measurement windows. The combat-start probe bounds only loading and script
+length. Hosting reports waiting as open, then follows the unchanged combat/results join gate;
+the stress fixture still runs its operator workload while an empty server waits for a player.
+
+The scratch runner in `.agents/scratch/battle-verify/` is unchanged. Its `run.py` waits for
+`server: Battle 2 FillUp`, uses that to stop its capture and refuses a run without it. Its
+`audit.py` parses `FillUp` and reports `next_fill_up_observed`. Those assumptions require updating
+before the orchestrator reuses that scratch instrument.
+
+## Immediate-start lane verification (#271)
+
+MEASURED: 189 targeted tests passed, with six existing tests ignored. The run includes the
+Battle clock and command-release tests, spawn/score lifecycle, harness and recorder start-file
+gates, loading snapshot order, HUD, hosting's real-UDP cycle and typed refusal, environment
+reconstruction, and the brake-hold seam. Whole-tree `doc_citations`, `ui_ascii`, `net_boundary`
+and `bake::` guards passed in that run. The wire type tripwire passes after re-pinning the
+changed Battle phase; `PROTOCOL_REV` is deliberately incremented. No frame or tick cost was
+sampled, and no screen or capture was taken. Formatting, CI clippy with warnings denied, and
+Bash/Zsh syntax checks for every changed shell runner passed.
+
+Ratchet review: no backlog row was closed. `net-21` and `net-22` still describe real defects in
+`protocol::publish_servo_angles` / `apply_servo_angles`: ancestor state is absent from the stream,
+and non-owner servo targets are applied on arrival. This lane changes only the protocol revision
+and type hash in that file; the servo items and their tracked presentation decisions remain open.
+This is a file-level ratchet exception, not a claim that either row is fixed.
+
+## Historical timed-fill-up evidence
+
+The measurements and review dispositions below describe the retired timed flow.
+The current start rule and tools are defined above and in the #271 lane report.
 
 MEASURED 2026-11-01 for `lane/sweep-net-7`: the end-of-lane smoke ran once with this bay's dev
 server and client, headless and unattended under the machine lock on loopback. The client

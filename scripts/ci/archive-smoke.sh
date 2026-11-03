@@ -25,13 +25,10 @@
 #   2. `— input slot`      — the server replicated a tank this client controls
 #   3. `simulation script complete` + exit status 0 — it played its script out and left cleanly
 # A wedged client is bounded twice: the in-app watchdog (`harness::simulate_watchdog`,
-# startup slack + remaining replicated fill-up before release, then script length / 64 + 20 s
-# from release) and the wall-clock kill below. The outer bound is DERIVED: the 120 s load
-# allowance + a full fill-up + ceil(script ticks / 64). The fill-up is read from this checkout's
-# `assets/modes/battle.ron` (`scripts/lib/battle-mode.sh`), the file the server compiles in
-# (`BattleMode::shipped`); the server tarball does not ship it. The smoke's idle script uses the
-# same combat clock as every workload and must wait for release. The script length (256 ticks,
-# DERIVED ≈ 4 s at 64 Hz), the bound and the log directory (a temp dir, both logs printed on any
+# startup slack before synchronized combat, then script length / 64 + 20 s from release)
+# and the wall-clock kill below. The outer bound is DERIVED: the 120 s load allowance +
+# ceil(script ticks / 64). The script length (256 ticks, DERIVED 4 s at 64 Hz), the bound
+# and the log directory (a temp dir, both logs printed on any
 # failure) are fixed: nothing tracked sets them otherwise.
 #
 # Env:
@@ -54,9 +51,6 @@ ticks=256
 logs=$(mktemp -d)
 server_log="$logs/server.log"
 client_log="$logs/client.log"
-repo="$(cd "$(dirname "$0")/../.." && pwd)"
-# shellcheck source=../lib/battle-mode.sh
-. "$repo/scripts/lib/battle-mode.sh"
 
 # PREFLIGHT, and the one class of failure that prints no logs — there are none yet. A missing or
 # non-executable binary (a lost exec bit, an archive that unpacked to a different shape) is fully
@@ -68,8 +62,7 @@ if [ -n "${SMOKE_EXPECT_API:-}" ] && ! grep -q -a -F -- "$SMOKE_EXPECT_API" "$cl
     exit 1
 fi
 
-fill_up_s=$(battle_fill_up_s "$repo") || { echo "smoke: no fill-up to bound the run by" >&2; exit 1; }
-deadline=$((120 + fill_up_s + (ticks + 63) / 64))
+deadline=$((120 + (ticks + 63) / 64))
 
 # From here on, both logs on every failure — the runner is gone the moment this job ends, and a
 # failure whose evidence was not printed is a failure nobody can diagnose.

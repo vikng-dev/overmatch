@@ -241,7 +241,7 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
         }
         *app.world_mut().get_mut::<BattleState>(battle).unwrap() = BattleState {
             number: 2,
-            phase: BattlePhase::FillUp { ends_at: None },
+            phase: BattlePhase::WaitingForPlayer,
         };
         let fixed_visits = app.world().resource::<FixedVisits>().0;
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
@@ -333,7 +333,7 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
         assert!(app.world().resource::<CurrentWorld>().0.is_none());
         app.world_mut().spawn(BattleState {
             number: 2,
-            phase: BattlePhase::FillUp { ends_at: None },
+            phase: BattlePhase::WaitingForPlayer,
         });
         snapshots(app.world_mut(), 2, Vec::new(), TreeState::Standing, tree);
         app.update();
@@ -475,10 +475,10 @@ fn assert_authority_generation(server: &mut App, number: u32) {
 
 /// FRESH BATTLE EQUALS STARTUP BY COUNT AND IDENTITY, on authority, connected client and late
 /// joiners. The game's damage model: a wall chunk and trunk leave their map roots during combat;
-/// the next fill-up replaces them and every segment pool. Keeping a ledger, a loose body, or
+/// the next Battle replaces them and every segment pool. Keeping a ledger, a loose body, or
 /// a damaged root would fail this comparison for the next Battle's players.
 #[test]
-fn a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp() {
+fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
     let _udp = lock_real_udp_test();
     let port = free_port();
     let mut server = crate::net::link_drop::build_server(port);
@@ -499,7 +499,7 @@ fn a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp() {
     let mut destroyed = false;
     let mut saw_destroyed = false;
     let mut combat_joined = false;
-    let mut fill_joined = false;
+    let mut next_joined = false;
     for step in 0..2000 {
         server.update();
         std::thread::sleep(std::time::Duration::from_micros(300));
@@ -622,9 +622,9 @@ fn a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp() {
                     .all(|generation| *generation == WorldGeneration(2)),
                 "the boundary retires every previous Battle's carrier on the authority"
             );
-            if !fill_joined {
+            if !next_joined {
                 clients.push(network_client(port, 3));
-                fill_joined = true;
+                next_joined = true;
             }
             if clients
                 .iter_mut()
@@ -640,7 +640,7 @@ fn a_destroyed_world_is_startup_again_at_next_fill_up_over_real_udp() {
                 }
                 eprintln!(
                     "MEASURED: world cycle rebuilt {} map identities and {} colliders on authority \
-                     and {} clients; combat and fill-up joins isolated at fixture step {step}",
+                     and {} clients; joins across Battles isolated at fixture step {step}",
                     fresh.as_ref().unwrap().identities.len(),
                     fresh.as_ref().unwrap().colliders,
                     clients.len()

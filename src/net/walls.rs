@@ -1,6 +1,6 @@
 //! The wall ledger, about the game's environment destruction (game state only): one globally
 //! visible entity per Battle whose component lists every change the authority made to every
-//! building in that Battle's world (`net::world_reset` replaces it at the next fill-up)
+//! building in that Battle's world (`net::world_reset` replaces it at the next Battle)
 //! ([`WallEntry`]: a swap, dust, a hole, a crack or a fall, with its building's ordinal and tick),
 //! replicated as diffs — a client whose acknowledged ledger is within the last
 //! `Diffable::HISTORY_LEN` (64) appends receives only the entries past it, one further behind and

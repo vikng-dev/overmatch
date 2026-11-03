@@ -3,7 +3,6 @@
     target_distance_m: 40.0,
     minimum_distance_m: 20.0,
     respawn_wait_s: 0.125,
-    fill_up_s: 0.25,
     combat_s: 1.0,
     late_join_s: 0.5,
     results_s: 0.25,

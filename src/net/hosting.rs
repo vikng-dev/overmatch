@@ -1683,7 +1683,7 @@ mod tests {
         assert_eq!(connected_on_server(&mut server), 1, "{reason}");
     }
     /// The server's short-mode headless run uses the production clock and wire registrations:
-    /// fill-up, open combat, closed combat, results and another occupied fill-up all replicate.
+    /// open combat, closed combat, results and the next immediate combat all replicate.
     /// Heartbeats follow the same admission gate. A late join is refused with its typed cause,
     /// and the production joining Text shows it while the original player remains connected.
     #[test]
@@ -1726,8 +1726,7 @@ mod tests {
             (
                 state.number,
                 match state.phase {
-                    BattlePhase::FillUp { ends_at: None } => "idle",
-                    BattlePhase::FillUp { ends_at: Some(_) } => "fill-up",
+                    BattlePhase::WaitingForPlayer => "idle",
                     BattlePhase::Combat {
                         late_join: LateJoin::Open { .. },
                         ..
@@ -1821,13 +1820,13 @@ mod tests {
                     refused = true;
                 }
             }
-            if state.number == 2 && client_phases.contains(&(2, "fill-up")) {
+            if state.number == 2 && client_phases.contains(&(2, "combat-open")) {
                 assert!(
                     client_state(&mut first).0,
                     "the admitted player stays connected across Battles"
                 );
                 assert!(refused && score_replicated);
-                for phase in ["fill-up", "combat-open", "combat-closed", "results"] {
+                for phase in ["combat-open", "combat-closed", "results"] {
                     assert!(server_phases.contains(&(1, phase)), "server missed {phase}");
                     assert!(
                         client_phases.contains(&(1, phase)),

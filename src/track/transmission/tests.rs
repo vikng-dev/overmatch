@@ -273,7 +273,7 @@ fn readout_reports_crank_state() {
 
 /// The brake hold: a rolling tank brakes to a stop and stays parked, never through zero into
 /// reverse, on a FIXTURE downhill pull well inside both brake capacities. The repair and the
-/// Battle's fill-up rely on it (`track::sim::apply_track_forces`); the same input with the brakes
+/// Battle's command hold rely on it (`track::sim::apply_track_forces`); the same input with the brakes
 /// released keeps rolling, so a hold that only zeroes the command fails.
 #[test]
 fn brake_hold_stops_a_rolling_tank_and_parks_it() {

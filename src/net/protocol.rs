@@ -275,7 +275,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// rollout. Wire layouts and client derivation are unchanged; the authority exports resolved paths.
 /// REV 82 (the game's spawn flow): respawn admission and map-pick refusal are independent owner-private facts.
 /// REV 83 (#198, driving model): direct ground grip and nominal-pressure rolling resistance.
-pub const PROTOCOL_REV: u32 = 83;
+pub const PROTOCOL_REV: u32 = 84;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1108,7 +1108,7 @@ const WIRE_SURFACE_HASH: u64 = 0x5afa185f66009321;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xa1498b20e15fb952;
+const WIRE_TYPES_HASH: u64 = 0x40bdeb3b0facb3cc;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can

@@ -195,7 +195,7 @@ mod tests {
 
     /// The loading screen covers the empty view until the client has its tank: a connected link
     /// whose own tank is not yet presented is still loading. A match shown before it would show an
-    /// empty world; one hidden after it would hide the fill-up the player waits in.
+    /// empty world; one hidden after it would hide active combat.
     #[test]
     fn a_connected_client_loads_until_its_tank_is_presented() {
         let loading = FlowFacts::Net {

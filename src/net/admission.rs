@@ -37,7 +37,7 @@ impl JoinRefusal {
     }
 }
 
-/// Shared with netcode's request handler. It starts open for the first fill-up; the Battle's
+/// Shared with netcode's request handler. It starts open for the first player; the Battle's
 /// authority is its sole writer. Hosting reads the same gate for its heartbeat.
 #[derive(Resource, Clone, Debug)]
 pub(super) struct JoinAdmission(Arc<AtomicBool>);

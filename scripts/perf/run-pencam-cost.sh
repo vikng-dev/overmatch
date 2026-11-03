@@ -28,8 +28,8 @@
 #   mp-on/off       a local dedicated server and the latency runner's duel
 #                   (scripts/shot/run-pencam-latency.sh): the MEASURED client connects first and
 #                   runs VISIBLE (OVERMATCH_WINDOW=visible), the opponent hidden. Both settings
-#                   On / Off. Both scripts play from the Battle's combat release after the shipped
-#                   fill-up (src/net/harness.rs), so the run's span and its analysis count from
+#                   On / Off. A runner-owned SPIKE_WORKLOAD_READY file releases both scripts
+#                   after both input slots arrive, so the run's span and its analysis count from
 #                   the measured client's `harness: released … frame_s=` line, on the rows' own app
 #                   clock. The opponent's rounds knock the measured tank out about 30 s in
 #                   (MEASURED 2026-10-19), and the scripted client never respawns: the analysis
@@ -60,8 +60,6 @@ CLIENT="$REPO/$BIN/overmatch"
 SERVER="$REPO/$BIN/overmatch-server"
 STARTUP_GRACE_S="${STARTUP_GRACE_S:-60}"
 WARMUP_S=5
-source "$REPO/scripts/lib/battle-mode.sh"
-FILL_UP_S=$(battle_fill_up_s "$REPO") || exit 1
 RELEASED='harness: released'
 # The marks are `debug!` lines: the default filter (INFO, wgpu=error, naga=warn) plus them.
 LOG_FILTER="info,wgpu=error,naga=warn,overmatch::damage_cam::pen_cam=debug"
@@ -193,10 +191,12 @@ for cond in "${CONDITIONS[@]}"; do
       grep -q "knocked out at" "$log" || invalid "$cond" "the player's tank was never knocked out (see $log)"
     fi
   else
-    # DERIVED: 64 Hz fixed ticks from the shared combat release; the measured client runs 128
+    # DERIVED: 64 Hz fixed ticks from the shared tool barrier; the measured client runs 128
     # ticks longer so it is still present for the opponent's last rounds (as the latency runner's
     # first client is).
     ticks=$((run_s * 64))
+    ready="$OUT/$cond.ready"
+    rm -f "$ready"
     # The flat patch (scripts/harness/flat-patch.ron); lane 1 spawns 8 m along +x from lane 0.
     env OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" BEVY_ASSET_ROOT="$REPO" \
       "$SERVER" >"$OUT/$cond.server.log" 2>&1 &
@@ -209,7 +209,7 @@ for cond in "${CONDITIONS[@]}"; do
     # The measured client: lane 0, visible, its guns on the opponent's engine bay.
     printf '(drive: Fire(primary: true, secondary: true), fire_tick: 320, fire_interval: 256, aim: Point((8, 1.2, 2.2)), range_m: 12, ticks: %s)\n' \
       "$((ticks + 128))" >"$OUT/$cond.harness.ron"
-    env OVERMATCH_UNATTENDED=1 OVERMATCH_CONFIG_DIR="$cfg" \
+    env SPIKE_WORKLOAD_READY="$ready" OVERMATCH_UNATTENDED=1 OVERMATCH_CONFIG_DIR="$cfg" \
       OVERMATCH_HARNESS="$OUT/$cond.harness.ron" OVERMATCH_WINDOW=visible OVERMATCH_SERVER=127.0.0.1:5888 \
       SPIKE_FRAME_COST="$OUT/$cond.jsonl" RUST_LOG="$LOG_FILTER" BEVY_ASSET_ROOT="$REPO" \
       "$CLIENT" >"$log" 2>&1 &
@@ -222,19 +222,30 @@ for cond in "${CONDITIONS[@]}"; do
     # The opponent: lane 1, hidden (so unattended), its guns on the measured tank's front hull.
     printf '(drive: Fire(primary: true, secondary: true), fire_tick: 448, fire_interval: 256, aim: Point((-8, 0.8, -2.2)), range_m: 12, ticks: %s)\n' \
       "$ticks" >"$OUT/$cond.opponent.harness.ron"
-    env OVERMATCH_WINDOW=hidden \
+    env SPIKE_WORKLOAD_READY="$ready" OVERMATCH_WINDOW=hidden \
       OVERMATCH_HARNESS="$OUT/$cond.opponent.harness.ron" OVERMATCH_SERVER=127.0.0.1:5888 \
       BEVY_ASSET_ROOT="$REPO" \
       "$CLIENT" >"$OUT/$cond.opponent.log" 2>&1 &
     OTHER_PID=$!
-    # Both clients wait out the fill-up in their held tanks; the measured client's release line
-    # is the origin of its span and its analysis window.
-    for _ in $(seq 1 $(( (FILL_UP_S + STARTUP_GRACE_S) * 5 ))); do
+    # Both clients hold their scripts until every input slot is present; combat is already live.
+    for _ in $(seq 1 $(( STARTUP_GRACE_S * 5 ))); do
+      if grep -q 'harness: input slot' "$log" && grep -q 'harness: input slot' "$OUT/$cond.opponent.log"; then break; fi
+      sleep 0.2
+    done
+    grep -q 'harness: input slot' "$log" && grep -q 'harness: input slot' "$OUT/$cond.opponent.log" \
+      || invalid "$cond" "both clients must hold input slots before the tool barrier"
+    touch "$ready"
+    for _ in $(seq 1 $(( STARTUP_GRACE_S * 5 ))); do
       grep -q "$RELEASED" "$log" 2>/dev/null && break
       sleep 0.2
     done
     release_s="$(sed -n "s/.*$RELEASED .*frame_s=\([0-9.]*\).*/\1/p" "$log" | head -n1)"
     [[ -n "$release_s" ]] || invalid "$cond" "the measured client was never released into combat (no '$RELEASED' line; see $log)"
+    for _ in $(seq 1 $(( STARTUP_GRACE_S * 5 ))); do
+      grep -q "$RELEASED" "$OUT/$cond.opponent.log" 2>/dev/null && break
+      sleep 0.2
+    done
+    grep -q "$RELEASED" "$OUT/$cond.opponent.log" || invalid "$cond" "the opponent never reached synchronized combat"
     t_first="$(head -n1 "$stream" 2>/dev/null | sed -n 's/.*"t"[[:space:]]*:[[:space:]]*\([0-9.eE+-]*\).*/\1/p')"
     [[ -n "$t_first" ]] || invalid "$cond" "no frame row by the release (see $log)"
     origin=$(( release_s - t_first ))
@@ -249,7 +260,7 @@ for cond in "${CONDITIONS[@]}"; do
       kill "$CLIENT_PID" 2>/dev/null || true; wait "$CLIENT_PID" 2>/dev/null || true
     fi
     CLIENT_PID=""
-    # The opponent's script, from the same release, is 128 ticks shorter than the measured
+    # The opponent's script, from the same tool barrier, is 128 ticks shorter than the measured
     # client's, so it has run its ticks and exited by the measured client's own exit; after a
     # `spanned` kill it finishes within those two seconds. Its status and its completion line
     # prove it supplied the schedule. Its process is this shell's child, so `wait` reads the status.

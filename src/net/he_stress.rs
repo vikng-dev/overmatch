@@ -187,7 +187,7 @@ mod tests {
     }
 
     /// The operator's empty-server recipe must create real bursts and a nonempty destruction
-    /// ledger with the shipped sim, even while Battle holds player commands in idle fill-up.
+    /// ledger with the shipped sim, even while the empty Battle waits for its first player.
     #[test]
     fn armed_empty_server_breaks_through_real_flight() {
         use crate::buildings::breakage::WallRecord;
@@ -254,7 +254,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             battle.phase,
-            super::super::battle::BattlePhase::FillUp { ends_at: None }
+            super::super::battle::BattlePhase::WaitingForPlayer
         ));
     }
 }

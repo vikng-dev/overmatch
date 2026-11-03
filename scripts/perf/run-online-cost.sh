@@ -22,13 +22,9 @@
 # share this Mac's CPU with the measured client, so a condition with load is not the same machine
 # as one without (ASSUMED non-trivial: a 2 ms run loop each).
 #
-# The window opens at the Battle's combat release, not at launch: every client takes its slot
-# during the shipped fill-up and plays its script from the release (src/net/harness.rs), so the
-# measured client's `harness: released … frame_s=` line, on the rows' own app clock, is the window's
-# origin (frame-run.zsh's FRAME_RUN_ORIGIN_S): the edges are origin+WARMUP_S and
-# origin+WARMUP_S+DURATION_S of span, and the analyzer discards everything before the first. Until
-# the line appears the origin is the fill-up itself (DERIVED from assets/modes/battle.ron), so the
-# loop waits it out; a condition never released is INVALID.
+# The window opens after the last load client takes its slot and the measured client reaches
+# synchronized combat. That frame-stream span is FRAME_RUN_ORIGIN_S; warmup and duration follow
+# it. Scripts run from each client's own synchronized combat arrival, with no Battle wait.
 #
 # MODE — exactly one, no default, so nothing takes a screen by omission:
 #   VISIBLE=1    the window on screen: every presentation precondition and gate of the frame sweep
@@ -63,9 +59,8 @@
 # on stdout the client frame table, the network table and the server table (tables.txt keeps the
 # last two).
 #
-# Wall clock: per condition, startup (5–15 s; longer on a cold shader cache) + the shipped fill-up
-# (60 s) + WARMUP_S + DURATION_S + COOLDOWN_S, ~2.5–3 min at the defaults; a local server adds
-# ~5 s.
+# Wall clock: startup and load-client admission, then WARMUP_S + DURATION_S + COOLDOWN_S.
+# The admission allowance is STARTUP_GRACE_S; no Battle timer contributes to the bound.
 # =======================================================================
 #
 # Usage: run-online-cost.sh <out-dir> [condition ...]   (default condition: `online|`)
@@ -113,8 +108,6 @@ SESSION="${EDGEGAP_SESSION:-$REPO/scripts/edgegap/session.sh}"
 SIM_TICKS=$(((WARMUP_S + DURATION_S + STARTUP_GRACE_S + 60) * 64))
 INPUT_SLOT='— input slot'
 RELEASED='harness: released'
-source "$REPO/scripts/lib/battle-mode.sh"
-FILL_UP_S=$(battle_fill_up_s "$REPO") || exit 1
 
 CONDITIONS=("$@")
 (( ${#CONDITIONS[@]} > 0 )) || CONDITIONS=("online|")
@@ -222,8 +215,8 @@ condition_launched() {
   edge_end=""
   marked=""
   LOAD_PIDS=()
-  # The expected origin until the release line names the real one.
-  FRAME_RUN_ORIGIN_S=$FILL_UP_S
+  # Keep the window pending until the cohort is present.
+  FRAME_RUN_ORIGIN_S=$((STARTUP_GRACE_S + 1))
   printf 'edge\tepoch_s\tspan_s\tbytes_in\tbytes_out\n' >"$OUT/$1.window.tsv"
 }
 
@@ -236,9 +229,12 @@ condition_poll() {
   if [[ -z "$released" ]]; then
     release_s="$(sed -n "s/.*$RELEASED .*frame_s=\([0-9.]*\).*/\1/p" "$log" | head -n1)"
     t_first="$(frame_run_t_first "$stream")"
-    if [[ -n "$release_s" && -n "$t_first" ]]; then
+    if [[ -n "$release_s" && -n "$t_first" && -n "$span" ]]; then
+      for (( i = 1; i <= load_count; i++ )); do
+        grep -q -- "$INPUT_SLOT" "$OUT/$cond.load$i.log" 2>/dev/null || return 0
+      done
       released=1
-      FRAME_RUN_ORIGIN_S=$(( release_s - t_first ))
+      FRAME_RUN_ORIGIN_S=$span
       echo "   $cond: combat release at ${release_s}s of frame-clock time, origin ${FRAME_RUN_ORIGIN_S}s into the stream"
     fi
   fi

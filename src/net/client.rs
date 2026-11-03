@@ -883,7 +883,8 @@ pub(super) fn refusal_probe(app: &mut App) -> (Option<JoinRefusal>, String) {
 }
 
 /// Latch [`ConnectRetry::tank_seen`] once the own tank is presented: its view has bound
-/// (`TankViewReady`). `tank::view::bind_tank_view` binds only a root carrying `SimParts`, which
+/// (`TankViewReady`) and a combat or results snapshot has arrived.
+/// `tank::view::bind_tank_view` binds only a root carrying `SimParts`, which
 /// the body assembly inserts with the local `Tank` after the rig has attached to the replicated
 /// `Position` and `Rotation`, so the bound view implies the pose and the complete body.
 fn latch_tank_seen(
@@ -895,9 +896,18 @@ fn latch_tank_seen(
             With<crate::tank::TankViewReady>,
         ),
     >,
+    battles: Query<&super::battle::BattleState>,
     mut retry: ResMut<ConnectRetry>,
 ) {
-    if retry.connected_once && !retry.tank_seen && !own.is_empty() {
+    // A tank may precede the combat snapshot. Keep loading rather than exposing an empty phase.
+    let playable = match battles.single() {
+        Ok(battle) => !matches!(battle.phase, super::battle::BattlePhase::WaitingForPlayer),
+        Err(bevy::ecs::query::QuerySingleError::NoEntities(_)) => false,
+        Err(bevy::ecs::query::QuerySingleError::MultipleEntities(_)) => {
+            panic!("a client replicates exactly one Battle before presenting its own tank")
+        }
+    };
+    if retry.connected_once && !retry.tank_seen && !own.is_empty() && playable {
         retry.tank_seen = true;
     }
 }
@@ -2323,6 +2333,22 @@ mod tests {
             "ownership is not presentation"
         );
         world.entity_mut(own).insert(crate::tank::TankViewReady);
+        world.run_system_once(latch_tank_seen).unwrap();
+        assert!(
+            !world.resource::<ConnectRetry>().tank_seen,
+            "a bound view without its phase still loads"
+        );
+        let battle = world
+            .spawn(super::super::battle::BattleState::default())
+            .id();
+        world.run_system_once(latch_tank_seen).unwrap();
+        assert!(
+            !world.resource::<ConnectRetry>().tank_seen,
+            "a stale empty-server snapshot cannot expose a waiting screen"
+        );
+        *world
+            .get_mut::<super::super::battle::BattleState>(battle)
+            .unwrap() = super::super::battle::BattleState::combat_fixture();
         world.run_system_once(latch_tank_seen).unwrap();
         assert!(world.resource::<ConnectRetry>().tank_seen);
         world.despawn(own);

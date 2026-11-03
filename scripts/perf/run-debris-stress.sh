@@ -25,15 +25,15 @@
 # Mac's CPU beside the server.
 #
 # Per condition: the server starts (OVERMATCH_SERVER_BIND=127.0.0.1, so the firewall has nothing to
-# ask; OVERMATCH_SERVER_STATS_S=1), the clients connect, take their input slots and wait out the
-# shipped fill-up until the Battle's combat release (each client's `harness: released` line),
+# ask; OVERMATCH_SERVER_STATS_S=1), the clients connect, take their input slots and reach
+# synchronized combat (each client's `harness: released` line),
 # WARMUP_S passes from the release and the server's last stats line becomes the marker, DURATION_S
 # passes, the server's log is copied at the window's close, then every process is killed. The
 # window is the stats lines after the marker in that copy (online_cost.py server-window).
 # Gates per condition (a failed one marks it INVALID in manifest.txt; the run goes on):
 #   * the server listened and spawned BOTS bots;
-#   * every client took its input slot within STARTUP_GRACE_S, was released within the fill-up
-#     plus STARTUP_GRACE_S after it, and was alive at the window's close;
+#   * every client took its input slot and reached synchronized combat within STARTUP_GRACE_S
+#     after launch, and was alive at the window's close;
 #   * the server was alive at the window's close and printed stats lines inside the window;
 #   * an armed lever released fragments inside the window.
 #
@@ -47,8 +47,8 @@
 # SMOKE=1: two short conditions (off, 35:5) of WARMUP_S 5 + DURATION_S 10, plumbing only.
 #
 # Wall clock: per condition ~5 s server start + ~10 s client connect (longer on a cold cache) +
-# the shipped fill-up (DERIVED from assets/modes/battle.ron, 60 s) + WARMUP_S 20 + DURATION_S 60
-# + ~2 s, ~2.6 min: ~21 min for the default eight.
+# WARMUP_S 20 + DURATION_S 60 after the last client is released
+# plus process cleanup.
 # =======================================================================
 #
 # Usage: run-debris-stress.sh <out-dir> [condition ...]
@@ -85,8 +85,6 @@ STARTUP_GRACE_S="${STARTUP_GRACE_S:-90}"
 CLIENT_WORKLOAD="${CLIENT_WORKLOAD:-drive: Idle}"
 SERVER_ENV="${SERVER_ENV:-}"
 ADDR="127.0.0.1:5888"
-source "$REPO/scripts/lib/battle-mode.sh"
-FILL_UP_S=$(battle_fill_up_s "$REPO") || exit 1
 # The scripted client exits after its ticks (64 Hz, counted from combat release); the runner ends
 # it first, at the window's close, so the script must outlast the condition.
 SIM_TICKS=$(((WARMUP_S + DURATION_S + STARTUP_GRACE_S + 60) * 64))
@@ -191,12 +189,11 @@ run_condition() {
       sleep 0.5
     done
   done
-  # The window opens from combat release, which every client of this server shares: the first
-  # slot started the server's fill-up, so release comes within the fill-up plus the slots' grace.
+  # Warmup starts only after the last client reaches synchronized combat.
   for (( i = 1; i <= CLIENTS; i++ )); do
     until grep -q -- "$RELEASED" "$OUT/$cond.client$i.log" 2>/dev/null; do
-      if ! alive "${CLIENT_PIDS[$i]}" || (( EPOCHREALTIME - start > STARTUP_GRACE_S + FILL_UP_S )); then
-        invalid "$cond" "client $i was not released within the ${FILL_UP_S}s fill-up plus ${STARTUP_GRACE_S}s (see $OUT/$cond.client$i.log)"
+      if ! alive "${CLIENT_PIDS[$i]}" || (( EPOCHREALTIME - start > STARTUP_GRACE_S )); then
+        invalid "$cond" "client $i was not released within ${STARTUP_GRACE_S}s (see $OUT/$cond.client$i.log)"
         return 1
       fi
       sleep 0.5

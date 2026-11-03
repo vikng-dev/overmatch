@@ -56,10 +56,8 @@ def main():
     harness.write_text(f"(drive: Fire(primary: true), fire_tick: 0, ticks: {ticks})\n")
     for role in ("client", "server"):
         (out / f"{role}.{role}.jsonl").unlink(missing_ok=True)
-    fill_up = float(match(r"fill_up_s:\s*([\d.]+)",
-                          (root / "assets/modes/battle.ron").read_text())[1])
-    # DERIVED outer bound: ASSUMED 120 s load allowance + shipped fill-up + 64 Hz script.
-    deadline = 120 + math.ceil(fill_up) + math.ceil(ticks / 64)
+    # DERIVED outer bound: ASSUMED 120 s load allowance + the 64 Hz script.
+    deadline = 120 + math.ceil(ticks / 64)
     children = []
     with (out / "server.log").open("w") as server_log, (out / "client.log").open("w") as client_log:
         try:

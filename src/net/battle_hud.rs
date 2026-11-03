@@ -1,5 +1,4 @@
-//! The Battle's match UI, game state only: a clock line always on screen (the wait for players,
-//! the time until combat, the time left in it, the results' remaining time), and the scoreboard
+//! The Battle's match UI, game state only: a clock line in combat and results, and the scoreboard
 //! (rank, name, knockouts, losses), held on Tab during combat and shown through results with the
 //! authority's result marked.
 //!
@@ -41,13 +40,9 @@ const ROW_PX: f32 = 16.0;
 /// What the match UI shows, from the replicated phase alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
-    /// Fill-up before its first player: the server has set no deadline.
-    Waiting,
-    /// Fill-up, `seconds` until combat.
-    StartsIn { seconds: u32 },
     /// Combat, `seconds` of it left.
     Combat { seconds: u32 },
-    /// Results with the authority's outcome, `seconds` until the next fill-up.
+    /// Results with the authority's outcome, `seconds` until the next Battle.
     Results {
         seconds: u32,
         outcome: BattleOutcome,
@@ -55,12 +50,9 @@ enum View {
 }
 
 impl View {
-    fn of(phase: BattlePhase, now: u32, tick: Duration) -> Self {
-        match phase {
-            BattlePhase::FillUp { ends_at: None } => Self::Waiting,
-            BattlePhase::FillUp { ends_at: Some(end) } => Self::StartsIn {
-                seconds: seconds_left(end, now, tick),
-            },
+    fn of(phase: BattlePhase, now: u32, tick: Duration) -> Option<Self> {
+        Some(match phase {
+            BattlePhase::WaitingForPlayer => return None,
             BattlePhase::Combat { ends_at, .. } => Self::Combat {
                 seconds: seconds_left(ends_at, now, tick),
             },
@@ -68,7 +60,7 @@ impl View {
                 seconds: seconds_left(ends_at, now, tick),
                 outcome,
             },
-        }
+        })
     }
 
     /// Whether the scoreboard shows: through results, and during combat while `held`.
@@ -76,7 +68,6 @@ impl View {
         match self {
             Self::Results { .. } => true,
             Self::Combat { .. } => held,
-            Self::Waiting | Self::StartsIn { .. } => false,
         }
     }
 
@@ -88,16 +79,12 @@ impl View {
                 outcome: BattleOutcome::Winner(combatant),
                 ..
             } => Some(combatant),
-            Self::Results { .. } | Self::Combat { .. } | Self::Waiting | Self::StartsIn { .. } => {
-                None
-            }
+            Self::Results { .. } | Self::Combat { .. } => None,
         }
     }
 
     fn clock_line(self) -> String {
         match self {
-            Self::Waiting => "WAITING FOR PLAYERS".to_owned(),
-            Self::StartsIn { seconds } => format!("BATTLE STARTS IN {}", clock(seconds)),
             Self::Combat { seconds } => clock(seconds),
             Self::Results { seconds, .. } => format!("RESULTS {}", clock(seconds)),
         }
@@ -217,7 +204,7 @@ fn title(battle: BattleState) -> String {
             BattleOutcome::Draw => format!("BATTLE {number} — DRAW"),
             BattleOutcome::NoContest => format!("BATTLE {number} — NO CONTEST"),
         },
-        BattlePhase::FillUp { .. } | BattlePhase::Combat { .. } => format!("BATTLE {number}"),
+        BattlePhase::WaitingForPlayer | BattlePhase::Combat { .. } => format!("BATTLE {number}"),
     }
 }
 
@@ -490,7 +477,11 @@ fn update_battle_hud(
         return;
     }
     let now = clock.tick().0;
-    let view = View::of(battle.phase, now, time.timestep());
+    let Some(view) = View::of(battle.phase, now, time.timestep()) else {
+        // A stale empty-server snapshot can arrive before combat; loading owns that interval.
+        hide_views(&mut roots, &mut nodes);
+        return;
+    };
     let board_shown =
         view.shows_board(keys.pressed(BOARD_KEY)) && !overlay::input_blocked(&overlays, true);
     let (table_node, mut scroll, mut table) = nodes
@@ -1267,15 +1258,25 @@ mod tests {
     }
 
     /// Players rely on the view following the replicated phase alone: no clock and no board
-    /// before the first snapshot; the wait, then the time until combat in fill-up, with no board
+    /// before the first snapshot; a stale empty-server phase shows no match UI
     /// even on Tab; the time left in combat, the board only while Tab is held and nothing
     /// captures input; the same board through results without Tab, the authority's winner on its
-    /// own line, or the draw in the title. Mutants: showing the board in fill-up, needing Tab in
+    /// own line, or the draw in the title. Mutants: showing the board while waiting, needing Tab in
     /// results, drawing over the menu, or marking the board's top row instead of the authority's
     /// winner all fail. Fixture ticks of half a second.
     #[test]
     fn the_view_follows_the_replicated_phase() {
-        let mut app = app(Duration::from_millis(500));
+        let tick = Duration::from_millis(500); // Fixture presentation timestep.
+        let mode = super::super::battle_mode::BattleMode::shipped();
+        let end = |duration| {
+            crate::sim_tick::SimTick::new(40)
+                .after(crate::sim_tick::TickSpan::from_duration(duration, tick).unwrap())
+        };
+        let display = |duration: Duration| {
+            let seconds = duration.as_secs_f64().ceil() as u64;
+            format!("{}:{:02}", seconds / 60, seconds % 60)
+        };
+        let mut app = app(tick);
         app.update();
         assert_eq!(clock_line(&mut app), None);
         assert!(!shown(&mut app, MatchUi::Scoreboard));
@@ -1297,7 +1298,7 @@ mod tests {
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(BOARD_KEY);
         app.update();
-        assert_eq!(clock_line(&mut app).as_deref(), Some("WAITING FOR PLAYERS"));
+        assert_eq!(clock_line(&mut app), None);
         assert!(!shown(&mut app, MatchUi::Scoreboard));
 
         // Fixture input time leads presentation time. The match display must follow the latter.
@@ -1309,26 +1310,13 @@ mod tests {
             ));
         set_phase(
             &mut app,
-            BattlePhase::FillUp {
-                ends_at: Some(crate::sim_tick::SimTick::new(100)),
-            },
-        );
-        app.update();
-        assert_eq!(
-            clock_line(&mut app).as_deref(),
-            Some("BATTLE STARTS IN 0:30")
-        );
-        assert!(!shown(&mut app, MatchUi::Scoreboard));
-
-        set_phase(
-            &mut app,
             BattlePhase::Combat {
-                ends_at: crate::sim_tick::SimTick::new(40 + 2 * 900),
+                ends_at: end(mode.combat),
                 late_join: LateJoin::Closed,
             },
         );
         app.update();
-        assert_eq!(clock_line(&mut app).as_deref(), Some("15:00"));
+        assert_eq!(clock_line(&mut app), Some(display(mode.combat)));
         assert!(
             shown(&mut app, MatchUi::Scoreboard),
             "Tab held in combat shows the board"
@@ -1365,12 +1353,15 @@ mod tests {
         set_phase(
             &mut app,
             BattlePhase::Results {
-                ends_at: crate::sim_tick::SimTick::new(70),
+                ends_at: end(mode.results),
                 outcome: BattleOutcome::Winner(CombatantId(7)),
             },
         );
         app.update();
-        assert_eq!(clock_line(&mut app).as_deref(), Some("RESULTS 0:15"));
+        assert_eq!(
+            clock_line(&mut app),
+            Some(format!("RESULTS {}", display(mode.results)))
+        );
         assert!(
             shown(&mut app, MatchUi::Scoreboard),
             "results show the board without Tab"
@@ -1381,7 +1372,7 @@ mod tests {
         set_phase(
             &mut app,
             BattlePhase::Results {
-                ends_at: crate::sim_tick::SimTick::new(70),
+                ends_at: end(mode.results),
                 outcome: BattleOutcome::Draw,
             },
         );

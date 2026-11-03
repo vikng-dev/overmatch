@@ -209,7 +209,7 @@ pub(super) fn install_battle(app: &mut App, mode: BattleMode, tick: Duration) {
 
 /// Advance before the Battle's hold and gameplay read this tick. No combatant or flying round
 /// survives the results boundary; connected links persist and are queued together at the next
-/// fill-up, whose spawn pass places them into the world its boundary rebuilds.
+/// Battle, whose spawn pass places them into its rebuilt world.
 #[expect(
     clippy::too_many_arguments,
     reason = "one atomic phase boundary spans clock, score, admission, connected links and combat cleanup"
@@ -233,7 +233,7 @@ fn cycle_battles(
     let previous = *battle;
     let mut next = *battle;
     match next.advance(clock.0, !clients.is_empty(), &rules, &score) {
-        // The fill-up's tanks are combat's: the hold releases them on this tick.
+        // Bots can already be placed while the empty server waits for a player.
         Boundary::Combat => {
             for &combatant in &combatants {
                 score.enter_combat(combatant);
@@ -245,7 +245,7 @@ fn cycle_battles(
                 commands.entity(root).despawn();
             }
         }
-        Boundary::FillUp => {
+        Boundary::NextBattle => {
             score.0.clear();
             overrides.0.clear();
             lane.0 = 0;
@@ -574,7 +574,7 @@ const SPAWN_SEARCH_RINGS: [(f32, &[Vec2]); 6] = [
 ];
 
 /// Each link's last accepted map pick, retained through respawns until disconnect or the next
-/// fill-up. Sender-derived link keys prevent choosing for another player. Initial joins use
+/// Battle. Sender-derived link keys prevent choosing for another player. Initial joins use
 /// automatic placement.
 #[derive(Resource, Default)]
 struct SpawnOverrides(bevy::platform::collections::HashMap<Entity, Vec2>);
@@ -812,7 +812,7 @@ fn handle_new_clients(
     for (link, remote) in &new {
         info!("server: client connected: {remote} (link {link})");
         if !pending.0.iter().any(|(queued, _)| *queued == link) {
-            // The fill-up boundary may already have queued this newly connected link.
+            // The next-Battle boundary may already have queued this newly connected link.
             pending.0.push((link, remote.0));
         }
     }
@@ -1940,13 +1940,11 @@ mod tests {
         }
     }
 
-    /// The game's match flow: a player present at a fill-up holds a tank, the one it fights combat
-    /// in; combat's boundary spawns no second life, and a connection landing on it joins once.
-    /// Results sweeps every tank, and the next fill-up hands every connected player a fresh life at
-    /// once. Unchanged ticks must not dirty the replicated score or phase, whose whole snapshots
-    /// would otherwise be sent every tick to every player.
+    /// The game's match flow: the first arrival starts combat with one life per link. Results
+    /// sweep those lives; the next Battle resets scores and places every connected player at once.
+    /// Unchanged ticks must leave replicated score and phase snapshots clean.
     #[test]
-    fn a_fill_up_places_every_player_once_and_keeps_unchanged_snapshots_clean() {
+    fn immediate_combat_places_every_player_once_and_keeps_unchanged_snapshots_clean() {
         use super::super::battle::BattlePhase;
         use super::super::score::Scoreboard;
         let mut app = placement_app();
@@ -1973,12 +1971,10 @@ mod tests {
             .spawn((RemoteId(PeerId::Netcode(1)), Connected, ClientOf))
             .id();
         app.update();
-        let BattlePhase::FillUp {
-            ends_at: Some(fill_end),
-        } = app.world().get::<BattleState>(board).expect("Battle").phase
-        else {
-            panic!("first player starts fill-up");
-        };
+        assert!(
+            app.world().get::<BattleState>(board).unwrap().is_combat(),
+            "the first arrival starts combat on this tick"
+        );
         let owned = |app: &mut App| -> Vec<(Entity, Entity)> {
             app.world_mut()
                 .query_filtered::<(Entity, &ControlledBy), With<NetTank>>()
@@ -1986,13 +1982,10 @@ mod tests {
                 .map(|(root, owner)| (root, owner.owner))
                 .collect()
         };
-        let waiting = owned(&mut app);
-        assert_eq!(waiting.len(), 1, "the joining player waits in its tank");
-        assert_eq!(waiting[0].1, link);
-        advance(&mut app, fill_end.raw() - 1);
-        app.update();
-        assert_eq!(owned(&mut app), waiting, "the fill-up keeps its one tank");
-        // Fixture peer joins on the combat boundary itself.
+        let first = owned(&mut app);
+        assert_eq!(first.len(), 1, "one life for the first arrival");
+        assert_eq!(first[0].1, link);
+        // Fixture peer joins open combat.
         app.world_mut()
             .spawn((RemoteId(PeerId::Netcode(2)), Connected, ClientOf));
         advance(&mut app, 1);
@@ -2007,15 +2000,15 @@ mod tests {
         assert_eq!(
             app.world().get::<Scoreboard>(board).unwrap().0.len(),
             roots.len(),
-            "the combat boundary opens the waiting tanks and the boundary joiner once"
+            "each combat spawn opens its standing once"
         );
         let &(old_root, _, combatant) = roots
             .iter()
             .find(|(_, owner, _)| *owner == link)
             .expect("first player's tank");
         assert_eq!(
-            old_root, waiting[0].0,
-            "combat starts in the fill-up's tank"
+            old_root, first[0].0,
+            "a late join cannot replace the first player's life"
         );
         app.world_mut().clear_trackers();
         advance(&mut app, 1);
@@ -2041,7 +2034,7 @@ mod tests {
         else {
             panic!("combat started");
         };
-        // FIXTURE: a combat score the next fill-up must clear.
+        // FIXTURE: a combat score the next Battle must clear.
         for standing in &mut app.world_mut().get_mut::<Scoreboard>(board).unwrap().0 {
             standing.knockouts = 3;
             standing.losses = 1;
@@ -2072,16 +2065,16 @@ mod tests {
         assert!(
             app.world()
                 .get::<Scoreboard>(board)
-                .expect("board")
+                .unwrap()
                 .0
-                .is_empty(),
-            "the new fill-up has no combat participants yet"
+                .iter()
+                .all(|standing| standing.knockouts == 0 && standing.losses == 0),
+            "the new combat clears the frozen scores"
         );
-        let BattlePhase::FillUp { ends_at: Some(_) } =
-            app.world().get::<BattleState>(board).expect("Battle").phase
-        else {
-            panic!("connected players start the next fill-up");
-        };
+        assert!(
+            app.world().get::<BattleState>(board).unwrap().is_combat(),
+            "connected players start the next combat on the results boundary"
+        );
         assert!(app.world().get::<Connected>(link).is_some());
         let fresh: Vec<_> = app
             .world_mut()
@@ -2098,12 +2091,10 @@ mod tests {
         assert_eq!(life, CombatantLife(1));
     }
 
-    /// The game's match flow: held commands move nothing during the fill-up — drive, aim, fire and
-    /// edges all idle, the brakes held — and combat releases them on its first tick, because the
-    /// cycle advances the phase before the hold reads it. A hold keyed on a stale phase, ordered
-    /// before the cycle, or leaving any field live fails here.
+    /// The game's match flow: the production phase clock must release every command on the
+    /// first arrival's tick. A hold ordered before the clock would delay combat input by one tick.
     #[test]
-    fn the_fill_up_holds_every_command_and_combat_releases_them_on_its_first_tick() {
+    fn first_arrival_releases_every_command_on_that_tick() {
         use crate::command::{AimIntent, ParsedTankCommand};
         // FIXTURE: a live player command, written where the input bridge writes it.
         fn author(mut tanks: Query<(&mut TankCommand, &mut ParsedTankCommand)>) {
@@ -2136,27 +2127,14 @@ mod tests {
                 BattleState::default(),
             ))
             .id();
-        app.world_mut()
-            .spawn((RemoteId(PeerId::Netcode(1)), Connected, ClientOf));
         let tank = app.world_mut().spawn(TankCommand::default()).id();
         app.world_mut().run_schedule(FixedUpdate);
-        let super::super::battle::BattlePhase::FillUp { ends_at: Some(end) } =
-            app.world().get::<BattleState>(board).unwrap().phase
-        else {
-            panic!("the connected player starts the fill-up");
-        };
-        let parsed = *app.world().get::<ParsedTankCommand>(tank).unwrap();
-        assert!(parsed.held(), "a fill-up tank brakes and stays parked");
         assert!(
-            parsed.aim().is_none(),
-            "a held turret and gun keep their targets"
+            app.world().get::<ParsedTankCommand>(tank).unwrap().held(),
+            "the empty server holds input"
         );
-        assert_eq!(parsed.command(), TankCommand::default());
-        assert_eq!(
-            *app.world().get::<TankCommand>(tank).unwrap(),
-            TankCommand::default()
-        );
-        app.world_mut().resource_mut::<crate::ShotClock>().0 = end;
+        app.world_mut()
+            .spawn((RemoteId(PeerId::Netcode(1)), Connected, ClientOf));
         app.world_mut().run_schedule(FixedUpdate);
         assert!(app.world().get::<BattleState>(board).unwrap().is_combat());
         let parsed = *app.world().get::<ParsedTankCommand>(tank).unwrap();

@@ -24,8 +24,8 @@ pub(crate) struct BattleState {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BattlePhase {
-    /// No deadline until the first player joins. Once started, fill-up runs to its deadline.
-    FillUp { ends_at: Option<SimTick> },
+    /// An empty server has no clock to advance until a player connects.
+    WaitingForPlayer,
     Combat {
         ends_at: SimTick,
         late_join: LateJoin,
@@ -54,7 +54,7 @@ impl Default for BattleState {
     fn default() -> Self {
         Self {
             number: 1,
-            phase: BattlePhase::FillUp { ends_at: None },
+            phase: BattlePhase::WaitingForPlayer,
         }
     }
 }
@@ -62,7 +62,6 @@ impl Default for BattleState {
 /// Checked mode spans in authority ticks. Each span fits a wrapped signed deadline comparison.
 #[derive(Resource, Debug)]
 pub(super) struct CycleRules {
-    fill_up: TickSpan,
     combat: TickSpan,
     late_join: TickSpan,
     results: TickSpan,
@@ -76,10 +75,22 @@ impl CycleRules {
             })
         };
         Self {
-            fill_up: ticks("fill_up_s", mode.fill_up),
             combat: ticks("combat_s", mode.combat),
             late_join: ticks("late_join_s", mode.late_join),
             results: ticks("results_s", mode.results),
+        }
+    }
+
+    fn combat_at(&self, now: SimTick) -> BattlePhase {
+        BattlePhase::Combat {
+            ends_at: now.after(self.combat),
+            late_join: if self.late_join.raw() == 0 {
+                LateJoin::Closed
+            } else {
+                LateJoin::Open {
+                    closes_at: now.after(self.late_join),
+                }
+            },
         }
     }
 }
@@ -90,7 +101,7 @@ pub(super) enum Boundary {
     None,
     Combat,
     Results,
-    FillUp,
+    NextBattle,
 }
 
 impl BattleState {
@@ -101,7 +112,7 @@ impl BattleState {
     pub(super) fn accepts_joins(self) -> bool {
         matches!(
             self.phase,
-            BattlePhase::FillUp { .. }
+            BattlePhase::WaitingForPlayer
                 | BattlePhase::Combat {
                     late_join: LateJoin::Open { .. },
                     ..
@@ -109,8 +120,8 @@ impl BattleState {
         )
     }
 
-    /// Advance one authority tick. Occupancy starts an idle fill-up and the next fill-up's timer;
-    /// it never ends combat early. `Boundary::FillUp` asks the caller to clear the frozen score.
+    /// The first connected player starts combat on this tick. Occupancy never ends combat early;
+    /// `Boundary::NextBattle` resets the world and score, with combat already live if occupied.
     pub(super) fn advance(
         &mut self,
         now: SimTick,
@@ -119,22 +130,8 @@ impl BattleState {
         score: &Scoreboard,
     ) -> Boundary {
         match self.phase {
-            BattlePhase::FillUp { ends_at: None } if occupied => {
-                self.phase = BattlePhase::FillUp {
-                    ends_at: Some(now.after(rules.fill_up)),
-                };
-            }
-            BattlePhase::FillUp { ends_at: Some(end) } if now.has_reached(end) => {
-                self.phase = BattlePhase::Combat {
-                    ends_at: now.after(rules.combat),
-                    late_join: if rules.late_join.raw() == 0 {
-                        LateJoin::Closed
-                    } else {
-                        LateJoin::Open {
-                            closes_at: now.after(rules.late_join),
-                        }
-                    },
-                };
+            BattlePhase::WaitingForPlayer if occupied => {
+                self.phase = rules.combat_at(now);
                 return Boundary::Combat;
             }
             BattlePhase::Combat { ends_at, .. } if now.has_reached(ends_at) => {
@@ -158,12 +155,14 @@ impl BattleState {
                     .number
                     .checked_add(1)
                     .expect("Battle counter exhausted u32");
-                self.phase = BattlePhase::FillUp {
-                    ends_at: occupied.then(|| now.after(rules.fill_up)),
+                self.phase = if occupied {
+                    rules.combat_at(now)
+                } else {
+                    BattlePhase::WaitingForPlayer
                 };
-                return Boundary::FillUp;
+                return Boundary::NextBattle;
             }
-            _ => {} // An idle fill-up or a phase whose deadline has not arrived.
+            _ => {} // An empty server or a phase whose deadline has not arrived.
         }
         Boundary::None
     }
@@ -226,8 +225,7 @@ fn hold_commands(
     }
 }
 
-/// Whether the Battle places tanks: through fill-up and combat. Results has swept them, and the
-/// next fill-up places every connected player.
+/// Results has swept the tanks; every other phase permits placement.
 pub(super) fn places_tanks(battles: Query<&BattleState>) -> bool {
     !matches!(
         battles
@@ -274,7 +272,7 @@ mod tests {
         assert_eq!(*world.resource::<MatchCommands>(), MatchCommands::Held);
     }
 
-    /// Instruments read the same phase hold as gameplay: fill-up and results stop counting,
+    /// Instruments read the same phase hold as gameplay: waiting and results stop counting,
     /// and combat publishes Live immediately. Fixture deadlines do not choose mode balance.
     #[test]
     fn phase_publication_matches_the_command_hold() {
@@ -291,7 +289,7 @@ mod tests {
             outcome: BattleOutcome::NoContest,
         };
         for (phase, expected) in [
-            (BattlePhase::FillUp { ends_at: None }, MatchCommands::Held),
+            (BattlePhase::WaitingForPlayer, MatchCommands::Held),
             (combat, MatchCommands::Live),
             (results, MatchCommands::Held),
             (combat, MatchCommands::Live),
@@ -306,12 +304,11 @@ mod tests {
     /// relation would be ambiguous. Operators receive the mode file, field and repair direction.
     #[test]
     fn mode_spans_outside_the_signed_horizon_are_refused_by_field() {
-        for field in ["fill_up_s", "combat_s", "late_join_s", "results_s"] {
+        for field in ["combat_s", "late_join_s", "results_s"] {
             let mut mode = BattleMode::parse(include_str!("fixtures/battle-short.ron"));
             // DERIVED fixture: at the authority's default fixed step this exceeds half u32.
             let too_long = Duration::from_secs(67_108_860);
             match field {
-                "fill_up_s" => mode.fill_up = too_long,
                 "combat_s" => mode.combat = too_long,
                 "late_join_s" => mode.late_join = too_long,
                 "results_s" => mode.results = too_long,
@@ -328,48 +325,75 @@ mod tests {
         }
     }
 
-    /// The cycle's deadlines and full combat span survive the authority tick's wrap. Losing the
-    /// last player cannot shorten combat; an empty next fill-up waits for another first join.
+    /// Combat keeps its full authored span across tick wrap even after everyone leaves.
+    /// The next empty Battle waits indefinitely; a connected player starts either Battle at once.
     #[test]
-    fn the_cycle_runs_in_full_across_wrap_and_waits_when_empty() {
-        // Fixture spans in ticks, unrelated to shipped tuning.
-        let rules = CycleRules {
-            fill_up: TickSpan::of(2),
-            combat: TickSpan::of(4),
-            late_join: TickSpan::ONE,
-            results: TickSpan::of(2),
-        };
-        let mut battle = BattleState::default();
+    fn empty_servers_wait_and_occupied_battles_start_on_that_tick() {
+        let mode = BattleMode::shipped();
+        let rules = CycleRules::new(&mode, Time::<Fixed>::default().timestep());
         let score = Scoreboard::default();
-        let start = u32::MAX - 2;
-        battle.advance(SimTick::new(start), false, &rules, &score);
-        assert_eq!(battle.phase, BattlePhase::FillUp { ends_at: None });
-        battle.advance(SimTick::new(start), true, &rules, &score);
-        assert_eq!(
-            battle.advance(SimTick::new(start + 1), false, &rules, &score),
-            Boundary::None
-        );
-        assert_eq!(
-            battle.advance(SimTick::new(u32::MAX), false, &rules, &score),
-            Boundary::Combat
-        );
-        assert!(battle.accepts_joins());
-        battle.advance(SimTick::new(0), false, &rules, &score);
-        assert!(!battle.accepts_joins());
-        assert_eq!(
-            battle.advance(SimTick::new(2), false, &rules, &score),
-            Boundary::None
-        );
-        assert_eq!(
-            battle.advance(SimTick::new(3), false, &rules, &score),
-            Boundary::Results
-        );
-        assert_eq!(
-            battle.advance(SimTick::new(5), false, &rules, &score),
-            Boundary::FillUp
-        );
-        assert_eq!(battle.number, 2);
-        assert_eq!(battle.phase, BattlePhase::FillUp { ends_at: None });
-        assert!(battle.accepts_joins());
+        for occupied_next in [false, true] {
+            let mut battle = BattleState::default();
+            // Fixture epoch: combat crosses the authority tick's wrap.
+            let start = SimTick::new(u32::MAX - 2);
+            for now in [SimTick::new(0), start] {
+                assert_eq!(battle.advance(now, false, &rules, &score), Boundary::None);
+                assert_eq!(battle.phase, BattlePhase::WaitingForPlayer);
+            }
+            assert_eq!(
+                battle.advance(start, true, &rules, &score),
+                Boundary::Combat
+            );
+            let expected_combat = |now: SimTick| BattlePhase::Combat {
+                ends_at: now.after(
+                    TickSpan::from_duration(mode.combat, Time::<Fixed>::default().timestep())
+                        .unwrap(),
+                ),
+                late_join: if mode.late_join.is_zero() {
+                    LateJoin::Closed
+                } else {
+                    LateJoin::Open {
+                        closes_at: now.after(
+                            TickSpan::from_duration(
+                                mode.late_join,
+                                Time::<Fixed>::default().timestep(),
+                            )
+                            .unwrap(),
+                        ),
+                    }
+                },
+            };
+            assert_eq!(battle.phase, expected_combat(start));
+            assert_eq!(battle.accepts_joins(), !mode.late_join.is_zero());
+            let close = start.after(rules.late_join);
+            battle.advance(close, false, &rules, &score);
+            assert!(!battle.accepts_joins());
+            let end = start.after(rules.combat);
+            assert_eq!(
+                battle.advance(end, false, &rules, &score),
+                Boundary::Results
+            );
+            let next = end.after(rules.results);
+            assert_eq!(
+                battle.advance(next, occupied_next, &rules, &score),
+                Boundary::NextBattle
+            );
+            assert_eq!(battle.number, 2);
+            assert_eq!(
+                battle.phase,
+                if occupied_next {
+                    expected_combat(next)
+                } else {
+                    BattlePhase::WaitingForPlayer
+                }
+            );
+            if !occupied_next {
+                assert_eq!(
+                    battle.advance(next.after(rules.combat), false, &rules, &score),
+                    Boundary::None
+                );
+                assert_eq!(battle.phase, BattlePhase::WaitingForPlayer);
+            }
+        }
     }
 }
