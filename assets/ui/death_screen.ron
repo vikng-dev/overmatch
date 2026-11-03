@@ -1,0 +1,5 @@
+(
+    top_px: (12.0, Taste("Death-status effect: inset the admission line below the top edge, in logical pixels.")),
+    font_px: (20.0, Taste("Death-status effect: compact SemiBold admission text, in logical pixels.")),
+    text_srgb: ((0.9, 0.4, 0.3), Taste("Death-status effect: warm warning text above the menu or map, in sRGB.")),
+)

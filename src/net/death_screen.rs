@@ -120,7 +120,8 @@ impl OwnRespawn<'_, '_> {
 }
 
 /// Resolution: bound the unacknowledged request wait so a dropped input can be retried.
-/// An authoritative waiting/refusal state takes over immediately and has no local timeout.
+/// An authoritative placement wait takes over without a timeout; a pick refusal alone does not
+/// acknowledge the respawn request.
 const RESPAWN_TIMEOUT_SECS: f64 = 5.0;
 
 /// In-flight request state. The overlay remains visible through the dead-to-replacement gap.
@@ -390,6 +391,39 @@ struct DeathStatusLine;
 struct DeathStatusText;
 
 fn spawn_death_status_line(mut commands: Commands, fonts: Res<UiFonts>) {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Look {
+        top_px: crate::provenance::Sourced<f32>,
+        font_px: crate::provenance::Sourced<f32>,
+        text_srgb: crate::provenance::Sourced<[f32; 3]>,
+    }
+    const FILE: &str = "assets/ui/death_screen.ron";
+    static LOOK: std::sync::OnceLock<Look> = std::sync::OnceLock::new();
+    let look = LOOK.get_or_init(|| {
+        let look: Look = crate::provenance::from_shipped_str(
+            FILE,
+            include_str!("../../assets/ui/death_screen.ron"),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            look.top_px.0.is_finite() && look.top_px.0 >= 0.0,
+            "{FILE}: top_px must be finite and nonnegative; author a valid status-line position"
+        );
+        assert!(
+            look.font_px.0.is_finite() && look.font_px.0 > 0.0,
+            "{FILE}: font_px must be finite and positive; author a valid status-line font size"
+        );
+        assert!(
+            look.text_srgb
+                .0
+                .iter()
+                .all(|v| v.is_finite() && (0.0..=1.0).contains(v)),
+            "{FILE}: text_srgb needs finite sRGB channels in [0, 1]; author a valid colour"
+        );
+        look
+    });
+    let [r, g, b] = look.text_srgb.0;
     commands
         .spawn((
             FlowScoped(Flow::InMatch),
@@ -397,7 +431,7 @@ fn spawn_death_status_line(mut commands: Commands, fonts: Res<UiFonts>) {
             Node {
                 width: Val::Percent(100.0),
                 position_type: PositionType::Absolute,
-                top: Val::Px(12.0),
+                top: Val::Px(look.top_px.0),
                 justify_content: JustifyContent::Center,
                 ..default()
             },
@@ -411,10 +445,10 @@ fn spawn_death_status_line(mut commands: Commands, fonts: Res<UiFonts>) {
                 TextFont {
                     // SemiBold: a terse all-caps status line.
                     font: fonts.hud.clone().into(),
-                    font_size: FontSize::Px(20.0),
+                    font_size: FontSize::Px(look.font_px.0),
                     ..default()
                 },
-                TextColor(Color::srgb(0.9, 0.4, 0.3)),
+                TextColor(Color::srgb(r, g, b)),
             ));
         });
 }
@@ -576,17 +610,34 @@ mod tests {
             world.run_system_once(request_respawn).unwrap();
             assert!(!world.get::<TankCommand>(own).unwrap().respawn);
             assert!(!world.resource::<AwaitingRespawn>().active);
-            world
-                .resource_mut::<Overlays>()
-                .declare(Overlay::Menu, true);
-            let line = world.spawn((DeathStatusLine, Visibility::Hidden)).id();
-            let text = world.spawn((DeathStatusText, Text::new("fixture"))).id();
-            world.run_system_once(apply_death_status_line).unwrap();
-            assert_eq!(world.get::<Visibility>(line), Some(&Visibility::Visible));
-            assert!(
-                world.get::<Text>(text).unwrap().0.contains("re-pick"),
-                "the menu status supplies the way out"
-            );
+            world.run_system_once(spawn_death_status_line).unwrap();
+            let line = world
+                .query_filtered::<Entity, With<DeathStatusLine>>()
+                .single(&world)
+                .unwrap();
+            let text = world
+                .query_filtered::<Entity, With<DeathStatusText>>()
+                .single(&world)
+                .unwrap();
+            for top in [Overlay::Menu, Overlay::SpawnMap] {
+                for overlay in [Overlay::Menu, Overlay::SpawnMap] {
+                    world
+                        .resource_mut::<Overlays>()
+                        .declare(overlay, overlay == top);
+                }
+                world.run_system_once(apply_death_status_line).unwrap();
+                assert_eq!(world.get::<Visibility>(line), Some(&Visibility::Visible));
+                let message = &world.get::<Text>(text).unwrap().0;
+                assert!(
+                    message.contains("WAITING FOR SPAWN SPACE")
+                        && message.contains("automatic when clear"),
+                    "a hidden death screen must explain the automatic respawn: {message}"
+                );
+                assert!(
+                    message.contains("re-pick"),
+                    "the status supplies the way out"
+                );
+            }
         }
     }
 

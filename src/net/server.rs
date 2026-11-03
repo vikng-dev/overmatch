@@ -678,6 +678,8 @@ fn check_spawn_pick(
     height: Option<&crate::terrain_grid::HeightGrid>,
     radius: f32,
 ) -> Result<Vec2, SpawnPickRefusal> {
+    #[cfg(test)]
+    SPAWN_PICK_EVALUATIONS.set(SPAWN_PICK_EVALUATIONS.get() + 1);
     let xz = validate_spawn_request(half_extent, request).ok_or(SpawnPickRefusal::NonFinite)?;
     match resolve_free_spawn_xz(half_extent, xz, &[], blocks, height, radius) {
         Ok(_) => Ok(xz),
@@ -686,6 +688,11 @@ fn check_spawn_pick(
             unreachable!("an empty body occupancy list cannot block clear ground")
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SPAWN_PICK_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Drain at frame rate: Lightyear clears unread messages in `Last`, including frames without a tick.
@@ -1708,6 +1715,10 @@ mod tests {
     #[test]
     fn a_spawn_pick_flood_supersedes_earlier_choices_before_admission() {
         let mut app = spawn_pick_app();
+        // Keep the admission counter on this test's thread.
+        app.edit_schedule(Update, |schedule| {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
         let link = pick_link(&mut app, 1);
         let root = app
             .world_mut()
@@ -1728,6 +1739,7 @@ mod tests {
             .resource_mut::<SpawnObstacles>()
             .0
             .push(Transform::from_xyz(refused.x, 1.0, refused.y).with_scale(Vec3::splat(120.0)));
+        SPAWN_PICK_EVALUATIONS.set(0);
         for _ in 0..1024 {
             // Fixture flood delivered in one frame's drain.
             queue_pick(&mut app, link, superseded);
@@ -1735,6 +1747,11 @@ mod tests {
         }
         app.update();
         app.update();
+        assert_eq!(
+            SPAWN_PICK_EVALUATIONS.get(),
+            1,
+            "only the newest pick spends admission work"
+        );
         assert_eq!(
             app.world().resource::<SpawnOverrides>().0.get(&link),
             Some(&retained)
