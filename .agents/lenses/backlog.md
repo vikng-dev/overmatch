@@ -17,6 +17,7 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | load-12 | P2 | `src/substances.rs::every_shipped_row_holds_its_kinds_invariants` | base-truths: Asset-specific gate | A valid `Hard(Effective(0))` row fails a strict-positive assertion although admission explicitly permits zero. | Assert the admitted nonnegative domain or change the generic law and admission contract together. | ratchet |
 | load-13 | P2 | `tools/src/buildings.rs::most_cuts_follow_joints_and_some_crack_through_bricks` | base-truths: Asset-specific gate | Valid `crack_chance: 0` data fails mandatory cracks; other valid constructions can fail the required majority of joint cuts. | Test stochastic behavior with inline fixtures and condition shipped assertions on authored construction. | ratchet |
 | load-24 | P3 | `src/settings/ui.rs::tests::the_selection_skips_disabled_rows` | testing: Coupled assertion | A permitted `defaults.vsync: Off` taste change fails the ON premise before testing selection, though row skipping is unchanged. | Set the disabled-cap fixture to explicit `VsyncMode::On` rather than pinning the authored default. | ratchet |
+| load-25 | P3 | `ARCHITECTURE.md` content seam | base-truths: Claim beyond the code | The narrative says tank content is absent from the handshake and only the map digest enters, but `net::protocol::protocol_id` folds construction and registry digests too. | State the current fingerprint inputs; retain the unversioned-blueprint seam. | ratchet |
 
 ## net
 
@@ -50,6 +51,9 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | view-14 | P2 | `src/view.rs::track_view_facts` | error-handling: Silent exit | `window.single().ok()` treats two declared primary windows as an absent surface and silently holds stale height or leaves facts absent. | Distinguish legitimate zero-window teardown from contradictory primary-window cardinality and refuse the latter. | ratchet |
 | view-15 | P3 | `src/view.rs::DEFAULT_BUDGET_PX` | base-truths: Bare number in code | The authored one-pixel selection default lives in Rust rather than labelled presentation data. | Give the authored budget a data owner and provenance; consumers read that owner when settings are absent. | ratchet |
 | view-16 | P2 | `src/view.rs::ViewFacts::new`, `track_view_facts` | error-handling: Silent exit | A declared perspective camera with NaN or out-of-domain FOV silently holds old facts or defers forever, just like an unmeasurable surface. | Keep missing target height as absence, but visibly refuse an invalid internal camera projection. | ratchet |
+| view-17 | P3 | `src/overlay.rs::spawn_menu_overlay` | base-truths: Bare number in code | Menu-scrim RGBA is authored directly in Rust without provenance-bearing presentation data. | Read the required menu-scrim Taste and its effect-family note from presentation data. | ratchet |
+| view-18 | P2 | `src/overlay.rs::cursor_owner` | error-handling: Silent exit | `Single` skips cursor reconciliation and unread focus messages on contradictory multiple primary windows. | Name zero-window teardown and panic on contradictory primary-window cardinality. | ratchet |
+| view-19 | P3 | `src/overlay.rs::esc_cannot_latch_a_menu_under_an_overlay_declared_the_same_frame` | testing: Substituted composition | The test recreates Declare → Toggle → Cursor, so deleting the production chain leaves it green. | Mount the production overlay installer and Flow wiring around the race fixture. | ratchet |
 
 ## dev
 
@@ -68,6 +72,7 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | dev-19 | P3 | `scripts/hooks/pushed_assets.sh::assets_push_targets` | code-branching: Kept alternative | The retired pre-push selection and hydration route stays implemented and tested with no production caller; CI uses the range route. | Delete the route, its exclusive helpers and test arms; keep the shared predicates and CI-range evidence. | ratchet |
 | dev-20 | P3 | `scripts/tank/trio.py::coherence` | brevity: Repeated why | The inline paragraph repeats the docstring's reason that hashes exclude certificate-body claims and verification checks constructive laws. | Delete the inline paragraph; net 4 lines (DERIVED). | ratchet |
 | dev-21 | P3 | `src/track_sandbox/mod.rs` course, camera and visualization values | base-truths: Bare number in code | Course geometry, inspection camera, lighting, colours and display scales are authored directly in Rust without required provenance-bearing tool data. | Move authored choices into required provenance-bearing sandbox data; keep only justified Resolution constants in code. | ratchet |
+| dev-22 | P3 | `src/frame_cost.rs::PARK_AT` | base-truths: Bare number in code | The capture window's authored physical-pixel placement is compiled into Rust without a provenance-bearing tool-data owner. | Source the operator placement choice from required labelled instrument data. | ratchet |
 
 ## destruction
 
