@@ -1,0 +1,3 @@
+(
+    park_at_physical_px: ((120, 120), Taste("Frame recorder placement in global physical pixels: a small positive point selects the primary display; operator instrument choice.")),
+)

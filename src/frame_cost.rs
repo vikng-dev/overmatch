@@ -123,7 +123,20 @@ use crate::settings::{PresentCaps, Settings};
 use crate::trace::{JsonlSink, role_path};
 
 /// Startup park in global physical pixels; the module's presenting-monitor section owns its rationale.
-const PARK_AT: IVec2 = IVec2::new(120, 120);
+static PARK_AT: std::sync::LazyLock<IVec2> = std::sync::LazyLock::new(|| {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Placement {
+        park_at_physical_px: crate::provenance::Sourced<(i32, i32)>,
+    }
+    let placement: Placement = crate::provenance::from_shipped_str(
+        "assets/dev/frame_cost.ron",
+        include_str!("../assets/dev/frame_cost.ron"),
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let (x, y) = placement.park_at_physical_px.0;
+    IVec2::new(x, y)
+});
 
 /// Resolution: 1 Hz polling bounds monitor/surface changes from human-scale drags, cables and
 /// resizes within a second of affected frames; analysis rejects the whole condition either way.
@@ -263,7 +276,7 @@ fn park_and_pin(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
     let mut window = windows.single_mut().expect(
         "the frame-cost recorder is mounted on a windowed root with exactly one primary window",
     );
-    window.position = WindowPosition::At(PARK_AT);
+    window.position = WindowPosition::At(*PARK_AT);
     window.resolution.set(SURFACE_LOGICAL.x, SURFACE_LOGICAL.y);
 }
 
