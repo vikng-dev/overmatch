@@ -429,10 +429,19 @@ grip. Inside the fade a crawl remains possible, with equilibrium speed
 A spinning belt on a stationary hull creates no rolling drag. Solid recipients read `hard`.
 The Driver reads the same coefficient, pricing the full drag needed to leave the fade.
 
+The band has a second visible effect on slopes. With locked belts and saturated grip on
+uniform support, `atan(μ) < theta < atan(μ + r)` admits steady downhill creep at
+`band (tan(theta) - μ) / r` (DERIVED by balancing gravity against grip and faded rolling,
+with `r = rolling(p)` and `band = ROLLING_FADE_SPEED`). Above the upper angle full rolling
+cannot balance gravity, so the hull accelerates. This statement assumes the brakes can keep
+the belts locked; brake-limited slides have another budget. The band and this creep remain
+provisional for a later owner decision; they are not an extra material law.
+
 The fade regularizes a hull damper, not a belt damper. DERIVED for a supported scalar hull:
 `c dt / M = rolling(p) g dt / ROLLING_FADE_SPEED`; explicit integration is monotone below one
 and stable below two. This replaces the retired belt-inertia slope calculation; it is not a
-certificate for every coupled contact mode or arbitrarily large pressure.
+certificate for every coupled contact mode or arbitrarily large pressure. At mud's
+DERIVED `r = .1715` at nominal pressure 107 kPa, the 64 Hz scalar ratio is about .105.
 
 **Driver observation and measured force resolution.** `track::load::observe` supplies the
 unfiltered `TransmissionInput::perceived_load`: `L = W sin(theta) + c_rr W cos(theta) +
@@ -1014,13 +1023,19 @@ The sliding horizon is bounded by the finite plane even under free gravitational
 acceleration; leaving the plane is not a sliding-law failure. Angles and brake strength
 are read from ground and vehicle owners, never from a previous run.
 
-| Ground | Grip limit (degrees, DERIVED) | Brake limit (degrees, DERIVED) | Binding limit | Late held speed (m/s, MEASURED) | Above-limit late travel in one second (m, MEASURED) |
-|---|---:|---:|---|---:|---:|
-| concrete | 30.963758 | 31.000736 | ground | .00000031 | 2.598096 |
-| dirt | 22.684929 | 31.000736 | ground | .00000037 | .186064 |
-| gravel | 35.450867 | 31.000736 | brake | .00000078 | 10.897297 |
-| mud | 15.482733 | 31.000736 | ground | .00000008 | .043254 |
-| sand | 28.501959 | 31.000736 | ground | .00000070 | .123698 |
+| Ground | Grip limit (degrees, DERIVED) | Brake limit (degrees, DERIVED) | Binding limit | Late held speed (m/s, MEASURED) | Above-static-limit late travel in one second (m, MEASURED) | Sliding regime |
+|---|---:|---:|---|---:|---:|---|
+| concrete | 30.963758 | 31.000736 | ground | .00000031 | 2.598096 | Accelerates beyond full rolling |
+| dirt | 22.684929 | 31.000736 | ground | .00000037 | .186064 | Steady creep inside the fade |
+| gravel | 35.450867 | 31.000736 | brake | .00000078 | 10.897297 | Brake-limited slide |
+| mud | 15.482733 | 31.000736 | ground | .00000008 | .043254 | Steady creep inside the fade |
+| sand | 28.501959 | 31.000736 | ground | .00000070 | .123698 | Steady creep inside the fade |
+
+These are ten percent above the lower static limit, not necessarily above the full-rolling
+sliding limit. At nominal pressure 107 kPa, the locked-belt balance gives DERIVED creep
+speeds about .185 m/s on dirt, .0427 m/s on mud and .122 m/s on sand. Mud's upper creep
+angle is DERIVED `atan(.277 + .1715)`, about 24.2 degrees. The small travel in these rows
+is sustained downhill motion set by the numerical band, not evidence of acceleration.
 
 Common-K readers no longer carry a per-contact copy or load-weighted constant. The
 vanishing-patch downshift test is retired: an identical-coefficient patch supplied no

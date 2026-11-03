@@ -114,9 +114,12 @@ pub(crate) const GRIP_SHEAR_FLOOR_M: f32 = 0.075;
 /// Hull contact-point speed (m/s, relative to support) below which rolling fades to zero.
 /// Resolution: regularize the sign change of Coulomb drag in the explicit hull step.
 /// DERIVED for uniform support: c*dt/M = rolling*g*dt/band, monotone below one and stable
-/// below two. No rolling damper acts directly on belt inertia. At 64 Hz and rolling .1715
-/// the ratio is about .105 (DERIVED); this is no certificate for arbitrary pressure or
-/// coupled modes. The fade admits a crawl at band*min(engine pull, grip)/rolling_load.
+/// below two. No rolling damper acts directly on belt inertia. At 64 Hz on mud at nominal
+/// pressure 107 kPa, rolling is about .1715 and the ratio about .105 (DERIVED); this is no
+/// certificate for arbitrary pressure or coupled modes. The fade admits a flat crawl at
+/// band*min(engine pull, grip)/rolling_load. With locked belts on uniform support and brakes
+/// able to hold them, slopes between atan(mu) and atan(mu + rolling) creep at
+/// band*(tan(slope) - mu)/rolling instead of accelerating (DERIVED force balance).
 pub const ROLLING_FADE_SPEED: f32 = 0.25;
 
 /// One patch's signed rolling resistance (N), opposing hull travel relative to its support.
