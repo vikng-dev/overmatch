@@ -34,9 +34,16 @@ use crate::world::TerrainMap;
 
 const MAGIC: &[u8; 8] = b"OMBP\x01\r\n\0";
 const FORMAT_VERSION: u32 = 1;
+/// Resolution: fixed sampling rate bounds the probe's integration step independently of wall time.
 const TICK_HZ: f64 = 64.0;
+// Diagnostic scenario tastes stay inline because bitprobe has no scenario data owner.
+/// Taste: driving-probe coverage, through release after both steering holds
+/// (DERIVED: 48 s at TICK_HZ).
 const TICK_COUNT: u32 = 3_072;
 
+// Taste: driving-probe phase durations, chosen to exercise settle, ramp, climb, cruise and
+// both steering holds. DERIVED end ticks at TICK_HZ from successive durations 2, 2, 24, 8, 4, 4 s;
+// the remaining 4 s release steering. These are authored stimulus, never physical-law parameters.
 const SETTLE_END: u32 = 128;
 const RAMP_END: u32 = 256;
 const CLIMB_END: u32 = 1_792;
@@ -44,7 +51,9 @@ const CRUISE_END: u32 = 2_304;
 const WIDE_END: u32 = 2_560;
 const TIGHT_END: u32 = 2_816;
 
+/// Taste: diagnostic placement in world metres, with a drop above the flat slab to exercise settling.
 const SPAWN_TRANSLATION: Vec3 = Vec3::new(100.0, 2.0, 100.0);
+/// Taste: diagnostic initial heading, aligned with the world's axes for straight driving.
 const SPAWN_ROTATION: Quat = Quat::IDENTITY;
 
 const CONTACT_FIELDS: &[(&str, &str)] = &[
@@ -424,6 +433,7 @@ fn scripted_input(tick: u32) -> (f32, f32) {
             (step * (1.0 / (RAMP_END - SETTLE_END) as f32), 0.0)
         }
         RAMP_END..CRUISE_END => (1.0, 0.0),
+        // Taste: diagnostic steering stimuli exercise wide and tight detents at full throttle.
         CRUISE_END..WIDE_END => (1.0, 0.35),
         WIDE_END..TIGHT_END => (1.0, 0.80),
         _ => (1.0, 0.0),
