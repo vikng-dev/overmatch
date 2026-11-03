@@ -400,7 +400,7 @@ pub(super) struct Hosted {
 impl Hosted {
     /// Spawn the reporter thread; it sends nothing until [`Hosted::install`]'s systems see the
     /// server listening.
-    pub(super) fn start(config: &HostedConfig) -> Self {
+    pub(super) fn start(config: &HostedConfig) -> std::io::Result<Self> {
         info!(
             "hosting: server {} reporting to {} — capacity {}, heartbeat every {:?}, exit after \
              {:?} empty",
@@ -419,15 +419,14 @@ impl Hosted {
                 let (api, shared) = (api.clone(), shared.clone());
                 let (capacity, interval) = (config.capacity, config.heartbeat_interval);
                 move || report(api, shared, capacity, interval, receiver)
-            })
-            .expect("the hosting reporter thread must spawn");
-        Self {
+            })?;
+        Ok(Self {
             api,
             shared,
             control,
             reporter,
             empty_exit: config.empty_exit,
-        }
+        })
     }
 
     pub(super) fn install(&self, app: &mut App) {
@@ -615,6 +614,12 @@ mod tests {
         let key = config.netcode_key();
         let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(hex, env[NETCODE_KEY].to_ascii_lowercase());
+        let stats = &env["OVERMATCH_SERVER_STATS_S"];
+        assert_eq!(
+            super::super::server_stats::period_from(Some(stats)).expect("valid stats contract"),
+            Some(Duration::from_secs_f64(stats.parse().unwrap())),
+            "the Worker enables the shipped server's stats reader"
+        );
     }
 
     #[test]
@@ -842,7 +847,7 @@ mod tests {
     fn the_reporter_waits_for_listening_then_survives_failures() {
         let worker = FakeWorker::start(vec![503, 500, 204, 204]);
         let config = hosted_against(&worker, Duration::from_millis(20));
-        let hosted = Hosted::start(&config);
+        let hosted = Hosted::start(&config).expect("the test reporter thread starts");
         assert!(
             worker
                 .seen
@@ -865,7 +870,7 @@ mod tests {
     fn a_410_stops_the_reporter_exits_the_app_and_skips_end() {
         let worker = FakeWorker::start(vec![410]);
         let config = hosted_against(&worker, Duration::from_millis(20));
-        let hosted = Hosted::start(&config);
+        let hosted = Hosted::start(&config).expect("the test reporter thread starts");
         hosted.control.send(Control::Listening).unwrap();
         assert!(worker.next().path.ends_with("/heartbeat"));
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -919,7 +924,7 @@ mod tests {
         let worker = FakeWorker::start(vec![204]);
         let mut config = hosted_against(&worker, Duration::from_secs(5));
         config.empty_exit = Duration::from_millis(50);
-        let hosted = Hosted::start(&config);
+        let hosted = Hosted::start(&config).expect("the test reporter thread starts");
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
         app.add_message::<AppExit>()

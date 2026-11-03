@@ -20,6 +20,7 @@
 import { config, type Env } from "./config";
 import { bounded, settleAll } from "./deadline";
 import { edgegapFor, type DeploymentStatus } from "./edgegap";
+import { expireServerLogs, stopWithEvidence } from "./evidence";
 import { idOf, validVersion } from "./ids";
 import { diag } from "./reasons";
 import { registryFor } from "./registry";
@@ -51,6 +52,7 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	const cfg = config(env);
 	const timeout = cfg.providerTimeoutMs;
 	const provider = edgegapFor(env, timeout);
+	await expireServerLogs(env, now - cfg.serverLogRetentionMs, timeout);
 	const turn = Math.floor(now / SWEEP_PERIOD_MS);
 	const result: SweepResult = { at: now, listed: 0, unattributed: 0, stopped: 0, failed: 0, error: null };
 	const fail = (what: string, err: unknown) => {
@@ -74,7 +76,7 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	result.listed = tagged.length;
 
 	const checks = rotated(tagged, turn);
-	const stop: { id: string; why: string }[] = [];
+	const stop: { id: string; serverId: string; why: string }[] = [];
 	const claims = new Map<string, Claim[]>();
 	await settleAll(
 		checks.slice(0, SWEEP_MAX_CHECKS).map((d) => async () => {
@@ -101,7 +103,11 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 		[...claims].map(([version, list]) => async () => {
 			try {
 				const live = new Set<string>(await bounded(timeout, async () => registryFor(env, version).liveDeployments(list)));
-				for (const id of new Set(list.map((c) => c.deploymentId))) if (!live.has(id)) stop.push({ id, why: "no live claim" });
+				for (const claim of list) {
+					if (!live.has(claim.deploymentId) && !stop.some((s) => s.id === claim.deploymentId)) {
+						stop.push({ id: claim.deploymentId, serverId: claim.serverId, why: "no live claim" });
+					}
+				}
 			} catch (err) {
 				fail("registry", err);
 			}
@@ -113,9 +119,9 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	await settleAll(
 		rotated(stop, turn)
 			.slice(0, SWEEP_MAX_STOPS)
-			.map(({ id, why }) => async () => {
+			.map(({ id, serverId, why }) => async () => {
 				try {
-					await provider.stop(id);
+					await stopWithEvidence(env, provider, serverId, id, timeout);
 					result.stopped++;
 					console.warn("sweep stopped", id, why);
 				} catch (err) {

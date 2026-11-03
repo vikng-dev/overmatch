@@ -13,6 +13,7 @@ Design and decisions: `.agents/scratch/hosting-2026-10/` (`decisions.md`, `state
 | `src/registry.ts` | `Registry` Durable Object, one per game version: servers, tickets, alarm |
 | `src/edgegap.ts` | The provider adapter; the only Edgegap-specific code |
 | `src/history.ts` | `recordEvent`, the single writer of D1 `sessions` |
+| `src/evidence.ts` | Redacted, bounded server-log archive before every Worker stop; retention |
 | `src/sweep.ts` | The per-minute orphan sweep (cron trigger) |
 | `src/admin.ts` | `/admin` dashboard and its Access JWT check |
 | `src/types.ts` | The `/v1` wire types |
@@ -64,6 +65,31 @@ Every Edgegap call and D1 write is bounded by `PROVIDER_TIMEOUT_S`, and the alar
 transitions and re-arms itself before running that outbound work, so one slow call holds up no
 other row.
 
+Before each Worker stop (including late forgotten claims and attributed sweep orphans), the Worker
+fetches Edgegap's `container-logs` (`logs`, `crash_logs`, `crash_data`) and saves a redacted UTF-8
+tail in D1 `server_logs`, independently of session history. IPv4/IPv6 addresses, URLs, generated
+hex credentials and credential-bearing lines are masked before storage. `hosting.rs` never logs
+hosting secret values; Lightyear's UDP and netcode diagnostics can log addresses. Crash env dumps
+are discarded as credential-bearing lines. No raw provider errors are stored.
+
+The tail is bounded at 1 MiB and `truncated` records cutting. A successful archive (even an empty
+log) is reused on stop retries. Every capture read, fetch and write is bounded by
+`PROVIDER_TIMEOUT_S`; failures warn, record a diagnostic when D1 answers, and still stop. The cron
+deletes successful and failed captures after `SERVER_LOG_RETENTION_DAYS` (operator choice: 14 days),
+even when the provider listing fails. Session history has its own lifetime.
+
+Read one archive by deployment id (replace the example id), from `backend/`:
+
+```sh
+npx wrangler d1 execute overmatch-sessions --remote --command "SELECT server_id, captured_at, truncated, error, log FROM server_logs WHERE deployment_id = 'eb3ad1b3be65';"
+```
+
+This is a snapshot before stop, not continuous log shipping: later lines are absent. Edgegap
+deletes logs on deployment stop (`session.sh`'s `cmd_logs` contract). A process exit alone does not
+prove whether Edgegap still serves them; the Worker tries and records a 404 or other failure. A
+deployment that disappears without a following Worker stop, an unattributed orphan, or a capture
+that fails cannot leave a recoverable log. D1 failure can also lose the diagnostic itself.
+
 **Orphan sweep.** Every minute (`triggers.crons`) the Worker lists every Edgegap deployment (all
 pages, hard bound 100 pages) and stops each one tagged `om-<hex>` that no live claim owns. Ownership is the
 Registry's, never D1's: the deployment's status names its version, which with the tag gives the
@@ -101,6 +127,7 @@ The Worker passes these through Edgegap `env_vars` (example: `contract/server-en
 | `OVERMATCH_CAPACITY` | Required player cap; missing or invalid refuses startup |
 | `OVERMATCH_HEARTBEAT_INTERVAL_S` | Heartbeat period, default 5 |
 | `OVERMATCH_EMPTY_EXIT_S` | Exit after this long with no players, default 300 |
+| `OVERMATCH_SERVER_STATS_S` | Stats sampling period; Worker sets `SERVER_STATS_S` (5 seconds) |
 
 The server must: listen on its fixed UDP port (`game` in the Edgegap version); send its first
 heartbeat as soon as it listens and then every interval (`{players, capacity, state}`, full record,

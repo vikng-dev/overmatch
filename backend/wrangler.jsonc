@@ -49,6 +49,10 @@
 		"RESERVATION_TTL_S": "30",
 		"TICKET_TTL_S": "600",
 		"EMPTY_EXIT_S": "300",
+		// Resolution: evidence every 5 s balances sampling detail against log size.
+		"SERVER_STATS_S": "5",
+		// Taste: operator debugging window; delete archived logs (including failed captures) after 14 days.
+		"SERVER_LOG_RETENTION_DAYS": "14",
 		"ENDED_RETENTION_S": "600",
 		"JOIN_ATTEMPTS": "2",
 		"LOCATIONS_CACHE_S": "600",

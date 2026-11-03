@@ -82,6 +82,10 @@ export class FakeEdgegap {
 	failStops = 0;
 	/** Deployment ids whose stop call never answers. */
 	hangStops = new Set<string>();
+	/** Container-log fixtures; stopped deployments no longer expose logs. */
+	logBody: unknown = { logs: "server_stats fixture\n", crash_logs: null, crash_data: null };
+	logStatus = 200;
+	hangLogs = new Set<string>();
 	/** When set, status answers carry no `app_version`. */
 	omitVersion = false;
 	/** Deployment ids whose every stop call answers 503. */
@@ -194,6 +198,7 @@ export class FakeEdgegap {
 			return Response.json({ request_id: id, request_dns: `${id}.pr.edgegap.test`, request_app: body.app_name, request_version: body.version_name, request_user_count: 1, filters: body.filters });
 		}
 		if (req.method === "GET" && url.pathname === "/v1/deployments") {
+			if (this.listingDown) return Response.json({ message: "down" }, { status: 500 });
 			// Only the filter src/edgegap.ts sends: one `tags eq` filter. Lists active deployments, paged
 			// like /v1/locations.
 			const query = JSON.parse(url.searchParams.get("query") ?? "{}") as { filters?: { field: string; operator: string; value: string }[] };
@@ -211,7 +216,14 @@ export class FakeEdgegap {
 				pagination: { number: page, next_page_number: page < pages ? page + 1 : null, previous_page_number: page > 1 ? page - 1 : null, paginator: { num_pages: pages }, has_next: page < pages, has_previous: page > 1 },
 			});
 		}
-		let m = /^\/v1\/status\/(.+)$/.exec(url.pathname);
+		let m = /^\/v1\/deployment\/(.+)\/container-logs$/.exec(url.pathname);
+		if (req.method === "GET" && m) {
+			if (this.hangLogs.has(m[1])) return new Promise<Response>(() => {});
+			const d = this.deployments.get(m[1]);
+			if (!d || d.status === "Status.TERMINATED") return Response.json({ message: "not found" }, { status: 404 });
+			return Response.json(this.logBody, { status: this.logStatus });
+		}
+		m = /^\/v1\/status\/(.+)$/.exec(url.pathname);
 		if (req.method === "GET" && m) {
 			if (this.hangStatus.has(m[1])) return new Promise<Response>(() => {});
 			const d = this.deployments.get(m[1]);

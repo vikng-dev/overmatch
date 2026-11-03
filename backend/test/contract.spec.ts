@@ -16,7 +16,7 @@ import failedRes from "../contract/ticket.failed.response.json";
 import readyRes from "../contract/ticket.ready.response.json";
 import ticketStatusReq from "../contract/ticket.request.json";
 import startingRes from "../contract/ticket.starting.response.json";
-import { age, call, join, launched, registry, webhook } from "./helpers";
+import { age, call, env, join, launched, registry, webhook } from "./helpers";
 import { runDurableObjectAlarm } from "cloudflare:test";
 
 function kind(v: unknown): string {
@@ -108,5 +108,6 @@ describe("contract/*.json matches the handlers", () => {
 		await join(joinReq);
 		const vars = edgegap.deployment(0).body.env_vars as { key: string; value: string }[];
 		expect(vars.map((v) => v.key).sort()).toEqual(Object.keys(serverEnv).sort());
+		expect(vars.find((v) => v.key === "OVERMATCH_SERVER_STATS_S")?.value).toBe(env.SERVER_STATS_S);
 	});
 });

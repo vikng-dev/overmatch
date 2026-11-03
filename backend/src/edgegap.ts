@@ -6,6 +6,7 @@
 //                                     that takes a city `filters` entry (v2 places by IP/coords only)
 //   GET    /v1/status/{id}            V1DeploymentStatus
 //   DELETE /v1/stop/{id}
+//   GET    /v1/deployment/{id}/container-logs stdout/stderr and crash evidence (session.sh cmd_logs)
 //   GET    /v1/deployments?query=     active deployments, filtered here by one tag
 //   GET    /v1/deployments?page&limit every active deployment, paginated (`pagination.has_next`)
 //   GET    /v1/locations?page&limit   paginated (`pagination.has_next`)
@@ -68,6 +69,7 @@ export interface Provider {
 	status(deploymentId: string): Promise<DeploymentStatus>;
 	/** Idempotent: an already-stopped or unknown deployment is success. */
 	stop(deploymentId: string): Promise<void>;
+	containerLogs(deploymentId: string): Promise<string>;
 	locations(): Promise<LocationData[]>;
 	beacons(): Promise<Beacon[]>;
 }
@@ -181,6 +183,22 @@ export class Edgegap implements Provider {
 				return;
 			}
 			await this.json(res, "stop");
+		});
+	}
+
+	async containerLogs(deploymentId: string): Promise<string> {
+		return this.request("logs", "GET", `/v1/deployment/${encodeURIComponent(deploymentId)}/container-logs`, undefined, async (res) => {
+			const out = await this.json<Record<string, unknown>>(res, "logs");
+			if (!out || typeof out !== "object" || Array.isArray(out)) throw new ProviderError("logs", 502);
+			for (const key of ["logs", "crash_logs"]) {
+				if (out[key] != null && typeof out[key] !== "string") throw new ProviderError("logs", 502);
+			}
+			if (!["logs", "crash_logs", "crash_data"].some((key) => key in out)) throw new ProviderError("logs", 502);
+			return [
+				out.logs ?? "",
+				...(out.crash_logs != null ? ["--- crash_logs ---", out.crash_logs] : []),
+				...(out.crash_data != null ? ["--- crash_data ---", JSON.stringify(out.crash_data)] : []),
+			].join("\n");
 		});
 	}
 

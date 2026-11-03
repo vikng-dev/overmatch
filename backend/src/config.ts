@@ -17,6 +17,8 @@ export interface Env {
 	RESERVATION_TTL_S: string;
 	TICKET_TTL_S: string;
 	EMPTY_EXIT_S: string;
+	SERVER_STATS_S: string;
+	SERVER_LOG_RETENTION_DAYS: string;
 	ENDED_RETENTION_S: string;
 	JOIN_ATTEMPTS: string;
 	LOCATIONS_CACHE_S: string;
@@ -37,6 +39,8 @@ export interface Config {
 	reservationTtlMs: number;
 	ticketTtlMs: number;
 	emptyExitS: number;
+	serverStatsS: number;
+	serverLogRetentionMs: number;
 	endedRetentionMs: number;
 	joinAttempts: number;
 	locationsCacheMs: number;
@@ -63,6 +67,8 @@ export function config(env: Env): Config {
 		reservationTtlMs: num(env, "RESERVATION_TTL_S", 0) * s,
 		ticketTtlMs: num(env, "TICKET_TTL_S", 1) * s,
 		emptyExitS: num(env, "EMPTY_EXIT_S", 0),
+		serverStatsS: num(env, "SERVER_STATS_S", 0.001),
+		serverLogRetentionMs: num(env, "SERVER_LOG_RETENTION_DAYS", 1) * 24 * 60 * 60 * s,
 		endedRetentionMs: num(env, "ENDED_RETENTION_S", 0) * s,
 		joinAttempts: num(env, "JOIN_ATTEMPTS", 1),
 		locationsCacheMs: num(env, "LOCATIONS_CACHE_S", 0) * s,

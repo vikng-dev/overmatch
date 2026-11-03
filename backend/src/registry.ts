@@ -31,6 +31,7 @@ import { DurableObject } from "cloudflare:workers";
 import { config, type Config, type Env } from "./config";
 import { definiteRejection, edgegapFor, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./edgegap";
 import { settleAll } from "./deadline";
+import { stopWithEvidence } from "./evidence";
 import { recordEvent, type Outcome, type SessionEvent } from "./history";
 import { timingSafeEqual, newId, randomHex, sha256Hex, versionOf } from "./ids";
 import { groupLocations, locationId } from "./locations";
@@ -482,6 +483,7 @@ export class Registry extends DurableObject<Env> {
 					{ key: "OVERMATCH_CAPACITY", value: String(this.cfg.capacity), hidden: false },
 					{ key: "OVERMATCH_HEARTBEAT_INTERVAL_S", value: String(this.cfg.heartbeatIntervalMs / 1000), hidden: false },
 					{ key: "OVERMATCH_EMPTY_EXIT_S", value: String(this.cfg.emptyExitS), hidden: false },
+					{ key: "OVERMATCH_SERVER_STATS_S", value: String(this.cfg.serverStatsS), hidden: false },
 				],
 			});
 		} catch (err) {
@@ -507,7 +509,8 @@ export class Registry extends DurableObject<Env> {
 		const row = this.server(serverId);
 		if (!row) {
 			// The claim was forgotten (retention) before its deploy answered: one stop is all that is left.
-			await this.provider.stop(deploymentId).catch((err) => console.error("stop of forgotten claim failed", serverId, diag(err)));
+			await stopWithEvidence(this.env, this.provider, serverId, deploymentId, this.cfg.providerTimeoutMs)
+				.catch((err) => console.error("stop of forgotten claim failed", serverId, diag(err)));
 			return;
 		}
 		if (row.state === "ended" && !row.deployment_id) {
@@ -698,7 +701,7 @@ export class Registry extends DurableObject<Env> {
 		}
 		this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", now + this.cfg.statusPollMs, serverId);
 		try {
-			await this.provider.stop(s.deployment_id);
+			await stopWithEvidence(this.env, this.provider, serverId, s.deployment_id, this.cfg.providerTimeoutMs);
 		} catch (err) {
 			console.error("stop failed, will retry", serverId, diag(err));
 			return;

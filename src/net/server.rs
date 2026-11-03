@@ -151,7 +151,14 @@ pub fn run() {
         ),
     );
 
-    let hosting = hosted.as_ref().map(Hosted::start);
+    let hosting = hosted
+        .as_ref()
+        .map(Hosted::start)
+        .transpose()
+        .unwrap_or_else(|err| {
+            eprintln!("overmatch-server: fatal: could not start hosting reporter: {err}");
+            std::process::exit(2);
+        });
     if let Some(hosting) = &hosting {
         hosting.install(&mut app);
     }

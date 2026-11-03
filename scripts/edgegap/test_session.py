@@ -1,0 +1,96 @@
+"""Offline deploy-contract and cost-guard checks: real session.sh, stubbed outbound commands."""
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+
+class SessionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        script_dir = self.root / "scripts" / "edgegap"
+        script_dir.mkdir(parents=True)
+        self.script = script_dir / "session.sh"
+        shutil.copy(Path(__file__).with_name("session.sh"), self.script)
+        contract = self.root / "backend" / "contract"
+        contract.mkdir(parents=True)
+        shutil.copy(Path(__file__).resolve().parents[2] / "backend/contract/server-env.json", contract)
+        binary = self.root / "bin"
+        binary.mkdir()
+        # Never start a watchdog process or touch the network; the shipped script still arms one.
+        for name in ["sleep", "nohup"]:
+            (binary / name).write_text("#!/bin/sh\nexit 0\n")
+        (binary / "curl").write_text("""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+method = args[args.index('-X') + 1]
+url = args[args.index('-X') + 2]
+body = json.loads(args[args.index('--data-binary') + 1]) if '--data-binary' in args else None
+with open(os.environ['CALLS'], 'a') as f:
+    f.write(json.dumps({'method': method, 'url': url, 'body': body}) + '\\n')
+if '/v1/deployments?' in url:
+    code, response = 503, {'message': 'listing unavailable'}
+elif method == 'POST':
+    code, response = (502, {}) if os.environ.get('SCENARIO') == 'lost' else (200, {'request_id': 'fixture'})
+else:
+    code, response = 200, {'current_status': 'Status.READY', 'running': True, 'public_ip': '192.0.2.1',
+                         'ports': {'game': {'external': 5888}}, 'tags': ['profile-fixture']}
+Path(args[args.index('-o') + 1]).write_text(json.dumps(response))
+print(code, end='')
+""")
+        for executable in binary.iterdir():
+            executable.chmod(0o755)
+        token = self.root / "fixture.token"
+        token.write_text("fixture-only-token")
+        self.calls_path = self.root / "calls.jsonl"
+        self.env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}",
+                        EDGEGAP_TOKEN_FILE=str(token), EDGEGAP_SESSION_DIR=str(self.root / "sessions"),
+                        CALLS=str(self.calls_path), SCENARIO="ready")
+
+    def deploy(self, *args):
+        return subprocess.run(["bash", str(self.script), "deploy", "fixture-version", "--city", "Paris", *args],
+                              env=self.env, text=True, capture_output=True, timeout=10)
+
+    def calls(self):
+        return [json.loads(line) for line in self.calls_path.read_text().splitlines()] if self.calls_path.exists() else []
+
+    def test_stats_remains_a_non_hosted_lever(self):
+        # Profiling operators can set stats after it becomes part of the Worker's contract.
+        for period in ["2", "0"]:
+            with self.subTest(period=period):
+                run = self.deploy("--stats-s", period)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                variables = [c for c in self.calls() if c["method"] == "POST"][-1]["body"]["env_vars"]
+                stats = [v for v in variables if v["key"] == "OVERMATCH_SERVER_STATS_S"]
+                self.assertEqual(stats, [] if period == "0" else [{"key": "OVERMATCH_SERVER_STATS_S", "value": period, "is_hidden": False}])
+
+    def test_hosted_keys_still_refuse_before_any_deploy(self):
+        run = self.deploy("--env", "OVERMATCH_SERVER_ID=fixture")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("refusing OVERMATCH_SERVER_ID", run.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_bad_watchdog_limit_refuses_before_any_deploy(self):
+        for limit in ["0", "invalid"]:
+            with self.subTest(limit=limit):
+                run = self.deploy("--max-min", limit)
+                self.assertNotEqual(run.returncode, 0)
+                self.assertIn("watchdog minutes must be a positive integer", run.stderr)
+                self.assertEqual(self.calls(), [])
+
+    def test_failed_reconciliation_never_starts_another_deployment(self):
+        self.env["SCENARIO"] = "lost"
+        run = self.deploy("--city", "Tokyo")
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("deployment outcome unknown; refusing another deploy", run.stderr)
+        self.assertEqual(len([c for c in self.calls() if c["method"] == "POST"]), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -103,7 +103,7 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
 }
 
 /// The lever's value as a period; `None` is off.
-fn period_from(value: Option<&str>) -> Result<Option<Duration>, LeverError> {
+pub(super) fn period_from(value: Option<&str>) -> Result<Option<Duration>, LeverError> {
     let Some(value) = value.map(str::trim) else {
         return Ok(None);
     };

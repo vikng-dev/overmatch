@@ -4,7 +4,7 @@
 # the Edgegap API: no matchmaking Worker, no hosted mode. The scripted client cannot go through the
 # Worker (simulate mode always dials a fixed address with the all-zero dev key, src/net/client.rs),
 # so the server must run non-hosted: no `OVERMATCH_SERVER_ID`, none of the Worker's env
-# (backend/contract/server-env.json's keys are refused), all-zero netcode key.
+# (backend/contract/server-env.json's hosted keys are refused), all-zero netcode key.
 #
 #   D=$(scripts/edgegap/session.sh deploy 0.6.1 --bots 10)      # prints the id; READY line on stderr
 #   TARGET=$(scripts/edgegap/session.sh address "$D")             # ip:port
@@ -339,9 +339,13 @@ disarm_watchdog() {
   rm -f "$pidfile"
 }
 
+validate_watchdog_minutes() {
+  [[ "$1" =~ ^[0-9]+$ && "$1" -ge 1 ]] || die "watchdog minutes must be a positive integer, got '$1'"
+}
+
 arm_watchdog() { # <id> <minutes>
   local id="$1" minutes="$2" deadline
-  [[ "$minutes" =~ ^[0-9]+$ && "$minutes" -ge 1 ]] || die "watchdog minutes must be a positive integer, got '$minutes'"
+  validate_watchdog_minutes "$minutes"
   mkdir -p "$session_dir"
   disarm_watchdog "$id"
   deadline=$(($(date +%s) + minutes * 60))
@@ -395,10 +399,10 @@ watchdog_loop() {
   rm -f "$session_dir/$id.watchdog.pid"
 }
 
-# The deployment whose deploy answer was lost, found by its unique tag (empty when none or unread).
+# The deployment whose deploy answer was lost, found by its unique tag (empty only when absent).
 find_by_tag() {
   local tag="$1" all
-  all="$(list_all)" || return 0
+  all="$(list_all)" || return 1
   awk -v t="$tag" '{ n = split($2, a, ","); for (i = 1; i <= n; i++) if (a[i] == t) { print $1; exit } }' <<<"$all"
 }
 
@@ -422,6 +426,7 @@ cmd_deploy() {
   fi
   [[ "$bots" =~ ^[0-9]+$ ]] || die "--bots must be a non-negative integer"
   [[ "$stats_s" =~ ^[0-9]+$ ]] || die "--stats-s must be a non-negative integer"
+  validate_watchdog_minutes "$max_min"
   # The server refuses a malformed debris value at launch, which a deployment shows only as an
   # ERROR: refused here instead.
   [[ "$debris" == off || "$debris" =~ ^[0-9]+:[0-9]+(\.[0-9]+)?$ ]] ||
@@ -430,11 +435,10 @@ cmd_deploy() {
   ((stats_s > 0)) && envs+=("OVERMATCH_SERVER_STATS_S=$stats_s")
   [[ "$debris" != off ]] && envs+=("OVERMATCH_DEBRIS_STRESS=$debris")
 
-  # The hosted contract's keys are refused: any one of them flips the server into hosted mode (or
-  # half of it), which a scripted client cannot join.
+  # Hosting settings belong to the Worker; stats is also a non-hosted profiling lever.
   [[ -f "$contract" ]] || die "no hosted env contract at $contract"
   local refused kv key env_json='[]'
-  refused="$(jq -r 'keys[]' "$contract")"
+  refused="$(jq -r 'keys[] | select(. != "OVERMATCH_SERVER_STATS_S")' "$contract")"
   for kv in ${envs[@]+"${envs[@]}"}; do
     [[ "$kv" == *=* ]] || die "--env wants K=V, got '$kv'"
     key="${kv%%=*}"
@@ -462,7 +466,7 @@ cmd_deploy() {
       # Unknown outcome: a deployment may exist. Its tag finds it.
       say "  $city: HTTP $code — looking the deployment up by its tag"
       sleep 3
-      id="$(find_by_tag "$tag")"
+      id="$(find_by_tag "$tag")" || die "deployment outcome unknown; refusing another deploy (tag $tag)"
     else
       say "  $city: refused, HTTP $code $(api_message)"
       continue

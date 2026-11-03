@@ -57,15 +57,6 @@ describe("join-or-create", () => {
 		expect(d.body.version_name).toBe(V);
 		expect(d.body.filters).toEqual([{ field: "city", values: ["Singapore"], filter_type: "any" }]);
 		const vars = d.body.env_vars as { key: string; value: string; is_hidden: boolean }[];
-		expect(vars.map((v) => v.key).sort()).toEqual([
-			"OVERMATCH_API",
-			"OVERMATCH_CAPACITY",
-			"OVERMATCH_EMPTY_EXIT_S",
-			"OVERMATCH_HEARTBEAT_INTERVAL_S",
-			"OVERMATCH_NETCODE_KEY",
-			"OVERMATCH_REPORT_SECRET",
-			"OVERMATCH_SERVER_ID",
-		]);
 		expect(vars.filter((v) => v.is_hidden).map((v) => v.key).sort()).toEqual(["OVERMATCH_NETCODE_KEY", "OVERMATCH_REPORT_SECRET"]);
 		expect(launched().key).toMatch(/^[0-9a-f]{64}$/);
 		expect(d.body.webhook_url).toMatch(/^https:\/\/api\.overmatch\.test\/v1\/edgegap\/webhook\/[^/?]+\/[0-9a-f]{32}$/);
