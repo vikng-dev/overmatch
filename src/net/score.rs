@@ -484,16 +484,19 @@ mod tests {
         );
     }
 
-    /// The game's damage model: results must exclude a combatant placed before the first player arrived,
-    /// while a combat participant's standing survives disconnect and respawn. ASSUMED fixture
-    /// identities and respawn wait; phase membership is the invariant.
+    /// The game's damage model: standings require combat participation, including combatants
+    /// already present when combat starts. Waiting-only departures never enter results; combat
+    /// standings survive tank removal and respawn. Fixture identities distinguish those cases.
     #[test]
     fn standings_start_at_combat_participation_and_outlive_its_tanks() {
+        use super::super::protocol::NetTank;
+        use lightyear::prelude::server::ClientOf;
         let mut app = App::new();
         app.init_resource::<ShotClock>();
-        mount(
+        super::super::server::install_battle(
             &mut app,
-            RespawnWait::new(Duration::from_secs(1), Duration::from_millis(10)),
+            super::super::battle_mode::BattleMode::shipped(),
+            Time::<Fixed>::default().timestep(),
         );
         let board = app
             .world_mut()
@@ -501,7 +504,11 @@ mod tests {
             .id();
         let waiting = app
             .world_mut()
-            .spawn((CombatantId(1), CombatantLife(0)))
+            .spawn((NetTank, CombatantId(1), CombatantLife(0)))
+            .id();
+        let present_at_start = app
+            .world_mut()
+            .spawn((NetTank, CombatantId(2), CombatantLife(0)))
             .id();
         assert!(
             app.world().get::<Scoreboard>(board).unwrap().0.is_empty(),
@@ -512,24 +519,31 @@ mod tests {
             app.world().get::<Scoreboard>(board).unwrap().outcome(),
             BattleOutcome::NoContest
         );
-        *app.world_mut().get_mut::<BattleState>(board).unwrap() = BattleState::combat_fixture();
-        let fighter = app
-            .world_mut()
-            .spawn((CombatantId(2), CombatantLife(0)))
-            .id();
+        app.world_mut()
+            .spawn((RemoteId(PeerId::Netcode(1)), Connected, ClientOf));
+        app.world_mut().run_schedule(FixedUpdate);
         assert_eq!(
             app.world().get::<Scoreboard>(board).unwrap().outcome(),
-            BattleOutcome::Winner(CombatantId(2))
+            BattleOutcome::Winner(CombatantId(2)),
+            "the production combat boundary enters an already-present combatant"
         );
+        let fighter = app
+            .world_mut()
+            .spawn((NetTank, CombatantId(3), CombatantLife(0)))
+            .id();
+        app.world_mut().despawn(present_at_start);
         app.world_mut().despawn(fighter);
-        app.world_mut().spawn((CombatantId(2), CombatantLife(1)));
+        app.world_mut()
+            .spawn((NetTank, CombatantId(3), CombatantLife(1)));
         let standings = &app.world().get::<Scoreboard>(board).unwrap().0;
         assert_eq!(
             standings.len(),
-            1,
-            "a combat disconnect or respawn cannot erase or duplicate a standing"
+            2,
+            "combat removal and respawn cannot erase or duplicate standings"
         );
-        assert_eq!(standings[0].combatant, CombatantId(2));
+        for id in [CombatantId(2), CombatantId(3)] {
+            assert!(standings.iter().any(|standing| standing.combatant == id));
+        }
     }
 
     /// The game's damage model: only combat can change score. Waiting and results ignore a

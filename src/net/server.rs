@@ -803,8 +803,8 @@ fn lane_offset(lane: u32, spacing: f32) -> Vec2 {
     Vec2::new(sign * step, 0.0)
 }
 
-/// Queues each newly connected client for [`spawn_pending_tanks`] (one predicted tank per client,
-/// owned by that client; every other client interpolates it).
+/// Queues each newly connected client for one owned tank via [`spawn_pending_tanks`].
+/// Every client interpolates its hull from the authoritative stream (ADR-0037).
 fn handle_new_clients(
     new: Query<(Entity, &RemoteId), (Added<Connected>, With<ClientOf>)>,
     mut pending: ResMut<PendingClients>,
@@ -1151,7 +1151,7 @@ fn respawn_player_tanks(
 ) {
     // (dead root, owner link, owner client id) for every owned tank that both IS dead and asked to
     // respawn this tick. Resolve the owner's `RemoteId` up front (the `PeerId` the fresh tank must be
-    // predicted/owned by); an owner link mid-disconnect with no `RemoteId` is skipped rather than
+    // owned by); an owner link mid-disconnect with no `RemoteId` is skipped rather than
     // respawned to a client that is leaving.
     let requests: Vec<(Entity, Entity, PeerId, CombatantId, RespawnState)> = dead
         .iter()

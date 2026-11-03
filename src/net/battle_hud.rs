@@ -211,7 +211,7 @@ fn title(battle: BattleState) -> String {
 /// The match UI's two roots.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 enum MatchUi {
-    /// The clock line, shown whenever a Battle has arrived.
+    /// The combat/results clock line.
     Clock,
     /// The scoreboard card.
     Scoreboard,
@@ -564,11 +564,9 @@ mod tests {
     use crate::overlay::Overlay;
     use lightyear::prelude::TimelineSync;
 
-    /// FIXTURE DATA: viewport sizes/scales, thirty tied standings in combat with Tab held, and the
-    /// fixed readouts' text as the shipped seed tank renders them in the view-5 stills (its vitals
-    /// card with the repair hint and six module rows, its seat row and its drive row). Uses the
-    /// shipped spawners, fonts, Bevy layout and this module's own system; no simulated tank or link
-    /// is needed.
+    /// Fixture data: viewport sizes/scales, thirty tied standings in combat with Tab held, and
+    /// vitals, seat and drive readouts. Uses shipped spawners, fonts, Bevy layout and this module's
+    /// systems; no simulated tank or link is needed.
     fn hud_layout_app(width: u32, height: u32, scale: f32) -> App {
         let mut app = App::new();
         app.add_plugins(crate::gpu_less_default_plugins(Some(Window {

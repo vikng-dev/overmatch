@@ -155,7 +155,7 @@ MEASURED: the expanded authored candidate set admits the owner's 30-player
 stationary lobby from every possible first point; all candidates pass ground
 and building-footprint checks. It has 36 candidates with minimum pair separation
 240 m. Moving players can still block candidates during combat, but a connected
-waiter cannot remain blocked across the next fresh fill-up layout.
+waiter cannot remain blocked across the next Battle's fresh layout.
 
 ## Match UI
 
@@ -209,14 +209,8 @@ pending writes whose old image never reached the GPU. Arrival-order coverage als
 reconstructs without a fixed update and reconnects to a new authority whose Battle
 number coincides with the previous authority's.
 
-The release smoke (`scripts/ci/archive-smoke.sh`) uses the shipped mode. The harness claims its
-input slot during fill-up but advances its script only after replicated combat release on a
-synchronized local timeline (lightyear files a slot's command only from one, so an earlier tick
-would never reach the wire); the watchdog budgets both the remaining fill-up, read from that same
-synchronized tick, and the released script separately. Every measurement window opens at the
-release too: the cost recorder counts and writes only played ticks (`state::MatchCommands`, the
-hold the netcode layer publishes to the sim), and the frame-stream runners take the harness's
-`released` line as their window origin.
+The release smoke (`scripts/ci/archive-smoke.sh`) uses the shipped mode and checks that its
+script completes under the launch and completion bounds below.
 
 ## Scripted workloads after immediate start
 
@@ -227,8 +221,10 @@ allowances and script length alone. The fill-up-only shell helper and its tests 
 
 `scripts/cost/run.sh` creates `SPIKE_WORKLOAD_READY` only after all scripted clients hold input
 slots. Both their script clocks and the server/client cost recorders wait for this file; warmup
-cannot include partial-cohort ticks. The pen-camera cost runner uses the same tool barrier for
-its two scripts. No tool can delay the Battle. The online cost runner starts warmup from the
+cannot include partial-cohort ticks. `scripts/shot/run-mg-armor.sh` and
+`scripts/shot/run-pencam-latency.sh` share that admission helper: their script lifetimes and firing
+offsets start from the tool barrier. The pen-camera cost runner uses the same start-file contract
+for its two scripts. No tool can delay the Battle. The online cost runner starts warmup from the
 measured frame-stream span when all load clients have slots; the debris stress runner starts
 warmup after every client reaches synchronized combat. These latter scripts outlast admission
 and their requested measurement windows. The combat-start probe bounds only loading and script
