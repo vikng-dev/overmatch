@@ -1,0 +1,15 @@
+thread 'Compute Task Pool (6)' (112111622) panicked at src/track/rubble.rs:252:13:
+belt support shapes are boxes or convex polyhedra; fix the collider constructor
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: triangles
+             at ./src/track/rubble.rs:252:13
+   3: gather<()>
+             at ./src/track/rubble.rs:526:28
+   4: apply_track_forces
+             at ./src/track/sim.rs:888:22
+   5: <bevy_ecs::system::function_system::FunctionSystem<fn(bevy_ecs::change_detection::params::Res<bevy_time::time::Time>, bevy_ecs::change_detection::params::Res<overmatch::track::terrain::TrackFiel
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.

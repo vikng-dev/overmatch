@@ -1,0 +1,40 @@
+
+warning: `overmatch` (lib test) generated 1 warning
+    Finished `edit` profile [optimized + debuginfo] target(s) in 2m 35s
+     Running unittests src/lib.rs (target/edit/deps/overmatch-c0e530d9edaf6c14)
+
+running 1 test
+MEASURED freed collider shape=Compound children=Some(1)
+MEASURED freed collider shape=Compound children=Some(1)
+MEASURED freed collider shape=Compound children=Some(1)
+MEASURED freed collider shape=ConvexPolyhedron children=None
+MEASURED freed collider shape=ConvexPolyhedron children=None
+MEASURED freed collider shape=ConvexPolyhedron children=None
+
+thread 'trees::motion::tests::diag_tree_crash_detached_support' (112163064) panicked at src/track/rubble.rs:252:13:
+belt support shapes are boxes or convex polyhedra; fix the collider constructor
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/std/src/panicking.rs:679:5
+   1: core::panicking::panic_fmt
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/panicking.rs:80:14
+   2: <overmatch::track::rubble::Surface>::triangles
+   3: <overmatch::track::rubble::RubbleBodies>::gather::<()>
+   4: <&mut overmatch::trees::motion::tests::diag_tree_crash_detached_support::{closure#0} as core::ops::function::FnMut<(overmatch::track::rubble::RubbleQuery, bevy_ecs::system::query::Query<(avian3d::dynamics::rigid_body::forces::query_data::Forces, &avian3d::dynamics::rigid_body::RigidBody, &avian3d::dynamics::rigid_body::mass_properties::components::computed::ComputedMass, &avian3d::dynamics::
+   5: <bevy_ecs::system::function_system::FunctionSystem<fn(overmatch::track::rubble::RubbleQuery, bevy_ecs::system::query::Query<(avian3d::dynamics::rigid_body::forces::query_data::Forces, &avian3d::dynamics::rigid_body::RigidBody, &avian3d::dynamics::rigid_body::mass_properties::components::computed::ComputedMass, &avian3d::dynamics::rigid_body::mass_properties::components::computed::ComputedAng
+   6: <&mut bevy_ecs::world::World as bevy_ecs::system::system::RunSystemOnce>::run_system_once::<overmatch::trees::motion::tests::diag_tree_crash_detached_support::{closure#0}, (), (bevy_ecs::system::function_system::IsFunctionSystem, fn(overmatch::track::rubble::RubbleQuery, bevy_ecs::system::query::Query<(avian3d::dynamics::rigid_body::forces::query_data::Forces, &avian3d::dynamics::rigid_body:
+   7: overmatch::trees::motion::tests::diag_tree_crash_detached_support
+   8: <overmatch::trees::motion::tests::diag_tree_crash_detached_support::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+   9: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/88d9e12ae178fab0fb5cc050a94da85685d449ea/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+test trees::motion::tests::diag_tree_crash_detached_support ... FAILED
+
+failures:
+
+failures:
+    trees::motion::tests::diag_tree_crash_detached_support
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2391 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `--lib`

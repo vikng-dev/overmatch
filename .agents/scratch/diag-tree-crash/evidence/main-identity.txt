@@ -1,0 +1,2 @@
+2026-11-03T16:00:56.634894Z ERROR overmatch::track::rubble: [DEBUG-tree] game environment unsupported collider=13253v0 owner=13251v0 shape=Compound tree_piece=Ok(TreePiece { tree: 19, cut: 1 })
+thread 'Compute Task Pool (9)' (112174623) panicked at src/track/rubble.rs:253:13:

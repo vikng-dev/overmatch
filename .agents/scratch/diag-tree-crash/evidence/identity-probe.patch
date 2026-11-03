@@ -1,0 +1,28 @@
+diff --git a/src/track/rubble.rs b/src/track/rubble.rs
+index 8b586db5..18cf9ff1 100644
+--- a/src/track/rubble.rs
++++ b/src/track/rubble.rs
+@@ -97,6 +97,7 @@ pub(crate) struct RubbleQuery<'w, 's> {
+     spatial: SpatialQuery<'w, 's>,
+     field_surfaces: Query<'w, 's, (), With<FieldSurface>>,
+     structures: Query<'w, 's, (), With<StructureBody>>,
++    diag_tree_pieces: Query<'w, 's, &'static crate::trees::TreePiece>,
+     collider_of: Query<'w, 's, &'static ColliderOf>,
+     sensors: Query<'w, 's, (), With<Sensor>>,
+     layers: Query<'w, 's, &'static CollisionLayers>,
+@@ -516,6 +517,15 @@ impl RubbleBodies {
+                 .shapes
+                 .get(collider)
+                 .expect("a collider the spatial query returned carries its shape and pose");
++            if shape.shape_scaled().as_cuboid().is_none()
++                && shape.shape_scaled().as_convex_polyhedron().is_none()
++            {
++                error!(
++                    "[DEBUG-tree] game environment unsupported collider={collider} owner={body} shape={:?} tree_piece={:?}",
++                    shape.shape_scaled().shape_type(),
++                    rubble.diag_tree_pieces.get(body)
++                );
++            }
+             out.surfaces.push(Surface {
+                 collider,
+                 owner: body,

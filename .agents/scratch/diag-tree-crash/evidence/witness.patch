@@ -1,0 +1,50 @@
+diff --git a/src/trees/motion.rs b/src/trees/motion.rs
+index f559b462..774a0ab2 100644
+--- a/src/trees/motion.rs
++++ b/src/trees/motion.rs
+@@ -1257,4 +1257,45 @@ mod tests {
+             assert!((loads.iter().map(|load| load.blow).sum::<Vec3>() - expected).length() < 1e-4);
+         }
+     }
++    /// The game's environment physics: a freed trunk must remain readable by the belt's
++    /// support query. Players driving through construction rely on the spawn/reader contract.
++    /// Fixture: the shared tree fixture, freed at its base without gravity or launch velocity.
++    #[test]
++    fn diag_tree_crash_detached_support() {
++        use crate::track::rubble::{PieceData, RubbleBodies, RubbleQuery};
++        use bevy::ecs::system::RunSystemOnce;
++
++        let mut app = world(Vec3::ZERO);
++        let root = tree(&mut app, 0, Vec3::ZERO);
++        let piece = release(&mut app, root, 0, Vec3::ZERO);
++        let at = app.world().get::<Position>(piece).unwrap().0;
++        for (shape, owner) in app
++            .world_mut()
++            .query::<(&Collider, &ColliderOf)>()
++            .iter(app.world())
++        {
++            if owner.body == piece {
++                println!(
++                    "MEASURED freed collider shape={:?} children={:?}",
++                    shape.shape_scaled().shape_type(),
++                    shape
++                        .shape_scaled()
++                        .as_compound()
++                        .map(|compound| compound.shapes().len())
++                );
++            }
++        }
++        app.world_mut()
++            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
++                // Fixture query radius covers the shared fixture's freed body.
++                let near = rubble.near(at, 4.0);
++                assert!(
++                    near.iter()
++                        .any(|&collider| rubble.body_of(collider) == piece),
++                    "the belt must admit the production-spawned freed trunk"
++                );
++                RubbleBodies::gather(&rubble, &near, &bodies);
++            })
++            .unwrap();
++    }
+ }
