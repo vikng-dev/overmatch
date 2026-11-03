@@ -245,6 +245,7 @@ fn mount_indicator_placement(app: &mut App) {
 }
 
 fn spawn_hud(mut commands: Commands) {
+    let look = crate::sight::look::get();
     // Centre reticle: a small white dot held at screen centre by flexbox. Third person only
     // (`update_centre_reticle`); spawned visible, which is the default view.
     commands
@@ -262,12 +263,12 @@ fn spawn_hud(mut commands: Commands) {
             parent.spawn((
                 CentreReticle,
                 Node {
-                    width: Val::Px(6.0),
-                    height: Val::Px(6.0),
+                    width: Val::Px(look.centre.diameter_ui_px.0),
+                    height: Val::Px(look.centre.diameter_ui_px.0),
                     border_radius: BorderRadius::MAX,
                     ..default()
                 },
-                BackgroundColor(Color::WHITE),
+                BackgroundColor(look.centre.colour()),
                 Visibility::Visible,
             ));
         });
@@ -278,12 +279,12 @@ fn spawn_hud(mut commands: Commands) {
         BoreIndicator,
         Node {
             position_type: PositionType::Absolute,
-            width: Val::Px(4.0),
-            height: Val::Px(4.0),
+            width: Val::Px(look.bore.diameter_ui_px.0),
+            height: Val::Px(look.bore.diameter_ui_px.0),
             border_radius: BorderRadius::MAX,
             ..default()
         },
-        BackgroundColor(Color::srgba(0.3, 0.9, 0.4, 0.6)),
+        BackgroundColor(look.bore.colour()),
         Visibility::Hidden,
     ));
     commands.spawn((
@@ -291,12 +292,12 @@ fn spawn_hud(mut commands: Commands) {
         AimIndicator,
         Node {
             position_type: PositionType::Absolute,
-            width: Val::Px(6.0),
-            height: Val::Px(6.0),
+            width: Val::Px(look.aim.diameter_ui_px.0),
+            height: Val::Px(look.aim.diameter_ui_px.0),
             border_radius: BorderRadius::MAX,
             ..default()
         },
-        BackgroundColor(Color::srgba(1.0, 0.7, 0.1, 0.7)),
+        BackgroundColor(look.aim.colour()),
         Visibility::Hidden,
     ));
 }
@@ -602,7 +603,7 @@ fn update_bore_indicator(
         camera,
         cam_transform,
         point,
-        2.0,
+        crate::sight::look::get().bore.diameter_ui_px.0 / 2.0,
         target,
     );
 }
@@ -660,13 +661,36 @@ fn update_aim_indicator(
         camera,
         &cam_transform,
         world,
-        3.0,
+        crate::sight::look::get().aim.diameter_ui_px.0 / 2.0,
         target,
     );
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// Marker authors own diameter and colour; the spawner must not retain a Rust taste.
+    #[test]
+    fn hud_marker_sizes_and_colours_come_from_sight_data() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        fn check<M: Component>(world: &mut World, look: &crate::sight::look::DotLook) {
+            let (node, background) = world
+                .query_filtered::<(&Node, &BackgroundColor), With<M>>()
+                .single(world)
+                .unwrap();
+            assert_eq!(node.width, Val::Px(look.diameter_ui_px.0));
+            assert_eq!(node.height, Val::Px(look.diameter_ui_px.0));
+            assert_eq!(background.0.to_linear(), look.colour().to_linear());
+        }
+
+        let mut world = World::new();
+        world.run_system_once(spawn_hud).unwrap();
+        let look = crate::sight::look::get();
+        check::<CentreReticle>(&mut world, &look.centre);
+        check::<BoreIndicator>(&mut world, &look.bore);
+        check::<AimIndicator>(&mut world, &look.aim);
+    }
+
     use std::collections::VecDeque;
     use std::time::Duration;
 

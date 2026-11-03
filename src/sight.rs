@@ -3,6 +3,7 @@
 //! The presentation half — every HUD widget that draws the sight picture — lives behind
 //! [`reticle`], which this module mounts and otherwise touches only to raise a [`Toast`].
 
+pub(crate) mod look;
 mod reticle;
 
 use avian3d::prelude::{Position, Rotation, SpatialQuery};
@@ -63,21 +64,7 @@ pub fn in_third_person(mode: Res<SightMode>) -> bool {
     *mode == SightMode::ThirdPerson
 }
 
-/// **Where the optic camera rides between the gun and the player's intent** — one fraction on
-/// both axes, consulted ONLY while [`SightMode::Gunner`], and a pure VIEW parameter: the gun is
-/// commanded by [`drive_gunner_aim`] and laid by `aim::drive_aim_servos` at every value,
-/// identically.
-///
-/// `0` welds the look to the gun's SIGHT LINE (lay − superelevation), so the intent cursor leads
-/// inside the optic glass and drifts back as the gun catches up. `1` welds it to the committed
-/// intent, so the cursor holds the glass centre and the bore visibly lags behind it. Everything
-/// between is a geometric blend of the two bearings — no damping and no spring, so the view is
-/// instantaneous, stateless, and cannot overshoot. Settled at `0.8`: the look mostly on the intent,
-/// the bore's lag visible.
-pub const GUNNER_BLEND: f32 = 0.8;
-
-/// Blend fractions the optic's invariants are checked at: both ends, the settled value and
-/// interior samples.
+/// Fixture: endpoints and interior blend fractions for the optic's geometric invariants.
 #[cfg(test)]
 pub(crate) const BLEND_SAMPLES: [f32; 6] = [0.0, 0.35, 0.5, 0.65, 0.8, 1.0];
 
@@ -258,11 +245,6 @@ fn apply_sight_camera_profile(
     }
 }
 
-/// The fraction of the viewport's LARGER half-extent the cursor reaches, in the camera's PROJECTED
-/// space. The one aiming bound; the surround (`reticle`) spans the same fraction of the same axis
-/// for the circle it draws, so the reachable set and the drawn glass are one circle.
-pub const OPTIC_RADIUS_FRACTION: f32 = 0.9;
-
 /// Viewport aspect (width / height) before the camera's render target has one — square, the aspect
 /// at which the two half-extents coincide.
 const OPTIC_ASPECT_FALLBACK: f32 = 1.0;
@@ -270,11 +252,11 @@ const OPTIC_ASPECT_FALLBACK: f32 = 1.0;
 /// The cursor's angular reach off the gun's sight line for vertical field `fov` over a viewport of
 /// `aspect` (width / height): ONE angle, equal at every bearing.
 ///
-/// `OPTIC_RADIUS_FRACTION` of the LARGER axis' half-extent, taken through the projection —
+/// The authored fraction of the LARGER axis' half-extent, taken through the projection —
 /// `atan(f · tan(half-field))`. In height units that half-extent is `max(aspect, 1)` times the
 /// vertical one, and the drawn rim (`reticle`) spans the same fraction of the same axis.
 pub(crate) fn optic_margin(fov: f32, aspect: f32) -> f32 {
-    (OPTIC_RADIUS_FRACTION * aspect.max(1.0) * (fov / 2.0).tan()).atan()
+    (look::get().optic_span_fraction.0 * aspect.max(1.0) * (fov / 2.0).tan()).atan()
 }
 
 /// Clamp `value` to a servo's authored travel `limits` (radians); a `None` (continuous) mount passes
@@ -440,12 +422,8 @@ pub(crate) fn drive_gunner_aim(
         .map_or(OPTIC_ASPECT_FALLBACK, |size| size.x / size.y);
     let margin = optic_margin(fov, aspect);
 
-    // Radians of commanded aim per mouse count, per radian of vertical FOV. What the knob tunes is
-    // the cursor's SCREEN travel, so scaling with the field holds the count of mouse-counts needed
-    // to cross the optic the same in every instrument (a narrower field puts the same screen move
-    // over a smaller angle). TUNED at 0.0005 rad/count against a 0.12 rad field.
-    const SENSITIVITY_PER_FOV: f32 = 0.0005 / 0.12;
-    let sensitivity = SENSITIVITY_PER_FOV * fov;
+    // Scaling mouse gain with the field preserves comparable screen travel across optics.
+    let sensitivity = look::get().mouse_sensitivity_per_fov.0 * fov;
 
     // The margin below clamps intent against the gun's live lay — see [`LiveServos::angle`].
     let t_current = servos.angle(tank, rig.turret);
@@ -774,13 +752,10 @@ mod tests {
         );
     }
 
-    /// **The bound is a CIRCLE of `OPTIC_RADIUS_FRACTION` of the LARGER axis' half-extent, taken
+    /// **The bound is a CIRCLE of the authored optic span of the LARGER axis' half-extent, taken
     /// through the projection.** Stated in the tangents, where the shape lives, so a bound that
     /// went back to being linear in the angle — or that took the vertical axis when the horizontal
     /// one is larger — moves a number here.
-    ///
-    /// Worked instances as fixture data: the TZF 9b frames 25°, so at 16:9 the cursor reaches
-    /// 19.53° in every direction, and on a portrait or square viewport 11.28°.
     #[test]
     fn the_deflection_bound_is_the_projected_fraction_of_the_larger_axis() {
         let fov = Optics::Magnified {
@@ -793,15 +768,10 @@ mod tests {
             let margin = optic_margin(fov, aspect);
             let larger = aspect.max(1.0);
             assert!(
-                (margin.tan() - OPTIC_RADIUS_FRACTION * half * larger).abs() < 1e-7,
-                "the bound at aspect {aspect} is not {OPTIC_RADIUS_FRACTION} of the larger axis' \
-                 half-extent",
+                (margin.tan() - look::get().optic_span_fraction.0 * half * larger).abs() < 1e-7,
+                "the bound at aspect {aspect} does not follow the authored larger-axis fraction",
             );
         }
-
-        assert!((optic_margin(fov, 16.0 / 9.0).to_degrees() - 19.53).abs() < 5e-3);
-        assert!((optic_margin(fov, 0.5625).to_degrees() - 11.28).abs() < 5e-3);
-        assert!((optic_margin(fov, 1.0).to_degrees() - 11.28).abs() < 5e-3);
     }
 
     /// **The deflection bound is DERIVED from the field the optic frames, never a stored angle and

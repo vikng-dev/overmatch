@@ -17,7 +17,7 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
 use crate::aim::CommittedAim;
-use crate::camera::{GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
+use crate::camera::GunnerCameraPlaced;
 use crate::damage::{ControlledTank, TankKnockedOut};
 use crate::damage_cam::pen_cam::game::KillCamGate;
 use crate::firecontrol::{RangeTable, Ranging};
@@ -49,9 +49,6 @@ struct ViewDeathOverlay;
 #[derive(Component)]
 struct ViewDeathText;
 
-/// Seconds a refusal toast stays up.
-const TOAST_SECONDS: f32 = 2.0;
-
 /// A brief on-screen message — used when a view switch is *refused* (the target view's crewman is
 /// down), so the silent Lshift no-op gets a reason. Ticks down in `update_toast`.
 ///
@@ -66,7 +63,7 @@ pub(super) struct Toast {
 impl Toast {
     pub(super) fn show(&mut self, message: impl Into<String>) {
         self.message = message.into();
-        self.remaining = TOAST_SECONDS;
+        self.remaining = crate::sight::look::get().toast_seconds.0;
     }
 }
 
@@ -94,6 +91,7 @@ struct RangeScaleTick {
 /// black, an overlay, once at startup), then keep them in step with the sight.
 pub(super) fn plugin(app: &mut App) {
     crate::flow::require(app, "sight");
+    crate::sight::look::get();
     app.insert_resource(GraticuleLook::load())
         .init_match_resource::<Toast>()
         // The optic surround is the sight's one custom-shaded widget: a full-screen node whose
@@ -160,17 +158,18 @@ fn mount_placement(app: &mut App) {
 }
 
 fn spawn_intent_reticle(mut commands: Commands) {
+    let look = &crate::sight::look::get().intent;
     commands.spawn((
         FlowScoped(Flow::InMatch),
         IntentReticle,
         Node {
             position_type: PositionType::Absolute,
-            width: Val::Px(8.0),
-            height: Val::Px(8.0),
+            width: Val::Px(look.diameter_ui_px.0),
+            height: Val::Px(look.diameter_ui_px.0),
             border_radius: BorderRadius::MAX,
             ..default()
         },
-        BackgroundColor(Color::srgba(1.0, 0.7, 0.1, 0.9)),
+        BackgroundColor(look.colour()),
         Visibility::Hidden,
     ));
 }
@@ -179,6 +178,7 @@ fn spawn_intent_reticle(mut commands: Commands) {
 /// The prompt offers Lshift only when the other view's station is available. An out-of-action
 /// station supplies no sight picture in the game's damage model (design §7a).
 fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
+    let look = &crate::sight::look::get().view_prompt;
     commands
         .spawn((
             ViewDeathOverlay,
@@ -198,7 +198,7 @@ fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(Color::BLACK),
+            BackgroundColor(crate::sight::look::get().view_surround()),
             Visibility::Hidden,
         ))
         .with_children(|parent| {
@@ -208,10 +208,10 @@ fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
                 TextFont {
                     // SemiBold: a full-screen crew-death prompt.
                     font: fonts.hud.clone().into(),
-                    font_size: FontSize::Px(20.0),
+                    font_size: FontSize::Px(look.font_ui_px.0),
                     ..default()
                 },
-                TextColor(Color::srgb(0.9, 0.4, 0.3)),
+                TextColor(look.colour()),
             ));
         });
 }
@@ -219,13 +219,14 @@ fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
 /// The refusal-toast text node: a centred banner in the upper third, hidden until a refused switch
 /// raises it. Its own entity carries both `Text` and `Visibility`, so `update_toast` writes one query.
 fn spawn_toast(mut commands: Commands, fonts: Res<UiFonts>) {
+    let look = crate::sight::look::get();
     commands
         .spawn((
             FlowScoped(Flow::InMatch),
             Node {
                 width: Val::Percent(100.0),
                 position_type: PositionType::Absolute,
-                top: Val::Percent(30.0),
+                top: Val::Percent(look.toast_top_percent.0),
                 justify_content: JustifyContent::Center,
                 ..default()
             },
@@ -237,10 +238,10 @@ fn spawn_toast(mut commands: Commands, fonts: Res<UiFonts>) {
                 TextFont {
                     // SemiBold: a centred refusal banner.
                     font: fonts.hud.clone().into(),
-                    font_size: FontSize::Px(22.0),
+                    font_size: FontSize::Px(look.toast.font_ui_px.0),
                     ..default()
                 },
-                TextColor(Color::srgb(1.0, 0.75, 0.3)),
+                TextColor(look.toast.colour()),
                 Visibility::Hidden,
             ));
         });
@@ -248,6 +249,7 @@ fn spawn_toast(mut commands: Commands, fonts: Res<UiFonts>) {
 
 /// The dialed-range readout, parked bottom-left; populated/shown only in the optic.
 fn spawn_range_readout(mut commands: Commands, fonts: Res<UiFonts>) {
+    let look = crate::sight::look::get();
     commands.spawn((
         FlowScoped(Flow::InMatch),
         RangeReadout,
@@ -255,14 +257,14 @@ fn spawn_range_readout(mut commands: Commands, fonts: Res<UiFonts>) {
         TextFont {
             // SemiBold: an all-caps gunnery readout ("RANGE ... m").
             font: fonts.hud.clone().into(),
-            font_size: FontSize::Px(16.0),
+            font_size: FontSize::Px(look.range.font_ui_px.0),
             ..default()
         },
-        TextColor(Color::srgba(1.0, 0.8, 0.3, 0.9)),
+        TextColor(look.range.colour()),
         Node {
             position_type: PositionType::Absolute,
-            bottom: Val::Px(24.0),
-            left: Val::Px(24.0),
+            bottom: Val::Px(look.range_inset_ui_px.0),
+            left: Val::Px(look.range_inset_ui_px.0),
             ..default()
         },
         Visibility::Hidden,
@@ -300,7 +302,7 @@ fn update_range_readout(
 /// Spawn the ranging reticle: the zero mark and the authored graduation pool, numbered in hundreds
 /// of metres. Every mark is absolutely positioned — the whole graticule is
 /// placed against the gun's sight line each frame ([`update_ranging_reticle`]), which is not screen
-/// centre at `sight::GUNNER_BLEND`. All hidden until shown in the optic; a mark's height is written
+/// centre at the authored sight blend. All hidden until shown in the optic; a mark's height is written
 /// where it is placed ([`place_mark`]).
 fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>, look: Res<GraticuleLook>) {
     let colour = look.colour();
@@ -395,7 +397,7 @@ fn place_mark(
 /// (`super::sight_line`: the gun's lay minus the dialed superelevation), which is the line the shell
 /// arcs back down onto and so the only line the dialed-range mark can name. That is NOT the green
 /// bore dot, which is the barrel axis and by design rides the same superelevation ABOVE the sight
-/// line. The anchor coincides with screen centre only at a blend of `0`; at `sight::GUNNER_BLEND`
+/// line. The anchor coincides with screen centre only at a blend of `0`; at the authored sight blend
 /// the camera rides toward the intent and the scale correctly lags with the gun.
 ///
 /// The sight line is read off the VIEW gun node — the render-smoothed chain (`interpolate_servos`,
@@ -502,47 +504,14 @@ fn update_ranging_reticle(
     }
 }
 
-/// How opaque the surround outside the glass is. `1.0` is what looking down an optic actually looks
-/// like; lower dims the world around the sight picture instead of blanking it.
-const OPTIC_SURROUND_OPACITY: f32 = 1.0;
-
-/// The drawn circle's DIAMETER, as a fraction of the viewport's LARGER axis. `MASK_SPAN_FRACTION`
-/// and `sight::OPTIC_RADIUS_FRACTION` are read off the same axis, so at equal values the cursor's
-/// bound IS this rim; a smaller span here would draw a glass the cursor can leave, which
-/// [`mask_rim`] asserts against.
-const MASK_SPAN_FRACTION: f32 = 0.9;
-
-/// Half-width of the rim's feather, as a fraction of its OWN radius: a broad gradient rather than
-/// an anti-alias, which is what reads as a blurred surround. Far enough from `0` that
-/// `radius ± feather` stays representable (the shader's `smoothstep` across two edges collapsed
-/// onto one float is undefined) and far enough from `1` that the gradient cannot reach the centre.
-const MASK_EDGE_FEATHER: f32 = 0.10;
-
-/// The cursor's angular bound carried into the mask's own units — a fraction of the viewport HEIGHT
-/// — through the perspective divide the glass itself is measured through.
-fn projected_bound(fov: f32, aspect: f32) -> f32 {
-    0.5 * super::optic_margin(fov, aspect).tan() / (fov / 2.0).tan()
+/// The drawn rim in shader height units; cursor reach consumes the same authored span.
+fn mask_rim(viewport: Vec2) -> (f32, f32) {
+    let look = crate::sight::look::get();
+    let radius = 0.5 * look.optic_span_fraction.0 * viewport.max_element() / viewport.y;
+    (radius, look.optic_feather_fraction.0 * radius)
 }
 
-/// The drawn rim for a viewport framing `fov`: `(radius, feather half-width)`, both as fractions of
-/// the viewport HEIGHT — the shader's units.
-///
-/// **The rim must contain the bound**: a smaller radius would draw a glass the cursor can leave.
-fn mask_rim(viewport: Vec2, fov: f32) -> (f32, f32) {
-    // The larger axis as a comparison, never as an assumption about which one it is: in height
-    // units a landscape viewport frames off its width and a portrait one off its height, through
-    // this one line.
-    let radius = 0.5 * MASK_SPAN_FRACTION * viewport.max_element() / viewport.y;
-    assert!(
-        radius >= projected_bound(fov, viewport.x / viewport.y) - 1e-6,
-        "the mask draws a {radius} rim inside the bound the cursor is clamped to, so the intent \
-         can leave the glass",
-    );
-    (radius, MASK_EDGE_FEATHER * radius)
-}
-
-/// The glass radius before [`update_optic_mask`] has measured one: wider than the node's own
-/// diagonal at any aspect, so the surround is fully open.
+/// Resolution: finite seed for the hidden material; placement overwrites it before visibility.
 const OPTIC_GLASS_UNPLACED: f32 = 16.0;
 
 /// The uniform block `assets/shaders/optic_mask.wgsl` reads (lane map in the shader).
@@ -590,9 +559,9 @@ fn spawn_optic_mask(mut commands: Commands, mut materials: ResMut<Assets<OpticMa
                     0.5,
                     0.5,
                     OPTIC_GLASS_UNPLACED,
-                    MASK_EDGE_FEATHER * OPTIC_GLASS_UNPLACED,
+                    crate::sight::look::get().optic_feather_fraction.0 * OPTIC_GLASS_UNPLACED,
                 ),
-                surround: Vec4::new(0.0, 0.0, 0.0, OPTIC_SURROUND_OPACITY),
+                surround: Vec4::from_array(crate::sight::look::get().optic_surround_linear_rgba.0),
             },
         })),
         Node {
@@ -617,7 +586,7 @@ struct OpticGlass {
 /// Where the optic's glass lands on screen, measured through the camera's ACTUAL projection.
 ///
 /// The centre is the gun's `sight` line reprojected — neither the viewport's centre nor the camera
-/// axis, which coincide with it only at a blend of `0`; at `sight::GUNNER_BLEND` the glass
+/// axis, which coincide with it only at a blend of `0`; at the authored sight blend the glass
 /// slides as the gun lags, which is the whole point of the blend. It may land OUTSIDE the rect and is
 /// passed through unclamped: the visible arc is still the right arc, and clamping would drag the
 /// glass off the sight line. Only a sight line BEHIND the camera has no answer, and
@@ -631,7 +600,6 @@ fn optic_glass(
     camera: &Camera,
     cam_transform: &GlobalTransform,
     sight: Vec3,
-    fov: f32,
 ) -> Option<OpticGlass> {
     let viewport = camera.logical_viewport_size()?;
     // Height is the unit every measurement below is in, so a viewport without one has no answer —
@@ -651,7 +619,7 @@ fn optic_glass(
     let centre = camera
         .world_to_viewport(cam_transform, eye + sight * reach)
         .ok()?;
-    let (radius, feather) = mask_rim(viewport, fov);
+    let (radius, feather) = mask_rim(viewport);
     Some(OpticGlass {
         centre: centre / viewport,
         radius,
@@ -673,7 +641,6 @@ fn update_optic_mask(
     mode: Res<SightMode>,
     ranging: Res<Ranging>,
     controlled: Query<&Rig, With<Controlled>>,
-    views: Query<&TankViews, With<Controlled>>,
     view_nodes: Query<&ViewNode>,
     gun: Query<&GlobalTransform>,
     tables: Query<&RangeTable>,
@@ -700,14 +667,7 @@ fn update_optic_mask(
                 .get(rig.muzzle)
                 .expect("the primary muzzle receives its range table at spawn")
                 .superelevation(ranging.range);
-            // The same field the camera's projection was set to and the cursor's bound was taken
-            // against, from the same authored optic.
-            optic_glass(
-                camera,
-                cam_transform,
-                sight_line(gun.rotation(), theta),
-                view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK),
-            )
+            optic_glass(camera, cam_transform, sight_line(gun.rotation(), theta))
         })
         .flatten();
 
@@ -773,8 +733,8 @@ fn update_intent_reticle(
                 .expect("a successful viewport projection has the camera's target scale")
                 / target.scale_factor();
             let screen = screen * to_ui;
-            node.left = Val::Px(screen.x - 4.0);
-            node.top = Val::Px(screen.y - 4.0);
+            node.left = Val::Px(screen.x - crate::sight::look::get().intent.diameter_ui_px.0 / 2.0);
+            node.top = Val::Px(screen.y - crate::sight::look::get().intent.diameter_ui_px.0 / 2.0);
             *visibility = Visibility::Visible;
         }
         Err(_) => *visibility = Visibility::Hidden,
@@ -898,6 +858,78 @@ fn update_toast(
 
 #[cfg(test)]
 mod tests {
+    /// Sight appearance must reach the shipped widget spawners; retunes cannot leave a code copy.
+    #[test]
+    fn sight_widget_appearance_comes_from_data() {
+        fn label<M: Component>(world: &mut World, look: &crate::sight::look::LabelLook) {
+            let (font, colour) = world
+                .query_filtered::<(&TextFont, &TextColor), With<M>>()
+                .single(world)
+                .unwrap();
+            assert_eq!(font.font_size, FontSize::Px(look.font_ui_px.0));
+            assert_eq!(colour.0.to_linear(), look.colour().to_linear());
+        }
+
+        let mut world = World::new();
+        world.insert_resource(UiFonts {
+            hud: Handle::default(),
+            body: Handle::default(),
+        });
+        world.init_resource::<Assets<OpticMaskMaterial>>();
+        world.run_system_once(spawn_intent_reticle).unwrap();
+        world.run_system_once(spawn_view_death_overlay).unwrap();
+        world.run_system_once(spawn_toast).unwrap();
+        world.run_system_once(spawn_range_readout).unwrap();
+        world.run_system_once(spawn_optic_mask).unwrap();
+        let look = crate::sight::look::get();
+        let (node, colour) = world
+            .query_filtered::<(&Node, &BackgroundColor), With<IntentReticle>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(node.width, Val::Px(look.intent.diameter_ui_px.0));
+        assert_eq!(node.height, Val::Px(look.intent.diameter_ui_px.0));
+        assert_eq!(colour.0.to_linear(), look.intent.colour().to_linear());
+        let backing = world
+            .query_filtered::<&BackgroundColor, With<ViewDeathOverlay>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(backing.0.to_linear(), look.view_surround().to_linear());
+        label::<ViewDeathText>(&mut world, &look.view_prompt);
+        label::<ToastText>(&mut world, &look.toast);
+        let toast_parent = world
+            .query_filtered::<&ChildOf, With<ToastText>>()
+            .single(&world)
+            .unwrap()
+            .parent();
+        assert_eq!(
+            world.get::<Node>(toast_parent).unwrap().top,
+            Val::Percent(look.toast_top_percent.0)
+        );
+        label::<RangeReadout>(&mut world, &look.range);
+        let readout = world
+            .query_filtered::<&Node, With<RangeReadout>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(readout.left, Val::Px(look.range_inset_ui_px.0));
+        assert_eq!(readout.bottom, Val::Px(look.range_inset_ui_px.0));
+        let material = world
+            .query_filtered::<&MaterialNode<OpticMaskMaterial>, With<OpticMask>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(
+            world
+                .resource::<Assets<OpticMaskMaterial>>()
+                .get(&material.0)
+                .unwrap()
+                .params
+                .surround,
+            Vec4::from_array(look.optic_surround_linear_rgba.0)
+        );
+        let mut toast = Toast::default();
+        toast.show("fixture");
+        assert_eq!(toast.remaining, look.toast_seconds.0);
+    }
+
     use bevy::camera::{ComputedCameraValues, RenderTargetInfo};
     use bevy::ecs::system::RunSystemOnce;
     use bevy::math::Affine3A;
@@ -1720,7 +1752,6 @@ mod tests {
         pose: GlobalTransform,
         viewport: Vec2,
         sight: Vec3,
-        fov: f32,
         margin: f32,
     }
 
@@ -1758,13 +1789,12 @@ mod tests {
                 ),
                 viewport: viewport.as_vec2(),
                 sight,
-                fov,
                 margin: optic_margin(fov, aspect),
             }
         }
 
         fn glass(&self) -> OpticGlass {
-            optic_glass(&self.camera, &self.pose, self.sight, self.fov)
+            optic_glass(&self.camera, &self.pose, self.sight)
                 .expect("the shipped placement answers for a camera with a viewport")
         }
 
@@ -1825,14 +1855,16 @@ mod tests {
             let size = viewport.as_vec2();
             let drawn = OpticPicture::new(viewport, None, 0.5).glass().radius;
             // Height units, the shader's: a circle spanning that fraction of the longer side.
-            let span = 0.5 * MASK_SPAN_FRACTION * size.max_element() / size.y;
+            let span =
+                0.5 * crate::sight::look::get().optic_span_fraction.0 * size.max_element() / size.y;
             assert!(
                 (drawn - span).abs() < EPS,
                 "the rim on a {viewport} viewport is {drawn} of the height, against the {span} its \
                  larger axis spans",
             );
             if size.x < size.y {
-                let width_basis = 0.5 * MASK_SPAN_FRACTION * size.x / size.y;
+                let width_basis =
+                    0.5 * crate::sight::look::get().optic_span_fraction.0 * size.x / size.y;
                 assert!(
                     drawn > width_basis + EPS,
                     "on a portrait viewport the larger axis is the HEIGHT: a width basis would \
@@ -1842,15 +1874,8 @@ mod tests {
         }
     }
 
-    /// **The travel circle IS the drawn glass, exactly, at every aspect and every field.** Both
-    /// sides are the same fraction of the viewport's LARGER half-extent in the camera's projected
-    /// space — `sight::OPTIC_RADIUS_FRACTION` reaching it through an `atan` the projection's `tan`
-    /// undoes, `MASK_SPAN_FRACTION` spanning it as a diameter — so the equality holds to float
-    /// noise rather than approximately, and the `debug_assert` in [`mask_rim`] guards it on every
-    /// drawn frame.
-    ///
-    /// The field cancels out of both sides, so a sight of any power reaches the same rim: a bound
-    /// coupled to an absolute angle would move by the 12× this sweep spans.
+    /// Cursor travel and drawn glass share one projected span at every aspect and FOV.
+    /// The projection must cancel the bound's atan; an absolute-angle bound would fail this.
     #[test]
     fn the_bound_is_the_drawn_rim() {
         for viewport in ASPECTS {
@@ -1862,8 +1887,8 @@ mod tests {
                     field_deg,
                 }
                 .vertical_fov();
-                let (rim, _) = mask_rim(size, fov);
-                let bound = projected_bound(fov, aspect);
+                let (rim, _) = mask_rim(size);
+                let bound = 0.5 * optic_margin(fov, aspect).tan() / (fov / 2.0).tan();
                 assert!(
                     (rim - bound).abs() < 1e-6,
                     "on a {viewport} viewport framing {field_deg}° the cursor reaches {bound} of \
@@ -1898,9 +1923,9 @@ mod tests {
         assert!(
             representable(
                 OPTIC_GLASS_UNPLACED,
-                MASK_EDGE_FEATHER * OPTIC_GLASS_UNPLACED
+                crate::sight::look::get().optic_feather_fraction.0 * OPTIC_GLASS_UNPLACED
             ),
-            "the pre-placement seed is drawn too, on the frame before the mask is measured",
+            "the hidden pre-placement material also needs distinct smoothstep edges",
         );
     }
 
@@ -1946,15 +1971,8 @@ mod tests {
         );
     }
 
-    /// **The intent can never leave the drawn GLASS — at any blend rung and any aspect.** The one
-    /// property that makes the mask coherent, and it rests on a SHARED NUMBER:
-    /// `super::OPTIC_RADIUS_FRACTION` is the fraction of the larger half-extent the cursor reaches
-    /// and `MASK_SPAN_FRACTION` is the fraction of that same axis the circle spans, both in the
-    /// camera's projected space, so the reachable circle IS the drawn one at every aspect with no
-    /// `min()` and no aspect branch. It touches that rim on all four axes, which is why this is
-    /// asserted rather than argued. The blend contributes the rest: it puts the camera on the
-    /// segment between the sight line and the intent, so no rung can push the intent past a rim
-    /// measured from either end.
+    /// The intent stays inside the drawn glass at every blend and aspect. Cursor reach and
+    /// glass consume one authored span; the camera blends between the sight line and intent.
     ///
     /// The glass is NOT contained in the viewport, and the intent therefore need not be: the rim
     /// spans the LARGER axis, so on a landscape viewport it runs off the top and bottom, and an

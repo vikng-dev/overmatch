@@ -1,0 +1,19 @@
+// Required sight appearance. UI pixels follow the UI scale; optic fractions use the larger viewport axis.
+(
+    gunner_blend: (0.8, Taste("optic view: mostly follow intent while the bore's lag remains visible")),
+    mouse_sensitivity_per_fov: (0.004166667, Taste("optic cursor: 0.0005 rad/count at a 0.12 rad field, scaled by vertical field for comparable screen travel")),
+    optic_span_fraction: (0.9, Taste("optic: shared glass diameter and cursor projected reach")),
+    optic_feather_fraction: (0.10, Taste("optic: soft surround edge as a fraction of glass radius")),
+    optic_surround_linear_rgba: ((0.0, 0.0, 0.0, 1.0), Taste("optic: opaque black surround")),
+    view_surround_srgba: ((0.0, 0.0, 0.0, 1.0), Taste("view status: opaque black backing when no sight picture is available")),
+    toast_seconds: (2.0, Taste("sight refusal: readable banner lifetime")),
+    toast_top_percent: (30.0, Taste("sight refusal: upper-third banner position")),
+    range_inset_ui_px: (24.0, Taste("range readout: clearance from left and bottom edges")),
+    intent: (diameter_ui_px: (8.0, Taste("sight cursor: legible intent dot")), colour_srgba: ((1.0, 0.7, 0.1, 0.9), Taste("sight cursor: amber intent"))),
+    centre: (diameter_ui_px: (6.0, Taste("third-person crosshair: small centre dot")), colour_srgba: ((1.0, 1.0, 1.0, 1.0), Taste("third-person crosshair: opaque white"))),
+    bore: (diameter_ui_px: (4.0, Taste("bore indicator: smaller than commanded aim")), colour_srgba: ((0.3, 0.9, 0.4, 0.6), Taste("bore indicator: translucent green"))),
+    aim: (diameter_ui_px: (6.0, Taste("aim indicator: commanded point dot")), colour_srgba: ((1.0, 0.7, 0.1, 0.7), Taste("aim indicator: translucent amber"))),
+    view_prompt: (font_ui_px: (20.0, Taste("view status: central prompt size")), colour_srgba: ((0.9, 0.4, 0.3, 1.0), Taste("view status: red prompt"))),
+    toast: (font_ui_px: (22.0, Taste("sight refusal: banner size")), colour_srgba: ((1.0, 0.75, 0.3, 1.0), Taste("sight refusal: amber banner"))),
+    range: (font_ui_px: (16.0, Taste("range readout: compact numerals")), colour_srgba: ((1.0, 0.8, 0.3, 0.9), Taste("range readout: translucent amber"))),
+)

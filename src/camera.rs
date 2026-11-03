@@ -40,7 +40,7 @@ use bevy::prelude::*;
 use crate::aim::CommittedAim;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::sight::{
-    GUNNER_BLEND, SightMode, hull_local_dir, in_gunner, in_third_person, sight_line, yaw_pitch_of,
+    SightMode, hull_local_dir, in_gunner, in_third_person, sight_line, yaw_pitch_of,
 };
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
@@ -489,7 +489,7 @@ fn reaim_orbit_on_optic_exit(
 
 /// The optic's look bearing (a WORLD direction): the geometric blend, fraction `k`, from the gun's
 /// `sight` line toward the committed `intent` — the two ends of the optic's one blend, which rides
-/// at [`GUNNER_BLEND`]. `k = 0` is the sight line itself, `k = 1` the intent's bearing from the
+/// at the authored sight blend. `k = 0` is the sight line itself, `k = 1` the intent's bearing from the
 /// sight's own origin `eye`; the whole interval is a plain interpolation of the two BEARINGS, with
 /// no state, so the view cannot overshoot, wobble, or lag.
 ///
@@ -582,7 +582,7 @@ fn gunner_camera(
                 "the committed aim stores finite hull-local points"
             );
         }),
-        GUNNER_BLEND,
+        crate::sight::look::get().gunner_blend.0,
     );
     place_optic_camera(
         &mut transform,
