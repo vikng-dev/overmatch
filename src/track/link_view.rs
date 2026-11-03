@@ -164,7 +164,6 @@ use bevy::math::Affine3A;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
-use crate::geometry_lod::certificate::Rung;
 use crate::geometry_lod::{Chain, ChainRef};
 use crate::view::{PlayerView, ViewError, ViewProfile};
 
@@ -325,26 +324,6 @@ impl LinkTemplate {
             frame: PerSide::new(LinkFrame::default(), LinkFrame::default()),
             chain: None,
         }
-    }
-
-    /// Derive the log phrase from the chain, so a re-cut cannot silently falsify a quoted threshold.
-    pub(crate) fn chain_summary(&self) -> String {
-        let levels = self
-            .switches
-            .iter()
-            .enumerate()
-            .map(|(index, switch)| format!("LOD{} beyond {switch:.0} m", index + 1))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "{} reduced {}, {levels}",
-            self.lods.len(),
-            if self.lods.len() == 1 {
-                "level"
-            } else {
-                "levels"
-            },
-        )
     }
 }
 
@@ -855,7 +834,6 @@ fn bind_link_template(
              with `{LINK_MATERIAL}` assigned to it"
         )
     });
-    let triangles = shoe.indices().map_or(0, Indices::len) / 3;
     let mirrored = mirrored_mesh(shoe);
 
     // `lod_shoe_meshes` supplies tangents and uses the base shoe's mirror construction.
@@ -878,13 +856,11 @@ fn bind_link_template(
     }
     let rungs: &[Handle<Mesh>] = chain.map_or(&[], ChainRef::rungs);
     let mut lods = Vec::with_capacity(rungs.len());
-    let mut tris = vec![triangles];
     for (index, handle) in rungs.iter().enumerate() {
         // A rung record still loading.
         let Some(shoe) = meshes.get(handle) else {
             return;
         };
-        tris.push(shoe.indices().map_or(0, Indices::len) / 3);
         match lod_shoe_meshes(shoe) {
             // Both sides are derived; `GeometryLodChains` retains the loaded rung handles.
             Ok(pair) => lods.push(pair.map(|shoe| meshes.add(shoe))),
@@ -906,47 +882,6 @@ fn bind_link_template(
     // and the pin plane; at unit scale that difference is already in mesh units.
     let shoe_offset = geom.shoe_center_offset();
     let frame = frames(pin_start, pin_end, shoe_offset);
-
-    info!(
-        "track links: template bound - pitch {:.5} m, shoe {:.1} mm outboard of the pin plane, {} \
-         triangles/shoe, {} level(s) on {}",
-        (pin_start - pin_end).with_x(0.0).length(),
-        shoe_offset * 1000.0,
-        triangles,
-        lods.len() + 1,
-        chain.map_or_else(
-            || format!(
-                "no certified chain (`{}` names none — source detail)",
-                shoe_chain_key()
-            ),
-            |chain| format!("chain `{}`", chain.key()),
-        ),
-    );
-    // Log each level's band, savings and shared per-side mesh assets with its derivation inputs
-    // (deviation and view profile), so captures of a re-cut asset can check the threshold claim.
-    let deviations: &[Rung] = chain.map_or(&[], |chain| &chain.chain().rungs);
-    for (index, (rung, tier)) in deviations.iter().zip(lods.iter()).enumerate() {
-        info!(
-            "track links: LOD{} bound - `{}`, {} triangles/shoe (−{}%) over [{:.1}, {:.1}) m \
-             ({:.3} mm certified deviation + {:.3} m radius, at {:.0} px through the {:.4} rad \
-             field on a {:.2} px budget), one mesh per side L {:?} R {:?}",
-            index + 1,
-            rung.mesh,
-            tris[index + 1],
-            100 - (tris[index + 1] * 100)
-                .checked_div(triangles.max(1))
-                .unwrap_or(0),
-            switches[index],
-            switches.get(index + 1).copied().unwrap_or(f32::INFINITY),
-            rung.deviation_mm,
-            chain.map_or(f32::NAN, |chain| chain.chain().radius_m),
-            view.facts.height_px,
-            view.facts.vfov_rad,
-            view.budget_px,
-            tier.get(Side::Left).id(),
-            tier.get(Side::Right).id(),
-        );
-    }
 
     let template = LinkTemplate {
         mesh,

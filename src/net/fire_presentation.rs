@@ -263,12 +263,6 @@ impl SlotLedger {
     fn absorbed(&self) -> u32 {
         self.presented.saturating_sub(self.confirmed)
     }
-
-    /// Rounds accounted for that this client has not presented. Under fused own fire this is the
-    /// lawful in-flight window (and, past the wait, the fallback's due list).
-    fn overrun(&self) -> u32 {
-        self.confirmed.saturating_sub(self.presented)
-    }
 }
 
 /// The owner's fire-presentation ledger: one entry per weapon slot, in `WeaponGate` order.
@@ -296,24 +290,13 @@ impl OwnFirePresentation {
     }
 }
 
-/// Self-heal counters, appended to the FRONTIER summary line by `net::frontier`.
+/// Counts included in missing-announcement and refused-presentation diagnostics.
 #[derive(Resource, Default, Debug)]
 pub(super) struct OwnFireDiag {
     /// Fallback bangs presented for state-proven consumptions with no announcement.
     recovered: u64,
     /// Presented reloads restored after the server stayed silent past the refusal deadline.
     healed: u64,
-    /// Late own echoes swallowed because the fallback had already presented their round.
-    pub(super) swallowed: u64,
-}
-
-impl OwnFireDiag {
-    pub(super) fn describe(&self) -> String {
-        format!(
-            "own-fire(recovered={} healed={} swallowed={})",
-            self.recovered, self.healed, self.swallowed,
-        )
-    }
 }
 
 /// One released shot's wire/state facts — everything presentation needs except its age, which is
@@ -507,26 +490,12 @@ fn fold_arrivals(
             // An unset mark (fresh arm) folds against the seed: zero rounds, unless a replication
             // write landed between the arm and this fold, which confirms as any other.
             ledger.gate_write_mark = Some(gate.last_changed());
-            for (slot, (entry, &arriving)) in ledger.slots.iter_mut().zip(&gate.weapons).enumerate()
-            {
+            for (entry, &arriving) in ledger.slots.iter_mut().zip(&gate.weapons) {
                 if arriving == entry.last_arrived {
                     continue;
                 }
                 if entry.confirm(arriving) > 0 {
                     entry.reconcile_reveals(revealed_tick);
-                }
-                if entry.overrun() > 0 {
-                    // Under fused own fire the state's consumption legitimately lands before the
-                    // echoed round crosses the cursor, so a transient overrun is the in-flight
-                    // window (and, past the wait, the fallback's due list), not a violated
-                    // invariant.
-                    debug!(
-                        "net: weapon {slot} has {} confirmed rounds not yet presented \
-                         (presented {}, confirmed {})",
-                        entry.overrun(),
-                        entry.presented,
-                        entry.confirmed,
-                    );
                 }
             }
         }
@@ -1125,7 +1094,6 @@ mod tests {
         assert_eq!(ledger.confirmed, 3);
         ledger.confirm(ready(BELT));
         assert_eq!(ledger.confirmed, 3, "the swap accounts for nothing");
-        assert_eq!(ledger.overrun(), 0);
         ledger.confirm(ready(BELT - 2));
         assert_eq!(ledger.confirmed, 5, "the next belt counts from its refill");
     }
@@ -1929,9 +1897,6 @@ mod tests {
                 &[(root, 0)],
                 "the fallback recoils through the same seam as an echoed round",
             );
-            assert_eq!(world.resource::<OwnFireDiag>().describe(), {
-                "own-fire(recovered=1 healed=0 swallowed=0)"
-            });
         }
 
         // Inside the wait the announcement may still cross the cursor: nothing presents.

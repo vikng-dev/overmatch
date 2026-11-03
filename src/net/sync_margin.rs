@@ -53,8 +53,7 @@
 //!
 //! The uplink cannot measure its own arrival at the client, so its margin is the downlink
 //! distribution's spread — the SYMMETRY ASSUMPTION, stated: the measured burst structure (60–70 ms
-//! every ~0.52 s, sessions of 2026-08-15) was observed in BOTH directions, and the client's
-//! `FRONTIER` arrival summary (`net::frontier`) is the live certifier of this derivation.
+//! every ~0.52 s, sessions of 2026-08-15) was observed in BOTH directions.
 //! The objective's terms:
 //!
 //! - `jitter_margin` (coverage) = the half-tick content-phase floor + `(Q_p − Q_50)/tick` — the
@@ -120,10 +119,6 @@ const SPIKE_WINDOW: Duration = Duration::from_secs(2);
 fn warmup_ring_floor() -> usize {
     (SPIKE_WINDOW.as_secs_f64() * TICK_RATE_HZ) as usize
 }
-
-/// Log-rate guard, not a term of the law: the margins follow the estimator continuously, so an
-/// unconditional log is per-frame spam.
-const LOG_STEP: Duration = Duration::from_millis(2);
 
 /// The estimator's per-frame digest, refreshed by [`refresh_arrival_stats`] ahead of both margin
 /// laws. Values are epoch-relative seconds — only their differences carry meaning.
@@ -313,17 +308,6 @@ impl ArrivalDelay {
     pub(super) fn link(&self) -> u64 {
         self.link
     }
-
-    /// One line for the FRONTIER summary: the anchored spreads in ms and the sample count.
-    pub(super) fn describe(&self) -> String {
-        let stats = &self.stats;
-        format!(
-            "arrival(q50-min={:.1}ms qp-min={:.1}ms n={})",
-            stats.bulk().as_secs_f64() * 1000.0,
-            stats.spread().as_secs_f64() * 1000.0,
-            stats.samples,
-        )
-    }
 }
 
 /// Feed the estimator from every received transport packet — the tick-stamped arrival stream the
@@ -415,15 +399,6 @@ pub(super) fn install(
     input_delay: InputDelayConfig,
     mut interpolation: InterpolationConfig,
 ) -> InterpolationConfig {
-    info!(
-        "net: input sync margin DERIVED = {CONTENT_PHASE_MEAN_TICKS} tick floor + \
-         stream-measured (Qp−Q50) coverage + (Q50−min) deadband, arming when the own hull rides \
-         the server stream"
-    );
-    info!(
-        "net: interpolation sync margin DERIVED = {CONTENT_PHASE_MEAN_TICKS} x tick floor, jitter \
-         chain 0 (the arrival-delay quantile in min_delay subsumes it)"
-    );
     interpolation.sync = derived_interp_sync();
     app.init_resource::<ArrivalDelay>();
     app.add_observer(record_packet_arrival);
@@ -446,10 +421,6 @@ pub(super) fn install(
 /// cannot change mid-session; a respawn gap must not revert the margins). The rebuild reuses the
 /// installed `InputDelayConfig` by value and assigns in place — no insert, so lightyear's
 /// input-delay recompute observer never runs and the delay stays byte-identical.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a system spanning sync base, tick, arrival delay, the own tank's role, the timeline config and three locals"
-)]
 fn derive_input_margins(
     base: Res<InputSyncBase>,
     tick: Res<TickDuration>,
@@ -466,7 +437,6 @@ fn derive_input_margins(
     config: Option<ResMut<InputTimelineConfig>>,
     mut armed: Local<bool>,
     mut written: Local<Option<(u8, f32, f32)>>,
-    mut logged: Local<Option<Duration>>,
 ) {
     if !*armed {
         if own.is_empty() {
@@ -480,16 +450,6 @@ fn derive_input_margins(
         let key = (sync.jitter_multiple, sync.jitter_margin, sync.error_margin);
         if *written == Some(key) {
             return;
-        }
-        let coverage = estimator.stats.coverage();
-        if logged.is_none_or(|last| last.abs_diff(coverage) >= LOG_STEP) {
-            info!(
-                "net: input sync margins floor+coverage {:.2} t, deadband {:.2} t ({})",
-                sync.jitter_margin,
-                sync.error_margin,
-                estimator.describe(),
-            );
-            *logged = Some(coverage);
         }
         *config = InputTimelineConfig::new(sync, base.input_delay);
         *written = Some(key);

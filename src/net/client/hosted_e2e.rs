@@ -147,7 +147,6 @@ fn client_app(api: &str, log: bool) -> App {
                 receive_damage_confirms,
                 diagnostics::nan_tripwire,
                 open_gameplay_gate,
-                diagnostics::log_sim_evidence,
                 log_local_tank_role,
             ),
         );

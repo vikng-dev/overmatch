@@ -22,7 +22,7 @@ use super::protocol::{
 };
 use super::score::{Opening, RespawnGate, RespawnWait};
 use super::spawn_placement::SpawnPlacement;
-use super::{diagnostics, harness, open_gameplay_gate, physics, spawn_map};
+use super::{harness, open_gameplay_gate, physics, spawn_map};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::TankKnockedOut;
 use crate::hull_marks::HullMarks;
@@ -70,13 +70,22 @@ pub fn run() {
         .and_then(|value| BotCount::from_value(value.as_deref()))
         .unwrap_or_else(harness::refuse_start);
     let mut app = App::new();
-    app.add_plugins(crate::server_plugin_floor())
-        // Headless composition needs its own application runner.
-        .add_plugins(ScheduleRunnerPlugin::run_loop(FRAME));
+    app.add_plugins(crate::server_plugin_floor().set(bevy::log::LogPlugin {
+        // This target only reports missing RenderApp extraction; the server has no GPU backend.
+        filter: format!(
+            "{},bevy_render::extract_resource=off",
+            bevy::log::DEFAULT_FILTER
+        ),
+        ..default()
+    }))
+    // Headless composition needs its own application runner.
+    .add_plugins(ScheduleRunnerPlugin::run_loop(FRAME));
     super::server_host::log_startup();
-    // No `CompressedImageFormatSupport` here, unlike `headless_test.rs`: every texture on the
-    // server's asset allowlist (`.github/actions/build-server/action.yml`) is png, and the UASTC
-    // KTX2 sits behind plugins this root does not mount — `load_tank_sim_assets` opens no scene.
+    // No GPU supplies compression support. Declare the loaders' existing NONE fallback explicitly;
+    // the server allowlist carries only PNG textures and `load_tank_sim_assets` opens no scene.
+    app.insert_resource(bevy::image::CompressedImageFormatSupport(
+        bevy::image::CompressedImageFormats::NONE,
+    ));
     app.add_plugins(ServerPlugins {
         tick_duration: TICK,
     });
@@ -135,13 +144,11 @@ pub fn run() {
             spawn_bots.run_if(places_tanks),
             respawn_dead_bots.run_if(in_combat),
             open_gameplay_gate,
-            diagnostics::log_sim_evidence,
         ),
     );
     app.add_systems(
         FixedUpdate,
         (
-            log_tank_commands,
             // A bot authors its command as a device does, before the parse and the Battle's hold.
             drive_bot.before(crate::command::ParseCommands),
             respawn_player_tanks
@@ -1294,20 +1301,6 @@ fn drive_bot(mut bots: Query<&mut TankCommand, With<Bot>>) {
         // reload), forward/unaimed as it circles. Aiming at a player is later bot-AI work; for now
         // this is purely the solo test-fire source described above.
         command.fire_primary = true;
-    }
-}
-
-/// Log commands received through Lightyear's input buffer. `debug!`: it fires every fixed tick for
-/// every driving or firing client.
-fn log_tank_commands(states: Query<(Entity, &ActionState<TankCommand>)>) {
-    for (entity, state) in &states {
-        let cmd = &state.0;
-        if cmd.throttle != 0.0 || cmd.fire_primary {
-            debug!(
-                "server: {entity} command: throttle={} steer={} fire_primary={}",
-                cmd.throttle, cmd.steer, cmd.fire_primary
-            );
-        }
     }
 }
 

@@ -52,7 +52,6 @@ fn attach_visible_rigs(
     }
     let content = source.get();
     for entity in &tanks {
-        info!("client: {entity} replicated tank gets local sim body");
         attach_replicated_tank_body(
             &mut commands,
             entity,

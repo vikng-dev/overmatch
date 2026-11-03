@@ -176,13 +176,8 @@ pub(crate) enum ProxyStep {
     /// Nothing to do — the ribbon is already carrying the shadow, or is still not ready and the
     /// shoes are still carrying it.
     Idle,
-    /// The ribbon became real THIS frame, as `mesh` with `triangles` triangles (MEASURED from its
-    /// index buffer). Give the ribbon entity its `Mesh3d` and silence this side's shoes now, and
-    /// only now.
-    Silence {
-        mesh: Handle<Mesh>,
-        triangles: usize,
-    },
+    /// The ribbon became real this frame. Give its entity the mesh and silence the shoes now.
+    Silence { mesh: Handle<Mesh> },
     /// [`PROXY_READY_GRACE_FRAMES`] fitted frames have passed with no ribbon. Say so, once.
     Overdue,
 }
@@ -224,10 +219,9 @@ impl ProxySide {
             return ProxyStep::Idle;
         }
         if let Some(mesh) = self.ribbon.build(joints, self.section) {
-            let triangles = mesh.indices().map_or(0, |indices| indices.len() / 3);
             let mesh = meshes.add(mesh);
             self.mesh = Some(mesh.clone());
-            return ProxyStep::Silence { mesh, triangles };
+            return ProxyStep::Silence { mesh };
         }
         self.pending_frames += 1;
         if self.pending_frames == PROXY_READY_GRACE_FRAMES {
@@ -716,13 +710,13 @@ mod tests {
         assert!(meshes.is_empty(), "no loop, no mesh asset");
 
         let stations = ring(48, 2.0);
-        let ProxyStep::Silence { mesh, triangles } = side.fit(&mut meshes, &stations) else {
+        let ProxyStep::Silence { mesh } = side.fit(&mut meshes, &stations) else {
             panic!("the first closed loop is the swap");
         };
         assert_eq!(side.mesh.as_ref(), Some(&mesh));
         let built = meshes.get(&mesh).expect("the swap names a live asset");
         assert_eq!(positions(built).len(), stations.len() * 4);
-        assert_eq!(triangles, stations.len() * 8, "the triangles that exist");
+        assert_eq!(built.indices().unwrap().len() / 3, stations.len() * 8);
         assert_eq!(meshes.len(), 1);
 
         let moved: Vec<Vec2> = stations.iter().map(|p| *p * 1.01).collect();

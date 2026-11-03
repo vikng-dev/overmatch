@@ -895,19 +895,6 @@ fn extract_at_startup(mut commands: Commands) {
             root.display(),
         )
     });
-    let mesh_nodes = asset
-        .geometry
-        .nodes
-        .iter()
-        .filter(|n| !n.primitives.is_empty())
-        .count();
-    info!(
-        "bake: extracted tank geometry — {} nodes, {} mesh-captured, {} ballistic volumes",
-        asset.geometry.nodes.len(),
-        mesh_nodes,
-        asset.geometry.ballistic_volumes.len(),
-    );
-
     let blueprint = TankBlueprint::new(
         crate::tank::TANK_SPEC_PATH.to_owned(),
         asset.geometry,
@@ -1803,19 +1790,7 @@ fn shadow_compare_on_instance_ready(
         }
     }
 
-    if mismatches.is_empty() {
-        let verts: usize = geometry
-            .nodes
-            .iter()
-            .flat_map(|n| &n.primitives)
-            .map(|p| p.positions.len())
-            .sum();
-        info!(
-            "bake: SHADOW-BAKE ok — {} nodes matched, {} captured verts",
-            geometry.nodes.len(),
-            verts
-        );
-    } else {
+    if !mismatches.is_empty() {
         fail(mismatches);
     }
 }

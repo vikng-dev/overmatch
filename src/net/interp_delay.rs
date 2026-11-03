@@ -5,8 +5,7 @@
 //! anchors `remote_estimate` RTT/2 AHEAD of the newest received keyframe (`lightyear_sync`
 //! `remote.rs`: `network_delay = ping_manager.rtt() / 2`). A keyframe therefore exists ahead of the
 //! cursor only while `delay ≥ rtt/2 + largest snapshot gap`; below that lightyear clamps to the
-//! newest sample (`lightyear_interpolation` `registry.rs`) — the buffer edge `net::frontier`
-//! instruments.
+//! newest sample (`lightyear_interpolation` `registry.rs`).
 //!
 //! Lightyear's own `delay` term is `max(send_interval_ratio × remote_send_interval, min_delay)`,
 //! which carries the gap half only, and our per-tick server advertises `send_interval = 0` — that
@@ -55,9 +54,6 @@ use lightyear::prelude::{Client, PingManager, SyncSystems, TimelineSync, Timelin
 
 use super::sync_margin::{ArrivalDelay, ArrivalStats};
 
-/// Resolution: suppress sub-5 ms diagnostic changes to bound logging cost as the law moves.
-const LOG_STEP: Duration = Duration::from_millis(5);
-
 /// Coverage applied so far, excluding RTT anchor compensation. The saved controller rate exists
 /// only around `TimelineSystems::Advance`; synchronization always sees its own uncomposed rate.
 #[derive(Resource)]
@@ -84,10 +80,7 @@ fn pace_interpolation_delay(
             return; // A cold distribution must not add startup-pollution coverage.
         }
         applied.link = Some(estimator.link());
-        info!(
-            "net: interpolation delay law ARMED — estimator distribution valid ({})",
-            estimator.describe()
-        );
+        info!("net: interpolation delay law ARMED — estimator distribution valid");
     }
     if !timeline.is_synced() || time.relative_speed() == 0.0 {
         return; // Handshake acquires the cold cursor; a paused clock has no elapsed pacing.
@@ -136,10 +129,6 @@ pub(super) fn install(app: &mut App, tick: Duration) -> InterpolationConfig {
     // one-interval gap term alone, and `derive_interpolation_delay` overwrites this before the
     // first `SyncSystems::Sync`; RTT anchor compensation is written even before warmup.
     let initial = derived_min_delay(Duration::ZERO, &ArrivalStats::default(), tick);
-    info!(
-        "net: interpolation min_delay DERIVED = rtt/2 + (Qp − min) + one tick ({:.1} ms cold)",
-        millis(initial)
-    );
     app.insert_resource(AppliedDelay {
         headroom: initial,
         link: None,
@@ -162,11 +151,9 @@ pub(super) fn install(app: &mut App, tick: Duration) -> InterpolationConfig {
 /// Pay exactly the coverage already paced this frame, plus the current RTT anchor compensation.
 /// The estimator refresh precedes this writer; pacing reads that digest on the next frame.
 pub(super) fn derive_interpolation_delay(
-    estimator: Res<ArrivalDelay>,
     applied: Res<AppliedDelay>,
     mut config: ResMut<InterpolationConfig>,
     pings: Query<&PingManager, With<Client>>,
-    mut logged: Local<Option<Duration>>,
 ) {
     // No client link exists before connection setup or after disconnect cleanup.
     for pings in &pings {
@@ -174,20 +161,7 @@ pub(super) fn derive_interpolation_delay(
         if config.min_delay != next {
             config.min_delay = next;
         }
-        if logged.is_none_or(|last| last.abs_diff(next) >= LOG_STEP) {
-            info!(
-                "net: interpolation applied min_delay {:.1} ms (rtt {:.1} ms, {})",
-                millis(next),
-                millis(pings.rtt()),
-                estimator.describe()
-            );
-            *logged = Some(next);
-        }
     }
-}
-
-fn millis(duration: Duration) -> f64 {
-    duration.as_secs_f64() * 1000.0
 }
 
 #[cfg(test)]

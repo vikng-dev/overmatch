@@ -840,10 +840,6 @@ impl RecordAtlas {
         let Some(pictures) = laying.lay.as_ref().map(|lay| Arc::new(lay(&details))) else {
             return;
         };
-        debug!(
-            "pen cam: a record's pictures laid out at {details:?}: atlas {}x{}",
-            pictures.size.x, pictures.size.y
-        );
         pictures.image(images, jobs);
         laying.next = Some(pictures);
     }

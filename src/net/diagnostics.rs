@@ -1,13 +1,12 @@
 //! Network diagnostics. Corrupt state stops in every build before it can propagate.
 
 use avian3d::prelude::{
-    AngularVelocity, ColliderOf, ColliderTransform, LinearVelocity, Position, RigidBody, Rotation,
+    AngularVelocity, ColliderOf, ColliderTransform, LinearVelocity, Position, Rotation,
 };
 use bevy::prelude::*;
 use lightyear::prelude::*;
 
-use crate::tank::{RemoteServos, ServoIndex, ServoState, Tank, TankRoot, TankServos, Turret};
-use crate::track::sim::TrackContacts;
+use crate::tank::Tank;
 
 /// Refuse corrupt or uninitialized physics state before Avian consumes it.
 ///
@@ -121,62 +120,6 @@ pub(crate) fn nan_tripwire(
                 transform
             );
         }
-    }
-}
-
-/// Periodically log grounded track sides and each root's turret/reload state.
-pub(crate) fn log_sim_evidence(
-    turrets: Query<(&ServoIndex, &TankRoot), With<Turret>>,
-    sims: Query<
-        (
-            Entity,
-            Option<&TankServos>,
-            Option<&RemoteServos>,
-            Option<&crate::tank::WeaponGate>,
-        ),
-        With<Tank>,
-    >,
-    tracks: Query<(&TrackContacts, &RigidBody)>,
-    mut timer: Local<f32>,
-    time: Res<Time>,
-) {
-    *timer += time.delta_secs();
-    if *timer < 2.0 {
-        return;
-    }
-    *timer = 0.0;
-    // SIMULATED tanks only. `TrackContacts` is required by `Tank`, so every tank carries one — but
-    // the belt sim skips any body that is not `Dynamic` (`track::sim`), and a client's remote tanks
-    // are driven by interpolation, never simulated. Counting them left two permanently empty sides
-    // in the denominator, so a perfectly grounded 2-client session read `2/4` and looked like half
-    // the running gear had fallen through the map.
-    let (grounded, simulated) = tracks
-        .iter()
-        .filter(|(_, body)| matches!(**body, RigidBody::Dynamic))
-        .fold((0usize, 0usize), |(grounded, tanks), (contacts, _)| {
-            (
-                grounded + contacts.0.iter().filter(|side| !side.is_empty()).count(),
-                tanks + 1,
-            )
-        });
-    let observed = tracks.iter().count();
-    info!(
-        "net: SIM-EVIDENCE track_sides_grounded={grounded}/{} ({simulated} simulated of {observed} tanks)",
-        simulated * 2,
-    );
-    for (root, servos, remote_servos, gate) in &sims {
-        // `TankRoot` owns the turret-to-simulation join.
-        let turret = turrets
-            .iter()
-            .find(|(_, tank_root)| tank_root.0 == root)
-            .and_then(|(slot, _)| {
-                remote_servos
-                    .and_then(|servos| servos.0.get(slot.0))
-                    .or_else(|| servos.and_then(|servos| servos.states.get(slot.0)))
-            })
-            .map(ServoState::current);
-        let weapon_gate = gate.map(|gate| &gate.weapons);
-        info!("net: SIM-EVIDENCE {root} turret_angle={turret:?} weapon_gate={weapon_gate:?}");
     }
 }
 

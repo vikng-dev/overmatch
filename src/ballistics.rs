@@ -1969,7 +1969,6 @@ pub fn sim_plugin(app: &mut App) {
     )
     .init_resource::<RetainSpentShells>()
     .add_observer(on_fire_shell)
-    .add_observer(on_impact)
     // The game's damage model walks the completed physics interval. Its impulses affect
     // the next physics step; all consequences and publications follow in the phase chain.
     .add_systems(
@@ -3911,12 +3910,6 @@ fn apply_hit_impulse(bodies: &mut Query<Forces>, body: Entity, impulse: Vec3, po
     if let Ok(forces) = bodies.get_mut(body) {
         crate::track::sim::apply_explicit_impulse(forces, impulse, point);
     }
-}
-
-fn on_impact(impact: On<Impact>) {
-    // Debug level (`RUST_LOG=overmatch=debug`): sustained-fire impacts swamp info logs.
-    // View markers belong to `debug::spawn_impact_marker` (ADR-0014).
-    debug!("shell impact at {:?}", impact.position);
 }
 
 #[cfg(test)]

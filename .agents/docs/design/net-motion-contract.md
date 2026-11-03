@@ -3,8 +3,7 @@
 Subject: the game's netcode and damage model, game state only.
 
 Hull presentation uses only the server stream. When the interpolation cursor passes its newest
-confirmed pose, Lightyear holds that sample until another arrives. `net::frontier` observes this
-starvation without writing position, rotation or velocity. Fresh samples resume ordinary
+confirmed pose, Lightyear holds that sample until another arrives. Fresh samples resume ordinary
 interpolation; no projected trajectory or correction blend survives beside it.
 
 The rejected constant-velocity projection assumed terrain traction bounded hull acceleration.
@@ -88,5 +87,5 @@ under multiple frame partitions, preserves nonzero-RTT anchor cancellation, and 
 past the game's cosmetic catch-up horizon through a delay rise. The game's damage-model path
 never rewinds or resets that round's free-flight cache. For delay changes, `show_pieces`' birth and
 handover predicates cannot revert: the shared cursor is monotone. Genuine remote-clock resyncs
-remain discontinuities, observed by the unchanged frontier gauge; a nonzero steady count still
-means every remote hull jumped.
+remain discontinuities; `net::frontier` warns when a resync after the handshake snaps every remote
+hull.

@@ -398,16 +398,6 @@ impl BeltMeshes {
             .expect("a ready count retains every loaded template shoe");
         let mesh = repeated_shoe(source, count)
             .expect("ready certified every rung's repeatability before any mesh was built");
-        info!(
-            "track belt: rung {rung} {side:?} of {count} links built — {} vertices of {} B, {} \
-             indices, {:.1} MB DERIVED",
-            mesh.count_vertices(),
-            mesh.get_vertex_size(),
-            mesh.indices().map_or(0, Indices::len),
-            (mesh.count_vertices() as u64 * mesh.get_vertex_size()
-                + 4 * mesh.indices().map_or(0, Indices::len) as u64) as f64
-                / 1e6,
-        );
         let handle = meshes.add(mesh);
         *slot = Some(handle.clone());
         Some(handle)

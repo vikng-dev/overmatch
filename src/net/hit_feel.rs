@@ -146,13 +146,12 @@ fn detect_health_drops(
         let worst = worst_drop(&memory.0, &slots);
         memory.0 = slots;
 
-        let Some((_, drop_hp)) = worst else {
+        let Some(_) = worst else {
             continue;
         };
 
         if is_own {
             flash.0 = 1.0;
-            info!("hit-feel: OWN tank hit — worst drop {drop_hp} hp → damage flash");
         }
     }
 }
@@ -178,10 +177,6 @@ fn on_local_hit_confirmed(
         hit.received_tick,
         shot,
         || serde_json::json!({ "own": true, "dt": hit.damage_tick }),
-    );
-    info!(
-        "hit-feel: receipt {:?} damaged on the authority → hit-confirm",
-        hit.receipt
     );
 }
 

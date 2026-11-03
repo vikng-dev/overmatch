@@ -587,15 +587,6 @@ fn bind_track_rigs(
                 proxy: None,
             },
         ];
-        info!(
-            "track rig bound: {} links/side drawn by one belt entity each ({}), {} \
-             wheels/side; sprocket tooth tips L {:.2}° R {:.2}°",
-            spec.link_count,
-            template.chain_summary(),
-            sides[0].wheels.len(),
-            sl_tip.to_degrees(),
-            sr_tip.to_degrees(),
-        );
         commands.entity(root).insert(TrackRig {
             belt_len,
             count: spec.link_count,
@@ -674,12 +665,6 @@ fn attach_shadow_proxies(
                 ),
             ));
         }
-        // Intent only — deliberately says nothing about triangles or silenced shoes, because at this
-        // point neither exists. `drive_track_views` logs the MEASURED geometry when the swap lands.
-        info!(
-            "track shadow proxy: 2 ribbons spawned for {} shoes/side, awaiting first fit",
-            rig.count
-        );
     }
 }
 
@@ -900,18 +885,12 @@ fn drive_track_views(
                     // is a CASTER swap, not an LOD. `PROXIED_CASTER` is the preset that says so: it
                     // stops the belt casting and leaves it RECEIVING, and it deliberately keeps
                     // inheriting the tank's channel, so a silenced belt still follows its tank into
-                    // and out of the gunner optic. MEASURED triangles, never `count * 8`: the
-                    // number in this line is the number of triangles that exist.
-                    ProxyStep::Silence { mesh, triangles } => {
+                    // and out of the gunner optic.
+                    ProxyStep::Silence { mesh } => {
                         commands.entity(proxy.entity).insert(Mesh3d(mesh));
                         commands
                             .entity(side.belt)
                             .insert(VisualScope::PROXIED_CASTER);
-                        info!(
-                            "track shadow proxy: side {si} — ribbon built, {triangles} \
-                             triangles MEASURED; {} shoes silenced",
-                            rig.count
-                        );
                     }
                     ProxyStep::Overdue => warn!(
                         "track shadow proxy: side {si} still has no ribbon after {} frames — the \

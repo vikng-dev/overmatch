@@ -538,13 +538,7 @@ fn follow_eye(mut prints: ResMut<TrackPrints>, eye: Query<&GlobalTransform, With
     };
     let stores = &mut prints.stores;
     let eye = eye.translation();
-    if stores.recentre(Vec2::new(eye.x, eye.z)) {
-        debug!(
-            "track prints: near window recentred at {:?} over {} logged stamps",
-            stores.near.origin_m(),
-            stores.log.len()
-        );
-    }
+    stores.recentre(Vec2::new(eye.x, eye.z));
 }
 
 /// Hand this frame's written tiles to the render world, and the near window's place to the

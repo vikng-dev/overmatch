@@ -1317,16 +1317,16 @@ fn apply_deposits(mut p: DepositParam) {
             );
             let frame = frames[&root];
             let kind = breakage.kind.clone();
-            let (building, label) = match (identity, piece) {
-                (Some(identity), None) => (identity.ordinal, identity.id.as_str()),
-                (None, Some(piece)) => (piece.building, kind.asset.id.as_str()),
+            let building = match (identity, piece) {
+                (Some(identity), None) => identity.ordinal,
+                (None, Some(piece)) => piece.building,
                 _ => panic!("a chunk group is either a placed map instance or one moving owner"),
             };
             let scale = breakage.scale;
             let construction = breakage.physics_frame(transform);
             let moving = piece.map(|piece| piece.chunks.clone());
             let live = breakage.bypass_change_detection().live();
-            let blast = blast_loads(label, &kind, frame.scale, &taken.blast, live);
+            let blast = blast_loads(&kind, frame.scale, &taken.blast, live);
             let holes = holes_of(&kind, frame.scale, &taken.lines, &blast);
             // A run that changes nothing leaves the colliders as they stand: only a recorded
             // change marks the building for the refit (`reconcile`).
@@ -1367,15 +1367,6 @@ fn apply_deposits(mut p: DepositParam) {
                 changes
                     .events
                     .retain(|event| !matches!(event, WallEvent::Fall(_)));
-            }
-            let counts = [
-                taken.lines.len(),
-                taken.field.len(),
-                taken.blast.len(),
-                taken.contacts.len().max(pressing.len()) + resting.len(),
-            ];
-            if !changes.events.is_empty() || loads.iter().any(|load| load.energy > 0.0) {
-                log_changes(label, &loads, counts, &changes);
             }
             p.record
                 .entries
@@ -1439,9 +1430,8 @@ fn apply_deposits(mut p: DepositParam) {
 }
 
 /// A blast's ray hits on one building as its loads ([`Load::blast`]), each face's Law 2 read on
-/// its chunk's hull at the instance's `scale`; logs the rear scabs thrown (debug).
+/// its chunk's hull at the instance's `scale`.
 fn blast_loads(
-    id: &str,
     kind: &BuildingKind,
     scale: f32,
     hits: &[(usize, fracture::RayHit)],
@@ -1451,72 +1441,13 @@ fn blast_loads(
         return Vec::new(); // This deposit has no blast surface stops.
     }
     let contacts: Vec<Joint> = live.state.contacts(&live.structure).collect();
-    let (loads, scabs) = Load::blast(hits, |c| fracture::Backing {
+    let (loads, _) = Load::blast(hits, |c| fracture::Backing {
         block: &kind.layout.blocks[c],
         scale,
         material: kind.layout.materials[c],
         contacts: &contacts,
     });
-    if !scabs.is_empty() {
-        debug!(
-            "buildings: {id} took {} rear scabs, {:.2} kg carrying {:.1} N s",
-            scabs.len(),
-            scabs.iter().map(|scab| scab.mass).sum::<f32>(),
-            scabs
-                .iter()
-                .map(|scab| scab.momentum().length())
-                .sum::<f32>(),
-        );
-    }
     loads
-}
-
-/// Log what one deposit did to a building (debug): `id` the building's, `loads` its deposit's,
-/// `counts` its lines, field stops, blast rays and contact points.
-fn log_changes(id: &str, loads: &[Load], counts: [usize; 4], changes: &Changes) {
-    let count = |f: fn(&WallEvent) -> bool| changes.events.iter().filter(|e| f(e)).count();
-    debug!(
-        "buildings: {id} took {:.0} J in {} chunks ({} lines, {} field stops, {} blast rays, {} \
-         contact points from {} bodies pressing {:.0} N): {} swapped, {} dust, {} holes, {} \
-         cracks, {} structural sections {:?} (cause, demand, capacity: N s m for a push, Pa for \
-         weight), weight check {} steps with {} touched chunks unassessed, {} chunks fell in {} \
-         groups",
-        loads.iter().map(|load| load.energy).sum::<f32>(),
-        loads
-            .iter()
-            .filter(|load| load.energy > 0.0)
-            .map(|load| load.chunk)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        counts[0],
-        counts[1],
-        counts[2],
-        counts[3],
-        loads
-            .iter()
-            .filter_map(|load| match load.origin {
-                Origin::Body { body, .. } => Some(body),
-                Origin::Contact { other, .. } => Some(other),
-                Origin::Field | Origin::Inertia { .. } => None,
-            })
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        loads.iter().map(|load| load.press.length()).sum::<f32>(),
-        count(|e| matches!(e, WallEvent::Swap(_))),
-        count(|e| matches!(e, WallEvent::Dust(_))),
-        count(|e| matches!(e, WallEvent::Hole(..))),
-        count(|e| matches!(e, WallEvent::Crack(_))),
-        changes.failures.len(),
-        changes
-            .failures
-            .iter()
-            .map(|f| (f.cause, f.demand, f.capacity))
-            .collect::<Vec<_>>(),
-        changes.weight_steps,
-        changes.unassessed.len(),
-        count(|e| matches!(e, WallEvent::Fall(_))),
-        changes.groups.len(),
-    );
 }
 
 /// One blast's rays from `origin` (module doc): each stops, within the blast's reach, on the
@@ -2132,28 +2063,10 @@ fn spawn_group(commands: &mut Commands, departure: Departure, finalize: bool) {
         centroid,
         velocity,
         spin,
-        mass,
         ..
     } = &launch;
     let origin = *centroid;
     let at = root.translation + root.rotation * origin;
-    let mut elements: Vec<&str> = group
-        .iter()
-        .map(|&c| {
-            kind.asset.elements[usize::from(kind.layout.element_of[c])]
-                .name
-                .as_str()
-        })
-        .collect();
-    elements.dedup();
-    debug!(
-        "buildings: building {building} drops {} chunks ({:.0} kg, of {elements:?}) at {at:?}, \
-         leaving at {:.3} m/s spinning {:.3} rad/s",
-        group.len(),
-        mass,
-        velocity.length(),
-        spin.length(),
-    );
     // `Position`/`Rotation` before the body: it never flushes with avian's placeholder pose.
     let mut piece = commands.spawn((
         Name::new("WallPiece"),
@@ -2262,15 +2175,6 @@ fn split_groups(
                 false,
             );
         }
-        debug!(
-            "buildings: group of {} chunks splits into {:?}",
-            piece.chunks.len(),
-            split
-                .children
-                .iter()
-                .map(|(group, _)| group.len())
-                .collect::<Vec<_>>()
-        );
         commands.trigger(RetirePiece {
             entity,
             tick: split.tick,
