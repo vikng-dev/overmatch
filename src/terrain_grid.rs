@@ -11,23 +11,14 @@
 //!
 //! # THE ONE-SURFACE INVARIANT
 //!
-//! There is exactly ONE ground surface, and every consumer reads the SAME one:
+//! Decode once, downsample once to at most [`GRID_RESOLUTION`]², and publish that [`HeightGrid`].
+//! [`HeightGrid::height_at`], [`heightfield_collider`] and [`terrain_mesh_tiles`] use its samples
+//! and parry's anti-diagonal cell split, agreeing up to float rounding
+//! (`oracle_matches_collider_at_seeded_points`). No consumer sees the full-resolution decode.
 //!
-//! 1. The decoded map is downsampled ONCE to [`GRID_RESOLUTION`]² and THAT grid is the
-//!    [`HeightGrid`] resource. No consumer ever sees the full-resolution decode.
-//! 2. [`HeightGrid::height_at`] is piecewise-TRIANGULAR, splitting every cell along the SAME
-//!    diagonal parry's heightfield triangulation uses (the anti-diagonal — pinned empirically by
-//!    `oracle_matches_collider_at_seeded_points` below). So oracle == collider at every point, up
-//!    to float rounding.
-//! 3. The collider ([`heightfield_collider`]) and the render mesh ([`terrain_mesh_tiles`]) are
-//!    built from the grid's OWN samples — never resampled at a different resolution — with that
-//!    same diagonal split. Oracle, collider, and visuals are the identical surface.
-//!
-//! History: before this invariant the oracle read a 4096² bilinear surface, the collider a 1025²
-//! triangulated resample, and the render mesh a 513² resample — measured to disagree by up to
-//! 0.519 m (oracle vs collider, more than the suspension's 0.5 m probe reach) and 1.46 m
-//! (oracle vs render): the hull could touch ground the belts never felt. Do not reintroduce a
-//! second resolution anywhere.
+//! MEASURED counterexample: separate 4096² bilinear oracle, 1025² triangulated collider and 513²
+//! render resamples disagreed by 0.519 m (oracle/collider, beyond the 0.5 m suspension probe) and
+//! 1.46 m (oracle/render). The hull could touch ground the belts never felt. Keep one resolution.
 //!
 //! One decode, one mapping, identical bytes on every peer (the map directory ships in `assets/` on
 //! the client archives AND the server tar — see `.github/actions/build-server`), so the
@@ -43,12 +34,8 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 
-/// The square a height grid covers and the metres its samples span — the SCALE a heightmap is hung
-/// at, as opposed to the shape the heightmap itself is. The map declares its own
-/// ([`crate::map::MapManifest`]); the code never chooses one for it.
-///
-/// Single home for the world mapping: every grid carries a copy ([`HeightGrid::extent`]), and the
-/// oracle term, collider, render mesh, and spawn queries all read it from there.
+/// Map-declared horizontal and vertical scale ([`crate::map::MapManifest`]), carried by each
+/// [`HeightGrid::extent`]. Oracle, collider, render and spawn mapping all read that owner.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TerrainExtent {
     /// Side length (m) of the square world. A map's pixels are STRETCHED over this side,
@@ -61,13 +48,8 @@ pub struct TerrainExtent {
     pub height_span_m: f32,
 }
 
-/// Which world direction a heightmap's ROWS increase toward. The column index is X either way (the
-/// decode walks a row-major image), so this is the one image-axis convention an export is free to
-/// choose, and the map declares its own (`crate::map::MapManifest::rows`).
-///
-/// Folded in ONCE, at [`grid_from_png`]: a `-Z` image has its rows reversed there, so every
-/// [`HeightGrid`] in memory runs toward `+Z` and no consumer downstream ever asks again — the
-/// ONE-SURFACE invariant covers orientation as much as it covers resolution.
+/// Map-declared image-row direction (`crate::map::MapManifest::rows`); columns increase along X.
+/// [`grid_from_png`] reverses negative-Z rows once, so all in-memory grids increase toward +Z.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowOrder {
     /// Row 0 at `z = -half`, matching the grid's own mapping — decoded straight through.
@@ -89,18 +71,15 @@ impl TerrainExtent {
     }
 }
 
-/// The extent every SYNTHETIC world is hung at: the flat-slab fixture world (`world::GROUND_SIZE`,
-/// whose top face at y = 0 is the whole surface), the analytic ramp probes, and the unit fixtures.
-/// FIXTURE data — a shipped map declares its own extent and never reads this.
+/// FIXTURE extent for the flat slab (`world::GROUND_SIZE`, top at y = 0), analytic ramps and
+/// unit fixtures. Shipped maps declare their own extent.
 pub(crate) const FIXTURE_EXTENT: TerrainExtent = TerrainExtent {
     world_size_m: 1000.0,
     height_offset_m: 0.0,
     height_span_m: 100.0,
 };
 
-/// The extent the world is hung at whether or not a heightmap decoded: the grid's own when there is
-/// one, the flat slab's when there is not. The bounds consumers that must answer in BOTH worlds —
-/// the spawn map's UV mapping and the authority's spawn clamp — resolve through this.
+/// Grid extent, or the flat slab's when absent, for spawn-map UVs and authority spawn bounds.
 pub(crate) fn world_extent(grid: Option<&HeightGrid>) -> TerrainExtent {
     grid.map_or(FIXTURE_EXTENT, HeightGrid::extent)
 }
@@ -152,16 +131,13 @@ const SMOOTH_KERNEL: [f32; 19] = [
     0.000_740_138_36, // k = 18
 ];
 
-/// Sample count per side of THE ground surface: the decode is downsampled ONCE to this, and the
-/// resulting grid is what the oracle, the collider, the render mesh, and spawn placement all read —
-/// see the ONE-SURFACE INVARIANT in the module doc. (The full 4096² decode is too heavy for parry,
-/// so the shared resolution is the collider's.) Sample SPACING follows the map's declared extent:
-/// 1.465 m on the shipped 1500 m world.
+/// Resolution: cap samples per side for parry's cost; the full 4096² decode is too heavy.
+/// Every consumer shares this downsample (module invariant). DERIVED spacing: 1500 / 1024 ≈
+/// 1.465 m on the shipped world; other map extents change spacing, not sample count.
 pub(crate) const GRID_RESOLUTION: u32 = 1025;
 
-/// Render-mesh tile size in CELLS per side: the mesh carries the grid's own 1025² vertices (the
-/// one surface, never resampled), chunked into 8×8 tiles of 128² cells so bevy's per-entity
-/// frustum culling works instead of drawing ~2.1M triangles every frame.
+/// Resolution: cells per render tile for per-entity frustum culling. DERIVED: the 1025² grid
+/// becomes 8×8 tiles of 128² cells instead of drawing ~2.1M triangles every frame.
 pub(crate) const MESH_TILE_CELLS: usize = 128;
 
 /// Real-world coverage the ACTIVE pack was authored at, metres per texture repeat. Poly Haven
@@ -177,13 +153,10 @@ pub(crate) const MESH_TILE_CELLS: usize = 128;
 /// which is all `scripts/encode-terrain-ktx2.sh` needs to cut one.
 const COAST_SAND_ROCKS_02_AUTHORED_M: f32 = 15.0;
 
-/// World metres per repeat of the terrain surface pack: the mesh's UVs are `world_xz / this`,
-/// sampled with a REPEAT-addressing sampler. It is the active pack's AUTHORED size, not a taste
-/// setting — mapping a scan onto anything else silently resizes every pebble and rock in it. (It
-/// was 8 m, an import-time guess, which squeezed a 15 m patch into 8 m and rendered every feature
-/// at 0.53× life size: a 1 m boulder read as 53 cm, so the ground looked like a scale model.)
-/// In WORLD units, so a re-scaled world keeps the same physical texel density. View-only (the UVs
-/// live on the client render mesh; grid/oracle/collider are untouched by texturing).
+/// Authored world metres per repeat (`world_xz / this`, repeat sampler), not a taste. View-only:
+/// texturing never changes grid/oracle/collider, and world rescaling keeps physical texel density.
+/// DERIVED counterexample: fitting this 15 m scan into an 8 m guess gives 0.53× features — a 1 m
+/// boulder reads as 53 cm, making the terrain look like a scale model.
 pub(crate) const TEXTURE_TILE_M: f32 = COAST_SAND_ROCKS_02_AUTHORED_M;
 
 /// The BASE terrain surface pack — Poly Haven `coast_sand_rocks_02`, CC0 (see the pack folder's
@@ -216,31 +189,20 @@ pub struct ForceFlatWorld;
 /// over a surface at 0, reproduced over terrain as the footprint's max ground height plus this.
 pub(crate) const SPAWN_CLEARANCE_M: f32 = 2.0;
 
-/// Half-side (m) of the conservative axis-aligned square footprint a spawn samples the ground over
-/// (10 m × 10 m — covers the hull at any yaw). Spawn Y is the MAXIMUM grid height over this square,
-/// not the centre-point height: a tank dropped at the centre height on a slope spawns with its
-/// uphill running gear buried (measured 1.65 m of axle burial before this existed).
+/// Spawn footprint half-side (m): a fixed square, independent of hull construction or yaw.
+/// DERIVED coverage: 10 m × 10 m; larger hulls need a construction-derived footprint.
+/// Sample its maximum, not its centre: MEASURED centre-only placement buried uphill axles 1.65 m.
 pub(crate) const SPAWN_FOOTPRINT_HALF_M: f32 = 5.0;
 
-/// THE spawn-height rule. Every spawn in every composition — the offline duel, server lanes, the
-/// interpolation bot, spawn-map overrides, respawns — resolves its Y through this one function, at
-/// the moment it spawns.
-///
-/// **Spawn definitions are HORIZONTAL.** No authored or constant spawn carries a Y, because a
-/// hardcoded height is a claim about a specific world that stops being true the moment the map is
-/// re-authored or re-scaled. This is not hypothetical: the offline duel shipped two `y = 2.0`
-/// spawns that put both Tigers ~116 m under the terrain surface, and the fix was not to pick a
-/// better number — there is no number, only the surface at the time of asking.
-///
-/// Absent grid = the flat-slab fixture world, whose surface is y = 0 — which reproduces exactly
-/// the old flat-pad `y = 2.0` pose, so the authored test course is unchanged.
+/// Shared ground-height rule for all spawns: resolve the horizontal definition at spawn time.
+/// Authored Y goes stale when a map is re-authored or rescaled. MEASURED counterexample: fixed
+/// `y = 2.0` duel spawns sat ~116 m below terrain. No better constant replaces a surface query.
+/// No grid means the flat slab at y = 0; adding clearance reproduces the flat-pad y = 2.0 pose.
 pub(crate) fn spawn_surface_height(grid: Option<&HeightGrid>, xz: Vec2) -> f32 {
     grid.map_or(0.0, |grid| {
-        // Fail loud (ADR-0011): outside the span there IS no surface — the parry collider ends and
-        // `height_at`'s clamped read would hand back an edge height for a point in the void, so the
-        // tank spawns over nothing and falls forever. Every caller either clamps into the placeable
-        // square first (`net::spawn_map::spawn_limit`) or spawns at a compile-time constant, so
-        // reaching here out of bounds is a code bug, never client input.
+        // Outside the collider there is no surface; an edge-clamped height would spawn a tank
+        // over void. Callers clamp via `net::spawn_map::spawn_limit` or use constant positions,
+        // so an out-of-span point here is a code bug (ADR-0011), not client input.
         assert!(
             grid.contains_xz(xz.x, xz.y),
             "spawn at ({}, {}) is outside the ±{} m world span — spawn points must be clamped \
@@ -253,9 +215,8 @@ pub(crate) fn spawn_surface_height(grid: Option<&HeightGrid>, xz: Vec2) -> f32 {
     })
 }
 
-/// A horizontal spawn definition resolved against the live surface: the caller's XZ, the ground
-/// under its footprint, plus [`SPAWN_CLEARANCE_M`]. The ONE way to turn a spawn point into a pose
-/// — see [`spawn_surface_height`] for why no spawn carries an authored Y.
+/// Horizontal XZ → footprint ground height + [`SPAWN_CLEARANCE_M`].
+/// [`spawn_surface_height`] owns why spawn definitions carry no Y.
 pub(crate) fn spawn_pos(grid: Option<&HeightGrid>, xz: Vec2) -> Vec3 {
     Vec3::new(
         xz.x,
@@ -314,12 +275,10 @@ impl HeightGrid {
         }
     }
 
-    /// Samples per side.
     pub fn size(&self) -> u32 {
         self.size
     }
 
-    /// The square this grid covers and the metres it spans.
     pub fn extent(&self) -> TerrainExtent {
         self.extent
     }
@@ -335,30 +294,21 @@ impl HeightGrid {
         self.extent.half_extent()
     }
 
-    /// One sample (meters). `pub(crate)` because the render-LOD ladder
-    /// ([`crate::terrain_lod`]) reads the SAME slab rather than resampling — the ONE-SURFACE
-    /// invariant is what makes that ladder legal in the first place.
+    /// Metres at a node; [`crate::terrain_lod`] reads this same slab rather than resampling.
     pub(crate) fn sample(&self, i: usize, j: usize) -> f32 {
         self.samples[j * self.size as usize + i]
     }
 
-    /// Terrain height (m) at world `(x, z)` — piecewise TRIANGULAR over the grid, clamped at the
-    /// map edges. THE CLAMP IS PLACEMENT-ONLY (spawn queries want a defined answer everywhere):
-    /// the collider ends at the span, so surface consumers — the track oracle's ground term and
-    /// [`Self::cast_ray`] — report NO ground outside it instead of the clamped phantom (belts
-    /// feeling ground the hull collider would fall through). Pure arithmetic, no
-    /// platform-varying ops: this is the ground surface the DETERMINISTIC belt sim probes.
+    /// Metres at world `(x, z)`, piecewise triangular and edge-clamped for placement only.
+    /// Surface consumers (track oracle, [`Self::cast_ray`]) reject out-of-span points: clamped
+    /// phantom ground would support belts where the hull collider falls through.
     ///
-    /// THE ONE-SURFACE INVARIANT (module doc): every cell is split along the SAME diagonal
-    /// parry's heightfield triangulation uses — the ANTI-diagonal, connecting the cell's
-    /// `(x_lo, z_hi)` and `(x_hi, z_lo)` corners (parry `triangles_at`, default non-zigzag
-    /// status: triangles `(p00, p10, p01)` / `(p10, p11, p01)`; pinned empirically by the
-    /// `oracle_matches_collider_at_seeded_points` test). So this function IS the collider
-    /// surface, up to float rounding — not an
-    /// approximation of it. Do NOT change this back to bilinear without changing the collider.
-    ///
-    /// Intended consumers beyond the oracle: the net server's spawn/respawn placement
-    /// (`src/net/server.rs` reads `Res<HeightGrid>` — see also [`Self::max_height_in_square`]).
+    /// Uses parry's `triangles_at` default non-zigzag split: anti-diagonal
+    /// `(x_lo, z_hi)`–`(x_hi, z_lo)`, triangles `(p00, p10, p01)` / `(p10, p11, p01)`.
+    /// `oracle_matches_collider_at_seeded_points` pins agreement up to float rounding; bilinear
+    /// interpolation would break it. Fixed-order arithmetic has no platform-varying operations
+    /// because the deterministic belt sim probes this ground. Server spawn/respawn also reads it
+    /// (`src/net/server.rs`; see [`Self::max_height_in_square`]).
     pub fn height_at(&self, x: f32, z: f32) -> f32 {
         let n = self.size as usize;
         let last = (n - 1) as f32;
@@ -382,15 +332,10 @@ impl HeightGrid {
         }
     }
 
-    /// The MAXIMUM grid height (m) over an axis-aligned square footprint of half-side `half`
-    /// centered at world `(x, z)` — the spawn-placement query (a tank dropped at
-    /// `height_at(center)` on a slope spawns with its uphill running gear buried; measured
-    /// 1.65 m of axle burial on a legal spawn click before this existed).
-    ///
-    /// Conservative by construction: it takes the max over every grid NODE of every cell the
-    /// square touches (the enclosing node rectangle). The surface is piecewise linear with its
-    /// extremes at nodes, so this bounds the true surface maximum over the square from above.
-    /// Pure and deterministic like [`Self::height_at`].
+    /// Conservative maximum height (m) over the square of half-side `half` at world `(x, z)`.
+    /// Spawn placement must clear uphill gear, not only the centre (see [`SPAWN_FOOTPRINT_HALF_M`]).
+    /// Take every node of every touched cell: piecewise-linear extrema occur at nodes, so their
+    /// enclosing rectangle bounds the square's surface maximum. Pure and deterministic.
     pub fn max_height_in_square(&self, x: f32, z: f32, half: f32) -> f32 {
         let n = self.size as usize;
         let last = (n - 1) as f32;
@@ -409,36 +354,24 @@ impl HeightGrid {
         max
     }
 
-    /// Whether world `(x, z)` lies on the grid's span. The surface EXISTS only here: beyond the
-    /// span the parry collider ends and so does the ground ([`Self::cast_ray`] reports no hit
-    /// there) — [`Self::height_at`]'s clamped reads outside the span are for placement queries
-    /// only, never a surface anything can stand on.
+    /// Whether `(x, z)` lies on the collider's finite surface. [`Self::height_at`]'s out-of-span
+    /// clamp serves placement only; [`Self::cast_ray`] reports no ground there.
     pub fn contains_xz(&self, x: f32, z: f32) -> bool {
         let half = self.half_extent();
         x.abs() <= half && z.abs() <= half
     }
 
-    /// Exact first hit of a ray with the triangular surface within `t ∈ [0, t_max]`, or `None`.
+    /// First hit on the two-sided triangular surface within `t ∈ [0, t_max]`, or `None`.
+    /// `dir` need not be unit: the point is `origin + dir * t`.
     ///
-    /// THE deterministic terrain raycast (fixed iteration order, pure f32 arithmetic, no
-    /// transcendentals, hard iteration bound): a 2-D DDA walks exactly the cells the ray's XZ
-    /// footprint crosses, in ray order, and solves the ray against each cell's two triangles —
-    /// the SAME anti-diagonal split [`Self::height_at`] evaluates and parry triangulates (the
-    /// ONE-SURFACE invariant, module doc) — in closed form: over one triangle's plane the
-    /// surface gap `f(t) = ray_y(t) − plane(ray_xz(t))` is LINEAR in `t`, so the crossing is one
-    /// division. No scan resolution for a thin ridge to slip through, no bisection budget.
+    /// A deterministic 2-D DDA visits crossed XZ cells in ray order, solving each triangle's linear
+    /// gap `f(t) = ray_y(t) − plane(ray_xz(t))` with one division. Fixed order, pure f32, no
+    /// transcendentals and a hard iteration bound; no scan spacing to miss a ridge or bisection.
+    /// Triangles share [`Self::height_at`]'s anti-diagonal / parry surface. Crossings from either
+    /// side report; rays remaining on one side miss.
     ///
-    /// The surface is the same two-sided sheet parry casts against: a crossing from below
-    /// reports like a crossing from above, and a ray that stays on one side reports nothing.
-    ///
-    /// THE WORLD ENDS AT THE COLLIDER EDGE: outside the grid span there is no ground — the ray
-    /// meets the surface only where cells exist, exactly like the parry heightfield collider
-    /// (which spans the same square and stops). Spawn placement clamps every tank inside
-    /// ±`net::spawn_map::spawn_limit` (= 95 % of the half-extent — derived, so it follows a
-    /// re-scaled world instead of naming a metre count that goes stale), well off the edge.
-    /// This deliberately DISAGREES with `height_at`'s clamped, placement-only reads.
-    ///
-    /// `dir` need not be unit: `t` is in units of `dir`'s length.
+    /// No cells exist outside the collider span, unlike placement-only edge clamping. Spawns
+    /// stay inside `net::spawn_map::spawn_limit` (DERIVED 95 % of half-extent) as maps rescale.
     pub fn cast_ray(&self, origin: Vec3, dir: Vec3, t_max: f32) -> Option<TerrainRayHit> {
         let n = self.size as usize;
         let last = (n - 1) as f32;
@@ -465,13 +398,10 @@ impl HeightGrid {
         if t0 > t1 {
             return None;
         }
-        // Cell-interval padding: a crossing landing exactly on a shared cell boundary (float
-        // rounding) must not fall between two cells' intervals — both accept it, first-in-ray-
-        // order wins. 0.1 mm of `t` slop on a unit direction, far under every consumer tolerance.
-        // OWNERSHIP slop only: the global interval `[t0, t1] ⊆ [0, t_max]` stays a HARD bound
-        // (no padding, no clamping) — a root behind the origin or past `t_max` is never a hit.
-        // Clamping such a root to an endpoint turned micron-scale clearance into full-reach
-        // penetration for an away-facing probe.
+        // Resolution: pad cell ownership by 0.1 mm of t for unit directions, below consumer
+        // tolerances, so float-rounded shared-boundary hits reach both cells; first-in-ray wins.
+        // Global `[t0, t1] ⊆ [0, t_max]` stays unpadded: clamping an outside root to an endpoint
+        // turns micron clearance into full-reach contact for an away-facing probe.
         const EPS_T: f32 = 1.0e-4;
         let cell = |w: f32| (w as usize).min(n - 2); // `as usize` saturates negatives to 0
         let (mut i, mut j) = (cell(u0 + du * t0), cell(v0 + dv * t0));
@@ -620,28 +550,19 @@ impl HeightGrid {
     }
 }
 
-/// Decode the heightmap synchronously at Startup (before `world::spawn_environment`, which is
-/// chained after this in `world::plugin`).
+/// Decode synchronously at Startup, before `world::spawn_environment` (chained by `world::plugin`).
+/// Except for [`ForceFlatWorld`], compositions require the selected map's valid `level.json` and
+/// decodable square heightmap; broken shipped data panics (ADR-0011). CI's
+/// `map::tests::shipped_map_ships_a_valid_manifest` guards half-shipped maps before boot.
 ///
-/// THE MANIFEST IS THE MAP. Every composition but a [`ForceFlatWorld`] fixture loads the selected
-/// map's `level.json` ([`crate::map::MapManifest`]), and everything it declares must hold — an
-/// absent, unparseable or invalid manifest, a missing heightmap, or an undecodable/non-square one
-/// is a broken ship and panics (ADR-0011 fail-fast).
-/// `map::tests::shipped_map_ships_a_valid_manifest` refuses a half-shipped map at build time rather
-/// than at first boot.
-///
-/// THE ONE PARSE. The manifest is read here and published as a resource, so `scatter` places the
-/// author's objects out of the same struct this decode took its extent from.
-///
-/// THE GROUND FIELD rides the same decision ([`crate::ground_field::GroundField`]): the map's
-/// painted masks are decoded beside the heightmap they paint, and every world this decode does not
-/// build from the map (the flat slab, a preset or flattened grid) is the base pack's ground alone.
+/// Publish the one parsed manifest for `scatter` to share the decode's extent and object placement.
+/// Decode [`crate::ground_field::GroundField`] masks beside their heightmap; flat, preset or
+/// flattened worlds use only the base pack's ground.
 pub(crate) fn decode_height_grid(
     mut commands: Commands,
     flat: Option<Res<ForceFlatWorld>>,
-    // A grid inserted BEFORE the first update is an explicit synthetic world (the driving-feel
-    // probes' analytic ramps): decoding the shipped PNG over it would silently replace the
-    // fixture. Product compositions never pre-insert one, so this branch is dev-only in practice.
+    // Pre-inserted grids are synthetic worlds (driving-feel ramps); shipped decode must not
+    // replace them. Product compositions never supply one.
     preset: Option<Res<HeightGrid>>,
     // Likewise a manifest inserted before the first update is an explicit fixture map (the tick
     // cost bed's variants of the shipped placement), read in place of the shipped file.
@@ -681,14 +602,9 @@ pub(crate) fn decode_height_grid(
         return;
     }
     if crate::lod_showcase::enabled() {
-        // A GRID of zeros, not "no grid": with no grid the world builds its flat slab AND its
-        // authored obstacle course (the `ForceFlatWorld` fixture world), which is scenery in
-        // front of the thing being looked at. A zero grid keeps the real terrain path — same
-        // decode-free construction, same collider, same render tiles, same oracle — so the one
-        // surface stays one surface and it is level everywhere. Flattening only the render mesh
-        // would leave the tanks standing on invisible hills, which is the exact class of bug the
-        // one-surface doctrine exists to make impossible. The map's own extent is kept, so the
-        // showcase's range ladder stands on the same square the shipped map spans.
+        // A zero grid keeps collider, render and oracle level on the map's own extent. Omitting
+        // it would add the flat fixture world's obstacle course in front of the showcase;
+        // flattening only render would leave tanks on invisible hills.
         let size = GRID_RESOLUTION;
         let samples = vec![0.0_f32; (size as usize) * (size as usize)];
         info!(
@@ -767,10 +683,8 @@ pub(crate) fn grid_from_png(
     if width != height {
         return Err(format!("must be square, got {width}x{height}"));
     }
-    // ORIENT ONCE, HERE. The map declares which way its rows run; a `-Z` image is reversed row-wise
-    // so row 0 lands at `z = -half` like every other grid in the process. A pure index remap — the
-    // sample VALUES are the decoded bytes, bit for bit — and it runs before the downsample, so the
-    // one surface every consumer reads is already in the world's frame.
+    // Reverse negative-Z rows before downsampling: row 0 becomes z = -half, in the world's
+    // frame. Index remapping preserves decoded sample values bit-for-bit.
     let samples = match rows {
         RowOrder::TowardPositiveZ => samples,
         RowOrder::TowardNegativeZ => flip_rows(&samples, width as usize),
@@ -788,9 +702,8 @@ pub(crate) fn grid_from_png(
         samples
     };
     let grid = HeightGrid::new(samples.into(), width, extent);
-    // THE ONE-SURFACE INVARIANT (module doc): the decode is resampled ONCE, here, down to
-    // GRID_RESOLUTION — the resource every consumer reads. A map already at or below that
-    // resolution passes through untouched (tests build tiny grids directly).
+    // Publish only this one resample. At-or-below-resolution maps (including tiny tests) pass
+    // through unchanged.
     if grid.size() > GRID_RESOLUTION {
         Ok(downsample(&grid, GRID_RESOLUTION))
     } else {
@@ -866,24 +779,17 @@ pub(crate) fn gaussian_smooth(samples: &[f32], size: usize) -> Vec<f32> {
     transpose(&pass_rows(&transpose(&horizontal)))
 }
 
-/// The one static terrain collider: an Avian/parry heightfield whose nodes ARE the grid's own
-/// samples (the ONE-SURFACE invariant — never resampled at another resolution), spanning the
-/// full `[-WORLD_HALF_EXTENT, +WORLD_HALF_EXTENT]` square.
+/// Static heightfield over the grid's full `[-half_extent, +half_extent]` square, using its own
+/// samples and anti-diagonal split. EMPIRICAL: `oracle_matches_collider_at_seeded_points` guards
+/// orientation and millimetre agreement, catching transposes. Avian 0.7's
+/// `Collider::heightfield(Vec<Vec<f32>>, scale)` layout is `sample(i, j)` at `data[i·n + j]`;
+/// parry's column-major `Array2` reads `heights_zx`: i along X, j along Z. The origin-centred
+/// field uses total X/Z spans, with scale.y multiplying raw heights; trust raycasts over prose.
 ///
-/// Orientation is pinned EMPIRICALLY by `oracle_matches_collider_at_seeded_points` below (the
-/// classic transposed-heightfield bug fails its seeded noise-grid comparison): the fill is
-/// avian 0.7's `Collider::heightfield(Vec<Vec<f32>>, scale)`'s, the grid's `sample(i, j)` at
-/// `data[i·n + j]`, which parry's column-major `Array2` reads as `heights_zx`, so `i` runs along
-/// world X and `j` along world Z (trust the raycast, not the doc comments). The field is centered on the origin with `scale.x`/`scale.z` as TOTAL spans
-/// and `scale.y` multiplying the raw heights. Parry splits each cell along the anti-diagonal,
-/// which is exactly what [`HeightGrid::height_at`] evaluates —
-/// `oracle_matches_collider_at_seeded_points` pins the two surfaces together to millimetres.
-///
-/// Built with parry's `FIX_INTERNAL_EDGES`, which avian's constructor does not set: a contact
-/// against one triangle keeps its normal inside the cone of that triangle and its neighbours, so
-/// a body crossing a triangle edge on a continuous surface is pushed along the surface normal,
-/// never back off the edge (`a_frictionless_edge_slides_across_flat_terrain_at_speed`). Only
-/// contact-manifold generation reads the flag; ray, shape and point queries are unchanged.
+/// Set parry's `FIX_INTERNAL_EDGES` (absent from Avian's constructor) to keep contact normals
+/// inside the triangle/neighbour cone. Continuous-surface edges then push along the surface,
+/// rather than back off the edge (`a_frictionless_edge_slides_across_flat_terrain_at_speed`).
+/// Only contact manifolds read the flag; ray, shape and point queries are unchanged.
 pub(crate) fn heightfield_collider(grid: &HeightGrid) -> Collider {
     use avian3d::parry::shape::{HeightFieldFlags, SharedShape};
     use avian3d::parry::utils::Array2;
@@ -903,25 +809,17 @@ pub(crate) fn heightfield_collider(grid: &HeightGrid) -> Collider {
     ))
 }
 
-/// The client-only terrain render meshes: the grid's OWN samples as vertices (the ONE-SURFACE
-/// invariant — the drawn ground is the identical surface the collider and oracle read, cell
-/// diagonals included), chunked into [`MESH_TILE_CELLS`]² tiles purely so bevy can frustum-cull
-/// per entity. Positions are world-space (tiles spawn at `Transform::IDENTITY`); adjacent tiles
-/// share their border row of vertices, so the surface is seamless. Normals are central
-/// differences of the grid (view-only shading), UVs world-space-tiled
-/// (`world_xz / TEXTURE_TILE_M` — repeat-sampled, see [`TEXTURE_TILE_M`]). The dedicated server
-/// never builds this (`world::spawn_environment` gates it on a window existing).
-///
-/// Every terrain mesh — this one and every LOD level — is created with [`TERRAIN_MESH_USAGE`].
-/// RENDER-WORLD ONLY, and that is a size decision, not a style one: the ground never changes after
-/// startup, nothing in the main world reads its vertices back (the collider and the oracle read the
-/// GRID, and the pinned `Aabb` plus `NoAutoAabb` keep bevy from re-deriving bounds from the mesh),
-/// and the default flags mean "keep a full CPU copy forever as well". DERIVED from the census —
-/// ~2.9 M triangles and ~1.5 M tangented vertices across the ladder — that copy is ~100 MiB of
-/// resident nothing. Anything that later needs terrain geometry on the CPU should read the grid,
-/// which is the one surface anyway.
+/// Render-only storage for every terrain level. Static vertices have no CPU reader: collider
+/// and oracle read the grid; pinned `Aabb` / `NoAutoAabb` prevent bounds re-derivation. DERIVED
+/// from ~2.9 M triangles and ~1.5 M tangented vertices: the default CPU copy costs ~100 MiB.
+/// Future CPU geometry readers must use the grid.
 pub(crate) const TERRAIN_MESH_USAGE: RenderAssetUsages = RenderAssetUsages::RENDER_WORLD;
 
+/// Client meshes from exact grid samples and anti-diagonals, chunked into [`MESH_TILE_CELLS`]²
+/// tiles for entity culling. World-space positions require `Transform::IDENTITY`; adjacent tiles
+/// share border vertices. Normals use full-grid central differences, UVs `world_xz / TEXTURE_TILE_M`
+/// with repeat sampling. `world::spawn_environment` builds these only with a window, never on
+/// the dedicated server.
 pub(crate) fn terrain_mesh_tiles(grid: &HeightGrid) -> Vec<Mesh> {
     let ranges = mesh_tile_node_ranges(grid);
     let mut meshes = Vec::with_capacity(ranges.len());
@@ -968,14 +866,9 @@ pub(crate) fn node_world_coord(grid: &HeightGrid, k: usize) -> f32 {
     -grid.half_extent() + k as f32 * (grid.world_size() / (grid.size() - 1) as f32)
 }
 
-/// THE shading normal at grid node `(i, j)`: central differences over the FULL grid, one-sided at
-/// the map edges.
-///
-/// Single home because the LOD ladder must sample this at the vertices it KEEPS — a normal
-/// recomputed from a simplified mesh would make shading pop with the geometry, which is the one
-/// thing a screen-space-error ladder is supposed to make invisible. It reads across tile borders
-/// by construction (it takes the grid, not a tile patch), so neighbouring tiles agree on their
-/// shared row's normal at every level.
+/// Full-grid central-difference normal at `(i, j)`, one-sided at map edges. The LOD ladder
+/// samples kept nodes here: recomputing from simplified triangles would pop shading with geometry.
+/// Reading the grid across tile borders keeps shared normals identical at every level.
 pub(crate) fn surface_normal_at(grid: &HeightGrid, i: usize, j: usize) -> [f32; 3] {
     let n = grid.size() as usize;
     let step = grid.world_size() / (n - 1) as f32;
@@ -986,13 +879,10 @@ pub(crate) fn surface_normal_at(grid: &HeightGrid, i: usize, j: usize) -> [f32; 
     Vec3::new(-dhdx, 1.0, -dhdz).normalize().to_array()
 }
 
-/// The render TILING: one inclusive node range `[ia, ib, ja, jb]` per [`MESH_TILE_CELLS`]² tile,
-/// row-major in `(tz, tx)`. The last row/column of each tile is SHARED with the next one (same
-/// world position, same height, so no seam), which is why the ranges overlap by a node.
-///
-/// Single home so [`terrain_mesh_tiles`] and [`crate::terrain_lod`] cannot drift into two
-/// different tilings — the LOD ladder's crack-freeness is a claim about neighbours, and it is only
-/// true if both agree on who the neighbours are.
+/// Inclusive `[ia, ib, ja, jb]` per [`MESH_TILE_CELLS`]² tile, row-major `(tz, tx)`.
+/// Ranges overlap by one node so neighbours share border positions and heights. Both
+/// [`terrain_mesh_tiles`] and [`crate::terrain_lod`] use this tiling: crack-freeness needs the
+/// same neighbours, not independently derived partitions.
 pub(crate) fn mesh_tile_node_ranges(grid: &HeightGrid) -> Vec<[usize; 4]> {
     let cells = grid.size() as usize - 1;
     let tiles_per_side = cells.div_ceil(MESH_TILE_CELLS);
@@ -1032,9 +922,8 @@ pub(crate) mod tests {
         .expect("shipped heightmap must decode")
     }
 
-    /// One spawn point, one verdict: inside the world span, above the surface at its own XZ, and
-    /// above its whole FOOTPRINT (the rule that keeps the uphill running gear out of a slope —
-    /// clearing the centre sample alone is what used to bury axles by 1.65 m).
+    /// Require a spawn inside the span and above its centre and whole footprint, so uphill gear
+    /// clears slopes. [`SPAWN_FOOTPRINT_HALF_M`] owns the centre-only burial counterexample.
     pub(crate) fn assert_spawn_clears_terrain(grid: &HeightGrid, name: &str, xz: Vec2) {
         assert!(
             grid.contains_xz(xz.x, xz.y),
@@ -1110,7 +999,7 @@ pub(crate) mod tests {
         assert!((grid.height_at(h, 0.0) - FIXTURE_SPAN).abs() < 1e-4);
         assert!((grid.height_at(0.0, 123.0) - FIXTURE_SPAN * 0.5).abs() < 1e-4);
         assert!((grid.height_at(h / 2.0, -h) - FIXTURE_SPAN * 0.75).abs() < 1e-4);
-        // Beyond the map edge the surface continues flat (clamped).
+        // Placement queries clamp outside the map; the collider surface ends at the edge.
         assert_eq!(grid.height_at(-h - 500.0, 0.0), 0.0);
         assert!((grid.height_at(h + 500.0, 9999.0) - FIXTURE_SPAN).abs() < 1e-4);
 
@@ -1148,14 +1037,10 @@ pub(crate) mod tests {
         HeightGrid::new(samples.into(), size, FIXTURE_EXTENT)
     }
 
-    /// The ONE-SURFACE tolerance pin: `height_at` AND `cast_ray` vs a parry raycast of the
-    /// production collider at many random-but-seeded points over a rough (seeded-noise) grid —
-    /// the surfaces must agree to a few MILLIMETRES everywhere (before this invariant the
-    /// measured disagreement was up to 0.519 m, more than the suspension's 0.5 m probe reach).
-    ///
-    /// Coverage spans the FULL square including the outer 2%, plus just-outside points where
-    /// hit/no-hit itself must agree: the collider ends at the span edge, and so must the exact
-    /// caster (the map-edge consistency fix — `height_at`'s clamp is placement-only).
+    /// Oracle height and exact cast must match the production parry collider within millimetres
+    /// across a seeded rough grid, including its outer 2 % and just-outside misses. The module's
+    /// one-surface invariant owns the MEASURED 0.519 m mismatch vs the 0.5 m suspension reach.
+    /// Placement clamping must not extend either surface beyond the collider edge.
     #[test]
     fn oracle_matches_collider_at_seeded_points() {
         let mut next = lcg(0x243F_6A88_85A3_08D3);
@@ -1335,10 +1220,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// The DECODE LAW, end to end: the extent comes out of a `level.json` terrain block through the
-    /// real reader, a full-scale-zero sample lands on the floor that block declares and a full-scale
-    /// sample on its ceiling, at the corners of the declared square. Pins the arithmetic
-    /// (`offset + normalized · span`) that every consumer's metres come from.
+    /// Through the real manifest reader and PNG decode, `offset + normalized · span` must map
+    /// full-scale zero/one to declared floor/ceiling at the declared square's corners.
     #[test]
     fn manifest_decode_maps_full_scale_onto_the_declared_range() {
         let manifest = crate::map::tests::fixture_manifest(750.0, -12.5, 50.0);
@@ -1367,13 +1250,9 @@ pub(crate) mod tests {
         assert!((grid.height_at(0.0, 0.0) - (floor + ceiling) / 2.0).abs() < 1e-4);
     }
 
-    /// THE ORIENTATION LAW: the manifest's declared row direction decides which world Z edge the
-    /// image's FIRST row lands on, and the grid comes out in the world's frame either way.
-    ///
-    /// The fixture is asymmetric on BOTH axes (four distinct heights over a 2×2 image, whose nodes
-    /// ARE the map corners), so a flip along either axis — or a transpose — moves at least one
-    /// corner's value. A `-Z` export is the shipped bundle's own declaration; read straight through
-    /// it would stand the whole world north–south mirrored under the author's objects.
+    /// The declared row direction must place the first image row on the matching Z edge.
+    /// Four distinct heights in a 2×2 fixture expose flips on either axis and transposes. Reading
+    /// the shipped -Z export straight through would mirror ground under authored objects.
     #[test]
     fn the_declared_row_direction_places_the_first_image_row() {
         // Row 0 = [0, 1/3], row 1 = [2/3, 1] of full scale — every corner distinct.
@@ -1463,19 +1342,12 @@ pub(crate) mod tests {
         );
     }
 
-    /// The three surface maps `world::spawn_environment` binds must SHIP, and must still be
-    /// MIP-MAPPED KTX2. The runtime backstop (`world::report_failed_terrain_map`) panics on a
-    /// decode failure, but only on a machine with a window; this catches the whole class in CI: a
-    /// missing file, a Git-LFS POINTER from a checkout without `lfs pull`, a map re-exported as
-    /// PNG/JPG (single mip level — the 30 fps regression that put these in KTX2 in the first
-    /// place), or a `basis-universal` feature drop that leaves UASTC untranscodable.
-    ///
-    /// Size and mip count come off each file's KTX2 header; the transcode itself is the same law
-    /// for every map, so one map, the albedo, runs through bevy's own loader. It is pinned against
-    /// `CompressedImageFormats::BC` because the transcode target is a pure function of the
-    /// caller's flags, not of the test machine's GPU: desktop GPUs land on BC7, Apple Silicon on
-    /// ASTC 4x4 (`get_transcoded_formats`), and both are 8 bpp. The albedo asks for the sRGB
-    /// variant, as `world::MapEncoding` does.
+    /// CI must catch missing maps, LFS pointers, PNG/JPG single-mip regressions (MEASURED 30 fps),
+    /// and missing `basis-universal` support; `world::report_failed_terrain_map` runs only with a
+    /// window. All three bound maps need mipmapped KTX2 headers; the albedo also uses Bevy's loader.
+    /// Transcode target follows flags, not the host GPU: `CompressedImageFormats::BC` chooses BC7,
+    /// Apple Silicon uses ASTC 4x4 (`get_transcoded_formats`), both 8 bpp. Albedo requests sRGB as
+    /// `world::MapEncoding` does.
     #[test]
     fn shipped_terrain_surface_maps_are_mipmapped_ktx2() {
         use bevy::image::{CompressedImageFormats, ktx2_buffer_to_image};
@@ -1540,11 +1412,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// Normal mapping's PRECONDITION, guarded in CI instead of at first boot: `world` runs
-    /// `generate_tangents` on every tile and panics if it fails (ADR-0011), so the attributes
-    /// mikktspace requires — positions, normals, UV0, and indices on a triangle list — must all
-    /// survive any change to [`terrain_mesh_tiles`]. Without a tangent basis the normal map has
-    /// no frame to rotate its directions into and the ground renders flat/greasy.
+    /// `world` requires mikktspace tangents on every tile (ADR-0011): triangle-list positions,
+    /// normals, UV0 and indices must survive tiler changes. Without a tangent basis, normal-map
+    /// directions have no frame and ground renders flat/greasy.
     #[test]
     fn render_mesh_tiles_can_carry_a_tangent_basis() {
         let grid = grid_from(9, |i, j| (i * 20 + j * 10) as u8);
@@ -1571,23 +1441,12 @@ pub(crate) mod tests {
         }
     }
 
-    /// THE regression guard for "tanks spawn underground", sim half: the spawn points this layer
-    /// owns, resolved through the one shared rule against the REAL heightmap, must put the tank
-    /// above the surface at their own XZ.
-    ///
-    /// This is the whole bug class, not one bug. The offline duel shipped `y = 2.0` poses that sat
-    /// ~116 m under the terrain the moment the heightmap world landed, and nothing caught it
-    /// because no test ever compared a spawn against the ground it spawns on.
-    ///
-    /// Split by LAYER, not by taste: the netcode's own spawn points (lanes, bot, spawn-map clamp)
-    /// are asserted the same way in `net::server`, because `src/net/tests/net_boundary.rs` forbids
-    /// the sim from naming `crate::net` — single-player has to stay runnable with no netcode
-    /// mounted. Both halves call [`assert_spawn_clears_terrain`], so there is still one rule and
-    /// one assertion.
-    ///
-    /// The probe grid is in scope for exactly the same reason, and the FAR placement doubly so: it
-    /// is 28 hardcoded points, 60 m from the map edge, chosen by a scan rather than by playing there
-    /// — precisely the shape of thing that gets a coordinate wrong and falls forever.
+    /// Sim-owned spawns must clear real terrain at their XZ and footprint. See
+    /// [`spawn_surface_height`] for the MEASURED ~116 m fixed-Y counterexample.
+    /// Net-owned lane, bot and map-clamp spawns use the same [`assert_spawn_clears_terrain`] in
+    /// `net::server`: `src/net/tests/net_boundary.rs` forbids sim dependencies on `crate::net`,
+    /// keeping single-player runnable without it. Cover the generated far probe layout too: the first
+    /// 28 indices represent a 30-tank block; `tank::scenario::probe_spawn_xz` owns their positions.
     #[test]
     fn every_sim_spawn_point_lands_above_the_shipped_terrain() {
         use crate::tank::scenario::{duel_spawn_xz, probe_spawn_xz};
@@ -1621,16 +1480,11 @@ pub(crate) mod tests {
         spawn_pos(Some(&grid), Vec2::new(FIXTURE_HALF + 1.0, 0.0));
     }
 
-    /// A FRICTIONLESS BODY RIDING ITS LEADING BOTTOM EDGE ACROSS FLAT TERRAIN KEEPS ITS SPEED: the
-    /// collider's contacts on a flat field push only along the field's normal, at every triangle
-    /// edge the body crosses. A box pitched so its leading bottom edge is its lowest point, held
-    /// at that pitch, slides frictionless along +Z across the grid lines; on flat ground nothing
-    /// may take its horizontal speed. Without the internal-edge fix, the next triangle's contact
-    /// takes that triangle's edge as its feature, its normal leans toward horizontal, and the
-    /// solver stops the box dead within a tick — the stop a tank's rear hull edge meets when it
-    /// reverses off a slope onto flat ground. Every dynamic body the terrain collider supports
-    /// (tank hull backstops, debris, launched turrets) relies on this. The box, pitch, speed and
-    /// the 1.465 m spacing (the shipped map's) are fixture data.
+    /// A frictionless box, pitched and rotation-locked with its leading bottom edge lowest, must
+    /// retain horizontal +Z speed across flat grid lines. Without `FIX_INTERNAL_EDGES`, a
+    /// triangle-edge normal tilts horizontally and stops it within a tick, as with a hull's rear
+    /// edge reversing off a slope. Every terrain-supported dynamic body relies on this.
+    /// Box, pitch, speed and DERIVED 1.465 m shipped-map spacing are FIXTURE data.
     #[test]
     fn a_frictionless_edge_slides_across_flat_terrain_at_speed() {
         use avian3d::prelude::{
