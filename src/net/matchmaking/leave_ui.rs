@@ -7,12 +7,8 @@ use bevy::prelude::*;
 
 use super::LeaveMatch;
 use crate::flow::{Flow, FlowScoped, InMatchSystems};
-use crate::overlay::{self, Overlay, OverlaySet, Overlays};
+use crate::overlay::{self, Overlay, OverlaySet, Overlays, look};
 use crate::ui_font::{TEXT, UiFonts};
-
-const BUTTON: Color = Color::srgb(0.40, 0.17, 0.14);
-const BUTTON_HOVER: Color = Color::srgb(0.52, 0.23, 0.18);
-const LABEL_PX: f32 = 22.0;
 
 #[derive(Component)]
 struct LeaveMatchRoot;
@@ -22,6 +18,7 @@ struct LeaveMatchButton;
 
 pub(super) fn plugin(app: &mut App) {
     crate::flow::require(app, "matchmaking::leave_ui");
+    look::get();
     app.add_observer(clicked)
         .add_systems(OnEnter(Flow::InMatch), spawn)
         .add_systems(
@@ -31,6 +28,8 @@ pub(super) fn plugin(app: &mut App) {
 }
 
 fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
+    let look = look::get();
+    let button = &look.action_button;
     commands
         .spawn((
             FlowScoped(Flow::InMatch),
@@ -38,8 +37,9 @@ fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
             GlobalZIndex(Overlay::MATCH_ACTIONS_Z),
             Node {
                 position_type: PositionType::Absolute,
+                // Resolution: fill the parent so centering is independent of viewport width.
                 width: Val::Percent(100.0),
-                bottom: Val::Percent(3.0),
+                bottom: Val::Percent(look.leave_match.bottom_percent.0),
                 justify_content: JustifyContent::Center,
                 ..default()
             },
@@ -50,17 +50,20 @@ fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
                 LeaveMatchButton,
                 Hovered::default(),
                 Node {
-                    padding: UiRect::axes(Val::Px(26.0), Val::Px(8.0)),
-                    border_radius: BorderRadius::all(Val::Px(4.0)),
+                    padding: UiRect::axes(
+                        Val::Px(button.padding_x_px.0),
+                        Val::Px(button.padding_y_px.0),
+                    ),
+                    border_radius: BorderRadius::all(Val::Px(button.radius_px.0)),
                     ..default()
                 },
-                BackgroundColor(BUTTON),
+                BackgroundColor(look::color(look.leave_match.button_srgba)),
             ))
             .with_child((
                 Text::new("LEAVE MATCH"),
                 TextFont {
                     font: fonts.hud.clone().into(),
-                    font_size: FontSize::Px(LABEL_PX),
+                    font_size: FontSize::Px(button.label_px.0),
                     ..default()
                 },
                 TextColor(TEXT),
@@ -80,6 +83,7 @@ fn show(
     mut buttons: Query<(&Hovered, &mut BackgroundColor), With<LeaveMatchButton>>,
 ) {
     let shown = can_leave(&overlays);
+    let look = &look::get().leave_match;
     for mut visibility in &mut root {
         visibility.set_if_neq(if shown {
             Visibility::Visible
@@ -89,9 +93,9 @@ fn show(
     }
     for (hovered, mut fill) in &mut buttons {
         fill.set_if_neq(BackgroundColor(if hovered.get() {
-            BUTTON_HOVER
+            look::color(look.button_hover_srgba)
         } else {
-            BUTTON
+            look::color(look.button_srgba)
         }));
     }
 }

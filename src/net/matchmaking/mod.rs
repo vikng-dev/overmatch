@@ -140,6 +140,7 @@ impl Lobby {
 
 /// Mount the lobby against the Worker at `api`.
 pub(super) fn install(app: &mut App, api: &str) {
+    crate::overlay::look::get();
     info!(
         "matchmaking: Worker {api}, version {}",
         super::CLIENT_VERSION

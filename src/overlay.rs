@@ -11,6 +11,8 @@ use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
+pub(crate) mod look;
+
 use crate::flow::{Flow, InMatchSystems};
 use crate::state::{EscapeAction, EscapeRouted};
 
@@ -295,17 +297,7 @@ fn declare_screen(flow: Res<State<Flow>>, mut overlays: ResMut<Overlays>) {
 /// from `ui_font::spawn_overlay`; the settings page occupies that space. [`OverlayNode`] supplies
 /// visibility reconciliation and z stamping.
 fn spawn_menu_overlay(mut commands: Commands) {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Look {
-        menu_scrim_srgba: crate::provenance::Sourced<(u8, u8, u8, u8)>,
-    }
-    let look: Look = crate::provenance::from_shipped_str(
-        "assets/ui/overlay.ron",
-        include_str!("../assets/ui/overlay.ron"),
-    )
-    .unwrap_or_else(|error| panic!("{error}"));
-    let (r, g, b, a) = look.menu_scrim_srgba.0;
+    let (r, g, b, a) = look::get().menu_scrim_srgba.0;
     commands.spawn((
         OverlayNode(Overlay::Menu),
         Node {

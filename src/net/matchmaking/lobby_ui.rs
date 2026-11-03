@@ -18,20 +18,11 @@ use super::ticket::{self, Phase};
 use super::worker::WorkerLink;
 use super::{Lobby, Locations};
 use crate::flow::{Flow, FlowScoped};
+use crate::overlay::look;
 use crate::ui_font::{MODAL_BG, TEXT, TEXT_DIM, UiFonts};
 
-const CARD_WIDTH_PX: f32 = 620.0;
-const TITLE_PX: f32 = 34.0;
-const ROW_PX: f32 = 19.0;
-const SMALL_PX: f32 = 15.0;
-/// The lobby scrim: the world behind it loads but is not yet anyone's view.
-const SCRIM: Color = Color::srgba(0.01, 0.02, 0.03, 0.94);
-const ROW_HOVER: Color = Color::srgba(0.85, 0.95, 1.0, 0.08);
-const BUTTON: Color = Color::srgb(0.16, 0.30, 0.38);
-const BUTTON_HOVER: Color = Color::srgb(0.22, 0.40, 0.50);
-const BUTTON_DISABLED: Color = Color::srgb(0.12, 0.15, 0.18);
-/// The HUD family's amber (`net::debug_hud`'s warn literal).
-const WARN: Color = Color::srgb(1.0, 0.8, 0.3);
+// Resolution: full-parent extents let flex layout position the card and its rows.
+const FILL_PARENT: Val = Val::Percent(100.0);
 
 /// What a click on this node does.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
@@ -107,28 +98,29 @@ fn font(handle: &Handle<Font>, px: f32) -> TextFont {
 }
 
 pub(super) fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
+    let look = &look::get().lobby;
     commands
         .spawn((
             FlowScoped(Flow::Lobby),
             Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
+                width: FILL_PARENT,
+                height: FILL_PARENT,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(SCRIM),
+            BackgroundColor(look::color(look.scrim_srgba)),
         ))
         .with_children(|scrim| {
             scrim
                 .spawn((
                     Node {
-                        width: Val::Px(CARD_WIDTH_PX),
-                        max_height: Val::Percent(90.0),
-                        padding: UiRect::all(Val::Px(22.0)),
-                        border_radius: BorderRadius::all(Val::Px(6.0)),
+                        width: Val::Px(look.card_width_px.0),
+                        max_height: Val::Percent(look.card_max_height_percent.0),
+                        padding: UiRect::all(Val::Px(look.card_padding_px.0)),
+                        border_radius: BorderRadius::all(Val::Px(look.card_radius_px.0)),
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(12.0),
+                        row_gap: Val::Px(look.card_row_gap_px.0),
                         overflow: Overflow::clip_y(),
                         ..default()
                     },
@@ -136,7 +128,7 @@ pub(super) fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
                 ))
                 .with_children(|card| {
                     card.spawn(Node {
-                        width: Val::Percent(100.0),
+                        width: FILL_PARENT,
                         justify_content: JustifyContent::SpaceBetween,
                         align_items: AlignItems::Baseline,
                         ..default()
@@ -144,21 +136,21 @@ pub(super) fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
                     .with_children(|header| {
                         header.spawn((
                             Text::new("OVERMATCH"),
-                            font(&fonts.hud, TITLE_PX),
+                            font(&fonts.hud, look.title_px.0),
                             TextColor(TEXT),
                         ));
                         header.spawn((
                             Text::new(format!("VERSION {}", super::super::CLIENT_VERSION)),
-                            font(&fonts.body, SMALL_PX),
+                            font(&fonts.body, look.small_px.0),
                             TextColor(TEXT_DIM),
                         ));
                     });
                     card.spawn((
                         LobbyList,
                         Node {
-                            width: Val::Percent(100.0),
+                            width: FILL_PARENT,
                             flex_direction: FlexDirection::Column,
-                            row_gap: Val::Px(2.0),
+                            row_gap: Val::Px(look.list_row_gap_px.0),
                             overflow: Overflow::clip_y(),
                             ..default()
                         },
@@ -166,13 +158,13 @@ pub(super) fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
                     card.spawn((
                         StatusLine,
                         Text::new(""),
-                        font(&fonts.body, ROW_PX),
+                        font(&fonts.body, look.row_px.0),
                         TextColor(TEXT),
                     ));
                     card.spawn(Node {
-                        width: Val::Percent(100.0),
+                        width: FILL_PARENT,
                         justify_content: JustifyContent::FlexEnd,
-                        column_gap: Val::Px(10.0),
+                        column_gap: Val::Px(look.footer_gap_px.0),
                         ..default()
                     })
                     .with_children(|buttons| {
@@ -184,19 +176,28 @@ pub(super) fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
 }
 
 fn button(parent: &mut ChildSpawnerCommands, fonts: &UiFonts, target: Target, label: &str) {
+    let look = &look::get().lobby;
+    let button = &look::get().action_button;
     parent
         .spawn((
             target,
             Hovered::default(),
             Node {
-                padding: UiRect::axes(Val::Px(26.0), Val::Px(8.0)),
-                border_radius: BorderRadius::all(Val::Px(4.0)),
+                padding: UiRect::axes(
+                    Val::Px(button.padding_x_px.0),
+                    Val::Px(button.padding_y_px.0),
+                ),
+                border_radius: BorderRadius::all(Val::Px(button.radius_px.0)),
                 justify_content: JustifyContent::Center,
                 ..default()
             },
-            BackgroundColor(BUTTON),
+            BackgroundColor(look::color(look.button_srgba)),
         ))
-        .with_child((Text::new(label), font(&fonts.hud, 22.0), TextColor(TEXT)));
+        .with_child((
+            Text::new(label),
+            font(&fonts.hud, button.label_px.0),
+            TextColor(TEXT),
+        ));
 }
 
 /// A fixed-width cell, right-aligned unless `width` is `None` (then it takes the free space).
@@ -214,6 +215,7 @@ fn cell(
             ..default()
         },
         None => Node {
+            // Resolution: give the label all space left by the fixed-width cells.
             flex_grow: 1.0,
             ..default()
         },
@@ -223,24 +225,19 @@ fn cell(
         .with_child((Text::new(text), font, TextColor(color)));
 }
 
-const TICK_W: f32 = 30.0;
-const PING_W: f32 = 110.0;
-const SPREAD_W: f32 = 70.0;
-const MATCHES_W: f32 = 90.0;
-const CHEVRON_W: f32 = 22.0;
-
 fn row_node(indent: f32) -> Node {
+    let look = &look::get().lobby;
     Node {
-        width: Val::Percent(100.0),
+        width: FILL_PARENT,
         align_items: AlignItems::Center,
-        column_gap: Val::Px(8.0),
+        column_gap: Val::Px(look.row_gap_px.0),
         padding: UiRect {
-            left: Val::Px(8.0 + indent),
-            right: Val::Px(8.0),
-            top: Val::Px(5.0),
-            bottom: Val::Px(5.0),
+            left: Val::Px(look.row_padding_x_px.0 + indent),
+            right: Val::Px(look.row_padding_x_px.0),
+            top: Val::Px(look.row_padding_y_px.0),
+            bottom: Val::Px(look.row_padding_y_px.0),
         },
-        border_radius: BorderRadius::all(Val::Px(4.0)),
+        border_radius: BorderRadius::all(Val::Px(look.row_radius_px.0)),
         ..default()
     }
 }
@@ -253,10 +250,12 @@ fn spawn_group(
     expanded: bool,
     editable: bool,
 ) {
+    let look = &look::get().lobby;
     let tick_color = if editable { TEXT } else { TEXT_DIM };
     list.spawn((
         Target::GroupExpand(group.continent.clone()),
         Hovered::default(),
+        // Resolution: group rows align with the list's leading edge.
         row_node(0.0),
         BackgroundColor(Color::NONE),
     ))
@@ -265,48 +264,48 @@ fn spawn_group(
             Target::GroupTick(group.continent.clone()),
             Hovered::default(),
             Node {
-                width: Val::Px(TICK_W),
+                width: Val::Px(look.tick_width_px.0),
                 ..default()
             },
         ))
         .with_child((
             Text::new(picker::group_tick(group, selection).glyph()),
-            font(&fonts.hud, ROW_PX),
+            font(&fonts.hud, look.row_px.0),
             TextColor(tick_color),
         ));
         cell(
             row,
             None,
             printable(&group.continent).to_uppercase(),
-            font(&fonts.hud, ROW_PX),
+            font(&fonts.hud, look.row_px.0),
             TEXT,
         );
         cell(
             row,
-            Some(PING_W),
+            Some(look.ping_width_px.0),
             picker::group_ping_label(group),
-            font(&fonts.body, ROW_PX),
+            font(&fonts.body, look.row_px.0),
             TEXT,
         );
         cell(
             row,
-            Some(SPREAD_W),
+            Some(look.spread_width_px.0),
             "",
-            font(&fonts.body, SMALL_PX),
+            font(&fonts.body, look.small_px.0),
             TEXT_DIM,
         );
         cell(
             row,
-            Some(MATCHES_W),
+            Some(look.matches_width_px.0),
             picker::matches_label(group.matches),
-            font(&fonts.body, ROW_PX),
+            font(&fonts.body, look.row_px.0),
             TEXT_DIM,
         );
         cell(
             row,
-            Some(CHEVRON_W),
+            Some(look.chevron_width_px.0),
             if expanded { "–" } else { "+" },
-            font(&fonts.hud, ROW_PX),
+            font(&fonts.hud, look.row_px.0),
             TEXT_DIM,
         );
     });
@@ -322,48 +321,54 @@ fn spawn_group(
         list.spawn((
             Target::Location(location.id.clone()),
             Hovered::default(),
-            row_node(TICK_W),
+            row_node(look.tick_width_px.0),
             BackgroundColor(Color::NONE),
         ))
         .with_children(|row| {
             row.spawn(Node {
-                width: Val::Px(TICK_W),
+                width: Val::Px(look.tick_width_px.0),
                 ..default()
             })
             .with_child((
                 Text::new(ticked.glyph()),
-                font(&fonts.hud, ROW_PX),
+                font(&fonts.hud, look.row_px.0),
                 TextColor(tick_color),
             ));
             cell(
                 row,
                 None,
                 printable(&location.label),
-                font(&fonts.body, ROW_PX),
+                font(&fonts.body, look.row_px.0),
                 TEXT,
             );
             cell(
                 row,
-                Some(PING_W),
+                Some(look.ping_width_px.0),
                 picker::estimate_label(&location.estimate),
-                font(&fonts.body, ROW_PX),
+                font(&fonts.body, look.row_px.0),
                 TEXT,
             );
             cell(
                 row,
-                Some(SPREAD_W),
+                Some(look.spread_width_px.0),
                 picker::spread_label(&location.estimate),
-                font(&fonts.body, SMALL_PX),
+                font(&fonts.body, look.small_px.0),
                 TEXT_DIM,
             );
             cell(
                 row,
-                Some(MATCHES_W),
+                Some(look.matches_width_px.0),
                 picker::matches_label(location.matches),
-                font(&fonts.body, ROW_PX),
+                font(&fonts.body, look.row_px.0),
                 TEXT_DIM,
             );
-            cell(row, Some(CHEVRON_W), "", font(&fonts.hud, ROW_PX), TEXT_DIM);
+            cell(
+                row,
+                Some(look.chevron_width_px.0),
+                "",
+                font(&fonts.hud, look.row_px.0),
+                TEXT_DIM,
+            );
         });
     }
 }
@@ -388,6 +393,7 @@ pub(super) fn refresh_list(
     lists: Query<Entity, With<LobbyList>>,
     mut shown: Local<Option<(Entity, ListView)>>,
 ) {
+    let look = &look::get().lobby;
     let list_entity = lists.single().expect(LOBBY_SPAWNED);
     let view = list_view(&lobby);
     if shown
@@ -402,18 +408,18 @@ pub(super) fn refresh_list(
         ListView::Loading => {
             list.spawn((
                 Text::new("Contacting the matchmaker…"),
-                font(&fonts.body, ROW_PX),
+                font(&fonts.body, look.row_px.0),
                 TextColor(TEXT_DIM),
             ));
         }
         ListView::Failed(reason) => {
             list.spawn((
                 Text::new(printable(reason)),
-                font(&fonts.body, ROW_PX),
-                TextColor(WARN),
+                font(&fonts.body, look.row_px.0),
+                TextColor(look::color(look.warn_srgba)),
             ));
             list.spawn(Node {
-                margin: UiRect::top(Val::Px(8.0)),
+                margin: UiRect::top(Val::Px(look.retry_margin_px.0)),
                 ..default()
             })
             .with_children(|row| button(row, &fonts, Target::Retry, "RETRY"));
@@ -427,7 +433,7 @@ pub(super) fn refresh_list(
             if groups.is_empty() {
                 list.spawn((
                     Text::new("No regions are available for this version."),
-                    font(&fonts.body, ROW_PX),
+                    font(&fonts.body, look.row_px.0),
                     TextColor(TEXT_DIM),
                 ));
             }
@@ -448,6 +454,7 @@ pub(super) fn refresh_list(
 
 /// The status line's text and colour for the current lobby state.
 fn status(lobby: &Lobby, now: f64) -> (String, Color) {
+    let look = &look::get().lobby;
     let flow = &lobby.flow;
     if let Phase::Connecting { .. } = flow.phase() {
         return ("Connecting to the match server…".into(), TEXT);
@@ -456,7 +463,10 @@ fn status(lobby: &Lobby, now: f64) -> (String, Color) {
         return (format!("{label}  {}", ticket::clock_label(elapsed)), TEXT);
     }
     if let Some(reason) = flow.failure() {
-        return (format!("Couldn't join: {}", printable(reason)), WARN);
+        return (
+            format!("Couldn't join: {}", printable(reason)),
+            look::color(look.warn_srgba),
+        );
     }
     if let Some(reason) = flow.ended() {
         return (format!("Match server lost: {}", printable(reason)), TEXT);
@@ -475,6 +485,7 @@ pub(super) fn refresh_footer(
     mut lines: Query<(&mut Text, &mut TextColor), With<StatusLine>>,
     mut buttons: Query<(&Target, &Hovered, &mut Node, &mut BackgroundColor)>,
 ) {
+    let look = &look::get().lobby;
     let (text, color) = status(&lobby, time.elapsed_secs_f64());
     let (mut line_text, mut line_color) = lines.single_mut().expect(LOBBY_SPAWNED);
     if line_text.0 != text {
@@ -502,11 +513,11 @@ pub(super) fn refresh_footer(
             node.display = display;
         }
         let fill = match (row, enabled, hovered.get()) {
-            (true, _, true) => ROW_HOVER,
+            (true, _, true) => look::color(look.row_hover_srgba),
             (true, _, false) => Color::NONE,
-            (false, false, _) => BUTTON_DISABLED,
-            (false, true, true) => BUTTON_HOVER,
-            (false, true, false) => BUTTON,
+            (false, false, _) => look::color(look.button_disabled_srgba),
+            (false, true, true) => look::color(look.button_hover_srgba),
+            (false, true, false) => look::color(look.button_srgba),
         };
         background.set_if_neq(BackgroundColor(fill));
     }

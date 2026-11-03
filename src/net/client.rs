@@ -1078,6 +1078,7 @@ fn close_lost_match(
 /// before the cursor owner derives the input license from the set.
 pub(super) fn connect_screen_plugin(app: &mut App) {
     use crate::flow::{Flow, InMatchSystems};
+    crate::overlay::look::get();
     app.init_resource::<ConnectRetry>()
         .add_systems(Startup, spawn_connect_status)
         .add_systems(OnEnter(Flow::Joining), spawn_joining_screen)
@@ -1111,7 +1112,9 @@ fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
         ),
         RECONNECT_LABEL,
         ConnectStatusText,
-        Some(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+        Some(crate::overlay::look::color(
+            crate::overlay::look::get().connect_scrim_srgba,
+        )),
     );
 }
 
@@ -1123,7 +1126,9 @@ fn spawn_joining_screen(mut commands: Commands, fonts: Res<UiFonts>, retry: Res<
         crate::flow::FlowScoped(crate::flow::Flow::Joining),
         screen_label(&retry),
         JoiningText,
-        Some(Color::srgb(0.01, 0.02, 0.03)),
+        Some(crate::overlay::look::color(
+            crate::overlay::look::get().joining_scrim_srgba,
+        )),
     );
 }
 
