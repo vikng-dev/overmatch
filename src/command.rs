@@ -1103,35 +1103,36 @@ mod tests {
         }
     }
 
-    /// The Driver consumes a signed persistent lever, not a direction key. Stepping down from
-    /// cruise must not request opposing intent during the tap window, on either axis.
+    /// The Driver sees neutral on an opposing tap from any notch, then the first notch in
+    /// the new direction on the next tap, independently for throttle and steering.
     #[test]
-    fn taps_step_both_signed_levers_without_flashing_opposing_intent() {
+    fn an_opposing_tap_neutralizes_each_axis_before_the_next_reverses_it() {
         let feel = crate::track::drive::drive_feel();
-        // Fixture: two increments, then enough decrements to cross neutral.
         for (positive, negative, throttle) in [
             (KeyCode::KeyW, KeyCode::KeyS, true),
             (KeyCode::KeyD, KeyCode::KeyA, false),
         ] {
-            let mut script = DriveKeys::new();
-            let axis =
-                |v: crate::track::drive::DriveAxes| if throttle { v.throttle } else { v.steer };
-            let step = feel.notch_step();
-            assert_eq!(axis(script.tap(positive)), step);
-            let mut expected = (2.0 * step).min(1.0);
-            assert_eq!(axis(script.tap(positive)), expected);
-            for index in 1..=3 {
-                expected = (2.0 - index as f32) / f32::from(feel.notch_count.0);
-                script.press(negative);
-                assert_eq!(axis(script.gather(0.0)), expected);
-                assert_eq!(axis(script.gather(feel.tap_window_s.0 / 2.0)), expected);
-                script.release(negative);
-                assert_eq!(axis(script.gather(0.0)), expected);
-                assert_eq!(
-                    axis(script.gather(feel.tap_window_s.0)),
-                    expected,
-                    "notch persists"
-                );
+            for (key, opposing, sign) in [(positive, negative, 1.0), (negative, positive, -1.0)] {
+                for index in 1..=feel.notch_count.0 {
+                    let mut script = DriveKeys::new();
+                    let axis = |v: crate::track::drive::DriveAxes| {
+                        if throttle { v.throttle } else { v.steer }
+                    };
+                    for _ in 0..index {
+                        script.tap(key);
+                    }
+                    assert_eq!(
+                        axis(script.gather(0.0)),
+                        sign * f32::from(index) / f32::from(feel.notch_count.0)
+                    );
+                    script.press(opposing);
+                    assert_eq!(axis(script.gather(0.0)), 0.0);
+                    assert_eq!(axis(script.gather(feel.tap_window_s.0 / 2.0)), 0.0);
+                    script.release(opposing);
+                    assert_eq!(axis(script.gather(0.0)), 0.0);
+                    assert_eq!(axis(script.gather(feel.tap_window_s.0)), 0.0);
+                    assert_eq!(axis(script.tap(opposing)), -sign * feel.notch_step());
+                }
             }
         }
     }
@@ -1250,27 +1251,32 @@ mod tests {
         );
     }
 
-    /// The Driver must get neutral on the first opposing hold tick, rather than another tick
-    /// asking for forward motion. This covers the production gather-to-shaper boundary.
+    /// An opposing hold overrides the neutral tap after the window on either axis; the
+    /// Driver's shaper still crosses neutral before serving the held direction.
     #[test]
-    fn a_reversal_hold_snaps_on_its_first_tick_after_the_tap_window() {
+    fn opposing_holds_override_the_neutral_tap_on_both_axes() {
         use crate::track::drive::{DriveAxes, drive_feel, shape_drive};
-        let mut script = DriveKeys::new();
-        script.tap(KeyCode::KeyW);
-        script.tap(KeyCode::KeyW);
-        script.press(KeyCode::KeyS);
-        let target = script.gather(0.0);
-        let axes = DriveAxes {
-            throttle: 0.5,
-            steer: 0.0,
-        }; // Fixture: forward cruise.
-        assert_eq!(
-            target.throttle,
-            (2.0 * drive_feel().notch_step()).min(1.0) - drive_feel().notch_step()
-        );
-        let held = script.gather(drive_feel().tap_window_s.0);
-        assert_eq!(held.throttle, -1.0);
-        assert_eq!(shape_drive(axes, held, 1.0 / 64.0).throttle, 0.0); // Fixture tick.
+        let feel = drive_feel();
+        for (key, opposing, throttle, sign) in [
+            (KeyCode::KeyW, KeyCode::KeyS, true, 1.0),
+            (KeyCode::KeyS, KeyCode::KeyW, true, -1.0),
+            (KeyCode::KeyD, KeyCode::KeyA, false, 1.0),
+            (KeyCode::KeyA, KeyCode::KeyD, false, -1.0),
+        ] {
+            let mut script = DriveKeys::new();
+            let axis = |v: DriveAxes| if throttle { v.throttle } else { v.steer };
+            // Fixture: an opposing press from two same-direction taps.
+            script.tap(key);
+            let current = script.tap(key);
+            assert_eq!(axis(current), sign * (2.0 * feel.notch_step()).min(1.0));
+            script.press(opposing);
+            assert_eq!(axis(script.gather(0.0)), 0.0);
+            let held = script.gather(feel.tap_window_s.0);
+            assert_eq!(axis(held), -sign);
+            assert_eq!(axis(shape_drive(current, held, 1.0 / 64.0)), 0.0); // Fixture tick.
+            script.release(opposing);
+            assert_eq!(axis(script.gather(0.0)), 0.0);
+        }
     }
 
     /// Real devices may deliver both edges in one frame. That tap still counts once, and the

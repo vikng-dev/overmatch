@@ -77,11 +77,16 @@ impl DriveFeel {
         1.0 / f32::from(self.notch_count.0)
     }
 
-    /// Step on the integer lattice so rounding never accumulates between taps.
+    /// Opposing taps return to neutral; same-direction taps use the integer lattice so
+    /// rounding never accumulates between taps.
     pub(crate) fn tap_notch(&self, current: f32, positive: bool) -> f32 {
         let count = f32::from(self.notch_count.0);
         let sign = if positive { 1.0 } else { -1.0 };
-        ((current * count).round() + sign).clamp(-count, count) / count
+        if current * sign < 0.0 {
+            0.0
+        } else {
+            ((current * count).round() + sign).clamp(-count, count) / count
+        }
     }
 }
 
