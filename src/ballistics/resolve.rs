@@ -67,16 +67,17 @@ pub(crate) use playback::Playback;
 #[cfg(test)]
 mod tests;
 
-/// How far past first contact the first corridor reaches. Most crossings close well inside it; the
-/// driver extends when they do not, so this is a starting guess, not a limit.
+/// Resolution: how far (m) past first contact the first corridor reaches. Most crossings close well
+/// inside it; the driver extends when they do not, so it sets work, never an outcome.
 pub(super) const ENTRANCE_SPAN: f32 = 0.5;
 
-/// The game's damage model: spatial reach of a field throw (ASSUMED metres), also used as an
-/// initial discovery guess for held material. Material corridors extend independently of it.
+/// The game's damage model. Resolution: how far (m, ASSUMED) a field throw is evaluated, also used
+/// as an initial discovery guess for held material. Material corridors extend independently of it.
 pub(crate) const FIELD_REACH: f32 = 50.0;
 
-/// The game's damage model: chosen ceiling on discovery decisions per step (ASSUMED work bound).
-/// A decision may collect arbitrarily many faces; this bounds successive decisions, not geometry.
+/// The game's damage model. Resolution: ceiling on discovery decisions per step, an ASSUMED work
+/// bound. A decision may collect arbitrarily many faces; this bounds successive decisions, not
+/// geometry.
 pub(crate) const MAX_STEP_CROSSINGS: usize = 4096;
 
 /// The crossing ceiling a world's steps run under in place of [`MAX_STEP_CROSSINGS`], when it names
@@ -135,7 +136,7 @@ impl Budget {
     }
 }
 
-/// Below this calibre the disc degenerates to its axis (`k = 1`).
+/// Resolution: below this calibre the disc degenerates to its axis (`k = 1`), saving ring casts.
 ///
 /// The ring sits at `calibre / 2`, so for an MG round it is 4 mm from the axis — inside the geometry
 /// tolerance of everything it can meet, and §13.5 already says a fragment IS a shell with `r → 0`.
@@ -291,9 +292,10 @@ pub(crate) fn layout(frame: &DiscFrame, radius: f32) -> Vec<Vec3> {
     }
 }
 
-/// Resolution: how far (m) a sliding round's lowest sample stands off the face it rests on. It
-/// exceeds the collector's sitting reach (at most a quarter of [`MARCH_EPS`],
-/// `collect::sitting_reach`), so a ray running along the face owns no crossing of it by rounding.
+/// Resolution: clearance (m) above [`resting_height`] targeted by a skid. It exceeds the collector's
+/// sitting reach (at most a quarter of [`MARCH_EPS`], `collect::sitting_reach`), preventing rounded
+/// crossings along a resting face. An axis-only round can instead target this clearance alone
+/// ([`skid_turn`]); within it, that branch ends the round. Thus clearance also bounds that stop band.
 pub(crate) const REST_CLEARANCE: f32 = MARCH_EPS;
 
 /// Resolution: how far (m) before first touch a live contact opens. It exceeds the collector's
@@ -468,8 +470,10 @@ pub(super) const PROBE_MARGIN: f32 = MARCH_EPS;
 /// ray then ends outside the candidates' bounds `lo..hi` grown by [`PROBE_MARGIN`].
 ///
 /// World bounds are rounded, so a face a ray runs along can lie a hair past them, and a start can
-/// stand past them inside that face. Only the grown box is sure to hold every face: past the first
-/// grown slab a ray leaves, it is outside everything.
+/// stand past them inside that face. The grown box holds every face while that rounding stays under
+/// [`PROBE_MARGIN`]: past the first grown slab a ray leaves, it is outside everything. DERIVED:
+/// f32 spacing alone is 9.8e-4 m at 8192 m, nearly exhausting the margin; this is no unbounded-world
+/// containment guarantee.
 fn probe_reach(offsets: &[Vec3], axis: Vec3, lo: Vec3, hi: Vec3) -> (f32, f32) {
     let (lo, hi) = (lo - PROBE_MARGIN, hi + PROBE_MARGIN);
     let leave = |point: Vec3, direction: Vec3| {
@@ -501,8 +505,8 @@ fn probe_reach(offsets: &[Vec3], axis: Vec3, lo: Vec3, hi: Vec3) -> (f32, f32) {
 /// current as Avian's collider AABBs, which every corridor's broad phase relies on equally — and the
 /// probe reads only those whose bounds, grown by [`PROBE_MARGIN`], contain some sample's start.
 /// With none, every sample is outside everything. Otherwise each sample's ray is walked from a point
-/// outside all those candidates' bounds — a world AABB contains its collider — through its start to
-/// the far side of them, with nothing declared: the same collector and the same pairing walk as any
+/// outside all those candidates' grown bounds ([`probe_reach`]) through its start to the far side of
+/// them, with nothing declared: the same collector and the same pairing walk as any
 /// corridor, so a sample's membership is the parity of oriented crossings behind it, and the
 /// corridor must close or the walk errors. The seeds are read at the start
 /// ([`walk::RayWalk::inside_at`]), under the band that and the collector's hand-off clamp already
@@ -2286,8 +2290,9 @@ pub(super) fn closing_walk(
             Err(WalkError::IncompleteCorridor { .. }) => {}
             Err(_) => return result,
         }
-        // The game's damage model: every tree candidate is contained by its world AABB.
-        // Beyond their furthest support plane plus weld clearance there can be no new face.
+        // The game's damage model: every tree candidate lies within [`PROBE_MARGIN`] of its world
+        // AABB ([`probe_reach`]). Beyond the furthest support plane plus that margin and weld
+        // clearance there can be no new face.
         // Read this finite scene bound only when a corridor actually needs extension.
         let horizon = *horizon.get_or_init(|| {
             let direction = axis.as_dvec3();

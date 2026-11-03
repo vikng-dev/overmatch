@@ -2637,13 +2637,15 @@ fn contact_classes_on_the_shipped_hull() {
 
 // --- Reach on a real map -------------------------------------------------------------------------
 
-/// Slant ranges a volley is fired from, metres. A chosen spread of engagement distances, ASSUMED.
+/// Slant ranges a volley is fired from, metres. Fixture data: a chosen spread of engagement
+/// distances, ASSUMED.
 const REACH_RANGES: [f32; 4] = [60.0, 150.0, 300.0, 600.0];
 /// Flights per round and hull state in one slice, and flights per volley: a line round flies in
-/// long bursts, a disc round one shell at a time, so a slice flies many more of the first.
+/// long bursts, a disc round one shell at a time, so a slice flies many more of the first. Fixture
+/// data.
 const REACH_LINE: (usize, usize) = (6_000, 32);
 const REACH_DISC: (usize, usize) = (600, 12);
-/// Ticks a volley is followed: 3.1 s, past a 600 m flight and any skid off the hull.
+/// Ticks a volley is followed: 3.1 s, past a 600 m flight and any skid off the hull. Fixture data.
 const REACH_TICKS: usize = 200;
 /// A moving hull's speed, m/s, and yaw rate, rad/s: the top of each drawn range. Fixture data.
 const REACH_SPEED: f32 = 12.0;
@@ -3185,8 +3187,9 @@ fn a_volley_along_a_long_face_flies_out() {
 
 /// The game's damage model: no shot ends the process through the march, on the aims that once did:
 /// line rounds whose start stood under their resting height over a face, and discs whose rim stayed
-/// on a face. A panic ends the server's whole match. Mutant: a line round turning at first touch
-/// with an ungrown probe box, or a blend angle read with `acos`.
+/// on a face. A panic ends the server's whole match, and an aim that no longer touches tests nothing.
+/// Mutant: a line round turning at first touch with an ungrown probe box, or a blend angle read with
+/// `acos`.
 #[test]
 fn the_shots_that_once_ended_the_process_fly() {
     let registry = crate::guns::GunRegistry::shipped();
@@ -3199,5 +3202,9 @@ fn the_shots_that_once_ended_the_process_fly() {
             .2;
         let flown = range.fly(&round, Vec3::from(*birth), Vec3::from(*post));
         assert_eq!(flown.panicked, None, "{arm} born at {birth:?}");
+        assert!(
+            flown.first().is_some(),
+            "{arm} born at {birth:?} no longer touches the hull"
+        );
     }
 }

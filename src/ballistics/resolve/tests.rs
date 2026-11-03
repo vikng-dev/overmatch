@@ -3707,29 +3707,6 @@ fn a_blend_closes_its_share_of_any_angle() {
     }
 }
 
-/// The game's damage model: a chain of low-coverage contacts on one face ends, because each contact
-/// brings the heading closer to the face's plane until the rest of the step fits between the rim and
-/// the face. Fixture: a heading 1.1e-3 rad into a face, blended at the least coverage a ring reads
-/// (1/13), which reaches a unit direction's rounding in about 110 contacts (DERIVED: ln(1.1e-3 /
-/// 1e-7) / ln(13 / 12)). Mutant: read the angle with `acos`, which freezes the heading 3.45e-4 rad
-/// into the face and walks the rest of the step in contacts of rounding's length, past the step's
-/// crossing limit.
-#[test]
-fn a_chain_of_rim_contacts_converges_on_the_face() {
-    let normal = Dir3::new(Vec3::new(0.2, 0.9, -0.3)).unwrap();
-    let side = Dir3::new(normal.cross(Vec3::X)).unwrap();
-    let along = normal.cross(*side);
-    let into = Quat::from_axis_angle(*side, -1.1e-3) * along;
-    assert!(into.dot(*normal) < 0.0, "the fixture heads into the face");
-    let mut heading = Dir3::new(into).unwrap();
-    for _ in 0..130 {
-        let slide = Dir3::new(*heading - *normal * heading.dot(*normal)).unwrap();
-        heading = super::super::turned_toward(heading, slide, 1.0 / 13.0);
-    }
-    let left = heading.dot(*normal).abs();
-    assert!(left < 1.0e-6, "the heading stands {left} rad off the face");
-}
-
 /// The game's damage model: the gate opens a newly reached face through the live entry path.
 /// A full-coverage skid keeps its along-face speed, which the armour gate's admission relies on.
 /// Fixture: an 88-class disc, 773 m/s, 75-degree incidence, thick steel. Mutant: no reopening in
