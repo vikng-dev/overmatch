@@ -108,6 +108,11 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | ballistics-29 | P3 | `src/ballistics/collect.rs::a_t_junction_cracks_only_within_its_own_rounding` | testing: Historical oracle | At most 1 % misses; the rounding argument beside it never derives that share. | Derive the share from the rounding bound, or print it. | ratchet |
 | ballistics-30 | P3 | `assets/ballistics/spall_cone.ron::cone_emitted_hp_per_joule` | base-truths: Retrospective calibration | The unit is set against a retired reference cone of 395 HP, a target with no remaining owner. | State the crew-station outcome it aims at as a balance decision, or replace it with the fragment-hit law it names. | ratchet |
 
+| ballistics-31 | P3 | `src/ballistics.rs::HP_PER_REFERENCE_MM` | base-truths: Bare number in code | The game's damage model compiles an authored crew-line game-unit scale into Rust and calls it Resolution, although it scales HP dose rather than solver accuracy. | Give the required game-unit scale a provenance-bearing data owner and read it at the conversion edge. | ratchet |
+| ballistics-32 | P3 | `src/ballistics.rs::STALE_FIRE_TICKS` | base-truths: Bare number in code | The game's damage-model view compiles a cosmetic cue-age taste into Rust without provenance-bearing presentation data. | Source the required age limit from presentation data naming its muzzle-cue effect family. | ratchet |
+
+| ballistics-33 | P3 | `src/ballistics.rs::MarchTick::deposit`, `strike_ground` | code-branching: Kept alternative | The game's damage model constructs `MarchTick` only after replicas return, yet it retains a false-deposit cosmetic trace arm and redundant role branches in the authority march. | Remove the runtime tick's unreachable cosmetic role; client lifecycle recording remains in public-path presentation, and read-only resolver contexts remain available to instruments. | ratchet |
+
 ## driving
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |

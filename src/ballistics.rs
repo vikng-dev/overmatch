@@ -1,4 +1,6 @@
-//! Shared shell flight, collision queries, penetration, and impacts.
+//! The game's damage model: shell flight, penetration, dose and impact events; game state only.
+//! [`sim_plugin`] mounts authority resolution; [`view_plugin`] mounts client presentation.
+//! Design narrative: `.agents/docs/design/armor-penetration-and-damage.md`.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,32 +21,25 @@ use crate::terrain_grid::HeightGrid;
 use crate::{ClientReplica, Layer, ShotClock, ShotId};
 
 pub(crate) mod path;
-/// Server-sanctioned outcome bookkeeping: the client's reconciliation buffer and the bounded
-/// catch-up that replays it into a drawable flight. Netcode, not ballistics — the flight,
-/// penetration and spall math below never reads it.
+/// Client reconciliation buffer and bounded catch-up for drawable flight; resolution never reads it.
 mod sanctioned;
 pub(crate) use path::{FlightOutcome, PathClock};
 
-/// The §13 union field walk — the pure resolution core (overlaps charge their union, micro-gaps
-/// ε-weld, the shell samples the world as a caliber-wide disc). The march runs it through
-/// `resolve::decide`, the Avian adapter that collects the corridor. Everything in there
-/// is a pure function over pre-collected hit lists, which is what makes the §13.6 invariants
-/// testable to the bit.
+/// Pure resolution over collected hits: union charging, ε-welded micro-gaps and a caliber-wide
+/// disc (§13). [`resolve::decide`] adapts the live world; §13.6 invariants are bit-testable here.
 mod walk;
 pub(crate) use walk::VolumeMaterial;
 
 /// The game's damage model: shared environment and cavity-law stand-ins.
 use crate::physical_laws;
 
-/// Round mechanisms: how a round's state advances through the ordered encounters of a crossing.
-/// Solid shot is the only one built.
+/// Solid-shot state across ordered crossing encounters (the only round mechanism).
 mod mechanism;
 
 /// A burst round's derived burst and the fuze that times it.
 pub(crate) mod burst;
 
-/// The spall cone's shape data (half-angle, axis rule and the directions it is sampled by), the
-/// energy a field carries and each field mechanism's HP-per-joule unit.
+/// Cone shape (half-angle, axis, sampling), field energy and mechanism-specific HP-per-joule units.
 pub(crate) mod spall_cone;
 
 /// The energy-to-HP rate every dose of energy converts at: joules per HP point.
@@ -53,27 +48,24 @@ pub(crate) mod energy_dose;
 /// The game's damage model: the shared authored crew HP pool and geometry-based pen cam bands.
 pub(crate) mod box_classes;
 
-/// The §13 walk driven against the live world: corridor collection, the staged `begin`/`finish`, and
-/// the mapping from its declarative plan onto this module's impacts, spall, damage and impulses.
+/// Live §13 adapter: corridor collection, staged `begin`/`finish`, and plan-to-effect mapping.
 mod resolve;
 
 /// The witness pass (ADR-0040): the round's line and the field's directions intersected with the
 /// witness volumes the hard world never sees.
 mod wound;
 
-/// The spatial half of the §13 walk: turning a corridor of world rays into EVERY face crossing along
-/// them, with each face's true (winding) orientation. Avian's own all-hits query cannot express it —
-/// see the module doc.
+/// Every face crossing along world rays, with winding orientation; the module doc explains why
+/// Avian's all-hits query cannot express this.
 mod collect;
 pub(crate) use collect::convex_interval;
 
 mod motion;
 pub(crate) mod plate_capacity;
 
-/// The §13.6 ray fuzzer: random rays at the BOUND tank, the union-field invariants machine-checked,
-/// and every corridor reaching crew or ammunition reported with its admitting caliber and per-caliber
-/// η. A corridor fails the gate by name, unconditionally: an effectively unarmoured route into the
-/// tank is a defect in the model.
+/// §13.6 fuzzer at the bound tank: checks union-field invariants and reports corridors reaching
+/// crew HP pools or ammunition with admitting caliber and per-caliber η. Effectively unarmoured
+/// routes fail by name, unconditionally.
 pub mod fuzz;
 
 /// The spall-cone casts digested to the bit and compared with a pinned digest, run on every
@@ -86,8 +78,8 @@ mod field_casts;
 #[cfg(test)]
 mod pen_cam;
 
-/// The crew-outcome sweep (ignored; run on demand): random main-gun hits on the bound tank under
-/// the witness law and the law it replaced, counted per crewman.
+/// The game's damage-model outcome sweep (ignored; on demand): random hits by station,
+/// direction-count comparisons and aimed shot sequences to tank knockout.
 #[cfg(test)]
 mod crew_sweep;
 
@@ -101,9 +93,8 @@ mod contact_classes;
 #[cfg(test)]
 mod recording_tests;
 
-/// The PRESENTATION half of this module: the shell scene, the tracer streak, and the visibility a
-/// hold draws with. Mounted by the client roots alone ([`view::plugin`]) — the dedicated server
-/// composes [`sim_plugin`] and therefore opens no view artifact and emits no render component.
+/// Client-only shell scenes, tracers and hold visibility ([`view::plugin`]). The dedicated server
+/// mounts only [`sim_plugin`], opening no view artifact and emitting no render component.
 mod view;
 
 #[cfg(test)]
@@ -131,14 +122,11 @@ fn form_per_drag_coefficient() -> f64 {
     physical_laws::PhysicalLaws::shipped().air_density * std::f64::consts::PI / 8.0
 }
 
-/// The drag law: the form a round flies on (form units, the drag coefficient × ρπ/8 of
-/// [`form_per_drag_coefficient`]) is a base share plus a nose share × its flight nose's factor
-/// ([`NoseShape::factor`], the factor the force law reads off a hit nose), so a pointed nose flies on
-/// less. Its parameters are data: the round-type table's `drag` block
-/// (`assets/ballistics/round_types.ron`) states the base drag coefficient and one anchor nose's
-/// form, each with its provenance, and the nose share is DERIVED so the anchor nose flies on its
-/// form to the bit. In f64 and cast once, so the cast rounds the form and not the factor. No Mach
-/// dependence, an accepted stand-in: a round flies on one form at every speed.
+/// Drag form = base + nose share × flight [`NoseShape::factor`]; a pointed nose flies on less.
+/// Form units are drag coefficient × ρπ/8 ([`form_per_drag_coefficient`]). The `drag` block in
+/// `assets/ballistics/round_types.ron` sources the base coefficient and an anchor nose's form.
+/// The nose share is DERIVED to reproduce that form to the bit. Evaluate in f64 and cast once,
+/// rounding the form rather than the factor. Stand-in: no Mach dependence.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DragLaw {
     base_form: f64,
@@ -196,9 +184,8 @@ pub fn drag_k(form: f32, caliber: f32, mass: f32) -> f32 {
     form * caliber * caliber / mass
 }
 
-/// The drag coefficient of a fixture round of `caliber` (m) and `mass` (kg) flying on
-/// [`FIXTURE_DRAG_NOSE`] under [`fixture_drag_law`]: the flight every test fixture flies, fixture
-/// data.
+/// Fixture drag coefficient for `caliber` (m), `mass` (kg) and [`FIXTURE_DRAG_NOSE`] under
+/// [`fixture_drag_law`].
 #[cfg(test)]
 pub(crate) fn fixture_drag_k(caliber: f32, mass: f32) -> f32 {
     drag_k(fixture_drag_law().form(FIXTURE_DRAG_NOSE), caliber, mass)
@@ -216,8 +203,8 @@ pub fn freeflight_step(velocity: Vec3, drag_k: f32, dt: f32) -> Vec3 {
     (v / speed) * (speed / (1.0 + drag_k * speed * dt))
 }
 
-/// The game's damage model: free-flight catch-up from the physical birth. Returns the caught-up state plus its path; callers must
-/// resolve any armor crossed by the skipped chords.
+/// The game's damage model: free-flight state and path from physical birth. Callers must resolve
+/// armor crossed by the skipped chords.
 ///
 /// Positionally equivalent to the live march's open air: the axis is carried as the march carries
 /// it, an anchor re-taken at each step's start plus an anchor-relative offset advanced by
@@ -260,9 +247,8 @@ fn elapsed_ticks(now: u32, then: u32) -> Option<u32> {
 /// or corrupt off the wire and fails closed rather than drawing a shortened, invented trajectory.
 pub(crate) const MAX_COSMETIC_CATCH_UP_TICKS: u32 = 100;
 
-/// Reference steel's material facts: the substance registry's `Reference` entry
-/// (`assets/materials/materials.ron`), parsed once from the embedded file — data, never an asset,
-/// so it is in hand synchronously wherever a round is bound.
+/// The registry's `Reference` facts (`assets/materials/materials.ron`), parsed once from embedded
+/// data and synchronously available wherever a round is bound.
 fn reference_steel() -> &'static crate::substances::MaterialFacts {
     static FACTS: std::sync::LazyLock<crate::substances::MaterialFacts> =
         std::sync::LazyLock::new(|| {
@@ -306,8 +292,7 @@ impl RoundBody {
     }
 }
 
-/// The force law's readout in reference-mm for a round of `terms` ([`RoundBody::terms_against`]) at
-/// `speed` m/s: `1000 · m / (2 A k) · ln(1 + k v² / a)`.
+/// Force-law readout (reference-mm) at `speed` (m/s), from [`RoundBody::terms_against`].
 ///
 /// The shell-state transcendentals (`ln(1 + x)` here, `exp(x) − 1` in [`speed_for`] and the
 /// mechanism, `ln` in the reference's cavity strength) are `libm`'s, not the platform's: the same
@@ -435,14 +420,11 @@ pub(crate) fn dose_units(dose: f32) -> u64 {
     (f64::from(dose) * DOSE_UNITS_PER_REFERENCE_MM as f64).round() as u64
 }
 
-/// One ENERGY dose contribution of `energy` joules in the dose units a box's total is kept in: the
-/// HP points the energy rate gives it ([`energy_dose::joules_per_hp`]) in units of
-/// [`DOSE_UNITS_PER_HP`], widened to f64 (exact), one IEEE division and multiply and a round to
-/// nearest, ties away from zero, so it is the same on every target. A hard box's line deposit and
-/// a bounce's shock enter a total through this; a field deposit through [`field_units`]. A deposit
-/// converts to the same units wherever it is summed (the shot's tally, the pen cam record's
-/// emptying deposit). Finite, nonnegative internal energy is required; a broken line deposit is a
-/// bug. The cast saturates a valid contribution above the accumulator's range.
+/// Convert `energy` (J) at [`energy_dose::joules_per_hp`] to [`DOSE_UNITS_PER_HP`] units for hard
+/// line deposits and bounce shock; fields use [`field_units`]. The shot tally and pen cam's
+/// emptying deposit use this same conversion: exact f64 widening, one IEEE division and multiply,
+/// nearest rounding with ties away from zero, identical on every target. Internal energy must be
+/// finite and nonnegative; a broken deposit is a bug. Valid contributions above the range saturate.
 pub(crate) fn energy_units(energy: f32) -> u64 {
     assert!(
         energy.is_finite() && energy >= 0.0,
@@ -451,15 +433,12 @@ pub(crate) fn energy_units(energy: f32) -> u64 {
     (f64::from(energy) / energy_dose::joules_per_hp() * DOSE_UNITS_PER_HP as f64).round() as u64
 }
 
-/// One FIELD dose contribution of `energy` joules (what a field's direction left in a box, a hard
-/// box's and a witness's alike) in dose units: the HP points its mechanism's unit `unit` gives it
-/// in units of [`DOSE_UNITS_PER_HP`], widened to f64 (exact), two IEEE multiplies and a round to
-/// nearest, ties away from zero, so it is the same on every target. The one place a field's joules
-/// become HP in the sim: the field itself carries only the energy its source put into it, which a
-/// building reads as crushing energy. A deposit converts to the same units wherever it is summed
-/// (the shot's tally, the pen cam record's ledger). Finite, nonnegative internal energy is
-/// required; a broken field deposit is a bug. The cast saturates a valid contribution above the
-/// accumulator's range.
+/// The sim's only field J-to-HP conversion: a direction's deposit in any box, hard or witness,
+/// at its mechanism's `unit`, in [`DOSE_UNITS_PER_HP`] units. The field carries source energy,
+/// which buildings read as crushing energy. Shot tally and pen cam ledger use this same conversion:
+/// exact f64 widening, two IEEE multiplies, nearest rounding with ties away from zero, identical
+/// on every target. Internal energy must be finite and nonnegative; a broken deposit is a bug.
+/// Contributions above the range saturate.
 pub(crate) fn field_units(energy: f32, unit: spall_cone::FieldUnit) -> u64 {
     assert!(
         energy.is_finite() && energy >= 0.0,
@@ -502,31 +481,22 @@ pub(crate) fn least_shown_hp() -> f64 {
     (DOSE_UNITS_PER_HP - DOSE_UNITS_PER_POOL_UNIT / 2) as f64 / DOSE_UNITS_PER_HP as f64
 }
 
-/// The pool units one dose of `dose` reference-mm (a witness's chord) converts to: [`dose_units`]
-/// then [`pool_units_of`], the conversion a box's per-shot total takes. Invalid internal dose
-/// fails the same invariant as every production deposit.
+/// Test witness-chord dose (reference-mm) through the production per-shot conversion and
+/// invalid-dose invariant.
 #[cfg(test)]
 pub(crate) fn pool_units(dose: f32) -> u32 {
     pool_units_of(dose_units(dose))
 }
 
-/// One shot's dose to each box it has reached, in whole dose units ([`dose_units`]), the pool units
-/// already taken for it and the pool units its pool actually lost. A box loses
-/// `pool_units_of(total)` over the shot, its total from the line, a bounce's shock and every spall
-/// cone summed first: each contribution quantized (a hard box's line deposit or a shock at the
-/// energy rate, [`energy_units`]; a field deposit at its mechanism's unit, [`field_units`]; a
-/// witness's chord at
-/// [`HP_PER_REFERENCE_MM`], [`dose_units`]), the integers summed, the sum converted to pool units
-/// once per box per shot, never per direction or per source, and never dependent on the order the
-/// contributions arrive in. No whole-point rounding happens here: a pool keeps every pool unit a
-/// shot takes, so doses below a point accumulate across shots. [`Self::settle`] takes what the
-/// running total has added since it last ran, so the pool falls as the shot goes and lands on the
-/// converted total when it ends.
+/// Per-shot, per-box dose totals and pool losses. Quantize each deposit through [`energy_units`]
+/// (hard line and shock), [`field_units`] (fields), or [`dose_units`] at [`HP_PER_REFERENCE_MM`]
+/// (witness chords), then sum integers independently of arrival order. Convert the total to pool
+/// units once per box per shot, never per direction or source. [`Self::settle`] takes each increase
+/// in that converted total; sub-point losses accumulate across shots without whole-point rounding.
 ///
-/// Every figure here is this shot's own, never a difference of pool HP: a march step resolves one
-/// shell whole before the next, and one settle closes each armour mark, so what a shell finds in a
-/// pool at a mark and takes from it there is its own even where other rounds dose the box between
-/// its marks ([`Settle`]).
+/// Figures belong to this shot, never a difference of pool HP. A march step resolves one shell
+/// before the next and each settle closes one armour mark, isolating its readings and losses even
+/// when other rounds dose the box between marks ([`Settle`]).
 ///
 /// Invariant: created with the projectile, never attached after replication. See ADR-0014.
 #[derive(Component, Default)]
@@ -536,9 +506,7 @@ pub(crate) struct ShotDose {
     emptied: Vec<Entity>,
 }
 
-/// A box's running dose this shot (dose units), the dose units its last settle took pool units
-/// for, whether a dose has been added since, and each settle that took a dose of its pool
-/// (authority only).
+/// A box's running and settled dose units, freshness and authority-only settlement history.
 struct BoxTally {
     address: Entity,
     units: u64,
@@ -558,7 +526,6 @@ pub(crate) enum DoseContext {
     Field { origin: Vec3 },
 }
 
-/// One deposit as the tally took it: its dose units and its context.
 #[derive(Clone, Copy, Debug)]
 struct Landed {
     units: u64,
@@ -581,12 +548,10 @@ pub(crate) struct Settle {
 }
 
 impl Settle {
-    /// This settle took the pool to zero.
     pub(crate) fn emptied(&self) -> bool {
         self.lost > 0 && self.lost == self.held
     }
 
-    /// The shown points ([`shown_lost`]) this settle took from the pool.
     pub(crate) fn shown_lost(&self) -> u32 {
         shown_lost(self.held, self.lost)
     }
@@ -605,7 +570,6 @@ impl ShotDose {
         self.add_units(address, energy_units(energy), context);
     }
 
-    /// Add `units` dose units to `address`'s dose, from `context`.
     fn add_units(&mut self, address: Entity, units: u64, context: DoseContext) {
         let landed = Landed { units, context };
         match self
@@ -763,12 +727,9 @@ impl ShotDose {
     }
 }
 
-/// The shown points ([`ShotDose::shown_losses`]) this shot has taken so far from pools that belong
-/// to a tank other than `shooter` (a [`VolumeOf`] node): what a hit confirmation counts, so the
-/// shooter's marker follows the struck tank's display. A pool nothing owns — a tree's — is dosed the
-/// same way and counts for nothing here. Neither does the shooter's own: the game's damage-model
-/// fields reach every volume regardless of owner ([`walk_field`]), so a burst near the firing tank
-/// can dose its pools, and that dose is no hit on anyone.
+/// The game's damage model: hit confirmation counts [`ShotDose::shown_losses`] only on another
+/// tank's [`VolumeOf`] pools, matching its display. Unowned pools (trees) and the shooter's pools
+/// receive dose but confirm no hit; [`walk_field`] reaches volumes regardless of owner.
 fn owned_losses(dose: &ShotDose, owners: &Query<&VolumeOf>, shooter: Option<Entity>) -> u32 {
     dose.shown_losses()
         .filter(|(volume, _)| {
@@ -815,7 +776,6 @@ impl SourceBox {
         local.cmpge(self.min).all() && local.cmple(self.max).all()
     }
 
-    /// Some of `starts` is inside the box at `fraction`.
     fn holds_any(self, starts: &[Vec3], fraction: f32) -> bool {
         starts.iter().any(|start| self.contains(*start, fraction))
     }
@@ -864,29 +824,22 @@ impl SourceBox {
     }
 }
 
-/// One first-surface contact along a march segment (see [`cast_disc_segment`]).
+/// First-surface contact along a march segment ([`cast_disc_segment`]).
 enum SegmentHit {
     /// A parry hit on the `Armor` layer — real, entity-addressed geometry the penetration
     /// resolution then probes (thickness/exit casts, ancestry, HP).
     Armor(avian3d::prelude::RayHitData),
-    /// The ground.
-    Terrain { distance: f32, normal: Vec3 },
+    Terrain {
+        distance: f32,
+        normal: Vec3,
+    },
 }
 
-/// First contact along one march segment, with ARMOUR probed as the caliber-wide disc it is.
-///
-/// The axis alone is not first contact: §13.5's shell meets the world as a disc, so a round whose
-/// centre threads a gap while its rim clips a plate MUST resolve — otherwise the whole η law is
-/// unreachable in the live march and every graze silently becomes a clean miss.
-///
-/// Terrain stays axis-only. The ground is one continuous surface that stops the round outright; there
-/// is no η to grade and no union to integrate, and [`HeightGrid::cast_ray`] is the deterministic
-/// caster the sim depends on.
-///
-/// Cost posture: one broad-phase AABB traversal decides whether ANY armour is near the corridor. In
-/// open air — where a shell spends nearly all of its life — that is the whole armour cost, cheaper
-/// than the ray cast it replaces. The k sample casts are paid only within reach of geometry, and only
-/// by rounds big enough for the ring to mean anything (see `resolve::DISC_MIN_CALIBER`).
+/// First contact tests armour as a caliber-wide disc (§13.5): a rim clipping a plate must resolve
+/// even when the axis threads a gap, or η never grades grazes. Terrain stays axis-only through
+/// deterministic [`HeightGrid::cast_ray`]: continuous ground stops the round, with no η or union.
+/// One broad-phase AABB traversal is the entire armour cost in open air, cheaper than a ray cast.
+/// Ring casts run only near geometry at or above `resolve::DISC_MIN_CALIBER`.
 fn cast_disc_segment(
     world: &ProjectileMarchWorld,
     // Each sample's start relative to `origin`, the axis sample's (`offsets[0]` is zero).
@@ -1089,8 +1042,7 @@ fn probe_march(world: ProjectileMarchWorld, mut probe: ResMut<MarchProbe>) {
     probe.reached.push(reached);
 }
 
-/// Whether a spent shell freezes in place — keeping its stuck mesh, tracer, and penetration marks
-/// for inspection — instead of despawning. The game despawns (default); the sandbox opts in.
+/// Sandbox inspection keeps a spent shell's mesh, tracer and marks frozen; the game despawns it.
 #[derive(Resource, Default)]
 pub struct RetainSpentShells(pub bool);
 
@@ -1268,7 +1220,6 @@ pub struct FireShell {
     pub shooter: Option<ShotSource>,
     /// Whether this round has a tracer visual; flight and collision are unaffected.
     pub tracer: bool,
-    /// Whether this event was locally authored or reconstructed from the network.
     pub shot_origin: FireShellOrigin,
     /// Free-flight ticks to apply at spawn for a reconstructed remote shell.
     pub catch_up_ticks: u32,
@@ -1333,7 +1284,6 @@ pub(crate) struct FlyingBody {
 }
 
 impl FlyingBody {
-    /// At fixed form, quadratic drag scales with calibre squared over mass.
     fn with_body(self, body: RoundBody) -> Self {
         Self {
             mass: body.mass,
@@ -1369,16 +1319,10 @@ pub(crate) struct Projectile {
     /// The round's fuze, built at spawn from its fire data ([`burst::Fuze::of`]) and advanced by
     /// the authority's march alone: SIM state, never on the wire.
     fuze: burst::Fuze,
-    /// The basis the §13.5 sample ring is laid out in — SIM state, not a view detail: it decides
-    /// where the disc's rays go and therefore what the shell hits.
-    ///
-    /// Anchored at spawn from the fire direction ([`DiscFrame::anchored`]) and parallel-transported
-    /// on every direction change afterwards — gravity's per-tick bend and a ricochet.
-    /// Rebuilding it from the current direction instead would snap the sample pattern mid-flight the
-    /// moment the direction crossed the anchoring branch.
-    ///
-    /// Authority discovery state, constructed from fire data. Replicas consume the exported path
-    /// and never use this sampling frame.
+    /// Authority's §13.5 sampling frame: sim state deciding hits. Anchored from the fire direction
+    /// at spawn ([`DiscFrame::anchored`]) and parallel-transported through gravity and ricochets;
+    /// rebuilding from current travel would snap the pattern across the anchoring branch.
+    /// Replicas consume the exported path without using this frame.
     disc: walk::DiscFrame,
     /// The game's damage model: where every sample stands as the last step ended, anchor-relative.
     /// Discovery retains these reached positions, including a skid's disc or perforated hand-offs,
@@ -1432,8 +1376,7 @@ impl Projectile {
             .is_some_and(|(_, armed)| armed == Some(tank))
     }
 
-    /// A shell of `caliber` at rest, for view-layer tests that need a projectile ENTITY and none of
-    /// the flight state (the view never marches one). Not compiled into a shipped binary.
+    /// Stationary fixture for view tests needing a projectile entity; never marched.
     #[cfg(test)]
     pub(crate) fn view_test_round(caliber: f32) -> Self {
         Self {
@@ -1497,13 +1440,9 @@ impl ShellPath {
     }
 }
 
-/// A ballistic volume: a solid the penetrator marches *through*, taxing it over the geometric
-/// line-of-sight distance (the unified primitive — armor plates and modules alike, design doc §2).
-/// On the `Armor` layer.
-///
-/// Both fields come from the SUBSTANCE the model's primitives wear (§12): `bake` resolves the material datablock name against `assets/materials/materials.ron`
-/// once, at extraction, so the walk never does a string lookup per query and no per-node number is
-/// authored anywhere.
+/// Solid taxing the penetrator over geometric line-of-sight distance, for plates and modules
+/// alike (§2), on `Armor`. At extraction, `bake` resolves primitive material names against
+/// `assets/materials/materials.ron` (§12): no per-query string lookup or per-node authored number.
 #[derive(Component)]
 pub struct BallisticVolume {
     /// The substance's identity and its §13.2 field value (reference-mm of armour per metre of
@@ -1519,10 +1458,9 @@ pub struct BallisticVolume {
     pub substance: String,
 }
 
-/// A witness volume (ADR-0040): a crew box. Not matter — it is no layer of the armour walk, never
-/// resists the shell, never shadows a spall direction and never throws one. It is wounded by what
-/// the hard world sends through it ([`wound`]). Its colliders carry [`WitnessSurface`] and sit on
-/// [`crate::Layer::Witness`]; it carries a [`ComponentHealth`] pool like any box.
+/// Crew HP pool at a station (ADR-0040), dosed by what the hard world sends through it ([`wound`]).
+/// It supplies no armour layer, resistance, shadowing or spall. Colliders carry [`WitnessSurface`]
+/// on [`crate::Layer::Witness`]; the node carries [`ComponentHealth`].
 #[derive(Component)]
 pub struct WitnessVolume {
     /// The substance's registry name — identity, for diagnostics and inspection.
@@ -1567,14 +1505,12 @@ pub struct ExternalArmour;
 #[derive(Component)]
 pub struct ComponentVolume;
 
-/// A component's HP pool (crew/module/ammo, a tree's trunk): its size in whole HP points, as data
-/// authors it, and what it holds in pool units ([`POOL_UNITS_PER_HP`] per point). A shot takes from
-/// it its dose converted to pool units once per box per shot ([`ShotDose`]): the energy the main
-/// penetrator lost crossing it (a crew station: its chord at the round's crew line rate), a
-/// bounce's shock, and each spall cone direction entering it (design §§5–6). No fraction of a point
-/// is dropped, so doses below a point accumulate; the pool is emptied when what it holds reaches
-/// zero, and stops there. What an emptied pool does (a cook-off, a station out of action, a module
-/// knocked out, a tree down) is the owner's. Every view reads [`Self::shown`], never what it holds.
+/// The game's damage model: HP pool for a crew station, module, ammunition or tree trunk.
+/// Data authors whole HP points; holdings use [`POOL_UNITS_PER_HP`] units per point. [`ShotDose`]
+/// converts once per box per shot, combining penetrator energy loss (crew: chord × crew line rate),
+/// bounce shock and entering cone directions (§§5–6). Sub-point doses accumulate; holdings stop
+/// at zero. The owner decides cook-off, station/module knockout or tree fall. Views read only
+/// [`Self::shown`].
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ComponentHealth {
     /// Pool units held, at most `points × POOL_UNITS_PER_HP`.
@@ -1634,12 +1570,10 @@ impl ComponentHealth {
         taken
     }
 
-    /// Empty it at once.
     pub fn drain(&mut self) {
         self.held = 0;
     }
 
-    /// Fill it.
     pub fn refill(&mut self) {
         self.held = self.capacity();
     }
@@ -1751,7 +1685,6 @@ pub enum ArmourMark {
     },
 }
 
-/// How a crossing ended.
 #[derive(Clone, Copy, Debug)]
 pub enum CrossingEnd {
     Rest { at: Vec3 },
@@ -1848,8 +1781,8 @@ pub struct SpallMarks {
     pub burst: Option<BurstField>,
 }
 
-/// Catch-up age beyond which cosmetic muzzle/impact reads are suppressed. Shared with muzzle VFX;
-/// authority damage is unaffected.
+/// Catch-up age beyond which muzzle effects and fire audio are suppressed; authority dose is
+/// unaffected.
 pub(crate) const STALE_FIRE_TICKS: u32 = 16;
 
 /// This round carries a tracer — a fact of the BELT it came out of ([`FireShell::tracer`]), and so a
@@ -1916,8 +1849,6 @@ impl ImpactOutcome {
     }
 }
 
-/// How an armour terminal ended: the round entered the material and stayed in it or came out.
-///
 /// The game's damage-model view: the calibre (m) of the body that marks a struck face. A
 /// perforation's hole is cut by the penetrator (`penetrator`, the body the cone's hole reads); a
 /// bounce or a stop is the flying assembly (`flying`, a kept carrier with its core) meeting the
@@ -2004,18 +1935,13 @@ pub(crate) struct Impact {
 #[derive(Component)]
 pub struct ImpactMarker;
 
-/// The SIMULATION half: the flight, the armor resolution, and the impact seam. It opens no asset,
-/// builds no mesh or material, and writes no `Visibility` — a shell born here is a bare simulation
-/// entity, and [`view::plugin`] (client roots only) is what dresses one.
+/// Flight, armour resolution and impact events. Spawns bare sim entities: no assets, meshes,
+/// materials or `Visibility`. Client roots dress them through [`view::plugin`].
 pub fn sim_plugin(app: &mut App) {
-    // The game's damage-model cone shape, HP-per-joule units and burst field are authored data:
-    // parsed and validated here, while the app is built, so a malformed file stops startup rather than the
-    // first throw.
+    // Validate the game's damage-model laws, pools and field units before play.
     spall_cone::ConeShape::shipped();
     spall_cone::cone_unit();
     spall_cone::BurstFields::shipped();
-    // The game's damage model validates the shared crew HP pool, the hard-pool energy rate and the
-    // walk's shared physical laws at startup.
     box_classes::BoxClasses::shipped();
     energy_dose::joules_per_hp();
     physical_laws::PhysicalLaws::shipped();
@@ -2056,10 +1982,8 @@ pub fn sim_plugin(app: &mut App) {
     mount_collider_motion(app);
 }
 
-/// The game's damage model: the collider history the walk reads ([`motion`]), kept only where the
-/// walk runs. A client marches no round (ADR-0037: [`integrate_projectiles`] returns on a
-/// [`ClientReplica`], which replays the server's paths), so it keeps no history. Only the
-/// authority needs successive collider poses for its walk; presentation consumes the public path.
+/// The game's damage model keeps collider history only for authority resolution ([`motion`]).
+/// [`integrate_projectiles`] returns on [`ClientReplica`]; clients replay public paths (ADR-0037).
 fn mount_collider_motion(app: &mut App) {
     app.init_resource::<motion::ColliderMotion>()
         .add_observer(motion::forget_collider)
@@ -2138,10 +2062,8 @@ fn on_fire_shell(
     // Travel direction after any catch-up (gravity/drag bend it); fall back to the bore for a
     // degenerate zero velocity so a spent-to-rest catch-up never trips `Dir3`.
     let travel = Dir3::new(velocity).unwrap_or(fire.direction);
-    // The sim shell is IDENTICAL for every round — it flies and raycasts the same whether or not it is
-    // drawn (a non-tracer MG round still bounces, ricochets, and lands; dead-reckoned streaks were
-    // rejected). What the round IS rides along as [`TracerRound`]; whether anything is DRAWN for it is
-    // decided by `ballistics::view`, which a server never mounts.
+    // Tracer presence never changes flight or collision: non-tracer rounds still resolve impacts.
+    // Dead-reckoned streaks were rejected; client-only `ballistics::view` reads `TracerRound`.
     let penetrator = RoundBody {
         mass: fire.penetrator_mass,
         caliber: fire.penetrator_caliber,
@@ -2194,11 +2116,9 @@ fn on_fire_shell(
         Transform::from_translation(position).looking_to(travel, Vec3::Y),
     );
 
-    // Every component the shell is born with is in this ONE spawn transaction — `view`'s dressing
-    // observer reads the finished round (Bevy 0.19 writes the whole bundle before any `Add` observer
-    // runs), so a late `.insert` here would hand it an incomplete shell. `Option<T>` is not a Bundle,
-    // hence the explicit branches; [`spawn_shell`] folds the tracer and the recording in so they do
-    // not multiply.
+    // One spawn transaction lets `view`'s dressing observer read a complete shell: Bevy 0.19
+    // writes the bundle before `Add` observers; a late insert would be incomplete. `Option<T>`
+    // is not a Bundle, so branch explicitly; `spawn_shell` folds in tracer and recording.
     let born = Born {
         tracer: fire.tracer,
         recording: (recorder.is_some() && replica.is_none() && ShotRecording::records(&fire)).then(
@@ -2240,18 +2160,14 @@ fn on_fire_shell(
     }
 }
 
-/// The optional facts a shell is born with besides its identity and hold.
+/// Optional tracer and recording facts included in the spawn transaction.
 struct Born {
-    /// The belt says the round carries a tracer.
     tracer: bool,
-    /// The pen cam recorder records the round.
     recording: Option<ShotRecording>,
 }
 
-/// Spawn one complete shell, with [`TracerRound`] and its [`ShotRecording`] folded into the SAME
-/// bundle when it has them. Generic over the caller's branch so the eight identity/hold arms above
-/// do not multiply — and so those facts are born with the shell rather than inserted after it,
-/// which is what lets `view`'s `Add` observer read a finished round.
+/// Fold [`TracerRound`] and [`ShotRecording`] into any caller bundle without multiplying its
+/// identity/source branches; see [`on_fire_shell`] for the complete-spawn invariant.
 fn spawn_shell(commands: &mut Commands, shell: impl Bundle, born: Born) {
     match (born.tracer, born.recording) {
         (true, Some(recording)) => commands.spawn((shell, TracerRound, recording)),
@@ -2269,9 +2185,8 @@ struct ProjectileMarchNet<'w> {
     shot_clock: Option<Res<'w, ShotClock>>,
 }
 
-/// The world one shell march probes: armor geometry, the ownership hierarchy that classifies a hit,
-/// and the deterministic ground. Grouped as a [`SystemParam`] so the march's phase helpers share one
-/// parameter instead of five, exactly as [`ProjectileMarchNet`] groups the net state.
+/// Armour geometry, hit ownership and deterministic ground shared by march phases as one
+/// [`SystemParam`].
 #[derive(SystemParam)]
 struct ProjectileMarchWorld<'w, 's> {
     motion: Option<Res<'w, motion::ColliderMotion>>,
@@ -2467,11 +2382,8 @@ impl ProjectileMarchWorld<'_, '_> {
     }
 }
 
-/// The one shell a march phase is resolving: its pose, flight state, and the per-flight record every
-/// phase appends to. Grouped so each phase takes the shell as a single parameter.
-///
-/// The component wrappers are kept as [`Mut`] rather than plain `&mut`: a phase that writes nothing
-/// then marks nothing changed, exactly as the single fused loop did.
+/// One march phase's shell pose, flight state and records. [`Mut`] wrappers preserve change
+/// detection: a phase that writes nothing marks nothing changed.
 struct MarchingShell<'a, 'w> {
     transform: &'a mut Mut<'w, Transform>,
     projectile: &'a mut Mut<'w, Projectile>,
@@ -2483,7 +2395,7 @@ struct MarchingShell<'a, 'w> {
     /// The shell's network identity, when it has one: `None` where no shot clock runs (the
     /// sandboxes); single-player keys its rounds (`damage_cam::delivery::offline_plugin`).
     shot: Option<&'a Shot>,
-    /// The tank that fired this shell, read ONLY to exclude its own volumes from the march.
+    /// Firing source for launch clearance and hit attribution.
     source: Option<&'a ShotSource>,
 }
 
@@ -2495,7 +2407,7 @@ struct MarchStep {
     direction: Dir3,
     /// Final speed (m/s).
     speed: f32,
-    /// The shell reached a terminal (terrain, embed, or a consumed authority verdict) and retires.
+    /// The flight ended and the shell retires.
     stopped: bool,
     /// Pool units the authority actually removed this step, across every crossing and every spall
     /// fragment.
@@ -2544,9 +2456,8 @@ fn integrate_projectiles(
     mut health: Query<&mut ComponentHealth>,
     retain: Res<RetainSpentShells>,
     net: ProjectileMarchNet,
-    // The fixed-tick clock (`SPIKE_COST_TRACE`, or the server stats line): absent unless a consumer
-    // armed it, so an unmeasured run pays only the `Option` check. This system's whole wall-time is
-    // stamped into it.
+    // Optional fixed-tick cost sink (`SPIKE_COST_TRACE` or server stats), covering the whole march.
+    // Unarmed runs pay only the Option check.
     mut cost: Option<ResMut<crate::cost::TickClock>>,
     // The authority's optional shot-lifecycle recorder. Public path playback records on the client
     // in `path::present`; transport records authority emissions.
@@ -2558,8 +2469,7 @@ fn integrate_projectiles(
         replica,
         shot_clock,
     } = net;
-    // March-cost attribution timer: only sampled when the tick clock is armed, so an unmeasured run
-    // never touches the clock. Covers the whole march (query iteration + every cast).
+    // No clock read unless the cost sink is armed.
     let march_t0 = cost.as_ref().map(|_| Instant::now());
     let dt = time.delta_secs();
     // Authority = not a replica: only then does a hit actually mutate health here.
@@ -2570,8 +2480,7 @@ fn integrate_projectiles(
 
     // The published authority tick stamps immutable paths. It is absent on tank-less fixtures.
     let present = shot_clock.map(|clock| clock.0.raw());
-    // The tick every shot-lifecycle row this march writes is stamped with (the tick each cosmetic
-    // shell lives at). Never read on the authority — every row site is `!deposit`.
+    // Publication tick; clockless fixtures use zero.
     let now = present.unwrap_or(0);
 
     for (
@@ -2667,17 +2576,12 @@ fn integrate_projectiles(
             }
         }
 
-        // Reorient the shell to its travel direction so the mesh follows the (gravity-curved,
-        // ricochet-bent) path instead of holding its launch heading.
         shell.transform.translation = step.position;
         shell.transform.look_to(step.direction, Vec3::Y);
         shell.path.points.push(step.position);
 
-        // A state snapshot cannot preserve how many shots caused its resulting HP. Raise one discrete,
-        // shot-attributed fact; `net::shot_transport` routes it reliably to the fire-time owner.
-        // Only a shown point taken from a tank's pools confirms a hit, so the marker follows the
-        // struck tank's display: a tree's pool is dosed the same way and must not read as "hit the
-        // enemy".
+        // HP snapshots lose shot count: route a discrete fact reliably to the fire-time owner
+        // through `net::shot_transport`. `owned_losses` keeps its marker aligned with tank displays.
         if deposit
             && step.damage_dealt > 0
             && !damage_report.0
@@ -2695,18 +2599,15 @@ fn integrate_projectiles(
 
         if step.stopped {
             if retain.0 {
-                // Sandbox: freeze where it stopped — drop the live components so it is no longer
-                // integrated or labelled, but keep the stuck shell, its path, and its penetration
-                // marks on screen for study (the sandbox's `c` command clears them).
+                // Sandbox inspection: remove live flight but retain mesh, path and marks;
+                // its `c` command clears them.
                 commands.entity(entity).remove::<Projectile>();
             } else {
-                // Game: the spent shell is done.
                 commands.entity(entity).despawn();
             }
         } else if step.position.y < physical_laws::PhysicalLaws::shipped().floor_m {
-            // Left the world: cleared the map edge and fell into the void below the terrain. Despawn
-            // outright — there is no impact to inspect, so this ignores the sandbox's retain (unlike a
-            // real impact). This is what bounds a shell that never hits terrain; see `physical_laws::PhysicalLaws::shipped().floor_m`.
+            // Below the world floor: bound a shell that never hits terrain. No impact to inspect,
+            // so even the sandbox despawns it.
             if let Some(shot) = shot {
                 commands.trigger(FlightOutcome {
                     shot: shot.0,
@@ -2729,8 +2630,6 @@ fn integrate_projectiles(
         }
     }
 
-    // Attribute this system's whole wall-time to the current fixed tick. Inert (both `Option`s
-    // empty) unless the tick clock is armed.
     if let (Some(cost), Some(t0)) = (cost.as_mut(), march_t0) {
         cost.record_march(t0.elapsed().as_secs_f64() * 1.0e6);
     }
@@ -2892,9 +2791,6 @@ fn march_shell_step(
     // interior bounce after it must not ride the wire.
     let mut terminal_emitted = shell.terminal_report.0;
 
-    // Ray-march the step: free flight until a surface, then resolve it — terrain stops the
-    // shell; a ballistic volume ricochets (too oblique) or is crossed (charge resistance → spend potency →
-    // perforate or embed) — and keep marching the leftover budget along the new direction.
     // The disc's sampling basis, carried through this tick's gravity bend so the ring never re-rolls
     // (§13.5: the frame is spawn-anchored and transported, never rebuilt from the current direction).
     // Transported from the direction the frame was LAST left on — the pre-step velocity, which is
@@ -4018,12 +3914,9 @@ fn apply_hit_impulse(bodies: &mut Query<Forces>, body: Entity, impulse: Vec3, po
 }
 
 fn on_impact(impact: On<Impact>) {
-    // `debug!`, not `info!`: this fires once per shell/pellet impact, so sustained MG fire made it
-    // the dominant console spam. Kept as a diagnostic under `RUST_LOG=overmatch=debug`.
+    // Debug level (`RUST_LOG=overmatch=debug`): sustained-fire impacts swamp info logs.
+    // View markers belong to `debug::spawn_impact_marker` (ADR-0014).
     debug!("shell impact at {:?}", impact.position);
-    // The sim-side seam: the armor penetration march/spall hook in here. The debug marker is a
-    // separate, view-side observer on this same event (`debug::spawn_impact_marker`), kept out of
-    // the sim per ADR-0014.
 }
 
 #[cfg(test)]
@@ -4110,10 +4003,9 @@ mod tests {
         assert!(world.get::<ComponentHealth>(target).unwrap().is_empty());
     }
 
-    /// The game's damage model: a hit confirmation counts the shown points a shot took from another
-    /// tank's pools only. Fields reach the firing tank's own pools as they reach any other, so a
-    /// mutant that counts every owned pool would confirm a hit on a self-dose; the shooter's marker
-    /// relies on it (`ShellDamage`). FIXTURE DATA: three 30-point pools, 1 reference-mm each.
+    /// The game's damage model: `ShellDamage` confirms only shown points lost by another tank.
+    /// Fields reach the shooter's pools too; counting every owned pool would confirm self-dose.
+    /// FIXTURE DATA: three 30-point pools, 1 reference-mm each.
     #[test]
     fn a_hit_confirmation_never_counts_the_shooters_own_pools() {
         let mut world = World::new();
@@ -4158,12 +4050,9 @@ mod tests {
         );
     }
 
-    /// In the game's damage model a settle returns the pool units it removed from every box it
-    /// took from, so the sum is wider than one pool: two pools at the largest size a tank file may
-    /// author ([`MAX_POOL_POINTS`]), each losing just over half the u32 range in one settle,
-    /// remove one unit more than a u32 holds (DERIVED). The march's hit-confirmation gate
-    /// (`MarchStep::damage_dealt`) reads that sum; a u32 sum panics here under overflow checks and
-    /// wraps in release. Fixture: the two pools and their doses.
+    /// The game's damage model: `MarchStep::damage_dealt` needs a wider sum than one pool.
+    /// Fixture: two [`MAX_POOL_POINTS`] pools each lose just over half the u32 range, summing to
+    /// one unit beyond u32 (DERIVED). A u32 sum panics under overflow checks and wraps in release.
     #[test]
     fn a_settle_can_remove_more_units_than_one_pool_can_hold() {
         use bevy::ecs::system::RunSystemOnce;
@@ -4195,13 +4084,11 @@ mod tests {
         }
     }
 
-    /// The game's damage model keeps fractions: shots whose dose is each below half an HP point
-    /// accumulate in the pool and eventually empty it, and the pool shows full until a whole point
-    /// is gone. Each fixture shot doses 0.47 HP points (a 0.047 reference-mm chord dose) into a
-    /// 3-point pool, every shot its own [`ShotDose`]. A per-shot rounding to whole points (which takes none
-    /// of each and never empties the pool), a display that rounds down or to nearest (which shows a
-    /// lost point after the first or second shot), or an emptying short of the whole pool fails
-    /// here. Every view reads [`ComponentHealth::shown`] and relies on it.
+    /// The game's damage model accumulates sub-half-point shots; every view relies on
+    /// [`ComponentHealth::shown`] showing full until a whole point is lost and zero only when empty.
+    /// Fixture: separate [`ShotDose`]s of 0.47 HP (0.047 reference-mm) into a 3-point pool.
+    /// Whole-point dose rounding never empties it; rounding the display down or to nearest shows
+    /// loss after the first or second shot. Emptying before the full pool is taken also fails.
     #[test]
     fn doses_below_half_a_point_accumulate_and_show_only_whole_points() {
         use bevy::ecs::system::RunSystemOnce;
@@ -4574,11 +4461,10 @@ mod tests {
         }
     }
 
-    /// The game's damage model: plate and ammunition authors rely on rising limit speed,
-    /// a continuous one-calibre join, unchanged bulk and preserved mass/nose/calibre ordering.
-    /// Mutants: apply the thin share above one calibre or reverse thickness/calibre.
-    /// This composes the inverse law; the walk tests own its production wiring.
-    /// Fixture thickness sweep; every shipped round supplies its own body and hit-nose proxy.
+    /// The game's damage model: plate/ammunition authors rely on rising limit speed, a continuous
+    /// one-calibre join, unchanged bulk and mass/nose/calibre ordering. Catches thin share above
+    /// one calibre or reversed thickness/calibre. Composes the inverse; walk tests own wiring.
+    /// Fixture thickness sweep; shipped rounds supply their bodies and hit-nose proxies.
     #[test]
     fn plate_limit_speeds_keep_bulk_and_round_ordering() {
         let capacity = &physical_laws::PhysicalLaws::shipped().plate_capacity;
@@ -4867,13 +4753,10 @@ mod tests {
         assert!(v1.y < 0.0, "gravity must pull the shell down");
     }
 
-    /// The "one integrator" property: fast-forwarding a shell N ticks folds the same per-tick
-    /// [`freeflight_step`] the live march steps in open air, so its velocity is N single-tick steps
-    /// exactly. Guards against re-deriving the catch-up as a closed-form trajectory. Its position is
-    /// held to the march's own by `march_tests::catch_up_lands_where_the_march_flies`. Zero catch-up
-    /// is an exact no-op: the shell stays at the muzzle with its launch velocity and a one-point
-    /// trail, byte-identical to a locally fired shell (SP / sandbox / own predicted), which always
-    /// passes `catch_up_ticks: 0`.
+    /// The game's damage model uses one integrator: catch-up velocity equals N [`freeflight_step`]s,
+    /// never a separate closed-form trajectory. `march_tests::catch_up_lands_where_the_march_flies`
+    /// owns positional agreement. Zero catch-up preserves origin, launch velocity and a one-point
+    /// trail, as local fire does.
     #[test]
     fn fast_forward_matches_single_tick_advances() {
         let origin = Vec3::new(1.0, 50.0, -3.0);
@@ -4912,10 +4795,8 @@ mod tests {
     }
 }
 
-/// Physics-backed march tests: an Avian world with a single steel `BallisticVolume` plate, an 88
-/// round marched into it, and every `Impact` captured — so the new armor triggers (ricochet +
-/// perforation) and the surface classification are exercised through the REAL `integrate_projectiles`
-/// resolution, not mocked. Modelled on the sandbox's plate targets (`sandbox::spawn_targets`).
+/// The game's damage model: Avian-backed [`integrate_projectiles`] tests capturing real impacts
+/// and surface classification. Plate fixtures follow `sandbox::spawn_targets`.
 #[cfg(test)]
 pub(crate) mod march_tests {
     use std::time::Duration;
@@ -4928,10 +4809,8 @@ pub(crate) mod march_tests {
 
     use super::*;
 
-    /// The sampling basis a hand-built test shell is born with — anchored on ITS OWN fire direction,
-    /// exactly as `on_fire_shell` would. A frame anchored on some other direction is not merely
-    /// mis-rolled: it has a component ALONG this shell's travel, which puts ring samples in front of
-    /// and behind the disc.
+    /// Anchor fixture sampling on its fire direction, as [`on_fire_shell`] does. Another direction
+    /// gives the ring a longitudinal component, putting samples ahead of and behind the disc.
     fn test_disc(direction: Vec3) -> walk::DiscFrame {
         walk::DiscFrame::anchored(direction).expect("a fixture fires along a real direction")
     }
@@ -5013,7 +4892,6 @@ pub(crate) mod march_tests {
             contact: crate::rounds::ContactPreset::fixture(),
             wound: FIXTURE_WOUND,
             fuze: burst::Fuze::Inert,
-            // Anchored on this round's fire direction, as on_fire_shell does.
             disc: test_disc(velocity.normalize()),
             starts: None,
             playback: Default::default(),
@@ -5024,14 +4902,9 @@ pub(crate) mod march_tests {
         }
     }
 
-    /// Build an Avian world with one static steel plate (full extents `size`, centred at `at`, facing
-    /// ±Z) on the `Armor` layer, register the
-    /// real march + the impact capture, and settle the physics
-    /// so the spatial-query pipeline includes the plate before any shell is marched.
-    ///
-    /// SIM ONLY — the server's composition. A shell here is born bare, which is what almost every
-    /// gate in this module wants; the ones that assert on what a round is DRAWN as use
-    /// the presentation plugin instead.
+    /// Settled Avian world with real march/impact capture and one static steel `Armor` plate
+    /// (full extents `size`, centre `at`, facing ±Z). Sim-only: shells are bare; drawing tests
+    /// mount the presentation plugin.
     pub(super) fn world_with_plate(size: Vec3, at: Vec3) -> App {
         plate_world(size, at, false)
     }
@@ -5103,9 +4976,8 @@ pub(crate) mod march_tests {
         app
     }
 
-    /// The game's damage model: only the authority's walk consumes collider history. Replicas
-    /// present the public path and retain no walk history; the authority keeps interval history.
-    /// FIXTURE DATA: a static hull with one child collider.
+    /// The game's damage model: authority resolution alone keeps collider history; replicas
+    /// present public paths. FIXTURE DATA: a static hull with one child collider.
     #[test]
     fn only_the_authority_keeps_collider_history() {
         for replica in [false, true] {
@@ -5667,14 +5539,10 @@ pub(crate) mod march_tests {
         );
     }
 
-    /// A sub-calibre round flies on its fire's drag and meets the plate as its penetrator: the
-    /// shell [`on_fire_shell`] spawns from a fire whose penetrator differs from its body binds the
-    /// penetrator's mechanism (the disc, contact and the cone's hole read its calibre), starts
-    /// the penetrator's capability at the muzzle, steps the drag coefficient the
-    /// fire carries (which body flies is the round registry's to decide, `rounds`), and is sized
-    /// for the view as the whole body. Every role's shell of a sub-calibre round is spawned here.
-    /// The core and the drag are fixture data. A mutant that binds the body, or re-derives the
-    /// drag from either body, fails here.
+    /// The game's damage model: [`on_fire_shell`] binds the penetrator's mechanism and muzzle
+    /// capability; disc, contact and cone hole read its calibre. Flight uses the fire's drag and
+    /// views use its flying-body size (`rounds` owns flying-body selection). All roles spawn here.
+    /// Fixture core and drag catch binding the flying body or rebuilding drag from either body.
     #[test]
     fn a_fired_shell_flies_as_its_body_and_meets_the_plate_as_its_penetrator() {
         const CORE: RoundBody = RoundBody {
@@ -5916,9 +5784,8 @@ pub(crate) mod march_tests {
         spawn_headon_shell_at(app, shot, Vec3::new(0.0, 2.0, 2.0))
     }
 
-    /// The same shell, anywhere on the map. Position is a LAW input here, not decoration: f32 spacing
-    /// coarsens with distance from the world origin, so a fixture that only ever fires two metres
-    /// from it cannot see the tolerances that matter at combat range.
+    /// Position is a law input: f32 spacing grows with distance, so near-origin fixtures alone
+    /// cannot exercise combat-range tolerances.
     fn spawn_headon_shell_at(app: &mut App, shot: ShotId, origin: Vec3) -> Entity {
         let dir = Vec3::NEG_Z;
         let speed = 800.0;
@@ -6007,9 +5874,6 @@ pub(crate) mod march_tests {
             "the terminal reads at the plate's ENTRY face, got z={}",
             terminals[0].position.z
         );
-        // The authoritative shell marched past the plate (into the backstop) — the cosmetic-terminal
-        // choice truncates nothing on the authority: the impact log shows the perforation AND the
-        // backstop embed.
         let impacts = app.world().resource::<ImpactLog>().0.clone();
         assert!(
             impacts.len() >= 2,
@@ -6168,21 +6032,11 @@ pub(crate) mod march_tests {
         );
     }
 
-    // -----------------------------------------------------------------------------------------
-    // §13.1's pathology table, end to end
-    // -----------------------------------------------------------------------------------------
-    //
-    // The core tests state these as laws over synthetic hit lists. These state them as OUTCOMES, on
-    // real trimesh colliders, through the live march — because §13.1 is a table of things the
-    // resolver DID, and only the resolver can be asked whether it still does them.
+    // §13.1 end-to-end counterparts of the core's synthetic-hit laws: real trimeshes and live march.
 
-    /// A box as an outward-wound triangle mesh, with the shell table the collector requires — the
-    /// shape production armour actually is, spawned the way the bind spawns it.
-    ///
-    /// Winding is the whole point: the collector reads a face's orientation from it (parry's normal
-    /// is flipped to oppose the ray and cannot tell entry from exit), so a mesh wound inwards would
-    /// invert every crossing. Each face is listed counter-clockwise seen from OUTSIDE. One closed
-    /// box is one shell, so every triangle carries shell `0`.
+    /// Production-style box trimesh and shell table: counter-clockwise faces from outside.
+    /// The collector reads winding because parry flips normals against the ray, losing entry/exit
+    /// orientation; inward winding would invert crossings. One closed box gives every face shell 0.
     pub(super) fn box_trimesh(size: Vec3) -> (Collider, BallisticSurfaces) {
         let h = size * 0.5;
         let vertices: Vec<Vec3> = [
@@ -6277,21 +6131,13 @@ pub(crate) mod march_tests {
         (Vec3::new(3.0, 3.0, thickness), Vec3::new(0.0, 2.0, centre))
     }
 
-    /// §13.1's headline defect, as an outcome. The serial resolver entered an overlapping second
-    /// plate from inside, found no exit face ahead, and crossed it for FREE; the union charges the
-    /// space once — neither zero nor twice.
-    ///
-    /// Two arrangements, each pinning one direction against the test round's capability (~121
-    /// reference-mm, DERIVED): a union of 160 mm must defeat the round even though its first plate
-    /// alone (70 mm) would not, and a union of 115 mm must let it through even though the two plates
-    /// SUMMED (140 mm) would not.
-    ///
-    /// SEAM INVISIBILITY, the abutting arrangement: plates meeting exactly resolve as the one plate
-    /// they add up to, on BOTH sides of the capability. A resolver that hops the shared face crosses
-    /// the second plate for free, and perfect abutment buys nothing.
+    /// The game's damage model charges a union once; see §13.1 for the rejected serial resolver.
+    /// Fixture capability ≈121 reference-mm (DERIVED): 160 mm union stops it though the first
+    /// 70 mm plate cannot; 115 mm union passes it though the 140 mm sum cannot. Abutting totals
+    /// straddle the same limit, catching a shared-face hop that skips the second plate.
     #[test]
     fn overlapping_trimesh_plates_charge_their_union_once() {
-        // Undercharge — the defect that shipped. Union 160 mm.
+        // Fixture: 160 mm union tests undercharge.
         assert!(
             perforates(&[slab(0.07, 0.025)]),
             "the first plate alone does not defeat the round",
@@ -6301,7 +6147,7 @@ pub(crate) mod march_tests {
             "the overlapped second plate is charged, not crossed for free",
         );
 
-        // Overcharge — War Thunder's failure mode. Union 115 mm, sum 140 mm.
+        // Fixture: 115 mm union, 140 mm sum tests overcharge.
         assert!(
             perforates(&[slab(0.07, 0.0225), slab(0.07, -0.0225)]),
             "the shared 25 mm is charged ONCE; summing it would have defeated the round",
@@ -6328,10 +6174,8 @@ pub(crate) mod march_tests {
         }
     }
 
-    /// η, end to end. A round whose AXIS misses an oblique plate while its rim clips it deflects —
-    /// which the point model could not do at all, the centre ray having missed — and deflects LESS
-    /// than the same plate struck square-on. That is §13.5's graded weakspot and §13.5's "a graze IS
-    /// a partial ricochet" in one observable: the deflection angle scales with the engagement.
+    /// The game's damage model: rim-only engagement deflects less than full engagement (§13.5).
+    /// An axis-only model misses this plate; deflection must scale with engagement.
     #[test]
     fn a_rim_only_graze_deflects_less_than_a_full_engagement() {
         // A 75°-oblique plate whose +Y edge sits at y = 2.0.
@@ -6439,10 +6283,8 @@ pub(crate) mod march_tests {
                     impact.position.z,
                 );
             }
-            // Nothing may be reported in the air itself: a fabricated weld across the gap would
-            // report ONE crossing spanning both plates, and a fabricated surface would report a
-            // third read between them. The faces themselves are read to the same 1 mm the reads
-            // above are.
+            // No event in air: a fabricated weld merges both crossings; a fabricated surface
+            // adds a third. Face reads keep the same 1 mm allowance as above.
             let air = faces[1] + 1.0e-3..=faces[0] - 0.05 - 1.0e-3;
             assert!(
                 impacts
@@ -6467,25 +6309,14 @@ pub(crate) mod march_tests {
         }
     }
 
-    /// A PERFORATION'S SEEDS AND THE NEXT CORRIDOR DESCRIBE ONE POINT, ANYWHERE ON THE MAP.
-    ///
-    /// After a perforation the march resumes one [`MARCH_EPS`] past the exit, carrying which
-    /// primitives each sample is inside there ([`resolve::Interior::seeds`]). The seed was read on
-    /// the transit corridor's own anchor-relative ray; the next corridor must start from that same
-    /// point. A resume point rebuilt in world f32 is quantized at the world's own spacing —
-    /// 2.44e-4 m past 2048 m, DERIVED — so an entry face that close to the resumption plane is
-    /// owned by the seed AND re-collected ahead of the origin (`UnexpectedEntry`), or by nobody
-    /// (`UnexpectedExit`), and the round fails closed on armour it had already bitten.
-    ///
-    /// The near-origin half pins the other link of the same chain: the resumed corridor's crossing
-    /// of the volume it began inside hands off at its own origin, and the declared presence must be
-    /// seeded there too ([`walk::ShellPresence::spans`]).
-    ///
-    /// Generic geometry: a thin plate, then a second volume tilted so its entry face does not weld
-    /// to the plate's exit, its entry swept across the resumption plane in steps finer than that
-    /// spacing. Every arrangement must resolve without a walk error, near the world origin and far
-    /// from it. A sub-disc round keeps the case to the axis sample, which is the sample the
-    /// resumption plane is read on.
+    /// The game's damage model: seeds and resumed corridor share one anchor-relative point,
+    /// [`MARCH_EPS`] past the perforation exit ([`resolve::Interior::seeds`]). Rebuilding that
+    /// point in world f32 (2.44e-4 m spacing past 2048 m, DERIVED) can double-own a nearby entry
+    /// (`UnexpectedEntry`) or leave it unowned (`UnexpectedExit`); either is a walk error.
+    /// Near the origin, a resumed crossing also seeds presence at its own handoff origin
+    /// ([`walk::ShellPresence::spans`]). Fixture: a thin plate followed by a non-welding tilted
+    /// volume, its entry swept across the resumption plane below world spacing, near and far.
+    /// A sub-disc round isolates the axis sample; every arrangement must resolve without error.
     #[test]
     fn a_perforation_resumes_where_its_seeds_were_read_far_from_the_origin() {
         const TILT: f32 = 65.0;
@@ -7195,16 +7026,11 @@ pub(crate) mod march_tests {
         );
     }
 
-    /// A HELD SAMPLE'S DRAIN CLOSES ITS MATERIAL PAST THE TRAVEL.
-    ///
-    /// The resume fixture above, with the round's travel for the tick ending half a nudge past the
-    /// plate's exit: the perforation leaves the axis sample inside the tilted volume (its entry lies
-    /// before the resumption plane, so the seed owns it), and the tick's budget runs out before that
-    /// volume's exit. Held samples carry that crossing to completion;
-    /// the held sample's drain alone does, closing the volume past the travel within the step
-    /// ([`next_surface`]). A march that let the travel end the step would start the next inside the
-    /// volume with nothing declared, read its exit as `UnexpectedExit`, and panic on armour it
-    /// had already entered. Playback retains that immutable continuation until its real path moment.
+    /// The game's damage model closes held material in discovery beyond this tick's travel;
+    /// playback retains the immutable continuation until its path moment. Fixture: tick travel
+    /// ends half a nudge past a plate exit, inside a tilted volume whose entry precedes the
+    /// resumption plane. The seed owns it even though the tick ends before its exit. Discarding
+    /// that presence would leave an unowned exit (`UnexpectedExit`) and panic ([`next_surface`]).
     #[test]
     fn a_held_samples_drain_closes_its_material_past_the_travel() {
         const TILT: f32 = 65.0;
@@ -7299,11 +7125,9 @@ pub(crate) mod march_tests {
         );
     }
 
-    /// CATCH-UP LANDS WHERE THE MARCH FLIES, AT ANY MAP COORDINATE.
-    ///
-    /// The fixture above, flown natively, against [`fast_forward_shell`] over the same number of
-    /// steps. Both carry the axis as anchor plus offset, so they agree to a world rounding; a
-    /// catch-up that re-rounds its position at world spacing every step does not.
+    /// The game's damage model: native flight and [`fast_forward_shell`] agree within one world
+    /// rounding over equal steps, at any map coordinate. Per-step world rounding would drift;
+    /// both carry anchor plus offset.
     #[test]
     fn catch_up_lands_where_the_march_flies() {
         const STEPS: usize = 100;
@@ -7558,26 +7382,15 @@ pub(crate) mod march_tests {
         let _ = app.world_mut().try_despawn(shell);
     }
 
-    /// A ROUND LAUNCHED JUST OFF A FACE NEVER STARTS A SAMPLE INSIDE IT.
-    ///
-    /// FREE PENETRATION IS THE ONE OUTCOME WORSE THAN A STOPPED SHELL. A face dropped from a TRANSIT
-    /// corridor leaves a bare exit and the walk shouts `UnexpectedExit` — wrong, but loud, and the
-    /// game's damage-model driver panics on it. The same dropped face on an ENTRANCE corridor is silent: `begin`
-    /// sees no material, returns [`walk::Begin::Miss`], and `resolve::decide` flies the round
-    /// through the whole examined corridor with zero cost, zero damage and NO `Impact` at all. That
-    /// is armour that was never modelled, which is precisely the defect class §13 exists to kill,
-    /// and it would leave no trace in any log.
-    ///
-    /// Each sample's sweep starts where its membership is known. Two ways of starting past that put a
-    /// sample inside a plate it is declared outside of: a boundary nudge, which steps over any face
-    /// within one `MARCH_EPS` ahead; and re-laying the disc square to the tick's gravity-bent travel,
-    /// which puts its leading samples up to `r·sin θ` ahead of where they were laid (DERIVED: 9 µm
-    /// for an 88 at 800 m/s after one 16 ms bend). Fired level from a few ULP to half a nudge off a
-    /// face, and from one nudge ± 4 ULP, the crossing must resolve. Falling straight down onto a
-    /// level plate, gravity cannot tilt the travel, so the disc stays flush with the face and every
-    /// sample meets it at the same `t`; from one nudge ± 4 ULP it must resolve too.
-    ///
-    /// One world per direction: the plate never changes, so each launch re-spawns only the round.
+    /// The game's damage model starts each sweep where membership is known. A dropped transit
+    /// entry gives `UnexpectedExit` and panics; a dropped entrance silently gives [`walk::Begin::Miss`]
+    /// and free passage with no dose or `Impact` — no log trace. A boundary nudge skips faces
+    /// within [`MARCH_EPS`]; re-laying a gravity-bent disc advances samples by up to `r·sin θ`
+    /// (DERIVED 9 µm for an 88 at 800 m/s after a 16 ms bend), putting them inside unowned material.
+    /// Fixture level launches span a few ULP to half a nudge, and one nudge ± 4 ULP, from the face.
+    /// Vertical launches at one nudge ± 4 ULP keep the disc flush: gravity cannot tilt travel,
+    /// so every sample meets at the same `t`. All crossings must resolve. One unchanged plate per
+    /// direction; only the round respawns.
     #[test]
     fn a_round_launched_just_off_a_face_never_starts_a_sample_inside_it() {
         let face = 0.525_f32;
@@ -7875,21 +7688,11 @@ pub(crate) mod march_tests {
         }
     }
 
-    /// `MISS` MUST ADVANCE PAST THE GROUND IT JUST EXAMINED.
-    ///
-    /// First contact is a cast; the disc is the resolution. When they disagree — the cast touched
-    /// something, the walk found no material in it — the round flies on. What it must NOT do is
-    /// advance only to the contact, because the contact is exactly where the next cast will find the
-    /// same thing again: the round creeps forward one boundary nudge at a time, burning the tick's
-    /// budget in place, and ends a tick that should have carried it twelve metres a few millimetres
-    /// past a plate it never touched.
-    ///
-    /// Codex's mutant ledger had this one SURVIVING both its supposed catchers, so here is a fixture
-    /// that cannot miss it. A zero-factor volume is a `Miss` by construction rather than by
-    /// geometric knife-edge — the cast finds it, being real armour-layer geometry under a
-    /// `BallisticVolume`, and the union field never rises above zero, so there is nothing to resolve.
-    /// Nothing there means nothing there: no impact, and the tick lands exactly where free flight
-    /// would have put it.
+    /// The game's damage model: a `Miss` flies the examined corridor, not just to first contact.
+    /// Otherwise repeated casts creep by boundary nudges, spending a tick's roughly twelve-metre
+    /// flight within millimetres of the plate. Fixture: zero-factor `BallisticVolume` geometry
+    /// guarantees a cast hit but no positive union field, avoiding a geometric knife-edge.
+    /// It must emit no impact and land at the free-flight endpoint.
     #[test]
     fn a_miss_flies_the_whole_corridor_it_examined() {
         let start = Vec3::new(0.0, 2.0, 2.0);
@@ -7942,8 +7745,7 @@ pub(crate) mod march_tests {
             end.distance(free_flight) < 1.0e-3,
             "the tick lands where free flight would: expected {free_flight}, got {end}",
         );
-        // Stated again as the thing that actually goes wrong, so the failure reads as the defect:
-        // creeping leaves the round at the plate instead of twelve metres past it.
+        // A direct creep witness complements the free-flight comparison.
         assert!(
             end.z < -10.0,
             "the round did not creep at the surface it examined: z = {}",
@@ -7951,28 +7753,18 @@ pub(crate) mod march_tests {
         );
     }
 
-    /// CODEX'S MEASURED POINT: `(2499.9, 924.963, 1524.939)` at 38° incidence.
-    ///
-    /// The corridor origin used to be a WORLD position, and f32 out here resolves to 0.24 mm — so
-    /// the handoff and the very face it was computed from were quantised to that grid
-    /// INDEPENDENTLY, by different routes. Codex swept the live handoff arithmetic and measured it
-    /// landing 0.3848 mm off its own plane at this point: past the prune margin's 0.25 mm ceiling,
-    /// inside the playable envelope, and therefore a real entry face pruned in real combat. The
-    /// round then reported an exit it never entered and stopped dead on a plate it should have
-    /// crossed.
-    ///
-    /// No margin could fix that, because the floor the geometry demanded and the ceiling safety
-    /// demanded had crossed. Anchoring removes the cause: the world-scale subtraction happens once,
-    /// on the anchor, and the handoff is a small offset from the same origin the face positions were
-    /// measured from. The error is now corridor-scale wherever the shot is.
+    /// The game's damage model: MEASURED counterexample at `(2499.9, 924.963, 1524.939)`, 38°
+    /// incidence. Independent world-f32 rounding (0.24 mm spacing) puts a handoff 0.3848 mm past
+    /// its plane, beyond the prune margin's 0.25 mm ceiling, pruning an entry inside the playable
+    /// envelope and leaving an unmatched exit. No margin can satisfy both bounds. Anchoring takes
+    /// world-scale subtraction once and keeps handoff and face offsets on one origin, so error
+    /// stays corridor-scale.
     #[test]
     fn a_crossing_resolves_at_the_far_corner_of_the_map() {
-        // Codex's point, and the incidence it measured there.
         let at = Vec3::new(2499.9, 924.963, 1524.939);
         let mut app = world_with_trimesh_plates(&[]);
-        // TWO plates, spaced. One crossing exercises the handoff once; a second corridor re-anchors
-        // downrange and exercises it again on geometry the first crossing already bent the round
-        // toward — which is where the error used to compound.
+        // Two spaced plates exercise re-anchoring after the first crossing bends the round,
+        // catching compounded handoff error.
         for z in [0.0_f32, -0.9] {
             app.world_mut().spawn((
                 Transform::from_translation(at + Vec3::new(0.0, 0.0, z))
@@ -8571,9 +8363,8 @@ pub(crate) mod march_tests {
         );
     }
 
-    /// THE BURST PATH IS UNCHANGED: a round armed on one tree bursts past its exit, and a tree
-    /// beside the burst, a segment of it emptied by the field alone, breaks at that segment away
-    /// from the burst's centre, while the armed-on tree keeps its own line entry.
+    /// The game's damage model: a field-only emptying beside a burst breaks that tree's segment
+    /// away from the burst centre; the tree that armed the round keeps its own line entry.
     #[test]
     fn a_burst_breaks_a_neighbouring_tree_where_it_emptied_away_from_its_centre() {
         use crate::trees::{TreeState, azimuth_bin, tests::fixture_kind_of};
