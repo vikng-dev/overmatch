@@ -3532,7 +3532,9 @@ fn impact_fuze_reads_the_charged_entry_force() {
 }
 
 /// The game's damage model: every skid advances the clock or ends the round. A narrow converging
-/// wedge cannot exchange forever at one axis point. All dimensions and speeds are fixture data.
+/// wedge cannot exchange forever at one axis point. Continuing turns must fly at least half the
+/// contact stand-off (Fixture: 0.5 mm with the current resolution), well above rounding travel.
+/// All dimensions and speeds are fixture data. Mutant: `turn.max(1e-9)` invents progress.
 #[test]
 fn a_converging_wedge_spends_time_or_holds_the_round() {
     for air_angle in [10.0_f32, 2.0] {
@@ -3565,7 +3567,7 @@ fn a_converging_wedge_spends_time_or_holds_the_round() {
             if let Decision::Bounce(bounce) = decision {
                 skids += 1;
                 assert!(
-                    bounce.travel > 0.0 || bounce.continuation.is_none(),
+                    bounce.travel >= 0.5 * CONTACT_STAND_OFF || bounce.continuation.is_none(),
                     "{air_angle} degrees: an exchange must spend time or end the round: {bounce:?}"
                 );
             }
