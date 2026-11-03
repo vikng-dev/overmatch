@@ -6,6 +6,7 @@
 use std::collections::BTreeSet;
 
 use bevy::ecs::lifecycle::HookContext;
+use bevy::ecs::query::QuerySingleError;
 use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
@@ -354,13 +355,19 @@ fn cursor_owner(
     overlays: Res<Overlays>,
     mut focus: MessageReader<WindowFocused>,
     mut refocus: ResMut<RefocusGrab>,
-    window: Single<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
+    mut windows: Query<(&mut Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
-    let (mut window, mut cursor) = window.into_inner();
     // Arm the deferred re-grab on a focus-REGAIN edge; a loss cancels any pending one.
     if let Some(focused) = crate::state::collapse_focus(&mut focus) {
         refocus.0 = focused.then_some(REFOCUS_GRAB_FRAMES);
     }
+    let (mut window, mut cursor) = match windows.single_mut() {
+        Ok(window) => window,
+        Err(QuerySingleError::NoEntities(_)) => return, // Window teardown has no cursor to reconcile.
+        Err(QuerySingleError::MultipleEntities(_)) => {
+            panic!("overlay cursor ownership requires exactly one primary window")
+        }
+    };
     if input_blocked(&overlays, window.focused) {
         // Write the release edge to reconcile requested grab with OS focus loss; repeating it
         // every blocked frame would mark cursor options changed without a transition.
@@ -659,6 +666,28 @@ mod tests {
     /// Race fixture: declare the highest overlay like `net::client::update_connect_status` on link loss.
     fn declare_connect_status(mut overlays: ResMut<Overlays>) {
         overlays.declare(Overlay::ConnectStatus, true);
+    }
+
+    /// Cursor policy tolerates window teardown and refuses contradictory primary windows;
+    /// neither case may silently skip the ownership system through a `Single` parameter.
+    #[test]
+    fn cursor_ownership_distinguishes_teardown_from_multiple_windows() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<Overlays>();
+        world.init_resource::<RefocusGrab>();
+        world.init_resource::<Messages<WindowFocused>>();
+        world.run_system_once(cursor_owner).unwrap();
+        for _ in 0..2 {
+            world.spawn((Window::default(), PrimaryWindow));
+        }
+        let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            world.run_system_once(cursor_owner).unwrap();
+        }));
+        assert!(
+            refusal.is_err(),
+            "two primary windows must refuse cursor ownership"
+        );
     }
 
     /// Off the match screen input is blocked whatever is latched, and the default set — the state
