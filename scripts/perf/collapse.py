@@ -166,7 +166,7 @@ def complete_windows(rows, recipe, duration, clients):
     expected = {i for e in recipe["events"] for i in e["instances"]}
     targets = {t["id"]: t for t in last["targets"]}
     if set(targets) != expected or any(t["falls"] == 0 for t in targets.values()):
-        raise RuntimeError("schedule incomplete: each named construction must have a recorded fall")
+        raise RuntimeError("schedule incomplete: each named construction must have a derived departure")
     return windows
 
 

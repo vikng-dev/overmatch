@@ -107,7 +107,7 @@ impl Loadtest {
         period: std::time::Duration,
     ) -> Value {
         let targets: Vec<_> = constructions.iter().filter(|(id, _)| self.recipe.events.iter().any(|e| e.instances.contains(&id.id))).map(|(id, body)| {
-            let falls = record.entries.iter().filter(|entry| entry.construction == id.ordinal && matches!(entry.event, Event::Fall(_))).count();
+            let falls = body.live.state.fate.iter().filter(|&&fate| fate == crate::construction::fracture::Fate::Fallen).count();
             let dust = record.entries.iter().filter(|entry| entry.construction == id.ordinal && matches!(entry.event, Event::Dust(_))).count();
             json!({"id": id.id, "falls": falls, "dust": dust, "chunks": body.kind.layout.chunks.len()})
         }).collect();
@@ -404,6 +404,9 @@ mod tests {
             app.world().resource::<Loadtest>().state,
             RunState::Running { next: 1, .. }
         ));
+        let mut constructions = app
+            .world_mut()
+            .query_filtered::<(&MapInstance, &Breakage), With<Body>>();
         let record = app.world().resource::<Record>();
         let expected: BTreeSet<_> = (0..kind.asset.chunks.len())
             .filter(|&c| !kind.asset.anchors.iter().any(|a| a.chunk as usize == c))
@@ -411,20 +414,30 @@ mod tests {
             .collect();
         let mut ticks = BTreeSet::new();
         for ordinal in [0, 1] {
-            let fallen = record
+            let (_, body) = constructions
+                .iter(app.world())
+                .find(|(id, _)| id.ordinal == ordinal)
+                .unwrap();
+            let mut shape = crate::construction::breakage::Shape::intact(&kind.layout);
+            for entry in record
                 .entries
                 .iter()
-                .filter_map(|e| match e.event {
-                    Event::Fall(c) if e.construction == ordinal => {
-                        ticks.insert(e.tick);
-                        Some(c)
-                    }
-                    _ => None,
-                })
+                .filter(|entry| entry.construction == ordinal)
+            {
+                ticks.insert(entry.tick);
+                shape.apply(entry.event, &kind.layout);
+            }
+            shape.derive_departures(&kind.layout, &body.live);
+            let fallen = shape
+                .fate
+                .iter()
+                .enumerate()
+                .filter(|(_, fate)| **fate == crate::construction::fracture::Fate::Fallen)
+                .map(|(c, _)| kind.layout.chunks[c] as u16)
                 .collect::<BTreeSet<_>>();
             assert_eq!(
                 fallen, expected,
-                "all unsupported chunks must reach the ledger in the producing update"
+                "the producing update must publish causes for every unsupported chunk to depart"
             );
         }
         assert_eq!(
