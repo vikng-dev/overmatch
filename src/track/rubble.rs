@@ -68,13 +68,17 @@
 //!   (`ContactManifold::tangent_velocity`, set in `CollisionHooks::modify_contacts`) model the
 //!   belt twice (the field holds the tank, colliders push pieces) and push without limit.
 
+use std::borrow::Cow;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
 use avian3d::prelude::{
     Collider, ColliderAabb, ColliderOf, CollisionLayers, ComputedAngularInertia,
     ComputedCenterOfMass, ComputedMass, DefaultFriction, Forces, Friction, LayerMask, LockedAxes,
     Position, ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery, WriteRigidBodyForces,
 };
-use bevy::ecs::query::QueryFilter;
+use bevy::ecs::query::{QueryData, QueryFilter};
 use bevy::ecs::system::SystemParam;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
@@ -173,6 +177,8 @@ pub(crate) type PieceData = (
     &'static ComputedCenterOfMass,
     Option<&'static LockedAxes>,
 );
+
+pub(crate) type PieceReadData = <PieceData as QueryData>::ReadOnly;
 
 /// A dynamic piece's rigid state at the tick's start, advanced by each impulse it takes.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -419,20 +425,20 @@ pub(crate) struct SlabOverlap {
 /// The colliders near every driving tank this tick, read once at tick start: each collider's
 /// surface and its dynamic bodies' states. Empty where no tank has any near it, and for every
 /// pass that reads the field alone (the envelope calibration).
-#[derive(Clone, Default)]
-pub struct RubbleBodies {
-    surfaces: Vec<Surface>,
-    by_collider: HashMap<Entity, usize>,
+#[derive(Default)]
+pub struct RubbleBodies<'a> {
+    surfaces: Cow<'a, [Surface]>,
+    by_collider: Cow<'a, HashMap<Entity, usize>>,
     /// Indices in gather order, restricted once per source using its tick-start AABB query.
     active: Vec<usize>,
     #[cfg(test)]
-    surface_checks: std::cell::Cell<usize>,
+    surface_checks: AtomicUsize,
     #[cfg(test)]
-    reaction_sort_keys: std::cell::Cell<usize>,
-    pub(crate) bodies: Vec<PieceBody>,
+    reaction_sort_keys: AtomicUsize,
+    pub(crate) bodies: Cow<'a, [PieceBody]>,
 }
 
-impl RubbleBodies {
+impl RubbleBodies<'_> {
     /// The piece's actual struck face, independent of the belt frame. A coarse overlap
     /// cell may contain empty space at its pressure centroid; then there is no geometric
     /// support sample for the Driver, although the coarse physical overlap law still runs.
@@ -460,10 +466,10 @@ impl RubbleBodies {
 
     /// Read the `near` colliders' shapes, frictions and bodies. Every dynamic body must carry the
     /// force state Avian constructs for it, readable through `bodies`.
-    pub(crate) fn gather<F: QueryFilter>(
+    pub(crate) fn gather<D: QueryData<ReadOnly = PieceReadData>, F: QueryFilter>(
         rubble: &RubbleQuery,
         near: &[Entity],
-        bodies: &Query<PieceData, F>,
+        bodies: &Query<D, F>,
     ) -> Self {
         let mut out = Self::default();
         for &collider in near {
@@ -490,7 +496,7 @@ impl RubbleBodies {
                     0,
                     true,
                 );
-                out.bodies.push(PieceBody {
+                out.bodies.to_mut().push(PieceBody {
                     entity: body,
                     com: forces.position().0 + rotation * com.0,
                     inv_mass: inertia.effective_inv_mass(),
@@ -516,7 +522,7 @@ impl RubbleBodies {
                 .shapes
                 .get(collider)
                 .expect("a collider the spatial query returned carries its shape and pose");
-            out.surfaces.push(Surface {
+            out.surfaces.to_mut().push(Surface {
                 collider,
                 owner: body,
                 shape: shape.clone(),
@@ -530,10 +536,22 @@ impl RubbleBodies {
                 motion,
             });
             let index = out.surfaces.len() - 1;
-            out.by_collider.insert(collider, index);
+            out.by_collider.to_mut().insert(collider, index);
             out.active.push(index);
         }
         out
+    }
+
+    /// Borrow the common tick-start geometry and motion; only candidate membership is local.
+    pub(crate) fn for_source(&self, source: Entity, near: &[Entity]) -> RubbleBodies<'_> {
+        let mut selected = RubbleBodies {
+            surfaces: Cow::Borrowed(&self.surfaces),
+            by_collider: Cow::Borrowed(&self.by_collider),
+            bodies: Cow::Borrowed(&self.bodies),
+            ..Default::default()
+        };
+        selected.select_source(source, near);
+        selected
     }
 
     /// Select the source's tick-start nearby colliders and exclude its own body. The shared
@@ -676,7 +694,7 @@ impl RubbleBodies {
         let radial = (slab.face - slab.reach, slab.face + slab.travel);
         for &piece in &self.active {
             #[cfg(test)]
-            self.surface_checks.set(self.surface_checks.get() + 1);
+            self.surface_checks.fetch_add(1, Ordering::Relaxed);
             let s = &self.surfaces[piece];
             if (s.aabb.min.cmpgt(hi) | s.aabb.max.cmplt(lo)).any() {
                 continue;
@@ -765,7 +783,10 @@ impl BeltSource {
         }
     }
 
-    pub(crate) fn read<F: QueryFilter>(entity: Entity, bodies: &Query<PieceData, F>) -> Self {
+    pub(crate) fn read<D: QueryData<ReadOnly = PieceReadData>, F: QueryFilter>(
+        entity: Entity,
+        bodies: &Query<D, F>,
+    ) -> Self {
         let (forces, _, mass, angular, com, locked) = bodies
             .get(entity)
             .expect("every driving source has Avian mass, pose and force state at tick start");
@@ -910,7 +931,7 @@ fn explicit_recipients(
         }
         // Every recipient already failing alone was clamped before the first pass, so a failing
         // system clamps all its explicit recipients.
-        for (whole, body) in explicit.iter_mut().zip(&bodies.bodies) {
+        for (whole, body) in explicit.iter_mut().zip(bodies.bodies.iter()) {
             if roots.contains(&reaction_root(&parents, index(body.entity))) {
                 *whole = false;
             }
@@ -974,9 +995,7 @@ pub(crate) fn piece_impulses<'c>(
     let explicit = explicit_recipients(bodies, &dynamic, dt);
     dynamic.sort_by_cached_key(|(contact, ..)| {
         #[cfg(test)]
-        bodies
-            .reaction_sort_keys
-            .set(bodies.reaction_sort_keys.get() + 1);
+        bodies.reaction_sort_keys.fetch_add(1, Ordering::Relaxed);
         // Lexicographic over the contact's geometry and forces, as bits.
         [
             contact.point.x.to_bits(),
@@ -997,7 +1016,7 @@ pub(crate) fn piece_impulses<'c>(
     });
     let mut pushes = Vec::new();
     for (contact, slot, collider, source, closing_speed) in dynamic {
-        let body = &mut bodies.bodies[slot];
+        let body = &mut bodies.bodies.to_mut()[slot];
         let impulse = if explicit[slot] {
             -source_force(contact) * dt
         } else {
@@ -1221,7 +1240,7 @@ mod tests {
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, mut bodies: Query<PieceData>| {
                 let mut snapshot = RubbleBodies::gather(&rubble, &[body], &bodies);
-                let state = &mut snapshot.bodies[0];
+                let state = &mut snapshot.bodies.to_mut()[0];
                 // FIXTURE DATA: off-centre impulse exercises both translation and rotation.
                 let at = state.com + Vec3::new(0.2, 0.1, 0.3);
                 let impulse = Vec3::new(10.0, -30.0, 20.0);
@@ -1790,7 +1809,7 @@ mod tests {
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 for mass in [500.0, 200.0] {
                     let mut pieces = RubbleBodies::gather(&rubble, &[collider], &bodies);
-                    let body = &mut pieces.bodies[0];
+                    let body = &mut pieces.bodies.to_mut()[0];
                     body.inv_mass = Vec3::splat(1.0 / mass);
                     body.linear = Vec3::Y;
                     body.angular = Vec3::ZERO;
@@ -1885,7 +1904,7 @@ mod tests {
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 let mut pieces = RubbleBodies::gather(&rubble, &[collider], &bodies);
-                let body = &mut pieces.bodies[0];
+                let body = &mut pieces.bodies.to_mut()[0];
                 body.inv_mass = Vec3::splat(0.001);
                 body.linear = Vec3::Y;
                 body.angular = Vec3::ZERO;
@@ -1930,7 +1949,7 @@ mod tests {
                 for with_brick in [false, true] {
                     let mut pieces = RubbleBodies::gather(&rubble, &[slab, brick], &bodies);
                     let mut points = [Vec3::ZERO; 2];
-                    for (body, point) in pieces.bodies.iter_mut().zip(&mut points) {
+                    for (body, point) in pieces.bodies.to_mut().iter_mut().zip(&mut points) {
                         let mass = if body.entity == slab { 2000.0 } else { 16.0 };
                         body.inv_mass = Vec3::splat(1.0 / mass);
                         body.inv_inertia = Mat3::ZERO;
@@ -2702,13 +2721,13 @@ mod tests {
                 let pushes = piece_impulses(&mut pieces, sourced(&contacts), DT);
                 assert!(pushes.is_empty());
                 assert_eq!(
-                    pieces.reaction_sort_keys.get(),
+                    pieces.reaction_sort_keys.load(Ordering::Relaxed),
                     0,
                     "contacts without dynamic recipients must not construct sort keys"
                 );
                 println!(
                     "MEASURED fixture reaction keys: {}",
-                    pieces.reaction_sort_keys.get()
+                    pieces.reaction_sort_keys.load(Ordering::Relaxed)
                 );
             })
             .unwrap();
@@ -2740,10 +2759,27 @@ mod tests {
                 };
                 let full = pieces.in_slab(&slab);
                 assert_eq!(full.len(), 1);
-                assert_eq!(pieces.surface_checks.replace(0), 2);
+                assert_eq!(pieces.surface_checks.swap(0, Ordering::Relaxed), 2);
+                {
+                    let local_view = pieces.for_source(Entity::PLACEHOLDER, &[local]);
+                    let remote_view = pieces.for_source(Entity::PLACEHOLDER, &[remote]);
+                    assert_eq!(local_view.in_slab(&slab), full);
+                    assert!(remote_view.in_slab(&slab).is_empty());
+                    assert_eq!(
+                        local_view.in_slab(&slab),
+                        full,
+                        "another source's selection cannot change this source's membership"
+                    );
+                }
+                assert_eq!(pieces.in_slab(&slab), full);
+                assert_eq!(
+                    pieces.surface_checks.swap(0, Ordering::Relaxed),
+                    2,
+                    "borrowed selections leave the common snapshot's membership intact"
+                );
                 pieces.select_source(Entity::PLACEHOLDER, &[local]);
                 assert_eq!(pieces.in_slab(&slab), full);
-                assert_eq!(pieces.surface_checks.replace(0), 1);
+                assert_eq!(pieces.surface_checks.swap(0, Ordering::Relaxed), 1);
                 assert!(
                     pieces.is_dynamic(remote),
                     "unselected recipients stay in the snapshot"
@@ -2754,13 +2790,13 @@ mod tests {
                     full,
                     "gather order and membership are unchanged"
                 );
-                assert_eq!(pieces.surface_checks.replace(0), 2);
+                assert_eq!(pieces.surface_checks.swap(0, Ordering::Relaxed), 2);
                 pieces.select_source(local, &[local]);
                 assert!(
                     pieces.in_slab(&slab).is_empty(),
                     "a hull cannot support its own belt"
                 );
-                assert_eq!(pieces.surface_checks.get(), 0);
+                assert_eq!(pieces.surface_checks.load(Ordering::Relaxed), 0);
                 println!("MEASURED candidate checks per fixture slab: global=2 local=1 empty=0");
             })
             .unwrap();

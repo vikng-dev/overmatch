@@ -5,7 +5,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::app::ScheduleRunnerPlugin;
-use bevy::ecs::system::SystemParam;
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::{ScheduleSystem, SystemParam};
 use bevy::prelude::*;
 use lightyear::prelude::input::native::{ActionState, NativeStateSequence};
 use lightyear::prelude::input::server::{InputValidationAppExt, authorize_controlled_targets};
@@ -26,7 +27,7 @@ use super::{harness, open_gameplay_gate, physics, spawn_map};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::TankKnockedOut;
 use crate::hull_marks::HullMarks;
-use crate::state::GameplaySet;
+use crate::state::{GameplaySet, SimPhase};
 // The spawn-height rule and its constants live in `terrain_grid`: ONE rule for every spawn path in
 // every composition (see `terrain_grid::spawn_surface_height`), so the offline duel, the lanes, the
 // bot and the spawn-map overrides cannot drift apart. Spawn points here are HORIZONTAL (XZ) — Y is
@@ -158,10 +159,7 @@ pub fn run() {
         (
             // A bot authors its command as a device does, before the parse and the Battle's hold.
             drive_bot.before(crate::command::ParseCommands),
-            respawn_player_tanks
-                .run_if(in_combat)
-                .in_set(GameplaySet)
-                .before(ConsumeCommandEdges),
+            player_respawn_system(),
         ),
     );
 
@@ -181,6 +179,17 @@ pub fn run() {
     if let Some(hosting) = hosting {
         hosting.finish();
     }
+}
+
+/// Root replacement publishes before the drive snapshot; no source can disappear between
+/// snapshot publication and the same tick's ordered contact commit.
+fn player_respawn_system() -> ScheduleConfigs<ScheduleSystem> {
+    respawn_player_tanks
+        .run_if(in_combat)
+        .in_set(GameplaySet)
+        .before(SimPhase::DrivingForces)
+        .before(ConsumeCommandEdges)
+        .into_configs()
 }
 
 /// Install the production Battle clock and score. The short-mode headless probe mounts this same
@@ -1108,7 +1117,7 @@ fn respawn_dead_bots(
 /// The authority's `TankKnockedOut` marker validates eligibility; `ControlledBy` excludes bots. A
 /// request before the life's respawn opens (`score::RespawnGate`, the mode's wait after the
 /// knockout) is refused: it is dropped, and the client, which shows the time left, sends another.
-/// Runs in `GameplaySet` before `ConsumeCommandEdges`, after the command bridge. Both initial
+/// Runs after the command bridge and before the driving snapshot. Both initial
 /// placement and automatic respawn use `SpawnPlacement`; the player's persistent spawn-map pick
 /// still wins. Recursive root despawn and `tank::sweep_launched_turret_on_root_despawn` sweep the
 /// old rig, including any detached turret.
@@ -1628,7 +1637,7 @@ mod tests {
                 Update,
                 (
                     spawn_pending_tanks.run_if(places_tanks),
-                    respawn_player_tanks.run_if(in_combat),
+                    player_respawn_system(),
                 )
                     .chain(),
             );
@@ -2167,13 +2176,23 @@ mod tests {
         clock.0 = clock.0.after(crate::sim_tick::TickSpan::of(ticks));
     }
 
-    /// The respawn opens the mode's wait after the knockout, on the server: a request one tick
-    /// before is refused and leaves the tank as it was; a request at the opening replaces it. The
-    /// client's countdown and the server's gate read this one opening. Mutants: no gate, a gate on
-    /// a client-side clock, or a wait rounded down respawn early; a gate that never opens fails.
+    /// The game's damage model supplies respawn eligibility. The mode's wait opens on the server:
+    /// an earlier request is refused; a request at the opening replaces the root before driving
+    /// snapshots it. The client's countdown and server gate share that opening. Removing the
+    /// lifecycle edge leaves the driving reader looking at the old root's deferred replacement.
     #[test]
     fn a_respawn_request_is_refused_before_the_wait_and_granted_after() {
+        #[derive(Resource, Default)]
+        struct DrivingSnapshot(Vec<Entity>);
         let mut app = placement_app();
+        app.init_resource::<DrivingSnapshot>().add_systems(
+            Update,
+            (|tanks: Query<Entity, With<ControlledBy>>, mut snapshot: ResMut<DrivingSnapshot>| {
+                snapshot.0.clear();
+                snapshot.0.extend(tanks.iter());
+            })
+            .in_set(SimPhase::DrivingForces),
+        );
         let peer = PeerId::Netcode(1);
         let link = app.world_mut().spawn((RemoteId(peer), Connected)).id();
         app.world_mut()
@@ -2212,10 +2231,16 @@ mod tests {
             app.world().get_entity(root).is_err(),
             "a request at the opening replaces the knocked-out tank"
         );
-        app.world_mut()
+        let replacement = app
+            .world_mut()
             .query_filtered::<Entity, With<ControlledBy>>()
             .single(app.world())
             .expect("one replacement player tank");
+        assert_eq!(
+            app.world().resource::<DrivingSnapshot>().0,
+            vec![replacement],
+            "the first driving reader sees the complete replacement in this same update"
+        );
     }
 
     /// The game's damage model: bots and players are combatants under the same mode wait.

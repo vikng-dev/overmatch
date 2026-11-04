@@ -21,10 +21,15 @@
 
 use avian3d::dynamics::rigid_body::forces::ForcesItem;
 use avian3d::prelude::{
-    ComputedCenterOfMass, Position, ReadRigidBodyForces, RigidBody, Rotation, WriteRigidBodyForces,
+    ComputedCenterOfMass, Forces, Position, ReadRigidBodyForces, RigidBody, Rotation,
+    WriteRigidBodyForces,
 };
+use bevy::ecs::query::QueryData;
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::math::{Affine3A, Vec2};
 use bevy::prelude::*;
+use bevy::utils::Parallel;
 use serde::{Deserialize, Serialize};
 
 use crate::bake::TankBlueprint;
@@ -46,8 +51,8 @@ use super::forces::{
 use super::oracle::TerrainOracle;
 use super::route::build_route;
 use super::rubble::{
-    BeltSource, PieceData, RubbleBodies, RubbleQuery, apply_pushes, footprint_radius,
-    piece_impulses,
+    BeltSource, PieceData, PieceReadData, RubbleBodies, RubbleQuery, apply_pushes,
+    footprint_radius, piece_impulses,
 };
 use super::side::Side;
 use super::terrain::TrackField;
@@ -72,7 +77,7 @@ pub struct TrackDriveSide {
     pub phase: f64,
 }
 
-/// The length (m) a replicated belt phase is known modulo: the wire carries it wrapped into
+/// Resolution: replicated travel span (m). The wire carries belt phase wrapped into
 /// `[0, BELT_PHASE_WRAP_M)`, so a replica's phase jumps by this length where the authority's
 /// crosses a multiple of it. Every reader of a phase takes differences through
 /// [`wrapped_phase_delta`], so none needs it to divide a link pitch — and no generic length could.
@@ -454,6 +459,7 @@ impl TrackGear {
 }
 
 pub fn sim_plugin(app: &mut App) {
+    app.init_resource::<DriveSupports>();
     app.insert_resource(super::load::DriverResolution::load());
     // Lazy one-shot: the blueprint lands at Startup (bake); the gear builds on the first
     // frame after and never again.
@@ -464,9 +470,11 @@ pub fn sim_plugin(app: &mut App) {
     );
     app.add_systems(
         FixedUpdate,
-        // Chained: the published rpm is this tick's crank, which `apply_track_forces` writes.
-        (apply_track_forces, publish_engine_rpm)
-            .chain()
+        // RPM reads the completed crank; contact commits need not delay its projection.
+        (
+            driving_systems(),
+            publish_engine_rpm.after(apply_track_forces),
+        )
             .in_set(SimPhase::DrivingForces)
             .in_set(GameplaySet),
     );
@@ -478,11 +486,13 @@ pub fn sim_plugin(app: &mut App) {
 fn publish_engine_rpm(
     mut tanks: Query<(&RigidBody, &TankTransmission, &mut EngineRpm), With<Tank>>,
 ) {
-    for (body, transmission, mut rpm) in &mut tanks {
-        if matches!(*body, RigidBody::Dynamic) {
-            rpm.set_if_neq(EngineRpm::of(transmission));
-        }
-    }
+    tanks
+        .par_iter_mut()
+        .for_each(|(body, transmission, mut rpm)| {
+            if matches!(*body, RigidBody::Dynamic) {
+                rpm.set_if_neq(EngineRpm::of(transmission));
+            }
+        });
 }
 
 /// Build [`TrackGear`] from the baked blueprint: the marker-derived running gear
@@ -808,59 +818,100 @@ fn supply_from_parts(
     }
 }
 
-/// The drive step: shape the command, run each side's belt force model at the tick-truth
-/// pose, apply the returned forces in report order, commit the new belt state.
-///
-/// Every tank reads the same tick-start support snapshot and excludes its own hull by identity.
-/// The recipients' sides are sized after every pass, over all tanks' contacts at once
-/// ([`piece_impulses`]), and written before recoil and physics.
-#[cfg_attr(
-    feature = "bitprobe",
-    expect(
-        clippy::too_many_arguments,
-        reason = "ECS adapter over terrain, tanks and piece reactions, plus bitprobe capture"
+/// The complete dynamic driving bundle; an absent force item is a broken Avian bundle,
+/// not a query filter that may silently remove an admitted tank.
+#[derive(QueryData)]
+#[query_data(mutable)]
+struct DriveTank {
+    entity: Entity,
+    position: &'static Position,
+    rotation: &'static Rotation,
+    center_of_mass: &'static ComputedCenterOfMass,
+    body: &'static RigidBody,
+    command: &'static ParsedTankCommand,
+    drive: &'static mut TrackDrive,
+    signal: &'static mut DriveSignal,
+    grip: &'static mut TrackGrip,
+    elements: &'static mut TrackGripElements,
+    effect: &'static mut TrackGripEffect,
+    transmission: &'static mut TankTransmission,
+    contacts: &'static mut TrackContacts,
+    forces: Option<Forces>,
+    volumes: Option<&'static TankVolumes>,
+    capabilities: Option<&'static TankCapabilities>,
+}
+
+/// Tick-start geometry and source inertia, consumed by commit_track_contacts. Support shape
+/// copies live only between snapshot publication and the same update's contact commit.
+#[derive(Resource, Default)]
+struct DriveSupports {
+    pieces: RubbleBodies<'static>,
+    sources: Vec<(BeltSource, Vec<Entity>)>,
+}
+
+/// Snapshot -> owner-local calculation -> cross-owner effects, all in this fixed update.
+fn driving_systems() -> ScheduleConfigs<ScheduleSystem> {
+    (
+        gather_drive_supports,
+        apply_track_forces,
+        commit_track_contacts,
     )
-)]
+        .chain()
+        .into_configs()
+}
+
+fn gather_drive_supports(
+    gear: Option<Res<TrackGear>>,
+    rubble: RubbleQuery,
+    bodies: Query<PieceReadData>,
+    tanks: Query<(Entity, &Position, &RigidBody), With<Tank>>,
+    mut supports: ResMut<DriveSupports>,
+    mut gathered: Local<Parallel<Vec<(BeltSource, Vec<Entity>)>>>,
+) {
+    tanks.par_iter().for_each(|(entity, position, body)| {
+        // Replicas have no authoritative driving pass and gather no support shapes.
+        if *body != RigidBody::Dynamic {
+            return;
+        }
+        let gear = gear
+            .as_deref()
+            .expect("a dynamic tank is admitted only after startup constructs TrackGear");
+        let mut local = rubble.near(position.0, gear.rubble_radius);
+        local.retain(|&collider| rubble.body_of(collider) != entity);
+        let source = BeltSource::read(entity, &bodies);
+        gathered.scope(|sources| sources.push((source, local)));
+    });
+    gathered.drain_into(&mut supports.sources);
+    let mut near = Vec::new();
+    for (_, local) in &supports.sources {
+        near.extend_from_slice(local);
+    }
+    supports
+        .sources
+        .sort_unstable_by_key(|(source, _)| source.entity);
+    near.sort_unstable();
+    near.dedup();
+    // Gathering reads body state once, before any source applies its own forces.
+    supports.pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+}
+
+/// Each tank reads the common tick-start snapshot and changes only its own driving and force state.
+/// Bevy 0.19.1's QueryParIter batches on ComputeTaskPool; worker assignment has no effect order.
 fn apply_track_forces(
     time: Res<Time>,
     field: Res<TrackField>,
     gear: Option<Res<TrackGear>>,
     #[cfg(feature = "bitprobe")] mut bitprobe: Option<ResMut<BitprobeCapture>>,
     volumes: Query<VolumeFacets>,
-    (rubble, mut transfers): (
-        RubbleQuery,
-        ResMut<crate::contact_transfer::ContactTransfers>,
-    ),
-    mut pieces_query: Query<PieceData>,
-    mut tanks: Query<
-        (
-            Entity,
-            &Position,
-            &Rotation,
-            &ComputedCenterOfMass,
-            &RigidBody,
-            &ParsedTankCommand,
-            &mut TrackDrive,
-            &mut DriveSignal,
-            &mut TrackGrip,
-            &mut TrackGripElements,
-            &mut TrackGripEffect,
-            &mut TankTransmission,
-            &mut TrackContacts,
-            (Option<&TankVolumes>, Option<&TankCapabilities>),
-        ),
-        With<Tank>,
-    >,
+    supports: Res<DriveSupports>,
+    mut tanks: Query<DriveTank, With<Tank>>,
 ) {
     #[cfg(feature = "bitprobe")]
     if let Some(capture) = bitprobe.as_deref_mut() {
         capture.clear_tick();
     }
     // Before spawn, and on a replica-only client, no dynamic tank needs driving construction.
-    if !tanks
-        .iter()
-        .any(|(_, _, _, _, body, ..)| *body == RigidBody::Dynamic)
-    {
+    if supports.sources.is_empty() {
         return;
     }
     let gear = gear
@@ -870,71 +921,51 @@ fn apply_track_forces(
         .field
         .as_ref()
         .expect("a dynamic tank is admitted only after its world publishes the terrain field");
-    let dt = time.delta_secs();
-    let mut sources = Vec::new();
-    let mut near = Vec::new();
-    for (entity, pos, _, _, body, ..) in &tanks {
-        // Replicas have no authoritative driving pass and gather no support shapes.
-        if *body == RigidBody::Dynamic {
-            let mut local = rubble.near(pos.0, gear.rubble_radius);
-            local.retain(|&collider| rubble.body_of(collider) != entity);
-            near.extend_from_slice(&local);
-            sources.push((entity, local));
-        }
+    for (source, _) in &supports.sources {
+        assert!(
+            tanks.contains(source.entity),
+            "a dynamic tank carries its complete spawn-built driving state"
+        );
     }
-    sources.sort_unstable_by_key(|(entity, _)| *entity);
-    let entities: Vec<_> = sources.iter().map(|(entity, _)| *entity).collect();
-    near.sort_unstable();
-    near.dedup();
-    // A hull's shape is read only if another tank's footprint query reached it. All recipients
-    // come from the same body query, before any source applies driving forces.
-    let mut pieces = RubbleBodies::gather(&rubble, &near, &pieces_query);
-    for (entity, local) in sources {
-        let (
-            _,
-            pos,
-            rot,
-            center_of_mass,
-            _,
-            command,
-            mut drive,
-            mut signal,
-            mut grip,
-            mut grip_elements,
-            mut grip_effect,
-            mut trans_state,
-            mut contacts,
-            (tank_volumes, tank_caps),
-        ) = tanks
-            .get_mut(entity)
-            .expect("a tank gathered for this synchronous tick remains alive");
-        pieces.select_source(entity, &local);
-        let (mut forces, ..) = pieces_query
-            .get_mut(entity)
-            .expect("a dynamic driving hull carries Avian force state");
-        #[cfg(feature = "bitprobe")]
-        if let Some(capture) = bitprobe.as_deref_mut() {
-            capture.tanks_seen += 1;
-            capture.command = [command.throttle, command.steer];
+    let dt = time.delta_secs();
+    #[cfg(feature = "bitprobe")]
+    let captured = std::sync::OnceLock::new();
+    #[cfg(feature = "bitprobe")]
+    let capture_source = bitprobe.as_ref().map(|_| {
+        supports
+            .sources
+            .last()
+            .expect("dynamic sources are nonempty")
+            .0
+            .entity
+    });
+    tanks.par_iter_mut().for_each(|mut tank| {
+        if *tank.body != RigidBody::Dynamic {
+            return; // Replicas consume the server stream.
         }
-        let target = drive_target(command, tank_volumes, tank_caps, &volumes);
-
-        let affine = Affine3A::from_rotation_translation(rot.0, pos.0);
-        // avian3d 0.7 `ForcesItem` keeps this helper private; this is its version-pinned
-        // source expression (`query_data.rs`): position + rotation * local computed COM.
-        let center_of_mass = pos.0 + rot.0 * center_of_mass.0;
+        let index = supports
+            .sources
+            .binary_search_by_key(&tank.entity, |(source, _)| source.entity)
+            .expect("every dynamic tank belongs to the synchronous tick-start snapshot");
+        let pieces = supports
+            .pieces
+            .for_source(tank.entity, &supports.sources[index].1);
+        let mut forces = tank
+            .forces
+            .take()
+            .expect("a dynamic driving hull carries Avian force state");
+        let target = drive_target(tank.command, tank.volumes, tank.capabilities, &volumes);
+        let affine = Affine3A::from_rotation_translation(tank.rotation.0, tank.position.0);
+        // avian3d 0.7 ForcesItem's global COM expression in query_data.rs.
+        let center_of_mass = tank.position.0 + tank.rotation.0 * tank.center_of_mass.0;
         let linear = forces.linear_velocity();
         let angular = forces.angular_velocity();
-        let mut effect = TrackGripEffect::default();
-
-        // The shared per-tank drivetrain tick — contact evaluation, joint transmission, belt
-        // commit — with this adapter supplying Avian's live velocity field.
         #[cfg_attr(
             not(feature = "bitprobe"),
             expect(
                 unused_mut,
                 unused_variables,
-                reason = "only the bitprobe capture consumes"
+                reason = "only bitprobe consumes the transmission trace"
             )
         )]
         let (mut reports, tr) = belt_tick(
@@ -946,28 +977,37 @@ fn apply_track_forces(
             dt,
             |p| linear + angular.cross(p - center_of_mass),
             BeltRig {
-                drive: &mut drive,
-                signal: &mut signal,
-                grip: &mut grip,
-                elements: &mut grip_elements,
-                transmission: &mut trans_state.0,
+                drive: &mut tank.drive,
+                signal: &mut tank.signal,
+                grip: &mut tank.grip,
+                elements: &mut tank.elements,
+                transmission: &mut tank.transmission.0,
             },
         );
         #[cfg(feature = "bitprobe")]
-        if let Some(capture) = bitprobe.as_deref_mut() {
-            for (side, report) in reports.iter_mut().enumerate() {
-                capture.contact_inputs[side] = std::mem::take(&mut report.bitprobe_contacts);
-                capture.element_outputs[side] = std::mem::take(&mut report.bitprobe_elements);
-            }
-            capture.belt_reaction = [reports[0].belt_reaction, reports[1].belt_reaction];
-            capture.transmission = tr.bitprobe;
+        if capture_source == Some(tank.entity) {
+            // The single-source diagnostic selects the greatest tank entity, never the last worker.
+            captured
+                .set(BitprobeCapture {
+                    tanks_seen: supports.sources.len() as u32,
+                    command: [tank.command.throttle, tank.command.steer],
+                    contact_inputs: reports
+                        .each_mut()
+                        .map(|report| std::mem::take(&mut report.bitprobe_contacts)),
+                    element_outputs: reports
+                        .each_mut()
+                        .map(|report| std::mem::take(&mut report.bitprobe_elements)),
+                    belt_reaction: [reports[0].belt_reaction, reports[1].belt_reaction],
+                    transmission: tr.bitprobe,
+                })
+                .expect("a parallel query visits its selected capture source exactly once");
         }
+        let mut effect = TrackGripEffect::default();
         #[cfg(feature = "bitprobe")]
         {
             effect.transmission_probe = tr.bitprobe;
         }
         for (si, report) in reports.into_iter().enumerate() {
-            pieces.record_static_contacts(entity, &report.contacts, &mut transfers);
             effect.belt_reaction[si] = report.belt_reaction;
             for contact in &report.contacts {
                 effect.tangential_force += contact.tangential_force();
@@ -976,37 +1016,65 @@ fn apply_track_forces(
                 effect.tangential_torque +=
                     (contact.point - center_of_mass).cross(contact.tangential_force());
             }
-            // Apply in report order — accumulation order is part of determinism.
+            // Each owner retains left/right and force-emission order.
             for app in &report.apps {
                 forces.apply_force_at_point(app.force, app.point);
             }
-            contacts.0[si] = report.contacts;
+            tank.contacts.0[si] = report.contacts;
         }
-        effect.field_digest = coarse_grip_digest(&grip_elements);
-        *grip_effect = effect;
+        effect.field_digest = coarse_grip_digest(&tank.elements);
+        *tank.effect = effect;
+    });
+    #[cfg(feature = "bitprobe")]
+    if let Some(capture) = bitprobe.as_deref_mut() {
+        *capture = captured
+            .into_inner()
+            .expect("the selected dynamic capture source completed this tick");
     }
-    // Every pass has read the tick-start snapshot, so the recipients' sides are sized after
-    // them all, over every tank's contacts at once, by one law for every recipient body.
-    // These writes stay in DrivingForces, before recoil and Avian integration.
-    let contacts = entities.iter().flat_map(|&entity| {
-        let (.., contacts, _) = tanks
-            .get(entity)
-            .expect("a tank gathered for this synchronous tick remains alive");
-        let source = BeltSource::read(entity, &pieces_query);
-        contacts
+}
+
+/// Static reactions commit by ascending source entity, then side and contact emission order.
+/// Moving reactions use piece_impulses' canonical geometry order across all sources; their
+/// sequential velocity updates are a coupled solve and complete before recoil and physics.
+fn commit_track_contacts(
+    time: Res<Time>,
+    mut supports: ResMut<DriveSupports>,
+    tanks: Query<&TrackContacts, With<Tank>>,
+    mut bodies: Query<PieceData>,
+    mut transfers: ResMut<crate::contact_transfer::ContactTransfers>,
+) {
+    let DriveSupports { pieces, sources } = &mut *supports;
+    for (source, _) in sources.iter() {
+        let contacts = tanks
+            .get(source.entity)
+            .expect("a gathered source remains alive through its same-tick commit");
+        for side in &contacts.0 {
+            pieces.record_static_contacts(source.entity, side, &mut transfers);
+        }
+    }
+    let contacts = sources.iter().flat_map(|(source, _)| {
+        tanks
+            .get(source.entity)
+            .expect("a gathered source remains alive through its same-tick commit")
             .0
             .iter()
             .flatten()
-            .map(move |contact| (source, contact))
+            .map(move |contact| (*source, contact))
     });
-    let pushes = piece_impulses(&mut pieces, contacts, dt);
+    let dt = time.delta_secs();
+    let pushes = piece_impulses(pieces, contacts, dt);
     pieces.record_moving_contacts(&pushes, &mut transfers, dt);
-    apply_pushes(&pushes, &mut pieces_query);
+    apply_pushes(&pushes, &mut bodies);
+    *pieces = RubbleBodies::default();
+    sources.clear();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+    struct DriveTest;
     use crate::damage::Part;
 
     /// The production adapter's app with real data-derived running gear on a flat field (top
@@ -1025,6 +1093,8 @@ mod tests {
             crate::bake::plugin,
         ))
         .init_asset::<Mesh>()
+        .init_resource::<DriveSupports>()
+        .add_systems(DriveTest, driving_systems())
         .init_resource::<crate::contact_transfer::ContactTransfers>()
         .insert_resource(Gravity::ZERO)
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
@@ -1049,6 +1119,8 @@ mod tests {
         }
         app.finish();
         app.cleanup();
+        #[cfg(feature = "bitprobe")]
+        app.init_resource::<BitprobeCapture>();
         app.update();
         let gear = app.world().resource::<TrackGear>();
         let low = gear
@@ -1090,7 +1162,6 @@ mod tests {
     /// Avian's tick-start velocity state on `body`, then the production adapter once.
     fn run_adapter(app: &mut App, bodies: &[(Entity, Vec3)]) {
         use avian3d::prelude::*;
-        use bevy::ecs::system::RunSystemOnce;
         for &(body, velocity) in bodies {
             app.world_mut().entity_mut(body).insert((
                 LinearVelocity(velocity),
@@ -1098,7 +1169,7 @@ mod tests {
                 avian3d::dynamics::integrator::VelocityIntegrationData::default(),
             ));
         }
-        app.world_mut().run_system_once(apply_track_forces).unwrap();
+        app.world_mut().run_schedule(DriveTest);
     }
 
     /// Fixture bodies run the production adapter with real data-derived running gear. The box
@@ -2025,7 +2096,6 @@ mod tests {
     #[test]
     fn stopped_engine_cannot_pivot_a_free_hull() {
         use avian3d::prelude::*;
-        use bevy::ecs::system::RunSystemOnce;
         let mut hull = DrivenHull::new();
         hull.engine_held(0);
         hull.app
@@ -2051,10 +2121,7 @@ mod tests {
                 AngularVelocity(Vec3::Y * yaw),
                 avian3d::dynamics::integrator::VelocityIntegrationData::default(),
             ));
-            hull.app
-                .world_mut()
-                .run_system_once(apply_track_forces)
-                .unwrap();
+            hull.app.world_mut().run_schedule(DriveTest);
             let effect = hull.app.world().get::<TrackGripEffect>(hull.root).unwrap();
             // Fixture yaw inertia is the 30,000 kg m² authored by fixture_tank. Translation
             // uses the same data-derived mass as the free longitudinal hull fixture.
@@ -2776,5 +2843,159 @@ mod tests {
         let first = coarse_grip_digest(&elements);
         elements.sides[0].strain[0] = Vec3::X * super::super::forces::GRIP_SHEAR_FLOOR_M * 0.4;
         assert_ne!(first, coarse_grip_digest(&elements));
+    }
+
+    /// A tank owns its drive result: adding unrelated tanks or moving it to another query batch
+    /// cannot change its forces or carried state. The server relies on that ownership when workers
+    /// receive different batches. Fixture: sensor hulls on a uniform field, varied belt/point speeds.
+    #[test]
+    fn one_tanks_drive_is_independent_of_population_and_query_order() {
+        use avian3d::prelude::*;
+        let mut reference = None;
+        for (count, reverse) in [(1, false), (8, false), (8, true)] {
+            let (mut app, upper_y) = adapter_app();
+            let mut order: Vec<_> = (0..count).collect();
+            if reverse {
+                order.reverse();
+            }
+            let mut roots = vec![Entity::PLACEHOLDER; count];
+            for index in order {
+                let root = fixture_tank(
+                    &mut app,
+                    Vec3::new(index as f32 * 10.0, upper_y - 0.25, 0.0),
+                );
+                app.world_mut().entity_mut(root).insert((
+                    Sensor,
+                    TrackDrive {
+                        sides: [
+                            TrackDriveSide {
+                                speed: 2.0,
+                                phase: 0.01,
+                            },
+                            TrackDriveSide {
+                                speed: -1.0,
+                                phase: 0.02,
+                            },
+                        ],
+                    },
+                ));
+                roots[index] = root;
+            }
+            app.update();
+            app.update();
+            let velocities: Vec<_> = roots
+                .iter()
+                .enumerate()
+                .map(|(index, &root)| (root, Vec3::NEG_Z * (1.0 + index as f32 * 0.25)))
+                .collect();
+            let mut observed = Vec::new();
+            for _ in 0..4 {
+                run_adapter(&mut app, &velocities);
+                observed.extend(support_bits(&app, &roots[..1]));
+                let effect = app.world().get::<TrackGripEffect>(roots[0]).unwrap();
+                observed.extend(
+                    effect
+                        .rolling_force
+                        .to_array()
+                        .map(|v| u64::from(v.to_bits())),
+                );
+                assert!(
+                    effect.traction_capacity_n > 0.0,
+                    "the comparison must exercise supported driving"
+                );
+                observed.push(u64::from(effect.traction_capacity_n.to_bits()));
+                #[cfg(feature = "bitprobe")]
+                {
+                    let selected = *roots.iter().max().unwrap();
+                    let capture = app.world().resource::<BitprobeCapture>();
+                    assert_eq!(capture.tanks_seen as usize, count);
+                    assert_eq!(
+                        capture.transmission,
+                        app.world()
+                            .get::<TrackGripEffect>(selected)
+                            .unwrap()
+                            .transmission_probe,
+                        "capture commits the selected source, regardless of its worker's completion order"
+                    );
+                }
+            }
+            if let Some(reference) = &reference {
+                assert_eq!(
+                    &observed, reference,
+                    "population {count}, reversed {reverse}"
+                );
+            } else {
+                reference = Some(observed);
+            }
+        }
+    }
+
+    /// Structural readers receive source-keyed contact staging after every tank has evaluated.
+    /// A worker-completion-order append breaks this contract. Fixture: sensor hulls bearing on
+    /// one fixed structural slab; entity order differs from their spatial order.
+    #[test]
+    fn shared_static_contacts_commit_by_source_then_side_and_contact() {
+        use avian3d::prelude::*;
+        let (mut app, upper_y) = adapter_app();
+        let slab = app
+            .world_mut()
+            .spawn((
+                Position(Vec3::ZERO),
+                Rotation::default(),
+                RigidBody::Static,
+                Collider::cuboid(200.0, 0.5, 200.0),
+                crate::contact_transfer::StructureBody,
+            ))
+            .id();
+        let mut roots = Vec::new();
+        for x in [20.0, 0.0, -20.0] {
+            let root = fixture_tank(&mut app, Vec3::new(x, upper_y, 0.0));
+            app.world_mut().entity_mut(root).insert(Sensor);
+            roots.push(root);
+        }
+        app.update();
+        app.update();
+        let velocities: Vec<_> = roots
+            .iter()
+            .map(|&root| (root, Vec3::NEG_Y * 0.1))
+            .collect();
+        run_adapter(&mut app, &velocities);
+        roots.sort_unstable();
+        let mut expected = Vec::new();
+        for root in roots {
+            let contacts = app.world().get::<TrackContacts>(root).unwrap();
+            let before = expected.len();
+            expected.extend(
+                contacts
+                    .0
+                    .iter()
+                    .flatten()
+                    .filter(|contact| contact.collider == Some(slab))
+                    .map(|contact| (root, contact.point)),
+            );
+            assert!(
+                expected.len() > before,
+                "every source must bear on the shared slab"
+            );
+        }
+        let transfers = app
+            .world()
+            .resource::<crate::contact_transfer::ContactTransfers>();
+        let staged: Vec<_> = transfers
+            .staged()
+            .iter()
+            .map(|contact| (contact.body, contact.point))
+            .collect();
+        assert_eq!(staged, expected);
+    }
+
+    /// A dynamic hull must never vanish from the worker query while its old contact report survives.
+    /// Structural admission relies on a missing driving component failing before any force commit.
+    #[test]
+    #[should_panic(expected = "a dynamic tank carries its complete spawn-built driving state")]
+    fn an_incomplete_dynamic_drive_bundle_is_a_bug_instead_of_a_skipped_tank() {
+        let (mut app, roots) = support_fixture(false, false, true, 0.0);
+        app.world_mut().entity_mut(roots[0]).remove::<TrackDrive>();
+        run_adapter(&mut app, &[(roots[0], Vec3::ZERO)]);
     }
 }

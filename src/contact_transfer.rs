@@ -172,6 +172,12 @@ struct Kept {
 }
 
 impl ContactTransfers {
+    /// Pre-physics staging order, before the solver reading canonicalizes contact geometry.
+    #[cfg(test)]
+    pub(crate) fn staged(&self) -> &[AppliedContact] {
+        &self.pending
+    }
+
     /// Stage a fixed structure's opposite force this tick, before physics integrates it.
     /// Dynamic receivers must use Self::stage_on_moving with their tick-start inertia.
     pub(crate) fn stage(&mut self, contact: AppliedContact) {
