@@ -10,9 +10,9 @@
 //!
 //! # Elements, chunks, joints, anchors
 //!
-//! - An [`Element`] is a generator terminal (a pier, a sill, a lintel, a gable, a wall plate, a roof
-//!   plane): a convex solid, the hull of its corners. Intact, each is one convex collider; elements
-//!   tile the building and never overlap.
+//! - An [`Element`] is a construction's piece (a pier, a sill, a lintel, a gable, a wall plate, a
+//!   roof plane, a tree's trunk): a convex solid, the hull of its corners. Intact, each is one
+//!   convex collider; elements tile the building and never overlap.
 //! - A [`Chunk`] is the fracture bake's piece: a convex hull inside one element. An element's
 //!   chunks are a contiguous run of [`BuildingAsset::chunks`] ([`Element::chunks`]) and tile it.
 //! - A component is a part the generator builds as one (a brick wall, a wall plate, a roof plane):
@@ -70,7 +70,8 @@ pub struct BuildingAsset {
     pub anchors: Vec<Anchor>,
 }
 
-/// What an element is, as the generator labelled it.
+/// What an element is, as its construction data labels it. A label and the key a construction's
+/// joins name, never a law's selector: no law reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ElementKind {
     /// Full wall height between openings or at a wall's end.
@@ -85,6 +86,8 @@ pub enum ElementKind {
     WallPlate,
     /// A roof plane: its boards.
     Roof,
+    /// A tree's trunk, root to tip.
+    Trunk,
 }
 
 /// The authored surface frame: upright image mapping, or grain in the building frame.

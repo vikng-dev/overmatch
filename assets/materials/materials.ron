@@ -371,8 +371,9 @@
         // crew line rate along the chord the shell's disc cut through it, and each spall
         // direction's strength entering it.
         "Flesh": Witness,
-        // Every tree's trunk, whatever its species (`assets/trees/wood.ron` names it): one wood,
-        // since a player cannot tell one species' wood from another's. No penetration data: the
+        // Dry timber: a building's planks and plates, and the segment tree runtime's trunk
+        // substance (`assets/trees/wood.ron` names it). A construction's trunk is green wood, its
+        // species' row below. No penetration data: the
         // factor is the wood's crushing strength along the grain over the reference steel's flow
         // strength, scaled to the reference's 1000 — a strength ratio, the same reading the steels'
         // DERIVED rows note, not a measured equivalence.
@@ -459,6 +460,136 @@
                     https://www.icfweb.org/Proceedings/ICF10A/72/ and /74/, read primary.
                     ASSUMED spruce analogue for this scalar wood row; the source reports a
                     specimen-size effect. Grain-resolved timber remains collision lane 8"))),
+            )),
+        ),
+        // A living trunk's green wood, one row per species (`assets/trees/species.ron` names each):
+        // the fresh wood's density, its water in it, and its along-grain facts as ForestGALES
+        // carries them. A seam between two of a trunk's chunks is the wood parting across its
+        // fibres, so `tensile` is the green modulus of rupture and `fracture_energy` the along-grain
+        // opening work; the facts the crush and punch laws read are the dry spruce's, ASSUMED. The
+        // segment tree runtime (`src/trees.rs`) reads its own copies of the same three facts in
+        // `assets/trees/wood.ron`.
+        "GreenNorwaySpruce": Hard(
+            resistance: Effective((40.0, StandIn("Stand-in for porous timber penetration from its own density and strength: the Wood row's factor, the trunk's today; no green-wood crushing strength read"))),
+            visual: "dark_planks",
+            feedback: (
+                exposed_linear_rgb: ((0.32, 0.18, 0.08), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.34, 0.22, 0.12), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (0.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (2.25, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (false, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
+            ),
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
+            friction: Some((0.5, Unknown("ASSUMED, no source read: the Wood row's one-side value"))),
+            facts: None,
+            bulk: Some((
+                density: (850.0, Measured("MEASURED transcription: ForestGALES fgr
+                package species parameters (tom-locatelli/fgr, data/ud_species_parameters.rda,
+                read 2026-11-01), row NS,
+                stem_density 850 kg/m3: the green wood density the model multiplies stem
+                volume by for the fresh stem mass its overturning coefficients read (fgr
+                manual 16092020). The same table states NS mor 3.6e7 Pa, matching
+                along_grain_rupture_pa. A model parameter, not a measurement of these trees")),
+                tensile: Some((36.0e6, Measured("MEASURED transcription: Merlin et al.,
+                Large-scale modelling wind damage vulnerability (2025), Table 2, default Norway
+                spruce MOR 36 MPa (green-wood ForestGALES parameter, not a fresh tree measurement).
+                https://www.plantedforests.org/wp-content/uploads/2025/05/FECOS-D-25-00237_R1paper_only.pdf
+                The table misprints its MOR unit; MPa follows the model definition, not kN/mm2."))),
+                fracture_energy: Some((22340.0, Unknown("ASSUMED saturated clear-softwood
+                analogue, not measured Norway spruce: Murray, FHWA-HRT-04-097 (2007), section 1.7.3,
+                Table 10, saturated parallel mode I 2.234 MPa cm = 22340 J/m2 (DERIVED unit
+                conversion). Source uses correlated model values for southern yellow pine and
+                Douglas fir, no measured parallel-mode data. Species and living-trunk transfer are
+                unverified. https://www.fhwa.dot.gov/publications/research/safety/04097/04097.pdf.
+                Settled by a living Norway-spruce along-grain opening fracture-energy measurement"))),
+                blast: Some((
+                    compressive_strength: Some((5.6e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (tangential quasi-static compression of dry spruce, Zulkifli et al. 2021). Settled by a green Norway spruce measurement of this quantity"))),
+                    compressive_dif: Some((5.960714285714286, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (dynamic over static tangential compression of dry spruce, Zulkifli et al. 2021). Settled by a green Norway spruce measurement of this quantity"))),
+                    solid_density: Some((1500.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (cell-wall density, Kamke 2006). Settled by a green Norway spruce measurement of this quantity"))),
+                    youngs_modulus: Some((118.23e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (tangential compression modulus of dry spruce, Zulkifli et al. 2021). Settled by a green Norway spruce measurement of this quantity"))),
+                    tensile_dif: Some((1.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (no dynamic tensile ratio read for any spruce). Settled by a green Norway spruce measurement of this quantity"))),
+                )),
+                shear_cohesion: Some((8.9e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce shear parallel to grain at 12 % moisture, Wood Handbook FPL-GTR-282 Table 5-3a). Settled by a green Norway spruce measurement of this quantity"))),
+                shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green Norway spruce measurement of this quantity"))),
+            )),
+        ),
+        "GreenScotsPine": Hard(
+            resistance: Effective((40.0, StandIn("Stand-in for porous timber penetration from its own density and strength: the Wood row's factor, the trunk's today; no green-wood crushing strength read"))),
+            visual: "dark_planks",
+            feedback: (
+                exposed_linear_rgb: ((0.32, 0.18, 0.08), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.34, 0.22, 0.12), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (0.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (2.25, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (false, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
+            ),
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
+            friction: Some((0.5, Unknown("ASSUMED, no source read: the Wood row's one-side value"))),
+            facts: None,
+            bulk: Some((
+                density: (850.0, Measured("MEASURED transcription: fgr species
+                parameters, row SP, stem_density 850 kg/m3, green wood density (same source as norway_spruce above; the same
+                table states SP mor 4.6e7 Pa). A model parameter, not a measurement of these
+                trees")),
+                tensile: Some((46.0e6, Measured("MEASURED transcription: Merlin et al.
+                (2025), Table 2, default Scots pine MOR 46 MPa, the green-wood ForestGALES
+                parameter. Same source and MOR unit correction as norway_spruce above."))),
+                fracture_energy: Some((22340.0, Unknown("ASSUMED saturated clear-softwood
+                analogue, not measured Scots pine: Murray, FHWA-HRT-04-097 (2007), section 1.7.3,
+                Table 10, saturated parallel mode I 2.234 MPa cm = 22340 J/m2 (DERIVED conversion).
+                Correlated model values for southern yellow pine and Douglas fir; species and
+                living-trunk transfer unverified. Same FHWA source as norway_spruce above. Settled
+                by a living Scots-pine along-grain opening fracture-energy measurement"))),
+                blast: Some((
+                    compressive_strength: Some((5.6e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (tangential quasi-static compression of dry spruce, Zulkifli et al. 2021). Settled by a green Scots pine measurement of this quantity"))),
+                    compressive_dif: Some((5.960714285714286, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (dynamic over static tangential compression of dry spruce, Zulkifli et al. 2021). Settled by a green Scots pine measurement of this quantity"))),
+                    solid_density: Some((1500.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (cell-wall density, Kamke 2006). Settled by a green Scots pine measurement of this quantity"))),
+                    youngs_modulus: Some((118.23e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (tangential compression modulus of dry spruce, Zulkifli et al. 2021). Settled by a green Scots pine measurement of this quantity"))),
+                    tensile_dif: Some((1.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (no dynamic tensile ratio read for any spruce). Settled by a green Scots pine measurement of this quantity"))),
+                )),
+                shear_cohesion: Some((8.9e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce shear parallel to grain at 12 % moisture, Wood Handbook FPL-GTR-282 Table 5-3a). Settled by a green Scots pine measurement of this quantity"))),
+                shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green Scots pine measurement of this quantity"))),
+            )),
+        ),
+        "GreenSilverBirch": Hard(
+            resistance: Effective((40.0, StandIn("Stand-in for porous timber penetration from its own density and strength: the Wood row's factor, the trunk's today; no green-wood crushing strength read"))),
+            visual: "dark_planks",
+            feedback: (
+                exposed_linear_rgb: ((0.32, 0.18, 0.08), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                powder_linear_rgb: ((0.34, 0.22, 0.12), Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                metallic: (0.0, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                roughness_gain: (2.25, Taste("material contact and fracture effects: ASSUMED: provisional exposed-surface and powder read; no measured optical response read for this substance")),
+                sparks: (false, Taste("material contact and fracture effects: ASSUMED: provisional contact-spark emission for this substance")),
+            ),
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
+            friction: Some((0.5, Unknown("ASSUMED, no source read: the Wood row's one-side value"))),
+            facts: None,
+            bulk: Some((
+                density: (900.0, Measured("ASSUMED species transfer of the MEASURED
+                transcription in the fgr species parameters, row BI (birch, not specifically Betula
+                pendula), stem_density 900 kg/m3, green wood density (same source as norway_spruce
+                above; the same table states BI mor 6.3e7 Pa)")),
+                tensile: Some((63.0e6, Measured("ASSUMED species transfer of the MEASURED
+                transcription in Merlin et al. (2025), Table 2: default birch MOR 63 MPa, the
+                green-wood ForestGALES parameter. Table says birch, not specifically Betula pendula;
+                treating it as silver birch is an analogue. Same source and MOR unit correction as
+                norway_spruce above."))),
+                fracture_energy: Some((22340.0, Unknown("ASSUMED saturated clear-softwood
+                analogue for hardwood, not measured silver birch: Murray, FHWA-HRT-04-097 (2007),
+                section 1.7.3, Table 10, saturated parallel mode I 2.234 MPa cm = 22340 J/m2
+                (DERIVED conversion). Correlated southern yellow pine/Douglas fir model value;
+                neither species nor living-trunk transfer is verified. No suitable birch
+                longitudinal-opening measurement found. Same FHWA source as norway_spruce above.
+                Settled by a living silver-birch along-grain opening fracture-energy measurement"))),
+                blast: Some((
+                    compressive_strength: Some((5.6e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (tangential quasi-static compression of dry spruce, Zulkifli et al. 2021). Settled by a green silver birch measurement of this quantity"))),
+                    compressive_dif: Some((5.960714285714286, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (dynamic over static tangential compression of dry spruce, Zulkifli et al. 2021). Settled by a green silver birch measurement of this quantity"))),
+                    solid_density: Some((1500.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (cell-wall density, Kamke 2006). Settled by a green silver birch measurement of this quantity"))),
+                    youngs_modulus: Some((118.23e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (tangential compression modulus of dry spruce, Zulkifli et al. 2021). Settled by a green silver birch measurement of this quantity"))),
+                    tensile_dif: Some((1.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (no dynamic tensile ratio read for any spruce). Settled by a green silver birch measurement of this quantity"))),
+                )),
+                shear_cohesion: Some((8.9e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce shear parallel to grain at 12 % moisture, Wood Handbook FPL-GTR-282 Table 5-3a). Settled by a green silver birch measurement of this quantity"))),
+                shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green silver birch measurement of this quantity"))),
             )),
         ),
         // Fired clay brick: every building's masonry (`assets/buildings/<id>/<id>.building.ron`

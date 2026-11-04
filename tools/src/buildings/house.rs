@@ -274,7 +274,9 @@ fn wall_elements(
             ElementKind::Sill => "sill",
             ElementKind::Lintel => "lintel",
             ElementKind::Gable => "gable",
-            ElementKind::WallPlate | ElementKind::Roof => unreachable!("a wall lays no {kind:?}"),
+            ElementKind::WallPlate | ElementKind::Roof | ElementKind::Trunk => {
+                unreachable!("a wall lays no {kind:?}")
+            }
         };
         let name = if kind == ElementKind::Gable {
             format!("{}/{label}", wall.name)
