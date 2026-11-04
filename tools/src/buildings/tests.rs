@@ -112,10 +112,8 @@ fn every_chunk_is_joined_to_the_ground_and_anchors_lie_on_the_foundation() {
 }
 
 /// THE CHUNKS TILE THEIR ELEMENTS: each element's chunks sum to its piece's volume, each chunk
-/// lies inside its element's bounds, and a coursed piece's chunks are about the size its bond
-/// aims at (no dimension past two and a half of its modules, a gable corner's widest). A cut that
-/// dropped a sliver, or let two chunks overlap, breaks the volume sum; a row that never split
-/// breaks the size.
+/// lies inside its element's bounds. The baker relies on conservation of the authored volume;
+/// controlled course fixtures separately check that head joints split each row.
 #[test]
 fn the_chunks_tile_each_element() {
     for (spec, baked) in shipped() {
@@ -139,14 +137,6 @@ fn the_chunks_tile_each_element() {
                     "{id}: a chunk of {} leaves it",
                     element.name
                 );
-                if let Pattern::Courses(bond) = &piece.pattern {
-                    let size = chi - clo;
-                    assert!(
-                        size.max_element() <= 2.5 * bond.module_m as f32,
-                        "{id}: a chunk of {} spans {size}",
-                        element.name
-                    );
-                }
             }
         }
     }
@@ -194,6 +184,12 @@ const FIXTURE_HOUSE: &str = r#"House(
 fn fixture_house() -> House {
     House::from_ron(FIXTURE_HOUSE).expect("the constructed fixture states a house")
 }
+
+/// FIXTURE DATA: a running bond with straight head joints.
+const FIXTURE_COURSES: &str = "Courses((origin: (0.0, 0.0, 0.0), along: (1.0, 0.0, 0.0), up: (0.0, 1.0, 0.0), \
+         course_m: 0.075, module_m: 0.26, rule: (row_courses: (3, Fixture(\"fixture\")), \
+         crack_chance: (0.0, Fixture(\"fixture\")), crack_shift_m: (0.05, Fixture(\"fixture\")), \
+         min_width_m: (0.08, Fixture(\"fixture\")))))";
 
 /// FIXTURE DATA: a stretched-cell cut, `size_m` across the grain.
 fn cells(size_m: f64, stretch: f64) -> String {
@@ -266,10 +262,7 @@ fn with_clinker(name: &str) -> Result<f64, String> {
 /// a hard-coded material, or picks a piece's pattern from its material fails.
 #[test]
 fn an_additional_material_bakes_from_data_alone() {
-    let courses = "Courses((origin: (0.0, 0.0, 0.0), along: (1.0, 0.0, 0.0), up: (0.0, 1.0, 0.0), \
-         course_m: 0.075, module_m: 0.26, rule: (row_courses: (3, Fixture(\"fixture\")), \
-         crack_chance: (0.0, Fixture(\"fixture\")), crack_shift_m: (0.05, Fixture(\"fixture\")), \
-         min_width_m: (0.08, Fixture(\"fixture\")))))";
+    let courses = FIXTURE_COURSES;
     let grain = "Grain((1.0, 0.0, 0.0))";
     let text = |block: &str, beam: &str| {
         construction(
@@ -799,4 +792,42 @@ fn overlapping_bounds_do_not_imply_overlapping_matter() {
     }
     spec.resolve()
         .expect("the slabs share no matter despite overlapping bounds");
+}
+
+/// Courses cut along the authored bond and leave depth intact. Fixture rows of three and ten
+/// courses are four modules wide and one metre deep: the three interior head joints must make
+/// four full-depth chunks. A module-only size gate rejects valid rows; skipping cuts fails here.
+#[test]
+fn course_chunk_bounds_follow_the_authored_geometry_and_row() {
+    let mut piece = lone(box_piece(
+        "row",
+        "Pier",
+        "Wood",
+        "Upright",
+        DVec3::ZERO,
+        DVec3::ONE,
+        FIXTURE_COURSES,
+    ));
+    for rows in [3, 10] {
+        let Pattern::Courses(bond) = &mut piece.pattern else {
+            unreachable!("fixture courses")
+        };
+        bond.rule.row_courses.0 = rows;
+        let height = f64::from(rows) * bond.course_m;
+        let module = bond.module_m;
+        let depth = 1.0;
+        piece.solid =
+            super::geom::tests::cuboid(DVec3::ZERO, DVec3::new(4.0 * module, height, depth));
+        let mut count = CutCount::default();
+        let cut = fracture::chunks(&piece, "fixture", &mut count);
+        assert_eq!(count.joints, 3);
+        assert_eq!(cut.len(), 4);
+        for chunk in cut {
+            chunk.certify(PLANE_M).unwrap();
+            let (lo, hi) = chunk.bounds();
+            let expected = DVec3::new(module, height, depth);
+            assert!((hi - lo - expected).length() < 1e-9, "{rows}: {lo}..{hi}");
+            assert!((chunk.volume() - module * height * depth).abs() < 1e-12);
+        }
+    }
 }
