@@ -619,7 +619,7 @@ fn a_shipped_spec_refuses_a_fixture_label() {
         std::fs::write(dir.join(&name), text).unwrap();
         let result = specs(&root).map(|_| ());
         std::fs::remove_dir_all(&root).unwrap();
-        let err = result.unwrap_err();
+        let err = result.unwrap_err().to_string();
         assert!(
             err.contains(&name) && err.contains(field) && err.contains("Fixture"),
             "{err}"
@@ -904,7 +904,8 @@ fn the_bake_entry_refuses_before_creating_output() {
     );
     let err = result
         .err()
-        .expect("the game's load gate refuses the rounded hull");
+        .expect("the game's load gate refuses the rounded hull")
+        .to_string();
     assert!(
         err.contains(&spec.path) && err.contains("chunks[0].hull") && err.contains("rebake"),
         "{err}"
@@ -943,8 +944,52 @@ fn the_bake_entry_distinguishes_absent_unchanged_and_unreadable_output() {
     let err = result
         .err()
         .expect("a failed output comparison refuses the bake");
-    assert!(err.contains(&path.display().to_string()), "{err}");
+    assert!(
+        matches!(&err, BakeError::Io { path: failed_path, operation: "compare output", source } if failed_path == &path && source.kind() == std::io::ErrorKind::InvalidData),
+        "{err}"
+    );
+    assert!(
+        std::error::Error::source(&err).is_some(),
+        "the OS cause is retained"
+    );
+    assert!(
+        err.to_string().contains(&path.display().to_string()),
+        "{err}"
+    );
     assert_eq!(preserved, unreadable, "a refused bake preserves the output");
+}
+
+/// Command startup preserves the filesystem cause when the input directory is absent.
+#[test]
+fn spec_enumeration_retains_io_error_kinds() {
+    let root = std::env::temp_dir().join(format!("overmatch-specs-absent-{}", std::process::id()));
+    assert!(!root.exists(), "the fixture root starts absent");
+    let error = specs(&root)
+        .err()
+        .expect("missing input is a visible refusal");
+    assert!(
+        matches!(&error, BakeError::Io { path, operation: "list specs", source } if path == &root.join(SPECS_DIR) && source.kind() == std::io::ErrorKind::NotFound),
+        "{error}"
+    );
+}
+
+/// Filename admission must not silently substitute replacement characters before reading a spec.
+#[cfg(unix)]
+#[test]
+fn spec_enumeration_refuses_non_utf8_names() {
+    use std::os::unix::ffi::OsStringExt;
+    // Fixture: raw directory input; macOS refuses creating this filename on disk.
+    let dir = std::path::Path::new("fixture specs");
+    let name = std::ffi::OsString::from_vec(b"invalid-\xff.pieces.ron".to_vec());
+    let error = spec_filename(dir, name.clone()).unwrap_err();
+    assert!(
+        matches!(&error, BakeError::Filename { directory, name: actual } if directory == dir && actual == &name),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("use a UTF-8 filename"),
+        "{error}"
+    );
 }
 
 /// Idle joins and unknown attachment kinds are refused before play. FIXTURE DATA supplies the

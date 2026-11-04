@@ -289,23 +289,79 @@ pub struct Written {
     pub unchanged: bool,
 }
 
+/// Authored-data refusals and filesystem failures retain distinct outcomes at the command edge.
+#[derive(Debug)]
+pub enum BakeError {
+    Admission(String),
+    Io {
+        path: PathBuf,
+        operation: &'static str,
+        source: std::io::Error,
+    },
+    Filename {
+        directory: PathBuf,
+        name: std::ffi::OsString,
+    },
+}
+
+impl std::fmt::Display for BakeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Admission(reason) => f.write_str(reason),
+            Self::Io {
+                path,
+                operation,
+                source,
+            } => write!(f, "{}: cannot {operation}: {source}", path.display()),
+            Self::Filename { directory, name } => write!(
+                f,
+                "{}: spec filename {name:?}: use a UTF-8 filename",
+                directory.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BakeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Admission(_) | Self::Filename { .. } => None,
+        }
+    }
+}
+
 /// Bake, admit the serialized output through the game's gate, then write changed bytes only.
 /// Admission precedes every filesystem mutation, so a refused spec creates no output directory.
-pub fn bake_to(root: &Path, spec: &Spec) -> Result<Written, String> {
+pub fn bake_to(root: &Path, spec: &Spec) -> Result<Written, BakeError> {
     let baked = bake(&spec.construction, schema::substance_density)
-        .map_err(|err| format!("{}: {err}", spec.path))?;
-    let text = admitted(&baked.asset, &spec.path)?;
+        .map_err(|err| BakeError::Admission(format!("{}: {err}", spec.path)))?;
+    let text = admitted(&baked.asset, &spec.path).map_err(BakeError::Admission)?;
     let path = asset_path(root, &spec.construction.id);
     let unchanged = match std::fs::read_to_string(&path) {
         Ok(old) => old == text,
         // A first bake has no previous output to compare.
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-        Err(err) => return Err(format!("{}: {err}", path.display())),
+        Err(source) => {
+            return Err(BakeError::Io {
+                path,
+                operation: "compare output",
+                source,
+            });
+        }
     };
     if !unchanged {
         let dir = path.parent().expect("an asset path has a folder");
-        std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
-        std::fs::write(&path, &text).map_err(|err| format!("{}: {err}", path.display()))?;
+        std::fs::create_dir_all(dir).map_err(|source| BakeError::Io {
+            path: dir.to_path_buf(),
+            operation: "create output directory",
+            source,
+        })?;
+        std::fs::write(&path, &text).map_err(|source| BakeError::Io {
+            path: path.clone(),
+            operation: "write output",
+            source,
+        })?;
     }
     Ok(Written {
         baked,
@@ -330,15 +386,22 @@ pub struct Spec {
 /// Every spec under the repository root's [`SPECS_DIR`], house generators' and explicit
 /// constructions' alike, in file name order. Refuses a file whose id is not its stem and two
 /// specs of one id.
-pub fn specs(root: &Path) -> Result<Vec<Spec>, String> {
+pub fn specs(root: &Path) -> Result<Vec<Spec>, BakeError> {
     let _shipped = spec::Shipped::enter();
     let dir = root.join(SPECS_DIR);
     let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .map_err(|err| format!("{}: {err}", dir.display()))?
+        .map_err(|source| BakeError::Io {
+            path: dir.clone(),
+            operation: "list specs",
+            source,
+        })?
         .map(|entry| {
-            entry
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .map_err(|err| format!("{}: {err}", dir.display()))
+            let entry = entry.map_err(|source| BakeError::Io {
+                path: dir.clone(),
+                operation: "read spec directory entry",
+                source,
+            })?;
+            spec_filename(&dir, entry.file_name())
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
@@ -348,8 +411,11 @@ pub fn specs(root: &Path) -> Result<Vec<Spec>, String> {
     let mut out: Vec<Spec> = Vec::with_capacity(names.len());
     for name in names {
         let path = format!("{SPECS_DIR}/{name}");
-        let text =
-            std::fs::read_to_string(root.join(&path)).map_err(|err| format!("{path}: {err}"))?;
+        let text = std::fs::read_to_string(root.join(&path)).map_err(|source| BakeError::Io {
+            path: root.join(&path),
+            operation: "read spec",
+            source,
+        })?;
         let (stem, construction) = match name.strip_suffix(HOUSE_SUFFIX) {
             Some(stem) => (
                 stem,
@@ -361,19 +427,29 @@ pub fn specs(root: &Path) -> Result<Vec<Spec>, String> {
                 ConstructionSpec::from_ron(&text),
             ),
         };
-        let construction = construction.map_err(|err| format!("{path}: {err}"))?;
+        let construction =
+            construction.map_err(|err| BakeError::Admission(format!("{path}: {err}")))?;
         if stem != construction.id {
-            return Err(format!(
+            return Err(BakeError::Admission(format!(
                 "{path}: id {:?} is not the file's stem",
                 construction.id
-            ));
+            )));
         }
         if out.iter().any(|spec| spec.construction.id == stem) {
-            return Err(format!("{path}: another spec already bakes {stem}"));
+            return Err(BakeError::Admission(format!(
+                "{path}: another spec already bakes {stem}"
+            )));
         }
         out.push(Spec { path, construction });
     }
     Ok(out)
+}
+
+fn spec_filename(directory: &Path, name: std::ffi::OsString) -> Result<String, BakeError> {
+    name.into_string().map_err(|name| BakeError::Filename {
+        directory: directory.to_path_buf(),
+        name,
+    })
 }
 
 #[cfg(test)]

@@ -6,18 +6,26 @@
 
 use overmatch_tools::construction;
 
-fn main() {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("bake-constructions: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), construction::BakeError> {
     let root = overmatch_tools::repo_root();
-    let specs =
-        construction::specs(&root).unwrap_or_else(|err| panic!("bake-constructions: {err}"));
+    let specs = construction::specs(&root)?;
     for spec in specs {
         let id = &spec.construction.id;
         let construction::Written {
             baked,
             bytes,
             unchanged,
-        } = construction::bake_to(&root, &spec)
-            .unwrap_or_else(|err| panic!("bake-constructions: {err}"));
+        } = construction::bake_to(&root, &spec)?;
         let asset = &baked.asset;
         let volume: f64 = asset.chunks.iter().map(|c| f64::from(c.volume_m3)).sum();
         let mass: f64 = asset.chunks.iter().map(|c| f64::from(c.mass_kg)).sum();
@@ -35,4 +43,5 @@ fn main() {
             if unchanged { " (unchanged)" } else { "" },
         );
     }
+    Ok(())
 }
