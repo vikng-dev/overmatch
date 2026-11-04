@@ -468,12 +468,13 @@ fn publish_poses(
     mut carriers: Query<&mut DebrisPose>,
 ) {
     for (carrier, position, rotation) in &pieces {
-        if let Ok(mut pose) = carriers.get_mut(carrier.0) {
-            pose.set_if_neq(DebrisPose {
-                position: position.0,
-                rotation: rotation.0,
-            });
-        }
+        let mut pose = carriers
+            .get_mut(carrier.0)
+            .expect("every live body's Carrier retains its DebrisPose until the body is retired");
+        pose.set_if_neq(DebrisPose {
+            position: position.0,
+            rotation: rotation.0,
+        });
     }
 }
 
@@ -682,6 +683,19 @@ mod tests {
             retired: None,
         });
         world.flush();
+    }
+
+    /// Authority must publish every moved body. Losing the carrier or its pose is a lifetime bug,
+    /// never a body whose movement silently disappears from the client stream.
+    #[test]
+    #[should_panic(expected = "every live body's Carrier retains its DebrisPose")]
+    fn a_live_body_without_its_carrier_pose_is_a_bug() {
+        let mut app = App::new();
+        app.add_systems(Update, publish_poses);
+        let carrier = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .spawn((Carrier(carrier), Position(Vec3::ZERO), Rotation::default()));
+        app.update();
     }
 
     /// The lever's readings. A mutant that arms an unset or `off` lever spawns fragments on every
