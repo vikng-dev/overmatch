@@ -86,6 +86,7 @@ use avian3d::prelude::{
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
+use bevy::tasks::{ComputeTaskPool, TaskPool};
 use serde::{Deserialize, Serialize};
 
 use super::attachments::{Attachments, GroundAttachment};
@@ -1316,6 +1317,7 @@ struct OwnerEffects {
 
 /// Immutable inputs for one owner's law run; shared-body effects are staged in `OwnerEffects`.
 struct OwnerInputs<'a> {
+    pool: &'a TaskPool,
     frame: Frame,
     taken: &'a Taken,
     pressing: &'a [Load],
@@ -1332,6 +1334,7 @@ fn evaluate_owner(
     inputs: OwnerInputs,
 ) -> OwnerEffects {
     let OwnerInputs {
+        pool,
         frame,
         taken,
         pressing,
@@ -1399,19 +1402,26 @@ fn evaluate_owner(
             Some(PendingSplit { children, tick })
         }
     } else {
-        for (group, loads) in changes.groups {
-            let launch = launch(&kind, &live.structure, frame.scale, &group, &loads);
-            departures.push(prepare_group(Departure {
-                kind: kind.clone(),
-                building,
-                root: construction,
-                scale,
-                live: live.group(&group),
-                group,
-                launch,
-                tick,
-            }));
-        }
+        // Direct scoped submissions return in group order; all geometry is ready before commit.
+        departures = pool.scope(|scope| {
+            let kind = &kind;
+            let live = &*live;
+            for (group, loads) in changes.groups {
+                scope.spawn(async move {
+                    let launch = launch(kind, &live.structure, frame.scale, &group, &loads);
+                    prepare_group(Departure {
+                        kind: kind.clone(),
+                        building,
+                        root: construction,
+                        scale,
+                        live: live.group(&group),
+                        group,
+                        launch,
+                        tick,
+                    })
+                });
+            }
+        });
         None
     };
     OwnerEffects {
@@ -1527,6 +1537,7 @@ fn apply_deposits(mut p: DepositParam) {
                         piece.map(|piece| piece.chunks.as_slice()),
                         construction,
                         OwnerInputs {
+                            pool: ComputeTaskPool::get(),
                             frame,
                             taken,
                             pressing: presses.get(&root).map_or(&[][..], Vec::as_slice),
@@ -2413,6 +2424,52 @@ struct PendingSplit {
     tick: u32,
 }
 
+/// Parent velocities in the construction frame; COM offset from its body origin, metres.
+#[derive(Clone, Copy)]
+struct SplitMotion {
+    velocity: Vec3,
+    spin: Vec3,
+    centre: Vec3,
+}
+
+impl PendingSplit {
+    fn prepare(
+        &self,
+        pool: &TaskPool,
+        breakage: &Breakage,
+        building: u16,
+        root: Transform,
+        motion: SplitMotion,
+    ) -> Vec<PreparedDeparture> {
+        pool.scope(|scope| {
+            for (group, live) in &self.children {
+                scope.spawn(async move {
+                    let mut launch =
+                        launch(&breakage.kind, &live.structure, breakage.scale, group, &[]);
+                    // DERIVED rigid velocity field: every new COM gets v + omega cross r; every
+                    // child retains omega. Occupied hulls partition the parent's mass and inertia;
+                    // contact insets do not enter this calculation.
+                    launch.velocity = motion.velocity
+                        + motion
+                            .spin
+                            .cross(launch.centre - breakage.origin - motion.centre);
+                    launch.spin = motion.spin;
+                    prepare_group(Departure {
+                        kind: breakage.kind.clone(),
+                        building,
+                        root,
+                        group: group.clone(),
+                        launch,
+                        scale: breakage.scale,
+                        live: live.clone(),
+                        tick: self.tick,
+                    })
+                });
+            }
+        })
+    }
+}
+
 fn split_groups(
     parents: Query<(
         Entity,
@@ -2430,29 +2487,19 @@ fn split_groups(
         bevy::utils::Parallel::<Vec<(Entity, u32, Vec<PreparedDeparture>)>>::default();
     parents.par_iter().for_each(
         |(entity, piece, body, breakage, velocity, spin, centre, split)| {
-            let mut children = Vec::new();
             let root = breakage.physics_frame(body);
             let inverse = root.rotation.inverse();
-            for (group, live) in &split.children {
-                let mut launch =
-                    launch(&breakage.kind, &live.structure, breakage.scale, group, &[]);
-                // DERIVED rigid velocity field: every new COM gets v + omega cross r; every child
-                // retains omega. Whole occupied child hulls partition the parent's occupied geometry;
-                // contact insets do not enter this mass and inertia calculation.
-                launch.velocity = inverse * velocity.0
-                    + (inverse * spin.0).cross(launch.centre - breakage.origin - centre.0);
-                launch.spin = inverse * spin.0;
-                children.push(prepare_group(Departure {
-                    kind: breakage.kind.clone(),
-                    building: piece.building,
-                    root,
-                    group: group.clone(),
-                    launch,
-                    scale: breakage.scale,
-                    live: live.clone(),
-                    tick: split.tick,
-                }));
-            }
+            let children = split.prepare(
+                ComputeTaskPool::get(),
+                breakage,
+                piece.building,
+                root,
+                SplitMotion {
+                    velocity: inverse * velocity.0,
+                    spin: inverse * spin.0,
+                    centre: centre.0,
+                },
+            );
             effects.scope(|effects| effects.push((entity, split.tick, children)));
         },
     );

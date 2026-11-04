@@ -11,7 +11,7 @@ use super::*;
 use crate::ballistics::MarchProbe;
 use crate::buildings::fracture::FIT_ONLY_PRODUCTS;
 use crate::buildings::schema::ElementKind;
-use crate::buildings::tests::shipped_house;
+use crate::buildings::tests::{column_construction, shipped_house};
 use crate::scatter::MapInstance;
 
 /// A fixture physics step, s: the harness's 64 Hz tick (fixture data).
@@ -63,75 +63,6 @@ fn composed_kind(replica: bool, kind: &Arc<BuildingKind>) -> (App, Entity) {
     );
     queue.apply(world);
     (app, root)
-}
-
-/// Fixture: a column of three unit cubes, joined over their full faces, anchored at its base.
-/// It has no house topology or view asset; all masses derive from the registry's material density.
-fn column_construction() -> Arc<BuildingKind> {
-    let registry = crate::substances::SubstanceRegistry::shipped_static();
-    let density = Masonry::of(registry, "Brick").unwrap().unwrap().density;
-    let hull = |lo: f32, hi: f32| {
-        [-0.5, 0.5]
-            .into_iter()
-            .flat_map(|x| {
-                [lo, hi]
-                    .into_iter()
-                    .flat_map(move |y| [-0.5, 0.5].map(|z| [x, y, z]))
-            })
-            .collect()
-    };
-    let asset = BuildingAsset {
-        id: "column_fixture".into(),
-        format: schema::FORMAT,
-        foundation_y_m: 0.0,
-        materials: vec!["Brick".into()],
-        attachments: vec!["mortared".into()],
-        components: vec!["column".into()],
-        elements: vec![schema::Element {
-            name: "column".into(),
-            kind: ElementKind::Pier,
-            component: 0,
-            material: 0,
-            surface_frame: schema::SurfaceFrame::Upright,
-            hull: hull(0.0, 3.0),
-            chunks: [0, 3],
-        }],
-        chunks: (0..3)
-            .map(|c| schema::Chunk {
-                element: 0,
-                material: 0,
-                hull: hull(c as f32, c as f32 + 1.0),
-                volume_m3: 1.0,
-                mass_kg: density,
-                centroid: [0.0, c as f32 + 0.5, 0.0],
-            })
-            .collect(),
-        joints: (0..2)
-            .map(|a| schema::Joint {
-                a,
-                b: a + 1,
-                area_m2: 1.0,
-                centroid: [0.0, a as f32 + 1.0, 0.0],
-                normal: [0.0, 1.0, 0.0],
-                bond: schema::Bond::Seam,
-            })
-            .collect(),
-        anchors: vec![schema::Anchor {
-            chunk: 0,
-            attachment: 0,
-            area_m2: 1.0,
-            centroid: [0.0; 3],
-        }],
-    };
-    Arc::new(
-        BuildingKind::resolve(
-            &asset.id,
-            &ron::ser::to_string(&asset).unwrap(),
-            registry,
-            Attachments::shipped_static(),
-        )
-        .unwrap(),
-    )
 }
 
 /// The game's environment destruction model: authority, replicas and presentation rely on
@@ -4693,6 +4624,7 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
                             owned.as_deref(),
                             pose,
                             OwnerInputs {
+                                pool: &pool,
                                 frame,
                                 taken,
                                 pressing: &[],
@@ -4710,19 +4642,7 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
                         let departures: Vec<_> = effect
                             .departures
                             .into_iter()
-                            .map(|prepared| {
-                                let departure = prepared.departure;
-                                let launch = departure.launch;
-                                (
-                                    departure.group,
-                                    departure.live.state,
-                                    launch.centroid,
-                                    launch.mass,
-                                    launch.inertia,
-                                    launch.velocity,
-                                    launch.spin,
-                                )
-                            })
+                            .map(prepared_group_state)
                             .collect();
                         (
                             *root,
@@ -4760,4 +4680,84 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
             assert_eq!(run(threads, reverse), expected);
         }
     }
+}
+
+fn prepared_group_state(prepared: PreparedDeparture) -> impl std::fmt::Debug + PartialEq {
+    let departure = prepared.departure;
+    let launch = departure.launch;
+    (
+        (
+            departure.building,
+            departure.root,
+            departure.scale,
+            departure.tick,
+            departure.group,
+            departure.live.state,
+            departure.live.holes,
+        ),
+        (
+            launch.centroid,
+            launch.centre,
+            launch.mass,
+            launch.inertia,
+            launch.velocity,
+            launch.spin,
+        ),
+        prepared
+            .chunks
+            .into_iter()
+            .map(|(contact, occupied)| {
+                (
+                    contact.0,
+                    contact.1.mass_properties(1.0),
+                    contact.2,
+                    contact.5,
+                    occupied.0,
+                    occupied.1.mass_properties(1.0),
+                    occupied.5,
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// The game's split preparation must finish in child order with identical geometry, wear and
+/// inherited motion on any worker. Ordered retirement and publication rely on those bundles.
+#[test]
+fn split_preparation_keeps_child_order_and_state_across_workers() {
+    use bevy::tasks::TaskPoolBuilder;
+    // Fixture: two groups in deliberately non-address order, with wear on the last cube.
+    let kind = column_construction();
+    let mut breakage = Breakage::new(kind, 7, 1.0);
+    breakage.live.state.pool[2] /= 2.0;
+    let groups = [vec![2], vec![0, 1]];
+    let split = PendingSplit {
+        children: groups
+            .iter()
+            .map(|group| (group.clone(), breakage.live.group(group)))
+            .collect(),
+        tick: 11,
+    };
+    let root = Transform::from_xyz(20.0, 10.0, -3.0).with_rotation(Quat::from_rotation_y(0.7));
+    let motion = SplitMotion {
+        velocity: Vec3::new(2.0, -3.0, 1.0),
+        spin: Vec3::new(0.3, 0.5, -0.2),
+        centre: Vec3::new(0.0, 1.5, 0.0),
+    };
+    let run = |threads| {
+        let pool = TaskPoolBuilder::new().num_threads(threads).build();
+        let prepared = split.prepare(&pool, &breakage, breakage.construction, root, motion);
+        assert_eq!(
+            prepared
+                .iter()
+                .map(|prepared| &prepared.departure.group)
+                .collect::<Vec<_>>(),
+            groups.iter().collect::<Vec<_>>()
+        );
+        prepared
+            .into_iter()
+            .map(prepared_group_state)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(run(1), run(2));
 }

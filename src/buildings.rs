@@ -317,6 +317,78 @@ pub(crate) mod tests {
     use super::*;
     use crate::map::tests::shipped_assets;
 
+    /// Fixture: a column of three unit cubes, joined over their full faces, anchored at its base.
+    /// It has no house topology or view asset; all masses derive from the registry's material density.
+    pub(crate) fn column_construction() -> Arc<BuildingKind> {
+        let registry = crate::substances::SubstanceRegistry::shipped_static();
+        let density = fracture::Masonry::of(registry, "Brick")
+            .unwrap()
+            .unwrap()
+            .density;
+        let hull = |lo: f32, hi: f32| {
+            [-0.5, 0.5]
+                .into_iter()
+                .flat_map(|x| {
+                    [lo, hi]
+                        .into_iter()
+                        .flat_map(move |y| [-0.5, 0.5].map(|z| [x, y, z]))
+                })
+                .collect()
+        };
+        let asset = BuildingAsset {
+            id: "column_fixture".into(),
+            format: schema::FORMAT,
+            foundation_y_m: 0.0,
+            materials: vec!["Brick".into()],
+            attachments: vec!["mortared".into()],
+            components: vec!["column".into()],
+            elements: vec![schema::Element {
+                name: "column".into(),
+                kind: schema::ElementKind::Pier,
+                component: 0,
+                material: 0,
+                surface_frame: schema::SurfaceFrame::Upright,
+                hull: hull(0.0, 3.0),
+                chunks: [0, 3],
+            }],
+            chunks: (0..3)
+                .map(|c| schema::Chunk {
+                    element: 0,
+                    material: 0,
+                    hull: hull(c as f32, c as f32 + 1.0),
+                    volume_m3: 1.0,
+                    mass_kg: density,
+                    centroid: [0.0, c as f32 + 0.5, 0.0],
+                })
+                .collect(),
+            joints: (0..2)
+                .map(|a| schema::Joint {
+                    a,
+                    b: a + 1,
+                    area_m2: 1.0,
+                    centroid: [0.0, a as f32 + 1.0, 0.0],
+                    normal: [0.0, 1.0, 0.0],
+                    bond: schema::Bond::Seam,
+                })
+                .collect(),
+            anchors: vec![schema::Anchor {
+                chunk: 0,
+                attachment: 0,
+                area_m2: 1.0,
+                centroid: [0.0; 3],
+            }],
+        };
+        Arc::new(
+            BuildingKind::resolve(
+                &asset.id,
+                &ron::ser::to_string(&asset).unwrap(),
+                registry,
+                Attachments::shipped_static(),
+            )
+            .unwrap(),
+        )
+    }
+
     /// The immutable shipped fixture, resolved through the real loader once per test process.
     /// Loader refusal tests read their own inputs; sharing this fixture repeats no hull construction.
     pub(crate) fn shipped_house() -> Arc<BuildingKind> {
