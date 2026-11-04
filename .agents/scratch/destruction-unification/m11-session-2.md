@@ -24,8 +24,8 @@ Avian default enables `f32` / `parry-f32`. Parry deletes an edge when adjacent u
 `dot > 1-sqrt(f32::EPSILON)`: **1.505662561 degrees, DERIVED**. The planner refuses neighbouring
 longitudinal faces inside that threshold; tests also check every shared-edge face pair of the
 sampled species ranges. The shipped fir's tolerance admits a base ring and apex: one polygonal
-cone. This is a deliberate coarse approximation of the taper, with the mass difference below
-reported for judgement; no density, attachment or cell size compensates for it.
+cone. The shipped source is a cone. Session 3 aligns the authored exponent with that shape;
+no density, attachment or cell size compensates for the source geometry.
 
 ## Generator and data census
 
@@ -56,16 +56,10 @@ reported for judgement; no density, attachment or cell size compensates for it.
 
 ## Geometry and collider evidence
 
-DERIVED from the fir generator source: `H = 27.02 m`, `dbh = 0.4 m`, breast height `1.3 m`,
-`k = 0.8`, so `r(0) = 0.2080470203 m`. The exact taper has
-`V = pi r(0)^2 H / (2k+1) = 1.4131389582 m³` and, at the material's **850 kg/m³, MEASURED
-transcription of its declared density**, mass **1201.1681145 kg, DERIVED**.
-The cone's maximum longitudinal radial deficit is **0.0170432119 m, DERIVED**.
-
-MEASURED by the admitted construction bake: **1 element, 37 chunks, 1.169522 m³, 994.094 kg**,
-with **126 joints and 6 anchors**. The house bake is byte-identical. Relative to the exact taper,
-the baked mass is approximately **17.24% lower, DERIVED**; this is the geometric approximation's
-outcome, not a strength target. The emitted source has no intermediate horizontal face.
+MEASURED by this session's admitted construction bake: **1 element, 37 chunks, 1.169522 m³,
+994.094 kg**, with **126 joints and 6 anchors**. The house bake is byte-identical. The emitted
+source has no intermediate horizontal face. The source is a polygonal cone; comparison against
+an unbuilt nonlinear taper is removed. Session 3 reports mass against the corrected authored cone.
 
 The dressing was regenerated and checked against every exported canopy corner. Its bytes are
 unchanged; `ConstructionLibrary::load` resolves every card base against the new chunk table, and

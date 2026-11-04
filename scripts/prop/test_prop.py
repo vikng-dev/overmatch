@@ -130,6 +130,7 @@ class SourceGeometry(unittest.TestCase):
 
     def test_unrepresentable_surface_resolution_is_refused(self):
         shape = copy.deepcopy(next(iter(ron.load(TABLE).values()))["trunk"]["shape"])
+        shape["exponent"] = (0.8, shape["exponent"][1])  # Fixture curved source.
         shape["radial_error_m"] = (1e-4, shape["radial_error_m"][1])
         with self.assertRaisesRegex(ValueError,"merge angle"):
             plan.rings(20,0.4,shape)  # Fixture dimensions, not a species target.

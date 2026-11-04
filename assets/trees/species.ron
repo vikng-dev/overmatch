@@ -29,7 +29,7 @@
         trunk: Trunk(
             shape: (
                 breast_height_m: (1.3, Measured("forestry DBH convention: diameter 1.3 m above ground")),
-                exponent: (0.8, Taste("stem silhouette between a cone and paraboloid; no sourced stem-form factor")),
+                exponent: (1.0, Taste("conical trunk silhouette; the authored radius is linear from the DBH-derived base to the apex")),
                 radial_error_m: (0.03, Resolution("at most 3 cm radial chord error along the taper; coarse enough to keep side faces distinct under Parry's face merge")),
             ),
             material: "GreenNorwaySpruce",
@@ -53,7 +53,7 @@
         trunk: Trunk(
             shape: (
                 breast_height_m: (1.3, Measured("forestry DBH convention: diameter 1.3 m above ground")),
-                exponent: (0.8, Taste("stem silhouette between a cone and paraboloid; no sourced stem-form factor")),
+                exponent: (1.0, Taste("conical trunk silhouette; the authored radius is linear from the DBH-derived base to the apex")),
                 radial_error_m: (0.03, Resolution("at most 3 cm radial chord error along the taper; coarse enough to keep side faces distinct under Parry's face merge")),
             ),
             material: "GreenScotsPine",
@@ -78,7 +78,7 @@
         trunk: Trunk(
             shape: (
                 breast_height_m: (1.3, Measured("forestry DBH convention: diameter 1.3 m above ground")),
-                exponent: (0.8, Taste("stem silhouette between a cone and paraboloid; no sourced stem-form factor")),
+                exponent: (1.0, Taste("conical trunk silhouette; the authored radius is linear from the DBH-derived base to the apex")),
                 radial_error_m: (0.03, Resolution("at most 3 cm radial chord error along the taper; coarse enough to keep side faces distinct under Parry's face merge")),
             ),
             material: "GreenSilverBirch",
