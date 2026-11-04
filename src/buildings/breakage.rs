@@ -150,7 +150,7 @@ impl Layout {
     ) -> Result<Self, String> {
         for (k, kind) in asset.attachments.iter().enumerate() {
             attachments
-                .holds_anchor(kind)
+                .holds_kind(kind)
                 .map_err(|err| format!("attachments[{k}]: {err}"))?;
         }
         let anchors = attachments.anchors(asset)?;

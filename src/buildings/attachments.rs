@@ -233,9 +233,20 @@ impl Attachments {
         }
     }
 
-    /// Admission for foundation attachments; both joint kinds and root plates can hold ground.
-    pub fn holds_anchor(&self, name: &str) -> Result<(), String> {
+    /// A table entry may name either a joint kind or a root plate.
+    pub(crate) fn holds_kind(&self, name: &str) -> Result<(), String> {
         self.kind(name).map(|_| ())
+    }
+
+    /// The game's environment destruction model has no ground-side material for a friction
+    /// pair. A foundation therefore requires a bonded kind; rest is admitted only between parts.
+    pub fn holds_anchor(&self, name: &str) -> Result<(), String> {
+        match self.kind(name)? {
+            Kind::Joint(Bond::Resting) => Err(format!(
+                "kind {name:?} in {ATTACHMENTS_PATH} is resting but the ground states no friction pair; author a bonded foundation attachment"
+            )),
+            _ => Ok(()),
+        }
     }
 
     /// The game's environment destruction model: distribute one component's root moment by
@@ -257,6 +268,7 @@ impl Attachments {
         }
         asset.anchors.iter().map(|anchor| {
             let name = &asset.attachments[usize::from(anchor.attachment)];
+            self.holds_anchor(name).map_err(|err| format!("anchor on chunk {}: {err}", anchor.chunk))?;
             let (area, mass) = footprints[&component(anchor.chunk)];
             let hold = match self.kind(name)? {
                 Kind::Joint(bond) => GroundAttachment::Joint(bond),
@@ -500,24 +512,52 @@ mod tests {
         }
     }
 
+    /// The game's environment destruction model cannot resolve a ground rest's friction
+    /// without a ground-side material. Bakers and loaders must refuse it, while internal rests remain valid.
+    #[test]
+    fn a_ground_rest_without_a_material_pair_is_refused_before_play() {
+        let list = Attachments::from_ron(r#"{"fixture": Resting}"#, registry()).unwrap();
+        assert_eq!(list.holds("fixture"), Ok(()));
+        let error = list.holds_anchor("fixture").unwrap_err();
+        for part in ["fixture", ATTACHMENTS_PATH, "ground", "bonded"] {
+            assert!(error.contains(part), "{error}");
+        }
+        let asset = footprint();
+        let masonry = [Masonry::of(registry(), "Brick").unwrap()];
+        let error = super::super::breakage::Layout::of(&asset, &masonry, &list).unwrap_err();
+        assert!(
+            error.contains("anchor on chunk") && error.contains("bonded"),
+            "{error}"
+        );
+        let mut internal = asset;
+        internal.anchors.clear();
+        internal.joints.push(super::super::schema::Joint {
+            a: 0,
+            b: 2,
+            area_m2: 0.5,
+            centroid: [0.25, 1.0, 0.5],
+            normal: [0.0, 1.0, 0.0],
+            bond: super::super::schema::Bond::Attached(0),
+        });
+        let layout = super::super::breakage::Layout::of(&internal, &masonry, &list).unwrap();
+        assert_eq!(layout.joints[0].bond, Bond::Resting);
+    }
+
     /// The game's environment destruction load laws must read the named foundation kind,
-    /// including rest. Substituting the chunk's seam fails these analytical fixture strengths.
+    /// at the ground. Substituting the chunk's seam fails these analytical fixture strengths.
     #[test]
     fn layout_reads_the_named_anchor_kind() {
         let asset = footprint();
         asset.check().unwrap();
         let masonry = [Masonry::of(registry(), "Brick").unwrap()];
-        for (row, expected) in [
-            ("Resting", Bond::Resting),
-            (
-                "Stated(tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))",
-                Bond::Bonded(Seam {
-                    tensile: 10.0,
-                    fracture_energy: 5.0,
-                    shear: Shear::OpeningOnly,
-                }),
-            ),
-        ] {
+        for (row, expected) in [(
+            "Stated(tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))",
+            Bond::Bonded(Seam {
+                tensile: 10.0,
+                fracture_energy: 5.0,
+                shear: Shear::OpeningOnly,
+            }),
+        )] {
             let list =
                 Attachments::from_ron(&format!("{{\"fixture\": {row}}}"), registry()).unwrap();
             let layout = super::super::breakage::Layout::of(&asset, &masonry, &list).unwrap();
