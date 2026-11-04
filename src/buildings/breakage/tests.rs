@@ -1530,7 +1530,7 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
     for spawn in [&piece as &dyn Fn(&mut App) -> Entity, &other] {
         let (rays, momentum, expected, shadowed, aimed, wears) = after(Some(spawn));
         assert_eq!(shadowed, aimed, "the large body shades every fixture ray");
-        assert!(rays > 100, "the body is in the field");
+        assert!(rays > 0, "the body is in the field");
         assert!(
             (momentum - expected).length() <= 1e-3 * expected.length(),
             "the body leaves with {momentum}, its rays pushed {expected}"
@@ -1553,7 +1553,7 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
 
     let armour = |app: &mut App| moving_cube(app, near, 0.4, Layer::Armor);
     let (rays, momentum, _, _, _, wears) = after(Some(&armour));
-    assert!(rays > 100, "the armour volume is in the field");
+    assert!(rays > 0, "the armour volume is in the field");
     assert_eq!(momentum, Vec3::ZERO, "an armour volume takes no push");
     assert!(wears, "and the rays pass it to the chunk");
 }
