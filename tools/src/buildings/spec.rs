@@ -193,7 +193,8 @@ impl ConstructionSpec {
 
     /// The construction its pieces state, refusing a piece whose name repeats, whose index leaves
     /// its corners, whose solid is no closed convex cell at `tolerance` m ([`Polyhedron::certify`]),
-    /// whose frame or pattern is unusable, and an attachment kind the shared list does not hold.
+    /// whose frame or pattern is unusable, overlapping interiors (at the clip's weld resolution),
+    /// and an attachment kind the shared list does not hold. Shared boundaries are allowed.
     pub fn resolve(self) -> Result<Construction, String> {
         check_holds(&self.foundation_attachment, &self.joins)?;
         if !self.foundation_y_m.is_finite() {
@@ -225,6 +226,21 @@ impl ConstructionSpec {
             solid
                 .certify(super::PLANE_M)
                 .map_err(|err| format!("{what}: no closed convex solid ({err})"))?;
+            for (j, other) in pieces.iter().enumerate() {
+                let intersection = other
+                    .solid
+                    .faces
+                    .iter()
+                    .try_fold(solid.clone(), |part, face| {
+                        part.clip(face.normal, face.offset)
+                    });
+                if intersection.is_some() {
+                    return Err(format!(
+                        "{what} overlaps pieces[{j}] ({}): author disjoint interiors; shared boundaries are allowed",
+                        other.name
+                    ));
+                }
+            }
             pieces.push(Piece {
                 name: piece.name,
                 kind: piece.kind,

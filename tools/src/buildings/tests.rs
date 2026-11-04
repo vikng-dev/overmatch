@@ -731,3 +731,72 @@ fn a_house_the_generator_cannot_lay_out_is_refused() {
         assert!(err.contains(field), "{case}: {err}");
     }
 }
+
+/// The bake's mass and colliders require disjoint piece interiors. Fixture boxes may share a
+/// face, edge or corner, but coincident, contained and partially intersecting boxes must be
+/// refused at resolution, naming both pieces. A per-piece certificate alone admits them.
+#[test]
+fn authored_pieces_share_boundaries_but_never_matter() {
+    let first = box_piece(
+        "first",
+        "Pier",
+        "Wood",
+        "Upright",
+        DVec3::ZERO,
+        DVec3::ONE,
+        "Whole",
+    );
+    for (lo, hi, overlaps) in [
+        (DVec3::ZERO, DVec3::ONE, true),
+        (DVec3::splat(0.2), DVec3::splat(0.8), true),
+        (DVec3::splat(0.5), DVec3::splat(1.5), true),
+        (DVec3::X, DVec3::new(2.0, 1.0, 1.0), false),
+        (DVec3::new(1.0, 1.0, 0.0), DVec3::new(2.0, 2.0, 1.0), false),
+        (DVec3::ONE, DVec3::splat(2.0), false),
+        (DVec3::splat(2.0), DVec3::splat(3.0), false),
+    ] {
+        let second = box_piece("second", "Pier", "Wood", "Upright", lo, hi, "Whole");
+        let result = ConstructionSpec::from_ron(&construction(&[first.clone(), second], ""));
+        if overlaps {
+            let err = result.unwrap_err();
+            assert!(
+                err.contains("first") && err.contains("second") && err.contains("overlap"),
+                "{err}"
+            );
+        } else {
+            result.expect("boundary contact and separation contain no duplicated matter");
+        }
+    }
+}
+
+/// Bounding boxes overlap for these fixture wedges, but their slabs x+z <= 0.8 and x+z >= 1.2
+/// are disjoint. Authors need the gate to compare solids, not refuse their enclosing boxes.
+#[test]
+fn overlapping_bounds_do_not_imply_overlapping_matter() {
+    let cube = super::geom::tests::cuboid(DVec3::ZERO, DVec3::ONE);
+    let axis = DVec3::new(1.0, 0.0, 1.0);
+    let solids = [
+        cube.clip(axis, 0.8).unwrap(),
+        cube.clip(-axis, -1.2).unwrap(),
+    ];
+    let texts: Vec<_> = ["first", "second"]
+        .map(|name| {
+            box_piece(
+                name,
+                "Pier",
+                "Wood",
+                "Upright",
+                DVec3::ZERO,
+                DVec3::ONE,
+                "Whole",
+            )
+        })
+        .into();
+    let mut spec: ConstructionSpec = ron::from_str(&construction(&texts, "")).unwrap();
+    for (piece, solid) in spec.pieces.iter_mut().zip(solids) {
+        piece.corners = solid.corners;
+        piece.faces = solid.faces.into_iter().map(|face| face.corners).collect();
+    }
+    spec.resolve()
+        .expect("the slabs share no matter despite overlapping bounds");
+}
