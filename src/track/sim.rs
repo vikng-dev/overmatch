@@ -2035,6 +2035,18 @@ mod tests {
         );
         let (run_down, slowest) = (hull.rpm(), hull.speed);
         hull.engine_held(DrivenHull::POOL);
+        let tp = &hull.app.world().resource::<TrackGear>().trans;
+        let drag_base = transmission::motoring_drag_base_share();
+        let mid_rpm = (tp.engine.idle_rpm + tp.engine.governed_rpm) * 0.5;
+        let drag = tp.peak_torque_nm
+            * tp.drag_fraction
+            * (drag_base + (1.0 - drag_base) * run_down.abs() / mid_rpm);
+        // DERIVED: gross fuel/idle torque <= curve peak + drag, loss <= drag and clutch
+        // torque <= capacity. With no steering work, J*|delta omega| <= sum(|torque|)*dt.
+        let max_rpm_step = (tp.peak_torque_nm + 2.0 * drag + tp.clutch_capacity)
+            * hull.app.world().resource::<Time>().delta_secs()
+            / tp.engine_inertia
+            / transmission::RPM_TO_RAD;
         hull.tick(1.0, 0.0);
         let first = hull.rpm();
         for _ in 0..64 {
@@ -2045,9 +2057,10 @@ mod tests {
             hull.rpm(),
             hull.speed
         );
+        println!("DERIVED recovery angular-impulse bound {max_rpm_step} rpm per tick");
         assert!(
-            (first - run_down).abs() < 0.1 * at,
-            "the clutch engages against the tracked crank: {run_down} -> {first}"
+            (first - run_down).abs() <= max_rpm_step,
+            "recovery exceeds available angular impulse: {run_down} -> {first}, bound {max_rpm_step} rpm"
         );
         assert!(hull.speed > slowest, "a recovered engine pulls away again");
     }
