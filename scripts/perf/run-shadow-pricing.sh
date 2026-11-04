@@ -45,7 +45,7 @@ abba() {
 }
 
 for tanks in 2 30; do
-  for class in terrain tree house tank; do
+  for class in terrain construction tank; do
     part "$tanks-$class-casters" abba "$tanks" "$class-casters" "" "SPIKE_ABLATE=$class-casters"
   done
   for filter in gaussian hardware temporal; do
