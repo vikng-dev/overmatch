@@ -1002,6 +1002,67 @@ fn an_unrecorded_machine_gun_round_credits_its_shooter() {
     );
 }
 
+/// The game's damage model: the scoreboard credits the first keyed shot to empty a shared
+/// ammunition HP pool in one tick, independently of ECS insertion order. Fixture shots share a
+/// trajectory; source identity, then weapon and fire tick, declares their settlement order.
+#[test]
+fn simultaneous_shots_credit_the_same_source_in_either_insertion_order() {
+    use crate::net::score::Scoreboard;
+    use crate::{CombatantId, CombatantLife, ShotId};
+
+    for reverse in [false, true] {
+        let (mut app, board, _) = scoring_world();
+        let (root, _) = tank(
+            &mut app,
+            Vec3::ZERO,
+            0.0,
+            Vec3::ZERO,
+            &[("ammo", Vec3::ONE, Vec3::ZERO, Kind::Ammo(ONE))],
+        );
+        app.world_mut()
+            .entity_mut(root)
+            .insert((CombatantId(2), CombatantLife(0)));
+        settle(&mut app);
+        let mut shots = [1, 3].map(|id| ShotId {
+            combatant: CombatantId(id),
+            weapon: 0,
+            fire_tick: 1,
+        });
+        if reverse {
+            shots.reverse();
+        }
+        for shot in shots {
+            fire_along(
+                &mut app,
+                Vec3::new(0.0, 0.0, 2.0),
+                Dir3::NEG_Z,
+                FireMechanism::Single,
+                Some(shot),
+            );
+        }
+        run(&mut app, 2);
+        assert_eq!(
+            app.world().resource::<KnockoutFacts>().attributed,
+            [(
+                root,
+                crate::damage::KnockoutCause::Round(ShotId {
+                    combatant: CombatantId(1),
+                    weapon: 0,
+                    fire_tick: 1,
+                })
+            )],
+        );
+        let standings = &app.world().get::<Scoreboard>(board).unwrap().0;
+        for id in [1, 3] {
+            let standing = standings
+                .iter()
+                .find(|s| s.combatant == CombatantId(id))
+                .unwrap();
+            assert_eq!(standing.knockouts, u32::from(id == 1));
+        }
+    }
+}
+
 /// The game's damage model: a later round can cause a cook-off on a crew-loss husk, but the
 /// scoreboard and pen cam must retain the first round's one knockout. The offset ammunition
 /// box is fixture geometry keeping the two deciding depositions in separate shots.
@@ -3840,7 +3901,8 @@ fn a_moving_face_decides_a_skid_in_its_own_frame() {
 }
 
 /// The game's damage model: an instant contact burst reaches the moving face's world position.
-/// The burst mark, fragment field and environment blast share that point. Fixture speeds include
+/// The mounted burst-mark and fragment-field consumers use the carrier-corrected tip position
+/// and the authored filler setback. Environment delivery is not mounted. Fixture speeds include
 /// a spent round carried almost alongside a fast face; a small relative speed amplifies stand-off
 /// seconds. Mutant: apply the carrier correction only after recording and throwing the burst.
 #[test]

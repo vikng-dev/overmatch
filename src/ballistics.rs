@@ -2392,6 +2392,15 @@ fn integrate_projectiles(
     // Publication tick; clockless fixtures use zero.
     let now = present.unwrap_or(0);
 
+    // The game's damage model: shared HP, impulses and attribution commit by stable source,
+    // weapon and fire tick, retaining each shot's internal order. Tank-less unkeyed instruments
+    // follow keyed fire in local entity order; they have no network scoring identity.
+    let mut ordered: Vec<_> = projectiles.iter_mut().collect();
+    ordered.sort_unstable_by_key(|shell| match shell.9 {
+        Some(Shot(id)) => (0, id.combatant.0, id.weapon, id.fire_tick, 0),
+        None => (1, 0, 0, 0, shell.0.to_bits()),
+    });
+
     for (
         entity,
         mut transform,
@@ -2405,7 +2414,7 @@ fn integrate_projectiles(
         shot,
         source,
         recording,
-    ) in &mut projectiles
+    ) in ordered
     {
         let mut shell = MarchingShell {
             transform: &mut transform,
