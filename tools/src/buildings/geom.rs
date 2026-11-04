@@ -243,8 +243,9 @@ impl Polyhedron {
     /// corner within [`WELD_M`] of the plane lies on it, so no cut leaves a sliver thinner than
     /// that. The cut face is new, on the plane, its outward normal `normal`.
     ///
-    /// Each crossing corner is computed once per edge from its lower-indexed end, so the faces
-    /// on either side of an edge, and the two halves of [`Self::split`], meet at the same bits.
+    /// Each crossing corner is computed once per edge, from its lesser end in coordinate order, so
+    /// every solid holding that edge (the faces on either side of it, the two halves of
+    /// [`Self::split`], neighbouring cells cut by one plane) meets at the same bits.
     pub fn clip(&self, normal: DVec3, offset: f64) -> Option<Self> {
         let length = normal.length();
         let (n, d) = (normal / length, offset / length);
@@ -288,8 +289,20 @@ impl Polyhedron {
                     }
                 }
                 if side[i] * side[j] < 0.0 {
-                    let (a, b) = (i.min(j), i.max(j));
-                    let at = *crossings.entry((a, b)).or_insert_with(|| {
+                    let at = *crossings.entry((i.min(j), i.max(j))).or_insert_with(|| {
+                        let lesser = |p: DVec3, q: DVec3| {
+                            p.to_array()
+                                .iter()
+                                .zip(q.to_array())
+                                .map(|(a, b)| a.total_cmp(&b))
+                                .find(|order| order.is_ne())
+                                .is_some_and(|order| order.is_lt())
+                        };
+                        let (a, b) = if lesser(self.corners[j], self.corners[i]) {
+                            (j, i)
+                        } else {
+                            (i, j)
+                        };
                         let (pa, pb) = (self.corners[a], self.corners[b]);
                         corners.push(pa + (pb - pa) * (side[a] / (side[a] - side[b])));
                         corners.len() - 1
@@ -627,6 +640,52 @@ pub(crate) mod tests {
             .expect("the twin's corners are the same bits");
         reversed.rotate_left(start);
         assert_eq!(fb.corners, reversed);
+    }
+
+    /// NEIGHBOURING CELLS CUT BY ONE PLANE MEET AT THE SAME BITS: two unit boxes sharing the face
+    /// `x = 1`, stated by prisms that number its corners differently, each cut by one oblique
+    /// plane across that face, hold the same corners on it, bit for bit. The cutter's cells join
+    /// over exactly shared corners; a crossing taken from whichever end a cell numbered first
+    /// drifts by a rounding between neighbours. Fixture data.
+    #[test]
+    fn neighbouring_cells_cut_by_one_plane_meet_at_the_same_bits() {
+        let left = cuboid(DVec3::ZERO, DVec3::ONE);
+        let right = Prism {
+            frame: Frame {
+                origin: DVec3::X,
+                u: DVec3::Z,
+                v: DVec3::Y,
+            },
+            profile: vec![
+                DVec2::ZERO,
+                DVec2::new(1.0, 0.0),
+                DVec2::new(1.0, 1.0),
+                DVec2::new(0.0, 1.0),
+            ],
+            near: -1.0,
+            far: 0.0,
+        }
+        .solid();
+        for k in 1..40 {
+            let t = f64::from(k) / 40.0;
+            let n = DVec3::new(0.3 * t, 0.7 - t, 1.0);
+            let d = n.dot(DVec3::new(1.0, 1.0, t));
+            let shared = |cell: &Polyhedron, out: DVec3, offset: f64| {
+                let cell = cell.clip(n, d).unwrap();
+                let mut corners: Vec<[u64; 3]> = cut_face(&cell, out, offset)
+                    .corners
+                    .iter()
+                    .map(|p| p.to_array().map(f64::to_bits))
+                    .collect();
+                corners.sort_unstable();
+                corners
+            };
+            assert_eq!(
+                shared(&left, DVec3::X, 1.0),
+                shared(&right, DVec3::NEG_X, -1.0),
+                "case {k}"
+            );
+        }
     }
 
     /// A CUT ON A FACE LEAVES NO SLIVER: a plane within the weld of a face keeps the whole solid
