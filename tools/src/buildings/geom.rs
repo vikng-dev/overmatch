@@ -1,10 +1,16 @@
-//! The bake's geometry: convex polygons and right prisms in f64, with only the operations IEEE 754
-//! fixes on every platform (add, multiply, divide, square root, round). No trigonometry, so a bake
-//! is the same bits everywhere.
+//! The bake's geometry: convex polygons, right prisms and convex polyhedra in f64, with only the
+//! operations IEEE 754 fixes on every platform (add, multiply, divide, square root, round). No
+//! trigonometry, so a bake is the same bits everywhere.
+//!
+//! A [`Polyhedron`] is the one solid every cut produces and every reader after the cut takes
+//! (contacts, volume, centroid, the written hull); a [`Prism`] is how a generator states one.
+
+use std::collections::BTreeMap;
 
 use glam::{DVec2, DVec3};
 
-/// Two vertices nearer than this (m) are one: the clip's own rounding, far below any feature.
+/// Two vertices nearer than this (m) are one, and a corner nearer a cutting plane lies on it: the
+/// clip's own rounding, far below any feature (Resolution).
 const WELD_M: f64 = 1.0e-9;
 
 /// `polygon` (convex, counter-clockwise) cut to the half-plane `normal · p ≤ offset`. Keeps the
@@ -178,6 +184,33 @@ impl Prism {
     }
 }
 
+impl Prism {
+    /// The prism as a [`Polyhedron`]: the profile at `near` (corners `0..n`), then at `far`
+    /// (`n..2n`); its faces in [`Prism::faces`]' order.
+    pub fn solid(&self) -> Polyhedron {
+        let n = self.profile.len();
+        let corners = self.corners();
+        let faces = self
+            .faces()
+            .into_iter()
+            .enumerate()
+            .map(|(f, face)| Facet {
+                normal: face.normal,
+                offset: face.offset,
+                corners: match f {
+                    0 => (n..2 * n).collect(),
+                    1 => (0..n).rev().collect(),
+                    _ => {
+                        let k = f - 2;
+                        vec![k, (k + 1) % n, n + (k + 1) % n, n + k]
+                    }
+                },
+            })
+            .collect();
+        Polyhedron { corners, faces }
+    }
+}
+
 /// An orthonormal basis `(e1, e2)` of the plane with unit normal `n`, `e1 × e2 = n`: the one
 /// projection both faces of a contact are read in.
 pub fn plane_basis(n: DVec3) -> (DVec3, DVec3) {
@@ -186,8 +219,267 @@ pub fn plane_basis(n: DVec3) -> (DVec3, DVec3) {
     (e1, n.cross(e1))
 }
 
+impl Face {
+    /// The face's area, m²: its fan's cross products read along its normal.
+    pub fn area(&self) -> f64 {
+        let first = self.corners[0];
+        0.5 * self
+            .corners
+            .windows(2)
+            .skip(1)
+            .map(|pair| (pair[0] - first).cross(pair[1] - first))
+            .sum::<DVec3>()
+            .dot(self.normal)
+    }
+}
+
+/// One face of a [`Polyhedron`]: its plane (outward unit normal, offset `normal · p`) and its
+/// corners, indices into [`Polyhedron::corners`], counter-clockwise seen from outside.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Facet {
+    pub normal: DVec3,
+    pub offset: f64,
+    pub corners: Vec<usize>,
+}
+
+/// A convex polyhedron (module doc). Closed: every edge one face runs `i → j`, exactly one other
+/// runs `j → i`, so two faces sharing an edge share its corners, bit for bit. A face's plane is
+/// the plane it was cut on, never refitted to its rounded corners.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Polyhedron {
+    pub corners: Vec<DVec3>,
+    pub faces: Vec<Facet>,
+}
+
+impl Polyhedron {
+    /// The part of the solid with `normal · p ≤ offset` (`normal` nonzero, any length): `None`
+    /// when no corner lies strictly inside, the whole solid when none lies strictly outside. A
+    /// corner within [`WELD_M`] of the plane lies on it, so no cut leaves a sliver thinner than
+    /// that. The cut face is new, on the plane, its outward normal `normal`.
+    ///
+    /// Each crossing corner is computed once per edge from its lower-indexed end, so the faces
+    /// on either side of an edge, and the two halves of [`Self::split`], meet at the same bits.
+    pub fn clip(&self, normal: DVec3, offset: f64) -> Option<Self> {
+        let length = normal.length();
+        let (n, d) = (normal / length, offset / length);
+        let side: Vec<f64> = self
+            .corners
+            .iter()
+            .map(|&p| {
+                let s = n.dot(p) - d;
+                if s.abs() <= WELD_M { 0.0 } else { s }
+            })
+            .collect();
+        if side.iter().all(|&s| s >= 0.0) {
+            return None;
+        }
+        if side.iter().all(|&s| s <= 0.0) {
+            return Some(self.clone());
+        }
+        let mut corners: Vec<DVec3> = Vec::new();
+        let mut kept: Vec<Option<usize>> = vec![None; self.corners.len()];
+        for (k, &p) in self.corners.iter().enumerate() {
+            if side[k] <= 0.0 {
+                kept[k] = Some(corners.len());
+                corners.push(p);
+            }
+        }
+        let mut crossings: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        let mut cap: Vec<usize> = Vec::new();
+        let mut faces: Vec<Facet> = Vec::new();
+        for face in &self.faces {
+            if face.corners.iter().all(|&i| side[i] >= 0.0) {
+                continue;
+            }
+            let m = face.corners.len();
+            let mut ring = Vec::with_capacity(m + 1);
+            for k in 0..m {
+                let (i, j) = (face.corners[k], face.corners[(k + 1) % m]);
+                if let Some(at) = kept[i] {
+                    ring.push(at);
+                    if side[i] == 0.0 {
+                        cap.push(at);
+                    }
+                }
+                if side[i] * side[j] < 0.0 {
+                    let (a, b) = (i.min(j), i.max(j));
+                    let at = *crossings.entry((a, b)).or_insert_with(|| {
+                        let (pa, pb) = (self.corners[a], self.corners[b]);
+                        corners.push(pa + (pb - pa) * (side[a] / (side[a] - side[b])));
+                        corners.len() - 1
+                    });
+                    ring.push(at);
+                    cap.push(at);
+                }
+            }
+            faces.push(Facet {
+                normal: face.normal,
+                offset: face.offset,
+                corners: ring,
+            });
+        }
+        cap.sort_unstable();
+        cap.dedup();
+        faces.push(Facet {
+            normal: n,
+            offset: d,
+            corners: counter_clockwise(&corners, cap, n),
+        });
+        Some(Self { corners, faces }.compact())
+    }
+
+    /// The solid's two parts on either side of the plane `normal · p = offset`: `(≤, ≥)`. Their
+    /// cut faces share every corner, bit for bit ([`Self::clip`]).
+    pub fn split(&self, normal: DVec3, offset: f64) -> (Option<Self>, Option<Self>) {
+        (self.clip(normal, offset), self.clip(-normal, -offset))
+    }
+
+    /// The same solid without corners no face names, renumbered in first-use order of the old.
+    fn compact(self) -> Self {
+        let mut used = vec![false; self.corners.len()];
+        for face in &self.faces {
+            for &i in &face.corners {
+                used[i] = true;
+            }
+        }
+        let mut renumber = vec![usize::MAX; self.corners.len()];
+        let mut corners = Vec::new();
+        for (k, p) in self.corners.into_iter().enumerate() {
+            if used[k] {
+                renumber[k] = corners.len();
+                corners.push(p);
+            }
+        }
+        let faces = self
+            .faces
+            .into_iter()
+            .map(|face| Facet {
+                corners: face.corners.iter().map(|&i| renumber[i]).collect(),
+                ..face
+            })
+            .collect();
+        Self { corners, faces }
+    }
+
+    /// Every face with its corners as points.
+    pub fn faces(&self) -> Vec<Face> {
+        self.faces
+            .iter()
+            .map(|face| Face {
+                normal: face.normal,
+                offset: face.offset,
+                corners: face.corners.iter().map(|&i| self.corners[i]).collect(),
+            })
+            .collect()
+    }
+
+    /// The volume and the volume centroid: the signed tetrahedra from the corners' mean to each
+    /// face's fan.
+    fn moments(&self) -> (f64, DVec3) {
+        let mean = self.corners.iter().sum::<DVec3>() / self.corners.len() as f64;
+        let (mut volume, mut moment) = (0.0, DVec3::ZERO);
+        for face in self.faces() {
+            let first = face.corners[0];
+            for pair in face.corners.windows(2).skip(1) {
+                let v = (first - mean).dot((pair[0] - mean).cross(pair[1] - mean)) / 6.0;
+                volume += v;
+                moment += (mean + first + pair[0] + pair[1]) * (v / 4.0);
+            }
+        }
+        (volume, moment / volume)
+    }
+
+    /// The volume, m³.
+    pub fn volume(&self) -> f64 {
+        self.moments().0
+    }
+
+    /// The volume centroid.
+    pub fn centroid(&self) -> DVec3 {
+        self.moments().1
+    }
+
+    /// The axis-aligned bounds, `(min, max)`.
+    pub fn bounds(&self) -> (DVec3, DVec3) {
+        self.corners.iter().fold(
+            (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
+            |(lo, hi), &p| (lo.min(p), hi.max(p)),
+        )
+    }
+
+    /// The certificate every baked cell meets, naming the first breach: at least four faces, each
+    /// of three corners or more, a unit normal, positive area and its corners on its plane;
+    /// closed (each directed edge once, its reverse once); convex (every corner on or inside every
+    /// face's plane); positive volume. Plane tolerance `tolerance` m.
+    pub fn certify(&self, tolerance: f64) -> Result<(), String> {
+        if self.faces.len() < 4 {
+            return Err(format!("{} faces bound no solid", self.faces.len()));
+        }
+        let mut edges: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        for (f, face) in self.faces().iter().enumerate() {
+            let ring = &self.faces[f].corners;
+            if ring.len() < 3 || (face.normal.length() - 1.0).abs() > 1.0e-9 {
+                return Err(format!(
+                    "face {f} has {} corners or no unit normal",
+                    ring.len()
+                ));
+            }
+            if face.area() <= tolerance * tolerance {
+                return Err(format!(
+                    "face {f} has area {} about its normal: reversed or degenerate",
+                    face.area()
+                ));
+            }
+            for (k, &p) in face.corners.iter().enumerate() {
+                if (face.normal.dot(p) - face.offset).abs() > tolerance {
+                    return Err(format!("face {f}'s corner {k} is off its plane"));
+                }
+            }
+            for k in 0..ring.len() {
+                *edges
+                    .entry((ring[k], ring[(k + 1) % ring.len()]))
+                    .or_default() += 1;
+            }
+            for (i, &p) in self.corners.iter().enumerate() {
+                if face.normal.dot(p) - face.offset > tolerance {
+                    return Err(format!("corner {i} lies outside face {f}: not convex"));
+                }
+            }
+        }
+        for (&(i, j), &count) in &edges {
+            if count != 1 || edges.get(&(j, i)) != Some(&1) {
+                return Err(format!("edge {i} → {j} is not shared by exactly two faces"));
+            }
+        }
+        if self.volume() <= 0.0 {
+            return Err(format!("volume {} is not positive", self.volume()));
+        }
+        Ok(())
+    }
+}
+
+/// `points` (indices into `corners`, on one plane of unit normal `n`, the corners of a convex
+/// polygon) ordered counter-clockwise about `n`, by half-plane then cross product about their
+/// mean: exact comparisons, no angle.
+fn counter_clockwise(corners: &[DVec3], mut points: Vec<usize>, n: DVec3) -> Vec<usize> {
+    let (e1, e2) = plane_basis(n);
+    let mean = points.iter().map(|&i| corners[i]).sum::<DVec3>() / points.len() as f64;
+    let flat = |i: usize| {
+        let p = corners[i] - mean;
+        DVec2::new(p.dot(e1), p.dot(e2))
+    };
+    let upper = |p: DVec2| p.y > 0.0 || (p.y == 0.0 && p.x > 0.0);
+    points.sort_by(|&a, &b| {
+        let (pa, pb) = (flat(a), flat(b));
+        upper(pb)
+            .cmp(&upper(pa))
+            .then_with(|| 0.0_f64.total_cmp(&pa.perp_dot(pb)))
+    });
+    points
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn square() -> Vec<DVec2> {
@@ -238,5 +530,174 @@ mod tests {
                 .collect();
             assert!(area(&flat) > 0.0, "counter-clockwise about the normal");
         }
+        prism
+            .solid()
+            .certify(1e-12)
+            .expect("a prism is a closed convex solid");
+    }
+
+    /// FIXTURE DATA: the axis-aligned box `lo..hi` as a prism's solid.
+    pub(crate) fn cuboid(lo: DVec3, hi: DVec3) -> Polyhedron {
+        let size = hi - lo;
+        Prism {
+            frame: Frame {
+                origin: lo,
+                u: DVec3::X,
+                v: DVec3::Y,
+            },
+            profile: vec![
+                DVec2::ZERO,
+                DVec2::new(size.x, 0.0),
+                DVec2::new(size.x, size.y),
+                DVec2::new(0.0, size.y),
+            ],
+            near: 0.0,
+            far: size.z,
+        }
+        .solid()
+    }
+
+    /// FIXTURE DATA: a pentagonal prism in a frame off every axis, about `origin`, at `scale`.
+    fn oblique(origin: DVec3, scale: f64) -> Polyhedron {
+        Prism {
+            frame: Frame {
+                origin,
+                u: DVec3::new(0.8, 0.0, -0.6),
+                v: DVec3::new(0.0, 1.0, 0.0),
+            },
+            profile: [(0.0, 0.0), (1.2, 0.0), (1.5, 0.7), (0.6, 1.3), (-0.2, 0.8)]
+                .map(|(x, y)| DVec2::new(x, y) * scale)
+                .to_vec(),
+            near: -0.4 * scale,
+            far: 0.5 * scale,
+        }
+        .solid()
+    }
+
+    /// The cut face is the face a clip adds: the one on the cutting plane.
+    fn cut_face(solid: &Polyhedron, n: DVec3, d: f64) -> Face {
+        solid
+            .faces()
+            .into_iter()
+            .find(|face| face.normal.dot(n) > 1.0 - 1e-12 && (face.offset - d).abs() < 1e-12)
+            .expect("a clip that cut adds a face on its plane")
+    }
+
+    /// A CLIP IS THE SOLID CALCULATED BY HAND: the unit cube cut to `x + y + z ≤ 1` is the corner
+    /// tetrahedron (volume 1/6, centroid (¼, ¼, ¼), a cut face of area √3/2), and cut to `≤ 1.5`
+    /// is the half cube whose cut face is the regular hexagon of side √½ (area 3√3/4). Both are
+    /// closed convex solids. A clip that lost volume, kept the wrong side, wound the cut face
+    /// inward or dropped a face fails here. Expectations DERIVED by hand, independent of the code.
+    #[test]
+    fn a_clip_is_the_solid_calculated_by_hand() {
+        let cube = cuboid(DVec3::ZERO, DVec3::ONE);
+        let n = DVec3::ONE / 3.0_f64.sqrt();
+        let corner = cube.clip(DVec3::ONE, 1.0).expect("the corner is inside");
+        corner.certify(1e-12).unwrap();
+        assert_eq!((corner.corners.len(), corner.faces.len()), (4, 4));
+        assert!((corner.volume() - 1.0 / 6.0).abs() < 1e-14);
+        assert!((corner.centroid() - DVec3::splat(0.25)).length() < 1e-14);
+        let face = cut_face(&corner, n, 1.0 / 3.0_f64.sqrt());
+        assert!((face.area() - 3.0_f64.sqrt() / 2.0).abs() < 1e-14);
+        let half = cube.clip(DVec3::ONE, 1.5).expect("half the cube is inside");
+        half.certify(1e-12).unwrap();
+        assert!((half.volume() - 0.5).abs() < 1e-14);
+        let face = cut_face(&half, n, 1.5 / 3.0_f64.sqrt());
+        assert_eq!(face.corners.len(), 6);
+        assert!((face.area() - 3.0 * 3.0_f64.sqrt() / 4.0).abs() < 1e-14);
+    }
+
+    /// A SPLIT PARTITIONS: its two parts are closed convex solids, each on its own side of the
+    /// plane (no overlap), their volumes and first moments sum to the whole's, and their cut
+    /// faces are one polygon, the same corners to the bit, facing opposite ways. The contact
+    /// search relies on that shared face to find the interface; a part that kept the other side,
+    /// lost a sliver, or computed its crossings apart from its twin fails here.
+    #[test]
+    fn a_split_partitions_the_solid_and_its_parts_share_one_face() {
+        let solid = oblique(DVec3::new(1.0, -2.0, 0.5), 1.0);
+        let n = DVec3::new(0.3, 1.0, -0.2);
+        let d = n.dot(solid.centroid()) + 0.05;
+        let (below, above) = solid.split(n, d);
+        let (below, above) = (below.unwrap(), above.unwrap());
+        for part in [&below, &above] {
+            part.certify(1e-12).unwrap();
+        }
+        assert!(below.corners.iter().all(|p| n.dot(*p) <= d + 1e-12));
+        assert!(above.corners.iter().all(|p| n.dot(*p) >= d - 1e-12));
+        let whole = solid.volume();
+        assert!((below.volume() + above.volume() - whole).abs() < 1e-12 * whole);
+        let moment = below.centroid() * below.volume() + above.centroid() * above.volume();
+        assert!((moment - solid.centroid() * whole).length() < 1e-12);
+        let unit = n.normalize();
+        let (fb, fa) = (
+            cut_face(&below, unit, d / n.length()),
+            cut_face(&above, -unit, -d / n.length()),
+        );
+        let mut reversed = fa.corners;
+        reversed.reverse();
+        let start = reversed
+            .iter()
+            .position(|p| *p == fb.corners[0])
+            .expect("the twin's corners are the same bits");
+        reversed.rotate_left(start);
+        assert_eq!(fb.corners, reversed);
+    }
+
+    /// A CUT ON A FACE LEAVES NO SLIVER: a plane within the weld of a face keeps the whole solid
+    /// on its side and nothing on the other, so no cell thinner than the clip's rounding exists;
+    /// one a micrometre in is a real cut. Mutant: a clip that reads corners a picometre over the
+    /// plane as outside writes a zero-thickness cell.
+    #[test]
+    fn a_cut_on_a_face_leaves_no_sliver() {
+        let cube = cuboid(DVec3::ZERO, DVec3::ONE);
+        for offset in [1.0 - 1e-12, 1.0, 1.0 + 1e-12] {
+            assert_eq!(cube.split(DVec3::Y, offset), (Some(cube.clone()), None));
+        }
+        let (_, cap) = cube.split(DVec3::Y, 1.0 - 1e-6);
+        assert!((cap.expect("a micrometre in cuts").volume() - 1e-6).abs() < 1e-15);
+    }
+
+    /// SCALE AND TRANSLATION CARRY THROUGH A CUT: the same cut of a solid scaled by `s` and moved
+    /// by `t` has `s³` the volume, `s²` the cut face's area and its centroid at `s·c + t`. A cut
+    /// whose crossings or moments depend on where the solid sits fails here. Fixture data.
+    #[test]
+    fn scale_and_translation_carry_through_a_cut() {
+        let (n, d) = (DVec3::new(-0.5, 1.0, 0.25), 0.3);
+        let unit = n.normalize();
+        let part = oblique(DVec3::ZERO, 1.0).clip(n, d).unwrap();
+        let area = cut_face(&part, unit, d / n.length()).area();
+        for (s, t) in [
+            (2.5, DVec3::new(10.0, -3.0, 7.0)),
+            (0.2, DVec3::new(-1.0, 0.5, 2.0)),
+        ] {
+            let moved = oblique(t, s).clip(n, s * d + n.dot(t)).unwrap();
+            moved.certify(1e-12).unwrap();
+            assert!((moved.volume() - s.powi(3) * part.volume()).abs() < 1e-12 * moved.volume());
+            assert!((moved.centroid() - (part.centroid() * s + t)).length() < 1e-12);
+            let face = cut_face(&moved, unit, (s * d + n.dot(t)) / n.length());
+            assert!((face.area() - s * s * area).abs() < 1e-12 * face.area());
+        }
+    }
+
+    /// THE CERTIFICATE REFUSES WHAT NO CELL MAY BE: a face wound inward, a missing face (an open
+    /// shell) and a corner pushed off its faces' planes (a dent) each name their breach; the
+    /// writer refuses a bake on any of them. Fixture data: the unit cube.
+    #[test]
+    fn the_certificate_refuses_a_reversed_open_or_dented_solid() {
+        let cube = cuboid(DVec3::ZERO, DVec3::ONE);
+        cube.certify(1e-9).unwrap();
+        let mut reversed = cube.clone();
+        reversed.faces[2].corners.reverse();
+        assert!(reversed.certify(1e-9).unwrap_err().contains("reversed"));
+        let mut open = cube.clone();
+        open.faces.pop();
+        assert!(
+            open.certify(1e-9)
+                .unwrap_err()
+                .contains("exactly two faces")
+        );
+        let mut dented = cube;
+        dented.corners[0] += DVec3::splat(0.1);
+        assert!(dented.certify(1e-9).unwrap_err().contains("off its plane"));
     }
 }

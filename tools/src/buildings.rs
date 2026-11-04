@@ -131,7 +131,8 @@ pub fn bake(house: &House) -> Result<Baked, String> {
     let index32 = |k: usize| u32::try_from(k).expect("chunk count fits u32");
     let attachments = attachment_kinds(house);
     let mut used = vec![false; house.joins.len()];
-    let joints = contact::joints(&prisms)
+    let solids: Vec<_> = prisms.iter().map(geom::Prism::solid).collect();
+    let joints = contact::joints(&solids)
         .into_iter()
         .map(|joint| {
             Ok(schema::Joint {
@@ -174,7 +175,7 @@ pub fn bake(house: &House) -> Result<Baked, String> {
         joints,
         elements,
         chunks,
-        anchors: contact::anchors(&prisms, foundation_y)
+        anchors: contact::anchors(&solids, foundation_y)
             .into_iter()
             .map(|anchor| schema::Anchor {
                 chunk: index32(anchor.chunk),
