@@ -5,6 +5,7 @@
 use bevy::math::{Quat, Vec3};
 
 use super::model::{Block, Bond, Chunk, Cut, Joint, Masonry, Side, Structure, clip_polygon};
+use crate::buildings::attachments::Attachments;
 use crate::buildings::schema::BuildingAsset;
 
 /// Where a wall is set down: the world x its centre stands at, the world z its back face stands
@@ -148,7 +149,15 @@ pub(crate) fn wall_cut(
         });
         faces.push(polygon);
     }
-    for (index, anchor) in asset.anchors.iter().enumerate() {
+    let anchors = Attachments::shipped_static()
+        .anchors(asset)
+        .map_err(|err| {
+            format!(
+                "assets/buildings/{id}/{id}.building.ron: {err}",
+                id = asset.id,
+            )
+        })?;
+    for (index, (anchor, (_, bond))) in asset.anchors.iter().zip(anchors).enumerate() {
         let Some(a) = new_index[anchor.chunk as usize] else {
             continue;
         };
@@ -168,7 +177,18 @@ pub(crate) fn wall_cut(
             area: anchor.area_m2,
             centroid,
             normal: Vec3::Y,
-            bond: Bond::Bonded(material.seam),
+            bond: match bond {
+                Bond::AreaShare {
+                    seam,
+                    footprint_area,
+                    footprint_centroid,
+                } => Bond::AreaShare {
+                    seam,
+                    footprint_area,
+                    footprint_centroid: place(footprint_centroid),
+                },
+                bond => bond,
+            },
         });
         faces.push(polygon);
     }
@@ -194,6 +214,105 @@ mod tests {
         let element = &asset.elements[usize::from(asset.chunks[chunk as usize].element)];
         asset.components[usize::from(element.component)] == WALL
             && asset.materials[usize::from(element.material)] == SUBSTANCE
+    }
+
+    fn foundation_fixture(name: &str) -> BuildingAsset {
+        let mut asset = BuildingAsset::from_ron(BUILDING).unwrap();
+        // Fixture: only the inspected chunks carry ground interfaces, so their placed
+        // centroids independently determine each complete footprint's centroid.
+        asset.anchors = asset
+            .anchors
+            .iter()
+            .filter(|anchor| selected(&asset, anchor.chunk))
+            .cloned()
+            .collect();
+        let attachment = asset
+            .attachments
+            .iter()
+            .position(|kind| kind == name)
+            .unwrap_or_else(|| {
+                asset.attachments.push(name.into());
+                asset.attachments.len() - 1
+            });
+        for anchor in &mut asset.anchors {
+            anchor.attachment = u8::try_from(attachment).unwrap();
+        }
+        asset.check().expect("the fixture meets schema admission");
+        asset
+    }
+
+    /// The game's environment destruction inspector must retain the declared foundation's
+    /// strength and whole-footprint geometry. Fixture kinds exercise unequal seams and a root
+    /// plate; replacing any of them with the wall material's seam changes the construction.
+    #[test]
+    fn foundations_keep_their_declared_attachment() {
+        let attachments = Attachments::shipped_static();
+        for name in ["mortared", "nailed", "norway_spruce_root_plate"] {
+            let asset = foundation_fixture(name);
+            let expected = attachments.anchors(&asset).unwrap();
+            let cut = cut(&asset).unwrap();
+            let ground: Vec<_> = cut
+                .structure
+                .joints
+                .iter()
+                .filter(|joint| joint.b == Side::Ground)
+                .collect();
+            let mut checked = 0;
+            for (anchor, (_, bond)) in asset.anchors.iter().zip(expected) {
+                if !selected(&asset, anchor.chunk) {
+                    continue;
+                }
+                let actual = ground[checked].bond;
+                match (bond, actual) {
+                    (
+                        Bond::AreaShare {
+                            seam,
+                            footprint_area,
+                            ..
+                        },
+                        Bond::AreaShare {
+                            seam: actual_seam,
+                            footprint_area: actual_area,
+                            footprint_centroid,
+                        },
+                    ) => {
+                        assert_eq!(actual_seam, seam);
+                        assert_eq!(actual_area, footprint_area);
+                        let component = asset.elements
+                            [usize::from(asset.chunks[anchor.chunk as usize].element)]
+                        .component;
+                        let footprint: Vec<_> = ground
+                            .iter()
+                            .filter(|joint| {
+                                asset.elements[usize::from(cut.element_of[joint.a])].component
+                                    == component
+                            })
+                            .collect();
+                        let area: f32 = footprint.iter().map(|joint| joint.area).sum();
+                        let centre = footprint
+                            .iter()
+                            .map(|joint| joint.centroid * joint.area)
+                            .sum::<Vec3>()
+                            / area;
+                        assert!((footprint_centroid - centre).length() < 1e-4);
+                    }
+                    _ => assert_eq!(actual, bond, "fixture attachment {name}"),
+                }
+                checked += 1;
+            }
+            assert!(checked > 0, "the fixture exercises a foundation");
+            assert_eq!(checked, ground.len());
+        }
+    }
+
+    /// The game's environment destruction model refuses ground rests without a friction pair;
+    /// the inspector must report that same admission failure instead of inventing a seam.
+    #[test]
+    fn a_resting_foundation_is_refused_by_the_inspector() {
+        let asset = foundation_fixture("resting");
+        let error = cut(&asset).unwrap_err();
+        assert!(error.contains("ground states no friction pair"), "{error}");
+        assert!(error.contains(&asset.id), "{error}");
     }
 
     /// The sandbox must draw real shared interfaces. Fixture edits move either the declared
