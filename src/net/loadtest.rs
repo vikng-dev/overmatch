@@ -3,7 +3,10 @@
 //! Support-removal work is derived from each construction's own volume pools. The ordinary
 //! deposit, law, launch and replication paths perform the break; this is an instrument, not fire.
 
-use std::{collections::BTreeSet, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -106,11 +109,22 @@ impl Loadtest {
         now: Instant,
         period: std::time::Duration,
     ) -> Value {
-        let targets: Vec<_> = constructions.iter().filter(|(id, _)| self.recipe.events.iter().any(|e| e.instances.contains(&id.id))).map(|(id, body)| {
-            let falls = body.live.state.fate.iter().filter(|&&fate| fate == crate::construction::fracture::Fate::Fallen).count();
-            let dust = record.entries.iter().filter(|entry| entry.construction == id.ordinal && matches!(entry.event, Event::Dust(_))).count();
-            json!({"id": id.id, "falls": falls, "dust": dust, "chunks": body.kind.layout.chunks.len()})
-        }).collect();
+        let mut dust_by_construction = BTreeMap::<u16, usize>::new();
+        for entry in &record.entries {
+            if matches!(entry.event, Event::Dust(_)) {
+                *dust_by_construction.entry(entry.construction).or_default() += 1;
+            }
+        }
+        let targets: Vec<_> = constructions
+            .iter()
+            .filter(|(id, _)| self.recipe.events.iter().any(|e| e.instances.contains(&id.id)))
+            .map(|(id, body)| {
+                let falls = body.live.state.fate.iter().filter(|&&fate| fate == crate::construction::fracture::Fate::Fallen).count();
+                // A construction with no dust events has a zero census.
+                let dust = dust_by_construction.get(&id.ordinal).copied().unwrap_or(0);
+                json!({"id": id.id, "falls": falls, "dust": dust, "chunks": body.kind.layout.chunks.len()})
+            })
+            .collect();
         let (elapsed, next) = match &self.state {
             RunState::AwaitingAdmission | RunState::AwaitingCombat { .. } => (None, 0),
             RunState::Running { started, next, .. } => {
