@@ -38,7 +38,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// Every wire change bumps this revision and re-pins the affected manifest hashes (ADR-0018).
 /// The game's environment destruction model carries shared causes and chunk-addressed groups;
 /// replacement and departure derive from the admitted graph on each peer.
-pub const PROTOCOL_REV: u32 = 88;
+pub const PROTOCOL_REV: u32 = 89;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -171,9 +171,52 @@ pub struct NetBot;
 
 /// Authoritative parent-local Gunner yaw/pitch targets for remote local rigs.
 #[derive(Component, Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(try_from = "ServoAnglesWire")]
 pub struct ServoAngles {
     pub gunner_yaw: f32,
     pub gunner_pitch: f32,
+}
+
+/// Untrusted peer angles, admitted before they become servo targets.
+#[derive(Deserialize)]
+struct ServoAnglesWire {
+    gunner_yaw: f32,
+    gunner_pitch: f32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ServoAnglesError {
+    NonFinite { field: &'static str },
+}
+
+impl std::fmt::Display for ServoAnglesError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonFinite { field } => write!(f, "{field}: send a finite angle in radians"),
+        }
+    }
+}
+
+impl TryFrom<ServoAnglesWire> for ServoAngles {
+    type Error = ServoAnglesError;
+
+    fn try_from(wire: ServoAnglesWire) -> Result<Self, Self::Error> {
+        for (field, value) in [
+            ("gunner_yaw", wire.gunner_yaw),
+            ("gunner_pitch", wire.gunner_pitch),
+        ] {
+            if !value.is_finite() {
+                let error = ServoAnglesError::NonFinite { field };
+                // Postcard erases custom serde error text, so name the refusal at admission.
+                warn!("client: refused ServoAngles from peer: {error}");
+                return Err(error);
+            }
+        }
+        Ok(Self {
+            gunner_yaw: wire.gunner_yaw,
+            gunner_pitch: wire.gunner_pitch,
+        })
+    }
 }
 
 /// Authoritative occupant facts transmitted atomically with `NetCrew` health.
@@ -869,7 +912,7 @@ const WIRE_SURFACE_HASH: u64 = 0x8ce64195b777b742;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x1ca5596988d05ea5;
+const WIRE_TYPES_HASH: u64 = 0x26e8bcc4d2962c15;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1462,6 +1505,31 @@ mod tests {
         assert_eq!((angles.gunner_yaw, angles.gunner_pitch), (0.7, -0.2));
     }
 
+    /// Peer input must never put nonfinite targets into a remote rig. Postcard is the receive
+    /// codec; valid fields retain their wire order and all finite angles remain admitted.
+    #[test]
+    fn peer_servo_angles_admit_only_finite_values() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for (yaw, pitch, field) in [(value, 0.0, "gunner_yaw"), (0.0, value, "gunner_pitch")] {
+                assert_eq!(
+                    ServoAngles::try_from(ServoAnglesWire {
+                        gunner_yaw: yaw,
+                        gunner_pitch: pitch
+                    }),
+                    Err(ServoAnglesError::NonFinite { field }),
+                );
+                let bytes = postcard::to_allocvec(&(yaw, pitch)).unwrap();
+                assert!(postcard::from_bytes::<ServoAngles>(&bytes).is_err());
+            }
+        }
+        for (yaw, pitch) in [(0.75, -0.2), (f32::MAX, f32::MIN)] {
+            let bytes = postcard::to_allocvec(&(yaw, pitch)).unwrap();
+            let angles: ServoAngles = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!((angles.gunner_yaw, angles.gunner_pitch), (yaw, pitch));
+            assert_eq!(postcard::to_allocvec(&angles).unwrap(), bytes);
+        }
+    }
+
     /// The public `ServoAngles` drive every remote tank's servo targets, but the owner's belong to
     /// `aim::drive_aim_servos` alone. The OWN tank is `Remote` like every replicated tank, so only
     /// the owner marker keeps this pump off it — mutate `Without<GameControlled>` away and the
@@ -1768,6 +1836,7 @@ mod tests {
         ("src/lib.rs", "CombatantId"),
         ("src/lib.rs", "CombatantLife"),
         ("src/net/protocol.rs", "ServoAngles"),
+        ("src/net/protocol.rs", "ServoAnglesWire"),
         ("src/net/protocol.rs", "NetCrew"),
         ("src/net/disclosure.rs", "NetTankStatus"),
         ("src/net/disclosure.rs", "RespawnState"),
