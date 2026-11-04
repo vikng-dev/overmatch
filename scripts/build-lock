@@ -4,4 +4,10 @@
 # Operator timeout: OVERMATCH_CARGO_LOCK_WAIT_S (default 3600 s); lockf exits 75 on expiry.
 set -euo pipefail
 
-exec /usr/bin/lockf -k -t "${OVERMATCH_CARGO_LOCK_WAIT_S:-3600}" /tmp/overmatch-cargo.lock "$@"
+wait_s=${OVERMATCH_CARGO_LOCK_WAIT_S-3600}
+if [[ ! $wait_s =~ ^[0-9]+$ ]]; then
+  echo "build-lock: OVERMATCH_CARGO_LOCK_WAIT_S must be unsigned integer seconds; unset it for the default" >&2
+  exit 64
+fi
+
+exec /usr/bin/lockf -k -t "$wait_s" /tmp/overmatch-cargo.lock "$@"
