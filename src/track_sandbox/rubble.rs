@@ -69,6 +69,33 @@ pub(super) fn footprint_sphere(geom: &RigGeom, envelope: &EnvelopeLaw) -> f32 {
     )
 }
 
+/// Reserve the largest breakable element for the wall, admitting the entire requested pile.
+fn yard_geometry(
+    source: &str,
+    layout: &crate::construction::breakage::Layout,
+    requested: usize,
+) -> Result<(usize, Vec<usize>), String> {
+    let mut elements: Vec<_> = (0..layout.elements.len())
+        .filter(|&e| !layout.chunks_of(e).is_empty())
+        .collect();
+    elements.sort_by_key(|&e| std::cmp::Reverse(layout.chunks_of(e).len()));
+    let refuse = || {
+        format!(
+            "assets/dev/track_sandbox.ron: rubble_construction {source:?}, rubble_pile_pieces {requested}: insufficient source geometry after reserving the largest breakable element for the wall; choose a source with more breakable elements, author more chunks, or reduce the requested pile count"
+        )
+    };
+    let (&wall, rest) = elements.split_first().ok_or_else(refuse)?;
+    let pieces: Vec<_> = rest
+        .iter()
+        .flat_map(|&e| layout.chunks_of(e))
+        .take(requested)
+        .collect();
+    if pieces.len() != requested {
+        return Err(refuse());
+    }
+    Ok((wall, pieces))
+}
+
 /// Spawn the yard (module doc).
 pub(super) fn spawn_rubble_yard(
     mut commands: Commands,
@@ -83,21 +110,13 @@ pub(super) fn spawn_rubble_yard(
         .get(source)
         .expect("the scene's source construction was loaded");
     let layout = &kind.layout;
+    let (wall, pieces) = yard_geometry(source, layout, yard.rubble_pile_pieces.0)
+        .unwrap_or_else(|error| panic!("{error}"));
     let structure = layout.structure(&kind.asset, 1.0);
     let brick = materials.add(Color::srgb_from_array(yard.rubble_piece_srgb.0));
     let standing = materials.add(Color::srgb_from_array(yard.rubble_wall_srgb.0));
     let [wall_x, wall_z] = yard.rubble_wall_at_m.0;
     let (row_count, taper) = (yard.rubble_pile_row.0.width(), yard.rubble_pile_taper.0);
-
-    // The breakable elements, most chunks first: the first is the wall section, the rest feed
-    // the pile.
-    let mut elements: Vec<usize> = (0..kind.asset.elements.len())
-        .filter(|&e| !layout.chunks_of(e).is_empty())
-        .collect();
-    elements.sort_by_key(|&e| std::cmp::Reverse(layout.chunks_of(e).len()));
-    let (&wall, rest) = elements
-        .split_first()
-        .expect("the rubble yard’s fixture must declare a breakable element with chunks");
 
     // The wall section: one static root, its element's chunks standing on it, turned so its long
     // axis runs along the lane (beside the rig, never across its path).
@@ -147,11 +166,6 @@ pub(super) fn spawn_rubble_yard(
     }
 
     // The pile: pieces dropped on a square grid, layer over layer, to settle into a heap.
-    let pieces: Vec<usize> = rest
-        .iter()
-        .flat_map(|&e| layout.chunks_of(e))
-        .take(yard.rubble_pile_pieces.0)
-        .collect();
     let spacing = pieces
         .iter()
         .map(|&c| {
@@ -230,5 +244,37 @@ pub(super) fn draw_rubble(
                 Color::srgb(1.0, 0.5, 0.1),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A requested yard cannot silently lose pile pieces when its source is too small. Fixture
+    /// element ranges cover empty, single-element, exact-capacity and insufficient-capacity cases.
+    #[test]
+    fn rubble_source_must_supply_the_wall_and_the_whole_pile() {
+        let mut layout = crate::construction::tests::column_construction()
+            .layout
+            .clone();
+        for elements in [vec![], vec![Some((0, 3))], vec![Some((0, 2)), Some((2, 3))]] {
+            layout.elements = elements;
+            let requested = 2;
+            let error = yard_geometry("fixture-source", &layout, requested).unwrap_err();
+            for required in [
+                "assets/dev/track_sandbox.ron",
+                "fixture-source",
+                "rubble_pile_pieces 2",
+                "choose a source",
+            ] {
+                assert!(error.contains(required), "{error}");
+            }
+        }
+        layout.elements = vec![Some((0, 2)), Some((2, 3))];
+        assert_eq!(
+            yard_geometry("fixture-source", &layout, 1).unwrap(),
+            (0, vec![2])
+        );
     }
 }
