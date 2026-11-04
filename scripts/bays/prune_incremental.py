@@ -73,15 +73,37 @@ class Retained:
 def prune(target: Path, budget_bytes: int) -> Retained:
     if budget_bytes <= 0:
         raise ValueError("incremental budget must be positive")
-    if target.is_symlink():
-        raise CacheLayoutError(f"{target}: target must not be a symlink")
-    # A bay that has not built yet has no cache to retain.
-    if not target.exists():
+    try:
+        target_info = target.lstat()
+    except FileNotFoundError:
+        # A bay that has not built yet has no cache to retain.
         return Retained(0, 0)
-    if not target.is_dir():
+    if stat.S_ISLNK(target_info.st_mode):
+        raise CacheLayoutError(f"{target}: target must not be a symlink")
+    if not stat.S_ISDIR(target_info.st_mode):
         raise CacheLayoutError(f"{target}: expected a target directory")
 
-    roots = sorted(set(target.glob("*/incremental")) | set(target.glob("*/*/incremental")))
+    roots = []
+    for first in sorted(target.iterdir()):
+        mode = first.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            raise CacheLayoutError(f"{first}: incremental paths must not contain symlinks")
+        if not stat.S_ISDIR(mode):
+            continue
+        for second in sorted(first.iterdir()):
+            mode = second.lstat().st_mode
+            if stat.S_ISLNK(mode):
+                raise CacheLayoutError(f"{second}: incremental paths must not contain symlinks")
+            if second.name == "incremental":
+                roots.append(second)
+            elif stat.S_ISDIR(mode):
+                root = second / "incremental"
+                try:
+                    root.lstat()
+                except FileNotFoundError:
+                    # Most profile children are artifacts, not target triples.
+                    continue
+                roots.append(root)
     variants = []
     empty = []
     for root in roots:

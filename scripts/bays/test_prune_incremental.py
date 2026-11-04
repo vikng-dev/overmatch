@@ -1,13 +1,17 @@
 """Fixture-only contracts relied on by the bay pool and its next lane."""
 
 import os
+import errno
+import io
+from contextlib import redirect_stderr
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from prune_incremental import CacheLayoutError, accounted_bytes, prune
+from prune_incremental import CacheLayoutError, accounted_bytes, main, prune
 
 
 class PruneTests(unittest.TestCase):
@@ -116,6 +120,36 @@ class PruneTests(unittest.TestCase):
     def test_missing_target_is_a_legitimate_cold_bay(self):
         self.assertEqual(prune(self.target, 1).variants, 0)
         self.assertFalse(self.target.exists())
+
+    def test_discovery_errors_visibly_refuse_release_before_any_eviction(self):
+        old, _ = self.session(stamp="z")
+        self.session(stamp="10")
+        triple = self.target / "aarch64-apple-darwin/edit"
+        triple.mkdir(parents=True)
+        # Inject OS failures even when the test runner can bypass permissions.
+        # Release must see failure, not a successful empty-cache report.
+        for operation, paths in (
+            ("iterdir", (self.target, self.target / "debug", triple.parent)),
+            ("lstat", (self.target, triple / "incremental")),
+        ):
+            original = getattr(Path, operation)
+            for path in paths:
+                with self.subTest(operation=operation, path=path):
+                    def refuse(entry):
+                        if entry == path:
+                            raise PermissionError(errno.EACCES, "Permission denied", str(entry))
+                        return original(entry)
+
+                    stderr = io.StringIO()
+                    with patch.object(Path, operation, refuse), \
+                            patch.object(sys, "argv", ["prune_incremental.py", str(self.target)]), \
+                            redirect_stderr(stderr):
+                        self.assertEqual(main(), 1)
+                    self.assertIn(str(path), stderr.getvalue())
+                    self.assertIn("Permission denied", stderr.getvalue())
+                    self.assertIn("bay remains leased", stderr.getvalue())
+                    self.assertNotIn("retained", stderr.getvalue())
+                    self.assertTrue(old.is_dir())
 
     def test_operator_typo_refuses_without_deleting_a_session(self):
         path, _ = self.session()
