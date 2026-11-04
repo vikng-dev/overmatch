@@ -460,18 +460,42 @@ fn fastening_follows_the_joins_never_the_pattern() {
 /// A SHIPPED SPEC CARRIES NO FIXTURE LABEL, IN THE TEST BUILD TOO: the fixture house loads inline,
 /// and the same text read as a shipped spec is refused naming the field. The bake binary has no
 /// fixture label at all, so a shipped spec the tests accepted with one could not be baked.
-/// Mutant: a check that admits fixtures whatever the reader passes it.
+/// Mutant: deleting the production reader's shipped guard admits these files.
 #[test]
 fn a_shipped_spec_refuses_a_fixture_label() {
     fixture_house();
-    let err = {
-        let _shipped = spec::Shipped::enter();
-        House::from_ron(FIXTURE_HOUSE).unwrap_err()
-    };
-    assert!(
-        err.contains("parts.walls.cut") && err.contains("Fixture"),
-        "{err}"
-    );
+    let root = std::env::temp_dir().join(format!("overmatch-tools-shipped-{}", std::process::id()));
+    let dir = root.join(SPECS_DIR);
+    for (suffix, text, field) in [
+        (HOUSE_SUFFIX, FIXTURE_HOUSE.to_owned(), "parts.walls.cut"),
+        (
+            CONSTRUCTION_SUFFIX,
+            construction(
+                &[box_piece(
+                    "cube",
+                    "Pier",
+                    "Wood",
+                    "Upright",
+                    DVec3::ZERO,
+                    DVec3::ONE,
+                    &cells(0.2, 2.0),
+                )],
+                "",
+            ),
+            "size_m",
+        ),
+    ] {
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = format!("fixture{suffix}");
+        std::fs::write(dir.join(&name), text).unwrap();
+        let result = specs(&root).map(|_| ());
+        std::fs::remove_dir_all(&root).unwrap();
+        let err = result.unwrap_err();
+        assert!(
+            err.contains(&name) && err.contains(field) && err.contains("Fixture"),
+            "{err}"
+        );
+    }
     fixture_house();
 }
 
