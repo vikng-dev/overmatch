@@ -449,6 +449,22 @@ fn publish_fixture_departures(world: &mut World) {
     }
 }
 
+fn admitted_carriers_match_constructions(world: &mut World) -> bool {
+    let carriers = world
+        .query::<(
+            &Piece,
+            &crate::construction::breakage::AdmittedPiece,
+            &DebrisPose,
+        )>()
+        .iter(world)
+        .count();
+    carriers
+        == world
+            .query_filtered::<&Breakage, Without<Piece>>()
+            .iter(world)
+            .count()
+}
+
 /// FRESH BATTLE EQUALS STARTUP BY COUNT AND IDENTITY, on authority, connected client and late
 /// joiners. The game's environment destruction model: each construction releases a chunk during
 /// combat; the next Battle replaces them and every chunk pool. Keeping a ledger, a loose body, or
@@ -504,18 +520,7 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
                         .query_filtered::<&Breakage, Without<Piece>>()
                         .iter(world)
                         .all(|b| b.shape().fate.contains(&Fate::Fallen))
-                    && world
-                        .query::<(
-                            &Piece,
-                            &crate::construction::breakage::AdmittedPiece,
-                            &DebrisPose,
-                        )>()
-                        .iter(world)
-                        .count()
-                        == world
-                            .query_filtered::<&Breakage, Without<Piece>>()
-                            .iter(world)
-                            .count()
+                    && admitted_carriers_match_constructions(world)
                     && world
                         .query_filtered::<&WorldGeneration, With<DebrisPose>>()
                         .iter(world)
@@ -529,18 +534,7 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
             let world = clients[1].world_mut();
             combat_joined = battle(world).is_some_and(|b| b.number == 1 && b.is_combat())
                 && !world.resource::<Record>().entries.is_empty()
-                && world
-                    .query::<(
-                        &Piece,
-                        &crate::construction::breakage::AdmittedPiece,
-                        &DebrisPose,
-                    )>()
-                    .iter(world)
-                    .count()
-                    == world
-                        .query_filtered::<&Breakage, Without<Piece>>()
-                        .iter(world)
-                        .count();
+                && admitted_carriers_match_constructions(world);
         }
         if combat_joined && reconnect_link.is_none() && state.number == 1 {
             let client = &mut clients[0];
@@ -574,20 +568,7 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
                 && battle(client.world_mut()).is_some_and(|b| b.number == 1)
                 && client.world().resource::<Record>().entries
                     == server.world().resource::<Record>().entries
-                && client
-                    .world_mut()
-                    .query::<(
-                        &Piece,
-                        &crate::construction::breakage::AdmittedPiece,
-                        &DebrisPose,
-                    )>()
-                    .iter(client.world())
-                    .count()
-                    == client
-                        .world_mut()
-                        .query_filtered::<&Breakage, Without<Piece>>()
-                        .iter(client.world())
-                        .count()
+                && admitted_carriers_match_constructions(client.world_mut())
             {
                 assert!(
                     previous_client_roots
