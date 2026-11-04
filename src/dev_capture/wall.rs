@@ -467,7 +467,7 @@ fn place_preview(
                 Transform::IDENTITY,
                 Mesh3d(meshes.add(crate::construction::view::mesh(kind))),
                 MeshMaterial3d(look.surface.clone()),
-                crate::render_cost::CasterClass::House,
+                crate::render_cost::CasterClass::Construction,
                 crate::construction::view::View,
             ));
         }

@@ -1620,12 +1620,8 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
             .run_system_once(
                 move |mut shot: Query<&mut ShotDose>, mut health: Query<&mut ComponentHealth>| {
                     let mut shot = shot.single_mut().unwrap();
-                    let context = DoseContext::Line {
-                        entry: Vec3::ZERO,
-                        along: Vec3::NEG_Z,
-                    };
                     for units in &units {
-                        shot.add_units(ammo, *units, context);
+                        shot.add_units(ammo, *units);
                     }
                     shot.settle(&mut health, true, mark);
                 },
@@ -1840,14 +1836,7 @@ fn interleaved_fractional_doses_record_the_shown_point_the_shot_took() {
             .run_system_once(
                 move |mut shots: Query<&mut ShotDose>, mut health: Query<&mut ComponentHealth>| {
                     let mut shot = shots.single_mut().unwrap();
-                    shot.add(
-                        target,
-                        0.04,
-                        DoseContext::Line {
-                            entry: Vec3::ZERO,
-                            along: Vec3::NEG_Z,
-                        },
-                    );
+                    shot.add(target, 0.04);
                     shot.settle(&mut health, true, mark);
                 },
             )

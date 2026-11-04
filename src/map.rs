@@ -41,7 +41,6 @@ use bevy::prelude::*;
 
 use crate::construction::ConstructionLibrary;
 use crate::terrain_grid::{RowOrder, TerrainExtent};
-use crate::trees::TreeLibrary;
 
 /// The map every build loads: `assets/maps/<MAP_ID>/`. `scripts/lod/config.py` reads this
 /// declaration for the world the LOD ladder is cut for.
@@ -115,8 +114,6 @@ pub(crate) struct MapManifest {
     /// The game's library, keyed by the ids the placement uses. Every instance's prototype and
     /// every id the author's block declares resolves here; [`parse`] checked it.
     pub(crate) prototypes: BTreeMap<String, Prototype>,
-    /// Every tree asset a [`Prototype::Tree`] names, loaded and validated ([`load`]).
-    pub(crate) trees: TreeLibrary,
     /// Every construction asset a [`Prototype::Construction`] names, loaded and validated ([`load`]).
     pub(crate) constructions: ConstructionLibrary,
 }
@@ -150,23 +147,13 @@ impl SpawnPoints {
 }
 
 impl MapManifest {
-    /// The tree asset ids the library names, each once.
-    fn tree_assets(&self) -> impl Iterator<Item = &str> {
-        self.prototypes
-            .values()
-            .filter_map(|prototype| match prototype {
-                Prototype::Tree { asset } => Some(asset.as_str()),
-                Prototype::Block { .. } | Prototype::Construction { .. } => None,
-            })
-    }
-
     /// The construction asset ids the library names, each once.
     fn construction_assets(&self) -> impl Iterator<Item = &str> {
         self.prototypes
             .values()
             .filter_map(|prototype| match prototype {
                 Prototype::Construction { asset } => Some(asset.as_str()),
-                Prototype::Block { .. } | Prototype::Tree { .. } => None,
+                Prototype::Block { .. } => None,
             })
     }
 
@@ -230,8 +217,6 @@ pub(crate) enum Prototype {
         substance: String,
         surface: BoxSurface,
     },
-    /// A tree of the damage model ([`crate::trees`]): the asset `assets/trees/<asset>/`.
-    Tree { asset: String },
     /// A construction of the destruction model ([`crate::construction`]): the asset
     /// `assets/constructions/<asset>/<asset>.construction.ron`.
     Construction { asset: String },
@@ -443,7 +428,6 @@ pub(crate) fn load(root: &Path) -> MapManifest {
     let text = read_manifest(&path);
     let library = read_prototypes(root);
     let mut manifest = parse(&text, &library, &path);
-    manifest.trees = TreeLibrary::load(root, manifest.tree_assets());
     manifest.load_constructions(root, &path);
     manifest
 }
@@ -474,8 +458,8 @@ fn read_manifest(path: &Path) -> String {
 }
 
 /// The CONTENT digest of the world this process will build: the manifest's own bytes, its prototype
-/// library's, the bytes of the heightmap it names, the species table, the wood row and every tree
-/// asset the library names, then every construction asset it names — the files that decide the terrain
+/// library's, the bytes of its heightmap, and every construction and dressing file it names —
+/// the files that decide the terrain
 /// and the scatter, none of which crosses the wire.
 ///
 /// CONTENT, not the id: two peers can select the same map name over different files (a stale
@@ -488,7 +472,6 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
     let text = read_manifest(&path);
     let library = read_prototypes(root);
     let mut manifest = parse(&text, &library, &path);
-    let trees = TreeLibrary::load(root, manifest.tree_assets());
     manifest.load_constructions(root, &path);
     let constructions = &manifest.constructions;
     let heightmap = manifest.heightmap_path();
@@ -501,7 +484,6 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
         )
     });
     let mut files = vec![text.as_bytes(), library.as_bytes(), bytes.as_slice()];
-    files.extend(trees.texts());
     files.extend(constructions.texts());
     digest_of(&files)
 }
@@ -522,8 +504,8 @@ fn digest_of(files: &[&[u8]]) -> u64 {
 
 /// Refuse a graybox prototype that describes no collider, naming the library file, the id, the
 /// field and the fix: a box whose corners are not finite and ordered on every axis, or whose
-/// substance states no friction (its collider carries the substance's, `scatter`). A tree or a structure is its own
-/// asset's to check (`TreeLibrary::load`, `ConstructionLibrary::load`).
+/// substance states no friction (its collider carries the substance's, `scatter`).
+/// `ConstructionLibrary::load` checks each construction's asset.
 fn check_prototype(id: &str, prototype: &Prototype, library: &Path) {
     let substance = match prototype {
         Prototype::Block {
@@ -542,7 +524,7 @@ fn check_prototype(id: &str, prototype: &Prototype, library: &Path) {
             }
             substance
         }
-        Prototype::Tree { .. } | Prototype::Construction { .. } => return,
+        Prototype::Construction { .. } => return,
     };
     if let Err(err) =
         crate::substances::SubstanceRegistry::shipped_static().contact_friction(substance)
@@ -631,7 +613,6 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
         spawn_points: SpawnPoints::checked(level.spawn_points, side_m * 0.5, path),
         instances: level.instances,
         prototypes,
-        trees: TreeLibrary::default(),
         constructions: ConstructionLibrary::default(),
     }
 }
@@ -1094,10 +1075,6 @@ pub(crate) mod tests {
         let text = read_manifest(&path);
         let library = read_prototypes(&root);
         let manifest = load(&root);
-        assert!(
-            manifest.tree_assets().next().is_none(),
-            "live scatter uses constructions"
-        );
         let heightmap = std::fs::read(manifest.heightmap_path()).unwrap();
         let mut files = vec![text.as_bytes(), library.as_bytes(), heightmap.as_slice()];
         let assets: std::collections::BTreeSet<_> = manifest.construction_assets().collect();

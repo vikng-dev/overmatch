@@ -21,7 +21,7 @@ def run_one(root, out, seconds, index):
     # Fixture cues exercise real wall crossings and structural changes, without taking frames.
     plan.write_text('(wall: (shots: [Round(round: "88mm_AP", at: 10.0), '
                     'Charge(kg: 1.0, core: "88mm_burst_core", at: 20.0)]))\n')
-    env = dict(os.environ, OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless",
+    env = dict(os.environ, OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1",
                OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_BOT="30",
                SPIKE_SHOT_TRACE=str(prefix), OVERMATCH_CAPTURE=str(plan),
                BEVY_ASSET_ROOT=str(root), RUST_BACKTRACE="1")
@@ -63,14 +63,14 @@ def run_one(root, out, seconds, index):
     result = {"run": index, "measured_live_seconds": elapsed,
               "first_contact_stops": stops, "walk_panics": panics,
               "crossing_events_by_kind": {kind: crossings[kind]
-                  for kind in ("tank", "tree", "wall", "other", "retired")},
-              "trees_placed": max((row["trees"] for row in census), default=0),
+                  for kind in ("tank", "construction", "other", "retired")},
+              "constructions_placed": max((row["constructions"] for row in census), default=0),
               "max_tanks": max((row["tanks"] for row in census), default=0),
-              "wall_changes": max((row["wall_changes"] for row in census), default=0),
+              "construction_changes": max((row["construction_changes"] for row in census), default=0),
               "trace": str(trace_path), "log": str(log_path)}
     prefix.with_suffix(".json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result), flush=True)
-    if stops or panics or result["max_tanks"] < 30 or not result["trees_placed"] or not result["wall_changes"]:
+    if stops or panics or result["max_tanks"] < 30 or not result["constructions_placed"] or not result["construction_changes"]:
         raise RuntimeError(f"live walk gate failed: {prefix.with_suffix('.json')}")
     return result
 

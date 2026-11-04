@@ -76,7 +76,7 @@ the filter passes. That is exact while `LastPhysicsTick` is newer than the syste
 every tick newer than `LastPhysicsTick` is then newer than that run too, so the filter passes every
 collider the check accepts. `update_last_physics_tick` runs after this system in every step, so
 inside the physics schedule it always holds; any other instance (Overmatch runs the system in
-`trees::derive_systems` and `buildings::breakage::refit_systems`) falls back to the unfiltered
+`construction::breakage::refit_systems`) falls back to the unfiltered
 query whenever it does not.
 
 `ColliderTreeDiagnostics` gains `moved_aabb_candidates`, the colliders the pass examined this step

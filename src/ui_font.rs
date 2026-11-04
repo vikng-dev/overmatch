@@ -1,18 +1,10 @@
-//! Bundled Barlow Condensed UI fonts, and the handful of style constants every client surface draws
-//! with.
-//!
-//! Handles are inserted during plugin setup so every `Startup` UI spawner can read [`UiFonts`]. UI
-//! strings must remain within the shipped font coverage enforced by `src/tests/ui_ascii.rs`.
-//!
-//! The colours below live here for the same reason [`OVERLAY_FONT_PX`] does: they are the family
-//! standard, and they had already been hand-copied into three files. Layout is deliberately NOT
-//! unified — each HUD card has its own anti-jitter column shape, and collapsing those would trade a
-//! real property for a cosmetic one.
+//! Bundled Barlow Condensed handles and required UI styling from `assets/ui/style.ron`.
+//! Handles exist before Startup; both weights join presentation admission before play.
+//! Rendered strings stay within the bundled coverage guarded by `src/tests/ui_ascii.rs`.
 
 use bevy::prelude::*;
 
-/// The two bundled Barlow Condensed weights, as ready-to-clone `Handle<Font>`s. Cheap to `clone`
-/// (a handle is refcounted), so each `TextFont` site clones the weight it wants.
+/// The bundled weights shared by every client text surface.
 #[derive(Resource, Clone)]
 pub(crate) struct UiFonts {
     /// SemiBold — HUD overlays, all-caps banners, big prompts, identity chips.
@@ -21,56 +13,11 @@ pub(crate) struct UiFonts {
     pub body: Handle<Font>,
 }
 
-/// The family font size for every full-screen overlay banner (menu, connect-status, death, pause),
-/// in pixels. Unifies what had drifted — the pause overlay used to render at 80 px while the other
-/// three used 48 — onto the family standard.
-const OVERLAY_FONT_PX: f32 = 48.0;
+include!(concat!(env!("OUT_DIR"), "/ui_style_authored.rs"));
 
-/// The cold blue-white every client surface renders its live text in — the crew card, the net debug
-/// panel and the settings page all drew this literal before it was named once here.
-pub(crate) const TEXT: Color = Color::srgb(0.85, 0.95, 1.0);
-
-/// The muted companion to [`TEXT`], for a line that explains rather than reports (the settings
-/// page's footer hint and its control legend). Kept beside [`TEXT`] so the contrast between the two
-/// is a decision rather than two literals that drifted apart.
-pub(crate) const TEXT_DIM: Color = Color::srgb(0.55, 0.63, 0.70);
-
-/// The translucent slab behind a HUD CARD — a panel that sits over live play and must not hide it
-/// (the crew status card, the net ping/FPS panel).
-///
-/// **Known drift, deliberately left:** `hud.rs`'s tank-state card uses the same RGB at `0.55` alpha
-/// rather than this `0.62`. Unifying it would change a shipped picture on a judgement call nobody
-/// has made, so it stays a separate literal there; if the two are ever reconciled, this is the
-/// constant that should win.
-pub(crate) const PANEL_BG: Color = Color::srgba(0.04, 0.06, 0.08, 0.62);
-
-/// The card behind a MODAL page (the settings page). The same family as [`PANEL_BG`] but far more
-/// opaque, and on purpose: a modal has stopped play and owns the screen, so its text wants a solid
-/// backing rather than a readable-through one.
-pub(crate) const MODAL_BG: Color = Color::srgba(0.03, 0.05, 0.07, 0.92);
-
-/// Opaque backing for a modal HUD card drawn over live world labels. Unlike a full-screen page,
-/// the card owns no scrim; its own surface must obscure the lower layers under its text.
-pub(crate) const MODAL_CARD_BG: Color = Color::srgb(0.03, 0.05, 0.07);
-
-/// The death screen's red wash over the world (TUNED), drawn only by `overlay::death_tint`.
-pub(crate) const DEATH_TINT: Color = Color::srgba(0.15, 0.0, 0.0, 0.6);
-
-/// Spawn a full-screen, centered overlay: an optional dim translucent backdrop with one line (or
-/// block) of centered SemiBold [`UiFonts::hud`] text. This is the single shape behind the menu,
-/// connect-status, death, and pause overlays, which had drifted into four near-identical copies that
-/// each commented that they "mirror" the others. Callers supply only what genuinely differs:
-///
-/// - `node_markers` — component(s) placed on the backdrop node. This is each site's identity and its
-///   despawn handle: the shared `overlay::OverlayNode(_)` (which drives z + one-scrim visibility) plus
-///   any site-specific marker such as the death-screen state enum, or `DespawnOnExit(Paused)` for the
-///   single-player pause overlay. Everything each site queries or despawns hangs off this.
-/// - `text` — the message (may contain `\n`).
-/// - `text_markers` — component(s) on the `Text` child. Only the connect overlay needs one
-///   (`ConnectStatusText`, so its label can be rewritten later); the other three pass `()`.
-/// - `backdrop` — the dim fill `Color`, or `None` for no fill (the pause overlay carries none).
-///
-/// Font size is [`OVERLAY_FONT_PX`] for every site. Returns the spawned node entity.
+/// A centered overlay banner. `node_markers` own the backdrop's lifetime and layer; `text_markers`
+/// identify a label that changes. `backdrop: None` leaves the scene undimmed. Every banner uses
+/// the required overlay font size and colour.
 pub(crate) fn spawn_overlay(
     commands: &mut Commands,
     font: &Handle<Font>,
@@ -102,7 +49,7 @@ pub(crate) fn spawn_overlay(
                 font_size: FontSize::Px(OVERLAY_FONT_PX),
                 ..default()
             },
-            TextColor(Color::WHITE),
+            TextColor(OVERLAY_TEXT),
         ));
     });
     node.id()
@@ -117,7 +64,38 @@ pub(crate) fn plugin(app: &mut App) {
         hud: asset_server.load("fonts/BarlowCondensed-SemiBold.ttf"),
         body: asset_server.load("fonts/BarlowCondensed-Regular.ttf"),
     };
-    app.insert_resource(fonts);
+    app.insert_resource(fonts)
+        .init_resource::<crate::assets::PresentationLoads>()
+        .add_systems(PreStartup, require_fonts);
+}
+
+/// Bevy 0.19's FontLoader wraps bytes without decoding them. Admit format and glyph coverage
+/// synchronously, then let the shared presentation gate wait for both asynchronous handles.
+fn require_fonts(fonts: Res<UiFonts>, mut required: ResMut<crate::assets::PresentationLoads>) {
+    let root = crate::assets::asset_root();
+    for (path, handle) in [
+        ("fonts/BarlowCondensed-SemiBold.ttf", &fonts.hud),
+        ("fonts/BarlowCondensed-Regular.ttf", &fonts.body),
+    ] {
+        let bytes = crate::assets::require_file(&root, path, "UiFonts");
+        admit_font(path, &bytes);
+        required.0.push((path.into(), handle.clone().untyped()));
+    }
+}
+
+fn admit_font(path: &str, bytes: &[u8]) {
+    let face = ttf_parser::Face::parse(bytes, 0).unwrap_or_else(|error| {
+        panic!("{path}: UiFonts: invalid font: {error:?}; restore the bundled font export")
+    });
+    for glyph in (' '..='~').chain(TYPOGRAPHIC) {
+        let index = face.glyph_index(glyph).unwrap_or_else(|| {
+            panic!("{path}: UiFonts: missing required glyph {glyph:?}; restore a font with the bundled UI coverage")
+        });
+        assert!(
+            glyph == ' ' || face.glyph_bounding_box(index).is_some(),
+            "{path}: UiFonts: unreadable outline for {glyph:?}; restore the bundled font export"
+        );
+    }
 }
 
 /// The glyphs past printable ASCII that both shipped weights carry, each confirmed in their cmaps;
@@ -161,6 +139,49 @@ pub(crate) fn set_text(mut text: Mut<Text>, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Client admission must wait for both weights, including a client with no text entities yet.
+    /// Mount the shipped font installer: omitting either registration cannot pass this witness.
+    #[test]
+    fn both_weights_are_required_presentation_dependencies() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Font>()
+            .init_asset_loader::<bevy::text::FontLoader>()
+            .add_plugins(plugin);
+        app.update();
+        let fonts = app.world().resource::<UiFonts>();
+        let required = &app.world().resource::<crate::assets::PresentationLoads>().0;
+        for handle in [&fonts.hud, &fonts.body] {
+            assert!(
+                required
+                    .iter()
+                    .any(|(_, entry)| entry.id() == handle.clone().untyped().id())
+            );
+        }
+        assert_ne!(fonts.hud.id(), fonts.body.id());
+    }
+
+    /// A loader's Loaded state alone cannot prove drawable text in Bevy 0.19. Corrupt or
+    /// truncated bytes must refuse at the font gate, naming the asset and its repair.
+    #[test]
+    fn font_admission_refuses_corrupt_bytes_and_checks_the_bundled_coverage() {
+        for path in [
+            "fonts/BarlowCondensed-SemiBold.ttf",
+            "fonts/BarlowCondensed-Regular.ttf",
+        ] {
+            let bytes =
+                crate::assets::require_file(&crate::assets::asset_root(), path, "font fixture");
+            admit_font(path, &bytes);
+            for bad in [&b"not a font"[..], &bytes[..bytes.len() / 2]] {
+                let error = std::panic::catch_unwind(|| admit_font(path, bad)).unwrap_err();
+                let text = error
+                    .downcast_ref::<String>()
+                    .expect("font admission formats its cause");
+                assert!(text.contains(path) && text.contains("restore"), "{text}");
+            }
+        }
+    }
 
     /// What the font draws passes unchanged; anything else collapses to a space, runs of spaces
     /// collapse to one and the ends are trimmed, and a string with nothing legible left is refused.

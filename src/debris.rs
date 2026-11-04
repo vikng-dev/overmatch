@@ -44,8 +44,6 @@
 //! HOW MANY CONSTRUCTION PIECES (DERIVED from `construction::breakage`): a chunk leaves its construction at most once
 //! and every split partitions its owned chunks, so live construction bodies never exceed the map's
 //! breakable chunks. The construction design owns the retained carriers' bound and the split model.
-//! DERIVED: each tree carrier owns at least one segment, so its live bodies never exceed its
-//! segment count; later cuts partition existing ownership.
 //! Awake pieces are the ones in the solver. A sleeping piece's own per-tick cost and an awake pile
 //! held by a tank's island (above) are both unpriced.
 

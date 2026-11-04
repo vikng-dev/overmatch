@@ -38,7 +38,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// Every wire change bumps this revision and re-pins the affected manifest hashes (ADR-0018).
 /// The game's environment destruction model carries shared causes and chunk-addressed groups;
 /// replacement and departure derive from the admitted graph on each peer.
-pub const PROTOCOL_REV: u32 = 87;
+pub const PROTOCOL_REV: u32 = 88;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -169,11 +169,11 @@ pub struct NetTank;
 #[derive(Component, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct NetBot;
 
-/// Authoritative parent-local turret/gun targets for remote local rigs.
+/// Authoritative parent-local Gunner yaw/pitch targets for remote local rigs.
 #[derive(Component, Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ServoAngles {
-    pub turret: f32,
-    pub gun: f32,
+    pub gunner_yaw: f32,
+    pub gunner_pitch: f32,
 }
 
 /// Authoritative occupant facts transmitted atomically with `NetCrew` health.
@@ -673,11 +673,11 @@ fn publish_servo_angles(
                 .current()
         };
         angles.set_if_neq(ServoAngles {
-            turret: angle(
+            gunner_yaw: angle(
                 yaw.expect("a complete player rig carries its Gunner yaw handle")
                     .0,
             ),
-            gun: angle(rig.gun),
+            gunner_pitch: angle(rig.gun),
         });
     }
 }
@@ -702,11 +702,11 @@ fn apply_servo_angles(
                     .0,
             )
             .expect("complete spawn gives every attached Gunner yaw servo its command")
-            .target = angles.turret;
+            .target = angles.gunner_yaw;
         servos
             .get_mut(rig.gun)
             .expect("complete spawn gives every attached Gunner pitch servo its command")
-            .target = angles.gun;
+            .target = angles.gunner_pitch;
     }
 }
 
@@ -869,7 +869,7 @@ const WIRE_SURFACE_HASH: u64 = 0x8ce64195b777b742;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x570b2c9cd42cdbc4;
+const WIRE_TYPES_HASH: u64 = 0x1ca5596988d05ea5;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1454,12 +1454,12 @@ mod tests {
             .id();
         world.run_system_once(publish_servo_angles).unwrap();
         let angles = world.get::<ServoAngles>(root).unwrap();
-        assert_eq!((angles.turret, angles.gun), (0.7, -0.2));
+        assert_eq!((angles.gunner_yaw, angles.gunner_pitch), (0.7, -0.2));
         world.entity_mut(assembly).insert(LaunchedTurret);
         world.entity_mut(yaw).remove::<ServoIndex>();
         world.run_system_once(publish_servo_angles).unwrap();
         let angles = world.get::<ServoAngles>(root).unwrap();
-        assert_eq!((angles.turret, angles.gun), (0.7, -0.2));
+        assert_eq!((angles.gunner_yaw, angles.gunner_pitch), (0.7, -0.2));
     }
 
     /// The public `ServoAngles` drive every remote tank's servo targets, but the owner's belong to
@@ -1478,8 +1478,8 @@ mod tests {
                 Remote,
                 crate::tank::GunnerYaw(yaw),
                 ServoAngles {
-                    turret: 0.75,
-                    gun: -0.2,
+                    gunner_yaw: 0.75,
+                    gunner_pitch: -0.2,
                 },
                 Rig {
                     hull,

@@ -1251,17 +1251,6 @@ struct DepositParam<'w, 's> {
     queue: ResMut<'w, Queue>,
     resting: Res<'w, RestingLoads>,
     volumes: Colliders<'w, 's>,
-    tree_segments: Query<'w, 's, (&'static crate::trees::TreeSegment, &'static ChildOf)>,
-    trunks: Query<
-        'w,
-        's,
-        (
-            &'static crate::trees::TreeBody,
-            Option<&'static crate::trees::TreePiece>,
-            (&'static Position, &'static Rotation),
-            &'static mut crate::trees::TrunkLoads,
-        ),
-    >,
     constructions: Query<
         'w,
         's,
@@ -1305,7 +1294,6 @@ fn moving_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
                     .get(of.body)
                     .is_ok_and(|(_, body)| body.is_dynamic())
                     && !p.constructions.contains(of.body)
-                    && !p.trunks.contains(of.body)
             }) {
                 near.push(collider);
             }
@@ -1989,28 +1977,7 @@ fn cast_blast(
                 + dir.y.abs() * size.x * size.z
                 + dir.z.abs() * size.x * size.y;
             if near.binary_search(&hit.entity).is_err() {
-                // Terrain shades the ray. A live trunk receives this same visible stop through
-                // its own laws; no second cast can pass the wall or ground before it.
-                let Ok((&crate::trees::TreeSegment(segment), parent)) =
-                    p.tree_segments.get(hit.entity)
-                else {
-                    return None;
-                };
-                let (body, piece, (position, rotation), _) = p
-                    .trunks
-                    .get(parent.parent())
-                    .expect("a tree segment's current owner retains its construction");
-                let root = body.construction_frame(piece, position.0, rotation.0);
-                let into = root.rotation.inverse();
-                return Some(fracture::BlastSurface {
-                    target: Stop::Trunk(parent.parent(), segment),
-                    at: into * (origin + dir * hit.distance - root.translation),
-                    normal: into * hit.normal,
-                    direction: into * dir,
-                    distance: hit.distance,
-                    silhouette: shown,
-                    material: None,
-                });
+                return None; // Static surfaces shade the ray; constructions use their chunk walk.
             }
             return Some(fracture::BlastSurface {
                 target: Stop::Body(hit.entity),
@@ -2027,23 +1994,6 @@ fn cast_blast(
     for (target, hit) in hits {
         match target {
             Stop::Chunk(root, c) => taken.entry(root).or_default().blast.push((c, hit)),
-            Stop::Trunk(root, segment) => {
-                p.trunks
-                    .get_mut(root)
-                    .expect("the world-ray tree survives this structural pass")
-                    .3
-                    .0
-                    .push(Load {
-                        chunk: usize::from(segment),
-                        at: hit.at,
-                        blow: hit.impulse,
-                        peak: Some(hit.peak),
-                        press: Vec3::ZERO,
-                        energy: 0.0,
-                        crushed: 0.0,
-                        origin: Origin::Field,
-                    });
-            }
             Stop::Body(collider) => {
                 let of = p
                     .collider_of
@@ -2065,7 +2015,6 @@ fn cast_blast(
 enum Stop {
     Chunk(Entity, usize),
     Body(Entity),
-    Trunk(Entity, u8),
 }
 
 /// The holes one deposit cuts (module doc), each with its law chunk, in the baked chunk's frame

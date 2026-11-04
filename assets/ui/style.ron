@@ -1,0 +1,10 @@
+(
+    overlay_font_px: (48.0, Taste("full-screen overlay banner size")),
+    overlay_text_srgb: ((1.0, 1.0, 1.0), Taste("full-screen overlay text contrast")),
+    text_srgb: ((0.85, 0.95, 1.0), Taste("live UI text colour")),
+    text_dim_srgb: ((0.55, 0.63, 0.70), Taste("explanatory UI text colour")),
+    panel_srgba: ((0.04, 0.06, 0.08, 0.62), Taste("HUD card backing while the world stays readable")),
+    modal_srgba: ((0.03, 0.05, 0.07, 0.92), Taste("modal page backing")),
+    modal_card_srgb: ((0.03, 0.05, 0.07), Taste("opaque modal card over world labels")),
+    death_tint_srgba: ((0.15, 0.0, 0.0, 0.6), Taste("out-of-action screen wash")),
+)

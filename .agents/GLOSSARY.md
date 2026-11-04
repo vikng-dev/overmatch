@@ -31,9 +31,11 @@ _Avoid_: building, wall (for the generic thing)
 **Battlefield destruction**:
 An authority-owned change to a placed world object that alters gameplay during a Battle, such as a fallen tree or breached wall.
 
-**Wood row**:
-The shared values of every tree in the game's damage model: its wood substance, HP per square metre of a trunk segment's cross-section, and ram threshold. Each trunk segment has its own HP pool, the rate × its cross-section at mid-height, so a pool follows the square of the segment's diameter; the tree breaks at the segment whose pool is emptied. **Species** supplies only appearance and generation ranges.
-_Avoid_: species HP, softwood, hardwood (one wood for every tree)
+**Wood**:
+The substance of a timber construction in the game's environment destruction model. Its material properties and declared construction determine its response under the common laws.
+
+**Species**:
+A tree's authored generation and appearance parameters; its placed trunk and foliage belong to a construction.
 
 **Surface evidence**:
 Visual-only traces of action on an otherwise simulation-static surface, such as track marks, impact scars, scorch, dust, and shallow visual craters.

@@ -30,24 +30,16 @@ pub(super) fn stop_detached_assembly_servos(
     mut commands: Commands,
 ) {
     for (servo, pose, view) in &servos {
-        let mut node = servo;
-        loop {
-            if node == add.entity {
+        if servo == add.entity || parents.iter_ancestors(servo).any(|node| node == add.entity) {
+            commands
+                .entity(servo)
+                .remove::<super::servo::ServoCommand>();
+            if let Some(view) = view {
                 commands
-                    .entity(servo)
-                    .remove::<super::servo::ServoCommand>();
-                if let Some(view) = view {
-                    commands
-                        .entity(view.0)
-                        .remove::<super::view::ViewServo>()
-                        .insert(*pose);
-                }
-                break;
+                    .entity(view.0)
+                    .remove::<super::view::ViewServo>()
+                    .insert(*pose);
             }
-            let Ok(parent) = parents.get(node) else {
-                break;
-            };
-            node = parent.parent();
         }
     }
 }

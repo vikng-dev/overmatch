@@ -4,9 +4,8 @@
 //! components ([`super::schema::Bond::Attached`]) and each foundation anchor; the list says what
 //! that kind holds by, as the
 //! fracture laws read it ([`Bond`]): the seam of a substance (`materials.ron` owns those numbers),
-//! a seam the list states with its sources, or a rest. A tree's species names the kind its trunk
-//! holds to the ground by ([`RootPlate`], `crate::trees`). The file's comments carry each kind's
-//! meaning.
+//! a seam the list states with its sources, or a rest. Each foundation declares its attachment
+//! independently of the joints between parts.
 //!
 //! Embedded in the build as `materials.ron` is, and parsed once ([`Attachments::shipped_static`]).
 
@@ -240,18 +239,6 @@ impl Attachments {
         }
     }
 
-    /// The root plate `name` holds a trunk to the ground by. Refuses a name the list does not
-    /// hold, and a kind that joins two parts.
-    pub(crate) fn root_plate(&self, name: &str) -> Result<RootPlate, String> {
-        match self.kind(name)? {
-            Kind::RootPlate(plate) => Ok(plate),
-            Kind::Joint(_) => Err(format!(
-                "kind {name:?} in {ATTACHMENTS_PATH} joins two parts: a trunk's anchorage names a \
-                 `RootPlate` kind"
-            )),
-        }
-    }
-
     /// A table entry may name either a joint kind or a root plate.
     pub(crate) fn holds_kind(&self, name: &str) -> Result<(), String> {
         self.kind(name).map(|_| ())
@@ -368,10 +355,9 @@ mod tests {
             match expected {
                 Kind::Joint(bond) => {
                     assert_eq!(list.bond(&name), Ok(bond), "{name}");
-                    assert!(list.root_plate(&name).is_err(), "{name}");
                 }
                 Kind::RootPlate(plate) => {
-                    assert_eq!(list.root_plate(&name), Ok(plate), "{name}");
+                    assert_eq!(list.kind(&name), Ok(Kind::RootPlate(plate)), "{name}");
                     assert!(list.bond(&name).is_err(), "{name}");
                 }
             }

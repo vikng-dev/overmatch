@@ -897,7 +897,7 @@ fn dress_pieces(
                 Transform::from_scale(Vec3::splat(admitted.scale)),
                 Mesh3d(mesh),
                 MeshMaterial3d(look.surface.clone()),
-                crate::render_cost::CasterClass::House,
+                crate::render_cost::CasterClass::Construction,
             ))
             .id();
         commands.entity(entity).insert((

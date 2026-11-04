@@ -3,7 +3,7 @@
 //! performs no spatial query; it delivers each addressed effect when its path moment is reached.
 
 use super::*;
-use crate::ballistics::{DoseContext, ShotDose, SpallCone, SpallMarks};
+use crate::ballistics::{ShotDose, SpallCone, SpallMarks};
 
 use super::super::path::{FlightOutcome, PathImpact, Span as Stretch};
 
@@ -33,7 +33,6 @@ enum Effect {
         crossing: VolumeCrossing,
         contacts: Vec<(Vec3, Vec3)>,
         units: u64,
-        context: DoseContext,
         momentum: Vec3,
         entrance_momentum: Vec3,
         entrance_energy: f32,
@@ -46,7 +45,7 @@ enum Effect {
     },
     Cone {
         cone: Option<SpallCone>,
-        doses: Vec<(Entity, u64, DoseContext)>,
+        doses: Vec<(Entity, u64)>,
     },
     Finish,
 }
@@ -285,10 +284,6 @@ impl Playback {
                         crossing: *volume,
                         contacts: bite.contacts[&dose.address].clone(),
                         units: super::super::energy_units(dose.amount),
-                        context: DoseContext::Line {
-                            entry: volume.entry,
-                            along: *bite.incoming,
-                        },
                         momentum: line.momentum,
                         entrance_momentum: line.entrance_momentum,
                         entrance_energy: line.entrance_energy,
@@ -307,12 +302,8 @@ impl Playback {
                 let doses = dose
                     .tallies
                     .into_iter()
-                    .flat_map(|tally| {
-                        tally
-                            .deposits
-                            .into_iter()
-                            .map(move |landed| (tally.address, landed.units, landed.context))
-                    })
+                    // Nonnegative saturating integer addition is associative; each cone settles once.
+                    .map(|tally| (tally.address, tally.units))
                     .collect();
                 let moment = crossing.seconds_to(f64::from(bite.approach) + source.t);
                 crossing.effects.push((
@@ -511,18 +502,6 @@ impl Playback {
         volume
     }
 
-    fn dose_context(&self, context: DoseContext, moment: f64) -> DoseContext {
-        match context {
-            DoseContext::Line { entry, along } => DoseContext::Line {
-                entry: self.point(entry),
-                along,
-            },
-            DoseContext::Field { origin } => DoseContext::Field {
-                origin: origin + self.carrier * moment as f32,
-            },
-        }
-    }
-
     fn world_decision(&self) -> Decision {
         let mut decision = self.crossing.decision.clone();
         if self.carrier == Vec3::ZERO {
@@ -643,7 +622,6 @@ impl Playback {
                     crossing,
                     contacts,
                     units,
-                    context,
                     momentum,
                     entrance_momentum,
                     entrance_energy,
@@ -663,11 +641,7 @@ impl Playback {
                         entrance_momentum: *entrance_momentum,
                         entrance_energy: *entrance_energy,
                     });
-                    shell.dose.add_units(
-                        crossing.volume,
-                        *units,
-                        self.dose_context(*context, *moment),
-                    );
+                    shell.dose.add_units(crossing.volume, *units);
                     removed += shell.dose.settle(
                         health,
                         self.deposit,
@@ -680,9 +654,7 @@ impl Playback {
                     speed,
                 } => {
                     let crossing = self.volume(*crossing);
-                    shell
-                        .dose
-                        .add_wounds(std::slice::from_ref(&crossing), **incoming);
+                    shell.dose.add_wounds(std::slice::from_ref(&crossing));
                     let mark = shell.marks.log.len();
                     shell.marks.log.push(ArmourMark::Wound {
                         incoming: **incoming,
@@ -692,10 +664,8 @@ impl Playback {
                     removed += shell.dose.settle(health, self.deposit, mark);
                 }
                 Effect::Cone { cone, doses } => {
-                    for &(address, units, context) in doses {
-                        shell
-                            .dose
-                            .add_units(address, units, self.dose_context(context, *moment));
+                    for &(address, units) in doses {
+                        shell.dose.add_units(address, units);
                     }
                     let mark = self
                         .mark

@@ -44,14 +44,13 @@ impl Default for WorldGeneration {
 }
 
 /// Replace mutable environment entities with the startup construction. Terrain, its immutable
-/// height samples and field, lighting and shared asset handles survive. A loose tree's reparented
-/// segments belong to its loose body, so both map roots and loose bodies are lifetime owners.
+/// height samples and field, lighting and shared asset handles survive. Map roots and released
+/// construction bodies own disjoint entity subtrees.
 pub(crate) fn reconstruct(world: &mut World) {
     let roots: Vec<Entity> = world
         .query_filtered::<Entity, Or<(
             With<crate::scatter::MapInstance>,
             With<crate::debris::DebrisPiece>,
-            With<crate::trees::LooseTrunk>,
         )>>()
         .iter(world)
         .collect();
@@ -96,7 +95,7 @@ pub struct SpawnObstacles(pub Vec<Transform>);
 /// (`terrain_grid::FIXTURE_EXTENT`), which is what the spawn map's UV mapping and the authority's
 /// spawn clamp resolve against when no heightmap decoded.
 const GROUND_SIZE: f32 = crate::terrain_grid::FIXTURE_EXTENT.world_size_m;
-/// Thickness of the ground slab. Only the top face (at y=0) matters; the rest is buried.
+/// Resolution: a nonzero buried thickness keeps the test-course ground a closed collision solid.
 const GROUND_THICKNESS: f32 = 1.0;
 
 /// Resolution: shadow lookup offset suppresses numerical self-shadowing at grazing incidence.
@@ -927,15 +926,9 @@ fn spawn_test_course(
     }
 }
 
-/// Longest CAST any view-layer ground/aim ray needs, metres: no terrain sightline can exceed the
-/// world's full diagonal — `world_size·√2`, 2 121.3 m on the shipped 1 500 m map — from any
-/// in-world origin, and this adds headroom on top. The world's side is the MAP's to declare
-/// (`map::MapManifest`), so the bound is checked against the decoded grid in
-/// [`spawn_environment`] rather than at compile time.
-/// Purely a parry-traversal cap for the view layer (aim/sight picks, the bore dot, the camera
-/// pull-in): `aim::MAX_RANGE` (10 km) keeps its separate role as the far "sky" FALLBACK distance,
-/// so committed aim points and all in-range behavior are unchanged — nothing exists between the
-/// diagonal and 10 km for a ray to hit. Sim code must not read this.
+/// Resolution: cap view-only Parry traversal above the map's full horizontal diagonal.
+/// `spawn_environment` checks this against the decoded extent. `aim::MAX_RANGE` separately
+/// supplies the sky point when a ray meets no surface; simulation does not read this cap.
 pub(crate) const VIEW_CAST_MAX_M: f32 = 2_500.0;
 
 /// Distance along `ray` to the terrain, capped at `max`, falling back to `max` when the ray

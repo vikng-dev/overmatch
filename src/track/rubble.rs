@@ -1563,10 +1563,10 @@ mod tests {
         );
     }
 
-    /// FIXTURE DATA: a standing trunk segment as `trees::segment_collider` builds one, the convex
-    /// hull of two twelve-point rings, radius 0.4 m at its foot and 0.35 m at its top, 0.6 m tall.
+    /// A convex frustum supports the belt and receives its reaction, independently of boxes.
+    /// Fixture: two twelve-point rings, radii 0.4/0.35 m, separated by 0.6 m.
     #[test]
-    fn a_trunk_segment_carries_the_belt_and_is_loaded_by_it() {
+    fn a_convex_frustum_carries_the_belt_and_is_loaded_by_it() {
         let ring = |radius: f32, y: f32| {
             (0..12).map(move |k| {
                 let angle = k as f32 * std::f32::consts::TAU / 12.0;

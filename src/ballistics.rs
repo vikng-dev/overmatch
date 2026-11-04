@@ -512,38 +512,16 @@ struct BoxTally {
     settled: u64,
     fresh: bool,
     settles: Vec<Settle>,
-    /// Every deposit this shot put into the box, in path order, with where it came from.
-    deposits: Vec<Landed>,
 }
 
-/// Where a deposit came from, for whoever reads the consequence of the pool it emptied: the
-/// round's own line, at its entry into THAT box and its travel there (a bounce's shock at the
-/// bounce), or a field, from its origin (a cone's apex, a burst's centre).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum DoseContext {
-    Line { entry: Vec3, along: Vec3 },
-    Field { origin: Vec3 },
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Landed {
-    units: u64,
-    context: DoseContext,
-}
-
-/// One settle of a box's pool for a mark that dosed it: the armour mark it closed (its index in the
-/// shell's log), the pool units the pool held before it, this shot's dose units on the box before
-/// that mark, the pool units the pool lost, and how many of the box's deposits had landed by then.
-/// Every deposit of that mark is the shot's own and lands between the two pool readings, so the
-/// deposit that emptied a pool is the first of the mark's, in path order, whose running total from
-/// `units_before` takes `held` pool units ([`ShotDose::emptier`]).
+/// The game's damage model: one mark's pool settlement. The pen cam uses `units_before`
+/// and `held` to locate the emptying contribution in that mark's own recorded deposits.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Settle {
     pub mark: usize,
     pub held: u32,
     pub units_before: u64,
     pub lost: u32,
-    pub deposited: usize,
 }
 
 impl Settle {
@@ -557,20 +535,17 @@ impl Settle {
 }
 
 impl ShotDose {
-    /// Add `amount` reference-mm on the line (a witness's chord dose) to `address`'s dose, from
-    /// `context`.
-    fn add(&mut self, address: Entity, amount: f32, context: DoseContext) {
-        self.add_units(address, dose_units(amount), context);
+    /// The game's damage model: convert crew-line coefficient units to HP at the authored scale.
+    fn add(&mut self, address: Entity, amount: f32) {
+        self.add_units(address, dose_units(amount));
     }
 
-    /// Add `energy` joules (a bounce's shock) to `address`'s dose at the energy rate
-    /// ([`energy_units`]), from `context`.
-    fn add_energy(&mut self, address: Entity, energy: f32, context: DoseContext) {
-        self.add_units(address, energy_units(energy), context);
+    /// Convert a bounce's shock energy through the common energy-to-HP rate.
+    fn add_energy(&mut self, address: Entity, energy: f32) {
+        self.add_units(address, energy_units(energy));
     }
 
-    fn add_units(&mut self, address: Entity, units: u64, context: DoseContext) {
-        let landed = Landed { units, context };
+    fn add_units(&mut self, address: Entity, units: u64) {
         match self
             .tallies
             .iter_mut()
@@ -579,7 +554,6 @@ impl ShotDose {
             Some(entry) => {
                 entry.units = entry.units.saturating_add(units);
                 entry.fresh = true;
-                entry.deposits.push(landed);
             }
             None => self.tallies.push(BoxTally {
                 address,
@@ -587,39 +561,25 @@ impl ShotDose {
                 settled: 0,
                 fresh: true,
                 settles: Vec::new(),
-                deposits: vec![landed],
             }),
         }
     }
 
-    /// Add each witness's line dose of a [`ArmourMark::Wound`]: its `cost` as it stands, in
-    /// reference-mm at [`HP_PER_REFERENCE_MM`] (the round's crew line rate is the witness law's
-    /// whole scale), each at its own entry along `incoming`.
-    fn add_wounds(&mut self, volumes: &[VolumeCrossing], incoming: Vec3) {
+    /// Each witness supplies its own chord dose; the round's crew line rate owns its scale.
+    fn add_wounds(&mut self, volumes: &[VolumeCrossing]) {
         for crossed in volumes {
-            let context = DoseContext::Line {
-                entry: crossed.entry,
-                along: incoming,
-            };
-            self.add(crossed.volume, crossed.cost, context);
+            self.add(crossed.volume, crossed.cost);
         }
     }
 
-    /// Add every dose of `doses`, a field direction's joules, at its mechanism's unit `unit`
-    /// ([`field_units`]), from `context`. The game's damage model hands this only field doses: a
-    /// line dose here is a bug.
-    fn add_field(
-        &mut self,
-        doses: &[mechanism::Dose],
-        unit: spall_cone::FieldUnit,
-        context: DoseContext,
-    ) {
+    /// Convert field joules through their mechanism's unit. Line dose here is an internal bug.
+    fn add_field(&mut self, doses: &[mechanism::Dose], unit: spall_cone::FieldUnit) {
         for dose in doses {
             assert!(
                 dose.line_chord().is_none(),
                 "the game's damage model converts only field doses at a field's unit"
             );
-            self.add_units(dose.address, field_units(dose.amount, unit), context);
+            self.add_units(dose.address, field_units(dose.amount, unit));
         }
     }
 
@@ -655,7 +615,6 @@ impl ShotDose {
                 held,
                 units_before,
                 lost,
-                deposited: entry.deposits.len(),
             });
             if lost > 0 && hp.is_empty() {
                 self.emptied.push(entry.address);
@@ -696,33 +655,6 @@ impl ShotDose {
     /// The boxes whose pool this shot took to zero, in the order it emptied them.
     pub(crate) fn emptied(&self) -> &[Entity] {
         &self.emptied
-    }
-
-    /// Where the deposit that emptied `address`'s pool came from, by the rule the pen cam's record
-    /// applies to the marks: of the emptying settle's own deposits in path order, the first whose
-    /// running total from the settle's `units_before` takes the pool units the pool held, else the
-    /// last of them. `None` for a pool this shot did not empty.
-    pub(crate) fn emptier(&self, address: Entity) -> Option<DoseContext> {
-        let entry = self.tallies.iter().find(|entry| entry.address == address)?;
-        let (k, settle) = entry
-            .settles
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, settle)| settle.emptied())?;
-        let from = k
-            .checked_sub(1)
-            .map_or(0, |previous| entry.settles[previous].deposited);
-        let own = &entry.deposits[from..settle.deposited];
-        let taken_before = pool_units_of(settle.units_before);
-        let mut total = settle.units_before;
-        own.iter()
-            .find(|landed| {
-                total = total.saturating_add(landed.units);
-                pool_units_of(total) - taken_before >= settle.held
-            })
-            .or(own.last())
-            .map(|landed| landed.context)
     }
 }
 
@@ -1137,19 +1069,6 @@ pub(crate) struct ShellDamage {
     pub shot: ShotId,
     /// The shown HP points this step took from the tank's pools.
     pub amount: u32,
-}
-
-/// A box whose HP pool this shot's dose emptied, raised by the authority's march in the tick the
-/// pool reached zero, with the context of the deposit that did it ([`ShotDose::emptier`]): `at` is
-/// where that deposit came from (the line's entry into THIS box, a bounce's point, a field's
-/// origin) and `along` the round's travel there, `None` for a field, which has no line. Whoever
-/// owns the pool reads its consequence off this — a tree its cut and fall direction — rather than
-/// polling the pool.
-#[derive(EntityEvent, Debug, Clone, Copy)]
-pub(crate) struct PoolEmptied {
-    pub(crate) entity: Entity,
-    pub(crate) at: Vec3,
-    pub(crate) along: Option<Vec3>,
 }
 
 /// The game's damage model: one line contribution delivered at its resolved path moment.
@@ -2534,22 +2453,6 @@ fn integrate_projectiles(
             &world.owners,
             &health,
         );
-        // Each pool this step emptied, with the deposit that did it: its own entry into the
-        // box, never the crossing's entrance, which a neighbouring volume shares.
-        for &address in &shell.dose.emptied()[emptied_from..] {
-            let (at, along) = match shell.dose.emptier(address).expect(
-                "the game's damage model records the emptying deposit's context when settle \
-                 appends an emptied pool",
-            ) {
-                DoseContext::Line { entry, along } => (entry, Some(along)),
-                DoseContext::Field { origin } => (origin, None),
-            };
-            commands.trigger(PoolEmptied {
-                entity: address,
-                at,
-                along,
-            });
-        }
         // A fuze holds its burst until it bursts, and only bursting leaves it inert.
         let burst = burst_before.filter(|_| shell.projectile.fuze.burst().is_none());
         if shell.marks.log.len() > marks_from
@@ -2651,7 +2554,7 @@ fn wound_legs(
     let Some(incoming) = incoming else {
         return 0; // No witness chord lies on these resolved legs.
     };
-    shell.dose.add_wounds(&volumes, Vec3::from(incoming));
+    shell.dose.add_wounds(&volumes);
     shell.marks.log.push(ArmourMark::Wound {
         incoming: Vec3::from(incoming),
         speed,
@@ -3785,13 +3688,7 @@ fn walk_field(
             weight,
         );
         let ray = walked.unwrap_or_else(|error| error.panic());
-        dose.add_field(
-            &ray.doses,
-            throw.unit,
-            DoseContext::Field {
-                origin: throw.origin,
-            },
-        );
+        dose.add_field(&ray.doses, throw.unit);
         let doses = ray
             .doses
             .iter()
@@ -3883,12 +3780,6 @@ mod tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
 
-    /// A context for a deposit whose origin the test does not read.
-    const FIXTURE_CONTEXT: DoseContext = DoseContext::Line {
-        entry: Vec3::ZERO,
-        along: Vec3::NEG_Z,
-    };
-
     /// The game's damage model rounds quantized dose to the nearest pool unit, ties away from
     /// zero. Pool settlement relies on this independently of authored crew-line and energy rates.
     #[test]
@@ -3934,7 +3825,7 @@ mod tests {
                           mut health: Query<&mut ComponentHealth>| {
                         let mut shot = shot.single_mut().unwrap();
                         for amount in &amounts {
-                            shot.add_units(target, *amount, FIXTURE_CONTEXT);
+                            shot.add_units(target, *amount);
                         }
                         shot.settle(&mut health, true, 0)
                     },
@@ -3992,7 +3883,7 @@ mod tests {
                           owners: Query<&VolumeOf>| {
                         let mut shot = shot.single_mut().unwrap();
                         for &address in &boxes {
-                            shot.add(address, 1.0, FIXTURE_CONTEXT);
+                            shot.add(address, 1.0);
                         }
                         shot.settle(&mut health, true, 0);
                         (
@@ -4032,11 +3923,7 @@ mod tests {
             .run_system_once(move |mut health: Query<&mut ComponentHealth>| {
                 let mut shot = ShotDose::default();
                 for target in targets {
-                    shot.add_units(
-                        target,
-                        u64::from(each) * DOSE_UNITS_PER_POOL_UNIT,
-                        FIXTURE_CONTEXT,
-                    );
+                    shot.add_units(target, u64::from(each) * DOSE_UNITS_PER_POOL_UNIT);
                 }
                 shot.settle(&mut health, true, 0)
             })
@@ -4064,7 +3951,7 @@ mod tests {
             world
                 .run_system_once(move |mut health: Query<&mut ComponentHealth>| {
                     let mut shot = ShotDose::default();
-                    shot.add_units(target, 47 * DOSE_UNITS_PER_HP / 100, FIXTURE_CONTEXT);
+                    shot.add_units(target, 47 * DOSE_UNITS_PER_HP / 100);
                     shot.settle(&mut health, true, 0);
                     shot.emptied().contains(&target)
                 })
@@ -4087,69 +3974,6 @@ mod tests {
         );
     }
 
-    /// The deposit that empties a pool is the one whose running sum, in the settlement that
-    /// emptied it, first reaches what the pool held — never the first of that settlement, never one
-    /// of an earlier settlement. Consequence readers rely on the context of that deposit
-    /// (ADR-0016). Fixture doses are HP on a 10 HP pool.
-    #[test]
-    fn the_deposit_that_empties_a_pool_is_the_one_that_crosses_what_it_held() {
-        use bevy::ecs::system::RunSystemOnce;
-        let line = |z: f32| DoseContext::Line {
-            entry: Vec3::new(0.0, 0.0, z),
-            along: Vec3::NEG_Z,
-        };
-        let field = DoseContext::Field { origin: Vec3::X };
-        let pool = || {
-            let mut world = World::new();
-            let target = world.spawn(ComponentHealth::full(10)).id();
-            world.spawn(ShotDose::default());
-            (world, target)
-        };
-        let settle = |world: &mut World,
-                      target: Entity,
-                      deposits: Vec<(f32, DoseContext)>|
-         -> Option<DoseContext> {
-            world
-                .run_system_once(
-                    move |mut shot: Query<&mut ShotDose>,
-                          mut health: Query<&mut ComponentHealth>| {
-                        let mut shot = shot.single_mut().unwrap();
-                        for (amount, context) in &deposits {
-                            shot.add_units(
-                                target,
-                                (f64::from(*amount) * DOSE_UNITS_PER_HP as f64).round() as u64,
-                                *context,
-                            );
-                        }
-                        shot.settle(&mut health, true, 0);
-                        shot.emptier(target)
-                    },
-                )
-                .unwrap()
-        };
-        let (mut world, target) = pool();
-        assert_eq!(
-            settle(&mut world, target, vec![(7.0, line(-1.0))]),
-            None,
-            "7 of 10 HP taken: not emptied"
-        );
-        assert_eq!(
-            settle(
-                &mut world,
-                target,
-                vec![(1.0, line(-2.0)), (2.0, field), (5.0, line(-3.0))]
-            ),
-            Some(field),
-            "the 10th point lands with the second deposit of the second settlement"
-        );
-        let (mut world, target) = pool();
-        assert_eq!(
-            settle(&mut world, target, vec![(50.0, field), (1.0, line(-2.0))]),
-            Some(field),
-            "the first deposit alone empties the pool: the rest are not the emptier"
-        );
-    }
-
     /// What a box's pool loses depends only on the multiset of its contributions, never their
     /// order: several cones' rays summed forward, reversed, sorted either way, interleaved and
     /// shuffled take the same pool units, including totals beside a conversion tie. Fixture doses
@@ -4161,7 +3985,7 @@ mod tests {
         let lost = |amounts: &[f32]| -> u32 {
             let mut shot = ShotDose::default();
             for amount in amounts {
-                shot.add(target, *amount, FIXTURE_CONTEXT);
+                shot.add(target, *amount);
             }
             pool_units_of(shot.tallies[0].units)
         };
@@ -4249,14 +4073,14 @@ mod tests {
         let points = |fields: &[Dose], lines: &[f32], shocks: &[f32], chords: &[f32]| -> u32 {
             let mut shot = ShotDose::default();
             for line in lines {
-                shot.add_units(target, energy_units(*line), FIXTURE_CONTEXT);
+                shot.add_units(target, energy_units(*line));
             }
-            shot.add_field(fields, unit, FIXTURE_CONTEXT);
+            shot.add_field(fields, unit);
             for shock in shocks {
-                shot.add_energy(target, *shock, FIXTURE_CONTEXT);
+                shot.add_energy(target, *shock);
             }
             for chord in chords {
-                shot.add(target, *chord, FIXTURE_CONTEXT);
+                shot.add(target, *chord);
             }
             shown_points(pool_units_of(shot.tallies[0].units))
         };
@@ -4273,10 +4097,10 @@ mod tests {
             3 + 2 + 1 + chord_rate
         );
         let mut shot = ShotDose::default();
-        shot.add(target, 1.0, FIXTURE_CONTEXT);
-        shot.add_energy(target, joules(1.0), FIXTURE_CONTEXT);
-        shot.add_field(&three, unit, FIXTURE_CONTEXT);
-        shot.add_units(target, energy_units(joules(2.0)), FIXTURE_CONTEXT);
+        shot.add(target, 1.0);
+        shot.add_energy(target, joules(1.0));
+        shot.add_field(&three, unit);
+        shot.add_units(target, energy_units(joules(2.0)));
         assert_eq!(
             shown_points(pool_units_of(shot.tallies[0].units)),
             3 + 2 + 1 + chord_rate,
@@ -4343,7 +4167,7 @@ mod tests {
                         source: mechanism::DoseSource::Field,
                     })
                     .collect();
-                shot.add_field(&field, fixture, FIXTURE_CONTEXT);
+                shot.add_field(&field, fixture);
                 let hp = hp_before_rounding(shot.tallies[0].units) as f64;
                 let joules: f64 = doses.iter().map(|&dose| f64::from(dose)).sum();
                 assert!(

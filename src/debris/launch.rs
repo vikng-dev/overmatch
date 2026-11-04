@@ -238,7 +238,7 @@ impl PendingLaunch {
     }
 }
 
-/// Every simultaneous departure shares one budget, including a source touching walls and trees.
+/// Every simultaneous construction departure shares its source's budget.
 pub(crate) struct LaunchPlugin;
 
 /// Every plastic return has reached its same-tick source before a group can split it.
@@ -252,7 +252,6 @@ impl Plugin for LaunchPlugin {
             finish_launches
                 .in_set(LaunchSet)
                 .after(crate::construction::breakage::LawSet)
-                .after(crate::trees::TreeDerived)
                 .before(crate::state::SimPhase::Publish),
         );
     }

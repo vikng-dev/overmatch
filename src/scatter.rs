@@ -1,6 +1,6 @@
-//! The map's object scatter: the authored placement of constructions and trees, out of the map's own
+//! The map's object scatter: the authored placement of constructions, out of the map's own
 //! manifest ([`crate::map`]), spawned with static colliders on every composition, the dedicated
-//! server included — a graybox construction as a box proxy, or a tree or construction of the game's
+//! server included — a graybox construction as a box proxy, or a construction of the game's
 //! destruction model as its own body
 //! (below). A graybox construction's box is drawn in brick under a timber roof
 //! ([`crate::construction_surface`]), its shape still the collider's.
@@ -16,12 +16,12 @@
 //!
 //! EVERY INSTANCE KEEPS ITS IDENTITY: the file's own id and its ordinal in the id-sorted order ride
 //! on the spawned entity as [`MapInstance`], so anything that must name one instance to a peer —
-//! a tree's state on the wire — names it by a number both peers derived from the same bytes.
+//! a construction's state on the wire — names it by a number both peers derived from the same bytes.
 //!
 //! THE FILE'S Y IS STALE (authored against an older sculpt): every instance is re-projected onto
 //! the live [`HeightGrid`] at its own XZ. Yaw and scale are taken as authored.
 //!
-//! Graybox constructions, trees and constructions of the destruction model are colliders outside
+//! Graybox blocks and constructions of the destruction model are colliders outside
 //! the immutable terrain field; construction bounds also supply spawn obstacles.
 
 use std::collections::BTreeMap;
@@ -91,7 +91,7 @@ fn graybox_friction(substance: &str) -> avian3d::prelude::Friction {
 
 impl Placement<'_> {
     /// A graybox collider and spawn obstacle: a unit cube posed and scaled, its centre lifted by the
-    /// prototype's own bounds. `None` for a tree or a structure — a trunk is not a block.
+    /// prototype's own bounds. `None` for a construction with its own geometry.
     fn block(&self) -> Option<Transform> {
         match self.shape {
             Prototype::Block { min, max, .. } => {
@@ -103,7 +103,7 @@ impl Placement<'_> {
                     scale: (max - min) * self.pose.scale,
                 })
             }
-            Prototype::Tree { .. } | Prototype::Construction { .. } => None,
+            Prototype::Construction { .. } => None,
         }
     }
 }
@@ -201,8 +201,7 @@ fn place<'a>(instances: &[Instance<'a>], grid: &HeightGrid) -> Vec<Placement<'a>
         .collect()
 }
 
-/// What a composition that draws hands the scatter: the server the trees' glb views and the
-/// constructions' maps load through, and the store the constructions' one material goes into.
+/// The asset server and stores for the shared construction material.
 pub(crate) struct ViewAssets<'a> {
     pub(crate) server: &'a AssetServer,
     pub(crate) construction_materials: &'a mut Assets<ConstructionMaterial>,
@@ -232,7 +231,6 @@ pub(crate) struct ScatterScene {
     manifest: MapManifest,
     grid: HeightGrid,
     view: Option<ScatterView>,
-    server: Option<AssetServer>,
 }
 
 impl ScatterView {
@@ -254,14 +252,14 @@ impl ScatterView {
                             &surface.faces,
                         )),
                     )),
-                    Prototype::Tree { .. } | Prototype::Construction { .. } => None,
+                    Prototype::Construction { .. } => None,
                 })
                 .collect(),
             structure: library
                 .values()
                 .filter_map(|shape| match shape {
                     Prototype::Construction { asset } => Some(asset),
-                    Prototype::Block { .. } | Prototype::Tree { .. } => None,
+                    Prototype::Block { .. } => None,
                 })
                 .map(|asset| {
                     let kind = manifest
@@ -286,7 +284,7 @@ impl ScatterView {
 
 /// Spawn the scatter into the world the grid describes, returning construction bounds as spawn
 /// obstacles ([`crate::world::SpawnObstacles`]), never as analytic terrain. Colliders spawn in every
-/// composition; meshes and the trees' glb views only where `view_assets` offers a server to draw
+/// composition; meshes only where `view_assets` offers a server to draw
 /// with — the dedicated server draws nothing, exactly as it skips the terrain's render tiles.
 pub(crate) fn spawn(
     commands: &mut Commands,
@@ -302,7 +300,6 @@ pub(crate) fn spawn(
         manifest: manifest.clone(),
         grid: grid.clone(),
         view,
-        server: view_assets.map(|assets| assets.server.clone()),
     };
     let obstacles = scene.construct(commands);
     commands.insert_resource(scene);
@@ -330,9 +327,8 @@ impl ScatterScene {
                 surface: view.surface.clone(),
             });
         }
-        let assets = self.server.as_ref();
         let statics = CollisionLayers::new([Layer::Terrain], LayerMask::ALL);
-        let (mut constructions, mut trees, mut structures) = (0usize, 0usize, 0usize);
+        let (mut constructions, mut structures) = (0usize, 0usize);
         let mut obstacles = Vec::new();
         for placement in &placements {
             match placement.shape {
@@ -355,33 +351,11 @@ impl ScatterScene {
                             Transform::from_scale(placement.pose.scale),
                             Mesh3d(view.structure[asset].clone()),
                             MeshMaterial3d(view.surface.clone()),
-                            crate::render_cost::CasterClass::House,
+                            crate::render_cost::CasterClass::Construction,
                             crate::construction::view::View,
                         ));
                     }
                     structures += 1;
-                }
-                Prototype::Tree { asset } => {
-                    let kind = manifest
-                        .trees
-                        .get(asset)
-                        .expect("map::load loaded every tree asset the library names");
-                    let root = crate::trees::spawn(
-                        commands,
-                        kind,
-                        placement.identity.clone(),
-                        placement.pose,
-                    );
-                    if let Some(assets) = assets {
-                        crate::trees::view::attach(
-                            commands,
-                            root,
-                            kind,
-                            placement.pose.scale.x,
-                            assets,
-                        );
-                    }
-                    trees += 1;
                 }
                 Prototype::Block { substance, .. } => {
                     let block = placement
@@ -405,7 +379,7 @@ impl ScatterScene {
                         entity.insert((
                             Mesh3d(view.construction[placement.prototype].clone()),
                             MeshMaterial3d(view.surface.clone()),
-                            crate::render_cost::CasterClass::House,
+                            crate::render_cost::CasterClass::Construction,
                         ));
                     }
                     constructions += 1;
@@ -413,7 +387,7 @@ impl ScatterScene {
             }
         }
         info!(
-            "scatter: {} instances placed on the live surface — {constructions} graybox constructions, {structures} constructions (a collider per element), {trees} trees",
+            "scatter: {} instances placed on the live surface — {constructions} graybox constructions, {structures} constructions (a collider per element)",
             placements.len(),
         );
         obstacles
@@ -799,24 +773,12 @@ mod tests {
             proxies,
             "the surface-evidence cast sees every graybox proxy",
         );
-        assert_eq!(
-            world
-                .query::<&crate::trees::view::TreeView>()
-                .iter(world)
-                .count(),
-            0,
-            "a composition without view assets attaches no legacy view"
-        );
-        assert_eq!(
-            world.query::<&crate::trees::TreeBody>().iter(world).count(),
-            0
-        );
         assert_eq!(world.query::<&Mesh3d>().iter(world).count(), 0);
     }
 
     /// The game's environment destruction view shares a mesh per admitted kind and one surface
     /// material. Each view keeps its instance scale while the physical root stays at unit scale.
-    /// Skin and cards come from the common mesh builder, without the former segmented GLB view.
+    /// Every construction instance shares its kind's skin-and-card mesh and the common material.
     #[test]
     fn drawing_shares_each_constructions_mesh_and_preserves_instance_scale() {
         let mut manifest = construction_fixture_manifest();
@@ -877,12 +839,5 @@ mod tests {
             assert_eq!(views[0].2, views[1].2);
         }
         assert_eq!(world.resource::<Assets<ConstructionMaterial>>().len(), 1);
-        assert_eq!(
-            world
-                .query::<&crate::trees::view::TreeView>()
-                .iter(world)
-                .count(),
-            0
-        );
     }
 }

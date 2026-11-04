@@ -2597,7 +2597,6 @@ mod tests {
                         .expect("map load resolved every structure"),
                     pose,
                 ),
-                crate::map::Prototype::Tree { .. } => continue,
             };
             if let Some(footprint) = block_footprint(&block, None, radius) {
                 for point in manifest.spawn_points.as_slice() {

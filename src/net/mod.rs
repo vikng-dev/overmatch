@@ -55,6 +55,7 @@ mod physics;
 mod protocol;
 mod resync;
 mod rig;
+mod rig_admission;
 /// The match score: knockouts and losses per combatant, and each knocked-out life's respawn
 /// opening, held by the server and replicated. `pub(crate)` for the ballistics fixture that fires
 /// a real round at it.
@@ -112,6 +113,7 @@ pub(crate) const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Shared protocol, physics, and safety wiring. Both endpoints must mount it identically.
 fn plugin(app: &mut App) {
     protocol::plugin(app);
+    rig_admission::plugin(app);
     battle::install_hold(app);
     physics::plugin(app);
     // Record corrupt values before Avian's physics preparation consumes them.

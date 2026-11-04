@@ -60,7 +60,7 @@
 //!   `terrain_macro` skips the terrain shader's per-pixel macro tint and `terrain_layers` draws the
 //!   base pack only (skips the painted-layer loop), both through shader defs on the terrain
 //!   material (`terrain_blend::TerrainAblate`); the picture changes (flatter ground).
-//!   `terrain-casters`, `tree-casters`, `house-casters`, `tank-casters` suppress only casting
+//!   `terrain-casters`, `construction-casters`, `tank-casters` suppress only casting
 //!   through render policy; receivers and main-view geometry retain their roles.
 //! * `SPIKE_SHADOW_FILTER=gaussian|hardware|temporal`, `SPIKE_SHADOW_SPLITS=<metres,...>` and
 //!   `SPIKE_SHADOW_OVERLAP=<proportion>` independently override stock shadow controls at boot.
@@ -107,8 +107,7 @@ pub(crate) struct Ablate {
     depth_prepass: bool,
     ui: bool,
     terrain_casters: bool,
-    tree_casters: bool,
-    house_casters: bool,
+    construction_casters: bool,
     tank_casters: bool,
     /// The pen cam inset's target at half size, its masks with it.
     pub(crate) inset_half: bool,
@@ -144,8 +143,7 @@ impl Ablate {
                 "depth_prepass" => ablate.depth_prepass = true,
                 "ui" => ablate.ui = true,
                 "terrain-casters" => ablate.terrain_casters = true,
-                "tree-casters" => ablate.tree_casters = true,
-                "house-casters" => ablate.house_casters = true,
+                "construction-casters" => ablate.construction_casters = true,
                 "tank-casters" => ablate.tank_casters = true,
                 "inset_half" => ablate.inset_half = true,
                 "inset_masks" => ablate.inset_masks = true,
@@ -164,8 +162,7 @@ impl Ablate {
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) enum CasterClass {
     Terrain,
-    Tree,
-    House,
+    Construction,
     Tank,
 }
 
@@ -173,8 +170,7 @@ impl Ablate {
     pub(crate) fn suppresses_caster(self, class: CasterClass) -> bool {
         match class {
             CasterClass::Terrain => self.terrain_casters,
-            CasterClass::Tree => self.tree_casters,
-            CasterClass::House => self.house_casters,
+            CasterClass::Construction => self.construction_casters,
             CasterClass::Tank => self.tank_casters,
         }
     }
@@ -210,7 +206,7 @@ impl std::fmt::Display for RenderControlError {
             Self::Ablation(value) => (
                 "SPIKE_ABLATE",
                 value,
-                "bloom, env_light, depth_prepass, ui, terrain-casters, tree-casters, house-casters, tank-casters, inset_half, inset_masks, inset_bloom, terrain_macro or terrain_layers",
+                "bloom, env_light, depth_prepass, ui, terrain-casters, construction-casters, tank-casters, inset_half, inset_masks, inset_bloom, terrain_macro or terrain_layers",
             ),
         };
         write!(f, "{name}={value:?}: expected {expected}")
@@ -663,14 +659,13 @@ mod tests {
         use bevy::light::{NotShadowCaster, NotShadowReceiver};
         for (lever, excluded_class) in [
             ("terrain-casters", 0),
-            ("tree-casters", 1),
-            ("house-casters", 2),
-            ("tank-casters", 3),
+            ("construction-casters", 1),
+            ("tank-casters", 2),
         ] {
             let mut app = App::new();
             app.add_plugins(plugin)
                 .insert_resource(Ablate::parse(lever).unwrap());
-            let roots: Vec<_> = [CasterClass::Terrain, CasterClass::Tree, CasterClass::House]
+            let roots: Vec<_> = [CasterClass::Terrain, CasterClass::Construction]
                 .into_iter()
                 .map(|class| app.world_mut().spawn(class).id())
                 .collect();
@@ -710,7 +705,7 @@ mod tests {
             }
             assert_eq!(
                 app.world().entity(proxy).contains::<NotShadowCaster>(),
-                excluded_class == 3
+                excluded_class == 2
             );
         }
     }

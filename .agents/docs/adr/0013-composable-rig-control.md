@@ -20,7 +20,7 @@ A consequence forced this shape: **superelevation cannot live in the servo.** It
 
 The old single global capability map (Drive / Traverse / Fire / Load / GunnerSight / CommanderView) is dissolved into per-concern gates, all evaluated against the same part-quality vocabulary (`design/armor-penetration-and-damage.md` §7b; `part_facts` resolves station and function quality per tank, then `evaluate` over Group / Part / Pool / Backup):
 
-- per-**servo** `requires` — the slew gate (a knocked-out gunner freezes the turret; a future traverse motor would slow it).
+- per-**servo** `requires` — the slew gate (a knocked-out gunner freezes the turret; a reduced traverse-motor gate slows powered slew).
 - per-**weapon** `fire` / `load` — independent gates (the loader can *fire* the coax but not lay it; the breech + barrel gate the main gun).
 - per-**view** `requires` — the view-death gate (a knocked-out gunner blacks the optic; a knocked-out commander closes third-person).
 - the global `Capability` map keeps **only tank-wide verbs** — currently just `Drive`.

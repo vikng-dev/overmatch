@@ -39,7 +39,7 @@
 //! point of a lane toward any of its aims, turned up to the tests' `AIM_ERROR_DEG` either way,
 //! passes at least half a hull's width plus [`DRIFT_M`] from every other tank's hull on its lane
 //! (overruns of up to [`OVERRUN_M`] included). A round that flies long lands beyond the battle,
-//! where it may strike a tree or a construction; each summary line counts the trees down.
+//! where it may strike a construction; each summary line counts construction changes.
 //!
 //! The cost: the scene prices muzzle, flight, tracers, terrain impacts, dust, prints and audio,
 //! and never a hull strike, a hull mark or the pen cam corner (which has its own transient
@@ -82,7 +82,6 @@ use crate::map::{MapManifest, Prototype};
 use crate::spec::Trigger;
 use crate::state::GameplaySet;
 use crate::terrain_grid::HeightGrid;
-use crate::trees::TreeState;
 use crate::view::PlayerView;
 
 /// Is this process running the battle scene? A dev lever, `OVERMATCH_BATTLE`, read by the
@@ -96,10 +95,9 @@ const SEED: u64 = 153;
 
 // ---- Layout: fixture data for the shipped map, DERIVED from its level.json and heightmap ----
 
-/// The camera tank's lane starts here, world XZ: the south edge of the map's north forest, 50
-/// trunks within 150 m of the camera, 4 of them within ±36° of the view axis (DERIVED from
-/// level.json; the arm line logs both). The lanes stand on ground no steeper than 5.8° over a 6 m
-/// baseline (DERIVED from the heightmap), clear of every tree and construction
+/// The camera tank's lane starts here, world XZ: the south edge of the map's north forest.
+/// Startup reports nearby constructions from the current map. The lanes stand on ground no
+/// steeper than 5.8° over a 6 m baseline (DERIVED from the heightmap), clear of every construction
 /// (`the_lanes_and_lines_of_fire_stand_clear_of_the_map`).
 const ANCHOR_XZ: Vec2 = Vec2::new(-160.0, 470.0);
 /// The strip's axis, degrees from `+Z` toward `+X` (fixture data, with [`ANCHOR_XZ`]).
@@ -442,11 +440,12 @@ pub(super) fn spawn(
             (lo.min(range), hi.max(range))
         });
     let (eye, look) = camera_ground_pose();
-    let (near, in_view) = manifest.map_or((0, 0), |manifest| trunks_near(manifest, eye, look));
+    let (near, in_view) =
+        manifest.map_or((0, 0), |manifest| constructions_near(manifest, eye, look));
     info!(
         "battle: armed — seed {}, {} tanks, script digest {:#018x}, aims {:.0}..{:.0} m from the \
          lanes, camera near ({:.0}, {:.0}) heading {AXIS_HEADING_DEG}° pitch {CAMERA_PITCH_DEG}°, \
-         {near} trunks within 150 m of it ({in_view} within ±36° of the view axis; DERIVED from \
+         {near} constructions within 150 m of it ({in_view} within ±36° of the view axis; DERIVED from \
          the map's placement)",
         plan.seed,
         plan.tanks.len(),
@@ -467,8 +466,8 @@ fn camera_ground_pose() -> (Vec2, Vec2) {
     (ANCHOR_XZ - look * back, look)
 }
 
-/// Trunks standing within 150 m of `eye`, and those of them within ±36° of `look`.
-fn trunks_near(manifest: &MapManifest, eye: Vec2, look: Vec2) -> (usize, usize) {
+/// Constructions standing within 150 m of `eye`, and those of them within ±36° of `look`.
+fn constructions_near(manifest: &MapManifest, eye: Vec2, look: Vec2) -> (usize, usize) {
     let half_field = 36f32.to_radians().cos();
     manifest
         .instances
@@ -476,7 +475,7 @@ fn trunks_near(manifest: &MapManifest, eye: Vec2, look: Vec2) -> (usize, usize) 
         .filter(|instance| {
             matches!(
                 manifest.prototypes.get(&instance.prototype),
-                Some(Prototype::Tree { .. })
+                Some(Prototype::Construction { .. })
             )
         })
         .map(|instance| Vec2::new(instance.translation[0], instance.translation[2]) - eye)
@@ -858,7 +857,7 @@ fn report(
     plan: Option<Res<Plan>>,
     mut tally: ResMut<Tally>,
     tanks: Query<Has<TankKnockedOut>, (With<BattleSlot>, With<Tank>)>,
-    trees: Query<&TreeState>,
+    changes: Res<crate::construction::breakage::Record>,
 ) {
     let Some(plan) = plan else {
         return;
@@ -884,15 +883,11 @@ fn report(
         && knocked_out == 0
         && tally.overrun_m <= OVERRUN_M
         && tally.drift_m <= DRIFT_M;
-    let down = trees
-        .iter()
-        .filter(|state| matches!(state, TreeState::Down { .. }))
-        .count();
     let from = previous as f32 * WINDOW_S;
     info!(
         "battle: window {from:.0}..{:.0} s real: {} — {moved}/{tanks_n} moved >= {MOVED_MIN_M} m \
          (least {least:.1} m), {fired}/{tanks_n} fired (main {}, secondary {} rounds), strikes on \
-         terrain {}, on tanks {}, on other armour {}, knocked out {knocked_out}, trees down {down}, \
+         terrain {}, on tanks {}, on other armour {}, knocked out {knocked_out}, construction changes {}, \
          worst overrun {:.1} m, worst drift {:.1} m",
         from + WINDOW_S,
         if full { "full" } else { "short" },
@@ -901,6 +896,7 @@ fn report(
         tally.terrain,
         tally.on_tanks,
         tally.elsewhere,
+        changes.entries.len(),
         tally.overrun_m,
         tally.drift_m,
     );
@@ -1037,10 +1033,9 @@ mod tests {
     }
 
     /// The layout against the shipped map: every lane inside the world, on ground no steeper than
-    /// a tank drives without stalling or sliding, clear of every tree and construction, every spawn
-    /// clear of the others and of the terrain, and every line of fire clear of every tree and
-    /// construction until it has passed every lane — so no tank is stopped by the scatter and no round
-    /// that lands in the battle fells a tree, either of which would change the scene between runs.
+    /// a tank drives without stalling or sliding, clear of every construction, every spawn
+    /// clear of the others and of the terrain, and every line of fire clear of every construction until it has passed every lane — so no tank is stopped by the scatter and no round
+    /// that lands in the battle changes a construction, either of which would change the scene between runs.
     /// Thresholds ASSUMED.
     #[test]
     fn the_lanes_and_lines_of_fire_stand_clear_of_the_map() {
@@ -1054,7 +1049,6 @@ mod tests {
         for instance in &manifest.instances {
             let xz = Vec2::new(instance.translation[0], instance.translation[2]);
             match manifest.prototypes.get(&instance.prototype) {
-                Some(Prototype::Tree { .. }) => panic!("the live map uses common constructions"),
                 Some(Prototype::Block { min, max, .. }) => {
                     let reach = Vec2::new(
                         min[0].abs().max(max[0].abs()),

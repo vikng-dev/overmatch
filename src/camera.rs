@@ -50,6 +50,11 @@ use crate::tank::{
 use crate::view::PlayerView;
 use crate::world::ground_distance;
 
+include!(concat!(env!("OUT_DIR"), "/camera_authored.rs"));
+
+/// Resolution: stay clear of the Euler singularity so yaw retains a defined horizontal axis.
+const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
+
 /// Apply one free-fly input frame to `transform`.
 ///
 /// Mouse delta controls yaw/pitch without time scaling. WASD moves on the horizontal heading plane,
@@ -61,16 +66,13 @@ pub(crate) fn free_fly_transform(
     mouse_delta: Vec2,
     delta_secs: f32,
 ) {
-    const SENS: f32 = 0.003;
-    const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
     let (mut yaw, mut pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
-    yaw -= mouse_delta.x * SENS;
-    pitch = (pitch - mouse_delta.y * SENS).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    yaw -= mouse_delta.x * FREE_FLY_SENSITIVITY;
+    pitch = (pitch - mouse_delta.y * FREE_FLY_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
 
     // Looking down and pressing W keeps moving forward over the ground, not into it. Near-vertical
     // look leaves no horizontal heading, so `normalize_or_zero` just no-ops that axis.
-    const SPEED: f32 = 12.0;
     let forward = Vec3::from(transform.forward())
         .with_y(0.0)
         .normalize_or_zero();
@@ -97,7 +99,7 @@ pub(crate) fn free_fly_transform(
         dir -= Vec3::Y;
     }
     if dir != Vec3::ZERO {
-        transform.translation += dir.normalize() * SPEED * delta_secs;
+        transform.translation += dir.normalize() * FREE_FLY_SPEED * delta_secs;
     }
 }
 
@@ -111,7 +113,8 @@ pub(crate) struct OrbitCamera {
 
 impl OrbitCamera {
     /// The orbit radius the player's zoom sets: the distance `orbit_camera` places the body from
-    /// [`orbit_pivot`] before the ground pulls it in.
+    /// [`orbit_pivot`] before the ground pulls it in. Zoom stays in 0..=1; required near <= far
+    /// makes `ORBIT_FAR` an upper bound, including when the camera sits toward another tank.
     pub(crate) fn radius(&self) -> f32 {
         ORBIT_FAR + (ORBIT_NEAR - ORBIT_FAR) * self.zoom
     }
@@ -166,23 +169,6 @@ impl TurretPivot {
         Self(Some((Entity::PLACEHOLDER, offset)))
     }
 }
-
-/// Height of the orbit pivot above the turret ring.
-pub(crate) const PIVOT_LIFT: f32 = 2.5;
-
-/// The orbit radius at full zoom-out — how far the camera body can sit from [`orbit_pivot`] along
-/// the view axis. A feel knob for [`orbit_camera`], and a BOUND for anything that has to reason
-/// about where the camera can actually be relative to the tank it follows: mouse-look is free, so
-/// the body can be this far to any side of the pivot, INCLUDING toward whatever is being measured.
-/// `terrain_grid`'s far-probe placement test spends it that way — a probe's camera-to-shoe distance
-/// is its tank-to-tank distance minus this, worst case.
-///
-/// A ground ray only ever pulls the body IN (`ground_distance`), so this is a true maximum.
-pub(crate) const ORBIT_FAR: f32 = 18.0;
-
-/// The orbit radius at full zoom-in. Paired with [`ORBIT_FAR`] purely as the other end of the
-/// dolly; nothing outside [`orbit_camera`] needs it.
-const ORBIT_NEAR: f32 = 5.0;
 
 /// The orbit pivot in world space: the turret ring (root pose × captured offset), lifted a little.
 /// THE point the camera body is placed from ([`orbit_camera`]) and the optic-exit re-aim aims from
@@ -297,19 +283,6 @@ fn capture_turret_pivot(
     pivot.0 = Some((tank, position));
 }
 
-/// The vertical FOV (radians) every consumer assumes before it can read a real one — a conservative
-/// BOUND, not any vehicle's authored field: narrower than the field any authored optic derives
-/// (`spec::Optics`), and deliberately so.
-///
-/// Two consumers, one reason. The gunner camera and the sight's cursor-travel margin take it for
-/// the pre-bind frame before `TankViews` lands, so they agree on one number rather than each
-/// carrying a literal. NEITHER LOD LADDER seeds with it any more: a view nobody has measured is not
-/// a view at all (`view::ViewFacts` carries no default), so a ladder without facts defers instead of
-/// selecting through a field it guessed. What is left here is the pre-bind CAMERA field, and it is
-/// still deliberately narrow — the optic opens up to its authored field the frame the rig lands
-/// rather than snapping shut.
-pub const GUNNER_FOV_FALLBACK: f32 = 0.12;
-
 /// The controlled tank's authored FOV for `kind`, or `fallback` before the rig binds.
 pub fn view_fov(views: &Query<&TankViews, With<Controlled>>, kind: ViewKind, fallback: f32) -> f32 {
     match crate::tank::controlled_one(views.single()) {
@@ -329,7 +302,8 @@ fn spawn_camera(mut commands: Commands) {
         // requires `DepthPrepass`, without which the DEPTH_PREPASS shader def is absent: every
         // sprite is hard-edged and no hull mark draws.
         crate::scene_depth::MainPassDepth,
-        Transform::from_xyz(10.0, 7.0, -7.0).looking_at(Vec3::new(10.0, 1.0, 5.0), Vec3::Y),
+        Transform::from_translation(Vec3::from_array(INITIAL_EYE))
+            .looking_at(Vec3::from_array(INITIAL_LOOK), Vec3::Y),
         OrbitCamera {
             zoom: 0.0,
             target_zoom: 0.0,
@@ -372,12 +346,9 @@ fn orbit_look(
 /// from the rotation, so no orientation state is stored; the delta is already per-frame, so it is
 /// not scaled by dt. Pitch stops just short of vertical, where euler angles hit gimbal lock.
 pub(crate) fn orbit_rotation(rotation: Quat, mouse_delta: Vec2) -> Quat {
-    const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
-    const YAW_SENSITIVITY: f32 = 0.004;
-    const PITCH_SENSITIVITY: f32 = 0.003;
     let (yaw, pitch, _) = rotation.to_euler(EulerRot::YXZ);
-    let yaw = yaw - mouse_delta.x * YAW_SENSITIVITY;
-    let pitch = (pitch - mouse_delta.y * PITCH_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    let yaw = yaw - mouse_delta.x * ORBIT_YAW_SENSITIVITY;
+    let pitch = (pitch - mouse_delta.y * ORBIT_PITCH_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0)
 }
 
@@ -407,7 +378,7 @@ fn orbit_camera(
 
     // Restore the wide commander-view FOV when returning from the gunner optic (which narrows it).
     if let Projection::Perspective(p) = projection.as_mut() {
-        p.fov = view_fov(&views, ViewKind::Commander, std::f32::consts::FRAC_PI_4);
+        p.fov = view_fov(&views, ViewKind::Commander, COMMANDER_FOV_BEFORE_BIND);
     }
     let (Some(turret_local), Some(tank_transform)) =
         (pivot.offset(), crate::tank::controlled_one(tank.single()))
@@ -419,13 +390,10 @@ fn orbit_camera(
     // ordered `.before` this) — here we only read it to place the body, so the orbit stays frozen
     // behind the menu while the follow keeps tracking the tank.
 
-    // Zoom: scroll sets a target the actual zoom eases toward, so chunky (device-dependent)
-    // scroll deltas become a smooth dolly. Both consts are feel knobs.
-    const ZOOM_SPEED: f32 = 0.01;
-    const ZOOM_GLIDE: f32 = 12.0;
-    orbit.target_zoom = (orbit.target_zoom + mouse_scroll.delta.y * ZOOM_SPEED).clamp(0.0, 1.0);
+    orbit.target_zoom =
+        (orbit.target_zoom + mouse_scroll.delta.y * ORBIT_ZOOM_SPEED).clamp(0.0, 1.0);
     // Exponential easing makes the dolly's response independent of frame time.
-    let ease = 1.0 - (-ZOOM_GLIDE * time.delta_secs()).exp();
+    let ease = 1.0 - (-ORBIT_ZOOM_GLIDE * time.delta_secs()).exp();
     orbit.zoom += (orbit.target_zoom - orbit.zoom) * ease;
 
     // Orbit around the shared pivot (`orbit_pivot` — the re-aim reconstructs this same point). The
@@ -493,11 +461,9 @@ fn reaim_orbit_on_optic_exit(
 /// sight's own origin `eye`; the whole interval is a plain interpolation of the two BEARINGS, with
 /// no state, so the view cannot overshoot, wobble, or lag.
 ///
-/// The blend is taken in the HULL's frame — the frame `sight::drive_gunner_aim` bounds the intent
-/// in — so the camera lands on the segment between the two bearings in exactly the space the
-/// optic's bound is a circle in, and the drawn glass therefore always contains the intent. Yaw uses
-/// [`shortest_angle`], as the commit does: a continuous turret wraps, and a naive lerp would wind
-/// the view the long way round.
+/// The blend uses hull-local bearings. `sight::drive_gunner_aim` bounds intent in the Gunner
+/// yaw's rest frame; the camera applies no second clamp. Yaw uses [`shortest_angle`] so a
+/// continuous mount crossing the seam does not wind the view the long way round.
 ///
 /// `intent` is the hull-local committed point; `None` (a tank with no commitment yet) collapses the
 /// blend to the sight line at every `k`.
@@ -775,10 +741,10 @@ mod tests {
     fn the_orbit_look_clamps_pitch() {
         let turned = orbit_rotation(Quat::IDENTITY, Vec2::new(-100.0, 0.0));
         let (yaw, pitch, _) = turned.to_euler(EulerRot::YXZ);
-        assert!((yaw - 0.4).abs() < 1e-5 && pitch.abs() < 1e-5);
+        assert!((yaw - 100.0 * ORBIT_YAW_SENSITIVITY).abs() < 1e-5 && pitch.abs() < 1e-5);
         let up = orbit_rotation(Quat::IDENTITY, Vec2::new(0.0, -1.0e6));
         let (_, pitch, _) = up.to_euler(EulerRot::YXZ);
-        assert!(pitch < std::f32::consts::FRAC_PI_2 && pitch > 1.5);
+        assert!((pitch - PITCH_LIMIT).abs() < 1e-4);
     }
 
     /// Angular tolerance (rad) for a law asserted through the yaw/pitch round trip — a hundredth of

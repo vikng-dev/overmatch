@@ -1146,6 +1146,161 @@ pub(crate) mod tests {
         );
     }
 
+    struct LayFixture {
+        app: App,
+        roots: [Entity; 2],
+        yaws: [Entity; 2],
+        pitches: [Entity; 2],
+        points: [Vec3; 2],
+    }
+
+    impl LayFixture {
+        fn new() -> Self {
+            let mut app = App::new();
+            app.add_plugins(sim_plugin);
+            let world = app.world_mut();
+            // Fixture: distinct root translations, headings and intended local bearings.
+            let positions = [Vec3::new(-20.0, 0.0, 30.0), Vec3::new(15.0, 0.0, -40.0)];
+            let rotations = [Quat::from_rotation_y(0.3), Quat::from_rotation_y(-0.7)];
+            let points = [Vec3::new(10.0, 4.0, -100.0), Vec3::new(-30.0, -8.0, -50.0)];
+            let roots = std::array::from_fn(|i| {
+                world
+                    .spawn((
+                        Position(positions[i]),
+                        Rotation(rotations[i]),
+                        Transform::IDENTITY,
+                    ))
+                    .id()
+            });
+            let hulls: [Entity; 2] =
+                std::array::from_fn(|i| world.spawn((ChildOf(roots[i]), Transform::IDENTITY)).id());
+            let mut servo = |i: usize, parent, role| {
+                world
+                    .spawn((
+                        ChildOf(parent),
+                        Transform::IDENTITY,
+                        role,
+                        TankRoot(roots[i]),
+                        ServoRest(Quat::IDENTITY),
+                        ServoCommand::default(),
+                    ))
+                    .id()
+            };
+            // Entity order interleaves owners differently in the two servo tables.
+            let b_yaw = servo(1, hulls[1], ServoRole::Yaw);
+            let a_yaw = servo(0, hulls[0], ServoRole::Yaw);
+            let a_pitch = servo(0, a_yaw, ServoRole::Pitch);
+            let b_pitch = servo(1, b_yaw, ServoRole::Pitch);
+            let yaws = [a_yaw, b_yaw];
+            let pitches = [a_pitch, b_pitch];
+            for i in 0..2 {
+                let muzzle = world.spawn(RangeTable::test_fixed(0.0)).id();
+                let command = TankCommand {
+                    aim: Some(AimIntent::World(positions[i] + rotations[i] * points[i])),
+                    ..default()
+                };
+                world.entity_mut(roots[i]).insert((
+                    Tank,
+                    Rig {
+                        hull: hulls[i],
+                        turret: yaws[i],
+                        gun: pitches[i],
+                        muzzle,
+                    },
+                    ParsedTankCommand::try_from(command).unwrap(),
+                ));
+            }
+            Self {
+                app,
+                roots,
+                yaws,
+                pitches,
+                points,
+            }
+        }
+
+        fn step(&mut self) {
+            self.app.world_mut().run_schedule(FixedUpdate);
+        }
+    }
+
+    /// Every servo consumes its own root's intention and physics frame, independent of entity
+    /// order. A single cached hull or first-tank lookup mislays the other owner's axes.
+    #[test]
+    fn interleaved_tanks_lay_each_servo_from_its_own_root() {
+        let mut fixture = LayFixture::new();
+        fixture.step();
+        for i in 0..2 {
+            let point = fixture.points[i];
+            let expected_yaw = (-point.x).atan2(-point.z);
+            let expected_pitch = point.y.atan2(point.xz().length());
+            let world = fixture.app.world();
+            assert!(
+                (world.get::<ServoCommand>(fixture.yaws[i]).unwrap().target - expected_yaw).abs()
+                    < 1e-5
+            );
+            assert!(
+                (world
+                    .get::<ServoCommand>(fixture.pitches[i])
+                    .unwrap()
+                    .target
+                    - expected_pitch)
+                    .abs()
+                    < 1e-5
+            );
+        }
+    }
+
+    /// A tank with no current commitment retains every target, including after a prior committed
+    /// update. The other tank keeps laying; stale per-root scratch must not re-author the held one.
+    #[test]
+    fn no_commitment_retains_targets_after_a_prior_lay() {
+        let mut fixture = LayFixture::new();
+        fixture.step();
+        let held = [(fixture.yaws[0], 0.31), (fixture.pitches[0], -0.42)]; // Fixture held targets.
+        fixture
+            .app
+            .world_mut()
+            .entity_mut(fixture.roots[0])
+            .insert(ParsedTankCommand::default());
+        for (servo, target) in held {
+            fixture
+                .app
+                .world_mut()
+                .get_mut::<ServoCommand>(servo)
+                .unwrap()
+                .target = target;
+        }
+        fixture
+            .app
+            .world_mut()
+            .get_mut::<ServoCommand>(fixture.yaws[1])
+            .unwrap()
+            .target = 0.0;
+        fixture.step();
+        for (servo, target) in held {
+            assert_eq!(
+                fixture
+                    .app
+                    .world()
+                    .get::<ServoCommand>(servo)
+                    .unwrap()
+                    .target,
+                target
+            );
+        }
+        assert!(
+            fixture
+                .app
+                .world()
+                .get::<ServoCommand>(fixture.yaws[1])
+                .unwrap()
+                .target
+                .abs()
+                > 0.0
+        );
+    }
+
     /// A yaw command is relative to its actual parent frame, including an independently turned
     /// structural yaw. Otherwise the sight repeats its parent's turn and cannot converge.
     #[test]

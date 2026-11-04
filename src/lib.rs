@@ -131,6 +131,8 @@ mod overlay;
 mod physical_laws;
 /// OS-level process and window helpers that belong to no game layer.
 mod platform;
+#[cfg(test)]
+mod presentation_authored;
 /// Provenance of authored data values: each authored value names its fact, unit, taste,
 /// resolution or stand-in job; an unlabelled value does not load.
 mod provenance;
@@ -167,8 +169,7 @@ mod run_window;
 pub mod sandbox;
 /// The map's object scatter (`level.json` resolved through `prototypes.ron`): shared placement
 /// data, with stable map identities on both peers. Graybox blocks enter `world::TerrainMap`;
-/// `construction::spawn` builds complete construction bodies, and `trees::spawn` builds the
-/// segmented trees of the game's environment destruction model.
+/// `construction::spawn` builds complete bodies for the game's environment destruction model.
 mod scatter;
 /// Copy the player's main-pass depth into Bevy's prepass texture after opaque rendering for
 /// soft sprites/hull marks, avoiding a second scene draw. `camera` mounts it and spawns its marker.
@@ -234,10 +235,6 @@ mod track_prints;
 /// cast/route/contact gizmos on a driving hull. Also owns suspension inspection.
 #[cfg(feature = "dev_ui")]
 pub mod track_sandbox;
-/// Trees in the game's damage model: a hard body of segments, each with its own HP pool, and a
-/// state, built at spawn from `assets/trees/` data (the glb is the view), dosed by the union walk
-/// and felled at the segment whose pool empties.
-mod trees;
 /// Load both bundled Barlow Condensed weights once into `ui_font::UiFonts` for client `Text` spawners,
 /// replacing Bevy's ASCII-only font. Mounted by every windowed root.
 mod ui_font;
@@ -677,7 +674,6 @@ impl Plugin for SimPlugin {
             // `ballistics::view_plugin`, which the client roots mount and the server never does.
             ballistics::sim_plugin,
             damage::plugin,
-            trees::sim_plugin,
             shooting::plugin,
             // The pen cam's records of the authority's main-gun hits, inert on a net client, and
             // the vocabulary both ends explain them in.
@@ -685,8 +681,8 @@ impl Plugin for SimPlugin {
         ));
         // Constructions breaking (the game's environment destruction): the authority's laws and
         // record, every peer's colliders from it, the rule loose pieces rest by, and the solver's
-        // reading of every structure contact. Separate call: the tuple above is at bevy's
-        // 15-plugin arity limit.
+        // reading of every structure contact. A separate tuple keeps the combined composition
+        // within Bevy's plugin-tuple arity limit.
         app.add_plugins((
             construction::breakage::sim_plugin,
             debris::sim_plugin,
@@ -764,8 +760,6 @@ impl Plugin for ClientPlugin {
             // Each tank's surface: its materials' visuals under the livery (view-only, ADR-0014).
             tank_surface::plugin,
             ballistics::view_plugin,
-            // The trees' glb binding and fall presentation (view-only, ADR-0014).
-            trees::view::plugin,
             // The broken constructions and their fallen pieces (view-only, ADR-0014).
             construction::view::plugin,
         ));
@@ -846,8 +840,6 @@ impl Plugin for NetClientPlugin {
             // The render half of ballistics (see `ClientPlugin`): the shell glb, the tracer streak
             // and hold visibility. `SimPlugin` mounts only the sim half.
             ballistics::view_plugin,
-            // The trees' glb binding and fall presentation (view-only, ADR-0014).
-            trees::view::plugin,
             // The broken constructions and their fallen pieces (view-only, ADR-0014).
             construction::view::plugin,
             drive_hud::plugin,
@@ -959,7 +951,6 @@ pub fn run_offline() {
     // this root, the only one with no replica, alone mounts them.
     app.add_plugins((
         dev_capture::plugin,
-        dev_capture::offline_fell_plugin,
         dev_capture::offline_impact_plugin,
         dev_capture::offline_shot_plugin,
         dev_capture::offline_wall_plugin,

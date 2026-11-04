@@ -2563,11 +2563,7 @@ fn apply_bounce(
     commands: &mut Commands,
 ) {
     if bounce.shock > 0.0 {
-        let context = super::DoseContext::Line {
-            entry: bounce.position,
-            along: Vec3::from(bounce.incoming),
-        };
-        shell.dose.add_energy(bounce.struck, bounce.shock, context);
+        shell.dose.add_energy(bounce.struck, bounce.shock);
     }
     if let Some(owner) = bounce.owner {
         apply_hit_impulse(bodies, owner, bounce.impulse, bounce.position);

@@ -30,7 +30,7 @@
 #     'probes-a||OVERMATCH_PROBE_TANKS=30' 'battle-a||OVERMATCH_BATTLE=1' \
 #     'battle-b||OVERMATCH_BATTLE=1' 'probes-b||OVERMATCH_PROBE_TANKS=30'
 # Caster exclusions (instruments, not product settings): SPIKE_ABLATE=terrain-casters,
-#   tree-casters,house-casters,tank-casters (comma-separated; each removes only that class's casting).
+#   construction-casters,tank-casters (comma-separated; each removes only that class's casting).
 # SPIKE_ABLATE=terrain_macro (no per-pixel macro tint) and terrain_layers (base pack only, no
 #   painted-layer loop) are shader-def levers on the terrain material (src/terrain_blend.rs,
 #   assets/shaders/terrain_blend.wgsl); the picture goes flatter. Battery: run-terrain-pricing.sh.

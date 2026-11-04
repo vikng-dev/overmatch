@@ -29,13 +29,10 @@ pub(crate) struct CapturePlan {
     /// key is held. Default none.
     #[serde(default)]
     pub(crate) keys: Vec<KeyHold>,
-    /// One standing tree falls ([`Fell`]); the offline root alone mounts it.
-    #[serde(default)]
-    pub(crate) fell: Option<Fell>,
     /// Terrain strikes raised with no round flown ([`Impact`]); the offline root alone mounts them.
     #[serde(default)]
     pub(crate) impacts: Vec<Impact>,
-    /// One shipped round fired at a tree or the ground beside it ([`Shot`]); the offline root
+    /// One shipped round fired at a construction or the ground beside it ([`Shot`]); the offline root
     /// alone mounts it.
     #[serde(default)]
     pub(crate) shot: Option<Shot>,
@@ -219,17 +216,6 @@ pub(crate) struct KeyHold {
     pub(crate) to: f32,
 }
 
-/// On the first fixed tick at or after app second `at`, the standing tree of map instance
-/// `instance` falls broken at segment `cut` toward azimuth bin `dir`, exactly as a law sets it.
-#[derive(Deserialize, Debug, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Fell {
-    pub(crate) instance: String,
-    pub(crate) at: f32,
-    pub(crate) cut: u8,
-    pub(crate) dir: u8,
-}
-
 /// On the first frame at or after app second `at`, the shipped round `round` dresses the terrain
 /// point under world `x, z` as a strike on `surface`: the game's damage-model view raises its
 /// impact read there with no round flown and no shot recorded, so a plan presents what that round's
@@ -306,7 +292,7 @@ impl TryFrom<f64> for FrameStep {
 }
 
 /// On the first frame at or after app second `at`, the shipped round `round` in fuze mode `mode`
-/// is fired at a real tree or at the ground beside it, and the frames are timed from its burst.
+/// is fired at a real construction or at the ground beside it, and the frames are timed from its burst.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(try_from = "ShotInput")]
 pub(crate) struct Shot {
@@ -341,7 +327,7 @@ impl TryFrom<ShotInput> for Shot {
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShotTarget {
-    Tree,
+    Construction,
     Ground,
 }
 
@@ -642,11 +628,6 @@ impl CapturePlan {
                 ));
             }
         }
-        if let Some(fell) = &self.fell
-            && !fell.at.is_finite()
-        {
-            return Err(format!("fell.at: {} is not finite", fell.at));
-        }
         for impact in &self.impacts {
             let numbers = [impact.x, impact.z, impact.at];
             if !numbers.iter().all(|n| n.is_finite()) {
@@ -876,7 +857,7 @@ mod tests {
         let registry = crate::guns::GunRegistry::shipped();
         let (_, key, _) = registry.fired_rounds().next().unwrap();
         let error = CapturePlan::parse(
-            r#"(shot: (round: "missing capture round", target: Tree, at: 0.0))"#,
+            r#"(shot: (round: "missing capture round", target: Construction, at: 0.0))"#,
         )
         .unwrap_err()
         .to_string();
@@ -886,7 +867,8 @@ mod tests {
         );
         let weapon_round = crate::tank::WeaponRound::resolve(key).unwrap();
         for mode in 0..=u8::MAX {
-            let text = format!("(shot: (round: {key:?}, mode: {mode}, target: Tree, at: 0.0))");
+            let text =
+                format!("(shot: (round: {key:?}, mode: {mode}, target: Construction, at: 0.0))");
             match weapon_round.in_mode(mode) {
                 Some(expected) => {
                     let shot = CapturePlan::parse(&text).unwrap().shot.unwrap();
@@ -931,7 +913,6 @@ mod tests {
                     camera: Pose(eye: (1.0, 2.0, 3.0), look: (0.0, 0.0, 0.0)),
                 ),
                 keys: [(key: Tab, from: 2.0, to: 3.5)],
-                fell: (instance: "tree_0001", at: 4.0, cut: 1, dir: 3),
                 impacts: [(x: 1.0, z: -2.0, round: "88mm_HE", surface: Substance("Wood"), at: 5.0)],
                 shot: (round: "88mm_HE", mode: 1, target: Ground, at: 6.0),
                 wall: (
@@ -972,15 +953,6 @@ mod tests {
                 from: 2.0,
                 to: 3.5,
             }]
-        );
-        assert_eq!(
-            plan.fell,
-            Some(Fell {
-                instance: "tree_0001".into(),
-                at: 4.0,
-                cut: 1,
-                dir: 3,
-            })
         );
         assert_eq!(
             plan.impacts,
@@ -1058,8 +1030,8 @@ mod tests {
         assert!(frames.ui && frames.gizmos && !frames.sight);
         assert_eq!((frames.step_s, frames.camera), (None, Camera::Player));
         assert_eq!(
-            (&plan.fell, plan.impacts.is_empty(), &plan.shot, &plan.wall),
-            (&None, true, &None, &None)
+            (plan.impacts.is_empty(), &plan.shot, &plan.wall),
+            (true, &None, &None)
         );
         assert!(plan.keys.is_empty());
         let scene = &plan.scene;
@@ -1187,7 +1159,7 @@ mod tests {
                 "Tabb",
             ),
             (
-                r#"(shot: (round: "88mm_AP", target: Tree, at: -2.0))"#.to_owned(),
+                r#"(shot: (round: "88mm_AP", target: Construction, at: -2.0))"#.to_owned(),
                 "shot.at",
             ),
             ("(wall: (shots: []))".to_owned(), "wall.shots"),

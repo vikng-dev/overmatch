@@ -31,7 +31,7 @@ client's whole tree:
 | `assets/maps/*/level.json`, `assets/maps/*/*.png` | `crate::map::parse`, the terrain height decode, and the handshake content digest. Every map: the heightmap's file name is inside `level.json`, so it cannot be resolved at packaging time. |
 | `assets/terrain/ground_types.ron` | Per-contact traction and rolling resistance, decoded with the map masks |
 | `assets/maps/*/prototypes.ron` | `crate::map::read_prototypes` and the content digest (`map::load` panics without it) |
-| `assets/trees/**/*.ron` | `crate::trees::TreeLibrary::load` (species table, wood row, each `<id>.tree.ron`) and the content digest |
+| `assets/constructions/**/*.construction.ron`, `*.dressing.ron` | `ConstructionLibrary::load` and the content digest: common geometry and owned dressing |
 | `assets/<id>/<id>.sim.glb` | the bake's consumer contract, the `geometry_lod` trio fingerprint, and the track rig — the one geometry artifact the server reads (ADR-0035) |
 | `assets/<id>/<id>.lod.json` | `geometry_lod::load_certificate` (panics without it) |
 | `assets/<id>/<id>.tank.ron` | the spec sheet, through the `AssetServer` |

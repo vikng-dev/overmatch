@@ -1,5 +1,5 @@
 //! The capture's shot lever, in the game's damage model: on the first frame at or after app second
-//! `at`, a shipped round in one of its fuze modes is fired at a real tree or at the ground beside
+//! `at`, a shipped round in one of its fuze modes is fired at a real construction or at the ground beside
 //! it, and the capture's frames are timed from the round's burst. The burst outside a tank opens no
 //! pen cam, so the view draws it over the scene: the flight path cyan, a quarter of the fragment
 //! cone's directions orange (4 m each), the burst point a white cross. The controlled tank's weapon
@@ -26,7 +26,7 @@ pub(super) struct ShotReady(pub(super) Option<f32>);
 struct Cue {
     key: String,
     round: crate::rounds::Round,
-    tree: bool,
+    construction: bool,
     at: f32,
     fired: bool,
     camera: Option<Transform>,
@@ -40,7 +40,7 @@ pub(crate) fn offline_shot_plugin(app: &mut App) {
     let cue = Cue {
         key: shot.key.clone(),
         round: shot.round,
-        tree: shot.target == super::plan::ShotTarget::Tree,
+        construction: shot.target == super::plan::ShotTarget::Construction,
         at: shot.at,
         fired: false,
         camera: None,
@@ -60,13 +60,16 @@ pub(crate) fn offline_shot_plugin(app: &mut App) {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "the cue, its clock and exit, the tree and ground it aims at, the HUD it sets"
+    reason = "the cue, its clock and exit, the construction and ground it aims at, the HUD it sets"
 )]
 fn fire_on_cue(
     time: Res<Time>,
     mut cue: ResMut<Cue>,
     mut exit: MessageWriter<bevy::app::AppExit>,
-    trees: Query<(&crate::scatter::MapInstance, &Transform), With<crate::trees::TreeBody>>,
+    constructions: Query<
+        (&crate::scatter::MapInstance, &Transform),
+        With<crate::construction::Body>,
+    >,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut tanks: Query<(Entity, &mut WeaponLoads), With<Controlled>>,
     weapons: Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
@@ -81,9 +84,8 @@ fn fire_on_cue(
         return;
     }
     let grid = grid.expect("capture: shot: the offline scene must supply HeightGrid before its cue; choose a terrain scene");
-    // The tree nearest the map's centre, the lowest ordinal on a tie: a real tree the
-    // same on every run, with the map on every side of it.
-    let (_, transform) = trees
+    // Stable placement identity breaks distance ties independently of ECS iteration order.
+    let (_, transform) = constructions
         .iter()
         .min_by(|a, b| {
             let reach = |transform: &Transform| {
@@ -93,16 +95,16 @@ fn fire_on_cue(
                 .total_cmp(&reach(b.1))
                 .then(a.0.ordinal.cmp(&b.0.ordinal))
         })
-        .expect("capture: shot: the scene has no tree to aim at; choose a map with a tree");
-    // Fixture geometry: the trunk 2.5 m up from 10 m off, or the ground 10 m beside the tree from
+        .expect("capture: shot: the scene has no construction to aim at; choose a map with a construction");
+    // Fixture geometry: the construction 2.5 m up from 10 m off, or the ground 10 m beside it from
     // 10 m above and 2 m back.
-    let target = if cue.tree {
+    let target = if cue.construction {
         transform.translation + Vec3::Y * 2.5
     } else {
         let p = transform.translation + Vec3::X * 10.0;
         Vec3::new(p.x, grid.height_at(p.x, p.z), p.z)
     };
-    let origin = if cue.tree {
+    let origin = if cue.construction {
         target + Vec3::Z * 10.0
     } else {
         target + Vec3::new(0.0, 10.0, 2.0)

@@ -172,7 +172,6 @@ fn record_walk_crossings(
     marks: Query<&crate::ballistics::PenetrationMarks>,
     kinds: Query<(
         Has<crate::damage::VolumeOf>,
-        Has<crate::trees::TreeSegment>,
         Has<crate::construction::Element>,
         Has<crate::construction::breakage::ChunkCollider>,
     )>,
@@ -189,9 +188,8 @@ fn record_walk_crossings(
         let mut seen = std::collections::BTreeSet::new();
         for volume in volumes {
             let kind = match kinds.get(volume.volume) {
-                Ok((true, _, _, _)) => "tank",
-                Ok((_, true, _, _)) => "tree",
-                Ok((_, _, true, _) | (_, _, _, true)) => "wall",
+                Ok((true, _, _)) => "tank",
+                Ok((_, true, _) | (_, _, true)) => "construction",
                 Ok(_) => "other",
                 // A frozen crossing can outlive geometry removed by an earlier consequence.
                 Err(_) => "retired",
@@ -227,9 +225,9 @@ fn record_unresolved_contact(
 /// The game's damage model: scene and destruction census in simulation ticks, without a cost timer.
 fn record_walk_world(
     clock: Res<crate::ShotClock>,
-    trees: Query<(), With<crate::trees::TreeBody>>,
+    constructions: Query<(), With<crate::construction::Body>>,
     tanks: Query<(), With<crate::tank::Tank>>,
-    walls: Res<crate::construction::breakage::Record>,
+    record: Res<crate::construction::breakage::Record>,
     mut trace: ResMut<ShotTrace>,
 ) {
     // DERIVED: the shipping fixed clock has 64 ticks per simulation second.
@@ -238,8 +236,8 @@ fn record_walk_world(
             "walk_world",
             clock.0.raw(),
             json!({
-                "trees": trees.iter().count(), "tanks": tanks.iter().count(),
-                "wall_changes": walls.entries.len(),
+                "constructions": constructions.iter().count(), "tanks": tanks.iter().count(),
+                "construction_changes": record.entries.len(),
             }),
         );
     }

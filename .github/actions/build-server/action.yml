@@ -54,15 +54,12 @@ runs:
     #                                    time. `derived/` is excluded — `map_ui.png` is
     #                                    loaded only by `net::spawn_map`, a client plugin.
     #   maps/*/prototypes.ron            crate::map::read_prototypes, what each id a map places
-    #                                    means (a block's bounds, a fir's species), and the
+    #                                    means (a block's bounds or a construction asset), and the
     #                                    content digest; `map::load` panics without it
-    #   trees/**/*.ron                   crate::trees::TreeLibrary::load: the species table, the wood
-    #                                    row and each placed tree's `<id>/<id>.tree.ron`, all folded
-    #                                    into the content digest; it panics without any of them.
-    #                                    EVERY RON under trees/, so the next table the library reads
-    #                                    ships without a line here. The trees' `<id>.glb` is
-    #                                    view-only (trees::view, a client plugin) and `<id>.lod.json`
-    #                                    has no reader, so neither ships.
+    #   constructions/**/*.construction.ron, *.dressing.ron
+    #                                    ConstructionLibrary::load and the content digest read the
+    #                                    admitted geometry and chunk-owned dressing on every peer.
+    #                                    trees/ contains generator sources only; no server reader.
     #   <id>/<id>.sim.glb                the bake's consumer contract, the geometry_lod trio
     #                                    fingerprint, and the track rig's marker read — the ONE
     #                                    geometry artifact the server opens (ADR 0035)
@@ -116,8 +113,7 @@ runs:
           {
             find assets/maps -type f \( -name '*.json' -o -name '*.png' -o -name '*.ron' \) \
               -not -path 'assets/maps/*/derived/*'
-            find assets/trees -type f -name '*.ron'
-            find assets/constructions -type f -name '*.construction.ron'
+            find assets/constructions -type f \( -name '*.construction.ron' -o -name '*.dressing.ron' \)
             echo assets/terrain/ground_types.ron
           } | LC_ALL=C sort
         )

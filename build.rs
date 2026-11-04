@@ -7,7 +7,8 @@
 //! from disk at run time.
 //!
 //! Also admits the game damage-model crew-line unit and fire-cue age from required sourced data,
-//! writing their constant interfaces to `$OUT_DIR/ballistics_authored.rs`.
+//! writing their constant interfaces to `$OUT_DIR/ballistics_authored.rs`. Camera and UI styling
+//! are admitted into `camera_authored.rs` and `ui_style_authored.rs` by the same build gate.
 //!
 //! A file in either directory that is not `<stem><suffix>` with a non-empty stem fails the build,
 //! naming the file: a stray file there is an authoring slip, never an ignored one. Dotfiles are
@@ -15,6 +16,8 @@
 
 #[path = "src/ballistics/authored.rs"]
 mod authored;
+#[path = "src/presentation_authored.rs"]
+mod presentation_authored;
 #[path = "src/provenance.rs"]
 mod provenance;
 
@@ -31,7 +34,7 @@ fn main() {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets it"));
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets it"));
     println!("cargo:rerun-if-changed=build.rs");
-    write_ballistics_data(&manifest, &out);
+    write_authored_data(&manifest, &out);
     let mut text = String::from("// Written by build.rs from assets/rounds/ and assets/guns/.\n");
     for (constant, directory, suffix) in INDEXES {
         let directory = manifest.join(directory);
@@ -52,7 +55,7 @@ fn main() {
 }
 
 /// Required authored scalars keep constant interfaces without handwritten copies of their values.
-fn write_ballistics_data(manifest: &Path, out: &Path) {
+fn write_authored_data(manifest: &Path, out: &Path) {
     let read = |file: &str| {
         let path = manifest.join(file);
         println!("cargo:rerun-if-changed={}", path.display());
@@ -63,10 +66,28 @@ fn write_ballistics_data(manifest: &Path, out: &Path) {
         .unwrap_or_else(|error| panic!("{error}"));
     let age = authored::fire_cue_age(&read(authored::FIRE_CUES_FILE))
         .unwrap_or_else(|error| panic!("{error}"));
-    let target = out.join("ballistics_authored.rs");
-    std::fs::write(&target, format!(
-        "pub(super) const HP_PER_REFERENCE_MM: u64 = {hp};\npub(super) const STALE_FIRE_TICKS: u32 = {age};\n"
-    )).unwrap_or_else(|error| panic!("writing {}: {error}", target.display()));
+    for (name, text) in [
+        (
+            "ballistics_authored.rs",
+            format!(
+                "pub(super) const HP_PER_REFERENCE_MM: u64 = {hp};\npub(super) const STALE_FIRE_TICKS: u32 = {age};\n"
+            ),
+        ),
+        (
+            "camera_authored.rs",
+            presentation_authored::camera_constants(&read(presentation_authored::CAMERA_FILE))
+                .unwrap_or_else(|error| panic!("{error}")),
+        ),
+        (
+            "ui_style_authored.rs",
+            presentation_authored::style_constants(&read(presentation_authored::STYLE_FILE))
+                .unwrap_or_else(|error| panic!("{error}")),
+        ),
+    ] {
+        let target = out.join(name);
+        std::fs::write(&target, text)
+            .unwrap_or_else(|error| panic!("writing {}: {error}", target.display()));
+    }
 }
 
 /// Every `<stem><suffix>` file in `directory` as `(stem, absolute path)`, in byte order of the stem.

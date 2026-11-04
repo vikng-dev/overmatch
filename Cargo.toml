@@ -55,6 +55,8 @@ bevy_egui = { version = "0.42", optional = true }
 # crates). Its one default, `x11`, is already on through bevy; only the feature name differs.
 bevy_winit = "0.19"
 gltf = "1.4"
+# Bevy 0.19 wraps font bytes without parsing; UI admission verifies the bundled faces and coverage.
+ttf-parser = "0.25.1"
 # Already in the tree through the asset stack (same locked version — this adds no compiled crate);
 # named directly only by `geometry_lod::certificate`, which fingerprints the shipped trio's bytes
 # against the `view_glb_sha` / `sim_glb_sha` the tank build recorded (ADR-0035).
@@ -81,9 +83,10 @@ libc = "0.2"
 
 [build-dependencies]
 # Required scalar authoring data generates constant interfaces at build time, using the same
-# provenance admission as runtime assets. Both dependencies are already locked for the game.
+# provenance admission as runtime assets. These dependencies are already locked for the game.
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"
+serde_path_to_error = "0.1"
 
 # The Objective-C runtime's own C declarations. Already in the tree through winit's `objc2` (same
 # locked version — this adds no compiled crate); named directly only by `quit::terminate`, which
