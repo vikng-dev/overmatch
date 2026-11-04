@@ -1270,8 +1270,8 @@ struct DepositParam<'w, 's> {
     bodies: Query<'w, 's, (Forces, &'static RigidBody)>,
 }
 
-/// The layers of the surfaces a blast's rays meet through avian: the ground, a standing tree and
-/// every other static surface ([`Layer::Terrain`]), and a moving body's collision proxy. A tank's
+/// The layers of the surfaces a blast's rays meet through avian: static surfaces
+/// ([`Layer::Terrain`]) and a moving body's collision proxy. A tank's
 /// armour and witness volumes ([`Layer`]) are its ballistics, not its surface.
 const SURFACES: [Layer; 4] = [
     Layer::Terrain,
