@@ -200,10 +200,10 @@ mod tests {
         );
     }
 
-    /// The operator's empty-server recipe must create real bursts and a nonempty destruction
-    /// ledger with the shipped sim, even while the empty Battle waits for its first player.
+    /// The game's damage model: the empty-server recipe must fly and function real fuzes.
+    /// A controlled support-removal deposit checks destruction delivery while Battle waits.
     #[test]
-    fn armed_empty_server_breaks_through_real_flight() {
+    fn armed_empty_server_flies_and_delivers_controlled_destruction() {
         assert_real_flight(App::new());
     }
 
@@ -312,14 +312,20 @@ mod tests {
             .map(|id| id.ordinal)
             .min()
             .unwrap();
-        assert!(
-            app.world()
-                .resource::<WallRecord>()
-                .entries
-                .iter()
-                .any(|entry| entry.building == target
-                    && matches!(entry.event, crate::buildings::breakage::WallEvent::Fall(_))),
-            "real deposits must free chunks of the selected building"
+        let falls = app
+            .world()
+            .resource::<WallRecord>()
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.building == target
+                    && matches!(entry.event, crate::buildings::breakage::WallEvent::Fall(_))
+            })
+            .count();
+        println!(
+            "MEASURED shipped game destruction: fired={} bursts={} target={target} falls={falls}",
+            app.world().resource::<HeStress>().fired,
+            app.world().resource::<HeStress>().burst,
         );
         assert_eq!(
             app.world_mut()
@@ -337,6 +343,116 @@ mod tests {
             battle.phase,
             super::super::battle::BattlePhase::WaitingForPlayer
         ));
+        assert_controlled_destruction_delivery(&mut app);
+    }
+
+    /// The game's destruction ledger must receive support loss through the shipped observer and
+    /// law schedule. DERIVED: work above V * crush empties the base's volume pool; the remaining
+    /// column has no ground path and falls. No shipped round's potency or house strength gates it.
+    fn assert_controlled_destruction_delivery(app: &mut App) {
+        use crate::ballistics::{BallisticVolume, DeliveredLine, PenetrationMarks, VolumeCrossing};
+        use crate::buildings::breakage::{WallEvent, WallRecord};
+        use crate::buildings::fracture::Masonry;
+        use crate::substances::SubstanceRegistry;
+        use std::collections::BTreeSet;
+        let kind = crate::buildings::tests::column_construction();
+        let used: BTreeSet<_> = app
+            .world_mut()
+            .query_filtered::<&MapInstance, With<BuildingBody>>()
+            .iter(app.world())
+            .map(|id| id.ordinal)
+            .collect();
+        let ordinal = (0..=u16::MAX)
+            .find(|id| !used.contains(id))
+            .expect("the controlled fixture needs an unused construction ordinal");
+        // Fixture: y = 1000 m separates the column from the shipped map's contacts.
+        let offset = Vec3::Y * 1000.0;
+        let root = crate::buildings::spawn(
+            &mut app.world_mut().commands(),
+            &kind,
+            MapInstance {
+                id: "stress_column_fixture".into(),
+                ordinal,
+            },
+            Transform::from_translation(offset),
+        );
+        app.world_mut().flush();
+        app.update();
+        let volume = app
+            .world_mut()
+            .query::<(Entity, &ChildOf, &BallisticVolume)>()
+            .iter(app.world())
+            .find(|(_, parent, _)| parent.parent() == root)
+            .unwrap()
+            .0;
+        // Fixture: twice the independently derived removal threshold of the unit base cube.
+        let base = &kind.asset.chunks[0];
+        let material = Masonry::of(
+            SubstanceRegistry::shipped_static(),
+            &kind.asset.materials[usize::from(base.material)],
+        )
+        .unwrap()
+        .unwrap();
+        let threshold = base.volume_m3 * material.crush;
+        let entry = offset + Vec3::new(-0.5, 0.5, 0.0);
+        let end = offset + Vec3::new(0.5, 0.5, 0.0);
+        let shell = app.world_mut().spawn(PenetrationMarks::default()).id();
+        assert!(
+            app.world()
+                .resource::<WallRecord>()
+                .entries
+                .iter()
+                .all(|entry| entry.building != ordinal)
+        );
+        app.world_mut().trigger(ShellMarched {
+            shell,
+            marks_from: 0,
+            cones_from: 0,
+            burst: None,
+            lines: vec![DeliveredLine {
+                crossing: VolumeCrossing {
+                    volume,
+                    entry,
+                    end,
+                    chord: entry.distance(end),
+                    cost: 0.0,
+                    energy: 2.0 * threshold,
+                    perforated: true,
+                },
+                contacts: vec![(entry, end)],
+                momentum: Vec3::ZERO,
+                entrance_momentum: Vec3::ZERO,
+                entrance_energy: 0.0,
+            }],
+        });
+        app.update();
+        let record = app.world().resource::<WallRecord>();
+        assert!(
+            record
+                .entries
+                .iter()
+                .any(|entry| entry.building == ordinal && entry.event == WallEvent::Dust(0))
+        );
+        let fallen: BTreeSet<_> = record
+            .entries
+            .iter()
+            .filter_map(|entry| match entry.event {
+                WallEvent::Fall(chunk) if entry.building == ordinal => Some(chunk),
+                _ => None,
+            })
+            .collect();
+        let unsupported: BTreeSet<_> = (1..kind.asset.chunks.len())
+            .map(|c| u16::try_from(c).unwrap())
+            .collect();
+        assert_eq!(
+            fallen, unsupported,
+            "support loss must reach the destruction ledger in this update"
+        );
+        println!(
+            "MEASURED controlled game destruction: threshold={threshold} J, delivered={} J, fallen={fallen:?}",
+            2.0 * threshold
+        );
+        app.world_mut().despawn(shell);
     }
 
     struct ReadDelay {
