@@ -406,7 +406,7 @@ fn place_preview(
     mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
 ) {
-    let Some(preview) = cue.preview.clone() else {
+    let Some(preview) = &cue.preview else {
         return; // The plan asks for no preview.
     };
     let (house, _) = the_house(&houses).unwrap_or_else(|| {
@@ -439,8 +439,7 @@ fn place_preview(
             });
         let kind = library
             .get(&placed.asset)
-            .expect("the preview library loaded every preview asset")
-            .clone();
+            .expect("the preview library loaded every preview asset");
         let (x, z) = placed.offset;
         let mut at = house.translation + house.rotation * Vec3::new(x, 0.0, z);
         at.y = grid.height_at(at.x, at.z);
@@ -453,13 +452,13 @@ fn place_preview(
             id: placed.id.clone(),
             ordinal,
         };
-        let root = crate::construction::spawn(&mut commands, &kind, identity, pose);
+        let root = crate::construction::spawn(&mut commands, kind, identity, pose);
         commands.entity(root).insert(Previewed);
         if let Some(look) = &look {
             commands.spawn((
                 ChildOf(root),
                 Transform::IDENTITY,
-                Mesh3d(meshes.add(crate::construction::view::mesh(&kind))),
+                Mesh3d(meshes.add(crate::construction::view::mesh(kind))),
                 MeshMaterial3d(look.surface.clone()),
                 crate::render_cost::CasterClass::House,
                 crate::construction::view::View,
