@@ -115,8 +115,6 @@ fn run(points: &[Vec3]) -> Vec3 {
     longest.normalize()
 }
 
-/// How an element's faces are drawn: its authored surface frame, its [`run`] and whether it wears
-/// the secondary palette lane.
 struct Look {
     frame: SurfaceFrame,
     run: Vec3,
@@ -173,7 +171,6 @@ impl Faces {
         }
     }
 
-    /// Element `e`'s whole hull.
     fn element(&mut self, asset: &BuildingAsset, e: usize) {
         let look = Look::of(asset, e);
         for (n, corners) in hull_faces(&asset.elements[e].points()) {
