@@ -445,19 +445,18 @@ mod tests {
     /// Inline fixture geometry has total volume 4 m³ and density 100 kg/m³, hence mass 400 kg.
     fn footprint() -> BuildingAsset {
         use super::super::schema::*;
+        let cuboid = |x: [f32; 2], y: [f32; 2]| -> Vec<[f32; 3]> {
+            (0..8)
+                .map(|i| [x[i & 1], y[(i >> 1) & 1], [0.0, 1.0][i >> 2]])
+                .collect()
+        };
         let element = Element {
             name: "fixture".into(),
             kind: ElementKind::Pier,
             component: 0,
             material: 0,
-            frame: Frame {
-                origin: [0.0; 3],
-                u: [1.0, 0.0, 0.0],
-                v: [0.0, 1.0, 0.0],
-            },
             surface_frame: SurfaceFrame::Upright,
-            profile: vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]],
-            depth: [0.0, 1.0],
+            hull: cuboid([0.0, 2.0], [0.0, 2.0]),
             chunks: [0, 3],
         };
         let mut chunks = Vec::new();
@@ -470,12 +469,10 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            let mut cell = element.clone();
-            cell.profile = vec![[low, bottom], [high, bottom], [high, top], [low, top]];
             chunks.push(Chunk {
                 element: 0,
                 material: 0,
-                hull: cell.points().iter().map(|p| p.to_array()).collect(),
+                hull: cuboid([low, high], [bottom, top]),
                 volume_m3: high - low,
                 centroid: [(low + high) / 2.0, (bottom + top) / 2.0, 0.5],
                 mass_kg: (high - low) * 100.0,

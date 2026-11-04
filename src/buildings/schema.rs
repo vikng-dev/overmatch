@@ -38,7 +38,7 @@ use bevy::math::Vec3;
 use serde::{Deserialize, Serialize};
 
 /// The format revision this build reads and writes. A file of another revision is refused.
-pub const FORMAT: u32 = 6;
+pub const FORMAT: u32 = 7;
 
 /// How far a vertex, a centroid or a plane may sit from where the contract places it, metres:
 /// the f32 rounding of a building-sized coordinate, many times over, and far below any modelled

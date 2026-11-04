@@ -2,7 +2,7 @@
 // Do not edit: change the spec or the bake and bake again.
 BuildingAsset(
     id: "house_1",
-    format: 6,
+    format: 7,
     foundation_y_m: -0.45,
     materials: [
         "Brick",
