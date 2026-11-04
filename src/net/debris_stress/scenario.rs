@@ -193,6 +193,12 @@ impl Parameters {
                 return Err(invalid(field, "author a finite nonnegative value"));
             }
         }
+        if !(2.0 * self.along_speed_m_s.0).is_finite() {
+            return Err(invalid(
+                "along_speed_m_s",
+                "reduce the speed so doubling it for release sampling stays finite",
+            ));
+        }
         if self.rows.0 == 0 || self.columns.0 == 0 {
             return Err(invalid("rows / columns", "author positive lattice counts"));
         }

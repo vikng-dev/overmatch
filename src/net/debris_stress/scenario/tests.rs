@@ -48,6 +48,7 @@ fn construction_faults_name_the_file_field_and_fix_before_play() {
         ("inward_speed_m_s", |p| p.inward_speed_m_s.0 = [2.0, 1.0]),
         ("upward_speed_m_s", |p| p.upward_speed_m_s.0 = -1.0),
         ("along_speed_m_s", |p| p.along_speed_m_s.0 = f32::NAN),
+        ("along_speed_m_s", |p| p.along_speed_m_s.0 = f32::MAX),
         ("spin_rad_s", |p| p.spin_rad_s.0 = f32::INFINITY),
         ("roughness", |p| p.roughness.0 = -1.0),
         ("albedo_srgb", |p| p.albedo_srgb.0[0] = 2.0),
@@ -58,6 +59,9 @@ fn construction_faults_name_the_file_field_and_fix_before_play() {
         }),
     ];
     assert!(Scenario::admit(parameters()).is_ok());
+    let mut boundary = parameters();
+    boundary.along_speed_m_s.0 = f32::MAX / 2.0;
+    assert!(Scenario::admit(boundary).is_ok());
     for (field, mutate) in faults {
         let mut data = parameters();
         mutate(&mut data);
