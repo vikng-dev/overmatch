@@ -261,8 +261,38 @@ fn a_construction_is_complete_at_spawn_and_keeps_its_state_through_splits() {
     );
 }
 
-/// The game's environment destruction model: every admitted map kind releases through the
-/// common plugin when a chunk loses support. The Driver relies on that owner reaching the
+/// Fixture support loss: sever the selected chunk's bonds and request a zero-work evaluation.
+fn isolate_chunk(app: &mut App, root: Entity, chunk: usize) {
+    let at = {
+        let mut body = app.world_mut().get_mut::<Breakage>(root).unwrap();
+        let live = &mut body.live;
+        for (index, joint) in live.structure.joints.iter().enumerate() {
+            if joint.a == chunk || joint.b == Side::Chunk(chunk) {
+                live.state.cracked[index] = true;
+            }
+        }
+        live.structure.chunks[chunk].centroid
+    };
+    app.world_mut().resource_mut::<Queue>().0.push(RawDeposit {
+        contacts: vec![(
+            root,
+            Load {
+                chunk,
+                at,
+                energy: 0.0,
+                crushed: 0.0,
+                blow: Vec3::ZERO,
+                press: Vec3::ZERO,
+                peak: None,
+                origin: Origin::Field,
+            },
+        )],
+        ..default()
+    });
+}
+
+/// The game's environment destruction model: admitted map kinds with above-ground breakable
+/// matter release through the common plugin when a chunk loses support. The Driver relies on that owner reaching the
 /// production belt gather and footprint reader with centroid-local convex geometry.
 /// Fixture: isolate one above-ground chunk, then request a law evaluation with zero work.
 #[test]
@@ -281,38 +311,18 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
         let (mut app, root) = composed_kind(false, kind);
         app.update();
         app.update();
-        let (chunk, at) = {
-            let mut body = app.world_mut().get_mut::<Breakage>(root).unwrap();
-            let live = body.live.as_mut();
-            let chunk = live
-                .structure
-                .chunks
-                .iter()
-                .position(|chunk| !chunk.buried)
-                .expect("fixture construction has above-ground matter");
-            for (j, joint) in live.structure.joints.iter().enumerate() {
-                if joint.a == chunk || joint.b == Side::Chunk(chunk) {
-                    live.state.cracked[j] = true;
-                }
-            }
-            (chunk, live.structure.chunks[chunk].centroid)
+        let body = app.world().get::<Breakage>(root).unwrap();
+        let Some(chunk) = body
+            .live
+            .structure
+            .chunks
+            .iter()
+            .position(|chunk| !chunk.buried)
+        else {
+            continue; // Valid constructions can have no above-ground breakable matter to release.
         };
-        app.world_mut().resource_mut::<Queue>().0.push(RawDeposit {
-            contacts: vec![(
-                root,
-                Load {
-                    chunk,
-                    at,
-                    energy: 0.0,
-                    crushed: 0.0,
-                    blow: Vec3::ZERO,
-                    press: Vec3::ZERO,
-                    peak: None,
-                    origin: Origin::Field,
-                },
-            )],
-            ..default()
-        });
+        let at = body.live.structure.chunks[chunk].centroid;
+        isolate_chunk(&mut app, root, chunk);
         app.update();
         let (owner, piece) = app
             .world_mut()
@@ -5001,32 +5011,7 @@ fn occupied_matter_queries_follow_common_release_and_sleeping_pose() {
     let volume = occupied(&mut app, root);
     crate::ballistics::assert_occupied_matter_queries(&mut app, volume);
     let chunk = kind.layout.blocks.len() / 2; // Fixture: the column's middle cube.
-    let at = {
-        let mut body = app.world_mut().get_mut::<Breakage>(root).unwrap();
-        let live = &mut body.live;
-        for (index, joint) in live.structure.joints.iter().enumerate() {
-            if joint.a == chunk || joint.b == Side::Chunk(chunk) {
-                live.state.cracked[index] = true;
-            }
-        }
-        live.structure.chunks[chunk].centroid
-    };
-    app.world_mut().resource_mut::<Queue>().0.push(RawDeposit {
-        contacts: vec![(
-            root,
-            Load {
-                chunk,
-                at,
-                energy: 0.0,
-                crushed: 0.0,
-                blow: Vec3::ZERO,
-                press: Vec3::ZERO,
-                peak: None,
-                origin: Origin::Field,
-            },
-        )],
-        ..default()
-    });
+    isolate_chunk(&mut app, root, chunk);
     app.update();
     app.update();
     let owner = app
