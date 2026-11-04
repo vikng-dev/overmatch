@@ -3,7 +3,7 @@
 //! the body's pose and builds collision geometry from the same spawn data; it simulates nothing.
 
 use super::*;
-use crate::buildings::breakage::piece_layers;
+use crate::construction::breakage::piece_layers;
 use crate::debris::launch::{Launch, PendingLaunch, launch_colliders};
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::dynamics::rigid_body::mass_properties::components::RecomputeMassProperties;
@@ -545,7 +545,7 @@ mod tests {
             crate::contact_transfer::sim_plugin,
             sim_plugin,
             crate::debris::sim_plugin,
-            crate::buildings::breakage::sim_plugin,
+            crate::construction::breakage::sim_plugin,
         ))
         .init_asset::<Mesh>()
         .insert_resource(Gravity(gravity))
@@ -1095,7 +1095,7 @@ mod tests {
             app.init_resource::<Observed>().add_systems(
                 FixedPostUpdate,
                 observe
-                    .after(crate::buildings::breakage::WallLawSet)
+                    .after(crate::construction::breakage::LawSet)
                     .before(TreeFallSet),
             );
             tree(&mut app, 0, Vec3::ZERO);
@@ -1111,7 +1111,7 @@ mod tests {
                 app.update();
             }
             app.world_mut()
-                .trigger(crate::buildings::breakage::WallCharge {
+                .trigger(crate::construction::breakage::Charge {
                     at: Vec3::new(-1.0, 1.0, 0.0),
                     blast: fracture::Blast::of(1.0e6, 0.05, fracture::FIT_ONLY_PRODUCTS),
                 });

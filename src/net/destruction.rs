@@ -61,7 +61,7 @@ pub(super) fn install_client(app: &mut App) {
         Update,
         publish_presentation_clock
             .before(apply_ledger)
-            .before(crate::buildings::breakage::WallReplicaSet),
+            .before(crate::construction::breakage::ReplicaSet),
     );
 }
 pub(crate) fn install_apply(app: &mut App) {
@@ -286,7 +286,7 @@ fn attach_trunks(
                 local,
                 crate::trees::replica_segment_collider(body, k),
                 segment,
-                crate::buildings::breakage::piece_layers(),
+                crate::construction::breakage::piece_layers(),
                 body.kind.friction,
             ));
             // The game's damage-model aim reads the streamed pose even though replica fuzes

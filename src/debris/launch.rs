@@ -2,7 +2,7 @@
 //! Walls and trunks supply geometry and loads; this module owns their common plastic launch,
 //! coupled energy bound and give-back. The wall design's "Bodies in contact" owns the derivation.
 
-use crate::buildings::fracture::{Load, Origin};
+use crate::construction::fracture::{Load, Origin};
 use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::{
     ComputeMassProperties3d, MassProperties3d,
 };
@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use std::collections::BTreeMap;
 
 /// Momentum the rigid structure took beyond a departing chunk's plastic exchange: the source
-/// body, contact point (m) and returned impulse (N·s), in the building's frame.
+/// body, contact point (m) and returned impulse (N·s), in the construction's frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BodyReturn {
     pub(crate) body: Entity,
@@ -34,7 +34,7 @@ impl BodyReturn {
     }
 }
 
-/// One freed group's collider frame and departure in building terms, and the source bodies'
+/// One freed group's collider frame and departure in construction terms, and the source bodies'
 /// give-back. The mass and inertia are those of these exact colliders at their data's density.
 #[derive(Debug)]
 pub(crate) struct Launch {
@@ -251,7 +251,7 @@ impl Plugin for LaunchPlugin {
             FixedPostUpdate,
             finish_launches
                 .in_set(LaunchSet)
-                .after(crate::buildings::breakage::WallLawSet)
+                .after(crate::construction::breakage::LawSet)
                 .after(crate::trees::TreeDerived)
                 .before(crate::state::SimPhase::Publish),
         );

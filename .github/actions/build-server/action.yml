@@ -117,7 +117,7 @@ runs:
             find assets/maps -type f \( -name '*.json' -o -name '*.png' -o -name '*.ron' \) \
               -not -path 'assets/maps/*/derived/*'
             find assets/trees -type f -name '*.ron'
-            find assets/buildings -type f -name '*.building.ron'
+            find assets/constructions -type f -name '*.construction.ron'
             echo assets/terrain/ground_types.ron
           } | LC_ALL=C sort
         )

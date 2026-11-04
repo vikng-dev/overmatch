@@ -431,7 +431,7 @@ impl BeltMeshes {
         self.by_count.retain(|&count, _| live(count));
     }
 
-    /// A fixture's meshes for belts of `count` links, one per rung, without building any.
+    /// A fixture's meshes for belts of `count` links, one per rung, without construction any.
     #[cfg(test)]
     pub(crate) fn insert_fixture(&mut self, count: usize, rungs: Vec<PerSide<Handle<Mesh>>>) {
         self.by_count.insert(

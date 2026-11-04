@@ -119,8 +119,8 @@ fn side_plates_follow_the_true_shoe_faces_and_belt_bottom() {
     }
     let layers = side_plate_layers();
     assert!(!layers.interacts_with(CollisionLayers::new([Layer::Terrain], LayerMask::ALL)));
-    assert!(layers.interacts_with(crate::buildings::element_layers()));
-    assert!(layers.interacts_with(crate::buildings::breakage::piece_layers()));
+    assert!(layers.interacts_with(crate::construction::element_layers()));
+    assert!(layers.interacts_with(crate::construction::breakage::piece_layers()));
     assert!(layers.interacts_with(CollisionLayers::new([Layer::Vehicle], LayerMask::ALL)));
     assert!(layers.interacts_with(layers));
     assert!(!layers.interacts_with(CollisionLayers::new([Layer::Armor], LayerMask::NONE)));
@@ -214,7 +214,7 @@ fn a_pivoting_track_shoves_a_piece_without_throwing_it_or_touching_terrain() {
                     Transform::from_translation(initial),
                     piece_shape,
                     ColliderDensity(1800.0), // FIXTURE material density, kg/m^3.
-                    crate::buildings::breakage::piece_layers(),
+                    crate::construction::breakage::piece_layers(),
                     Friction::new(0.6), // FIXTURE piece friction.
                     Restitution::ZERO,
                 ))
@@ -308,7 +308,7 @@ fn side_plate_contacts_reach_the_structure_contact_reader() {
         ChildOf(wall),
         Transform::IDENTITY,
         Collider::cuboid(size, size, size),
-        crate::buildings::element_layers(),
+        crate::construction::element_layers(),
         Friction::new(0.6),
     ));
     app.world_mut()

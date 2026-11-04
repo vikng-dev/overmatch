@@ -205,8 +205,8 @@ pub(crate) enum Visual {
     Maps {
         maps: String,
         metres_per_repeat: Sourced<f32>,
-        /// The building shader's palette lane, absent for visuals not used by buildings.
-        building_lane: Option<crate::building_surface::SurfaceLane>,
+        /// The construction shader's palette lane, absent for visuals not used by constructions.
+        construction_lane: Option<crate::construction_surface::SurfaceLane>,
         takes_paint: bool,
     },
     /// No maps: a colour and two factors.

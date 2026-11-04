@@ -28,7 +28,7 @@ No P1 or P2 was found. Its P3s and the weighed questions:
 | `walls.rs` publish `single()`, `unwrap_or_default`, replica `single()`, shrink | Fixed (`e48b0970`), as `destruction.rs` already was (`b20301bc`). |
 | `destruction.rs` / `walls.rs` "record shrank" | Classified (`e48b0970`): the authority only appends and a snapshot carries its whole list, so a shorter list on one entity is a malformed peer record: logged, then replaced. Not a panic: it is outside input. |
 | `destruction.rs` entry naming no tree | Already handled: a logged refusal of a malformed peer entry (the lookup's `get_mut` was already an `expect`). |
-| `debris_stress.rs` `carry_wall_piece` | Fixed (`6f898f29`); partly disagreed: an `expect` alone would panic on the carrier, which holds the group's `WallPiece` itself. The carrier is named and skipped; a pose-less piece panics. |
+| `debris_stress.rs` `carry_construction_piece` | Fixed (`6f898f29`); partly disagreed: an `expect` alone would panic on the carrier, which holds the group's `Piece` itself. The carrier is named and skipped; a pose-less piece panics. |
 | `fire_presentation.rs` recovery and three `single()` | Fixed (`ab7b432d`). Missing muzzle named (rig attaches after the arm); bore `expect`; a load index past the list is a logged peer refusal before the cosmetic default; ping/input-slot/armed-root reads name none and panic on many. |
 | 13 UI `Single` sites (`hit_feel`, `spawn_map`, `lobby_ui`, `state`) | Fixed (`591e9bab`, `06888667`). Nodes spawned once are queries with `expect`; the primary window goes through `state::primary_window` (none named, two a bug). `591e9bab` alone fails the kill cam's composed test; `06888667` gives the bare mount its panel. Land them together. |
 | `command.rs` `snapshot_device_command` | Fixed (`f341b793`), through `tank::controlled_one`. |
@@ -49,7 +49,7 @@ fixture data asserting a class invariant).
 Still open, with owners:
 
 - Owner (batched feel and pricing review): the empirical receipt-spread delay (sweep-net-1, -3).
-- Destruction area: `buildings::breakage::derive_from_record`'s same-generation shrink arm is
+- Destruction area: `construction::breakage::derive_from_record`'s same-generation shrink arm is
   unreachable now that `receive_ledger` moves the generation on every replacement.
 - Driving area: `tank::scenario::spawn_tank_when_loaded` reads `PendingTankAssets` as optional,
   though `load_tank_assets` inserts it at `Startup`.

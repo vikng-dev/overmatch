@@ -1,7 +1,7 @@
 //! What solver contacts and implicit belt contacts moved between a standing structure and a
 //! dynamic body, one physics step at a time: the reading a body's contact load is taken from in
 //! the game's environment destruction model (game state only; a contact never doses a tank). The model it
-//! serves is `.agents/docs/design/wall-destruction.md`, "Bodies in contact".
+//! serves is `.agents/docs/design/construction-destruction.md`, "Bodies in contact".
 //!
 //! THE READING. Avian's contact solver runs sequential impulses over substeps. Each substep warm
 //! starts every contact point with its accumulated impulse scaled by
@@ -217,7 +217,7 @@ impl ContactTransfers {
 
     /// The last step's points, each with the blow and the press the structure took through it,
     /// in Avian's constraint order: each constraint's transfer split at its body's rest speed (the
-    /// wall design, `.agents/docs/design/wall-destruction.md`, "Bodies in contact"). A
+    /// wall design, `.agents/docs/design/construction-destruction.md`, "Bodies in contact"). A
     /// constraint's blow is the momentum its body's closing delivered (N·s): its points' `m_b v_n`
     /// summed over those closing faster than the rest speed, `m_b` each point's effective mass,
     /// and never more than the solver moved along the normal; it falls on the points in shares of
@@ -930,7 +930,7 @@ mod tests {
     }
 
     /// A structure: a static root holding a 0.5 m thick wall whose face toward −x stands at
-    /// x = −0.25, as a building holds its elements (fixture data).
+    /// x = −0.25, as a construction holds its elements (fixture data).
     fn wall(app: &mut App) -> Entity {
         let root = app
             .world_mut()

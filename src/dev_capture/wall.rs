@@ -7,7 +7,7 @@
 //! server mounts the same cue from the same plan file ([`server_wall_plugin`]): it fires and draws
 //! nothing, and logs the camera its capture clients hold as a plan fragment (a `frames.camera`
 //! value), so every peer frames the one break the server made. The wall is chosen by class, the
-//! same on every run: the building nearest the map's centre (the lowest ordinal on a tie), its
+//! same on every run: the construction nearest the map's centre (the lowest ordinal on a tie), its
 //! breakable pier of the largest volume (the lowest element on a tie). A round is fired out
 //! along the pier's outward normal at the chunk nearest the pier's centre; `assets/dev/capture-wall.ron`
 //! owns the staging distances (m). A charge sits on the pier's outer face near its foot, its
@@ -20,9 +20,9 @@
 use bevy::prelude::*;
 
 use crate::ballistics::FireShell;
-use crate::buildings::breakage::{Breakage, WallCharge};
-use crate::buildings::fracture::Blast;
-use crate::buildings::schema::ElementKind;
+use crate::construction::breakage::{Breakage, Charge as ConstructionCharge};
+use crate::construction::fracture::Blast;
+use crate::construction::schema::ElementKind;
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
 
@@ -209,7 +209,7 @@ fn framing(outward: Vec3, aim: Vec3, foot: Vec3) -> Transform {
 }
 
 /// The wall (module doc): the pier's outward normal, the aim point on its outer face, the foot of
-/// that face, and a point inset past the building's middle from the pier, at the aim's
+/// that face, and a point inset past the construction's middle from the pier, at the aim's
 /// height, all world.
 fn the_wall((root, breakage): (&Transform, &Breakage)) -> Option<(Vec3, Vec3, Vec3, Vec3)> {
     let kind = &breakage.kind;
@@ -262,12 +262,12 @@ fn the_wall((root, breakage): (&Transform, &Breakage)) -> Option<(Vec3, Vec3, Ve
     ))
 }
 
-/// The building the cue works on (module doc): its pose and breakable state.
+/// The construction the cue works on (module doc): its pose and breakable state.
 fn the_house<'a>(
-    buildings: &'a Query<(&MapInstance, &Transform, &Breakage)>,
+    constructions: &'a Query<(&MapInstance, &Transform, &Breakage)>,
 ) -> Option<(&'a Transform, &'a Breakage)> {
     let reach = |t: &Transform| Vec2::new(t.translation.x, t.translation.z).length_squared();
-    buildings
+    constructions
         .iter()
         .min_by(|a, b| {
             reach(a.1)
@@ -277,11 +277,11 @@ fn the_house<'a>(
         .map(|(_, transform, breakage)| (transform, breakage))
 }
 
-/// The wall, resolved at boot: the map's buildings spawn at `Startup`, from data, so a plan whose
+/// The wall, resolved at boot: the map's constructions spawn at `Startup`, from data, so a plan whose
 /// `wall` cue finds no breakable house with a pier fails the run before any frame.
-fn check_wall_target(buildings: Query<(&MapInstance, &Transform, &Breakage)>) {
+fn check_wall_target(constructions: Query<(&MapInstance, &Transform, &Breakage)>) {
     assert!(
-        the_house(&buildings).and_then(the_wall).is_some(),
+        the_house(&constructions).and_then(the_wall).is_some(),
         "{}: wall: the map has no breakable house with a pier to shoot at",
         super::plan::VARIABLE
     );
@@ -296,11 +296,11 @@ fn check_wall_target(buildings: Query<(&MapInstance, &Transform, &Breakage)>) {
 fn fire_on_cue(
     time: Res<Time>,
     mut cue: ResMut<Cue>,
-    buildings: Query<(&MapInstance, &Transform, &Breakage)>,
+    constructions: Query<(&MapInstance, &Transform, &Breakage)>,
     mut commands: Commands,
 ) {
     let now = time.elapsed_secs();
-    let Some((outward, aim, foot, inside)) = the_house(&buildings).and_then(the_wall) else {
+    let Some((outward, aim, foot, inside)) = the_house(&constructions).and_then(the_wall) else {
         assert!(
             !cue.shots.iter().any(|(_, at, fired)| !*fired && now >= *at),
             "{}: wall: a shot is due at {now} s and the house's wall is gone",
@@ -351,7 +351,7 @@ fn shoot(what: &What, (outward, aim, foot): (Vec3, Vec3, Vec3), commands: &mut C
         }
         &What::Charge(Charge { mass, blast }) => {
             let at = foot + Vec3::Y * staging().charge_height_m.0 + outward * blast.radius;
-            commands.trigger(WallCharge { at, blast });
+            commands.trigger(ConstructionCharge { at, blast });
             info!(
                 "capture: wall charge of {mass} kg ({:.0} J) at {at:?}",
                 blast.energy

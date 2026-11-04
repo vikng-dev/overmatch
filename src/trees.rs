@@ -38,7 +38,7 @@
 //! Replicas partition segments by sorted carrier cuts; every segment retains its HP pool when
 //! it changes body. See the wall design's "Trees are structures by the same laws".
 
-use crate::buildings::fracture::GroupLoads;
+use crate::construction::fracture::GroupLoads;
 use std::collections::{BTreeMap, BTreeSet};
 use std::f32::consts::PI;
 use std::path::Path;
@@ -56,10 +56,10 @@ use bevy::prelude::*;
 use crate::ClientReplica;
 use crate::Layer;
 use crate::ballistics::{BallisticVolume, ComponentHealth, PoolEmptied, VolumeMaterial};
-use crate::buildings::attachments::{ATTACHMENTS_PATH, Attachments, RootPlate};
-use crate::buildings::fracture::{
-    self, Bond, Chunk, Joint, Load, Masonry, Origin, Seam, SectionCache, Shear, Side, Structure,
-    WallState,
+use crate::construction::attachments::{ATTACHMENTS_PATH, Attachments, RootPlate};
+use crate::construction::fracture::{
+    self, Bond, Chunk, Joint, Load, Masonry, Origin, Seam, SectionCache, Shear, Side, State,
+    Structure,
 };
 use crate::contact_transfer::ContactTransfers;
 #[cfg(test)]
@@ -150,7 +150,7 @@ struct StructuralWood {
     /// Modulus of rupture under bending, longitudinal extreme-fibre stress, Pa.
     along_grain_rupture_pa: f32,
     /// Mode-I opening work per section area, J/m²: tension along the grain, breaking across
-    /// fibres (LR/LT), not the RL/TL splitting energy of a building's timber seam.
+    /// fibres (LR/LT), not the RL/TL splitting energy of a construction's timber seam.
     along_grain_fracture_j_per_m2: f32,
     /// The green wood's density, kg/m³: a segment's mass per volume, and the fresh stem mass a
     /// root plate's coefficient multiplies.
@@ -795,7 +795,7 @@ pub(crate) fn spawn(
 /// lowest open joint ([`Self::cut`]).
 #[derive(Component, Debug, Clone)]
 pub(crate) struct TrunkState {
-    state: WallState,
+    state: State,
     sections: SectionCache,
     owned: std::ops::Range<usize>,
 }
@@ -803,7 +803,7 @@ pub(crate) struct TrunkState {
 impl TrunkState {
     pub(crate) fn new(structure: &Structure) -> Self {
         Self {
-            state: WallState::new(structure),
+            state: State::new(structure),
             sections: SectionCache::default(),
             owned: 0..structure.chunks.len(),
         }
@@ -1149,7 +1149,7 @@ pub(crate) mod tests {
         )
     }
 
-    /// Structural laws must never inherit the across-grain building seam when a trunk's grain
+    /// Structural laws must never inherit the across-grain construction seam when a trunk's grain
     /// datum is missing. Every missing field is refused before play with file, species, field
     /// and repair; a defaulted grain or root strength/work breaks this load contract.
     #[test]
@@ -1174,7 +1174,7 @@ pub(crate) mod tests {
     /// A trunk's anchor is a root plate of the shared attachment list, resolved at load: an
     /// anchor naming no kind, or a kind that joins two parts (a mortar bed), is refused naming
     /// the row, the list and the fix. A loader that took any name would hold a trunk to the
-    /// ground by a code default, or by a building's seam.
+    /// ground by a code default, or by a construction's seam.
     #[test]
     fn a_trunks_anchor_is_a_root_plate_of_the_shared_list() {
         let wood = parse_fixture_wood(&structural_row("fixture", &structural_fields()))

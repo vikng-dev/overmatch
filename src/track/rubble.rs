@@ -1,6 +1,6 @@
 //! Buildings and rubble under the running gear, in the game's tank driving physics (game state
 //! only). The terrain field ([`super::oracle::BlockField`]) is the heightmap and the authored
-//! blocks; a building's elements and standing chunks and every loose piece are Avian colliders the
+//! blocks; a construction's elements and standing chunks and every loose piece are Avian colliders the
 //! field never holds. [`RubbleBodies`] snapshots the nearby colliders shared by every driving source, the belt's support
 //! reads each through a convex shape check over every link's footprint ([`RubbleBodies::in_slab`])
 //! at the ground's own per-metre spring. In the same tick [`piece_impulses`] sizes what a loose
@@ -1092,7 +1092,7 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
-    use crate::buildings::breakage::BuildingChunk;
+    use crate::construction::breakage::ChunkCollider;
     use crate::substances::contact_friction;
     use crate::track::forces::{
         ForceParams, GripElements, GripParams, SideInput, SideReport, SideState, TravelField,
@@ -1149,7 +1149,7 @@ mod tests {
         piece_box(app, Vec3::new(x, 0.2, z), Vec3::new(2.0, 0.4, 2.0))
     }
 
-    /// A static building root holding one 2 × 0.6 × 2 m standing chunk whose top is at y = 0.6,
+    /// A static construction root holding one 2 × 0.6 × 2 m standing chunk whose top is at y = 0.6,
     /// centred at `(x, z)` (fixture data); returns the root and the chunk.
     fn standing_chunk(app: &mut App, x: f32, z: f32) -> (Entity, Entity) {
         let root = app
@@ -1166,7 +1166,7 @@ mod tests {
                 ChildOf(root),
                 Transform::IDENTITY,
                 Collider::cuboid(2.0, 0.6, 2.0),
-                BuildingChunk(0),
+                ChunkCollider(0),
             ))
             .id();
         (root, chunk)

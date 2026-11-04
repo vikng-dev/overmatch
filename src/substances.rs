@@ -151,15 +151,15 @@ impl MaterialFacts {
     }
 }
 
-/// The bulk facts of a non-metal: what a building's bake reads (a chunk's mass) and what the
-/// buildings' fracture laws read (`buildings::fracture`). SI units.
+/// The bulk facts of a non-metal: what a construction's bake reads (a chunk's mass) and what the
+/// constructions' fracture laws read (`construction::fracture`). SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BulkFacts {
     /// kg/m³.
     pub density: f64,
     /// The tensile strength across a seam between pre-cut chunks of this substance, Pa: what the
-    /// push rule compares the load at a joint with. `None` where none is sourced: the buildings'
-    /// laws then refuse the substance as a breakable material (`buildings::fracture::Masonry::of`).
+    /// push rule compares the load at a joint with. `None` where none is sourced: the constructions'
+    /// laws then refuse the substance as a breakable material (`construction::fracture::Masonry::of`).
     pub tensile: Option<f64>,
     /// The seam's mode-I fracture energy `G_f`, J/m²: the energy that opens a square metre of
     /// seam, what the structural check charges a section. The opening and shear facts are
@@ -167,19 +167,19 @@ pub struct BulkFacts {
     pub fracture_energy: Option<f64>,
     /// Cohesive shear strength `c` of the seam without precompression, Pa. Required with the
     /// opening properties for a breakable row; absent on bulk-only, unbreakable matter. The
-    /// punch-ring law reads it (`buildings::fracture::Shear`).
+    /// punch-ring law reads it (`construction::fracture::Shear`).
     pub shear_cohesion: Option<f64>,
     /// Cohesive mode-II fracture energy `G_II`, J/m², excluding continuing friction work.
     /// Required with [`Self::shear_cohesion`]; the punch-ring law reads it.
     pub shear_fracture_energy: Option<f64>,
     /// Sourced inputs for the blast crush and scab laws, required on every breakable row. The
-    /// crush law reads them (`buildings::fracture::Compaction`).
+    /// crush law reads them (`construction::fracture::Compaction`).
     pub blast: Option<BlastFacts>,
 }
 
 /// Material inputs of the game's environment blast laws. SI units. The crush law (Law 1,
-/// `buildings::fracture::Compaction`) reads the compression, its ratio and the fully dense
-/// density; the scab law (Law 2, `buildings::fracture::Spall`) reads the modulus and the tensile
+/// `construction::fracture::Compaction`) reads the compression, its ratio and the fully dense
+/// density; the scab law (Law 2, `construction::fracture::Spall`) reads the modulus and the tensile
 /// ratio, which raises the row's `bulk.tensile`. Sources and the scope of each analogue
 /// live in `assets/materials/materials.ron` and `.agents/scratch/blast-b3-material-sources.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -208,7 +208,7 @@ pub struct BurstFacts {
     /// The speed constant `K` (m/s): the sideways speed scale of the burst's `v_s`.
     pub speed_constant: f64,
     /// The chemical energy one kilogram of it releases, J/kg: what a burst's blast field carries
-    /// once the casing has taken its share (`buildings::fracture`). Required: a core whose speed
+    /// once the casing has taken its share (`construction::fracture`). Required: a core whose speed
     /// constant drives a casing releases chemical energy, so a burst core states it.
     pub chemical_energy: f64,
 }
@@ -1149,7 +1149,7 @@ mod tests {
         }
     }
 
-    /// A ROW STATES ITS DENSITY ONCE: density alone admits bulk-only matter; the building
+    /// A ROW STATES ITS DENSITY ONCE: density alone admits bulk-only matter; the construction
     /// bake reads it for every chunk's mass, and a row stating bulk beside material facts (each with a
     /// density) is refused, as is a bulk fact out of its domain. A mutant reading the density off
     /// the wrong block, or letting two densities stand, fails here.
@@ -1180,7 +1180,7 @@ mod tests {
     }
 
     /// BREAKABLE MATERIALS NEED BOTH SHEAR FACTS AT LOAD (the game's environment destruction
-    /// model). The bake and building loader must refuse an incomplete seam, naming its file,
+    /// model). The bake and construction loader must refuse an incomplete seam, naming its file,
     /// row, missing field and repair, so the punch ring never reads a code default.
     /// ASSUMED fixture values isolate the contract from changes in shipped material numbers.
     #[test]
@@ -1373,7 +1373,7 @@ mod tests {
     }
 
     /// EVERY SHIPPED BREAKABLE MATERIAL CARRIES THE SHEAR PAIR (the game's environment
-    /// destruction model). Every building's material seam needs both independently sourced
+    /// destruction model). Every construction's material seam needs both independently sourced
     /// properties. This ranges over the registry, so a new material must meet the same gate.
     #[test]
     fn every_shipped_breakable_material_carries_both_shear_facts() {

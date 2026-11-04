@@ -24,6 +24,10 @@ _Avoid_: hit marker (that names one disposable presentation)
 
 ## Battlefield
 
+**Construction**:
+Anything the game's environment destruction model breaks, built from its data: a house or a fir alike.
+_Avoid_: building, wall (for the generic thing)
+
 **Battlefield destruction**:
 An authority-owned change to a placed world object that alters gameplay during a Battle, such as a fallen tree or breached wall.
 

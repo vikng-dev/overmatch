@@ -39,7 +39,7 @@ pub(super) use pose::replication as pose_replication;
 use super::harness::{LeverError, env_text};
 use super::world_reset::AuthorityWorld;
 use crate::Layer;
-use crate::buildings::breakage::{RetirePiece, WallPiece};
+use crate::construction::breakage::{Piece, RetirePiece};
 use crate::debris::DebrisPiece;
 use crate::tank::Tank;
 use crate::terrain_grid::HeightGrid;
@@ -137,7 +137,7 @@ impl DebrisStress {
     }
 }
 
-/// The stats line's view of the pieces, the lever's and buildings'.
+/// The stats line's view of the pieces, the lever's and constructions'.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct DebrisCensus<'w, 's> {
     stress: Option<Res<'w, DebrisStress>>,
@@ -178,7 +178,7 @@ impl std::fmt::Display for StartupError {
 
 impl std::error::Error for StartupError {}
 
-/// Every server: a carrier for each building piece and every moved piece's pose onto its carrier.
+/// Every server: a carrier for each construction piece and every moved piece's pose onto its carrier.
 /// Then the lever, when armed; a malformed value is refused.
 pub(super) fn install_server(app: &mut App) -> Result<(), StartupError> {
     let value = env_text(LEVER).map_err(StartupError::Lever)?;
@@ -192,8 +192,8 @@ fn install_server_from(
 ) -> Result<(), StartupError> {
     let scenario = Scenario::parse(scenario_text).map_err(StartupError::Scenario)?;
     let lever = Lever::parse(value).map_err(StartupError::Lever)?;
-    app.add_observer(carry_wall_piece)
-        .add_observer(retire_wall_piece)
+    app.add_observer(carry_construction_piece)
+        .add_observer(retire_construction_piece)
         .add_observer(carry_tree_piece)
         .add_systems(
             FixedPostUpdate,
@@ -236,28 +236,28 @@ fn refuse_peer_pose(
     }
 }
 
-/// A building piece's carrier: its pose and its group, replicated to every client. The carrier
-/// holds the group's `WallPiece` too, so its own spawn reaches this observer: it is the carrier
+/// A construction piece's carrier: its pose and its group, replicated to every client. The carrier
+/// holds the group's `Piece` too, so its own spawn reaches this observer: it is the carrier
 /// (it has a [`DebrisPose`]), not a piece, and gets none.
-fn carry_wall_piece(
-    added: On<Add, WallPiece>,
-    pieces: Query<(&WallPiece, Option<(&Position, &Rotation)>, Has<DebrisPose>)>,
+fn carry_construction_piece(
+    added: On<Add, Piece>,
+    pieces: Query<(&Piece, Option<(&Position, &Rotation)>, Has<DebrisPose>)>,
     generation: Res<AuthorityWorld>,
     mut commands: Commands,
 ) {
     let (piece, pose, carrier) = pieces
         .get(added.entity)
-        .expect("an added WallPiece is on its entity in its own Add observer");
+        .expect("an added Piece is on its entity in its own Add observer");
     if carrier {
         return;
     }
     let (position, rotation) = pose.expect(
-        "`buildings::breakage` spawns every piece with its Position and Rotation in the WallPiece \
+        "`construction::breakage` spawns every piece with its Position and Rotation in the Piece \
          bundle",
     );
     let carrier = commands
         .spawn((
-            Name::new("WallPieceCarrier"),
+            Name::new("ConstructionPieceCarrier"),
             DebrisPose {
                 position: position.0,
                 rotation: rotation.0,
@@ -266,7 +266,7 @@ fn carry_wall_piece(
             generation.0,
             Replicate::to_clients(NetworkTarget::All),
             // ONE TIMELINE: a piece draws at the interpolation cursor, with the hulls and the
-            // record's presentation (`buildings::view`), never at its pose's arrival.
+            // record's presentation (`construction::view`), never at its pose's arrival.
             InterpolationTarget::to_clients(NetworkTarget::All),
         ))
         .id();
@@ -275,13 +275,13 @@ fn carry_wall_piece(
 
 /// Keep the parent's final pose and retirement tick on the wire until the shared view
 /// cursor reaches the split. Its children carry their own birth tick and occupied chunks.
-fn retire_wall_piece(
+fn retire_construction_piece(
     retired: On<RetirePiece>,
     bodies: Query<(&Carrier, &Position, &Rotation)>,
-    mut carriers: Query<(&mut WallPiece, &mut DebrisPose)>,
+    mut carriers: Query<(&mut Piece, &mut DebrisPose)>,
 ) {
     let (carrier, position, rotation) = bodies.get(retired.entity).expect(
-        "only the server installs this observer, and `carry_wall_piece` gives every server chunk \
+        "only the server installs this observer, and `carry_construction_piece` gives every server chunk \
          group its carrier in the flush that spawns it, before a deposit can stage its split",
     );
     let (mut piece, mut pose) = carriers
@@ -581,7 +581,7 @@ fn attach_view(
         (
             Entity,
             &DebrisPose,
-            Has<WallPiece>,
+            Has<Piece>,
             Has<crate::trees::TreePiece>,
         ),
         Added<DebrisPose>,
@@ -590,7 +590,7 @@ fn attach_view(
 ) {
     for (carrier, pose, wall, tree) in &arrived {
         let mut entity = commands.entity(carrier);
-        // A building piece's view may already hold it hidden until its fall is presented.
+        // A construction piece's view may already hold it hidden until its fall is presented.
         entity
             .insert(pose.transform())
             .insert_if_new(Visibility::default());
@@ -622,20 +622,20 @@ mod tests {
         AuthorityWorld(crate::world::WorldGeneration(1))
     }
 
-    /// Every building piece gets exactly one replicated carrier at its spawn pose, and the carrier
-    /// (which holds the group's `WallPiece` too) gets none. A mutant that skips a pose-less entity
+    /// Every construction piece gets exactly one replicated carrier at its spawn pose, and the carrier
+    /// (which holds the group's `Piece` too) gets none. A mutant that skips a pose-less entity
     /// silently, or that carries the carrier, breaks one of the two counts; clients then draw no
     /// fallen group, or a phantom at the origin.
     #[test]
     fn a_piece_gets_one_carrier_and_the_carrier_none() {
         let mut world = World::new();
         world.insert_resource(fixture_world());
-        world.add_observer(carry_wall_piece);
+        world.add_observer(carry_construction_piece);
         let at = Vec3::new(3.0, 1.5, -2.0);
         let piece = world
             .spawn((
-                WallPiece {
-                    building: 2,
+                Piece {
+                    construction: 2,
                     chunks: vec![4, 5],
                     born: 0,
                     retired: None,
@@ -657,12 +657,12 @@ mod tests {
     fn a_retired_group_keeps_its_final_pose_and_wire_interval() {
         let mut world = World::new();
         world.insert_resource(fixture_world());
-        world.add_observer(carry_wall_piece);
-        world.add_observer(retire_wall_piece);
+        world.add_observer(carry_construction_piece);
+        world.add_observer(retire_construction_piece);
         let body = world
             .spawn((
-                WallPiece {
-                    building: 3,
+                Piece {
+                    construction: 3,
                     chunks: vec![1, 2],
                     born: 4,
                     retired: None,
@@ -679,14 +679,14 @@ mod tests {
             tick: 12,
         });
         world.flush();
-        let piece = world.get::<WallPiece>(carrier).unwrap();
+        let piece = world.get::<Piece>(carrier).unwrap();
         assert_eq!((piece.born, piece.retired), (4, Some(12)));
         assert_eq!(
             world.get::<DebrisPose>(carrier).unwrap().position,
             Vec3::new(1.0, 2.0, 3.0)
         );
         let bytes = postcard::to_allocvec(piece).unwrap();
-        assert_eq!(&postcard::from_bytes::<WallPiece>(&bytes).unwrap(), piece);
+        assert_eq!(&postcard::from_bytes::<Piece>(&bytes).unwrap(), piece);
     }
 
     /// A trunk and its carrier share one interpolated pose path, with no recursive carrier.
@@ -717,9 +717,9 @@ mod tests {
     fn a_piece_without_its_pose_is_a_bug() {
         let mut world = World::new();
         world.insert_resource(fixture_world());
-        world.add_observer(carry_wall_piece);
-        world.spawn(WallPiece {
-            building: 2,
+        world.add_observer(carry_construction_piece);
+        world.spawn(Piece {
+            construction: 2,
             chunks: vec![4],
             born: 0,
             retired: None,

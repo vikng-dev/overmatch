@@ -99,7 +99,7 @@ pub fn run() {
     app.add_plugins(super::plugin);
     super::disclosure::install_server(&mut app);
     super::destruction::install_server(&mut app);
-    super::walls::install_server(&mut app);
+    super::construction::install_server(&mut app);
     // A capture plan's wall cue (`OVERMATCH_CAPTURE`, its `wall`): inert without one.
     crate::dev_capture::server_wall_plugin(&mut app);
     if let Err(err) = super::debris_stress::install_server(&mut app) {
@@ -619,7 +619,7 @@ fn lane_spawn_pos(pose: Vec3, lane: u32, radius: f32) -> Vec3 {
 /// that IS ground rather than something standing on it.
 ///
 /// That distinction is the vertical test, taken against the block's OWN ground — the surface under
-/// its centre, where `scatter` projected it — so the margin is the building's own height. A block
+/// its centre, where `scatter` projected it — so the margin is the construction's own height. A block
 /// whose top does not clear that surface is drivable ground (the flat-slab world's 1500 m ground
 /// block, a buried course slab) and denies nothing. Against the CANDIDATE's ground the margin
 /// would instead be the roof's clearance over `spawn_pos`'s max-over-footprint sample, which the
@@ -1150,8 +1150,8 @@ fn respawn_player_tanks(
     overrides: Res<SpawnOverrides>,
     // The authority's own ground truth for spawn-map placement; absent in the flat-slab world.
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
-    // The world's standing geometry (the scatter's graybox buildings, as blocks, and its
-    // buildings of the destruction model, as obstacles): occupancy an override spawn checks
+    // The world's standing geometry (the scatter's graybox constructions, as blocks, and its
+    // constructions of the destruction model, as obstacles): occupancy an override spawn checks
     // against exactly like a live tank. `world` inserts both at startup in every world.
     map: Res<TerrainMap>,
     obstacles: Res<SpawnObstacles>,
@@ -1196,7 +1196,7 @@ fn respawn_player_tanks(
         .filter(|(_, _, knocked_out)| !knocked_out)
         .map(|(_, position, _)| position.0.xz())
         .collect();
-    // What stands on the map, in the block encoding: the terrain blocks, then the buildings' bounds.
+    // What stands on the map, in the block encoding: the terrain blocks, then the constructions' bounds.
     let standing: Vec<Transform> = map.blocks.iter().chain(&obstacles.0).copied().collect();
     // Occupancy also includes the spots ALREADY HANDED OUT this pass: two clients respawning onto
     // the same click in the same tick would otherwise both read the pre-pass world and overlap.
@@ -1619,7 +1619,7 @@ mod tests {
             })
             .insert_resource(crate::map::tests::fixture_manifest(750.0, 0.0, 50.0))
             .insert_resource(SpawnPlacement::new(BattleMode::shipped().spawn))
-            // Fixture world: no standing blocks or buildings.
+            // Fixture world: no standing blocks or constructions.
             .insert_resource(crate::ground_field::GroundField::unpainted(
                 &crate::ground_types::GroundTypes::load_shipped(),
             ))
@@ -2563,11 +2563,11 @@ mod tests {
         assert!(app.world().resource::<PendingClients>().0.is_empty());
     }
 
-    /// Every map's authored automatic spawn points must clear its building footprints expanded
+    /// Every map's authored automatic spawn points must clear its construction footprints expanded
     /// by the same occupancy radius as the player's spawn-map path. This catches placement edits
-    /// that would put an automatically spawned tank in a building, regardless of prototype id.
+    /// that would put an automatically spawned tank in a construction, regardless of prototype id.
     #[test]
-    fn authored_spawn_points_clear_building_footprints() {
+    fn authored_spawn_points_clear_construction_footprints() {
         let mut fixture = placement_app();
         let radius = fixture
             .world_mut()
@@ -2581,7 +2581,7 @@ mod tests {
                 scale: Vec3::from_array(instance.scale),
             };
             let block = match &manifest.prototypes[&instance.prototype] {
-                crate::map::Prototype::Building { min, max, .. } => {
+                crate::map::Prototype::Block { min, max, .. } => {
                     let (min, max) = (Vec3::from_array(*min), Vec3::from_array(*max));
                     Transform {
                         translation: pose.translation
@@ -2590,9 +2590,9 @@ mod tests {
                         scale: (max - min) * pose.scale,
                     }
                 }
-                crate::map::Prototype::Structure { asset } => crate::buildings::footprint(
+                crate::map::Prototype::Construction { asset } => crate::construction::footprint(
                     manifest
-                        .buildings
+                        .constructions
                         .get(asset)
                         .expect("map load resolved every structure"),
                     pose,
@@ -2603,7 +2603,7 @@ mod tests {
                 for point in manifest.spawn_points.as_slice() {
                     assert!(
                         !footprint_denies(footprint, *point),
-                        "spawn {point:?} overlaps building {}",
+                        "spawn {point:?} overlaps construction {}",
                         instance.id
                     );
                 }
@@ -2762,34 +2762,34 @@ mod tests {
         assert!(spot.x.abs() <= limit && spot.y.abs() <= limit);
     }
 
-    /// A building block in the [`TerrainMap`] encoding (`world::spawn_block` / `scatter`): a
+    /// A construction block in the [`TerrainMap`] encoding (`world::spawn_block` / `scatter`): a
     /// `size`-metre box standing on a surface at y = 0, centred at `center` in XZ, its bottom
     /// `sink` metres under that surface (the house proxy's skirt).
-    fn building(center: Vec2, size: Vec3, sink: f32) -> Transform {
+    fn construction(center: Vec2, size: Vec3, sink: f32) -> Transform {
         Transform::from_xyz(center.x, size.y / 2.0 - sink, center.y).with_scale(size)
     }
 
-    /// The building rule: a spawn inside a house is refused and the ring search lands the tank
+    /// The construction rule: a spawn inside a house is refused and the ring search lands the tank
     /// outside its walls, while the flat-slab world's GROUND block — a block whose top IS the
     /// surface it defines — denies nothing (it would otherwise swallow the whole placeable square).
     #[test]
-    fn spawns_inside_a_building_are_refused_and_the_ground_block_is_not() {
+    fn spawns_inside_a_construction_are_refused_and_the_ground_block_is_not() {
         let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
         let desired = Vec2::new(100.0, -50.0);
         // DERIVED fixture: a hall 16 m × 20 m plus a 3 m body radius has the same footprint
         // covers every ring-8 candidate (max |dx| = 8 < 11, |dz| = 8 < 13), so the first free
         // candidate is ring 16's +X — deterministically, in fixed ring order.
-        let hall = building(desired, Vec3::new(16.0, 6.0, 20.0), 0.5);
+        let hall = construction(desired, Vec3::new(16.0, 6.0, 20.0), 0.5);
         let (spot, nudged) =
             resolve_free_spawn_xz(half, desired, &[], &[hall], None, FIXTURE_BODY_RADIUS_M)
                 .expect("a ring is free");
         assert!(nudged);
         assert_eq!(spot, desired + SPAWN_DIRS_13[0] * SPAWN_SEARCH_RINGS[1].0);
         let walls = block_footprint(&hall, None, FIXTURE_BODY_RADIUS_M)
-            .expect("a building stands on the map");
+            .expect("a construction stands on the map");
         assert!(
             !footprint_denies(walls, spot),
-            "the resolved spot must clear the building's walls"
+            "the resolved spot must clear the construction's walls"
         );
         // The flat-slab world's ground: a 1500 m block whose top face IS the surface every spawn
         // stands on. Under a footprint-only rule it would occupy the entire world.
@@ -2804,7 +2804,7 @@ mod tests {
             Ok((desired, false)),
         );
         // A house standing ON that ground is still occupancy — the ground term never masks it.
-        let house = building(desired, Vec3::new(4.0, 3.0, 6.0), 0.5);
+        let house = construction(desired, Vec3::new(4.0, 3.0, 6.0), 0.5);
         let (spot, nudged) = resolve_free_spawn_xz(
             half,
             desired,
@@ -2833,7 +2833,8 @@ mod tests {
         let pose = Transform::from_xyz(desired.x, 0.0, desired.y)
             .with_rotation(Quat::from_rotation_y(0.4))
             .with_scale(Vec3::splat(1.3));
-        let house = crate::buildings::footprint(&crate::buildings::tests::shipped_house(), pose);
+        let house =
+            crate::construction::footprint(&crate::construction::tests::shipped_house(), pose);
         let walls = block_footprint(&house, None, FIXTURE_BODY_RADIUS_M)
             .expect("a house stands on the map");
         assert!(

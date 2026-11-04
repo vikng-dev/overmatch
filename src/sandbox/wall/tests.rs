@@ -2,7 +2,7 @@
 //! on the game's laws over the baked wall. Fixture numbers are fixture data; the brick is the
 //! shipped row's ([`super::brick`]).
 
-use crate::buildings::fracture::GroupLoads;
+use crate::construction::fracture::GroupLoads;
 use bevy::math::Vec3;
 
 use super::model::*;
@@ -28,7 +28,7 @@ const FIXTURE_BLAST: Blast = Blast {
 fn a_group_with_no_intact_path_to_the_ground_falls_as_one() {
     let layout = layout();
     let structure = &layout.cut.structure;
-    let state = WallState::new(structure);
+    let state = State::new(structure);
     assert!(
         loose_groups(structure, &state).is_empty(),
         "an intact wall stands"
@@ -39,7 +39,7 @@ fn a_group_with_no_intact_path_to_the_ground_falls_as_one() {
         .filter(|&i| structure.chunks[i].centroid.y > top)
         .collect();
     assert!(!region.is_empty());
-    let mut state = WallState::new(structure);
+    let mut state = State::new(structure);
     for (j, joint) in structure.joints.iter().enumerate() {
         let inside = |side: Side| match side {
             Side::Chunk(i) => region.contains(&i),
@@ -51,7 +51,7 @@ fn a_group_with_no_intact_path_to_the_ground_falls_as_one() {
     }
     assert_eq!(loose_groups(structure, &state), vec![region]);
 
-    let mut state = WallState::new(structure);
+    let mut state = State::new(structure);
     for (j, joint) in structure.joints.iter().enumerate() {
         state.cracked[j] = joint.b == Side::Ground;
     }
@@ -125,7 +125,7 @@ fn renumbering_the_chunks_changes_no_outcome() {
             .collect()
     };
     let outcome = |structure: &Structure| {
-        let mut state = WallState::new(structure);
+        let mut state = State::new(structure);
         crack(structure, &mut state, &source(structure));
         structural(
             structure,
@@ -165,7 +165,7 @@ fn renumbering_the_chunks_changes_no_outcome() {
 /// (the joint alone holds the top chunk), and 1 % under it cracks nothing; `I` is the top's inertia
 /// about the hinge and `E_g` the work of raising its centre of mass over it, for the bed bears the
 /// top. A capacity read about the centroid, or without the weight the section carries (one far
-/// push then opening a plane a whole building stands on), fails here. Fixture geometry; the
+/// push then opening a plane a whole construction stands on), fails here. Fixture geometry; the
 /// fixture's seams state no shear ([`Shear::OpeningOnly`]), so no punch ring (the top sliding off
 /// its bed) competes with the hinge this test pins.
 #[test]
@@ -216,7 +216,7 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
     let at = Vec3::new(0.1, 0.4, 0.25);
     let lever = at.y - joint.centroid.y;
     for (scale, fails) in [(1.01, true), (0.99, false)] {
-        let mut state = WallState::new(&structure);
+        let mut state = State::new(&structure);
         let push = Load {
             chunk: 1,
             at,
@@ -345,7 +345,7 @@ fn wall_deposit_at(energy: f32, distance: f32) -> Applied {
     let layout = layout();
     let mut wall = Wall {
         cut: layout.cut.clone(),
-        live: crate::buildings::breakage::Live::from_structure(
+        live: crate::construction::breakage::Live::from_structure(
             layout.cut.structure.clone(),
             layout.cut.elements,
         ),
@@ -467,7 +467,7 @@ fn a_fixed_far_face_loading_topples_monotonically_and_stops() {
         for k in 0..=samples {
             let distance = from + k as f32 * step;
             let loads = wall_face_pushes(energy, distance);
-            let mut state = WallState::new(&layout.cut.structure);
+            let mut state = State::new(&layout.cut.structure);
             let failures = structural(
                 &layout.cut.structure,
                 &mut state,
@@ -563,7 +563,7 @@ fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
     ] {
         let mut wall = Wall {
             cut: layout.cut.clone(),
-            live: crate::buildings::breakage::Live::from_structure(
+            live: crate::construction::breakage::Live::from_structure(
                 layout.cut.structure.clone(),
                 layout.cut.elements,
             ),
@@ -626,12 +626,12 @@ fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
 /// the channels.
 #[test]
 fn the_sandbox_chunk_outlives_the_hole_cap() {
-    use crate::buildings::breakage::HOLES_PER_CHUNK;
+    use crate::construction::breakage::HOLES_PER_CHUNK;
     let layout = layout();
     let charge = Charge::of(&super::wall_rounds());
     let mut wall = Wall {
         cut: layout.cut.clone(),
-        live: crate::buildings::breakage::Live::from_structure(
+        live: crate::construction::breakage::Live::from_structure(
             layout.cut.structure.clone(),
             layout.cut.elements,
         ),
@@ -717,7 +717,7 @@ fn inspector_app(held: bool) -> (bevy::prelude::App, crate::ballistics::Delivere
         chunks: vec![chunk],
         joints: Vec::new(),
     };
-    let live = crate::buildings::breakage::Live::from_structure(structure.clone(), 1);
+    let live = crate::construction::breakage::Live::from_structure(structure.clone(), 1);
     let energy = live.state.pool[0] * chunk.material.crush * 0.01;
     let reach = (block.max - block.min).length();
     let from = block.center() - Vec3::Z * reach;
@@ -1056,19 +1056,20 @@ fn the_inspector_attributes_cones_to_their_wall_and_shell() {
 }
 
 /// THE WALL IS ITS DECLARED COMPONENT, NOT ITS NAMES: renaming every element of the shipped
-/// building (fixture edit) leaves the sandbox's cut the same, hull for hull. A selection by name
+/// construction (fixture edit) leaves the sandbox's cut the same, hull for hull. A selection by name
 /// prefix loses the wall the moment an element is renamed.
 #[test]
 fn renaming_the_elements_keeps_the_wall() {
-    use crate::buildings::schema::BuildingAsset;
-    let asset = BuildingAsset::from_ron(super::BUILDING).expect("the shipped building parses");
+    use crate::construction::schema::ConstructionAsset;
+    let asset =
+        ConstructionAsset::from_ron(super::CONSTRUCTION).expect("the shipped construction parses");
     let mut renamed = asset.clone();
     for (k, element) in renamed.elements.iter_mut().enumerate() {
         element.name = format!("renamed_{k}");
     }
-    let cut = |asset: &BuildingAsset| {
+    let cut = |asset: &ConstructionAsset| {
         super::baked::wall_cut(asset, super::WALL, super::SUBSTANCE, brick(), super::PLACE)
-            .expect("the shipped building has the wall")
+            .expect("the shipped construction has the wall")
             .blocks
     };
     let blocks = cut(&asset);

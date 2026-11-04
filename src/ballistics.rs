@@ -435,7 +435,7 @@ pub(crate) fn energy_units(energy: f32) -> u64 {
 
 /// The sim's only field J-to-HP conversion: a direction's deposit in any box, hard or witness,
 /// at its mechanism's `unit`, in [`DOSE_UNITS_PER_HP`] units. The field carries source energy,
-/// which buildings read as crushing energy. Shot tally and pen cam ledger use this same conversion:
+/// which constructions read as crushing energy. Shot tally and pen cam ledger use this same conversion:
 /// exact f64 widening, two IEEE multiplies, nearest rounding with ties away from zero, identical
 /// on every target. Internal energy must be finite and nonnegative; a broken deposit is a bug.
 /// Contributions above the range saturate.
@@ -1018,7 +1018,7 @@ pub(crate) fn mount_march_probe(app: &mut App) {
             .after(avian3d::prelude::PhysicsSystems::Writeback)
             .after(SimPhase::ColliderPoses)
             .before(SimPhase::ProjectileMarch)
-            .before(crate::buildings::breakage::WallLawSet)
+            .before(crate::construction::breakage::LawSet)
             .before(crate::trees::TreeFallSet),
     );
 }
@@ -1169,7 +1169,7 @@ pub(crate) struct DeliveredLine {
 /// One authority march step of `shell` that logged armour marks, threw spall cones or burst,
 /// raised in the tick it marched, before the shell can despawn: its marks from `marks_from` and
 /// its cones from `cones_from` are this step's, and `burst` is the burst it set off, if it did.
-/// The buildings' fracture laws read their deposits off it (`buildings::breakage`).
+/// The constructions' fracture laws read their deposits off it (`construction::breakage`).
 #[derive(Event, Debug, Clone)]
 pub(crate) struct ShellMarched {
     pub(crate) shell: Entity,
@@ -1721,7 +1721,7 @@ pub struct SpallRay {
     pub direction: Dir3,
     pub end: Vec3,
     /// The strength (J) the direction was thrown with: the cone's `S` times its profile. It and
-    /// its doses are the field's energy, never HP: a building crushes with `strength / N`, a box's
+    /// its doses are the field's energy, never HP: a construction crushes with `strength / N`, a box's
     /// pool reads a dose through its field's unit ([`field_units`]).
     pub strength: f32,
     /// The doses it addressed (volume, J), in entry order.
@@ -1953,7 +1953,7 @@ pub fn sim_plugin(app: &mut App) {
             SimPhase::ProjectileMarch,
             DamageConsequences,
             SimPhase::RecordedConsequences,
-            crate::buildings::breakage::WallLawSet,
+            crate::construction::breakage::LawSet,
             crate::trees::TreeFallSet,
             crate::trees::TreeDerived,
             SimPhase::Publish,
@@ -3757,7 +3757,7 @@ fn throw_burst(
         "the game's damage model derives finite nonnegative burst strength from validated energy",
     );
     if throw.strength == 0.0 {
-        return; // A field carrying no energy has nothing for a pool or a building.
+        return; // A field carrying no energy has nothing for a pool or a construction.
     }
     let (field, law) = fields.field(speed / burst.sideways_speed);
     let spread = law.spread(field).expect(
@@ -3884,7 +3884,7 @@ fn throw_spall_cone(
         exited: &source.exited,
     };
     if strength == 0.0 {
-        return false; // A cone carrying no energy has nothing for a pool or a building.
+        return false; // A cone carrying no energy has nothing for a pool or a construction.
     }
     let spread = shape
         .spread(spall_cone::FieldDescriptor::ball(source.debris_ratio))
@@ -4309,16 +4309,16 @@ mod tests {
 
     /// A FIELD'S HP UNIT MOVES ITS CREW DOSE AND NEVER THE VOLUME IT CRUSHES (the game's damage
     /// model and environment destruction model, game state only). A cone carries its share of the
-    /// energy its round lost across the body, `κ r` ([`walk::SpallSource::carried`]); a building
+    /// energy its round lost across the body, `κ r` ([`walk::SpallSource::carried`]); a construction
     /// reads each direction's `S·f_k / N` joules as the energy it crushes with
-    /// (`buildings::breakage`'s shell reader, [`crate::buildings::fracture::Load::field`]), and a
+    /// (`construction::breakage`'s shell reader, [`crate::construction::fracture::Load::field`]), and a
     /// crew station's HP pool reads the same joules through the cone's unit, summed by the shot's
     /// tally ([`ShotDose`]'s field deposit). So the crushed volume is the energy carried over the
     /// chunk's crushing energy density whatever the unit, and the crew dose is the joules times
     /// the unit at each of two units. A unit or the line rate entering the strength (the defect
     /// this pins: a balance unit crushing masonry) moves the crushed volume; a tally converting a
     /// field deposit at the energy rate, or at no unit, misses the crew dose. Who relies on it:
-    /// every building a cone meets and every crew pool it doses. Fixture data: 2.7 MJ lost
+    /// every construction a cone meets and every crew pool it doses. Fixture data: 2.7 MJ lost
     /// through a reference-strength exit (ratio 1) and a softer one (0.2), `λ` 2.4, 64
     /// directions, a chunk crushed at 1.35e8 J/m³, a crew station every direction reaches, and
     /// units 1.5e-4 and 3.0e-4 HP per joule, neither the energy rate's 1/3000.
@@ -4352,7 +4352,7 @@ mod tests {
                 .iter()
                 .map(|&energy| (0, Vec3::ZERO, energy, Vec3::ZERO))
                 .collect();
-            let crushed: f64 = crate::buildings::fracture::Load::field(&hits, |_| CRUSH)
+            let crushed: f64 = crate::construction::fracture::Load::field(&hits, |_| CRUSH)
                 .iter()
                 .map(|load| f64::from(load.crushed))
                 .sum();
@@ -7147,7 +7147,7 @@ pub(crate) mod march_tests {
         );
     }
 
-    /// The game's damage model: a skid's exchange reaches the matter it struck. A building or trunk
+    /// The game's damage model: a skid's exchange reaches the matter it struck. A construction or trunk
     /// reads only `ShellMarched::lines`, so a skid that published none would spend its work and
     /// momentum on nothing. Plate, speed and the 75° graze are fixture data. Mutant: no line for a
     /// skid.
@@ -8165,11 +8165,11 @@ pub(crate) mod march_tests {
     /// world: every element a collider of its own substance, as the scatter spawns it.
     fn house_world() -> App {
         let mut app = bare_world(false);
-        let kind = crate::buildings::tests::shipped_house();
+        let kind = crate::construction::tests::shipped_house();
         let world = app.world_mut();
         let mut queue = bevy::ecs::world::CommandQueue::default();
         let mut commands = Commands::new(&mut queue, world);
-        crate::buildings::spawn(
+        crate::construction::spawn(
             &mut commands,
             &kind,
             crate::scatter::MapInstance {

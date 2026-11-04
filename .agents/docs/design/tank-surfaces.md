@@ -50,7 +50,7 @@ the column here says where they come from.
 | Engine block (interior) | `EngineBlock` | `cast_steel` | yes | grey cast iron × fill, DERIVED |
 | Stowed rounds (interior) | `Ammunition` | `machined_steel` | yes | unknown |
 | Penetrator core (worn by no tank) | `TungstenCarbide` | `machined_steel` | yes | CoorsTek datasheet |
-| Masonry (buildings) | `Brick` | `brick` | no | BIA Technical Note 3A |
+| Masonry (constructions) | `Brick` | `brick` | no | BIA Technical Note 3A |
 
 Every `Hard` row names a visual; the parser refuses one that does not. A `Witness` (crew, `Flesh`) is
 not matter and names none: crew boxes keep the glb's flat legibility colour. An `Unworn` row (a burst
@@ -83,7 +83,7 @@ scout §1.4). Each folder's `cc.txt` names the source.
 | `machined_steel` | ambientCG Metal009 | CC0 | 0.5 m ASSUMED | yes |
 | `track_steel` | ambientCG Metal046B (the track link's own source) | CC0 | 0.5 m ASSUMED | no |
 | `rubber` | ambientCG Rubber004 | CC0 | 0.5 m ASSUMED | no |
-| `brick` | Poly Haven brick_wall_006 (the buildings' wall pack, shared) | CC0 | 3.0 m MEASURED | no |
+| `brick` | Poly Haven brick_wall_006 (the constructions' wall pack, shared) | CC0 | 3.0 m MEASURED | no |
 | `glass` | flat colour and factors: neither source carries a glass pack (APIs queried 2026-10-31) | — | — | no |
 
 ambientCG publishes no real-world size, so those repeats are ASSUMED. Memory, DERIVED: a 1024² map

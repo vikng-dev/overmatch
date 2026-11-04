@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-pub mod buildings;
+pub mod construction;
 
 /// The repository's root: the game's manifest directory, one above this package's.
 pub fn repo_root() -> PathBuf {

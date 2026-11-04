@@ -1,7 +1,7 @@
 #!/bin/sh
 # encode-terrain-ktx2.sh — re-encode the surface packs into the KTX2 files the game actually ships:
 # the terrain's (`assets/terrain/<pack>/<pack>_*.ktx2`, `assets/terrain/blend/blend_*.ktx2`) and
-# the scatter buildings' (`assets/buildings/<pack>/<pack>_*.ktx2`).
+# the scatter constructions' (`assets/constructions/<pack>/<pack>_*.ktx2`).
 #
 # WHY KTX2 AND NOT PNG/JPG: bevy's PNG/JPG loaders produce a texture with ONE mip level. A 4k
 # ground texture tiled every 8 m, sampled at grazing angles across the whole horizon, then misses
@@ -29,10 +29,10 @@
 #   aerial_mud_1          diff         2048  4k  blend layer 2 (lowlands)
 #   brown_mud_leaves_01   diff         2048  4k  staged — nothing loads it
 #   rocks_ground_02       col          2048  4k  staged — nothing loads it
-#   brick_wall_006        diff         1024  2k  the primary building lane (visuals.ron "brick")
-#   dark_planks           diff         1024  2k  the secondary building lane (visuals.ron "dark_planks")
+#   brick_wall_006        diff         1024  2k  the primary construction lane (visuals.ron "brick")
+#   dark_planks           diff         1024  2k  the secondary construction lane (visuals.ron "dark_planks")
 #
-# A building pack is cut at 1024², from 2k masters: a house face spans metres, not a horizon, and
+# A construction pack is cut at 1024², from 2k masters: a house face spans metres, not a horizon, and
 # the LOW preset's GPU is a GTX 1650-class part. Two master texels per shipped texel is all the
 # resample's filter uses.
 set -e
@@ -47,7 +47,7 @@ LAYER_PACKS="dirt_aerial_03 coast_sand_05 aerial_mud_1"
 BLEND_DIR="assets/terrain/blend"
 BLEND_RES=2048
 
-# The scatter buildings' packs: standalone maps into `assets/buildings/<pack>/`.
+# The scatter constructions' packs: standalone maps into `assets/constructions/<pack>/`.
 BUILDING_PACKS="brick_wall_006 dark_planks"
 
 TARGETS="${*:-coast_sand_rocks_02 brown_mud_leaves_01 rocks_ground_02 blend $BUILDING_PACKS}"
@@ -55,8 +55,8 @@ TARGETS="${*:-coast_sand_rocks_02 brown_mud_leaves_01 rocks_ground_02 blend $BUI
 command -v basisu >/dev/null || { echo "need basisu: brew install basis_universal" >&2; exit 1; }
 mkdir -p "$SRC"
 
-# Is $1 one of the scatter buildings' packs?
-is_building() {
+# Is $1 one of the scatter constructions' packs?
+is_construction() {
     case " $BUILDING_PACKS " in
         *" $1 "*) return 0 ;;
         *)        return 1 ;;
@@ -65,7 +65,7 @@ is_building() {
 
 # The master resolution a pack is cut from (see the table above).
 source_res_of() {
-    if is_building "$1"; then echo 2k; else echo 4k; fi
+    if is_construction "$1"; then echo 2k; else echo 4k; fi
 }
 
 # A source map's path in $SRC. $1 = pack, $2 = map, $3 = extension.
@@ -151,8 +151,8 @@ encode_pack() {
         coast_sand_rocks_02) res=4096 ;;
         *)                   res=2048 ;;
     esac
-    if is_building "$pack"; then
-        out="assets/buildings/$pack"
+    if is_construction "$pack"; then
+        out="assets/constructions/$pack"
         res=1024
     fi
     albedo="$(albedo_of "$pack")"
@@ -195,7 +195,7 @@ for target in $TARGETS; do
     case "$target" in
         coast_sand_rocks_02|brown_mud_leaves_01|rocks_ground_02) packs="$packs $target" ;;
         *)
-            is_building "$target" || { echo "unknown target: $target" >&2; exit 1; }
+            is_construction "$target" || { echo "unknown target: $target" >&2; exit 1; }
             packs="$packs $target"
             ;;
     esac

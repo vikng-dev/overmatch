@@ -1747,7 +1747,7 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
                 CenterOfMass(Vec3::ZERO),
                 NoAutoCenterOfMass,
                 crate::substances::contact_friction(0.6),
-                crate::buildings::breakage::piece_layers(),
+                crate::construction::breakage::piece_layers(),
             ))
             .id()
     });
@@ -3219,7 +3219,7 @@ fn a_felled_trees_colliders_follow_its_dynamic_body() {
     let at = body.structure.chunks[n - 1].centroid;
     app.world_mut().entity_mut(root).insert((
         TreeState::Down { cut, dir: 0 },
-        crate::trees::TrunkLoads(vec![crate::buildings::fracture::Load {
+        crate::trees::TrunkLoads(vec![crate::construction::fracture::Load {
             chunk: n - 1,
             at,
             blow: Vec3::X * mass * 2.0,
@@ -3227,7 +3227,7 @@ fn a_felled_trees_colliders_follow_its_dynamic_body() {
             energy: 0.0,
             crushed: 0.0,
             peak: None,
-            origin: crate::buildings::fracture::Origin::Field,
+            origin: crate::construction::fracture::Origin::Field,
         }]),
     ));
     for _ in 0..128 {
@@ -3381,9 +3381,7 @@ fn every_collider_carries_its_materials_friction_under_the_one_rule() {
             let id = instance.expect("a scatter proxy carries its instance");
             let record = manifest.instances.iter().find(|i| i.id == id).unwrap();
             match &manifest.prototypes[&record.prototype] {
-                Prototype::Building { substance, .. } => {
-                    registry.contact_friction(substance).unwrap()
-                }
+                Prototype::Block { substance, .. } => registry.contact_friction(substance).unwrap(),
                 other => panic!("a scatter proxy of {other:?}"),
             }
         } else if world
@@ -3422,7 +3420,7 @@ fn every_collider_carries_its_materials_friction_under_the_one_rule() {
 #[test]
 #[ignore = "a measurement bed, run on demand"]
 fn a_shipped_data_hull_push_reports_environment_release_groups() {
-    use crate::buildings::breakage::{WallPiece, WallRecord};
+    use crate::construction::breakage::{Piece, Record};
     use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
     let (mut app, tank) = booted_offline_sim();
     for _ in 0..128 {
@@ -3430,10 +3428,10 @@ fn a_shipped_data_hull_push_reports_environment_release_groups() {
     }
     let y = app.world().get::<Position>(tank).unwrap().y;
     let house_at = Vec3::new(20.0, 0.0, 20.0);
-    let kind = crate::buildings::tests::shipped_house();
+    let kind = crate::construction::tests::shipped_house();
     let mut queue = bevy::ecs::world::CommandQueue::default();
     let mut commands = Commands::new(&mut queue, app.world());
-    crate::buildings::spawn(
+    crate::construction::spawn(
         &mut commands,
         &kind,
         crate::scatter::MapInstance {
@@ -3454,17 +3452,17 @@ fn a_shipped_data_hull_push_reports_environment_release_groups() {
     }
     let groups: Vec<usize> = app
         .world_mut()
-        .query::<&WallPiece>()
+        .query::<&Piece>()
         .iter(app.world())
-        .filter(|piece| piece.building == 60000)
+        .filter(|piece| piece.construction == 60000)
         .map(|piece| piece.chunks.len())
         .collect();
     assert!(
         app.world()
-            .resource::<WallRecord>()
+            .resource::<Record>()
             .entries
             .iter()
-            .any(|entry| entry.building == 60000),
+            .any(|entry| entry.construction == 60000),
         "the driving fixture must reach the wall through production contacts"
     );
     println!(
@@ -3567,7 +3565,7 @@ fn loose_pieces_priced_per_tick() {
                         CenterOfMass(Vec3::ZERO),
                         NoAutoCenterOfMass,
                         crate::substances::contact_friction(0.6),
-                        crate::buildings::breakage::piece_layers(),
+                        crate::construction::breakage::piece_layers(),
                     ))
                     .id()
             })

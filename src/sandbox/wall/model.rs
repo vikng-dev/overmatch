@@ -1,8 +1,8 @@
 //! The wall prototype's model, about the game's environment destruction (game state only): the
-//! game's own fracture laws ([`crate::buildings::fracture`], the laws' one home), and the cut the
+//! game's own fracture laws ([`crate::construction::fracture`], the laws' one home), and the cut the
 //! sandbox draws them on.
 
-pub(crate) use crate::buildings::fracture::*;
+pub(crate) use crate::construction::fracture::*;
 
 /// A cut: the structure the laws read, and per chunk and joint what the view draws.
 #[derive(Clone, Debug)]

@@ -292,7 +292,7 @@ reaction; the shared plank's bits differed with the spawn order exchanged.
   timeline is held at the end adds one more. Lightyear's own transport tick still saturates, and
   its input and replication ordering past that end (776 days at 64 Hz, DERIVED) belong to lightyear.
 - **What holds the recipient decides its side** (superseded: one law by mass, inertia and the belt's
-  springs, `wall-destruction-sweep-2.md` part 6). A body whose own support is a belt law this
+  springs, `construction-destruction-sweep-2.md` part 6). A body whose own support is a belt law this
   tick (any driving tank's hull) takes the whole opposite reaction, `−(normal × load + traction) ×
   dt`, as fixed construction does, with no closing-speed condition. Every other dynamic body is a
   piece and keeps the clamped sequential impulse. This is a fact about construction, not about a
@@ -317,7 +317,7 @@ reaction; part 5 clamped it).
 
 MEASURED green batches: shooting, sim_tick, spec, crew_ui, `vfx::muzzle`, state hash and all `net::`
 **384 passed, 1 ignored** (the wire-type pin then re-pinned at REV 61). The combined batch passed
-**1033 tests, 10 ignored**: contact transfer, track, trees, buildings, `headless_test`, `pen_cam`,
+**1033 tests, 10 ignored**: contact transfer, track, trees, constructions, `headless_test`, `pen_cam`,
 `field_casts`, all `net::`, the weapon modules, and the whole-tree guards (`doc_citations ui_ascii
 net_boundary bake::`). The new tests, contact transfer, rubble and citations passed **35** after
 the mutants were restored. On the final tree, the whole-tree guards with `track::sim` passed **50**.

@@ -1,12 +1,12 @@
-//! The wall's cut, read from a building's bake (`assets/buildings/<id>/<id>.building.ron`): one
+//! The wall's cut, read from a construction's bake (`assets/constructions/<id>/<id>.construction.ron`): one
 //! wall's chunks and joints, set down in the sandbox. The bake chose the cut; this only selects
 //! and places it.
 
 use bevy::math::{Quat, Vec3};
 
 use super::model::{Block, Bond, Chunk, Cut, Joint, Masonry, Side, Structure, clip_polygon};
-use crate::buildings::attachments::Attachments;
-use crate::buildings::schema::BuildingAsset;
+use crate::construction::attachments::Attachments;
+use crate::construction::schema::ConstructionAsset;
 
 /// Where a wall is set down: the world x its centre stands at, the world z its back face stands
 /// at; its foundation plane lies on world y = 0 and its outer face looks down +Z.
@@ -17,12 +17,12 @@ pub(crate) struct Placement {
 }
 
 /// The chunks and joints of the elements of `substance` in component `wall` (the bake's declared
-/// membership, [`crate::buildings::schema::Element::component`]), as one [`Cut`] of `material`,
+/// membership, [`crate::construction::schema::Element::component`]), as one [`Cut`] of `material`,
 /// placed by `at`. The wall's outer face is its first
-/// element's face across its thinnest span ([`Block::thinnest`]) away from the building's middle.
+/// element's face across its thinnest span ([`Block::thinnest`]) away from the construction's middle.
 /// A joint to a chunk outside the selection (another wall, or another substance) is dropped.
 pub(crate) fn wall_cut(
-    asset: &BuildingAsset,
+    asset: &ConstructionAsset,
     wall: &str,
     substance: &str,
     material: Masonry,
@@ -134,7 +134,7 @@ pub(crate) fn wall_cut(
         let polygon = clip_polygon(&face_a, &face_b, normal);
         if face_a.len() < 3 || face_b.len() < 3 || polygon.len() < 3 {
             return Err(format!(
-                "assets/buildings/{id}/{id}.building.ron joints[{index}].centroid/normal: \
+                "assets/constructions/{id}/{id}.construction.ron joints[{index}].centroid/normal: \
                  no shared face reconstructs from chunks {} and {}; rebake the interface on both hulls",
                 j.a,
                 j.b,
@@ -155,7 +155,7 @@ pub(crate) fn wall_cut(
         .anchors(asset)
         .map_err(|err| {
             format!(
-                "assets/buildings/{id}/{id}.building.ron: {err}",
+                "assets/constructions/{id}/{id}.construction.ron: {err}",
                 id = asset.id,
             )
         })?;
@@ -167,7 +167,7 @@ pub(crate) fn wall_cut(
         let polygon = blocks[a].face_on(centroid, Vec3::Y);
         if polygon.len() < 3 {
             return Err(format!(
-                "assets/buildings/{id}/{id}.building.ron anchors[{index}].centroid: \
+                "assets/constructions/{id}/{id}.construction.ron anchors[{index}].centroid: \
                  no foundation face reconstructs from chunk {}; rebake the anchor on its hull",
                 anchor.chunk,
                 id = asset.id,
@@ -205,21 +205,21 @@ pub(crate) fn wall_cut(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{BUILDING, PLACE, SUBSTANCE, WALL, brick};
+    use super::super::{CONSTRUCTION, PLACE, SUBSTANCE, WALL, brick};
     use super::*;
 
-    fn cut(asset: &BuildingAsset) -> Result<Cut, String> {
+    fn cut(asset: &ConstructionAsset) -> Result<Cut, String> {
         wall_cut(asset, WALL, SUBSTANCE, brick(), PLACE)
     }
 
-    fn selected(asset: &BuildingAsset, chunk: u32) -> bool {
+    fn selected(asset: &ConstructionAsset, chunk: u32) -> bool {
         let element = &asset.elements[usize::from(asset.chunks[chunk as usize].element)];
         asset.components[usize::from(element.component)] == WALL
             && asset.materials[usize::from(element.material)] == SUBSTANCE
     }
 
-    fn foundation_fixture(name: &str) -> BuildingAsset {
-        let mut asset = BuildingAsset::from_ron(BUILDING).unwrap();
+    fn foundation_fixture(name: &str) -> ConstructionAsset {
+        let mut asset = ConstructionAsset::from_ron(CONSTRUCTION).unwrap();
         // Fixture: only the inspected chunks carry ground interfaces, so their placed
         // centroids independently determine each complete footprint's centroid.
         asset.anchors = asset
@@ -322,7 +322,7 @@ mod tests {
     /// against an absent second face as if it imposed no bounds, must refuse the bake.
     #[test]
     fn an_interface_requires_both_chunk_faces() {
-        let original = BuildingAsset::from_ron(BUILDING).unwrap();
+        let original = ConstructionAsset::from_ron(CONSTRUCTION).unwrap();
         cut(&original).expect("the unmodified fixture reconstructs");
         let joint = original
             .joints
@@ -357,7 +357,7 @@ mod tests {
                 panic!("an absent interface must refuse the bake");
             };
             assert!(
-                error.contains(&format!("{}/{}.building.ron", asset.id, asset.id))
+                error.contains(&format!("{}/{}.construction.ron", asset.id, asset.id))
                     && error.contains("joints[0]")
                     && error.contains("rebake"),
                 "{error}"
@@ -369,7 +369,7 @@ mod tests {
     /// hides this fixture's chunk translated above its still-admitted foundation declaration.
     #[test]
     fn an_anchor_requires_its_chunk_face() {
-        let mut asset = BuildingAsset::from_ron(BUILDING).unwrap();
+        let mut asset = ConstructionAsset::from_ron(CONSTRUCTION).unwrap();
         cut(&asset).expect("the unmodified fixture reconstructs");
         let anchor = asset
             .anchors
@@ -393,7 +393,7 @@ mod tests {
             panic!("an absent anchor face must refuse the bake");
         };
         assert!(
-            error.contains(&format!("{}/{}.building.ron", asset.id, asset.id))
+            error.contains(&format!("{}/{}.construction.ron", asset.id, asset.id))
                 && error.contains("anchors[0]")
                 && error.contains("rebake"),
             "{error}"

@@ -40,9 +40,9 @@
 //   Cast armour has no sourced row.
 //
 // `bulk` = the bulk facts of a non-metal (density kg/m³ and optionally a seam between a
-// building's pre-cut chunks: `tensile`, its tensile strength, Pa, and
-// `fracture_energy`, its mode-I fracture energy G_f, J/m², stated together): the building bake
-// reads the density for each chunk's mass; the buildings' fracture laws read the density, the
+// construction's pre-cut chunks: `tensile`, its tensile strength, Pa, and
+// `fracture_energy`, its mode-I fracture energy G_f, J/m², stated together): the construction bake
+// reads the density for each chunk's mass; the constructions' fracture laws read the density, the
 // factor and the seam, and an element of a substance stating no seam never breaks.
 // Optional, absent read as `None`, and never stated beside `facts` (each states a density).
 // A breakable seam also requires `shear_cohesion` (c, Pa, without precompression) and `shear_fracture_energy` (cohesive G_II, J/m², excluding
@@ -371,7 +371,7 @@
         // crew line rate along the chord the shell's disc cut through it, and each spall
         // direction's strength entering it.
         "Flesh": Witness,
-        // Dry timber: a building's planks and plates, and the segment tree runtime's trunk
+        // Dry timber: a construction's planks and plates, and the segment tree runtime's trunk
         // substance (`assets/trees/wood.ron` names it). A construction's trunk is green wood, its
         // species' row below. No penetration data: the
         // factor is the wood's crushing strength along the grain over the reference steel's flow
@@ -592,7 +592,7 @@
                 shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green silver birch measurement of this quantity"))),
             )),
         ),
-        // Fired clay brick: every building's masonry (`assets/buildings/<id>/<id>.building.ron`
+        // Fired clay brick: every construction's masonry (`assets/constructions/<id>/<id>.construction.ron`
         // names it) and the armour sandbox's wall prototype (`src/sandbox/wall.rs`). No
         // penetration data: the factor is the brick unit's compressive strength over the reference
         // steel's flow strength, scaled to the reference's 1000 — the strength ratio Wood's row
@@ -620,12 +620,12 @@
             bulk: Some((
                 density: (1845.0, Measured("London stock brick, Engineering ToolBox 'Bricks -
                     Densities' (read, secondary; the wall prototype's value,
-                    .agents/scratch/destruction-2026-10-30-buildings/wall-prototype/README.md).
+                    .agents/scratch/destruction-2026-10-30-constructions/wall-prototype/README.md).
                     Range 1765–2165 kg/m³, red facings to engineering")),
                 tensile: Some((0.69e6, Measured("CLAIMED: the modulus of rupture normal to bed joints of
                     solid units in portland cement-lime Type N mortar, 690 kPa, Brick Industry
                     Association Technical Note 3A (2024) Table 7, read 2026-10-30 (the wall
-                    prototype's value, .agents/scratch/destruction-2026-10-30-buildings/
+                    prototype's value, .agents/scratch/destruction-2026-10-30-constructions/
                     wall-prototype/README.md); 349-919 kPa across mortar types. A seam is the
                     wall material's: mortar is no separate material"))),
                 fracture_energy: Some((10.0, Measured("CLAIMED, not read: the brick-mortar interface's

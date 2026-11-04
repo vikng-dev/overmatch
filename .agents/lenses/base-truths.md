@@ -12,7 +12,7 @@ Review test: would this line survive tank #2, house #2 and a new material unchan
 - **Per-object rule**: behaviour keyed on what a body is rather than what it is made of and how it
   is built: a marker component gating physics ("turrets do not slide", "roofs do not fall"), a
   special case for one body type in contact, friction, weight, collapse or the damage model.
-- **Named asset in logic**: a tank, building, round or material name in a branch, a constant or a
+- **Named asset in logic**: a tank, construction, round or material name in a branch, a constant or a
   lookup outside the asset data.
 - **Per-asset constant**: a number tuned for one asset and living in code rather than in that asset's
   data, or a code default that only one asset's data happens to override.

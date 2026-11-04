@@ -206,7 +206,7 @@ pub(crate) struct Hull;
 struct FreeFlyCam;
 
 pub fn plugin(app: &mut App) {
-    scene(); // Refuse tool data before building or spawning the inspection scene.
+    scene(); // Refuse tool data before construction or spawning the inspection scene.
     crate::track::wheels::wheel_lift_rise_omega();
     // Fingerprint the sim artifact before bake reads it and resolve the shoe's certified chain.
     app.add_plugins((

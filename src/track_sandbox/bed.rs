@@ -14,7 +14,7 @@ use bevy::prelude::*;
 
 use super::{BeltContacts, Hull, mount_harness};
 use crate::bake::TankBlueprint;
-use crate::buildings::breakage::BuildingChunk;
+use crate::construction::breakage::ChunkCollider;
 use crate::debris::DebrisPiece;
 use crate::headless_test::{BOOT_LEASE, finish_plugins, headless_shell, start_fixed_clock};
 use crate::track::bump_stop::{BumpStop, SidePlate};
@@ -163,7 +163,7 @@ fn run(spec: &str, ticks: usize) -> Run {
             let body = world.get::<ColliderOf>(other).map_or(other, |of| of.body);
             let kind = if world.get::<DebrisPiece>(body).is_some() {
                 "piece"
-            } else if world.get::<BuildingChunk>(other).is_some() {
+            } else if world.get::<ChunkCollider>(other).is_some() {
                 "standing chunk"
             } else {
                 "terrain"

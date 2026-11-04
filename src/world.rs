@@ -61,8 +61,8 @@ pub(crate) fn reconstruct(world: &mut World) {
             "environment roots have disjoint ownership"
         );
     }
-    if let Some(mut record) = world.get_resource_mut::<crate::buildings::breakage::WallRecord>() {
-        *record = crate::buildings::breakage::WallRecord {
+    if let Some(mut record) = world.get_resource_mut::<crate::construction::breakage::Record>() {
+        *record = crate::construction::breakage::Record {
             generation: record.generation.wrapping_add(1),
             ..default()
         };
@@ -85,8 +85,8 @@ pub struct TerrainMap {
     pub blocks: Vec<Transform>,
 }
 
-/// What stands on the map without being terrain: each building's bounds in the [`TerrainMap`]
-/// block encoding (a unit cube posed and scaled; `crate::buildings::footprint`). Never part of the
+/// What stands on the map without being terrain: each construction's bounds in the [`TerrainMap`]
+/// block encoding (a unit cube posed and scaled; `crate::construction::footprint`). Never part of the
 /// track field: belts read its colliders. Spawn avoidance refuses a spawn inside one exactly as inside
 /// a standing block (`net::server`).
 #[derive(Resource, Default)]
@@ -431,15 +431,15 @@ pub fn plugin(app: &mut App) {
     // composition because `spawn_environment` writes its asset collection on every composition:
     // the plugin's render half is behind the render app, which the dedicated server does not have.
     app.add_plugins(crate::terrain_blend::plugin);
-    // The scatter buildings' material, which `spawn_environment` takes for the same reason.
-    app.add_plugins(crate::building_surface::plugin);
+    // The scatter constructions' material, which `spawn_environment` takes for the same reason.
+    app.add_plugins(crate::construction_surface::plugin);
     // The terrain LOD ladder's adaptive half: the levels are generated in `spawn_environment`
     // above, and this keeps their switch distances honest as the optic toggles and the window
     // resizes. Inert until a ladder exists, so the dedicated server pays nothing.
     app.add_plugins(crate::terrain_lod::plugin);
 }
 
-/// How a surface map's bytes (a terrain or building pack's, or a mask's) must be interpreted at LOAD
+/// How a surface map's bytes (a terrain or construction pack's, or a mask's) must be interpreted at LOAD
 /// time — the one texture decision that cannot be corrected downstream (the sampler hands the
 /// shader whatever the GPU format says). The diffuse carries COLOUR and is authored in sRGB; the
 /// normal and ARM maps carry DATA — a tangent-space direction, and three material scalars — and an
@@ -487,10 +487,10 @@ pub(crate) fn surface_sampler(tiling: MapTiling) -> bevy::image::ImageSamplerDes
     sampler
 }
 
-/// Load one surface image (a terrain or building pack's map, or a mask) with the sampler its role
+/// Load one surface image (a terrain or construction pack's map, or a mask) with the sampler its role
 /// needs ([`surface_sampler`]). Async load is fine — this is pure view (ADR-0014), nothing sim-side
 /// reads it — but a FAILED load is fatal, so every caller holds its maps' ids for a reporter
-/// ([`report_failed_terrain_map`], `building_surface`'s). The sampler is orthogonal to the
+/// ([`report_failed_terrain_map`], `construction_surface`'s). The sampler is orthogonal to the
 /// container: the same descriptor rides the KTX2 maps exactly as it rode the PNGs.
 pub(crate) fn surface_map(
     asset_server: &AssetServer,
@@ -573,8 +573,8 @@ fn spawn_environment(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut terrain_materials: ResMut<Assets<crate::terrain_blend::TerrainMaterial>>,
-    // The scatter buildings' one shared material (`building_surface`).
-    mut building_materials: ResMut<Assets<crate::building_surface::BuildingMaterial>>,
+    // The scatter constructions' one shared material (`construction_surface`).
+    mut construction_materials: ResMut<Assets<crate::construction_surface::ConstructionMaterial>>,
     // Its hole tables' store, which the shared material binds an empty one from: the render
     // plugin's, so absent where nothing draws.
     mut buffers: Option<ResMut<Assets<bevy::render::storage::ShaderBuffer>>>,
@@ -613,7 +613,7 @@ fn spawn_environment(
 
     // The heightmap world: when the grid decoded, the heightfield IS the world — no flat slab,
     // no authored test course. The oracle's ground term comes from the grid; `TerrainMap` carries
-    // only what stands ON it (the scatter's buildings, below), on the same revision semantics
+    // only what stands ON it (the scatter's constructions, below), on the same revision semantics
     // `TrackField` rebuilds from.
     if let Some(grid) = grid {
         // The view layer's parry cap must reach across the map the grid actually is (ADR-0011): a
@@ -775,9 +775,9 @@ fn spawn_environment(
         }
         // The map's object scatter (`scatter`): proxies and bodies posed from the shipped level file
         // onto THIS grid, colliders on every composition and meshes only where there is a window.
-        // A graybox building is appended to `blocks` before the resource is inserted, so it enters
+        // A graybox construction is appended to `blocks` before the resource is inserted, so it enters
         // the analytic track field through the same list the authored course's cuboids do; a
-        // building of the destruction model comes back as a spawn obstacle instead. The showcase
+        // construction of the destruction model comes back as a spawn obstacle instead. The showcase
         // world is excluded for the reason its grid is flat: scenery in front of the thing being
         // looked at.
         let mut obstacles = Vec::new();
@@ -793,7 +793,7 @@ fn spawn_environment(
                     .filter(|_| !windows.is_empty())
                     .map(|buffers| crate::scatter::ViewAssets {
                         server: &asset_server,
-                        building_materials: &mut building_materials,
+                        construction_materials: &mut construction_materials,
                         buffers,
                     }),
             );
@@ -832,7 +832,7 @@ fn spawn_environment(
         revision: 0,
         blocks,
     });
-    // The course stands no buildings: every block is terrain.
+    // The course stands no constructions: every block is terrain.
     commands.insert_resource(SpawnObstacles::default());
 }
 

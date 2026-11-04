@@ -112,7 +112,7 @@ use std::path::{Path, PathBuf};
 const ALLOWED_IDENTIFIERS: &[(&str, &str, &str)] = &[
     // ---- Owned by another codebase. -------------------------------------------------------
     (
-        "src/net/walls.rs",
+        "src/net/construction.rs",
         "HISTORY_LEN",
         "bevy_replicon 0.44's `Diffable::HISTORY_LEN`, default 64 (`shared/replication/diff.rs`); \
          the ledger keeps the default.",

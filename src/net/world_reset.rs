@@ -107,7 +107,7 @@ fn hide_other_worlds(
         (
             &WorldGeneration,
             &mut Visibility,
-            Has<crate::buildings::breakage::WallPiece>,
+            Has<crate::construction::breakage::Piece>,
         ),
         With<super::debris_stress::DebrisPose>,
     >,

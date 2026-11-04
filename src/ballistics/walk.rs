@@ -1990,7 +1990,7 @@ impl SpallSource {
 
     /// The cone's strength `S` (J), the strength of a field carrying [`Self::emitted`] joules
     /// ([`super::spall_cone::field_strength`]), which the cone emits whole. No HP unit enters it: a
-    /// box's pool reads it through the cone's unit at its dose edge, a building as the energy it
+    /// box's pool reads it through the cone's unit at its dose edge, a construction as the energy it
     /// crushes with. Whatever the round or the plate, a round that loses more energy across a body
     /// of one substance throws a stronger cone, and one that loses none throws none.
     pub fn strength(&self) -> f32 {

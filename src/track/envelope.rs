@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn a_zero_travel_request_floors_instead_of_exploding() {
         let loop_pts = rect_loop(0.0);
-        // Real callers floor the travel BEFORE building knots — mirror that here.
+        // Real callers floor the travel BEFORE construction knots — mirror that here.
         let knots = [(-1.0, MIN_ENVELOPE_TRAVEL), (1.0, MIN_ENVELOPE_TRAVEL)];
         let columns = [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)];
         let sides = [-1.5_f32, 1.5].map(|plane_x| EnvelopeSide {

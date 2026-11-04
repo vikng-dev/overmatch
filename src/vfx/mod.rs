@@ -12,7 +12,7 @@ mod ground;
 mod hull_marks;
 mod impact;
 mod look;
-pub(crate) use look::{BuildingCracks, building_cracks, diagram};
+pub(crate) use look::{ConstructionCracks, construction_cracks, diagram};
 mod muzzle;
 mod prewarm;
 mod scatter_hit;

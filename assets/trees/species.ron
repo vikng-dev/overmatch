@@ -4,7 +4,7 @@
 // here: its substance, HP pools and structural facts live in `assets/trees/wood.ron`.
 //
 // `trunk` is what the prop build writes a tree's construction from
-// (`tools/buildings/<id>.construction.ron`, `scripts/prop/plan.py`'s `construction_ron`): the
+// (`tools/constructions/<id>.pieces.ron`, `scripts/prop/plan.py`'s `construction_ron`): the
 // trunk's `material`, a key of `assets/materials/materials.ron` holding the species' green-wood
 // facts; its `anchor`, the `RootPlate` kind of `assets/materials/attachments.ron` holding it to the
 // ground; and its `cells`, the common cutter's grain-stretched cut (`size_m` across the grain,

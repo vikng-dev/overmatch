@@ -146,7 +146,7 @@ impl Lab {
                     .resource::<RenderMeshInstances>(),
                 RenderMeshInstances::GpuBuilding(_)
             ),
-            "this adapter builds mesh uniforms on the CPU, so the GPU-building removal path is \
+            "this adapter builds mesh uniforms on the CPU, so the GPU-construction removal path is \
              not what these tests exercise"
         );
         lab
@@ -287,7 +287,7 @@ impl Lab {
             .collect();
         let RenderMeshInstances::GpuBuilding(instances) = render.resource::<RenderMeshInstances>()
         else {
-            panic!("GPU mesh building switched off mid-test");
+            panic!("GPU mesh construction switched off mid-test");
         };
         let input = &render
             .resource::<BatchedInstanceBuffers<MeshUniform, MeshInputUniform>>()

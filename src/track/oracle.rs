@@ -14,7 +14,7 @@
 //!   spawn the terrain colliders (the sandbox's step-19..25 field, generalized), which is the
 //!   whole surface in the sandbox and the obstacle layer on the map.
 //!
-//! Geometry that is not a block (a building's elements and chunks, loose pieces) is an Avian
+//! Geometry that is not a block (a construction's elements and chunks, loose pieces) is an Avian
 //! collider: [`super::rubble::RubbleBodies`] snapshots it for the belt's footprint checks. Those
 //! shapes enter the support law beside this field, rather than through terrain probe lines.
 
@@ -110,7 +110,7 @@ impl TerrainBlock {
     }
 
     /// World-space AABB of the block (this field's broadphase bounds, and the spawn selector's
-    /// building footprint): extent along each world axis is the rotated half-extent's projection
+    /// construction footprint): extent along each world axis is the rotated half-extent's projection
     /// sum. [`FIELD_BURY`] moves the bottom only while the block's local +Y points up (every
     /// authored block): the centre shift and the half-extent growth cancel along world Y, so
     /// `max.y` is the authored top.
@@ -411,7 +411,7 @@ impl BlockField {
 impl BlockField {
     /// The view's cosmetic print sink lowers only the heightmap ground term. Authored blocks
     /// have no terrain shader and retain their original surface; translating the entire oracle
-    /// would sink belts into buildings and obstacles as though those surfaces had printed too.
+    /// would sink belts into constructions and obstacles as though those surfaces had printed too.
     /// The simulation calls this with zero lowering through [`TerrainOracle`].
     pub(crate) fn depth_along_lowered_ground(
         &self,

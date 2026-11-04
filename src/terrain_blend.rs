@@ -3,7 +3,7 @@
 //!
 //! Material construction is view only (ADR-0014); pack membership and painted weights also
 //! supply simulation ground facts through [`crate::ground_field`]. The height grid and collider
-//! remain one geometric surface. The dedicated server reads those facts without building a material.
+//! remain one geometric surface. The dedicated server reads those facts without construction a material.
 //!
 //! # The four packs
 //!

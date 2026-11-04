@@ -1,9 +1,9 @@
 // The game's damage-model presentation, game state only. Required fields; no defaults.
 (
-    building_cracks: (
-        half_width_m: (0.006, Taste("building seam cracks: ASSUMED half width in asset metres for readable dark strips")),
-        standoff_m: (0.0015, Taste("building seam cracks: ASSUMED lift in asset metres to separate the dark strip from the wall surface")),
-        color_srgb: ((0.05, 0.04, 0.035), Taste("building seam cracks: ASSUMED near-black unlit shadow colour in sRGB")),
+    construction_cracks: (
+        half_width_m: (0.006, Taste("construction seam cracks: ASSUMED half width in asset metres for readable dark strips")),
+        standoff_m: (0.0015, Taste("construction seam cracks: ASSUMED lift in asset metres to separate the dark strip from the wall surface")),
+        color_srgb: ((0.05, 0.04, 0.035), Taste("construction seam cracks: ASSUMED near-black unlit shadow colour in sRGB")),
     ),
     diagram: (
         lead_m: (1.5, Taste("damage-model diagram: ASSUMED metres of incoming line before contact")),

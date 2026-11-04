@@ -1,5 +1,5 @@
 //! Server-simulated pieces at rest, in the game's environment destruction (game state only): the
-//! one rule every loose piece follows: a building's fallen chunks ([`crate::buildings::breakage`]),
+//! one rule every loose piece follows: a construction's fallen chunks ([`crate::construction::breakage`]),
 //! a freed trunk and the debris stress lever's fixture fragments (`net::debris_stress`). The authority
 //! alone simulates a piece; a replica draws it at the pose the network carries. A piece is a body
 //! with [`DebrisPiece`]; its colliders are the body's own ([`RigidBodyColliders`]). Paths below
@@ -23,7 +23,7 @@
 //!
 //! THE WAKES AVIAN LACKS. Avian wakes no body when a support with no dynamic body of its own goes,
 //! is disabled or moves (the TODO in `collision/narrow_phase/mod.rs`, `remove_collider`), so a
-//! building chunk turned to dust under a sleeping piece would leave it hanging. The rule wakes
+//! construction chunk turned to dust under a sleeping piece would leave it hanging. The rule wakes
 //! every sleeping body, a piece or any other (a launched turret), that touches a support as it:
 //! * goes ([`wake_on_collider_gone`]: `Discard` runs before avian's `Remove` drops the pairs);
 //! * goes with its body ([`wake_on_body_gone`]: a static root despawned with child colliders,
@@ -37,12 +37,12 @@
 //!   lightyear child-pose writers (`vendor/avian3d-0.7.0-child-pose`,
 //!   `vendor/lightyear_avian3d-0.30.1-child-pose`) writing a child collider's pose only when its
 //!   bits change: a writer that rewrote it every step would wake every sleeper touching a
-//!   building every step.
+//!   construction every step.
 //!
 //! A piece stays all match: nothing here despawns one.
 //!
-//! HOW MANY BUILDING PIECES (DERIVED from `buildings::breakage`): a chunk leaves its building at most once
-//! and every split partitions its owned chunks, so live building bodies never exceed the map's
+//! HOW MANY CONSTRUCTION PIECES (DERIVED from `construction::breakage`): a chunk leaves its construction at most once
+//! and every split partitions its owned chunks, so live construction bodies never exceed the map's
 //! breakable chunks. The wall design owns the retained carriers' bound and the split model.
 //! DERIVED: each tree carrier owns at least one segment, so its live bodies never exceed its
 //! segment count; later cuts partition existing ownership.

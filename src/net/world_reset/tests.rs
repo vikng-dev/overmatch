@@ -3,16 +3,14 @@
 
 use super::*;
 use crate::ballistics::ComponentHealth;
-use crate::buildings::BuildingElement;
-use crate::buildings::breakage::{
-    Breakage, BuildingChunk, WallEntry, WallEvent, WallPiece, WallRecord,
-};
-use crate::buildings::fracture::Fate;
+use crate::construction::Element;
+use crate::construction::breakage::{Breakage, ChunkCollider, Entry, Event, Piece, Record};
+use crate::construction::fracture::Fate;
 use crate::net::battle::BattlePhase;
+use crate::net::construction::Ledger;
 use crate::net::debris_stress::DebrisPose;
 use crate::net::destruction::{DestructionLedger, LedgerEntry};
 use crate::net::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
-use crate::net::walls::WallLedger;
 use crate::scatter::MapInstance;
 use crate::trees::{TreeBody, TreeParts, TreeSegment, TreeState};
 use avian3d::prelude::*;
@@ -49,7 +47,7 @@ fn environment(app: &mut App) {
     app.add_plugins((
         bevy::transform::TransformPlugin,
         crate::contact_transfer::sim_plugin,
-        crate::buildings::breakage::sim_plugin,
+        crate::construction::breakage::sim_plugin,
         crate::trees::sim_plugin,
         crate::debris::sim_plugin,
     ))
@@ -63,7 +61,7 @@ fn replica() -> App {
     environment(&mut app);
     app.init_resource::<crate::ClientReplica>();
     install_client(&mut app);
-    crate::net::walls::install_client(&mut app);
+    crate::net::construction::install_client(&mut app);
     crate::net::destruction::install_apply(&mut app);
     finish(&mut app);
     app
@@ -90,7 +88,7 @@ fn census(world: &mut World) -> Census {
         .collect();
     identities.sort_by(|a, b| a.0.cmp(&b.0));
     let mut elements: Vec<_> = world
-        .query::<(&ChildOf, &BuildingElement)>()
+        .query::<(&ChildOf, &Element)>()
         .iter(world)
         .map(|(parent, element)| {
             (
@@ -120,7 +118,7 @@ fn census(world: &mut World) -> Census {
         elements,
         pools,
         colliders: world.query::<&Collider>().iter(world).count(),
-        chunks: world.query::<&BuildingChunk>().iter(world).count(),
+        chunks: world.query::<&ChunkCollider>().iter(world).count(),
         loose: world
             .query_filtered::<(), Or<(
                 With<crate::debris::DebrisPiece>,
@@ -138,7 +136,7 @@ fn roots(world: &mut World) -> Vec<Entity> {
         .collect()
 }
 
-fn topology(world: &mut World) -> (Vec<WallEntry>, TreeState, u16) {
+fn topology(world: &mut World) -> (Vec<Entry>, TreeState, u16) {
     let (identity, breakage) = world
         .query::<(&MapInstance, &Breakage)>()
         .single(world)
@@ -147,16 +145,13 @@ fn topology(world: &mut World) -> (Vec<WallEntry>, TreeState, u16) {
         .find(|&e| !breakage.kind.layout.chunks_of(e).is_empty())
         .unwrap();
     let chunk = breakage.kind.layout.chunks_of(element).next().unwrap();
-    let entries = [
-        WallEvent::Swap(element as u16),
-        WallEvent::Fall(chunk as u16),
-    ]
-    .map(|event| WallEntry {
-        building: identity.ordinal,
-        event,
-        tick: 0,
-    })
-    .to_vec();
+    let entries = [Event::Swap(element as u16), Event::Fall(chunk as u16)]
+        .map(|event| Entry {
+            construction: identity.ordinal,
+            event,
+            tick: 0,
+        })
+        .to_vec();
     let (tree, body) = world
         .query::<(&MapInstance, &TreeBody)>()
         .single(world)
@@ -168,8 +163,8 @@ fn topology(world: &mut World) -> (Vec<WallEntry>, TreeState, u16) {
     (entries, state, tree.ordinal)
 }
 
-fn snapshots(world: &mut World, number: u32, walls: Vec<WallEntry>, state: TreeState, tree: u16) {
-    world.spawn((WorldGeneration(number), WallLedger(walls)));
+fn snapshots(world: &mut World, number: u32, walls: Vec<Entry>, state: TreeState, tree: u16) {
+    world.spawn((WorldGeneration(number), Ledger(walls)));
     world.spawn((
         WorldGeneration(number),
         DestructionLedger(vec![LedgerEntry::State {
@@ -267,7 +262,7 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
             app.world().get::<Visibility>(old_carrier),
             Some(&Visibility::Hidden)
         );
-        assert!(app.world().resource::<WallRecord>().entries.is_empty());
+        assert!(app.world().resource::<Record>().entries.is_empty());
         if phase_first {
             snapshots(app.world_mut(), 2, Vec::new(), TreeState::Standing, tree);
             app.update();
@@ -280,7 +275,7 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
         // The current Battle's own records apply, not only the first Battle's: its ledgers grow.
         for (belongs, mut ledger) in app
             .world_mut()
-            .query::<(&WorldGeneration, &mut WallLedger)>()
+            .query::<(&WorldGeneration, &mut Ledger)>()
             .iter_mut(app.world_mut())
         {
             if *belongs == WorldGeneration(2) {
@@ -301,7 +296,7 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
         }
         app.update();
         assert_eq!(
-            app.world().resource::<WallRecord>().entries,
+            app.world().resource::<Record>().entries,
             walls,
             "the later Battle's wall consumer must apply its own records independently of trees"
         );
@@ -320,7 +315,7 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
         );
         let previous_construction = roots(app.world_mut());
         app.world_mut().despawn(battle);
-        type OldWire = Or<(With<WallLedger>, With<DestructionLedger>, With<DebrisPose>)>;
+        type OldWire = Or<(With<Ledger>, With<DestructionLedger>, With<DebrisPose>)>;
         let old_wire_entities: Vec<_> = app
             .world_mut()
             .query_filtered::<Entity, OldWire>()
@@ -350,13 +345,13 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
 /// Startup and rebuild must select environment records from the same installed subsystems.
 /// A composition with no wall or tree publisher must not gain that publisher's ledger later.
 #[test]
-fn rebuilding_constructs_only_the_environment_records_installed_at_startup() {
+fn reconstruction_constructs_only_the_environment_records_installed_at_startup() {
     let _udp = lock_real_udp_test();
     for (walls, trees) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut server = crate::net::link_drop::build_server(free_port());
         environment(&mut server);
         if walls {
-            crate::net::walls::install_server(&mut server);
+            crate::net::construction::install_server(&mut server);
         }
         if trees {
             crate::net::destruction::install_server(&mut server);
@@ -373,7 +368,7 @@ fn rebuilding_constructs_only_the_environment_records_installed_at_startup() {
         let records = |world: &mut World| {
             (
                 world
-                    .query_filtered::<Entity, With<WallLedger>>()
+                    .query_filtered::<Entity, With<Ledger>>()
                     .iter(world)
                     .collect::<Vec<_>>(),
                 world
@@ -422,7 +417,7 @@ fn network_client(port: u16, id: u64) -> App {
     environment(&mut app);
     app.init_resource::<crate::ClientReplica>();
     install_client(&mut app);
-    crate::net::walls::install_client(&mut app);
+    crate::net::construction::install_client(&mut app);
     crate::net::destruction::install_client(&mut app);
     crate::net::debris_stress::install_client(&mut app);
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
@@ -462,7 +457,7 @@ fn assert_authority_generation(server: &mut App, number: u32) {
         server.world().resource::<AuthorityWorld>().0,
         WorldGeneration(number)
     );
-    type Ledgers = Or<(With<WallLedger>, With<DestructionLedger>)>;
+    type Ledgers = Or<(With<Ledger>, With<DestructionLedger>)>;
     assert!(
         server
             .world_mut()
@@ -483,7 +478,7 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
     let port = free_port();
     let mut server = crate::net::link_drop::build_server(port);
     environment(&mut server);
-    crate::net::walls::install_server(&mut server);
+    crate::net::construction::install_server(&mut server);
     crate::net::destruction::install_server(&mut server);
     crate::net::debris_stress::install_server(&mut server).unwrap();
     let mut mode =
@@ -520,10 +515,10 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
                 .query::<(Entity, &Breakage)>()
                 .single(server.world())
                 .unwrap();
-            let WallEvent::Swap(element) = walls[0].event else {
+            let Event::Swap(element) = walls[0].event else {
                 unreachable!()
             };
-            let WallEvent::Fall(chunk) = walls[1].event else {
+            let Event::Fall(chunk) = walls[1].event else {
                 unreachable!()
             };
             {
@@ -534,13 +529,13 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
             }
             server
                 .world_mut()
-                .resource_mut::<WallRecord>()
+                .resource_mut::<Record>()
                 .entries
                 .extend(walls.clone());
             server.world_mut().spawn((
                 crate::debris::DebrisPiece,
-                WallPiece {
-                    building: walls[0].building,
+                Piece {
+                    construction: walls[0].construction,
                     chunks: vec![chunk],
                     born: 0,
                     retired: None,
@@ -550,7 +545,7 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
                 Collider::cuboid(1.0, 1.0, 1.0),
                 ColliderDensity(1.0),
                 Friction::ZERO,
-                crate::buildings::breakage::piece_layers(),
+                crate::construction::breakage::piece_layers(),
                 Position(Vec3::Y * 20.0),
                 Rotation::default(),
                 Transform::from_translation(Vec3::Y * 20.0),
@@ -599,7 +594,7 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
                     .query::<&TreeState>()
                     .iter(world)
                     .any(|s| *s != TreeState::Standing)
-                && !world.resource::<WallRecord>().entries.is_empty()
+                && !world.resource::<Record>().entries.is_empty()
                 && world
                     .query::<&crate::trees::LooseTrunk>()
                     .iter(world)
@@ -613,7 +608,7 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
                     .iter()
                     .all(|root| server.world().get_entity(*root).is_err())
             );
-            assert!(server.world().resource::<WallRecord>().entries.is_empty());
+            assert!(server.world().resource::<Record>().entries.is_empty());
             assert!(
                 server
                     .world_mut()
@@ -636,7 +631,7 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
                 );
                 for client in &mut clients {
                     assert_eq!(&census(client.world_mut()), fresh.as_ref().unwrap());
-                    assert!(client.world().resource::<WallRecord>().entries.is_empty());
+                    assert!(client.world().resource::<Record>().entries.is_empty());
                 }
                 eprintln!(
                     "MEASURED: world cycle rebuilt {} map identities and {} colliders on authority \

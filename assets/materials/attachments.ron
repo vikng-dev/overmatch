@@ -1,15 +1,15 @@
 // The attachment kinds: how two parts of a structure hold together where they touch, or a trunk to
 // the ground, in the game's environment destruction (game state only). One shared list, beside
-// `materials.ron`: a building's spec names a kind for each pair of parts it joins
-// (`tools/buildings/<id>.house.ron`, its `joins`), the bake writes those names into the building
-// (`assets/buildings/<id>/<id>.building.ron`, its `attachments`), and the game reads each name here
+// `materials.ron`: a construction's spec names a kind for each pair of parts it joins
+// (`tools/constructions/<id>.house.ron`, its `joins`), the bake writes those names into the construction
+// (`assets/constructions/<id>/<id>.construction.ron`, its `attachments`), and the game reads each name here
 // at load, refusing one this list does not hold. A tree species names the root plate its trunk
 // holds to the ground by (`assets/trees/wood.ron`, its row's `anchor`). Inside one component its
 // chunks hold by the component's own seam, never by a kind here: a trunk's segments hold by the
 // wood's own along-grain seam (`wood.ron`).
 //
 // No fastener is modelled: a kind is a seam spread over the joint's whole contact area, never a
-// count of nails or bolts (`.agents/docs/design/wall-destruction.md`, "Attachment kinds").
+// count of nails or bolts (`.agents/docs/design/construction-destruction.md`, "Attachment kinds").
 //
 // Every kind is one of four:
 // - `Seam("<substance>")`: the seam of that row of `materials.ron` (its bulk `tensile` and
@@ -31,11 +31,11 @@
 // is ASSUMED; it is no coefficient for every soil, and another soil or rooting depth is a kind of
 // its own. The moment includes the applied pull and the overhanging self-weight.
 //
-// Bolted and welded join the list once a building or a vehicle uses them.
+// Bolted and welded join the list once a construction or a vehicle uses them.
 {
     // A mortar bed, as between a masonry's own courses: a wall coursed into the next at a corner, a
     // timber bedded on a wall (ASSUMED: a mortar bed holds a timber as it holds the next course).
-    // Brick is the one masonry a building is of.
+    // Brick is the one masonry a construction is of.
     // Its c and G_II are also Brick's bulk values, sourced there once.
     "mortared": Seam("Brick"),
     // Timber nailed to timber or to a wall plate, as rafters to their plate and to each other at a

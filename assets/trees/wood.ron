@@ -3,8 +3,8 @@
 // by every species, and per species (`structure`) the facts a trunk is built from as a structure
 // (`crate::trees::TreeBody::structure`): its segments chunks of one wood, joined by the wood's
 // own along-grain seam, the trunk held to the ground by its species' root plate. The wall design
-// (`.agents/docs/design/wall-destruction.md`, "Trees are structures by the same laws") owns the
-// model narrative. A tree's construction (the common building bake's) reads the same facts from
+// (`.agents/docs/design/construction-destruction.md`, "Trees are structures by the same laws") owns the
+// model narrative. A tree's construction (the common construction bake's) reads the same facts from
 // its species' green-wood row in `assets/materials/materials.ron` and its root plate from
 // `species.ron`'s `trunk`; `scripts/prop/test_prop.py` holds every structure row here equal to
 // them, value and label.
@@ -12,7 +12,7 @@
 // `structure.<species>.along_grain_rupture_pa` (Pa): green-wood bending modulus of rupture,
 // longitudinal extreme-fibre stress: the tensile strength of the trunk's seam between two
 // segments, which the section strength law compares with the bending stress there. It is
-// distinct from the perpendicular-to-grain timber seam in materials.ron, which building joints
+// distinct from the perpendicular-to-grain timber seam in materials.ron, which construction joints
 // read.
 // `along_grain_fracture_j_per_m2` (J/m²): mode-I opening work for tension ALONG the fibres,
 // across a trunk section (LR/LT fracture systems): the seam's fracture energy, which the blow law

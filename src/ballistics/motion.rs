@@ -958,7 +958,7 @@ mod tests {
             SimPhase::ProjectileMarch.intern(),
             crate::damage::DamageConsequences.intern(),
             SimPhase::RecordedConsequences.intern(),
-            crate::buildings::breakage::WallLawSet.intern(),
+            crate::construction::breakage::LawSet.intern(),
             crate::trees::TreeFallSet.intern(),
             crate::trees::TreeDerived.intern(),
             SimPhase::Publish.intern(),

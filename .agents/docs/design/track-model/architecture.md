@@ -335,7 +335,7 @@ clamped at texel centres, the same weights the prints and the muzzle dust are dr
 the decode does not build from the map (the flat slab and its authored course, a preset or
 flattened grid) is the base pack's ground everywhere, which is what the blend is where the mask is
 silent; the sandbox's course is the same. `BlockField::with_ground` carries the field into the
-track field; an authored block on the map reads the ground at its own XZ (a graybox building's
+track field; an authored block on the map reads the ground at its own XZ (a graybox construction's
 substance is not yet a ground the belt reads).
 
 - Resolution (`Resolution`): the mask's own, 1024² over 1 500 m, 1.46 m a texel (DERIVED). It is
@@ -603,7 +603,7 @@ current supply law; the fixed tree changes surface normals and normal closing. B
 fixtures. A downward probe 5 mm inside a flat heightfield edge, 5 cm deep with 0.5 m reach, reads
 normal `(0.999835, 0.018179, 0)` before and `(0, 1, 0)` after. The force-level edge test also pins
 every loaded column upright. A probe 5 mm inside a rounded step silhouette reads 107.31665 m/s
-closing for a 2 m/s hull before, 1.66667 m/s after. The vertical building-corner force fixture,
+closing for a 2 m/s hull before, 1.66667 m/s after. The vertical construction-corner force fixture,
 crossed along world X (belt lateral), reads 108.31694 / 1.66665 m/s effective closing.
 
 Prescribed-pad longitudinal force trace (positive z is rearward): fixture 2 m pad, its hull held
@@ -705,7 +705,7 @@ change to keep it below clippy's function-length limit. No wire type changes.
 | Claude (law-ground-1b review) P3 | this section said no ground term slowed a declutched tank before the law, derived coast-down from `c_rr` alone and named the bristle dampers as the likely source | verified: the support damper acted with the clutch out; the bristle share was 85 N | docs: record the flat-ground contact law and its measured split (#146) |
 | Claude (law-ground-1b review) P3 | `predict_shift_landing_m` decayed `c_rr·N` as relaxing drive shear, and `POSTSHIFT_MARGIN_RPM`'s note named only the grade as the sustained leftover | verified | transmission: keep the ground's rolling resistance whole through a shift window (#146) |
 | Codex (law-ground-1c review) P1 | a neighbouring heightfield-edge miss becomes a fictitious lateral slope | verified by the 5 mm edge fixture and its force pass | driving: read contact normals from struck surfaces (#146) |
-| Claude (law-ground-1c review) P2 | a first-hit jump at a step lip or building corner rotates support and amplifies closing; the column mid probe supplies other patches' normals | verified: the full-hull trace and lateral corner fail the old law; each resultant now queries its own hit. The rounded face's genuine inclination is not a defect | driving: read contact normals from struck surfaces (#146) |
+| Claude (law-ground-1c review) P2 | a first-hit jump at a step lip or construction corner rotates support and amplifies closing; the column mid probe supplies other patches' normals | verified: the full-hull trace and lateral corner fail the old law; each resultant now queries its own hit. The rounded face's genuine inclination is not a defect | driving: read contact normals from struck surfaces (#146) |
 | Claude (law-ground-1c review) P3 | a saturated/missing mid probe silently takes the old belt-normal law | verified: `Miss` and `Buried` are named, carry no support, and the no-surface force regression fails the old law | driving: read contact normals from struck surfaces (#146) |
 | Claude (law-ground-1c review) P3 | the rolling test does not kill the belt-normal damper mutant and reverses fixture run directions | verified: per-contact moving/parked load comparison kills the mutant; directions corrected | driving: read contact normals from struck surfaces (#146) |
 | Claude (law-ground-1c review) P3 | piece overlap faces are parallel to the belt, not the piece's physical face | verified: orientation is explicitly a StandIn above, settled by the overlap face normal; recipient code stays outside this lane | driving: record surface contact traces and entry-dependent speeds (#146) |

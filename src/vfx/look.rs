@@ -389,13 +389,13 @@ pub(crate) fn diagram() -> &'static DiagramLook {
     &load().diagram
 }
 
-look_table! { pub(crate) BuildingCracks {
+look_table! { pub(crate) ConstructionCracks {
     half_width_m: f32 => positive,
     standoff_m: f32 => positive,
     color_srgb: Vec3 => fraction_vec3,
 }}
-pub(crate) fn building_cracks() -> &'static BuildingCracks {
-    &load().building_cracks
+pub(crate) fn construction_cracks() -> &'static ConstructionCracks {
+    &load().construction_cracks
 }
 
 #[derive(Debug, Deserialize)]
@@ -406,7 +406,7 @@ pub(super) struct VfxLook {
     trail: TrailLook,
     marks: MarksLook,
     diagram: DiagramLook,
-    building_cracks: BuildingCracks,
+    construction_cracks: ConstructionCracks,
 }
 
 pub(super) fn load() -> &'static VfxLook {
@@ -493,7 +493,7 @@ mod tests {
             error.contains(FILE) && error.contains("Fixture provenance is test-only"),
             "{error}"
         );
-        let cracks = &parse(DATA).unwrap().building_cracks;
+        let cracks = &parse(DATA).unwrap().construction_cracks;
         let rgb = cracks.color_srgb.to_array();
         for invalid in [f32::NAN, -0.1, 1.1] {
             for channel in 0..3 {

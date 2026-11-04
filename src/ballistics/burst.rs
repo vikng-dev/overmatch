@@ -104,7 +104,7 @@ pub(crate) struct Burst {
     pub(crate) core_mass: f32,
     /// The blast's energy (J): the core's chemical energy less what the casing took,
     /// `C · e − ½ M v_s²`; a core whose chemistry cannot pay its casing is refused at load. What
-    /// the buildings' blast field carries.
+    /// the constructions' blast field carries.
     pub(crate) blast: f32,
     /// Authored distance behind the tip (m), used by the environment airblast.
     pub(crate) filler_setback: f32,
@@ -118,7 +118,7 @@ pub(crate) struct Burst {
 /// profile, the products' speed rising linearly from the axis to the driven wall, which is what
 /// gives `v_s = K (M/C + ½)^−½` its `½`. A cased core's outer speed is its casing's `v_s`; a bare
 /// one's is the same law with no casing, `K √2`. The game's environment blast field reads it
-/// near the charge (`buildings::fracture::Blast::products_floor`).
+/// near the charge (`construction::fracture::Blast::products_floor`).
 pub(crate) fn products_momentum(core_mass: f32, speed: f32) -> f32 {
     2.0 / 3.0 * core_mass * speed
 }

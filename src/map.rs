@@ -11,7 +11,7 @@
 //! [`crate::scatter`] takes its instances from the same one. Nothing else opens the file.
 //!
 //! THE LIBRARY IS THE GAME'S, THE PLACEMENT IS THE MAP'S. What a prototype id the placement
-//! references MEANS to the game — a building's box, a fir's size — is `prototypes.ron` beside the
+//! references MEANS to the game — a construction's box, a fir's size — is `prototypes.ron` beside the
 //! manifest ([`PROTOTYPES_FILE`], [`Prototype`]), keyed by the ids the placement uses. The
 //! manifest's own `prototypes` block is the author's export record (which glb, whether it shipped)
 //! and is rewritten on every export; it is read only for its keys, so the library is checked
@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 
-use crate::buildings::BuildingLibrary;
+use crate::construction::ConstructionLibrary;
 use crate::terrain_grid::{RowOrder, TerrainExtent};
 use crate::trees::TreeLibrary;
 
@@ -117,8 +117,8 @@ pub(crate) struct MapManifest {
     pub(crate) prototypes: BTreeMap<String, Prototype>,
     /// Every tree asset a [`Prototype::Tree`] names, loaded and validated ([`load`]).
     pub(crate) trees: TreeLibrary,
-    /// Every building asset a [`Prototype::Structure`] names, loaded and validated ([`load`]).
-    pub(crate) buildings: BuildingLibrary,
+    /// Every construction asset a [`Prototype::Construction`] names, loaded and validated ([`load`]).
+    pub(crate) constructions: ConstructionLibrary,
 }
 
 /// Authored XZ spawn points certified once at the map load edge. The private slice cannot be
@@ -156,27 +156,27 @@ impl MapManifest {
             .values()
             .filter_map(|prototype| match prototype {
                 Prototype::Tree { asset } => Some(asset.as_str()),
-                Prototype::Building { .. } | Prototype::Structure { .. } => None,
+                Prototype::Block { .. } | Prototype::Construction { .. } => None,
             })
     }
 
-    /// The building asset ids the library names, each once.
-    fn structure_assets(&self) -> impl Iterator<Item = &str> {
+    /// The construction asset ids the library names, each once.
+    fn construction_assets(&self) -> impl Iterator<Item = &str> {
         self.prototypes
             .values()
             .filter_map(|prototype| match prototype {
-                Prototype::Structure { asset } => Some(asset.as_str()),
-                Prototype::Building { .. } | Prototype::Tree { .. } => None,
+                Prototype::Construction { asset } => Some(asset.as_str()),
+                Prototype::Block { .. } | Prototype::Tree { .. } => None,
             })
     }
 
     /// The game's environment destruction model admits every authored placement's scaled
     /// structure at the map edge, with the asset path, instance, field and repair on refusal.
-    fn load_buildings(&mut self, root: &Path, path: &Path) {
-        let mut buildings = BuildingLibrary::load(root, self.structure_assets());
+    fn load_constructions(&mut self, root: &Path, path: &Path) {
+        let mut constructions = ConstructionLibrary::load(root, self.construction_assets());
         for instance in &self.instances {
-            if let Prototype::Structure { asset } = &self.prototypes[&instance.prototype] {
-                buildings
+            if let Prototype::Construction { asset } = &self.prototypes[&instance.prototype] {
+                constructions
                     .admit_placement(asset, instance.scale)
                     .unwrap_or_else(|error| {
                         panic!(
@@ -187,7 +187,7 @@ impl MapManifest {
                     });
             }
         }
-        self.buildings = buildings;
+        self.constructions = constructions;
     }
 
     /// The declared heightmap's path.
@@ -212,8 +212,8 @@ impl MapManifest {
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BoxSurface {
-    pub(crate) faces: [crate::building_surface::SurfaceLane; 6],
-    pub(crate) top_tangent: crate::building_surface::BoxAxis,
+    pub(crate) faces: [crate::construction_surface::SurfaceLane; 6],
+    pub(crate) top_tangent: crate::construction_surface::BoxAxis,
 }
 
 /// What one prototype id resolves to (`prototypes.ron`, module doc). Metres at instance scale 1;
@@ -221,10 +221,10 @@ pub(crate) struct BoxSurface {
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum Prototype {
-    /// A building: an axis-aligned box in the prototype's local frame, `min`/`max` corners around
+    /// A block: an axis-aligned box in the prototype's local frame, `min`/`max` corners around
     /// the instance origin, of `substance` (a hard row of `materials.ron`, whose friction its
     /// collider carries). A `min.y` below zero is a skirt that sinks into the surface.
-    Building {
+    Block {
         min: [f32; 3],
         max: [f32; 3],
         substance: String,
@@ -232,9 +232,9 @@ pub(crate) enum Prototype {
     },
     /// A tree of the damage model ([`crate::trees`]): the asset `assets/trees/<asset>/`.
     Tree { asset: String },
-    /// A building of the destruction model ([`crate::buildings`]): the asset
-    /// `assets/buildings/<asset>/<asset>.building.ron`, its walls and roof matter.
-    Structure { asset: String },
+    /// A construction of the destruction model ([`crate::construction`]): the asset
+    /// `assets/constructions/<asset>/<asset>.construction.ron`.
+    Construction { asset: String },
 }
 
 /// One instance record as authored. `rotation` is XYZW, `translation`/`scale` are XYZ.
@@ -444,7 +444,7 @@ pub(crate) fn load(root: &Path) -> MapManifest {
     let library = read_prototypes(root);
     let mut manifest = parse(&text, &library, &path);
     manifest.trees = TreeLibrary::load(root, manifest.tree_assets());
-    manifest.load_buildings(root, &path);
+    manifest.load_constructions(root, &path);
     manifest
 }
 
@@ -475,7 +475,7 @@ fn read_manifest(path: &Path) -> String {
 
 /// The CONTENT digest of the world this process will build: the manifest's own bytes, its prototype
 /// library's, the bytes of the heightmap it names, the species table, the wood row and every tree
-/// asset the library names, then every building asset it names — the files that decide the terrain
+/// asset the library names, then every construction asset it names — the files that decide the terrain
 /// and the scatter, none of which crosses the wire.
 ///
 /// CONTENT, not the id: two peers can select the same map name over different files (a stale
@@ -489,8 +489,8 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
     let library = read_prototypes(root);
     let mut manifest = parse(&text, &library, &path);
     let trees = TreeLibrary::load(root, manifest.tree_assets());
-    manifest.load_buildings(root, &path);
-    let buildings = &manifest.buildings;
+    manifest.load_constructions(root, &path);
+    let constructions = &manifest.constructions;
     let heightmap = manifest.heightmap_path();
     let bytes = std::fs::read(&heightmap).unwrap_or_else(|err| {
         panic!(
@@ -502,7 +502,7 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
     });
     let mut files = vec![text.as_bytes(), library.as_bytes(), bytes.as_slice()];
     files.extend(trees.texts());
-    files.extend(buildings.texts());
+    files.extend(constructions.texts());
     digest_of(&files)
 }
 
@@ -523,10 +523,10 @@ fn digest_of(files: &[&[u8]]) -> u64 {
 /// Refuse a graybox prototype that describes no collider, naming the library file, the id, the
 /// field and the fix: a box whose corners are not finite and ordered on every axis, or whose
 /// substance states no friction (its collider carries the substance's, `scatter`). A tree or a structure is its own
-/// asset's to check (`TreeLibrary::load`, `BuildingLibrary::load`).
+/// asset's to check (`TreeLibrary::load`, `ConstructionLibrary::load`).
 fn check_prototype(id: &str, prototype: &Prototype, library: &Path) {
     let substance = match prototype {
-        Prototype::Building {
+        Prototype::Block {
             min,
             max,
             substance,
@@ -542,7 +542,7 @@ fn check_prototype(id: &str, prototype: &Prototype, library: &Path) {
             }
             substance
         }
-        Prototype::Tree { .. } | Prototype::Structure { .. } => return,
+        Prototype::Tree { .. } | Prototype::Construction { .. } => return,
     };
     if let Err(err) =
         crate::substances::SubstanceRegistry::shipped_static().contact_friction(substance)
@@ -632,7 +632,7 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
         instances: level.instances,
         prototypes,
         trees: TreeLibrary::default(),
-        buildings: BuildingLibrary::default(),
+        constructions: ConstructionLibrary::default(),
     }
 }
 
@@ -696,27 +696,27 @@ pub(crate) mod tests {
     const EMPTY_LIBRARY: &str = "{}";
 
     pub(crate) fn fixture_box_surface() -> BoxSurface {
-        use crate::building_surface::SurfaceLane::{Primary, Secondary};
+        use crate::construction_surface::SurfaceLane::{Primary, Secondary};
         BoxSurface {
             faces: [Primary, Primary, Primary, Primary, Secondary, Primary],
-            top_tangent: crate::building_surface::BoxAxis::Z,
+            top_tangent: crate::construction_surface::BoxAxis::Z,
         }
     }
 
-    /// A single-building library and a placement that uses it, for the resolution law.
-    const HOUSE_LIBRARY: &str = r#"{"house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#;
+    /// A single-construction library and a placement that uses it, for the resolution law.
+    const HOUSE_LIBRARY: &str = r#"{"house": Block(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#;
     const HOUSE_INSTANCE: &str = r#"{"prototype":"house","translation":[0,0,0],
         "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"}"#;
 
     /// One instance of every prototype kind — a graybox house, a tree of the damage
-    /// model and a building of the destruction model, the last two read from the shipped assets —
+    /// model and a construction of the destruction model, the last two read from the shipped assets —
     /// on the fixture extent: what a layer that spawns a map asserts against, whatever the shipped
     /// map happens to place.
     pub(crate) fn mixed_fixture_manifest() -> MapManifest {
         const LIBRARY: &str = r#"{
-            "house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z)),
+            "house": Block(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z)),
             "fir": Tree(asset: "fir_1"),
-            "brick": Structure(asset: "house_1"),
+            "brick": Construction(asset: "house_1"),
         }"#;
         const INSTANCES: &str = r#"{"prototype":"house","translation":[0,0,0],
             "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"},
@@ -730,7 +730,7 @@ pub(crate) mod tests {
         );
         let mut manifest = parse(&text, LIBRARY, Path::new("fixture/level.json"));
         manifest.trees = TreeLibrary::load(&shipped_assets(), ["fir_1"]);
-        manifest.buildings = BuildingLibrary::load(&shipped_assets(), ["house_1"]);
+        manifest.constructions = ConstructionLibrary::load(&shipped_assets(), ["house_1"]);
         manifest
     }
 
@@ -922,21 +922,21 @@ pub(crate) mod tests {
     /// A graybox prototype that describes no collider is refused when the library is read, naming
     /// the library file, the id and the field: `scatter` builds the box and its
     /// friction from these with no check of its own. Mutant: dropping any arm of `check_prototype`
-    /// loads its case. FIXTURE DATA: the dimensions are round and stand for no building.
+    /// loads its case. FIXTURE DATA: the dimensions are round and stand for no construction.
     #[test]
     fn a_graybox_prototype_that_describes_no_collider_is_refused_at_parse() {
         let text = manifest_text(750.0, 0.0, 50.0, "+Z");
         for (library, field) in [
             (
-                r#"{"p": Building(min: (1.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#,
+                r#"{"p": Block(min: (1.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#,
                 "`min`",
             ),
             (
-                r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, NaN, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#,
+                r#"{"p": Block(min: (0.0, 0.0, 0.0), max: (1.0, NaN, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#,
                 "`min`",
             ),
             (
-                r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Nope", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#,
+                r#"{"p": Block(min: (0.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Nope", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#,
                 "`substance`",
             ),
         ] {
@@ -980,7 +980,7 @@ pub(crate) mod tests {
         let manifest = parse(&text, HOUSE_LIBRARY, Path::new("fixture/level.json"));
         assert_eq!(
             manifest.prototypes[&manifest.instances[0].prototype],
-            Prototype::Building {
+            Prototype::Block {
                 min: [-1.0, -0.5, -1.0],
                 max: [1.0, 2.0, 1.0],
                 substance: "Brick".to_owned(),
@@ -1063,7 +1063,7 @@ pub(crate) mod tests {
     /// The game's environment destruction model admits placement scales while loading the map,
     /// before spawning any body. Removing the placement gate admits this nonuniform fixture.
     #[test]
-    fn building_placement_admission_names_the_manifest_instance_asset_and_scale() {
+    fn construction_placement_admission_names_the_manifest_instance_asset_and_scale() {
         let root = shipped_assets();
         let path = level_path(&root);
         let mut manifest = load(&root);
@@ -1073,19 +1073,19 @@ pub(crate) mod tests {
             .position(|instance| {
                 matches!(
                     manifest.prototypes[&instance.prototype],
-                    Prototype::Structure { .. }
+                    Prototype::Construction { .. }
                 )
             })
             .expect("the fixture map places a structure");
         let instance = &mut manifest.instances[index];
         instance.scale[0] *= 2.0;
         let id = instance.id.clone();
-        let Prototype::Structure { asset } = &manifest.prototypes[&instance.prototype] else {
+        let Prototype::Construction { asset } = &manifest.prototypes[&instance.prototype] else {
             unreachable!()
         };
         let asset = asset.clone();
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            manifest.load_buildings(&root, &path)
+            manifest.load_constructions(&root, &path)
         }))
         .unwrap_err();
         let message = panic
@@ -1094,7 +1094,7 @@ pub(crate) mod tests {
         for required in [
             path.to_str().unwrap(),
             &id,
-            &format!("{asset}.building.ron"),
+            &format!("{asset}.construction.ron"),
             "scale",
             "uniform",
         ] {
@@ -1103,20 +1103,20 @@ pub(crate) mod tests {
     }
 
     /// THE DIGEST FOLDS THE TREES' TEXTS (the species table, the wood row and every tree asset
-    /// the map places) after the three map files, in the library's order, then every building
+    /// the map places) after the three map files, in the library's order, then every construction
     /// asset's: two peers with one map and one different tree segment integrate different walks,
     /// two with one different wood row build different pools, and two with one different wall
     /// element stop different rounds, so no such pair may match. Dropping the trees, the wood row
-    /// or the buildings from the fold, or folding them in another order, reds this.
+    /// or the constructions from the fold, or folding them in another order, reds this.
     #[test]
-    fn the_digest_folds_the_tree_and_building_texts_after_the_map_files() {
+    fn the_digest_folds_the_tree_and_construction_texts_after_the_map_files() {
         let root = shipped_assets();
         let path = level_path(&root);
         let text = read_manifest(&path);
         let library = read_prototypes(&root);
         let manifest = parse(&text, &library, &path);
         let trees = TreeLibrary::load(&root, manifest.tree_assets());
-        let buildings = BuildingLibrary::load(&root, manifest.structure_assets());
+        let constructions = ConstructionLibrary::load(&root, manifest.construction_assets());
         let heightmap = std::fs::read(manifest.heightmap_path()).expect("the heightmap");
         let map_files = vec![text.as_bytes(), library.as_bytes(), heightmap.as_slice()];
         assert!(
@@ -1130,20 +1130,20 @@ pub(crate) mod tests {
         );
         let shipped = content_digest(&root);
         assert_ne!(shipped, digest_of(&map_files), "the tree texts count");
-        let house = std::fs::read(root.join("buildings/house_1/house_1.building.ron"))
+        let house = std::fs::read(root.join("constructions/house_1/house_1.construction.ron"))
             .expect("the shipped house");
         assert!(
-            buildings.texts().any(|text| text == house.as_slice()),
-            "the shipped map places a building and its file is folded"
+            constructions.texts().any(|text| text == house.as_slice()),
+            "the shipped map places a construction and its file is folded"
         );
         let mut files = map_files;
         files.extend(trees.texts());
-        assert_ne!(shipped, digest_of(&files), "the building texts count");
-        files.extend(buildings.texts());
+        assert_ne!(shipped, digest_of(&files), "the construction texts count");
+        files.extend(constructions.texts());
         assert_eq!(
             shipped,
             digest_of(&files),
-            "the fold is the map files, then the trees, then the buildings"
+            "the fold is the map files, then the trees, then the constructions"
         );
     }
 

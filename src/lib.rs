@@ -35,12 +35,6 @@ mod bitprobe;
 #[cfg(feature = "bitprobe")]
 pub use bitprobe::run_bitprobe;
 mod branding;
-/// View-only brick/timber surfaces mapped in metres on every face through a shared `ExtendedMaterial`.
-/// See the module doc.
-mod building_surface;
-/// Buildings in the game's destruction model, as data: `buildings::schema` is the
-/// `<id>.building.ron` format the asset tools write and the game reads. Public for the tools.
-pub mod buildings;
 mod camera;
 /// A collider moved onto another rigid body (a launched turret's) drops its contact pairs, so
 /// Avian makes them again naming its new body. Mounted by `damage::plugin`, the only launcher.
@@ -48,6 +42,12 @@ mod collider_rehome;
 /// Devices → bindings → serializable per-tank `TankCommand`: the multiplayer seam.
 /// Sim modules consume commands, never devices.
 mod command;
+/// Constructions in the game's destruction model, as data: `construction::schema` is the
+/// `<id>.construction.ron` format the asset tools write and the game reads. Public for the tools.
+pub mod construction;
+/// View-only brick/timber surfaces mapped in metres on every face through a shared `ExtendedMaterial`.
+/// See the module doc.
+mod construction_surface;
 /// What the physics solver moved through each contact between a standing structure and a dynamic
 /// body, per step (the game's environment destruction): the reading a body's contact load comes
 /// from. Mounted by `SimPlugin`.
@@ -166,8 +166,8 @@ mod run_window;
 #[cfg(feature = "dev_ui")]
 pub mod sandbox;
 /// The map's object scatter (the map's own `level.json`, resolved through its `prototypes.ron`
-/// library): authored building and tree placement, each instance carrying its map identity,
-/// spawned from shared data on both binaries rather than over the wire. A building is a graybox
+/// library): authored construction and tree placement, each instance carrying its map identity,
+/// spawned from shared data on both binaries rather than over the wire. A construction is a graybox
 /// box with a static collider that joins `world::TerrainMap`'s block list; a damage-model tree is
 /// spawned by `trees` — a static root with a state,
 /// one frustum collider per segment, each segment with its own HP pool.
@@ -602,7 +602,7 @@ pub(crate) enum Layer {
     /// Witness volumes (crew, ADR-0040): never cast against, never in the armour walk; read only
     /// by the witness pass (`ballistics::wound`).
     Witness,
-    /// Server-simulated pieces (`crate::debris`): a building's fallen chunks and the debris stress
+    /// Server-simulated pieces (`crate::debris`): a construction's fallen chunks and the debris stress
     /// lever's fragments. They collide with `Terrain`, `Vehicle` and each other, and no ground
     /// query reads them. A construction piece's separate occupied-hull sensors carry `Armor`
     /// and ballistic volumes, so the game's damage-model walk meets its substance.
@@ -690,7 +690,7 @@ impl Plugin for SimPlugin {
         // reading of every structure contact. Separate call: the tuple above is at bevy's
         // 15-plugin arity limit.
         app.add_plugins((
-            buildings::breakage::sim_plugin,
+            construction::breakage::sim_plugin,
             debris::sim_plugin,
             contact_transfer::sim_plugin,
         ));
@@ -768,8 +768,8 @@ impl Plugin for ClientPlugin {
             ballistics::view_plugin,
             // The trees' glb binding and fall presentation (view-only, ADR-0014).
             trees::view::plugin,
-            // The broken buildings and their fallen pieces (view-only, ADR-0014).
-            buildings::view::plugin,
+            // The broken constructions and their fallen pieces (view-only, ADR-0014).
+            construction::view::plugin,
         ));
         app.add_plugins(drive_hud::plugin);
         // The pen cam's shooter corner over the player's own hits (view-only; the store it reads
@@ -850,8 +850,8 @@ impl Plugin for NetClientPlugin {
             ballistics::view_plugin,
             // The trees' glb binding and fall presentation (view-only, ADR-0014).
             trees::view::plugin,
-            // The broken buildings and their fallen pieces (view-only, ADR-0014).
-            buildings::view::plugin,
+            // The broken constructions and their fallen pieces (view-only, ADR-0014).
+            construction::view::plugin,
             drive_hud::plugin,
             // Required by every scope/profile declarer; see `render_policy`.
             render_policy::plugin,

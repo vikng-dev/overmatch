@@ -158,7 +158,7 @@ describe("stopped match servers leave evidence for the operator", () => {
 		const s = await bringUp();
 		const lines = [
 			"overmatch::net::server: server: client connected",
-			"src/buildings/fracture.rs:2100:9",
+			"src/construction/fracture.rs:2100:9",
 			"12:45:41.925415Z",
 			"lightyear_netcode::server_plugin",
 			'server_stats {"tick_us":{"p50":123.4},"debris":{"live":2,"sleeping":18}}',

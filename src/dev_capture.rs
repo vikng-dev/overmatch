@@ -381,7 +381,7 @@ fn fell_on_cue(
         .map(|chunk| chunk.mass)
         .sum();
     commands.entity(root).insert(crate::trees::TrunkLoads(vec![
-        crate::buildings::fracture::Load {
+        crate::construction::fracture::Load {
             chunk: usize::from(cue.cut),
             at: body.piece_centroid(cue.cut),
             blow: Vec3::new(dx, 0.0, dz) * mass,
@@ -389,7 +389,7 @@ fn fell_on_cue(
             energy: 0.0,
             crushed: 0.0,
             peak: None,
-            origin: crate::buildings::fracture::Origin::Field,
+            origin: crate::construction::fracture::Origin::Field,
         },
     ]));
     info!(

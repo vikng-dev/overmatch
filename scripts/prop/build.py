@@ -5,15 +5,15 @@
     python3 scripts/prop/build.py lint   assets/trees/<id>/<id>.blend
 
 A `.blend` (and the `<id>.tree.ron` the generator wrote beside it) goes in; `<id>.glb`,
-`<id>.lod.json` and the trunk's construction `tools/buildings/<id>.construction.ron` come out, and
+`<id>.lod.json` and the trunk's construction `tools/constructions/<id>.pieces.ron` come out, and
 the `.tree.ron` is carried through: checked against the glb and hashed into the certificate. The
 pattern is the tank build's (`scripts/tank/build.py`, ADR 0035) cut down to what a tree has. The
 node contract is `.agents/scratch/destruction-2026-10-26/slice-1-fallen-tree.md` (§2 the node
 tree, §3 the species table, amendments A5, A6, A12, A13), the view and the segment tree runtime's
 (`src/trees.rs`); this module states only what it enforces.
 
-THE CONSTRUCTION is the trunk as the common building bake reads it (`tools/`, `bake-buildings`,
-to `assets/buildings/<id>/<id>.building.ron`): one convex piece, the hull of the view's trunk
+THE CONSTRUCTION is the trunk as the common construction bake reads it (`tools/`, `bake-constructions`,
+to `assets/constructions/<id>/<id>.construction.ron`): one convex piece, the hull of the view's trunk
 rings to `plan.PROFILE_M` (`plan.envelope_solid`), of the species row's `trunk` material, anchored
 by its root plate
 and cut by its grain-stretched cells. Intact it is one collider holding its chunk table; the bake
@@ -56,7 +56,7 @@ a unit normal's components.
 
 THE CERTIFICATE is the tank's four fields with `sim_ron_sha` in `sim_glb_sha`'s place (A13), and
 `construction_sha`: a tree's sim artifacts are the `.tree.ron` the segment runtime is built from
-at spawn (ADR 0014) and the construction the building bake cuts, and the two fields hash those
+at spawn (ADR 0014) and the construction the construction bake cuts, and the two fields hash those
 bytes. `chains` is EMPTY, and that is a SCOPED EXCEPTION, not a measured outcome:
 ADR 0033 wants a generated ladder for every renderable mesh or an explicit unsupported verdict,
 and this build searches for no rung. The exception is scoped to the slice-1 fixture: the chain
@@ -95,8 +95,8 @@ SPECIES_TABLE = os.path.join("assets", "trees", "species.ron")
 CERTIFICATE_FIELDS = ("view_glb_sha", "sim_ron_sha", "construction_sha", "mesh_count", "chains")
 PARTS = ("trunk", "cap_bottom", "cap_top", "canopy")
 
-#: Where a tree's construction goes, under the repository root: the building bake's spec folder.
-CONSTRUCTIONS = os.path.join("tools", "buildings")
+#: Where a tree's construction goes, under the repository root: the construction bake's spec folder.
+CONSTRUCTIONS = os.path.join("tools", "constructions")
 
 #: What can move either artifact — the build's declared dependency list, relative to this
 #: directory. Read only by `scripts/hooks/test_pushed_assets.sh`, by text: its coverage row holds
@@ -728,7 +728,7 @@ def identity_failures(construction: str, js: dict, binary: bytes) -> List[str]:
 
 
 def construction_path(root: str, stem: str) -> str:
-    return os.path.join(root, CONSTRUCTIONS, stem + ".construction.ron")
+    return os.path.join(root, CONSTRUCTIONS, stem + ".pieces.ron")
 
 
 # ── the certificate ──────────────────────────────────────────────────────────────────────────────
@@ -895,7 +895,7 @@ def build(blend: str, root: str, work: str, blender: str, publish: bool) -> int:
     land(glb, view_blob)
     land(spec, text.encode())
     land(cert_path, certificate_bytes(cert))
-    print("build ▸ run `bake-buildings` (tools/) to cut {}".format(shown(spec, root)), flush=True)
+    print("build ▸ run `bake-constructions` (tools/) to cut {}".format(shown(spec, root)), flush=True)
     for path in (glb, tree_ron, spec, cert_path):
         print("build ▸ published {} — {:.2f} MB, sha256 {}".format(
             shown(path, root), os.path.getsize(path) / 1e6, sha256_bytes(read(path))),

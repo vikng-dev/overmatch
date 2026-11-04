@@ -173,8 +173,8 @@ fn record_walk_crossings(
     kinds: Query<(
         Has<crate::damage::VolumeOf>,
         Has<crate::trees::TreeSegment>,
-        Has<crate::buildings::BuildingElement>,
-        Has<crate::buildings::breakage::BuildingChunk>,
+        Has<crate::construction::Element>,
+        Has<crate::construction::breakage::ChunkCollider>,
     )>,
     clock: Res<crate::ShotClock>,
     mut trace: ResMut<ShotTrace>,
@@ -229,7 +229,7 @@ fn record_walk_world(
     clock: Res<crate::ShotClock>,
     trees: Query<(), With<crate::trees::TreeBody>>,
     tanks: Query<(), With<crate::tank::Tank>>,
-    walls: Res<crate::buildings::breakage::WallRecord>,
+    walls: Res<crate::construction::breakage::Record>,
     mut trace: ResMut<ShotTrace>,
 ) {
     // DERIVED: the shipping fixed clock has 64 ticks per simulation second.

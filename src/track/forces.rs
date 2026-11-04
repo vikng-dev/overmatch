@@ -2455,12 +2455,12 @@ mod tests {
         }
     }
 
-    /// A vertical building corner crossed laterally must not manufacture damping from a ray
+    /// A vertical construction corner crossed laterally must not manufacture damping from a ray
     /// miss beside it. Drivers rely on this bound while a wrap arc scrubs along a corner.
     /// Fixture: a rounded wall facing +z and ending at x=0, a vertical pad 5 mm inside that
-    /// lateral silhouette, moving toward -x at 2 m/s. No rubble or per-building rule is used.
+    /// lateral silhouette, moving toward -x at 2 m/s. No rubble or per-construction rule is used.
     #[test]
-    fn vertical_building_corner_damps_only_the_contact_point_normal_speed() {
+    fn vertical_construction_corner_damps_only_the_contact_point_normal_speed() {
         use crate::track::oracle::{BlockField, TerrainBlock};
         use bevy::math::Quat;
         let rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)

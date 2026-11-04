@@ -8,7 +8,7 @@ the plan is a function of its inputs.
 
 The trunk's construction (`envelope`, `construction_ron`) is the common cutter's input: one convex
 piece, the hull of the view's trunk rings to `PROFILE_M`, cut into grain-stretched cells the
-species row authors (`tools/src/buildings/fracture.rs`). Its rings come from the same rows the
+species row authors (`tools/src/construction/fracture.rs`). Its rings come from the same rows the
 mesh is built from, so the construction and the view are one source.
 
 Units: metres and radians throughout. Blender authors Z up; the glTF export turns that into +Y up.
@@ -174,7 +174,7 @@ def boundaries(segment_rows: List[dict]) -> List[tuple]:
 
 
 #: Resolution: how far, m, a view ring may stand radially off the construction's profile. The
-#: collider, the view and the law block all read one hull (`src/buildings/fracture.rs`,
+#: collider, the view and the law block all read one hull (`src/construction/fracture.rs`,
 #: `Block::hull`), the collision library's, which joins neighbouring faces whose normals lie within
 #: about 1.5° (1 − cos θ < √ε of f32, DERIVED from parry's merge test) into one face with one plane.
 #: A trunk's sides turn by its taper, about 1e-4 rad a ring (DERIVED from fir_1's rings; with every
@@ -273,7 +273,7 @@ def _choice(pair) -> str:
 
 def construction_ron(stem: str, trunk: dict, segment_rows: List[dict], sides: int,
                      header: str) -> str:
-    """`tools/buildings/<stem>.construction.ron`: the trunk's envelope as one piece of the species
+    """`tools/constructions/<stem>.pieces.ron`: the trunk's envelope as one piece of the species
     row's `trunk` material, its grain up the trunk, cut by the row's cells, anchored at its base
     by the row's root plate. `header` leads as a comment."""
     corners, faces = envelope_solid(segment_rows, sides)

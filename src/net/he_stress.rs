@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use super::harness::{LeverError, env_text};
 use crate::ballistics::{FireShell, ShellMarched, ShotSource};
-use crate::buildings::{BuildingBody, breakage::Breakage};
+use crate::construction::{Body, breakage::Breakage};
 use crate::rounds::fuze::Trigger;
 use crate::scatter::MapInstance;
 use crate::state::GameplaySet;
@@ -96,19 +96,19 @@ fn install_value(app: &mut App, value: Option<&str>) -> Result<(), LeverError> {
 fn fire(
     time: Res<Time>,
     mut stress: ResMut<HeStress>,
-    buildings: Query<(&MapInstance, &Transform, &Breakage), With<BuildingBody>>,
+    constructions: Query<(&MapInstance, &Transform, &Breakage), With<Body>>,
     mut commands: Commands,
 ) {
     let now = time.elapsed_secs_f64();
     if stress.fired == stress.recipe.bursts || now < stress.next_s {
         return;
     }
-    let (identity, pose, body) = buildings
+    let (identity, pose, body) = constructions
         .iter()
         .min_by_key(|(id, ..)| id.ordinal)
-        .expect("the loaded shipped map must contain a destructible building for HE stress");
+        .expect("the loaded shipped map must contain a destructible construction for HE stress");
     let (min, max) = body.kind.bounds();
-    // DERIVED: the bounds' centre in XZ, one full building height above its roof. Vertical
+    // DERIVED: the bounds' centre in XZ, one full construction height above its roof. Vertical
     // flight crosses the roof, interior and ground without needing a tank or an aim solver.
     let centre = (min + max) * 0.5 * body.scale;
     let birth = pose.translation
@@ -239,7 +239,7 @@ mod tests {
     }
 
     fn assert_real_flight(mut app: App) {
-        use crate::buildings::breakage::WallRecord;
+        use crate::construction::breakage::Record;
         app.add_plugins(crate::server_plugin_floor())
             .add_plugins(super::super::physics::physics_plugins())
             .add_plugins(crate::SimPlugin)
@@ -307,19 +307,19 @@ mod tests {
         );
         let target = app
             .world_mut()
-            .query_filtered::<&MapInstance, With<BuildingBody>>()
+            .query_filtered::<&MapInstance, With<Body>>()
             .iter(app.world())
             .map(|id| id.ordinal)
             .min()
             .unwrap();
         let falls = app
             .world()
-            .resource::<WallRecord>()
+            .resource::<Record>()
             .entries
             .iter()
             .filter(|entry| {
-                entry.building == target
-                    && matches!(entry.event, crate::buildings::breakage::WallEvent::Fall(_))
+                entry.construction == target
+                    && matches!(entry.event, crate::construction::breakage::Event::Fall(_))
             })
             .count();
         println!(
@@ -351,14 +351,14 @@ mod tests {
     /// column has no ground path and falls. No shipped round's potency or house strength gates it.
     fn assert_controlled_destruction_delivery(app: &mut App) {
         use crate::ballistics::{BallisticVolume, DeliveredLine, PenetrationMarks, VolumeCrossing};
-        use crate::buildings::breakage::{WallEvent, WallRecord};
-        use crate::buildings::fracture::Masonry;
+        use crate::construction::breakage::{Event, Record};
+        use crate::construction::fracture::Masonry;
         use crate::substances::SubstanceRegistry;
         use std::collections::BTreeSet;
-        let kind = crate::buildings::tests::column_construction();
+        let kind = crate::construction::tests::column_construction();
         let used: BTreeSet<_> = app
             .world_mut()
-            .query_filtered::<&MapInstance, With<BuildingBody>>()
+            .query_filtered::<&MapInstance, With<Body>>()
             .iter(app.world())
             .map(|id| id.ordinal)
             .collect();
@@ -367,7 +367,7 @@ mod tests {
             .expect("the controlled fixture needs an unused construction ordinal");
         // Fixture: y = 1000 m separates the column from the shipped map's contacts.
         let offset = Vec3::Y * 1000.0;
-        let root = crate::buildings::spawn(
+        let root = crate::construction::spawn(
             &mut app.world_mut().commands(),
             &kind,
             MapInstance {
@@ -399,10 +399,10 @@ mod tests {
         let shell = app.world_mut().spawn(PenetrationMarks::default()).id();
         assert!(
             app.world()
-                .resource::<WallRecord>()
+                .resource::<Record>()
                 .entries
                 .iter()
-                .all(|entry| entry.building != ordinal)
+                .all(|entry| entry.construction != ordinal)
         );
         app.world_mut().trigger(ShellMarched {
             shell,
@@ -426,18 +426,18 @@ mod tests {
             }],
         });
         app.update();
-        let record = app.world().resource::<WallRecord>();
+        let record = app.world().resource::<Record>();
         assert!(
             record
                 .entries
                 .iter()
-                .any(|entry| entry.building == ordinal && entry.event == WallEvent::Dust(0))
+                .any(|entry| entry.construction == ordinal && entry.event == Event::Dust(0))
         );
         let fallen: BTreeSet<_> = record
             .entries
             .iter()
             .filter_map(|entry| match entry.event {
-                WallEvent::Fall(chunk) if entry.building == ordinal => Some(chunk),
+                Event::Fall(chunk) if entry.construction == ordinal => Some(chunk),
                 _ => None,
             })
             .collect();

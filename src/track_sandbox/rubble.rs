@@ -12,15 +12,15 @@
 use avian3d::prelude::{ColliderDensity, Position, RigidBody, Rotation};
 use bevy::prelude::*;
 
-use crate::buildings::BuildingLibrary;
-use crate::buildings::breakage::{BuildingChunk, chunk_collider, piece_layers};
+use crate::construction::ConstructionLibrary;
+use crate::construction::breakage::{ChunkCollider, chunk_collider, piece_layers};
 use crate::debris::DebrisPiece;
 use crate::track::rubble::footprint_radius;
 
 use super::belt::EnvelopeLaw;
 use super::{RigGeom, Side, belt_loop, contact_probe, force_viz_scale};
 
-/// The building asset the yard is cut from.
+/// The construction asset the yard is cut from.
 const HOUSE: &str = "house_1";
 /// Fixture layout: where the pile's base centre stands (world, on the lane's ground at y = 0): on the open flat
 /// ground left of the washboards.
@@ -86,7 +86,7 @@ pub(super) fn spawn_rubble_yard(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-    let library = BuildingLibrary::load(&root, [HOUSE]);
+    let library = ConstructionLibrary::load(&root, [HOUSE]);
     let kind = library.get(HOUSE).expect("the shipped house loads").clone();
     let layout = &kind.layout;
     let structure = layout.structure(&kind.asset, 1.0);
@@ -130,7 +130,7 @@ pub(super) fn spawn_rubble_yard(
             Name::new("rubble yard wall"),
             Transform::from_xyz(WALL_AT.x - mid.x, 0.0, WALL_AT.y - mid.z).with_rotation(turn),
             RigidBody::Static,
-            Mesh3d(meshes.add(crate::buildings::view::piece_mesh(
+            Mesh3d(meshes.add(crate::construction::view::piece_mesh(
                 &kind.asset,
                 layout,
                 &wall_chunks.iter().map(|&c| c as u16).collect::<Vec<_>>(),
@@ -145,9 +145,9 @@ pub(super) fn spawn_rubble_yard(
             ChildOf(wall_root),
             Transform::IDENTITY,
             collider,
-            crate::buildings::element_layers(),
+            crate::construction::element_layers(),
             kind.chunk_friction(c),
-            BuildingChunk(c as u16),
+            ChunkCollider(c as u16),
         ));
     }
 
@@ -200,7 +200,7 @@ pub(super) fn spawn_rubble_yard(
             ColliderDensity(structure.chunks[c].material.density),
             piece_layers(),
             kind.chunk_friction(c),
-            Mesh3d(meshes.add(crate::buildings::view::piece_mesh(
+            Mesh3d(meshes.add(crate::construction::view::piece_mesh(
                 &kind.asset,
                 layout,
                 &[c as u16],

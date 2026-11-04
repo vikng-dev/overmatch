@@ -60,7 +60,7 @@ When a breach slips past a lens and is found later, the miss becomes a line in t
 |---|---|
 | load | `spec.rs`, `assets.rs`, `bake*`, `provenance.rs`, `fingerprint.rs`, `geometry_lod*`, `substances.rs`, `ground_types.rs`, `map.rs`, `world.rs`, `settings*`, `keyed_map.rs`, `build.rs`, `tools/` |
 | ballistics | `ballistics*`, `rounds*`, `damage*`, `damage_cam/`, `guns.rs`, `shooting.rs`, `firecontrol.rs`, `aim.rs`, `exact.rs`, `shot_trace.rs`, `trace*` |
-| destruction | `buildings*`, `building_surface.rs`, `debris.rs`, `collider_rehome.rs`, `trees*`, `scatter.rs`, `terrain_grid.rs`, `terrain_lod.rs`, `terrain_blend*` |
+| destruction | `construction*`, `construction_surface.rs`, `debris.rs`, `collider_rehome.rs`, `trees*`, `scatter.rs`, `terrain_grid.rs`, `terrain_lod.rs`, `terrain_blend*` |
 | driving | `track*`, `track_prints*`, `tank*`, `tank_surface.rs` (not `track_sandbox/`) |
 | net | `net/`, `state.rs`, `flow.rs`, `command.rs`, `platform.rs`, `quit.rs`, `lib.rs`, `main.rs` |
 | view | `view.rs`, `camera.rs`, `hud.rs`, `drive_hud.rs`, `crew_ui.rs`, `sight*`, `overlay.rs`, `vfx/`, `sfx/`, `hull_marks*`, `render_*`, `scene_depth.rs`, `terrain_shadow.rs`, `ui_font.rs`, `branding.rs`, `lod_showcase.rs` |

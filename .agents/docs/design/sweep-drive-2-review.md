@@ -29,7 +29,7 @@ reserve scaling (`e29dabb8`) were read for correctness; no P1 or P2 found.
 
 | Finding | Disposition |
 |---|---|
-| G5 | **Partly fixed, P1 stays open.** Dynamic support is generic: a solid collider (no `Sensor`) whose layers meet the hull's contact class, on a dynamic body the caller's piece query can write (self and other tanks are outside it). Static support still reads `BuildingElement`/`BuildingChunk`. |
+| G5 | **Partly fixed, P1 stays open.** Dynamic support is generic: a solid collider (no `Sensor`) whose layers meet the hull's contact class, on a dynamic body the caller's piece query can write (self and other tanks are outside it). Static support still reads `Element`/`ChunkCollider`. |
 | R19–R25 | Fixed: every `bind_link_template` / `mirrored_mesh` fault refuses; only assets still loading wait. A vehicle view instance without the template is refused on `WorldInstanceReady`. |
 | `Stragglers::Park` | Disagree with the inventory: `track_sandbox::link_view` parks stragglers on a live-tuned link count, a product caller, not a test-only arm. |
 | `ShoeBelt::pin` | No finding now: its one writer is the capture plan's `LodShowcase` scene (`lod_showcase`), a named user. |
@@ -43,7 +43,7 @@ structure laws (`contact_transfer`, the walls' and trunks') read load only from 
 An admitted standing trunk would carry the belt, which climbs it by traction, and never be loaded,
 so no tank could fell a tree it meets with its track. Walls already have this gap: the belt bears
 on a wall element and the wall never feels it. The fix is to feed the belt's reaction on a static
-structure into the same transfer reading, then drop the building identity rule and add the field
+structure into the same transfer reading, then drop the construction identity rule and add the field
 representation rule (heightfield and authored blocks are already field surfaces and must not be
 counted twice) and cylinder support in `Surface::triangles` (scatter trunks). Other tanks still
 need a tick-start snapshot and staged reaction writes in the server order.

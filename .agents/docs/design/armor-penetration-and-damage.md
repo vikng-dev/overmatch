@@ -478,7 +478,7 @@ and a barely perforating round yields the strongest cone that plate gives.
 
 The walker and records carry the **energy the field carries**: strength `S = E_C / q`,
 `q = EMITTED_SHARE = ½` the exact normalization of the field weights, so the field emits
-`qS = E_C = κ r ΔE` joules. No HP unit enters `S`. A building reads a direction's `S f_k / N`
+`qS = E_C = κ r ΔE` joules. No HP unit enters `S`. A construction reads a direction's `S f_k / N`
 joules as crushing energy; a box's pool reads the same joules times `u_C / κ`
 (`spall_cone::FieldUnit`, `spall_cone::cone_unit`, `ballistics::field_units`), so
 `H_C = (u_C / κ) qS`. The three mechanisms' units and their replacement law are stated in §6.
@@ -883,7 +883,7 @@ enters it. Its strength is `S = E_wall / q`, as for the cone the energy it carri
 emitted share; the ring's equal-solid-angle strata emit `qS = E_wall` at every direction count.
 They march, shadow and dose as a cone's do (§5), through spatially reached volumes, leaving none,
 every contribution reaching the shot tally; a deposit's joules times `u_B` are its HP, and a
-building reads the joules themselves. The record and wire carry the field descriptor and that strength. The data
+construction reads the joules themselves. The record and wire carry the field descriptor and that strength. The data
 block also holds the ring's half-width and direction count, independently of potency.
 
 **Potency.** The ring's unit was set against the retired even-sphere target: a crew station's
@@ -1031,7 +1031,7 @@ Each mechanism has one balance knob whose name says what it converts:
 The field units are DERIVED from the preserved transport coefficients and normalization (§5,
 §5a); the line unit's derivation is above. There are three because these are three mechanisms
 with independent game potency, not three physical shares of one energy budget. Changing the
-line's unit does not touch a cone or ring: a field carries joules, which a building crushes
+line's unit does not touch a cone or ring: a field carries joules, which a construction crushes
 with, and converts them to HP only through its own unit. A witness's line is a chord law with the round's crew line
 rate, not a fourth energy mechanism.
 
@@ -1090,7 +1090,7 @@ the diameter while a line's dose grows with its chord, so thin wood breaks in fe
 0.1 m sapling at the first; the machine gun breaks the sapling in 34 centred hits and the fir's
 base in 187 (MEASURED, `.agents/scratch/damage-model-2026-10-29/segment-pools-results.md`). An
 emptied pool opens the joint at its segment's base in the trunk's structural state, the one a
-body's contact breaks too (`wall-destruction.md`, "Trees are structures by the same laws"). A
+body's contact breaks too (`construction-destruction.md`, "Trees are structures by the same laws"). A
 species' structural facts (grain, green density, root plate) are its own; its HP rate is not, and
 for the dose a species is the generator's look and ranges only: a player cannot tell that a round lost a little more speed
 in one species than another, while trunk thickness is simple and visible. A round entering a trunk meets the wood's share of the
@@ -1777,7 +1777,7 @@ the invariants, not chosen by taxonomy:
 - **Commutative** — authoring order can't matter.
 
 This is CSG union evaluated lazily on the 1D ray (Roth '82): overlapping *individually-manifold*
-plates behave exactly as their boolean union, without ever building the merged mesh. Boolean union
+plates behave exactly as their boolean union, without ever construction the merged mesh. Boolean union
 is the special case of `max` over {absent, factor}; "steel beats rubber" is `1000 ≫ 50`, a
 consequence rather than a rule. A witness (§6) contributes no factor: it is no part of the field.
 
@@ -2289,7 +2289,7 @@ No historical commit is rewritten.
 
 **Admission gates (MEASURED):** the initial embedded-value regression failed by accepting Fixture.
 After the fix, the broader targeted run passed 915 tests (12 existing ignored measurement tests),
-including the requested provenance/spec/rounds/materials/substances/ballistics/buildings filters,
+including the requested provenance/spec/rounds/materials/substances/ballistics/constructions filters,
 headless, pen-cam and field-cast checks, and whole-tree guards. The final tree admission/unwind
 assertions, provenance tests and whole-tree guards passed another 82 tests. Formatting and CI
 clippy (`--locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`) passed.
@@ -2326,7 +2326,7 @@ fixture wording. The two spall energy notes and the round-type hit noses/notes a
 unchanged; their law lanes retain ownership. No authored value or schema changes.
 
 **Final gates (MEASURED):** 915 tests passed, with 12 existing ignored measurement tests. The run
-included the requested provenance, spec, rounds, materials, substances, ballistics and buildings
+included the requested provenance, spec, rounds, materials, substances, ballistics and constructions
 filters; the headless, pen-cam and field-cast checks; and the whole-tree `doc_citations`,
 `ui_ascii`, `net_boundary` and `bake::` guards. Formatting, `git diff --check` and CI clippy passed.
 The eight-file, 284-label value-token comparison passed again on the final authored data.
@@ -2365,8 +2365,8 @@ reports on the energy-unit lane were verified against the code before this table
 
 | reviewer | finding | verified / not a defect | fixed in (subject) |
 |---|---|---|---|
-| Claude P2 | the energy a round loses across a body is spent twice: the line deals the whole ΔE to the body's volumes and the exit's cone carries ΔE × r more, which buildings crush with; `r` did a partition job with no label | verified: `SpallSource::strength` was `field_strength(energy × strength_ratio)` while `finish` dealt every stretch's whole loss to the line, and three walk tests pinned line deposits alone at ΔE on perforations | `ballistics: spend a body's lost energy once between its line and its cone (#258)`: the cone carries `κ r ΔE` (`cone_debris_energy_share`, then labelled `Unknown` 0.06; current classification is `StandIn`, §5 "The energy partition"), the line `(1 − κ r) ΔE` sample by sample, the cone's HP unit is `u_C / κ`; the walk tests now sum line and fields to ΔE |
-| Codex P2, Claude P3 | the pool-quantum gate lets a field's HP unit decide whether its joules reach a building | verified: `throw_spall_cone` and `throw_burst` returned before walking a gated field, so the shell reader saw no rays | same commit: the gate withholds HP doses only; a gated field carrying energy is walked and recorded without doses; `a_cone_below_the_pool_quantum_doses_no_pool_and_is_still_thrown` |
+| Claude P2 | the energy a round loses across a body is spent twice: the line deals the whole ΔE to the body's volumes and the exit's cone carries ΔE × r more, which constructions crush with; `r` did a partition job with no label | verified: `SpallSource::strength` was `field_strength(energy × strength_ratio)` while `finish` dealt every stretch's whole loss to the line, and three walk tests pinned line deposits alone at ΔE on perforations | `ballistics: spend a body's lost energy once between its line and its cone (#258)`: the cone carries `κ r ΔE` (`cone_debris_energy_share`, then labelled `Unknown` 0.06; current classification is `StandIn`, §5 "The energy partition"), the line `(1 − κ r) ΔE` sample by sample, the cone's HP unit is `u_C / κ`; the walk tests now sum line and fields to ΔE |
+| Codex P2, Claude P3 | the pool-quantum gate lets a field's HP unit decide whether its joules reach a construction | verified: `throw_spall_cone` and `throw_burst` returned before walking a gated field, so the shell reader saw no rays | same commit: the gate withholds HP doses only; a gated field carrying energy is walked and recorded without doses; `a_cone_below_the_pool_quantum_doses_no_pool_and_is_still_thrown` |
 | Codex P3, Claude P3 | §5's knockout radius still read `E = qS/j`, the gate "the energy rate", potency colour `ρ = 1/joules_per_hp` | verified: `qS/j` on the 2.7035 MJ cone gives 901 HP against the 396.5 HP quoted | `docs: state the energy partition and the HP-only gate (#258)` |
 | Claude P3 | the glossary's Field, Spall cone, Dose and Energy-to-HP rate said every field converts at `joules_per_hp` and a cone carries "one fixed share" | verified against `spall_cone::FieldUnit` and `ballistics::field_units`; Line dose had the same gap | same docs commit, Line dose included |
 | Claude P3 | nothing tested the pen cam's per-mechanism joule-to-HP conversion | verified: no test compared a planned field's HP with its mechanism's unit | code commit: `each_planned_field_reads_its_own_mechanisms_unit` compares every recorded field's planned HP with the sim's dose edge at its own unit |
@@ -2634,7 +2634,7 @@ The carried reviews were checked against source. MEASURED regressions: mixed ove
 2116.354 N s to a hull whose own line carried 1058.177 N s; a fixture assembly of 40.8 kg retained
 that mass after perforation despite its 10.2 kg core. The unequal-mass test now balances retained
 work plus emitted debris against incoming assembly energy less outgoing core energy, head-on and
-obliquely, and compares the vector transfer independently. The building whole-blow mutant and
+obliquely, and compares the vector transfer independently. The construction whole-blow mutant and
 trunk duplicate-entrance mutant each fail their nonzero `ShellMarched` consumer tests.
 
 The hollow-body re-entry test was red with field dose zero despite positive retained line dose.
@@ -2660,7 +2660,7 @@ shipped units instead of the supplied mechanism units.
 |---|---|---|---|
 | Codex exchange-1 P1; Claude exchange-1 P2 | hull gets the sum while environment gets its line again; reversed entrance loses hull transfer | verified red; each line resolves its own owner once | `ballistics: give every crossed body its exchange once (#258)` |
 | Claude exchange-1 P2/P3 | carrier energy has no owner, carrier keeps flying, unequal-mass bend is untested, mass doc disagrees | verified red; first resisting contact retains carrier work and impulse; only the core bends and continues, with unequal-mass head-on and oblique budget tests | `ballistics: give every crossed body its exchange once (#258)` |
-| Claude exchange-1 P2/P3 | building/trunk consumers have no nonzero line proof; entrance bend spreads into rear chunks | verified through the shipped message and explicit consumer mutants; entry impulse stays at entry | `ballistics: give every crossed body its exchange once (#258)` |
+| Claude exchange-1 P2/P3 | construction/trunk consumers have no nonzero line proof; entrance bend spreads into rear chunks | verified through the shipped message and explicit consumer mutants; entry impulse stays at entry | `ballistics: give every crossed body its exchange once (#258)` |
 | Claude exchange-1 P3 | debris is unread while rays recompute it | verified; exit emission now sums addressed exchange work, and the duplicate loss field is deleted | `ballistics: give every crossed body its exchange once (#258)` |
 | Claude exchange-1 P3 | parallel dose/exchange vectors are rejoined by address | verified; one exchange contains its dose, work allocation and momentum | `ballistics: give every crossed body its exchange once (#258)` |
 | Claude exchange-1 P3 | one accumulator changes from lost to retained work | verified; retained contributions accumulate directly in a separately named field | `ballistics: give every crossed body its exchange once (#258)` |
@@ -2711,7 +2711,7 @@ still follows the verdict: core for a hole, flying body for a stop or bounce. Pu
 the outgoing body's drag for their exit leg. Protocol revision 71 names that meaning; revision 72
 names corrected contact marks and checked packed directions, with the wire-definition pin updated.
 
-The addressed exchange carries entrance-only retained work through `DeliveredLine`; the building
+The addressed exchange carries entrance-only retained work through `DeliveredLine`; the construction
 queue keeps that line directly. The entrance chunk takes this work as a point load, while core
 work follows chord. Total retained energy and HP conversion keep their existing owners. The
 head-on and oblique allocator fixtures replace the narrower momentum-only test and retain its

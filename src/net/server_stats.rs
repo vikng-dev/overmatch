@@ -24,7 +24,7 @@
 //! - `throttled_usec`, `nr_throttled`: the container's CPU-quota throttling over the period, from
 //!   the cgroup's `cpu.stat` (microseconds throttled, enforcement periods throttled); null off
 //!   Linux or where the file is unreadable;
-//! - `debris`: the `live` (awake) and `sleeping` loose pieces at the line, a building's and the
+//! - `debris`: the `live` (awake) and `sleeping` loose pieces at the line, a construction's and the
 //!   debris stress lever's (`net::debris_stress`); while the lever is armed also its cumulative
 //!   `breaches` and `released`.
 //!

@@ -39,7 +39,7 @@
 //! point of a lane toward any of its aims, turned up to the tests' `AIM_ERROR_DEG` either way,
 //! passes at least half a hull's width plus [`DRIFT_M`] from every other tank's hull on its lane
 //! (overruns of up to [`OVERRUN_M`] included). A round that flies long lands beyond the battle,
-//! where it may strike a tree or a building; each summary line counts the trees down.
+//! where it may strike a tree or a construction; each summary line counts the trees down.
 //!
 //! The cost: the scene prices muzzle, flight, tracers, terrain impacts, dust, prints and audio,
 //! and never a hull strike, a hull mark or the pen cam corner (which has its own transient
@@ -99,7 +99,7 @@ const SEED: u64 = 153;
 /// The camera tank's lane starts here, world XZ: the south edge of the map's north forest, 50
 /// trunks within 150 m of the camera, 4 of them within ±36° of the view axis (DERIVED from
 /// level.json; the arm line logs both). The lanes stand on ground no steeper than 5.8° over a 6 m
-/// baseline (DERIVED from the heightmap), clear of every tree and building
+/// baseline (DERIVED from the heightmap), clear of every tree and construction
 /// (`the_lanes_and_lines_of_fire_stand_clear_of_the_map`).
 const ANCHOR_XZ: Vec2 = Vec2::new(-160.0, 470.0);
 /// The strip's axis, degrees from `+Z` toward `+X` (fixture data, with [`ANCHOR_XZ`]).
@@ -1037,9 +1037,9 @@ mod tests {
     }
 
     /// The layout against the shipped map: every lane inside the world, on ground no steeper than
-    /// a tank drives without stalling or sliding, clear of every tree and building, every spawn
+    /// a tank drives without stalling or sliding, clear of every tree and construction, every spawn
     /// clear of the others and of the terrain, and every line of fire clear of every tree and
-    /// building until it has passed every lane — so no tank is stopped by the scatter and no round
+    /// construction until it has passed every lane — so no tank is stopped by the scatter and no round
     /// that lands in the battle fells a tree, either of which would change the scene between runs.
     /// Thresholds ASSUMED.
     #[test]
@@ -1052,33 +1052,33 @@ mod tests {
         let grid = crate::terrain_grid::tests::shipped_grid();
         let manifest = crate::map::tests::shipped_manifest();
         let mut trees = Vec::new();
-        let mut buildings = Vec::new();
+        let mut constructions = Vec::new();
         for instance in &manifest.instances {
             let xz = Vec2::new(instance.translation[0], instance.translation[2]);
             match manifest.prototypes.get(&instance.prototype) {
                 Some(Prototype::Tree { .. }) => trees.push(xz),
-                Some(Prototype::Building { min, max, .. }) => {
+                Some(Prototype::Block { min, max, .. }) => {
                     let reach = Vec2::new(
                         min[0].abs().max(max[0].abs()),
                         min[2].abs().max(max[2].abs()),
                     );
-                    buildings.push((xz, reach.length() * instance.scale[0]));
+                    constructions.push((xz, reach.length() * instance.scale[0]));
                 }
-                Some(Prototype::Structure { asset }) => {
+                Some(Prototype::Construction { asset }) => {
                     let (min, max) = manifest
-                        .buildings
+                        .constructions
                         .get(asset)
-                        .expect("the manifest loads every building it places")
+                        .expect("the manifest loads every construction it places")
                         .bounds();
                     let reach =
                         Vec2::new(min.x.abs().max(max.x.abs()), min.z.abs().max(max.z.abs()));
-                    buildings.push((xz, reach.length() * instance.scale[0]));
+                    constructions.push((xz, reach.length() * instance.scale[0]));
                 }
                 None => {}
             }
         }
         assert!(
-            !trees.is_empty() && !buildings.is_empty(),
+            !trees.is_empty() && !constructions.is_empty(),
             "the shipped map's scatter"
         );
         let plan = Plan::new(SEED);
@@ -1106,11 +1106,11 @@ mod tests {
                     "tank {index}'s lane passes {clear:.1} m from a tree at {tree}"
                 );
             }
-            for &(building, reach) in &buildings {
-                let clear = point_segment(building, from, to) - reach;
+            for &(construction, reach) in &constructions {
+                let clear = point_segment(construction, from, to) - reach;
                 assert!(
                     clear >= LANE_BUILDING_CLEAR_M,
-                    "tank {index}'s lane passes {clear:.1} m from a building at {building}"
+                    "tank {index}'s lane passes {clear:.1} m from a construction at {construction}"
                 );
             }
             crate::terrain_grid::tests::assert_spawn_clears_terrain(
@@ -1141,11 +1141,11 @@ mod tests {
                             "tank {index}'s fire toward {aim} passes {clear:.1} m from a tree at {tree}"
                         );
                     }
-                    for &(building, reach) in &buildings {
-                        let clear = point_segment(building, start, end) - reach;
+                    for &(construction, reach) in &constructions {
+                        let clear = point_segment(construction, start, end) - reach;
                         assert!(
                             clear >= FIRE_TREE_CLEAR_M,
-                            "tank {index}'s fire toward {aim} passes {clear:.1} m from a building at {building}"
+                            "tank {index}'s fire toward {aim} passes {clear:.1} m from a construction at {construction}"
                         );
                     }
                 }

@@ -23,6 +23,6 @@ workspace = true
 doctest = false
 
 [[bin]]
-name = "bake-buildings"
-path = "src/bin/bake-buildings.rs"
+name = "bake-constructions"
+path = "src/bin/bake-constructions.rs"
 test = false

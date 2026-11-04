@@ -639,7 +639,7 @@ Subject: the game's damage model and shot records, game state only. Fixed in "re
 holding a discovery start". The release capture reports discovery inside one certified shell
 whose key names one entity as both volume and primitive. By the spawn code that is a collider
 that is its own volume: a split multi-substance tank volume (`tank::spawn`'s `split` arm), a
-building element, a tree segment or a breakage chunk, never the child primitive of a
+construction element, a tree segment or a breakage chunk, never the child primitive of a
 single-substance tank node. The log's last respawn came 5 s before the panic (MEASURED: the
 server log's last respawn at 08:53:39.36Z; the panic follows lines stamped 08:53:44.50Z), so the
 capture's state is not the newborn-body regression's. The likelier route is the second one
@@ -1088,7 +1088,7 @@ Formatting and locked workspace/all-target CI clippy with `dev_ui,bitprobe` pass
 commit. Ignored pricing and capture instruments were left ignored.
 
 Wire definitions are unchanged: PROTOCOL_REV deliberately remains 63. The protected track,
-building, contact-transfer and net modules were not edited. No captures, pricing, pushes or issue
+construction, contact-transfer and net modules were not edited. No captures, pricing, pushes or issue
 comments were made.
 
 ## Verification of the sweep-ball-11 review (sweep-ball-12)

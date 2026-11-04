@@ -73,6 +73,8 @@ mod shot_explanation;
 mod shot_loss;
 mod shot_transport;
 // `pub(crate)` for `spawn_limit` — the clamp the spawn regression test resolves its corners at.
+/// The wall ledger: every construction change on one globally visible entity, replicated by diff.
+mod construction;
 pub(crate) mod spawn_map;
 mod spawn_placement;
 /// The sync margins on both wire timelines, derived from the measured link instead of pinned.
@@ -85,8 +87,6 @@ mod tests;
 /// The net client's UI, screen by screen: every root owned, each screen drawing only its own.
 #[cfg(test)]
 mod ui_ownership;
-/// The wall ledger: every building change on one globally visible entity, replicated by diff.
-mod walls;
 /// The quantised wire forms of the per-tick hull and belt state.
 mod wire_quant;
 mod world_reset;

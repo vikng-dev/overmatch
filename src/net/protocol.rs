@@ -208,11 +208,11 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// `DriveSignal`. Surface, own-type graph and REV move.
 ///
 /// REV 41 (walls break): the wall ledger, one globally visible entity whose
-/// [`WallLedger`](super::walls::WallLedger) lists every building change as `(building, event,
-/// tick)` and replicates by diff, and each fallen group's [`WallPiece`] on its pose carrier.
+/// [`Ledger`](super::construction::Ledger) lists every construction change as `(construction, event,
+/// tick)` and replicates by diff, and each fallen group's [`Piece`] on its pose carrier.
 /// Surface and own-type graph move.
 ///
-/// REV 42 (#189, holes in walls): the ledger's [`WallEvent`] gains `Hole(chunk, Hole)`, a round's
+/// REV 42 (#189, holes in walls): the ledger's [`Event`] gains `Hole(chunk, Hole)`, a round's
 /// channel or a blast's crater dish in one chunk, drawn only: two `i16` millimetre points about
 /// the baked chunk's centroid and a `u16` millimetre radius. Own-type graph and REV move.
 ///
@@ -225,8 +225,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// Battle number and result. Netcode retains authenticated refusal causes and rechecks admission
 /// at challenge completion. The packet format is unchanged; the replicated surface and type graph move.
 ///
-/// [`WallPiece`]: crate::buildings::breakage::WallPiece
-/// [`WallEvent`]: crate::buildings::breakage::WallEvent
+/// [`Piece`]: crate::construction::breakage::Piece
+/// [`Event`]: crate::construction::breakage::Event
 /// REV 55 (#236): tree motion uses the interpolated debris pose stream. The topology ledger
 /// carries only a state word; each freed trunk's TreePiece identifies its map tree and cut.
 /// REV 57: environment ledgers and pose carriers carry `WorldGeneration`; the Battle number
@@ -277,7 +277,10 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 83 (#198, driving model): direct ground grip and nominal-pressure rolling resistance.
 /// REV 85 (the game environment destruction model): checked debris-pose receive with a terminal
 /// client refusal. Valid pose bytes retain their layout.
-pub const PROTOCOL_REV: u32 = 85;
+/// REV 86 (the game's environment destruction model): construction ledger and piece ordinal
+/// fields say `construction`; registrations and type definitions use construction names.
+/// Postcard retains the positional field layout; the named wire contract and fingerprint move.
+pub const PROTOCOL_REV: u32 = 86;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1063,8 +1066,8 @@ const WIRE_SURFACE: &[&str] = &[
     "DestructionLedger",
     "HullMarks",
     "DebrisPose",
-    "WallLedger",
-    "WallPiece",
+    "Ledger",
+    "Piece",
     "TreePiece",
     "Scoreboard",
     "BattleState",
@@ -1096,7 +1099,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x5afa185f66009321;
+const WIRE_SURFACE_HASH: u64 = 0xf6f4efee9a7cda11;
 
 // Wire coverage: `plugin_registrations_match_wire_surface` binds registration order and channel
 // semantics to `WIRE_SURFACE`; `wire_surface_is_pinned` binds that list to the handshake. Neither
@@ -1110,7 +1113,7 @@ const WIRE_SURFACE_HASH: u64 = 0x5afa185f66009321;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xc29bccec38265308;
+const WIRE_TYPES_HASH: u64 = 0x4670e21a88eed9f2;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1150,7 +1153,7 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<crate::hull_marks::HullMarks>()
         .replicate_diff();
     // Every server piece's carrier: one pose per piece, written only while it moves, so a sleeping
-    // piece sends nothing more. A building piece's carrier is interpolated, so it draws at the
+    // piece sends nothing more. A construction piece's carrier is interpolated, so it draws at the
     // cursor the hulls draw at; the stress lever's are not, and apply on arrival.
     app.component::<super::debris_stress::DebrisPose>()
         .replicate_with(super::debris_stress::pose_replication())
@@ -1158,10 +1161,11 @@ pub(crate) fn plugin(app: &mut App) {
     super::resync::retain_stream::<super::debris_stress::DebrisPose>(app);
     // The wall ledger (one world entity): appended entries ride as diffs, a late joiner takes the
     // list once.
-    app.component::<super::walls::WallLedger>().replicate_diff();
-    // A building's fallen group on its pose carrier: which building and which chunks, sent once
+    app.component::<super::construction::Ledger>()
+        .replicate_diff();
+    // A construction's fallen group on its pose carrier: which construction and which chunks, sent once
     // with the carrier.
-    app.component::<crate::buildings::breakage::WallPiece>()
+    app.component::<crate::construction::breakage::Piece>()
         .replicate();
     app.component::<crate::trees::TreePiece>().replicate();
     // The match score (one world entity): sent whole when a knockout changes it, a late joiner
@@ -1239,7 +1243,7 @@ pub(crate) fn plugin(app: &mut App) {
     });
     // The plugin mirrors `sync_to_transform` into `PhysicsTransformConfig::transform_to_position`,
     // and in this mode that flag's only reader is avian's spawn hook (`init_physics_transform`):
-    // OFF, a body spawned with a `Transform` and no `Position` — every scatter building and trunk,
+    // OFF, a body spawned with a `Transform` and no `Position` — every scatter construction and trunk,
     // the test course's statics — gets its placeholder `Position` ZEROED, and with avian's
     // transform plugin disabled nothing ever moves it. ON, the hook derives `Position`/`Rotation`
     // from the spawn transform once. No per-frame import is installed either way in this mode.
@@ -1622,7 +1626,7 @@ mod tests {
         assert!(!registry.is_registered::<avian3d::prelude::AngularVelocity>());
     }
 
-    /// A building's fallen piece draws at the cursor the hulls and the wall record draw at
+    /// A construction's fallen piece draws at the cursor the hulls and the wall record draw at
     /// (ADR-0037): its carrier's pose is registered for interpolation, and the law between two
     /// samples moves the position along the line and turns along the shorter arc. Unregistered,
     /// a client writes each pose on arrival and the piece leads the round that freed it by the
@@ -2032,11 +2036,11 @@ mod tests {
         ("src/hull_marks.rs", "MarkKind"),
         ("src/net/debris_stress.rs", "DebrisPose"),
         ("src/net/debris_stress/pose.rs", "WirePose"),
-        ("src/net/walls.rs", "WallLedger"),
-        ("src/buildings/breakage.rs", "WallEntry"),
-        ("src/buildings/breakage.rs", "WallEvent"),
-        ("src/buildings/breakage.rs", "Hole"),
-        ("src/buildings/breakage.rs", "WallPiece"),
+        ("src/net/construction.rs", "Ledger"),
+        ("src/construction/breakage.rs", "Entry"),
+        ("src/construction/breakage.rs", "Event"),
+        ("src/construction/breakage.rs", "Hole"),
+        ("src/construction/breakage.rs", "Piece"),
         ("src/trees/motion.rs", "TreePiece"),
         ("src/net/score.rs", "Scoreboard"),
         ("src/net/battle.rs", "BattleState"),

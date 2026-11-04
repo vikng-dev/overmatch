@@ -2,7 +2,7 @@
 //! the range whose chunks the range's rounds and a blast turn to dust or crack loose. A prototype
 //! isolated to the sandbox: nothing here is wired into the game's sim or its net.
 //!
-//! * **The wall.** One wall of the baked house (`assets/buildings/house_1/house_1.building.ron`,
+//! * **The wall.** One wall of the baked house (`assets/constructions/house_1/house_1.construction.ron`,
 //!   [`WALL`]'s brick elements), set down at [`PLACE`] by [`baked::wall_cut`]: the bake's convex
 //!   chunks, each a static collider with the `Brick` substance, so the walk crosses them as it
 //!   crosses any hard volume, and the bake's joints and ground anchors.
@@ -11,7 +11,7 @@
 //!   tool (O) bursts a charge of 0.1–5 kg at 0–5 m standoff: a sphere of rays ([`blast_field`])
 //!   each stopping on the first chunk it meets with its share of the energy, pushing the face it
 //!   meets with the blast's reflected impulse ([`model::Blast::push`]).
-//! * **Responses.** The game's fracture laws ([`crate::buildings::fracture`], through [`model`])
+//! * **Responses.** The game's fracture laws ([`crate::construction::fracture`], through [`model`])
 //!   turn each deposit into dust (the pools), local cracks (the push rule) and structural cracks
 //!   (the structural check, then the weight check on what changed), then let every group with no
 //!   path to the ground fall with the momentum pushed into it.
@@ -53,14 +53,15 @@ use self::model::{Block, Cut, Load, Masonry};
 use super::{FreeFlyCam, SEED_SPEC, UI_LEFT, panel_capturing};
 use crate::ballistics::burst::products_momentum;
 use crate::ballistics::{BallisticVolume, DeliveredLine, FireShell, ShellMarched, SpallMarks};
-use crate::buildings::schema::BuildingAsset;
+use crate::construction::schema::ConstructionAsset;
 use crate::dev_capture::plan::RangeWallCase;
 use crate::substances::SubstanceRegistry;
 use crate::{Layer, spec};
 
-/// The baked building the wall comes from, and which of its walls (a declared component): the
+/// The baked construction the wall comes from, and which of its walls (a declared component): the
 /// brick elements of that wall.
-const BUILDING: &str = include_str!("../../assets/buildings/house_1/house_1.building.ron");
+const CONSTRUCTION: &str =
+    include_str!("../../assets/constructions/house_1/house_1.construction.ron");
 const WALL: &str = "east";
 /// Fixture layout, world metres: where the wall stands, clear of the range's plates and target (x within ±7.5)
 /// and of the test course (z ≤ −30). Its front face looks down +Z.
@@ -175,7 +176,7 @@ struct WallHelp;
 #[derive(Resource)]
 struct Wall {
     cut: Cut,
-    live: crate::buildings::breakage::Live,
+    live: crate::construction::breakage::Live,
     structural: Vec<bool>,
     entities: Vec<Option<Entity>>,
     meshes: Vec<Handle<Mesh>>,
@@ -195,13 +196,14 @@ impl Layout {
     }
 }
 
-/// The wall's layout, read once from [`BUILDING`]. A building the bake wrote and the build
+/// The wall's layout, read once from [`CONSTRUCTION`]. A construction the bake wrote and the build
 /// shipped: one that does not parse is a broken build.
 fn layout() -> &'static Layout {
     static LAYOUT: std::sync::LazyLock<Layout> = std::sync::LazyLock::new(|| {
-        let asset = BuildingAsset::from_ron(BUILDING).expect("the shipped building parses");
+        let asset =
+            ConstructionAsset::from_ron(CONSTRUCTION).expect("the shipped construction parses");
         let cut = baked::wall_cut(&asset, WALL, SUBSTANCE, brick(), PLACE)
-            .expect("the shipped building has the wall");
+            .expect("the shipped construction has the wall");
         let (min, max) = cut.blocks.iter().fold(
             (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
             |(lo, hi), block| (lo.min(block.min), hi.max(block.max)),
@@ -807,7 +809,7 @@ fn setup_wall(
 
 /// A chunk's drawn mesh, vertices about its bounding box's centre: its faces inset by [`WallTool::seam_m`].
 fn chunk_mesh(block: &Block) -> Mesh {
-    let inset = crate::buildings::breakage::inset_point(block, 1.0, wall_tool().seam_m.0);
+    let inset = crate::construction::breakage::inset_point(block, 1.0, wall_tool().seam_m.0);
     let (mut positions, mut normals, mut indices) = (Vec::new(), Vec::new(), Vec::new());
     for (normal, face) in block.faces() {
         let base = positions.len() as u32;
@@ -868,7 +870,10 @@ fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallA
         ));
     }
     Wall {
-        live: crate::buildings::breakage::Live::from_structure(cut.structure.clone(), cut.elements),
+        live: crate::construction::breakage::Live::from_structure(
+            cut.structure.clone(),
+            cut.elements,
+        ),
         structural: vec![false; cut.structure.joints.len()],
         cut,
         entities,
@@ -1144,14 +1149,14 @@ struct Applied {
     blast: Option<(Blast, Vec3, f32, f32, Vec<Vec3>)>,
 }
 
-/// The holes a deposit cuts in the wall, the game's own sizing ([`crate::buildings::breakage::cut_holes`]):
+/// The holes a deposit cuts in the wall, the game's own sizing ([`crate::construction::breakage::cut_holes`]):
 /// the wall is its own frame at scale 1, each hole about its chunk's centroid.
 fn cut_holes(
     cut: &model::Cut,
     lines: &[(usize, Vec3, Vec3, f32)],
     blast: &[Load],
-) -> Vec<(usize, crate::buildings::breakage::Hole)> {
-    crate::buildings::breakage::cut_holes(
+) -> Vec<(usize, crate::construction::breakage::Hole)> {
+    crate::construction::breakage::cut_holes(
         &cut.blocks,
         |c| cut.structure.chunks[c].centroid,
         |c| cut.structure.chunks[c].material.crush,
@@ -1176,7 +1181,7 @@ fn apply_deposit(
             lines
                 .iter()
                 .flat_map(|(chunk, line)| {
-                    crate::buildings::breakage::resolved_line_loads(
+                    crate::construction::breakage::resolved_line_loads(
                         *chunk,
                         &wall.cut.structure.chunks[*chunk].material,
                         line,
@@ -1241,7 +1246,7 @@ fn apply_deposit(
         .len();
     applied.crushed = loads.iter().map(|load| load.crushed).sum();
     let pools = wall.live.state.pool.clone();
-    let changes = crate::buildings::breakage::run_laws(
+    let changes = crate::construction::breakage::run_laws(
         &wall.cut.element_of,
         &mut wall.live,
         &loads,
@@ -1258,14 +1263,14 @@ fn apply_deposit(
         .events
         .iter()
         .filter_map(|event| match event {
-            crate::buildings::breakage::WallEvent::Dust(c) => Some(usize::from(*c)),
+            crate::construction::breakage::Event::Dust(c) => Some(usize::from(*c)),
             _ => None,
         })
         .collect();
     let cracks = changes
         .events
         .iter()
-        .filter(|event| matches!(event, crate::buildings::breakage::WallEvent::Crack(_)))
+        .filter(|event| matches!(event, crate::construction::breakage::Event::Crack(_)))
         .count();
     applied.failures = changes.failures;
     applied.local = cracks
@@ -1416,7 +1421,11 @@ fn apply_deposits(mut p: ApplyParam) {
                             Mesh3d(wall.meshes[chunk].clone()),
                             MeshMaterial3d(tint.clone()),
                             Transform::from_translation(block.center() - *centroid),
-                            crate::buildings::breakage::loose_collider(block, 1.0, block.center()),
+                            crate::construction::breakage::loose_collider(
+                                block,
+                                1.0,
+                                block.center(),
+                            ),
                             crate::debris::launch::occupied_mass(
                                 &chunk_collider(block),
                                 wall.material.density,

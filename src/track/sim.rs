@@ -8,7 +8,7 @@
 //! replaces):
 //! - Pose from tick-truth `Position`/`Rotation`, never `GlobalTransform` (render lag differs
 //!   per machine).
-//! - Terrain from the analytic [`TrackField`]; building and loose-piece support from a
+//! - Terrain from the analytic [`TrackField`]; construction and loose-piece support from a
 //!   tick-start shape snapshot ([`RubbleBodies`]), checked across the complete shoe footprint.
 //! - Runs every tick unconditionally (this is sim state); stays inside
 //!   `SimPhase::DrivingForces` so drive samples velocity before the weapon-fire impulse.

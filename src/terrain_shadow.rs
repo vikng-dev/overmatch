@@ -1,7 +1,7 @@
 //! The terrain's sun shadow as a baked occlusion field (issue #170): generated once, when the
 //! heightfield loads, from the canonical [`HeightGrid`] toward the fixed sun, and handed to the
 //! vendored renderer as `bevy::pbr::HeightfieldShadow`. Every lit fragment samples it — ground,
-//! tanks, trees and buildings — so a ridge shades what stands under it with no terrain caster in
+//! tanks, trees and constructions — so a ridge shades what stands under it with no terrain caster in
 //! the cascades. Dynamic casters keep drawing into the cascades; the field multiplies their result
 //! (`vendor/bevy_pbr-0.19.1-scalar-math/src/render/shadows.wgsl`, `fetch_heightfield_shadow`).
 //!

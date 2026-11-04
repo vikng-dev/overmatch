@@ -41,17 +41,17 @@ countdown or reset message advances a client world.
 
 `scatter::ScatterScene` retains parsed manifest/grid data and shared view handles.
 Its `construct` method builds both startup and subsequent worlds through
-`buildings::spawn` and `trees::spawn`, with complete state from data. Despawning
+`construction::spawn` and `trees::spawn`, with complete state from data. Despawning
 map roots also removes their standing colliders and views. Loose bodies are
-separate lifetime owners: fallen building groups and freed trunks, including tree
+separate lifetime owners: fallen construction groups and freed trunks, including tree
 segments reparented under a trunk, are removed too. Rebuilding reuses stable
 `MapInstance` ids and ordinals; ECS entity identities are new.
 
 | Mutable state | Construction and boundary | Late join |
 |---|---|---|
-| Building roots, elements/chunks, structural state, cracks and holes | Fresh `Breakage` and intact element colliders from the building data; old roots/views and loose groups depart | Current-generation `WallLedger`, copied into `WallRecord`; collision and drawing derive from it |
+| Construction roots, elements/chunks, structural state, cracks and holes | Fresh `Breakage` and intact element colliders from the construction data; old roots/views and loose groups depart | Current-generation `Ledger`, copied into `Record`; collision and drawing derive from it |
 | Trees, segment HP pools, cuts, loose trunks and their collision copies | Fresh tree and full segment pools from tree data; old root and freed-body ownership both depart | Current-generation `DestructionLedger` plus interpolated trunk pose carriers |
-| Building debris and stress-fixture debris | Bodies and carriers depart; new Battle starts without loose pieces | Only current Battle carriers are spawned by authority |
+| Construction debris and stress-fixture debris | Bodies and carriers depart; new Battle starts without loose pieces | Only current Battle carriers are spawned by authority |
 | Cosmetic track prints | Startup print-store constructor, new GPU images and empty shoe memory; old uploads address unbound images | View-local history begins at join |
 | Ground scars and other billboards | Occupants depart and their rings use the startup constructors | View-local effects begin at join |
 | Terrain samples/collider, immutable terrain field, ground material/masks, lighting and shared meshes | Immutable construction retained; terrain has no deformation state | Shared shipped data, checked by the content fingerprint |
@@ -153,7 +153,7 @@ The most recent accepted point persists until replaced or the Battle boundary cl
 
 MEASURED: the expanded authored candidate set admits the owner's 30-player
 stationary lobby from every possible first point; all candidates pass ground
-and building-footprint checks. It has 36 candidates with minimum pair separation
+and construction-footprint checks. It has 36 candidates with minimum pair separation
 240 m. Moving players can still block candidates during combat, but a connected
 waiter cannot remain blocked across the next Battle's fresh layout.
 
@@ -290,7 +290,7 @@ Two blind reviews of the fresh-world lane, each finding checked against the code
 | Claude | The authority holds an `Option` it can never empty, checked by five `expect`s | verified | `net: carry authority world generation in a nonempty type (#253)`; `AuthorityWorld` carries the generation directly, while replica selection retains its legitimate absence |
 | Claude | `world_reset::follow_battle` had an unreachable branch whose comment promised more than it kept | verified | same commit: a frame with no Battle forgets the construction, so the next Battle constructs its own |
 | Claude | `world_reset::start_next` decides from its own list which environment records exist, while startup decides through each `install_server` | verified: the short-mode probe server gains both ledgers at its first fill-up | `net: register environment constructors for startup and rebuild (#253)`; each installed publisher registers its constructor in one list used by both paths, and all generation-tagged wire roots share boundary cleanup |
-| Claude | Stale docs: `WallRecord` said its generation moves on a replica's next link; the wall ledger's module doc said one entity holds every change | verified | same commit |
+| Claude | Stale docs: `Record` said its generation moves on a replica's next link; the wall ledger's module doc said one entity holds every change | verified | same commit |
 
 ## Fill-up review
 
@@ -301,7 +301,7 @@ Both blind reviews concern the game's match flow and damage model, game state on
 | Codex | Loading clears on ownership before an interpolated pose and attached rig | verified: an owned `NetTank` without `Position`, `Rotation`, local `Tank` or bound view sets the old latch | `client: wait for the own tank presentation before leaving loading (#253)`; the gate now requires all of them, and remains latched through results and respawn |
 | Codex | The repair test never drives repair-to-brake selection | verified: the old assertions never reached drive-target selection; the missing-repair-arm mutant fails the new assertion on the selector used by `apply_track_forces` | `track: guard repair and phase holds at the drive-target seam (#253)` |
 | Claude | No test covers either hold arm at the gameplay-to-brake seam | verified: both missing-arm mutants fail independently; the production selector is shared with the repair test, which asserts repair braking, release after completion and phase braking without a repair | `track: guard repair and phase holds at the drive-target seam (#253)` |
-| Codex | A combined census inequality lets either later-generation ledger consumer hide the other's failure | verified: first-generation-only wall and tree mutants fail independently at their own assertions; the later-generation wall record, derived building elements and tree state are checked separately | `net: verify each later-generation environment consumer independently (#253)` |
+| Codex | A combined census inequality lets either later-generation ledger consumer hide the other's failure | verified: first-generation-only wall and tree mutants fail independently at their own assertions; the later-generation wall record, derived construction elements and tree state are checked separately | `net: verify each later-generation environment consumer independently (#253)` |
 | Claude | A fill-up-only connection opens a ghost standing that can win or tie the later result | verified: spawning a waiting combatant populates the old board before combat; a solo fill-up departure can therefore win without participating | `net: open standings only for combat participants (#253)`; combat release opens existing tanks, combat spawns open once, and combat standings survive disconnect and respawn |
 | Claude | Harness scripts run out inside fill-up and silently exercise no combat | verified, already fixed on main | `net: start harness scripts at combat release (#253)`; `held_ticks_advance_nothing_and_release_writes_tick_zero` and the end-of-lane smoke verify the production release clock |
 | Claude | Crowded-placement prose says combat queues the fresh layout | verified: `Boundary::FillUp` queues it; combat retains those tanks | `docs: record the fill-up review and measured release smoke (#253)` |

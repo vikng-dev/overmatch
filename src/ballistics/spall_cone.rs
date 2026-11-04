@@ -13,7 +13,7 @@
 //! [`ConeEnergy::debris_share`] times the exit material's strength ratio; the line deals the body
 //! the rest), a burst its wall's driven energy (`burst::Burst::energy`). Its strength is that
 //! energy over [`EMITTED_SHARE`] ([`field_strength`]), so its directions emit exactly it, and no
-//! HP unit enters it. Each consumer converts at its own edge: a building reads a direction's
+//! HP unit enters it. Each consumer converts at its own edge: a construction reads a direction's
 //! joules as the energy it crushes with, and a box's HP pool reads them through its mechanism's
 //! one unit ([`FieldUnit`]: [`cone_unit`], [`BurstFields::unit`]). The design narrative is in
 //! §§5–6.
@@ -512,7 +512,7 @@ fn cone_unit_from_ron(text: &str) -> Result<FieldUnit, String> {
 
 /// The game's damage model: one field mechanism's HP per joule of its field's energy, a game unit
 /// the mechanism's data declares. The one place a field's joules become HP (`super::field_units`,
-/// the pen cam's plan); nothing a field's energy, and so nothing a building reads, passes through it.
+/// the pen cam's plan); nothing a field's energy, and so nothing a construction reads, passes through it.
 /// Built only from a parsed file ([`Self::new`]): positive and a normal f32, so the f32 pen cam
 /// reads it as the f64 dose does.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1192,7 +1192,7 @@ mod tests {
 
     /// Measurement bed, run on demand: the shipped cone's emission for the reference plate's lost
     /// energy through a reference-strength exit, and the volume of a shipped Brick chunk its
-    /// directions crush if every one stops on it (`buildings::fracture::Load::field`), and every
+    /// directions crush if every one stops on it (`construction::fracture::Load::field`), and every
     /// shipped burst round's ring emission, printed MEASURED through the spread and the dose edge.
     /// It asserts nothing: no shipped unit or round is a pass condition.
     #[test]
@@ -1218,7 +1218,7 @@ mod tests {
         let joules = emitted(&cone, strength);
         let cone_hp = hp(joules, cone_unit());
         eprintln!("MEASURED cone: {joules:.3} J emitted, {cone_hp:.6} HP");
-        let brick = crate::buildings::fracture::Masonry::of(
+        let brick = crate::construction::fracture::Masonry::of(
             crate::substances::SubstanceRegistry::shipped_static(),
             "Brick",
         )
@@ -1229,7 +1229,7 @@ mod tests {
             .strata()
             .map(|[.., f]| (0, Vec3::ZERO, strength * f * share, Vec3::ZERO))
             .collect();
-        let crushed: f64 = crate::buildings::fracture::Load::field(&hits, |_| brick.crush)
+        let crushed: f64 = crate::construction::fracture::Load::field(&hits, |_| brick.crush)
             .iter()
             .map(|load| f64::from(load.crushed))
             .sum();

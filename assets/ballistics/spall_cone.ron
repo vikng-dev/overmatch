@@ -5,7 +5,7 @@
 // The law (emitted HP, the ball law's centre-weighted profile, shadowing, dose) is design doc
 // §§5–6, `.agents/docs/design/armor-penetration-and-damage.md`. A field carries the energy its
 // source put into it (a cone its share of the energy its round lost at the plate, a burst its
-// wall's driven energy), which a building crushes with; each mechanism declares its own HP scale,
+// wall's driven energy), which a construction crushes with; each mechanism declares its own HP scale,
 // which only a box's pool reads.
 // A cone's half-angle and profile follow from its exit layer's debris ratio in
 // `assets/materials/materials.ron`.
@@ -42,7 +42,7 @@
     // κ: the share of the energy a round loses across a body that its debris carries out through
     // an exit of the reference steel's strength. A cone carries κ × the exit's strength ratio of
     // that energy and the line deals the body's volumes the rest, so the two spend it once; a
-    // building reads the cone's share as crushing energy. HP does not move with it (the unit below
+    // construction reads the cone's share as crushing energy. HP does not move with it (the unit below
     // is per joule lost).
     cone_debris_energy_share: (0.06, StandIn("missing law: debris production from the crossed
         construction and material. This global share and the capped exit resistance ratio used

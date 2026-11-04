@@ -9,7 +9,7 @@
 //! Second: lightyear_avian's child pass visits only the children whose offset, own pose,
 //! attachment or body changed since it last ran, and still carries every one that did; stock
 //! lightyear_avian3d 0.30.1 visits every child every frame and fails the third test. Who relies on
-//! both: the dedicated server, whose map holds every building element and tree segment as a static
+//! both: the dedicated server, whose map holds every construction element and tree segment as a static
 //! body's child collider, and whose ballistics reads a moving tank's armour, child colliders too,
 //! at the pose this pass leaves between steps. A dependency bump that drops either patch fails here.
 //!
@@ -54,7 +54,7 @@ pub(super) fn physics_app_on(mut app: App) -> App {
 }
 
 /// A static root, posed off the origin and turned, with one turned, offset box collider child: the
-/// shape of a building's element or a tree's segment. Returns `(root, child)` after the spawn has
+/// shape of a construction's element or a tree's segment. Returns `(root, child)` after the spawn has
 /// settled.
 pub(super) fn standing_compound(app: &mut App) -> (Entity, Entity) {
     let root = app
