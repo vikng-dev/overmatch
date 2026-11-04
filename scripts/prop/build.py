@@ -58,6 +58,10 @@ PIPELINE_SOURCES = (
 #: Resolution: float32 view-coordinate allowance, metres; below visible silhouette changes.
 TOL_M = 1e-4
 
+#: Resolution: relative face-area allowance for float32 triangulation sums; admits rounding
+#: while refusing a missing or overlapping face independently of the coordinate allowance.
+AREA_REL_TOL = 1e-4
+
 REBUILD = ("run `scripts/prop/build.py build` and commit the trio — the tracked artifacts are not "
            "what this source and this pipeline produce")
 
@@ -462,7 +466,7 @@ def geometry_failures(js: dict, binary: bytes, tree: dict, species: dict) -> Lis
             for b, c in zip(points[1:], points[2:]):
                 u, v = [b[k]-points[0][k] for k in range(3)], [c[k]-points[0][k] for k in range(3)]
                 expected += sum(n[k]*(u[(k+1)%3]*v[(k+2)%3]-u[(k+2)%3]*v[(k+1)%3]) for k in range(3))/2
-            if abs(areas[i]-expected) > TOL_M*expected:
+            if abs(areas[i]-expected) > AREA_REL_TOL*expected:
                 failures.append("trunk face {} is not completely tiled".format(i))
     return failures
 
