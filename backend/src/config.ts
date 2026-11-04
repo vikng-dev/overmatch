@@ -1,8 +1,13 @@
 // Operator tunables are wrangler `vars` entries; production-server.json owns the production CPU
 // allocation (CLAIMED: owner's hosting choice), shared with scripts/ci/edgegap-version.sh.
-// Missing or malformed vars throw on the first request instead of running with a silent default.
+// Invalid production allocation refuses startup; missing or malformed vars refuse first use.
 
 import productionServer from "../production-server.json";
+
+const vcpuPerServer = productionServer.vcpu;
+if (!Number.isFinite(vcpuPerServer) || vcpuPerServer <= 0) {
+	throw new Error(`config: production-server.json vcpu=${String(vcpuPerServer)} (need a finite number > 0)`);
+}
 
 export interface Env {
 	REGISTRY: DurableObjectNamespace<import("./registry").Registry>;
@@ -75,7 +80,7 @@ export function config(env: Env): Config {
 		joinAttempts: num(env, "JOIN_ATTEMPTS", 1),
 		locationsCacheMs: num(env, "LOCATIONS_CACHE_S", 0) * s,
 		providerTimeoutMs: num(env, "PROVIDER_TIMEOUT_S", 0.05) * s,
-		vcpuPerServer: productionServer.vcpu,
+		vcpuPerServer,
 		usdPerVcpuMinute: num(env, "USD_PER_VCPU_MINUTE", 0),
 	};
 }
