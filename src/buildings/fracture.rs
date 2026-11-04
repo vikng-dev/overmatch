@@ -560,10 +560,10 @@ impl Block {
         (near <= far).then_some((near, far, face))
     }
 
-    /// The corners on the plane through `at` of unit normal `normal`, ordered counter-clockwise
-    /// about `normal`: the face the shape shows there. Empty when fewer than three lie on it.
+    /// The convex perimeter on the plane through `at` of unit normal `normal`, counter-clockwise
+    /// about `normal`, excluding redundant points. Fewer than three corners span no face.
     pub fn face_on(&self, at: Vec3, normal: Vec3) -> Vec<Vec3> {
-        let on: Vec<Vec3> = self
+        let mut on: Vec<Vec3> = self
             .points
             .iter()
             .copied()
@@ -572,14 +572,8 @@ impl Block {
         if on.len() < 3 {
             return Vec::new();
         }
-        let centre = on.iter().sum::<Vec3>() / on.len() as f32;
         let (u, v) = plane_axes(normal);
-        let mut on = on;
-        on.sort_by(|a, b| {
-            let angle = |p: &Vec3| (*p - centre).dot(v).atan2((*p - centre).dot(u));
-            angle(a).total_cmp(&angle(b))
-        });
-        on
+        convex_hull(&mut on, |p| (p.dot(u), p.dot(v)))
     }
 
     /// Every face, as its outward unit normal and its corners counter-clockwise seen from outside.
@@ -2654,7 +2648,7 @@ fn unseat(
     let (u, v) = plane_axes(support);
     let project = |p: Vec3| (p.dot(u), p.dot(v));
     let mut rim: Vec<_> = rim_points.into_iter().map(project).collect();
-    let hull = convex_hull(&mut rim);
+    let hull = convex_hull(&mut rim, |p| p);
     if hull.len() < 3 {
         return open(Cause::Tip, f32::INFINITY, 0.0);
     }
@@ -2776,12 +2770,21 @@ fn unseat(
 
 /// The convex hull of `points` (reordered), counter-clockwise, by Andrew's monotone chain: fewer
 /// than three corners when the points span no area.
-fn convex_hull(points: &mut [(f32, f32)]) -> Vec<(f32, f32)> {
-    points.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+fn convex_hull<T: Copy>(points: &mut [T], project: impl Fn(T) -> (f32, f32)) -> Vec<T> {
+    points.sort_by(|&a, &b| {
+        let (a, b) = (project(a), project(b));
+        a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+    });
     // The lower hull left to right, then the upper right to left.
-    let mut hull: Vec<(f32, f32)> = Vec::with_capacity(points.len() + 1);
-    let push = |hull: &mut Vec<(f32, f32)>, floor: usize, q: (f32, f32)| {
-        while hull.len() >= floor && cross(hull[hull.len() - 2], hull[hull.len() - 1], q) <= 0.0 {
+    let mut hull: Vec<T> = Vec::with_capacity(points.len() + 1);
+    let push = |hull: &mut Vec<T>, floor: usize, q: T| {
+        while hull.len() >= floor
+            && cross(
+                project(hull[hull.len() - 2]),
+                project(hull[hull.len() - 1]),
+                project(q),
+            ) <= 0.0
+        {
             hull.pop();
         }
         hull.push(q);
@@ -4095,6 +4098,28 @@ mod tests {
         assert!(block.is_solid());
         block.planes.pop();
         assert!(!block.is_solid());
+    }
+
+    /// The game's building destruction law reads the same solid with redundant points: face
+    /// areas and closed edges must survive face-centre, edge and interior points in either order.
+    /// Fixture: a unit cube, whose six square faces each have unit area and four corners.
+    #[test]
+    fn redundant_hull_points_do_not_change_the_law_boundary() {
+        let mut points = Block::cuboid(Vec3::ZERO, Vec3::ONE).points;
+        points.extend([
+            Vec3::new(0.5, 0.5, 1.0),
+            Vec3::new(0.5, 0.0, 1.0),
+            Vec3::splat(0.5),
+        ]);
+        for _ in 0..2 {
+            let block = Block::hull(points.clone());
+            assert!(block.is_solid());
+            let faces = block.faces();
+            assert_eq!(faces.len(), 6);
+            assert!(faces.iter().all(|(_, corners)| corners.len() == 4));
+            assert!(block.face_areas().iter().all(|(_, area)| *area == 1.0));
+            points.reverse();
+        }
     }
 
     use super::*;
