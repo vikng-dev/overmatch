@@ -406,15 +406,29 @@ impl Polyhedron {
         )
     }
 
-    /// The certificate every baked cell meets, naming the first breach: at least four faces, each
-    /// of three corners or more, a unit normal, positive area and its corners on its plane;
-    /// closed (each directed edge once, its reverse once); convex (every corner on or inside every
-    /// face's plane); positive volume. Plane tolerance `tolerance` m.
+    /// The certificate every baked cell meets, naming the first breach: every corner and plane
+    /// finite (a NaN passes every ordered test below, so it is refused first); at least four
+    /// faces, each of three corners or more, a unit normal, positive area and its corners on its
+    /// plane; closed (each directed edge once, its reverse once); one shell (every face reaches
+    /// every other across edges, so no second surface over the same corners doubles the volume);
+    /// convex (every corner on or inside every face's plane); positive volume. Plane tolerance
+    /// `tolerance` m.
     pub fn certify(&self, tolerance: f64) -> Result<(), String> {
+        if let Some(i) = self.corners.iter().position(|p| !p.is_finite()) {
+            return Err(format!("corner {i} is not finite"));
+        }
+        if let Some(f) = self
+            .faces
+            .iter()
+            .position(|face| !(face.normal.is_finite() && face.offset.is_finite()))
+        {
+            return Err(format!("face {f}'s plane is not finite"));
+        }
         if self.faces.len() < 4 {
             return Err(format!("{} faces bound no solid", self.faces.len()));
         }
         let mut edges: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        let mut owner: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         for (f, face) in self.faces().iter().enumerate() {
             let ring = &self.faces[f].corners;
             if ring.len() < 3 || (face.normal.length() - 1.0).abs() > 1.0e-9 {
@@ -435,9 +449,9 @@ impl Polyhedron {
                 }
             }
             for k in 0..ring.len() {
-                *edges
-                    .entry((ring[k], ring[(k + 1) % ring.len()]))
-                    .or_default() += 1;
+                let edge = (ring[k], ring[(k + 1) % ring.len()]);
+                *edges.entry(edge).or_default() += 1;
+                owner.insert(edge, f);
             }
             for (i, &p) in self.corners.iter().enumerate() {
                 if face.normal.dot(p) - face.offset > tolerance {
@@ -449,6 +463,23 @@ impl Polyhedron {
             if count != 1 || edges.get(&(j, i)) != Some(&1) {
                 return Err(format!("edge {i} → {j} is not shared by exactly two faces"));
             }
+        }
+        let mut shell = vec![false; self.faces.len()];
+        let mut stack = vec![0];
+        shell[0] = true;
+        while let Some(f) = stack.pop() {
+            let ring = &self.faces[f].corners;
+            for k in 0..ring.len() {
+                let twin = owner[&(ring[(k + 1) % ring.len()], ring[k])];
+                if !std::mem::replace(&mut shell[twin], true) {
+                    stack.push(twin);
+                }
+            }
+        }
+        if let Some(f) = shell.iter().position(|&reached| !reached) {
+            return Err(format!(
+                "face {f} lies on a second shell, unreached from face 0 across edges"
+            ));
         }
         if self.volume() <= 0.0 {
             return Err(format!("volume {} is not positive", self.volume()));
@@ -744,5 +775,50 @@ pub(crate) mod tests {
         let mut dented = cube;
         dented.corners[0] += DVec3::splat(0.1);
         assert!(dented.certify(1e-9).unwrap_err().contains("off its plane"));
+    }
+
+    /// A NAN NEVER CERTIFIES: every ordered test is false on a NaN, so a facet offset, a normal
+    /// component or a corner coordinate set to NaN would pass each one. The writer relies on a
+    /// certified cell's numbers being real. Mutant: a certificate without the finiteness gate
+    /// passes the cube with a NaN offset. Fixture data: the unit cube.
+    #[test]
+    fn the_certificate_refuses_a_nan_plane_or_corner() {
+        let cube = cuboid(DVec3::ZERO, DVec3::ONE);
+        let mut offset = cube.clone();
+        offset.faces[0].offset = f64::NAN;
+        let mut normal = cube.clone();
+        normal.faces[3].normal.y = f64::NAN;
+        let mut corner = cube;
+        corner.corners[5].z = f64::NAN;
+        for (case, solid, breach) in [
+            ("offset", offset, "plane is not finite"),
+            ("normal", normal, "plane is not finite"),
+            ("corner", corner, "not finite"),
+        ] {
+            let err = solid.certify(1e-9).unwrap_err();
+            assert!(err.contains(breach), "{case}: {err}");
+        }
+    }
+
+    /// TWO SHELLS ARE NOT ONE SOLID: a cube's corners and faces repeated under fresh indices close
+    /// every edge on its own copy and pass every per-face test, yet their moments sum to twice the
+    /// volume, so the writer would bake twice the mass. Mutant: a certificate that checks edges
+    /// pairwise but not that one shell holds every face passes it. Fixture data: the unit cube.
+    #[test]
+    fn the_certificate_refuses_coincident_shells() {
+        let cube = cuboid(DVec3::ZERO, DVec3::ONE);
+        let mut doubled = cube.clone();
+        let n = cube.corners.len();
+        doubled.corners.extend(cube.corners.iter().copied());
+        doubled.faces.extend(cube.faces.iter().map(|face| Facet {
+            corners: face.corners.iter().map(|&i| i + n).collect(),
+            ..face.clone()
+        }));
+        assert!(
+            (doubled.volume() - 2.0).abs() < 1e-12,
+            "the mass it would bake"
+        );
+        let err = doubled.certify(1e-9).unwrap_err();
+        assert!(err.contains("second shell"), "{err}");
     }
 }
