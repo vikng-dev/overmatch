@@ -164,7 +164,6 @@ pub fn grain(frame: SurfaceFrame) -> DVec3 {
 /// above a decimal's f64 rounding, far below any visible skew of the bond).
 const UNIT: f64 = 1.0e-9;
 
-/// `Ok` for a finite positive `value`, else an error naming `name`.
 fn positive(name: &str, value: f64) -> Result<(), String> {
     (value.is_finite() && value > 0.0)
         .then_some(())
@@ -366,7 +365,6 @@ fn courses(piece: &Piece, asset: &str, bond: &Courses, count: &mut CutCount) -> 
     out
 }
 
-/// The cells of `piece` (module doc).
 fn cells(piece: &Piece, asset: &str, rule: &Cells) -> Vec<Polyhedron> {
     let solid = &piece.solid;
     let (size, stretch) = (rule.size_m.0, rule.stretch.0);
@@ -441,7 +439,6 @@ fn cells(piece: &Piece, asset: &str, rule: &Cells) -> Vec<Polyhedron> {
         .collect()
 }
 
-/// The timber chunks of `piece` (module doc).
 fn boards(piece: &Piece, asset: &str, rule: &Boards) -> Vec<Polyhedron> {
     let solid = &piece.solid;
     let strips: Vec<Polyhedron> = match &rule.across {

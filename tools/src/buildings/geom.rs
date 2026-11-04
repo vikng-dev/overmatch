@@ -112,44 +112,7 @@ impl Prism {
 
     /// The far cap, the near cap, then one side per profile edge.
     pub fn faces(&self) -> Vec<Face> {
-        let n = self.profile.len();
-        let w = self.frame.w();
-        let face = |normal: DVec3, corners: Vec<DVec3>| Face {
-            normal,
-            offset: normal.dot(corners[0]),
-            corners,
-        };
-        let mut faces = vec![
-            face(
-                w,
-                self.profile
-                    .iter()
-                    .map(|&p| self.frame.point(p, self.far))
-                    .collect(),
-            ),
-            face(
-                -w,
-                self.profile
-                    .iter()
-                    .rev()
-                    .map(|&p| self.frame.point(p, self.near))
-                    .collect(),
-            ),
-        ];
-        for k in 0..n {
-            let (p, q) = (self.profile[k], self.profile[(k + 1) % n]);
-            let out = DVec2::new(q.y - p.y, p.x - q.x).normalize();
-            faces.push(face(
-                (self.frame.u * out.x + self.frame.v * out.y).normalize(),
-                vec![
-                    self.frame.point(p, self.near),
-                    self.frame.point(q, self.near),
-                    self.frame.point(q, self.far),
-                    self.frame.point(p, self.far),
-                ],
-            ));
-        }
-        faces
+        self.solid().faces()
     }
 
     /// The prism as a [`Polyhedron`]: the profile at `near` (corners `0..n`), then at `far`
@@ -157,23 +120,24 @@ impl Prism {
     pub fn solid(&self) -> Polyhedron {
         let n = self.profile.len();
         let corners = self.corners();
-        let faces = self
-            .faces()
-            .into_iter()
-            .enumerate()
-            .map(|(f, face)| Facet {
-                normal: face.normal,
-                offset: face.offset,
-                corners: match f {
-                    0 => (n..2 * n).collect(),
-                    1 => (0..n).rev().collect(),
-                    _ => {
-                        let k = f - 2;
-                        vec![k, (k + 1) % n, n + (k + 1) % n, n + k]
-                    }
-                },
-            })
-            .collect();
+        let w = self.frame.w();
+        let facet = |normal: DVec3, ring: Vec<usize>| Facet {
+            normal,
+            offset: normal.dot(corners[ring[0]]),
+            corners: ring,
+        };
+        let mut faces = vec![
+            facet(w, (n..2 * n).collect()),
+            facet(-w, (0..n).rev().collect()),
+        ];
+        for k in 0..n {
+            let (p, q) = (self.profile[k], self.profile[(k + 1) % n]);
+            let out = DVec2::new(q.y - p.y, p.x - q.x).normalize();
+            faces.push(facet(
+                (self.frame.u * out.x + self.frame.v * out.y).normalize(),
+                vec![k, (k + 1) % n, n + (k + 1) % n, n + k],
+            ));
+        }
         Polyhedron { corners, faces }
     }
 }
@@ -181,6 +145,7 @@ impl Prism {
 /// An orthonormal basis `(e1, e2)` of the plane with unit normal `n`, `e1 × e2 = n`: the one
 /// projection both faces of a contact are read in.
 pub fn plane_basis(n: DVec3) -> (DVec3, DVec3) {
+    // Resolution: avoid a near-parallel cross product when choosing the plane's basis.
     let axis = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
     let e1 = n.cross(axis).normalize();
     (e1, n.cross(e1))
@@ -485,6 +450,7 @@ impl Polyhedron {
         let mut owner: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         for (f, face) in self.faces().iter().enumerate() {
             let ring = &self.faces[f].corners;
+            // Resolution: permit f64 normalization roundoff, far below visible angular skew.
             if ring.len() < 3 || (face.normal.length() - 1.0).abs() > 1.0e-9 {
                 return Err(format!(
                     "face {f} has {} corners or no unit normal",
