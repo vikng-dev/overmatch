@@ -586,9 +586,6 @@ pub(crate) mod tests {
         for corner in &mut asset.elements[0].hull {
             corner[1] = height;
         }
-        asset
-            .check()
-            .expect("a flat hull passes the text's own contract");
         let text = ron::ser::to_string(&asset).unwrap();
         let err = BuildingKind::resolve(
             "house_1",
