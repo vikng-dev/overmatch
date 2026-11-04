@@ -788,9 +788,9 @@ fn checked_hard(name: &str, substance: HardSubstance) -> Result<HardSubstance, S
             .into_iter()
             .filter_map(|(field, value)| value.map(|value| (field, value)))
         {
-            if !value.is_finite() || value <= 0.0 {
+            if !(value as f32).is_finite() || (value as f32) <= 0.0 {
                 return Err(format!(
-                    "substance {name:?}: bulk {field} must be finite and positive (got {value})"
+                    "substance {name:?}: bulk.{field} must be positive and finite in simulation precision (got {value}); author a representable value with its material-property source"
                 ));
             }
         }
@@ -1170,23 +1170,15 @@ mod tests {
         let both = format!(
             r#"facts: Some((density: (7850.0, Fixture("f")), flow_strength: (1.0e9, Fixture("f")), youngs_modulus: (205.0e9, Fixture("f")), poisson_ratio: (0.29, Fixture("f")))), {bulk}"#
         );
-        for refused in [
-            both,
-            format!("facts: None, {}", bulk.replace("1800.0", "0.0")),
-            format!(
-                "facts: None, {}",
-                bulk.replace(
-                    "))))",
-                    r#")), tensile: Some((-1.0, Fixture("fixture"))), fracture_energy: Some((10.0, Fixture("fixture")))))"#
-                )
-            ),
-            format!(
-                "facts: None, {}",
-                bulk.replace("))))", r#")), tensile: Some((1.0e6, Fixture("fixture")))))"#)
+        for (refused, field) in [
+            (both, "density"),
+            (
+                format!("facts: None, {}", bulk.replace("1800.0", "0.0")),
+                "density",
             ),
         ] {
             let err = SubstanceRegistry::from_ron(&row(&refused)).expect_err(&refused);
-            assert!(matches!(err, SubstanceError::Parse(_)), "{err}");
+            assert!(err.to_string().contains(field), "{err}");
         }
     }
 
@@ -1292,6 +1284,36 @@ mod tests {
         let load = |blast: &str| SubstanceRegistry::from_ron_at(path, &row(blast));
         let block = |fields: &[String]| format!("blast: Some(({}))", fields.join(","));
         load(&block(&authored)).expect("complete sourced fixture loads");
+        // The game's environment destruction model consumes every seam coefficient in f32.
+        // Fixture mutations leave every companion field complete; refusals name the changed seam field.
+        for (field, valid) in [
+            ("tensile", "1e6"),
+            ("fracture_energy", "10.0"),
+            ("shear_cohesion", "200000.0"),
+            ("shear_fracture_energy", "30.0"),
+        ] {
+            for invalid in ["-1.0", "1e100", "1e-100"] {
+                let text = row(&block(&authored)).replace(
+                    &format!("{field}: Some(({valid},"),
+                    &format!("{field}: Some(({invalid},"),
+                );
+                let error = SubstanceRegistry::from_ron_at(path, &text)
+                    .unwrap_err()
+                    .to_string();
+                for required in ["fixture/materials.ron", "Fixture", field, "author"] {
+                    assert!(error.contains(required), "{required}: {error}");
+                }
+            }
+            let text = row(&block(&authored)).replace(
+                &format!("{field}: Some(({valid}, Fixture(\"fixture\"))),"),
+                "",
+            );
+            let error = SubstanceRegistry::from_ron_at(path, &text)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(field), "{error}");
+        }
+
         let refusal = |blast: &str, field: &str| {
             let err = load(blast).unwrap_err().to_string();
             for required in [
