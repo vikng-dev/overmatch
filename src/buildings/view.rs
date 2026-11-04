@@ -1114,18 +1114,97 @@ mod tests {
         );
     }
 
-    /// AN OPENING IS A HOLE THE CAMERA SEES THROUGH, A PIER IS NOT: across the shipped house's
-    /// east wall (outer face x = 2 m, inner 1.75 m), a sight line through its first window's
-    /// middle (z 1.5 m, 1.5 m up; house_1's spec) meets no triangle, and one through the pier
-    /// beside it (z 2.5 m) does. A view that drew the wall as its graybox box, or filled the
-    /// openings, fails the first; one that dropped an element fails the second.
+    /// An opening is absent construction: the camera sees through it and meets the surrounding
+    /// solids. Fixture geometry is in metres, independent of shipped window placement.
     #[test]
     fn a_window_is_a_hole_and_a_pier_is_solid() {
-        let kind = shipped_house();
+        use crate::buildings::schema::{self, ElementKind};
+        // Fixture: a wall with an off-centre rectangular opening, one chunk per solid.
+        let size = Vec3::new(4.0, 3.0, 0.25);
+        let opening_low = Vec3::new(1.0, 0.8, 0.0);
+        let opening_high = Vec3::new(2.5, 2.2, size.z);
+        let solids = [
+            (
+                Vec3::ZERO,
+                Vec3::new(opening_low.x, size.y, size.z),
+                ElementKind::Pier,
+            ),
+            (Vec3::new(opening_high.x, 0.0, 0.0), size, ElementKind::Pier),
+            (
+                Vec3::new(opening_low.x, 0.0, 0.0),
+                Vec3::new(opening_high.x, opening_low.y, size.z),
+                ElementKind::Sill,
+            ),
+            (
+                Vec3::new(opening_low.x, opening_high.y, 0.0),
+                Vec3::new(opening_high.x, size.y, size.z),
+                ElementKind::Lintel,
+            ),
+        ];
+        let mut asset = BuildingAsset {
+            id: "opening_fixture".into(),
+            format: schema::FORMAT,
+            foundation_y_m: 0.0,
+            materials: vec!["Brick".into()],
+            attachments: Vec::new(),
+            components: vec!["wall".into()],
+            elements: Vec::new(),
+            chunks: Vec::new(),
+            joints: Vec::new(),
+            anchors: Vec::new(),
+        };
+        let density = schema::substance_density(&asset.materials[0]).unwrap() as f32;
+        for (index, (low, high, kind)) in solids.into_iter().enumerate() {
+            let hull: Vec<_> = Block::cuboid(low, high)
+                .points
+                .iter()
+                .map(Vec3::to_array)
+                .collect();
+            let span = high - low;
+            let volume = span.x * span.y * span.z;
+            asset.elements.push(schema::Element {
+                name: format!("solid_{index}"),
+                kind,
+                component: 0,
+                material: 0,
+                surface_frame: SurfaceFrame::Upright,
+                hull: hull.clone(),
+                chunks: [index as u32, index as u32 + 1],
+            });
+            asset.chunks.push(schema::Chunk {
+                element: index as u16,
+                material: 0,
+                hull,
+                volume_m3: volume,
+                centroid: ((low + high) / 2.0).to_array(),
+                mass_kg: density * volume,
+            });
+        }
+        let kind = crate::buildings::BuildingKind::resolve(
+            &asset.id,
+            &ron::ser::to_string(&asset).unwrap(),
+            crate::substances::SubstanceRegistry::shipped_static(),
+            crate::buildings::attachments::Attachments::shipped_static(),
+        )
+        .unwrap();
         let triangles = triangles(&mesh(&kind.asset, &kind.layout));
-        let across = |z: f32| crosses(&triangles, Vec3::new(2.1, 1.5, z), Vec3::new(1.6, 1.5, z));
-        assert!(!across(1.5), "the window is open");
-        assert!(across(2.5), "the pier is drawn");
+        let centre = (opening_low + opening_high) / 2.0;
+        let across = |x, y| {
+            crosses(
+                &triangles,
+                Vec3::new(x, y, -size.z),
+                Vec3::new(x, y, 2.0 * size.z),
+            )
+        };
+        assert!(!across(centre.x, centre.y), "the window is open");
+        for (x, y) in [
+            (opening_low.x / 2.0, centre.y),
+            ((opening_high.x + size.x) / 2.0, centre.y),
+            (centre.x, opening_low.y / 2.0),
+            (centre.x, (opening_high.y + size.y) / 2.0),
+        ] {
+            assert!(across(x, y), "the surrounding solid is drawn at {x}, {y}");
+        }
     }
 
     /// EVERY FACE IS FRAMED IN METRES AND WEARS ITS ELEMENT'S PACK: each corner's UV is its
