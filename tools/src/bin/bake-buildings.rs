@@ -1,7 +1,8 @@
 //! The building bake, the one entry point for every construction: each spec under
 //! `tools/buildings/` (a house generator's `<id>.house.ron` or an explicit `<id>.construction.ron`)
 //! to its `assets/buildings/<id>/<id>.building.ron` (`overmatch_tools::buildings`). Writes only a
-//! file whose bytes change, and prints what each bake made.
+//! file whose bytes change and the game's load gate admits (`overmatch::buildings::admit`), and
+//! prints what each bake made.
 
 use overmatch::buildings::schema;
 use overmatch_tools::buildings;
@@ -15,6 +16,13 @@ fn main() {
             .unwrap_or_else(|err| panic!("bake-buildings: {}: {err}", spec.path));
         let text = buildings::write(&baked.asset, &spec.path);
         let path = buildings::asset_path(&root, id);
+        overmatch::buildings::admit(id, &text).unwrap_or_else(|err| {
+            panic!(
+                "bake-buildings: {}: the game's load gate refuses {}: {err}",
+                spec.path,
+                path.display()
+            )
+        });
         let unchanged = std::fs::read_to_string(&path).is_ok_and(|old| old == text);
         if !unchanged {
             let dir = path.parent().expect("an asset path has a folder");

@@ -157,6 +157,19 @@ impl BuildingKind {
     }
 }
 
+/// The map's load gate ([`BuildingLibrary::load`]) on asset `id`'s file text, against the shipped
+/// substances and attachment kinds, at its baked scale: what the bake runs on each asset before it
+/// writes it, so a refusal stops there in the game's own words.
+pub fn admit(id: &str, text: &str) -> Result<(), String> {
+    BuildingKind::resolve(
+        id,
+        text,
+        SubstanceRegistry::shipped_static(),
+        Attachments::shipped_static(),
+    )
+    .map(drop)
+}
+
 /// Every building asset the selected map places, keyed by asset id.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct BuildingLibrary {
@@ -504,6 +517,38 @@ pub(crate) mod tests {
                 "{id}"
             );
         }
+    }
+
+    /// THE BAKE ADMITS BY THE LOAD GATE (the game's environment destruction model): [`admit`] is
+    /// the gate a map runs, on the text the bake is about to write, so the bake refuses what a map
+    /// would, in the gate's words. Fixture: the shipped house with one chunk's hull pressed to a
+    /// slab half as thick as the law's plane tolerance, which the schema passes and the law block
+    /// refuses.
+    #[test]
+    fn the_bake_admits_by_the_load_gate() {
+        let kind = shipped_house();
+        let mut asset = kind.asset.clone();
+        admit(
+            &asset.id,
+            &ron::to_string(&asset).expect("the schema serializes"),
+        )
+        .expect("the shipped house is admitted");
+        let c = kind.layout.chunks[0] as usize;
+        asset.chunks[c].hull = (0..8)
+            .map(|i| {
+                [
+                    [0.0, 0.08][i & 1],
+                    [0.0, 0.08][(i >> 1) & 1],
+                    [0.0, fracture::ON_PLANE / 2.0][i >> 2],
+                ]
+            })
+            .collect();
+        let text = ron::to_string(&asset).expect("the schema serializes");
+        let error = admit(&asset.id, &text).unwrap_err();
+        assert!(
+            error.contains(&format!("chunks[{c}].hull")) && error.contains("law block"),
+            "{error}"
+        );
     }
 
     /// EVERY CHUNK CARRIES ITS SUBSTANCE'S FRICTION UNDER THE ONE RULE, standing or loose: a
