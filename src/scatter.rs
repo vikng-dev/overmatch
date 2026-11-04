@@ -51,7 +51,7 @@ pub(crate) struct MapInstance {
 #[derive(Component)]
 pub(crate) struct ScatterProxy;
 
-/// Resolution: smallest squared quaternion length [`resolve`] will normalize. Far below any rounding an f32
+/// Resolution: least squared quaternion length [`resolve`] will normalize. Far below any rounding an f32
 /// text export produces (those land within ~1e-7 of unit) and far above the point where the
 /// squaring itself underflows, so the only thing it rejects is a quaternion with no direction in it.
 const MIN_ROTATION_LENGTH_SQ: f32 = 1.0e-12;
@@ -424,7 +424,7 @@ impl ScatterScene {
 mod tests {
     use super::*;
 
-    use crate::map::tests::mixed_fixture_manifest;
+    use crate::map::tests::construction_fixture_manifest;
 
     /// A tilted fixture surface: height rises with x and z, so a re-projection lands on a different
     /// Y at every XZ (a flat fixture would pass whatever the placement did with the file's Y).
@@ -584,7 +584,7 @@ mod tests {
     /// that minted either per instance would split the constructions into a draw each.
     #[test]
     fn every_construction_draws_with_one_mesh_and_one_material() {
-        let mut manifest = mixed_fixture_manifest();
+        let mut manifest = construction_fixture_manifest();
         let mut second = manifest
             .instances
             .iter()
@@ -627,7 +627,7 @@ mod tests {
         use crate::track::rubble::{PieceData, RubbleBodies, RubbleQuery};
         use bevy::ecs::system::RunSystemOnce;
         use bevy::math::Affine3A;
-        let manifest = mixed_fixture_manifest();
+        let manifest = construction_fixture_manifest();
         let (mut app, _) = spawned(&manifest, false, true);
         app.finish();
         app.cleanup();
@@ -727,199 +727,162 @@ mod tests {
             .unwrap();
     }
 
-    /// Every scatter instance has its own static body and identity. Construction bounds are spawn
-    /// obstacles; belt support reads their colliders. A windowless composition draws no view.
+    /// The game's environment destruction model must build complete simulation state without a
+    /// renderer. Map spawning and the contact laws rely on one common body per construction,
+    /// one collider per source element, and no construction in the immutable terrain field.
     #[test]
-    fn spawn_adds_a_body_per_instance_and_obstacles_for_constructions() {
-        let manifest = mixed_fixture_manifest();
+    fn spawn_builds_complete_constructions_without_view_assets() {
+        let manifest = construction_fixture_manifest();
         let (mut app, obstacles) = spawned(&manifest, false, false);
         let world = app.world_mut();
-        let (mut constructions, mut proxies, mut trees, mut segments) = (0, 0, 0, 0);
-        let (mut structures, mut elements) = (0, 0);
+        let mut expected_elements = 0;
+        let mut expected_bodies = 0;
         for instance in &manifest.instances {
-            match &manifest.prototypes[&instance.prototype] {
-                Prototype::Block { .. } => {
-                    constructions += 1;
-                    proxies += 1;
-                }
-                Prototype::Tree { asset } => {
-                    trees += 1;
-                    segments += manifest.trees.get(asset).unwrap().segments.len();
-                }
-                Prototype::Construction { asset } => {
-                    structures += 1;
-                    elements += manifest
-                        .constructions
-                        .get(asset)
-                        .unwrap()
-                        .asset
-                        .elements
-                        .len();
-                }
+            if let Prototype::Construction { asset } = &manifest.prototypes[&instance.prototype] {
+                let kind = manifest.constructions.get(asset).unwrap();
+                expected_elements += kind.asset.elements.len();
+                expected_bodies += 1;
             }
         }
-        assert_eq!(structures, 1, "the fixture places a construction");
+        let proxies = manifest.instances.len() - expected_bodies;
+        assert_eq!(obstacles.len(), manifest.instances.len());
         assert_eq!(
-            obstacles.len(),
-            structures + constructions,
-            "every construction is a spawn obstacle"
+            world.query::<&RigidBody>().iter(world).count(),
+            manifest.instances.len()
         );
-        assert_eq!(
-            (constructions, proxies, trees),
-            (1, 1, 1),
-            "the fixture places a graybox house and a data-built tree"
-        );
-        let bodies = world
-            .query_filtered::<Entity, With<RigidBody>>()
-            .iter(world)
-            .count();
-        assert_eq!(
-            bodies,
-            manifest.instances.len(),
-            "one static body per instance"
-        );
-        let mut identities: Vec<(String, u16)> = world
+        let mut identities: Vec<_> = world
             .query::<&MapInstance>()
             .iter(world)
             .map(|instance| (instance.id.clone(), instance.ordinal))
             .collect();
         identities.sort();
-        assert_eq!(identities.len(), bodies, "every body carries its identity");
+        assert_eq!(identities.len(), manifest.instances.len());
         assert!(
             identities
                 .iter()
                 .enumerate()
-                .all(|(k, (_, ordinal))| usize::from(*ordinal) == k),
-            "ordinals are the id order, dense from zero",
+                .all(|(k, (_, ordinal))| usize::from(*ordinal) == k)
         );
-        // The view read casts against the marker, not against the terrain layer at large: a
-        // proxy collider without it is invisible to the scatter-hit effect, so the tag is on every
-        // proxy and on no tree (the walk marks a tree's hits itself).
-        let tagged = world
-            .query_filtered::<Entity, (With<ScatterProxy>, With<Collider>)>()
+        let roots: Vec<_> = world
+            .query::<(&MapInstance, &crate::construction::breakage::Breakage)>()
             .iter(world)
-            .count();
-        assert_eq!(tagged, proxies, "every proxy collider is a ScatterProxy");
-        let tree_roots = world
-            .query_filtered::<Entity, (With<crate::trees::TreeBody>, Without<ScatterProxy>)>()
-            .iter(world)
-            .count();
-        assert_eq!(tree_roots, trees, "one untagged root per tree");
-        let tree_colliders = world
-            .query_filtered::<Entity, (With<crate::trees::TreeSegment>, With<Collider>)>()
-            .iter(world)
-            .count();
-        assert_eq!(tree_colliders, segments, "one collider per tree segment");
-        let element_colliders = world
-            .query_filtered::<Entity, (With<crate::construction::Element>, With<Collider>)>()
-            .iter(world)
-            .count();
+            .collect();
+        assert_eq!(roots.len(), expected_bodies);
+        for (identity, body) in roots {
+            assert_eq!(body.construction, identity.ordinal);
+            assert_eq!(
+                body.live.state.pool,
+                body.live
+                    .structure
+                    .chunks
+                    .iter()
+                    .map(crate::construction::fracture::full_pool)
+                    .collect::<Vec<_>>()
+            );
+        }
         assert_eq!(
-            element_colliders, elements,
-            "one collider per construction element"
+            world
+                .query_filtered::<Entity, (With<crate::construction::Element>, With<Collider>)>()
+                .iter(world)
+                .count(),
+            expected_elements
         );
         assert_eq!(
             world.query::<&Collider>().iter(world).count(),
-            proxies + segments + elements,
-            "no other collider ships",
+            expected_elements + proxies
         );
-        let views = world
-            .query::<&crate::trees::view::TreeView>()
-            .iter(world)
-            .count();
-        assert_eq!(views, 0, "a windowless composition attaches no view");
-        let meshes = world.query::<&Mesh3d>().iter(world).count();
-        assert_eq!(meshes, 0, "a windowless composition draws nothing");
+        assert_eq!(
+            world
+                .query_filtered::<Entity, (With<ScatterProxy>, With<Collider>)>()
+                .iter(world)
+                .count(),
+            proxies,
+            "the surface-evidence cast sees every graybox proxy",
+        );
+        assert_eq!(
+            world
+                .query::<&crate::trees::view::TreeView>()
+                .iter(world)
+                .count(),
+            0,
+            "a composition without view assets attaches no legacy view"
+        );
+        assert_eq!(
+            world.query::<&crate::trees::TreeBody>().iter(world).count(),
+            0
+        );
+        assert_eq!(world.query::<&Mesh3d>().iter(world).count(), 0);
     }
 
-    /// EVERY CONSTRUCTION OF ONE ASSET DRAWS ONE SHARED MESH IN THE ONE MATERIAL: a second instance of
-    /// the fixture's brick house at another scale (1.3, fixture data) draws, as a child of its
-    /// root at its own scale, with the first one's mesh, and both wear the material the graybox
-    /// houses wear. A view that built a mesh per instance (74 on Kalinovo) or a material per house
-    /// splits the constructions into a draw each; one at the root's unit scale draws a scaled house at
-    /// asset size, its walls off its colliders.
+    /// The game's environment destruction view shares a mesh per admitted kind and one surface
+    /// material. Each view keeps its instance scale while the physical root stays at unit scale.
+    /// Skin and cards come from the common mesh builder, without the former segmented GLB view.
     #[test]
-    fn every_construction_of_one_asset_draws_one_mesh_at_its_instance_scale() {
-        let mut manifest = mixed_fixture_manifest();
-        let (mut second, asset) = manifest
-            .instances
-            .iter()
-            .find_map(|instance| match &manifest.prototypes[&instance.prototype] {
-                Prototype::Construction { asset } => Some((instance.clone(), asset.clone())),
-                Prototype::Block { .. } | Prototype::Tree { .. } => None,
-            })
-            .expect("the fixture places a construction");
-        second.id = "brick_0002".to_owned();
-        second.translation[0] += 30.0;
-        second.scale = [1.3; 3];
-        manifest
-            .constructions
-            .admit_placement(&asset, second.scale)
-            .expect("the added fixture placement passes production scale admission");
-        manifest.instances.push(second);
+    fn drawing_shares_each_constructions_mesh_and_preserves_instance_scale() {
+        let mut manifest = construction_fixture_manifest();
+        let originals = manifest.instances.clone();
+        for instance in originals {
+            if let Prototype::Construction { asset } = &manifest.prototypes[&instance.prototype] {
+                let mut second = instance.clone();
+                second.id.push_str("_copy");
+                second.translation[0] += 30.0; // Fixture separation.
+                second.scale = [1.3; 3]; // Fixture scale.
+                manifest
+                    .constructions
+                    .admit_placement(asset, second.scale)
+                    .unwrap();
+                manifest.instances.push(second);
+            }
+        }
         let (mut app, _) = spawned(&manifest, true, false);
         let world = app.world_mut();
-        let views: Vec<(Entity, Vec3, AssetId<Mesh>, AssetId<ConstructionMaterial>)> = world
-            .query::<(
+        let views: Vec<_> = world
+            .query_filtered::<(
                 &ChildOf,
                 &Transform,
                 &Mesh3d,
                 &MeshMaterial3d<ConstructionMaterial>,
-            )>()
+            ), With<crate::construction::view::View>>()
             .iter(world)
             .map(|(parent, transform, mesh, material)| {
                 (parent.parent(), transform.scale, mesh.id(), material.id())
             })
             .collect();
-        assert_eq!(views.len(), 2, "one view per construction");
-        assert_eq!(views[0].2, views[1].2, "one mesh for the asset");
-        assert_eq!(views[0].3, views[1].3, "one material");
-        let mut scales: Vec<f32> = views
-            .iter()
-            .map(|&(root, scale, ..)| {
-                assert!(world.get::<crate::construction::Body>(root).is_some());
-                assert_eq!(scale, Vec3::splat(scale.x));
-                scale.x
+        let mut by_kind: BTreeMap<String, Vec<_>> = BTreeMap::new();
+        for (root, scale, mesh, material) in views {
+            let body = world
+                .get::<crate::construction::breakage::Breakage>(root)
+                .unwrap();
+            assert_eq!(scale, Vec3::splat(body.scale));
+            assert_eq!(world.get::<Transform>(root).unwrap().scale, Vec3::ONE);
+            by_kind
+                .entry(body.kind.asset.id.clone())
+                .or_default()
+                .push((scale.x, mesh, material));
+        }
+        let expected_kinds: std::collections::BTreeSet<_> = manifest
+            .prototypes
+            .values()
+            .filter_map(|prototype| match prototype {
+                Prototype::Construction { asset } => Some(asset),
+                _ => None,
             })
             .collect();
-        scales.sort_by(f32::total_cmp);
-        assert_eq!(scales, [1.0, 1.3], "each at its instance's scale");
+        assert_eq!(by_kind.len(), expected_kinds.len());
+        for views in by_kind.values_mut() {
+            views.sort_by(|a, b| a.0.total_cmp(&b.0));
+            assert_eq!(views.len(), 2);
+            assert_eq!((views[0].0, views[1].0), (1.0, 1.3));
+            assert_eq!(views[0].1, views[1].1);
+            assert_eq!(views[0].2, views[1].2);
+        }
         assert_eq!(world.resource::<Assets<ConstructionMaterial>>().len(), 1);
-    }
-
-    /// A COMPOSITION THAT DRAWS ATTACHES EACH TREE'S VIEW: the sim spawns a tree's body only, so
-    /// the scatter, handed an asset server, puts one glb view under each tree's root at that
-    /// instance's scale (the fixture's tree rescaled to 1.5, fixture data, so a view at unit
-    /// scale is told apart). A scatter that leaves the view to the sim, which spawns none, draws
-    /// no tree at all.
-    #[test]
-    fn a_drawing_composition_attaches_one_view_per_tree_at_its_scale() {
-        let mut manifest = mixed_fixture_manifest();
-        let mut trees = 0;
-        for instance in &mut manifest.instances {
-            if let Prototype::Tree { .. } = manifest.prototypes[&instance.prototype] {
-                instance.scale = [1.5; 3];
-                trees += 1;
-            }
-        }
-        let (mut app, _) = spawned(&manifest, true, false);
-        let world = app.world_mut();
-        let views: Vec<(Entity, Vec3)> = world
-            .query_filtered::<(&ChildOf, &Transform), With<crate::trees::view::TreeView>>()
-            .iter(world)
-            .map(|(parent, transform)| (parent.parent(), transform.scale))
-            .collect();
-        assert_eq!(views.len(), trees, "one view per tree");
-        for (root, scale) in views {
-            let body = world
-                .get::<crate::trees::TreeBody>(root)
-                .expect("a view hangs under its tree's root");
-            assert_eq!(
-                scale,
-                Vec3::splat(body.scale),
-                "the view is at the instance's scale"
-            );
-            assert_eq!(body.scale, 1.5);
-        }
+        assert_eq!(
+            world
+                .query::<&crate::trees::view::TreeView>()
+                .iter(world)
+                .count(),
+            0
+        );
     }
 }

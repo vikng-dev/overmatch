@@ -261,6 +261,127 @@ fn a_construction_is_complete_at_spawn_and_keeps_its_state_through_splits() {
     );
 }
 
+/// The game's environment destruction model: every admitted map kind releases through the
+/// common plugin when a chunk loses support. Hull contact and presentation rely on its stable
+/// address and direct convex colliders following the new dynamic owner. Fixture: isolate one
+/// above-ground chunk, then apply a zero-work load to request a scheduled law evaluation.
+#[test]
+fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
+    let manifest = crate::map::tests::shipped_manifest();
+    let assets: BTreeSet<_> = manifest
+        .prototypes
+        .values()
+        .filter_map(|prototype| match prototype {
+            crate::map::Prototype::Construction { asset } => Some(asset),
+            _ => None,
+        })
+        .collect();
+    for asset in assets {
+        let kind = manifest.constructions.get(asset).unwrap();
+        let (mut app, root) = composed_kind(false, kind);
+        app.update();
+        app.update();
+        let (chunk, at) = {
+            let mut body = app.world_mut().get_mut::<Breakage>(root).unwrap();
+            let live = body.live.as_mut();
+            let chunk = live
+                .structure
+                .chunks
+                .iter()
+                .position(|chunk| !chunk.buried)
+                .expect("fixture construction has above-ground matter");
+            for (j, joint) in live.structure.joints.iter().enumerate() {
+                if joint.a == chunk || joint.b == Side::Chunk(chunk) {
+                    live.state.cracked[j] = true;
+                }
+            }
+            (chunk, live.structure.chunks[chunk].centroid)
+        };
+        app.world_mut().resource_mut::<Queue>().0.push(RawDeposit {
+            contacts: vec![(
+                root,
+                Load {
+                    chunk,
+                    at,
+                    energy: 0.0,
+                    crushed: 0.0,
+                    blow: Vec3::ZERO,
+                    press: Vec3::ZERO,
+                    peak: None,
+                    origin: Origin::Field,
+                },
+            )],
+            ..default()
+        });
+        app.update();
+        let (owner, piece) = app
+            .world_mut()
+            .query::<(Entity, &Piece)>()
+            .iter(app.world())
+            .find(|(_, piece)| piece.chunks.contains(&(chunk as u16)))
+            .expect("unsupported matter releases through the common plugin");
+        assert_eq!(
+            piece.construction,
+            app.world().get::<Breakage>(root).unwrap().construction
+        );
+        assert_eq!(piece.chunks, [chunk as u16]);
+        assert_eq!(
+            app.world().get::<RigidBody>(owner),
+            Some(&RigidBody::Dynamic)
+        );
+        assert!(Arc::ptr_eq(
+            &app.world().get::<Breakage>(owner).unwrap().kind,
+            kind
+        ));
+        let contact: Vec<_> = app
+            .world_mut()
+            .query::<(Entity, &ChildOf, &Collider, &CollisionLayers)>()
+            .iter(app.world())
+            .filter(|(_, parent, _, layers)| {
+                parent.parent() == owner && layers.filters != LayerMask::NONE
+            })
+            .map(|(entity, _, collider, _)| {
+                assert!(
+                    collider.shape().as_convex_polyhedron().is_some(),
+                    "a freed contact hull is direct convex geometry, never a translated compound"
+                );
+                entity
+            })
+            .collect();
+        assert_eq!(contact.len(), 1, "one contact hull owns the isolated chunk");
+        app.world_mut()
+            .entity_mut(owner)
+            .insert(LinearVelocity(Vec3::X)); // Fixture motion.
+        let before = app.world().get::<Position>(owner).unwrap().0;
+        for _ in 0..8 {
+            app.update();
+        } // Fixture observation window.
+        let after = app.world().get::<Position>(owner).unwrap().0;
+        assert!(after.x > before.x, "the common dynamic owner advances");
+        for entity in contact {
+            let world = app.world();
+            assert_eq!(world.get::<ColliderOf>(entity).unwrap().body, owner);
+            let bound = world.get::<ColliderAabb>(entity).unwrap();
+            let at = world.get::<Position>(entity).unwrap().0;
+            let rotation = world.get::<Rotation>(entity).unwrap().0;
+            let expected = world.get::<Collider>(entity).unwrap().aabb(at, rotation);
+            // Resolution: the engine's collision margin may expand the broad-phase bounds;
+            // containment, rather than equality, is the spatial query contract.
+            assert!(
+                bound.min.cmple(expected.min).all() && bound.max.cmpge(expected.max).all(),
+                "the common collider's live bounds contain its posed hull"
+            );
+        }
+        assert_eq!(
+            app.world().get::<Breakage>(root).unwrap().live.state.fate[chunk],
+            Fate::Fallen
+        );
+        println!(
+            "MEASURED {asset}: common detachment retains chunk {chunk}, direct contact hull and moving bounds"
+        );
+    }
+}
+
 /// The game's environment destruction model: a moving owner's strength check reads spin after
 /// earlier owners' plastic returns. Independent owners can evaluate together; crossing this
 /// dependency or serializing every independent owner violates the evaluation contract.

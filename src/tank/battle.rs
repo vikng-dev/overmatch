@@ -1045,18 +1045,16 @@ mod tests {
     #[test]
     fn the_lanes_and_lines_of_fire_stand_clear_of_the_map() {
         const MAX_SLOPE_DEG: f32 = 8.0;
-        const LANE_TREE_CLEAR_M: f32 = 10.0;
-        const LANE_BUILDING_CLEAR_M: f32 = 10.0;
-        const FIRE_TREE_CLEAR_M: f32 = 3.0;
+        const LANE_CLEAR_M: f32 = 10.0;
+        const FIRE_CLEAR_M: f32 = 3.0;
         const EDGE_MARGIN_M: f32 = 50.0;
         let grid = crate::terrain_grid::tests::shipped_grid();
         let manifest = crate::map::tests::shipped_manifest();
-        let mut trees = Vec::new();
         let mut constructions = Vec::new();
         for instance in &manifest.instances {
             let xz = Vec2::new(instance.translation[0], instance.translation[2]);
             match manifest.prototypes.get(&instance.prototype) {
-                Some(Prototype::Tree { .. }) => trees.push(xz),
+                Some(Prototype::Tree { .. }) => panic!("the live map uses common constructions"),
                 Some(Prototype::Block { min, max, .. }) => {
                     let reach = Vec2::new(
                         min[0].abs().max(max[0].abs()),
@@ -1077,10 +1075,7 @@ mod tests {
                 None => {}
             }
         }
-        assert!(
-            !trees.is_empty() && !constructions.is_empty(),
-            "the shipped map's scatter"
-        );
+        assert!(!constructions.is_empty(), "the shipped map's scatter");
         let plan = Plan::new(SEED);
         let bodies: Vec<(Vec2, Vec2)> = plan.tanks.iter().map(|tank| body(tank.lane)).collect();
         for (index, tank) in plan.tanks.iter().enumerate() {
@@ -1099,17 +1094,10 @@ mod tests {
                     "tank {index}'s lane climbs {slope:.1}° at {p}"
                 );
             }
-            for &tree in &trees {
-                let clear = point_segment(tree, from, to);
-                assert!(
-                    clear >= LANE_TREE_CLEAR_M,
-                    "tank {index}'s lane passes {clear:.1} m from a tree at {tree}"
-                );
-            }
             for &(construction, reach) in &constructions {
                 let clear = point_segment(construction, from, to) - reach;
                 assert!(
-                    clear >= LANE_BUILDING_CLEAR_M,
+                    clear >= LANE_CLEAR_M,
                     "tank {index}'s lane passes {clear:.1} m from a construction at {construction}"
                 );
             }
@@ -1134,17 +1122,10 @@ mod tests {
                         .map(|point| (point - start).dot(end - start))
                         .fold(0.0f32, f32::max);
                     let end = start + (end - start) * reach;
-                    for &tree in &trees {
-                        let clear = point_segment(tree, start, end);
-                        assert!(
-                            clear >= FIRE_TREE_CLEAR_M,
-                            "tank {index}'s fire toward {aim} passes {clear:.1} m from a tree at {tree}"
-                        );
-                    }
                     for &(construction, reach) in &constructions {
                         let clear = point_segment(construction, start, end) - reach;
                         assert!(
-                            clear >= FIRE_TREE_CLEAR_M,
+                            clear >= FIRE_CLEAR_M,
                             "tank {index}'s fire toward {aim} passes {clear:.1} m from a construction at {construction}"
                         );
                     }

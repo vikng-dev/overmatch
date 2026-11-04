@@ -3109,164 +3109,80 @@ mod reverse_throw {
     }
 }
 
-/// A freed trunk's segment bounds follow its finite-mass physics body, while the stump stays
-/// where it stood. The game's damage-model casts and hull contacts rely on these live bounds;
-/// moving only the view or leaving child colliders under the map body fails this fixture.
+/// The game's environment destruction model: the shipped simulation must activate every map
+/// construction through the common spawn, with complete state before any contact or view load.
+/// A cutover that leaves trunks on their segmented path fails the root/collider census.
 #[test]
-fn a_felled_trees_colliders_follow_its_dynamic_body() {
+fn shipped_map_constructions_use_complete_common_spawn_state() {
+    use crate::construction::{Body, Element, breakage::Breakage};
     use crate::map::Prototype;
-    use crate::trees::{TreeBody, TreePiece, TreeState};
-    use avian3d::prelude::ColliderAabb;
-    use avian3d::prelude::{Position, RigidBody, Rotation};
-    let shipped = crate::map::tests::shipped_manifest();
-    // Fixture selection: one tree kind the shipped map places. Every bound below is read from the
-    // spawned body's own data and its resting record, never from this kind's numbers.
-    let asset = shipped
-        .instances
-        .iter()
-        .find_map(|instance| match &shipped.prototypes[&instance.prototype] {
-            Prototype::Tree { asset } => Some(asset),
-            _ => None,
-        })
-        .expect("the shipped map places a tree");
-    let kind = shipped
-        .trees
-        .get(asset)
-        .expect("map admission loaded every placed tree kind")
-        .clone();
-    let bare = {
-        let mut manifest = shipped;
-        let prototypes = manifest.prototypes.clone();
-        manifest
-            .instances
-            .retain(|instance| !matches!(prototypes[&instance.prototype], Prototype::Tree { .. }));
-        manifest
-    };
-    let grid = crate::terrain_grid::tests::shipped_grid();
-    let base = Vec3::new(40.0, grid.height_at(40.0, 40.0), 40.0);
-    let mut app = booted_sim_on_map(Some(grid), Some(bare));
-    start_fixed_clock(&mut app);
-    let root = {
-        let world = app.world_mut();
-        let mut queue = bevy::ecs::world::CommandQueue::default();
-        let mut commands = Commands::new(&mut queue, world);
-        crate::trees::spawn(
-            &mut commands,
-            &kind,
-            crate::scatter::MapInstance {
-                id: "fir_bed".to_owned(),
-                ordinal: 0,
-            },
-            Transform::from_translation(base),
+    use avian3d::prelude::Collider;
+    let mut app = booted_sim_on(Some(crate::terrain_grid::tests::shipped_grid()));
+    let manifest = app.world().resource::<crate::map::MapManifest>();
+    let mut expected = std::collections::BTreeMap::<String, (usize, usize)>::new();
+    for instance in &manifest.instances {
+        match &manifest.prototypes[&instance.prototype] {
+            Prototype::Construction { asset } => {
+                let kind = manifest.constructions.get(asset).unwrap();
+                let count = expected.entry(asset.clone()).or_default();
+                count.0 += 1;
+                count.1 += kind.asset.elements.len();
+            }
+            Prototype::Block { .. } => {}
+            Prototype::Tree { .. } => {
+                panic!("live map must admit every construction through the common library")
+            }
+        }
+    }
+    let world = app.world_mut();
+    let roots: Vec<_> = world
+        .query_filtered::<(&crate::scatter::MapInstance, &Breakage), With<Body>>()
+        .iter(world)
+        .collect();
+    for (identity, body) in &roots {
+        assert_eq!(body.construction, identity.ordinal);
+        assert_eq!(
+            body.live.state.pool,
+            body.live
+                .structure
+                .chunks
+                .iter()
+                .map(crate::construction::fracture::full_pool)
+                .collect::<Vec<_>>()
         );
-        queue.apply(world);
-        world
-            .query_filtered::<Entity, With<TreeBody>>()
-            .single(world)
-            .expect("one tree")
-    };
-    for _ in 0..3 {
-        app.update();
-    }
-    // The segments in spawn order: bottom first.
-    let bounds = |app: &App| -> Vec<ColliderAabb> {
-        let world = app.world();
-        world
-            .get::<Children>(root)
-            .expect("segments")
-            .iter()
-            .filter_map(|child| world.get::<ColliderAabb>(child).copied())
-            .collect()
-    };
-    let prefix = app
-        .world()
-        .get::<TreeBody>(root)
-        .expect("the body")
-        .prefix
-        .clone();
-    let n = kind.segments.len();
-    // DERIVED tolerance: every coordinate read is under 256 m (asserted), where one f32 rounding
-    // is at most 2⁻¹⁷ m ≈ 7.6 µm; avian's vertex route and this one differ by a few roundings,
-    // far under the millimetre.
-    const TOLERANCE: f32 = 1.0e-3;
-    assert!(base.abs().max_element() + prefix[n] < 256.0);
-    let holds = |aabb: &ColliderAabb, point: Vec3| {
-        (aabb.min - Vec3::splat(TOLERANCE)).cmple(point).all()
-            && point.cmple(aabb.max + Vec3::splat(TOLERANCE)).all()
-    };
-    let standing = bounds(&app);
-    assert_eq!(standing.len(), n);
-    let tip_standing = standing[n - 1];
-    let standing_top = base + Vec3::Y * prefix[n];
-    for point in [base + Vec3::Y * prefix[n - 1], standing_top] {
-        assert!(
-            holds(&tip_standing, point),
-            "standing: the tip segment's bounds {tip_standing:?} hold its centre {point}"
+        assert_eq!(
+            body.live.state.fate,
+            vec![crate::construction::fracture::Fate::Standing; body.live.structure.chunks.len()]
         );
+        assert_eq!(
+            body.live.state.cracked,
+            vec![false; body.live.structure.joints.len()]
+        );
+        assert_eq!(
+            body.live.swapped,
+            vec![false; body.kind.asset.elements.len()]
+        );
+        assert!(body.live.holes.iter().all(Vec::is_empty));
     }
-    let cut = 1;
-    let parts = app
-        .world()
-        .get::<crate::trees::TreeParts>(root)
-        .unwrap()
-        .0
-        .clone();
-    let body = app.world().get::<TreeBody>(root).unwrap();
-    let mass: f32 = body.structure.chunks[usize::from(cut)..]
-        .iter()
-        .map(|chunk| chunk.mass)
-        .sum();
-    let at = body.structure.chunks[n - 1].centroid;
-    app.world_mut().entity_mut(root).insert((
-        TreeState::Down { cut, dir: 0 },
-        crate::trees::TrunkLoads(vec![crate::construction::fracture::Load {
-            chunk: n - 1,
-            at,
-            blow: Vec3::X * mass * 2.0,
-            press: Vec3::ZERO,
-            energy: 0.0,
-            crushed: 0.0,
-            peak: None,
-            origin: crate::construction::fracture::Origin::Field,
-        }]),
-    ));
-    for _ in 0..128 {
-        app.update();
-    }
-    let tip = parts[n - 1];
-    let piece = app.world().get::<ChildOf>(tip).unwrap().parent();
-    assert!(app.world().get::<TreePiece>(piece).is_some());
+    let roots = roots.len();
+    assert_eq!(roots, expected.values().map(|count| count.0).sum::<usize>());
+    let elements = world
+        .query_filtered::<Entity, (With<Element>, With<Collider>)>()
+        .iter(world)
+        .count();
     assert_eq!(
-        app.world().get::<RigidBody>(piece),
-        Some(&RigidBody::Dynamic)
+        elements,
+        expected.values().map(|count| count.1).sum::<usize>()
     );
     assert_eq!(
-        *app.world().get::<ColliderAabb>(parts[0]).unwrap(),
-        standing[0]
+        world.query::<&crate::trees::TreeBody>().iter(world).count(),
+        0
     );
-    let bound = app.world().get::<ColliderAabb>(tip).unwrap();
-    let position = app.world().get::<Position>(tip).unwrap().0;
-    let rotation = app.world().get::<Rotation>(tip).unwrap().0;
-    for point in [
-        position,
-        position + rotation * Vec3::Y * (prefix[n] - prefix[n - 1]),
-    ] {
-        assert!(
-            holds(bound, point),
-            "the live tip bounds {bound:?} hold {point}"
+    for (asset, (instances, colliders)) in expected {
+        println!(
+            "MEASURED live map {asset}: {instances} instances, {colliders} intact element colliders"
         );
     }
-    assert!(
-        !holds(bound, standing_top),
-        "the tip left its standing bound"
-    );
-    assert_eq!(
-        app.world()
-            .get::<avian3d::prelude::ColliderOf>(tip)
-            .unwrap()
-            .body,
-        piece
-    );
 }
 
 /// ADR-0014, SERVER-COMPOSITION HONESTY for the track prints (the game's cosmetic terrain marks):

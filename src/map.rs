@@ -734,6 +734,22 @@ pub(crate) mod tests {
         manifest
     }
 
+    /// Fixture: common construction placements. Independent ledger/reset fixtures use
+    /// `mixed_fixture_manifest` to exercise their separate topology streams.
+    pub(crate) fn construction_fixture_manifest() -> MapManifest {
+        let mut manifest = mixed_fixture_manifest();
+        for prototype in manifest.prototypes.values_mut() {
+            if let Prototype::Tree { asset } = prototype {
+                *prototype = Prototype::Construction {
+                    asset: asset.clone(),
+                };
+            }
+        }
+        manifest.trees = TreeLibrary::default();
+        manifest.load_constructions(&shipped_assets(), Path::new("fixture/level.json"));
+        manifest
+    }
+
     /// The collider-spawning layer relies on the file gate refusing collapsed or inverted
     /// placements. Every refusal must identify the manifest, instance, field and repair.
     #[test]
@@ -1102,49 +1118,53 @@ pub(crate) mod tests {
         }
     }
 
-    /// THE DIGEST FOLDS THE TREES' TEXTS (the species table, the wood row and every tree asset
-    /// the map places) after the three map files, in the library's order, then every construction
-    /// asset's: two peers with one map and one different tree segment integrate different walks,
-    /// two with one different wood row build different pools, and two with one different wall
-    /// element stop different rounds, so no such pair may match. Dropping the trees, the wood row
-    /// or the constructions from the fold, or folding them in another order, reds this.
+    /// Peers derive construction geometry and dressing from the same admitted bytes. Omitting
+    /// either file from the compatibility term would admit a different collision or foliage view.
     #[test]
-    fn the_digest_folds_the_tree_and_construction_texts_after_the_map_files() {
+    fn the_digest_folds_every_admitted_construction_file() {
         let root = shipped_assets();
         let path = level_path(&root);
         let text = read_manifest(&path);
         let library = read_prototypes(&root);
-        let manifest = parse(&text, &library, &path);
-        let trees = TreeLibrary::load(&root, manifest.tree_assets());
-        let constructions = ConstructionLibrary::load(&root, manifest.construction_assets());
-        let heightmap = std::fs::read(manifest.heightmap_path()).expect("the heightmap");
-        let map_files = vec![text.as_bytes(), library.as_bytes(), heightmap.as_slice()];
+        let manifest = load(&root);
         assert!(
-            trees.texts().count() >= 3,
-            "the shipped map places a tree: the species table, the wood row and its asset"
+            manifest.tree_assets().next().is_none(),
+            "live scatter uses constructions"
         );
-        let wood = std::fs::read(root.join("trees/wood.ron")).expect("the wood row");
-        assert!(
-            trees.texts().any(|text| text == wood.as_slice()),
-            "the wood row is folded"
-        );
+        let heightmap = std::fs::read(manifest.heightmap_path()).unwrap();
+        let mut files = vec![text.as_bytes(), library.as_bytes(), heightmap.as_slice()];
+        let assets: std::collections::BTreeSet<_> = manifest.construction_assets().collect();
+        let construction_texts: Vec<_> = assets
+            .iter()
+            .flat_map(|asset| {
+                ["construction", "dressing"].map(|suffix| {
+                    std::fs::read(
+                        root.join("constructions")
+                            .join(asset)
+                            .join(format!("{asset}.{suffix}.ron")),
+                    )
+                    .unwrap()
+                })
+            })
+            .collect();
+        let construction_files: Vec<_> = construction_texts.iter().map(Vec::as_slice).collect();
         let shipped = content_digest(&root);
-        assert_ne!(shipped, digest_of(&map_files), "the tree texts count");
-        let house = std::fs::read(root.join("constructions/house_1/house_1.construction.ron"))
-            .expect("the shipped house");
-        assert!(
-            constructions.texts().any(|text| text == house.as_slice()),
-            "the shipped map places a construction and its file is folded"
-        );
-        let mut files = map_files;
-        files.extend(trees.texts());
-        assert_ne!(shipped, digest_of(&files), "the construction texts count");
-        files.extend(constructions.texts());
-        assert_eq!(
-            shipped,
-            digest_of(&files),
-            "the fold is the map files, then the trees, then the constructions"
-        );
+        for omitted in 0..construction_files.len() {
+            let mut incomplete = files.clone();
+            incomplete.extend(
+                construction_files
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, bytes)| (index != omitted).then_some(*bytes)),
+            );
+            assert_ne!(
+                shipped,
+                digest_of(&incomplete),
+                "construction file {omitted} counts"
+            );
+        }
+        files.extend(construction_files);
+        assert_eq!(shipped, digest_of(&files));
     }
 
     /// The column index IS X — the decode walks a row-major image, so a `-X` export describes

@@ -1,0 +1,853 @@
+{
+  "subject": "The video game environment destruction model, game state only. M13 pre-cutover content baseline.",
+  "parent_sha": "1dcf58cae73bf8403b7728f17f98b7af1c3e6977",
+  "parent_subject": "construction: wood view on the common view, dressed from data (#106)",
+  "hash_kind": "SHA-256 of working asset bytes, including hydrated LFS content; sizes MEASURED",
+  "files": [
+    {
+      "path": "assets/ballistics/box_classes.ron",
+      "bytes": 1492,
+      "sha256": "c73c08fa555992576ada8b59ce017ff587f298265acec5de8e47b09c966ae043"
+    },
+    {
+      "path": "assets/ballistics/energy_dose.ron",
+      "bytes": 1841,
+      "sha256": "91882a11b17e6c62dabb50d265de57adbccd1bde0f2de54ce256c2dc807ebb25"
+    },
+    {
+      "path": "assets/ballistics/physical_laws.ron",
+      "bytes": 3422,
+      "sha256": "274182dcf17a087a820a9d019b762414e040a351376d814e2566000bae2b006b"
+    },
+    {
+      "path": "assets/ballistics/round_types.ron",
+      "bytes": 6503,
+      "sha256": "8c8e97f91a6ab7d85cbf580c7796a3c8eed9742892fe5ac46d910a5a817b4e62"
+    },
+    {
+      "path": "assets/ballistics/spall_cone.ron",
+      "bytes": 7859,
+      "sha256": "8fa41063784256d67579ba30fd59e88d151f38db10faab8d530e8f077db73062"
+    },
+    {
+      "path": "assets/constructions/brick_wall_006/brick_wall_006_arm.ktx2",
+      "bytes": 1184207,
+      "sha256": "9e8edaa498b62c1444863cbb030e667bfde9cfee4ba7d18bd160869b48c7c778"
+    },
+    {
+      "path": "assets/constructions/brick_wall_006/brick_wall_006_diff.ktx2",
+      "bytes": 1392335,
+      "sha256": "4c21dfa4f42103c9439e744bb1a3690dd84f5a79f932282a04841600dd4c3d1d"
+    },
+    {
+      "path": "assets/constructions/brick_wall_006/brick_wall_006_nor_gl.ktx2",
+      "bytes": 1333987,
+      "sha256": "8af93668a48e2d61416ccf43c5b3ea7a720325c0fa203ef36e699a12ac917672"
+    },
+    {
+      "path": "assets/constructions/brick_wall_006/cc.txt",
+      "bytes": 808,
+      "sha256": "750f66b4804c3896a5ed1c8e6dac14799355f11af20315730573d697bb6781f7"
+    },
+    {
+      "path": "assets/constructions/dark_planks/cc.txt",
+      "bytes": 886,
+      "sha256": "14b233c136ced9c2cc9690a185ff246156fb714d6b1e2e0a883ac13fb51608a8"
+    },
+    {
+      "path": "assets/constructions/dark_planks/dark_planks_arm.ktx2",
+      "bytes": 1105866,
+      "sha256": "0ef8db7008d02b987cdb4d9e64688f98bd185e434aac5b7cb68b6f32eda30e85"
+    },
+    {
+      "path": "assets/constructions/dark_planks/dark_planks_diff.ktx2",
+      "bytes": 1256413,
+      "sha256": "51b385ba7d1fdf9704b6ba93782a6e8241af4ade49024ec5b1895522922aa58f"
+    },
+    {
+      "path": "assets/constructions/dark_planks/dark_planks_nor_gl.ktx2",
+      "bytes": 1158395,
+      "sha256": "577033bb70ce44196750b1508fdc7de6b88734a141fbf0c7294ff9321d3ab663"
+    },
+    {
+      "path": "assets/constructions/fir_1/fir_1.construction.ron",
+      "bytes": 81010,
+      "sha256": "746e66f9d277d901dbf1c7d89d3c92d034652edc62ef97dda23fd4f516d20f96"
+    },
+    {
+      "path": "assets/constructions/fir_1/fir_1.dressing.ron",
+      "bytes": 90067,
+      "sha256": "649f469cd300c76db433c925853a205db7b0fc3629d552c5ec2e4ed8b79434eb"
+    },
+    {
+      "path": "assets/constructions/house_1/house_1.construction.ron",
+      "bytes": 762771,
+      "sha256": "62996a3b9ef103b407bee31df7ff972d5eaab02401f52b857c5c4b05c43731ea"
+    },
+    {
+      "path": "assets/constructions/house_1/house_1.dressing.ron",
+      "bytes": 200,
+      "sha256": "d186acc1c6425eb1c51a7bd529a3a1fd34aa7abc79f8943d66ace5e9d8adeb67"
+    },
+    {
+      "path": "assets/damage/crew.ron",
+      "bytes": 294,
+      "sha256": "4d3149889513123da312697843be03d169cecc9eccceade00b9bea3a59ee5a15"
+    },
+    {
+      "path": "assets/damage/repair.ron",
+      "bytes": 504,
+      "sha256": "f9ca87f392ca5bd8e1275bed4ef03519f3dedb42b3b487b5da8b07095df06432"
+    },
+    {
+      "path": "assets/dev/capture-wall.ron",
+      "bytes": 629,
+      "sha256": "acef066a16e3a0dd28e4bdc2f2a549076de6d23ec87e366ab0ed84d81978a833"
+    },
+    {
+      "path": "assets/dev/debris-stress.ron",
+      "bytes": 2094,
+      "sha256": "7f34756e269271e6b80e49d821621aee2ccb04453c1c93e18525c0c6f5815e13"
+    },
+    {
+      "path": "assets/dev/frame_cost.ron",
+      "bytes": 185,
+      "sha256": "f817a755c2eb9aa90bd83bae203f6f786a7e34d7937745677aff0f39a2981631"
+    },
+    {
+      "path": "assets/dev/pen_cam/s10_gun_barrel_struck.ron",
+      "bytes": 38288,
+      "sha256": "beb93ac8e93796277d31fc90f1aa2ebc54e995b9249c1c4ada3fe934654da23d"
+    },
+    {
+      "path": "assets/dev/pen_cam/s11_mg_barrel_struck.ron",
+      "bytes": 4423,
+      "sha256": "7b8bc798b3dc9bbf29a370b1d5bceee174adc47c79dc0f83ae44aa4f685a3086"
+    },
+    {
+      "path": "assets/dev/pen_cam/s12_apcr_through_crew.ron",
+      "bytes": 28184,
+      "sha256": "9a4f0ed1983597a9f4f0b7a80ffcbdcd26fbe0ef8e0e02d4a2b335fa8c892afd"
+    },
+    {
+      "path": "assets/dev/pen_cam/s13_ring_through_crew.ron",
+      "bytes": 100657,
+      "sha256": "9f646c963150e4f1170c6a2c61c2dbecbc5783baa70c06f0816d133b2033163b"
+    },
+    {
+      "path": "assets/dev/pen_cam/s15_unarmed_overpen.ron",
+      "bytes": 27513,
+      "sha256": "e1807bd53e5b9046742860b687697f445474e5a5bb7d0d919c1f1e533c8ea7fc"
+    },
+    {
+      "path": "assets/dev/pen_cam/s16_side_burst.ron",
+      "bytes": 118903,
+      "sha256": "d98f013fe3b999c002f7e40187cdce702a98cc3c6bc7f84aaee85733898bc905"
+    },
+    {
+      "path": "assets/dev/pen_cam/s1_through_crew.ron",
+      "bytes": 28265,
+      "sha256": "2e33d0b2155a6bea9562f0f42f06e0c50a7909ded8f4f9602ac747a955f3a574"
+    },
+    {
+      "path": "assets/dev/pen_cam/s2_stopped_mantlet.ron",
+      "bytes": 4536,
+      "sha256": "2fab7fcf98cd9aff4bfb32b3f1a32f331704f59587198abfcec369fc68910bb1"
+    },
+    {
+      "path": "assets/dev/pen_cam/s3_ricochet.ron",
+      "bytes": 4531,
+      "sha256": "e6843dbdb0b3be496bcb741f4e2b5dd13de1364051ae0bc2281b0591382d9367"
+    },
+    {
+      "path": "assets/dev/pen_cam/s4_spaced_then_stopped.ron",
+      "bytes": 51531,
+      "sha256": "4fa850da5461c6577ff05e9fba4408745eb07a93d11a0662213f549033ec5120"
+    },
+    {
+      "path": "assets/dev/pen_cam/s5_oblique_through.ron",
+      "bytes": 27312,
+      "sha256": "9edd83367d29ca2f8a1439a31ae4c394fe799fdeca246df772ef69ca27ae23a4"
+    },
+    {
+      "path": "assets/dev/pen_cam/s6_overpen.ron",
+      "bytes": 27353,
+      "sha256": "0cf947ba213be5edf911b2c20185f6cc116e74b049ea05c70372298699023eaa"
+    },
+    {
+      "path": "assets/dev/pen_cam/s7_engine_shadow.ron",
+      "bytes": 25612,
+      "sha256": "ddb1893a364b818ed8412e988d54dbb9c7ea081ce04941d2d612c80b5d3dcbc1"
+    },
+    {
+      "path": "assets/dev/pen_cam/s8a_mg_ricochet.ron",
+      "bytes": 4552,
+      "sha256": "c069e241206248204974e451fbc8b9eb0e1bbf48a634bed6b24ce840ad4aae8a"
+    },
+    {
+      "path": "assets/dev/pen_cam/s8b_mg_stopped.ron",
+      "bytes": 4487,
+      "sha256": "a4971f8590da0bd82a800a5a9cc081acb64bf3afc52f70e815845457c678f7f8"
+    },
+    {
+      "path": "assets/dev/pen_cam/s9_breech_and_loader.ron",
+      "bytes": 56979,
+      "sha256": "41bfc7c750fbc1a21569514b64d8d0eedd86e85c9258ad3daa6eac6fdf1e73b4"
+    },
+    {
+      "path": "assets/dev/pen_cam/scenarios.ron",
+      "bytes": 7151,
+      "sha256": "9aa227b7dfda4f67f23f4a0158c924c9fc246243b1628dc95b596e513d3b2465"
+    },
+    {
+      "path": "assets/dev/track_sandbox.ron",
+      "bytes": 6977,
+      "sha256": "e8e4958713edd3be90d5f20c838c590a51813199cc30a2bf8b219d5b3e73d829"
+    },
+    {
+      "path": "assets/dev/wall-tool.ron",
+      "bytes": 2743,
+      "sha256": "23adbf322ed9413460efa56b9632035cfd893672dde1df5a1a554ecf334a7f98"
+    },
+    {
+      "path": "assets/driving/actuation.ron",
+      "bytes": 347,
+      "sha256": "4ac19ce97e8b6771ac9e607bdbe91d08a8397daec7c2b717830e5da9a7e656a1"
+    },
+    {
+      "path": "assets/driving/driver.ron",
+      "bytes": 924,
+      "sha256": "2d72da30e4a7d4bf6ea0f1ebca4c8880526511837cdd02c3ab1c15c2904285b7"
+    },
+    {
+      "path": "assets/driving/engine.ron",
+      "bytes": 1056,
+      "sha256": "c4eec3a5f1653c978d3324cd066f7113b0a5e4c98fcaf276478e974bce7c0321"
+    },
+    {
+      "path": "assets/driving/grip.ron",
+      "bytes": 656,
+      "sha256": "be27ed8e3bc7b3f19697066c9547a0eb544f2027b4b5f483fb0fcbaa056de96d"
+    },
+    {
+      "path": "assets/driving/wheel_view.ron",
+      "bytes": 197,
+      "sha256": "23d4f1b01035d39fc835adc7b0c358f5d312cd511b59dabdbbf4d4bfa032a0cb"
+    },
+    {
+      "path": "assets/fonts/BarlowCondensed-Regular.ttf",
+      "bytes": 97132,
+      "sha256": "dd8271eb0ced7add028539113155a99000c1e62dee2dc48a1b2765c00f4862ab"
+    },
+    {
+      "path": "assets/fonts/BarlowCondensed-SemiBold.ttf",
+      "bytes": 103856,
+      "sha256": "571bbdabf1bca470ee84d51b77fe02ed3b9efa26d75799ef3dd8dd87b38ba9e0"
+    },
+    {
+      "path": "assets/fonts/OFL.txt",
+      "bytes": 4378,
+      "sha256": "6f931351c6b4a1732c099c5261138dbdb37f26456ab933ab9a66ecda162e240c"
+    },
+    {
+      "path": "assets/guns/kwk36_l56.gun.ron",
+      "bytes": 1880,
+      "sha256": "21b4c6364d7389d3165e93d2431e45f2b92370c810cc3b9145cf3a54f5a7f5b8"
+    },
+    {
+      "path": "assets/guns/mg34.gun.ron",
+      "bytes": 1391,
+      "sha256": "b0dacb4ce5fdd4fdd408b8cd17e1868038e8487641dfb7ed687d7b55e7aff101"
+    },
+    {
+      "path": "assets/input/aim.ron",
+      "bytes": 213,
+      "sha256": "e78c2c3f0b28e23a5ddb189101040a2fb53f1ffc379d892d5796d0e9592e0568"
+    },
+    {
+      "path": "assets/input/drive.ron",
+      "bytes": 605,
+      "sha256": "05ac13084a97dfd04c244f262fb5404256cbe9f317c979021822915345dc9c55"
+    },
+    {
+      "path": "assets/input/drive_hud.ron",
+      "bytes": 1369,
+      "sha256": "180a610d682d8cff18c98c9242efcdcd8add0b0de2343523de4956e5e47d7514"
+    },
+    {
+      "path": "assets/maps/kalinovo/derived/map_ui.png",
+      "bytes": 215494,
+      "sha256": "0ac9bb6e377b1dea9f4d0a4e0212e4dae90c5382df689be96f752f64d07c9234"
+    },
+    {
+      "path": "assets/maps/kalinovo/level.json",
+      "bytes": 246997,
+      "sha256": "b9c66df40d8b032acee1e0602cd33a1e7e43b3df5b9520ad25fb9df9d37111e7"
+    },
+    {
+      "path": "assets/maps/kalinovo/prototypes.ron",
+      "bytes": 1787,
+      "sha256": "8369537a81cb76ff6bc7187d5d74415ad644a159ae10627cb5bfa1a41afa9b61"
+    },
+    {
+      "path": "assets/maps/kalinovo/terrain_height.png",
+      "bytes": 10908063,
+      "sha256": "9d8642bada6f18ef0a7129757d90774d8555e9e323ee8d7436b663b9981808d3"
+    },
+    {
+      "path": "assets/maps/kalinovo/terrain_masks.png",
+      "bytes": 992213,
+      "sha256": "495b02e30538d4bc43acb49eaba91e8322b4c5727ab0498b431713e5a4df16e5"
+    },
+    {
+      "path": "assets/materials/attachments.ron",
+      "bytes": 7722,
+      "sha256": "3ac9627dfaa1e1bc155aff4eae08ca67f2a14bf6ce346b5f2b4f4f628415e24d"
+    },
+    {
+      "path": "assets/materials/camouflage/cc.txt",
+      "bytes": 553,
+      "sha256": "171d1805a0f644a49248c98d4ce05fe101d2889e5de7530ebfc98fee1adebcb0"
+    },
+    {
+      "path": "assets/materials/camouflage/stripes.ktx2",
+      "bytes": 192672,
+      "sha256": "21c44abed725d6ac50b8f608095d52cbea6f2dcca67e915f48ad7df150e57415"
+    },
+    {
+      "path": "assets/materials/cc.txt",
+      "bytes": 1082,
+      "sha256": "80d837d9783829c179a052bb091889100351b7de6c64f4270051b76e7cf11b36"
+    },
+    {
+      "path": "assets/materials/materials.blend",
+      "bytes": 2529497,
+      "sha256": "865702557122b63b57530ba59d23455ed2fcb7a4a711690bf4a0972882f4dbec"
+    },
+    {
+      "path": "assets/materials/materials.ron",
+      "bytes": 66749,
+      "sha256": "fea255be44c2d9f4305a24ddb155c081891ed2aded1adbdf8a441e7693bb5727"
+    },
+    {
+      "path": "assets/materials/visuals.ron",
+      "bytes": 4198,
+      "sha256": "9ea17bff8c8b5014f192fc4ba03ae13acb9a9361cb93e4a2c4f29ccdb2a2689c"
+    },
+    {
+      "path": "assets/materials/visuals/cast_steel/cast_steel_arm.ktx2",
+      "bytes": 1122311,
+      "sha256": "03bbed6ef8300b7b342add8fa0e12d121f47ef13d69e01fba63aa2371f983e36"
+    },
+    {
+      "path": "assets/materials/visuals/cast_steel/cast_steel_diff.ktx2",
+      "bytes": 1104813,
+      "sha256": "44ec8908cbbdbb0dd5058a7d9f0c80bc87f4240321d493ebf528665cbe6f537f"
+    },
+    {
+      "path": "assets/materials/visuals/cast_steel/cast_steel_nor_gl.ktx2",
+      "bytes": 906163,
+      "sha256": "28ae4a6d1cbb385c45bdc1734211525984c402e7ed9555eac7140646a4bd6fe0"
+    },
+    {
+      "path": "assets/materials/visuals/cast_steel/cc.txt",
+      "bytes": 764,
+      "sha256": "fcd859e8f96fa452e5821197a4b45f2a4c6e3ae8f358d6fa41d7079a17fcac68"
+    },
+    {
+      "path": "assets/materials/visuals/machined_steel/cc.txt",
+      "bytes": 782,
+      "sha256": "9a0cdb7aa0857d5e86e937f9483688b7faff71b9410e7fbdfaba8fa2004502cf"
+    },
+    {
+      "path": "assets/materials/visuals/machined_steel/machined_steel_arm.ktx2",
+      "bytes": 934585,
+      "sha256": "235afdaa686c6e1bb9bcdfd6559926b824119740ff72c484ec62be44f94a32b6"
+    },
+    {
+      "path": "assets/materials/visuals/machined_steel/machined_steel_diff.ktx2",
+      "bytes": 926158,
+      "sha256": "dfdad804f1a76af2d5d19aeb12d144c84e5198d242929e0c1cf716601e5bdce2"
+    },
+    {
+      "path": "assets/materials/visuals/machined_steel/machined_steel_nor_gl.ktx2",
+      "bytes": 898482,
+      "sha256": "18dd81c49b2ba757fb13e705b130471aa1aeb8e2247081b7d0dfef61c7a9dcff"
+    },
+    {
+      "path": "assets/materials/visuals/rolled_steel/cc.txt",
+      "bytes": 774,
+      "sha256": "75e1ef9f9d0bab09935bcf2a1a60c33590aadfefe9bfd98805b4fa7314bee39d"
+    },
+    {
+      "path": "assets/materials/visuals/rolled_steel/rolled_steel_arm.ktx2",
+      "bytes": 856769,
+      "sha256": "73f241be1d6a38d846295c1a0b37f03cebd128b91c42bf2f9888fe4fffca20e3"
+    },
+    {
+      "path": "assets/materials/visuals/rolled_steel/rolled_steel_diff.ktx2",
+      "bytes": 996830,
+      "sha256": "9aaf6f20ae4263f3fc9361b28f42a242f973feb69b97c97be6546759279419e4"
+    },
+    {
+      "path": "assets/materials/visuals/rolled_steel/rolled_steel_nor_gl.ktx2",
+      "bytes": 1121175,
+      "sha256": "0123a7cce9ebe8f5c62f381917d095a301a4fc995040109e90b5cfb5dd76c1c4"
+    },
+    {
+      "path": "assets/materials/visuals/rubber/cc.txt",
+      "bytes": 759,
+      "sha256": "023ceccf19f37c2307af04308fb002137dbf573c9360e7646d03d84747552f65"
+    },
+    {
+      "path": "assets/materials/visuals/rubber/rubber_arm.ktx2",
+      "bytes": 1013699,
+      "sha256": "dce530dc78138ed9e909dfb221e05d40562d90722dbb6f32ce231da12738aaf3"
+    },
+    {
+      "path": "assets/materials/visuals/rubber/rubber_diff.ktx2",
+      "bytes": 1212442,
+      "sha256": "66a238084c34b04c60e458fa4c66eaa633e614cf66ca44487f104368b7e4a4b2"
+    },
+    {
+      "path": "assets/materials/visuals/rubber/rubber_nor_gl.ktx2",
+      "bytes": 1315919,
+      "sha256": "02c23c30812194537db2b0c1b99eb756258da775e2eca7a3c6cb73fd5bb9c2bf"
+    },
+    {
+      "path": "assets/materials/visuals/track_steel/cc.txt",
+      "bytes": 769,
+      "sha256": "b0e9b6379cc3374633a1134c68b0d12bbc72d59242f4b0d142a5f21d92e52af2"
+    },
+    {
+      "path": "assets/materials/visuals/track_steel/track_steel_arm.ktx2",
+      "bytes": 1127459,
+      "sha256": "bffddae8d45f5352174bb18d1059b82d0b0a54a75237c1dfdcb13faee3eca80a"
+    },
+    {
+      "path": "assets/materials/visuals/track_steel/track_steel_diff.ktx2",
+      "bytes": 1029775,
+      "sha256": "3e8f7256acf4cd124bbcd41984b5d7dd714ef1c0713a31f57b94222783b3186f"
+    },
+    {
+      "path": "assets/materials/visuals/track_steel/track_steel_nor_gl.ktx2",
+      "bytes": 1121303,
+      "sha256": "2cc006f07c0c774d622846dd64bb0bb0cc8a03a529bda44f538d8465212e69c8"
+    },
+    {
+      "path": "assets/modes/battle.ron",
+      "bytes": 401,
+      "sha256": "894ddf857758850a4756d501b43cea132c0bce999ee1b7229f89a6a00a812cce"
+    },
+    {
+      "path": "assets/net/client.ron",
+      "bytes": 703,
+      "sha256": "856015b5f4a94fc46d70c62ff54878cf64ff6c6256756dcad3cdeb38baf7c280"
+    },
+    {
+      "path": "assets/rounds/7.9mm_AP.round.ron",
+      "bytes": 2855,
+      "sha256": "483d3fc11c84c6074984555b58c026c05df39df506d8f56ade4f624cd29a95a8"
+    },
+    {
+      "path": "assets/rounds/88mm_AP.round.ron",
+      "bytes": 3884,
+      "sha256": "08124301de372b29155fd35b6213739995c8d83c633702a9615ff24c7c7ee625"
+    },
+    {
+      "path": "assets/rounds/88mm_APCR.round.ron",
+      "bytes": 4761,
+      "sha256": "85d2b0a96a51a01d7c121a38f41e465ab5cd781277569508adf551c14f1dac2e"
+    },
+    {
+      "path": "assets/rounds/88mm_APHE_ring.round.ron",
+      "bytes": 7163,
+      "sha256": "d61bfc0ce0aa109c41f018e60cb11b12efe58eec823744c2155be191d8bba0f1"
+    },
+    {
+      "path": "assets/rounds/88mm_HE.round.ron",
+      "bytes": 4587,
+      "sha256": "8572e5158d69fdff11146b10f9987eaf095cd3dcc90ee3d1bd3ef387d6479973"
+    },
+    {
+      "path": "assets/sfx/cc.txt",
+      "bytes": 2272,
+      "sha256": "68c4530df717690ca2901e9135ca02c46f873ec9600af6507c8b6cf6595767a6"
+    },
+    {
+      "path": "assets/sfx/click/click_1.ogg",
+      "bytes": 5301,
+      "sha256": "cb363ef17094fbb3bd70bfcda54e2466d51f9609663f3c1c38578548bf794d04"
+    },
+    {
+      "path": "assets/sfx/engine/engine_loop_44hz.ogg",
+      "bytes": 29160,
+      "sha256": "577fc1ab43b924a8415d7191a19480f4442a17b0ad4948b3eccf1c704649f1e4"
+    },
+    {
+      "path": "assets/sfx/explosion/88_cannon_1.ogg",
+      "bytes": 23831,
+      "sha256": "d56483bef0adc54ae366bcb0fa6f51083074a05918f9f3cab09f9395c6900fa7"
+    },
+    {
+      "path": "assets/sfx/explosion/88_cannon_2.ogg",
+      "bytes": 23505,
+      "sha256": "8f031eff65bab0f4281fc68e35e2378552d202ea3b8f11f5b3b1df39409306c0"
+    },
+    {
+      "path": "assets/sfx/explosion/88_cannon_3.ogg",
+      "bytes": 24500,
+      "sha256": "ee7c47c4db96c78878255ef3ec0a4e08365103f16a02320273e14154ea3ac48c"
+    },
+    {
+      "path": "assets/sfx/explosion/88_cannon_4.ogg",
+      "bytes": 25093,
+      "sha256": "d31026defbc109be47855061dd64c46f2550c78362048c122ca0be55c12afa5e"
+    },
+    {
+      "path": "assets/sfx/explosion/88_cannon_5.ogg",
+      "bytes": 21649,
+      "sha256": "79ba9d9b578bbd0dafbf648cbd1cc5593e3dc74e43e7ed52dce36cb2214ca99c"
+    },
+    {
+      "path": "assets/shaders/construction_holes.wgsl",
+      "bytes": 7256,
+      "sha256": "33e5bc97554d48370ab709d2e7f66493b158b420c8b721ef492cf82e89dbe736"
+    },
+    {
+      "path": "assets/shaders/construction_surface.wgsl",
+      "bytes": 6747,
+      "sha256": "4e515558ff7b20c15ac9ed60e2c1dd21f07d598d4a32c9138342a9811412a37e"
+    },
+    {
+      "path": "assets/shaders/construction_surface_prepass.wgsl",
+      "bytes": 1726,
+      "sha256": "9bb217dc81085bf925de854b4aaa9f8a67bad5f728c01a611ad58e52385668d3"
+    },
+    {
+      "path": "assets/shaders/optic_mask.wgsl",
+      "bytes": 1311,
+      "sha256": "2a1022d2caafa21a222fd7f8fec568905d2f1e874ab912f7271dba9002c16b5d"
+    },
+    {
+      "path": "assets/shaders/pen_cam_glow.wgsl",
+      "bytes": 1738,
+      "sha256": "05c193977e9f7aa37382188ce949cff20863503283d17536600e51a1a340b2de"
+    },
+    {
+      "path": "assets/shaders/pen_cam_look.wgsl",
+      "bytes": 35528,
+      "sha256": "70534235bfabea18984ad452c2177b8d1c34b54450386c8c9f02350b752793c1"
+    },
+    {
+      "path": "assets/shaders/pen_cam_look_belt.wgsl",
+      "bytes": 1379,
+      "sha256": "337e553faad55214d4e074a6e091f34461c4eb3520e44fa154baa162b75ba2f0"
+    },
+    {
+      "path": "assets/shaders/pen_cam_outline.wgsl",
+      "bytes": 1841,
+      "sha256": "2b527ade788ecb20bd4ed3f527282e57d3758fda1f28e2d37787d0b2863f1fbb"
+    },
+    {
+      "path": "assets/shaders/pen_cam_picture.wgsl",
+      "bytes": 2015,
+      "sha256": "66ad8f47b2779251c19637b9503c6078ffb9596359e05b31857e48b3d59fcb87"
+    },
+    {
+      "path": "assets/shaders/pen_cam_slice.wgsl",
+      "bytes": 3284,
+      "sha256": "fa2c335a724245944cab6f06b159d6018ef5a1b349d59343ffd6a169c73e3b0b"
+    },
+    {
+      "path": "assets/shaders/render_scale_upscale.wgsl",
+      "bytes": 2492,
+      "sha256": "52aad0feed0aa8b84288ee3bc8f58b5c83aef1adb69111c54154f072b4582680"
+    },
+    {
+      "path": "assets/shaders/tank_surface.wgsl",
+      "bytes": 10151,
+      "sha256": "ed9635f8d54d79e86fcc5e786fc83412e4908fa8b9144a2e0c2688b789146e72"
+    },
+    {
+      "path": "assets/shaders/terrain_blend.wgsl",
+      "bytes": 22846,
+      "sha256": "6a41b58c6cf589dec43325c1c4e009d57bf6566c2a7f3d8a6660b2c5b752c9f6"
+    },
+    {
+      "path": "assets/shaders/track_belt.wgsl",
+      "bytes": 2957,
+      "sha256": "9d48859318588a08b47cd99389f8870b971e2d26e565c99c1f83f4993439fab1"
+    },
+    {
+      "path": "assets/shaders/track_belt_mesh.wgsl",
+      "bytes": 3279,
+      "sha256": "1f4be9ecdb4c89afed6364543256efefd4f58d57e3e2a4970bbb1bb4f1be1e16"
+    },
+    {
+      "path": "assets/shaders/vfx_billboard.wgsl",
+      "bytes": 6512,
+      "sha256": "34f13c04ac241723a856375ad979ee851dcbe09c319620ee3165e6979cc2aef4"
+    },
+    {
+      "path": "assets/shaders/vfx_trail.wgsl",
+      "bytes": 3660,
+      "sha256": "7ec80a20dffd124b3fc116e6cf0e2377c090cc23553ec5e652f1a710e919d903"
+    },
+    {
+      "path": "assets/shell/cc.txt",
+      "bytes": 144,
+      "sha256": "747fdf1de2fd113e557b2949a36c3b84d9a1a2e488e847153429386ab3471f29"
+    },
+    {
+      "path": "assets/shell/shell.blend",
+      "bytes": 1577723,
+      "sha256": "0ed4d2317672baf96ccac9d65b49711546c9de8766e301bc22b806f99c0b7fc1"
+    },
+    {
+      "path": "assets/shell/shell.glb",
+      "bytes": 701512,
+      "sha256": "045dcf3aa02580cb2632ce55ecb042b73e5dfe041f46ae2a89320739c87b46c3"
+    },
+    {
+      "path": "assets/shell/shell.model.ron",
+      "bytes": 685,
+      "sha256": "4e3f14c47648cd81b880a8e54b7a263da57c78ca6d41c9130a6137dc8941e546"
+    },
+    {
+      "path": "assets/terrain/aerial_mud_1/cc.txt",
+      "bytes": 969,
+      "sha256": "0ba014cb84d87853eb76f766f44d63f8bc2213babedee1247139790a9d7a3840"
+    },
+    {
+      "path": "assets/terrain/blend/blend_arm.ktx2",
+      "bytes": 14001120,
+      "sha256": "5c2de8979f74a8c7aae519d3b4137026381da3910a883924422e1b56e7c7c04a"
+    },
+    {
+      "path": "assets/terrain/blend/blend_diff.ktx2",
+      "bytes": 14622496,
+      "sha256": "b75a11709145bd76bf9dd3b46acf0705f7cd791c19e7d36a733a968d6b3c66b2"
+    },
+    {
+      "path": "assets/terrain/blend/blend_nor_gl.ktx2",
+      "bytes": 14654371,
+      "sha256": "f0ea0443c68d4c5e4bbc45759e1222aa2915de79be23ef593626fa9163cb4390"
+    },
+    {
+      "path": "assets/terrain/blend/cc.txt",
+      "bytes": 810,
+      "sha256": "eff68f33c9d8f8eae2eddab150ec3270f10545ece27a5c84d2c4503010bc1f31"
+    },
+    {
+      "path": "assets/terrain/brown_mud_leaves_01/cc.txt",
+      "bytes": 1051,
+      "sha256": "5f79fa90927a27f0144eb95a92fc7eb60219129f1668173241ff0b2d51fffd68"
+    },
+    {
+      "path": "assets/terrain/coast_sand_05/cc.txt",
+      "bytes": 1005,
+      "sha256": "0794f6cb41794c21425483d8afa939516c920135af11b5a0393e31d4d87ecfd7"
+    },
+    {
+      "path": "assets/terrain/coast_sand_rocks_02/cc.txt",
+      "bytes": 712,
+      "sha256": "f802b9c64dd0eb4539b4476ae77297b62ce393d9633963203494ad24af5cb58e"
+    },
+    {
+      "path": "assets/terrain/coast_sand_rocks_02/coast_sand_rocks_02_arm.ktx2",
+      "bytes": 19415571,
+      "sha256": "b52d255a9382340c38fb090d4c26f9a4c773ecc0fd5010d312e81cca2d96a7ab"
+    },
+    {
+      "path": "assets/terrain/coast_sand_rocks_02/coast_sand_rocks_02_diff.ktx2",
+      "bytes": 20804172,
+      "sha256": "b9aec4ef8e7d058b704fa45297568d2e5e17180b03ce0f538904f3c3fdc20da7"
+    },
+    {
+      "path": "assets/terrain/coast_sand_rocks_02/coast_sand_rocks_02_nor_gl.ktx2",
+      "bytes": 21480029,
+      "sha256": "bab7feeac56417c32e74770c81bbf7574e455a736d42001fe37c2557cea0e1dc"
+    },
+    {
+      "path": "assets/terrain/dirt_aerial_03/cc.txt",
+      "bytes": 1028,
+      "sha256": "3ae2e9c393d7baa6d64bee57ba8549b07879aee75d3d8556806b11563c70cd7b"
+    },
+    {
+      "path": "assets/terrain/ground_types.ron",
+      "bytes": 8317,
+      "sha256": "c6dad821962a0dc272551839c56a15bb0a402afea66140098558c30a063f4d73"
+    },
+    {
+      "path": "assets/terrain/rocks_ground_02/cc.txt",
+      "bytes": 820,
+      "sha256": "a5d3332cc8fcc98cafd9f3bd7138d10b95d918de44ff12033e8f4741058fbc37"
+    },
+    {
+      "path": "assets/terrain/track_prints.ron",
+      "bytes": 859,
+      "sha256": "c7bc2ce376681c39ae69629be3ae75c94488c39117c8b6e566e7b3ef952ac009"
+    },
+    {
+      "path": "assets/tiger_1/cc.txt",
+      "bytes": 2359,
+      "sha256": "502f69c0b584688684ed3438b3828ee826370e20733b03066779dd511ecc7f34"
+    },
+    {
+      "path": "assets/tiger_1/tiger_1.blend",
+      "bytes": 63356649,
+      "sha256": "873c768ba1a9c0f56b10ff17f7a0e8988029d80ac65549a02b933960911c2d2b"
+    },
+    {
+      "path": "assets/tiger_1/tiger_1.glb",
+      "bytes": 67301428,
+      "sha256": "c2005555e5bfbcd84a7efb9593c8f5225f3d8f17f264681bb03d9b6aca743209"
+    },
+    {
+      "path": "assets/tiger_1/tiger_1.livery.ron",
+      "bytes": 2210,
+      "sha256": "95c38a6a59adf610d9a5d1b468596d4d6764d00c5aa6b8fe10ccb2a9e69abed0"
+    },
+    {
+      "path": "assets/tiger_1/tiger_1.lod.json",
+      "bytes": 22228,
+      "sha256": "ea4f654590cdd0f4e9c66a0daeb042a656cc93fd5f0ef572bf997dc167c417f9"
+    },
+    {
+      "path": "assets/tiger_1/tiger_1.sim.glb",
+      "bytes": 1768940,
+      "sha256": "a261ed68319a80d5ed5fa02b53cabd6fb3316b7c961c28b74f90680b891dc0c8"
+    },
+    {
+      "path": "assets/tiger_1/tiger_1.tank.ron",
+      "bytes": 37378,
+      "sha256": "2fb21b7a0f8ecc535c6993a765b2a5584d8eb5b79901851feb48bded3faedd9a"
+    },
+    {
+      "path": "assets/trees/fir_1/fir_1.blend",
+      "bytes": 133530,
+      "sha256": "38e51120aa91298941ceb22084298af5dd49741955d5df413f9cedd9b55e0818"
+    },
+    {
+      "path": "assets/trees/fir_1/fir_1.glb",
+      "bytes": 118936,
+      "sha256": "84b28be5a552512887e27cc3b17d6dbe5ac574b66bb6f9ac0578165941a853ec"
+    },
+    {
+      "path": "assets/trees/fir_1/fir_1.lod.json",
+      "bytes": 300,
+      "sha256": "d9cb62589230693f55dd63fe09c0dac2398313f290abcbd0e5524abeb72d6502"
+    },
+    {
+      "path": "assets/trees/fir_1/fir_1.tree.ron",
+      "bytes": 1074,
+      "sha256": "910fef166d3d40973ffca263136581270fc62aa6cfdcaa0e4c278ae200ca94a3"
+    },
+    {
+      "path": "assets/trees/species.ron",
+      "bytes": 4517,
+      "sha256": "443387b21ef7762dc01fde5e1f578f40951ace4038f9b9ae146cfa96ce59db5e"
+    },
+    {
+      "path": "assets/trees/wood.ron",
+      "bytes": 8455,
+      "sha256": "a007e8bf5d20b786685d04fe7e0c4d4c2069328b00915275cf42ca5658d472c9"
+    },
+    {
+      "path": "assets/ui/death_screen.ron",
+      "bytes": 338,
+      "sha256": "3c891faecdfebbdb61beb4745fba2955746bdda08064e0a0b890c353a6935364"
+    },
+    {
+      "path": "assets/ui/graticule.ron",
+      "bytes": 1273,
+      "sha256": "914fb2e5ada84ba7e5ad766ce4e53af25ff10284fa829be8c0abafdb6687497b"
+    },
+    {
+      "path": "assets/ui/overlay.ron",
+      "bytes": 3035,
+      "sha256": "b371b32aaeb834dfab162ac6a5eb91fb98086b02f05df486e8c70faecae4ac16"
+    },
+    {
+      "path": "assets/ui/settings.ron",
+      "bytes": 7215,
+      "sha256": "d730c7085c15bf36a2d549aedab1747d1dbf094938e4e843e4c87918814a12a1"
+    },
+    {
+      "path": "assets/ui/sight.ron",
+      "bytes": 2169,
+      "sha256": "fc810be9a0da4cd33b7b70b220aadf72848bd745a5ad6fc5d6a8556224e604ac"
+    },
+    {
+      "path": "assets/ui/spawn_map.ron",
+      "bytes": 1014,
+      "sha256": "adddcf23c932bd5a7348c8676518849a55207ffb59da21302b08ad223961d773"
+    },
+    {
+      "path": "assets/vfx/blast_core_a.ktx2",
+      "bytes": 249091,
+      "sha256": "a7fcb00526a433c45fb5d64af2edf12e761da449de3b2a168ccdac56b40d6529"
+    },
+    {
+      "path": "assets/vfx/blast_core_b.ktx2",
+      "bytes": 318177,
+      "sha256": "72b3d7fedbccf7076c2fbed691b4e0bd7f3a4daaca33fc24c88066e9b12f2a07"
+    },
+    {
+      "path": "assets/vfx/cc.txt",
+      "bytes": 1994,
+      "sha256": "1157003e73a95432bedc043f4996d01975930821c12472846cf1aadc6836a20d"
+    },
+    {
+      "path": "assets/vfx/flash_core_atlas.png",
+      "bytes": 167558,
+      "sha256": "e65c6d870b85bb24d877f9f29ace723f61917c51b02681cae24ec764031b11e5"
+    },
+    {
+      "path": "assets/vfx/flash_flames_atlas.png",
+      "bytes": 126469,
+      "sha256": "873347a5cda493b30893e7e97623c1080d5b87d3f53e961bd0d4dc637ca00d56"
+    },
+    {
+      "path": "assets/vfx/hull_marks.ron",
+      "bytes": 212,
+      "sha256": "ccebb9044fb01f175808f37c152487c58ee20c5204a0f2296a9370c7f7969211"
+    },
+    {
+      "path": "assets/vfx/impact_dust.png",
+      "bytes": 228589,
+      "sha256": "c815b2de68a4c9cad1ce44f7f5fc9a983ff188b6b41fe5ef1316a0ff8b6cd40c"
+    },
+    {
+      "path": "assets/vfx/mg_core.png",
+      "bytes": 47840,
+      "sha256": "deb45fe7bc165bb5580c1a5785a968f68fb943394ae3ae1b3b8cdbc3e7a7e371"
+    },
+    {
+      "path": "assets/vfx/muzzle.ron",
+      "bytes": 8635,
+      "sha256": "5a3a5fccd7c1dacde0a831b9436faf19d879ed64de8203fee51cb39009c506c9"
+    },
+    {
+      "path": "assets/vfx/presentation.ron",
+      "bytes": 43239,
+      "sha256": "1b53012cb36623dd424e8dc8680c85c4182a9b33b0fb7765d9f5807f37ce14e3"
+    },
+    {
+      "path": "assets/vfx/smoke_atlas.png",
+      "bytes": 155793,
+      "sha256": "be72df0f1028272faa39fd71455eba1446dc27bd9653ef14a0ead29423e9a03c"
+    },
+    {
+      "path": "assets/vfx/spark_atlas.png",
+      "bytes": 56920,
+      "sha256": "2788f9edc2e108d9c99b5cc66550cbbcab4f4ec8aeb4c2ff917d31697b9a2c23"
+    },
+    {
+      "path": "assets/world/lighting.ron",
+      "bytes": 1057,
+      "sha256": "5d31d5279845d61ee2484bef2b5f81c760e0a5340c5105587b30ab5a24524717"
+    }
+  ]
+}

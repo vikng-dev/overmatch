@@ -203,11 +203,12 @@ impl ConstructionLibrary {
             let mut kind = ConstructionKind::resolve(id, &text, registry, attachments)
                 .unwrap_or_else(|err| panic!("construction: {}: {err}", path.display()));
             let dressed = path.with_file_name(format!("{id}.dressing.ron"));
-            kind.dressing = std::fs::read_to_string(&dressed)
-                .map_err(|err| err.to_string())
-                .and_then(|text| view::Dressing::resolve(&text, &kind.asset, &kind.layout))
+            let dressing = std::fs::read_to_string(&dressed).unwrap_or_else(|err| {
+                panic!("construction: {} cannot be read: {err}", dressed.display())
+            });
+            kind.dressing = view::Dressing::resolve(&dressing, &kind.asset, &kind.layout)
                 .unwrap_or_else(|err| panic!("construction: {}: {err}", dressed.display()));
-            library.texts.push(text);
+            library.texts.extend([text, dressing]);
             library.kinds.insert(id.to_owned(), Arc::new(kind));
         }
         library
