@@ -13,9 +13,10 @@
 //! pentagon whose sloped top is the roof's underside. A timber wall plate lies along each long
 //! wall's top, its own top bevelled to the roof's slope, and each roof plane is its boards laid
 //! side by side down the slope from the ridge, on the plates and the gables, the top board mitred
-//! where the two planes meet. Each board is its own piece, so its cut never crosses into the next;
-//! a plane's boards are one component. The generator lays the parts out; how each is held to
-//! another it touches is the spec's ([`super::spec::Join`]).
+//! where the two planes meet. Each board is its own piece and its own component: its cut never
+//! crosses into the next, and only the joins hold it to the next board, the plates and the gables;
+//! a board's own seam holds only the cuts inside it. The generator lays the parts out; how each is
+//! held to another it touches is the spec's ([`super::spec::Join`]).
 //!
 //! Every slope is the spec's pitch as a ratio (rise over run, a Pythagorean pair's hypotenuse taken
 //! by square root), so no angle and no trigonometry enters the bake.
@@ -194,31 +195,24 @@ pub fn construction(house: &House) -> Result<Construction, String> {
         };
         // Board `board` spans `[s0, s1]` down the slope from the ridge line on the underside; the
         // top board's top corner is mitred onto the ridge's vertical plane, `s cos + t sin = 0`.
-        let profiles: Vec<Vec<DVec2>> = (0..house.boards_per_slope)
-            .map(|board| {
-                let (s0, s1) = (f64::from(board) * width, f64::from(board + 1) * width);
-                let top = if board == 0 { -thick * slope } else { s0 };
-                vec![
-                    DVec2::new(s0, 0.0),
-                    DVec2::new(s1, 0.0),
-                    DVec2::new(s1, thick),
-                    DVec2::new(top, thick),
-                ]
-            })
-            .collect();
-        let datum = lowest(&profiles.concat());
-        for (board, profile) in profiles.into_iter().enumerate() {
+        for board in 0..house.boards_per_slope {
+            let (s0, s1) = (f64::from(board) * width, f64::from(board + 1) * width);
+            let top = if board == 0 { -thick * slope } else { s0 };
+            let profile = vec![
+                DVec2::new(s0, 0.0),
+                DVec2::new(s1, 0.0),
+                DVec2::new(s1, thick),
+                DVec2::new(top, thick),
+            ];
+            let datum = lowest(&profile);
             let prism = Prism {
                 frame: plane,
                 profile,
                 near: -half_l - house.gable_overhang_m,
                 far: half_l + house.gable_overhang_m,
             };
-            let names = (
-                format!("{name}/board_{board}"),
-                "roof",
-                format!("{name}/roof"),
-            );
+            let board = format!("{name}/board_{board}");
+            let names = (board.clone(), "roof", board);
             pieces.push(piece(house, &house.parts.roof, names, &prism, datum));
         }
     }

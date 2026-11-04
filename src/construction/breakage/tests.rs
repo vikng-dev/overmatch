@@ -3516,12 +3516,11 @@ fn the_weight_check_priced_per_change_and_after_a_long_wall_shot() {
         .flat_map(|e| kind.layout.chunks_of(e))
         .collect();
     roof.sort_unstable();
-    let plane = component_chunks(&kind, elements[of_part("roof")[0]].component);
     let plate = of_part("wall_plate")
         .into_iter()
         .map(|e| elements[e].component)
-        .find(|c| joined_to(&kind, &base.structure, &plane, false, fixed).contains(c))
-        .expect("the plane is fixed to a wall plate");
+        .find(|c| joined_to(&kind, &base.structure, &roof, false, fixed).contains(c))
+        .expect("the roof is fixed to a wall plate");
     let wall_chunks: Vec<usize> = joined_to(
         &kind,
         &base.structure,

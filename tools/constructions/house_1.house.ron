@@ -23,13 +23,15 @@ House(
     eaves_course: 39,
     // Roof pitch as rise over run, 3 : 4 (36.87°, a 3-4-5 triangle, so every slope is a ratio and
     // no angle is taken): the wall plate's outer face height, the boards' width up the slope and
-    // their thickness, the boards per slope (2.8 m of slope: 0.24 m of eaves overhang) and the
-    // overhang past each gable.
+    // their thickness, the boards per slope (2.6 m of slope: 0.08 m of eaves overhang, the last
+    // board half on the plate) and the overhang past each gable. Every board bears on a plate or
+    // the gables: the house has no rafters, so a board laid wholly past the plate would hang by
+    // its neighbour's edge nails alone.
     pitch: (3, 4),
     plate_height_m: 0.10,
     board_width_m: 0.2,
     board_thickness_m: 0.05,
-    boards_per_slope: 14,
+    boards_per_slope: 13,
     gable_overhang_m: 0.3,
     // Each part's matter (an `assets/materials/materials.ron` key), surface frame and cut
     // (`tools/src/construction/fracture.rs`): the walls (piers, sills, lintels, gables), the wall
@@ -58,9 +60,8 @@ House(
             // ASSUMED authoring choice: plates run along the authored Z ridge.
             surface_frame: Grain((0.0, 0.0, 1.0)),
             cut: Cells((
-                size_m: (0.25, Resolution("about the plate's breadth across the grain: smaller
-                    cells stack sites across its section and cut slivers the game's law blocks
-                    cannot reconstruct")),
+                size_m: (0.15, Taste("timber break look, as the trees' trunks: shards about a hand
+                    and a half across the grain")),
                 stretch: (5.0, Taste("timber break look: beam pieces several times their breadth
                     long, their broken ends running slant along the grain")),
             )),
@@ -69,12 +70,12 @@ House(
             material: "Wood",
             // ASSUMED authoring choice: boards run along the authored Z ridge.
             surface_frame: Grain((0.0, 0.0, 1.0)),
-            // Each board is its own piece, cut alone.
+            // Each board is its own piece and component, cut alone; the joins below hold it to the
+            // boards beside it, the plates and the gables.
             cut: Cells((
-                size_m: (0.2, Resolution("a board's width across the grain: smaller cells stack
-                    sites across the board's thickness and cut slivers the game's law blocks
-                    cannot reconstruct")),
-                stretch: (1.5, Taste("timber break look: a board breaks across its length into
+                size_m: (0.15, Taste("timber break look, as the trees' trunks: shards about a hand
+                    and a half across the grain")),
+                stretch: (5.0, Taste("timber break look: a board breaks across its length into
                     pieces of uneven length, their broken ends running slant along the grain")),
             )),
         ),
@@ -106,7 +107,8 @@ House(
         (parts: ("pier", "wall_plate"), by: "mortared"),
         (parts: ("lintel", "wall_plate"), by: "mortared"),
         (parts: ("gable", "wall_plate"), by: "mortared"),
-        // The rafters skew-nailed to the plates, and each pair nailed at the ridge.
+        // Each board nailed to the plates it lies on and to the boards beside it, the two top
+        // boards to each other at the ridge.
         // The nailed kind has no sourced c or lateral separation work G_II for this fixing.
         // Its seams answer by the opening law alone, and no punch ring forms across them; see
         // .agents/scratch/collision-c6-shear-sources.md. Never substitute solid wood's values.

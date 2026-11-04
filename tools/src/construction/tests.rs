@@ -228,33 +228,38 @@ fn houses() -> Vec<House> {
     houses
 }
 
-/// THE ROOF IS LAID IN ITS AUTHORED BOARDS: each roof plane is `boards_per_slope` pieces, every two
-/// neighbours sharing a whole side, `board_thickness_m` deep along the board's length, and each
-/// board with two neighbours `board_width_m` across between them; the cutter cuts each piece alone
-/// (`the_chunks_tile_each_element`). Board layout is construction, so no break crosses from one
-/// board into another; the roof's response and its view rely on that. Widths and lengths are read
-/// from the laid pieces. Mutant: a plane laid as one slab, or two boards as one piece, then cut by
-/// cells, fails here.
+/// THE ROOF IS LAID IN ITS AUTHORED BOARDS, EACH ITS OWN COMPONENT: each roof plane (the boards on
+/// one side of the ridge, the construction frame's `x = 0`) is `boards_per_slope` pieces, every two
+/// neighbours sharing a whole side, `board_thickness_m` deep along the board's length, each board
+/// with two neighbours `board_width_m` across between them, and no other piece in a board's
+/// component. The cutter cuts each piece alone (`the_chunks_tile_each_element`), and a board's own
+/// seam holds only its cuts, so only the joins hold one board to the next (`assert_bond_kinds`);
+/// the roof's response and its view rely on that. Widths and lengths are read from the laid
+/// pieces. Mutant: a plane laid as one slab, two boards as one piece, or a plane's boards in one
+/// component (held by timber's seam across their joints), fails here.
 #[test]
-fn each_roof_board_is_its_own_piece() {
+fn each_roof_board_is_its_own_piece_and_component() {
     for house in houses() {
         let built = house::construction(&house).unwrap();
-        let mut planes: Vec<&str> = built
-            .pieces
-            .iter()
-            .filter(|piece| piece.part == "roof")
-            .map(|piece| piece.component.as_str())
-            .collect();
-        planes.sort_unstable();
-        planes.dedup();
-        assert!(!planes.is_empty(), "{}: a roof", house.id);
-        for plane in planes {
+        for board in built.pieces.iter().filter(|piece| piece.part == "roof") {
+            let sharing = built
+                .pieces
+                .iter()
+                .filter(|piece| piece.component == board.component)
+                .count();
+            assert_eq!(
+                sharing, 1,
+                "{}: {} shares its component",
+                house.id, board.name
+            );
+        }
+        for side in [1.0, -1.0] {
             let boards: Vec<&Piece> = built
                 .pieces
                 .iter()
-                .filter(|piece| piece.part == "roof" && piece.component == plane)
+                .filter(|piece| piece.part == "roof" && piece.solid.centroid().x * side > 0.0)
                 .collect();
-            let what = format!("{}: {plane}", house.id);
+            let what = format!("{}: the plane on side {side}", house.id);
             assert_eq!(boards.len(), house.boards_per_slope as usize, "{what}");
             let solids: Vec<Polyhedron> = boards.iter().map(|board| board.solid.clone()).collect();
             let sides = contact::joints(&solids);
