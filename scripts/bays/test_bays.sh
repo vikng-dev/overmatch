@@ -88,8 +88,9 @@ echo base >"$REPO/README"
 echo lock-v1 >"$REPO/Cargo.lock"
 mkdir -p "$REPO/scripts/bays" "$REPO/.claude/hooks"
 cp "$HERE/lib.sh" "$HERE/lease" "$HERE/release" "$HERE/status" "$HERE/prune_incremental.py" "$REPO/scripts/bays/"
+cp "$HERE/../build-lock" "$REPO/scripts/"
 # Keep the production locking call while isolating the OS resource from live builds.
-sed "s|/tmp/overmatch-cargo.lock|$WORK/build.lock|g" "$HERE/release" >"$REPO/scripts/bays/release"
+sed "s|/tmp/overmatch-cargo.lock|$WORK/build.lock|g" "$HERE/../build-lock" >"$REPO/scripts/build-lock"
 cp "$HOOKS/bay-lease.sh" "$HOOKS/bay-release.sh" "$REPO/.claude/hooks/"
 git -C "$REPO" add -A
 git -C "$REPO" commit -q -m base

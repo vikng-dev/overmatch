@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# build-lock — serialize compilation and cache pruning on this machine.
+# Usage: scripts/build-lock <command> [arguments...]
+# Operator timeout: OVERMATCH_CARGO_LOCK_WAIT_S (default 3600 s); lockf exits 75 on expiry.
+set -euo pipefail
+
+exec /usr/bin/lockf -k -t "${OVERMATCH_CARGO_LOCK_WAIT_S:-3600}" /tmp/overmatch-cargo.lock "$@"

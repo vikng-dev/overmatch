@@ -65,7 +65,7 @@ fi
 # while sessions are pruned. A failed prune leaves the bay leased to its owner.
 kb_free() { df -k "$bay" | awk 'NR == 2 {print $4}'; }
 before=$(kb_free)
-/usr/bin/lockf -k -t "${OVERMATCH_CARGO_LOCK_WAIT_S:-3600}" /tmp/overmatch-cargo.lock \
+"$bays_here/../build-lock" \
   python3 "$bays_here/prune_incremental.py" "$bay/target"
 freed=$(awk -v a="$before" -v b="$(kb_free)" 'BEGIN {printf "%.1f", (b - a) / 1048576}')
 git -C "$bay" switch -q --detach >&2
