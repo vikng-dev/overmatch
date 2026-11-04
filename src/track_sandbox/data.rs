@@ -75,11 +75,43 @@ pub(super) struct Scene {
     pub(super) rubble_wall_at_m: Sourced<[f32; 2]>,
     pub(super) rubble_spot_ahead_m: Sourced<f32>,
     pub(super) rubble_pile_pieces: Sourced<usize>,
-    pub(super) rubble_pile_row: Sourced<usize>,
+    pub(super) rubble_pile_row: Sourced<PileRow>,
     pub(super) rubble_pile_taper: Sourced<f32>,
     pub(super) rubble_pile_yaw_rad: Sourced<f32>,
     pub(super) rubble_piece_srgb: Sourced<[f32; 3]>,
     pub(super) rubble_wall_srgb: Sourced<[f32; 3]>,
+}
+
+/// A square drop layer whose nonzero capacity fits the spawning index type.
+#[derive(Deserialize)]
+#[serde(try_from = "usize")]
+pub(super) struct PileRow {
+    width: usize,
+    capacity: usize,
+}
+
+impl TryFrom<usize> for PileRow {
+    type Error = String;
+
+    fn try_from(width: usize) -> Result<Self, Self::Error> {
+        let capacity = width.checked_mul(width).filter(|&n| n > 0).ok_or_else(|| {
+            refuse(
+                "rubble_pile_row",
+                "author a positive row width whose square fits usize",
+            )
+        })?;
+        Ok(Self { width, capacity })
+    }
+}
+
+impl PileRow {
+    pub(super) fn width(&self) -> usize {
+        self.width
+    }
+
+    pub(super) fn capacity(&self) -> usize {
+        self.capacity
+    }
 }
 
 impl Scene {
@@ -117,16 +149,13 @@ impl Scene {
                 return Err(refuse(field, "author a finite positive value"));
             }
         }
-        if self.rubble_pile_pieces.0 == 0 || self.rubble_pile_row.0 == 0 {
-            return Err(refuse(
-                "rubble_pile_pieces / rubble_pile_row",
-                "author at least one piece and one piece per row",
-            ));
+        if self.rubble_pile_pieces.0 == 0 {
+            return Err(refuse("rubble_pile_pieces", "author at least one piece"));
         }
         let layers = self
             .rubble_pile_pieces
             .0
-            .div_ceil(self.rubble_pile_row.0.pow(2));
+            .div_ceil(self.rubble_pile_row.0.capacity());
         if !(0.0..1.0 / layers as f32).contains(&self.rubble_pile_taper.0) {
             return Err(refuse(
                 "rubble_pile_taper",
@@ -215,6 +244,9 @@ impl Scene {
                 "author finite positive X/Z lengths",
             ));
         }
+        if self.rubble_wall_at_m.0.iter().any(|v| !v.is_finite()) {
+            return Err(refuse("rubble_wall_at_m", "author finite coordinates"));
+        }
         self.validate_colours()?;
         let mut previous = self.lane_near_m.0;
         for (index, trench) in self.trenches.iter().enumerate() {
@@ -288,6 +320,46 @@ fn refuse(field: &str, fix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spawned walls require finite positions; checking only the pile leaves physics invalid.
+    #[test]
+    fn wall_coordinates_are_refused_before_spawn() {
+        // Fixture: each nonfinite coordinate, in either authored axis.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for axis in 0..2 {
+                let mut data = Scene::parse(DATA).expect("the shipped course is admitted");
+                data.rubble_wall_at_m.0[axis] = bad;
+                let error = data
+                    .validate()
+                    .expect_err("nonfinite wall position is refused");
+                for required in [FILE, "rubble_wall_at_m", "finite coordinates"] {
+                    assert!(error.contains(required), "{error}");
+                }
+            }
+        }
+    }
+
+    /// Spawning divides by a layer's capacity; authored overflow or zero must fail at load.
+    #[test]
+    fn unrepresentable_drop_layers_are_refused_at_load() {
+        let original = DATA
+            .lines()
+            .find(|line| line.trim_start().starts_with("rubble_pile_row:"))
+            .unwrap();
+        // Fixture: a zero divisor and an overflowing authored row width.
+        for width in [0, usize::MAX] {
+            let text = DATA.replace(
+                original,
+                &format!("rubble_pile_row: ({width}, Taste(\"Fixture invalid row\")),"),
+            );
+            let error = Scene::parse(&text)
+                .err()
+                .expect("invalid layer capacity is refused");
+            for required in [FILE, "rubble_pile_row", "positive row width", "square fits"] {
+                assert!(error.contains(required), "{error}");
+            }
+        }
+    }
 
     /// The dimension gate names its field and repair, independent of authored course tastes.
     #[test]

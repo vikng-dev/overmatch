@@ -87,7 +87,7 @@ pub(super) fn spawn_rubble_yard(
     let brick = materials.add(Color::srgb_from_array(yard.rubble_piece_srgb.0));
     let standing = materials.add(Color::srgb_from_array(yard.rubble_wall_srgb.0));
     let [wall_x, wall_z] = yard.rubble_wall_at_m.0;
-    let (row_count, taper) = (yard.rubble_pile_row.0, yard.rubble_pile_taper.0);
+    let (row_count, taper) = (yard.rubble_pile_row.0.width(), yard.rubble_pile_taper.0);
 
     // The breakable elements, most chunks first: the first is the wall section, the rest feed
     // the pile.
@@ -174,7 +174,7 @@ pub(super) fn spawn_rubble_yard(
         let (row, col, layer) = (
             i % row_count,
             (i / row_count) % row_count,
-            i / (row_count * row_count),
+            i / yard.rubble_pile_row.0.capacity(),
         );
         let half = (row_count as f32 - 1.0) / 2.0;
         let at = Vec3::from_array(yard.rubble_pile_at_m.0)
