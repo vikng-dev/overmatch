@@ -12,13 +12,10 @@ node contract is `.agents/scratch/destruction-2026-10-26/slice-1-fallen-tree.md`
 tree, §3 the species table, amendments A5, A6, A12, A13), the view and the segment tree runtime's
 (`src/trees.rs`); this module states only what it enforces.
 
-THE CONSTRUCTION is the trunk as the common construction bake reads it (`tools/`, `bake-constructions`,
-to `assets/constructions/<id>/<id>.construction.ron`): the ron's rings stacked as bands
-(`plan.band_solids`), each a frustum of `plan.RING_SIDES` corners and its own convex piece, one
-component of the species row's `trunk` material, anchored by its root plate and cut by its
-grain-stretched cells. Intact each band is one collider holding its chunk table; the bake certifies
-the cut (closure, partition, interfaces, mass and inertia, anchor reach), and this build certifies
-the construction is the view's: `identity_failures`. The view is read only for that check.
+THE CONSTRUCTION comes from `plan.construction_ron`; the common bake writes
+`assets/constructions/<id>/<id>.construction.ron`. Each intact band is one collider holding its
+chunk table. The bake certifies closure, partition, interfaces, mass, inertia and anchor reach;
+`identity_failures` certifies agreement with the view, which is read only for that check.
 
 `build`: the toolchain preflight (`scripts/toolchain.py`); the export (`export_tree.py` inside
 Blender, custom properties as glTF extras) into this invocation's work directory; the three
