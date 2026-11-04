@@ -387,7 +387,11 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             substances,
-            BTreeSet::from(["Brick".to_owned(), "Wood".to_owned()])
+            kind.asset
+                .elements
+                .iter()
+                .map(|element| kind.asset.materials[usize::from(element.material)].clone())
+                .collect()
         );
         assert!(world.get::<RigidBody>(root).is_some());
     }

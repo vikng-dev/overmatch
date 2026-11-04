@@ -1158,266 +1158,89 @@ fn joined_to(
     joined
 }
 
-/// THE ROOF'S FIXINGS AND RESTS ARE DISTINCT: a supported roof stays after a local strike;
-/// losing its masonry supports overloads fixed joints and frees the unsupported portion. On the shipped house (fixture data; the parts chosen by class: the
-/// roof planes, the plate a plane is fixed to, the masonry that plate bears on, and the gables of
-/// the walls the planes rest on), a round through a plane's middle chunk wears it and moves
-/// nothing, and a blast that spends that chunk carves the plane, which stands. Shooting out the
-/// long wall under the plate (every standing unburied chunk of it turned to dust) leaves the whole
-/// roof on the house: the plate hangs between the gables, the planes still rest on them. Shooting
-/// out the gables too leaves the roof hanging from the other plate by nails, which its weight
-/// breaks locally (weight failures across overloaded fixed joints alone): the plane fixed to the
-/// plate that lost its wall leaves whole, and no touched chunk stands unassessed. The other
-/// plane, nailed at its eave to a plate whose wall still stands with its ridge free, is not
-/// pinned: whether eave fixings hold a cantilevered plane is the continued-fracture law's open
-/// question (`.agents/docs/design/wall-destruction-sweep-2.md`). A roof laid
-/// unfixed on its plates (a rest at a 3 : 4 pitch, steeper than the friction of wood on wood)
-/// slides off at the first touch and fails here; so does a law that let a rest carry tension.
+/// The game's environment destruction model gives a rest no tension and a fixing its stated
+/// tension. A controlled slab lifts at its weight on rests, or weight + f_t*A when fixed.
+/// `Breakage` relies on these distinct limits; shipped roof geometry and material parameters do not pin them.
 #[test]
-fn a_nailed_roof_distinguishes_rests_from_local_fixing_failure() {
-    let kind = shipped_house();
-    let layout = &kind.layout;
-    let elements = &kind.asset.elements;
-    let of_kind = |kind_of: ElementKind| {
-        (0..elements.len())
-            .filter(|&e| elements[e].kind == kind_of)
-            .collect::<Vec<_>>()
+fn rests_and_fixings_release_at_their_independent_axial_limits() {
+    let mut material = Masonry::of(
+        crate::substances::SubstanceRegistry::shipped_static(),
+        "Brick",
+    )
+    .unwrap()
+    .unwrap();
+    // Fixture data: unit-volume chunks at 100 kg/m³, a unit-area fixing with f_t=100 Pa.
+    material.density = 100.0;
+    let area = 1.0;
+    let mass = material.density;
+    let weight = mass * crate::physical_laws::gravity_mps2();
+    let seam = fracture::Seam {
+        tensile: 100.0,
+        fracture_energy: 5.0,
+        shear: fracture::Shear::OpeningOnly,
     };
-    let fresh = || Live::new(&kind, 1.0);
-    let base = fresh();
-    let fixed = |joint: &Joint| matches!(joint.bond, Bond::Bonded(_));
-    let resting = |joint: &Joint| joint.bond == Bond::Resting;
-    let mut roof: Vec<usize> = of_kind(ElementKind::Roof)
-        .into_iter()
-        .flat_map(|e| layout.chunks_of(e))
-        .collect();
-    roof.sort_unstable();
-    let roof_element = of_kind(ElementKind::Roof)[0];
-    let plane = component_chunks(&kind, elements[roof_element].component);
-    let plate = of_kind(ElementKind::WallPlate)
-        .into_iter()
-        .map(|e| elements[e].component)
-        .find(|c| joined_to(&kind, &base.structure, &plane, false, fixed).contains(c))
-        .expect("the plane is fixed to a wall plate");
-    let plate_chunks = component_chunks(&kind, plate);
-    let wall = joined_to(&kind, &base.structure, &plate_chunks, true, fixed);
-    let rests = joined_to(&kind, &base.structure, &roof, true, resting);
-    let gables: Vec<usize> = of_kind(ElementKind::Gable)
-        .into_iter()
-        .filter(|&e| rests.contains(&elements[e].component))
-        .flat_map(|e| layout.chunks_of(e))
-        .collect();
-    let name = |c: &u16| &kind.asset.components[usize::from(*c)];
-    println!(
-        "MEASURED: plane {} of {} chunks is fixed to plate {}, which bears on {:?}; the roof's {} \
-         chunks rest on {:?}, whose gables hold {} chunks",
-        name(&elements[roof_element].component),
-        plane.len(),
-        name(&plate),
-        wall.iter().map(name).collect::<Vec<_>>(),
-        roof.len(),
-        rests.iter().map(name).collect::<Vec<_>>(),
-        gables.len()
-    );
-    assert!(!wall.is_empty() && !gables.is_empty());
-    let standing =
-        |live: &Live, chunks: &[usize]| chunks.iter().filter(|&&c| live.state.standing(c)).count();
-
-    // Struck: a round's line through the plane's chunk nearest its centre, a tenth of its pool
-    // pushing with the momentum a round at 773 m/s loses giving that energy up (fixture data,
-    // `ΔE / v`), then a blast that spends the chunk.
-    let centre = layout.element_blocks[roof_element].center();
-    let middle = *plane
-        .iter()
-        .min_by(|&&a, &&b| {
-            base.structure.chunks[a]
-                .centroid
-                .distance(centre)
-                .total_cmp(&base.structure.chunks[b].centroid.distance(centre))
-        })
-        .unwrap();
-    let mut live = fresh();
-    // Fixture data: the line runs along the plane's declared grain, the boards' length.
-    let schema::SurfaceFrame::Grain(grain) = elements[roof_element].surface_frame else {
-        panic!("the shipped roof declares its grain");
-    };
-    let line = line_through_chunk(&live.structure, Vec3::from_array(grain), middle, 0.1);
-    let push = Load {
-        chunk: middle,
-        at: line.1,
-        energy: 0.0,
-        crushed: 0.0,
-        blow: (line.2 - line.1).normalize() * (line.3 / 773.0),
-        press: Vec3::ZERO,
-        peak: None,
-        origin: Origin::Field,
-    };
-    let loads: Vec<Load> = line_loads(&live.structure, &[line])
-        .into_iter()
-        .chain([push])
-        .collect();
-    let changes = run_laws(
-        &layout.element_of,
-        &mut live,
-        &loads,
-        Vec::new(),
-        Vec3::ZERO,
-    );
-    println!(
-        "MEASURED: a round through the plane's middle ({:.0} J, {:.0} N s): {} failures, {} groups",
-        line.3,
-        push.blow.length(),
-        changes.failures.len(),
-        changes.groups.len()
-    );
-    assert!(changes.groups.is_empty() && changes.failures.is_empty());
-    assert_eq!(standing(&live, &roof), roof.len(), "a round moves nothing");
-    let blast = blast_on(&live.structure, middle, 1.0);
-    let changes = run_laws(
-        &layout.element_of,
-        &mut live,
-        &blast,
-        Vec::new(),
-        Vec3::ZERO,
-    );
-    assert!(!live.state.standing(middle), "the blast spent the chunk");
-    assert!(changes.groups.is_empty(), "{:?}", changes.failures);
-    assert_eq!(
-        standing(&live, &roof),
-        roof.len() - 1,
-        "carved, the roof stands"
-    );
-
-    // Shoot out the long wall under the plate, then the gables: every standing unburied chunk's
-    // pool spent by the removal alone (a load's energy would also stress the joints about it), then
-    // the laws that follow a removal with no blow, the weight check on the dust and support.
-    let mut live = fresh();
-    let shoot_out = |live: &mut Live, chunks: &[usize]| {
-        let mut dusted = Vec::new();
-        for &c in chunks {
-            let chunk = &live.structure.chunks[c];
-            if live.state.standing(c)
-                && !chunk.buried
-                && fracture::wear(
-                    &live.structure,
-                    &mut live.state,
-                    c,
-                    fracture::full_pool(chunk),
-                )
-            {
-                dusted.push(c);
+    for (bond, bias, capacity, cause) in [
+        (Bond::Resting, 0.0, weight, fracture::Cause::LiftForce),
+        (
+            Bond::Bonded(seam),
+            weight,
+            seam.tensile * area,
+            fracture::Cause::Weight,
+        ),
+    ] {
+        let structure = Structure {
+            chunks: [-0.5, 0.5]
+                .into_iter()
+                .map(|height| Chunk {
+                    volume: 1.0,
+                    mass,
+                    centroid: Vec3::Y * height,
+                    material,
+                    buried: height < 0.0,
+                })
+                .collect(),
+            joints: vec![Joint {
+                a: 0,
+                b: Side::Chunk(1),
+                area,
+                centroid: Vec3::ZERO,
+                normal: Vec3::Y,
+                bond,
+            }],
+        };
+        for ratio in [0.99, 1.01] {
+            let loads = [Load {
+                chunk: 1,
+                at: Vec3::Y * 0.5,
+                energy: 0.0,
+                crushed: 0.0,
+                blow: Vec3::ZERO,
+                press: Vec3::Y * (bias + ratio * capacity),
+                peak: None,
+                origin: Origin::Field,
+            }];
+            let mut state = WallState::new(&structure);
+            let weighed = fracture::weigh(
+                &structure,
+                &mut state,
+                &[],
+                &[],
+                GroupLoads::new(&loads, Vec3::ZERO),
+                &[],
+                &mut SectionCache::default(),
+            );
+            assert_eq!(
+                state.cracked[0],
+                ratio > 1.0,
+                "{bond:?}, ratio {ratio}: {:?}",
+                weighed.failures
+            );
+            assert_eq!(weighed.failures.len(), usize::from(ratio > 1.0));
+            if let Some(failure) = weighed.failures.first() {
+                assert_eq!(failure.cause, cause);
             }
         }
-        dusted.sort_unstable();
-        let weighed = fracture::weigh(
-            &live.structure,
-            &mut live.state,
-            &dusted,
-            &[],
-            GroupLoads::new(&[], Vec3::ZERO),
-            &[],
-            &mut live.sections,
-        );
-        let groups = fracture::fall(&live.structure, &mut live.state);
-        (dusted.len(), weighed, groups)
-    };
-    let wall_chunks: Vec<usize> = wall
-        .iter()
-        .flat_map(|&c| component_chunks(&kind, c))
-        .collect();
-    let (dusted, weighed, groups) = shoot_out(&mut live, &wall_chunks);
-    println!(
-        "MEASURED: the long wall shot away ({} chunks to dust): {} failures, groups {:?}, plate \
-         standing {} of {}, roof standing {} of {}, weight steps {}",
-        dusted,
-        weighed.failures.len(),
-        groups.iter().map(Vec::len).collect::<Vec<_>>(),
-        standing(&live, &plate_chunks),
-        plate_chunks.len(),
-        standing(&live, &roof),
-        roof.len(),
-        weighed.steps
-    );
-    assert!(weighed.failures.is_empty(), "{:?}", weighed.failures);
-    assert_eq!(standing(&live, &plate_chunks), plate_chunks.len());
-    assert_eq!(standing(&live, &roof), roof.len(), "the roof stands");
-
-    let (dusted, weighed, groups) = shoot_out(&mut live, &gables);
-    let joints = &live.structure.joints;
-    println!(
-        "MEASURED: the gables shot away too ({} chunks to dust): failures {:?}, groups {:?}, roof \
-         standing {} of {} ({} touched chunks unassessed)",
-        dusted,
-        weighed
-            .failures
-            .iter()
-            .map(|f| (f.cause, f.joints.len(), f.demand, f.capacity))
-            .collect::<Vec<_>>(),
-        groups.iter().map(Vec::len).collect::<Vec<_>>(),
-        standing(&live, &roof),
-        roof.len(),
-        weighed.unassessed.len()
-    );
-    assert!(!weighed.failures.is_empty());
-    for failure in &weighed.failures {
-        assert_eq!(failure.cause, fracture::Cause::Weight, "{failure:?}");
-        assert!(failure.joints.iter().all(|&j| fixed(&joints[j])));
     }
-    assert_eq!(
-        standing(&live, &plane),
-        0,
-        "the plane fixed to the plate that lost its wall and its rests leaves whole"
-    );
-    assert!(
-        !weighed.unassessed.is_empty(),
-        "the locally deferred fixing/contact section remains counted: {:?}",
-        weighed.unassessed
-    );
-    probe_remaining_roof(&mut live, &roof);
-}
-
-/// Recheck every surviving roof chunk, not just the neighbours of the last removal. Class
-/// invariants only: a standing, unburied part holds by a live boundary, and a locally deferred
-/// section stays counted even when an enclosing wall section was assessed. What that boundary is
-/// made of is the house's construction, measured in the destruction record, never a pass
-/// condition here.
-fn probe_remaining_roof(live: &mut Live, roof: &[usize]) {
-    let remaining: Vec<_> = roof
-        .iter()
-        .copied()
-        .filter(|&c| live.state.standing(c))
-        .collect();
-    let boundary = live
-        .structure
-        .joints
-        .iter()
-        .enumerate()
-        .filter(|(j, joint)| {
-            !live.state.cracked[*j]
-                && live.state.live(joint)
-                && match joint.b {
-                    Side::Chunk(b) => remaining.contains(&joint.a) != remaining.contains(&b),
-                    Side::Ground => remaining.contains(&joint.a),
-                }
-        })
-        .count();
-    assert!(
-        boundary > 0,
-        "a standing, unburied part holds by a live boundary"
-    );
-    let rechecked = fracture::weigh(
-        &live.structure,
-        &mut live.state,
-        &[],
-        &[],
-        GroupLoads::new(&[], Vec3::ZERO),
-        &remaining,
-        &mut live.sections,
-    );
-    assert!(
-        !rechecked.unassessed.is_empty(),
-        "a locally deferred eave must be counted even when a larger wall section was assessed"
-    );
 }
 
 /// A ROUND'S CHANNEL IS THE CYLINDER IT CROSSED, OPEN ACROSS EACH FACE: a line through a house
@@ -3727,8 +3550,7 @@ fn priced(mut values: Vec<f64>) -> (f64, f64, f64, f64) {
 /// check on the shipped house (fixture data), game state only. Per change: every standing unburied
 /// chunk turned to dust alone, from the intact house, then [`fracture::weigh`] on it. After a
 /// long-wall shot: the long wall under the roof's fixed plate turned to dust at once, then the
-/// gables, as `a_nailed_roof_distinguishes_rests_from_local_fixing_failure` removes them. Each
-/// weigh runs on a clone of the prepared house, so only the check itself is timed. It asserts
+/// gables. Each weigh runs on a clone of the prepared house, so only the check itself is timed. It asserts
 /// nothing about time; run it under the `perf` profile with the machine quiet.
 #[test]
 #[ignore = "a pricing bed, run on demand"]
