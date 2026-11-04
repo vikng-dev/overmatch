@@ -3467,6 +3467,8 @@ fn landing_slab() -> (Arc<BuildingKind>, Vec<usize>) {
         }
     }
     assert_eq!(internal, 2, "the fixture is a chain, not a loop");
+    kind.structures.clear();
+    kind.admit_scale(1.0).unwrap();
     (Arc::new(kind), group)
 }
 

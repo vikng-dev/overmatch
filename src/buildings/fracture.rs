@@ -272,6 +272,14 @@ pub(crate) enum Side {
 pub(crate) enum Bond {
     /// A seam: it opens under tension at its strength, and a push spends its fracture energy.
     Bonded(Seam),
+    /// A uniform area share of one bonded footprint. StandIn: the footprint is an equivalent
+    /// disk; each cell contributes its fraction of that disk's area and second moment, so cutting
+    /// it more finely cannot change its hold. The seam is converted from the whole footprint.
+    AreaShare {
+        seam: Seam,
+        footprint_area: f32,
+        footprint_centroid: Vec3,
+    },
     /// One part laid on another, nothing fixing it: no pull strength and no fracture work. It
     /// holds only what bears on it from above, by weight and the friction of its two materials,
     /// so no tension check reads it (it lies in no section and on no path a section cuts) and the
@@ -293,17 +301,30 @@ pub(crate) struct Joint {
 }
 
 impl Joint {
+    /// The game's environment destruction model reads a bond's circular patch: its centre and
+    /// total area. An area share integrates over its whole footprint, weighted by `Self::area`.
+    fn patch(&self) -> (Vec3, f32) {
+        match self.bond {
+            Bond::AreaShare {
+                footprint_area,
+                footprint_centroid,
+                ..
+            } => (footprint_centroid, footprint_area),
+            _ => (self.centroid, self.area),
+        }
+    }
+
     /// Its seam, `None` for a rest.
     pub(crate) fn seam(&self) -> Option<Seam> {
         match self.bond {
-            Bond::Bonded(seam) => Some(seam),
+            Bond::Bonded(seam) | Bond::AreaShare { seam, .. } => Some(seam),
             Bond::Resting => None,
         }
     }
 }
 
 /// A chunk table and its joint graph.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Structure {
     pub chunks: Vec<Chunk>,
     pub joints: Vec<Joint>,
@@ -701,7 +722,7 @@ impl WallState {
             .enumerate()
             .filter_map(|(j, joint)| {
                 let touching = match joint.bond {
-                    Bond::Bonded(_) => true,
+                    Bond::Bonded(_) | Bond::AreaShare { .. } => true,
                     Bond::Resting => !self.cracked[j],
                 };
                 (touching && self.live(joint)).then_some(*joint)
@@ -1038,18 +1059,16 @@ impl Load {
     }
 }
 
-/// Seven points of a disc of `joint`'s area in its plane, with weights summing to 1: the centre at
+/// Seven points of `joint`'s circular patch in its plane, with weights summing to 1: the centre at
 /// ¼ and six on the ring at `√(2/3)` of its radius at ⅛ each.
 fn disc(joint: &Joint) -> [(Vec3, f32); 7] {
     let (u, v) = plane_axes(joint.normal);
-    let ring = (joint.area / PI).sqrt() * (2.0_f32 / 3.0).sqrt();
-    let mut points = [(joint.centroid, 0.25); 7];
+    let (centre, area) = joint.patch();
+    let ring = (area / PI).sqrt() * (2.0_f32 / 3.0).sqrt();
+    let mut points = [(centre, 0.25); 7];
     for (k, point) in points.iter_mut().skip(1).enumerate() {
         let angle = k as f32 * PI / 3.0;
-        *point = (
-            joint.centroid + (u * angle.cos() + v * angle.sin()) * ring,
-            0.125,
-        );
+        *point = (centre + (u * angle.cos() + v * angle.sin()) * ring, 0.125);
     }
     points
 }
@@ -1962,11 +1981,11 @@ fn section_failure(
     let joints: Vec<&Joint> = section.iter().map(|&j| &structure.joints[j]).collect();
     // All levers and centroids share a section-local origin. Translating construction
     // coordinates cannot multiply the load-summation allowance by an absolute position.
-    let origin = joints[0].centroid;
+    let origin = joints[0].patch().0;
     let area: f32 = joints.iter().map(|joint| joint.area).sum();
     let centre = joints
         .iter()
-        .map(|joint| (joint.centroid - origin) * joint.area)
+        .map(|joint| (joint.patch().0 - origin) * joint.area)
         .sum::<Vec3>()
         / area;
     let (mass, weighted) = group.iter().fold((0.0, Vec3::ZERO), |(mass, at), &i| {
@@ -1984,7 +2003,7 @@ fn section_failure(
         .map(|joint| {
             let n = joint.normal;
             joint.area
-                * if n.dot(com - (joint.centroid - origin)) >= 0.0 {
+                * if n.dot(com - (joint.patch().0 - origin)) >= 0.0 {
                     n
                 } else {
                     -n
@@ -2024,7 +2043,7 @@ fn section_failure(
     let centre_error = roundoff_gamma(2 * joints.len() + 6)
         * joints
             .iter()
-            .map(|j| f64::from(j.area) * (j.centroid - origin).as_dvec3().length())
+            .map(|j| f64::from(j.area) * (j.patch().0 - origin).as_dvec3().length())
             .sum::<f64>()
         / f64::from(area);
     let normal_error = 2.0
@@ -2046,7 +2065,9 @@ fn section_failure(
     let across = n.cross(axis);
     let back = joints
         .iter()
-        .map(|joint| across.dot((joint.centroid - origin) - centre) - (joint.area / PI).sqrt())
+        .map(|joint| {
+            across.dot((joint.patch().0 - origin) - centre) - (joint.patch().1 / PI).sqrt()
+        })
         .fold(f32::INFINITY, f32::min);
     let hinge = centre + across * back;
     let inertia: f32 = group
@@ -2374,7 +2395,7 @@ fn bears_on_contact(
             let joint = &structure.joints[j];
             let contact = match joint.bond {
                 Bond::Resting => !state.cracked[j],
-                Bond::Bonded(_) => state.cracked[j],
+                Bond::Bonded(_) | Bond::AreaShare { .. } => state.cracked[j],
             };
             let outside = match joint.b {
                 Side::Chunk(b) if inside(b) != inside(joint.a) => {
@@ -2908,8 +2929,8 @@ fn force_wrench(
 /// toward the group, tension positive, so a group hanging below its section pulls and one standing
 /// on it presses), and the bending part `M_b` of the moment (in the plane) sets the stress's
 /// gradient `g` from `J g = n × M_b`, `J` the joints' second moment of area about `c`. Each joint
-/// is a disc of its area (the push rule's reading of a joint, [`disc`]), so it adds its own
-/// `A²/4π` to `J`, and its peak is the gradient's reach to its rim. Each joint compares with its
+/// integrates its circular patch ([`Joint::patch`], [`disc`]), contributing `A r²/4` to `J`
+/// and the gradient's reach to that patch's rim to its peak. Each joint compares with its
 /// own seam (its bond's tensile strength, as [`crack`] reads it); the section's
 /// demand and capacity are the joint's whose ratio is highest. ASSUMED out of the check: the
 /// shear and the twist about `n` the joints also carry (a punch ring reads shear on its own
@@ -2997,15 +3018,15 @@ impl Navier {
         let area: f32 = border.iter().map(|&(j, _)| joints[j].area).sum();
         let centre = border
             .iter()
-            .map(|&(j, _)| joints[j].centroid * joints[j].area)
+            .map(|&(j, _)| joints[j].patch().0 * joints[j].area)
             .sum::<Vec3>()
             / area;
         let (u, v) = plane_axes(normal);
         let (mut juu, mut juv, mut jvv) = (0.0, 0.0, 0.0);
         for &(j, _) in &border {
             let a = joints[j].area;
-            let own = a * a / (4.0 * PI);
-            let d = joints[j].centroid - centre;
+            let own = a * joints[j].patch().1 / (4.0 * PI);
+            let d = joints[j].patch().0 - centre;
             let (du, dv) = (d.dot(u), d.dot(v));
             juu += own + a * du * du;
             juv += a * du * dv;
@@ -3049,9 +3070,9 @@ impl Navier {
         let (gu, gv) = ((jvv * lu - juv * lv) / det, (juu * lv - juv * lu) / det);
         let reach = gu.hypot(gv);
         self.border.iter().map(move |&(j, _)| {
-            let d = joints[j].centroid - self.centre;
+            let d = joints[j].patch().0 - self.centre;
             let (du, dv) = (d.dot(u), d.dot(v));
-            let rim = (joints[j].area / PI).sqrt();
+            let rim = (joints[j].patch().1 / PI).sqrt();
             (
                 j,
                 direct + gu * du + gv * dv + reach * rim,

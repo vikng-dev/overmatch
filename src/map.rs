@@ -170,6 +170,26 @@ impl MapManifest {
             })
     }
 
+    /// The game's environment destruction model admits every authored placement's scaled
+    /// structure at the map edge, with the asset path, instance, field and repair on refusal.
+    fn load_buildings(&mut self, root: &Path, path: &Path) {
+        let mut buildings = BuildingLibrary::load(root, self.structure_assets());
+        for instance in &self.instances {
+            if let Prototype::Structure { asset } = &self.prototypes[&instance.prototype] {
+                buildings
+                    .admit_placement(asset, instance.scale)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "map: {} instance {:?} field scale: {error}",
+                            path.display(),
+                            instance.id
+                        )
+                    });
+            }
+        }
+        self.buildings = buildings;
+    }
+
     /// The declared heightmap's path.
     pub(crate) fn heightmap_path(&self) -> PathBuf {
         self.dir.join(&self.heightmap)
@@ -424,7 +444,7 @@ pub(crate) fn load(root: &Path) -> MapManifest {
     let library = read_prototypes(root);
     let mut manifest = parse(&text, &library, &path);
     manifest.trees = TreeLibrary::load(root, manifest.tree_assets());
-    manifest.buildings = BuildingLibrary::load(root, manifest.structure_assets());
+    manifest.load_buildings(root, &path);
     manifest
 }
 
@@ -467,9 +487,10 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
     let path = level_path(root);
     let text = read_manifest(&path);
     let library = read_prototypes(root);
-    let manifest = parse(&text, &library, &path);
+    let mut manifest = parse(&text, &library, &path);
     let trees = TreeLibrary::load(root, manifest.tree_assets());
-    let buildings = BuildingLibrary::load(root, manifest.structure_assets());
+    manifest.load_buildings(root, &path);
+    let buildings = &manifest.buildings;
     let heightmap = manifest.heightmap_path();
     let bytes = std::fs::read(&heightmap).unwrap_or_else(|err| {
         panic!(
@@ -1037,6 +1058,48 @@ pub(crate) mod tests {
             digest_of(&[b"abc", b"d"]),
             "the boundary between two files is part of the digest",
         );
+    }
+
+    /// The game's environment destruction model admits placement scales while loading the map,
+    /// before spawning any body. Removing the placement gate admits this nonuniform fixture.
+    #[test]
+    fn building_placement_admission_names_the_manifest_instance_asset_and_scale() {
+        let root = shipped_assets();
+        let path = level_path(&root);
+        let mut manifest = load(&root);
+        let index = manifest
+            .instances
+            .iter()
+            .position(|instance| {
+                matches!(
+                    manifest.prototypes[&instance.prototype],
+                    Prototype::Structure { .. }
+                )
+            })
+            .expect("the fixture map places a structure");
+        let instance = &mut manifest.instances[index];
+        instance.scale[0] *= 2.0;
+        let id = instance.id.clone();
+        let Prototype::Structure { asset } = &manifest.prototypes[&instance.prototype] else {
+            unreachable!()
+        };
+        let asset = asset.clone();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            manifest.load_buildings(&root, &path)
+        }))
+        .unwrap_err();
+        let message = panic
+            .downcast_ref::<String>()
+            .expect("the load refusal carries its context");
+        for required in [
+            path.to_str().unwrap(),
+            &id,
+            &format!("{asset}.building.ron"),
+            "scale",
+            "uniform",
+        ] {
+            assert!(message.contains(required), "{message}");
+        }
     }
 
     /// THE DIGEST FOLDS THE TREES' TEXTS (the species table, the wood row and every tree asset

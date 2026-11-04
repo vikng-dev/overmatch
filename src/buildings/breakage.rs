@@ -129,7 +129,7 @@ pub(crate) struct Layout {
     pub(crate) elements: Vec<Option<(u16, u16)>>,
     /// Per law chunk: its material's values.
     materials: Vec<Masonry>,
-    ground: Vec<(usize, GroundAttachment)>,
+    ground: Vec<(GroundAttachment, Vec<usize>)>,
     /// The law's joints, chunk pairs first in asset order, then the anchors in asset order.
     pub(crate) joints: Vec<Joint>,
     /// Per law chunk: its hull.
@@ -199,17 +199,24 @@ impl Layout {
                 });
             }
         }
-        let mut ground = Vec::new();
-        for (anchor, hold) in asset.anchors.iter().zip(anchors) {
+        let mut ground = BTreeMap::<u16, (GroundAttachment, Vec<usize>)>::new();
+        for (anchor, (hold, bond)) in asset.anchors.iter().zip(anchors) {
             if let Some(a) = law_of[anchor.chunk as usize] {
-                ground.push((joints.len(), hold));
+                let component = asset.elements
+                    [usize::from(asset.chunks[anchor.chunk as usize].element)]
+                .component;
+                ground
+                    .entry(component)
+                    .or_insert_with(|| (hold, Vec::new()))
+                    .1
+                    .push(joints.len());
                 joints.push(Joint {
                     a,
                     b: Side::Ground,
                     area: anchor.area_m2,
                     centroid: Vec3::from_array(anchor.centroid),
                     normal: Vec3::Y,
-                    bond: hold.bond(1.0)?,
+                    bond,
                 });
             }
         }
@@ -269,7 +276,7 @@ impl Layout {
             chunks,
             element_of,
             materials,
-            ground,
+            ground: ground.into_values().collect(),
             joints,
             blocks,
             element_blocks,
@@ -278,7 +285,16 @@ impl Layout {
 
     /// The structure the laws read for an instance at uniform `scale`: lengths × s, areas × s²,
     /// volumes and masses × s³.
-    pub(crate) fn structure(&self, asset: &BuildingAsset, scale: f32) -> Structure {
+    pub(crate) fn checked_structure(
+        &self,
+        asset: &BuildingAsset,
+        scale: f32,
+    ) -> Result<Structure, String> {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(
+                "scale must be finite and positive; author a representable instance scale".into(),
+            );
+        }
         let (s2, s3) = (scale * scale, scale * scale * scale);
         let mut structure = Structure {
             chunks: self
@@ -306,12 +322,44 @@ impl Layout {
                 })
                 .collect(),
         };
-        for &(index, hold) in &self.ground {
-            structure.joints[index].bond = hold.bond(scale).expect(
-                "admitted footprint must retain a positive finite hold at the instance scale",
-            );
+        if scale != 1.0 {
+            for (hold, indices) in &self.ground {
+                let bond = hold.bond(scale).map_err(|error| format!(
+                    "foundation attachment at joints {indices:?}: {error}; reduce the instance scale or rebake a representable footprint"
+                ))?;
+                for &index in indices {
+                    structure.joints[index].bond = bond;
+                }
+            }
         }
-        structure
+        for (index, chunk) in structure.chunks.iter().enumerate() {
+            if !(chunk.volume.is_finite()
+                && chunk.volume > 0.0
+                && chunk.mass.is_finite()
+                && chunk.mass > 0.0
+                && chunk.centroid.is_finite())
+            {
+                return Err(format!(
+                    "chunks[{}] scaled volume, mass and centroid must remain finite and positive where required; author a representable scale",
+                    self.chunks[index]
+                ));
+            }
+        }
+        for (index, joint) in structure.joints.iter().enumerate() {
+            if !(joint.area.is_finite() && joint.area > 0.0 && joint.centroid.is_finite()) {
+                return Err(format!(
+                    "joints[{index}] scaled area and centroid must remain finite and positive where required; author a representable scale"
+                ));
+            }
+        }
+        Ok(structure)
+    }
+
+    /// Instrument reconstruction at an admitted scale (`track_sandbox::rubble` and law tests).
+    /// Placed gameplay instances retain their checked structure in `BuildingKind` at map load.
+    pub(crate) fn structure(&self, asset: &BuildingAsset, scale: f32) -> Structure {
+        self.checked_structure(asset, scale)
+            .expect("instrument data names an admitted construction scale")
     }
 
     /// Whether `event` names an element, law chunk or joint of this layout: what a record entry
@@ -515,10 +563,7 @@ pub(crate) struct Live {
 
 impl Live {
     fn new(kind: &BuildingKind, scale: f32) -> Self {
-        Self::from_structure(
-            kind.layout.structure(&kind.asset, scale),
-            kind.layout.elements.len(),
-        )
+        Self::from_shared(kind.structure(scale), kind.layout.elements.len())
     }
 
     /// Complete live state built synchronously from a structure and its authored element count.

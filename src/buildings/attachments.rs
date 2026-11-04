@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
+use bevy::math::Vec3;
 use serde::Deserialize;
 
 use super::fracture::{Bond, Masonry, Seam, Shear};
@@ -51,7 +52,7 @@ pub(crate) struct RootPlate {
 }
 
 impl RootPlate {
-    /// The game's environment destruction model: equivalent circular base face. DERIVED:
+    /// The game's environment destruction model: equivalent circular footprint. DERIVED:
     /// S = pi r^3 / 4 and tensile = C m / S - m g / A, so the base opens at moment C m.
     /// Positive hold requires r < 4 C / g.
     /// StandIn: rigid-plastic release has no separation work; the source supplies no work fact.
@@ -76,7 +77,7 @@ impl RootPlate {
     }
 }
 
-/// A base face retains its footprint share so scaled instances use their actual mass and area.
+/// A foundation retains its whole footprint so instance admission converts its hold at the authored scale.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum GroundAttachment {
     Joint(Bond),
@@ -84,6 +85,7 @@ pub(crate) enum GroundAttachment {
         plate: RootPlate,
         area: f32,
         mass: f32,
+        centroid: Vec3,
     },
 }
 
@@ -91,9 +93,26 @@ impl GroundAttachment {
     pub(crate) fn bond(self, scale: f32) -> Result<Bond, String> {
         match self {
             Self::Joint(bond) => Ok(bond),
-            Self::RootPlate { plate, area, mass } => plate
-                .seam(area * scale * scale, mass * scale * scale * scale)
-                .map(Bond::Bonded),
+            Self::RootPlate {
+                plate,
+                area,
+                mass,
+                centroid,
+            } => {
+                let area = area * scale * scale;
+                let centroid = centroid * scale;
+                if !centroid.is_finite() {
+                    return Err(
+                        "root-plate footprint centroid must be finite in simulation precision"
+                            .into(),
+                    );
+                }
+                Ok(Bond::AreaShare {
+                    seam: plate.seam(area, mass * scale * scale * scale)?,
+                    footprint_area: area,
+                    footprint_centroid: centroid,
+                })
+            }
         }
     }
 }
@@ -249,39 +268,49 @@ impl Attachments {
         }
     }
 
-    /// The game's environment destruction model: distribute one component's root moment by
-    /// base-face area. Each face receives that share of the carried mass, never the whole mass.
-    pub(crate) fn anchors(&self, asset: &BuildingAsset) -> Result<Vec<GroundAttachment>, String> {
-        let mut footprints = BTreeMap::<u16, (f32, f32)>::new();
+    /// The game's environment destruction model resolves each whole footprint once. Each
+    /// base cell carries an area share of that same equivalent disk, never its own root circle.
+    /// Returns each anchor's source and checked unit-scale bond, in asset order.
+    pub(crate) fn anchors(
+        &self,
+        asset: &BuildingAsset,
+    ) -> Result<Vec<(GroundAttachment, Bond)>, String> {
+        let mut footprints = BTreeMap::<u16, (f32, f32, Vec3)>::new();
         let component = |chunk: u32| {
             asset.elements[usize::from(asset.chunks[chunk as usize].element)].component
         };
         for anchor in &asset.anchors {
-            footprints.entry(component(anchor.chunk)).or_default().0 += anchor.area_m2;
+            let footprint = footprints.entry(component(anchor.chunk)).or_default();
+            footprint.0 += anchor.area_m2;
+            footprint.2 += Vec3::from_array(anchor.centroid) * anchor.area_m2;
         }
         for chunk in &asset.chunks {
-            if let Some((_, mass)) =
+            if let Some((_, mass, _)) =
                 footprints.get_mut(&asset.elements[usize::from(chunk.element)].component)
             {
                 *mass += chunk.mass_kg;
             }
         }
+        let mut resolved = BTreeMap::new();
         asset.anchors.iter().map(|anchor| {
+            let component = component(anchor.chunk);
+            if let Some(&hold) = resolved.get(&component) {
+                return Ok(hold);
+            }
             let name = &asset.attachments[usize::from(anchor.attachment)];
             self.holds_anchor(name).map_err(|err| format!("anchor on chunk {}: {err}", anchor.chunk))?;
-            let (area, mass) = footprints[&component(anchor.chunk)];
+            let (area, mass, weighted) = footprints[&component];
             let hold = match self.kind(name)? {
                 Kind::Joint(bond) => GroundAttachment::Joint(bond),
                 Kind::RootPlate(plate) => GroundAttachment::RootPlate {
-                    plate,
-                    area: anchor.area_m2,
-                    mass: mass * (anchor.area_m2 / area),
+                    plate, area, mass, centroid: weighted / area,
                 },
             };
-            hold.bond(1.0).map_err(|err| {
+            let bond = hold.bond(1.0).map_err(|err| {
                 format!("anchor on chunk {}, attachment {name:?}: {err}; rebake a representable footprint", anchor.chunk)
             })?;
-            Ok(hold)
+            resolved.insert(component, (hold, bond));
+            Ok((hold, bond))
         }).collect()
     }
 
@@ -456,6 +485,10 @@ mod tests {
     /// Fixture construction: two unequal base cells and one upper cell in one component.
     /// Inline fixture geometry has total volume 4 m³ and density 100 kg/m³, hence mass 400 kg.
     fn footprint() -> BuildingAsset {
+        footprint_with_cuts(&[0.0, 0.5, 2.0])
+    }
+
+    fn footprint_with_cuts(cuts: &[f32]) -> BuildingAsset {
         use super::super::schema::*;
         let cuboid = |x: [f32; 2], y: [f32; 2]| -> Vec<[f32; 3]> {
             (0..8)
@@ -469,17 +502,15 @@ mod tests {
             material: 0,
             surface_frame: SurfaceFrame::Upright,
             hull: cuboid([0.0, 2.0], [0.0, 2.0]),
-            chunks: [0, 3],
+            chunks: [0, cuts.len() as u32],
         };
         let mut chunks = Vec::new();
         let mut anchors = Vec::new();
-        for (k, (low, high, bottom, top)) in [
-            (0.0, 0.5, 0.0, 1.0),
-            (0.5, 2.0, 0.0, 1.0),
-            (0.0, 2.0, 1.0, 2.0),
-        ]
-        .into_iter()
-        .enumerate()
+        for (k, (low, high, bottom, top)) in cuts
+            .windows(2)
+            .map(|ends| (ends[0], ends[1], 0.0, 1.0))
+            .chain(std::iter::once((0.0, 2.0, 1.0, 2.0)))
+            .enumerate()
         {
             chunks.push(Chunk {
                 element: 0,
@@ -531,6 +562,24 @@ mod tests {
         );
         let mut internal = asset;
         internal.anchors.clear();
+        let mut upper = internal.elements[0].clone();
+        upper.name = "upper".into();
+        upper.component = 1;
+        upper.hull = internal.chunks[2].hull.clone();
+        upper.chunks = [2, 3];
+        internal.components.push("upper".into());
+        internal.elements[0].hull = (0..8)
+            .map(|i| {
+                [
+                    [0.0, 2.0][i & 1],
+                    [0.0, 1.0][(i >> 1) & 1],
+                    [0.0, 1.0][i >> 2],
+                ]
+            })
+            .collect();
+        internal.elements[0].chunks = [0, 2];
+        internal.elements.push(upper);
+        internal.chunks[2].element = 1;
         internal.joints.push(super::super::schema::Joint {
             a: 0,
             b: 2,
@@ -539,6 +588,7 @@ mod tests {
             normal: [0.0, 1.0, 0.0],
             bond: super::super::schema::Bond::Attached(0),
         });
+        internal.check().unwrap();
         let layout = super::super::breakage::Layout::of(&internal, &masonry, &list).unwrap();
         assert_eq!(layout.joints[0].bond, Bond::Resting);
     }
@@ -569,45 +619,147 @@ mod tests {
         }
     }
 
-    /// The game's environment destruction model allocates C*m once per footprint. Load laws
-    /// rely on the sum of each base face's critical moments equalling that declared budget.
+    /// The game's environment destruction model opens a whole root footprint at C*m,
+    /// independent of cell resolution. This exercises the combined Navier threshold (including
+    /// parallel-axis terms), not the sum of isolated cell capacities. Fixture geometry has mass
+    /// 4 m³ * 100 kg/m³ and its COM over the footprint's centre; a pure couple adds no net force.
     #[test]
-    fn split_base_faces_share_one_root_moment_at_each_scale() {
-        let asset = footprint();
-        let masonry = [Masonry::of(registry(), "Brick").unwrap()];
+    fn root_opening_moment_is_invariant_under_footprint_refinement() {
+        use super::super::fracture::{self, GroupLoads, Load, Origin, SectionCache, WallState};
         let list = Attachments::from_ron(
             r#"{"fixture": RootPlate(overturning_nm_per_kg: (100.0, Fixture("fixture")))}"#,
             registry(),
         )
         .unwrap();
-        let layout = super::super::breakage::Layout::of(&asset, &masonry, &list).unwrap();
-        for scale in [0.5_f32, 1.0, 2.0] {
-            let structure = layout.structure(&asset, scale);
-            let mut moment = 0.0;
-            // Resolution: 32 f32 epsilons cover the products, square root and sum against
-            // this independently evaluated f64 section calculation.
-            for (joint, fraction) in structure.joints.iter().zip([0.25, 0.75]) {
-                let Bond::Bonded(seam) = joint.bond else {
-                    panic!("a root plate is bonded")
-                };
-                let area = f64::from(joint.area);
-                let radius = (area / std::f64::consts::PI).sqrt();
-                let modulus = std::f64::consts::PI * radius.powi(3) / 4.0;
-                let mass = 400.0 * f64::from(scale).powi(3) * fraction;
-                let critical =
-                    (f64::from(seam.tensile) + mass * f64::from(gravity_mps2()) / area) * modulus;
-                let expected = 100.0 * mass;
-                assert!(
-                    (critical - expected).abs() <= expected * 32.0 * f64::from(f32::EPSILON),
-                    "{critical} != {expected}"
-                );
-                assert_eq!(seam.fracture_energy, 0.0);
-                assert_eq!(seam.shear, Shear::OpeningOnly);
-                moment += critical;
+        let mut material = Masonry::of(registry(), "Brick").unwrap().unwrap();
+        // Fixture internal bonds carry the prescribed couple without opening or punch rings.
+        material.density = 100.0;
+        material.seam = Seam {
+            tensile: 1e12,
+            fracture_energy: 1e12,
+            shear: Shear::OpeningOnly,
+        };
+        for cuts in [
+            &[0.0, 2.0][..],
+            &[0.0, 1.0, 2.0],
+            &[0.0, 0.5, 2.0],
+            &[0.0, 0.125, 0.5, 1.0, 2.0],
+        ] {
+            let mut asset = footprint_with_cuts(cuts);
+            let upper = asset.chunks.len() - 1;
+            for (k, ends) in cuts.windows(2).enumerate() {
+                asset.joints.push(super::super::schema::Joint {
+                    a: k as u32,
+                    b: upper as u32,
+                    area_m2: ends[1] - ends[0],
+                    centroid: [(ends[0] + ends[1]) / 2.0, 1.0, 0.5],
+                    normal: [0.0, 1.0, 0.0],
+                    bond: super::super::schema::Bond::Seam,
+                });
             }
-            let expected = 40_000.0 * f64::from(scale).powi(3);
-            assert!((moment - expected).abs() <= expected * 32.0 * f64::from(f32::EPSILON));
+            asset.check().unwrap();
+            let layout =
+                super::super::breakage::Layout::of(&asset, &[Some(material)], &list).unwrap();
+            for scale in [0.5_f32, 1.0, 2.0] {
+                let structure = layout.structure(&asset, scale);
+                for across in [Vec3::X, Vec3::Z] {
+                    for ratio in [0.99, 1.01] {
+                        // DERIVED: target couple C*m, m = 4*100*s³; force pair separated by 2*s.
+                        let moment = ratio * 100.0 * (4.0 * 100.0 * scale.powi(3));
+                        let loads = [-1.0, 1.0].map(|sign| Load {
+                            chunk: upper,
+                            at: Vec3::new(1.0, 1.5, 0.5) * scale + across * (sign * scale),
+                            energy: 0.0,
+                            crushed: 0.0,
+                            blow: Vec3::ZERO,
+                            press: Vec3::Y * (sign * moment / (2.0 * scale)),
+                            peak: None,
+                            origin: Origin::Field,
+                        });
+                        let mut state = WallState::new(&structure);
+                        let weighed = fracture::weigh(
+                            &structure,
+                            &mut state,
+                            &[],
+                            &[],
+                            GroupLoads::new(&loads, Vec3::ZERO),
+                            &[],
+                            &mut SectionCache::default(),
+                        );
+                        assert_eq!(
+                            !weighed.failures.is_empty(),
+                            ratio > 1.0,
+                            "cuts {cuts:?}, scale {scale}, axis {across:?}, moment/Cm {ratio}: {:?}",
+                            weighed.failures
+                        );
+                        assert!(
+                            state.cracked[..upper].iter().all(|&cracked| !cracked),
+                            "the fixture's internal bonds hold"
+                        );
+                        assert!(
+                            state.cracked[upper..]
+                                .iter()
+                                .all(|&cracked| cracked == (ratio > 1.0)),
+                            "the whole footprint shares one threshold"
+                        );
+                    }
+                }
+            }
         }
+    }
+
+    /// The game's environment destruction model refuses an unrepresentable scaled hold at
+    /// placement admission and keeps the checked result. Fixture C=2 admits the unit footprint,
+    /// r=sqrt(2/pi), but at scale two r exceeds 4C/g (DERIVED). A late conversion or a cache that
+    /// forgets the scale would admit that placement or rebuild state instead of sharing it.
+    #[test]
+    fn placement_admission_retains_each_checked_scale_and_refuses_a_negative_root_hold() {
+        use std::sync::Arc;
+        let asset = footprint();
+        let list = Attachments::from_ron(
+            r#"{"fixture": RootPlate(overturning_nm_per_kg: (2.0, Fixture("fixture")))}"#,
+            registry(),
+        )
+        .unwrap();
+        let text = ron::ser::to_string(&asset).unwrap();
+        let kind =
+            super::super::BuildingKind::resolve("fixture", &text, registry(), &list).unwrap();
+        let mut library = super::super::BuildingLibrary {
+            kinds: BTreeMap::from([("fixture".into(), Arc::new(kind))]),
+            texts: vec![text],
+        };
+        library.admit_placement("fixture", [0.5; 3]).unwrap();
+        let half = library.get("fixture").unwrap().structure(0.5);
+        assert_eq!(
+            half.chunks.iter().map(|chunk| chunk.mass).sum::<f32>(),
+            4.0 * 100.0 * 0.5_f32.powi(3)
+        );
+        library.admit_placement("fixture", [0.5; 3]).unwrap();
+        assert!(Arc::ptr_eq(
+            &half,
+            &library.get("fixture").unwrap().structure(0.5)
+        ));
+        let error = library.admit_placement("fixture", [2.0; 3]).unwrap_err();
+        for required in [
+            "buildings/fixture/fixture.building.ron",
+            "foundation attachment",
+            "converted tensile",
+            "scale",
+            "rebake",
+        ] {
+            assert!(error.contains(required), "{error}");
+        }
+        assert_eq!(library.get("fixture").unwrap().structures.len(), 2);
+        assert!(Arc::ptr_eq(
+            &half,
+            &library.get("fixture").unwrap().structure(0.5)
+        ));
+        let spawned =
+            super::super::breakage::Breakage::new(library.get("fixture").unwrap().clone(), 0, 0.5);
+        assert!(
+            Arc::ptr_eq(&half, &spawned.live.structure),
+            "spawn retains the admitted structure"
+        );
     }
 
     /// Bakers and load laws refuse malformed anchor identities and root conversions before play.

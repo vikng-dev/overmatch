@@ -66,6 +66,9 @@ pub(crate) struct BuildingKind {
     bounds: (Vec3, Vec3),
     /// What the fracture laws read of it.
     pub(crate) layout: breakage::Layout,
+    /// Checked at admission, keyed by the authored uniform scale's bits. Gameplay never
+    /// converts an attachment again; instances at the same scale share immutable construction.
+    structures: BTreeMap<u32, Arc<fracture::Structure>>,
 }
 
 impl BuildingKind {
@@ -110,13 +113,31 @@ impl BuildingKind {
             .map(|name| fracture::Masonry::of(registry, name))
             .collect::<Result<Vec<_>, _>>()?;
         let layout = breakage::Layout::of(&asset, &masonry, attachments)?;
+        let structure = Arc::new(layout.checked_structure(&asset, 1.0)?);
         Ok(Self {
             asset,
             materials,
             friction,
             bounds,
             layout,
+            structures: BTreeMap::from([(1.0_f32.to_bits(), structure)]),
         })
+    }
+
+    fn admit_scale(&mut self, scale: f32) -> Result<(), String> {
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            self.structures.entry(scale.to_bits())
+        {
+            entry.insert(Arc::new(self.layout.checked_structure(&self.asset, scale)?));
+        }
+        Ok(())
+    }
+
+    fn structure(&self, scale: f32) -> Arc<fracture::Structure> {
+        self.structures
+            .get(&scale.to_bits())
+            .expect("map admission retains the checked structure for every placed building scale")
+            .clone()
     }
 
     /// The friction element `k`'s colliders carry, standing or loose: its substance's.
@@ -166,6 +187,27 @@ impl BuildingLibrary {
             library.kinds.insert(id.to_owned(), Arc::new(kind));
         }
         library
+    }
+
+    /// The game's environment destruction model resolves each placement before play, retaining
+    /// its checked structure. The caller supplies the manifest and instance in refusal messages.
+    pub(crate) fn admit_placement(&mut self, id: &str, scale: [f32; 3]) -> Result<(), String> {
+        let result = if !(scale.iter().all(|s| s.is_finite() && *s > 0.0)
+            && scale[0] == scale[1]
+            && scale[0] == scale[2])
+        {
+            Err(format!(
+                "scale {scale:?}: author a finite positive uniform scale"
+            ))
+        } else {
+            Arc::make_mut(
+                self.kinds
+                    .get_mut(id)
+                    .expect("the map library loaded every declared building asset"),
+            )
+            .admit_scale(scale[0])
+        };
+        result.map_err(|error| format!("{BUILDINGS_DIR}/{id}/{id}.building.ron: {error}"))
     }
 
     pub(crate) fn get(&self, id: &str) -> Option<&Arc<BuildingKind>> {
@@ -298,7 +340,9 @@ pub(crate) mod tests {
             id: "house_0001".to_owned(),
             ordinal: 0,
         };
-        let root = spawn(&mut commands, kind, identity, pose);
+        let mut admitted = (**kind).clone();
+        admitted.admit_scale(pose.scale.x).unwrap();
+        let root = spawn(&mut commands, &Arc::new(admitted), identity, pose);
         queue.apply(&mut world);
         (world, root)
     }
