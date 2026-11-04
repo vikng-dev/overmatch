@@ -48,11 +48,32 @@ use super::breakage::{
     Breakage, HOLES_PER_CHUNK, Hole, Layout, Shape, WallEvent, WallPiece, WallRecord,
     WallReplicaSet,
 };
-use super::fracture::{Block, Fate, Side, clip_polygon};
+use super::fracture::{Fate, Side, clip_polygon};
 use super::schema::{BuildingAsset, SurfaceFrame};
 use crate::building_surface::{BuildingMaterial, holed};
 use crate::debris::PresentationClock;
 use crate::scatter::MapInstance;
+
+/// Convex boundary faces, excluding redundant coplanar and interior points. The collision
+/// library owns this topology; angle-sorting every point on a plane would turn interior points
+/// into perimeter corners and leave visible holes in an occupied face.
+fn hull_faces(points: &[Vec3]) -> Vec<(Vec3, Vec<Vec3>)> {
+    let polyhedron = avian3d::parry::shape::ConvexPolyhedron::from_convex_hull(points)
+        .expect("an admitted solid hull reconstructs through the collision library");
+    polyhedron
+        .faces()
+        .iter()
+        .map(|face| {
+            let first = face.first_vertex_or_edge as usize;
+            let end = first + face.num_vertices_or_edges as usize;
+            let corners = polyhedron.vertices_adj_to_face()[first..end]
+                .iter()
+                .map(|&index| polyhedron.points()[index as usize])
+                .collect();
+            (face.normal, corners)
+        })
+        .collect()
+}
 
 /// A face's tangent: its element's authored grain projected into its plane; on an end face the
 /// grain crosses, and on every face of an Upright element, the upright image (`Y × n`). A level
@@ -76,9 +97,9 @@ fn tangent(n: Vec3, frame: SurfaceFrame, run: Vec3) -> Vec3 {
 /// An element's run: the level direction of its hull's edge longest seen from above, unit. A
 /// bounded solid has an edge off the vertical, so every element has one; a wall's runs along the
 /// wall wherever it is longer than thick.
-fn run(hull: &Block) -> Vec3 {
+fn run(points: &[Vec3]) -> Vec3 {
     let mut longest = Vec3::ZERO;
-    for (_, corners) in hull.faces() {
+    for (_, corners) in hull_faces(points) {
         for k in 0..corners.len() {
             let edge = corners[(k + 1) % corners.len()] - corners[k];
             let level = Vec3::new(edge.x, 0.0, edge.z);
@@ -99,11 +120,11 @@ struct Look {
 }
 
 impl Look {
-    fn of(asset: &BuildingAsset, layout: &Layout, e: usize) -> Self {
+    fn of(asset: &BuildingAsset, e: usize) -> Self {
         let element = &asset.elements[e];
         Self {
             frame: element.surface_frame,
-            run: run(&layout.element_blocks[e]),
+            run: run(&element.points()),
             secondary: crate::building_surface::lane_for_substance(
                 &asset.materials[usize::from(element.material)],
             ) == crate::building_surface::SurfaceLane::Secondary,
@@ -149,17 +170,30 @@ impl Faces {
     }
 
     /// Element `e`'s whole hull.
-    fn element(&mut self, asset: &BuildingAsset, layout: &Layout, e: usize) {
-        let look = Look::of(asset, layout, e);
-        for (n, corners) in layout.element_blocks[e].faces() {
+    fn element(&mut self, asset: &BuildingAsset, e: usize) {
+        let look = Look::of(asset, e);
+        for (n, corners) in hull_faces(&asset.elements[e].points()) {
             self.face(n, &corners, &look, Vec3::ZERO, 0.0);
         }
     }
 
     /// Law chunk `c`'s hull with its element's `look`, drawn `offset` back, its faces tagged `tag`
     /// (module doc).
-    fn chunk(&mut self, layout: &Layout, look: &Look, c: usize, offset: Vec3, tag: f32) {
-        for (n, corners) in layout.blocks[c].faces() {
+    fn chunk(
+        &mut self,
+        asset: &BuildingAsset,
+        layout: &Layout,
+        look: &Look,
+        c: usize,
+        offset: Vec3,
+        tag: f32,
+    ) {
+        let points: Vec<Vec3> = asset.chunks[layout.chunks[c] as usize]
+            .hull
+            .iter()
+            .map(|p| Vec3::from_array(*p))
+            .collect();
+        for (n, corners) in hull_faces(&points) {
             self.face(n, &corners, look, offset, tag);
         }
     }
@@ -178,8 +212,8 @@ impl Faces {
 /// The building's mesh in its own frame at scale 1 (module doc).
 pub(crate) fn mesh(asset: &BuildingAsset, layout: &Layout) -> Mesh {
     let mut faces = Faces::default();
-    for e in 0..asset.elements.len() {
-        faces.element(asset, layout, e);
+    for e in 0..layout.element_blocks.len() {
+        faces.element(asset, e);
     }
     faces.mesh()
 }
@@ -190,14 +224,14 @@ pub(crate) fn broken_mesh(asset: &BuildingAsset, layout: &Layout, shape: &Shape)
     let mut faces = Faces::default();
     for (e, swapped) in shape.swapped.iter().enumerate() {
         if *swapped {
-            let look = Look::of(asset, layout, e);
+            let look = Look::of(asset, e);
             for c in layout.chunks_of(e) {
                 if shape.fate[c] == Fate::Standing {
-                    faces.chunk(layout, &look, c, Vec3::ZERO, (c + 1) as f32);
+                    faces.chunk(asset, layout, &look, c, Vec3::ZERO, (c + 1) as f32);
                 }
             }
         } else {
-            faces.element(asset, layout, e);
+            faces.element(asset, e);
         }
     }
     faces.mesh()
@@ -214,8 +248,8 @@ pub(crate) fn piece_mesh(
     let mut faces = Faces::default();
     for (k, &c) in chunks.iter().enumerate() {
         let c = usize::from(c);
-        let look = Look::of(asset, layout, usize::from(layout.element_of[c]));
-        faces.chunk(layout, &look, c, origin, (k + 1) as f32);
+        let look = Look::of(asset, usize::from(layout.element_of[c]));
+        faces.chunk(asset, layout, &look, c, origin, (k + 1) as f32);
     }
     faces.mesh()
 }
@@ -818,6 +852,7 @@ mod tests {
     use bevy::mesh::VertexAttributeValues;
 
     use super::*;
+    use crate::buildings::fracture::Block;
     use crate::buildings::tests::shipped_house;
 
     /// Every triangle of `mesh`, as its three corners.
@@ -883,6 +918,56 @@ mod tests {
         );
     }
 
+    /// The camera must see every occupied face of an admitted hull. Fixture: a unit cube with
+    /// a redundant face-centre point. Sorting that point into the perimeter cuts a triangular
+    /// hole; a face-area check and sight lines through each face expose that mutant.
+    #[test]
+    fn redundant_hull_points_cannot_open_a_solid_face() {
+        let mut asset = shipped_house().asset.clone();
+        let mut points = Block::cuboid(Vec3::ZERO, Vec3::ONE).points;
+        points.extend([Vec3::new(0.5, 0.5, 1.0), Vec3::splat(0.5)]);
+        asset.elements[0].hull = points.iter().map(Vec3::to_array).collect();
+        asset.check().expect("the fixture meets schema admission");
+        let registry = crate::substances::SubstanceRegistry::shipped_static();
+        let masonry = asset
+            .materials
+            .iter()
+            .map(|name| super::super::fracture::Masonry::of(registry, name).unwrap())
+            .collect::<Vec<_>>();
+        let _layout = Layout::of(
+            &asset,
+            &masonry,
+            crate::buildings::attachments::Attachments::shipped_static(),
+        )
+        .expect("the fixture meets collider admission");
+        let mut faces = Faces::default();
+        faces.element(&asset, 0);
+        let triangles = triangles(&faces.mesh());
+        let area: f32 = triangles
+            .iter()
+            .map(|[a, b, c]| (b - a).cross(c - a).length() / 2.0)
+            .sum();
+        assert!((area - 6.0).abs() < 1e-5, "unit cube surface: {area}");
+        for (normal, u, v) in [
+            (Vec3::X, Vec3::Y, Vec3::Z),
+            (Vec3::Y, Vec3::Z, Vec3::X),
+            (Vec3::Z, Vec3::X, Vec3::Y),
+        ] {
+            for sign in [-1.0, 1.0] {
+                for x in [-0.4, 0.0, 0.4] {
+                    for y in [-0.4, 0.0, 0.4] {
+                        let centre = Vec3::splat(0.5) + normal * sign * 0.5 + u * x + v * y;
+                        assert!(crosses(
+                            &triangles,
+                            centre + normal * sign * 0.1,
+                            centre - normal * sign * 0.1,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     /// A LEVEL FACE RUNS ALONG ITS ELEMENT, NEVER ALONG A WORLD AXIS: an element's run is its
     /// hull's edge longest seen from above, so a box 2 m long, 1 m tall and 0.25 m thick (fixture
     /// data), yawed off every world axis, gives a level face drawn with its look, on the mesh path
@@ -903,7 +988,7 @@ mod tests {
             }
             let look = Look {
                 frame: SurfaceFrame::Upright,
-                run: run(&Block::hull(corners)),
+                run: run(&corners),
                 secondary: false,
             };
             for n in [Vec3::Y, Vec3::NEG_Y] {
