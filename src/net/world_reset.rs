@@ -112,11 +112,11 @@ fn hide_other_worlds(
         With<super::debris_stress::DebrisPose>,
     >,
 ) {
-    for (belongs, mut visibility, wall) in &mut carriers {
+    for (belongs, mut visibility, construction) in &mut carriers {
         if Some(*belongs) != generation.0 {
             visibility.set_if_neq(Visibility::Hidden);
-        } else if !wall {
-            // A wall's record owns its visibility; a trunk or lever carrier is visible at its pose.
+        } else if !construction {
+            // Construction membership owns its visibility; a diagnostic carrier follows its pose.
             visibility.set_if_neq(Visibility::Inherited);
         }
     }

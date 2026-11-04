@@ -1,7 +1,7 @@
 //! The construction ledger, about the game's environment destruction (game state only): one globally
 //! visible entity per Battle whose component lists every change the authority made to every
 //! construction in that Battle's world (`net::world_reset` replaces it at the next Battle)
-//! ([`Entry`]: a swap, dust, a hole, a crack or a fall, with its construction's ordinal and tick),
+//! ([`Entry`]: wear, dust, a hole or a crack, with its construction's ordinal and tick),
 //! replicated as diffs — a client whose acknowledged ledger is within the last
 //! `Diffable::HISTORY_LEN` (64) appends receives only the entries past it, one further behind and
 //! a late joiner the whole list as a snapshot. A client copies it into its [`Record`], from
@@ -12,9 +12,11 @@
 //!
 //! A fallen group rides its own carrier (`debris_stress::Carrier`), its chunks on it once.
 
+use crate::debris::PresentationClock;
 use bevy::ecs::error::Result;
 use bevy::prelude::*;
 use bevy_replicon::prelude::{Diffable, EntityCommandsDiffExt};
+use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -52,14 +54,34 @@ pub(super) fn install_server(app: &mut App) {
 
 pub(super) fn install_client(app: &mut App) {
     app.init_resource::<CurrentWorld>()
+        .insert_resource(PresentationClock::Waiting)
         .add_message::<ConstructionRefusal>()
         .add_message::<super::matchmaking::ServerGone>()
         .add_systems(
             Update,
-            (receive_ledger, receive_pieces, refuse_peer_record)
+            (
+                publish_presentation_clock,
+                receive_ledger,
+                receive_pieces,
+                refuse_duplicate_owners,
+                refuse_peer_record,
+            )
                 .chain()
                 .before(ReplicaSet),
         );
+}
+
+fn publish_presentation_clock(
+    cursor: Option<Res<InterpolationTimeline>>,
+    mut clock: ResMut<PresentationClock>,
+) {
+    *clock = match cursor.filter(|timeline| timeline.is_synced()) {
+        Some(timeline) => PresentationClock::At {
+            tick: timeline.tick().0,
+            overstep: f64::from(timeline.overstep().to_f32()),
+        },
+        None => PresentationClock::Waiting,
+    };
 }
 
 fn spawn_ledger(world: &mut World) {
@@ -239,6 +261,36 @@ fn receive_pieces(
     }
 }
 
+/// Same-birth owners cannot claim the same chunk. Parent/child generations may overlap in
+/// arrival time; their distinct birth ticks are resolved by the presentation handover.
+fn refuse_duplicate_owners(
+    pieces: Query<(Entity, &Piece, &AdmittedPiece, &WorldGeneration)>,
+    generation: Res<CurrentWorld>,
+    mut refused: MessageWriter<ConstructionRefusal>,
+    mut commands: Commands,
+) {
+    let mut owners = std::collections::BTreeMap::new();
+    for (entity, piece, admitted, belongs) in &pieces {
+        if Some(*belongs) != generation.0 {
+            continue;
+        }
+        for &chunk in &admitted.chunks {
+            if owners
+                .insert((admitted.construction, piece.born, chunk), entity)
+                .is_some()
+            {
+                refused.write(ConstructionRefusal::Piece(PieceError::DuplicateOwnership {
+                    construction: piece.construction,
+                    chunk,
+                    born: piece.born,
+                }));
+                commands.entity(entity).despawn();
+                return;
+            }
+        }
+    }
+}
+
 /// The ordinary match-close path removes the link, stops reconnecting and shows this cause.
 fn refuse_peer_record(
     mut refused: MessageReader<ConstructionRefusal>,
@@ -285,7 +337,7 @@ mod tests {
             (
                 Entry {
                     construction: 7,
-                    ..entry(Event::Swap(0), 4)
+                    ..entry(Event::Wear(0), 4)
                 },
                 EntryError::UnknownConstruction(7),
             ),
@@ -298,15 +350,15 @@ mod tests {
                 EntryError::OutsideLayout(1, Event::Crack(u16::MAX)),
             ),
             (
-                entry(Event::Fall(u16::MAX), 7),
-                EntryError::OutsideLayout(1, Event::Fall(u16::MAX)),
+                entry(Event::Wear(u16::MAX), 7),
+                EntryError::OutsideLayout(1, Event::Wear(u16::MAX)),
             ),
         ] {
             let mut app = replica();
             let ledger = app
                 .world_mut()
                 .spawn((
-                    Ledger(vec![entry(Event::Swap(0), 3)]),
+                    Ledger(vec![entry(Event::Wear(0), 3)]),
                     WorldGeneration::default(),
                 ))
                 .id();
@@ -338,7 +390,7 @@ mod tests {
         let first = app
             .world_mut()
             .spawn((
-                Ledger(vec![entry(Event::Swap(0), 3)]),
+                Ledger(vec![entry(Event::Wear(0), 3)]),
                 WorldGeneration::default(),
             ))
             .id();
@@ -352,7 +404,7 @@ mod tests {
         let record = app.world().resource::<Record>().clone();
         assert_eq!(
             record.entries,
-            vec![entry(Event::Swap(0), 3), entry(Event::Dust(4), 5)]
+            vec![entry(Event::Wear(0), 3), entry(Event::Dust(4), 5)]
         );
         let generation = record.generation;
         app.world_mut().entity_mut(first).despawn();
@@ -398,7 +450,7 @@ mod tests {
         let ledger = app
             .world_mut()
             .spawn((
-                Ledger(vec![entry(Event::Swap(0), 3)]),
+                Ledger(vec![entry(Event::Wear(0), 3)]),
                 WorldGeneration::default(),
             ))
             .id();
@@ -425,7 +477,7 @@ mod tests {
             let ledger = app
                 .world_mut()
                 .spawn((
-                    Ledger(vec![entry(Event::Swap(0), 3)]),
+                    Ledger(vec![entry(Event::Wear(0), 3)]),
                     WorldGeneration::default(),
                 ))
                 .id();
@@ -572,6 +624,66 @@ mod tests {
                 .iter(client.world())
                 .any(|text| text.0.contains(&expected))
         );
+    }
+
+    /// Admission must stop duplicate ownership before the same chunk can be drawn twice.
+    /// Different birth ticks remain legal while a parent's retirement is in flight.
+    #[test]
+    fn duplicate_chunk_owners_are_refused_before_presentation() {
+        let mut app = replica();
+        for born in [3, 5] {
+            app.world_mut().spawn((
+                Piece {
+                    construction: 1,
+                    chunks: vec![0],
+                    born,
+                    retired: None,
+                },
+                WorldGeneration::default(),
+            ));
+        }
+        app.update();
+        assert!(
+            app.world()
+                .resource::<Messages<super::super::matchmaking::ServerGone>>()
+                .is_empty()
+        );
+        app.world_mut().spawn((
+            Piece {
+                construction: 1,
+                chunks: vec![0],
+                born: 5,
+                retired: None,
+            },
+            WorldGeneration::default(),
+        ));
+        app.update();
+        assert_refused(
+            &mut app,
+            ConstructionRefusal::Piece(PieceError::DuplicateOwnership {
+                construction: 1,
+                chunk: 0,
+                born: 5,
+            }),
+        );
+    }
+
+    /// A replica has no local substitute for the shared interpolation cursor before sync.
+    #[test]
+    fn an_unsynchronized_replica_has_no_presentation_cursor() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = replica();
+        *app.world_mut().resource_mut::<PresentationClock>() = PresentationClock::At {
+            tick: 100,
+            overstep: 0.5,
+        };
+        app.world_mut()
+            .run_system_once(publish_presentation_clock)
+            .unwrap();
+        let clock = *app.world().resource::<PresentationClock>();
+        for tick in [0, 1, 100, u32::MAX] {
+            assert_eq!(clock.since(tick), None);
+        }
     }
 
     fn assert_refused(app: &mut App, expected: ConstructionRefusal) {

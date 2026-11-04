@@ -89,9 +89,8 @@ const WOOD_FILE: &str = "wood.ron";
 /// strength law reads gravity along the trunk's upright prefix sums.
 const UPRIGHT_EPSILON: f32 = 1e-6;
 
-/// Most segments a trunk may have: `cut` travels as one byte, and the wire word reserves
-/// `cut + 1 == 0` for a standing tree.
-const MAX_SEGMENTS: usize = 255;
+/// Resolution: bounds local segment and joint tables to the byte index's range.
+const MAX_SEGMENTS: usize = u8::MAX as usize;
 
 /// The fall azimuth's resolution: bins round the compass, from `+X` toward `+Z`.
 pub(crate) const AZIMUTH_BINS: u32 = 256;
@@ -456,79 +455,6 @@ pub(crate) enum TreeState {
     },
 }
 
-/// A malformed peer tree word, refused once at the topology receive boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TreeWordError {
-    StandingDirectionBits(u16),
-    CutOutside {
-        word: u16,
-        cut: u16,
-        segments: usize,
-    },
-}
-impl std::fmt::Display for TreeWordError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::StandingDirectionBits(word) => {
-                write!(f, "tree word {word:#06x}: standing with direction bits")
-            }
-            Self::CutOutside {
-                word,
-                cut,
-                segments,
-            } => write!(
-                f,
-                "tree word {word:#06x}: cut {cut} on a tree of {segments} segments"
-            ),
-        }
-    }
-}
-impl std::error::Error for TreeWordError {}
-
-impl TreeState {
-    /// The state's wire word: `Standing` is `0`, `Down { cut, dir }` is `((cut + 1) << 8) | dir`.
-    /// The `+ 1` keeps every `Down` word non-zero, so the high byte alone tells the two apart and
-    /// `Standing` has exactly one encoding.
-    pub(crate) fn encode(self) -> u16 {
-        match self {
-            Self::Standing => 0,
-            Self::Down { cut, dir } => {
-                assert!(
-                    usize::from(cut) < MAX_SEGMENTS,
-                    "tree cut {cut} has no word: the high byte carries cut + 1"
-                );
-                ((u16::from(cut) + 1) << 8) | u16::from(dir)
-            }
-        }
-    }
-
-    /// The inverse of [`Self::encode`] for a tree of `segments` segments; a word that no state
-    /// of that tree encodes to (`Standing` with direction bits, a cut at or past the last segment)
-    /// is refused rather than clamped, so a peer never derives a pose the authority did not set.
-    pub(crate) fn decode(word: u16, segments: usize) -> Result<Self, TreeWordError> {
-        let (high, dir) = (word >> 8, (word & 0xFF) as u8);
-        if high == 0 {
-            return if word == 0 {
-                Ok(Self::Standing)
-            } else {
-                Err(TreeWordError::StandingDirectionBits(word))
-            };
-        }
-        let cut = high - 1;
-        if usize::from(cut) >= segments {
-            return Err(TreeWordError::CutOutside {
-                word,
-                cut,
-                segments,
-            });
-        }
-        Ok(Self::Down {
-            cut: cut as u8,
-            dir,
-        })
-    }
-}
-
 /// A tree's body as spawned: its kind at the instance's uniform scale, every dimension here in
 /// world metres. A structure, whose contacts the solver's reading keeps.
 #[derive(Component, Debug, Clone)]
@@ -700,11 +626,6 @@ fn segment_collider(kind: &TreeKind, k: usize, scale: f32) -> Collider {
     Collider::convex_hull(points).expect("two rings of positive radius at distinct heights")
 }
 
-/// The same data-built segment geometry on a streamed replica.
-pub(crate) fn replica_segment_collider(body: &TreeBody, k: usize) -> Collider {
-    segment_collider(&body.kind, k, body.scale)
-}
-
 /// The azimuth bin of a horizontal `(x, z)` direction, [`AZIMUTH_BINS`] round from `+X` toward
 /// `+Z`. A zero vector lands in bin 0. `libm`, so the bin is the same on every platform.
 pub(crate) fn azimuth_bin(x: f32, z: f32) -> u8 {
@@ -866,7 +787,7 @@ fn fell(state: &mut TreeState, cut: u8, along: Vec3) {
 }
 
 /// The game's damage model: an emptied segment opens its base seam on its current owner,
-/// standing or moving. A stump's lower cut also updates the map topology word.
+/// standing or moving. A stump's lower cut also updates its map root's `TreeState`.
 pub(crate) fn fell_on_pool_emptied(
     emptied: On<PoolEmptied>,
     segments: Query<(&TreeSegment, &ChildOf)>,
@@ -1029,7 +950,7 @@ fn fell_on_loads(
     }
 }
 
-/// Authority transitions and shared free-body launch; replicas derive topology from the ledger.
+/// Local transitions and shared free-body launch.
 pub(crate) fn sim_plugin(app: &mut App) {
     use crate::debris::launch::LaunchPlugin;
     if !app.is_plugin_added::<LaunchPlugin>() {
@@ -1326,15 +1247,6 @@ pub(crate) mod tests {
         kind
     }
 
-    /// Inline game-state fixture for the separate topology tests awaiting consolidation.
-    /// No legacy simulation file ships with the construction assets.
-    pub(crate) fn fixture_library(id: &str) -> TreeLibrary {
-        TreeLibrary {
-            kinds: BTreeMap::from([(id.to_owned(), fixture_kind())]),
-            texts: Vec::new(),
-        }
-    }
-
     pub(crate) fn fixture_kind() -> Arc<TreeKind> {
         Arc::new(
             resolve(fixture_asset(), &fixture_table(), &fixture_wood())
@@ -1345,7 +1257,7 @@ pub(crate) mod tests {
     /// EVERY A6 REFUSAL IS A REFUSAL, NOT A CLAMP: an empty trunk, a non-finite or non-positive
     /// segment dimension, a missing, non-positive or non-finite tip radius, an unknown species, a
     /// wood row whose HP per square metre is not positive or whose substance states no bulk facts
-    /// for the trunk's chunks to be of, and more segments than the wire word's cut byte can name
+    /// for the trunk's chunks to be of, and more segments than the local segment/joint byte indices allow
     /// are each refused by name. Any one of these laxed to a default — a NaN height carried, a zero or
     /// infinite tip spawned, a pool of no HP per square metre spawned, a 256th segment accepted —
     /// reds its row.
@@ -1444,70 +1356,6 @@ pub(crate) mod tests {
         );
         assert_eq!(azimuth_bin(1.0, -0.02), 255);
         assert_eq!(azimuth_bin(0.0, 0.0), 0);
-    }
-
-    /// THE WIRE WORD IS A BIJECTION ONTO THE TREE'S STATES: every state of a tree of `n`
-    /// segments survives a round trip, `Standing` is the only word `0`, and the words no state
-    /// encodes to are refused, not clamped. A decoder that drops the `+ 1` maps `0x0100` to cut 1
-    /// (the round trip fails at cut 0); one that clamps the cut accepts `0x0400` on a 3-segment
-    /// tree; one that masks the high byte for `Standing` accepts `0x0040`. The peer-side derive
-    /// (ADR-0016) relies on a refused word never reaching a pose.
-    #[test]
-    fn the_wire_word_round_trips_every_state_and_refuses_the_rest() {
-        let segments = 3;
-        assert_eq!(TreeState::Standing.encode(), 0);
-        assert_eq!(
-            TreeState::decode(0x0040, segments),
-            Err(TreeWordError::StandingDirectionBits(0x0040))
-        );
-        assert_eq!(
-            TreeState::decode(0x0400, segments),
-            Err(TreeWordError::CutOutside {
-                word: 0x0400,
-                cut: 3,
-                segments
-            })
-        );
-        assert_eq!(TreeState::decode(0, segments), Ok(TreeState::Standing));
-        for cut in 0..segments as u8 {
-            for dir in [0u8, 1, 64, 255] {
-                let state = TreeState::Down { cut, dir };
-                let word = state.encode();
-                assert_eq!(word >> 8, u16::from(cut) + 1, "{state:?}");
-                assert_eq!(TreeState::decode(word, segments), Ok(state));
-            }
-        }
-        assert_eq!(
-            TreeState::Down { cut: 0, dir: 0 }.encode(),
-            0x0100,
-            "the first down word is the cut-0 word, never 0"
-        );
-        assert!(
-            TreeState::decode(0x0040, segments).is_err(),
-            "standing with dir bits"
-        );
-        assert!(
-            TreeState::decode(0x0400, segments).is_err(),
-            "cut == segments"
-        );
-        assert!(
-            TreeState::decode(0xFFFF, segments).is_err(),
-            "cut 254 past this tree (legal only on a 255-segment one)"
-        );
-        assert_eq!(
-            TreeState::decode(0x0300, segments),
-            Ok(TreeState::Down { cut: 2, dir: 0 }),
-            "the last segment is a legal cut"
-        );
-    }
-
-    /// A cut the word's high byte cannot carry (`cut + 1` past a byte) has no encoding: the
-    /// authority never sets one — resolve bounds the segment count — so encoding it is a broken
-    /// invariant, not a wrapped word.
-    #[test]
-    #[should_panic(expected = "has no word")]
-    fn a_cut_past_the_word_has_no_encoding() {
-        let _ = TreeState::Down { cut: 255, dir: 0 }.encode();
     }
 
     /// A BODY FELLS A TREE BY ITS CONTACT AND THE TRUNK'S CONSTRUCTION, NEVER BY WHAT THE BODY IS:

@@ -51,7 +51,7 @@
 //!   than the volume its load crushed, the volume it took from the chunk's pool, so one the size
 //!   of its chunk is a spent pool, recorded as dust. Only the pool decides dust: a chunk holding
 //!   [`HOLES_PER_CHUNK`] holes keeps standing and draws no later one.
-//! * **The record** ([`Record`]): every swap, dust, hole, crack and fall, in authority order,
+//! * **The record** ([`Record`]): wear, dust, holes and cracks, in authority order,
 //!   with its tick. The authority appends; the network carries it ([`crate::net`]'s ledger); a
 //!   replica rebuilds the same state from it ([`derive_from_record`]); the view presents it at the
 //!   presentation clock ([`super::view`]).
@@ -386,8 +386,7 @@ impl Layout {
     pub(crate) fn admits(&self, event: Event) -> bool {
         let within = |len: usize, i: u16| usize::from(i) < len;
         match event {
-            Event::Swap(e) => within(self.elements.len(), e),
-            Event::Dust(c) | Event::Fall(c) | Event::Hole(c, _) => within(self.chunks.len(), c),
+            Event::Wear(c) | Event::Dust(c) | Event::Hole(c, _) => within(self.chunks.len(), c),
             Event::Crack(j) => within(self.joints.len(), j),
         }
     }
@@ -432,15 +431,14 @@ impl Hole {
     }
 }
 
-/// One change to a construction, as the record carries it: the element swapped to its chunks, the
-/// chunk turned to dust, a hole cut in the chunk, the joint cracked, the chunk fallen with a loose
-/// group. Indices are the [`Layout`]'s.
+/// The game's environment destruction causes, with stable [`Layout`] addresses. Wear disturbs
+/// occupied matter; dust removes it; cracks remove supports; holes carry presentation geometry.
+/// Peers derive element replacement and departure from these causes and the admitted graph.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Event {
-    Swap(u16),
+    Wear(u16),
     Dust(u16),
     Crack(u16),
-    Fall(u16),
     Hole(u16, Hole),
 }
 
@@ -524,39 +522,46 @@ impl Shape {
         }
     }
 
-    /// Apply one recorded change. A record holds only events its construction's layout admits
-    /// ([`Layout::admits`]): the authority's laws write them, and a replica refuses a peer's
-    /// others where they arrive ([`EntryError`]). A hole leaves the shape as it is (module
-    /// doc).
-    pub(crate) fn apply(&mut self, event: Event) {
-        let slot = |len: usize, i: u16| {
-            assert!(
-                usize::from(i) < len,
-                "a construction record holds only events inside its construction's layout: {event:?}"
-            );
-            usize::from(i)
-        };
+    /// Apply an admitted cause. Replacement follows the affected source elements; departure
+    /// is derived after the batch by `derive_departures` using the same support law as the sim.
+    pub(crate) fn apply(&mut self, event: Event, layout: &Layout) {
+        assert!(
+            layout.admits(event),
+            "a construction record holds only admitted causes: {event:?}"
+        );
+        let mut touch = |c: usize| self.swapped[usize::from(layout.element_of[c])] = true;
         match event {
-            Event::Swap(e) => {
-                let e = slot(self.swapped.len(), e);
-                self.swapped[e] = true;
-            }
+            Event::Wear(c) => touch(usize::from(c)),
+            Event::Hole(..) => {}
             Event::Dust(c) => {
-                let c = slot(self.fate.len(), c);
-                self.fate[c] = Fate::Dust;
-            }
-            Event::Fall(c) => {
-                let c = slot(self.fate.len(), c);
-                self.fate[c] = Fate::Fallen;
+                touch(usize::from(c));
+                self.fate[usize::from(c)] = Fate::Dust;
             }
             Event::Crack(j) => {
-                let j = slot(self.cracked.len(), j);
-                self.cracked[j] = true;
-            }
-            Event::Hole(c, _) => {
-                slot(self.fate.len(), c);
+                self.cracked[usize::from(j)] = true;
+                let joint = &layout.joints[usize::from(j)];
+                touch(joint.a);
+                if let Side::Chunk(b) = joint.b {
+                    touch(b);
+                }
             }
         }
+    }
+
+    /// Connectivity is integer-only. Reuse the owner's admitted topology and burial facts;
+    /// the authority's wear pools never enter this derivation. Already departed chunks stay out
+    /// of the placed owner even when later causes split their moving carriers.
+    pub(crate) fn derive_departures(&mut self, layout: &Layout, live: &Live) {
+        let mut state = live.state.clone();
+        state.fate.clone_from(&self.fate);
+        state.cracked.clone_from(&self.cracked);
+        for c in fracture::fall(&live.structure, &mut state)
+            .into_iter()
+            .flatten()
+        {
+            self.swapped[usize::from(layout.element_of[c])] = true;
+        }
+        self.fate = state.fate;
     }
 
     /// Whether law chunk `c` stands as a collider of its own: its element swapped, it standing.
@@ -715,6 +720,11 @@ pub(crate) enum PieceError {
     OutsideLayout(u16, u16),
     Unordered(u16),
     Changed(u16),
+    DuplicateOwnership {
+        construction: u16,
+        chunk: u16,
+        born: u32,
+    },
 }
 
 impl std::fmt::Display for PieceError {
@@ -731,6 +741,14 @@ impl std::fmt::Display for PieceError {
             Self::Unordered(c) => write!(
                 f,
                 "construction {c}'s piece chunks must be unique and ascending"
+            ),
+            Self::DuplicateOwnership {
+                construction,
+                chunk,
+                born,
+            } => write!(
+                f,
+                "construction {construction}'s chunk {chunk} has multiple carriers born at tick {born}"
             ),
             Self::Changed(c) => write!(
                 f,
@@ -1538,12 +1556,9 @@ fn evaluate_owner(
         .chain(pressing.iter().copied())
         .chain(resting.iter().copied())
         .collect();
-    let mut changes = run_laws(&kind.layout.element_of, live, &loads, holes, spin);
+    let changes = run_laws(&kind.layout.element_of, live, &loads, holes, spin);
     // Moving matter already has a carrier; only surviving field loads push it.
     let fields = if moving.is_some() {
-        changes
-            .events
-            .retain(|event| !matches!(event, Event::Fall(_)));
         field_blows(&loads, &live.state).copied().collect()
     } else {
         Vec::new()
@@ -2162,9 +2177,9 @@ pub(crate) struct Changes {
 }
 
 /// Run one deposit's `loads`, with the `holes` it cuts ([`holes_of`]), through the laws on `live`
-/// (module doc) and say what changed: the elements first touched swap, then the dust, the holes
-/// kept, the cracks (the push rule's, then the structural check's, then the weight check's) and the
-/// falls, each ascending but the holes, in deposit order. A hole is kept only in a chunk standing
+/// (module doc) and record its wear, dust, kept holes and cracks (the push rule's, then the
+/// structural and weight checks'), each ascending but the holes, in deposit order. Replacement
+/// and departure are derived from these causes. A hole is kept only in a chunk standing
 /// after the removal and holding fewer than [`HOLES_PER_CHUNK`], and no law reads one. A field
 /// load on a chunk turned to dust went into crushing it and moves nothing; a body's blow there is
 /// returned whole because dust has no carrier. A queued contact on a chunk an earlier deposit freed is returned whole too:
@@ -2269,11 +2284,22 @@ pub(crate) fn run_laws(
         .collect();
     swaps.sort_unstable();
     swaps.dedup();
-    let mut events = Vec::new();
     for &e in &swaps {
         live.swapped[e] = true;
-        events.push(Event::Swap(e as u16));
     }
+    // Only first wear disturbs an intact element. Later wear stays in the authority's pool;
+    // dust, holes and cracks carry every further presentation change.
+    let mut worn_elements = BTreeSet::new();
+    let mut events: Vec<_> = struck
+        .worn
+        .iter()
+        .copied()
+        .filter(|&c| {
+            swaps.binary_search(&usize::from(element_of[c])).is_ok()
+                && worn_elements.insert(element_of[c])
+        })
+        .map(|c| Event::Wear(c as u16))
+        .collect();
     events.extend(struck.dusted.iter().map(|&c| Event::Dust(c as u16)));
     events.extend(holes.iter().map(|&(c, hole)| Event::Hole(c as u16, hole)));
     events.extend(
@@ -2283,7 +2309,6 @@ pub(crate) fn run_laws(
             .chain(&structural)
             .map(|&j| Event::Crack(j as u16)),
     );
-    events.extend(groups.iter().flatten().map(|&c| Event::Fall(c as u16)));
     let groups = groups
         .into_iter()
         .map(|group| {
@@ -2759,14 +2784,16 @@ fn derive_from_record(
             // This construction has no new entries in the ledger.
             continue;
         };
+        let kind = breakage.kind.clone();
         let live = breakage.live.as_mut();
         let mut shape = live.shape();
         for event in events {
-            shape.apply(event);
+            shape.apply(event, &kind.layout);
             if let Event::Hole(c, hole) = event {
                 live.holes[usize::from(c)].push(hole);
             }
         }
+        shape.derive_departures(&kind.layout, live);
         live.swapped = shape.swapped;
         live.state.fate = shape.fate;
         live.state.cracked = shape.cracked;

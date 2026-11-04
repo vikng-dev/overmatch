@@ -195,7 +195,6 @@ fn install_server_from(
     let lever = Lever::parse(value).map_err(StartupError::Lever)?;
     app.add_observer(carry_construction_piece)
         .add_observer(retire_construction_piece)
-        .add_observer(carry_tree_piece)
         .add_systems(
             FixedPostUpdate,
             publish_poses.in_set(crate::state::SimPhase::Publish),
@@ -293,41 +292,6 @@ fn retire_construction_piece(
         position: position.0,
         rotation: rotation.0,
     });
-}
-
-/// A freed trunk uses the same one-pose interpolated carrier as a construction piece.
-fn carry_tree_piece(
-    added: On<Add, crate::trees::TreePiece>,
-    pieces: Query<(
-        &crate::trees::TreePiece,
-        Option<(&Position, &Rotation)>,
-        Has<DebrisPose>,
-    )>,
-    generation: Res<AuthorityWorld>,
-    mut commands: Commands,
-) {
-    let (piece, pose, carrier) = pieces
-        .get(added.entity)
-        .expect("an added tree piece exists in its Add observer");
-    if carrier {
-        return;
-    }
-    let (position, rotation) =
-        pose.expect("every freed trunk is spawned with its complete physics pose");
-    let carrier = commands
-        .spawn((
-            Name::new("TreePieceCarrier"),
-            DebrisPose {
-                position: position.0,
-                rotation: rotation.0,
-            },
-            *piece,
-            generation.0,
-            Replicate::to_clients(NetworkTarget::All),
-            InterpolationTarget::to_clients(NetworkTarget::All),
-        ))
-        .id();
-    commands.entity(added.entity).insert(Carrier(carrier));
 }
 
 /// One piece of a breach, in world space.
@@ -597,24 +561,16 @@ fn build_view(
 /// A carrier's pose as its transform, from arrival; a lever carrier also takes the fixture mesh.
 fn attach_view(
     view: Option<Res<DebrisView>>,
-    arrived: Query<
-        (
-            Entity,
-            &DebrisPose,
-            Has<Piece>,
-            Has<crate::trees::TreePiece>,
-        ),
-        Added<DebrisPose>,
-    >,
+    arrived: Query<(Entity, &DebrisPose, Has<Piece>), Added<DebrisPose>>,
     mut commands: Commands,
 ) {
-    for (carrier, pose, wall, tree) in &arrived {
+    for (carrier, pose, construction) in &arrived {
         let mut entity = commands.entity(carrier);
         // A construction piece's view may already hold it hidden until its fall is presented.
         entity
             .insert(pose.transform())
             .insert_if_new(Visibility::default());
-        if let (false, false, Some(view)) = (wall, tree, view.as_deref()) {
+        if let (false, Some(view)) = (construction, view.as_deref()) {
             entity.insert((
                 Mesh3d(view.mesh.clone()),
                 MeshMaterial3d(view.material.clone()),
@@ -707,27 +663,6 @@ mod tests {
         );
         let bytes = postcard::to_allocvec(piece).unwrap();
         assert_eq!(&postcard::from_bytes::<Piece>(&bytes).unwrap(), piece);
-    }
-
-    /// A trunk and its carrier share one interpolated pose path, with no recursive carrier.
-    /// Clients rely on the immutable map/cut identity travelling with that pose.
-    #[test]
-    fn a_trunk_gets_one_interpolated_carrier_and_the_carrier_none() {
-        let mut world = World::new();
-        world.insert_resource(fixture_world());
-        world.add_observer(carry_tree_piece);
-        let marker = crate::trees::TreePiece { tree: 4, cut: 1 };
-        let at = Vec3::new(2.0, 3.0, -1.0);
-        let piece = world
-            .spawn((marker, Position(at), Rotation::default()))
-            .id();
-        world.flush();
-        let carrier = world.get::<Carrier>(piece).unwrap().0;
-        assert_eq!(world.get::<crate::trees::TreePiece>(carrier), Some(&marker));
-        assert_eq!(world.get::<DebrisPose>(carrier).unwrap().position, at);
-        assert!(world.get::<InterpolationTarget>(carrier).is_some());
-        assert!(world.get::<Carrier>(carrier).is_none());
-        assert_eq!(world.query::<&DebrisPose>().iter(&world).count(), 1);
     }
 
     /// A piece spawned without its body pose is a construction bug, never a group that silently

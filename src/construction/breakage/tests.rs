@@ -591,14 +591,12 @@ fn the_record_a_replica_derives_from_is_the_authoritys() {
         Vec3::ZERO,
     );
     for kind_of in [
-        |e: &Event| matches!(e, Event::Swap(_)),
         |e: &Event| matches!(e, Event::Dust(_)),
         |e: &Event| matches!(e, Event::Crack(_)),
-        |e: &Event| matches!(e, Event::Fall(_)),
     ] {
         assert!(changes.events.iter().any(kind_of), "{:?}", changes.events);
     }
-    assert!(changes.events.contains(&Event::Fall(lone as u16)));
+    assert_eq!(authority.state.fate[lone], Fate::Fallen);
 
     let (mut app, root) = composed(true);
     app.world_mut()
@@ -4703,7 +4701,7 @@ fn a_jointless_owner_still_wears_keeps_holes_and_launches() {
     assert_eq!(live.state.pool[1], pool - load.crushed);
     assert_eq!(live.holes[1], vec![hole]);
     assert!(changes.events.contains(&Event::Hole(1, hole)));
-    assert!(changes.events.contains(&Event::Fall(1)));
+    assert_eq!(live.state.fate[1], Fate::Fallen);
     assert_eq!(changes.groups, vec![(vec![1], vec![load])]);
     assert!(changes.failures.is_empty());
     assert_eq!(changes.weight_steps, 0);
@@ -4925,7 +4923,7 @@ fn deriving_a_shorter_same_generation_record_is_a_bug() {
         .entries
         .push(Entry {
             construction: 3,
-            event: Event::Swap(0),
+            event: Event::Wear(0),
             tick: 0,
         });
     app.update();

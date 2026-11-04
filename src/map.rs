@@ -708,14 +708,12 @@ pub(crate) mod tests {
     const HOUSE_INSTANCE: &str = r#"{"prototype":"house","translation":[0,0,0],
         "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"}"#;
 
-    /// One instance of every prototype kind — a graybox house, a tree of the damage
-    /// model and a construction of the destruction model, the latter read from shipped assets —
-    /// on the fixture extent: what a layer that spawns a map asserts against, whatever the shipped
-    /// map happens to place.
-    pub(crate) fn mixed_fixture_manifest() -> MapManifest {
+    /// The game's environment destruction fixture: one graybox block and two common construction
+    /// kinds read from shipped assets, independent of the shipped map's population.
+    pub(crate) fn construction_fixture_manifest() -> MapManifest {
         const LIBRARY: &str = r#"{
             "house": Block(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z)),
-            "fir": Tree(asset: "fir_1"),
+            "fir": Construction(asset: "fir_1"),
             "brick": Construction(asset: "house_1"),
         }"#;
         const INSTANCES: &str = r#"{"prototype":"house","translation":[0,0,0],
@@ -729,23 +727,6 @@ pub(crate) mod tests {
             &format!(r#""instances":[{INSTANCES}]"#),
         );
         let mut manifest = parse(&text, LIBRARY, Path::new("fixture/level.json"));
-        manifest.trees = crate::trees::tests::fixture_library("fir_1");
-        manifest.constructions = ConstructionLibrary::load(&shipped_assets(), ["house_1"]);
-        manifest
-    }
-
-    /// Fixture: common construction placements. Independent ledger/reset fixtures use
-    /// `mixed_fixture_manifest` to exercise their separate topology streams.
-    pub(crate) fn construction_fixture_manifest() -> MapManifest {
-        let mut manifest = mixed_fixture_manifest();
-        for prototype in manifest.prototypes.values_mut() {
-            if let Prototype::Tree { asset } = prototype {
-                *prototype = Prototype::Construction {
-                    asset: asset.clone(),
-                };
-            }
-        }
-        manifest.trees = TreeLibrary::default();
         manifest.load_constructions(&shipped_assets(), Path::new("fixture/level.json"));
         manifest
     }

@@ -692,9 +692,8 @@ pub(super) fn install_replica_consumers(app: &mut App) {
     app.add_systems(FixedUpdate, age_sanctioned_shots);
     // The pen cam's explanations addressed to this player, and whether each impact is drawn.
     super::shot_explanation::install_client(app);
-    // The destruction ledger's apply and the fall presentation's cursor clock.
+    // Select the authority world before consuming its common construction stream.
     super::world_reset::install_client(app);
-    super::destruction::install_client(app);
     // The debris stress lever's fragments and the constructions' fallen pieces, drawn where the
     // server's carriers say they are.
     super::debris_stress::install_client(app);

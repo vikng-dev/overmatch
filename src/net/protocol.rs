@@ -35,247 +35,10 @@ use crate::{CombatantId, CombatantLife, ShotId};
 // `protocol_id()` — the compile-time `PROTOCOL_FINGERPRINT` plus the runtime map digest — as their
 // netcode `protocol_id`; ADR-0018 and the manifest-pinning tests own the compatibility guard.
 
-/// Bump and re-pin the affected wire manifest value for every wire-surface change.
-///
-/// REV 19: added the client→authority spawn-point request ([`SpawnChannel`] + [`SetSpawnPoint`]) for
-/// the playtest spawn map — one new channel and one new message on the wire. The same REV also
-/// widened the manifest: every channel now rides [`WIRE_SURFACE`] with its delivery mode and
-/// direction, so a lane's CONFIG can no longer skew between two ends that shake hands. REV 19 has
-/// not shipped, so both landed as edits to it rather than a further bump.
-///
-/// REV 20: `TransmissionState` grew `band_confirm_ticks` — the upshift
-/// sustained-speed confirmation counter, replicated and rolled back
-/// atomically with the rest of the REV-14 transmission root and hashed in the determinism trace
-/// like every other discrete field.
-///
-/// REV 21 (the fire-backward-uphill shift-storm fix): NO wire-format change, but
-/// two REPLICATED transmission fields changed semantics/dynamics, which is sim-version skew (the
-/// alpha.9 lesson: silent sim skew passes the handshake and manifests as rollback storms):
-/// `band_confirm_ticks` now counts the FULL ordinary-upshift predicate for 8 consecutive decision
-/// ticks (was: the band sub-condition only, for 13 — it no longer saturates on a lugging climb),
-/// and the gated `demand_n` EMA became asymmetric (rise 8 ticks unchanged, fall 32 ticks). Two
-/// peers disagreeing on either law re-simulate different gear decisions from identical snapshots.
-///
-/// REV 22 (the receiving half of combat): one new owner-private replicated component,
-/// `HullShock` — an episode counter, the authority tick it changed on, and a
-/// cause tag. It carries no force. Its only job is to be a fact the owner cannot predict, so its
-/// arrival forces the rollback that restores the sub-threshold hull velocity a hit actually
-/// produced. New wire type and new registration: surface, own-type graph, and REV all move.
-///
-/// REV 23 (naming the victim on an impact): the ricochet message and the impact message each gain
-/// `victim: Option<CombatantId>` — the body the authority gave the impulse to. Without it the owner
-/// can tell WHICH EPISODE a spark belongs to (the authority tick already rides both facts) but not
-/// WHOSE HULL, so `net::adoption`'s ordering rule could release one tank's shove against a spark
-/// drawn on another. No new type and no new registration, so the surface hash is unchanged; the
-/// own-type graph and REV move.
-///
-/// REV 24 (the episode's own span): `HullShock` gains `opened` — the authority
-/// tick of the FIRST impulse the episode is made of. It is carried rather than derived because
-/// `close − SHOCK_EPISODE_TICKS` is only the span of a DEFERRED episode: the first episode a fresh
-/// hull publishes spans a single tick, so the derived window claimed fifteen ticks it never covered,
-/// and a respawn keeps the combatant identity, so those ticks can hold the previous life's hits.
-/// `net::adoption` matches sparks against `[opened, tick]`. No new type and no new registration, so
-/// the surface hash is unchanged; the own-type graph and REV move.
-///
-/// REV 25 (comparator ownership): NO wire-format change — the REV-21 precedent. `HullShock`'s
-/// registered rollback condition is permanently inert; `net::adoption` is the sole INTENTIONAL
-/// present-value `HullShock` delivery policy (lightyear's comparator-independent presence-mismatch
-/// recovery remains, and no production lifecycle exercises it). The bytes are identical, but two
-/// peers on opposite sides of this change reconcile the same `HullShock` snapshot with different
-/// ownership and presentation timing — the 5-seed capture measured the native comparator landing
-/// every belt-first shove 1–3 ticks before its spark, which is exactly the skew class REV exists
-/// to refuse. Surface and type hashes are unchanged; only the REV (and with it the manifest
-/// fingerprint) moves.
-///
-/// REV 26 (map2 terrain + 1500 m extent): NO wire-format change. The shipped heightmap and the
-/// square it is hung at both changed — a new 4096² map over 1 500 m spanning 0..50 m, declared by
-/// the map's own `level.json` instead of the old compile-time 1 000 m / 0..100 m pair. The ground is a
-/// sim input every peer integrates against (belt contacts, spawn heights, hull collisions), so two
-/// peers on opposite sides of this change simulate different worlds from identical snapshots —
-/// exactly the silent sim skew REV exists to refuse. Surface and type hashes are unchanged; only the
-/// REV (and with it the manifest fingerprint) moves. The same REV carries the ORIENTATION half of
-/// that ground: the decode now honours the map's declared `image_axes` and reverses a `-Z` image's
-/// rows once (`terrain_grid::RowOrder`), which mirrors the whole surface north–south against what an
-/// earlier REV-26 build integrates. REV 26 has not shipped, so that lands as an edit here rather
-/// than a further bump — the REV-19 precedent above.
-///
-/// REV 27 (one authoritative timeline): the prediction-era wire surface leaves. Every client
-/// renders every hull — its own included — from the interpolated server stream, so `.predict()`
-/// registrations, rollback conditions, and correction fns are gone; `HullShock` (REV 22/24/25),
-/// the `victim` fields on `ricochet message`/`impact message` (REV 23), and the element-grip
-/// netcode (`NetTrackGripAnchor`, `TrackGripElements` replicate-once, the grip checkpoint/resync
-/// channels and messages — ADR-0027) all leave the wire with their adoption/prediction consumers.
-/// Surface, own-type graph, and REV all move. Note on the servo ULP bands that leave with the
-/// comparators: dissolving the band deletes the symptom SENSOR, not the underlying cross-machine
-/// float divergence — nothing re-simulates servo state client-side anymore, so there is no gate
-/// left for it to storm.
-///
-/// Still REV 27 (pass 3): dropping lightyear's `prediction` cargo feature removes its internal
-/// `Predicted` registration, so lightyear's own protocol hash differs from earlier REV-27 builds.
-/// REV 27 has never deployed, so the change rides this bump rather than forcing a 28 — the
-/// REV-19/REV-26 precedent above.
-///
-/// Still REV 27: `TankServos` leaves the wire — dead since the promotion path died; clients
-/// integrate `RemoteServos` from the `ServoAngles` stream, so the replicated snapshot had no
-/// reader. Surface and own-type graph move; the change rides the undeployed bump — the
-/// REV-19/REV-26 precedent above.
-///
-/// REV 28 (the aim intention carries its own frame — ADR-0038): `TankCommand::aim` becomes an
-/// `Option<AimIntent>`, a tagged `World`/`HullLocal` point instead of a bare `Vec3` whose frame was
-/// convention. Own-type graph and REV move. Two peers on opposite sides lay the same command's
-/// servos at different bearings the moment the hull leaves yaw zero, so this is a sim skew as much
-/// as a format change; the tag exists so a consumer can never again be wrong about which frame it
-/// was handed.
-///
-/// REV 29 (lightyear 0.28 -> 0.30.1, bevy_replicon 0.41 -> 0.44): no own type moves, but the
-/// framing under all of it does — messages serialize with postcard instead of bincode, the packet
-/// header is 13 bytes, message ids are wrapping `u16`s, and replicon 0.43+ folds marker components
-/// into its own protocol hash. REV 28 shipped (v0.5.2 onward), so this is a real bump.
-///
-/// REV 30 (force-law capability): `FireEvent` carries the round's `nose_factor`, which the
-/// capability law reads beside mass and calibre. Own-type graph and REV move; capability itself
-/// never rides the wire.
-///
-/// REV 31 (a public impact outcome): the impact message's `penetrated` bool becomes a [`crate::ballistics::Verdict`]
-/// (`Through` / `Stopped` / `Ricochet` / `Struck`), so a peer can tell a round that stopped in the
-/// plate from one that went through, and a deflection from a stop that resolved no crossing. New
-/// embedded enum: own-type graph and REV move.
-///
-/// REV 32 (integer HP): [`VolumeSnapshot`]'s `hp` becomes a `u32` of whole HP points (one point is
-/// 0.1 reference-mm of dose, `ballistics::HP_PER_REFERENCE_MM`), the pools the authority now keeps
-/// as integers. Own-type graph and REV move.
-///
-/// REV 33 (the pen cam's explanation): `ShotExplanation` rides a new recipient-private
-/// [`ShotExplanationChannel`] to the shooter and the struck tank's player, and `CombatantLife`
-/// replicates beside `CombatantId`, so a client can tell the life an explanation is about from
-/// the one its tank is living. Surface, own-type graph and REV move. REV 33 has not shipped, so
-/// the round selector rides it, the REV-19 precedent: `TankCommand` gains the `select_round` edge,
-/// the authority's per-weapon round choice (`WeaponLoads`) replicates owner-private beside
-/// `WeaponGate`, and `FireEvent` names the fired round by its index in the weapon's round list in
-/// place of the round's physical fields, so a replica builds the round the authority fired from its
-/// own copy of the tank data. Surface and own-type graph move. The cone's field descriptor rides
-/// it too: each `WireCone` carries its field law and ratio (`spall_cone::FieldDescriptor`), from
-/// which the client rebuilds the cone's directions and weights. Own-type graph moves. The field law
-/// gains a burst's: the ball below a ratio of 1 and the ring (`FieldLaw::Ring`). Own-type graph
-/// moves. A record carries its round's burst (`WireBurst`) and a round can end in one
-/// (`WireEnd::Burst`). Own-type graph moves.
-///
-/// REV 34 (the fallen tree): the destruction ledger, one globally visible entity whose
-/// [`DestructionLedger`](super::destruction::DestructionLedger) lists every tree state transition
-/// as `(index, word, tick)` and replicates by diff. Surface and own-type graph move.
-///
-/// REV 35 (every burst is a ring, playtest fork F7 closed): a record's burst always names the nose
-/// piece's mass (`WireBurst::nose_kg` loses its `Option`), and no round ends at a burst
-/// (`WireEnd::Burst` leaves, the ball's end). The field law keeps the ball, which every plate
-/// exit's cone is thrown with. Own-type graph and REV move.
-///
-/// REV 36 (the game's damage model uses energy dose): `WireDose::line` and `field` carry HP
-/// points before rounding instead of reference-mm. The scalar types stay unchanged, but a REV 35
-/// client would read those values in the wrong units, so the protocol fingerprint must differ.
-/// REV 36 is unshipped, so the flight-nose drag form rides it: a replica builds the fired round
-/// from its own data, and peers on opposite sides would fly one shot on different drag and range
-/// tables even though the drag change adds no wire fields.
-///
-/// REV 37 (the game's damage model keeps fractional pools, and every field's strength is energy):
-/// [`VolumeSnapshot`]'s `held` (was `hp`), a record's `WireComponent::held` (was `hp`) and
-/// `WireDose::taken` (was `lost`) carry pool units (`ballistics::POOL_UNITS_PER_HP`, a thousandth
-/// of an HP point) instead of whole points. Postcard writes a renamed `u32` the same, so a REV 36
-/// peer would read every pool a thousand times fuller: own-type graph and REV move. `WireDose`
-/// gains `shown_taken`, the shown HP points the shot took counted settle by settle, sent where
-/// another round dosed the pool between the shot's marks and what it held at the shot less `taken`
-/// does not give them. Own-type graph moves. In the same revision `WireCone::strength` and every
-/// hit dose of a cone's palette carry joules instead of reference-mm (a spall cone's strength a
-/// share of the energy its round lost at the plate, a burst's scaled from the energy its explosive
-/// drives its wall with), and a bounce's shock enters `WireDose::line` at the energy rate: a
-/// REV 36 client would read the strengths in the wrong units and part its potency bands at a rate
-/// per reference-mm.
-/// REV 37 is unshipped, so the game's cosmetic hull marks ride it: every tank root carries
-/// public `HullMarks` (`hull_marks`), replicated by diff. Surface and own-type graph move.
-///
-/// REV 38: the debris stress lever's carriers (`debris_stress::DebrisPose`), one replicated pose
-/// per server-simulated fragment. Surface and own-type graph move.
-///
-/// REV 39 (the game's damage model picks a fuze mode): `TankCommand` gains the `toggle_fuze` edge,
-/// each `WeaponLoad` the crew's fuze mode per round type, and [`FireEvent`] the fired round's mode
-/// index, which the receiver binds the round in ([`crate::tank::WeaponRound::in_mode`]). Own-type
-/// graph and REV move.
-///
-/// REV 40 (#185, a client's download per remote tank): `TankTransmission` joins the owner-only
-/// disclosure scope and every tank root carries a public `EngineRpm` for the engine sound;
-/// `Rotation` rides `wire_quant`'s 6-byte smallest-three codec, `Position` its 8-byte millimetre
-/// fixed point and the velocities its 6-byte i16 triples; `TrackDrive` keeps the belt state alone,
-/// in `wire_quant`'s 10-byte belt codec, and its throttle and steer become the owner-only
-/// `DriveSignal`. Surface, own-type graph and REV move.
-///
-/// REV 41 (walls break): the construction ledger, one globally visible entity whose
-/// [`Ledger`](super::construction::Ledger) lists every construction change as `(construction, event,
-/// tick)` and replicates by diff, and each fallen group's [`Piece`] on its pose carrier.
-/// Surface and own-type graph move.
-///
-/// REV 42 (#189, holes in walls): the ledger's [`Event`] gains `Hole(chunk, Hole)`, a round's
-/// channel or a blast's crater dish in one chunk, drawn only: two `i16` millimetre points about
-/// the baked chunk's centroid and a `u16` millimetre radius. Own-type graph and REV move.
-///
-///
-/// REV 45 (#241, the match score): one globally visible entity's
-/// [`Scoreboard`](super::score::Scoreboard) lists each combatant's knockouts, losses and its
-/// knocked-out life's respawn opening, replicated whole. Surface and own-type graph move.
-///
-/// REV 46 (#240, the Battle cycle): `BattleState` carries the authority's phase, tick deadlines,
-/// Battle number and result. Netcode retains authenticated refusal causes and rechecks admission
-/// at challenge completion. The packet format is unchanged; the replicated surface and type graph move.
-///
-/// [`Piece`]: crate::construction::breakage::Piece
-/// [`Event`]: crate::construction::breakage::Event
-/// REV 55 (#236): tree motion uses the interpolated debris pose stream. The topology ledger
-/// carries only a state word; each freed trunk's TreePiece identifies its map tree and cut.
-/// REV 57: environment ledgers and pose carriers carry `WorldGeneration`; the Battle number
-/// selects a fresh construction and prevents records and streamed pieces crossing Battles.
-/// REV 61 (#238): `WeaponGateState` decodes through its phase rule and refuses paused load work
-/// beside a belt with rounds left. Its encoding is unchanged; its definition moves.
-/// REV 62 (#247): a fired round carries its birth at the source collider exit beside the muzzle.
-/// REV 63 (#238): respawn openings carry the shared SimTick deadline type.
-/// REV 64 (#228): the game's damage model carries a positive load rate in the weapon gate.
-/// REV 65 (#228): bounded load-work shares replace peer-authored rescalable spans; only load
-/// phases carry a rate, and zero-work/cyclic intervals carry none.
-/// REV 66 (#258, the game's damage model): `WireCone::strength` and every hit dose of a field's
-/// palette carry the energy the field carries (a cone's the energy its round lost times the exit's
-/// strength ratio, a burst's its wall's driven energy) instead of HP encoded as joules at the line
-/// rate. The scalar types stay unchanged, but a REV 65 client would part its potency bands at the
-/// wrong rate, so the protocol fingerprint must differ.
-/// REV 67 (#258, the game's damage model): `WireCone::strength` carries a cone's share of the
-/// energy its round lost, the debris share times the exit's strength ratio, and a client converts
-/// it at the cone's unit over that share; a field below the pool quantum is recorded without
-/// doses. The scalar types stay unchanged, but a REV 66 client would read every cone's potency
-/// at the wrong unit.
-/// REV 68 (#146, driving input): the client sends persistent signed notch intent and hold
-/// overrides; the server snaps opposing pedal signs to neutral. Wire types and surface are unchanged.
-/// REV 69 (#146, driving model): the main clutch carries Out, Slip or In on the wire.
-/// REV 70 (#258, the game's damage model): a kept carrier stops at first resisting contact,
-/// so recorded retained work includes its energy and later crossings carry only the core.
-/// Returning debris can dose its emitting body after genuine re-entry; every field's receiver
-/// contributions are recorded and accumulated before pool rounding.
-/// REV 71 (#258, the game's damage model): each public exit leg carries its own drag.
-/// REV 72 (#258, the game's damage-model view): first-contact marks retain the flying calibre;
-/// packed directions refuse zero at the wire edge, with the same three-byte representation.
-/// REV 73: owner-private respawn admission distinguishes waiting space from refused map picks.
-/// REV 74 (#146, driving model): support-priced C1-C3 gear selection removes scheduler memory.
-/// REV 75 (the game's damage-model view): hull-mark snapshots carry stable serials; diffs evict
-/// by physical footprint rather than arrival alone.
-/// REV 76 (#146, driving model): the brake law removes the hill-hold latch; a reversal counts its
-/// hold at rest.
-/// REV 77 (the game's environment destruction model): a freed piece carries its whole hull's mass
-/// and meets contacts on a hull 1 mm inside it.
-/// REV 78 (#146, driving model): eight canonical fields; construction rest and signed crank.
-/// REV 79 (#147, the game's damage model): the pressure contact law removes the entry bend and the
-/// overmatch verdict from what a crossing records.
-/// REV 80 (the game's environment destruction model): sorted tree carrier cuts partition
-/// moving construction; later seams can split and a stump can open a lower cut.
-/// REV 81 (#263, the game's damage model): compatibility checkpoint for the plate-capacity
-/// rollout. Wire layouts and client derivation are unchanged; the authority exports resolved paths.
-/// REV 82 (the game's spawn flow): respawn admission and map-pick refusal are independent owner-private facts.
-/// REV 83 (#198, driving model): direct ground grip and nominal-pressure rolling resistance.
-pub const PROTOCOL_REV: u32 = 86;
+/// Every wire change bumps this revision and re-pins the affected manifest hashes (ADR-0018).
+/// The game's environment destruction model carries shared causes and chunk-addressed groups;
+/// replacement and departure derive from the admitted graph on each peer.
+pub const PROTOCOL_REV: u32 = 87;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1058,12 +821,10 @@ const WIRE_SURFACE: &[&str] = &[
     "NetTankStatus",
     "RespawnState",
     "LaunchedTurretPose",
-    "DestructionLedger",
     "HullMarks",
     "DebrisPose",
     "Ledger",
     "Piece",
-    "TreePiece",
     "Scoreboard",
     "BattleState",
     "WorldGeneration",
@@ -1094,7 +855,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0xf6f4efee9a7cda11;
+const WIRE_SURFACE_HASH: u64 = 0x8ce64195b777b742;
 
 // Wire coverage: `plugin_registrations_match_wire_surface` binds registration order and channel
 // semantics to `WIRE_SURFACE`; `wire_surface_is_pinned` binds that list to the handshake. Neither
@@ -1108,7 +869,7 @@ const WIRE_SURFACE_HASH: u64 = 0xf6f4efee9a7cda11;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x4670e21a88eed9f2;
+const WIRE_TYPES_HASH: u64 = 0x570b2c9cd42cdbc4;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1139,10 +900,6 @@ pub(crate) fn plugin(app: &mut App) {
     // Authoritative launched-turret world pose (same plain-replication shape): the client shows the
     // cooked-off toss it does NOT simulate locally, writing the pose onto its own rig turret.
     app.component::<LaunchedTurretPose>().replicate();
-    // The destruction ledger (one world entity): appended entries ride as diffs, a late joiner
-    // takes the list once.
-    app.component::<super::destruction::DestructionLedger>()
-        .replicate_diff();
     // Each tank root's hull marks, public (ADR-0039): new marks ride as diffs, a late joiner takes
     // the held set once.
     app.component::<crate::hull_marks::HullMarks>()
@@ -1160,7 +917,6 @@ pub(crate) fn plugin(app: &mut App) {
     // with the carrier.
     app.component::<crate::construction::breakage::Piece>()
         .replicate();
-    app.component::<crate::trees::TreePiece>().replicate();
     // The match score (one world entity): sent whole when a knockout changes it, a late joiner
     // takes it once.
     app.component::<super::score::Scoreboard>().replicate();
@@ -2019,8 +1775,6 @@ mod tests {
         ("src/net/protocol.rs", "VolumeSnapshot"),
         ("src/net/protocol.rs", "CrewSnapshot"),
         ("src/net/protocol.rs", "LaunchedTurretPose"),
-        ("src/net/destruction.rs", "DestructionLedger"),
-        ("src/net/destruction.rs", "LedgerEntry"),
         ("src/hull_marks.rs", "HullMarks"),
         ("src/hull_marks.rs", "HullMark"),
         ("src/hull_marks.rs", "PackedDirection"),
@@ -2034,7 +1788,6 @@ mod tests {
         ("src/construction/breakage.rs", "Event"),
         ("src/construction/breakage.rs", "Hole"),
         ("src/construction/breakage.rs", "Piece"),
-        ("src/trees/motion.rs", "TreePiece"),
         ("src/net/score.rs", "Scoreboard"),
         ("src/net/battle.rs", "BattleState"),
         ("src/world.rs", "WorldGeneration"),

@@ -683,11 +683,12 @@ fn present_record(
         );
         holes.0.resize(shape.fate.len(), Vec::new());
         for event in events {
-            shape.apply(event);
+            shape.apply(event, &breakage.kind.layout);
             if let Event::Hole(c, hole) = event {
                 holes.0[usize::from(c)].push(hole);
             }
         }
+        shape.derive_departures(&breakage.kind.layout, &breakage.live);
         match shown {
             Some(mut shown) => {
                 shown.set_if_neq(ShownShape(shape));
@@ -1320,7 +1321,7 @@ mod tests {
         world.insert_resource(Record {
             entries: vec![Entry {
                 construction: 3,
-                event: Event::Swap(0),
+                event: Event::Wear(0),
                 tick: 0,
             }],
             ..default()
@@ -1363,7 +1364,7 @@ mod tests {
         world.insert_resource(Record {
             entries: vec![Entry {
                 construction: 3,
-                event: Event::Swap(0),
+                event: Event::Wear(0),
                 tick: 9,
             }],
             ..default()
@@ -2270,8 +2271,18 @@ mod tests {
     /// before the cursor. Ticks are fixture data.
     #[test]
     fn each_card_is_drawn_once_by_the_matter_holding_its_base() {
-        let (e, chunks) = chunked_element(&shipped_house().layout);
-        let (fallen, dusted) = (chunks.start, chunks.start + 1);
+        let source = Breakage::new(shipped_house(), 3, 1.0);
+        let structure = &source.live.structure;
+        let fallen = structure.chunks.iter().position(|c| !c.buried).unwrap();
+        let dusted = structure.chunks.iter().position(|c| c.buried).unwrap();
+        let causes = structure
+            .joints
+            .iter()
+            .enumerate()
+            .filter(|(_, joint)| {
+                joint.a == fallen || joint.b == super::super::fracture::Side::Chunk(fallen)
+            })
+            .map(|(j, _)| Event::Crack(j as u16));
         let (kind, firsts) = carded_house(&[fallen, dusted]);
         let kind = std::sync::Arc::new(kind);
         let mut app = App::new();
@@ -2281,17 +2292,15 @@ mod tests {
         world.insert_resource(Time::<Fixed>::default());
         world.init_resource::<Assets<StandardMaterial>>();
         world.insert_resource(Record {
-            entries: [
-                (Event::Swap(e as u16), 10),
-                (Event::Fall(fallen as u16), 10),
-                (Event::Dust(dusted as u16), 12),
-            ]
-            .map(|(event, tick)| crate::construction::breakage::Entry {
-                construction: 3,
-                event,
-                tick,
-            })
-            .to_vec(),
+            entries: causes
+                .map(|event| (event, 10))
+                .chain([(Event::Dust(dusted as u16), 12)])
+                .map(|(event, tick)| crate::construction::breakage::Entry {
+                    construction: 3,
+                    event,
+                    tick,
+                })
+                .collect(),
             ..default()
         });
         let intact = world.resource_mut::<Assets<Mesh>>().add(mesh(&kind));

@@ -26,8 +26,6 @@ pub(crate) use death_screen::{mount_bare as mount_death_screen, shows_died};
 /// rest, their poses replicated, drawn by clients.
 mod debris_stress;
 mod debug_hud;
-/// The destruction ledger: tree state transitions on one globally visible entity.
-mod destruction;
 mod diagnostics;
 mod disclosure;
 /// The owner's fire presentation: intent edges on the local tick, the arriving gate reconciled as a

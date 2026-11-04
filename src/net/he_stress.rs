@@ -239,7 +239,6 @@ mod tests {
     }
 
     fn assert_real_flight(mut app: App) {
-        use crate::construction::breakage::Record;
         app.add_plugins(crate::server_plugin_floor())
             .add_plugins(super::super::physics::physics_plugins())
             .add_plugins(crate::SimPlugin)
@@ -312,16 +311,10 @@ mod tests {
             .map(|id| id.ordinal)
             .min()
             .unwrap();
-        let falls = app
-            .world()
-            .resource::<Record>()
-            .entries
-            .iter()
-            .filter(|entry| {
-                entry.construction == target
-                    && matches!(entry.event, crate::construction::breakage::Event::Fall(_))
-            })
-            .count();
+        let falls = app.world_mut().query_filtered::<&crate::construction::breakage::Breakage, Without<crate::construction::breakage::Piece>>()
+            .iter(app.world()).filter(|b| b.construction == target)
+            .flat_map(|b| b.live.state.fate.iter())
+            .filter(|&&fate| fate == crate::construction::fracture::Fate::Fallen).count();
         println!(
             "MEASURED shipped game destruction: fired={} bursts={} target={target} falls={falls}",
             app.world().resource::<HeStress>().fired,
@@ -433,12 +426,22 @@ mod tests {
                 .iter()
                 .any(|entry| entry.construction == ordinal && entry.event == Event::Dust(0))
         );
-        let fallen: BTreeSet<_> = record
+        let fixture = crate::construction::breakage::Breakage::new(kind.clone(), ordinal, 1.0);
+        let mut derived = crate::construction::breakage::Shape::intact(&kind.layout);
+        for entry in record
             .entries
             .iter()
-            .filter_map(|entry| match entry.event {
-                Event::Fall(chunk) if entry.construction == ordinal => Some(chunk),
-                _ => None,
+            .filter(|entry| entry.construction == ordinal)
+        {
+            derived.apply(entry.event, &kind.layout);
+        }
+        derived.derive_departures(&kind.layout, &fixture.live);
+        let fallen: BTreeSet<_> = derived
+            .fate
+            .iter()
+            .enumerate()
+            .filter_map(|(chunk, fate)| {
+                (*fate == crate::construction::fracture::Fate::Fallen).then_some(chunk as u16)
             })
             .collect();
         let unsupported: BTreeSet<_> = (1..kind.asset.chunks.len())
@@ -446,7 +449,7 @@ mod tests {
             .collect();
         assert_eq!(
             fallen, unsupported,
-            "support loss must reach the destruction ledger in this update"
+            "support loss must derive from the recorded causes in this update"
         );
         println!(
             "MEASURED controlled game destruction: threshold={threshold} J, delivered={} J, fallen={fallen:?}",
