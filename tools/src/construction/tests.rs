@@ -228,15 +228,11 @@ fn houses() -> Vec<House> {
     houses
 }
 
-/// THE ROOF IS LAID IN ITS AUTHORED BOARDS, EACH ITS OWN COMPONENT: each roof plane (the boards on
-/// one side of the ridge, the construction frame's `x = 0`) is `boards_per_slope` pieces, every two
-/// neighbours sharing a whole side, `board_thickness_m` deep along the board's length, each board
-/// with two neighbours `board_width_m` across between them, and no other piece in a board's
-/// component. The cutter cuts each piece alone (`the_chunks_tile_each_element`), and a board's own
-/// seam holds only its cuts, so only the joins hold one board to the next (`assert_bond_kinds`);
-/// the roof's response and its view rely on that. Widths and lengths are read from the laid
-/// pieces. Mutant: a plane laid as one slab, two boards as one piece, or a plane's boards in one
-/// component (held by timber's seam across their joints), fails here.
+/// Each roof slope has `boards_per_slope` pieces with unique components and full-side contacts
+/// `board_thickness_m` deep along their laid lengths; interior boards are `board_width_m` across.
+/// Roof response and view rely on joins alone holding boards together: `the_chunks_tile_each_element`
+/// checks cuts within pieces; `assert_bond_kinds` checks seams within components and joins between.
+/// Mutants: a slope as one slab, two boards merged into one piece, or boards sharing a component.
 #[test]
 fn each_roof_board_is_its_own_piece_and_component() {
     for house in houses() {
