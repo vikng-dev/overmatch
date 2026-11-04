@@ -2310,7 +2310,7 @@ mod hosted_e2e;
 
 /// The matchmaking exits through the installed lifecycle, over real UDP.
 #[cfg(test)]
-mod match_exit;
+pub(super) mod match_exit;
 
 /// In-crate ECS tests can reach private `tank` types (`TankSim` / `Weapon` / `WeaponIndex`)
 /// unavailable to external integration tests. Recoil probes exercise the local-spec derivation.

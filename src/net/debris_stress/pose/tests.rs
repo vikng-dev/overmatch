@@ -1,14 +1,14 @@
-use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+use bevy::ecs::message::MessageCursor;
 use bevy::prelude::*;
-use lightyear::prelude::client::{ClientPlugins, NetcodeClient};
+use lightyear::prelude::client::NetcodeClient;
 use lightyear::prelude::*;
 
 use super::*;
-use crate::net::debris_stress::{debris_pose_lerp, install_client};
-use crate::net::matchmaking::ServerGone;
-use crate::net::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
+use crate::net::debris_stress::debris_pose_lerp;
+use crate::net::matchmaking::MatchClosed;
+use crate::net::test_harness::lock_real_udp_test;
 
 /// Replica interpolation may only see finite positions and unit rotations. Fixture coordinates
 /// span malformed components as well as the finite extremes; no received value is normalized away.
@@ -74,48 +74,14 @@ fn deserialization_checks_the_pose_without_changing_valid_wire_values() {
     }
 }
 
-fn client(port: u16) -> App {
-    let mut app = base_app();
-    app.add_plugins(ClientPlugins {
-        tick_duration: TICK,
-    });
-    crate::net::protocol::plugin(&mut app);
-    install_client(&mut app);
-    let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
-    let link = app
-        .world_mut()
-        .spawn((
-            Client,
-            Link::default(),
-            LocalAddr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)),
-            PeerAddr(server_addr),
-            ReplicationReceiver,
-            NetcodeClient::new(
-                Authentication::Manual {
-                    server_addr,
-                    client_id: 1,
-                    private_key: [0; 32],
-                    protocol_id: crate::net::protocol::protocol_id(),
-                },
-                lightyear::prelude::client::NetcodeConfig::default(),
-            )
-            .unwrap(),
-            UdpIo::default(),
-        ))
-        .id();
-    app.world_mut().commands().trigger(Connect { entity: link });
-    finish(&mut app);
-    app
-}
-
 /// Clients rely on the installed codec refusing mutations before interpolation. Bypassing the
 /// checked registration loses the visible cause; admitting the record puts invalid game state in
-/// history. Both fail this real-UDP witness, which mounts the production protocol and installer.
+/// history. The shipped lifecycle must close the link and report the cause in the lobby; leaving
+/// the link alive or reconnecting after refusal also fails this real-UDP witness.
 #[test]
 fn malformed_updates_are_visibly_refused_before_interpolation() {
     let _udp = lock_real_udp_test();
-    let port = free_port();
-    let mut server = crate::net::link_drop::build_server(port);
+    let (mut server, mut client) = crate::net::client::match_exit::in_match();
     // Fixture pose: the first sample establishes a real interpolation history before corruption.
     let valid = DebrisPose {
         position: Vec3::new(3.0, 2.0, -1.0),
@@ -129,10 +95,9 @@ fn malformed_updates_are_visibly_refused_before_interpolation() {
             InterpolationTarget::to_clients(NetworkTarget::All),
         ))
         .id();
-    finish(&mut server);
-    let mut client = client(port);
     let mut corrupted = false;
     let mut refused = false;
+    let mut closed = MessageCursor::<MatchClosed>::default();
     for _ in 0..2000 {
         server.update();
         std::thread::sleep(Duration::from_micros(300));
@@ -157,17 +122,15 @@ fn malformed_updates_are_visibly_refused_before_interpolation() {
                 .rotation = Quat::from_array([0.0; 4]);
             corrupted = true;
         }
-        let causes: Vec<_> = client
-            .world_mut()
-            .resource_mut::<Messages<ServerGone>>()
-            .drain()
+        let causes: Vec<_> = closed
+            .read(client.world().resource::<Messages<MatchClosed>>())
+            .cloned()
             .collect();
         if !causes.is_empty() {
             assert!(corrupted, "a valid stream must not be refused");
-            assert!(
-                causes
-                    .iter()
-                    .all(|cause| cause.0 == PoseRefusal::Rotation.to_string())
+            assert_eq!(
+                causes,
+                vec![MatchClosed::Ended(PoseRefusal::Rotation.to_string())]
             );
             refused = true;
             break;
@@ -177,5 +140,34 @@ fn malformed_updates_are_visibly_refused_before_interpolation() {
     assert!(
         refused,
         "malformed peer input must reach the visible match-close path"
+    );
+    crate::net::client::match_exit::advance_past_reconnect_window(&mut client);
+    // Fixture frames allow the lifecycle's deferred despawn and lobby transition to settle,
+    // with each frame advancing beyond the policy's reconnect window.
+    for _ in 0..8 {
+        server.update();
+        client.update();
+        assert_eq!(
+            client
+                .world_mut()
+                .query_filtered::<(), With<NetcodeClient>>()
+                .iter(client.world())
+                .count(),
+            0,
+            "a refused stream loses its link and never reconnects"
+        );
+    }
+    assert_eq!(
+        *client.world().resource::<State<crate::flow::Flow>>().get(),
+        crate::flow::Flow::Lobby
+    );
+    let cause = PoseRefusal::Rotation.to_string();
+    assert!(
+        client
+            .world_mut()
+            .query::<&Text>()
+            .iter(client.world())
+            .any(|text| text.0.contains(&cause)),
+        "the production lobby tells the player why the stream was refused"
     );
 }

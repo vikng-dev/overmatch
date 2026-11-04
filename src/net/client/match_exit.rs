@@ -68,6 +68,7 @@ fn client_app() -> App {
         tick_duration: TICK,
     });
     crate::net::protocol::plugin(&mut app);
+    crate::net::debris_stress::install_client(&mut app);
     // The lobby screen's card draws with the bundled font.
     app.init_asset::<Font>()
         .add_plugins((crate::ui_font::plugin, crate::flow::plugin))
@@ -97,6 +98,14 @@ fn client_app() -> App {
     app.init_resource::<Closed>()
         .add_systems(Update, record_closed);
     app
+}
+
+/// Advance each subsequent fixture frame past the shipped reconnect window.
+pub(in crate::net) fn advance_past_reconnect_window(app: &mut App) {
+    let policy = client_policy();
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        policy.reconnect_give_up_s.0 + policy.reconnect_cap_s.0,
+    )));
 }
 
 fn step(server: Option<&mut App>, client: &mut App) {
@@ -129,7 +138,7 @@ fn server_clients(server: &mut App) -> usize {
 }
 
 /// A ready match → the link → connected, in the match on both ends.
-fn in_match() -> (App, App) {
+pub(in crate::net) fn in_match() -> (App, App) {
     let port = free_port();
     let mut server = crate::net::link_drop::build_server(port);
     let mut client = client_app();
