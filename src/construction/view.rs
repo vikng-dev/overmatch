@@ -349,13 +349,19 @@ impl Faces {
         }
     }
 
-    /// Element `e`'s hull faces, its original exterior skinned (module doc).
+    /// Element `e`'s hull faces, its original exterior skinned, and its owned cards.
     fn element(&mut self, kind: &ConstructionKind, e: usize) {
         let look = ElementLook::of(&kind.asset, e);
         for (n, corners) in hull_faces(&kind.asset.elements[e].points()) {
             let tint = skin_tint(kind, e, n, &corners);
             self.face(n, &corners, &look, Vec3::ZERO, (0.0, tint));
         }
+        self.cards(
+            kind,
+            &look,
+            |c| usize::from(kind.layout.element_of[c]) == e,
+            Vec3::ZERO,
+        );
     }
 
     /// Law chunk `c`'s hull with its element's look, drawn `offset` back, its faces tagged `tag`
@@ -414,15 +420,8 @@ pub(crate) fn mesh(kind: &ConstructionKind) -> Mesh {
     let mut faces = Faces::default();
     for e in 0..kind.layout.element_blocks.len() {
         faces.element(kind, e);
-        let look = ElementLook::of(&kind.asset, e);
-        faces.cards(kind, &look, |c| chunk_of(kind, c) == e, Vec3::ZERO);
     }
     faces.mesh()
-}
-
-/// The element law chunk `c` tiles.
-fn chunk_of(kind: &ConstructionKind, c: usize) -> usize {
-    usize::from(kind.layout.element_of[c])
 }
 
 /// A broken construction's mesh in its own frame at scale 1: every whole element's hull, and every
@@ -439,8 +438,6 @@ pub(crate) fn broken_mesh(kind: &ConstructionKind, shape: &Shape) -> Mesh {
             }
         } else {
             faces.element(kind, e);
-            let look = ElementLook::of(&kind.asset, e);
-            faces.cards(kind, &look, |c| chunk_of(kind, c) == e, Vec3::ZERO);
         }
     }
     faces.mesh()
@@ -2427,14 +2424,13 @@ mod tests {
         let Some(Indices::U32(indices)) = mesh.indices() else {
             panic!("u32 indices");
         };
-        let card = tint(crate::vfx::construction_dressing().card_srgb);
         // Each vertex's chunk: its hole tag − 1, every element being swapped.
         let tags = tags(&mesh);
         let owner = |k: usize| tags[k] as usize - 1;
         let (mut barked, mut cut) = (0, 0);
         for (triangle, first) in triangles(&mesh).iter().zip(indices.iter().step_by(3)) {
             let k = *first as usize;
-            if colors[k] == card {
+            if tags[k] == 0.0 {
                 continue;
             }
             let [a, b, c] = *triangle;
@@ -2458,7 +2454,11 @@ mod tests {
             let underside = n.y < -0.999
                 && (centre.y - kind.asset.foundation_y_m).abs() < CRACK_FACE_TOLERANCE_M;
             let exterior = boundary && !inside && !underside;
-            assert_eq!(colors[k] == skin, exterior, "face at {centre} facing {n}");
+            assert_eq!(
+                colors[k],
+                if exterior { skin } else { UNTINTED },
+                "face at {centre} facing {n}"
+            );
             if exterior {
                 barked += 1;
             } else {

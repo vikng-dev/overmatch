@@ -5055,17 +5055,7 @@ fn reconciliation_prepares_the_same_ordered_geometry_across_workers() {
                         .into_iter()
                         .flatten()
                     {
-                        match change {
-                            ColliderChange::Despawn(entity) => {
-                                commands.entity(entity).despawn();
-                            }
-                            ColliderChange::Element(bundle) => {
-                                commands.spawn(bundle);
-                            }
-                            ColliderChange::Chunk(bundle) => {
-                                commands.spawn(bundle);
-                            }
-                        }
+                        change.apply(&mut commands);
                     }
                 },
             )

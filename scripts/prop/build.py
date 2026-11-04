@@ -753,6 +753,8 @@ def build(blend: str, root: str, work: str, blender: str, publish: bool) -> int:
     spec = construction_path(root, stem)
     dressed = dressing_path(root, stem)
     cert = certificate(view_blob, read(tree_ron), text.encode(), len(js.get("meshes", [])))
+    for path in (glb, spec, dressed, cert_path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
     land(glb, view_blob)
     land(spec, text.encode())
     land(dressed, dressed_blob)
@@ -827,6 +829,10 @@ def run(mode: str, blend: str) -> int:
             if mode == "verify":
                 return verify(blend, root, work, program.binary)
             return build(blend, root, work, program.binary, publish=mode == "build")
+    except OSError as error:
+        print("build ▸ {} refused at filesystem: {} — publication may be incomplete; "
+              "fix the filesystem and rebuild".format(mode, error), flush=True)
+        return 1
     except Refused as refusal:
         for line in refusal.failures:
             print("  - {}".format(line), flush=True)

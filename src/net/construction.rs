@@ -121,16 +121,20 @@ fn publish_record(
 /// Another ledger identity replaces the record and advances its generation. Within one identity
 /// the authority only appends; duplicates, shrinking and malformed entries refuse the match.
 fn receive_ledger(
-    ledgers: Query<(Entity, Ref<Ledger>, &WorldGeneration)>,
+    ledgers: Query<(Entity, Ref<Ledger>, Option<&WorldGeneration>)>,
     generation: Res<CurrentWorld>,
     constructions: Query<&Breakage, Without<Piece>>,
     mut copied: Local<(Option<Entity>, usize)>,
     mut record: ResMut<Record>,
     mut refused: MessageWriter<ConstructionRefusal>,
 ) {
+    if ledgers.iter().any(|(_, _, belongs)| belongs.is_none()) {
+        refused.write(ConstructionRefusal::UntaggedLedger);
+        return;
+    }
     let mut current = ledgers
         .iter()
-        .filter(|(_, _, belongs)| Some(**belongs) == generation.0);
+        .filter(|(_, _, belongs)| belongs.copied() == generation.0);
     let (ledger, entries, _) = match current.next() {
         Some(ledger) => ledger,
         // Before the first snapshot, or between links, no authority ledger has arrived yet.
@@ -182,6 +186,7 @@ fn receive_ledger(
 #[derive(Message, Debug, Clone, PartialEq)]
 enum ConstructionRefusal {
     DuplicateLedgers,
+    UntaggedLedger,
     UntaggedPiece,
     RewrittenLedger,
     ShrunkLedger { copied: usize, received: usize },
@@ -194,6 +199,7 @@ impl std::fmt::Display for ConstructionRefusal {
         f.write_str("Server construction stream refused: ")?;
         match self {
             Self::RewrittenLedger => f.write_str("ledger rewrote previously admitted entries"),
+            Self::UntaggedLedger => f.write_str("ledger has no world generation"),
             Self::UntaggedPiece => f.write_str("piece has no world generation"),
             Self::DuplicateLedgers => f.write_str("multiple ledgers for the selected world"),
             Self::ShrunkLedger { copied, received } => {
@@ -329,6 +335,31 @@ mod tests {
         app
     }
 
+    fn admitted_ledger() -> (App, Entity, Record) {
+        let mut app = replica();
+        let ledger = app
+            .world_mut()
+            .spawn((
+                Ledger(vec![entry(Event::Wear(0), 3)]),
+                WorldGeneration::default(),
+            ))
+            .id();
+        app.update();
+        let before = app.world().resource::<Record>().clone();
+        (app, ledger, before)
+    }
+
+    /// A peer ledger without world identity must close the match and preserve admitted state,
+    /// even when another, correctly tagged ledger is present.
+    #[test]
+    fn an_untagged_peer_ledger_is_visibly_refused() {
+        let (mut app, _, before) = admitted_ledger();
+        app.world_mut().spawn(Ledger::default());
+        app.update();
+        assert_eq!(*app.world().resource::<Record>(), before);
+        assert_refused(&mut app, ConstructionRefusal::UntaggedLedger);
+    }
+
     /// A malformed entry refuses the entire batch visibly, preserving the previous admitted
     /// record. Accepting surrounding entries would leave the player's destruction record incomplete.
     #[test]
@@ -354,16 +385,7 @@ mod tests {
                 EntryError::OutsideLayout(1, Event::Wear(u16::MAX)),
             ),
         ] {
-            let mut app = replica();
-            let ledger = app
-                .world_mut()
-                .spawn((
-                    Ledger(vec![entry(Event::Wear(0), 3)]),
-                    WorldGeneration::default(),
-                ))
-                .id();
-            app.update();
-            let before = app.world().resource::<Record>().clone();
+            let (mut app, ledger, before) = admitted_ledger();
             app.world_mut()
                 .get_mut::<Ledger>(ledger)
                 .unwrap()
@@ -446,16 +468,7 @@ mod tests {
     /// A peer cannot replace its append-only ledger with a shorter same-identity snapshot.
     #[test]
     fn a_shrinking_peer_ledger_is_visibly_refused() {
-        let mut app = replica();
-        let ledger = app
-            .world_mut()
-            .spawn((
-                Ledger(vec![entry(Event::Wear(0), 3)]),
-                WorldGeneration::default(),
-            ))
-            .id();
-        app.update();
-        let before = app.world().resource::<Record>().clone();
+        let (mut app, ledger, before) = admitted_ledger();
         app.world_mut().get_mut::<Ledger>(ledger).unwrap().0.clear();
         app.update();
         assert_eq!(*app.world().resource::<Record>(), before);
@@ -473,16 +486,7 @@ mod tests {
     #[test]
     fn a_peer_cannot_rewrite_previously_admitted_entries() {
         for event in [Event::Dust(0), Event::Dust(u16::MAX)] {
-            let mut app = replica();
-            let ledger = app
-                .world_mut()
-                .spawn((
-                    Ledger(vec![entry(Event::Wear(0), 3)]),
-                    WorldGeneration::default(),
-                ))
-                .id();
-            app.update();
-            let before = app.world().resource::<Record>().clone();
+            let (mut app, ledger, before) = admitted_ledger();
             app.world_mut().get_mut::<Ledger>(ledger).unwrap().0[0] = entry(event, 3);
             app.update();
             assert_eq!(*app.world().resource::<Record>(), before);

@@ -2813,6 +2813,22 @@ enum ColliderChange<E, C> {
     Chunk(C),
 }
 
+impl<E: Bundle, C: Bundle> ColliderChange<E, C> {
+    fn apply(self, commands: &mut Commands) {
+        match self {
+            Self::Despawn(entity) => {
+                commands.entity(entity).despawn();
+            }
+            Self::Element(bundle) => {
+                commands.spawn(bundle);
+            }
+            Self::Chunk(bundle) => {
+                commands.spawn(bundle);
+            }
+        }
+    }
+}
+
 fn prepare_reconcile(
     root: Entity,
     transform: &Transform,
@@ -2904,17 +2920,7 @@ fn reconcile(
     // Direct scoped submissions collect in query order. All hulls are ready before this flush,
     // and refit_systems exposes every new collider to spatial queries in the same update.
     for effect in effects.into_iter().flatten() {
-        match effect {
-            ColliderChange::Despawn(entity) => {
-                commands.entity(entity).despawn();
-            }
-            ColliderChange::Element(bundle) => {
-                commands.spawn(bundle);
-            }
-            ColliderChange::Chunk(bundle) => {
-                commands.spawn(bundle);
-            }
-        }
+        effect.apply(&mut commands);
     }
 }
 

@@ -15,6 +15,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -337,6 +338,55 @@ class CertificateMutants(unittest.TestCase):
 
 
 # ── mutants: the construction against its view ──────────────────────────────────────────────────
+
+class Publication(unittest.TestCase):
+    """Only admitted artifacts publish, including the first build of a construction kind."""
+
+    def setUp(self):
+        self.work = tempfile.TemporaryDirectory(prefix="prop-publish-")
+        self.addCleanup(self.work.cleanup)
+        self.root = self.work.name
+        source = os.path.join(self.root, "assets", "trees", "fir_1")
+        os.makedirs(source)
+        shutil.copyfile(TABLE, os.path.join(self.root, build.SPECIES_TABLE))
+        self.blend = os.path.join(source, "fir_1.blend")
+        shutil.copyfile(FIR + ".tree.ron", build.paths(self.blend)[1])
+        self.view = build.read(FIR + ".glb")
+
+    def test_first_build_creates_the_construction_directory_after_admission(self):
+        spec = build.construction_path(self.root, "fir_1")
+        self.assertFalse(os.path.exists(os.path.dirname(spec)))
+        with mock.patch.object(build, "export", return_value=self.view):
+            self.assertEqual(build.build(self.blend, self.root, self.root, "unused", True), 0)
+        glb, source, cert = build.paths(self.blend)
+        self.assertEqual(build.read(glb), self.view)
+        self.assertEqual(build.coherence(json.loads(build.read(cert)), build.read(glb),
+                                         build.read(source), build.read(spec)), [])
+        self.assertEqual(build.read(build.dressing_path(self.root, "fir_1")),
+                         build.dressing(self.view, TABLE, "fir_1").encode())
+
+    def test_invalid_dressing_refuses_lint_and_build_before_publication(self):
+        glb = build.paths(self.blend)[0]
+        build.land(glb, b"previous admitted artifact")
+        for publish in (False, True):
+            with mock.patch.object(build, "export", return_value=self.view), \
+                 mock.patch.object(build, "dressing", side_effect=build.Refused("dressing", ["bad card"])):
+                with self.assertRaises(build.Refused) as caught:
+                    build.build(self.blend, self.root, self.root, "unused", publish)
+            self.assertEqual(caught.exception.stage, "dressing")
+            self.assertEqual(build.read(glb), b"previous admitted artifact")
+            self.assertFalse(os.path.exists(build.construction_path(self.root, "fir_1")))
+
+    def test_filesystem_failure_reaches_the_command_as_a_visible_refusal(self):
+        with mock.patch.object(build.toolchain, "finding", return_value=None), \
+             mock.patch.object(build, "build", side_effect=PermissionError(13, "fixture denied", self.blend)), \
+             mock.patch("builtins.print") as printed:
+            self.assertEqual(build.run("build", self.blend), 1)
+        diagnostic = " ".join(str(call) for call in printed.call_args_list)
+        self.assertIn("filesystem", diagnostic)
+        self.assertIn("fixture denied", diagnostic)
+        self.assertIn("publication may be incomplete", diagnostic)
+
 
 @unittest.skipIf(BLENDER.mismatch, "the pinned Blender is not here: {}".format(BLENDER))
 class Generation(unittest.TestCase):
