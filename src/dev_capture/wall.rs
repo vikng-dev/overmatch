@@ -8,9 +8,10 @@
 //! nothing, and logs the camera its capture clients hold as a plan fragment (a `frames.camera`
 //! value), so every peer frames the one break the server made. The wall is chosen by class, the
 //! same on every run: the building nearest the map's centre (the lowest ordinal on a tie), its
-//! breakable pier of the largest volume (the lowest element on a tie). A round is fired 25 m out
-//! along the pier's outward normal at the chunk nearest the pier's centre; a charge sits on the
-//! pier's outer face at its foot, its energy its named burst core's chemical energy per kilogram
+//! breakable pier of the largest volume (the lowest element on a tie). A round is fired out
+//! along the pier's outward normal at the chunk nearest the pier's centre; `assets/dev/capture-wall.ron`
+//! owns the staging distances (m). A charge sits on the pier's outer face near its foot, its
+//! energy its named burst core's chemical energy per kilogram
 //! times its mass, with no casing.
 //!
 //! When the plan's `frames.camera` places the camera (a pose or a follow), the cue leaves the
@@ -18,7 +19,6 @@
 
 use bevy::prelude::*;
 
-use super::plan::WallShot;
 use crate::ballistics::FireShell;
 use crate::buildings::breakage::{Breakage, WallCharge};
 use crate::buildings::fracture::Blast;
@@ -26,21 +26,137 @@ use crate::buildings::schema::ElementKind;
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
 
-/// How far out along the wall's normal a round is fired from, m (fixture).
-const STANDOFF_M: f32 = 25.0;
-/// The camera's distance out from the wall's outer face and its height over the aim point, m
-/// (ASSUMED framing: the pier and its neighbours fill the frame).
-const CAMERA_OUT_M: f32 = 7.0;
-const CAMERA_UP_M: f32 = 0.6;
-
-#[derive(Clone, Debug)]
-enum What {
+/// The game's damage model: a resolved wall cue, constructed at plan admission.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum What {
     /// Boxed: a fired round carries its whole muzzle emission.
     Round(Box<crate::rounds::Round>),
-    Charge {
-        mass: f32,
-        core: crate::substances::BurstFacts,
-    },
+    Charge(Charge),
+}
+
+/// The game's damage model: a complete bare charge whose derived quantities fit simulation units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Charge {
+    mass: f32,
+    blast: Blast,
+}
+
+#[derive(Debug)]
+pub(super) enum CueError {
+    Round(crate::guns::GunError),
+    Mode { round: String, mode: u8 },
+    Core(crate::substances::SubstanceError),
+    NoBurst { core: String },
+    Mass { kg: f32 },
+    Derived { kg: f32, quantity: &'static str },
+}
+
+impl std::fmt::Display for CueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Round(error) => write!(
+                f,
+                "wall.shots.round: {error}; name a round chambered by one shipped gun"
+            ),
+            Self::Mode { round, mode } => write!(
+                f,
+                "wall.shots.mode: round {round:?} has no mode {mode}; choose 0 for an inert round or one of its authored fuze modes"
+            ),
+            Self::Core(error) => write!(
+                f,
+                "wall.shots.core: {error}; name a materials.ron row with burst facts"
+            ),
+            Self::NoBurst { core } => write!(
+                f,
+                "wall.shots.core: {core:?} states no burst facts; name a materials.ron row that does"
+            ),
+            Self::Mass { kg } => write!(
+                f,
+                "wall.shots.kg: {kg} is not finite and positive; supply a finite positive mass"
+            ),
+            Self::Derived { kg, quantity } => write!(
+                f,
+                "wall.shots.kg: {kg} kg produces {quantity} outside finite positive simulation units; reduce kg for overflow or increase it for underflow"
+            ),
+        }
+    }
+}
+
+impl What {
+    pub(super) fn round(key: &str, mode: u8) -> Result<Self, CueError> {
+        let round = crate::tank::WeaponRound::resolve(key).map_err(CueError::Round)?;
+        let round = round.in_mode(mode).ok_or_else(|| CueError::Mode {
+            round: key.into(),
+            mode,
+        })?;
+        Ok(Self::Round(Box::new(round)))
+    }
+
+    pub(super) fn charge(kg: f32, name: &str) -> Result<Self, CueError> {
+        if !(kg.is_finite() && kg > 0.0) {
+            return Err(CueError::Mass { kg });
+        }
+        let core = SubstanceRegistry::shipped_static()
+            .get(name)
+            .map_err(CueError::Core)?
+            .burst()
+            .ok_or_else(|| CueError::NoBurst { core: name.into() })?;
+        let radius = (3.0 * kg / (4.0 * std::f32::consts::PI * core.density as f32)).cbrt();
+        let energy = kg * core.chemical_energy as f32;
+        // The game's damage model: bare products expand at the burst law's no-casing speed, K sqrt(2).
+        let products = crate::ballistics::burst::products_momentum(
+            kg,
+            core.speed_constant as f32 * std::f32::consts::SQRT_2,
+        );
+        for (quantity, value) in [
+            ("radius", radius),
+            ("energy", energy),
+            ("products momentum", products),
+        ] {
+            if !(value.is_finite() && value > 0.0) {
+                return Err(CueError::Derived { kg, quantity });
+            }
+        }
+        Ok(Self::Charge(Charge {
+            mass: kg,
+            blast: Blast::of(energy, radius, products),
+        }))
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Staging {
+    round_standoff_m: crate::provenance::Sourced<f32>,
+    camera_out_m: crate::provenance::Sourced<f32>,
+    camera_up_m: crate::provenance::Sourced<f32>,
+    inside_inset_m: crate::provenance::Sourced<f32>,
+    charge_height_m: crate::provenance::Sourced<f32>,
+}
+
+fn staging() -> &'static Staging {
+    static STAGING: std::sync::LazyLock<Staging> = std::sync::LazyLock::new(|| {
+        crate::provenance::shipped("assets/dev/capture-wall.ron", || {
+            let staging: Staging = ron::from_str(include_str!("../../assets/dev/capture-wall.ron"))
+                .map_err(|error| error.to_string())?;
+            for (field, value) in [
+                ("round_standoff_m", staging.round_standoff_m.0),
+                ("camera_out_m", staging.camera_out_m.0),
+                ("camera_up_m", staging.camera_up_m.0),
+                ("inside_inset_m", staging.inside_inset_m.0),
+                ("charge_height_m", staging.charge_height_m.0),
+            ] {
+                if !(value.is_finite() && value > 0.0) {
+                    return Err(format!(
+                        "{field}: supply a finite positive distance in metres"
+                    ));
+                }
+            }
+            Ok(staging)
+        })
+        .unwrap_or_else(|error| panic!("assets/dev/capture-wall.ron: {error}"))
+    });
+    &STAGING
 }
 
 /// The cue's shots in order, each with its second and whether it went off; the wall's framing
@@ -82,36 +198,11 @@ pub(crate) fn server_wall_plugin(app: &mut App) {
 /// The plan's `wall` cue, `None` when the plan has none.
 fn cue_from_plan() -> Option<Cue> {
     let wall = super::plan()?.wall.as_ref()?;
+    staging();
     let shots = wall
         .shots
         .iter()
-        .map(|shot| match shot {
-            WallShot::Round { round, mode, at } => (
-                What::Round(Box::new(super::resolve_round(round, *mode, "wall.shots"))),
-                *at,
-                false,
-            ),
-            WallShot::Charge { kg, core, at } => (
-                What::Charge {
-                    mass: *kg,
-                    core: SubstanceRegistry::shipped_static()
-                        .get(core)
-                        .unwrap_or_else(|err| {
-                            panic!("{}: wall.shots: charge core: {err}", super::plan::VARIABLE)
-                        })
-                        .burst()
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "{}: wall.shots: charge core {core:?} states no burst facts; \
-                                 name a materials.ron row that does",
-                                super::plan::VARIABLE
-                            )
-                        }),
-                },
-                *at,
-                false,
-            ),
-        })
+        .map(|shot| (shot.what.clone(), shot.at, false))
         .collect();
     info!("capture: game's environment destruction wall cue {wall:?}");
     Some(Cue {
@@ -120,16 +211,17 @@ fn cue_from_plan() -> Option<Cue> {
     })
 }
 
-/// The camera that frames the wall: [`CAMERA_OUT_M`] out from the middle of the aim point and the
-/// foot, [`CAMERA_UP_M`] up, looking at that middle.
+/// The camera looks at the middle of the aim point and foot; [`staging`] owns its offsets (m).
 fn framing(outward: Vec3, aim: Vec3, foot: Vec3) -> Transform {
     let look = (aim + foot) / 2.0;
-    Transform::from_translation(look + outward * CAMERA_OUT_M + Vec3::Y * CAMERA_UP_M)
-        .looking_at(look, Vec3::Y)
+    Transform::from_translation(
+        look + outward * staging().camera_out_m.0 + Vec3::Y * staging().camera_up_m.0,
+    )
+    .looking_at(look, Vec3::Y)
 }
 
 /// The wall (module doc): the pier's outward normal, the aim point on its outer face, the foot of
-/// that face, and a point inside the building a metre past its middle from the pier, at the aim's
+/// that face, and a point inset past the building's middle from the pier, at the aim's
 /// height, all world.
 fn the_wall((root, breakage): (&Transform, &Breakage)) -> Option<(Vec3, Vec3, Vec3, Vec3)> {
     let kind = &breakage.kind;
@@ -173,7 +265,7 @@ fn the_wall((root, breakage): (&Transform, &Breakage)) -> Option<(Vec3, Vec3, Ve
     let foot = Vec3::new(centre.x, block.min.y.max(0.0), centre.z);
     let world = |p: Vec3| root.translation + root.rotation * (p * breakage.scale);
     let middle = (lo + hi) / 2.0;
-    let inside = Vec3::new(middle.x, aim.y, middle.z) - outward;
+    let inside = Vec3::new(middle.x, aim.y, middle.z) - outward * staging().inside_inset_m.0;
     Some((
         root.rotation * outward,
         world(on_face(aim)),
@@ -256,7 +348,7 @@ fn shoot(what: &What, (outward, aim, foot): (Vec3, Vec3, Vec3), commands: &mut C
     match what {
         What::Round(round) => {
             let along = -outward;
-            let origin = aim - along * STANDOFF_M;
+            let origin = aim - along * staging().round_standoff_m.0;
             commands.trigger(FireShell::of_round(
                 round,
                 origin,
@@ -269,21 +361,13 @@ fn shoot(what: &What, (outward, aim, foot): (Vec3, Vec3, Vec3), commands: &mut C
             ));
             info!("capture: wall round from {origin:?} at {aim:?}");
         }
-        &What::Charge { mass, core } => {
-            let at = foot + Vec3::Y * 0.3;
-            let radius = (3.0 * mass / (4.0 * std::f32::consts::PI * core.density as f32)).cbrt();
-            let energy = mass * core.chemical_energy as f32;
-            // A bare core's products expand at the burst law's no-casing speed, `K √2`.
-            let products = crate::ballistics::burst::products_momentum(
-                mass,
-                core.speed_constant as f32 * std::f32::consts::SQRT_2,
+        &What::Charge(Charge { mass, blast }) => {
+            let at = foot + Vec3::Y * staging().charge_height_m.0 + outward * blast.radius;
+            commands.trigger(WallCharge { at, blast });
+            info!(
+                "capture: wall charge of {mass} kg ({:.0} J) at {at:?}",
+                blast.energy
             );
-            let at = at + outward * radius;
-            commands.trigger(WallCharge {
-                at,
-                blast: Blast::of(energy, radius, products),
-            });
-            info!("capture: wall charge of {mass} kg ({energy:.0} J) at {at:?}");
         }
     }
 }
@@ -304,4 +388,12 @@ fn hold_camera(
             *camera = pose;
         }
     }
+}
+
+/// Capture plugins require the shipped staging file to carry valid sourced distances;
+/// a missing field, invalid magnitude or Fixture provenance must refuse this load.
+#[cfg(test)]
+#[test]
+fn shipped_staging_passes_capture_admission() {
+    staging();
 }

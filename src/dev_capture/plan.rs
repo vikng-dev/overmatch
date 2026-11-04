@@ -334,8 +334,15 @@ pub(crate) struct Wall {
 /// `kg` of the shipped burst core `core` (a `materials.ron` key) set off at its foot
 /// (`dev_capture::wall`'s module doc).
 #[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(try_from = "WallShotInput")]
+pub(crate) struct WallShot {
+    pub(super) what: super::wall::What,
+    pub(super) at: f32,
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) enum WallShot {
+enum WallShotInput {
     Round {
         round: String,
         #[serde(default)]
@@ -347,6 +354,40 @@ pub(crate) enum WallShot {
         core: String,
         at: f32,
     },
+}
+
+impl TryFrom<WallShotInput> for WallShot {
+    type Error = super::wall::CueError;
+
+    fn try_from(input: WallShotInput) -> Result<Self, Self::Error> {
+        let (what, at) = match input {
+            WallShotInput::Round { round, mode, at } => {
+                (super::wall::What::round(&round, mode)?, at)
+            }
+            WallShotInput::Charge { kg, core, at } => (super::wall::What::charge(kg, &core)?, at),
+        };
+        Ok(Self { what, at })
+    }
+}
+
+/// Operator input is refused at admission; the startup boundary adds its file path.
+#[derive(Debug)]
+pub(crate) enum PlanError {
+    Read(std::io::Error),
+    Parse(ron::error::SpannedError),
+    Field(String),
+}
+
+impl std::fmt::Display for PlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(error) => {
+                write!(f, "cannot read plan: {error}; fix the path or permissions")
+            }
+            Self::Parse(error) => error.fmt(f),
+            Self::Field(error) => f.write_str(error),
+        }
+    }
 }
 
 fn default_at() -> Vec<f32> {
@@ -363,20 +404,20 @@ fn yes() -> bool {
 
 impl CapturePlan {
     /// The plan `text` holds, validated and its frame times normalized; the error names the field.
-    pub(crate) fn parse(text: &str) -> Result<Self, String> {
+    pub(crate) fn parse(text: &str) -> Result<Self, PlanError> {
         let mut plan: Self = ron::Options::default()
             .with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME)
             .from_str(text)
-            .map_err(|error| error.to_string())?;
-        plan.validate()?;
+            .map_err(PlanError::Parse)?;
+        plan.validate().map_err(PlanError::Field)?;
         if let Some(frames) = &mut plan.frames {
             frames.at = super::normalize_times(std::mem::take(&mut frames.at));
         }
         Ok(plan)
     }
 
-    fn load(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    fn load(path: &Path) -> Result<Self, PlanError> {
+        let text = std::fs::read_to_string(path).map_err(PlanError::Read)?;
         Self::parse(&text)
     }
 
@@ -505,15 +546,7 @@ impl CapturePlan {
                 return Err("wall.shots: no shot".into());
             }
             for shot in &wall.shots {
-                match *shot {
-                    WallShot::Round { at, .. } => finite_at("wall.shots", at)?,
-                    WallShot::Charge { kg, at, .. } => {
-                        finite_at("wall.shots", at)?;
-                        if !(kg.is_finite() && kg > 0.0) {
-                            return Err(format!("wall.shots: a charge of {kg} kg"));
-                        }
-                    }
-                }
+                finite_at("wall.shots.at", shot.at)?;
             }
         }
         Ok(())
@@ -527,16 +560,15 @@ impl Frames {
 }
 
 /// This process's plan, read once from the file [`VARIABLE`] names; `None` when it is unset.
-///
-/// # Panics
-///
-/// When the variable names a file that is missing or holds no valid plan (module doc).
+/// Invalid operator input prints its path and cause and refuses startup with exit status 2.
 pub(crate) fn plan() -> Option<&'static CapturePlan> {
     static PLAN: OnceLock<Option<CapturePlan>> = OnceLock::new();
     PLAN.get_or_init(|| {
         let path = PathBuf::from(std::env::var_os(VARIABLE)?);
-        let plan = CapturePlan::load(&path)
-            .unwrap_or_else(|error| panic!("{VARIABLE}={}: {error}", path.display()));
+        let plan = CapturePlan::load(&path).unwrap_or_else(|error| {
+            eprintln!("{VARIABLE}={}: {error}", path.display());
+            std::process::exit(2);
+        });
         Some(plan)
     })
     .as_ref()
@@ -545,6 +577,86 @@ pub(crate) fn plan() -> Option<&'static CapturePlan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The game's damage model: Fixture charge inputs must be refused before a cue exists.
+    fn charge_refusal(kg: &str, core: &str, field: &str, fix: &str) {
+        let text = format!(r#"(wall: (shots: [Charge(kg: {kg}, core: "{core}", at: 1.0)]))"#);
+        let error = CapturePlan::parse(&text).unwrap_err().to_string();
+        assert!(error.contains(field) && error.contains(fix), "{error}");
+    }
+
+    /// The game's damage model: operators need an unknown core refused at plan admission;
+    /// deferring the lookup until cue setup would panic instead of returning this diagnostic.
+    #[test]
+    fn an_unknown_wall_charge_core_is_refused() {
+        charge_refusal(
+            "1.0",
+            "missing capture core",
+            "wall.shots.core",
+            "name a materials.ron",
+        );
+    }
+
+    /// The game's damage model: any material without burst facts is invalid as a charge core,
+    /// even though it is a valid registry key for other callers.
+    #[test]
+    fn a_wall_charge_core_without_burst_facts_is_refused() {
+        let registry = crate::substances::SubstanceRegistry::shipped_static();
+        let core = registry
+            .keys()
+            .into_iter()
+            .find(|key| registry.get(key).unwrap().burst().is_none())
+            .unwrap();
+        charge_refusal("1.0", core, "wall.shots.core", "burst facts");
+    }
+
+    /// The game's damage model: finite mass alone does not make a representable blast.
+    /// Operators must receive a plan refusal before derived energy can panic during firing.
+    #[test]
+    fn a_wall_charge_whose_energy_overflows_is_refused() {
+        let registry = crate::substances::SubstanceRegistry::shipped_static();
+        let core = registry
+            .keys()
+            .into_iter()
+            .find(|key| registry.get(key).unwrap().burst().is_some())
+            .unwrap();
+        let facts = registry.get(core).unwrap().burst().unwrap();
+        // Fixture mass: twice the core's finite-energy limit, with a finite radius.
+        let kg = (f32::MAX / facts.chemical_energy as f32) * 2.0;
+        let radius = (3.0 * kg / (4.0 * std::f32::consts::PI * facts.density as f32)).cbrt();
+        assert!(kg.is_finite() && radius.is_finite() && radius > 0.0);
+        assert!((kg * facts.chemical_energy as f32).is_infinite());
+        charge_refusal(&kg.to_string(), core, "wall.shots.kg", "energy");
+    }
+
+    /// The game's damage model: zero, nonfinite and underflowing Fixture masses cannot
+    /// reach the cue as an incomplete charge; an overbroad finite-only check admits them.
+    #[test]
+    fn a_wall_charge_outside_simulation_units_is_refused() {
+        let registry = crate::substances::SubstanceRegistry::shipped_static();
+        let core = registry
+            .keys()
+            .into_iter()
+            .find(|key| registry.get(key).unwrap().burst().is_some())
+            .unwrap();
+        for kg in ["0.0", "-1.0", "NaN", "inf"] {
+            charge_refusal(kg, core, "wall.shots.kg", "finite positive mass");
+        }
+        charge_refusal("1e-45", core, "wall.shots.kg", "increase");
+    }
+
+    /// The game's damage model: wall plans carry resolved shots. An unknown Fixture key
+    /// must be refused at admission before setup can panic.
+    #[test]
+    fn an_unknown_wall_round_is_refused() {
+        let text = r#"(wall: (shots: [Round(round: "missing capture round", at: 1.0)]))"#;
+        assert!(
+            CapturePlan::parse(text)
+                .unwrap_err()
+                .to_string()
+                .contains("wall.shots.round")
+        );
+    }
 
     /// The tracked inspection recipe must remain a valid input to the one scene-selection edge.
     #[test]
@@ -647,14 +759,12 @@ mod tests {
             plan.wall,
             Some(Wall {
                 shots: vec![
-                    WallShot::Round {
-                        round: "88mm_AP".into(),
-                        mode: 0,
+                    WallShot {
+                        what: super::super::wall::What::round("88mm_AP", 0).unwrap(),
                         at: 7.0,
                     },
-                    WallShot::Charge {
-                        kg: 2.0,
-                        core: "88mm_burst_core".into(),
+                    WallShot {
+                        what: super::super::wall::What::charge(2.0, "88mm_burst_core").unwrap(),
                         at: 8.0,
                     },
                 ],
@@ -735,6 +845,7 @@ mod tests {
             assert!(
                 CapturePlan::parse(&text)
                     .unwrap_err()
+                    .to_string()
                     .contains("scale_factor")
             );
         }
@@ -850,7 +961,9 @@ mod tests {
             ),
             ("(scene: (demo: Spin))".to_owned(), "Spin"),
         ] {
-            let error = CapturePlan::parse(&text).expect_err("the plan is refused");
+            let error = CapturePlan::parse(&text)
+                .expect_err("the plan is refused")
+                .to_string();
             assert!(
                 error.contains(field),
                 "{text}: {error:?} names no `{field}`"

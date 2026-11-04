@@ -1,0 +1,8 @@
+// The game's environment destruction capture, game state only. Distances in metres.
+(
+    round_standoff_m: (25.0, Taste("wall capture: ASSUMED firing distance along the pier's outward normal")),
+    camera_out_m: (7.0, Taste("wall capture framing: ASSUMED distance showing the pier and its neighbours")),
+    camera_up_m: (0.6, Taste("wall capture framing: ASSUMED height over the aim/foot midpoint")),
+    inside_inset_m: (1.0, Taste("wall capture framing: ASSUMED inset past the building's centre for the interior view")),
+    charge_height_m: (0.3, Taste("wall capture: ASSUMED charge height above the pier's foot")),
+)
