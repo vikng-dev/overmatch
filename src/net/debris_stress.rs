@@ -21,6 +21,7 @@
 
 use avian3d::prelude::*;
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::entity::EntityHashMap;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
 use bevy::tasks::{ComputeTaskPool, ParallelSlice};
@@ -504,17 +505,36 @@ fn release_breaches(
 /// asleep at.
 fn publish_poses(
     pieces: Query<(&Carrier, &Position, &Rotation), Or<(Changed<Position>, Changed<Rotation>)>>,
-    mut carriers: Query<&mut DebrisPose>,
+    mut carriers: Query<(Entity, &mut DebrisPose)>,
+    mut updates: Local<EntityHashMap<DebrisPose>>,
 ) {
+    updates.clear();
     for (carrier, position, rotation) in &pieces {
-        let mut pose = carriers
-            .get_mut(carrier.0)
-            .expect("every live body's Carrier retains its DebrisPose until the body is retired");
-        pose.set_if_neq(DebrisPose {
-            position: position.0,
-            rotation: rotation.0,
-        });
+        assert!(
+            carriers.contains(carrier.0),
+            "every live body's Carrier retains its DebrisPose until the body is retired"
+        );
+        assert!(
+            updates
+                .insert(
+                    carrier.0,
+                    DebrisPose {
+                        position: position.0,
+                        rotation: rotation.0,
+                    }
+                )
+                .is_none(),
+            "each moved body owns a distinct carrier"
+        );
     }
+    // Validate ownership before dispatch: distinct targets and fixed replacements make writes
+    // commute, independent of iteration order or worker assignment.
+    let updates = &*updates;
+    carriers
+        .par_iter_many_unique_mut(updates.keys())
+        .for_each(|(entity, mut pose)| {
+            pose.set_if_neq(updates[&entity]);
+        });
 }
 
 /// The client's shared fragment mesh and material.
@@ -738,6 +758,70 @@ mod tests {
         app.world_mut()
             .spawn((Carrier(carrier), Position(Vec3::ZERO), Rotation::default()));
         app.update();
+    }
+
+    /// Publication cannot resolve conflicting owners by worker order: sharing a carrier is a bug.
+    #[test]
+    #[should_panic(expected = "each moved body owns a distinct carrier")]
+    fn two_moved_bodies_cannot_share_a_carrier() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_systems(Update, publish_poses);
+        let carrier = app
+            .world_mut()
+            .spawn(DebrisPose {
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+            })
+            .id();
+        for _ in 0..2 {
+            app.world_mut()
+                .spawn((Carrier(carrier), Position(Vec3::ZERO), Rotation::default()));
+        }
+        app.update();
+    }
+
+    /// Clients rely on each carrier receiving its owner's pose. Fixture permutations vary body
+    /// traversal and batch membership; cross-owner reads or writes fail the same identity contract.
+    #[test]
+    fn publication_preserves_ownership_across_body_orders() {
+        // Fixture: a prime population and coprime strides visit every owner in different orders.
+        const COUNT: usize = 257;
+        for stride in [1, 17, COUNT - 1] {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .add_systems(Update, publish_poses);
+            let expected: Vec<_> = (0..COUNT)
+                .map(|i| DebrisPose {
+                    position: Vec3::new(i as f32, -(i as f32), (i * i) as f32),
+                    rotation: Quat::from_rotation_y(i as f32),
+                })
+                .collect();
+            let carriers: Vec<_> = expected
+                .iter()
+                .map(|_| {
+                    app.world_mut()
+                        .spawn(DebrisPose {
+                            position: Vec3::ZERO,
+                            rotation: Quat::IDENTITY,
+                        })
+                        .id()
+                })
+                .collect();
+            for i in 0..COUNT {
+                let owner = i * stride % COUNT;
+                let pose = expected[owner];
+                app.world_mut().spawn((
+                    Carrier(carriers[owner]),
+                    Position(pose.position),
+                    Rotation(pose.rotation),
+                ));
+            }
+            app.update();
+            for (&carrier, pose) in carriers.iter().zip(&expected) {
+                assert_eq!(app.world().get::<DebrisPose>(carrier), Some(pose));
+            }
+        }
     }
 
     /// The lever's readings. A mutant that arms an unset or `off` lever spawns fragments on every
