@@ -11,16 +11,19 @@ what is not a finding, and the fix each class takes.
 | [`base-truths`](base-truths.md) | Tanks are data; behaviour emerges from base truths |
 | [`brevity`](brevity.md) | Say each thing once, in the fewest words that keep it true |
 | [`testing`](testing.md) | A test is written under scrutiny; pin sourced facts |
+| [`parallel-work`](parallel-work.md) | Server work is parallel by ownership, ordered at its effects |
 
 ## When a lens runs
 
 - **Diff mode**, at each batch boundary and before a release: one reviewer per lens over every
   commit landed since the last boundary.
-- **Sweep mode**, over the whole tree, area by area (the areas below): its findings become rows of
-  [`backlog.md`](backlog.md).
+- **Sweep mode**, over the whole tree, area by area (the areas below). [`backlog.md`](backlog.md)
+  holds the first sweep's rows and only shrinks; a later sweep writes its evidence to a report under
+  `.agents/scratch/`, and its accepted findings become GitHub sub-issues under the epic they bear on.
 - **Ratchet**, in every lane: the items a lane edits, and their tests, leave clean under every lens,
-  and the lane closes the rows of [`backlog.md`](backlog.md) naming a file it edits, each verified
-  first. Only P1 rows get lanes of their own. Diff-mode review checks both.
+  and the lane closes the rows of [`backlog.md`](backlog.md) and fixes the open sweep issues naming
+  a file it edits, each verified first; the orchestrator closes those issues. Only P1 findings get
+  lanes of their own. Diff-mode review checks both.
 - **Direction audit**, when one subsystem reaches its third fix round in one chain (each fix
   exposing the next defect): before the next fix lane, one reviewer reads the subsystem's code and
   history against the `base-truths` lens and answers whether the chain converges on one declarative
