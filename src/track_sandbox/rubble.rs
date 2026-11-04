@@ -1,6 +1,6 @@
 //! The rubble yard, in the game's tank driving physics (game state only): a pile of loose brick
-//! pieces and a standing wall section off the lane's left edge, both cut from the shipped house's
-//! own chunks, for the belts to climb and push ([`crate::track::rubble`]). The `R` tour's last spot
+//! pieces and a standing wall section off the lane's left edge, both cut from the scene's
+//! source construction chunks, for the belts to climb and push ([`crate::track::rubble`]). The `R` tour's last spot
 //! parks the rig facing the pile; the harness reaches it with `x=`/`z=`.
 //!
 //! Gizmos, always on (they draw only where a contact presses on a body): a dot on the contact,
@@ -20,9 +20,6 @@ use crate::track::rubble::footprint_radius;
 use super::belt::EnvelopeLaw;
 use super::data::scene;
 use super::{RigGeom, Side, belt_loop, contact_probe, force_viz_scale};
-
-/// The construction asset the yard is cut from.
-const HOUSE: &str = "house_1";
 
 /// The `R` tour's rubble spot: the rig's hull origin (xz), facing −Z at the pile, the scene's
 /// `rubble_spot_ahead_m` short of it.
@@ -79,11 +76,14 @@ pub(super) fn spawn_rubble_yard(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-    let library = ConstructionLibrary::load(&root, [HOUSE]);
-    let kind = library.get(HOUSE).expect("the shipped house loads").clone();
+    let yard = scene();
+    let source = yard.rubble_construction.0.as_str();
+    let library = ConstructionLibrary::load(&root, [source]);
+    let kind = library
+        .get(source)
+        .expect("the scene's source construction was loaded");
     let layout = &kind.layout;
     let structure = layout.structure(&kind.asset, 1.0);
-    let yard = scene();
     let brick = materials.add(Color::srgb_from_array(yard.rubble_piece_srgb.0));
     let standing = materials.add(Color::srgb_from_array(yard.rubble_wall_srgb.0));
     let [wall_x, wall_z] = yard.rubble_wall_at_m.0;
@@ -127,7 +127,7 @@ pub(super) fn spawn_rubble_yard(
             Transform::from_xyz(wall_x - mid.x, 0.0, wall_z - mid.z).with_rotation(turn),
             RigidBody::Static,
             Mesh3d(meshes.add(crate::construction::view::piece_mesh(
-                &kind,
+                kind,
                 &wall_chunks.iter().map(|&c| c as u16).collect::<Vec<_>>(),
                 Vec3::ZERO,
             ))),
@@ -135,7 +135,7 @@ pub(super) fn spawn_rubble_yard(
         ))
         .id();
     for &c in &wall_chunks {
-        let collider = chunk_collider(&kind, c, 1.0, Vec3::ZERO);
+        let collider = chunk_collider(kind, c, 1.0, Vec3::ZERO);
         commands.spawn((
             ChildOf(wall_root),
             Transform::IDENTITY,
@@ -170,7 +170,7 @@ pub(super) fn spawn_rubble_yard(
     );
     for (i, &c) in pieces.iter().enumerate() {
         let centroid = structure.chunks[c].centroid;
-        let collider = chunk_collider(&kind, c, 1.0, centroid);
+        let collider = chunk_collider(kind, c, 1.0, centroid);
         let (row, col, layer) = (
             i % row_count,
             (i / row_count) % row_count,
@@ -196,7 +196,7 @@ pub(super) fn spawn_rubble_yard(
             piece_layers(),
             kind.chunk_friction(c),
             Mesh3d(meshes.add(crate::construction::view::piece_mesh(
-                &kind,
+                kind,
                 &[c as u16],
                 centroid,
             ))),

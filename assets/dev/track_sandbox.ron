@@ -52,6 +52,7 @@
     traction_force_srgb: ((1.0, 0.6, 0.1), Taste("Traction force arrows follow the orange drive-force convention.")),
     cast_srgb: ((0.85, 0.85, 0.9), Taste("Clear collocation stations use neutral grey-white.")),
     reference_srgb: ((0.7, 0.5, 1.0), Taste("Taut-reference diagnostic loop uses dim violet.")),
+    rubble_construction: ("house_1", Taste("Rubble yard source construction: cut the standing wall and loose pile from its authored chunks.")),
     rubble_pile_at_m: ((-13.0, 0.0, -8.0), Taste("Rubble yard pile base centre on the open flat ground left of the washboards, on the lane's ground.")),
     rubble_wall_at_m: ((-18.0, -8.0), Taste("Rubble yard wall section's chunk mean (X, Z) beside the pile; its height is the asset's own.")),
     rubble_spot_ahead_m: (9.0, Taste("Rubble reset spot this far +Z of the pile, facing it down -Z.")),

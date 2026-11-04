@@ -71,6 +71,7 @@ pub(super) struct Scene {
     pub(super) traction_force_srgb: Sourced<[f32; 3]>,
     pub(super) cast_srgb: Sourced<[f32; 3]>,
     pub(super) reference_srgb: Sourced<[f32; 3]>,
+    pub(super) rubble_construction: Sourced<String>,
     pub(super) rubble_pile_at_m: Sourced<[f32; 3]>,
     pub(super) rubble_wall_at_m: Sourced<[f32; 2]>,
     pub(super) rubble_spot_ahead_m: Sourced<f32>,
@@ -122,6 +123,12 @@ impl Scene {
     }
 
     fn validate(&self) -> Result<(), String> {
+        if self.rubble_construction.0.trim().is_empty() {
+            return Err(refuse(
+                "rubble_construction",
+                "name the construction asset to cut into the yard",
+            ));
+        }
         for (field, value) in [
             ("lane_width_m", self.lane_width_m.0),
             ("obstacle_width_m", self.obstacle_width_m.0),
@@ -320,6 +327,29 @@ fn refuse(field: &str, fix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The yard's source is an authored choice; an absent or blank key cannot invent a default.
+    #[test]
+    fn rubble_requires_an_authored_construction() {
+        let original = DATA
+            .lines()
+            .find(|line| line.trim_start().starts_with("rubble_construction:"))
+            .unwrap();
+        // Fixture: an omitted choice and an explicitly blank choice.
+        for replacement in [
+            "",
+            "rubble_construction: (\"\", Taste(\"Fixture absent construction\")),",
+        ] {
+            let text = DATA.replace(original, replacement);
+            let error = Scene::parse(&text)
+                .err()
+                .expect("a source construction is required");
+            assert!(
+                error.contains(FILE) && error.contains("rubble_construction"),
+                "{error}"
+            );
+        }
+    }
 
     /// Spawned walls require finite positions; checking only the pile leaves physics invalid.
     #[test]
