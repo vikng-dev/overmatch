@@ -202,6 +202,13 @@ timeout, cost rate, Durable Object location hint). Secrets, set with `wrangler s
 |---|---|
 | `EDGEGAP_TOKEN` | Edgegap API token (with or without the `token ` prefix) |
 
+`production-server.json` owns the production CPU allocation: **2 vCPU** (CLAIMED: owner's hosting
+choice). Both `scripts/ci/edgegap-version.sh` and the Worker's `/admin` cost calculation read it;
+there is no separate Worker CPU setting. DERIVED from the CLAIMED list rate in `wrangler.jsonc`:
+compute costs $0.138/hour, or at most $3.31 at the version's 1440-minute cap, excluding egress.
+Ship the Worker with the next game build so registration and cost estimates use the same allocation.
+`EDGEGAP_REQ_CPU` remains a registration override for separately named profiling versions only.
+
 `ACCESS_TEAM_DOMAIN` (e.g. `https://<team>.cloudflareaccess.com`) and `ACCESS_AUD` are plain vars,
 set in `wrangler.jsonc` once the Access application exists. While either is empty, `/admin` answers
 403.
@@ -238,12 +245,19 @@ calls the real Edgegap API, so a join there starts a billed deployment.
    `ghcr.io/vikng-dev/overmatch-server` (public; tags `<version>` and `<version>-<sha7>`) and
    creates or updates version `<version>` of app `Overmatch` (`EDGEGAP_APP`): the version named
    exactly as the client's `CARGO_PKG_VERSION`, image tag `<version>-<sha7>`, UDP 5888 named `game`
-   (`EDGEGAP_PORT_NAME`), `restart_policy: never`, `max_duration` 1440 min, 1 vCPU / 1 GB, no env vars
+   (`EDGEGAP_PORT_NAME`), `restart_policy: never`, `max_duration` 1440 min, production CPU from
+   `production-server.json` / 1 GB memory (CLAIMED allocation), no env vars
    (the Worker passes the game-server contract above per deployment). The Release is published
    only after that registration. To register a commit without a release, dispatch
    `gh workflow run edgegap-version.yml --ref <branch>`. Both run
    `scripts/ci/edgegap-version.sh`, which holds the request bodies and the reasons for each value;
    it needs the `EDGEGAP_TOKEN` repository secret.
+
+   On the first production deployment, check `server_host::log_startup`'s `server: host` line for
+   `available_parallelism=2 pools(compute/async_compute/io)=2/1/1 cpu_quota=2.00 cpus` (expected
+   from the allocation; MEASURED on the earlier two-vCPU profiling host in
+   `.agents/scratch/perf-2026-10-31/`). The server sizes pools from the quota-aware usable core
+   count; no thread-count override is needed.
 
 ## Built now, deferred behind a seam
 

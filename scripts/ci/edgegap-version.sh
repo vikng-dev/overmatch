@@ -23,10 +23,10 @@
 #                    version only — e.g. `0.6.1-profile` at 120, the Edgegap-side backstop for
 #                    scripts/edgegap/session.sh, whose deployments nothing else ends (no per-deployment
 #                    duration exists in Edgegap's deploy APIs). Never lower it on a version players join.
-#   EDGEGAP_REQ_CPU  vCPU units, 1024 = 1 vCPU, default 1024. A larger size is for a profiling version
-#                    only (e.g. `0.7.0-alpha.2-2vcpu` at 2048), deployed by name through
-#                    scripts/edgegap/session.sh; the Worker never picks it, since no client reports that
-#                    version name.
+#   EDGEGAP_REQ_CPU  overrides backend/production-server.json's production allocation. CLAIMED:
+#                    Edgegap's unit is 1024 per vCPU. Only override on separately named profiling
+#                    versions deployed through scripts/edgegap/session.sh and the perf tools;
+#                    no joining client reports those names, so the Worker never picks them.
 set -euo pipefail
 
 version="${1:?version}"
@@ -40,7 +40,7 @@ if ! [[ "${max_duration}" =~ ^[0-9]+$ ]] || ((max_duration < 1 || max_duration >
   exit 1
 fi
 max_duration=$((10#${max_duration}))
-req_cpu="${EDGEGAP_REQ_CPU:-1024}"
+req_cpu="${EDGEGAP_REQ_CPU:-$(jq -er '.vcpu * 1024' "$(dirname "$0")/../../backend/production-server.json")}"
 if ! [[ "${req_cpu}" =~ ^[0-9]+$ ]] || ((req_cpu < 256 || req_cpu > 8192)); then
   echo "::error::EDGEGAP_REQ_CPU must be 256–8192 vCPU units, got '${req_cpu}'"
   exit 1
@@ -53,13 +53,15 @@ req_cpu=$((10#${req_cpu}))
 # max_duration 1440 min (the default; EDGEGAP_MAX_DURATION) — Edgegap ends every deployment this
 # long after its start, occupied or not. Behind the Worker's per-minute orphan sweep it is the last defence, for when the Worker is
 # down; it also cuts a server still occupied at 24 h (its players Join again into a fresh one; there
-# is no graceful recycle before the cap). A leak costs at most 1440 × $0.00115/vCPU-min ≈ $1.66 per
-# vCPU (DERIVED, list price).
+# is no graceful recycle before the cap). DERIVED: at the CLAIMED $0.00115/vCPU-min list price,
+# a production leak costs at most 1440 × 2 × $0.00115 ≈ $3.31 (compute only).
 #
 # time_to_deploy 60 s = the Worker's START_DEADLINE_S: past it the Worker stops the deployment
 # anyway, so Edgegap marking it failed at the same moment changes nothing but its own report.
 #
-# 1 vCPU / 1 GB: MEASURED ~55 MiB resident with 2 clients (risk-test.md); 10 players unmeasured.
+# CPU comes from production-server.json, also used by the Worker's cost estimates.
+# CLAIMED: retain the 1 GB memory allocation. MEASURED: ~55 MiB resident with 2 clients on the
+# earlier single-vCPU host (risk-test.md); 10 players unmeasured.
 body="$(jq -n \
   --arg image "${image#*/}" --arg registry "${image%%/*}" --arg tag "${tag}" \
   --argjson max_duration "${max_duration}" --argjson req_cpu "${req_cpu}" '{

@@ -1,5 +1,6 @@
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { beforeEach, describe, expect, it } from "vitest";
+import productionServer from "../production-server.json";
 import { accessDenied } from "../src/admin";
 import { bringUp, call, env, join } from "./helpers";
 
@@ -70,5 +71,6 @@ describe("GET /admin", () => {
 		expect(html).toContain("198.51.100.1:31001");
 		expect(html).toContain("Singapore");
 		expect(html).toMatch(/est\. compute this month/);
+		expect(html).toContain(`× ${productionServer.vcpu} vCPU × $${env.USD_PER_VCPU_MINUTE}/vCPU-min`);
 	});
 });

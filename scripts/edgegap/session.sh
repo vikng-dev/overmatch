@@ -40,8 +40,9 @@
 #
 # THE COST GUARD. A non-hosted server never exits on its own, the Worker's sweep ignores anything
 # not tagged `om-` (backend/src/sweep.ts), and Edgegap ends a deployment only at its VERSION's
-# `max_duration` — 1440 min for the release versions (scripts/ci/edgegap-version.sh), about $1.66
-# per vCPU at list price (DERIVED). Three layers stand in front of that:
+# `max_duration` — 1440 min for the release versions (scripts/ci/edgegap-version.sh). DERIVED:
+# about $3.31 compute at the production 2 vCPU allocation and CLAIMED $0.00115/vCPU-min list
+# rate. Profiling overrides scale with their version's allocation. Three layers stand in front of that:
 #   1. the caller's trap (scripts/perf/run-online-night.sh stops every id it deployed, on any exit);
 #   2. the watchdog: a detached process in its own session (it survives the caller, the terminal and
 #      a process-group kill) that pulls the logs and stops the deployment at the limit, judged on the
@@ -62,7 +63,8 @@
 # Wall clock: deploy 5–15 s to READY (MEASURED: 3.3 s warm, 7–12.5 s cold, Singapore 4.6 s;
 # .agents/scratch/hosting-2026-10/risk-test.md, decisions.md); a city without capacity errors
 # within ~1.5 s (MEASURED, Frankfurt). stop: Edgegap reports TERMINATED within seconds.
-# Cost: $0.069/h at 1 vCPU plus $0.10/GB egress (CLAIMED, edgegap.com/pricing, 2026-10-26).
+# Cost: DERIVED $0.138/h at the production 2 vCPU allocation; profiling overrides scale with CPU.
+# Rates: $0.00115/vCPU-min plus $0.10/GB egress (CLAIMED, edgegap.com/pricing, 2026-10-26).
 # Validity: the only Edgegap writes this script makes are a deploy tagged `profile-` and a stop of
 # a deployment it has read back carrying a `profile-` tag.
 # =======================================================================

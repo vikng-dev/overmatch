@@ -23,7 +23,7 @@
 #   ends the chain: the larger counts would measure the same server again.
 # DEBRIS (the debris stress lever's values, src/net/debris_stress.rs; `off` for none) makes the
 # chain one deployment per bot count AND value, each deployed with `--debris <value>`, named
-# `bots<N>-d<NN>-<value>`: the server's price per falling wall fragment on the 1 vCPU host, the
+# `bots<N>-d<NN>-<value>`: the server's price per falling wall fragment on the supplied version's host, the
 # same conditions scripts/perf/run-debris-stress.sh runs locally. Tonight's:
 #
 #   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OFFSCREEN=1 BIN=<dir> ASSET_ROOT=<dir> \
@@ -47,7 +47,9 @@
 # Wall clock: per condition ~2.5 min (deploy 5–15 s, startup + WARMUP_S 20 + DURATION_S 60 +
 # COOLDOWN_S 5, logs and stop ~15 s), plus ~1.5 min of warm-up: ~9 min for the default three, ~22
 # min for one bot count and eight debris values.
-# Cost: ~10 deployment-minutes at 1 vCPU, ~$0.01 (DERIVED, $0.069/h list); ~$0.03 for the eight.
+# Cost: DERIVED ~10 deployment-minutes at the production 2 vCPU allocation, ~$0.023 compute;
+# eight conditions plus warm-up take ~22 min, ~$0.051. Uses the CLAIMED $0.00115/vCPU-min list
+# rate; profiling overrides scale with their version's allocation. Egress is additional.
 # Validity: the runner's gates, per condition; a condition that fails them is reported and the
 # chain goes on to the next count (the deployment is still stopped).
 # =======================================================================

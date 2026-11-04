@@ -1,6 +1,8 @@
-// Every tunable is a wrangler `vars` entry (wrangler.jsonc); this module only parses them. A missing
-// or malformed value throws, so a bad deploy fails on its first request instead of running with a
-// silent default.
+// Operator tunables are wrangler `vars` entries; production-server.json owns the production CPU
+// allocation (CLAIMED: owner's hosting choice), shared with scripts/ci/edgegap-version.sh.
+// Missing or malformed vars throw on the first request instead of running with a silent default.
+
+import productionServer from "../production-server.json";
 
 export interface Env {
 	REGISTRY: DurableObjectNamespace<import("./registry").Registry>;
@@ -23,7 +25,6 @@ export interface Env {
 	JOIN_ATTEMPTS: string;
 	LOCATIONS_CACHE_S: string;
 	PROVIDER_TIMEOUT_S: string;
-	VCPU_PER_SERVER: string;
 	USD_PER_VCPU_MINUTE: string;
 	LOCATION_HINT: string;
 	ACCESS_TEAM_DOMAIN: string;
@@ -74,7 +75,7 @@ export function config(env: Env): Config {
 		joinAttempts: num(env, "JOIN_ATTEMPTS", 1),
 		locationsCacheMs: num(env, "LOCATIONS_CACHE_S", 0) * s,
 		providerTimeoutMs: num(env, "PROVIDER_TIMEOUT_S", 0.05) * s,
-		vcpuPerServer: num(env, "VCPU_PER_SERVER", 0),
+		vcpuPerServer: productionServer.vcpu,
 		usdPerVcpuMinute: num(env, "USD_PER_VCPU_MINUTE", 0),
 	};
 }
