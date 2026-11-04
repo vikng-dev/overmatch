@@ -17,10 +17,11 @@ pub(crate) struct Placement {
     pub back_z: f32,
 }
 
-/// The chunks and joints of `wall`'s elements of `substance` (an element's name begins
-/// `<wall>/`), as one [`Cut`] of `material`, placed by `at`. The wall's outer face is the far side
-/// of its first element's extrusion. A joint to a chunk outside the selection (another wall, or
-/// another substance) is dropped.
+/// The chunks and joints of the elements of `substance` in component `wall` (the bake's declared
+/// membership, [`crate::buildings::schema::Element::component`]), as one [`Cut`] of `material`,
+/// placed by `at`. The wall's outer face is its first
+/// element's face across its thinnest span ([`Block::thinnest`]) away from the building's middle.
+/// A joint to a chunk outside the selection (another wall, or another substance) is dropped.
 pub(crate) fn wall_cut(
     asset: &BuildingAsset,
     wall: &str,
@@ -28,20 +29,40 @@ pub(crate) fn wall_cut(
     material: Masonry,
     at: Placement,
 ) -> Result<Cut, String> {
-    let prefix = format!("{wall}/");
+    let component = asset
+        .components
+        .iter()
+        .position(|name| name == wall)
+        .ok_or_else(|| format!("no component {wall:?}"))?;
     let kept: Vec<usize> = asset
         .elements
         .iter()
         .enumerate()
         .filter(|(_, e)| {
-            e.name.starts_with(&prefix) && asset.materials[usize::from(e.material)] == substance
+            usize::from(e.component) == component
+                && asset.materials[usize::from(e.material)] == substance
         })
         .map(|(i, _)| i)
         .collect();
     let first = kept
         .first()
         .ok_or_else(|| format!("no {substance} element in wall {wall:?}"))?;
-    let turn = Quat::from_rotation_arc(asset.elements[*first].frame.w().normalize(), Vec3::Z);
+    let element = Block::hull(asset.elements[*first].points());
+    let (middle_low, middle_high) = asset
+        .elements
+        .iter()
+        .flat_map(|element| element.points())
+        .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), p| {
+            (lo.min(p), hi.max(p))
+        });
+    let middle = (middle_low + middle_high) / 2.0;
+    let (axis, ..) = element.thinnest();
+    let outward = if (element.center() - middle).dot(axis) >= 0.0 {
+        axis
+    } else {
+        -axis
+    };
+    let turn = Quat::from_rotation_arc(outward, Vec3::Z);
     let mut chunks_of: Vec<usize> = Vec::new();
     for &e in &kept {
         let [from, to] = asset.elements[e].chunks;

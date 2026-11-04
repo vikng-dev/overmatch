@@ -331,7 +331,8 @@ pub(crate) struct Wall {
 }
 
 /// One shot at the wall, at app second `at`: a shipped round square at it, or a bare charge of
-/// `kg` set off at its foot (`dev_capture::wall`'s module doc).
+/// `kg` of the shipped burst core `core` (a `materials.ron` key) set off at its foot
+/// (`dev_capture::wall`'s module doc).
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum WallShot {
@@ -343,6 +344,7 @@ pub(crate) enum WallShot {
     },
     Charge {
         kg: f32,
+        core: String,
         at: f32,
     },
 }
@@ -505,7 +507,7 @@ impl CapturePlan {
             for shot in &wall.shots {
                 match *shot {
                     WallShot::Round { at, .. } => finite_at("wall.shots", at)?,
-                    WallShot::Charge { kg, at } => {
+                    WallShot::Charge { kg, at, .. } => {
                         finite_at("wall.shots", at)?;
                         if !(kg.is_finite() && kg > 0.0) {
                             return Err(format!("wall.shots: a charge of {kg} kg"));
@@ -577,7 +579,7 @@ mod tests {
                 wall: (
                     shots: [
                         Round(round: "88mm_AP", at: 7.0),
-                        Charge(kg: 2.0, at: 8.0),
+                        Charge(kg: 2.0, core: "88mm_burst_core", at: 8.0),
                     ],
                 ),
                 scene: (
@@ -650,7 +652,11 @@ mod tests {
                         mode: 0,
                         at: 7.0,
                     },
-                    WallShot::Charge { kg: 2.0, at: 8.0 },
+                    WallShot::Charge {
+                        kg: 2.0,
+                        core: "88mm_burst_core".into(),
+                        at: 8.0,
+                    },
                 ],
             })
         );
@@ -826,8 +832,13 @@ mod tests {
             ),
             ("(wall: (shots: []))".to_owned(), "wall.shots"),
             (
-                "(wall: (shots: [Charge(kg: 0.0, at: 1.0)]))".to_owned(),
+                r#"(wall: (shots: [Charge(kg: 0.0, core: "88mm_burst_core", at: 1.0)]))"#
+                    .to_owned(),
                 "wall.shots",
+            ),
+            (
+                "(wall: (shots: [Charge(kg: 1.0, at: 1.0)]))".to_owned(),
+                "core",
             ),
             (
                 "(scene: (sun_elevation_deg: 90.0))".to_owned(),

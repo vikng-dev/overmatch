@@ -10,8 +10,8 @@
 //! same on every run: the building nearest the map's centre (the lowest ordinal on a tie), its
 //! breakable pier of the largest volume (the lowest element on a tie). A round is fired 25 m out
 //! along the pier's outward normal at the chunk nearest the pier's centre; a charge sits on the
-//! pier's outer face at its foot, its energy the first shipped burst core's chemical energy per
-//! kilogram times its mass, with no casing.
+//! pier's outer face at its foot, its energy its named burst core's chemical energy per kilogram
+//! times its mass, with no casing.
 //!
 //! When the plan's `frames.camera` places the camera (a pose or a follow), the cue leaves the
 //! camera to it.
@@ -39,6 +39,7 @@ enum What {
     Round(Box<crate::rounds::Round>),
     Charge {
         mass: f32,
+        core: crate::substances::BurstFacts,
     },
 }
 
@@ -90,7 +91,26 @@ fn cue_from_plan() -> Option<Cue> {
                 *at,
                 false,
             ),
-            WallShot::Charge { kg, at } => (What::Charge { mass: *kg }, *at, false),
+            WallShot::Charge { kg, core, at } => (
+                What::Charge {
+                    mass: *kg,
+                    core: SubstanceRegistry::shipped_static()
+                        .get(core)
+                        .unwrap_or_else(|err| {
+                            panic!("{}: wall.shots: charge core: {err}", super::plan::VARIABLE)
+                        })
+                        .burst()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{}: wall.shots: charge core {core:?} states no burst facts; \
+                                 name a materials.ron row that does",
+                                super::plan::VARIABLE
+                            )
+                        }),
+                },
+                *at,
+                false,
+            ),
         })
         .collect();
     info!("capture: game's environment destruction wall cue {wall:?}");
@@ -116,7 +136,7 @@ fn the_wall((root, breakage): (&Transform, &Breakage)) -> Option<(Vec3, Vec3, Ve
     let layout = &kind.layout;
     let (lo, hi) = kind.bounds();
     let outward_of = |e: usize| {
-        let w = kind.asset.elements[e].frame.w().normalize();
+        let w = layout.element_blocks[e].thinnest().0;
         let centre = layout.element_blocks[e].center();
         if (centre - (lo + hi) / 2.0).dot(w) >= 0.0 {
             w
@@ -124,32 +144,32 @@ fn the_wall((root, breakage): (&Transform, &Breakage)) -> Option<(Vec3, Vec3, Ve
             -w
         }
     };
+    // An element's chunks tile it, so their volumes sum to its own.
+    let volume = |e: usize| -> f32 {
+        let [first, end] = kind.asset.elements[e].chunks;
+        kind.asset.chunks[first as usize..end as usize]
+            .iter()
+            .map(|chunk| chunk.volume_m3)
+            .sum()
+    };
     let e = (0..kind.asset.elements.len())
         .filter(|&e| {
             kind.asset.elements[e].kind == ElementKind::Pier && layout.elements[e].is_some()
         })
-        .max_by(|&a, &b| {
-            kind.asset.elements[a]
-                .volume()
-                .total_cmp(&kind.asset.elements[b].volume())
-                .then(b.cmp(&a))
-        })?;
-    let element = &kind.asset.elements[e];
-    let w = element.frame.w().normalize();
-    let origin = Vec3::from_array(element.frame.origin);
-    let centre = layout.element_blocks[e].center();
+        .max_by(|&a, &b| volume(a).total_cmp(&volume(b)).then(b.cmp(&a)))?;
+    let block = &layout.element_blocks[e];
+    let centre = block.center();
     let outward = outward_of(e);
-    let outer = if outward == w {
-        element.depth[1]
-    } else {
-        element.depth[0]
-    };
-    let on_face = |p: Vec3| p + w * (outer - (p - origin).dot(w));
+    let outer = block
+        .points
+        .iter()
+        .map(|p| p.dot(outward))
+        .fold(f32::NEG_INFINITY, f32::max);
+    let on_face = |p: Vec3| p + outward * (outer - p.dot(outward));
     let aim = layout
         .chunks_of(e)
         .map(|c| Vec3::from_array(kind.asset.chunks[layout.chunks[c] as usize].centroid))
         .min_by(|a, b| a.distance(centre).total_cmp(&b.distance(centre)))?;
-    let block = &layout.element_blocks[e];
     let foot = Vec3::new(centre.x, block.min.y.max(0.0), centre.z);
     let world = |p: Vec3| root.translation + root.rotation * (p * breakage.scale);
     let middle = (lo + hi) / 2.0;
@@ -249,13 +269,7 @@ fn shoot(what: &What, (outward, aim, foot): (Vec3, Vec3, Vec3), commands: &mut C
             ));
             info!("capture: wall round from {origin:?} at {aim:?}");
         }
-        &What::Charge { mass } => {
-            let registry = SubstanceRegistry::shipped_static();
-            let core = registry
-                .keys()
-                .into_iter()
-                .find_map(|name| registry.get(name).ok().and_then(|s| s.burst()))
-                .expect("capture: wall.shots Charge requires a shipped burst core; author one or choose a round cue");
+        &What::Charge { mass, core } => {
             let at = foot + Vec3::Y * 0.3;
             let radius = (3.0 * mass / (4.0 * std::f32::consts::PI * core.density as f32)).cbrt();
             let energy = mass * core.chemical_energy as f32;

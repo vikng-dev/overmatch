@@ -63,8 +63,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
-| dev-06 | P2 | `src/dev_capture/wall.rs::shoot` | error-handling: Invented default | A mass-only `Charge` cue picks the first burst-capable registry substance; registry ordering changes radius and products momentum. | Require a substance or construction key in cue data and resolve it at admission. | ratchet |
-| dev-07 | P2 | `src/sandbox/wall/baked.rs::wall_cut` | base-truths: Inferred construction | Renaming an element changes wall membership despite unchanged declared component and geometry. | Select the declared component and its authored membership. | ratchet |
 | dev-13 | P2 | `scripts/cost/analyze.py::parse` | error-handling: Dropped error | A malformed interior row is counted but never reported, so missing expensive ticks skew cost percentiles and the CLI succeeds. | Refuse malformed interior rows with file and line; name any permitted torn tail. | ratchet |
 | dev-14 | P2 | `scripts/cost/analyze.py::main` | error-handling: Invented default | A trace declaring `tick_hz: 128` gets duration at 128 Hz but per-round cost at a hardcoded 64 Hz, a factor of two (DERIVED). | Require the trace's tick rate once and carry it into every conversion. | ratchet |
 | dev-15 | P2 | `scripts/perf/pencam_cost.py::parse_marks_has` | error-handling: Silent exit | An x-ray opening parses as `glass-on` but the paired-off guard searches `glass`, so an off-run with inherited `OVERMATCH_XRAY` contaminates the baseline and passes. | Recognize every opening mark of the surface and refuse a contaminated off-run. | ratchet |

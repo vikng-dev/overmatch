@@ -137,7 +137,7 @@ pub(crate) struct Layout {
     pub(crate) joints: Vec<Joint>,
     /// Per law chunk: its hull.
     pub(crate) blocks: Vec<Block>,
-    /// Per element: its prism.
+    /// Per element: its hull.
     pub(crate) element_blocks: Vec<Block>,
 }
 
@@ -225,28 +225,38 @@ impl Layout {
             ));
         }
         use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
+        // Every hull a collider is built from bounds a solid: refused here, before play.
+        let solid = |points: Vec<Vec3>, what: String| {
+            if points.iter().any(|p| !p.is_finite())
+                || !Collider::convex_hull(points.clone()).is_some_and(|collider| {
+                    let properties = collider.mass_properties(1.0);
+                    properties.mass.is_finite()
+                        && properties.mass > 0.0
+                        && properties.angular_inertia_tensor().inverse().is_finite()
+                })
+            {
+                return Err(format!(
+                    "{what} cannot form a convex collider; rebake a finite, nondegenerate solid hull"
+                ));
+            }
+            Ok(Block::hull(points))
+        };
         let blocks = chunks
             .iter()
             .map(|&c| {
-                let points: Vec<Vec3> = asset.chunks[c as usize]
+                let points = asset.chunks[c as usize]
                     .hull
                     .iter()
                     .map(|p| Vec3::from_array(*p))
                     .collect();
-                if points.iter().any(|p| !p.is_finite())
-                    || !Collider::convex_hull(points.clone()).is_some_and(|collider| {
-                        let properties = collider.mass_properties(1.0);
-                        properties.mass.is_finite()
-                            && properties.mass > 0.0
-                            && properties.angular_inertia_tensor().inverse().is_finite()
-                    })
-                {
-                    return Err(format!(
-                        "chunks[{c}].hull cannot form a convex collider; rebake a finite, nondegenerate solid hull"
-                    ));
-                }
-                Ok(Block::hull(points))
+                solid(points, format!("chunks[{c}].hull"))
             })
+            .collect::<Result<Vec<_>, _>>()?;
+        let element_blocks = asset
+            .elements
+            .iter()
+            .enumerate()
+            .map(|(e, element)| solid(element.points(), format!("elements[{e}].hull")))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             elements: elements
@@ -259,11 +269,7 @@ impl Layout {
             ground,
             joints,
             blocks,
-            element_blocks: asset
-                .elements
-                .iter()
-                .map(|element| Block::hull(element.points()))
-                .collect(),
+            element_blocks,
         })
     }
 

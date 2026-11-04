@@ -20,7 +20,7 @@ def run_one(root, out, seconds, index):
     plan = out / "wall.ron"
     # Fixture cues exercise real wall crossings and structural changes, without taking frames.
     plan.write_text('(wall: (shots: [Round(round: "88mm_AP", at: 10.0), '
-                    'Charge(kg: 1.0, at: 20.0)]))\n')
+                    'Charge(kg: 1.0, core: "88mm_burst_core", at: 20.0)]))\n')
     env = dict(os.environ, OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless",
                OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_BOT="30",
                SPIKE_SHOT_TRACE=str(prefix), OVERMATCH_CAPTURE=str(plan),

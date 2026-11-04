@@ -1053,3 +1053,24 @@ fn the_inspector_attributes_cones_to_their_wall_and_shell() {
     assert_eq!(strength_of(&queue[1]), strength);
     assert_eq!(strength_of(&queue[2]), 0.0);
 }
+
+/// THE WALL IS ITS DECLARED COMPONENT, NOT ITS NAMES: renaming every element of the shipped
+/// building (fixture edit) leaves the sandbox's cut the same, hull for hull. A selection by name
+/// prefix loses the wall the moment an element is renamed.
+#[test]
+fn renaming_the_elements_keeps_the_wall() {
+    use crate::buildings::schema::BuildingAsset;
+    let asset = BuildingAsset::from_ron(super::BUILDING).expect("the shipped building parses");
+    let mut renamed = asset.clone();
+    for (k, element) in renamed.elements.iter_mut().enumerate() {
+        element.name = format!("renamed_{k}");
+    }
+    let cut = |asset: &BuildingAsset| {
+        super::baked::wall_cut(asset, super::WALL, super::SUBSTANCE, brick(), super::PLACE)
+            .expect("the shipped building has the wall")
+            .blocks
+    };
+    let blocks = cut(&asset);
+    assert!(!blocks.is_empty());
+    assert_eq!(cut(&renamed), blocks);
+}

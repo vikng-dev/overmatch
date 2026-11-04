@@ -8,7 +8,7 @@
 //! (ADR-0011), and folded into the map's content digest, so two peers spawn the same walls.
 //!
 //! THE BODY, INTACT. One static root per building, and one child per element: its own convex
-//! collider (the element's prism) on `[Terrain, Armor]` with filters `ALL`, and its own
+//! collider (the element's hull) on `[Terrain, Armor]` with filters `ALL`, and its own
 //! [`BallisticVolume`] of the element's substance. Hulls contact an element; the walk slows a
 //! round by chord × factor through every element it crosses, and an opening is no element, so
 //! rounds and sight pass through it. The instance's uniform scale is applied to the points at
@@ -194,7 +194,7 @@ pub(crate) fn element_layers() -> CollisionLayers {
     CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL)
 }
 
-/// Element `k`'s collider entity, less its parent: the prism at the instance's `scale`, a
+/// Element `k`'s collider entity, less its parent: its hull at the instance's `scale`, a
 /// ballistic volume of its substance.
 fn element_bundle(kind: &BuildingKind, k: usize, scale: f32) -> impl Bundle {
     let element = &kind.asset.elements[k];
@@ -493,9 +493,9 @@ pub(crate) mod tests {
     }
 
     /// A NON-FINITE OR MALFORMED GEOMETRIC FACT DOES NOT LOAD: NaN passes every `>` and `<`
-    /// comparison the contract once made, so a NaN profile, frame axis, hull corner, joint normal
-    /// or anchor centroid, a skewed frame or a concave profile would reach the colliders, faces
-    /// and laws that read them. Each is refused naming its element, chunk, joint or anchor.
+    /// comparison the contract once made, so a NaN element or chunk hull corner, joint normal or
+    /// anchor centroid, or an element hull of three corners, would reach the colliders, faces and
+    /// laws that read them. Each is refused naming its element, chunk, joint or anchor.
     #[test]
     fn a_non_finite_or_malformed_geometric_fact_is_refused() {
         let path = shipped_assets().join("buildings/house_1/house_1.building.ron");
@@ -508,13 +508,8 @@ pub(crate) mod tests {
             assert!(err.contains(part), "{part}: {err}");
         };
         refused(&|a| a.foundation_y_m = f32::NAN, "foundation_y_m");
-        refused(&|a| a.elements[0].profile[0][0] = f32::NAN, "profile");
-        refused(&|a| a.elements[0].frame.u[0] = f32::NAN, "frame");
-        refused(
-            &|a| a.elements[0].frame.v = a.elements[0].frame.u,
-            "orthogonal",
-        );
-        refused(&|a| a.elements[0].depth[1] = f32::INFINITY, "depth");
+        refused(&|a| a.elements[0].hull[0][0] = f32::NAN, "hull");
+        refused(&|a| a.elements[0].hull.truncate(3), "four");
         refused(&|a| a.chunks[0].hull[0][1] = f32::NAN, "hull or centroid");
         refused(
             &|a| a.joints[0].normal = [f32::NAN; 3],
@@ -528,100 +523,31 @@ pub(crate) mod tests {
             &|a| a.anchors[0].centroid[0] = f32::NAN,
             "centroid is not finite",
         );
-        refused(
-            &|a| {
-                let profile = &mut a
-                    .elements
-                    .iter_mut()
-                    .find(|element| element.profile.len() >= 4)
-                    .expect("the shipped house holds a profile of four corners or more")
-                    .profile;
-                let mean = profile
-                    .iter()
-                    .fold([0.0; 2], |sum, p| [sum[0] + p[0], sum[1] + p[1]]);
-                let n = profile.len() as f32;
-                // A corner pulled just past the centre dents the polygon and keeps its area positive.
-                let centre = [mean[0] / n, mean[1] / n];
-                profile[0] = [
-                    centre[0] - 0.25 * (profile[0][0] - centre[0]),
-                    centre[1] - 0.25 * (profile[0][1] - centre[1]),
-                ];
-            },
-            "not convex",
-        );
     }
 
-    /// Collider and face readers require a simple convex boundary. Local left turns alone
-    /// admit a self-intersecting star (ASSUMED fixture geometry), whose faces cross its hull.
+    /// AN ELEMENT HULL THAT BOUNDS NO SOLID DOES NOT LOAD: an intact element's collider, its law
+    /// shape and its drawn faces are all its hull, so a hull with every corner on one plane (the
+    /// shipped first element flattened onto its first corner's height, fixture data) is refused
+    /// before play naming the element's field, never left to fail when its collider is built.
     #[test]
-    fn a_self_intersecting_profile_is_refused_before_play() {
-        let mut asset = shipped_house().asset.clone();
-        asset.elements[0].profile = (0..5)
-            .map(|k| {
-                let angle = (k * 2) as f32 * std::f32::consts::TAU / 5.0;
-                [angle.cos(), angle.sin()]
-            })
-            .collect();
-        let error = asset.check().expect_err("a star is no convex boundary");
-        assert!(
-            error.contains("profile") && error.contains("split"),
-            "{error}"
-        );
-    }
-    /// A boundary traced twice has only left turns and passes every edge half-plane test,
-    /// but doubles the face list and profile area. Collider and face readers need one boundary.
-    #[test]
-    fn a_profile_traced_twice_is_refused_before_play() {
-        let mut asset = shipped_house().asset.clone();
-        let boundary = asset.elements[0].profile.clone();
-        asset.elements[0].profile.extend(boundary);
-        let error = asset
+    fn an_element_hull_that_bounds_no_solid_is_refused_before_play() {
+        let path = shipped_assets().join("buildings/house_1/house_1.building.ron");
+        let mut asset = BuildingAsset::from_ron(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let height = asset.elements[0].hull[0][1];
+        for corner in &mut asset.elements[0].hull {
+            corner[1] = height;
+        }
+        asset
             .check()
-            .expect_err("a repeated boundary is no simple polygon");
-        assert!(
-            error.contains("profile") && error.contains("remove repeated vertices"),
-            "{error}"
-        );
-    }
-    /// Collider and face readers require a simple boundary even when crossings fit inside
-    /// the plane tolerance. ASSUMED fixture: a unit-radius 501-gon visited in steps of two.
-    #[test]
-    fn a_dense_star_profile_is_refused_before_play() {
-        let mut asset = shipped_house().asset.clone();
-        asset.elements[0].profile = (0..501)
-            .map(|k| {
-                let angle = (k * 2) as f32 * std::f32::consts::TAU / 501.0;
-                [angle.cos(), angle.sin()]
-            })
-            .collect();
-        let error = asset
-            .check()
-            .expect_err("crossing edges cannot bound a prism");
-        assert!(
-            error.contains("profile") && error.contains("split"),
-            "{error}"
-        );
-    }
-    /// Collinear edges that retrace one another have no proper crossing and no strict
-    /// orientation change, yet trace the boundary twice. ASSUMED fixture: distinct vertices,
-    /// positive area and every vertex within the plane tolerance of every edge half-plane.
-    #[test]
-    fn a_profile_retracing_a_collinear_edge_is_refused_before_play() {
-        let mut asset = shipped_house().asset.clone();
-        asset.elements[0].profile = vec![
-            [0.0, 0.0],
-            [4.0, 0.0],
-            [1.0, 0.0],
-            [3.0, 0.0],
-            [5.0, 0.00005],
-            [-1.0, 0.00005],
-        ];
-        let error = asset
-            .check()
-            .expect_err("a retraced edge cannot bound a prism");
-        assert!(
-            error.contains("profile") && error.contains("split"),
-            "{error}"
-        );
+            .expect("a flat hull passes the text's own contract");
+        let text = ron::ser::to_string(&asset).unwrap();
+        let err = BuildingKind::resolve(
+            "house_1",
+            &text,
+            SubstanceRegistry::shipped_static(),
+            Attachments::shipped_static(),
+        )
+        .unwrap_err();
+        assert!(err.contains("elements[0].hull"), "{err}");
     }
 }

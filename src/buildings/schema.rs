@@ -11,8 +11,8 @@
 //! # Elements, chunks, joints, anchors
 //!
 //! - An [`Element`] is a generator terminal (a pier, a sill, a lintel, a gable, a wall plate, a roof
-//!   plane): a right prism, a convex profile extruded through a depth. Intact, each is one convex
-//!   collider; elements tile the building and never overlap.
+//!   plane): a convex solid, the hull of its corners. Intact, each is one convex collider; elements
+//!   tile the building and never overlap.
 //! - A [`Chunk`] is the fracture bake's piece: a convex hull inside one element. An element's
 //!   chunks are a contiguous run of [`BuildingAsset::chunks`] ([`Element::chunks`]) and tile it.
 //! - A component is a part the generator builds as one (a brick wall, a wall plate, a roof plane):
@@ -28,13 +28,13 @@
 //! The simulation reads chunks and joints only; it never reads how the bake chose the cuts.
 //!
 //! [`BuildingAsset::check`] is the format's contract: every coordinate finite, every index in
-//! range, every element's frame unit and orthogonal and its profile a convex counter-clockwise
-//! polygon, every element's chunk run contiguous and covering, every joint and anchor of positive
-//! area, every joint normal unit, every attachment kind named once, every anchor on the foundation
-//! plane. The game refuses a file that breaks it, and
-//! one naming a material or an attachment kind its registries do not hold (ADR-0011).
+//! range, every element's hull of four corners or more, every element's chunk run contiguous and
+//! covering, every joint and anchor of positive area, every joint normal unit, every attachment
+//! kind named once, every anchor on the foundation plane. The game refuses a file that breaks it,
+//! one whose element or chunk hull bounds no solid, and one naming a material or an attachment kind
+//! its registries do not hold (ADR-0011).
 
-use bevy::math::{Vec2, Vec3};
+use bevy::math::Vec3;
 use serde::{Deserialize, Serialize};
 
 /// The format revision this build reads and writes. A file of another revision is refused.
@@ -106,32 +106,7 @@ impl SurfaceFrame {
     }
 }
 
-/// An element's frame: origin and two in-plane axes, building frame. The extrusion axis is
-/// `w = u × v`; `u` and `v` are unit and orthogonal.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Frame {
-    pub origin: [f32; 3],
-    pub u: [f32; 3],
-    pub v: [f32; 3],
-}
-
-impl Frame {
-    /// The extrusion axis `u × v`.
-    pub fn w(&self) -> Vec3 {
-        Vec3::from_array(self.u).cross(Vec3::from_array(self.v))
-    }
-
-    /// The building-frame point at profile coordinates `p` and depth `d`.
-    pub fn point(&self, p: Vec2, d: f32) -> Vec3 {
-        Vec3::from_array(self.origin)
-            + Vec3::from_array(self.u) * p.x
-            + Vec3::from_array(self.v) * p.y
-            + self.w() * d
-    }
-}
-
-/// One generator terminal (module doc): the prism `profile × depth` in `frame`.
+/// One generator terminal (module doc): the convex hull of its corners.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Element {
@@ -142,60 +117,17 @@ pub struct Element {
     pub component: u16,
     /// Index into [`BuildingAsset::materials`].
     pub material: u8,
-    pub frame: Frame,
     pub surface_frame: SurfaceFrame,
-    /// The convex profile in `(u, v)`, counter-clockwise about `w`.
-    pub profile: Vec<[f32; 2]>,
-    /// The extrusion range along `w`, `[near, far]`, `near < far`.
-    pub depth: [f32; 2],
+    /// The convex hull's corners, building frame.
+    pub hull: Vec<[f32; 3]>,
     /// This element's chunks: `chunks[first..end]` of [`BuildingAsset::chunks`].
     pub chunks: [u32; 2],
 }
 
 impl Element {
-    /// The prism's corners, building frame: the profile at the near depth, then at the far.
+    /// The hull's corners, building frame.
     pub fn points(&self) -> Vec<Vec3> {
-        self.depth
-            .iter()
-            .flat_map(|&d| {
-                self.profile
-                    .iter()
-                    .map(move |&p| self.frame.point(Vec2::from_array(p), d))
-            })
-            .collect()
-    }
-
-    /// The prism's faces, each as its outward unit normal and its corners counter-clockwise seen
-    /// from outside: the far cap, the near cap, then one side per profile edge.
-    pub fn faces(&self) -> Vec<(Vec3, Vec<Vec3>)> {
-        let n = self.profile.len();
-        let [near, far] = self.depth;
-        let at = |k: usize, d: f32| self.frame.point(Vec2::from_array(self.profile[k]), d);
-        let w = self.frame.w();
-        let mut faces = vec![
-            (w, (0..n).map(|k| at(k, far)).collect()),
-            (-w, (0..n).rev().map(|k| at(k, near)).collect()),
-        ];
-        let (u, v) = (
-            Vec3::from_array(self.frame.u),
-            Vec3::from_array(self.frame.v),
-        );
-        for k in 0..n {
-            let next = (k + 1) % n;
-            let edge = Vec2::from_array(self.profile[next]) - Vec2::from_array(self.profile[k]);
-            // Counter-clockwise about `w`, the interior lies left of each edge.
-            let out = Vec2::new(edge.y, -edge.x).normalize();
-            faces.push((
-                (u * out.x + v * out.y).normalize(),
-                vec![at(k, near), at(next, near), at(next, far), at(k, far)],
-            ));
-        }
-        faces
-    }
-
-    /// The prism's volume, m³.
-    pub fn volume(&self) -> f32 {
-        polygon_area(&self.profile) * (self.depth[1] - self.depth[0])
+        self.hull.iter().map(|p| Vec3::from_array(*p)).collect()
     }
 }
 
@@ -256,83 +188,6 @@ pub struct Anchor {
     pub centroid: [f32; 3],
 }
 
-/// A repeated vertex makes a boundary non-simple even when every edge half-plane holds.
-fn repeated_corner(profile: &[[f32; 2]]) -> Option<usize> {
-    (0..profile.len()).find(|&k| {
-        profile[..k].iter().any(|&other| {
-            Vec2::from_array(profile[k]).distance(Vec2::from_array(other)) <= PLANE_TOLERANCE_M
-        })
-    })
-}
-
-/// The first edge shorter than [`PLANE_TOLERANCE_M`] or with another vertex on its
-/// exterior side. A convex counter-clockwise boundary puts every vertex in every edge's
-/// interior half-plane; local turns alone also admit self-intersecting stars.
-fn concave_corner(profile: &[[f32; 2]]) -> Option<usize> {
-    let n = profile.len();
-    (0..n).find(|&k| {
-        let start = Vec2::from_array(profile[k]);
-        let edge = Vec2::from_array(profile[(k + 1) % n]) - start;
-        let length = edge.length();
-        length <= PLANE_TOLERANCE_M
-            || profile.iter().any(|&point| {
-                edge.perp_dot(Vec2::from_array(point) - start) < -PLANE_TOLERANCE_M * length
-            })
-    })
-}
-
-/// The first edge that meets a nonadjacent edge, crossing or touching it (collinear overlap
-/// included), or that its successor folds back along: a simple boundary's nonadjacent edges
-/// are disjoint closed segments and its adjacent edges share only their corner. Either breach
-/// makes faces overlap even when the half-plane tolerance admits every vertex. Uses f64
-/// orientation of the authored f32 coordinates; simplicity is topological and has no
-/// plane-distance tolerance.
-fn crossing_edge(profile: &[[f32; 2]]) -> Option<usize> {
-    let orient = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
-        (f64::from(b[0]) - f64::from(a[0])) * (f64::from(c[1]) - f64::from(a[1]))
-            - (f64::from(b[1]) - f64::from(a[1])) * (f64::from(c[0]) - f64::from(a[0]))
-    };
-    let opposite = |a: f64, b: f64| (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0);
-    // `c`, collinear with `a`–`b`, lies on that closed segment.
-    let on = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| {
-        (0..2).all(|k| a[k].min(b[k]) <= c[k] && c[k] <= a[k].max(b[k]))
-    };
-    let meet = |a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]| {
-        let (abc, abd, cda, cdb) = (
-            orient(a, b, c),
-            orient(a, b, d),
-            orient(c, d, a),
-            orient(c, d, b),
-        );
-        (opposite(abc, abd) && opposite(cda, cdb))
-            || (abc == 0.0 && on(a, b, c))
-            || (abd == 0.0 && on(a, b, d))
-            || (cda == 0.0 && on(c, d, a))
-            || (cdb == 0.0 && on(c, d, b))
-    };
-    let n = profile.len();
-    (0..n).find(|&i| {
-        let (a, b, next) = (profile[i], profile[(i + 1) % n], profile[(i + 2) % n]);
-        let back = (f64::from(next[0]) - f64::from(b[0])) * (f64::from(a[0]) - f64::from(b[0]))
-            + (f64::from(next[1]) - f64::from(b[1])) * (f64::from(a[1]) - f64::from(b[1]));
-        (orient(a, b, next) == 0.0 && back > 0.0)
-            || (i + 2..n)
-                .filter(|&j| (j + 1) % n != i)
-                .any(|j| meet(a, b, profile[j], profile[(j + 1) % n]))
-    })
-}
-
-/// The signed area of a polygon, positive when counter-clockwise.
-pub fn polygon_area(points: &[[f32; 2]]) -> f32 {
-    let n = points.len();
-    0.5 * (0..n)
-        .map(|k| {
-            let (p, q) = (points[k], points[(k + 1) % n]);
-            p[0] * q[1] - q[0] * p[1]
-        })
-        .sum::<f32>()
-}
-
 impl BuildingAsset {
     /// Parse and check a file's text (ADR-0011): a file that does not parse or breaks the contract
     /// is refused, naming why.
@@ -379,7 +234,7 @@ impl BuildingAsset {
             }
         }
         let finite = |values: &[f32]| values.iter().all(|v| v.is_finite());
-        // NaN fails this comparison, so a NaN axis or normal is refused with the rest.
+        // NaN fails this comparison, so a NaN normal is refused with the rest.
         let unit = |axis: Vec3| (axis.length() - 1.0).abs() <= PLANE_TOLERANCE_M;
         let material = |index: u8, what: &str| {
             (usize::from(index) < self.materials.len())
@@ -401,47 +256,11 @@ impl BuildingAsset {
                     "element {name}'s surface_frame is no finite unit grain; author Upright or a unit Grain direction and rebake the building"
                 ));
             }
-            let frame = &element.frame;
-            if !finite(&frame.origin) || !finite(&frame.u) || !finite(&frame.v) {
+            if element.hull.len() < 4 || !element.hull.iter().all(|p| finite(p)) {
                 return Err(format!(
-                    "element {name}'s frame {frame:?} is not finite; rebake the building"
-                ));
-            }
-            let (u, v) = (Vec3::from_array(frame.u), Vec3::from_array(frame.v));
-            if !(unit(u) && unit(v) && u.dot(v).abs() <= PLANE_TOLERANCE_M) {
-                return Err(format!(
-                    "element {name}'s frame axes u {u} and v {v} are not unit and orthogonal; \
-                     rebake the building"
-                ));
-            }
-            if element.profile.len() < 3
-                || !element.profile.iter().all(|p| finite(p))
-                || !(polygon_area(&element.profile).is_finite()
-                    && polygon_area(&element.profile) > 0.0)
-            {
-                return Err(format!(
-                    "element {name}'s profile is no finite counter-clockwise polygon; rebake the building"
-                ));
-            }
-            if let Some(corner) = repeated_corner(&element.profile) {
-                return Err(format!(
-                    "element {name}'s profile repeats vertex {corner}; remove repeated vertices and rebake the building"
-                ));
-            }
-            if let Some(corner) =
-                crossing_edge(&element.profile).or_else(|| concave_corner(&element.profile))
-            {
-                return Err(format!(
-                    "element {name}'s profile is not convex at corner {corner}: its collider is \
-                     the profile's hull and its faces are the profile's edges; split the element"
-                ));
-            }
-            if !finite(&element.depth)
-                || element.depth[0].partial_cmp(&element.depth[1]) != Some(std::cmp::Ordering::Less)
-            {
-                return Err(format!(
-                    "element {name}'s depth {:?} is not finite and ordered; rebake the building",
-                    element.depth
+                    "element {name}'s hull has {} corners, or one not finite: a solid needs four \
+                     finite corners or more; rebake the building",
+                    element.hull.len()
                 ));
             }
             let [first, end] = element.chunks;

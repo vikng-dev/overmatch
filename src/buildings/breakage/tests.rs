@@ -83,17 +83,18 @@ fn fixture_chunks(kind: &BuildingKind) -> (usize, [usize; 3]) {
     (e, [chunks[0], chunks[1], chunks[2]])
 }
 
-/// A probe ray through chunk `c` along its element's extrusion axis, from half a metre before its
-/// near face to `beyond` m past its far face.
+/// Element `e`'s thickness axis: across its thinnest span ([`Block::thinnest`]).
+fn across(kind: &BuildingKind, e: usize) -> Vec3 {
+    kind.layout.element_blocks[e].thinnest().0
+}
+
+/// A probe ray through chunk `c` across its element's thinnest span ([`Block::thinnest`]), from
+/// half a metre before its near face to `beyond` m past its far face.
 fn through(kind: &BuildingKind, e: usize, c: usize, beyond: f32) -> (Vec3, Dir3, f32) {
-    let element = &kind.asset.elements[e];
-    let w = element.frame.w().normalize();
-    let origin = Vec3::from_array(element.frame.origin);
+    let (w, near, far) = kind.layout.element_blocks[e].thinnest();
     let centroid = Vec3::from_array(kind.asset.chunks[kind.layout.chunks[c] as usize].centroid);
-    let depth = (centroid - origin).dot(w);
-    let near = centroid - w * (depth - element.depth[0] + 0.5);
-    let length = element.depth[1] - element.depth[0] + 0.5 + beyond;
-    (near, Dir3::new(w).unwrap(), length)
+    let start = centroid + w * (near - 0.5 - centroid.dot(w));
+    (start, Dir3::new(w).unwrap(), far - near + 0.5 + beyond)
 }
 
 /// A CHUNK TURNED TO DUST OR FALLEN NEVER BLOCKS A SHOT AS THE INTACT ELEMENT: before the break a
@@ -425,16 +426,14 @@ fn the_world_ball_keeps_every_ray_the_bounds_meet() {
     }
 }
 
-/// A round's line through law chunk `c` of element `e` (building frame, unit scale): 10 cm along
-/// the element's extrusion axis about the chunk's centroid, carrying `share` of its full pool.
+/// A round's line through law chunk `c` (building frame, unit scale): 10 cm along unit `w` about
+/// the chunk's centroid, carrying `share` of its full pool.
 fn line_through_chunk(
-    kind: &BuildingKind,
     structure: &Structure,
-    e: usize,
+    w: Vec3,
     c: usize,
     share: f32,
 ) -> (usize, Vec3, Vec3, f32) {
-    let w = kind.asset.elements[e].frame.w().normalize();
     let chunk = &structure.chunks[c];
     (
         c,
@@ -516,9 +515,8 @@ fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
     let (e, [channel_chunk, dish_chunk, _]) = fixture_chunks(&kind);
     let mut authority = Live::new(&kind, 1.0);
     let lines = [line_through_chunk(
-        &kind,
         &authority.structure,
-        e,
+        across(&kind, e),
         channel_chunk,
         0.05,
     )];
@@ -578,7 +576,7 @@ fn a_hole_changes_no_collider_mass_or_structural_result() {
     let (e, [c, ..]) = fixture_chunks(&kind);
     let mut cut = Live::new(&kind, 1.0);
     let mut whole = Live::new(&kind, 1.0);
-    let line = line_through_chunk(&kind, &cut.structure, e, c, 0.3);
+    let line = line_through_chunk(&cut.structure, across(&kind, e), c, 0.3);
     let push = Load {
         chunk: c,
         at: cut.structure.chunks[c].centroid,
@@ -678,7 +676,7 @@ fn past_the_cap_a_chunk_stands_until_its_pool_is_spent() {
     let (e, [c, ..]) = fixture_chunks(&kind);
     let mut live = Live::new(&kind, 1.0);
     let to_spend = HOLES_PER_CHUNK + 4;
-    let line = line_through_chunk(&kind, &live.structure, e, c, 1.0 / to_spend as f32);
+    let line = line_through_chunk(&live.structure, across(&kind, e), c, 1.0 / to_spend as f32);
     let holes = holes_of(&kind, 1.0, &[line], &[]);
     assert_eq!(holes.len(), 1);
     let loads = line_loads(&live.structure, &[line]);
@@ -757,7 +755,7 @@ fn a_hole_holds_the_volume_its_load_crushed() {
     let crush = structure.chunks[c].material.crush;
     let metres = |p: [i16; 3]| Vec3::from_array(p.map(|v| f32::from(v) / 1000.0));
 
-    let line = line_through_chunk(&kind, &structure, e, c, 0.01);
+    let line = line_through_chunk(&structure, across(&kind, e), c, 0.01);
     let [(_, channel)] = holes_of(&kind, 1.0, &[line], &[])[..] else {
         panic!("one channel");
     };
@@ -911,7 +909,11 @@ fn a_nailed_roof_distinguishes_rests_from_local_fixing_failure() {
         })
         .unwrap();
     let mut live = fresh();
-    let line = line_through_chunk(&kind, &live.structure, roof_element, middle, 0.1);
+    // Fixture data: the line runs along the plane's declared grain, the boards' length.
+    let schema::SurfaceFrame::Grain(grain) = elements[roof_element].surface_frame else {
+        panic!("the shipped roof declares its grain");
+    };
+    let line = line_through_chunk(&live.structure, Vec3::from_array(grain), middle, 0.1);
     let push = Load {
         chunk: middle,
         at: line.1,
@@ -1105,7 +1107,7 @@ fn a_channel_is_the_cylinder_it_crossed_open_across_each_face() {
     let block = &kind.layout.blocks[c];
     let structure = kind.layout.structure(&kind.asset, 1.0);
     let centroid = Vec3::from_array(kind.asset.chunks[kind.layout.chunks[c] as usize].centroid);
-    let w = kind.asset.elements[e].frame.w().normalize();
+    let w = across(&kind, e);
     // Tilted along the chunk's widest direction across the axis, so both ends sit inside their
     // faces with room for the rim.
     let extent = |t: Vec3| {
@@ -1264,17 +1266,15 @@ fn shielding_cube() -> Arc<BuildingKind> {
         kind: ElementKind::Pier,
         component: 0,
         material: 0,
-        frame: schema::Frame {
-            origin: [0.0; 3],
-            u: [1.0, 0.0, 0.0],
-            v: [0.0, 1.0, 0.0],
-        },
         surface_frame: schema::SurfaceFrame::Upright,
-        profile: vec![[-0.1, 0.0], [0.1, 0.0], [0.1, 0.2], [-0.1, 0.2]],
-        depth: [-0.1, 0.1],
+        hull: [-0.1, 0.1]
+            .into_iter()
+            .flat_map(|x| [0.0, 0.2].map(|y| [-0.1, 0.1].map(|z| [x, y, z])))
+            .flatten()
+            .collect(),
         chunks: [0, 1],
     };
-    let volume = element.volume();
+    let volume = 0.2_f32.powi(3);
     let asset = BuildingAsset {
         id: "shielding_fixture".to_owned(),
         format: schema::FORMAT,
@@ -1418,10 +1418,9 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
 fn a_loose_piece_shadowed_by_a_standing_chunk_takes_nothing() {
     let kind = shipped_house();
     let (e, [c, ..]) = fixture_chunks(&kind);
-    let element = &kind.asset.elements[e];
-    let (origin, w, _) = through(&kind, e, c, 0.0);
+    let (origin, w, reach) = through(&kind, e, c, 0.0);
     // Each cube 0.3 m past the wall's far face, or as far out on the burst's side (fixture data).
-    let out = 0.5 + element.depth[1] - element.depth[0] + 0.3;
+    let out = reach + 0.3;
     let (mut app, _) = composed(false);
     let behind = loose_cube(&mut app, origin + *w * out, 0.1);
     let open = loose_cube(&mut app, origin - *w * out, 0.1);
@@ -1447,9 +1446,8 @@ fn a_loose_piece_shadowed_by_a_standing_chunk_takes_nothing() {
 fn the_ground_stops_a_blast_and_a_body_holding_the_burst_shades_nothing() {
     let kind = shielding_cube();
     let (e, c) = (0, 0);
-    let element = &kind.asset.elements[e];
-    let (origin, w, _) = through(&kind, e, c, 0.0);
-    let out = 0.5 + element.depth[1] - element.depth[0] + 0.3;
+    let (origin, w, reach) = through(&kind, e, c, 0.0);
+    let out = reach + 0.3;
     let speed_of_open = |slab: bool| {
         let (mut app, _) = composed_kind(false, &kind);
         let open = loose_cube(&mut app, origin - *w * out, 0.1);

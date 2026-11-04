@@ -116,13 +116,9 @@ pub struct Face {
 }
 
 impl Prism {
+    /// The volume in closed form, profile area × depth: the check its cells' moments sum to.
     pub fn volume(&self) -> f64 {
         area(&self.profile) * (self.far - self.near)
-    }
-
-    pub fn centroid(&self) -> DVec3 {
-        self.frame
-            .point(centroid(&self.profile), 0.5 * (self.near + self.far))
     }
 
     /// The corners: the profile at `near`, then at `far`.
@@ -175,16 +171,6 @@ impl Prism {
         faces
     }
 
-    /// The axis-aligned bounds, `(min, max)`.
-    pub fn bounds(&self) -> (DVec3, DVec3) {
-        self.corners().iter().fold(
-            (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)),
-            |(lo, hi), &p| (lo.min(p), hi.max(p)),
-        )
-    }
-}
-
-impl Prism {
     /// The prism as a [`Polyhedron`]: the profile at `near` (corners `0..n`), then at `far`
     /// (`n..2n`); its faces in [`Prism::faces`]' order.
     pub fn solid(&self) -> Polyhedron {
@@ -515,7 +501,7 @@ pub(crate) mod tests {
             near: -0.5,
             far: 0.25,
         };
-        let centre = prism.centroid();
+        let centre = prism.solid().centroid();
         assert!((prism.volume() - 0.75).abs() < 1e-12);
         for face in prism.faces() {
             assert!(face.normal.dot(face.corners[0] - centre) > 0.0);

@@ -58,8 +58,8 @@ use crate::dev_capture::plan::RangeWallCase;
 use crate::substances::SubstanceRegistry;
 use crate::{Layer, spec};
 
-/// The baked building the wall comes from, and which of its walls (an element's name begins
-/// `<wall>/`): the brick elements of that wall.
+/// The baked building the wall comes from, and which of its walls (a declared component): the
+/// brick elements of that wall.
 const BUILDING: &str = include_str!("../../assets/buildings/house_1/house_1.building.ron");
 const WALL: &str = "east";
 /// Fixture layout, world metres: where the wall stands, clear of the range's plates and target (x within ±7.5)

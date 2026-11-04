@@ -412,6 +412,24 @@ impl Block {
         (self.min + self.max) / 2.0
     }
 
+    /// The axis this shape is thinnest across and its extent along it, `(axis, lo, hi)`: the
+    /// outward normal of the bounding plane over which its corners span least (the first such
+    /// plane on a tie), and their least and greatest offsets along it. A wall's is its thickness.
+    pub fn thinnest(&self) -> (Vec3, f32, f32) {
+        self.planes
+            .iter()
+            .map(|&(n, _)| {
+                let along = || self.points.iter().map(move |p| p.dot(n));
+                (
+                    n,
+                    along().fold(f32::INFINITY, f32::min),
+                    along().fold(f32::NEG_INFINITY, f32::max),
+                )
+            })
+            .min_by(|a, b| (a.2 - a.1).total_cmp(&(b.2 - b.1)))
+            .expect("a certified solid has bounding planes")
+    }
+
     /// The distance from the centroid of the corners to the nearest bounding plane, m.
     /// The caller supplies a certified solid with at least four corners.
     pub fn inradius(&self) -> f32 {

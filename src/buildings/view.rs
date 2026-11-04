@@ -1,7 +1,7 @@
 //! A building's view: one mesh per building asset, built from its RON's elements, merged and
 //! shared by every instance, drawn with the buildings' one material ([`crate::building_surface`]).
 //!
-//! VIEW ONLY (ADR-0014). The mesh is every element's prism, face by face: the drawn silhouette is
+//! VIEW ONLY (ADR-0014). The mesh is every element's hull, face by face: the drawn silhouette is
 //! exactly the colliders' union, and an opening, which is no element, is a hole the camera sees
 //! through. Faces two elements share stay in the mesh; they lie inside the wall and are never seen.
 //!
@@ -12,9 +12,9 @@
 //! the building frame. The material's vertex stage multiplies them by the instance's own scale
 //! along `t` and `b`, so a scaled house keeps real-size bricks. A wall face stands its image
 //! upright (`t = Y × n`) when its surface frame declares Upright; a Grain frame projects its
-//! authored direction onto the face; a level face runs along its element's construction
-//! ([`tangent`]). The second UV channel selects the visual's declared
-//! palette lane, resolved through its substance and the visual library.
+//! authored direction onto the face; a level face runs along its element's longest level edge
+//! ([`tangent`]). The second UV channel selects the visual's declared palette lane, resolved through
+//! its substance and the visual library.
 //!
 //! # A broken building ([`plugin`])
 //!
@@ -23,8 +23,8 @@
 //! own mesh ([`broken_mesh`]): whole elements as before, a swapped element's standing chunks as
 //! their hulls, framed exactly as the element's faces, so a swapped wall looks unchanged until a
 //! chunk goes; one with nothing left standing draws no mesh at all, never an empty one. Cracks are
-//! dark strips where an opened seam meets a wall face ([`crack_mesh`]). A fallen group draws its
-//! chunks' hulls on its body or carrier ([`piece_mesh`]), holes and all.
+//! dark strips where an opened seam meets its element's surface ([`crack_mesh`]). A fallen group
+//! draws its chunks' hulls on its body or carrier ([`piece_mesh`]), holes and all.
 //!
 //! # Holes
 //!
@@ -48,7 +48,7 @@ use super::breakage::{
     Breakage, HOLES_PER_CHUNK, Hole, Layout, Shape, WallEvent, WallPiece, WallRecord,
     WallReplicaSet,
 };
-use super::fracture::{Fate, Side, clip_polygon};
+use super::fracture::{Block, Fate, Side, clip_polygon};
 use super::schema::{BuildingAsset, SurfaceFrame};
 use crate::building_surface::{BuildingMaterial, holed};
 use crate::debris::PresentationClock;
@@ -56,11 +56,9 @@ use crate::scatter::MapInstance;
 
 /// A face's tangent: its element's authored grain projected into its plane; on an end face the
 /// grain crosses, and on every face of an Upright element, the upright image (`Y × n`). A level
-/// face has no upright, so its image runs along the element's own construction: its profile's
-/// run `u` projected into the face, or its depth axis `w` on a face `u` crosses at over 45°.
-/// The frame's axes are orthonormal (the load gate), so `(u·n)² + (w·n)² ≤ 1` and the axis taken
-/// lies at least half in the face: no level face is left without a tangent.
-fn tangent(n: Vec3, frame: SurfaceFrame, [u, w]: [Vec3; 2]) -> Vec3 {
+/// face has no upright, so its image runs along its element's level `run` ([`run`]), which lies
+/// in the face within the upright test's tolerance: no level face is left without a tangent.
+fn tangent(n: Vec3, frame: SurfaceFrame, run: Vec3) -> Vec3 {
     let in_face = |axis: Vec3| axis - n * axis.dot(n);
     if let SurfaceFrame::Grain(grain) = frame {
         let projected = in_face(Vec3::from_array(grain));
@@ -72,21 +70,45 @@ fn tangent(n: Vec3, frame: SurfaceFrame, [u, w]: [Vec3; 2]) -> Vec3 {
     if upright.length_squared() > 1e-6 {
         return upright.normalize();
     }
-    let run = in_face(u);
-    if run.length_squared() >= 0.5 {
-        run.normalize()
-    } else {
-        in_face(w).normalize()
-    }
+    in_face(run).normalize()
 }
 
-/// An element's construction axes for [`tangent`]: its profile's run `u` and its depth `u × v`.
-fn axes(element: &super::schema::Element) -> [Vec3; 2] {
-    let (u, v) = (
-        Vec3::from_array(element.frame.u),
-        Vec3::from_array(element.frame.v),
-    );
-    [u, u.cross(v)]
+/// An element's run: the level direction of its hull's edge longest seen from above, unit. A
+/// bounded solid has an edge off the vertical, so every element has one; a wall's runs along the
+/// wall wherever it is longer than thick.
+fn run(hull: &Block) -> Vec3 {
+    let mut longest = Vec3::ZERO;
+    for (_, corners) in hull.faces() {
+        for k in 0..corners.len() {
+            let edge = corners[(k + 1) % corners.len()] - corners[k];
+            let level = Vec3::new(edge.x, 0.0, edge.z);
+            if level.length_squared() > longest.length_squared() {
+                longest = level;
+            }
+        }
+    }
+    longest.normalize()
+}
+
+/// How an element's faces are drawn: its authored surface frame, its [`run`] and whether it wears
+/// the secondary palette lane.
+struct Look {
+    frame: SurfaceFrame,
+    run: Vec3,
+    secondary: bool,
+}
+
+impl Look {
+    fn of(asset: &BuildingAsset, layout: &Layout, e: usize) -> Self {
+        let element = &asset.elements[e];
+        Self {
+            frame: element.surface_frame,
+            run: run(&layout.element_blocks[e]),
+            secondary: crate::building_surface::lane_for_substance(
+                &asset.materials[usize::from(element.material)],
+            ) == crate::building_surface::SurfaceLane::Secondary,
+        }
+    }
 }
 
 /// A mesh's faces as they are added, each framed in metres (module doc).
@@ -101,23 +123,15 @@ struct Faces {
 }
 
 impl Faces {
-    /// One face of outward normal `n`, its corners counter-clockwise seen from outside, on an
-    /// `element` (its authored surface frame and construction axes, [`tangent`]) in palette lane
-    /// `secondary`; drawn `offset` from where it is (asset frame) while framed where it is, so a
-    /// piece keeps the wall's bricks. `tag` is the hole lookup's (module doc).
-    fn face(
-        &mut self,
-        n: Vec3,
-        corners: &[Vec3],
-        element: &super::schema::Element,
-        secondary: bool,
-        offset: Vec3,
-        tag: f32,
-    ) {
+    /// One face of outward normal `n`, its corners counter-clockwise seen from outside, drawn with
+    /// its element's `look` ([`tangent`]); drawn `offset` from where it is (asset frame) while
+    /// framed where it is, so a piece keeps the wall's bricks. `tag` is the hole lookup's (module
+    /// doc).
+    fn face(&mut self, n: Vec3, corners: &[Vec3], look: &Look, offset: Vec3, tag: f32) {
         if corners.len() < 3 {
             return;
         }
-        let t = tangent(n, element.surface_frame, axes(element));
+        let t = tangent(n, look.frame, look.run);
         let b = n.cross(t);
         let first = u32::try_from(self.positions.len()).expect("a building's mesh fits u32");
         for p in corners {
@@ -125,7 +139,8 @@ impl Faces {
             self.normals.push(n.to_array());
             self.tangents.push(t.extend(1.0).to_array());
             self.uvs.push([p.dot(t), -p.dot(b)]);
-            self.packs.push([if secondary { 1.0 } else { 0.0 }, tag]);
+            self.packs
+                .push([if look.secondary { 1.0 } else { 0.0 }, tag]);
         }
         // Corners run counter-clockwise seen from outside: a fan from the first.
         for k in 1..corners.len() as u32 - 1 {
@@ -133,25 +148,19 @@ impl Faces {
         }
     }
 
-    /// Element `e`'s whole prism.
-    fn element(&mut self, asset: &BuildingAsset, e: usize) {
-        let element = &asset.elements[e];
-        let secondary = crate::building_surface::lane_for_substance(
-            &asset.materials[usize::from(element.material)],
-        ) == crate::building_surface::SurfaceLane::Secondary;
-        for (n, corners) in element.faces() {
-            self.face(n, &corners, element, secondary, Vec3::ZERO, 0.0);
+    /// Element `e`'s whole hull.
+    fn element(&mut self, asset: &BuildingAsset, layout: &Layout, e: usize) {
+        let look = Look::of(asset, layout, e);
+        for (n, corners) in layout.element_blocks[e].faces() {
+            self.face(n, &corners, &look, Vec3::ZERO, 0.0);
         }
     }
 
-    /// Law chunk `c`'s hull, drawn `offset` back, its faces tagged `tag` (module doc).
-    fn chunk(&mut self, asset: &BuildingAsset, layout: &Layout, c: usize, offset: Vec3, tag: f32) {
-        let element = &asset.elements[usize::from(layout.element_of[c])];
-        let secondary = crate::building_surface::lane_for_substance(
-            &asset.materials[usize::from(element.material)],
-        ) == crate::building_surface::SurfaceLane::Secondary;
+    /// Law chunk `c`'s hull with its element's `look`, drawn `offset` back, its faces tagged `tag`
+    /// (module doc).
+    fn chunk(&mut self, layout: &Layout, look: &Look, c: usize, offset: Vec3, tag: f32) {
         for (n, corners) in layout.blocks[c].faces() {
-            self.face(n, &corners, element, secondary, offset, tag);
+            self.face(n, &corners, look, offset, tag);
         }
     }
 
@@ -167,27 +176,28 @@ impl Faces {
 }
 
 /// The building's mesh in its own frame at scale 1 (module doc).
-pub(crate) fn mesh(asset: &BuildingAsset) -> Mesh {
+pub(crate) fn mesh(asset: &BuildingAsset, layout: &Layout) -> Mesh {
     let mut faces = Faces::default();
     for e in 0..asset.elements.len() {
-        faces.element(asset, e);
+        faces.element(asset, layout, e);
     }
     faces.mesh()
 }
 
-/// A broken building's mesh in its own frame at scale 1: every whole element's prism, and every
+/// A broken building's mesh in its own frame at scale 1: every whole element's hull, and every
 /// standing chunk of each swapped element its hull, so a chunk turned to dust or fallen is a hole.
 pub(crate) fn broken_mesh(asset: &BuildingAsset, layout: &Layout, shape: &Shape) -> Mesh {
     let mut faces = Faces::default();
     for (e, swapped) in shape.swapped.iter().enumerate() {
         if *swapped {
+            let look = Look::of(asset, layout, e);
             for c in layout.chunks_of(e) {
                 if shape.fate[c] == Fate::Standing {
-                    faces.chunk(asset, layout, c, Vec3::ZERO, (c + 1) as f32);
+                    faces.chunk(layout, &look, c, Vec3::ZERO, (c + 1) as f32);
                 }
             }
         } else {
-            faces.element(asset, e);
+            faces.element(asset, layout, e);
         }
     }
     faces.mesh()
@@ -203,7 +213,9 @@ pub(crate) fn piece_mesh(
 ) -> Mesh {
     let mut faces = Faces::default();
     for (k, &c) in chunks.iter().enumerate() {
-        faces.chunk(asset, layout, usize::from(c), origin, (k + 1) as f32);
+        let c = usize::from(c);
+        let look = Look::of(asset, layout, usize::from(layout.element_of[c]));
+        faces.chunk(layout, &look, c, origin, (k + 1) as f32);
     }
     faces.mesh()
 }
@@ -282,10 +294,10 @@ const CRACK_HALF_WIDTH_M: f32 = 0.006;
 const CRACK_STANDOFF_M: f32 = 0.0015;
 
 /// The cracks a broken building shows, in its frame at scale 1: for every cracked joint between
-/// two standing chunks, a dark strip along each edge of their shared face that lies on one of
-/// their element's two faces (its extrusion's near and far planes), where the crack opens to the
-/// eye. `None` when no crack shows.
-pub(crate) fn crack_mesh(asset: &BuildingAsset, layout: &Layout, shape: &Shape) -> Option<Mesh> {
+/// two standing chunks, a dark strip along each edge of their shared face that lies on a bounding
+/// plane of the first chunk's element, where the crack opens to the element's surface. `None` when
+/// no crack shows.
+pub(crate) fn crack_mesh(layout: &Layout, shape: &Shape) -> Option<Mesh> {
     let (mut positions, mut normals, mut indices) = (Vec::new(), Vec::new(), Vec::new());
     for (j, joint) in layout.joints.iter().enumerate() {
         let Side::Chunk(b) = joint.b else {
@@ -300,17 +312,15 @@ pub(crate) fn crack_mesh(asset: &BuildingAsset, layout: &Layout, shape: &Shape) 
         let face_a = layout.blocks[joint.a].face_on(joint.centroid, joint.normal);
         let face_b = layout.blocks[b].face_on(joint.centroid, joint.normal);
         let polygon = clip_polygon(&face_a, &face_b, joint.normal);
-        let element = &asset.elements[usize::from(layout.element_of[joint.a])];
-        let w = element.frame.w();
-        let origin = Vec3::from_array(element.frame.origin);
+        let element = &layout.element_blocks[usize::from(layout.element_of[joint.a])];
         for k in 0..polygon.len() {
             let (p, q) = (polygon[k], polygon[(k + 1) % polygon.len()]);
             let along = q - p;
             if along.length() < 1e-4 {
                 continue;
             }
-            for (depth, out) in [(element.depth[0], -w), (element.depth[1], w)] {
-                let on = |x: Vec3| ((x - origin).dot(w) - depth).abs() < 1e-3;
+            for &(out, offset) in &element.planes {
+                let on = |x: Vec3| (out.dot(x) - offset).abs() < 1e-3;
                 if !(on(p) && on(q)) {
                     continue;
                 }
@@ -524,7 +534,7 @@ fn redraw(
         }
         let broken = broken_mesh(&kind.asset, &kind.layout, &shown.0);
         let mesh = (broken.count_vertices() > 0).then(|| meshes.add(broken));
-        let cracks = crack_mesh(&kind.asset, &kind.layout, &shown.0).map(|m| meshes.add(m));
+        let cracks = crack_mesh(&kind.layout, &shown.0).map(|m| meshes.add(m));
         match (&mesh, drawn) {
             (Some(mesh), Some(mut drawn)) => drawn.0 = mesh.clone(),
             (Some(mesh), None) => {
@@ -851,9 +861,10 @@ mod tests {
     fn authored_grain_changes_the_frame_and_never_the_silhouette() {
         use bevy::mesh::VertexAttributeValues;
         let mut asset = crate::buildings::tests::shipped_house().asset.clone();
-        let before = mesh(&asset);
+        let layout = &crate::buildings::tests::shipped_house().layout;
+        let before = mesh(&asset, layout);
         asset.elements[0].surface_frame = SurfaceFrame::Grain([0.0, 0.0, 1.0]);
-        let after = mesh(&asset);
+        let after = mesh(&asset, layout);
         let positions = |mesh: &Mesh| match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
             Some(VertexAttributeValues::Float32x3(values)) => values.clone(),
             _ => panic!("positions"),
@@ -872,49 +883,37 @@ mod tests {
         );
     }
 
-    /// A level face projects a construction axis into its plane. The surface reader relies
-    /// on a unit tangent perpendicular to the normal, including sloping and vertical runs.
-    /// ASSUMED fixture rotations cover both axis choices without naming an asset.
+    /// A LEVEL FACE RUNS ALONG ITS ELEMENT, NEVER ALONG A WORLD AXIS: an element's run is its
+    /// hull's edge longest seen from above, so a box 2 m long, 1 m tall and 0.25 m thick (fixture
+    /// data), yawed off every world axis, gives a level face drawn with its look, on the mesh path
+    /// (`Faces::face`), a unit tangent in the face along its length. A run read from a world axis,
+    /// or from the shortest edge, draws a yawed sill's bricks across it.
     #[test]
     fn a_level_face_runs_along_its_element() {
-        for yaw in [0.0_f32, 0.7, 1.57] {
+        for yaw in [0.0_f32, 0.7, 1.57, 2.5] {
             let heading = Quat::from_rotation_y(yaw);
-            let horizontal = heading * Vec3::X;
-            for degrees in [0.0_f32, 5.0, 44.0, 46.0, 85.0, 90.0] {
-                let rotation = heading * Quat::from_rotation_z(degrees.to_radians());
-                let axes = [rotation * Vec3::X, rotation * Vec3::Y];
-                for n in [Vec3::Y, Vec3::NEG_Y] {
-                    let actual = tangent(n, SurfaceFrame::Upright, axes);
-                    assert!((actual.length() - 1.0).abs() < 1e-6);
-                    assert!(actual.dot(n).abs() < 1e-6);
-                    assert!(actual.dot(horizontal).abs() > 0.999);
+            let length = heading * Vec3::X;
+            let mut corners = Vec::new();
+            for x in [-1.0, 1.0] {
+                for y in [0.0, 1.0] {
+                    for z in [-0.125, 0.125] {
+                        corners.push(heading * Vec3::new(x, y, z));
+                    }
                 }
             }
+            let look = Look {
+                frame: SurfaceFrame::Upright,
+                run: run(&Block::hull(corners)),
+                secondary: false,
+            };
+            for n in [Vec3::Y, Vec3::NEG_Y] {
+                let mut faces = Faces::default();
+                faces.face(n, &[Vec3::ZERO, Vec3::Z, Vec3::X], &look, Vec3::ZERO, 0.0);
+                let t = Vec4::from_array(faces.tangents[0]).truncate();
+                assert!((t.length() - 1.0).abs() < 1e-6 && t.dot(n).abs() < 1e-6);
+                assert!(t.dot(length).abs() > 0.999, "yaw {yaw}: {t} along {length}");
+            }
         }
-    }
-
-    /// A level face takes its image from its own element's construction axes on the mesh
-    /// path (`Faces::face`), never from a world axis: a mutant passing `[X, Z]` there draws a
-    /// yawed element's floorboards along world X. ASSUMED fixture: a shipped element's frame
-    /// yawed off every world axis, its surface frame Upright.
-    #[test]
-    fn a_level_face_on_the_mesh_path_runs_along_its_element() {
-        let mut element = shipped_house().asset.elements[0].clone();
-        let run = Quat::from_rotation_y(0.7) * Vec3::X;
-        element.frame.u = run.to_array();
-        element.frame.v = Vec3::Y.to_array();
-        element.surface_frame = SurfaceFrame::Upright;
-        let mut faces = Faces::default();
-        faces.face(
-            Vec3::Y,
-            &[Vec3::ZERO, Vec3::Z, Vec3::X],
-            &element,
-            false,
-            Vec3::ZERO,
-            0.0,
-        );
-        let tangent = Vec4::from_array(faces.tangents[0]).truncate();
-        assert!(tangent.dot(run).abs() > 0.999, "{tangent} along {run}");
     }
 
     /// An unsynchronized replica must hold actual ledger entries. Checking only the clock's
@@ -967,7 +966,8 @@ mod tests {
     /// openings, fails the first; one that dropped an element fails the second.
     #[test]
     fn a_window_is_a_hole_and_a_pier_is_solid() {
-        let triangles = triangles(&mesh(&shipped_house().asset));
+        let kind = shipped_house();
+        let triangles = triangles(&mesh(&kind.asset, &kind.layout));
         let across = |z: f32| crosses(&triangles, Vec3::new(2.1, 1.5, z), Vec3::new(1.6, 1.5, z));
         assert!(!across(1.5), "the window is open");
         assert!(across(2.5), "the pier is drawn");
@@ -980,8 +980,9 @@ mod tests {
     /// mark on the wrong faces puts boards on a wall or bricks on the roof.
     #[test]
     fn every_face_is_framed_in_metres_and_wears_its_element_s_pack() {
-        let asset = shipped_house().asset.clone();
-        let mesh = mesh(&asset);
+        let kind = shipped_house();
+        let (asset, layout) = (&kind.asset, &kind.layout);
+        let mesh = mesh(asset, layout);
         let attribute = |id| match mesh.attribute(id) {
             Some(VertexAttributeValues::Float32x3(values)) => values
                 .iter()
@@ -1029,15 +1030,19 @@ mod tests {
                 }
             }
         }
-        let expected: usize = asset
-            .elements
-            .iter()
-            .filter(|element| {
+        let expected: usize = (0..asset.elements.len())
+            .filter(|&e| {
                 crate::building_surface::lane_for_substance(
-                    &asset.materials[usize::from(element.material)],
+                    &asset.materials[usize::from(asset.elements[e].material)],
                 ) == crate::building_surface::SurfaceLane::Secondary
             })
-            .map(|element| element.faces().iter().map(|(_, c)| c.len()).sum::<usize>())
+            .map(|e| {
+                layout.element_blocks[e]
+                    .faces()
+                    .iter()
+                    .map(|(_, c)| c.len())
+                    .sum::<usize>()
+            })
             .sum();
         assert!(expected > 0);
         assert_eq!(timber_vertices, expected, "exactly the timber faces");
@@ -1080,7 +1085,7 @@ mod tests {
         let (asset, layout) = (&kind.asset, &kind.layout);
         let (e, chunks) = chunked_element(layout);
         let mut shape = Shape::intact(layout);
-        assert!(tags(&mesh(asset)).iter().all(|&tag| tag == 0.0));
+        assert!(tags(&mesh(asset, layout)).iter().all(|&tag| tag == 0.0));
         shape.swapped[e] = true;
         let tagged = tags(&broken_mesh(asset, layout, &shape));
         for c in chunks.clone() {
@@ -1463,7 +1468,9 @@ mod tests {
         let kind = shipped_house();
         let mut world = World::new();
         world.init_resource::<Assets<Mesh>>();
-        let shared = world.resource_mut::<Assets<Mesh>>().add(mesh(&kind.asset));
+        let shared = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(mesh(&kind.asset, &kind.layout));
         let intact = Shape::intact(&kind.layout);
         let root = world
             .spawn((Breakage::new(kind, 1.0), ShownShape(intact.clone())))

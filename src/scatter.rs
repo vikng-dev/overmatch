@@ -272,7 +272,7 @@ impl ScatterView {
                         .expect("map::load loaded every building asset the library names");
                     (
                         asset.clone(),
-                        meshes.add(crate::buildings::view::mesh(&kind.asset)),
+                        meshes.add(crate::buildings::view::mesh(&kind.asset, &kind.layout)),
                     )
                 })
                 .collect(),

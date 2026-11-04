@@ -37,6 +37,10 @@ pub struct Baked {
     pub cuts: CutCount,
 }
 
+/// How far a baked cell's corner may sit off its face's plane, m (Resolution: the clip's own weld,
+/// far under the micrometre the writer rounds to).
+const CELL_PLANE_M: f64 = 1.0e-9;
+
 /// `value` rounded to a millionth of its unit, with `-0.0` made `0.0`, as f32: the canonical
 /// form of every number the bake writes.
 fn canon(value: f64) -> f32 {
@@ -73,26 +77,33 @@ pub fn bake(house: &House) -> Result<Baked, String> {
         }
     }
     let mut cuts = CutCount::default();
-    let mut prisms = Vec::new();
+    let mut solids = Vec::new();
     let mut elements = Vec::new();
     let mut chunks = Vec::new();
+    let hull = |solid: &geom::Polyhedron| solid.corners.iter().map(|&p| canon3(p)).collect();
     for (e, plan) in plans.iter().enumerate() {
         let material = index(plan.material);
         let rho = density(plan.material)?;
-        let first = u32::try_from(prisms.len()).expect("chunk count fits u32");
+        let first = u32::try_from(solids.len()).expect("chunk count fits u32");
         for prism in fracture::chunks(plan, &house.id, &house.cuts, &mut cuts) {
-            let volume = prism.volume();
+            let solid = prism.solid();
+            solid.certify(CELL_PLANE_M).map_err(|err| {
+                format!(
+                    "a chunk of {} is no closed convex cell ({err}); fix the cut rule",
+                    plan.name
+                )
+            })?;
+            let volume = solid.volume();
             chunks.push(schema::Chunk {
                 element: u16::try_from(e).map_err(|_| "more elements than a u16 names")?,
                 material,
-                hull: prism.corners().into_iter().map(canon3).collect(),
+                hull: hull(&solid),
                 volume_m3: canon(volume),
-                centroid: canon3(prism.centroid()),
+                centroid: canon3(solid.centroid()),
                 mass_kg: canon(volume * rho),
             });
-            prisms.push(prism);
+            solids.push(solid);
         }
-        let frame = plan.prism.frame;
         elements.push(schema::Element {
             name: plan.name.clone(),
             kind: plan.kind,
@@ -109,21 +120,10 @@ pub fn bake(house: &House) -> Result<Baked, String> {
                 schema::ElementKind::WallPlate => house.surface_frames.plates,
                 _ => house.surface_frames.walls,
             },
-            frame: schema::Frame {
-                origin: canon3(frame.origin),
-                u: canon3(frame.u),
-                v: canon3(frame.v),
-            },
-            profile: plan
-                .prism
-                .profile
-                .iter()
-                .map(|p| [canon(p.x), canon(p.y)])
-                .collect(),
-            depth: [canon(plan.prism.near), canon(plan.prism.far)],
+            hull: hull(&plan.prism.solid()),
             chunks: [
                 first,
-                u32::try_from(prisms.len()).expect("chunk count fits u32"),
+                u32::try_from(solids.len()).expect("chunk count fits u32"),
             ],
         });
     }
@@ -131,7 +131,6 @@ pub fn bake(house: &House) -> Result<Baked, String> {
     let index32 = |k: usize| u32::try_from(k).expect("chunk count fits u32");
     let attachments = attachment_kinds(house);
     let mut used = vec![false; house.joins.len()];
-    let solids: Vec<_> = prisms.iter().map(geom::Prism::solid).collect();
     let joints = contact::joints(&solids)
         .into_iter()
         .map(|joint| {
@@ -417,7 +416,7 @@ mod tests {
                 let [first, end] = element.chunks;
                 let run = &asset.chunks[first as usize..end as usize];
                 let sum: f32 = run.iter().map(|chunk| chunk.volume_m3).sum();
-                let whole = element.volume();
+                let whole = plan.prism.volume() as f32;
                 assert!(
                     (sum - whole).abs() <= 1e-4 * whole,
                     "{}: {} chunks sum to {sum} m³ of {whole}",
