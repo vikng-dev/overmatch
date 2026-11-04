@@ -468,6 +468,7 @@ mod tests {
             "half_width_m",
             "standoff_m",
             "color_srgb",
+            "dust_size",
         ] {
             let missing = DATA
                 .lines()
@@ -477,16 +478,6 @@ mod tests {
             let error = parse(&missing).unwrap_err();
             assert!(error.contains(FILE) && error.contains(field), "{error}");
         }
-        let missing = DATA
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("dust_size:"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let error = parse(&missing).unwrap_err();
-        assert!(
-            error.contains(FILE) && error.contains("dust_size"),
-            "{error}"
-        );
         for (field, value) in [
             ("ejecta_up_bias", "0.5"),
             ("splash_plume_aspect", "(0.0, 1.0, 1.0)"),
@@ -497,8 +488,7 @@ mod tests {
             let error = parse(&with_value(field, value)).unwrap_err();
             assert!(error.contains(FILE) && error.contains(field), "{error}");
         }
-        let error =
-            parse(&with_value("half_width_m", "1.0").replace("Taste(", "Fixture(")).unwrap_err();
+        let error = parse(&DATA.replace("Taste(", "Fixture(")).unwrap_err();
         assert!(
             error.contains(FILE) && error.contains("Fixture provenance is test-only"),
             "{error}"

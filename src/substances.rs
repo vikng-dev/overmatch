@@ -1170,15 +1170,12 @@ mod tests {
         let both = format!(
             r#"facts: Some((density: (7850.0, Fixture("f")), flow_strength: (1.0e9, Fixture("f")), youngs_modulus: (205.0e9, Fixture("f")), poisson_ratio: (0.29, Fixture("f")))), {bulk}"#
         );
-        for (refused, field) in [
-            (both, "density"),
-            (
-                format!("facts: None, {}", bulk.replace("1800.0", "0.0")),
-                "density",
-            ),
+        for refused in [
+            both,
+            format!("facts: None, {}", bulk.replace("1800.0", "0.0")),
         ] {
             let err = SubstanceRegistry::from_ron(&row(&refused)).expect_err(&refused);
-            assert!(err.to_string().contains(field), "{err}");
+            assert!(err.to_string().contains("density"), "{err}");
         }
     }
 

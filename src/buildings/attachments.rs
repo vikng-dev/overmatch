@@ -600,22 +600,18 @@ mod tests {
         let asset = footprint();
         asset.check().unwrap();
         let masonry = [Masonry::of(registry(), "Brick").unwrap()];
-        for (row, expected) in [(
-            "Stated(tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))",
-            Bond::Bonded(Seam {
-                tensile: 10.0,
-                fracture_energy: 5.0,
-                shear: Shear::OpeningOnly,
-            }),
-        )] {
-            let list =
-                Attachments::from_ron(&format!("{{\"fixture\": {row}}}"), registry()).unwrap();
-            let layout = super::super::breakage::Layout::of(&asset, &masonry, &list).unwrap();
-            let structure = layout.structure(&asset, 1.0);
-            assert_eq!(structure.joints.len(), asset.anchors.len());
-            for joint in structure.joints {
-                assert_eq!(joint.bond, expected);
-            }
+        let row = "Stated(tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))";
+        let expected = Bond::Bonded(Seam {
+            tensile: 10.0,
+            fracture_energy: 5.0,
+            shear: Shear::OpeningOnly,
+        });
+        let list = Attachments::from_ron(&format!("{{\"fixture\": {row}}}"), registry()).unwrap();
+        let layout = super::super::breakage::Layout::of(&asset, &masonry, &list).unwrap();
+        let structure = layout.structure(&asset, 1.0);
+        assert_eq!(structure.joints.len(), asset.anchors.len());
+        for joint in structure.joints {
+            assert_eq!(joint.bond, expected);
         }
     }
 
