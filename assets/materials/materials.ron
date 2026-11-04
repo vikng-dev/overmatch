@@ -371,9 +371,8 @@
         // crew line rate along the chord the shell's disc cut through it, and each spall
         // direction's strength entering it.
         "Flesh": Witness,
-        // Dry timber: a construction's planks and plates, and the segment tree runtime's trunk
-        // substance (`assets/trees/wood.ron` names it). A construction's trunk is green wood, its
-        // species' row below. No penetration data: the
+        // Dry timber: a construction's planks and plates. A living trunk uses its species'
+        // green-wood row below. No penetration data: the
         // factor is the wood's crushing strength along the grain over the reference steel's flow
         // strength, scaled to the reference's 1000 — a strength ratio, the same reading the steels'
         // DERIVED rows note, not a measured equivalence.
@@ -466,9 +465,7 @@
         // the fresh wood's density, its water in it, and its along-grain facts as ForestGALES
         // carries them. A seam between two of a trunk's chunks is the wood parting across its
         // fibres, so `tensile` is the green modulus of rupture and `fracture_energy` the along-grain
-        // opening work; the facts the crush and punch laws read are the dry spruce's, ASSUMED. The
-        // segment tree runtime (`src/trees.rs`) reads its own copies of the same three facts in
-        // `assets/trees/wood.ron`.
+        // opening work; the facts the crush and punch laws read are the dry spruce's, ASSUMED.
         "GreenNorwaySpruce": Hard(
             resistance: Effective((40.0, StandIn("Stand-in for porous timber penetration from its own density and strength: the Wood row's factor, the trunk's today; no green-wood crushing strength read"))),
             visual: "dark_planks",

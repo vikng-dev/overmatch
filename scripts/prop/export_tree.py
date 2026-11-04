@@ -7,10 +7,8 @@ Run by `scripts/prop/build.py`, never by hand. It asserts the pinned Blender and
 (`scripts/toolchain.py`) and exports the active scene with `EXPORT_SETTINGS`; every check of what
 came out is the wrapper's, under the system interpreter.
 
-`export_extras` is the one setting the slice contract hangs on: the custom properties the
-generator put on every node (`tree_segment`, `tree_part`) reach the glb as node extras only
-through it. Exit is non-zero exactly when the pin or the export refused — Blender propagates a
-`sys.exit` code from a `--python` script verbatim.
+`export_extras` carries the source identity and construction_part labels into the
+inspection artifact. The common runtime reads the baked construction and dressing.
 """
 
 from __future__ import annotations

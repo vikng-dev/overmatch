@@ -1243,17 +1243,6 @@ pub(crate) mod tests {
                 assert!(error.contains(required), "missing {required:?}: {error}");
             }
         }
-        let species: SpeciesTable =
-            ron::from_str(include_str!("../assets/trees/species.ron")).unwrap();
-        let wood = crate::provenance::shipped("assets/trees/wood.ron", || {
-            Wood::parse(
-                Path::new("assets/trees/wood.ron"),
-                include_str!("../assets/trees/wood.ron"),
-                &species,
-            )
-        })
-        .expect("all shipped species have sourced structural wood facts");
-        assert!(wood.structure.0.keys().eq(species.keys()));
     }
 
     /// The map loader must refuse missing structure facts before it constructs any tree asset.
@@ -1335,6 +1324,15 @@ pub(crate) mod tests {
             "the fixture pool"
         );
         kind
+    }
+
+    /// Inline game-state fixture for the separate topology tests awaiting consolidation.
+    /// No legacy simulation file ships with the construction assets.
+    pub(crate) fn fixture_library(id: &str) -> TreeLibrary {
+        TreeLibrary {
+            kinds: BTreeMap::from([(id.to_owned(), fixture_kind())]),
+            texts: Vec::new(),
+        }
     }
 
     pub(crate) fn fixture_kind() -> Arc<TreeKind> {

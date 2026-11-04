@@ -193,7 +193,7 @@ git -C "$REPO" checkout -q "$MAIN"
 # reads are untouched.
 git -C "$REPO" checkout -q -b treelane "$TWO"
 pointer assets/trees/fir_1/fir_1.blend "fir blend v1" place
-write   assets/trees/fir_1/fir_1.tree.ron "TreeAsset(species: \"norway_spruce\")"
+write   assets/trees/fir_1/fir_1.tree.ron "TreeSource(species: \"norway_spruce\")"
 pointer assets/trees/fir_1/fir_1.glb   "fir model v1" place
 write   assets/trees/fir_1/fir_1.lod.json "{}"
 write   assets/trees/species.ron "{}"

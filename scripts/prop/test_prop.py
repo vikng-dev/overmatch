@@ -1,14 +1,7 @@
-"""The prop build's laws, on the tracked tree trio and on mutants of it.
+"""Common prop source, geometry and certificate invariants, including refusal mutants.
 
-    python3 scripts/prop/test_prop.py
-    python3 -m pytest scripts/prop
-
-The tracked `fir_1` trio is the fixture: each law of the three contracts and the certificate is
-exercised by MUTATING the thing it gates on — the glb document, the BIN chunk's bytes, the ron,
-the species row, the certificate — and asserting the refusal names it. The tracked-trio cases
-re-read what the pipeline wrote and add the independent assertions (DBH, ranges, census). The
-cases that need Blender say so and skip without the pinned one: generation, export and the
-verifier's re-export are what they prove, and nothing else can stand in.
+The shipped prop is fixture input; no expected species dimensions, chunk counts or
+emergent physical outcomes are pinned here. Blender integration runs when pinned.
 """
 
 import copy
@@ -36,27 +29,6 @@ TABLE = os.path.join(ROOT, "assets", "trees", "species.ron")
 FIR = os.path.join(ROOT, "assets", "trees", "fir_1", "fir_1")
 BLENDER = toolchain.blender()
 
-#: The species the slice contract (§3) names; the table may hold more.
-CONTRACT_SPECIES = {"norway_spruce", "scots_pine", "silver_birch"}
-
-#: Every field a species row holds: its generation ranges, its look and its trunk's construction
-#: keys. No damage value is keyed by species — a trunk's facts are its material row's, its HP pool
-#: and ram threshold the wood row's (`assets/trees/wood.ron`) — so a row carrying one more field is
-#: a damage value the sim would silently ignore.
-SPECIES_FIELDS = {"__struct__", "height_m", "dbh_m", "crown_base_frac", "crown_width_frac",
-                  "whorl_spacing_m", "trunk"}
-
-WOOD = os.path.join(ROOT, "assets", "trees", "wood.ron")
-MATERIALS = os.path.join(ROOT, "assets", "materials", "materials.ron")
-
-#: How far the DBH read off the taper at 1.3 m may sit from the sampled one, metres. DERIVED from
-#: two sources of error: each ring radius is written to four decimals (at most 0.1 mm on a
-#: diameter) and the chord of the power-law taper across the breast-height segment is not the
-#: curve. MEASURED: 0.157 mm at most over 10,000 seeds of each species (plan.py as of this file);
-#: the bound leaves that a 60 % margin.
-DBH_TOL_M = 2.5e-4
-
-
 def tracked() -> types.SimpleNamespace:
     """The tracked fir_1 trio and its construction, parsed and raw."""
     view_blob = build.read(FIR + ".glb")
@@ -72,18 +44,6 @@ def tracked() -> types.SimpleNamespace:
 
 def node(js, name):
     return next(n for n in js["nodes"] if n.get("name") == name)
-
-
-def taper_dbh(segments) -> float:
-    """The loader's reading of DBH: the piecewise-linear taper at 1.3 m, doubled. `segments` are
-    rows carrying each segment's top radius, `plan.segments`' or `build.trunk_rows`'."""
-    z = 0.0
-    for segment in segments:
-        if z <= plan.BREAST_HEIGHT_M < z + segment["height_m"]:
-            t = (plan.BREAST_HEIGHT_M - z) / segment["height_m"]
-            return 2.0 * (segment["r_bottom_m"] + t * (segment["r_top_m"] - segment["r_bottom_m"]))
-        z = plan.round_m(z + segment["height_m"])
-    raise AssertionError("no segment spans breast height")
 
 
 def positions_of(js, binary, name):
@@ -114,564 +74,189 @@ def glb_bytes(js, binary) -> bytes:
     return bytes(out)
 
 
-# ── the species table ────────────────────────────────────────────────────────────────────────────
-
-class SpeciesTable(unittest.TestCase):
-    def test_the_contract_species_are_in_the_table(self):
-        """The runtime keys a tree by species; the three the slice contract names must resolve."""
-        self.assertTrue(CONTRACT_SPECIES <= set(ron.load(TABLE)))
-
-    def test_every_row_is_in_the_contract_shape(self):
-        """Class invariants over every row the table holds, so a fourth species is held to the
-        same law and not to a list: ordered positive ranges a taper can be cut from, view
-        parameters in range, and exactly the look and range fields — no damage value is keyed by
-        species, so a row that grew an `hp`, a `fell_k` or a `substance` again reds here."""
-        table = ron.load(TABLE)
-        self.assertTrue(table)
-        for key, row in table.items():
-            self.assertEqual(row["__struct__"], "Species", key)
-            self.assertEqual(set(row), SPECIES_FIELDS, key)
+class SourceGeometry(unittest.TestCase):
+    def test_every_species_has_complete_construction_and_convex_shape_data(self):
+        for key, row in ron.load(TABLE).items():
+            self.assertEqual(build.species_failures(key, row), [], key)
+            self.assertGreater(row["height_m"][0], row["trunk"]["shape"]["breast_height_m"][0])
             for field in ("height_m", "dbh_m"):
-                lo, hi = row[field]
-                self.assertLess(0.0, lo, key)
-                self.assertLess(lo, hi, key)
-            self.assertGreater(row["height_m"][0], 2.0 * plan.BREAST_HEIGHT_M,
-                               "{}: the taper is cut from breast height".format(key))
-            self.assertTrue(0.0 < row["crown_base_frac"] < 1.0, key)
-            self.assertGreater(row["crown_width_frac"], 0.0, key)
-            self.assertGreater(row["whorl_spacing_m"], 0.0, key)
-            self.assertEqual(build.species_failures(key, row), [])
+                self.assertLess(0, row[field][0])
+                self.assertLess(row[field][0], row[field][1])
 
-    def test_a_trunk_s_material_holds_the_facts_the_segment_runtime_reads(self):
-        """The segment tree runtime reads its species' green-wood facts and root plate from
-        `wood.ron`, the construction from the species row's material row and anchor: while both
-        are shipped, one tree must be the same wood to both, value for value."""
-        table, wood = ron.load(TABLE), ron.load(WOOD)["structure"]
-        substances = ron.load(MATERIALS)["substances"]
-        for key, row in table.items():
-            trunk, facts = row["trunk"], wood[key]
-            bulk = substances[trunk["material"]]["bulk"].args[0]
-            self.assertEqual(trunk["anchor"], facts["anchor"], key)
-            for theirs, ours in (("fresh_density_kg_per_m3", bulk["density"]),
-                                 ("along_grain_rupture_pa", bulk["tensile"].args[0]),
-                                 ("along_grain_fracture_j_per_m2",
-                                  bulk["fracture_energy"].args[0])):
-                self.assertEqual(facts[theirs], ours, (key, theirs))
+    def test_source_rows_refuse_unconsumed_fields(self):
+        key,row = next(iter(ron.load(TABLE).items()))
+        for target in ((), ("trunk",), ("trunk","shape"), ("trunk","cells")):
+            mutant = copy.deepcopy(row)
+            owner = mutant
+            for part in target:
+                owner = owner[part]
+            owner["unconsumed_fixture_field"] = 1
+            self.assertTrue(build.species_failures(key,mutant),target)
 
+    def test_taper_uses_dbh_and_has_concave_radius(self):
+        """The construction relies on a convex solid; reversed curvature breaks admission."""
+        for row in ron.load(TABLE).values():
+            shape = row["trunk"]["shape"]
+            height, dbh = row["height_m"][0], row["dbh_m"][1]
+            self.assertAlmostEqual(2*plan.radius_at(shape["breast_height_m"][0], height, dbh, shape), dbh)
+            radii = [plan.radius_at(height*i/100, height, dbh, shape) for i in range(101)]
+            self.assertEqual(radii[-1], 0)
+            self.assertTrue(all(b >= (a+c)/2-1e-12 for a,b,c in zip(radii,radii[1:],radii[2:])))
 
-# ── the plan ─────────────────────────────────────────────────────────────────────────────────────
+    def test_exterior_approximation_is_bounded_and_has_distinct_side_faces(self):
+        """Contact geometry may coarsen the surface only within its declared resolution."""
+        for row in ron.load(TABLE).values():
+            shape = row["trunk"]["shape"]
+            for height in row["height_m"]:
+                for dbh in row["dbh_m"]:
+                    rings = plan.rings(height, dbh, shape)
+                    for low, high in zip(rings,rings[1:]):
+                        for step in range(101):
+                            t = step/100
+                            z = low[0]*(1-t)+high[0]*t
+                            r = low[1]*(1-t)+high[1]*t
+                            error = plan.radius_at(z,height,dbh,shape)-r
+                            self.assertGreaterEqual(error,-1e-12)
+                            self.assertLessEqual(error,shape["radial_error_m"][0]+1e-12)
+                    corners, faces = plan.solid(rings)
+                    planes = build._planes(corners,faces)
+                    for n,d in planes:
+                        self.assertTrue(all(sum(n[k]*p[k] for k in range(3)) <= d+1e-9 for p in corners))
+                    for i, face in enumerate(faces):
+                        for j, other in enumerate(faces[:i]):
+                            if len(set(face)&set(other)) == 2:
+                                dot = sum(a*b for a,b in zip(planes[i][0],planes[j][0]))
+                                self.assertLessEqual(dot,1-math.sqrt(2**-23))
 
-class Plan(unittest.TestCase):
-    def test_segment_heights_sum_to_the_height_inside_the_band(self):
-        """A cut snaps to a segment boundary, so the boundaries must tile the height exactly and
-        every segment must sit in the contract's 1.5–2 m band. A row's top radius, which the
-        mesh's top ring is built at, is the next row's base, the one radius `tree_ron` writes
-        for that boundary; the taper never widens upward."""
-        for height in (15.0, 18.37, 25.0, 27.02, 33.333, 40.0):
-            rows = plan.segments(height, 0.4)
-            self.assertAlmostEqual(sum(r["height_m"] for r in rows), round(height, 4), places=9)
-            for row in rows:
-                self.assertGreaterEqual(row["height_m"], plan.SEGMENT_MIN_M - 1e-9)
-                self.assertLessEqual(row["height_m"], plan.SEGMENT_MAX_M + 1e-9)
-            for below, above in zip(rows, rows[1:]):
-                self.assertEqual(below["r_top_m"], above["r_bottom_m"])
-                self.assertGreaterEqual(below["r_bottom_m"], below["r_top_m"])
+    def test_unrepresentable_surface_resolution_is_refused(self):
+        shape = copy.deepcopy(next(iter(ron.load(TABLE).values()))["trunk"]["shape"])
+        shape["radial_error_m"] = (1e-4, shape["radial_error_m"][1])
+        with self.assertRaisesRegex(ValueError,"merge angle"):
+            plan.rings(20,0.4,shape)  # Fixture dimensions, not a species target.
 
-    def test_the_plan_is_a_function_of_species_and_seed(self):
+    def test_tracked_source_view_construction_and_dressing_are_coherent(self):
+        t = tracked()
         table = ron.load(TABLE)
-        first = plan.sample(table["scots_pine"], 11)
-        second = plan.sample(table["scots_pine"], 11)
-        self.assertEqual((first["height_m"], first["dbh_m"]), (second["height_m"], second["dbh_m"]))
-        self.assertEqual(plan.whorls(first["height_m"], table["scots_pine"], first["rng"]),
-                         plan.whorls(second["height_m"], table["scots_pine"], second["rng"]))
-        other = plan.sample(table["scots_pine"], 12)
-        self.assertNotEqual(first["height_m"], other["height_m"])
-
-    def test_the_taper_returns_the_sampled_dbh(self):
-        """The ron carries no dbh (A6): the loader reads it off the taper at 1.3 m, and that
-        reading must be the diameter the plan sampled, within `DBH_TOL_M`, for every species and
-        seed — a taper law that misplaced breast height would pass range checks and fail this."""
-        table = ron.load(TABLE)
-        worst = 0.0
-        for key, row in table.items():
-            for seed in range(1000):
-                sampled = plan.sample(row, seed)
-                rows = plan.segments(sampled["height_m"], sampled["dbh_m"])
-                error = abs(taper_dbh(rows) - sampled["dbh_m"])
-                self.assertLessEqual(error, DBH_TOL_M, "{} seed {}".format(key, seed))
-                worst = max(worst, error)
-        self.assertGreater(worst, 0.0, "the taper is a chord: some seed must miss by a little")
-
-    def test_the_bands_follow_every_ring_to_band_m(self):
-        """The construction's bands stack the trunk: they run from the base ring to the tip, and
-        every ring lies within `BAND_M` of its band's chord. Bands that dropped a ring farther off
-        would lose the view's wood from the trunk's mass and shape."""
-        table = ron.load(TABLE)
-        for key, row in table.items():
-            for seed in range(200):
-                sampled = plan.sample(row, seed)
-                rings = plan.boundaries(plan.segments(sampled["height_m"], sampled["dbh_m"]))
-                kept = plan.bands(rings)
-                self.assertEqual((kept[0], kept[-1]), (0, len(rings) - 1), (key, seed))
-
-                def off(z, r, a, b):
-                    (za, ra), (zb, rb) = rings[a], rings[b]
-                    return abs(r - (ra + (rb - ra) * (z - za) / (zb - za)))
-
-                for low, high in zip(kept, kept[1:]):
-                    for z, r in rings[low + 1:high]:
-                        self.assertLessEqual(off(z, r, low, high), plan.BAND_M + 1e-12, (key, seed))
-
-
-# ── the tracked trio ─────────────────────────────────────────────────────────────────────────────
-
-class TrackedTrio(unittest.TestCase):
-    def test_fir_1_satisfies_the_node_contract(self):
-        """Lane B's loader reads extras, chain parenting and origins; this is the glb it tests on."""
-        trio = tracked()
-        self.assertEqual(build.contract_failures(trio.js, "fir_1"), [])
-        by_part = build.tree_nodes(trio.js)
-        self.assertEqual(len(by_part["trunk"]), len(trio.tree["segments"]))
-        self.assertEqual(len(by_part["cap_bottom"]), len(by_part["trunk"]))
-        self.assertEqual(len(by_part["cap_top"]), len(by_part["trunk"]))
-        self.assertGreater(len(by_part["canopy"]), 0)
-        self.assertTrue(all(len(n.get("children", [])) >= 2
-                            for i, n in enumerate(trio.js["nodes"]) if i in by_part["trunk"].values()))
-
-    def test_fir_1_ron_matches_its_glb_and_is_a_realistic_spruce(self):
-        """The ron's species row resolves, its segments are the chain's, and both the height and
-        the DBH read off the taper sit in the species' ranges."""
-        trio = tracked()
-        table = ron.load(TABLE)
-        self.assertEqual(build.ron_failures(trio.tree, trio.js, table), [])
-        self.assertNotIn("dbh_m", trio.tree)
-        height = sum(s["height_m"] for s in trio.tree["segments"])
-        lo, hi = table[trio.tree["species"]]["height_m"]
-        self.assertTrue(lo <= height <= hi, height)
-        lo, hi = table[trio.tree["species"]]["dbh_m"]
-        self.assertTrue(lo <= taper_dbh(build.trunk_rows(trio.tree)) <= hi)
-
-    def test_fir_1_taper_encodes_the_seed_it_records(self):
-        """The root records the seed; re-sampling the species with it gives the DBH the taper
-        was cut from, within `DBH_TOL_M` — the stored geometry and the recorded provenance agree."""
-        trio = tracked()
-        root = trio.js["nodes"][build.root_node(trio.js)]["extras"]
-        self.assertEqual(root["tree_species"], trio.tree["species"])
-        sampled = plan.sample(ron.load(TABLE)[trio.tree["species"]], root["tree_seed"])
-        self.assertLessEqual(abs(taper_dbh(build.trunk_rows(trio.tree)) - sampled["dbh_m"]),
-                             DBH_TOL_M)
-        self.assertAlmostEqual(sum(s["height_m"] for s in trio.tree["segments"]),
-                               sampled["height_m"], places=3)
-
-    def test_fir_1_geometry_is_the_ron_s(self):
-        """The stored vertices, not the node offsets: rings, caps and shared loops are read out
-        of the BIN chunk against the ron's dimensions, the base ring a polygon at its radius."""
-        trio = tracked()
-        self.assertEqual(build.geometry_failures(trio.js, trio.binary, trio.tree), [])
-        bottom = [p for p in positions_of(trio.js, trio.binary, "trunk_00") if abs(p[1]) < 1e-6]
-        self.assertEqual(build.ring_sides(trio.js, trio.binary), plan.RING_SIDES)
-        for x, _, z in bottom:
-            self.assertAlmostEqual(math.hypot(x, z), trio.tree["segments"][0]["r_bottom_m"],
-                                   places=4)
-
-    def test_fir_1_certificate_is_coherent_and_lod0_only(self):
-        trio = tracked()
-        self.assertEqual(build.coherence(trio.cert, trio.view, trio.ron, trio.spec), [])
-        self.assertEqual(trio.cert["chains"], {})
-
-    def test_fir_1_construction_is_its_view_s_and_current(self):
-        """The tracked construction is what the tracked tree, its species row and its view give,
-        and its piece is the view's trunk: every corner a view vertex, every view vertex inside."""
-        trio = tracked()
-        self.assertEqual(build.stale_failures(trio.view, FIR + ".tree.ron", TABLE, "fir_1",
-                                              trio.spec), [])
-        self.assertEqual(build.identity_failures(trio.spec.decode(), trio.js, trio.binary), [])
-
-    def test_fir_1_dressing_is_its_canopy_s_and_current(self):
-        """The game gives each card to the chunk holding its base and draws it there, so the
-        tracked dressing must be the view's canopy card for card, and what the glb's recorded
-        seed plans: every outline corner a canopy vertex and every canopy vertex a corner."""
-        trio = tracked()
-        path = build.dressing_path(build.repo_root(), "fir_1")
-        with open(path, encoding="utf-8") as handle:
-            text = handle.read()
-        self.assertEqual(text, build.dressing(trio.view, TABLE, "fir_1"))
-        self.assertEqual(build.dressing_failures(text, trio.js, trio.binary), [])
-        cards = ron.parse(text)["cards"]
-        self.assertEqual(len(cards), sum(len(w["branches"]) for w in plan.whorls(
-            *self._replanned(trio))))
-        for card in cards:
-            x, _, z = card["base"]
-            self.assertEqual((x, z), (0.0, 0.0), "a card grows from the trunk's axis")
-
-    def _replanned(self, trio):
-        root = trio.js["nodes"][build.root_node(trio.js)]["extras"]
-        row = ron.load(TABLE)[root["tree_species"]]
-        sampled = plan.sample(row, root["tree_seed"])
-        return sampled["height_m"], row, sampled["rng"]
-
-    def test_a_lost_or_moved_card_is_refused(self):
-        """A dressing that dropped a card, or moved one off the canopy, is not the view's."""
-        trio = tracked()
-        text = build.dressing_text(trio.js, TABLE, "fir_1")
-        lines = text.split("\n")
-        first = next(i for i, line in enumerate(lines) if "base:" in line)
-        lost = "\n".join(lines[:first] + lines[first + 1:])
-        self.assertTrue(any("no card's corner" in f
-                            for f in build.dressing_failures(lost, trio.js, trio.binary)))
-        start = text.index("corners: [") + len("corners: [")
-        moved = text[:start] + "(5.0, 5.0, 5.0)" + text[text.index(")", start) + 1:]
-        self.assertTrue(any("no vertex of the view's canopy" in f
-                            for f in build.dressing_failures(moved, trio.js, trio.binary)))
-
-
-# ── mutants: the node contract ───────────────────────────────────────────────────────────────────
-
-class ContractMutants(unittest.TestCase):
-    def setUp(self):
-        self.js = copy.deepcopy(tracked().js)
-
-    def failures(self):
-        return build.contract_failures(self.js, "fir_1")
-
-    def assertNamed(self, *words):
-        failures = self.failures()
-        self.assertTrue(any(all(w in f for w in words) for f in failures), (words, failures))
-
-    def test_a_node_without_extras_is_refused(self):
-        del node(self.js, "cap_top_03")["extras"]
-        self.assertNamed("cap_top_03", "extras")
-
-    def test_a_segment_reparented_to_the_root_breaks_the_chain(self):
-        root, t0, t1 = node(self.js, "fir_1"), node(self.js, "trunk_00"), node(self.js, "trunk_01")
-        index = self.js["nodes"].index(t1)
-        t0["children"].remove(index)
-        root["children"].append(index)
-        self.assertNamed("trunk 1", "chain")
-
-    def test_a_rotated_segment_is_refused(self):
-        node(self.js, "trunk_02")["rotation"] = [0.0, 0.0, 0.3826834, 0.9238795]
-        self.assertNamed("trunk_02", "rotation")
-
-    def test_a_tilted_root_is_refused(self):
-        node(self.js, "fir_1")["rotation"] = [0.0, 0.0, 0.3826834, 0.9238795]
-        self.assertNamed("fir_1", "rotation")
-
-    def test_a_scaled_root_is_refused(self):
-        node(self.js, "fir_1")["scale"] = [1.0, 2.0, 1.0]
-        self.assertNamed("fir_1", "scale")
-
-    def test_a_displaced_root_is_refused(self):
-        node(self.js, "fir_1")["translation"] = [0.0, 0.5, 0.0]
-        self.assertNamed("root", "origin")
-
-    def test_a_raised_first_segment_is_refused(self):
-        node(self.js, "trunk_00")["translation"] = [0.0, 0.5, 0.0]
-        self.assertNamed("trunk 0", "root")
-
-    def test_a_non_finite_translation_is_refused(self):
-        node(self.js, "trunk_05")["translation"] = [0.0, float("nan"), 0.0]
-        self.assertNamed("trunk_05", "finite")
-
-    def test_a_short_rotation_array_is_refused(self):
-        node(self.js, "trunk_05")["rotation"] = [0.0, 0.0, 0.0]
-        self.assertNamed("trunk_05", "4 finite")
-
-    def test_a_matrix_is_refused(self):
-        node(self.js, "trunk_05")["matrix"] = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
-        self.assertNamed("trunk_05", "matrix")
-
-    def test_an_origin_off_the_axis_is_refused(self):
-        node(self.js, "trunk_02")["translation"] = [0.1, node(self.js, "trunk_02")["translation"][1], 0.0]
-        self.assertNamed("trunk_02", "axis")
-
-    def test_a_missing_cap_is_refused(self):
-        node(self.js, "cap_bottom_05")["extras"]["tree_part"] = "canopy"
-        self.assertNamed("trunk 5 has no cap_bottom")
-
-    def test_two_nodes_claiming_one_part_are_refused(self):
-        node(self.js, "cap_top_05")["extras"]["tree_segment"] = 4
-        self.assertNamed("two nodes")
-
-    def test_a_root_of_another_name_is_refused(self):
-        node(self.js, "fir_1")["name"] = "spruce_1"
-        self.assertNamed("root node(s)", "'fir_1'")
-
-    def test_a_part_outside_the_four_is_refused(self):
-        node(self.js, "canopy_03")["extras"]["tree_part"] = "leaves"
-        self.assertNamed("canopy_03", "tree_part 'leaves'")
-
-    def test_a_negative_segment_index_is_refused(self):
-        node(self.js, "canopy_03")["extras"]["tree_segment"] = -1
-        self.assertNamed("canopy_03", "tree_segment -1")
-
-    def test_a_node_without_a_mesh_is_refused(self):
-        del node(self.js, "cap_top_03")["mesh"]
-        self.assertNamed("cap_top_03", "references no mesh")
-
-    def test_a_document_without_a_trunk_is_refused(self):
-        for n in self.js["nodes"]:
-            if (n.get("extras") or {}).get("tree_part") == "trunk":
-                n["extras"]["tree_part"] = "canopy"
-                n["extras"]["tree_segment"] += 100
-        self.assertNamed("no trunk node")
-
-    def test_a_gap_in_the_trunk_numbering_is_refused(self):
-        node(self.js, "trunk_14")["extras"]["tree_segment"] = 20
-        self.assertNamed("without a gap")
-
-    def test_a_segment_not_above_its_parent_is_refused(self):
-        node(self.js, "trunk_03")["translation"] = [0.0, 0.0, 0.0]
-        self.assertNamed("trunk 3", "up its parent")
-
-    def test_a_canopy_reparented_off_its_segment_is_refused(self):
-        root, t3 = node(self.js, "fir_1"), node(self.js, "trunk_03")
-        index = self.js["nodes"].index(node(self.js, "canopy_03"))
-        t3["children"].remove(index)
-        root["children"].append(index)
-        self.assertNamed("canopy 3 is not a child of trunk 3")
-
-    def test_a_part_naming_a_segment_the_trunk_lacks_is_refused(self):
-        node(self.js, "canopy_03")["extras"]["tree_segment"] = 40
-        self.assertNamed("canopy node for segment 40", "does not have")
-
-    def test_a_raised_bottom_cap_is_refused(self):
-        node(self.js, "cap_bottom_05")["translation"] = [0.0, 0.1, 0.0]
-        self.assertNamed("cap_bottom 5 is not at its segment's origin")
-
-
-# ── mutants: the ron, the species row ────────────────────────────────────────────────────────────
-
-class RonMutants(unittest.TestCase):
-    def setUp(self):
-        trio = tracked()
-        self.js, self.tree = trio.js, copy.deepcopy(trio.tree)
-        self.table = ron.load(TABLE)
-
-    def assertNamed(self, *words):
-        failures = build.ron_failures(self.tree, self.js, self.table)
-        self.assertTrue(any(all(w in f for w in words) for f in failures), (words, failures))
-
-    def test_a_height_the_chain_does_not_place_is_refused(self):
-        self.tree["segments"][3]["height_m"] += 0.01
-        self.assertNamed("trunk 4")
-
-    def test_dbh_m_is_refused(self):
-        self.tree["dbh_m"] = 0.4
-        self.assertNamed("dbh_m", "A6")
-
-    def test_a_species_outside_the_table_is_refused(self):
-        self.tree["species"] = "baobab"
-        self.assertNamed("baobab")
-
-    def test_a_segment_count_the_glb_lacks_is_refused(self):
-        self.tree["segments"].append(dict(self.tree["segments"][-1]))
-        self.assertNamed("trunk node")
-
-    def test_a_species_that_is_no_species_row_is_refused(self):
-        self.table[self.tree["species"]]["__struct__"] = "Wood"
-        self.assertNamed("is not a Species row")
-
-    def test_a_species_without_a_trunk_is_refused(self):
-        del self.table[self.tree["species"]]["trunk"]
-        self.assertNamed("has no Trunk")
-
-    def test_a_cell_size_without_a_checked_provenance_is_refused(self):
-        """A cell parameter is a positive value with a Taste or Resolution and a non-blank string
-        reason: a bare value, a reason that is no string, a blank reason and a strength claim are
-        each refused naming the species file and the field, never a traceback downstream."""
-        cells = self.table[self.tree["species"]]["trunk"]["cells"]
-        for pair in (0.15, (0.15, ron.Call("Taste", (123,))), (0.15, ron.Call("Taste", (" ",))),
-                     (0.15, ron.Call("Measured", ("a strength",)))):
-            cells["size_m"] = pair
-            self.assertNamed(build.SPECIES_TABLE, "trunk.cells.size_m")
-
-    def test_a_document_that_is_no_tree_asset_is_refused(self):
-        self.tree["__struct__"] = "TankSpec"
-        self.assertNamed("not a TreeAsset")
-
-    def test_a_missing_field_is_refused(self):
-        for field in ("species", "segments", "r_tip_m"):
-            with self.subTest(field=field):
-                self.tree = copy.deepcopy(tracked().tree)
-                del self.tree[field]
-                self.assertNamed("TreeAsset has no {}".format(field))
-
-    def test_an_empty_trunk_is_refused(self):
-        self.tree["segments"] = []
-        self.assertNamed("segments is empty")
-
-    def test_a_row_that_is_no_segment_is_refused(self):
-        self.tree["segments"][2] = (1.8, 0.2, 0.19)
-        self.assertNamed("segment 2 is not a Segment")
-
-    def test_a_non_positive_dimension_is_refused(self):
-        self.tree["segments"][2]["r_bottom_m"] = 0.0
-        self.assertNamed("segment 2 r_bottom_m is 0.0")
-
-    def test_a_non_positive_tip_radius_is_refused(self):
-        self.tree["r_tip_m"] = 0.0
-        self.assertNamed("r_tip_m is 0.0")
-
-    def test_a_cap_top_the_ron_does_not_place_is_refused(self):
-        self.js = copy.deepcopy(self.js)
-        node(self.js, "cap_top_02")["translation"][1] += 0.01
-        self.assertNamed("cap_top 2 sits")
-
-    def test_a_recorded_height_the_segments_do_not_sum_to_is_refused(self):
-        self.js = copy.deepcopy(self.js)
-        node(self.js, "fir_1")["extras"]["tree_height_m"] = 30.0
-        self.assertNamed("root records a 30.0 m tree")
-
-
-# ── mutants: the geometry ────────────────────────────────────────────────────────────────────────
-
-class GeometryMutants(unittest.TestCase):
-    def setUp(self):
-        trio = tracked()
-        self.js, self.binary = copy.deepcopy(trio.js), trio.binary
-        self.tree = copy.deepcopy(trio.tree)
-
-    def assertNamed(self, *words):
-        failures = build.geometry_failures(self.js, self.binary, self.tree)
-        self.assertTrue(any(all(w in f for w in words) for f in failures), (words, failures))
-
-    def test_radii_ten_times_the_mesh_are_refused(self):
-        """A ron whose radii all moved together passes every ron check and every node-offset
-        check; only the stored rings refuse it, each naming the ron field it holds the ring to."""
-        for segment in self.tree["segments"]:
-            segment["r_bottom_m"] *= 10.0
-        self.tree["r_tip_m"] *= 10.0
-        last = len(self.tree["segments"]) - 1
-        self.assertNamed("trunk 0's bottom ring", "off the ron's segment 0 r_bottom_m")
-        self.assertNamed("cap_top 3 reaches", "the ron's segment 4 r_bottom_m")
-        self.assertNamed("trunk {}'s top ring".format(last), "off the ron's r_tip_m")
-
-    def test_a_moved_inner_boundary_radius_is_refused_on_both_sides(self):
-        """Segment 4's `r_bottom_m` is the boundary segments 3 and 4 share, so moving it alone
-        reds both rings that meet there and the cap above segment 3: a top ring held to anything
-        but the next segment's `r_bottom_m` misses trunk 3's."""
-        self.tree["segments"][4]["r_bottom_m"] += 0.01
-        self.assertNamed("trunk 4's bottom ring", "segment 4 r_bottom_m")
-        self.assertNamed("trunk 3's top ring", "segment 4 r_bottom_m")
-        self.assertNamed("cap_top 3 reaches", "segment 4 r_bottom_m")
-
-    def test_a_moved_tip_radius_is_refused(self):
-        """`r_tip_m` is the last segment's top: its top ring and its cap_top are held to it."""
-        self.tree["r_tip_m"] += 0.01
-        last = len(self.tree["segments"]) - 1
-        self.assertNamed("trunk {}'s top ring".format(last), "r_tip_m")
-        self.assertNamed("cap_top {} reaches".format(last), "r_tip_m")
-
-    def test_a_vertex_999_m_away_is_refused(self):
-        self.binary = rewritten(self.js, self.binary, "trunk_03", "POSITION", 0, (999.0, 0.0, 0.0))
-        self.assertNamed("trunk_03", "999.000 m from its origin")
-        self.assertNamed("trunk 3's bottom ring")
-
-    def test_a_vertex_off_the_ring_plane_is_refused(self):
-        self.binary = rewritten(self.js, self.binary, "trunk_03", "POSITION", 0, (0.2, 0.9, 0.0))
-        self.assertNamed("trunk 3", "off its ring planes")
-
-    def test_a_non_finite_vertex_is_refused(self):
-        self.binary = rewritten(self.js, self.binary, "canopy_03", "POSITION", 4,
-                                (float("nan"), 0.0, 0.0))
-        self.assertNamed("canopy_03", "not finite")
-
-    def test_an_empty_mesh_is_refused(self):
-        primitive = self.js["meshes"][node(self.js, "cap_top_02")["mesh"]]["primitives"][0]
-        self.js["accessors"][primitive["attributes"]["POSITION"]]["count"] = 0
-        self.js["accessors"][primitive["indices"]]["count"] = 0
-        self.assertNamed("cap_top_02", "empty")
-
-    def test_a_mesh_the_glb_lacks_is_refused(self):
-        node(self.js, "cap_top_02")["mesh"] = 999
-        self.assertNamed("cap_top_02", "references mesh 999")
-
-    def test_an_index_past_the_vertices_is_refused(self):
-        primitive = self.js["meshes"][node(self.js, "trunk_01")["mesh"]]["primitives"][0]
-        acc = self.js["accessors"][primitive["indices"]]
-        view = self.js["bufferViews"][acc["bufferView"]]
-        out = bytearray(self.binary)
-        struct.pack_into("<H", out, view["byteOffset"] + acc.get("byteOffset", 0), 60000)
-        self.binary = bytes(out)
-        self.assertNamed("trunk_01", "past its")
-
-    def test_a_missing_bin_chunk_is_refused(self):
-        js, binary = build.parse_glb(glb_bytes(self.js, b""))
-        self.assertEqual(binary, b"")
-        failures = build.geometry_failures(js, binary, self.tree)
-        self.assertTrue(any("BIN chunk holds 0" in f for f in failures), failures)
-
-    def test_a_tilted_cap_is_refused(self):
-        self.binary = rewritten(self.js, self.binary, "cap_bottom_04", "POSITION", 3,
-                                (0.1, 0.05, 0.0))
-        self.assertNamed("cap_bottom 4 is not flat")
-
-    def test_a_cap_facing_the_wrong_way_is_refused(self):
-        primitive = self.js["meshes"][node(self.js, "cap_top_01")["mesh"]]["primitives"][0]
-        for vertex in range(self.js["accessors"][primitive["attributes"]["NORMAL"]]["count"]):
-            self.binary = rewritten(self.js, self.binary, "cap_top_01", "NORMAL", vertex,
-                                    (0.0, -1.0, 0.0))
-        self.assertNamed("cap_top 1 does not face +Y")
-
-    def test_a_mesh_without_a_primitive_is_refused(self):
-        self.js["meshes"][node(self.js, "cap_top_02")["mesh"]]["primitives"] = []
-        self.assertNamed("cap_top_02", "no primitive")
-
-    def test_a_primitive_that_is_not_triangles_is_refused(self):
-        self.js["meshes"][node(self.js, "cap_top_02")["mesh"]]["primitives"][0]["mode"] = 1
-        self.assertNamed("cap_top_02", "mode 1")
-
-    def test_a_primitive_without_indices_is_refused(self):
-        del self.js["meshes"][node(self.js, "cap_top_02")["mesh"]]["primitives"][0]["indices"]
-        self.assertNamed("cap_top_02", "no POSITION or no indices")
-
-    def test_a_position_that_is_not_float_vec3_is_refused(self):
-        primitive = self.js["meshes"][node(self.js, "cap_top_02")["mesh"]]["primitives"][0]
-        self.js["accessors"][primitive["attributes"]["POSITION"]]["type"] = "VEC2"
-        self.assertNamed("cap_top_02", "VEC3 of float32")
-
-    def test_signed_indices_are_refused(self):
-        primitive = self.js["meshes"][node(self.js, "cap_top_02")["mesh"]]["primitives"][0]
-        self.js["accessors"][primitive["indices"]]["componentType"] = 5122
-        self.assertNamed("cap_top_02", "not unsigned")
-
-    def test_indices_that_are_no_whole_triangles_are_refused(self):
-        primitive = self.js["meshes"][node(self.js, "cap_top_02")["mesh"]]["primitives"][0]
-        self.js["accessors"][primitive["indices"]]["count"] -= 1
-        self.assertNamed("cap_top_02", "whole number of triangles")
-
-    def test_an_accessor_past_the_bin_chunk_is_refused(self):
-        primitive = self.js["meshes"][node(self.js, "cap_top_02")["mesh"]]["primitives"][0]
-        self.js["bufferViews"][self.js["accessors"][primitive["indices"]]["bufferView"]]["byteOffset"] += 1 << 20
-        self.assertNamed("cap_top_02", "BIN chunk holds")
-
-    def test_a_cap_without_normals_is_refused(self):
-        del self.js["meshes"][node(self.js, "cap_top_02")["mesh"]]["primitives"][0]["attributes"]["NORMAL"]
-        self.assertNamed("cap_top 2 has no normals")
-
-    def test_a_trunk_with_one_ring_is_refused(self):
-        """Trunk 2's top ring folded onto its bottom ring: nothing strays, the bottom ring is
-        over-full and still right, the top ring has no vertex at all."""
-        points = positions_of(self.js, self.binary, "trunk_02")
-        bottom = [p for p in points if abs(p[1]) < 1e-6]
-        for vertex, (x, y, z) in enumerate(points):
-            if abs(y) >= 1e-6:
-                self.binary = rewritten(self.js, self.binary, "trunk_02", "POSITION", vertex,
-                                        bottom[vertex % len(bottom)])
-        self.assertNamed("trunk 2's top ring has 0 vertex(es)")
-
-    def test_a_boundary_loop_that_does_not_meet_is_refused(self):
-        """Trunk 4's bottom ring turned by half a side: same plane, same radius, no vertex twin
-        on trunk 3's top ring — the continuity the ron states but only the mesh can break."""
-        points = positions_of(self.js, self.binary, "trunk_04")
-        turn = math.pi / 12.0
-        for vertex, (x, y, z) in enumerate(points):
-            if abs(y) < 1e-6:
-                self.binary = rewritten(self.js, self.binary, "trunk_04", "POSITION", vertex,
-                                        (x * math.cos(turn) - z * math.sin(turn), y,
-                                         x * math.sin(turn) + z * math.cos(turn)))
-        self.assertNamed("trunk 3's top ring and trunk 4's bottom ring are not one loop")
+        self.assertEqual(build.contract_failures(t.js,"fir_1"),[])
+        self.assertEqual(build.ron_failures(t.tree,t.js,table),[])
+        self.assertEqual(build.geometry_failures(t.js,t.binary,t.tree,table),[])
+        self.assertEqual(build.identity_failures(t.spec.decode(),t.js,t.binary),[])
+        self.assertEqual(len(ron.parse(t.spec.decode())["pieces"]),1,
+                         "one source element; only the pattern cuts the interior")
+        self.assertEqual(build.coherence(t.cert,t.view,t.ron,t.spec),[])
+        dressing = build.dressing(t.view,TABLE,"fir_1")
+        self.assertEqual(build.read(build.dressing_path(ROOT,"fir_1")),dressing.encode())
+
+    def test_missing_or_displaced_source_nodes_are_refused(self):
+        t = tracked()
+        for key,value in (("translation",[0,1,0]),("rotation",[0,0,1,0]),("scale",[2,2,2])):
+            js = copy.deepcopy(t.js)
+            node(js,"trunk")[key] = value
+            self.assertTrue(build.contract_failures(js,"fir_1"), key)
+        for change in ("extras","mesh"):
+            js = copy.deepcopy(t.js)
+            del node(js,"trunk")[change]
+            self.assertTrue(build.contract_failures(js,"fir_1"),change)
+        js = copy.deepcopy(t.js)
+        js["nodes"].append(copy.deepcopy(node(js,"trunk")))
+        self.assertTrue(build.contract_failures(js,"fir_1"))
+
+    def test_source_identity_and_dimensions_are_checked_at_the_edge(self):
+        t = tracked()
+        for field in ("species","seed","height_m","dbh_m"):
+            source = copy.deepcopy(t.tree)
+            source[field] = "absent" if field == "species" else 0
+            self.assertTrue(build.ron_failures(source,t.js,ron.load(TABLE)),field)
+            source = copy.deepcopy(t.tree)
+            del source[field]
+            self.assertTrue(build.ron_failures(source,t.js,ron.load(TABLE)),field)
+
+    def test_missing_shape_data_and_nonconvex_exponents_are_refused(self):
+        key,row = next(iter(ron.load(TABLE).items()))
+        for field in row["trunk"]["shape"]:
+            mutant = copy.deepcopy(row)
+            del mutant["trunk"]["shape"][field]
+            self.assertTrue(build.species_failures(key,mutant),field)
+        mutant = copy.deepcopy(row)
+        mutant["trunk"]["shape"]["exponent"] = (2, row["trunk"]["shape"]["exponent"][1])
+        self.assertTrue(build.species_failures(key,mutant))
+
+    def test_moved_missing_and_reversed_trunk_geometry_is_refused(self):
+        t = tracked()
+        for vertex in ((999,0,0),(float("nan"),0,0)):
+            binary = rewritten(t.js,t.binary,"trunk","POSITION",0,vertex)
+            self.assertTrue(build.geometry_failures(t.js,binary,t.tree,ron.load(TABLE)))
+        js = copy.deepcopy(t.js)
+        primitive = js["meshes"][node(js,"trunk")["mesh"]]["primitives"][0]
+        js["accessors"][primitive["indices"]]["count"] -= 3
+        self.assertTrue(build.geometry_failures(js,t.binary,t.tree,ron.load(TABLE)))
+        acc = t.js["accessors"][primitive["indices"]]
+        fmt,size = build._COMPONENT[acc["componentType"]]
+        at = t.js["bufferViews"][acc["bufferView"]].get("byteOffset",0)+acc.get("byteOffset",0)
+        binary = bytearray(t.binary)
+        indices = struct.unpack_from("<"+fmt*3,binary,at)
+        struct.pack_into("<"+fmt*3,binary,at,*reversed(indices))
+        self.assertTrue(build.geometry_failures(t.js,bytes(binary),t.tree,ron.load(TABLE)))
+
+    def test_missing_or_moved_foliage_is_refused(self):
+        t = tracked()
+        text = build.dressing(t.view,TABLE,"fir_1")
+        # Removing a card must expose uncovered inspection vertices.
+        first = text.index("        (base:")
+        end = text.index("\n",first)
+        self.assertTrue(build.dressing_failures(text[:first]+text[end:],t.js,t.binary))
+        binary = rewritten(t.js,t.binary,"canopy","POSITION",0,(999,0,0))
+        self.assertTrue(build.dressing_failures(text,t.js,binary))
+
+    def test_multiple_source_pieces_or_a_moved_corner_are_refused(self):
+        t = tracked()
+        spec = t.spec.decode()
+        piece = spec[spec.index("        ("):spec.rindex("    ],")]
+        duplicated = spec[:spec.rindex("    ],")]+piece+spec[spec.rindex("    ],"):]
+        self.assertTrue(build.identity_failures(duplicated,t.js,t.binary))
+        binary = rewritten(t.js,t.binary,"trunk","POSITION",0,(999,0,0))
+        self.assertTrue(build.identity_failures(spec,t.js,binary))
+
+
+class GltfGeometry(unittest.TestCase):
+    def test_invalid_triangle_buffers_are_refused_by_name(self):
+        """The source gate must refuse malformed stored geometry before comparing corners."""
+        cases = (
+            ("empty", lambda js,p: js["accessors"][p["indices"]].update(count=0)),
+            ("no primitive", lambda js,p: js["meshes"][node(js,"trunk")["mesh"]].update(primitives=[])),
+            ("mode 1", lambda js,p: p.update(mode=1)),
+            ("no POSITION or no indices", lambda js,p: p.pop("indices")),
+            ("VEC3 of float32", lambda js,p: js["accessors"][p["attributes"]["POSITION"]].update(type="VEC2")),
+            ("not unsigned", lambda js,p: js["accessors"][p["indices"]].update(componentType=5122)),
+            ("whole number of triangles", lambda js,p: js["accessors"][p["indices"]].update(count=js["accessors"][p["indices"]]["count"]-1)),
+            ("BIN chunk holds", lambda js,p: js["bufferViews"][js["accessors"][p["indices"]]["bufferView"]].update(byteOffset=1<<20)),
+            ("references mesh", lambda js,p: node(js,"trunk").update(mesh=len(js["meshes"]))),
+        )
+        t = tracked()
+        for expected,mutate in cases:
+            js = copy.deepcopy(t.js)
+            primitive = js["meshes"][node(js,"trunk")["mesh"]]["primitives"][0]
+            mutate(js,primitive)
+            failures = build.geometry_failures(js,t.binary,t.tree,ron.load(TABLE))
+            self.assertTrue(any(expected in f for f in failures),(expected,failures))
+        failures = build.geometry_failures(t.js,b"",t.tree,ron.load(TABLE))
+        self.assertTrue(any("BIN chunk holds 0" in f for f in failures),failures)
+
+    def test_out_of_range_indices_and_duplicate_triangles_are_refused(self):
+        t = tracked()
+        primitive = t.js["meshes"][node(t.js,"trunk")["mesh"]]["primitives"][0]
+        acc = t.js["accessors"][primitive["indices"]]
+        at = t.js["bufferViews"][acc["bufferView"]].get("byteOffset",0)+acc.get("byteOffset",0)
+        fmt,size = build._COMPONENT[acc["componentType"]]
+        binary = bytearray(t.binary)
+        vertices = t.js["accessors"][primitive["attributes"]["POSITION"]]["count"]
+        struct.pack_into("<"+fmt,binary,at,vertices)
+        failures = build.geometry_failures(t.js,bytes(binary),t.tree,ron.load(TABLE))
+        self.assertTrue(any("past its" in f for f in failures),failures)
+        binary = bytearray(t.binary)
+        binary[at:at+3*size] = binary[at+3*size:at+6*size]
+        failures = build.geometry_failures(t.js,bytes(binary),t.tree,ron.load(TABLE))
+        self.assertTrue(any("without duplicates" in f for f in failures),failures)
 
 
 class ContainerMutants(unittest.TestCase):
@@ -721,7 +306,7 @@ class CertificateMutants(unittest.TestCase):
     def test_an_extra_field_or_a_chain_is_refused(self):
         cert = dict(self.cert, note="lod0")
         self.assertTrue(any("not one of its" in f for f in self.coherence(cert)))
-        cert = dict(self.cert, chains={"trunk_00#0": {"radius_m": 1.0, "rungs": []}})
+        cert = dict(self.cert, chains={"trunk#0": {"radius_m": 1.0, "rungs": []}})
         self.assertTrue(any("nothing measured" in f for f in self.coherence(cert)))
 
     def test_a_changed_ron_is_incoherent(self):
@@ -736,7 +321,7 @@ class CertificateMutants(unittest.TestCase):
                         failures)
 
     def test_a_missing_field_is_refused(self):
-        for field in ("sim_ron_sha", "construction_sha"):
+        for field in ("source_ron_sha", "construction_sha"):
             cert = {k: v for k, v in self.cert.items() if k != field}
             self.assertTrue(any("has no " + field in f for f in self.coherence(cert)), field)
 
@@ -751,64 +336,6 @@ class CertificateMutants(unittest.TestCase):
 
 
 # ── mutants: the construction against its view ──────────────────────────────────────────────────
-
-class ConstructionMutants(unittest.TestCase):
-    """The construction's bands and the view's trunk are one solid; every mutation is sized from
-    the decoded geometry it moves, a hundredth of that ring's radius past the contract's own
-    tolerance, never a fixed length."""
-
-    def setUp(self):
-        trio = tracked()
-        self.js, self.binary, self.view = trio.js, trio.binary, trio.view
-        self.text = trio.spec.decode()
-
-    def test_a_corner_off_the_view_is_refused(self):
-        doc = ron.parse(self.text)
-        x, y, z = doc["pieces"][0]["corners"][0]
-        moved = "({}, {}, {})".format(plan._num(x * 1.01), plan._num(y), plan._num(z * 1.01))
-        original = "({}, {}, {})".format(plan._num(x), plan._num(y), plan._num(z))
-        self.assertIn(original, self.text)
-        failures = build.identity_failures(self.text.replace(original, moved, 1), self.js,
-                                           self.binary)
-        self.assertTrue(any("band 0 corner 0" in f and "no vertex" in f for f in failures),
-                        failures)
-
-    def test_a_view_vertex_outside_every_band_is_refused(self):
-        points = positions_of(self.js, self.binary, "trunk_00")
-        x, y, z = points[0]
-        radius = math.hypot(x, z)
-        # Radially out past `BAND_M` measured across the section's side face, whose normal
-        # leans up to half a side's angle off the radius: the cosine of that half-angle.
-        out = plan.BAND_M / math.cos(math.pi / plan.RING_SIDES) + 0.01 * radius
-        grow = 1.0 + out / radius
-        binary = rewritten(self.js, self.binary, "trunk_00", "POSITION", 0,
-                           (x * grow, y, z * grow))
-        failures = build.identity_failures(self.text, self.js, binary)
-        self.assertTrue(any("outside every band" in f for f in failures), failures)
-
-    def test_a_section_the_view_was_not_drawn_with_is_refused(self):
-        """The plan's section moved and the view not regenerated: the construction is built from
-        the plan, so the two no longer agree, and the build names the plan's field."""
-        sides = plan.RING_SIDES
-        try:
-            plan.RING_SIDES = sides + 1
-            failures = build.identity_failures(self.text, self.js, self.binary)
-        finally:
-            plan.RING_SIDES = sides
-        self.assertTrue(any("plan.RING_SIDES" in f for f in failures), failures)
-
-    def test_a_construction_the_tree_does_not_give_is_stale(self):
-        """A cell size edited in the tracked construction alone: the species row no longer gives
-        it, so the build names it stale rather than baking what nothing generated."""
-        size = ron.parse(self.text)["pieces"][0]["pattern"].args[0]["size_m"][0]
-        edited = self.text.replace("size_m: ({},".format(plan._num(size)),
-                                   "size_m: ({},".format(plan._num(2.0 * size)), 1)
-        self.assertNotEqual(edited, self.text)
-        self.assertTrue(build.stale_failures(self.view, FIR + ".tree.ron", TABLE, "fir_1",
-                                             edited.encode()))
-
-
-# ── generation, export and the verifier, in Blender ──────────────────────────────────────────────
 
 @unittest.skipIf(BLENDER.mismatch, "the pinned Blender is not here: {}".format(BLENDER))
 class Generation(unittest.TestCase):
@@ -841,7 +368,7 @@ class Generation(unittest.TestCase):
         tree = ron.parse(ron_blob.decode())
         self.assertEqual(build.contract_failures(js, "pine_3"), [])
         self.assertEqual(build.ron_failures(tree, js, ron.load(TABLE)), [])
-        self.assertEqual(build.geometry_failures(js, binary, tree), [])
+        self.assertEqual(build.geometry_failures(js, binary, tree, ron.load(TABLE)), [])
 
 
 @unittest.skipIf(BLENDER.mismatch, "the pinned Blender is not here: {}".format(BLENDER))
@@ -867,7 +394,7 @@ class Verifier(unittest.TestCase):
         """One texture coordinate moved: every contract still holds and the certificate is
         re-cut to match, so only the byte comparison with the re-export can refuse it."""
         trio = tracked()
-        primitive = trio.js["meshes"][node(trio.js, "trunk_02")["mesh"]]["primitives"][0]
+        primitive = trio.js["meshes"][node(trio.js, "trunk")["mesh"]]["primitives"][0]
         acc = trio.js["accessors"][primitive["attributes"]["TEXCOORD_0"]]
         at = trio.js["bufferViews"][acc["bufferView"]]["byteOffset"]
         binary = bytearray(trio.binary)

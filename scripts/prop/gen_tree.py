@@ -1,28 +1,8 @@
-"""gen_tree.py — the headless tree generator, run inside Blender.
+"""Generate a construction source and its Blender inspection view from species and seed.
 
-    blender --background --factory-startup --python scripts/prop/gen_tree.py -- \\
-        --species norway_spruce --seed 1 --out assets/trees/fir_1/fir_1.blend
-
-Writes `<stem>.blend`, holding the slice contract's node tree, and `<stem>.tree.ron` beside it.
-The species row comes from `assets/trees/species.ron` (`--table` to point elsewhere); the plan
-every mesh is built from is `scripts/prop/plan.py`'s, a function of (species row, seed).
-
-THE NODE TREE (slice contract §2, authored Z up; the export turns it +Y up):
-    <id>                      an empty at the origin
-      trunk_00                a tapered open tube, origin at its own bottom centre
-        cap_bottom_00         a disc at the segment's bottom, facing down
-        cap_top_00            a disc at the segment's top, facing up
-        canopy_00             every branch card whose base lies in this segment's span (optional)
-        trunk_01              placed `height_m[0]` up the parent's axis
-          ...
-Every node under the root carries the custom properties `tree_segment` (int) and `tree_part`
-(`trunk` | `cap_bottom` | `cap_top` | `canopy`); the build exports them as glTF extras. The root
-carries `tree_species`, `tree_seed` and `tree_height_m` so a reader of the blend alone knows what
-it holds.
-
-A placeholder look: untextured bark, cut-wood and needle materials; a branch is one flat kite in
-the whorl's plane. Determinism: the same (species, seed) plans the same meshes; the `.blend` bytes
-still differ run to run (Blender writes memory addresses into the file), the exported glb does not.
+The source solid and foliage share plan.py with the construction writer. The view has
+one closed trunk mesh and one canopy mesh, both at the root origin; it is never a
+simulation constructor. Run with Blender --background --factory-startup.
 """
 
 from __future__ import annotations
@@ -36,13 +16,13 @@ import bpy
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import build as prop_build  # noqa: E402
 import plan  # noqa: E402  — the path above is what makes this importable
 import ron  # noqa: E402
 
-#: Base colours (linear RGB) of the three placeholder materials.
+#: Base colours (linear RGB) of the two placeholder materials.
 MATERIALS = {
     "Bark": (0.16, 0.10, 0.06),
-    "CutWood": (0.62, 0.47, 0.26),
     "Needles": (0.05, 0.16, 0.05),
 }
 
@@ -90,44 +70,14 @@ def mesh_object(name: str, verts, faces, uvs, mat, smooth: bool, parent, locatio
     return obj
 
 
-def tube(r_bottom: float, r_top: float, length: float):
-    """An open tapered tube from z = 0 to z = `length`, `plan.RING_SIDES` quads, smooth."""
-    verts, uvs = [], []
-    for ring, (radius, z) in enumerate(((r_bottom, 0.0), (r_top, length))):
-        for side in range(plan.RING_SIDES):
-            angle = 2.0 * math.pi * side / plan.RING_SIDES
-            verts.append((radius * math.cos(angle), radius * math.sin(angle), z))
-            uvs.append((side / plan.RING_SIDES, float(ring)))
-    faces = []
-    for side in range(plan.RING_SIDES):
-        nxt = (side + 1) % plan.RING_SIDES
-        faces.append((side, nxt, plan.RING_SIDES + nxt, plan.RING_SIDES + side))
-    return verts, faces, uvs
-
-
-def disc(radius: float, z: float, facing_up: bool):
-    """A fan disc at height `z`; the winding faces +Z when `facing_up`, else -Z."""
-    verts = [(0.0, 0.0, z)]
-    uvs = [(0.5, 0.5)]
-    for side in range(plan.RING_SIDES):
-        angle = 2.0 * math.pi * side / plan.RING_SIDES
-        verts.append((radius * math.cos(angle), radius * math.sin(angle), z))
-        uvs.append((0.5 + 0.5 * math.cos(angle), 0.5 + 0.5 * math.sin(angle)))
-    faces = []
-    for side in range(plan.RING_SIDES):
-        a, b = 1 + side, 1 + (side + 1) % plan.RING_SIDES
-        faces.append((0, a, b) if facing_up else (0, b, a))
-    return verts, faces, uvs
-
-
-def cards(branches, z_local: float):
+def cards(branches, z_m: float):
     """Every branch of one whorl as its kite (`plan.kite`, the dressing's source too). Three
     triangles each."""
     verts, faces, uvs = [], [], []
     kite_uv = [(0.5, 0.0), (0.0, 0.4), (0.5, 1.0), (1.0, 0.4), (0.4, 0.0), (0.6, 0.0)]
     for branch in branches:
         base = len(verts)
-        verts += plan.kite(branch, z_local)
+        verts += plan.kite(branch, z_m)
         uvs += kite_uv
         faces += [(base + 4, base + 1, base + 3, base + 5),
                   (base + 1, base + 2, base + 3)]
@@ -138,47 +88,29 @@ def build(stem: str, species: str, seed: int, row: dict) -> dict:
     """The whole tree into the open (empty) scene. Returns what the `.tree.ron` records."""
     sampled = plan.sample(row, seed)
     height, dbh, rng = sampled["height_m"], sampled["dbh_m"], sampled["rng"]
-    segment_rows = plan.segments(height, dbh)
+    ring_rows = plan.rings(height, dbh, row["trunk"]["shape"])
     whorl_rows = plan.whorls(height, row, rng)
-    bark, cut, needles = material("Bark"), material("CutWood"), material("Needles")
-
     root = bpy.data.objects.new(stem, None)
     bpy.context.scene.collection.objects.link(root)
-    root["tree_species"] = species
-    root["tree_seed"] = seed
-    root["tree_height_m"] = height
-
-    parent, z = root, 0.0
-    for index, segment in enumerate(segment_rows):
-        tag = "{:02d}".format(index)
-        length = segment["height_m"]
-        verts, faces, uvs = tube(segment["r_bottom_m"], segment["r_top_m"], length)
-        trunk = mesh_object(
-            "trunk_" + tag, verts, faces, uvs, bark, True, parent,
-            (0.0, 0.0, 0.0 if index == 0 else segment_rows[index - 1]["height_m"]),
-            {"tree_segment": index, "tree_part": "trunk"},
-        )
-        for part, radius, at_z, up in (("cap_bottom", segment["r_bottom_m"], 0.0, False),
-                                       ("cap_top", segment["r_top_m"], length, True)):
-            verts, faces, uvs = disc(radius, 0.0, up)
-            mesh_object(part + "_" + tag, verts, faces, uvs, cut, False, trunk, (0.0, 0.0, at_z),
-                        {"tree_segment": index, "tree_part": part})
-        branches = [
-            (whorl["z_m"] - z, whorl["branches"])
-            for whorl in whorl_rows if z <= whorl["z_m"] < z + length
-        ]
-        if branches:
-            verts, faces, uvs = [], [], []
-            for z_local, whorl_branches in branches:
-                v, f, u = cards(whorl_branches, z_local)
-                offset = len(verts)
-                verts += v
-                uvs += u
-                faces += [tuple(offset + i for i in face) for face in f]
-            mesh_object("canopy_" + tag, verts, faces, uvs, needles, False, trunk,
-                        (0.0, 0.0, 0.0), {"tree_segment": index, "tree_part": "canopy"})
-        parent, z = trunk, plan.round_m(z + length)
-    return {"species": species, "dbh_m": dbh, "height_m": height, "segments": segment_rows}
+    for key, value in {"tree_species": species, "tree_seed": seed,
+                       "tree_height_m": height, "tree_dbh_m": dbh}.items():
+        root[key] = value
+    corners, faces = plan.solid(ring_rows)
+    # Inverse of plan.gltf; the exporter returns this one solid to Y up.
+    verts = [(x, -z, y) for x, y, z in corners]
+    uvs = [(math.atan2(y, x)/(2*math.pi), z/height) for x, y, z in verts]
+    mesh_object("trunk", verts, faces, uvs, material("Bark"), True, root,
+                (0, 0, 0), {"construction_part": "trunk"})
+    verts, faces, uvs = [], [], []
+    for whorl in whorl_rows:
+        v, f, u = cards(whorl["branches"], whorl["z_m"])
+        offset = len(verts)
+        verts += v
+        uvs += u
+        faces += [tuple(offset+i for i in face) for face in f]
+    mesh_object("canopy", verts, faces, uvs, material("Needles"), False, root,
+                (0, 0, 0), {"construction_part": "canopy"})
+    return {"species": species, "dbh_m": dbh, "height_m": height}
 
 
 def main(argv) -> int:
@@ -201,21 +133,26 @@ def main(argv) -> int:
         raise SystemExit("{} has no species {!r}; it has {}".format(
             table, arguments.species, ", ".join(sorted(species))))
     row = species[arguments.species]
+    failures = prop_build.species_failures(arguments.species, row)
+    if failures:
+        raise SystemExit("{}: {}; author valid generation data".format(table, "; ".join(failures)))
 
     # The scene the tree is built into is the factory one, emptied: no startup file and no user
     # preferences reach it, so nothing of this machine's configuration reaches the export.
     bpy.ops.wm.read_homefile(use_empty=True, use_factory_startup=True)
-    record = build(stem, arguments.species, arguments.seed, row)
+    try:
+        record = build(stem, arguments.species, arguments.seed, row)
+    except ValueError as error:
+        raise SystemExit("{}: species {!r}: {}".format(table, arguments.species, error)) from error
     os.makedirs(os.path.dirname(out), exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=out)
-    header = ("Generated by scripts/prop/gen_tree.py: species {}, seed {}, height {} m, dbh {} m "
+    header = ("DERIVED generation by scripts/prop/gen_tree.py: species {}, seed {}, height {} m, dbh {} m "
               "(sampled from assets/trees/species.ron). Regenerate rather than edit.").format(
                   arguments.species, arguments.seed, record["height_m"], record["dbh_m"])
     with open(out[:-len(".blend")] + ".tree.ron", "w", encoding="utf-8") as handle:
-        handle.write(plan.tree_ron(record["species"], record["segments"], header))
-    print("gen_tree ▸ {} — {} m, dbh {} m, {} segment(s), {} whorl card set(s)".format(
-        out, record["height_m"], record["dbh_m"], len(record["segments"]),
-        sum(1 for obj in bpy.data.objects if obj.name.startswith("canopy_"))), flush=True)
+        handle.write(plan.tree_ron(record["species"], arguments.seed, record["height_m"], record["dbh_m"], header))
+    print("gen_tree ▸ {} — {} m, dbh {} m, one convex source".format(
+        out, record["height_m"], record["dbh_m"]), flush=True)
     return 0
 
 

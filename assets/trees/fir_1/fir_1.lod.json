@@ -1,7 +1,7 @@
 {
-  "view_glb_sha": "84b28be5a552512887e27cc3b17d6dbe5ac574b66bb6f9ac0578165941a853ec",
-  "sim_ron_sha": "910fef166d3d40973ffca263136581270fc62aa6cfdcaa0e4c278ae200ca94a3",
-  "construction_sha": "c3001e6dd1228f4b9c233606d9ac2559bb94fce47495cc93cb8d8bcf64f47a1f",
-  "mesh_count": 57,
+  "view_glb_sha": "c585c3c65c2c8022734d14d875efd2b7424285c030733c68804e7fc1abf2860f",
+  "source_ron_sha": "64dfd1993b083f750f8789b445a7ba635621f56f47facdfb848089f38041780f",
+  "construction_sha": "d4b8a00e25e8e9c4ad2f00d02e66a5d05842ed726fbd789b0c10791751408c82",
+  "mesh_count": 2,
   "chains": {}
 }

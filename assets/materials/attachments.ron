@@ -4,9 +4,8 @@
 // (`tools/constructions/<id>.house.ron`, its `joins`), the bake writes those names into the construction
 // (`assets/constructions/<id>/<id>.construction.ron`, its `attachments`), and the game reads each name here
 // at load, refusing one this list does not hold. A tree species names the root plate its trunk
-// holds to the ground by (`assets/trees/wood.ron`, its row's `anchor`). Inside one component its
-// chunks hold by the component's own seam, never by a kind here: a trunk's segments hold by the
-// wood's own along-grain seam (`wood.ron`).
+// holds to the ground by (`assets/trees/species.ron`, its `trunk.anchor`). Inside one component
+// chunks hold by the material's own seam, never by a kind here.
 //
 // No fastener is modelled: a kind is a seam spread over the joint's whole contact area, never a
 // count of nails or bolts (`.agents/docs/design/construction-destruction.md`, "Attachment kinds").

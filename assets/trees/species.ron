@@ -1,7 +1,4 @@
-// The tree species table (slice contract §3). Every tree asset names one of these keys; the
-// generator draws a tree's height and breast-height diameter from the ranges and builds its look
-// from the view parameters. The segment tree runtime (`src/trees.rs`) reads no value of a row
-// here: its substance, HP pools and structural facts live in `assets/trees/wood.ron`.
+// Generation data for the game's common construction and foliage.
 //
 // `trunk` is what the prop build writes a tree's construction from
 // (`tools/constructions/<id>.pieces.ron`, `scripts/prop/plan.py`'s `construction_ron`): the
@@ -30,6 +27,11 @@
         crown_width_frac: 0.11,
         whorl_spacing_m: 0.6,
         trunk: Trunk(
+            shape: (
+                breast_height_m: (1.3, Measured("forestry DBH convention: diameter 1.3 m above ground")),
+                exponent: (0.8, Taste("stem silhouette between a cone and paraboloid; no sourced stem-form factor")),
+                radial_error_m: (0.03, Resolution("at most 3 cm radial chord error along the taper; coarse enough to keep side faces distinct under Parry's face merge")),
+            ),
             material: "GreenNorwaySpruce",
             anchor: "norway_spruce_root_plate",
             cells: (
@@ -49,6 +51,11 @@
         crown_width_frac: 0.14,
         whorl_spacing_m: 0.9,
         trunk: Trunk(
+            shape: (
+                breast_height_m: (1.3, Measured("forestry DBH convention: diameter 1.3 m above ground")),
+                exponent: (0.8, Taste("stem silhouette between a cone and paraboloid; no sourced stem-form factor")),
+                radial_error_m: (0.03, Resolution("at most 3 cm radial chord error along the taper; coarse enough to keep side faces distinct under Parry's face merge")),
+            ),
             material: "GreenScotsPine",
             anchor: "scots_pine_root_plate",
             cells: (
@@ -69,6 +76,11 @@
         crown_width_frac: 0.16,
         whorl_spacing_m: 0.7,
         trunk: Trunk(
+            shape: (
+                breast_height_m: (1.3, Measured("forestry DBH convention: diameter 1.3 m above ground")),
+                exponent: (0.8, Taste("stem silhouette between a cone and paraboloid; no sourced stem-form factor")),
+                radial_error_m: (0.03, Resolution("at most 3 cm radial chord error along the taper; coarse enough to keep side faces distinct under Parry's face merge")),
+            ),
             material: "GreenSilverBirch",
             anchor: "silver_birch_root_plate",
             cells: (

@@ -709,7 +709,7 @@ pub(crate) mod tests {
         "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"}"#;
 
     /// One instance of every prototype kind — a graybox house, a tree of the damage
-    /// model and a construction of the destruction model, the last two read from the shipped assets —
+    /// model and a construction of the destruction model, the latter read from shipped assets —
     /// on the fixture extent: what a layer that spawns a map asserts against, whatever the shipped
     /// map happens to place.
     pub(crate) fn mixed_fixture_manifest() -> MapManifest {
@@ -729,7 +729,7 @@ pub(crate) mod tests {
             &format!(r#""instances":[{INSTANCES}]"#),
         );
         let mut manifest = parse(&text, LIBRARY, Path::new("fixture/level.json"));
-        manifest.trees = TreeLibrary::load(&shipped_assets(), ["fir_1"]);
+        manifest.trees = crate::trees::tests::fixture_library("fir_1");
         manifest.constructions = ConstructionLibrary::load(&shipped_assets(), ["house_1"]);
         manifest
     }
@@ -969,20 +969,6 @@ pub(crate) mod tests {
                 "{library}: {message}"
             );
         }
-    }
-
-    /// A map that places a tree whose asset this tree does not carry is present-but-broken: the
-    /// loader panics naming the file rather than placing nothing there.
-    #[test]
-    #[should_panic(expected = "trees/no_such_tree/no_such_tree.tree.ron cannot be read")]
-    fn a_tree_asset_the_tree_does_not_carry_panics() {
-        let text = manifest_text(750.0, 0.0, 50.0, "+Z");
-        let manifest = parse(
-            &text,
-            r#"{"ghost": Tree(asset: "no_such_tree")}"#,
-            Path::new("fixture/level.json"),
-        );
-        TreeLibrary::load(&shipped_assets(), manifest.tree_assets());
     }
 
     /// A resolved instance reaches the manifest with its library entry beside it — the one
