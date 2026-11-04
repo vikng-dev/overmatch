@@ -275,8 +275,6 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// rollout. Wire layouts and client derivation are unchanged; the authority exports resolved paths.
 /// REV 82 (the game's spawn flow): respawn admission and map-pick refusal are independent owner-private facts.
 /// REV 83 (#198, driving model): direct ground grip and nominal-pressure rolling resistance.
-/// REV 85 (the game environment destruction model): checked debris-pose receive with a terminal
-/// client refusal. Valid pose bytes retain their layout.
 /// REV 86 (the game's environment destruction model): construction ledger and piece ordinal
 /// fields say `construction`; registrations and type definitions use construction names.
 /// Postcard retains the positional field layout; the named wire contract and fingerprint move.
@@ -1152,9 +1150,7 @@ pub(crate) fn plugin(app: &mut App) {
     // the held set once.
     app.component::<crate::hull_marks::HullMarks>()
         .replicate_diff();
-    // Every server piece's carrier: one pose per piece, written only while it moves, so a sleeping
-    // piece sends nothing more. A construction piece's carrier is interpolated, so it draws at the
-    // cursor the hulls draw at; the stress lever's are not, and apply on arrival.
+    // Carrier publication and presentation policies belong to `debris_stress`.
     app.component::<super::debris_stress::DebrisPose>()
         .replicate_with(super::debris_stress::pose_replication())
         .add_interpolation_with(super::debris_stress::debris_pose_lerp);

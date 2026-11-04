@@ -1016,9 +1016,7 @@ mod tests {
                 );
             }
             assert!(
-                piece.position.x - anchor.x
-                    + piece.position.abs().max_element() * f32::EPSILON * 4.0
-                    >= radius + pitch,
+                piece.position.x - anchor.x + tolerance >= radius + pitch,
                 "{piece:?}"
             );
             assert!(
