@@ -938,7 +938,7 @@ mod tests {
                     id: "fixture".to_owned(),
                     ordinal: 3,
                 },
-                Breakage::new(kind, 1.0),
+                Breakage::new(kind, 3, 1.0),
             ))
             .id();
         let mut schedule = Schedule::default();
@@ -1242,7 +1242,7 @@ mod tests {
                     id: "fixture_building".to_owned(),
                     ordinal: 3,
                 },
-                Breakage::new(kind.clone(), 1.0),
+                Breakage::new(kind.clone(), 3, 1.0),
             ))
             .id();
         let carrier = world
@@ -1277,7 +1277,7 @@ mod tests {
                     id: "fixture_building".to_owned(),
                     ordinal: 3,
                 },
-                Breakage::new(kind, 1.0),
+                Breakage::new(kind, 3, 1.0),
             ))
             .id();
         world.resource_mut::<CurrentWorld>().0 = Some(WorldGeneration(2));
@@ -1305,7 +1305,11 @@ mod tests {
             radius: 100,
         });
         let root = world
-            .spawn((Breakage::new(kind.clone(), 1.0), ShownShape(shape), holes))
+            .spawn((
+                Breakage::new(kind.clone(), 3, 1.0),
+                ShownShape(shape),
+                holes,
+            ))
             .id();
         let view = world
             .spawn((BuildingView, MeshMaterial3d(shared.clone()), ChildOf(root)))
@@ -1383,7 +1387,7 @@ mod tests {
                 id: "house_0001".to_owned(),
                 ordinal: 3,
             },
-            Breakage::new(kind.clone(), 1.0),
+            Breakage::new(kind.clone(), 3, 1.0),
             ShownShape(shape),
             holes.clone(),
         ));
@@ -1473,7 +1477,7 @@ mod tests {
             .add(mesh(&kind.asset, &kind.layout));
         let intact = Shape::intact(&kind.layout);
         let root = world
-            .spawn((Breakage::new(kind, 1.0), ShownShape(intact.clone())))
+            .spawn((Breakage::new(kind, 3, 1.0), ShownShape(intact.clone())))
             .id();
         let view = world
             .spawn((BuildingView, Mesh3d(shared), ChildOf(root)))
@@ -1534,7 +1538,7 @@ mod tests {
                 id: "fixture".to_owned(),
                 ordinal: 3,
             },
-            Breakage::new(kind, 1.0),
+            Breakage::new(kind, 3, 1.0),
             ShownShape(shape),
         ));
         let parent = world

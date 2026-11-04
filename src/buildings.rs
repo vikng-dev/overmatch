@@ -1,9 +1,8 @@
-//! Buildings in the game's destruction model: hollow houses whose walls and roof are matter.
+//! Constructions in the game's environment destruction model, game state only.
 //!
 //! A BUILDING IS DATA (ADR-0034). `assets/buildings/<id>/<id>.building.ron` ([`schema`]) is the
-//! building as the asset tools' bake wrote it: its elements (piers, sills, lintels, gables, wall
-//! plates, roof planes), the fracture chunks that tile them, the joints between chunks and the
-//! chunks the ground holds. No game code builds or edits one; the bake is `tools/`, which the game
+//! construction as the asset tools' bake wrote it: its convex elements, their fracture chunks,
+//! the joints between chunks and the chunks the ground holds. No game code builds or edits one; the bake is `tools/`, which the game
 //! never depends on. Read once at startup into the map's [`BuildingLibrary`], validated there
 //! (ADR-0011), and folded into the map's content digest, so two peers spawn the same walls.
 //!
@@ -14,9 +13,10 @@
 //! rounds and sight pass through it. The instance's uniform scale is applied to the points at
 //! spawn and the root's own scale is one (the trees' convention).
 //!
-//! THE CHUNKS STAY DATA UNTIL A HIT. No chunk is a collider while its element is whole; the
+//! MUTABLE STATE EXISTS AT SPAWN. No chunk is a collider while its element is whole; the
 //! first touch swaps the element to its chunks, and the fracture laws ([`fracture`]) wear, crack
-//! and drop them ([`breakage`]). Each root carries its [`breakage::Breakage`] from spawn.
+//! and drop them ([`breakage`]). Each root carries complete [`breakage::Breakage`] from spawn;
+//! neither simulation nor stable chunk addresses depend on view assets.
 //!
 //! NOT TERRAIN. No element enters the [`crate::world::TerrainMap`] block list, so the terrain
 //! field stays immutable and the floor inside is the terrain (playtest fork F9). The belts meet a
@@ -48,8 +48,8 @@ use schema::BuildingAsset;
 /// Directory under the asset root holding one folder per building asset.
 const BUILDINGS_DIR: &str = "buildings";
 
-/// How far below 1 an instance's up vector's Y may fall before the instance counts as tilted: a
-/// pure yaw's rounding, never a lean. A building stands on its foundation plane.
+/// Resolution: upright-vector tolerance for pure-yaw rounding, never a lean; anchored
+/// constructions stand on their foundation plane.
 const UPRIGHT_EPSILON: f32 = 1e-6;
 
 /// One building asset, read and validated: what every instance of it spawns from.
@@ -236,6 +236,7 @@ pub(crate) fn spawn(
         identity.id,
         pose.rotation,
     );
+    let breakage = breakage::Breakage::new(kind.clone(), identity.ordinal, scale);
     let root = commands
         .spawn((
             Name::new(format!("building {}", identity.id)),
@@ -247,7 +248,7 @@ pub(crate) fn spawn(
             RigidBody::Static,
             identity,
             BuildingBody,
-            breakage::Breakage::new(kind.clone(), scale),
+            breakage,
         ))
         .id();
     for k in 0..kind.asset.elements.len() {

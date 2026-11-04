@@ -528,7 +528,7 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
             };
             {
                 let mut breakage = server.world_mut().get_mut::<Breakage>(root).unwrap();
-                let live = breakage.live();
+                let live = breakage.live.as_mut();
                 live.swapped[usize::from(element)] = true;
                 live.state.fate[usize::from(chunk)] = Fate::Fallen;
             }

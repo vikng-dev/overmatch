@@ -20,9 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use super::world_reset::AuthorityWorld;
 use crate::buildings::breakage::{
-    Breakage, Layout, WallEntry, WallLawSet, WallRecord, WallReplicaSet,
+    Breakage, Layout, WallEntry, WallLawSet, WallPiece, WallRecord, WallReplicaSet,
 };
-use crate::scatter::MapInstance;
 use crate::world::{CurrentWorld, WorldGeneration};
 use std::collections::HashMap;
 
@@ -103,7 +102,7 @@ fn publish_record(
 fn receive_ledger(
     ledgers: Query<(Entity, &WallLedger, &WorldGeneration)>,
     generation: Res<CurrentWorld>,
-    buildings: Query<(&MapInstance, &Breakage)>,
+    buildings: Query<&Breakage, Without<WallPiece>>,
     mut copied: Local<(Option<Entity>, usize)>,
     mut record: ResMut<WallRecord>,
 ) {
@@ -136,7 +135,7 @@ fn receive_ledger(
     if entries.0.len() > copied.1 {
         let layouts: HashMap<u16, &Layout> = buildings
             .iter()
-            .map(|(identity, breakage)| (identity.ordinal, &breakage.kind.layout))
+            .map(|breakage| (breakage.construction, &breakage.kind.layout))
             .collect();
         for entry in &entries.0[copied.1..] {
             match entry.admitted(|building| layouts.get(&building).copied()) {
@@ -167,12 +166,10 @@ mod tests {
         app.init_resource::<CurrentWorld>()
             .init_resource::<WallRecord>()
             .add_systems(Update, receive_ledger);
-        app.world_mut().spawn((
-            MapInstance {
-                id: "fixture_house".to_owned(),
-                ordinal: 1,
-            },
-            Breakage::new(crate::buildings::tests::shipped_house(), 1.0),
+        app.world_mut().spawn(Breakage::new(
+            crate::buildings::tests::shipped_house(),
+            1,
+            1.0,
         ));
         app
     }

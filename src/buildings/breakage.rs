@@ -11,7 +11,7 @@
 //! * **First touch swaps an element.** An element stays one collider until a deposit, a crack, a
 //!   fall or dust touches one of its chunks; from then on each of its standing chunks is a static
 //!   collider of its substance ([`BuildingChunk`]) and the element's own collider is gone. A
-//!   building's [`Breakage`] holds its state, built from data on the first touch.
+//!   construction's [`Breakage`] holds its complete state, built from data at spawn.
 //! * **Deposits** (the authority's, [`ShellMarched`]): a round's line through an element is shared
 //!   among the chunks it crosses by chord; through a chunk it is that chunk's. Every field ray (a
 //!   spall cone's, a burst's fragments) that stops on a chunk deposits its energy there. A burst
@@ -73,7 +73,7 @@
 //! THE BODY IN THE PHYSICS WORLD. A state change reaches avian's world in the frame it is made
 //! ([`reconcile`], then avian's refit of moved colliders), so the next tick's march reads it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
@@ -102,18 +102,15 @@ use crate::contact_transfer::{ContactTransfer, ContactTransfers};
 use crate::debris::launch::{
     BodyReturn, Launch, LaunchPlugin, PendingLaunch, launch_colliders, occupied_mass,
 };
-use crate::scatter::MapInstance;
 use crate::{ClientReplica, Layer, ShotClock};
 
-/// How far a field ray's stop may sit from the chunk face that stops it and still be that chunk's,
-/// m: the f32 rounding of a stop the walk computed against the same face, many times over.
+/// Resolution: face-stop tolerance, m, for repeated f32 intersection rounding.
 const STOP_TOLERANCE_M: f32 = 0.01;
 
 /// DERIVED from the construction frame: grade is its zero-height plane, m, the plane the building stands on (a building spawns with its
 /// frame's origin on the ground, its foundation below). A chunk wholly below it is buried.
 const GRADE_M: f32 = 0.0;
-/// How far above grade a buried chunk's corner may sit, m: the bake's rounding of a corner it cut
-/// on the plane.
+/// Resolution: on-grade tolerance, m, for baked corners rounded off the cutting plane.
 const ON_GRADE_M: f32 = 1e-4;
 
 /// The most holes one chunk draws and the record carries (module doc), the earliest cut kept; a
@@ -376,7 +373,7 @@ pub(crate) enum WallEvent {
     Hole(u16, Hole),
 }
 
-/// One record entry: which building (its [`MapInstance`] ordinal), what changed, and the authority
+/// One record entry: which construction (its map ordinal), what changed, and the authority
 /// tick it changed at (`ShotClock` units).
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WallEntry {
@@ -520,14 +517,23 @@ impl Live {
 
     /// Complete live state built synchronously from a structure and its authored element count.
     pub(crate) fn from_structure(structure: Structure, elements: usize) -> Self {
+        Self::from_shared(Arc::new(structure), elements)
+    }
+
+    fn from_shared(structure: Arc<Structure>, elements: usize) -> Self {
         Self {
             state: WallState::new(&structure),
             swapped: vec![false; elements],
             sections: SectionCache::default(),
             held_presses: Vec::new(),
             holes: vec![Vec::new(); structure.chunks.len()],
-            structure: Arc::new(structure),
+            structure,
         }
+    }
+
+    /// A replacement ledger starts intact without rebuilding immutable construction geometry.
+    fn reset(&mut self) {
+        *self = Self::from_shared(self.structure.clone(), self.swapped.len());
     }
 
     /// State for one owned group, retaining the data and wear it had before separation.
@@ -556,25 +562,33 @@ impl Live {
     }
 }
 
-/// A building root's breakable state (module doc): its kind and instance scale, and its live
-/// state once anything has touched it. Inserted at spawn; the live state is built from the kind's
-/// data, synchronously, on the first touch.
+/// The game's environment destruction state, complete at spawn from admitted construction data.
+/// Every group retains its source construction's ordinal and chunk/joint addresses; splitting
+/// changes ownership and body origin, never the indices the record and presentation read.
 #[derive(Component)]
 #[require(crate::contact_transfer::StructureBody)]
 pub(crate) struct Breakage {
     pub(crate) kind: Arc<BuildingKind>,
     pub(crate) scale: f32,
-    pub(crate) live: Option<Box<Live>>,
+    /// Stable source identity, shared by placed matter and every group it releases.
+    pub(crate) construction: u16,
+    pub(crate) live: Box<Live>,
     /// The body's origin in the scaled construction frame; zero for a placed building.
     origin: Vec3,
 }
 
 impl Breakage {
-    pub(crate) fn new(kind: Arc<BuildingKind>, scale: f32) -> Self {
+    pub(crate) fn new(kind: Arc<BuildingKind>, construction: u16, scale: f32) -> Self {
+        assert!(
+            scale.is_finite() && scale > 0.0,
+            "a construction has positive finite uniform scale"
+        );
+        let live = Box::new(Live::new(&kind, scale));
         Self {
             kind,
             scale,
-            live: None,
+            construction,
+            live,
             origin: Vec3::ZERO,
         }
     }
@@ -590,17 +604,8 @@ impl Breakage {
         self.frame(&Transform::from_translation(position.0).with_rotation(rotation.0))
     }
 
-    /// The live state, built on first use.
-    pub(crate) fn live(&mut self) -> &mut Live {
-        self.live
-            .get_or_insert_with(|| Box::new(Live::new(&self.kind, self.scale)))
-    }
-
-    /// Its shape: the live state's, or intact.
     pub(crate) fn shape(&self) -> Shape {
-        self.live
-            .as_ref()
-            .map_or_else(|| Shape::intact(&self.kind.layout), |live| live.shape())
+        self.live.shape()
     }
 }
 
@@ -1019,7 +1024,6 @@ struct DepositParam<'w, 's> {
         's,
         (
             Entity,
-            Option<&'static MapInstance>,
             (&'static Position, &'static Rotation),
             &'static mut Breakage,
             Option<&'static WallPiece>,
@@ -1129,7 +1133,7 @@ fn take_lines(
         };
         let root = parent.parent();
         let frame = &frames[&root];
-        let (_, _, _, breakage, _) = p
+        let (_, _, breakage, _) = p
             .buildings
             .get(root)
             .expect("a building element or chunk is a child of its building's root");
@@ -1250,6 +1254,156 @@ pub(crate) fn resolved_line_loads(
     .collect()
 }
 
+/// Effects evaluated from one owner's state; shared bodies and the record change only at commit.
+struct OwnerEffects {
+    root: Entity,
+    construction: u16,
+    fields: Vec<Load>,
+    events: Vec<WallEvent>,
+    returns: Vec<BodyReturn>,
+    split: Option<PendingSplit>,
+    departures: Vec<Departure>,
+}
+
+/// Immutable inputs for one owner's law run; shared-body effects are staged in `OwnerEffects`.
+struct OwnerInputs<'a> {
+    frame: Frame,
+    taken: &'a Taken,
+    pressing: &'a [Load],
+    resting: &'a [Load],
+    spin: Vec3,
+    tick: u32,
+}
+
+fn evaluate_owner(
+    root: Entity,
+    breakage: &mut Breakage,
+    moving: Option<&[u16]>,
+    construction: Transform,
+    inputs: OwnerInputs,
+) -> OwnerEffects {
+    let OwnerInputs {
+        frame,
+        taken,
+        pressing,
+        resting,
+        spin,
+        tick,
+    } = inputs;
+    let kind = breakage.kind.clone();
+    let building = breakage.construction;
+    let scale = breakage.scale;
+    let live = breakage.live.as_mut();
+    let blast = blast_loads(&kind, frame.scale, &taken.blast, live);
+    let holes = holes_of(&kind, frame.scale, &taken.lines, &blast);
+    let loads: Vec<Load> = taken
+        .line_loads
+        .iter()
+        .copied()
+        .chain(Load::field(&taken.field, |c| {
+            kind.layout.materials[c].crush
+        }))
+        .chain(blast)
+        .chain(taken.contacts.iter().map(|load| Load {
+            press: Vec3::ZERO,
+            ..*load
+        }))
+        .chain(pressing.iter().copied())
+        .chain(resting.iter().copied())
+        .collect();
+    let mut changes = run_laws(&kind.layout.element_of, live, &loads, holes, spin);
+    // Moving matter already has a carrier; only surviving field loads push it.
+    let fields = if moving.is_some() {
+        changes
+            .events
+            .retain(|event| !matches!(event, WallEvent::Fall(_)));
+        field_blows(&loads, &live.state).copied().collect()
+    } else {
+        Vec::new()
+    };
+    let mut departures = Vec::new();
+    let split = if let Some(owned) = moving {
+        let groups: Vec<_> = changes.groups.into_iter().map(|(group, _)| group).collect();
+        let unchanged = groups.len() == 1
+            && groups[0]
+                .iter()
+                .copied()
+                .eq(owned.iter().map(|&c| usize::from(c)));
+        if unchanged {
+            for &c in &groups[0] {
+                live.state.fate[c] = Fate::Standing;
+            }
+            None
+        } else {
+            let children: Vec<_> = groups
+                .into_iter()
+                .map(|group| {
+                    let state = live.group(&group);
+                    (group, state)
+                })
+                .collect();
+            for (group, _) in &children {
+                for &c in group {
+                    live.state.fate[c] = Fate::Standing;
+                }
+            }
+            Some(PendingSplit { children, tick })
+        }
+    } else {
+        for (group, loads) in changes.groups {
+            let launch = launch(&kind, &live.structure, frame.scale, &group, &loads);
+            departures.push(Departure {
+                kind: kind.clone(),
+                building,
+                root: construction,
+                scale,
+                live: live.group(&group),
+                group,
+                launch,
+                tick,
+            });
+        }
+        None
+    };
+    OwnerEffects {
+        root,
+        construction: building,
+        fields,
+        events: changes.events,
+        returns: changes.returns,
+        split,
+        departures,
+    }
+}
+
+/// Keep source-entity effect order. An earlier owner's immediate plastic return may change a
+/// later moving owner's spin, which its laws read; that owner starts after those returns commit.
+/// Other owners evaluate together. Field loads have no source returns, and held presses no blow.
+fn owner_batches(taken: BTreeMap<Entity, Taken>) -> impl Iterator<Item = BTreeMap<Entity, Taken>> {
+    let mut pending = taken.into_iter().peekable();
+    std::iter::from_fn(move || {
+        let mut batch = BTreeMap::new();
+        let mut returns_to = BTreeSet::new();
+        while let Some(&(root, _)) = pending.peek() {
+            if returns_to.contains(&root) {
+                break;
+            }
+            let (root, taken) = pending.next().expect("peek found an owner");
+            returns_to.extend(
+                taken
+                    .contacts
+                    .iter()
+                    .chain(&taken.line_loads)
+                    .filter_map(|load| {
+                        BodyReturn::of(load, Vec3::ZERO).map(|returned| returned.body)
+                    }),
+            );
+            batch.insert(root, taken);
+        }
+        (!batch.is_empty()).then_some(batch)
+    })
+}
+
 /// AUTHORITY: run the tick's deposits through the laws (module doc), record every change and spawn
 /// a body per loose group.
 fn apply_deposits(mut p: DepositParam) {
@@ -1271,7 +1425,7 @@ fn apply_deposits(mut p: DepositParam) {
     let frames: BTreeMap<Entity, Frame> = p
         .buildings
         .iter()
-        .map(|(root, _, transform, breakage, _)| {
+        .map(|(root, transform, breakage, _)| {
             (
                 root,
                 Frame::new(
@@ -1297,7 +1451,7 @@ fn apply_deposits(mut p: DepositParam) {
                 if !frame.may_hold(end, STOP_TOLERANCE_M) {
                     continue;
                 }
-                let (_, _, _, breakage, piece) = p
+                let (_, _, breakage, piece) = p
                     .buildings
                     .get(*root)
                     .expect("frames enumerates this same building query");
@@ -1332,116 +1486,73 @@ fn apply_deposits(mut p: DepositParam) {
             taken.entry(root).or_default().contacts.push(load);
         }
         let mut departures = Vec::new();
-        for (root, taken) in taken {
-            let (_, identity, transform, mut breakage, piece) = p.buildings.get_mut(root).expect(
-                "a deposit's take is keyed by building roots, which a match never despawns",
-            );
-            let frame = frames[&root];
-            let kind = breakage.kind.clone();
-            let building = match (identity, piece) {
-                (Some(identity), None) => identity.ordinal,
-                (None, Some(piece)) => piece.building,
-                _ => panic!("a chunk group is either a placed map instance or one moving owner"),
-            };
-            let scale = breakage.scale;
-            let construction = breakage.physics_frame(transform);
-            let moving = piece.map(|piece| piece.chunks.clone());
-            let live = breakage.bypass_change_detection().live();
-            let blast = blast_loads(&kind, frame.scale, &taken.blast, live);
-            let holes = holes_of(&kind, frame.scale, &taken.lines, &blast);
-            // A run that changes nothing leaves the colliders as they stand: only a recorded
-            // change marks the building for the refit (`reconcile`).
-            let resting = p.resting.0.get(&root).map_or(&[][..], Vec::as_slice);
-            let pressing = presses.get(&root).map_or(&[][..], Vec::as_slice);
-            let loads: Vec<Load> = taken
-                .line_loads
-                .into_iter()
-                .chain(Load::field(&taken.field, |c| {
-                    kind.layout.materials[c].crush
-                }))
-                .chain(blast)
-                .chain(taken.contacts.iter().map(|load| Load {
-                    press: Vec3::ZERO,
-                    ..*load
-                }))
-                .chain(pressing.iter().copied())
-                .chain(resting.iter().copied())
-                .collect();
-            let spin = construction_spin(&p.bodies, root, frame, moving.is_some());
-            let mut changes = run_laws(&kind.layout.element_of, live, &loads, holes, spin);
-            // A moving group is already a body: a field's blow moves it directly, at the point
-            // it struck, except where it turned its chunk to dust and went into crushing it
-            // (`run_laws`), as on a standing building.
-            if moving.is_some() {
-                let (mut body, _) = p
-                    .bodies
-                    .get_mut(root)
-                    .expect("a moving chunk group is a physics body");
-                for load in field_blows(&loads, &live.state) {
-                    body.apply_linear_impulse_at_point(
-                        frame.rotation * load.blow,
-                        frame.translation + frame.rotation * load.at,
+        for batch in owner_batches(taken) {
+            let mut effects = bevy::utils::Parallel::<Vec<OwnerEffects>>::default();
+            let bodies = &p.bodies;
+            let resting = &p.resting.0;
+            p.buildings
+                .par_iter_mut()
+                .for_each(|(root, transform, mut breakage, piece)| {
+                    let Some(taken) = batch.get(&root) else {
+                        return; // This owner received no load in this batch.
+                    };
+                    let frame = frames[&root];
+                    let construction = breakage.physics_frame(transform);
+                    let effect = evaluate_owner(
+                        root,
+                        breakage.bypass_change_detection(),
+                        piece.map(|piece| piece.chunks.as_slice()),
+                        construction,
+                        OwnerInputs {
+                            frame,
+                            taken,
+                            pressing: presses.get(&root).map_or(&[][..], Vec::as_slice),
+                            resting: resting.get(&root).map_or(&[][..], Vec::as_slice),
+                            spin: construction_spin(bodies, root, frame, piece.is_some()),
+                            tick,
+                        },
                     );
-                }
-            }
-            if moving.is_some() {
-                changes
-                    .events
-                    .retain(|event| !matches!(event, WallEvent::Fall(_)));
-            }
-            p.record
-                .entries
-                .extend(changes.events.iter().map(|&event| WallEntry {
-                    building,
-                    event,
-                    tick,
-                }));
-            give_back(&mut p.bodies, frame, &changes.returns);
-            if let Some(owned) = moving {
-                let groups: Vec<_> = changes.groups.into_iter().map(|(group, _)| group).collect();
-                let unchanged = groups.len() == 1
-                    && groups[0]
-                        .iter()
-                        .copied()
-                        .eq(owned.iter().map(|&c| usize::from(c)));
-                if unchanged {
-                    for &c in &groups[0] {
-                        live.state.fate[c] = Fate::Standing;
+                    // Only recorded changes require a collider refit.
+                    if !effect.events.is_empty() {
+                        breakage.set_changed();
                     }
-                } else {
-                    let children: Vec<_> = groups
-                        .into_iter()
-                        .map(|group| {
-                            let state = live.group(&group);
-                            (group, state)
-                        })
-                        .collect();
-                    for (group, _) in &children {
-                        for &c in group {
-                            live.state.fate[c] = Fate::Standing;
-                        }
+                    effects.scope(|effects| effects.push(effect));
+                });
+            let mut effects: Vec<_> = effects.drain().collect();
+            assert_eq!(
+                effects.len(),
+                batch.len(),
+                "every deposit owner has complete construction state and a physics pose"
+            );
+            effects.sort_unstable_by_key(|effect| effect.root);
+            // Records, source impulses and carrier creation keep source-entity order,
+            // independent of worker completion. Each deposit commits before the next is cast.
+            for effect in effects {
+                let frame = frames[&effect.root];
+                if !effect.fields.is_empty() {
+                    let (mut body, _) = p
+                        .bodies
+                        .get_mut(effect.root)
+                        .expect("a moving chunk group is a physics body");
+                    for load in effect.fields {
+                        body.apply_linear_impulse_at_point(
+                            frame.rotation * load.blow,
+                            frame.translation + frame.rotation * load.at,
+                        );
                     }
-                    p.commands
-                        .entity(root)
-                        .insert(PendingSplit { children, tick });
                 }
-            } else {
-                for (group, loads) in changes.groups {
-                    let launch = launch(&kind, &live.structure, frame.scale, &group, &loads);
-                    departures.push(Departure {
-                        kind: kind.clone(),
-                        building,
-                        root: construction,
-                        scale,
-                        live: live.group(&group),
-                        group,
-                        launch,
+                p.record
+                    .entries
+                    .extend(effect.events.into_iter().map(|event| WallEntry {
+                        building: effect.construction,
+                        event,
                         tick,
-                    });
+                    }));
+                give_back(&mut p.bodies, frame, &effect.returns);
+                if let Some(split) = effect.split {
+                    p.commands.entity(effect.root).insert(split);
                 }
-            }
-            if !changes.events.is_empty() {
-                breakage.set_changed();
+                departures.extend(effect.departures);
             }
         }
         for departure in departures {
@@ -1513,7 +1624,7 @@ fn cast_blast(
             if !frame.may_meet(origin, dir) {
                 continue;
             }
-            let (_, _, _, breakage, piece) = p
+            let (_, _, breakage, piece) = p
                 .buildings
                 .get(*root)
                 .expect("frames enumerates this same building query");
@@ -1589,7 +1700,7 @@ fn cast_blast(
         let (root, Some(c), t, d) = stop? else {
             return None;
         }; // Unbreakable matter shades it.
-        let (_, _, _, breakage, _) = p
+        let (_, _, breakage, _) = p
             .buildings
             .get(root)
             .expect("the stop names a queried building");
@@ -2100,7 +2211,8 @@ fn spawn_group(commands: &mut Commands, departure: Departure, finalize: bool) {
         Breakage {
             kind: kind.clone(),
             scale,
-            live: Some(Box::new(live)),
+            construction: building,
+            live: Box::new(live),
             origin,
         },
         Transform::from_translation(at).with_rotation(root.rotation),
@@ -2223,14 +2335,12 @@ pub(crate) fn piece_layers() -> CollisionLayers {
 fn derive_from_record(
     record: Res<WallRecord>,
     mut applied: Local<(u32, usize)>,
-    mut buildings: Query<(&MapInstance, &mut Breakage), Without<WallPiece>>,
+    mut buildings: Query<&mut Breakage, Without<WallPiece>>,
 ) {
     if applied.0 != record.generation || record.entries.len() < applied.1 {
-        for (_, mut breakage) in &mut buildings {
-            if breakage.live.is_some() {
-                breakage.live = None;
-            }
-        }
+        buildings
+            .par_iter_mut()
+            .for_each(|mut breakage| breakage.live.reset());
         *applied = (record.generation, 0);
     }
     if record.entries.len() == applied.1 {
@@ -2243,11 +2353,12 @@ fn derive_from_record(
             .or_default()
             .push(entry.event);
     }
-    for (identity, mut breakage) in &mut buildings {
-        let Some(events) = by_ordinal.remove(&identity.ordinal) else {
+    for mut breakage in &mut buildings {
+        let Some(events) = by_ordinal.remove(&breakage.construction) else {
+            // This construction has no new entries in the ledger.
             continue;
         };
-        let live = breakage.live();
+        let live = breakage.live.as_mut();
         let mut shape = live.shape();
         for event in events {
             shape.apply(event);

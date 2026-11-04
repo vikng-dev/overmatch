@@ -12,6 +12,7 @@ use crate::ballistics::MarchProbe;
 use crate::buildings::fracture::FIT_ONLY_PRODUCTS;
 use crate::buildings::schema::ElementKind;
 use crate::buildings::tests::shipped_house;
+use crate::scatter::MapInstance;
 
 /// A fixture physics step, s: the harness's 64 Hz tick (fixture data).
 const STEP: f32 = 1.0 / 64.0;
@@ -62,6 +63,334 @@ fn composed_kind(replica: bool, kind: &Arc<BuildingKind>) -> (App, Entity) {
     );
     queue.apply(world);
     (app, root)
+}
+
+/// Fixture: a column of three unit cubes, joined over their full faces, anchored at its base.
+/// It has no house topology or view asset; all masses derive from the registry's material density.
+fn column_construction() -> Arc<BuildingKind> {
+    let registry = crate::substances::SubstanceRegistry::shipped_static();
+    let density = Masonry::of(registry, "Brick").unwrap().unwrap().density;
+    let hull = |lo: f32, hi: f32| {
+        [-0.5, 0.5]
+            .into_iter()
+            .flat_map(|x| {
+                [lo, hi]
+                    .into_iter()
+                    .flat_map(move |y| [-0.5, 0.5].map(|z| [x, y, z]))
+            })
+            .collect()
+    };
+    let asset = BuildingAsset {
+        id: "column_fixture".into(),
+        format: schema::FORMAT,
+        foundation_y_m: 0.0,
+        materials: vec!["Brick".into()],
+        attachments: vec!["mortared".into()],
+        components: vec!["column".into()],
+        elements: vec![schema::Element {
+            name: "column".into(),
+            kind: ElementKind::Pier,
+            component: 0,
+            material: 0,
+            surface_frame: schema::SurfaceFrame::Upright,
+            hull: hull(0.0, 3.0),
+            chunks: [0, 3],
+        }],
+        chunks: (0..3)
+            .map(|c| schema::Chunk {
+                element: 0,
+                material: 0,
+                hull: hull(c as f32, c as f32 + 1.0),
+                volume_m3: 1.0,
+                mass_kg: density,
+                centroid: [0.0, c as f32 + 0.5, 0.0],
+            })
+            .collect(),
+        joints: (0..2)
+            .map(|a| schema::Joint {
+                a,
+                b: a + 1,
+                area_m2: 1.0,
+                centroid: [0.0, a as f32 + 1.0, 0.0],
+                normal: [0.0, 1.0, 0.0],
+                bond: schema::Bond::Seam,
+            })
+            .collect(),
+        anchors: vec![schema::Anchor {
+            chunk: 0,
+            attachment: 0,
+            area_m2: 1.0,
+            centroid: [0.0; 3],
+        }],
+    };
+    Arc::new(
+        BuildingKind::resolve(
+            &asset.id,
+            &ron::ser::to_string(&asset).unwrap(),
+            registry,
+            Attachments::shipped_static(),
+        )
+        .unwrap(),
+    )
+}
+
+/// The game's environment destruction model: authority, replicas and presentation rely on
+/// complete spawn state and stable source addresses through every split. The production plugin
+/// must strike, release and split a non-house construction without loading a view, retaining
+/// existing wear and shared geometry. A deferred constructor or a split that renumbers or heals
+/// the surviving chunk breaks this witness. Fixture loads remove supports without adding motion.
+#[test]
+fn a_construction_is_complete_at_spawn_and_keeps_its_state_through_splits() {
+    let kind = column_construction();
+    let (mut app, root) = composed_kind(false, &kind);
+    let initial = app.world().get::<Breakage>(root).unwrap();
+    let structure = initial.live.structure.clone();
+    assert_eq!(
+        initial.live.state.pool,
+        structure
+            .chunks
+            .iter()
+            .map(fracture::full_pool)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        initial.live.state.fate,
+        vec![Fate::Standing; structure.chunks.len()]
+    );
+    assert_eq!(
+        initial.live.state.cracked,
+        vec![false; structure.joints.len()]
+    );
+    assert_eq!(initial.live.swapped, vec![false; kind.asset.elements.len()]);
+    assert_eq!(
+        initial.live.holes,
+        vec![Vec::<Hole>::new(); structure.chunks.len()]
+    );
+    let construction = initial.construction;
+    // Runtime ownership is the source ordinal, independent of a map-placement marker.
+    app.world_mut().entity_mut(root).remove::<MapInstance>();
+    app.update();
+    app.update();
+    let deposit = |app: &mut App, owner: Entity, chunk: usize, share: f32| {
+        let breakage = app.world().get::<Breakage>(owner).unwrap();
+        let matter = &breakage.live.structure.chunks[chunk];
+        let frame = breakage.physics_frame((
+            app.world().get::<Position>(owner).unwrap(),
+            app.world().get::<Rotation>(owner).unwrap(),
+        ));
+        let at = frame.translation + frame.rotation * matter.centroid;
+        let (from, to) = (
+            at - frame.rotation * Vec3::X * 0.5,
+            at + frame.rotation * Vec3::X * 0.5,
+        );
+        let energy = share * fracture::full_pool(matter) * matter.material.crush;
+        let volume = app
+            .world_mut()
+            .query::<(Entity, &ChildOf, Option<&BuildingChunk>, &BallisticVolume)>()
+            .iter(app.world())
+            .find(|(_, parent, address, _)| {
+                parent.parent() == owner
+                    && address.is_none_or(|address| usize::from(address.0) == chunk)
+            })
+            .unwrap()
+            .0;
+        let shell = app.world_mut().spawn(PenetrationMarks::default()).id();
+        app.world_mut().trigger(ShellMarched {
+            shell,
+            marks_from: 0,
+            cones_from: 0,
+            burst: None,
+            lines: vec![DeliveredLine {
+                contacts: vec![(from, to)],
+                crossing: crate::ballistics::VolumeCrossing {
+                    volume,
+                    entry: from,
+                    end: to,
+                    chord: from.distance(to),
+                    cost: 0.0,
+                    energy,
+                    perforated: true,
+                },
+                entrance_energy: 0.0,
+                momentum: Vec3::ZERO,
+                entrance_momentum: Vec3::ZERO,
+            }],
+        });
+        app.update();
+        app.update();
+        app.world_mut().despawn(shell);
+    };
+    deposit(&mut app, root, 2, 0.01);
+    let worn = app.world().get::<Breakage>(root).unwrap().live.state.pool[2];
+    assert!(worn < fracture::full_pool(&structure.chunks[2]));
+    let holes = app.world().get::<Breakage>(root).unwrap().live.holes[2].clone();
+    assert!(
+        !holes.is_empty(),
+        "the delivered line records a visual channel"
+    );
+    deposit(&mut app, root, 0, 1.25);
+    let (parent, piece) = app
+        .world_mut()
+        .query::<(Entity, &WallPiece)>()
+        .single(app.world())
+        .unwrap();
+    assert_eq!(
+        piece.chunks,
+        vec![1, 2],
+        "source addresses survive departure"
+    );
+    assert_eq!(piece.building, construction);
+    let parent_state = app.world().get::<Breakage>(parent).unwrap();
+    assert!(Arc::ptr_eq(&parent_state.kind, &kind));
+    assert!(Arc::ptr_eq(&parent_state.live.structure, &structure));
+    assert_eq!(
+        parent_state.live.state.pool[2], worn,
+        "departure keeps wear"
+    );
+    assert_eq!(
+        parent_state.live.holes[2], holes,
+        "departure keeps the chunk's view state"
+    );
+    deposit(&mut app, parent, 1, 1.25);
+    assert!(
+        app.world().get_entity(parent).is_err(),
+        "a split retires its parent"
+    );
+    let (child, piece) = app
+        .world_mut()
+        .query::<(Entity, &WallPiece)>()
+        .single(app.world())
+        .unwrap();
+    assert_eq!(
+        piece.chunks,
+        vec![2],
+        "splitting never compacts source addresses"
+    );
+    assert_eq!(piece.building, construction);
+    let child_state = app.world().get::<Breakage>(child).unwrap();
+    assert_eq!(child_state.construction, construction);
+    assert!(Arc::ptr_eq(&child_state.live.structure, &structure));
+    assert_eq!(
+        child_state.live.state.pool[2], worn,
+        "splitting never heals wear"
+    );
+    assert_eq!(
+        child_state.live.holes[2], holes,
+        "splitting keeps the chunk's view state"
+    );
+    assert_eq!(
+        child_state.live.state.fate,
+        vec![Fate::Dust, Fate::Dust, Fate::Standing]
+    );
+    let height = app.world().get::<Position>(child).unwrap().y;
+    app.insert_resource(Gravity(Vec3::NEG_Y * crate::physical_laws::gravity_mps2()));
+    for _ in 0..8 {
+        app.update();
+    }
+    assert!(
+        app.world().get::<Position>(child).unwrap().y < height,
+        "the owned group falls through production physics"
+    );
+
+    let record = app.world().resource::<WallRecord>().clone();
+    let (mut replica, replica_root) = composed_kind(true, &kind);
+    let replica_geometry = replica
+        .world()
+        .get::<Breakage>(replica_root)
+        .unwrap()
+        .live
+        .structure
+        .clone();
+    replica
+        .world_mut()
+        .entity_mut(replica_root)
+        .remove::<MapInstance>();
+    replica.insert_resource(record);
+    replica.update();
+    assert_eq!(
+        replica
+            .world()
+            .get::<Breakage>(replica_root)
+            .unwrap()
+            .shape()
+            .fate,
+        vec![Fate::Dust, Fate::Dust, Fate::Fallen],
+        "the replica keeps the source addresses of split records"
+    );
+    {
+        let mut record = replica.world_mut().resource_mut::<WallRecord>();
+        record.entries.clear();
+        record.generation += 1;
+    }
+    replica.update();
+    let reset = replica.world().get::<Breakage>(replica_root).unwrap();
+    assert_eq!(reset.shape(), Shape::intact(&kind.layout));
+    assert!(
+        Arc::ptr_eq(&reset.live.structure, &replica_geometry),
+        "a new ledger reuses geometry"
+    );
+}
+
+/// The game's environment destruction model: a moving owner's strength check reads spin after
+/// earlier owners' plastic returns. Independent owners can evaluate together; crossing this
+/// dependency or serializing every independent owner violates the evaluation contract.
+#[test]
+fn owner_evaluation_waits_only_for_earlier_source_returns() {
+    let mut world = World::new();
+    let mut roots: Vec<_> = (0..4).map(|_| world.spawn_empty().id()).collect();
+    roots.sort_unstable();
+    let load = Load {
+        chunk: 0,
+        at: Vec3::ZERO,
+        energy: 0.0,
+        crushed: 0.0,
+        blow: Vec3::X,
+        press: Vec3::ZERO,
+        peak: None,
+        origin: Origin::Body {
+            body: roots[2],
+            mass: 1.0,
+            speed: 1.0,
+            step: STEP,
+        },
+    };
+    let taken = roots
+        .iter()
+        .map(|&root| {
+            (
+                root,
+                Taken {
+                    contacts: if root == roots[0] {
+                        vec![load]
+                    } else {
+                        Vec::new()
+                    },
+                    ..default()
+                },
+            )
+        })
+        .collect();
+    let batches: Vec<_> = owner_batches(taken).collect();
+    let batch_of = |root| {
+        batches
+            .iter()
+            .position(|batch| batch.contains_key(&root))
+            .unwrap()
+    };
+    assert!(
+        batch_of(roots[0]) < batch_of(roots[2]),
+        "returns commit before their receiver reads spin"
+    );
+    assert_eq!(
+        batch_of(roots[0]),
+        batch_of(roots[1]),
+        "an independent owner shares the first batch"
+    );
+    assert_eq!(
+        batch_of(roots[2]),
+        batch_of(roots[3]),
+        "an independent owner shares the next batch"
+    );
 }
 
 /// A breakable element with at least three chunks, and its three chunks whose centroids lie
@@ -131,7 +460,7 @@ fn a_chunk_gone_never_blocks_as_the_intact_element() {
     );
     {
         let mut breakage = app.world_mut().get_mut::<Breakage>(root).unwrap();
-        let live = breakage.live();
+        let live = breakage.live.as_mut();
         live.swapped[e] = true;
         live.state.fate[dusted] = Fate::Dust;
         live.state.fate[fallen] = Fate::Fallen;
@@ -497,8 +826,6 @@ fn held_holes(app: &App, root: Entity) -> Vec<Vec<Hole>> {
         .get::<Breakage>(root)
         .unwrap()
         .live
-        .as_ref()
-        .expect("the record touched the house")
         .holes
         .clone()
 }
@@ -1368,11 +1695,8 @@ fn a_ray_that_stops_on_a_moving_body_pushes_it_by_its_share_and_deposits_nothing
                 * world.get::<LinearVelocity>(body).unwrap().0
         });
         let breakage = app.world().get::<Breakage>(root).unwrap();
-        let wears = match &breakage.live {
-            Some(live) => live.state.pool[c] < fracture::full_pool(&live.structure.chunks[c]),
-            // Complete shading leaves the fixture untouched, with no live fracture state.
-            None => false,
-        };
+        let live = &breakage.live;
+        let wears = live.state.pool[c] < fracture::full_pool(&live.structure.chunks[c]);
         (rays.len(), momentum, expected, shadowed, aimed, wears)
     };
     let (.., bare) = after(None);
@@ -1482,7 +1806,7 @@ fn the_ground_stops_a_blast_and_a_body_holding_the_burst_shades_nothing() {
         Blast::of(CRUSHING_BLAST_J, 1e-3, FIT_ONLY_PRODUCTS),
     );
     let breakage = app.world().get::<Breakage>(root).unwrap();
-    let live = breakage.live.as_ref().expect("the burst reached the house");
+    let live = breakage.live.as_ref();
     assert!(
         live.state.pool[c] < fracture::full_pool(&live.structure.chunks[c]),
         "the body holding the burst shades nothing"
@@ -2361,7 +2685,7 @@ fn a_break_launches_and_returns_in_one_authority_pass() {
                 return;
             };
             let mut breakage = buildings.get_mut(root).unwrap();
-            let live = breakage.live();
+            let live = breakage.live.as_mut();
             live.state.fate.fill(Fate::Dust);
             live.state.fate[load.chunk] = Fate::Standing;
             live.state.cracked.fill(true);
@@ -2684,7 +3008,7 @@ fn awake_and_sleeping_presses_join_every_deposit_once() {
         app.world_mut().resource_mut::<WallQueue>().0 = deposits;
         app.world_mut().run_system_once(apply_deposits).unwrap();
         let mut breakage = app.world_mut().get_mut::<Breakage>(root).unwrap();
-        let live = breakage.live();
+        let live = breakage.live.as_mut();
         let force: Vec3 = live.held_presses.iter().map(|&(_, _, force)| force).sum();
         assert_eq!(force, Vec3::X * 3.0, "contact first: {contact_first}");
         assert_eq!(live.held_presses.len(), 2, "each point once");
@@ -2846,13 +3170,7 @@ fn a_burst_touching_a_face_crushes_it_from_its_filler_center() {
     assert_eq!(queued.0[0].blast, Some((field_origin, blast)));
     app.update();
     app.update();
-    let live = app
-        .world()
-        .get::<Breakage>(root)
-        .unwrap()
-        .live
-        .as_ref()
-        .unwrap();
+    let live = app.world().get::<Breakage>(root).unwrap().live.as_ref();
     assert!(
         live.state.pool[chunk] < fracture::full_pool(&live.structure.chunks[chunk]),
         "a contacting burst crushes the face above its material threshold"
@@ -3114,7 +3432,7 @@ fn drop_slab(gently: bool) -> (Vec<usize>, Vec<Vec<u16>>) {
             .world_mut()
             .get_mut::<Breakage>(building)
             .expect("the fixture's placed root");
-        let live = fixed.live();
+        let live = fixed.live.as_mut();
         for &c in &group {
             live.state.fate[c] = Fate::Fallen;
             live.swapped[usize::from(kind.layout.element_of[c])] = true;
@@ -3248,7 +3566,7 @@ fn split_children_inherit_the_parents_rigid_momentum() {
     let breakage = app.world().get::<Breakage>(entity).unwrap();
     let exact = launch(
         &kind,
-        &breakage.live.as_ref().unwrap().structure,
+        &breakage.live.as_ref().structure,
         1.0,
         &app.world()
             .get::<WallPiece>(entity)
@@ -3282,13 +3600,7 @@ fn split_children_inherit_the_parents_rigid_momentum() {
         .iter(world)
     {
         let group: Vec<_> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
-        let geometry = launch(
-            &kind,
-            &breakage.live.as_ref().unwrap().structure,
-            1.0,
-            &group,
-            &[],
-        );
+        let geometry = launch(&kind, &breakage.live.as_ref().structure, 1.0, &group, &[]);
         let r = Mat3::from_quat(rotation.0);
         let inertia = r * geometry.inertia * r.transpose();
         let at = pose.0 + rotation.0 * (geometry.centre - geometry.centroid);
@@ -4082,7 +4394,7 @@ fn freed_in_place(group: &[usize], offset: Vec3) -> (App, (f32, Mat3, Vec3)) {
     }
     let live = {
         let mut fixed = app.world_mut().get_mut::<Breakage>(root).unwrap();
-        let live = fixed.live();
+        let live = fixed.live.as_mut();
         for &c in group {
             live.state.fate[c] = Fate::Fallen;
             live.swapped[usize::from(kind.layout.element_of[c])] = true;
