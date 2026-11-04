@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use bevy::input::keyboard::KeyCode;
-use bevy::math::{UVec2, Vec3};
+use bevy::math::{Dir3, UVec2, Vec3};
 use bevy::time::{Time, Virtual};
 use serde::Deserialize;
 
@@ -384,12 +384,76 @@ pub(crate) struct Placed {
 /// map instance is `instance`, the cue's house when absent (asset metres at its scale), arriving
 /// along `toward` in that frame.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "AimInput")]
 pub(crate) struct Aim {
-    #[serde(default)]
     pub(crate) instance: Option<String>,
     pub(crate) at: (f32, f32, f32),
-    pub(crate) toward: (f32, f32, f32),
+    pub(crate) toward: Dir3,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AimInput {
+    #[serde(default)]
+    instance: Option<String>,
+    at: (f32, f32, f32),
+    toward: (f32, f32, f32),
+}
+
+impl TryFrom<AimInput> for Aim {
+    type Error = String;
+
+    fn try_from(input: AimInput) -> Result<Self, Self::Error> {
+        if !Vec3::from(input.at).is_finite() {
+            return Err("wall.shots.aim.at: author finite coordinates".into());
+        }
+        let repair = "wall.shots.aim.toward: author a finite nonzero direction with representable length; rescale its components to unit magnitude";
+        let toward = Dir3::new(Vec3::from(input.toward)).map_err(|_| repair.to_owned())?;
+        if !toward.as_vec3().is_normalized() {
+            return Err(repair.into());
+        }
+        Ok(Self {
+            instance: input.instance,
+            at: input.at,
+            toward,
+        })
+    }
+}
+
+impl Wall {
+    fn validate_targets(&self) -> Result<(), String> {
+        let map = std::cell::LazyCell::new(|| crate::map::load(&crate::assets::asset_root()));
+        for name in self
+            .shots
+            .iter()
+            .filter_map(|shot| shot.aim.as_ref()?.instance.as_deref())
+        {
+            let preview_count = self
+                .preview
+                .iter()
+                .flat_map(|preview| &preview.place)
+                .filter(|placed| placed.id == name)
+                .count();
+            let map_count = map
+                .instances
+                .iter()
+                .filter(|instance| {
+                    instance.id == name
+                        && matches!(
+                            map.prototypes[&instance.prototype],
+                            crate::map::Prototype::Construction { .. }
+                        )
+                })
+                .count();
+            if preview_count + map_count != 1 {
+                return Err(format!(
+                    "wall.shots.aim.instance: {name:?} names {} constructions; name exactly one construction placed by the map or wall.preview, with a unique id",
+                    preview_count + map_count
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One shot at the wall, at app second `at`: a shipped round square at it, or a bare charge of
@@ -461,6 +525,15 @@ impl std::fmt::Display for PlanError {
             Self::Field(error) => f.write_str(error),
         }
     }
+}
+
+/// Refuse operator input at either file admission or binding to the startup world.
+pub(super) fn refuse(error: PlanError) -> ! {
+    let path = PathBuf::from(
+        std::env::var_os(VARIABLE).expect("a capture cue requires a loaded plan path"),
+    );
+    eprintln!("{VARIABLE}={}: {error}", path.display());
+    std::process::exit(2);
 }
 
 fn default_at() -> Vec<f32> {
@@ -615,20 +688,12 @@ impl CapturePlan {
             return Err("scene.demo: a track-print drive needs finite numbers".into());
         }
         if let Some(wall) = &self.wall {
+            wall.validate_targets()?;
             if wall.shots.is_empty() {
                 return Err("wall.shots: no shot".into());
             }
             for shot in &wall.shots {
                 finite_at("wall.shots.at", shot.at)?;
-                if let Some(aim) = &shot.aim
-                    && !(Vec3::from(aim.at).is_finite()
-                        && Vec3::from(aim.toward).is_finite()
-                        && Vec3::from(aim.toward) != Vec3::ZERO)
-                {
-                    return Err(
-                        "wall.shots.aim: a finite point and a finite nonzero direction".into(),
-                    );
-                }
             }
             if let Some(preview) = &wall.preview {
                 let (eye, look) = (Vec3::from(preview.eye), Vec3::from(preview.look));
@@ -662,10 +727,7 @@ pub(crate) fn plan() -> Option<&'static CapturePlan> {
     static PLAN: OnceLock<Option<CapturePlan>> = OnceLock::new();
     PLAN.get_or_init(|| {
         let path = PathBuf::from(std::env::var_os(VARIABLE)?);
-        let plan = CapturePlan::load(&path).unwrap_or_else(|error| {
-            eprintln!("{VARIABLE}={}: {error}", path.display());
-            std::process::exit(2);
-        });
+        let plan = CapturePlan::load(&path).unwrap_or_else(|error| refuse(error));
         Some(plan)
     })
     .as_ref()
@@ -680,6 +742,58 @@ mod tests {
         let text = format!(r#"(wall: (shots: [Charge(kg: {kg}, core: "{core}", at: 1.0)]))"#);
         let error = CapturePlan::parse(&text).unwrap_err().to_string();
         assert!(error.contains(field) && error.contains(fix), "{error}");
+    }
+
+    /// The game's damage-model capture cues cannot defer unknown targets until their firing time.
+    #[test]
+    fn wall_aim_targets_are_admitted_before_cues_run() {
+        let registry = crate::guns::GunRegistry::shipped();
+        let (_, key, _) = registry.fired_rounds().next().unwrap();
+        // Fixture: a target absent from both the selected map and the preview.
+        let text = format!(
+            r#"(wall: (shots: [Round(round: {key:?}, at: 0.0, aim: (instance: "missing capture construction", at: (0.0, 0.0, 0.0), toward: (1.0, 0.0, 0.0)))]))"#
+        );
+        let error = CapturePlan::parse(&text).unwrap_err().to_string();
+        for required in [
+            "wall.shots.aim.instance",
+            "missing capture construction",
+            "name exactly one construction",
+        ] {
+            assert!(error.contains(required), "{error}");
+        }
+    }
+
+    /// The game's damage-model cues retain a checked direction; a finite-only gate admits
+    /// underflow and overflow that would fail while firing or positioning a charge.
+    #[test]
+    fn wall_aim_directions_are_checked_once_at_admission() {
+        let registry = crate::guns::GunRegistry::shipped();
+        let (_, key, _) = registry.fired_rounds().next().unwrap();
+        // Fixture: degenerate, nonfinite and unrepresentable lengths, and a valid nonunit vector.
+        for toward in [
+            "(0.0, 0.0, 0.0)",
+            "(NaN, 0.0, 0.0)",
+            "(inf, 0.0, 0.0)",
+            "(1e-30, 0.0, 0.0)",
+            "(1e30, 0.0, 0.0)",
+            "(1e-22, 0.0, 0.0)",
+        ] {
+            let text = format!(
+                r#"(wall: (shots: [Round(round: {key:?}, at: 0.0, aim: (at: (0.0, 0.0, 0.0), toward: {toward}))]))"#
+            );
+            let error = CapturePlan::parse(&text).unwrap_err().to_string();
+            for required in ["wall.shots.aim.toward", "rescale"] {
+                assert!(error.contains(required), "{error}");
+            }
+        }
+        let text = format!(
+            r#"(wall: (shots: [Round(round: {key:?}, at: 0.0, aim: (at: (0.0, 0.0, 0.0), toward: (8.0, 0.0, 0.0)))]))"#
+        );
+        let plan = CapturePlan::parse(&text).unwrap();
+        assert_eq!(
+            plan.wall.unwrap().shots[0].aim.as_ref().unwrap().toward,
+            Dir3::X
+        );
     }
 
     /// The game's damage model: operators need an unknown core refused at plan admission;

@@ -25,7 +25,7 @@
 
 use bevy::prelude::*;
 
-use super::plan::{Aim, Preview};
+use super::plan::{PlanError, Preview};
 use crate::ballistics::FireShell;
 use crate::construction::breakage::{Breakage, Charge as ConstructionCharge};
 use crate::construction::fracture::Blast;
@@ -157,9 +157,16 @@ fn staging() -> &'static Staging {
 /// preview; the framing once found.
 #[derive(Resource)]
 struct Cue {
-    shots: Vec<(What, f32, Option<Aim>, bool)>,
+    shots: Vec<(What, f32, Option<BoundAim>, bool)>,
     preview: Option<Preview>,
     camera: Option<Transform>,
+}
+
+/// Startup binds named targets after preview placement; firing only reads the retained entity.
+struct BoundAim {
+    target: Option<Entity>,
+    at: Vec3,
+    toward: Dir3,
 }
 
 /// A construction the plan's preview placed: never the cue's house.
@@ -206,21 +213,16 @@ pub(crate) fn server_wall_plugin(app: &mut App) {
 fn cue_from_plan() -> Option<Cue> {
     let wall = super::plan()?.wall.as_ref()?;
     staging();
-    let shots = wall
-        .shots
-        .iter()
-        .map(|shot| (shot.what.clone(), shot.at, shot.aim.clone(), false))
-        .collect();
     info!("capture: game's environment destruction wall cue {wall:?}");
     Some(Cue {
-        shots,
+        shots: Vec::new(), // check_wall_target binds the shots before Update can fire them.
         preview: wall.preview.clone(),
         camera: None,
     })
 }
 
 /// The camera looks at the middle of the aim point and foot; [`staging`] owns its offsets (m).
-fn framing(outward: Vec3, aim: Vec3, foot: Vec3) -> Transform {
+fn framing(outward: Dir3, aim: Vec3, foot: Vec3) -> Transform {
     let look = (aim + foot) / 2.0;
     Transform::from_translation(
         look + outward * staging().camera_out_m.0 + Vec3::Y * staging().camera_up_m.0,
@@ -231,7 +233,7 @@ fn framing(outward: Vec3, aim: Vec3, foot: Vec3) -> Transform {
 /// The wall (module doc): the pier's outward normal, the aim point on its outer face, the foot of
 /// that face, and a point inset past the construction's middle from the pier, at the aim's
 /// height, all world.
-fn the_wall((root, breakage): (&Transform, &Breakage)) -> Option<(Vec3, Vec3, Vec3, Vec3)> {
+fn the_wall((root, breakage): (&Transform, &Breakage)) -> Option<(Dir3, Vec3, Vec3, Vec3)> {
     let kind = &breakage.kind;
     let layout = &kind.layout;
     let (lo, hi) = kind.bounds();
@@ -273,7 +275,8 @@ fn the_wall((root, breakage): (&Transform, &Breakage)) -> Option<(Vec3, Vec3, Ve
     let middle = (lo + hi) / 2.0;
     let inside = Vec3::new(middle.x, aim.y, middle.z) - outward * staging().inside_inset_m.0;
     Some((
-        root.rotation * outward,
+        Dir3::new(root.rotation * outward)
+            .expect("certified construction geometry has a finite nonzero wall normal"),
         world(on_face(aim)),
         world(on_face(foot)),
         world(inside),
@@ -295,12 +298,30 @@ fn the_house<'a>(constructions: &'a Houses) -> Option<(&'a Transform, &'a Breaka
 
 /// The wall, resolved at boot: the map's constructions spawn at `Startup`, from data, so a plan whose
 /// `wall` cue finds no breakable house with a pier fails the run before any frame.
-fn check_wall_target(constructions: Houses) {
+fn check_wall_target(
+    constructions: Houses,
+    targets: Query<(Entity, &MapInstance), With<Breakage>>,
+    mut cue: ResMut<Cue>,
+) {
     assert!(
         the_house(&constructions).and_then(the_wall).is_some(),
         "{}: wall: the map has no breakable house with a pier to shoot at",
         super::plan::VARIABLE
     );
+    let wall = super::plan()
+        .and_then(|plan| plan.wall.as_ref())
+        .expect("the wall plugin requires a wall plan");
+    cue.shots = wall.shots.iter().map(|shot| {
+        let aim = shot.aim.as_ref().map(|aim| {
+            let target = aim.instance.as_ref().map(|name| {
+                targets.iter().find(|(_, identity)| &identity.id == name).map(|(entity, _)| entity).unwrap_or_else(|| {
+                    super::plan::refuse(PlanError::Field(format!("wall.shots.aim.instance: {name:?} is not placed by this root; use offline mode for wall.preview targets or name a map construction")))
+                })
+            });
+            BoundAim { target, at: Vec3::from(aim.at), toward: aim.toward }
+        });
+        (shot.what.clone(), shot.at, aim, false)
+    }).collect();
 }
 
 /// Find the wall and frame it (logging the pose), then fire the cue on its second.
@@ -313,7 +334,7 @@ fn fire_on_cue(
     time: Res<Time>,
     mut cue: ResMut<Cue>,
     constructions: Houses,
-    targets: Query<(&MapInstance, &Transform, &Breakage)>,
+    targets: Query<(&Transform, &Breakage)>,
     mut commands: Commands,
 ) {
     let now = time.elapsed_secs();
@@ -359,34 +380,20 @@ fn fire_on_cue(
     }
 }
 
-/// A plan-aimed shot as [`shoot`] reads a wall, world: the reverse of its arrival direction, the
-/// aim point, and the aim point again as the charge's foot.
-///
-/// # Panics
-///
-/// When no construction is the named instance: the plan names one the map or its preview places.
+/// The game's damage-model aim, bound at startup, transformed through its construction's pose.
 fn aimed_at(
-    aimed: &Aim,
+    aimed: &BoundAim,
     house: (&Transform, &Breakage),
-    targets: &Query<(&MapInstance, &Transform, &Breakage)>,
-) -> (Vec3, Vec3, Vec3) {
-    let (root, breakage) = match &aimed.instance {
+    targets: &Query<(&Transform, &Breakage)>,
+) -> (Dir3, Vec3, Vec3) {
+    let (root, breakage) = match aimed.target {
         None => house,
-        Some(instance) => targets
-            .iter()
-            .find(|(identity, _, _)| &identity.id == instance)
-            .map(|(_, root, breakage)| (root, breakage))
-            .unwrap_or_else(|| {
-            panic!(
-                "{}: wall.shots.aim: no construction is instance {:?}; name one the map or wall.preview places",
-                super::plan::VARIABLE,
-                instance
-            )
-        }),
+        Some(entity) => targets
+            .get(entity)
+            .expect("a bound capture construction stays spawned until its cue fires"),
     };
-    let at = root.translation + root.rotation * (Vec3::from(aimed.at) * breakage.scale);
-    let along = (root.rotation * Vec3::from(aimed.toward)).normalize();
-    (-along, at, at)
+    let at = root.translation + root.rotation * (aimed.at * breakage.scale);
+    (-(root.rotation * aimed.toward), at, at)
 }
 
 /// Stand the plan's preview constructions beside the cue's house (module doc), each on the ground at
@@ -479,7 +486,7 @@ fn place_preview(
 }
 
 /// Fire `what` at the wall (its outward normal, aim point and foot, world): a round square to it.
-fn shoot(what: &What, (outward, aim, foot): (Vec3, Vec3, Vec3), commands: &mut Commands) {
+fn shoot(what: &What, (outward, aim, foot): (Dir3, Vec3, Vec3), commands: &mut Commands) {
     match what {
         What::Round(round) => {
             let along = -outward;
@@ -488,7 +495,7 @@ fn shoot(what: &What, (outward, aim, foot): (Vec3, Vec3, Vec3), commands: &mut C
                 round,
                 origin,
                 origin,
-                Dir3::new(along).expect("the game’s damage-model capture aims along a finite nonzero authored wall normal"),
+                along,
                 crate::spec::FireMechanism::Single,
                 true,
                 None,
