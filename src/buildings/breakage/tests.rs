@@ -334,6 +334,7 @@ fn a_construction_is_complete_at_spawn_and_keeps_its_state_through_splits() {
 /// The game's environment destruction model: a moving owner's strength check reads spin after
 /// earlier owners' plastic returns. Independent owners can evaluate together; crossing this
 /// dependency or serializing every independent owner violates the evaluation contract.
+/// Fixture: four owners and one source blow, with no contact geometry involved.
 #[test]
 fn owner_evaluation_waits_only_for_earlier_source_returns() {
     let mut world = World::new();
