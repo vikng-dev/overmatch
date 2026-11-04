@@ -680,27 +680,38 @@ mod tests {
         );
     }
 
-    /// The game's damage-model shot cue must refuse operator typos before setup. Fixture:
-    /// an absent key and an out-of-range mode; diagnostics name the field and its repair.
+    /// The game's damage-model shot cue must refuse operator typos before setup and retain every
+    /// authored mode. Fixture: an absent key; modes read their domain from the round's owner.
     #[test]
     fn shot_rounds_and_modes_are_resolved_at_admission() {
         let registry = crate::guns::GunRegistry::shipped();
         let (_, key, _) = registry.fired_rounds().next().unwrap();
-        for (round, mode, field, fix) in [
-            ("missing capture round", 0, "shot.round", "name a round"),
-            (key, u8::MAX, "shot.mode", "authored fuze modes"),
-        ] {
-            let text = format!("(shot: (round: {round:?}, mode: {mode}, target: Tree, at: 0.0))");
-            let error = CapturePlan::parse(&text).unwrap_err().to_string();
-            assert!(error.contains(field) && error.contains(fix), "{error}");
-        }
+        let error = CapturePlan::parse(
+            r#"(shot: (round: "missing capture round", target: Tree, at: 0.0))"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("shot.round") && error.contains("name a round"),
+            "{error}"
+        );
         let weapon_round = crate::tank::WeaponRound::resolve(key).unwrap();
-        for mode in 0..weapon_round.fuze_modes().len().max(1) {
-            let mode = u8::try_from(mode).unwrap();
+        for mode in 0..=u8::MAX {
             let text = format!("(shot: (round: {key:?}, mode: {mode}, target: Tree, at: 0.0))");
-            let shot = CapturePlan::parse(&text).unwrap().shot.unwrap();
-            assert_eq!(shot.key, key);
-            assert_eq!(shot.round, weapon_round.in_mode(mode).unwrap());
+            match weapon_round.in_mode(mode) {
+                Some(expected) => {
+                    let shot = CapturePlan::parse(&text).unwrap().shot.unwrap();
+                    assert_eq!(shot.key, key);
+                    assert_eq!(shot.round, expected);
+                }
+                None => {
+                    let error = CapturePlan::parse(&text).unwrap_err().to_string();
+                    assert!(
+                        error.contains("shot.mode") && error.contains("authored fuze modes"),
+                        "{error}"
+                    );
+                }
+            }
         }
     }
 
