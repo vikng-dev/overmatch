@@ -4,9 +4,7 @@
 
 use bevy::math::{Quat, Vec3};
 
-use super::model::{
-    Block, Bond, Chunk, Cut, Joint, Masonry, Side, Structure, clip_polygon, plane_axes,
-};
+use super::model::{Block, Bond, Chunk, Cut, Joint, Masonry, Side, Structure, clip_polygon};
 use crate::buildings::schema::BuildingAsset;
 
 /// Where a wall is set down: the world x its centre stands at, the world z its back face stands
@@ -120,7 +118,7 @@ pub(crate) fn wall_cut(
         .collect();
     let mut joints = Vec::new();
     let mut faces = Vec::new();
-    for j in &asset.joints {
+    for (index, j) in asset.joints.iter().enumerate() {
         let (Some(a), Some(b)) = (new_index[j.a as usize], new_index[j.b as usize]) else {
             continue;
         };
@@ -130,9 +128,15 @@ pub(crate) fn wall_cut(
             blocks[a].face_on(centroid, normal),
             blocks[b].face_on(centroid, normal),
         );
-        let mut polygon = clip_polygon(&face_a, &face_b, normal);
-        if polygon.len() < 3 {
-            polygon = square(centroid, normal, j.area_m2);
+        let polygon = clip_polygon(&face_a, &face_b, normal);
+        if face_a.len() < 3 || face_b.len() < 3 || polygon.len() < 3 {
+            return Err(format!(
+                "assets/buildings/{id}/{id}.building.ron joints[{index}].centroid/normal: \
+                 no shared face reconstructs from chunks {} and {}; rebake the interface on both hulls",
+                j.a,
+                j.b,
+                id = asset.id,
+            ));
         }
         joints.push(Joint {
             a,
@@ -144,14 +148,19 @@ pub(crate) fn wall_cut(
         });
         faces.push(polygon);
     }
-    for anchor in &asset.anchors {
+    for (index, anchor) in asset.anchors.iter().enumerate() {
         let Some(a) = new_index[anchor.chunk as usize] else {
             continue;
         };
         let centroid = place(Vec3::from_array(anchor.centroid));
-        let mut polygon = blocks[a].face_on(centroid, Vec3::Y);
+        let polygon = blocks[a].face_on(centroid, Vec3::Y);
         if polygon.len() < 3 {
-            polygon = square(centroid, Vec3::Y, anchor.area_m2);
+            return Err(format!(
+                "assets/buildings/{id}/{id}.building.ron anchors[{index}].centroid: \
+                 no foundation face reconstructs from chunk {}; rebake the anchor on its hull",
+                anchor.chunk,
+                id = asset.id,
+            ));
         }
         joints.push(Joint {
             a,
@@ -172,15 +181,101 @@ pub(crate) fn wall_cut(
     })
 }
 
-/// A square of `area` m² about `centroid` in the plane of unit `normal`: what a joint draws as
-/// when its corners are not on both chunks' faces.
-fn square(centroid: Vec3, normal: Vec3, area: f32) -> Vec<Vec3> {
-    let (u, v) = plane_axes(normal);
-    let h = area.sqrt() / 2.0;
-    vec![
-        centroid - u * h - v * h,
-        centroid + u * h - v * h,
-        centroid + u * h + v * h,
-        centroid - u * h + v * h,
-    ]
+#[cfg(test)]
+mod tests {
+    use super::super::{BUILDING, PLACE, SUBSTANCE, WALL, brick};
+    use super::*;
+
+    fn cut(asset: &BuildingAsset) -> Result<Cut, String> {
+        wall_cut(asset, WALL, SUBSTANCE, brick(), PLACE)
+    }
+
+    fn selected(asset: &BuildingAsset, chunk: u32) -> bool {
+        let element = &asset.elements[usize::from(asset.chunks[chunk as usize].element)];
+        asset.components[usize::from(element.component)] == WALL
+            && asset.materials[usize::from(element.material)] == SUBSTANCE
+    }
+
+    /// The sandbox must draw real shared interfaces. Fixture edits move either the declared
+    /// interface off both chunks or only its second chunk away. Inventing a square, or clipping
+    /// against an absent second face as if it imposed no bounds, must refuse the bake.
+    #[test]
+    fn an_interface_requires_both_chunk_faces() {
+        let original = BuildingAsset::from_ron(BUILDING).unwrap();
+        cut(&original).expect("the unmodified fixture reconstructs");
+        let joint = original
+            .joints
+            .iter()
+            .find(|j| selected(&original, j.a) && selected(&original, j.b))
+            .expect("the fixture has a selected interface")
+            .clone();
+        let normal = Vec3::from_array(joint.normal);
+        let (low, high) = [joint.a, joint.b]
+            .into_iter()
+            .flat_map(|c| &original.chunks[c as usize].hull)
+            .map(|p| normal.dot(Vec3::from_array(*p)))
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| {
+                (lo.min(p), hi.max(p))
+            });
+        // Fixture: one metre beyond the pair's full span cannot meet either original face.
+        let shift = normal * (high - low + 1.0);
+        for move_chunk in [false, true] {
+            let mut asset = original.clone();
+            asset.joints = vec![joint.clone()];
+            if move_chunk {
+                for p in &mut asset.chunks[joint.b as usize].hull {
+                    *p = (Vec3::from_array(*p) + shift).to_array();
+                }
+            } else {
+                asset.joints[0].centroid = (Vec3::from_array(joint.centroid) + shift).to_array();
+            }
+            asset
+                .check()
+                .expect("the fixture still meets schema admission");
+            let Err(error) = cut(&asset) else {
+                panic!("an absent interface must refuse the bake");
+            };
+            assert!(
+                error.contains(&format!("{}/{}.building.ron", asset.id, asset.id))
+                    && error.contains("joints[0]")
+                    && error.contains("rebake"),
+                "{error}"
+            );
+        }
+    }
+
+    /// The sandbox's ground interface must come from the anchored chunk. A square fallback
+    /// hides this fixture's chunk translated above its still-admitted foundation declaration.
+    #[test]
+    fn an_anchor_requires_its_chunk_face() {
+        let mut asset = BuildingAsset::from_ron(BUILDING).unwrap();
+        cut(&asset).expect("the unmodified fixture reconstructs");
+        let anchor = asset
+            .anchors
+            .iter()
+            .find(|a| selected(&asset, a.chunk))
+            .expect("the fixture has a selected anchor")
+            .clone();
+        asset.joints.clear();
+        asset.anchors = vec![anchor.clone()];
+        let hull = &mut asset.chunks[anchor.chunk as usize].hull;
+        let low = hull.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min);
+        // Fixture: lift the whole chunk at least one metre above its declared foundation.
+        let lift = asset.foundation_y_m - low + 1.0;
+        for p in hull {
+            p[1] += lift;
+        }
+        asset
+            .check()
+            .expect("the fixture still meets schema admission");
+        let Err(error) = cut(&asset) else {
+            panic!("an absent anchor face must refuse the bake");
+        };
+        assert!(
+            error.contains(&format!("{}/{}.building.ron", asset.id, asset.id))
+                && error.contains("anchors[0]")
+                && error.contains("rebake"),
+            "{error}"
+        );
+    }
 }
