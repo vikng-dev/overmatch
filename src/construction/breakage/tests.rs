@@ -262,9 +262,9 @@ fn a_construction_is_complete_at_spawn_and_keeps_its_state_through_splits() {
 }
 
 /// The game's environment destruction model: every admitted map kind releases through the
-/// common plugin when a chunk loses support. Hull contact and presentation rely on its stable
-/// address and direct convex colliders following the new dynamic owner. Fixture: isolate one
-/// above-ground chunk, then apply a zero-work load to request a scheduled law evaluation.
+/// common plugin when a chunk loses support. The Driver relies on that owner reaching the
+/// production belt gather and footprint reader with centroid-local convex geometry.
+/// Fixture: isolate one above-ground chunk, then request a law evaluation with zero work.
 #[test]
 fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
     let manifest = crate::map::tests::shipped_manifest();
@@ -326,6 +326,11 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
         );
         assert_eq!(piece.chunks, [chunk as u16]);
         assert_eq!(
+            app.world().get::<Position>(owner).unwrap().0,
+            at,
+            "an isolated chunk's dynamic frame starts at its occupied centroid"
+        );
+        assert_eq!(
             app.world().get::<RigidBody>(owner),
             Some(&RigidBody::Dynamic)
         );
@@ -335,18 +340,12 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
         ));
         let contact: Vec<_> = app
             .world_mut()
-            .query::<(Entity, &ChildOf, &Collider, &CollisionLayers)>()
+            .query::<(Entity, &ChildOf, &CollisionLayers)>()
             .iter(app.world())
-            .filter(|(_, parent, _, layers)| {
+            .filter(|(_, parent, layers)| {
                 parent.parent() == owner && layers.filters != LayerMask::NONE
             })
-            .map(|(entity, _, collider, _)| {
-                assert!(
-                    collider.shape().as_convex_polyhedron().is_some(),
-                    "a freed contact hull is direct convex geometry, never a translated compound"
-                );
-                entity
-            })
+            .map(|(entity, _, _)| entity)
             .collect();
         assert_eq!(contact.len(), 1, "one contact hull owns the isolated chunk");
         app.world_mut()
@@ -359,8 +358,16 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
         let after = app.world().get::<Position>(owner).unwrap().0;
         assert!(after.x > before.x, "the common dynamic owner advances");
         for entity in contact {
+            use crate::track::rubble::{PieceData, RubbleBodies, RubbleQuery, Slab};
+            use bevy::ecs::system::RunSystemOnce;
+
             let world = app.world();
             assert_eq!(world.get::<ColliderOf>(entity).unwrap().body, owner);
+            assert_eq!(
+                world.get::<Transform>(entity).unwrap().translation,
+                Vec3::ZERO,
+                "direct convex points already use the dynamic owner's centroid frame"
+            );
             let bound = world.get::<ColliderAabb>(entity).unwrap();
             let at = world.get::<Position>(entity).unwrap().0;
             let rotation = world.get::<Rotation>(entity).unwrap().0;
@@ -371,13 +378,56 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
                 bound.min.cmple(expected.min).all() && bound.max.cmpge(expected.max).all(),
                 "the common collider's live bounds contain its posed hull"
             );
+            let centre = (bound.min + bound.max) * 0.5;
+            let radius = (bound.max - bound.min).length();
+            app.world_mut()
+                .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                    let near = rubble.near(centre, radius);
+                    assert!(
+                        near.contains(&entity),
+                        "the belt spatial query must find the freed hull"
+                    );
+                    assert_eq!(rubble.body_of(entity), owner);
+                    let gathered = RubbleBodies::gather(&rubble, &near, &bodies);
+                    assert!(gathered.is_dynamic(entity));
+                    // Fixture footprint encloses the hull; its positive projected area must support.
+                    let slab = Slab {
+                        origin: centre - Vec3::X * radius,
+                        axis: Vec3::X,
+                        lat: Vec3::Z,
+                        out: Vec3::NEG_Y,
+                        len: 2.0 * radius,
+                        lateral: (-radius, radius),
+                        face: 0.0,
+                        reach: radius,
+                        travel: radius,
+                    };
+                    assert!(
+                        gathered.in_slab(&slab).iter().any(|overlap| {
+                            gathered.collider(overlap.piece) == entity
+                                && overlap.u.1 > overlap.u.0
+                                && overlap.l.1 > overlap.l.0
+                        }),
+                        "the freed occupied hull must reach the belt footprint reader"
+                    );
+                })
+                .unwrap();
+            assert!(
+                app.world()
+                    .get::<Collider>(entity)
+                    .unwrap()
+                    .shape()
+                    .as_convex_polyhedron()
+                    .is_some(),
+                "the freed contact hull is direct centroid-local convex geometry"
+            );
         }
         assert_eq!(
             app.world().get::<Breakage>(root).unwrap().live.state.fate[chunk],
             Fate::Fallen
         );
         println!(
-            "MEASURED {asset}: common detachment retains chunk {chunk}, direct contact hull and moving bounds"
+            "MEASURED {asset}: common detachment retains chunk {chunk}, direct contact hull, moving bounds and production belt support"
         );
     }
 }

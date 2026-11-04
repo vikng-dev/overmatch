@@ -4,7 +4,7 @@
 //! THE INVARIANT: every contact pair names the bodies its two colliders belong to now. Avian 0.7
 //! records a pair's bodies once, when its broad phase makes the pair, and never rewrites them when a
 //! collider's [`ColliderOf`] changes; a stale pair corrupts Avian's island lists. The game rehomes
-//! colliders when a turret launches or a trunk breaks free.
+//! colliders when a turret launches.
 //!
 //! [`drop_stale_pairs`] runs whenever `ColliderOf` is inserted. When one of the collider's pairs
 //! names another body for it, the collider is disabled and enabled again in one command batch, so

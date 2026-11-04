@@ -1,6 +1,6 @@
 //! Server-simulated pieces at rest, in the game's environment destruction (game state only): the
 //! one rule every loose piece follows: a construction's fallen chunks ([`crate::construction::breakage`]),
-//! a freed trunk and the debris stress lever's fixture fragments (`net::debris_stress`). The authority
+//! and the debris stress lever's fixture fragments (`net::debris_stress`). The authority
 //! alone simulates a piece; a replica draws it at the pose the network carries. A piece is a body
 //! with [`DebrisPiece`]; its colliders are the body's own ([`RigidBodyColliders`]). Paths below
 //! are under `vendor/avian3d-0.7.0-child-pose/src/`.

@@ -2,7 +2,7 @@
 //!
 //! Only the map's `Block` prototypes carry [`ScatterProxy`]. They have no ballistic
 //! volume, so this view-only cast marks their actual entry geometry without changing shell state.
-//! `Structure` and `Tree` prototypes carry ballistic volumes instead: the authority resolves their
+//! `Construction` prototypes carry ballistic volumes instead: the authority resolves their
 //! impacts and this cast does not see them. The proxy's authored substance supplies its surface
 //! response. Impact dimensions still use the shared provisional recipes in `impact`.
 //!

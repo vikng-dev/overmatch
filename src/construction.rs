@@ -11,7 +11,7 @@
 //! [`BallisticVolume`] of the element's substance. Hulls contact an element; the walk slows a
 //! round by chord × factor through every element it crosses, and an opening is no element, so
 //! rounds and sight pass through it. The instance's uniform scale is applied to the points at
-//! spawn and the root's own scale is one (the trees' convention).
+//! spawn and the root's own scale is one.
 //!
 //! MUTABLE STATE EXISTS AT SPAWN. No chunk is a collider while its element is whole; the
 //! first touch swaps the element to its chunks, and the fracture laws ([`fracture`]) wear, crack
@@ -500,8 +500,7 @@ pub(crate) mod tests {
     /// destruction model), whatever it builds: each asset under `assets/constructions/` passes the
     /// map's load gate (law blocks, collider mass and inertia, attachments and root plates) and
     /// spawns one collider per element and none per chunk, its whole chunk table in its breakage
-    /// state from spawn. A trunk's band is one element: one collider until disturbed. An asset the
-    /// gate refuses, or a spawn of a collider per chunk, fails here.
+    /// state from spawn. A refused asset or a spawn of a collider per chunk fails here.
     #[test]
     fn every_shipped_construction_is_admitted_and_stands_as_its_elements() {
         let assets = shipped_assets();
@@ -595,7 +594,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// THE INSTANCE'S SCALE SCALES THE WALLS, NOT THE ROOT (the trees' convention): at scale 1.5
+    /// THE INSTANCE'S SCALE SCALES ELEMENTS, NOT THE ROOT: at scale 1.5
     /// (fixture data) every element's collider spans 1.5 times its authored extent and the root
     /// stays at unit scale; the footprint spawn avoidance reads is the scaled bounds, posed.
     #[test]

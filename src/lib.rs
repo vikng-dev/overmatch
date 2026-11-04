@@ -946,9 +946,8 @@ pub fn run_offline() {
     // Same policy as the net client: never drop below the 64 Hz tick when unfocused.
     app.insert_resource(bevy::winit::WinitSettings::continuous());
     app.add_plugins(GamePlugin);
-    // Documentation frames; inert without `OVERMATCH_CAPTURE`. The tree-fall cue writes the
-    // authority's tree state and the impact cue raises the impact seam with no shot behind it, so
-    // this root, the only one with no replica, alone mounts them.
+    // Documentation frames; inert without `OVERMATCH_CAPTURE`. The impact cue raises the
+    // impact seam with no shot behind it, so this root, the only one with no replica, alone mounts them.
     app.add_plugins((
         dev_capture::plugin,
         dev_capture::offline_impact_plugin,

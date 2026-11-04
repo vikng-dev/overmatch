@@ -62,8 +62,7 @@ use bevy::prelude::*;
 
 use crate::ClientReplica;
 
-/// A body whose construction the destruction laws judge: an anchored or moving chunk group,
-/// or a tree. Its
+/// A body whose construction the destruction laws judge: an anchored or moving chunk group. Its
 /// contacts with dynamic bodies are read into [`ContactTransfers`]. Required by the components
 /// that make a body a structure, never inserted by hand.
 #[derive(Component, Debug, Default, Clone, Copy)]

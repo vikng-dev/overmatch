@@ -445,18 +445,29 @@ This prevents independent shares from creating energy when simultaneous contacts
 Its visible result is the same, since masonry does not visibly flex, and no study could bound its cost: **DERIVED** 34,890 bodies and 97,980 joints and anchors with 30 houses in play, from house_1's 1,163 chunks, 3,185 joints and 81 anchors (**MEASURED**, `house_1.construction.ron`).
 Reopen it only for a structure whose bending is visible: a swaying timber barn, a sagging bridge.
 
-**Trees are structures by the same laws.**
-A trunk's segments are chunks, its segment boundaries bonded joints of the wood along the grain, its root plate the anchor; the cut is wherever bending stress peaks, never a fixed segment.
-A trunk is one fracturing component, as a brick wall is (owner direction, 2026-11-01): its segments are chunks of one wood joined by the wood's own along-grain seam, so it breaks wherever the load beats a section and no segment boundary is a planted weak joint.
-`assets/trees/wood.ron` holds required structural rows for every declared species, refused at load if grain rupture strength, longitudinal opening energy, green density or the anchor is absent; each row names its sources and any analogue assumptions.
-The green density sets each segment's mass and the fresh stem mass; the dry-timber substance density never stands in for it.
-The trunk's join to the ground is an attachment kind in the shared list: a species' `anchor` names a `RootPlate` kind of `attachments.ron`, its critical overturning moment per kilogram of fresh stem mass, whose provenance binds the soil and rooting-depth domain.
-It states ultimate strength, no separation-work measurement. The anchor holds the moment `C m` as a seam across the base disc (`C m / S₀ − m g / A₀`, so the Navier law opens it exactly at `C m` under the trunk's own weight, **DERIVED**). Zero separation work is an **ASSUMED** rigid-plastic release, not a measured material fact; a blow that beats the strength pays only the lift over its hinge.
-In the game's environment destruction and damage model (game state only), `crate::trees` builds the structure at spawn. Each construction owner retains its structural state: the stump owns its grounded prefix, and each moving carrier owns a contiguous segment range. Contacts reach every owner from the solver's transfers and meet the shared fracture laws, including the accelerating-group frame and current spin on moving pieces. An emptied segment HP pool opens its base joint on its current owner; every opened seam partitions that owner's remaining construction. A later stump cut lowers the topology word without replacing an existing moving piece. The same segment entities and HP pools survive each partition.
-The ram law (`fell_k`, a per-tick angular impulse read off `normal_impulse`) is deleted.
-DERIVED for the shipped fir_1 (a 0.40 m Norway spruce, 1,202 kg fresh): its root plate holds 186 kN·m and its base section 254 kN·m, so a press at a hull's 1.5 m, below its first seam at 1.8 m, uproots it at 124 kN where the old ram law held every sustained push on a trunk over 0.245 m.
-A freed trunk is a dynamic body, like a wall piece: it strikes with its own fresh-wood mass, leaves with the plastic share of the blow that freed it, is stopped by any body, and rests by Avian's sleep. Its source receives the complementary impulse in the same post-physics pass. All simultaneous wall and trunk departures share the coupled kinetic budget. A press-only release starts with no invented velocity or spin; its continuing contacts and gravity move it.
-The authority alone integrates the body. Each freed trunk has an interpolated debris pose carrier plus its map ordinal and cut; the topology ledger carries the stump's lowest cut and no fall time or permanent stop. Sorted presented carrier cuts partition each tree into `cut..next_cut`, with the final range ending at the tip. Each carrier's pose origin stays at its original suffix centroid, even after it loses upper segments; this makes membership deterministic from the existing wire state without moving an older carrier's frame. A new upper carrier takes collision and view ownership only when its interpolated pose is present. The lower carrier survives a split, and each resulting piece inherits the parent's rigid velocity field at its own centre of mass and the parent's spin, after same-tick source returns. A replica derives collision geometry from map data and presented ranges, never predicts motion, and shows caps at every presented cut. Removing or moving support wakes a sleeping trunk through the same debris rule as every other loose body. DERIVED: each carrier owns at least one segment, so a tree's live moving bodies never exceed its segment count.
+**Trees are constructions by the same laws.**
+The prop generator authors one convex trunk element. The common cutter's grain-stretched
+pattern alone partitions its interior into chunks; source mesh rings introduce no internal
+break plane. Species data selects the shape, material, pattern and ground attachment.
+`assets/trees/` holds generator inputs and inspection artifacts; the placed game reads
+`assets/constructions/` geometry and dressing through the common construction library.
+
+Green-wood density, strength and separation energy live in `assets/materials/materials.ron`.
+Density sets occupied mass and inertia; no dry-timber density substitutes for the green wood.
+A species' `anchor` selects a `RootPlate` kind from `assets/materials/attachments.ron`, whose
+critical overturning moment per kilogram binds the declared soil and rooting-depth domain.
+It states ultimate strength, no separation-work measurement. DERIVED: the equivalent circular
+footprint's tensile hold is `C m / S₀ − m g / A₀`, so the Navier law opens it at moment `C m`
+under its own weight. Zero separation work is a StandIn for a rigid-plastic release until a
+source supplies that work fact; a blow still pays the lift over its hinge.
+
+`construction::spawn` builds complete state synchronously from admitted data. Common wear,
+cracking, contacts, connectivity and launch govern the trunk's chunks and every later split.
+No HP pool, segment grid, tree schedule or cut-range ownership supplements those laws.
+Wood exterior and foliage belong to the common dressing and follow their owning chunks.
+The shared ledger carries wear, holes, dust and cracks; swaps and departures derive from those
+causes. Pieces use source construction/chunk addresses, and the shared cursor controls their
+membership as described in “One assessment path for fixed and moving chunk groups” below.
 
 **Walls fail locally by punch rings.**
 A punch ring is a patch pushed out through its surrounding joints: the chunks a tick's loads touch, grown by rings through intact bonded joints, each group with no anchor a candidate whose cut set is every live joint to the rest.

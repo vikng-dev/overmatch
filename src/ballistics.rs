@@ -391,11 +391,7 @@ pub(crate) const DOSE_UNITS_PER_REFERENCE_MM: u64 = HP_PER_REFERENCE_MM * DOSE_U
 /// rounds to whole points ([`shown_points`]).
 ///
 /// RESOLUTION: a shot's dose loses at most half a unit, 0.0005 HP, to the conversion, so every
-/// dose of 0.05 HP or more keeps 1 % (DERIVED), the bound a single machine-gun hit is kept to. The
-/// machine gun's hits on a mature fir run from 1.04 HP at the base to 0.48 HP high on the trunk,
-/// kept within 0.10 %, and 0.058 HP in a graze near its top, within 0.86 % (MEASURED,
-/// `.agents/scratch/damage-model-2026-10-28/fractional-pools-measured.txt`). A hundredth of a
-/// point would put the 0.48 HP hit at 1.04 %. Decimal, so a pool unit is exactly
+/// dose of 0.05 HP or more stays within 1 % (DERIVED). Decimal, so a pool unit is exactly
 /// [`DOSE_UNITS_PER_POOL_UNIT`] dose units. A u32 pool holds [`MAX_POOL_POINTS`] points.
 pub const POOL_UNITS_PER_HP: u32 = 1_000;
 
@@ -1425,11 +1421,11 @@ pub struct ExternalArmour;
 #[derive(Component)]
 pub struct ComponentVolume;
 
-/// The game's damage model: HP pool for a crew station, module, ammunition or tree trunk.
+/// The game's damage model: HP pool for a crew station, module or ammunition.
 /// Data authors whole HP points; holdings use [`POOL_UNITS_PER_HP`] units per point. [`ShotDose`]
 /// converts once per box per shot, combining penetrator energy loss (crew: chord × crew line rate),
 /// bounce shock and entering cone directions (§§5–6). Sub-point doses accumulate; holdings stop
-/// at zero. The owner decides cook-off, station/module knockout or tree fall. Views read only
+/// at zero. The owner decides cook-off or station/module knockout. Views read only
 /// [`Self::shown`].
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ComponentHealth {

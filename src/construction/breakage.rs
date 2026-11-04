@@ -24,10 +24,9 @@
 //!   blast ray stops, within its
 //!   reach ([`Blast::reach`]), on the nearest of every chunk group's standing chunks (a placed
 //!   construction's or a moving group's) and a placed construction's unbreakable elements, the other moving
-//!   bodies (a hull, a launched turret) and every other surface (the ground, a standing tree); one
-//!   that stops on such a body pushes it the same way, through avian at the point it stops. A
-//!   tree stop loads that segment through the tree laws; terrain and other nonstructural surfaces
-//!   only shade the field.
+//!   bodies (a hull, a launched turret) and every other surface (the ground); one
+//!   that stops on such a body pushes it the same way, through avian at the point it stops.
+//!   Terrain and other nonstructural surfaces only shade the field.
 //! * **Contacts** (the authority's, each physics step, [`read_contacts`]): every point the solver
 //!   moved momentum through between a chunk group (a placed construction's breakable element or chunk,
 //!   or a moving group's chunk) and another body ([`ContactTransfers`]) loads the chunk there (an
@@ -892,7 +891,7 @@ type Colliders<'w, 's> = Query<
 /// AUTHORITY: each physics step's body contacts on the constructions as loads, read once a step
 /// (module doc): every point on a breakable element or chunk queued, the step's as one deposit,
 /// with the blow and press its transfer splits into; and every resting point's press as its
-/// construction's ([`RestingLoads`]). A structure that is no construction (a tree) reads its own.
+/// construction's ([`RestingLoads`]).
 fn read_contacts(
     transfers: Res<ContactTransfers>,
     mut read: Local<u64>,
@@ -1005,8 +1004,8 @@ fn prepare_contacts(
 /// on the chunk whose collider the point lies on, or for an intact element
 /// the element's chunk whose hull holds the point (the hull nearest it, by [`Block::outside`],
 /// ties to the lower index), turned into the construction's frame; with the construction's root. `None`
-/// when the structure is no construction (a tree) and on an element that never breaks, which the laws
-/// do not read. Reads the body's entity only to name the load's origin.
+/// for bodies without construction state and elements that never break, which these laws do not
+/// read. Reads the body's entity only to name the load's origin.
 fn contact_load(
     colliders: &Colliders,
     constructions: &Query<((&Position, &Rotation), &Breakage, Option<&Piece>)>,
@@ -1360,7 +1359,7 @@ fn take_lines(
         let impulse = line.momentum;
         let entrance_impulse = line.entrance_momentum;
         let Ok((element, chunk, parent)) = p.volumes.get(volume) else {
-            continue; // Another body's volume (a hull's armour, a trunk) is another law's.
+            continue; // A volume without a construction element or chunk belongs to another law.
         };
         let root = parent.parent();
         let frame = &frames[&root];

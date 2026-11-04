@@ -21,10 +21,11 @@ view hierarchy and trigger render extraction of hidden descendants.
 
 ## Reproduction
 
-Overmatch's regression `trees::tests::a_static_map_body_is_not_eased` uses the actual tree spawn,
-`MinimalPlugins`, `TransformPlugin` and the offline compositions' full `PhysicsPlugins`. A static
-root has its real collider children and an attached view subtree. After warming the fixed clock on
-10 ms frames, a `Last` system counts changed local and global transforms.
+The recorded reproduction used the retired tree runtime's static-map-body test and actual spawn,
+with `MinimalPlugins`, `TransformPlugin` and the offline compositions' full `PhysicsPlugins`.
+Its static root had real collider children and an attached view subtree. After warming the fixed
+clock on 10 ms frames (MEASURED fixture input), a `Last` system counted changed local and global
+transforms.
 
 MEASURED: with `PhysicsInterpolationPlugin::interpolate_all()` in that physics, the assertion
 reports `(local, global) = (1, 6)`, the root and every node beneath it, instead of `(0, 0)`. With

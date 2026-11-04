@@ -41,16 +41,14 @@ countdown or reset message advances a client world.
 
 `scatter::ScatterScene` retains parsed manifest/grid data and shared view handles.
 Its `construct` method builds both startup and subsequent worlds through
-`construction::spawn` and `trees::spawn`, with complete state from data. Despawning
-map roots also removes their standing colliders and views. Loose bodies are
-separate lifetime owners: fallen construction groups and freed trunks, including tree
-segments reparented under a trunk, are removed too. Rebuilding reuses stable
+`construction::spawn`, with complete state from data. Despawning map roots also removes
+their standing colliders and views. Fallen construction groups are separate lifetime owners
+and are removed too. Rebuilding reuses stable
 `MapInstance` ids and ordinals; ECS entity identities are new.
 
 | Mutable state | Construction and boundary | Late join |
 |---|---|---|
 | Construction roots, elements/chunks, structural state, cracks and holes | Fresh `Breakage` and intact element colliders from the construction data; old roots/views and loose groups depart | Current-generation `Ledger`, copied into `Record`; collision and drawing derive from it |
-| Trees, segment HP pools, cuts, loose trunks and their collision copies | Fresh tree and full segment pools from tree data; old root and freed-body ownership both depart | Current-generation `DestructionLedger` plus interpolated trunk pose carriers |
 | Construction debris and stress-fixture debris | Bodies and carriers depart; new Battle starts without loose pieces | Only current Battle carriers are spawned by authority |
 | Cosmetic track prints | Startup print-store constructor, new GPU images and empty shoe memory; old uploads address unbound images | View-local history begins at join |
 | Ground scars and other billboards | Occupants depart and their rings use the startup constructors | View-local effects begin at join |
@@ -65,7 +63,7 @@ a record arriving first waits for its Battle. Before any Battle snapshot, and
 between links, no generation is selected. A reconnect also compares the authority
 entity identity, so equal Battle numbers on different servers cannot reuse a
 construction. Retired carriers remain owned by replication until their despawn
-arrives, but cannot draw or supply a trunk collision copy in the next world.
+arrives, but cannot draw against the next world's construction.
 
 The boundary does not change the shared presentation delay: motion within a Battle
 still comes from its authority stream. The phase transition itself selects the
@@ -199,8 +197,8 @@ The transmission's brake-hold test brings a rolling tank to a parked rest where 
 command coasts.
 
 The world-cycle regression uses a mixed map fixture through the startup scatter
-construction. During combat a wall chunk is freed and a tree falls; the authority,
-connected client, combat late joiner and next-Battle joiner must recover startup
+construction. During combat both fixture constructions release chunks; the authority,
+connected client, combat late joiner, same-Battle reconnect and next-Battle joiner must recover startup
 counts and map identities in the next Battle. A separate arrival-order regression
 holds old and future ledgers across the replicated transition and verifies that
 neither is consumed against the wrong construction. The print-store regression

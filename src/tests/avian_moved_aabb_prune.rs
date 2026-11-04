@@ -4,8 +4,8 @@
 //! The invariant: Avian's `update_moved_collider_aabbs` examines only the colliders whose pose or
 //! shape changed since its previous run, and a static collider that is moved, rescaled, added or
 //! removed still reaches the collider trees. Who relies on it: the dedicated server's physics step,
-//! whose map holds thousands of static colliders that never move (every construction element and tree
-//! segment), and everything that reads the trees, the broad phase and ballistics' ray casts among
+//! whose map holds thousands of static colliders that never move (every intact construction
+//! element), and everything that reads the trees, the broad phase and ballistics' ray casts among
 //! them. Stock Avian 0.7.0 examines every collider every step and fails the first test; its
 //! examined count is `ColliderTreeDiagnostics::moved_aabb_candidates`, a field the patch adds.
 //!
