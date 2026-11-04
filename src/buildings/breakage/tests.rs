@@ -2551,8 +2551,9 @@ fn degenerate_chunk_hulls_are_refused_before_play() {
 }
 
 /// The game's environment destruction model reads reconstructed law blocks, not only the
-/// collider. Fixture thickness is below the law's weld resolution but remains a convex collider;
-/// neither chunk nor element geometry may reach play with a missing boundary.
+/// collider. A slab half as thick as the law's plane tolerance ([`fracture::ON_PLANE`]) remains a
+/// convex collider, but a plane on one face would hold the other; neither chunk nor element
+/// geometry may reach play so. Fixture: an 8 cm square.
 #[test]
 fn collider_valid_hulls_with_collapsed_law_boundaries_are_refused_at_load() {
     let kind = shipped_house();
@@ -2568,7 +2569,7 @@ fn collider_valid_hulls_with_collapsed_law_boundaries_are_refused_at_load() {
             [
                 [0.0, 0.08][i & 1],
                 [0.0, 0.08][(i >> 1) & 1],
-                [0.0, 0.00009][i >> 2],
+                [0.0, fracture::ON_PLANE / 2.0][i >> 2],
             ]
         })
         .collect::<Vec<_>>();
@@ -2594,6 +2595,29 @@ fn collider_valid_hulls_with_collapsed_law_boundaries_are_refused_at_load() {
             assert!(error.contains(required), "{error}");
         }
     }
+}
+
+/// EVERY SCALED COLLIDER IS CERTIFIED AT ADMISSION (the game's environment destruction model):
+/// spawn builds each element's collider, and a swap each chunk's, at the placement's scale, so a
+/// scale is admitted only where each keeps a finite positive mass and inertia, the refusal naming
+/// the field. A construction of unbreakable elements alone states no law value a scale could
+/// spoil, so only its hulls refuse the scale. Fixture: the shipped house read with no breakable
+/// substance, at 1e-20, where every collider's mass underflows f32.
+#[test]
+fn every_scaled_collider_is_certified_at_admission() {
+    let kind = shipped_house();
+    let unbreakable = vec![None; kind.asset.materials.len()];
+    let layout = Layout::of(&kind.asset, &unbreakable, Attachments::shipped_static())
+        .expect("the house's hulls are admitted");
+    assert!(layout.chunks.is_empty(), "no law chunk to refuse the scale");
+    layout
+        .checked_structure(&kind.asset, 1.0)
+        .expect("the baked scale is admitted");
+    let error = layout.checked_structure(&kind.asset, 1e-20).unwrap_err();
+    assert!(
+        error.contains("elements[0].hull at scale") && error.contains("author"),
+        "{error}"
+    );
 }
 
 /// A TINY CONTACT KEEPS THE SAME PLASTIC SHARE (the game's environment destruction model).

@@ -173,13 +173,15 @@ def boundaries(segment_rows: List[dict]) -> List[tuple]:
     return out
 
 
-#: Resolution: how far, m, a view ring may stand radially off the construction's profile. The law
-#: block (`src/buildings/fracture.rs`, `Block::face_on`) reads a face as the corners within a
-#: millimetre of its plane, so side faces that turn by a trunk's taper (about 1e-4 rad a ring,
-#: DERIVED from fir_1's rings) read as one face: with every hull ring kept, fir_1's neighbouring
-#: bands' side planes lay 0.004° to 0.02° apart, a chunk's corners 0.1 to 1 mm off the other's
-#: plane (MEASURED). A ring within a centimetre of its kept neighbours' chord is dropped, and its
-#: sliver of wood is not in the construction's mass.
+#: Resolution: how far, m, a view ring may stand radially off the construction's profile. The
+#: collider, the view and the law block all read one hull (`src/buildings/fracture.rs`,
+#: `Block::hull`), the collision library's, which joins neighbouring faces whose normals lie within
+#: about 1.5° (1 − cos θ < √ε of f32, DERIVED from parry's merge test) into one face with one plane.
+#: A trunk's sides turn by its taper, about 1e-4 rad a ring (DERIVED from fir_1's rings; with every
+#: hull ring kept its bands' side planes lay 0.004° to 0.02° apart, MEASURED), so each kept ring
+#: bends a side face that one plane then misstates by up to the ring's standoff. A ring within a
+#: centimetre of its kept neighbours' chord is dropped, and its sliver of wood is not in the
+#: construction's mass (fir_1: 4.3 %, MEASURED).
 PROFILE_M = 0.01
 
 

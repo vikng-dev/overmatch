@@ -48,31 +48,18 @@ use super::breakage::{
     Breakage, HOLES_PER_CHUNK, Hole, Layout, Shape, WallEvent, WallPiece, WallRecord,
     WallReplicaSet,
 };
-use super::fracture::{Fate, Side, clip_polygon};
+use super::fracture::{Block, Fate, Side, clip_polygon};
 use super::schema::{BuildingAsset, SurfaceFrame};
 use crate::building_surface::{BuildingMaterial, holed};
 use crate::debris::PresentationClock;
 use crate::scatter::MapInstance;
 
-/// Convex boundary faces, excluding redundant coplanar and interior points. The collision
-/// library owns this topology; angle-sorting every point on a plane would turn interior points
-/// into perimeter corners and leave visible holes in an occupied face.
+/// Convex boundary faces, excluding redundant coplanar and interior points: the law block's
+/// ([`Block::hull`]), so the view draws the faces the collider and the laws read.
 fn hull_faces(points: &[Vec3]) -> Vec<(Vec3, Vec<Vec3>)> {
-    let polyhedron = avian3d::parry::shape::ConvexPolyhedron::from_convex_hull(points)
-        .expect("an admitted solid hull reconstructs through the collision library");
-    polyhedron
+    Block::hull(points.to_vec())
+        .expect("an admitted hull is a law block")
         .faces()
-        .iter()
-        .map(|face| {
-            let first = face.first_vertex_or_edge as usize;
-            let end = first + face.num_vertices_or_edges as usize;
-            let corners = polyhedron.vertices_adj_to_face()[first..end]
-                .iter()
-                .map(|&index| polyhedron.points()[index as usize])
-                .collect();
-            (face.normal, corners)
-        })
-        .collect()
 }
 
 /// Resolution: squared projection floor for unit surface-frame axes; smaller projections
@@ -180,21 +167,8 @@ impl Faces {
 
     /// Law chunk `c`'s hull with its element's `look`, drawn `offset` back, its faces tagged `tag`
     /// (module doc).
-    fn chunk(
-        &mut self,
-        asset: &BuildingAsset,
-        layout: &Layout,
-        look: &Look,
-        c: usize,
-        offset: Vec3,
-        tag: f32,
-    ) {
-        let points: Vec<Vec3> = asset.chunks[layout.chunks[c] as usize]
-            .hull
-            .iter()
-            .map(|p| Vec3::from_array(*p))
-            .collect();
-        for (n, corners) in hull_faces(&points) {
+    fn chunk(&mut self, layout: &Layout, look: &Look, c: usize, offset: Vec3, tag: f32) {
+        for (n, corners) in layout.blocks[c].faces() {
             self.face(n, &corners, look, offset, tag);
         }
     }
@@ -228,7 +202,7 @@ pub(crate) fn broken_mesh(asset: &BuildingAsset, layout: &Layout, shape: &Shape)
             let look = Look::of(asset, e);
             for c in layout.chunks_of(e) {
                 if shape.fate[c] == Fate::Standing {
-                    faces.chunk(asset, layout, &look, c, Vec3::ZERO, (c + 1) as f32);
+                    faces.chunk(layout, &look, c, Vec3::ZERO, (c + 1) as f32);
                 }
             }
         } else {
@@ -250,7 +224,7 @@ pub(crate) fn piece_mesh(
     for (k, &c) in chunks.iter().enumerate() {
         let c = usize::from(c);
         let look = Look::of(asset, usize::from(layout.element_of[c]));
-        faces.chunk(asset, layout, &look, c, origin, (k + 1) as f32);
+        faces.chunk(layout, &look, c, origin, (k + 1) as f32);
     }
     faces.mesh()
 }

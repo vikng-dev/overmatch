@@ -230,28 +230,14 @@ impl Layout {
                 joints.len()
             ));
         }
-        use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
-        // Every hull a collider is built from bounds a solid: refused here, before play.
+        // Every hull bounds a closed solid law block: refused here, before play.
         let solid = |points: Vec<Vec3>, what: String| {
-            if points.iter().any(|p| !p.is_finite())
-                || !Collider::convex_hull(points.clone()).is_some_and(|collider| {
-                    let properties = collider.mass_properties(1.0);
-                    properties.mass.is_finite()
-                        && properties.mass > 0.0
-                        && properties.angular_inertia_tensor().inverse().is_finite()
-                })
-            {
-                return Err(format!(
-                    "{what} cannot form a convex collider; rebake a finite, nondegenerate solid hull"
-                ));
-            }
-            let block = Block::hull(points);
-            if !block.is_solid() {
-                return Err(format!(
-                    "{what} cannot form a closed solid law block at reconstruction precision; rebake a thicker or better-separated hull"
-                ));
-            }
-            Ok(block)
+            Block::hull(points).ok_or_else(|| {
+                format!(
+                    "{what} cannot form a closed solid law block thicker than {} m across; rebake a finite, thicker or better-separated hull",
+                    fracture::ON_PLANE
+                )
+            })
         };
         let blocks = chunks
             .iter()
@@ -286,7 +272,9 @@ impl Layout {
     }
 
     /// The structure the laws read for an instance at uniform `scale`: lengths × s, areas × s²,
-    /// volumes and masses × s³.
+    /// volumes and masses × s³. Refuses a scale at which an element's or a law chunk's collider,
+    /// as spawn and a swap build it ([`super::spawn`], [`chunk_collider`]), loses its finite
+    /// positive mass or inertia.
     pub(crate) fn checked_structure(
         &self,
         asset: &BuildingAsset,
@@ -296,6 +284,20 @@ impl Layout {
             return Err(
                 "scale must be finite and positive; author a representable instance scale".into(),
             );
+        }
+        let elements = asset
+            .elements
+            .iter()
+            .enumerate()
+            .map(|(e, element)| (element.points(), format!("elements[{e}].hull")));
+        let chunks = (self.blocks.iter().zip(&self.chunks))
+            .map(|(block, c)| (block.points.clone(), format!("chunks[{c}].hull")));
+        for (points, field) in elements.chain(chunks) {
+            if !solid_collider(points.into_iter().map(|p| p * scale).collect()) {
+                return Err(format!(
+                    "{field} at scale {scale} cannot form a convex collider of finite positive mass and inertia; author a representable instance scale or rebake a nondegenerate hull"
+                ));
+            }
         }
         let (s2, s3) = (scale * scale, scale * scale * scale);
         let mut structure = Structure {
@@ -2134,10 +2136,22 @@ pub(crate) fn run_laws(
     }
 }
 
+/// Whether `points` form a convex collider whose mass and inertia at unit density are finite and
+/// positive: a body the solver can weigh and turn.
+fn solid_collider(points: Vec<Vec3>) -> bool {
+    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
+    Collider::convex_hull(points).is_some_and(|collider| {
+        let properties = collider.mass_properties(1.0);
+        properties.mass.is_finite()
+            && properties.mass > 0.0
+            && properties.angular_inertia_tensor().inverse().is_finite()
+    })
+}
+
 /// A law chunk's whole hull as a collider for an instance at `scale`, about `origin` (building
 /// frame, scaled): its occupied volume, so its mass and inertia at its material's density are the
-/// construction's. The layout certified the hull as a solid convex collider at load; a positive
-/// uniform scale keeps it one.
+/// construction's. Admission certified the hull as a solid convex collider at every placed scale
+/// ([`Layout::checked_structure`]).
 pub(crate) fn chunk_collider(kind: &BuildingKind, c: usize, scale: f32, origin: Vec3) -> Collider {
     Collider::convex_hull(
         kind.layout.blocks[c]

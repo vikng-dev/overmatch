@@ -518,7 +518,8 @@ fn a_ray_enters_the_hull_not_its_bounding_box() {
         Vec3::new(0.0, 1.0, 1.0),
         Vec3::new(0.5, 1.0, 1.0),
         Vec3::new(1.0, 0.5, 1.0),
-    ]);
+    ])
+    .expect("the wedge is a closed solid");
     assert!(
         wedge
             .entry(Vec3::new(0.95, 0.95, 5.0), Vec3::NEG_Z)

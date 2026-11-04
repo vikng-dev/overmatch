@@ -330,116 +330,98 @@ pub(crate) struct Structure {
     pub joints: Vec<Joint>,
 }
 
-/// A convex chunk shape: the bake's hull corners, the planes bounding it (outward unit normal `n`
-/// and offset `o`, a point `x` inside when `n · x ≤ o`), and its bounding box.
+/// A convex chunk shape as the collision library reconstructs its hull ([`Block::hull`]): its
+/// corners, the plane bounding each face (outward unit normal `n` and offset `o`, a point `x`
+/// inside when `n · x ≤ o`), and its bounding box.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Block {
     pub points: Vec<Vec3>,
     pub planes: Vec<(Vec3, f32)>,
+    /// Per plane, its face's corners as indices into `points`, counter-clockwise seen from outside.
+    rings: Vec<Vec<usize>>,
     pub min: Vec3,
     pub max: Vec3,
 }
 
-/// Resolution: plane-membership tolerance, m, absorbing f32 hull reconstruction noise
-/// without merging distinct construction faces.
-const ON_PLANE: f32 = 1e-4;
+/// Resolution: plane-membership tolerance, m: how far a baked joint's plane may pass a block's
+/// corner, or a point of its face, and still hold it. It absorbs the bake's micrometre rounding and
+/// f32 building-frame coordinates (ulp 1.9 µm from 16 to 32 m, DERIVED) with margin. A law block
+/// must be thicker across ([`Block::hull`]), or a plane on one face would hold the opposite face.
+pub(crate) const ON_PLANE: f32 = 1e-4;
 
 impl Block {
-    /// The convex hull of `points`: its bounding planes are every plane through three corners
-    /// that has all the corners on one side.
-    pub fn hull(points: Vec<Vec3>) -> Self {
-        let mut corners: Vec<Vec3> = Vec::new();
-        for point in points {
-            if corners.iter().all(|c| c.distance(point) > ON_PLANE) {
-                corners.push(point);
-            }
+    /// The convex hull of `points` as the collider has it: the collision library's faces
+    /// (`ConvexPolyhedron::from_convex_hull`, what `Collider::convex_hull` builds and the view
+    /// draws), each bounded by its supporting plane, through the corner farthest along its normal.
+    /// A face is the library's topology, never a comparison of plane offsets, so the verdict and
+    /// the faces move with the corners. `None` unless the corners are finite and bound a closed
+    /// solid ([`Self::is_solid`]).
+    pub fn hull(points: Vec<Vec3>) -> Option<Self> {
+        if !points.iter().all(|p| p.is_finite()) {
+            return None;
         }
-        let mut planes: Vec<(Vec3, f32)> = Vec::new();
-        let count = corners.len();
-        for i in 0..count {
-            for j in i + 1..count {
-                for k in j + 1..count {
-                    let normal = (corners[j] - corners[i]).cross(corners[k] - corners[i]);
-                    if normal.length() < 1e-9 {
-                        continue;
-                    }
-                    let normal = normal.normalize();
-                    let offset = normal.dot(corners[i]);
-                    let (mut above, mut below) = (false, false);
-                    for corner in &corners {
-                        let side = normal.dot(*corner) - offset;
-                        above |= side > ON_PLANE;
-                        below |= side < -ON_PLANE;
-                    }
-                    let plane = match (above, below) {
-                        (false, true) => (normal, offset),
-                        (true, false) => (-normal, -offset),
-                        _ => continue,
-                    };
-                    if planes
-                        .iter()
-                        .all(|(n, o)| n.dot(plane.0) < 0.9999 || (o - plane.1).abs() > ON_PLANE)
-                    {
-                        planes.push(plane);
-                    }
-                }
-            }
-        }
-        let min = corners
+        let polyhedron = avian3d::parry::shape::ConvexPolyhedron::from_convex_hull(&points)?;
+        let points = polyhedron.points().to_vec();
+        let (planes, rings): (Vec<_>, Vec<_>) = polyhedron
+            .faces()
             .iter()
-            .fold(Vec3::splat(f32::INFINITY), |a, b| a.min(*b));
-        let max = corners
-            .iter()
-            .fold(Vec3::splat(f32::NEG_INFINITY), |a, b| a.max(*b));
-        Self {
-            points: corners,
+            .map(|face| {
+                let first = face.first_vertex_or_edge as usize;
+                let ring: Vec<usize> = polyhedron.vertices_adj_to_face()
+                    [first..first + face.num_vertices_or_edges as usize]
+                    .iter()
+                    .map(|&index| index as usize)
+                    .collect();
+                let offset = points
+                    .iter()
+                    .map(|p| face.normal.dot(*p))
+                    .fold(f32::NEG_INFINITY, f32::max);
+                ((face.normal, offset), ring)
+            })
+            .unzip();
+        let min = points.iter().fold(Vec3::INFINITY, |a, b| a.min(*b));
+        let max = points.iter().fold(Vec3::NEG_INFINITY, |a, b| a.max(*b));
+        let block = Self {
+            points,
             planes,
+            rings,
             min,
             max,
-        }
+        };
+        block.is_solid().then_some(block)
     }
 
-    /// Whether the game's environment destruction law reconstructed a closed solid: every
-    /// plane has a face, each edge has its opposite, and the boundary encloses positive volume.
-    pub(crate) fn is_solid(&self) -> bool {
-        let faces = self.faces();
-        if faces.len() < 4
-            || faces.len() != self.planes.len()
-            || !self.inradius().is_finite()
-            || self.inradius() <= 0.0
-        {
-            return false;
-        }
+    /// Whether the faces bound a closed solid the law resolves: each face's normal is a unit
+    /// vector, each edge has its opposite, the boundary encloses positive volume, and the block is
+    /// thicker across than [`ON_PLANE`].
+    fn is_solid(&self) -> bool {
         let mut edges = std::collections::BTreeMap::<(usize, usize), usize>::new();
         let centre = self.center().as_dvec3();
         let mut six_volume = 0.0;
-        for (normal, corners) in &faces {
-            if !normal.is_finite() {
+        for ((normal, _), ring) in self.planes.iter().zip(&self.rings) {
+            if !normal.is_normalized() || ring.len() < 3 {
                 return false;
             }
-            for k in 0..corners.len() {
-                let index = |p| {
-                    self.points
-                        .iter()
-                        .position(|&c| c == p)
-                        .expect("reconstructed faces contain only the block's stored corners")
-                };
+            for k in 0..ring.len() {
                 *edges
-                    .entry((index(corners[k]), index(corners[(k + 1) % corners.len()])))
+                    .entry((ring[k], ring[(k + 1) % ring.len()]))
                     .or_default() += 1;
             }
-            let a = corners[0].as_dvec3() - centre;
-            for k in 1..corners.len() - 1 {
-                let b = corners[k].as_dvec3() - centre;
-                let c = corners[k + 1].as_dvec3() - centre;
-                six_volume += a.dot(b.cross(c));
+            let corner = |k: usize| self.points[ring[k]].as_dvec3() - centre;
+            for k in 1..ring.len() - 1 {
+                six_volume += corner(0).dot(corner(k).cross(corner(k + 1)));
             }
         }
-        six_volume.is_finite()
+        self.planes.len() >= 4
+            && six_volume.is_finite()
             && six_volume > 0.0
             && edges
                 .iter()
                 .all(|(&(a, b), &count)| count == 1 && edges.get(&(b, a)) == Some(&1))
+            && {
+                let (_, lo, hi) = self.thinnest();
+                hi - lo > ON_PLANE
+            }
     }
 
     /// The axis-aligned box `min..max`.
@@ -459,7 +441,7 @@ impl Block {
                 }
             }
         }
-        Self::hull(points)
+        Self::hull(points).expect("a box thicker than the plane tolerance is a closed solid")
     }
 
     /// How far `at` lies outside this shape past its farthest bounding plane, m; 0 inside or on
@@ -560,14 +542,15 @@ impl Block {
         (near <= far).then_some((near, far, face))
     }
 
-    /// The convex perimeter on the plane through `at` of unit normal `normal`, counter-clockwise
-    /// about `normal`, excluding redundant points. Fewer than three corners span no face.
+    /// The convex perimeter of the corners within [`ON_PLANE`] of the plane through `at` of unit
+    /// normal `normal` (a baked joint's), counter-clockwise about `normal`, excluding redundant
+    /// points. Fewer than three corners span no face.
     pub fn face_on(&self, at: Vec3, normal: Vec3) -> Vec<Vec3> {
         let mut on: Vec<Vec3> = self
             .points
             .iter()
             .copied()
-            .filter(|p| normal.dot(*p - at).abs() < ON_PLANE * 10.0)
+            .filter(|p| normal.dot(*p - at).abs() < ON_PLANE)
             .collect();
         if on.len() < 3 {
             return Vec::new();
@@ -580,8 +563,8 @@ impl Block {
     pub fn faces(&self) -> Vec<(Vec3, Vec<Vec3>)> {
         self.planes
             .iter()
-            .map(|&(normal, offset)| (normal, self.face_on(normal * offset, normal)))
-            .filter(|(_, corners)| corners.len() >= 3)
+            .zip(&self.rings)
+            .map(|(&(normal, _), ring)| (normal, ring.iter().map(|&k| self.points[k]).collect()))
             .collect()
     }
 
@@ -4301,6 +4284,7 @@ mod tests {
         let mut block = super::Block::cuboid(bevy::math::Vec3::ZERO, bevy::math::Vec3::ONE);
         assert!(block.is_solid());
         block.planes.pop();
+        block.rings.pop();
         assert!(!block.is_solid());
     }
 
@@ -4316,8 +4300,7 @@ mod tests {
             Vec3::splat(0.5),
         ]);
         for _ in 0..2 {
-            let block = Block::hull(points.clone());
-            assert!(block.is_solid());
+            let block = Block::hull(points.clone()).expect("the cube is a closed solid");
             let faces = block.faces();
             assert_eq!(faces.len(), 6);
             assert!(faces.iter().all(|(_, corners)| corners.len() == 4));
@@ -4327,6 +4310,59 @@ mod tests {
     }
 
     use super::*;
+
+    /// A LAW BLOCK IS THE SAME WHEREVER IT SITS (the game's environment destruction model): a hull
+    /// admitted at the frame's origin stays admitted, with the same faces, moved as far as the
+    /// shipped map's side, so a piece's validity never depends on where it sits in its building.
+    /// A reconstruction that tells faces apart by plane offsets measured from the origin splits a
+    /// slanted face once its normal's rounding times that distance passes its tolerance, and fails
+    /// here. Fixture: a slanted parallelepiped on a 1/64 m grid, so its moved corners are exact in
+    /// f32 and only the reconstruction can differ.
+    #[test]
+    fn a_law_block_is_the_same_wherever_it_sits() {
+        const GRID: f32 = 64.0;
+        let side = crate::map::tests::shipped_manifest().extent.world_size_m;
+        let offset = Vec3::new(1.0, 0.5, -1.0) * (side * GRID).round() / GRID;
+        let edges = [
+            Vec3::new(0.3125, 0.0625, -0.125),
+            Vec3::new(0.046875, 0.25, 0.09375),
+            Vec3::new(-0.0625, 0.03125, 0.1875),
+        ];
+        let corners: Vec<Vec3> = (0..8)
+            .map(|i| (0..3).filter(|k| i >> k & 1 == 1).map(|k| edges[k]).sum())
+            .collect();
+        // Each face as its outward normal and the fixture corners it holds, by index.
+        let faces = |shift: Vec3| {
+            let block = Block::hull(corners.iter().map(|p| *p + shift).collect())
+                .unwrap_or_else(|| panic!("admitted {shift} from the origin"));
+            let mut faces: Vec<(Vec3, Vec<usize>)> = block
+                .faces()
+                .into_iter()
+                .map(|(normal, ring)| {
+                    let mut held: Vec<usize> = ring
+                        .iter()
+                        .map(|p| {
+                            corners
+                                .iter()
+                                .position(|c| *c + shift == *p)
+                                .expect("a face's corner is a fixture corner")
+                        })
+                        .collect();
+                    held.sort_unstable();
+                    (normal, held)
+                })
+                .collect();
+            faces.sort_by(|a, b| a.1.cmp(&b.1));
+            faces
+        };
+        let (home, moved) = (faces(Vec3::ZERO), faces(offset));
+        assert_eq!(home.len(), 6, "a parallelepiped has six faces");
+        assert_eq!(home.len(), moved.len());
+        for ((n, at_home), (m, there)) in home.iter().zip(&moved) {
+            assert_eq!(at_home, there, "the same corners bound each face");
+            assert!(n.dot(*m) > 1.0 - 1e-6, "{n} turned to {m}");
+        }
+    }
 
     /// A cracked anchor belongs to placed construction. A released group's old base cannot
     /// defer its sections as if a ground contact still held it. Fixture: a detached row pair.
@@ -8354,7 +8390,8 @@ mod tests {
             Vec3::new(1.0, -1.0, 0.5),
             Vec3::new(-1.0, 1.0, 0.25),
             Vec3::new(1.0, 1.0, 0.5),
-        ]);
+        ])
+        .expect("the wedge is a closed solid");
         for scale in [1.0_f32, 2.0] {
             let hit = RayHit {
                 impulse: hit.impulse * scale.powi(2),

@@ -46,7 +46,8 @@ pub(crate) fn wall_cut(
     let first = kept
         .first()
         .ok_or_else(|| format!("no {substance} element in wall {wall:?}"))?;
-    let element = Block::hull(asset.elements[*first].points());
+    let element = Block::hull(asset.elements[*first].points())
+        .ok_or_else(|| format!("elements[{first}].hull is no closed solid law block"))?;
     let (middle_low, middle_high) = asset
         .elements
         .iter()
@@ -101,8 +102,9 @@ pub(crate) fn wall_cut(
                     .map(|p| place(Vec3::from_array(*p)))
                     .collect(),
             )
+            .ok_or_else(|| format!("chunks[{old}].hull is no closed solid law block"))
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let chunks = chunks_of
         .iter()
         .map(|&old| {

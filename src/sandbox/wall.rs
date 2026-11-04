@@ -809,8 +809,7 @@ fn setup_wall(
 fn chunk_mesh(block: &Block) -> Mesh {
     let inset = crate::buildings::breakage::inset_point(block, 1.0, wall_tool().seam_m.0);
     let (mut positions, mut normals, mut indices) = (Vec::new(), Vec::new(), Vec::new());
-    for &(normal, offset) in &block.planes {
-        let face = block.face_on(normal * offset, normal);
+    for (normal, face) in block.faces() {
         let base = positions.len() as u32;
         for corner in &face {
             positions.push((inset(*corner) - block.center()).to_array());

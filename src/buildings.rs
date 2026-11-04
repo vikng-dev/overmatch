@@ -468,6 +468,44 @@ pub(crate) mod tests {
         assert!(world.get::<RigidBody>(root).is_some());
     }
 
+    /// EVERY SHIPPED CONSTRUCTION IS ADMITTED AND STANDS AS ITS ELEMENTS (the game's environment
+    /// destruction model), whatever it builds: each asset under `assets/buildings/` passes the
+    /// map's load gate (law blocks, collider mass and inertia, attachments and root plates) and
+    /// spawns one collider per element and none per chunk, its whole chunk table in its breakage
+    /// state from spawn. A trunk is one element: one collider until disturbed. An asset the gate
+    /// refuses, or a spawn of a collider per chunk, fails here.
+    #[test]
+    fn every_shipped_construction_is_admitted_and_stands_as_its_elements() {
+        let assets = shipped_assets();
+        let mut ids: Vec<String> = std::fs::read_dir(assets.join(BUILDINGS_DIR))
+            .expect("the shipped buildings folder")
+            .map(|entry| entry.expect("a readable entry").path())
+            .filter_map(|dir| {
+                let id = dir.file_name()?.to_str()?.to_owned();
+                dir.join(format!("{id}.building.ron"))
+                    .is_file()
+                    .then_some(id)
+            })
+            .collect();
+        ids.sort();
+        assert!(!ids.is_empty(), "no shipped construction");
+        let library = BuildingLibrary::load(&assets, ids.iter().map(String::as_str));
+        for id in &ids {
+            let kind = library.get(id).expect("the library holds every loaded id");
+            let (mut world, root) = spawned(kind, Transform::IDENTITY);
+            let colliders = world.query::<&Collider>().iter(&world).count();
+            assert_eq!(colliders, kind.asset.elements.len(), "{id}");
+            let breakage = world
+                .get::<breakage::Breakage>(root)
+                .expect("a construction carries its breakage state from spawn");
+            assert_eq!(
+                breakage.kind.asset.chunks.len(),
+                kind.asset.chunks.len(),
+                "{id}"
+            );
+        }
+    }
+
     /// EVERY CHUNK CARRIES ITS SUBSTANCE'S FRICTION UNDER THE ONE RULE, standing or loose: a
     /// collider's friction is its material's row (`substances::PAIR_RULE`), so a pair of two
     /// chunks, or of a chunk and anything else stating the rule, is the geometric mean of the two
