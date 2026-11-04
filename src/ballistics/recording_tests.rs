@@ -1874,7 +1874,7 @@ fn a_record_names_the_struck_life_its_ticks_and_the_hull_pose() {
 /// the pool between the shot's marks: the shot's second settle takes the pool from 3 shown points
 /// to 2, so the record is dosed and carries the point. The pen cam's verdict relies on it to agree
 /// with the hit marker; a record that reads what the first settle found less the shot's whole take
-/// (3000 less 800 pool units, still 3 shown) loses the point and the verdict. Fixture: a 3-point
+/// (3 less 0.8 HP, still 3 shown) loses the point and the verdict. Fixture: a 3-point
 /// pool, the shot dosing 0.4 HP at each of two marks and another round 0.4 HP between them.
 #[test]
 fn interleaved_fractional_doses_record_the_shown_point_the_shot_took() {
@@ -1882,6 +1882,9 @@ fn interleaved_fractional_doses_record_the_shown_point_the_shot_took() {
     use bevy::ecs::system::RunSystemOnce;
     use std::collections::BTreeMap;
 
+    // Fixture: each contribution is two fifths of an HP point, independent of the authored unit.
+    let fraction_units = 2 * POOL_UNITS_PER_HP / 5;
+    let cost = 0.4 / HP_PER_REFERENCE_MM as f32;
     let mut world = World::new();
     let tank = world.spawn_empty().id();
     let target = world
@@ -1897,13 +1900,16 @@ fn interleaved_fractional_doses_record_the_shown_point_the_shot_took() {
             .run_system_once(
                 move |mut shots: Query<&mut ShotDose>, mut health: Query<&mut ComponentHealth>| {
                     let mut shot = shots.single_mut().unwrap();
-                    shot.add(target, 0.04);
+                    shot.add(target, cost);
                     shot.settle(&mut health, true, mark);
                 },
             )
             .unwrap();
         if mark == 0 {
-            world.get_mut::<ComponentHealth>(target).unwrap().take(400);
+            world
+                .get_mut::<ComponentHealth>(target)
+                .unwrap()
+                .take(fraction_units);
         }
     }
     let shot = world.get::<ShotDose>(shell).unwrap();
@@ -1919,7 +1925,7 @@ fn interleaved_fractional_doses_record_the_shown_point_the_shot_took() {
                     entry,
                     end: entry + Vec3::NEG_Z * 0.4,
                     chord: 0.4,
-                    cost: 0.04,
+                    cost,
                     energy: 0.0,
                     perforated: true,
                 }],
@@ -1951,7 +1957,7 @@ fn interleaved_fractional_doses_record_the_shown_point_the_shot_took() {
     .expect("the shot took a shown point, so its path is dosed and it has a record");
     assert_eq!(report.steps(), vec![crate::damage_cam::PathStep::Dosed]);
     assert_eq!(report.impact.verdict, ShotVerdict::Damaged);
-    assert_eq!(lost(&report, "fixture box"), 800);
+    assert_eq!(lost(&report, "fixture box"), 2 * fraction_units);
     assert_eq!(report.doses[0].shown_taken, Some(1));
 }
 
