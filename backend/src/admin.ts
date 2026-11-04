@@ -38,7 +38,7 @@ interface SessionRow {
 	outcome: string | null;
 	reason: string | null;
 	peak_players: number;
-	minutes: number | null;
+	vcpu: number | null;
 }
 
 export async function adminPage(env: Env, now = Date.now()): Promise<string> {
@@ -48,16 +48,24 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 	const [liveVersions, totals, recent, swept] = await Promise.all([
 		env.DB.prepare("SELECT DISTINCT version FROM sessions WHERE ended_at IS NULL ORDER BY version").all<{ version: string }>(),
 		env.DB.prepare(
-			`SELECT
-				COALESCE(SUM(CASE WHEN ended_at IS NULL THEN (?1 - requested_at) / 60000.0 ELSE minutes END), 0) AS all_minutes,
-				COALESCE(SUM(CASE WHEN requested_at >= ?2 THEN
-					CASE WHEN ended_at IS NULL THEN (?1 - requested_at) / 60000.0 ELSE minutes END ELSE 0 END), 0) AS month_minutes,
+			`WITH durations AS (
+				SELECT *, CASE WHEN ended_at IS NULL THEN (?1 - requested_at) / 60000.0 ELSE (ended_at - requested_at) / 60000.0 END AS elapsed_minutes
+				FROM sessions
+			 ) SELECT
+				COALESCE(SUM(CASE WHEN requested_at >= ?2 THEN elapsed_minutes ELSE 0 END), 0) AS month_minutes,
+				COALESCE(SUM(elapsed_minutes * vcpu), 0) AS all_vcpu_minutes,
+				COALESCE(SUM(CASE WHEN requested_at >= ?2 THEN elapsed_minutes * vcpu ELSE 0 END), 0) AS month_vcpu_minutes,
+				COUNT(CASE WHEN vcpu IS NULL THEN 1 END) AS all_unknown,
+				COUNT(CASE WHEN vcpu IS NULL AND requested_at >= ?2 THEN 1 END) AS month_unknown,
 				COUNT(*) AS sessions,
-				COALESCE(SUM(CASE WHEN outcome = 'failed' THEN 1 ELSE 0 END), 0) AS failures
-			 FROM sessions`,
+				COUNT(CASE WHEN outcome = 'failed' THEN 1 END) AS failures
+			 FROM durations`,
 		)
 			.bind(now, monthStart)
-			.first<{ all_minutes: number; month_minutes: number; sessions: number; failures: number }>(),
+			.first<{
+				month_minutes: number; all_vcpu_minutes: number; month_vcpu_minutes: number;
+				all_unknown: number; month_unknown: number; sessions: number; failures: number;
+			}>(),
 		env.DB.prepare("SELECT * FROM sessions ORDER BY requested_at DESC LIMIT 30").all<SessionRow>(),
 		lastSweep(env),
 	]);
@@ -77,8 +85,10 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 		batch.forEach((version, j) => live.push({ version, servers: snaps[j] }));
 	}
 
-	const usd = (min: number) => (min * cfg.vcpuPerServer * cfg.usdPerVcpuMinute).toFixed(2);
-	const t = totals ?? { all_minutes: 0, month_minutes: 0, sessions: 0, failures: 0 };
+	const usd = (vcpuMinutes: number) => (vcpuMinutes * cfg.usdPerVcpuMinute).toFixed(2);
+	if (!totals) throw new Error("admin totals: an aggregate without GROUP BY must return one row");
+	const t = totals;
+	const excluded = (count: number) => count ? ` (${count} ${count === 1 ? "session" : "sessions"} excluded: vCPU unknown)` : "";
 	const allServers = live.flatMap((l) => l.servers ?? []);
 	const players = allServers.reduce((n, s) => n + (s.state === "ready" ? s.players : 0), 0);
 
@@ -96,12 +106,14 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 		.join("");
 
 	const recentRows = recent.results
-		.map(
-			(r) =>
-				`<tr><td>${iso(r.requested_at)}</td><td>${esc(r.version)}</td><td>${esc(r.location)}</td>` +
+		.map((r) => {
+			const minutes = ((r.ended_at ?? now) - r.requested_at) / 60000;
+			const cost = r.vcpu === null ? "unknown" : `$${usd(minutes * r.vcpu)}`;
+			return `<tr><td>${iso(r.requested_at)}</td><td>${esc(r.version)}</td><td>${esc(r.location)}</td>` +
 				`<td>${r.ended_at === null ? "live" : esc(r.outcome ?? "")}</td><td class="n">${r.peak_players}</td>` +
-				`<td class="n">${r.minutes === null ? "-" : r.minutes.toFixed(1)}</td><td>${esc(r.reason ?? "")}</td></tr>`,
-		)
+				`<td class="n">${minutes.toFixed(1)}</td><td class="n">${r.vcpu ?? "unknown (unrecorded)"}</td>` +
+				`<td class="n">${cost}</td><td>${esc(r.reason ?? "")}</td></tr>`;
+		})
 		.join("");
 
 	const sweepLine = swept
@@ -128,8 +140,8 @@ th{color:var(--mute);font-weight:500}.n{text-align:right;font-variant-numeric:ta
 <div><b>${allServers.length}</b><span>live servers</span></div>
 <div><b>${players}</b><span>players</span></div>
 <div><b>${t.month_minutes.toFixed(0)}</b><span>server-minutes this month</span></div>
-<div><b>$${usd(t.month_minutes)}</b><span>est. compute this month</span></div>
-<div><b>$${usd(t.all_minutes)}</b><span>est. compute all time</span></div>
+<div><b>$${usd(t.month_vcpu_minutes)}</b><span>est. compute this month${excluded(t.month_unknown)}</span></div>
+<div><b>$${usd(t.all_vcpu_minutes)}</b><span>est. compute all time${excluded(t.all_unknown)}</span></div>
 <div><b>${t.failures}/${t.sessions}</b><span>failed starts / sessions</span></div>
 </div>
 <h2>Live</h2>
@@ -137,9 +149,9 @@ th{color:var(--mute);font-weight:500}.n{text-align:right;font-variant-numeric:ta
 ${liveRows || '<tr><td colspan="7">none</td></tr>'}</table></div>
 <p style="color:var(--mute)">${sweepLine}</p>
 <h2>Recent sessions</h2>
-<div class="wrap"><table><tr><th>requested (UTC)</th><th>version</th><th>location</th><th>outcome</th><th class="n">peak</th><th class="n">minutes</th><th>reason</th></tr>
-${recentRows || '<tr><td colspan="7">none</td></tr>'}</table></div>
-<p style="color:var(--mute)">Cost is DERIVED: minutes from request to end × ${cfg.vcpuPerServer} vCPU × $${cfg.usdPerVcpuMinute}/vCPU-min, compute only (egress not included). Reconcile against the Edgegap invoice.</p>
+<div class="wrap"><table><tr><th>requested (UTC)</th><th>version</th><th>location</th><th>outcome</th><th class="n">peak</th><th class="n">minutes</th><th class="n">vCPU</th><th class="n">est. compute</th><th>reason</th></tr>
+${recentRows || '<tr><td colspan="9">none</td></tr>'}</table></div>
+<p style="color:var(--mute)">Cost is DERIVED: each session's minutes from request to end (or now while live) × its recorded vCPU × the current $${cfg.usdPerVcpuMinute}/vCPU-min rate, compute only (egress not included). Sessions with unrecorded vCPU show unknown and are excluded from cost totals. Reconcile against the Edgegap invoice.</p>
 </body></html>`;
 }
 

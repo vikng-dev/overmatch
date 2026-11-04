@@ -203,10 +203,14 @@ timeout, cost rate, Durable Object location hint). Secrets, set with `wrangler s
 | `EDGEGAP_TOKEN` | Edgegap API token (with or without the `token ` prefix) |
 
 `production-server.json` owns the production CPU allocation: **2 vCPU** (CLAIMED: owner's hosting
-choice). Both `scripts/ci/edgegap-version.sh` and the Worker's `/admin` cost calculation read it;
+choice). Both `scripts/ci/edgegap-version.sh` and the Worker's deployment recording read it;
 there is no separate Worker CPU setting. DERIVED from the CLAIMED list rate in `wrangler.jsonc`:
 compute costs $0.138/hour, or at most $3.31 at the version's 1440-minute cap, excluding egress.
-Ship the Worker with the next game build so registration and cost estimates use the same allocation.
+The Worker records that allocation on each new session before requesting its deployment; `/admin`
+prices each session from its recorded vCPU at the current rate. Unrecorded allocations show as
+unknown and are excluded from cost totals, with excluded counts beside the totals. Apply
+`0005_session_vcpu.sql` before shipping the Worker with the next game build so registration and
+session records use the same allocation.
 `EDGEGAP_REQ_CPU` remains a registration override for separately named profiling versions only.
 
 `ACCESS_TEAM_DOMAIN` (e.g. `https://<team>.cloudflareaccess.com`) and `ACCESS_AUD` are plain vars,

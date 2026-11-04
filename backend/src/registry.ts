@@ -42,6 +42,8 @@ type ServerState = "starting" | "ready" | "stopping" | "ended";
 
 type ServerRow = {
 	id: string;
+	/** NULL: the claim predates allocation recording. */
+	vcpu: number | null;
 	location: string;
 	deployment_id: string | null;
 	state: ServerState;
@@ -169,6 +171,10 @@ export class Registry extends DurableObject<Env> {
 		this.cfg = config(env);
 		this.provider = edgegapFor(env, this.cfg.providerTimeoutMs);
 		this.sql.exec(SCHEMA);
+		if (!this.sql.exec<{ name: string }>("PRAGMA table_info(servers)").toArray().some((c) => c.name === "vcpu")) {
+			// Existing claims have no recorded allocation; never infer one from today's config.
+			this.sql.exec("ALTER TABLE servers ADD COLUMN vcpu REAL CHECK (vcpu > 0)");
+		}
 	}
 
 	// ---- client API ---------------------------------------------------------------------------
@@ -453,8 +459,8 @@ export class Registry extends DurableObject<Env> {
 		const netcodeKey = randomHex(32);
 		const webhookNonce = randomHex(16);
 		this.sql.exec(
-			`INSERT INTO servers (id, location, state, capacity, netcode_key, secret_hash, created_at, next_poll_at, deploy, webhook_nonce)
-			 VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, 'calling', ?)`,
+			`INSERT INTO servers (id, location, state, capacity, netcode_key, secret_hash, created_at, next_poll_at, deploy, webhook_nonce, vcpu)
+			 VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, 'calling', ?, ?)`,
 			serverId,
 			where,
 			this.cfg.capacity,
@@ -463,13 +469,14 @@ export class Registry extends DurableObject<Env> {
 			now,
 			now + this.cfg.statusPollMs,
 			webhookNonce,
+			this.cfg.vcpuPerServer,
 		);
 		this.sql.exec("UPDATE tickets SET server_id = ?, attached_at = ? WHERE id = ?", serverId, now, ticketId);
 		// The claim's deadline is durable before any outbound await (D1, Edgegap): a stalled call or an
 		// eviction from here on still leaves an alarm that reaps the row.
 		await this.ensureAlarm(Math.min(now + this.cfg.statusPollMs, now + this.cfg.startDeadlineMs));
 
-		await this.record({ kind: "requested", serverId, version, location: where, at: now });
+		await this.record({ kind: "requested", serverId, version, location: where, at: now, vcpu: this.cfg.vcpuPerServer });
 		let deploymentId: string;
 		try {
 			deploymentId = await this.provider.deploy({
@@ -534,7 +541,7 @@ export class Registry extends DurableObject<Env> {
 			serverId,
 		).rowsWritten;
 		if (!written) return;
-		await this.record({ kind: "deployed", serverId, version: versionOf(serverId)!, location: row.location, requestedAt: row.created_at, deploymentId });
+		await this.record({ kind: "deployed", serverId, version: versionOf(serverId)!, location: row.location, requestedAt: row.created_at, deploymentId, vcpu: row.vcpu });
 		const s = this.server(serverId);
 		if (s?.state === "stopping") {
 			// The id makes the claim's fate known: its deferred tickets may now be placed elsewhere.

@@ -9,8 +9,8 @@ import { diag, REASONS } from "./reasons";
 export type Outcome = "ended" | "failed" | "lost";
 
 export type SessionEvent =
-	| { kind: "requested"; serverId: string; version: string; location: string; at: number }
-	| { kind: "deployed"; serverId: string; version: string; location: string; requestedAt: number; deploymentId: string }
+	| { kind: "requested"; serverId: string; version: string; location: string; at: number; vcpu: number }
+	| { kind: "deployed"; serverId: string; version: string; location: string; requestedAt: number; deploymentId: string; vcpu: number | null }
 	| { kind: "ready"; serverId: string; at: number }
 	| { kind: "crashed"; serverId: string }
 	| { kind: "ended"; serverId: string; at: number; outcome: Outcome; reason: string; peakPlayers: number };
@@ -28,19 +28,19 @@ async function write(db: D1Database, e: SessionEvent): Promise<void> {
 		case "requested":
 			await db
 				.prepare(
-					"INSERT INTO sessions (server_id, version, location, requested_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (server_id) DO NOTHING",
+					"INSERT INTO sessions (server_id, version, location, requested_at, vcpu) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (server_id) DO NOTHING",
 				)
-				.bind(e.serverId, e.version, e.location, e.at)
+				.bind(e.serverId, e.version, e.location, e.at, e.vcpu)
 				.run();
 			return;
 		case "deployed":
 			// An upsert, so a lost `requested` write is repaired here.
 			await db
 				.prepare(
-					`INSERT INTO sessions (server_id, version, location, requested_at, deployment_id) VALUES (?1, ?2, ?3, ?4, ?5)
+					`INSERT INTO sessions (server_id, version, location, requested_at, deployment_id, vcpu) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
 					 ON CONFLICT (server_id) DO UPDATE SET deployment_id = excluded.deployment_id`,
 				)
-				.bind(e.serverId, e.version, e.location, e.requestedAt, e.deploymentId)
+				.bind(e.serverId, e.version, e.location, e.requestedAt, e.deploymentId, e.vcpu)
 				.run();
 			return;
 		case "ready":
