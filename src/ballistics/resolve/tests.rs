@@ -164,7 +164,6 @@ fn handed_off(
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    deposit: false,
                     laws: WalkLaws::default(),
                 };
                 // The game's damage model: exercise the production driver and inspect ownership.
@@ -344,7 +343,6 @@ fn try_driven_with_contact(
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    deposit: false,
                     laws: WalkLaws::default(),
                 };
                 fuzz::drive(
@@ -1077,7 +1075,6 @@ fn certified_then_resumed(
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    deposit: false,
                     laws: WalkLaws::default(),
                 };
                 let frame = DiscFrame::anchored(swept).expect("a real direction");
@@ -1303,7 +1300,6 @@ fn certify(app: &mut App, at: Vec3, axis: Vec3, radius: f32) -> Result<Interior,
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    deposit: false,
                     laws: WalkLaws::default(),
                 };
                 certified(
@@ -1420,7 +1416,6 @@ fn a_probe_reads_every_samples_finite_faces() {
             let context = ResolveContext {
                 world: &world,
                 colliders: &colliders,
-                deposit: false,
                 laws: WalkLaws::default(),
             };
             build_corridor(
@@ -1484,7 +1479,6 @@ fn field_rays(
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    deposit: false,
                     laws: WalkLaws::default(),
                 };
                 let within = |collider: Entity| world.volume_of(collider).is_some();
@@ -1863,7 +1857,6 @@ fn two_subquantum_fields_reach_one_pool_unit_together() {
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    deposit: true,
                     laws: WalkLaws::default(),
                 };
                 let source = SpallSource {
@@ -1890,7 +1883,7 @@ fn two_subquantum_fields_reach_one_pool_unit_together() {
                         &context,
                         &|volume| volume == target
                     ));
-                    lost.push(shot.settle(&mut health, true, mark));
+                    lost.push(shot.settle(&mut health, mark));
                 }
                 lost
             },
@@ -2827,7 +2820,6 @@ fn a_convex_solid_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                         let context = ResolveContext {
                             world: &world,
                             colliders: &colliders,
-                            deposit: false,
                             laws: WalkLaws::default(),
                         };
                         let frame = DiscFrame::anchored(direction).expect("a real direction");
@@ -3250,7 +3242,6 @@ fn witness_lines_reuse_the_resolved_hard_presence() {
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    deposit: false,
                     laws: WalkLaws::default(),
                 };
                 super::super::wound::line(&context, &|_| true, std::slice::from_ref(&leg), 1.0)
@@ -3284,7 +3275,6 @@ fn a_finite_material_crossing_longer_than_fifty_metres_closes() {
             let context = ResolveContext {
                 world: &world,
                 colliders: &colliders,
-                deposit: false,
                 laws: WalkLaws::default(),
             };
             closing_walk(
@@ -3403,7 +3393,6 @@ fn a_kept_carrier_skid_reads_one_body_for_work_and_impulse() {
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    deposit: false,
                     laws: WalkLaws::default(),
                 };
                 let direction = Dir3::NEG_Y;
@@ -3472,7 +3461,6 @@ fn impact_fuze_reads_the_charged_entry_force() {
             let context = ResolveContext {
                 world: &world,
                 colliders: &colliders,
-                deposit: false,
                 laws: WalkLaws::default(),
             };
             let mut flight = Flight {

@@ -581,17 +581,8 @@ impl ShotDose {
 
     /// Close armour mark `mark` (its index in the shell's log): take from each box's HP pool the
     /// pool units its converted total has gained since the last settle, floored at zero, and return
-    /// the pool units removed. A box with no HP pool takes nothing. Only authority writes a pool
-    /// (`deposit`).
-    fn settle(
-        &mut self,
-        health: &mut Query<&mut ComponentHealth>,
-        deposit: bool,
-        mark: usize,
-    ) -> u64 {
-        if !deposit {
-            return 0;
-        }
+    /// the pool units removed. A box with no HP pool takes nothing; only authority settles dose.
+    fn settle(&mut self, health: &mut Query<&mut ComponentHealth>, mark: usize) -> u64 {
         let mut removed = 0;
         for entry in &mut self.tallies {
             let fresh = std::mem::take(&mut entry.fresh);
@@ -2566,7 +2557,7 @@ fn wound_legs(
         volumes,
     });
     let mark = shell.marks.log.len() - 1;
-    shell.dose.settle(health, true, mark)
+    shell.dose.settle(health, mark)
 }
 
 /// Ray-march one tick's travel budget for a single shell, resolving every surface it reaches.
@@ -2692,7 +2683,6 @@ fn march_shell_step(
     let context = resolve::ResolveContext {
         world,
         colliders,
-        deposit: true,
         laws: walk::WalkLaws::default(),
     };
     // The game's damage model discovers only outside a pending crossing. A carried result
@@ -3141,11 +3131,6 @@ fn decide_playback(
     health: &Query<&mut ComponentHealth>,
     budget: &mut resolve::Budget,
 ) -> (std::collections::VecDeque<resolve::Playback>, bool) {
-    assert!(
-        context.deposit,
-        "game's damage model: only the authority decides a crossing; a replica's contact ends in \
-         its replica state machine"
-    );
     let mut out = std::collections::VecDeque::new();
     let mut cleared = false;
     let mut flight = flight.clone();
@@ -3513,7 +3498,7 @@ fn burst_here(
     throw_burst(shell, context, &burst, flight, speed, &|volume| {
         health.contains(volume)
     });
-    let removed = shell.dose.settle(health, true, shell.marks.log.len() - 1);
+    let removed = shell.dose.settle(health, shell.marks.log.len() - 1);
     let ended = if speed > 0.0 {
         let projectile = &mut **shell.projectile;
         projectile.round = bound(nose);
@@ -3832,7 +3817,7 @@ mod tests {
                         for amount in &amounts {
                             shot.add_units(target, *amount);
                         }
-                        shot.settle(&mut health, true, 0)
+                        shot.settle(&mut health, 0)
                     },
                 )
                 .unwrap()
@@ -3890,7 +3875,7 @@ mod tests {
                         for &address in &boxes {
                             shot.add(address, 1.0);
                         }
-                        shot.settle(&mut health, true, 0);
+                        shot.settle(&mut health, 0);
                         (
                             owned_losses(&shot, &owners, Some(shooter)),
                             owned_losses(&shot, &owners, None),
@@ -3930,7 +3915,7 @@ mod tests {
                 for target in targets {
                     shot.add_units(target, u64::from(each) * DOSE_UNITS_PER_POOL_UNIT);
                 }
-                shot.settle(&mut health, true, 0)
+                shot.settle(&mut health, 0)
             })
             .unwrap();
         assert_eq!(removed, 2 * u64::from(each));
@@ -3957,7 +3942,7 @@ mod tests {
                 .run_system_once(move |mut health: Query<&mut ComponentHealth>| {
                     let mut shot = ShotDose::default();
                     shot.add_units(target, 47 * DOSE_UNITS_PER_HP / 100);
-                    shot.settle(&mut health, true, 0);
+                    shot.settle(&mut health, 0);
                     shot.emptied().contains(&target)
                 })
                 .unwrap()
@@ -7624,7 +7609,6 @@ pub(crate) mod march_tests {
                 let context = resolve::ResolveContext {
                     world: &world,
                     colliders: &world.geometry,
-                    deposit: false,
                     laws: walk::WalkLaws::default(),
                 };
                 let corridor = resolve::build_corridor(

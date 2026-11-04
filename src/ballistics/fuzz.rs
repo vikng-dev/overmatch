@@ -1143,7 +1143,6 @@ fn run_fuzz(
     let pass_context = ResolveContext {
         world: &world,
         colliders: &colliders,
-        deposit: false,
         laws: walk::WalkLaws::default(),
     };
     let Some((center, radius, local_min, local_max)) = tank_bounds(&world, &aabbs, to_local) else {
@@ -1536,7 +1535,6 @@ fn run_replay(
     let context = ResolveContext {
         world: &world,
         colliders: &colliders,
-        deposit: false,
         laws: walk::WalkLaws::default(),
     };
     let Some((center, radius, local_min, local_max)) = tank_bounds(&world, &aabbs, to_local) else {

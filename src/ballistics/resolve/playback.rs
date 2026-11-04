@@ -55,8 +55,6 @@ pub(crate) struct Playback {
     crossing: Crossing,
     incoming_body: super::super::FlyingBody,
     outgoing_body: super::super::FlyingBody,
-    /// The context's deposit flag: whether this end's pools take the crossing's doses.
-    deposit: bool,
     elapsed: f64,
     next_effect: usize,
     mark: Option<usize>,
@@ -349,7 +347,6 @@ impl Playback {
             crossing,
             incoming_body: flying,
             outgoing_body,
-            deposit: context.deposit,
             elapsed: 0.0,
             next_effect: 0,
             mark: None,
@@ -644,7 +641,6 @@ impl Playback {
                     shell.dose.add_units(crossing.volume, *units);
                     removed += shell.dose.settle(
                         health,
-                        self.deposit,
                         self.mark.expect("a transit dose follows its entrance mark"),
                     );
                 }
@@ -661,7 +657,7 @@ impl Playback {
                         speed: *speed,
                         volumes: vec![crossing],
                     });
-                    removed += shell.dose.settle(health, self.deposit, mark);
+                    removed += shell.dose.settle(health, mark);
                 }
                 Effect::Cone { cone, doses } => {
                     for &(address, units) in doses {
@@ -683,7 +679,7 @@ impl Playback {
                         };
                         *cones += 1;
                     }
-                    removed += shell.dose.settle(health, self.deposit, mark);
+                    removed += shell.dose.settle(health, mark);
                 }
                 Effect::Finish => match &self.world_decision() {
                     Decision::Clear { .. } => {}
@@ -706,10 +702,7 @@ impl Playback {
                             entrance_momentum: bounce.impulse,
                             entrance_energy: bounce.shock,
                         });
-                        removed +=
-                            shell
-                                .dose
-                                .settle(health, self.deposit, shell.marks.log.len() - 1);
+                        removed += shell.dose.settle(health, shell.marks.log.len() - 1);
                     }
                     Decision::Bite(bite) => finish_bite(
                         bite,

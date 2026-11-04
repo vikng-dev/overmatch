@@ -1684,7 +1684,7 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
                     for units in &units {
                         shot.add_units(ammo, *units);
                     }
-                    shot.settle(&mut health, true, mark);
+                    shot.settle(&mut health, mark);
                 },
             )
             .unwrap();
@@ -1901,7 +1901,7 @@ fn interleaved_fractional_doses_record_the_shown_point_the_shot_took() {
                 move |mut shots: Query<&mut ShotDose>, mut health: Query<&mut ComponentHealth>| {
                     let mut shot = shots.single_mut().unwrap();
                     shot.add(target, cost);
-                    shot.settle(&mut health, true, mark);
+                    shot.settle(&mut health, mark);
                 },
             )
             .unwrap();
@@ -2339,7 +2339,6 @@ fn a_zero_world_speed_waits_or_meets_a_moving_body_on_its_clock() {
                     let context = resolve::ResolveContext {
                         world: &world,
                         colliders: &colliders,
-                        deposit: true,
                         laws: walk::WalkLaws::default(),
                     };
                     let frame = walk::DiscFrame::anchored(Vec3::Z).unwrap();

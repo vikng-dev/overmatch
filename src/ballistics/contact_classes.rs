@@ -913,7 +913,6 @@ fn classify_batch(
     let context = resolve::ResolveContext {
         world: &world,
         colliders: &colliders,
-        deposit: true,
         laws: walk::WalkLaws::default(),
     };
     batch

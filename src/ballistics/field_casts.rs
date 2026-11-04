@@ -418,7 +418,6 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
                 let context = resolve::ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    deposit: true,
                     laws: walk::WalkLaws::default(),
                 };
                 let parents = &world.parents;
@@ -918,7 +917,6 @@ fn the_shipped_cone_sampler_priced_per_cone() {
                     let context = resolve::ResolveContext {
                         world: &world,
                         colliders: &colliders,
-                        deposit: true,
                         laws: walk::WalkLaws::default(),
                     };
                     let within = |collider: Entity| {
