@@ -1683,7 +1683,7 @@ mod tests {
     /// A small parked test vehicle for the element regime: perimeter 5 m, 25 links (pitch
     /// 0.2 m), 5 mm of bottom-face penetration at `bottom_y = 0.02`. The support damping is
     /// sized so a 2 m/s separation velocity clips every damped load to zero while elastic
-    /// penetration remains — the exact one-tick dropout of netcode review defect 1.
+    /// penetration remains.
     fn rig_params() -> ForceParams {
         ForceParams {
             face_offset: 0.025,
@@ -2019,9 +2019,8 @@ mod tests {
         }
     }
 
-    /// Netcode review defect 1: one separating tick (damped load clipped to zero, elastic
-    /// penetration intact) must NOT erase parked strain — the pre-fix law reset every
-    /// element its damped-load contacts missed, which is unsafe for parking.
+    /// Parking relies on elastic contact retaining strain when separation clips damped load
+    /// to zero. Resetting elements absent from damped-load contacts would erase that strain.
     #[test]
     fn element_strain_survives_damped_load_dropout() {
         let loop_pts = rect_loop(0.02);
@@ -2104,12 +2103,9 @@ mod tests {
         assert!(elems.dwell.iter().all(|&d| d == 0));
     }
 
-    /// Netcode review defect 3 (hysteresis band): an EXISTING member whose elastic load fades
-    /// into [leave, enter) — dwell still live, slip continuing — must HOLD its accumulated
-    /// strain, not keep integrating it. Integration is gated on `load_elastic >= enter`, NOT on
-    /// membership: writing the branch `if member` would let strain GROW in the band (the pad is
-    /// a member there) while the departure tests stayed green. This pins that the branch
-    /// is load-keyed.
+    /// Parking strain must hold while an existing member fades into [leave, enter), even with
+    /// continuing slip. Integration requires `load_elastic >= enter`; membership alone would
+    /// keep growing strain in that band while departure tests stayed green.
     #[test]
     fn element_member_fading_into_band_holds_strain() {
         let params = rig_params();
@@ -2172,9 +2168,8 @@ mod tests {
         );
     }
 
-    /// Netcode review defect 3: an element that never clears the enter bound must not
-    /// integrate strain — a barely-touching pad accumulating full strain would fire a sudden
-    /// force the moment real load arrives.
+    /// An element below the enter bound must not integrate strain: a barely touching pad would
+    /// otherwise store a sudden force for the moment real load arrives.
     #[test]
     fn element_below_enter_bound_never_integrates() {
         // 0.05 mm of face penetration: real contact, but orders below the enter bound.

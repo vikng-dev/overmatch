@@ -2035,10 +2035,9 @@ mod tests {
             .unwrap();
     }
 
-    /// One light piece under a belt is clamped on its own patches; it must not move its source's
-    /// other recipients out of the whole reaction. Driving relies on a slab under a tank carrying
-    /// that tank's load whatever else lies under the belt. FIXTURE (the Claude review's): a 57 t
-    /// source; a 2 t slab at rest under a 2 MN/m, 100 kN s/m patch pressing 120 kN; a 16 kg
+    /// A slab must carry its source's whole reaction even when another recipient is clamped.
+    /// FIXTURE: a 57 t source; a 2 t slab at rest under a 2 MN/m, 100 kN s/m patch pressing
+    /// 120 kN; a 16 kg
     /// brick under a 0.2 MN/m, 10 kN s/m patch. DERIVED rates: slab 1.87, brick 22.6.
     #[test]
     fn a_light_piece_leaves_a_co_sourced_slab_its_whole_reaction() {
