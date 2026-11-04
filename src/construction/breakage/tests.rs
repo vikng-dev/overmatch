@@ -2601,7 +2601,7 @@ fn collider_valid_hulls_with_collapsed_law_boundaries_are_refused_at_load() {
 /// scale is admitted only where each keeps a finite positive mass and inertia, the refusal naming
 /// the field. A construction of unbreakable elements alone states no law value a scale could
 /// spoil, so only its hulls refuse the scale. Fixture: the shipped house read with no breakable
-/// substance, at 1e-20, where every collider's mass underflows f32.
+/// substance. Fixture scales exercise positive-mass inverse-inertia underflow and mass underflow.
 #[test]
 fn every_scaled_collider_is_certified_at_admission() {
     let kind = shipped_house();
@@ -2612,11 +2612,24 @@ fn every_scaled_collider_is_certified_at_admission() {
     layout
         .checked_structure(&kind.asset, 1.0)
         .expect("the baked scale is admitted");
-    let error = layout.checked_structure(&kind.asset, 1e-20).unwrap_err();
-    assert!(
-        error.contains("elements[0].hull at scale") && error.contains("author"),
-        "{error}"
+    let element = &kind.asset.elements[0];
+    let density = schema::substance_density(&kind.asset.materials[usize::from(element.material)])
+        .unwrap() as f32;
+    let tiny = Collider::convex_hull(element.points().into_iter().map(|p| p * 1e-4).collect())
+        .unwrap()
+        .mass_properties(density);
+    assert!(tiny.mass > 0.0 && tiny.mass.is_finite());
+    assert_eq!(
+        tiny.angular_inertia_tensor().inverse().to_mat3(),
+        Mat3::ZERO
     );
+    for scale in [1e-4, 1e-20] {
+        let error = layout.checked_structure(&kind.asset, scale).unwrap_err();
+        assert!(
+            error.contains("elements[0].hull at scale") && error.contains("author"),
+            "{error}"
+        );
+    }
 }
 
 /// A TINY CONTACT KEEPS THE SAME PLASTIC SHARE (the game's environment destruction model).

@@ -285,17 +285,32 @@ impl Layout {
                 "scale must be finite and positive; author a representable instance scale".into(),
             );
         }
-        let elements = asset
-            .elements
+        let elements = asset.elements.iter().enumerate().map(|(e, element)| {
+            (
+                element.points(),
+                format!("elements[{e}].hull"),
+                element.material,
+            )
+        });
+        let chunks = self
+            .blocks
             .iter()
-            .enumerate()
-            .map(|(e, element)| (element.points(), format!("elements[{e}].hull")));
-        let chunks = (self.blocks.iter().zip(&self.chunks))
-            .map(|(block, c)| (block.points.clone(), format!("chunks[{c}].hull")));
-        for (points, field) in elements.chain(chunks) {
-            if !solid_collider(points.into_iter().map(|p| p * scale).collect()) {
+            .zip(&self.chunks)
+            .zip(&self.element_of)
+            .map(|((block, c), &e)| {
+                (
+                    block.points.clone(),
+                    format!("chunks[{c}].hull"),
+                    asset.elements[usize::from(e)].material,
+                )
+            });
+        for (points, field, material) in elements.chain(chunks) {
+            let density =
+                schema::substance_density(&asset.materials[usize::from(material)])? as f32;
+            if !solid_collider(points.into_iter().map(|p| p * scale).collect(), density) {
                 return Err(format!(
-                    "{field} at scale {scale} cannot form a convex collider of finite positive mass and inertia; author a representable instance scale or rebake a nondegenerate hull"
+                    "construction {:?}: {field} at scale {scale} cannot form a convex collider of finite positive mass and invertible inertia at its material density; author a representable instance scale or rebake a nondegenerate hull",
+                    asset.id
                 ));
             }
         }
@@ -2133,15 +2148,26 @@ pub(crate) fn run_laws(
     }
 }
 
-/// Whether `points` form a convex collider whose mass and inertia at unit density are finite and
-/// positive: a body the solver can weigh and turn.
-fn solid_collider(points: Vec<Vec3>) -> bool {
-    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
+/// Whether `points` at their material `density` form a body the solver can weigh and turn.
+fn solid_collider(points: Vec<Vec3>, density: f32) -> bool {
+    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::{
+        AngularInertiaTensor, ComputeMassProperties3d,
+    };
     Collider::convex_hull(points).is_some_and(|collider| {
-        let properties = collider.mass_properties(1.0);
+        let properties = collider.mass_properties(density);
+        // bevy_heavy 0.5 (avian3d 0.7) returns zero for an underflowed inertia determinant.
+        let inverse = properties.angular_inertia_tensor().inverse();
         properties.mass.is_finite()
             && properties.mass > 0.0
-            && properties.angular_inertia_tensor().inverse().is_finite()
+            && properties.mass.recip().is_finite()
+            && properties.principal_angular_inertia.is_finite()
+            && properties.principal_angular_inertia.min_element() > 0.0
+            && properties.principal_angular_inertia.recip().is_finite()
+            && properties.center_of_mass.is_finite()
+            && properties.local_inertial_frame.is_finite()
+            && properties.local_inertial_frame.is_normalized()
+            && inverse.is_finite()
+            && inverse != AngularInertiaTensor::ZERO
     })
 }
 
