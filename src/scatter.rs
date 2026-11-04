@@ -728,20 +728,21 @@ mod tests {
     #[test]
     fn every_building_of_one_asset_draws_one_mesh_at_its_instance_scale() {
         let mut manifest = mixed_fixture_manifest();
-        let mut second = manifest
+        let (mut second, asset) = manifest
             .instances
             .iter()
-            .find(|instance| {
-                matches!(
-                    manifest.prototypes[&instance.prototype],
-                    Prototype::Structure { .. }
-                )
+            .find_map(|instance| match &manifest.prototypes[&instance.prototype] {
+                Prototype::Structure { asset } => Some((instance.clone(), asset.clone())),
+                Prototype::Building { .. } | Prototype::Tree { .. } => None,
             })
-            .expect("the fixture places a building")
-            .clone();
+            .expect("the fixture places a building");
         second.id = "brick_0002".to_owned();
         second.translation[0] += 30.0;
         second.scale = [1.3; 3];
+        manifest
+            .buildings
+            .admit_placement(&asset, second.scale)
+            .expect("the added fixture placement passes production scale admission");
         manifest.instances.push(second);
         let (mut app, _, _) = spawned(&manifest, true);
         let world = app.world_mut();
