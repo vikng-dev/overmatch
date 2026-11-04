@@ -6,10 +6,11 @@ breast-height diameter from the species' ranges, `segments` stacks the trunk, `w
 canopy's branches. Every draw comes from one `random.Random(seed)`, consumed in a fixed order, so
 the plan is a function of its inputs.
 
-The trunk's construction (`envelope`, `construction_ron`) is the common cutter's input: one convex
-piece, the hull of the view's trunk rings to `PROFILE_M`, cut into grain-stretched cells the
-species row authors (`tools/src/construction/fracture.rs`). Its rings come from the same rows the
-mesh is built from, so the construction and the view are one source.
+The trunk's construction (`bands`, `construction_ron`) is the common cutter's input: the trunk's
+rings stacked as bands, each a frustum and its own convex piece, one component of one wood, cut
+into grain-stretched cells the species row authors (`tools/src/construction/fracture.rs`). Its
+rings and their `RING_SIDES` corners are the rows and the section the mesh is built from, so the
+construction and the view are one source.
 
 Units: metres and radians throughout. Blender authors Z up; the glTF export turns that into +Y up.
 """
@@ -37,6 +38,11 @@ TAPER_EXPONENT = 0.8
 #: The thinnest the trunk is allowed to get at the tip, metres, so the top cap is a disc and not a
 #: point.
 TIP_RADIUS_MIN_M = 0.02
+
+#: Corners of every trunk ring, the round section's polygon: the view's tubes and caps and the
+#: construction's bands are built with it (Resolution: a placeholder section, its sides about
+#: 30° apart, far above the collision library's 1.5° face merge).
+RING_SIDES = 12
 
 #: Decimal places the plan is written to. Four, so a `.tree.ron` reads as metres to the tenth of
 #: a millimetre and the segment heights sum to the tree's height in decimal.
@@ -173,92 +179,70 @@ def boundaries(segment_rows: List[dict]) -> List[tuple]:
     return out
 
 
-#: Resolution: how far, m, a view ring may stand radially off the construction's profile. The
-#: collider, the view and the law block all read one hull (`src/construction/fracture.rs`,
-#: `Block::hull`), the collision library's, which joins neighbouring faces whose normals lie within
-#: about 1.5° (1 − cos θ < √ε of f32, DERIVED from parry's merge test) into one face with one plane.
-#: A trunk's sides turn by its taper, about 1e-4 rad a ring (DERIVED from fir_1's rings; with every
-#: hull ring kept its bands' side planes lay 0.004° to 0.02° apart, MEASURED), so each kept ring
-#: bends a side face that one plane then misstates by up to the ring's standoff. A ring within a
-#: centimetre of its kept neighbours' chord is dropped, and its sliver of wood is not in the
-#: construction's mass (fir_1: 4.3 %, MEASURED).
-PROFILE_M = 0.01
+#: Resolution: how far, m, a ring may stand radially off the chord of the rings bounding its band
+#: before it bounds a band of its own: one written unit of the plan (`DECIMALS`), the rounding
+#: every radius carries, so a ring nearer the chord than that is on it as far as the plan states.
+BAND_M = 10.0 ** -DECIMALS
 
 
-def envelope(rings: List[tuple]) -> List[int]:
-    """The indices of the rings that are corners of the trunk's construction, base to tip.
-
-    Every ring is the same polygon scaled, so the hull of the rings is the hull of the radius
-    profile: the base, the tip and each ring on the profile's upper chain in `(z, r)`, which turns
-    strictly inward at every ring. Of that chain the base and the tip are kept, then, between two
-    kept rings, the one standing farthest above their chord while it stands more than `PROFILE_M`
-    above it. A subsequence of a strictly convex chain is strictly convex, so no two side faces
-    are coplanar, and every ring lies inside the profile or within `PROFILE_M` of it."""
-    chain: List[int] = []
-    for index, (z, r) in enumerate(rings):
-        while len(chain) >= 2:
-            (z0, r0), (z1, r1) = rings[chain[-2]], rings[chain[-1]]
-            if (z1 - z0) * (r - r0) - (r1 - r0) * (z - z0) < 0.0:
-                break
-            chain.pop()
-        chain.append(index)
-
+def bands(rings: List[tuple]) -> List[int]:
+    """The indices of the rings that bound the trunk's bands, base to tip: the base, the tip, then,
+    between two kept rings, the ring standing farthest off their chord while it stands more than
+    `BAND_M` off it. Every ring lies within `BAND_M` of its band's chord; each band is a frustum,
+    one convex piece, so a ring may turn either way."""
     def standoff(index: int, low: int, high: int) -> float:
         (z, r), (z0, r0), (z1, r1) = rings[index], rings[low], rings[high]
-        return r - (r0 + (r1 - r0) * (z - z0) / (z1 - z0))
+        return abs(r - (r0 + (r1 - r0) * (z - z0) / (z1 - z0)))
 
     def between(low: int, high: int) -> List[int]:
-        inner = [i for i in chain if low < i < high]
-        if not inner:
+        if high - low < 2:
             return []
-        far = max(inner, key=lambda i: standoff(i, low, high))
-        if standoff(far, low, high) <= PROFILE_M:
+        far = max(range(low + 1, high), key=lambda i: standoff(i, low, high))
+        if standoff(far, low, high) <= BAND_M:
             return []
         return between(low, far) + [far] + between(far, high)
 
-    return [chain[0]] + between(chain[0], chain[-1]) + [chain[-1]]
+    return [0] + between(0, len(rings) - 1) + [len(rings) - 1]
 
 
 def _num(value: float) -> str:
-    """`value` to `ENVELOPE_DECIMALS` places as RON reads it: a decimal point, no exponent, no -0."""
-    text = "{:.{}f}".format(value, ENVELOPE_DECIMALS).rstrip("0")
+    """`value` to `CORNER_DECIMALS` places as RON reads it: a decimal point, no exponent, no -0."""
+    text = "{:.{}f}".format(value, CORNER_DECIMALS).rstrip("0")
     text = text + "0" if text.endswith(".") else text
     return "0.0" if text in ("-0.0", "0.0") else text
 
 
 #: Decimal places a construction corner is written to (Resolution: far below the cutter's
 #: micrometre plane tolerance, so a side face's four corners stay coplanar in the written file).
-ENVELOPE_DECIMALS = 12
+CORNER_DECIMALS = 12
 
 
-def ring_corners(z_m: float, radius_m: float, sides: int) -> List[tuple]:
-    """One ring's corners in the glTF frame (+Y up), counter-clockwise seen from +Y: Blender's
-    `(r cos a, r sin a, z)` exported as `(x, z, -y)`."""
+def ring_corners(z_m: float, radius_m: float) -> List[tuple]:
+    """One ring's `RING_SIDES` corners in the glTF frame (+Y up), counter-clockwise seen from +Y:
+    Blender's `(r cos a, r sin a, z)` exported as `(x, z, -y)`."""
     out = []
-    for side in range(sides):
-        angle = 2.0 * math.pi * side / sides
-        out.append((round(radius_m * math.cos(angle), ENVELOPE_DECIMALS), z_m,
-                    round(-radius_m * math.sin(angle), ENVELOPE_DECIMALS)))
+    for side in range(RING_SIDES):
+        angle = 2.0 * math.pi * side / RING_SIDES
+        out.append((round(radius_m * math.cos(angle), CORNER_DECIMALS), z_m,
+                    round(-radius_m * math.sin(angle), CORNER_DECIMALS)))
     return out
 
 
-def envelope_solid(segment_rows: List[dict], sides: int):
-    """`(corners, faces)` of the trunk's convex envelope: the kept rings' corners, ring by ring,
-    and its faces, each counter-clockwise seen from outside: the base, the tip, then each band's
-    quads."""
+def band_solids(segment_rows: List[dict]) -> List[tuple]:
+    """`(corners, faces)` of each band, base to tip: its bottom ring's corners then its top ring's,
+    and its faces, each counter-clockwise seen from outside: the bottom, the top, then the sides."""
     rings = boundaries(segment_rows)
-    kept = envelope(rings)
-    corners = []
-    for index in kept:
-        corners += ring_corners(rings[index][0], rings[index][1], sides)
-    top = (len(kept) - 1) * sides
-    faces = [list(range(sides - 1, -1, -1)), [top + side for side in range(sides)]]
-    for band in range(len(kept) - 1):
-        low, high = band * sides, (band + 1) * sides
+    kept = bands(rings)
+    sides = RING_SIDES
+    out = []
+    for low, high in zip(kept, kept[1:]):
+        corners = ring_corners(*rings[low]) + ring_corners(*rings[high])
+        faces = [list(range(sides - 1, -1, -1)), [sides + side for side in range(sides)]]
         for side in range(sides):
             nxt = (side + 1) % sides
-            faces.append([low + side, low + nxt, high + nxt, high + side])
-    return corners, faces
+            faces.append([side, nxt, sides + nxt, sides + side])
+        out.append((corners, faces))
+    return out
 
 
 def _ron_string(text: str) -> str:
@@ -271,12 +255,11 @@ def _choice(pair) -> str:
     return "({}, {}({}))".format(_num(float(value)), job.name, _ron_string(job.args[0]))
 
 
-def construction_ron(stem: str, trunk: dict, segment_rows: List[dict], sides: int,
-                     header: str) -> str:
-    """`tools/constructions/<stem>.pieces.ron`: the trunk's envelope as one piece of the species
-    row's `trunk` material, its grain up the trunk, cut by the row's cells, anchored at its base
-    by the row's root plate. `header` leads as a comment."""
-    corners, faces = envelope_solid(segment_rows, sides)
+def construction_ron(stem: str, trunk: dict, segment_rows: List[dict], header: str) -> str:
+    """`tools/constructions/<stem>.pieces.ron`: the trunk's bands (`band_solids`), each a piece of
+    the species row's `trunk` material and one component, so the wood's own seam holds band to
+    band; its grain up the trunk, cut by the row's cells, anchored at its base by the row's root
+    plate. `header` leads as a comment."""
     cells = trunk["cells"]
     lines = ["// " + line for line in header.splitlines()]
     lines += [
@@ -285,23 +268,29 @@ def construction_ron(stem: str, trunk: dict, segment_rows: List[dict], sides: in
         "    foundation_y_m: 0.0,",
         "    foundation_attachment: {},".format(_ron_string(trunk["anchor"])),
         "    pieces: [",
-        "        (",
-        '            name: "trunk",',
-        '            part: "trunk",',
-        '            component: "trunk",',
-        "            material: {},".format(_ron_string(trunk["material"])),
-        "            surface_frame: Grain((0.0, 1.0, 0.0)),",
-        "            corners: [",
     ]
-    lines += ["                ({}, {}, {}),".format(*(_num(c) for c in corner))
-              for corner in corners]
-    lines += ["            ],", "            faces: ["]
-    lines += ["                [{}],".format(", ".join(str(i) for i in face)) for face in faces]
+    for band, (corners, faces) in enumerate(band_solids(segment_rows)):
+        lines += [
+            "        (",
+            '            name: "trunk/band_{}",'.format(band),
+            '            part: "trunk",',
+            '            component: "trunk",',
+            "            material: {},".format(_ron_string(trunk["material"])),
+            "            surface_frame: Grain((0.0, 1.0, 0.0)),",
+            "            corners: [",
+        ]
+        lines += ["                ({}, {}, {}),".format(*(_num(c) for c in corner))
+                  for corner in corners]
+        lines += ["            ],", "            faces: ["]
+        lines += ["                [{}],".format(", ".join(str(i) for i in face))
+                  for face in faces]
+        lines += [
+            "            ],",
+            "            pattern: Cells((size_m: {}, stretch: {})),".format(
+                _choice(cells["size_m"]), _choice(cells["stretch"])),
+            "        ),",
+        ]
     lines += [
-        "            ],",
-        "            pattern: Cells((size_m: {}, stretch: {})),".format(
-            _choice(cells["size_m"]), _choice(cells["stretch"])),
-        "        ),",
         "    ],",
         "    joins: [],",
         ")",

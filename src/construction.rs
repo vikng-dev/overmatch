@@ -487,8 +487,8 @@ pub(crate) mod tests {
     /// destruction model), whatever it builds: each asset under `assets/constructions/` passes the
     /// map's load gate (law blocks, collider mass and inertia, attachments and root plates) and
     /// spawns one collider per element and none per chunk, its whole chunk table in its breakage
-    /// state from spawn. A trunk is one element: one collider until disturbed. An asset the gate
-    /// refuses, or a spawn of a collider per chunk, fails here.
+    /// state from spawn. A trunk's band is one element: one collider until disturbed. An asset the
+    /// gate refuses, or a spawn of a collider per chunk, fails here.
     #[test]
     fn every_shipped_construction_is_admitted_and_stands_as_its_elements() {
         let assets = shipped_assets();

@@ -39,9 +39,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import plan  # noqa: E402  — the path above is what makes this importable
 import ron  # noqa: E402
 
-#: Sides of a trunk tube and a cap disc. Placeholder resolution.
-SIDES = 12
-
 #: Base colours (linear RGB) of the three placeholder materials.
 MATERIALS = {
     "Bark": (0.16, 0.10, 0.06),
@@ -94,17 +91,17 @@ def mesh_object(name: str, verts, faces, uvs, mat, smooth: bool, parent, locatio
 
 
 def tube(r_bottom: float, r_top: float, length: float):
-    """An open tapered tube from z = 0 to z = `length`, `SIDES` quads, smooth."""
+    """An open tapered tube from z = 0 to z = `length`, `plan.RING_SIDES` quads, smooth."""
     verts, uvs = [], []
     for ring, (radius, z) in enumerate(((r_bottom, 0.0), (r_top, length))):
-        for side in range(SIDES):
-            angle = 2.0 * math.pi * side / SIDES
+        for side in range(plan.RING_SIDES):
+            angle = 2.0 * math.pi * side / plan.RING_SIDES
             verts.append((radius * math.cos(angle), radius * math.sin(angle), z))
-            uvs.append((side / SIDES, float(ring)))
+            uvs.append((side / plan.RING_SIDES, float(ring)))
     faces = []
-    for side in range(SIDES):
-        nxt = (side + 1) % SIDES
-        faces.append((side, nxt, SIDES + nxt, SIDES + side))
+    for side in range(plan.RING_SIDES):
+        nxt = (side + 1) % plan.RING_SIDES
+        faces.append((side, nxt, plan.RING_SIDES + nxt, plan.RING_SIDES + side))
     return verts, faces, uvs
 
 
@@ -112,13 +109,13 @@ def disc(radius: float, z: float, facing_up: bool):
     """A fan disc at height `z`; the winding faces +Z when `facing_up`, else -Z."""
     verts = [(0.0, 0.0, z)]
     uvs = [(0.5, 0.5)]
-    for side in range(SIDES):
-        angle = 2.0 * math.pi * side / SIDES
+    for side in range(plan.RING_SIDES):
+        angle = 2.0 * math.pi * side / plan.RING_SIDES
         verts.append((radius * math.cos(angle), radius * math.sin(angle), z))
         uvs.append((0.5 + 0.5 * math.cos(angle), 0.5 + 0.5 * math.sin(angle)))
     faces = []
-    for side in range(SIDES):
-        a, b = 1 + side, 1 + (side + 1) % SIDES
+    for side in range(plan.RING_SIDES):
+        a, b = 1 + side, 1 + (side + 1) % plan.RING_SIDES
         faces.append((0, a, b) if facing_up else (0, b, a))
     return verts, faces, uvs
 

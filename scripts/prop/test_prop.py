@@ -202,27 +202,25 @@ class Plan(unittest.TestCase):
                 worst = max(worst, error)
         self.assertGreater(worst, 0.0, "the taper is a chord: some seed must miss by a little")
 
-    def test_the_envelope_is_the_hull_of_the_rings(self):
-        """The construction's piece is one convex solid around every ring of the view: its chain
-        keeps the base and the tip, turns strictly inward at every kept ring (no two side faces
-        coplanar), and no ring stands more than `PROFILE_M` outside it. A chain that kept a ring
-        under its neighbours' chord would author a concave piece the bake refuses; one that
-        dropped a ring farther above it would cut the view's trunk."""
+    def test_the_bands_follow_every_ring_to_band_m(self):
+        """The construction's bands stack the trunk: they run from the base ring to the tip, and
+        every ring lies within `BAND_M` of its band's chord. Bands that dropped a ring farther off
+        would lose the view's wood from the trunk's mass and shape."""
         table = ron.load(TABLE)
         for key, row in table.items():
             for seed in range(200):
                 sampled = plan.sample(row, seed)
                 rings = plan.boundaries(plan.segments(sampled["height_m"], sampled["dbh_m"]))
-                kept = plan.envelope(rings)
+                kept = plan.bands(rings)
                 self.assertEqual((kept[0], kept[-1]), (0, len(rings) - 1), (key, seed))
-                chain = [rings[i] for i in kept]
-                for (z0, r0), (z1, r1), (z2, r2) in zip(chain, chain[1:], chain[2:]):
-                    self.assertLess((z1 - z0) * (r2 - r0) - (r1 - r0) * (z2 - z0), 0.0)
-                for z, r in rings:
-                    (za, ra), (zb, rb) = next((a, b) for a, b in zip(chain, chain[1:])
-                                              if a[0] <= z <= b[0])
-                    self.assertLessEqual(
-                        r, ra + (rb - ra) * (z - za) / (zb - za) + plan.PROFILE_M + 1e-12)
+
+                def off(z, r, a, b):
+                    (za, ra), (zb, rb) = rings[a], rings[b]
+                    return abs(r - (ra + (rb - ra) * (z - za) / (zb - za)))
+
+                for low, high in zip(kept, kept[1:]):
+                    for z, r in rings[low + 1:high]:
+                        self.assertLessEqual(off(z, r, low, high), plan.BAND_M + 1e-12, (key, seed))
 
 
 # ── the tracked trio ─────────────────────────────────────────────────────────────────────────────
@@ -271,7 +269,7 @@ class TrackedTrio(unittest.TestCase):
         trio = tracked()
         self.assertEqual(build.geometry_failures(trio.js, trio.binary, trio.tree), [])
         bottom = [p for p in positions_of(trio.js, trio.binary, "trunk_00") if abs(p[1]) < 1e-6]
-        self.assertGreaterEqual(build.ring_sides(trio.js, trio.binary), 3)
+        self.assertEqual(build.ring_sides(trio.js, trio.binary), plan.RING_SIDES)
         for x, _, z in bottom:
             self.assertAlmostEqual(math.hypot(x, z), trio.tree["segments"][0]["r_bottom_m"],
                                    places=4)
@@ -441,9 +439,15 @@ class RonMutants(unittest.TestCase):
         del self.table[self.tree["species"]]["trunk"]
         self.assertNamed("has no Trunk")
 
-    def test_a_cell_size_without_its_job_is_refused(self):
-        self.table[self.tree["species"]]["trunk"]["cells"]["size_m"] = 0.15
-        self.assertNamed("trunk cells size_m")
+    def test_a_cell_size_without_a_checked_provenance_is_refused(self):
+        """A cell parameter is a positive value with a Taste or Resolution and a non-blank string
+        reason: a bare value, a reason that is no string, a blank reason and a strength claim are
+        each refused naming the species file and the field, never a traceback downstream."""
+        cells = self.table[self.tree["species"]]["trunk"]["cells"]
+        for pair in (0.15, (0.15, ron.Call("Taste", (123,))), (0.15, ron.Call("Taste", (" ",))),
+                     (0.15, ron.Call("Measured", ("a strength",)))):
+            cells["size_m"] = pair
+            self.assertNamed(build.SPECIES_TABLE, "trunk.cells.size_m")
 
     def test_a_document_that_is_no_tree_asset_is_refused(self):
         self.tree["__struct__"] = "TankSpec"
@@ -712,7 +716,7 @@ class CertificateMutants(unittest.TestCase):
 # ── mutants: the construction against its view ──────────────────────────────────────────────────
 
 class ConstructionMutants(unittest.TestCase):
-    """The construction's piece and the view's trunk are one solid; every mutation is sized from
+    """The construction's bands and the view's trunk are one solid; every mutation is sized from
     the decoded geometry it moves, a hundredth of that ring's radius past the contract's own
     tolerance, never a fixed length."""
 
@@ -729,21 +733,32 @@ class ConstructionMutants(unittest.TestCase):
         self.assertIn(original, self.text)
         failures = build.identity_failures(self.text.replace(original, moved, 1), self.js,
                                            self.binary)
-        self.assertTrue(any("corner 0" in f and "no vertex" in f for f in failures), failures)
+        self.assertTrue(any("band 0 corner 0" in f and "no vertex" in f for f in failures),
+                        failures)
 
-    def test_a_view_vertex_outside_the_piece_is_refused(self):
+    def test_a_view_vertex_outside_every_band_is_refused(self):
         points = positions_of(self.js, self.binary, "trunk_00")
         x, y, z = points[0]
         radius = math.hypot(x, z)
-        # Radially out past `PROFILE_M` measured across the 12-gon's side face, whose normal
+        # Radially out past `BAND_M` measured across the section's side face, whose normal
         # leans up to half a side's angle off the radius: the cosine of that half-angle.
-        out = (plan.PROFILE_M / math.cos(math.pi / build.ring_sides(self.js, self.binary))
-               + 0.01 * radius)
+        out = plan.BAND_M / math.cos(math.pi / plan.RING_SIDES) + 0.01 * radius
         grow = 1.0 + out / radius
         binary = rewritten(self.js, self.binary, "trunk_00", "POSITION", 0,
                            (x * grow, y, z * grow))
         failures = build.identity_failures(self.text, self.js, binary)
-        self.assertTrue(any("outside the construction's piece" in f for f in failures), failures)
+        self.assertTrue(any("outside every band" in f for f in failures), failures)
+
+    def test_a_section_the_view_was_not_drawn_with_is_refused(self):
+        """The plan's section moved and the view not regenerated: the construction is built from
+        the plan, so the two no longer agree, and the build names the plan's field."""
+        sides = plan.RING_SIDES
+        try:
+            plan.RING_SIDES = sides + 1
+            failures = build.identity_failures(self.text, self.js, self.binary)
+        finally:
+            plan.RING_SIDES = sides
+        self.assertTrue(any("plan.RING_SIDES" in f for f in failures), failures)
 
     def test_a_construction_the_tree_does_not_give_is_stale(self):
         """A cell size edited in the tracked construction alone: the species row no longer gives
