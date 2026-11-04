@@ -876,11 +876,8 @@ fn apply_track_forces(
     for (entity, pos, _, _, body, ..) in &tanks {
         // Replicas have no authoritative driving pass and gather no support shapes.
         if *body == RigidBody::Dynamic {
-            let local: Vec<_> = rubble
-                .near(pos.0, gear.rubble_radius)
-                .into_iter()
-                .filter(|&collider| rubble.body_of(collider) != entity)
-                .collect();
+            let mut local = rubble.near(pos.0, gear.rubble_radius);
+            local.retain(|&collider| rubble.body_of(collider) != entity);
             near.extend_from_slice(&local);
             sources.push((entity, local));
         }
@@ -926,6 +923,8 @@ fn apply_track_forces(
         // avian3d 0.7 `ForcesItem` keeps this helper private; this is its version-pinned
         // source expression (`query_data.rs`): position + rotation * local computed COM.
         let center_of_mass = pos.0 + rot.0 * center_of_mass.0;
+        let linear = forces.linear_velocity();
+        let angular = forces.angular_velocity();
         let mut effect = TrackGripEffect::default();
 
         // The shared per-tank drivetrain tick — contact evaluation, joint transmission, belt
@@ -945,7 +944,7 @@ fn apply_track_forces(
             target,
             affine,
             dt,
-            |p| forces.velocity_at_point(p),
+            |p| linear + angular.cross(p - center_of_mass),
             BeltRig {
                 drive: &mut drive,
                 signal: &mut signal,

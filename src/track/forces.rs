@@ -1038,6 +1038,10 @@ fn collect_column_contacts<O: TerrainOracle>(
     // relative to the pin plane), so they shift along the hull's lateral axis — never along
     // a per-segment cross product, whose sign would depend on the loop's winding.
     let lat_axis = affine.transform_vector3(Vec3::X);
+    let lateral = (
+        input.columns[0].0.min(input.columns[2].0),
+        input.columns[0].0.max(input.columns[2].0),
+    );
     let mut previous_end: [Option<(ProbeKey, f32)>; 3] = [None; 3];
 
     for i in 0..n {
@@ -1070,10 +1074,6 @@ fn collect_column_contacts<O: TerrainOracle>(
         let face_m = out * (params.face_offset + travel[1]);
         let face_b = out * (params.face_offset + travel[2]);
 
-        let lateral = (
-            input.columns[0].0.min(input.columns[2].0),
-            input.columns[0].0.max(input.columns[2].0),
-        );
         let slab = Slab {
             origin: wa,
             axis,
@@ -1346,17 +1346,28 @@ fn advance_element_strain(j0: Vec3, sdot: Vec3, dt: f32) -> Vec3 {
     j1
 }
 
+/// Tick-local accumulation for one material element, shared by all its surface patches.
+#[derive(Clone, Copy, Default)]
+struct ElementWork {
+    load: f32,
+    membership_load: f32,
+    slip: Vec3,
+    count: usize,
+    advanced: bool,
+    kept: bool,
+}
+
 /// Definitive departure only: the dwell rides out contact flicker; when it expires the pad has
 /// truly left the ground (cycled to the return run, or lifted off) and forgets — its shear was
 /// relieved by ground it no longer touches. `kept` flags the elements this tick found evidence
 /// for; every other element counts down.
-fn forget_departed_elements(kept: &[bool], elements: &mut GripElements) {
-    for ((&kept, dwell), strain) in kept
+fn forget_departed_elements(work: &[ElementWork], elements: &mut GripElements) {
+    for ((work, dwell), strain) in work
         .iter()
         .zip(elements.dwell.iter_mut())
         .zip(elements.strain.iter_mut())
     {
-        if !kept {
+        if !work.kept {
             let d = dwell.saturating_sub(1);
             *dwell = d;
             if d == 0 {
@@ -1396,33 +1407,31 @@ fn update_grip_elements(
 
     let enter = side_weight * GRIP_ELEMENT_ENTER_FRACTION;
     let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
-    let mut kept = vec![false; element_len];
+    let mut work = vec![ElementWork::default(); element_len];
     let mut elem_g = vec![Vec2::ZERO; cols.len()];
-    // A footprint can split a material element into several surface patches. Membership reads
-    // their summed elastic load, and its one strain advances once from their load-weighted slip.
-    // The single-contact case keeps the field-only arithmetic unchanged.
-    let mut loads = vec![0.0; element_len];
-    let mut slips = vec![Vec3::ZERO; element_len];
-    let mut counts = vec![0_usize; element_len];
-    let mut advanced = vec![false; element_len];
+    // Split footprints advance their material element once, from its load-weighted slip.
     for c in cols {
-        loads[c.element] += c.load_elastic;
-        slips[c.element] += (c.long_dir * c.slip_long - c.lat_dir * c.slip_lat) * c.load_elastic;
-        counts[c.element] += 1;
+        let element = &mut work[c.element];
+        element.load += c.load_elastic;
+        element.slip += (c.long_dir * c.slip_long - c.lat_dir * c.slip_lat) * c.load_elastic;
+        element.count += 1;
     }
-    let mut membership_loads = loads.clone();
+    for element in &mut work {
+        element.membership_load = element.load;
+    }
     for &(element, elastic) in held {
-        membership_loads[element] += elastic;
+        work[element].membership_load += elastic;
     }
     for (idx, c) in cols.iter().enumerate() {
         // ENTER above the high bound; STAY down to the low bound while already a member
         // (hysteresis + dwell refresh). Never the damped load's sign — see
         // [`GRIP_ELEMENT_ENTER_FRACTION`].
-        let elastic = membership_loads[c.element];
+        let element = &mut work[c.element];
+        let elastic = element.membership_load;
         let member = elastic >= enter || (elastic >= leave && elements.dwell[c.element] > 0);
         if member {
             elements.dwell[c.element] = GRIP_ELEMENT_LOSS_DWELL_TICKS;
-            kept[c.element] = true;
+            element.kept = true;
         }
         if !c.has_plane || c.load_elastic <= 0.0 {
             continue;
@@ -1431,19 +1440,19 @@ fn update_grip_elements(
         // hull (+slip_long along long_dir, −slip_lat along lat_dir — the kinetic law's
         // signs, vectorized).
         let sdot = c.long_dir * c.slip_long - c.lat_dir * c.slip_lat;
-        if !advanced[c.element] {
-            if loads[c.element] >= enter {
-                let mean_slip = if counts[c.element] == 1 {
+        if !element.advanced {
+            if element.load >= enter {
+                let mean_slip = if element.count == 1 {
                     sdot
                 } else {
-                    slips[c.element] / loads[c.element]
+                    element.slip / element.load
                 };
                 elements.strain[c.element] =
                     advance_element_strain(elements.strain[c.element], mean_slip, dt);
             }
             // Below the enter bound the existing strain holds; each patch's force still scales
             // with its own current elastic load, including its own local damping slip.
-            advanced[c.element] = true;
+            element.advanced = true;
         }
         let shared = elements.strain[c.element];
         let j1 = shared - c.normal * shared.dot(c.normal);
@@ -1467,13 +1476,14 @@ fn update_grip_elements(
     // remains: still on the ground — membership continues, stored strain holds, no force
     // (support omitted the contact entirely).
     for &(el, _) in held {
-        let elastic = membership_loads[el];
+        let element = &mut work[el];
+        let elastic = element.membership_load;
         if elastic >= enter || (elastic >= leave && elements.dwell[el] > 0) {
             elements.dwell[el] = GRIP_ELEMENT_LOSS_DWELL_TICKS;
-            kept[el] = true;
+            element.kept = true;
         }
     }
-    forget_departed_elements(&kept, elements);
+    forget_departed_elements(&work, elements);
     #[cfg(feature = "bitprobe")]
     for output in &mut report.bitprobe_elements {
         let element = output.material as usize * 3 + output.column as usize;
