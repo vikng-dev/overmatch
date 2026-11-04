@@ -119,6 +119,11 @@ fn wake_on_remove_sleeping(mut world: DeferredWorld, ctx: HookContext) {
         return;
     }
 
+    // OVERMATCH PATCH: this body has lost Sleeping by the time the queued wake runs.
+    // During despawn its timer may already be gone.
+    if let Some(mut timer) = world.get_mut::<SleepTimer>(ctx.entity) {
+        timer.0 = 0.0;
+    }
     world.commands().queue_silenced(WakeBody(ctx.entity));
 }
 
@@ -440,6 +445,7 @@ struct CachedIslandWakingSystemState(
             &'static BodyIslandNode,
             &'static mut SleepTimer,
             Option<&'static RigidBodyColliders>,
+            Has<Sleeping>,
         )>,
         SResMut<PhysicsIslands>,
         SResMut<ContactGraph>,
@@ -494,7 +500,8 @@ impl Command for WakeIslands {
                     let mut body = island.head_body;
 
                     while let Some(entity) = body {
-                        let Ok((body_island, mut sleep_timer, colliders)) = bodies.get_mut(entity)
+                        let Ok((body_island, mut sleep_timer, colliders, was_sleeping)) =
+                            bodies.get_mut(entity)
                         else {
                             body = None;
                             continue;
@@ -525,9 +532,13 @@ impl Command for WakeIslands {
                             }
                         }
 
-                        bodies_to_wake.push(entity);
                         body = body_island.next;
-                        sleep_timer.0 = 0.0;
+                        // OVERMATCH PATCH: a merged island may include already-awake bodies.
+                        // Their rest history still belongs to them.
+                        if was_sleeping {
+                            bodies_to_wake.push(entity);
+                            sleep_timer.0 = 0.0;
+                        }
                     }
                 }
             }

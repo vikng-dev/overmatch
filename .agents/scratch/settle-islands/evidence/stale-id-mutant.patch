@@ -1,0 +1,63 @@
+--- a/vendor/avian3d-0.7.0-child-pose/src/collision/narrow_phase/system_param.rs
++++ b/vendor/avian3d-0.7.0-child-pose/src/collision/narrow_phase/system_param.rs
+@@ -138,7 +138,7 @@
+         self.update_contacts::<H>(delta_secs, hooks, context, commands);
+ 
+         // OVERMATCH PATCH: a later merge can retire an island ID before wakes are applied.
+-        let mut wake_bodies: Vec<Entity> = Vec::with_capacity(128);
++        let mut wake_bodies: Vec<IslandId> = Vec::with_capacity(128);
+         let mut sleeping_colliders = Vec::new();
+         let mut contacts_to_link = Vec::new();
+ 
+@@ -308,11 +308,7 @@
+                             // TODO: Do we need this?
+                             if island.is_sleeping {
+                                 // Wake up the island if it was previously sleeping.
+-                                wake_bodies.push(
+-                                    island
+-                                        .head_body
+-                                        .expect("An island with a contact has a body"),
+-                                );
++                                wake_bodies.push(island.id);
+                             }
+                         }
+                     }
+@@ -400,15 +396,7 @@
+         }
+ 
+         if !wake_bodies.is_empty() {
+-            let mut islands_to_wake: Vec<IslandId> = wake_bodies
+-                .into_iter()
+-                .map(|body| {
+-                    self.body_islands
+-                        .get(body)
+-                        .expect("Contact bodies remain linked until narrow phase completes")
+-                        .island_id
+-                })
+-                .collect();
++            let mut islands_to_wake = wake_bodies;
+             islands_to_wake.sort_unstable();
+             islands_to_wake.dedup();
+ 
+@@ -424,7 +412,7 @@
+     fn link_contact_to_island(
+         &mut self,
+         contact_id: ContactId,
+-        wake_bodies: &mut Vec<Entity>,
++        wake_bodies: &mut Vec<IslandId>,
+         sleeping_colliders: &mut Vec<Entity>,
+     ) {
+         // IslandPlugin is optional.
+@@ -453,11 +441,7 @@
+         ) && island.is_sleeping
+         {
+             if has_awake_body {
+-                wake_bodies.push(
+-                    island
+-                        .head_body
+-                        .expect("An island with a contact has a body"),
+-                );
++                wake_bodies.push(island.id);
+             } else {
+                 for (collider, body) in participants {
+                     if body.is_some_and(|body| {

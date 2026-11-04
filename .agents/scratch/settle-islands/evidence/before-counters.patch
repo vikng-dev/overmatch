@@ -1,0 +1,207 @@
+diff --git a/src/buildings/breakage.rs b/src/buildings/breakage.rs
+index 4eb78481..8d1cff46 100644
+--- a/src/buildings/breakage.rs
++++ b/src/buildings/breakage.rs
+@@ -2366,3 +2366,24 @@ pub(crate) fn sim_plugin(app: &mut App) {
+ 
+ #[cfg(test)]
+ mod tests;
++
++// [DEBUG-settle] Census only, not timing.
++pub(crate) fn diag_settle_snapshot(world: &mut World) -> serde_json::Value {
++    use avian3d::dynamics::solver::islands::BodyIslandNode;
++    use avian3d::prelude::{SleepTimer, SleepThreshold, TimeToSleep, Sleeping};
++    use std::sync::atomic::Ordering::Relaxed;
++    let bodies: Vec<_> = world.query_filtered::<(Entity, &LinearVelocity, &AngularVelocity, &SleepTimer, &SleepThreshold, &BodyIslandNode, Has<Sleeping>), With<crate::debris::DebrisPiece>>()
++        .iter(world).map(|(e,l,a,t,h,i,s)| serde_json::json!({"entity":format!("{e:?}"),"v":l.length(),"w":a.length(),"timer":t.0,"mature":t.0 >= world.resource::<TimeToSleep>().0,"over_threshold":l.length() >= h.linear || a.length() >= h.angular,"island":i.island_id().0,"sleeping":s})).collect();
++    let asleep = bodies.iter().filter(|b| b["sleeping"] == true).count();
++    serde_json::json!({"awake":bodies.len()-asleep,"asleep":asleep,"over_threshold":bodies.iter().filter(|b|b["over_threshold"] == true && b["sleeping"] == false).count(),"mature":bodies.iter().filter(|b|b["mature"] == true && b["sleeping"] == false).count(),"contact_requests":avian3d::diag_settle::CONTACT.swap(0,Relaxed),"wake_requests":avian3d::diag_settle::WAKES.swap(0,Relaxed),"timer_resets":avian3d::diag_settle::RESETS.swap(0,Relaxed),"awake_timer_resets":avian3d::diag_settle::AWAKE_RESETS.swap(0,Relaxed),"bodies":bodies})
++}
++pub(crate) fn diag_settle_server(world: &mut World, mut last: bevy::ecs::system::Local<Option<std::time::Instant>>, mut began: bevy::ecs::system::Local<Option<std::time::Instant>>) {
++    let now=std::time::Instant::now();
++    let start=*began.get_or_insert(now);
++    let previous=last.get_or_insert(now);
++    if now.duration_since(*previous).as_secs_f64()<1.0 {return;}
++    *previous=now;
++    let mut snapshot=diag_settle_snapshot(world);
++    snapshot["wall_s"]=now.duration_since(start).as_secs_f64().into();
++    println!("[DEBUG-settle] {snapshot}");
++}
+diff --git a/src/buildings/breakage/tests.rs b/src/buildings/breakage/tests.rs
+index 65ac3b25..5f207283 100644
+--- a/src/buildings/breakage/tests.rs
++++ b/src/buildings/breakage/tests.rs
+@@ -4318,3 +4318,32 @@ fn a_ballistic_sensor_does_not_add_a_second_occupied_mass() {
+         "the no-sensor control must expose the duplicate mass: {added} of {extra}"
+     );
+ }
++
++// [DEBUG-settle] Observations of the game's environment destruction, not assertions on outputs.
++#[test]
++#[ignore]
++fn diag_settle_pile() {
++    let kind=std::env::var("SETTLE_KIND").unwrap();
++    let seconds=std::env::var("SETTLE_SECONDS").unwrap().parse::<u32>().unwrap();
++    let (mut app, root)=composed(false);
++    app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
++    app.world_mut().spawn((RigidBody::Static, Position(Vec3::new(0.0,-0.5,0.0)),Collider::cuboid(200.0,1.0,200.0),CollisionLayers::new([Layer::Terrain],LayerMask::ALL)));
++    if kind != "native" {
++        app.world_mut().entity_mut(root).despawn();
++        crate::net::debris_stress::diag_fixture(app.world_mut(),kind.parse().unwrap());
++    }
++    for tick in 0..64*seconds {
++        if kind == "native" && [64,384,704,1024].contains(&tick) {
++            let i=[64,384,704,1024].iter().position(|t|*t==tick).unwrap();
++            let offset=[Vec3::new(3.0,0.5,0.0),Vec3::new(-3.0,0.5,0.0),Vec3::new(0.0,0.5,4.0),Vec3::new(0.0,0.5,-4.0)][i];
++            set_off(&mut app,offset,Blast::of(16e6,0.1,1e-6));
++        }
++        app.update();
++        if tick%64==63 {
++            let mut snapshot=diag_settle_snapshot(app.world_mut());
++            snapshot["simulation_s"]=((tick+1)/64).into();
++            snapshot["kind"]=kind.clone().into();
++            println!("[DEBUG-settle] {snapshot}");
++        }
++    }
++}
+diff --git a/src/net/debris_stress.rs b/src/net/debris_stress.rs
+index 6b43b4b6..9ca81ab8 100644
+--- a/src/net/debris_stress.rs
++++ b/src/net/debris_stress.rs
+@@ -860,3 +860,26 @@ mod tests {
+         assert!(breach(anchor, Quat::IDENTITY, 1.0, radius, 10, 0, |_| None).is_empty());
+     }
+ }
++
++// [DEBUG-rest] Exact production stress geometry and release, without a tank or network.
++#[cfg(test)]
++pub(crate) fn diag_fixture(world: &mut World, count: u32) {
++    for release in breach(Vec3::ZERO, Quat::IDENTITY, 1.0, 3.0, count, 0, |_| {
++        Some(0.0)
++    }) {
++        world.spawn((
++            DebrisPiece,
++            Position(release.position),
++            Rotation(release.rotation),
++            RigidBody::Dynamic,
++            fragment_collider(),
++            ColliderDensity(DENSITY_KG_M3),
++            CollisionLayers::new(
++                [Layer::Debris],
++                [Layer::Terrain, Layer::Vehicle, Layer::Debris],
++            ),
++            LinearVelocity(release.velocity),
++            AngularVelocity(release.spin),
++        ));
++    }
++}
+diff --git a/src/net/mod.rs b/src/net/mod.rs
+index b70cb4c4..3fd620fa 100644
+--- a/src/net/mod.rs
++++ b/src/net/mod.rs
+@@ -24,7 +24,7 @@ mod death_screen;
+ pub(crate) use death_screen::{mount_bare as mount_death_screen, shows_died};
+ /// The debris stress lever (`OVERMATCH_DEBRIS_STRESS`): server-simulated wall fragments, asleep at
+ /// rest, their poses replicated, drawn by clients.
+-mod debris_stress;
++pub(crate) mod debris_stress;
+ mod debug_hud;
+ /// The destruction ledger: tree state transitions on one globally visible entity.
+ mod destruction;
+diff --git a/src/net/server.rs b/src/net/server.rs
+index 6ac77659..bff083c8 100644
+--- a/src/net/server.rs
++++ b/src/net/server.rs
+@@ -177,6 +177,7 @@ pub fn run() {
+         hosting.install(&mut app);
+     }
+ 
++    app.add_systems(Last, crate::buildings::breakage::diag_settle_server);
+     app.run();
+     if let Some(hosting) = hosting {
+         hosting.finish();
+diff --git a/vendor/avian3d-0.7.0-child-pose/src/collision/narrow_phase/system_param.rs b/vendor/avian3d-0.7.0-child-pose/src/collision/narrow_phase/system_param.rs
+index 6134e6f0..b8a1ad2e 100644
+--- a/vendor/avian3d-0.7.0-child-pose/src/collision/narrow_phase/system_param.rs
++++ b/vendor/avian3d-0.7.0-child-pose/src/collision/narrow_phase/system_param.rs
+@@ -257,6 +257,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
+                                 && island.is_sleeping
+                             {
+                                 // Wake up the island if it was previously sleeping.
++                                crate::diag_settle::CONTACT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // [DEBUG-settle]
+                                 islands_to_wake.push(island.id);
+                             }
+                         }
+@@ -318,6 +319,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
+                             // TODO: Do we need this?
+                             if island.is_sleeping {
+                                 // Wake up the island if it was previously sleeping.
++                                crate::diag_settle::CONTACT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // [DEBUG-settle]
+                                 islands_to_wake.push(island.id);
+                             }
+                         }
+@@ -351,7 +353,8 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
+                             && island.is_sleeping
+                         {
+                             // Wake up the island if it was previously sleeping.
+-                            islands_to_wake.push(island.id);
++                            crate::diag_settle::CONTACT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // [DEBUG-settle]
++                                islands_to_wake.push(island.id);
+                         }
+                     }
+                 } else if contact_pair.is_touching()
+diff --git a/vendor/avian3d-0.7.0-child-pose/src/dynamics/solver/islands/sleeping.rs b/vendor/avian3d-0.7.0-child-pose/src/dynamics/solver/islands/sleeping.rs
+index 3d5b07ae..e6dde57f 100644
+--- a/vendor/avian3d-0.7.0-child-pose/src/dynamics/solver/islands/sleeping.rs
++++ b/vendor/avian3d-0.7.0-child-pose/src/dynamics/solver/islands/sleeping.rs
+@@ -440,6 +440,7 @@ struct CachedIslandWakingSystemState(
+             &'static BodyIslandNode,
+             &'static mut SleepTimer,
+             Option<&'static RigidBodyColliders>,
++            Has<Sleeping>,
+         )>,
+         SResMut<PhysicsIslands>,
+         SResMut<ContactGraph>,
+@@ -476,6 +477,7 @@ pub struct WakeIslands(pub Vec<IslandId>);
+ impl Command for WakeIslands {
+     type Out = ();
+     fn apply(self, world: &mut World) {
++        crate::diag_settle::WAKES.fetch_add(self.0.len() as u64, std::sync::atomic::Ordering::Relaxed); // [DEBUG-settle]
+         world.try_resource_scope(|world, mut state: Mut<CachedIslandWakingSystemState>| {
+             let (mut bodies, mut islands, mut contact_graph, mut constraint_graph) =
+                 state.0.get_mut(world).unwrap();
+@@ -494,7 +496,7 @@ impl Command for WakeIslands {
+                     let mut body = island.head_body;
+ 
+                     while let Some(entity) = body {
+-                        let Ok((body_island, mut sleep_timer, colliders)) = bodies.get_mut(entity)
++                        let Ok((body_island, mut sleep_timer, colliders, was_sleeping)) = bodies.get_mut(entity)
+                         else {
+                             body = None;
+                             continue;
+@@ -527,6 +529,8 @@ impl Command for WakeIslands {
+ 
+                         bodies_to_wake.push(entity);
+                         body = body_island.next;
++                        crate::diag_settle::RESETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); // [DEBUG-settle]
++                        if !was_sleeping { crate::diag_settle::AWAKE_RESETS.fetch_add(1, std::sync::atomic::Ordering::Relaxed); } // [DEBUG-settle]
+                         sleep_timer.0 = 0.0;
+                     }
+                 }
+diff --git a/vendor/avian3d-0.7.0-child-pose/src/lib.rs b/vendor/avian3d-0.7.0-child-pose/src/lib.rs
+index 66d5a1d8..1d628b04 100644
+--- a/vendor/avian3d-0.7.0-child-pose/src/lib.rs
++++ b/vendor/avian3d-0.7.0-child-pose/src/lib.rs
+@@ -850,3 +850,12 @@ where
+         builder
+     }
+ }
++
++// [DEBUG-settle] Throwaway counters; no timing or intervention.
++pub mod diag_settle {
++    use std::sync::atomic::AtomicU64;
++    pub static CONTACT: AtomicU64 = AtomicU64::new(0);
++    pub static WAKES: AtomicU64 = AtomicU64::new(0);
++    pub static RESETS: AtomicU64 = AtomicU64::new(0);
++    pub static AWAKE_RESETS: AtomicU64 = AtomicU64::new(0);
++}

@@ -1,0 +1,45 @@
+--- a/.agents/scratch/slowdown-hunt/evidence/measure.py
++++ b/.agents/scratch/slowdown-hunt/evidence/measure.py
+@@ -32,15 +32,15 @@
+         os.execv('/usr/bin/lockf', ['lockf', '-k', '-t', '10800',
+                  '/tmp/overmatch-cargo.lock', sys.executable, __file__,
+                  *sys.argv[1:], '--holding-lock'])
+-    out = ROOT / 'target/slowdown-hunt' / args.label
++    out = ROOT / 'target/settle-islands' / args.label
+     out.mkdir(parents=True, exist_ok=True)
+     env = dict(os.environ, OVERMATCH_UNATTENDED='1', OVERMATCH_WINDOW='headless',
+                OVERMATCH_MUTE='1', BEVY_ASSET_ROOT=str(ROOT), RUST_BACKTRACE='1',
+                OVERMATCH_SERVER_BIND='127.0.0.1', OVERMATCH_SERVER='127.0.0.1:5888',
+-               OVERMATCH_BOT='0', OVERMATCH_SERVER_STATS_S='1', OVERMATCH_DEBRIS_STRESS='off',
++               OVERMATCH_BOT='0', OVERMATCH_DEBRIS_STRESS='off',
+                OVERMATCH_HE_STRESS=f'{args.shells}:{args.period}')
+     for key in ['OVERMATCH_SERVER_ID', 'OVERMATCH_NETCODE_KEY', 'OVERMATCH_REPORT_SECRET',
+-                'OVERMATCH_API', 'OVERMATCH_CAPTURE', 'OVERMATCH_HARNESS', 'SPIKE_COST_TRACE',
++                'OVERMATCH_API', 'OVERMATCH_SERVER_STATS_S', 'OVERMATCH_CAPTURE', 'OVERMATCH_HARNESS', 'SPIKE_COST_TRACE',
+                 'SPIKE_TRACE', 'SPIKE_FRAME_COST', 'SPIKE_RENDER_COST']:
+         env.pop(key, None)
+     if args.plan:
+@@ -50,6 +50,7 @@
+         sock.bind(('127.0.0.1', 5888))
+     processes, files, samples = [], [], []
+     reader = None
++    pending = ""
+     deadlines = [float(x) for x in args.samples.split(',') if x]
+     start = time.monotonic()
+     result = dict(label=args.label, profile=args.profile, client_profile=args.client_profile, variant=args.variant, duration=args.duration,
+@@ -66,9 +67,12 @@
+                 time.sleep(4)
+         while time.monotonic() - start < args.duration:
+             elapsed = time.monotonic() - start
+-            for line in reader.readlines():
+-                if line.startswith('server_stats '):
+-                    row = json.loads(line.removeprefix('server_stats '))
++            pending += reader.read()
++            lines = pending.split("\n")
++            pending = lines.pop()
++            for line in lines:
++                if line.startswith('[DEBUG-settle] '):
++                    row = json.loads(line.removeprefix('[DEBUG-settle] '))
+                     row['wall_s'] = elapsed
+                     result['rows'].append(row)
+             if args.plan and processes[1].poll() not in (None, 0):

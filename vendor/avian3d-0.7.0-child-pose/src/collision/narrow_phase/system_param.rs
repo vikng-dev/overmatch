@@ -51,6 +51,8 @@ struct RigidBodyQuery {
     center_of_mass: Read<ComputedCenterOfMass>,
     linear_velocity: Read<LinearVelocity>,
     angular_velocity: Read<AngularVelocity>,
+    // OVERMATCH PATCH: distinguish sleeping participants from awake wake sources.
+    is_sleeping: Has<Sleeping>,
     // TODO: We should define these as purely collider components and not query for them here.
     friction: Option<Read<Friction>>,
     restitution: Option<Read<Restitution>>,
@@ -135,7 +137,10 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
         // Update contacts for all contact pairs.
         self.update_contacts::<H>(delta_secs, hooks, context, commands);
 
-        let mut islands_to_wake: Vec<IslandId> = Vec::with_capacity(128);
+        // OVERMATCH PATCH: a later merge can retire an island ID before wakes are applied.
+        let mut wake_bodies: Vec<Entity> = Vec::with_capacity(128);
+        let mut sleeping_colliders = Vec::new();
+        let mut contacts_to_link = Vec::new();
 
         // Process contact status changes, iterating over set bits serially to maintain determinism.
         //
@@ -244,22 +249,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                                 .push_manifold(contact_edge, contact_pair);
                         }
 
-                        // Link the contact pair to an island.
-                        if let Some(islands) = &mut self.islands {
-                            let island = islands.add_contact(
-                                contact_id,
-                                &mut self.body_islands,
-                                &mut self.contact_graph,
-                                &mut self.joint_graph,
-                            );
-
-                            if let Some(island) = island
-                                && island.is_sleeping
-                            {
-                                // Wake up the island if it was previously sleeping.
-                                islands_to_wake.push(island.id);
-                            }
-                        }
+                        contacts_to_link.push(contact_id);
                     }
                 } else if contact_pair
                     .flags
@@ -318,7 +308,11 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                             // TODO: Do we need this?
                             if island.is_sleeping {
                                 // Wake up the island if it was previously sleeping.
-                                islands_to_wake.push(island.id);
+                                wake_bodies.push(
+                                    island
+                                        .head_body
+                                        .expect("An island with a contact has a body"),
+                                );
                             }
                         }
                     }
@@ -338,22 +332,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                             .push_manifold(contact_edge, contact_pair);
                     }
 
-                    // Link the contact pair to an island.
-                    if let Some(islands) = &mut self.islands {
-                        let island = islands.add_contact(
-                            contact_id,
-                            &mut self.body_islands,
-                            &mut self.contact_graph,
-                            &mut self.joint_graph,
-                        );
-
-                        if let Some(island) = island
-                            && island.is_sleeping
-                        {
-                            // Wake up the island if it was previously sleeping.
-                            islands_to_wake.push(island.id);
-                        }
-                    }
+                    contacts_to_link.push(contact_id);
                 } else if contact_pair.is_touching()
                     && contact_pair.generates_constraints()
                     && contact_pair.manifold_count_change > 0
@@ -391,7 +370,45 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
             }
         }
 
-        if !islands_to_wake.is_empty() {
+        for contact_id in contacts_to_link {
+            self.link_contact_to_island(contact_id, &mut wake_bodies, &mut sleeping_colliders);
+        }
+
+        // OVERMATCH PATCH: dormant new contacts belong in the sleeping pair set and
+        // must not leave manifold handles in the active constraint graph.
+        sleeping_colliders.sort_unstable();
+        sleeping_colliders.dedup();
+        for collider in sleeping_colliders {
+            self.contact_graph
+                .sleep_entity_with(collider, |graph, pair| {
+                    if pair.generates_constraints()
+                        && let (Some(body1), Some(body2)) = (pair.body1, pair.body2)
+                    {
+                        let edge = graph
+                            .get_edge_mut_by_id(pair.contact_id)
+                            .expect("A transferred sleeping pair retains its contact edge");
+                        for _ in 0..edge.constraint_handles.len() {
+                            self.constraint_graph.pop_manifold(
+                                &mut graph.edges,
+                                pair.contact_id,
+                                body1,
+                                body2,
+                            );
+                        }
+                    }
+                });
+        }
+
+        if !wake_bodies.is_empty() {
+            let mut islands_to_wake: Vec<IslandId> = wake_bodies
+                .into_iter()
+                .map(|body| {
+                    self.body_islands
+                        .get(body)
+                        .expect("Contact bodies remain linked until narrow phase completes")
+                        .island_id
+                })
+                .collect();
             islands_to_wake.sort_unstable();
             islands_to_wake.dedup();
 
@@ -399,6 +416,59 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
             commands.command_scope(|mut commands| {
                 commands.queue(WakeIslands(islands_to_wake));
             });
+        }
+    }
+
+    // OVERMATCH PATCH: contact discovery alone is not a wake source. An awake non-static
+    // participant supplies one; otherwise the new sleeping contact stays outside the solver.
+    fn link_contact_to_island(
+        &mut self,
+        contact_id: ContactId,
+        wake_bodies: &mut Vec<Entity>,
+        sleeping_colliders: &mut Vec<Entity>,
+    ) {
+        // IslandPlugin is optional.
+        let Some(islands) = &mut self.islands else {
+            return;
+        };
+        let (_, pair) = self
+            .contact_graph
+            .get_by_id(contact_id)
+            .expect("The contact being linked exists in the contact graph");
+        let participants = [(pair.collider1, pair.body1), (pair.collider2, pair.body2)];
+        // Disabled bodies are absent from body_query and supply no wake source.
+        let has_awake_body = participants.iter().any(|(_, body)| {
+            body.is_some_and(|body| {
+                self.body_query
+                    .get(body)
+                    .is_ok_and(|body| !body.rb.is_static() && !body.is_sleeping)
+            })
+        });
+        // A standalone collider pair need not belong to an island.
+        if let Some(island) = islands.add_contact(
+            contact_id,
+            &mut self.body_islands,
+            &mut self.contact_graph,
+            &mut self.joint_graph,
+        ) && island.is_sleeping
+        {
+            if has_awake_body {
+                wake_bodies.push(
+                    island
+                        .head_body
+                        .expect("An island with a contact has a body"),
+                );
+            } else {
+                for (collider, body) in participants {
+                    if body.is_some_and(|body| {
+                        self.body_query
+                            .get(body)
+                            .is_ok_and(|body| !body.rb.is_static() && body.is_sleeping)
+                    }) {
+                        sleeping_colliders.push(collider);
+                    }
+                }
+            }
         }
     }
 

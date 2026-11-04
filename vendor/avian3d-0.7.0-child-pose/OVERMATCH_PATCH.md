@@ -107,3 +107,18 @@ reads the key's change tick.
 Guard: `src/tests/avian_collider_of_removal.rs` (a collider that left its body takes its proxy
 when despawned; a static compound rebuilt in place holds no contact pair). Record:
 `upstream/avian-collider-of-removal-orphan-proxy.md`.
+
+## Island contact waking and rest history (`src/collision/narrow_phase/system_param.rs`, `src/dynamics/solver/islands/sleeping.rs`)
+
+A sleeping island's new contact supplies a wake only through an awake non-static participant.
+Dormant new contacts enter the sleeping pair set and leave no active manifold handles. Wakes
+resolve a representative body's current island after all contact changes, so a later merge
+cannot retire a requested wake's destination.
+
+`WakeIslands` preserves the rest timers of already-awake merge participants. Newly woken bodies
+restart their rest interval; explicit removal of `Sleeping` resets its initiating body's timer
+in the removal hook. The library's thresholds, time to sleep and whole-island eligibility rule
+are unchanged.
+
+Guard: `src/tests/avian_island_sleep.rs`; production impact and support-loss guards remain in
+`src/debris.rs`. Local upstream draft: `upstream/avian-island-rest-history.md`.
