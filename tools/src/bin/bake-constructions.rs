@@ -4,7 +4,6 @@
 //! file whose bytes change and the game's load gate admits (`overmatch::construction::admit`), and
 //! prints what each bake made.
 
-use overmatch::construction::schema;
 use overmatch_tools::construction;
 
 fn main() {
@@ -13,19 +12,12 @@ fn main() {
         construction::specs(&root).unwrap_or_else(|err| panic!("bake-constructions: {err}"));
     for spec in specs {
         let id = &spec.construction.id;
-        let baked = construction::bake(&spec.construction, schema::substance_density)
-            .unwrap_or_else(|err| panic!("bake-constructions: {}: {err}", spec.path));
-        let text = construction::admitted(&baked.asset, &spec.path)
+        let construction::Written {
+            baked,
+            bytes,
+            unchanged,
+        } = construction::bake_to(&root, &spec)
             .unwrap_or_else(|err| panic!("bake-constructions: {err}"));
-        let path = construction::asset_path(&root, id);
-        let unchanged = std::fs::read_to_string(&path).is_ok_and(|old| old == text);
-        if !unchanged {
-            let dir = path.parent().expect("an asset path has a folder");
-            std::fs::create_dir_all(dir)
-                .unwrap_or_else(|err| panic!("bake-constructions: {}: {err}", dir.display()));
-            std::fs::write(&path, &text)
-                .unwrap_or_else(|err| panic!("bake-constructions: {}: {err}", path.display()));
-        }
         let asset = &baked.asset;
         let volume: f64 = asset.chunks.iter().map(|c| f64::from(c.volume_m3)).sum();
         let mass: f64 = asset.chunks.iter().map(|c| f64::from(c.mass_kg)).sum();
@@ -39,7 +31,7 @@ fn main() {
             asset.anchors.len(),
             baked.cuts.joints,
             baked.cuts.cracks,
-            text.len(),
+            bytes,
             if unchanged { " (unchanged)" } else { "" },
         );
     }

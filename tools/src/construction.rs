@@ -282,6 +282,37 @@ pub fn admitted(asset: &ConstructionAsset, spec: &str) -> Result<String, String>
     Ok(text)
 }
 
+/// One admitted bake written under the caller's output root.
+pub struct Written {
+    pub baked: Baked,
+    pub bytes: usize,
+    pub unchanged: bool,
+}
+
+/// Bake, admit the serialized output through the game's gate, then write changed bytes only.
+/// Admission precedes every filesystem mutation, so a refused spec creates no output directory.
+pub fn bake_to(root: &Path, spec: &Spec) -> Result<Written, String> {
+    let baked = bake(&spec.construction, schema::substance_density)
+        .map_err(|err| format!("{}: {err}", spec.path))?;
+    let text = admitted(&baked.asset, &spec.path)?;
+    let path = asset_path(root, &spec.construction.id);
+    let unchanged = match std::fs::read_to_string(&path) {
+        Ok(old) => old == text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(format!("{}: {err}", path.display())),
+    };
+    if !unchanged {
+        let dir = path.parent().expect("an asset path has a folder");
+        std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+        std::fs::write(&path, &text).map_err(|err| format!("{}: {err}", path.display()))?;
+    }
+    Ok(Written {
+        baked,
+        bytes: text.len(),
+        unchanged,
+    })
+}
+
 /// Where the game reads construction `id` from, under the repository root.
 pub fn asset_path(root: &Path, id: &str) -> PathBuf {
     root.join("assets/constructions")

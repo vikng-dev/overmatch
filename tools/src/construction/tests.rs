@@ -877,6 +877,44 @@ fn a_hull_that_collapses_in_f32_is_refused_before_it_is_written() {
     );
 }
 
+/// The production bake entry point must refuse a game-invalid hull before creating any output.
+/// Removing its admission call writes this f64-valid, f32-collapsed fixture and fails both checks.
+#[test]
+fn the_bake_entry_refuses_before_creating_output() {
+    let far = DVec3::new(1.0e8, 0.0, 0.0); // Fixture: f32 spacing exceeds the cube's side.
+    let cube = box_piece(
+        "cube",
+        "fixture",
+        "Brick",
+        "Upright",
+        far,
+        far + DVec3::ONE,
+        "Whole",
+    );
+    let spec = Spec {
+        path: "tools/constructions/fixture.pieces.ron".into(),
+        construction: ConstructionSpec::from_ron(&construction(&[cube], "")).unwrap(),
+    };
+    let root = std::env::temp_dir().join(format!("overmatch-bake-refusal-{}", std::process::id()));
+    assert!(!root.exists(), "the fixture output root must start absent");
+    let result = bake_to(&root, &spec);
+    let created = root.exists();
+    if created {
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    assert!(
+        !created,
+        "a refused bake created its output root or artifacts"
+    );
+    let err = result
+        .err()
+        .expect("the game's load gate refuses the rounded hull");
+    assert!(
+        err.contains(&spec.path) && err.contains("chunks[0].hull") && err.contains("rebake"),
+        "{err}"
+    );
+}
+
 /// Idle joins and unknown attachment kinds are refused before play. FIXTURE DATA supplies the
 /// intentionally absent sill-to-roof pair; shipped houses need not have that topology.
 #[test]
