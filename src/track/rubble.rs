@@ -82,6 +82,7 @@ use bevy::ecs::query::{QueryData, QueryFilter};
 use bevy::ecs::system::SystemParam;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
+use bevy::tasks::{ComputeTaskPool, ParallelSlice, TaskPool};
 
 use super::terrain::FieldSurface;
 use crate::Layer;
@@ -471,24 +472,86 @@ impl RubbleBodies<'_> {
         near: &[Entity],
         bodies: &Query<D, F>,
     ) -> Self {
+        Self::gather_on_pool(rubble, near, bodies, ComputeTaskPool::get())
+    }
+
+    fn gather_on_pool<D: QueryData<ReadOnly = PieceReadData>, F: QueryFilter>(
+        rubble: &RubbleQuery,
+        near: &[Entity],
+        bodies: &Query<D, F>,
+        pool: &TaskPool,
+    ) -> Self {
+        // Bevy's slice map returns chunks in input order, independently of worker completion.
+        let prepared = near.par_splat_map(pool, None, |_, colliders| {
+            colliders
+                .iter()
+                .map(|&collider| {
+                    let body = rubble.body_of(collider);
+                    // A collider without a rigid body is fixed construction in Avian.
+                    let kind = rubble
+                        .rigid_bodies
+                        .get(body)
+                        .copied()
+                        .unwrap_or(RigidBody::Static);
+                    let motion = if kind.is_kinematic() {
+                        let (forces, _, _, _, com, _) = bodies.get(body).expect(
+                            "an admitted kinematic support body carries Avian pose and velocity state",
+                        );
+                        Some(SurfaceMotion {
+                            com: forces.position().0 + forces.rotation().0 * com.0,
+                            linear: forces.linear_velocity(),
+                            angular: forces.angular_velocity(),
+                        })
+                    } else {
+                        None
+                    };
+                    let (shape, position, rotation, aabb) = rubble
+                        .shapes
+                        .get(collider)
+                        .expect("a collider the spatial query returned carries its shape and pose");
+                    (
+                        Surface {
+                            collider,
+                            owner: body,
+                            shape: shape.clone(),
+                            position: position.0,
+                            rotation: rotation.0,
+                            aabb: *aabb,
+                            triangles: Surface::triangles(shape, position.0, rotation.0),
+                            body: None,
+                            friction: rubble.friction(collider),
+                            structure: rubble.structures.contains(body).then_some(body),
+                            motion,
+                        },
+                        kind.is_dynamic(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
         let mut out = Self::default();
-        for &collider in near {
-            let body = rubble.body_of(collider);
-            // A collider without a rigid body is fixed construction in Avian.
-            let kind = rubble
-                .rigid_bodies
-                .get(body)
-                .copied()
-                .unwrap_or(RigidBody::Static);
-            let dynamic = kind.is_dynamic();
-            let mut slot = out.bodies.iter().position(|b| b.entity == body);
-            if slot.is_none() && dynamic {
+        let mut owners = Vec::new();
+        let mut slots = HashMap::<Entity, usize>::default();
+        // Collider indices and shared body slots follow gather order, never task assignment.
+        for (mut surface, dynamic) in prepared.into_iter().flatten() {
+            if dynamic {
+                surface.body = Some(*slots.entry(surface.owner).or_insert_with(|| {
+                    let slot = owners.len();
+                    owners.push(surface.owner);
+                    slot
+                }));
+            }
+            let index = out.surfaces.len();
+            out.by_collider.to_mut().insert(surface.collider, index);
+            out.surfaces.to_mut().push(surface);
+            out.active.push(index);
+        }
+        let prepared_bodies = owners.par_splat_map(pool, None, |_, owners| {
+            owners.iter().map(|&body| {
                 let (forces, _, mass, inertia, com, locked) = bodies.get(body).expect(
                     "an admitted dynamic support body carries Avian force state its caller can read",
                 );
                 let rotation = forces.rotation().0;
-                // Avian uses this constructor to prepare solver inertia; it applies the same
-                // axis locks as Forces::apply_linear_impulse_at_point.
+                // Avian's solver constructor applies the same axis locks as point impulses.
                 let inertia = SolverBodyInertia::new(
                     mass.inverse(),
                     inertia.rotated(rotation).inverse(),
@@ -496,49 +559,21 @@ impl RubbleBodies<'_> {
                     0,
                     true,
                 );
-                out.bodies.to_mut().push(PieceBody {
+                PieceBody {
                     entity: body,
                     com: forces.position().0 + rotation * com.0,
                     inv_mass: inertia.effective_inv_mass(),
                     inv_inertia: inertia.effective_inv_angular_inertia().to_mat3(),
                     linear: forces.linear_velocity(),
                     angular: forces.angular_velocity(),
-                });
-                slot = Some(out.bodies.len() - 1);
-            }
-            let motion = if kind.is_kinematic() {
-                let (forces, _, _, _, com, _) = bodies.get(body).expect(
-                    "an admitted kinematic support body carries Avian pose and velocity state",
-                );
-                Some(SurfaceMotion {
-                    com: forces.position().0 + forces.rotation().0 * com.0,
-                    linear: forces.linear_velocity(),
-                    angular: forces.angular_velocity(),
-                })
-            } else {
-                None
-            };
-            let (shape, position, rotation, aabb) = rubble
-                .shapes
-                .get(collider)
-                .expect("a collider the spatial query returned carries its shape and pose");
-            out.surfaces.to_mut().push(Surface {
-                collider,
-                owner: body,
-                shape: shape.clone(),
-                position: position.0,
-                rotation: rotation.0,
-                aabb: *aabb,
-                triangles: Surface::triangles(shape, position.0, rotation.0),
-                body: slot,
-                friction: rubble.friction(collider),
-                structure: rubble.structures.contains(body).then_some(body),
-                motion,
-            });
-            let index = out.surfaces.len() - 1;
-            out.by_collider.to_mut().insert(collider, index);
-            out.active.push(index);
-        }
+                }
+            }).collect::<Vec<_>>()
+        });
+        out.bodies = prepared_bodies
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .into();
         out
     }
 
@@ -1170,6 +1205,77 @@ mod tests {
             ))
             .id();
         (root, chunk)
+    }
+
+    /// Driving and reaction commit require the same geometry, motion and shared body slots
+    /// under any worker assignment. Fixture: separate boxes, a compound dynamic body, a
+    /// kinematic surface and fixed construction; pool sizes vary the preparation batches.
+    #[test]
+    fn support_snapshot_is_independent_of_preparation_workers() {
+        use bevy::tasks::TaskPoolBuilder;
+        let mut app = physics();
+        let mut near: Vec<_> = (0..8)
+            .map(|i| piece(&mut app, i as f32 * 3.0, 0.0))
+            .collect();
+        let shared = app
+            .world_mut()
+            .spawn((
+                ChildOf(near[0]),
+                Transform::from_xyz(0.0, 0.5, 0.0),
+                Collider::cuboid(0.2, 0.2, 0.2),
+            ))
+            .id();
+        app.world_mut()
+            .entity_mut(near[0])
+            .insert(LockedAxes::ROTATION_LOCKED);
+        let moving = piece(&mut app, 30.0, 0.0);
+        app.world_mut().entity_mut(moving).insert((
+            RigidBody::Kinematic,
+            LinearVelocity(Vec3::new(0.2, 0.0, 0.3)),
+        ));
+        let (_, fixed) = standing_chunk(&mut app, 40.0, 0.0);
+        // A shared owner's second collider crosses batch boundaries in the fixture order.
+        near.reverse();
+        near.extend([moving, fixed, shared]);
+        app.update();
+        app.update();
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let reference = RubbleBodies::gather(&rubble, &near, &bodies);
+                assert_eq!(reference.bodies.len(), 8, "one state per dynamic owner");
+                assert_eq!(
+                    reference.surface(shared).body,
+                    reference.surface(near[7]).body
+                );
+                assert!(reference.surface(moving).motion.is_some());
+                assert!(reference.surface(fixed).body.is_none());
+                // Fixture worker counts exercise different chunk boundaries and completion orders.
+                for workers in [1, 2, 4] {
+                    let pool = TaskPoolBuilder::new().num_threads(workers).build();
+                    let actual = RubbleBodies::gather_on_pool(&rubble, &near, &bodies, &pool);
+                    assert_eq!(actual.bodies, reference.bodies);
+                    assert_eq!(actual.active, reference.active);
+                    assert_eq!(actual.by_collider, reference.by_collider);
+                    for (a, b) in actual.surfaces.iter().zip(reference.surfaces.iter()) {
+                        assert_eq!(
+                            (a.collider, a.owner, a.body, a.structure),
+                            (b.collider, b.owner, b.body, b.structure),
+                        );
+                        assert_eq!(
+                            (a.position, a.rotation, a.aabb),
+                            (b.position, b.rotation, b.aabb)
+                        );
+                        assert_eq!(a.triangles, b.triangles);
+                        assert_eq!(a.friction, b.friction);
+                        let motion = |m: &SurfaceMotion| (m.com, m.linear, m.angular);
+                        assert_eq!(a.motion.as_ref().map(motion), b.motion.as_ref().map(motion));
+                    }
+                }
+                println!(
+                    "MEASURED identical support snapshots with 1, 2 and 4 preparation workers"
+                );
+            })
+            .unwrap();
     }
 
     /// Flat terrain field, top face at y = 0.
