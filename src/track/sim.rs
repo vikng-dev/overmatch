@@ -864,7 +864,7 @@ fn gather_drive_supports(
     gear: Option<Res<TrackGear>>,
     rubble: RubbleQuery,
     bodies: Query<PieceReadData>,
-    tanks: Query<(Entity, &Position, &RigidBody), With<Tank>>,
+    tanks: Query<(Entity, Option<&Position>, &RigidBody), With<Tank>>,
     mut supports: ResMut<DriveSupports>,
     mut gathered: Local<Parallel<Vec<(BeltSource, Vec<Entity>)>>>,
 ) {
@@ -873,6 +873,9 @@ fn gather_drive_supports(
         if *body != RigidBody::Dynamic {
             return;
         }
+        let position = position.expect(
+            "a dynamic tank carries its complete spawn-built driving state, including Position",
+        );
         let gear = gear
             .as_deref()
             .expect("a dynamic tank is admitted only after startup constructs TrackGear");
@@ -2995,7 +2998,7 @@ mod tests {
     #[should_panic(expected = "a dynamic tank carries its complete spawn-built driving state")]
     fn an_incomplete_dynamic_drive_bundle_is_a_bug_instead_of_a_skipped_tank() {
         let (mut app, roots) = support_fixture(false, false, true, 0.0);
-        app.world_mut().entity_mut(roots[0]).remove::<TrackDrive>();
+        app.world_mut().entity_mut(roots[0]).remove::<Position>();
         run_adapter(&mut app, &[(roots[0], Vec3::ZERO)]);
     }
 }
