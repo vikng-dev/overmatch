@@ -453,8 +453,8 @@ impl Polyhedron {
     /// The certificate every baked cell meets, naming the first breach: every corner and plane
     /// finite (a NaN passes every ordered test below, so it is refused first); at least four
     /// faces, each of three corners or more, a unit normal, positive area and its corners on its
-    /// plane; closed (each directed edge once, its reverse once); one shell (every face reaches
-    /// every other across edges, so no second surface over the same corners doubles the volume);
+    /// plane; distinct geometric corners and simple convex faces; closed (each directed edge
+    /// once, its reverse once); one shell (every face reaches every other across edges);
     /// convex (every corner on or inside every face's plane); positive volume. Plane tolerance
     /// `tolerance` m.
     pub fn certify(&self, tolerance: f64) -> Result<(), String> {
@@ -470,6 +470,16 @@ impl Polyhedron {
         }
         if self.faces.len() < 4 {
             return Err(format!("{} faces bound no solid", self.faces.len()));
+        }
+        for (i, &p) in self.corners.iter().enumerate() {
+            if let Some(j) = self.corners[..i]
+                .iter()
+                .position(|&q| p.distance(q) <= WELD_M)
+            {
+                return Err(format!(
+                    "corners {j} and {i} coincide: use one corner per position"
+                ));
+            }
         }
         let mut edges: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         let mut owner: BTreeMap<(usize, usize), usize> = BTreeMap::new();
@@ -493,6 +503,21 @@ impl Polyhedron {
                 }
             }
             for k in 0..ring.len() {
+                if ring[..k].contains(&ring[k]) {
+                    return Err(format!(
+                        "face {f} repeats corner {}: not a simple polygon",
+                        ring[k]
+                    ));
+                }
+                let p = face.corners[k];
+                let edge_vector = face.corners[(k + 1) % ring.len()] - p;
+                if face.corners.iter().any(|&q| {
+                    edge_vector.cross(q - p).dot(face.normal) < -tolerance * edge_vector.length()
+                }) {
+                    return Err(format!(
+                        "face {f} crosses an edge's interior half-plane: not convex"
+                    ));
+                }
                 let edge = (ring[k], ring[(k + 1) % ring.len()]);
                 *edges.entry(edge).or_default() += 1;
                 owner.insert(edge, f);
@@ -847,7 +872,7 @@ pub(crate) mod tests {
     /// TWO SHELLS ARE NOT ONE SOLID: a cube's corners and faces repeated under fresh indices close
     /// every edge on its own copy and pass every per-face test, yet their moments sum to twice the
     /// volume, so the writer would bake twice the mass. Mutant: a certificate that checks edges
-    /// pairwise but not that one shell holds every face passes it. Fixture data: the unit cube.
+    /// pairwise without geometric uniqueness passes it. Fixture data: the unit cube.
     #[test]
     fn the_certificate_refuses_coincident_shells() {
         let cube = cuboid(DVec3::ZERO, DVec3::ONE);
@@ -863,6 +888,34 @@ pub(crate) mod tests {
             "the mass it would bake"
         );
         let err = doubled.certify(1e-9).unwrap_err();
-        assert!(err.contains("second shell"), "{err}");
+        assert!(err.contains("coincide"), "{err}");
+    }
+    /// The writer needs one surface, even when an edge walk connects two coincident cubes.
+    /// Fixture: replacing their far caps with a ring preserves edge pairing and doubles the
+    /// analytic unit-cube volume. Connectivity alone must not certify that mass.
+    #[test]
+    fn the_certificate_refuses_connected_coincident_shells() {
+        let cube = cuboid(DVec3::ZERO, DVec3::ONE);
+        let mut corners = cube.corners.clone();
+        corners.extend_from_slice(&cube.corners);
+        let mut faces: Vec<Vec<usize>> = cube
+            .faces
+            .iter()
+            .skip(1)
+            .map(|face| face.corners.clone())
+            .collect();
+        faces.extend(
+            cube.faces
+                .iter()
+                .skip(1)
+                .map(|face| face.corners.iter().map(|i| i + 8).collect()),
+        );
+        faces.push(vec![4, 5, 6, 7, 4, 12, 13, 14, 15, 12]);
+        let doubled = Polyhedron::from_faces(corners, faces);
+        assert!((doubled.volume() - 2.0).abs() < 1e-12);
+        assert!(
+            doubled.certify(1e-9).is_err(),
+            "a unit hull cannot certify twice its volume"
+        );
     }
 }
