@@ -1,8 +1,14 @@
 // The tree species table (slice contract §3). Every tree asset names one of these keys; the
 // generator draws a tree's height and breast-height diameter from the ranges and builds its look
-// from the view parameters. The sim reads no value of a row here: the shared substance and HP
-// pools and each species' structural facts (grain, green density, root plate) live in
-// `assets/trees/wood.ron`.
+// from the view parameters. The segment tree runtime (`src/trees.rs`) reads no value of a row
+// here: its substance, HP pools and structural facts live in `assets/trees/wood.ron`.
+//
+// `trunk` is what the prop build writes a tree's construction from
+// (`tools/buildings/<id>.construction.ron`, `scripts/prop/plan.py`'s `construction_ron`): the
+// trunk's `material`, a key of `assets/materials/materials.ron` holding the species' green-wood
+// facts; its `anchor`, the `RootPlate` kind of `assets/materials/attachments.ron` holding it to the
+// ground; and its `cells`, the common cutter's grain-stretched cut (`size_m` across the grain,
+// `stretch` along it over across), each a look and never a strength.
 //
 // `height_m` and `dbh_m` are MATURE STAND ranges for the game's forest, metres. Sources are read
 // 2026-10-26. A range carried as the source's typical range is MEASURED from the source text; a
@@ -23,6 +29,14 @@
         crown_base_frac: 0.22,
         crown_width_frac: 0.11,
         whorl_spacing_m: 0.6,
+        trunk: Trunk(
+            material: "GreenNorwaySpruce",
+            anchor: "norway_spruce_root_plate",
+            cells: (
+                size_m: (0.15, Taste("how a broken trunk looks: shards about a hand and a half across the grain")),
+                stretch: (8.0, Taste("how a broken trunk looks: splinters about eight times longer along the grain than across it")),
+            ),
+        ),
     ),
     "scots_pine": Species(
         // Wikipedia "Scots pine": "Modern trees can grow up to 35 metres (115 feet) in height ...
@@ -34,6 +48,14 @@
         crown_base_frac: 0.55,
         crown_width_frac: 0.14,
         whorl_spacing_m: 0.9,
+        trunk: Trunk(
+            material: "GreenScotsPine",
+            anchor: "scots_pine_root_plate",
+            cells: (
+                size_m: (0.15, Taste("how a broken trunk looks: shards about a hand and a half across the grain")),
+                stretch: (8.0, Taste("how a broken trunk looks: splinters about eight times longer along the grain than across it")),
+            ),
+        ),
     ),
     "silver_birch": Species(
         // Wikipedia "Betula pendula": "typically reaches 15 to 25 m (49 to 82 ft) tall,
@@ -46,5 +68,13 @@
         crown_base_frac: 0.35,
         crown_width_frac: 0.16,
         whorl_spacing_m: 0.7,
+        trunk: Trunk(
+            material: "GreenSilverBirch",
+            anchor: "silver_birch_root_plate",
+            cells: (
+                size_m: (0.15, Taste("how a broken trunk looks: shards about a hand and a half across the grain")),
+                stretch: (8.0, Taste("how a broken trunk looks: splinters about eight times longer along the grain than across it")),
+            ),
+        ),
     ),
 }

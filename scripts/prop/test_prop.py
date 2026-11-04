@@ -39,12 +39,15 @@ BLENDER = toolchain.blender()
 #: The species the slice contract (§3) names; the table may hold more.
 CONTRACT_SPECIES = {"norway_spruce", "scots_pine", "silver_birch"}
 
-#: Every field a species row holds: its generation ranges and its look. No damage value is keyed by
-#: species — a tree's substance, HP pool and ram threshold are the wood row's
-#: (`assets/trees/wood.ron`) — so a row carrying one more field is a damage value the sim would
-#: silently ignore.
+#: Every field a species row holds: its generation ranges, its look and its trunk's construction
+#: keys. No damage value is keyed by species — a trunk's facts are its material row's, its HP pool
+#: and ram threshold the wood row's (`assets/trees/wood.ron`) — so a row carrying one more field is
+#: a damage value the sim would silently ignore.
 SPECIES_FIELDS = {"__struct__", "height_m", "dbh_m", "crown_base_frac", "crown_width_frac",
-                  "whorl_spacing_m"}
+                  "whorl_spacing_m", "trunk"}
+
+WOOD = os.path.join(ROOT, "assets", "trees", "wood.ron")
+MATERIALS = os.path.join(ROOT, "assets", "materials", "materials.ron")
 
 #: How far the DBH read off the taper at 1.3 m may sit from the sampled one, metres. DERIVED from
 #: two sources of error: each ring radius is written to four decimals (at most 0.1 mm on a
@@ -55,14 +58,16 @@ DBH_TOL_M = 2.5e-4
 
 
 def tracked() -> types.SimpleNamespace:
-    """The tracked fir_1 trio, parsed and raw."""
+    """The tracked fir_1 trio and its construction, parsed and raw."""
     view_blob = build.read(FIR + ".glb")
     ron_blob = build.read(FIR + ".tree.ron")
+    spec_blob = build.read(build.construction_path(ROOT, "fir_1"))
     js, binary = build.parse_glb(view_blob)
     with open(FIR + ".lod.json", encoding="utf-8") as handle:
         cert = json.load(handle)
     return types.SimpleNamespace(js=js, binary=binary, view=view_blob, ron=ron_blob,
-                                 tree=ron.parse(ron_blob.decode("utf-8")), cert=cert)
+                                 spec=spec_blob, tree=ron.parse(ron_blob.decode("utf-8")),
+                                 cert=cert)
 
 
 def node(js, name):
@@ -137,6 +142,22 @@ class SpeciesTable(unittest.TestCase):
             self.assertGreater(row["whorl_spacing_m"], 0.0, key)
             self.assertEqual(build.species_failures(key, row), [])
 
+    def test_a_trunk_s_material_holds_the_facts_the_segment_runtime_reads(self):
+        """The segment tree runtime reads its species' green-wood facts and root plate from
+        `wood.ron`, the construction from the species row's material row and anchor: while both
+        are shipped, one tree must be the same wood to both, value for value."""
+        table, wood = ron.load(TABLE), ron.load(WOOD)["structure"]
+        substances = ron.load(MATERIALS)["substances"]
+        for key, row in table.items():
+            trunk, facts = row["trunk"], wood[key]
+            bulk = substances[trunk["material"]]["bulk"].args[0]
+            self.assertEqual(trunk["anchor"], facts["anchor"], key)
+            for theirs, ours in (("fresh_density_kg_per_m3", bulk["density"]),
+                                 ("along_grain_rupture_pa", bulk["tensile"].args[0]),
+                                 ("along_grain_fracture_j_per_m2",
+                                  bulk["fracture_energy"].args[0])):
+                self.assertEqual(facts[theirs], ours, (key, theirs))
+
 
 # ── the plan ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -181,6 +202,28 @@ class Plan(unittest.TestCase):
                 worst = max(worst, error)
         self.assertGreater(worst, 0.0, "the taper is a chord: some seed must miss by a little")
 
+    def test_the_envelope_is_the_hull_of_the_rings(self):
+        """The construction's piece is one convex solid around every ring of the view: its chain
+        keeps the base and the tip, turns strictly inward at every kept ring (no two side faces
+        coplanar), and no ring stands more than `PROFILE_M` outside it. A chain that kept a ring
+        under its neighbours' chord would author a concave piece the bake refuses; one that
+        dropped a ring farther above it would cut the view's trunk."""
+        table = ron.load(TABLE)
+        for key, row in table.items():
+            for seed in range(200):
+                sampled = plan.sample(row, seed)
+                rings = plan.boundaries(plan.segments(sampled["height_m"], sampled["dbh_m"]))
+                kept = plan.envelope(rings)
+                self.assertEqual((kept[0], kept[-1]), (0, len(rings) - 1), (key, seed))
+                chain = [rings[i] for i in kept]
+                for (z0, r0), (z1, r1), (z2, r2) in zip(chain, chain[1:], chain[2:]):
+                    self.assertLess((z1 - z0) * (r2 - r0) - (r1 - r0) * (z2 - z0), 0.0)
+                for z, r in rings:
+                    (za, ra), (zb, rb) = next((a, b) for a, b in zip(chain, chain[1:])
+                                              if a[0] <= z <= b[0])
+                    self.assertLessEqual(
+                        r, ra + (rb - ra) * (z - za) / (zb - za) + plan.PROFILE_M + 1e-12)
+
 
 # ── the tracked trio ─────────────────────────────────────────────────────────────────────────────
 
@@ -224,18 +267,27 @@ class TrackedTrio(unittest.TestCase):
 
     def test_fir_1_geometry_is_the_ron_s(self):
         """The stored vertices, not the node offsets: rings, caps and shared loops are read out
-        of the BIN chunk against the ron's dimensions."""
+        of the BIN chunk against the ron's dimensions, the base ring a polygon at its radius."""
         trio = tracked()
         self.assertEqual(build.geometry_failures(trio.js, trio.binary, trio.tree), [])
         bottom = [p for p in positions_of(trio.js, trio.binary, "trunk_00") if abs(p[1]) < 1e-6]
-        self.assertEqual(len(bottom), 12)
-        self.assertAlmostEqual(max(math.hypot(x, z) for x, _, z in bottom),
-                               trio.tree["segments"][0]["r_bottom_m"], places=4)
+        self.assertGreaterEqual(build.ring_sides(trio.js, trio.binary), 3)
+        for x, _, z in bottom:
+            self.assertAlmostEqual(math.hypot(x, z), trio.tree["segments"][0]["r_bottom_m"],
+                                   places=4)
 
     def test_fir_1_certificate_is_coherent_and_lod0_only(self):
         trio = tracked()
-        self.assertEqual(build.coherence(trio.cert, trio.view, trio.ron), [])
+        self.assertEqual(build.coherence(trio.cert, trio.view, trio.ron, trio.spec), [])
         self.assertEqual(trio.cert["chains"], {})
+
+    def test_fir_1_construction_is_its_view_s_and_current(self):
+        """The tracked construction is what the tracked tree, its species row and its view give,
+        and its piece is the view's trunk: every corner a view vertex, every view vertex inside."""
+        trio = tracked()
+        self.assertEqual(build.stale_failures(trio.view, FIR + ".tree.ron", TABLE, "fir_1",
+                                              trio.spec), [])
+        self.assertEqual(build.identity_failures(trio.spec.decode(), trio.js, trio.binary), [])
 
 
 # ── mutants: the node contract ───────────────────────────────────────────────────────────────────
@@ -381,15 +433,17 @@ class RonMutants(unittest.TestCase):
         self.tree["segments"].append(dict(self.tree["segments"][-1]))
         self.assertNamed("trunk node")
 
-    def test_more_segments_than_the_wire_word_holds_are_refused(self):
-        last = self.tree["segments"][-1]
-        while len(self.tree["segments"]) <= build.MAX_SEGMENTS:
-            self.tree["segments"].append(dict(last))
-        self.assertNamed("256 segments", "A3")
-
     def test_a_species_that_is_no_species_row_is_refused(self):
         self.table[self.tree["species"]]["__struct__"] = "Wood"
         self.assertNamed("is not a Species row")
+
+    def test_a_species_without_a_trunk_is_refused(self):
+        del self.table[self.tree["species"]]["trunk"]
+        self.assertNamed("has no Trunk")
+
+    def test_a_cell_size_without_its_job_is_refused(self):
+        self.table[self.tree["species"]]["trunk"]["cells"]["size_m"] = 0.15
+        self.assertNamed("trunk cells size_m")
 
     def test_a_document_that_is_no_tree_asset_is_refused(self):
         self.tree["__struct__"] = "TankSpec"
@@ -513,7 +567,8 @@ class GeometryMutants(unittest.TestCase):
         self.assertNamed("cap_bottom 4 is not flat")
 
     def test_a_cap_facing_the_wrong_way_is_refused(self):
-        for vertex in range(13):
+        primitive = self.js["meshes"][node(self.js, "cap_top_01")["mesh"]]["primitives"][0]
+        for vertex in range(self.js["accessors"][primitive["attributes"]["NORMAL"]]["count"]):
             self.binary = rewritten(self.js, self.binary, "cap_top_01", "NORMAL", vertex,
                                     (0.0, -1.0, 0.0))
         self.assertNamed("cap_top 1 does not face +Y")
@@ -613,38 +668,92 @@ class ContainerMutants(unittest.TestCase):
 class CertificateMutants(unittest.TestCase):
     def setUp(self):
         trio = tracked()
-        self.view, self.ron, self.cert = trio.view, trio.ron, trio.cert
+        self.view, self.ron, self.spec, self.cert = trio.view, trio.ron, trio.spec, trio.cert
+
+    def coherence(self, cert, view=None, ron_blob=None, spec=None):
+        return build.coherence(cert, view or self.view, ron_blob or self.ron, spec or self.spec)
 
     def test_an_edited_hash_is_incoherent(self):
         cert = dict(self.cert, view_glb_sha="0" * 64)
-        self.assertTrue(any("incoherent" in f for f in build.coherence(cert, self.view, self.ron)))
+        self.assertTrue(any("incoherent" in f for f in self.coherence(cert)))
 
-    def test_a_fifth_field_or_a_chain_is_refused(self):
+    def test_an_extra_field_or_a_chain_is_refused(self):
         cert = dict(self.cert, note="lod0")
-        self.assertTrue(any("four fields" in f for f in build.coherence(cert, self.view, self.ron)))
+        self.assertTrue(any("not one of its" in f for f in self.coherence(cert)))
         cert = dict(self.cert, chains={"trunk_00#0": {"radius_m": 1.0, "rungs": []}})
-        self.assertTrue(any("nothing measured" in f
-                            for f in build.coherence(cert, self.view, self.ron)))
+        self.assertTrue(any("nothing measured" in f for f in self.coherence(cert)))
 
     def test_a_changed_ron_is_incoherent(self):
-        self.assertTrue(any("tree ron" in f
-                            for f in build.coherence(self.cert, self.view, self.ron + b"\n")))
+        self.assertTrue(any("tree ron" in f for f in self.coherence(self.cert,
+                                                                    ron_blob=self.ron + b"\n")))
+
+    def test_a_stale_construction_certificate_is_incoherent(self):
+        """A construction rewritten after the certificate was cut: the certificate no longer
+        names the bytes the bake reads."""
+        failures = self.coherence(self.cert, spec=self.spec + b"\n")
+        self.assertTrue(any("construction_sha" in f and "incoherent" in f for f in failures),
+                        failures)
 
     def test_a_missing_field_is_refused(self):
-        cert = {k: v for k, v in self.cert.items() if k != "sim_ron_sha"}
-        self.assertTrue(any("has no sim_ron_sha" in f
-                            for f in build.coherence(cert, self.view, self.ron)))
+        for field in ("sim_ron_sha", "construction_sha"):
+            cert = {k: v for k, v in self.cert.items() if k != field}
+            self.assertTrue(any("has no " + field in f for f in self.coherence(cert)), field)
 
     def test_a_mesh_count_the_glb_does_not_hold_is_refused(self):
         cert = dict(self.cert, mesh_count=self.cert["mesh_count"] + 1)
-        self.assertTrue(any("mesh_count is" in f
-                            for f in build.coherence(cert, self.view, self.ron)))
+        self.assertTrue(any("mesh_count is" in f for f in self.coherence(cert)))
 
     def test_an_unreadable_glb_is_named(self):
         view = self.view[:-4]
         cert = dict(self.cert, view_glb_sha=build.sha256_bytes(view))
-        self.assertTrue(any("cannot be read" in f
-                            for f in build.coherence(cert, view, self.ron)))
+        self.assertTrue(any("cannot be read" in f for f in self.coherence(cert, view=view)))
+
+
+# ── mutants: the construction against its view ──────────────────────────────────────────────────
+
+class ConstructionMutants(unittest.TestCase):
+    """The construction's piece and the view's trunk are one solid; every mutation is sized from
+    the decoded geometry it moves, a hundredth of that ring's radius past the contract's own
+    tolerance, never a fixed length."""
+
+    def setUp(self):
+        trio = tracked()
+        self.js, self.binary, self.view = trio.js, trio.binary, trio.view
+        self.text = trio.spec.decode()
+
+    def test_a_corner_off_the_view_is_refused(self):
+        doc = ron.parse(self.text)
+        x, y, z = doc["pieces"][0]["corners"][0]
+        moved = "({}, {}, {})".format(plan._num(x * 1.01), plan._num(y), plan._num(z * 1.01))
+        original = "({}, {}, {})".format(plan._num(x), plan._num(y), plan._num(z))
+        self.assertIn(original, self.text)
+        failures = build.identity_failures(self.text.replace(original, moved, 1), self.js,
+                                           self.binary)
+        self.assertTrue(any("corner 0" in f and "no vertex" in f for f in failures), failures)
+
+    def test_a_view_vertex_outside_the_piece_is_refused(self):
+        points = positions_of(self.js, self.binary, "trunk_00")
+        x, y, z = points[0]
+        radius = math.hypot(x, z)
+        # Radially out past `PROFILE_M` measured across the 12-gon's side face, whose normal
+        # leans up to half a side's angle off the radius: the cosine of that half-angle.
+        out = (plan.PROFILE_M / math.cos(math.pi / build.ring_sides(self.js, self.binary))
+               + 0.01 * radius)
+        grow = 1.0 + out / radius
+        binary = rewritten(self.js, self.binary, "trunk_00", "POSITION", 0,
+                           (x * grow, y, z * grow))
+        failures = build.identity_failures(self.text, self.js, binary)
+        self.assertTrue(any("outside the construction's piece" in f for f in failures), failures)
+
+    def test_a_construction_the_tree_does_not_give_is_stale(self):
+        """A cell size edited in the tracked construction alone: the species row no longer gives
+        it, so the build names it stale rather than baking what nothing generated."""
+        size = ron.parse(self.text)["pieces"][0]["pattern"].args[0]["size_m"][0]
+        edited = self.text.replace("size_m: ({},".format(plan._num(size)),
+                                   "size_m: ({},".format(plan._num(2.0 * size)), 1)
+        self.assertNotEqual(edited, self.text)
+        self.assertTrue(build.stale_failures(self.view, FIR + ".tree.ron", TABLE, "fir_1",
+                                             edited.encode()))
 
 
 # ── generation, export and the verifier, in Blender ──────────────────────────────────────────────
@@ -715,7 +824,7 @@ class Verifier(unittest.TestCase):
         js, _ = build.parse_glb(view)
         self.assertEqual(build.contract_failures(js, "fir_1"), [])
         build.land(os.path.join(self.work, "fir_1.glb"), view)
-        cert = build.certificate(view, trio.ron, len(js["meshes"]))
+        cert = build.certificate(view, trio.ron, trio.spec, len(js["meshes"]))
         build.land(os.path.join(self.work, "fir_1.lod.json"), build.certificate_bytes(cert))
         with self.assertRaises(build.Refused) as caught:
             self.verify()

@@ -4,7 +4,8 @@
 //! Three steps: a construction's pieces come from its spec ([`spec`]: a house generator's
 //! parameters through [`house`], or convex pieces stated outright), the common cutter cuts each
 //! piece into chunks by the pattern its data names ([`fracture`]), and the contact search finds the
-//! joints between chunks and the chunks the ground holds ([`contact`]). What holds each joint
+//! joints between chunks and the chunks the ground holds ([`contact`]); nothing is written that
+//! [`certify`] refuses. What holds each joint
 //! between two components is the attachment kind the spec's join for their elements' kinds names
 //! ([`spec::Join`]), written by name: the strengths stay in the shared list, which the game reads;
 //! each chunk's mass is its volume times its material row's density. The output is canonical
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 use glam::DVec3;
 use overmatch::buildings::schema::{self, BuildingAsset};
 
+pub mod certify;
 pub mod contact;
 pub mod fracture;
 pub mod geom;
@@ -58,13 +60,35 @@ fn canon3(v: DVec3) -> [f32; 3] {
 
 /// Bake `construction` (module doc), weighing each chunk by `density` (kg/m³) of its piece's
 /// material key: the shipped registry's through [`schema::substance_density`]. Refuses a material
-/// `density` refuses, a chunk that is no closed convex cell, two components' parts touching where
-/// no join says what holds them, and a join no two parts make.
+/// `density` refuses, a cut [`certify`] refuses, two components' parts touching where no join says
+/// what holds them, and a join no two parts make.
 pub fn bake(
     construction: &Construction,
     density: impl Fn(&str) -> Result<f64, String>,
 ) -> Result<Baked, String> {
+    let mut cuts = CutCount::default();
+    let cut = construction
+        .pieces
+        .iter()
+        .map(|piece| fracture::chunks(piece, &construction.id, &mut cuts))
+        .collect();
+    assemble(construction, cut, density, cuts)
+}
+
+/// The building `cut` makes of `construction` (one run of chunks per piece, in order), certified
+/// ([`certify`]): [`bake`] past its cutter.
+fn assemble(
+    construction: &Construction,
+    cut: Vec<Vec<geom::Polyhedron>>,
+    density: impl Fn(&str) -> Result<f64, String>,
+    cuts: CutCount,
+) -> Result<Baked, String> {
     let pieces = &construction.pieces;
+    let densities = pieces
+        .iter()
+        .map(|piece| density(&piece.material).map_err(|err| format!("{}: {err}", piece.name)))
+        .collect::<Result<Vec<f64>, String>>()?;
+    certify::cut(construction, &cut, &densities)?;
     let mut materials: Vec<&str> = pieces.iter().map(|piece| piece.material.as_str()).collect();
     materials.sort_unstable();
     materials.dedup();
@@ -83,22 +107,15 @@ pub fn bake(
             components.push(piece.component.clone());
         }
     }
-    let mut cuts = CutCount::default();
     let mut solids = Vec::new();
     let mut elements = Vec::new();
     let mut chunks = Vec::new();
     let hull = |solid: &geom::Polyhedron| solid.corners.iter().map(|&p| canon3(p)).collect();
-    for (e, piece) in pieces.iter().enumerate() {
+    for (e, (piece, run)) in pieces.iter().zip(&cut).enumerate() {
         let material = index(&piece.material)?;
-        let rho = density(&piece.material).map_err(|err| format!("{}: {err}", piece.name))?;
+        let rho = densities[e];
         let first = u32::try_from(solids.len()).expect("chunk count fits u32");
-        for solid in fracture::chunks(piece, &construction.id, &mut cuts) {
-            solid.certify(PLANE_M).map_err(|err| {
-                format!(
-                    "a chunk of {} is no closed convex cell ({err}); fix its pattern",
-                    piece.name
-                )
-            })?;
+        for solid in run.iter().cloned() {
             let volume = solid.volume();
             chunks.push(schema::Chunk {
                 element: u16::try_from(e).map_err(|_| "more elements than a u16 names")?,
@@ -185,6 +202,7 @@ pub fn bake(
             .collect(),
     };
     asset.check()?;
+    certify::graph(construction, &cut, &asset)?;
     Ok(Baked { asset, cuts })
 }
 
