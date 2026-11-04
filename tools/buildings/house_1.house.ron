@@ -31,14 +31,43 @@ House(
     board_thickness_m: 0.05,
     boards_per_slope: 14,
     gable_overhang_m: 0.3,
-    // What each part is made of (`assets/materials/materials.ron` keys): the walls' masonry unit,
-    // the wall plates and the roof boards.
-    // The intrinsic seams' sourced c (Pa) and G_II (J/m²) live in those materials' bulk rows.
-    // The registry refuses either missing on a breakable material; the punch ring reads
-    // them. The separate attachment kinds below do not inherit a timber's intrinsic seam.
-    materials: (walls: Brick, plates: Wood, roof: Wood),
-    // ASSUMED authoring choice: boards and plates run along the authored Z ridge.
-    surface_frames: (walls: Upright, plates: Grain((0.0, 0.0, 1.0)), roof: Grain((0.0, 0.0, 1.0))),
+    // Each part's matter (an `assets/materials/materials.ron` key), surface frame and cut
+    // (`tools/src/buildings/fracture.rs`): the walls (piers, sills, lintels, gables), the wall
+    // plates and the roof boards. The intrinsic seams' sourced c (Pa) and G_II (J/m²) live in
+    // the materials' bulk rows; the registry refuses either missing on a breakable material, and
+    // the separate attachment kinds below do not inherit a timber's intrinsic seam. A cut's
+    // numbers are looks and resolutions, never strengths.
+    parts: (
+        walls: (
+            material: "Brick",
+            surface_frame: Upright,
+            // Running bond in this house's `course_m` and `module_m`.
+            cut: Courses((
+                row_courses: (3, Resolution("chunk rows three courses tall: about a hand's
+                    height of brick per chunk, the size a breach reads at")),
+                crack_chance: (0.2, Taste("masonry break edges: one cut in five leaves its head
+                    joint for a crack through the bricks")),
+                crack_shift_m: (0.09, Taste("masonry break edges: how far a crack's ends wander
+                    off their joint")),
+                min_width_m: (0.08, Resolution("no chunk narrower than about a third of a brick
+                    at a row's top or bottom: no sliver hulls")),
+            )),
+        ),
+        plates: (
+            material: "Wood",
+            // ASSUMED authoring choice: plates run along the authored Z ridge.
+            surface_frame: Grain((0.0, 0.0, 1.0)),
+            cut: Boards(((1.2, 2.0), Taste("timber break lengths: plate pieces 1.2 to 2 m along
+                the grain"))),
+        ),
+        roof: (
+            material: "Wood",
+            // ASSUMED authoring choice: boards run along the authored Z ridge.
+            surface_frame: Grain((0.0, 0.0, 1.0)),
+            cut: Boards(((0.9, 1.6), Taste("timber break lengths: board pieces 0.9 to 1.6 m along
+                the grain"))),
+        ),
+    ),
     // Openings per wall, `u` along the wall in its own frame (east and west: `u` = −z and +z; north
     // and south: `u` = +x and −x), heights in courses from the foundation. Windows 1.0 m wide from
     // 0.9 m to 2.025 m over the ground point; the door 0.9 m wide from the ground point up.
@@ -75,18 +104,4 @@ House(
         // The roof laid on the gables' rakes, nothing fixing it there.
         (kinds: (Gable, Roof), by: "resting"),
     ],
-    // The fracture bake's cut rule (`tools/src/buildings/fracture.rs`).
-    cuts: (
-        // Chunk rows, in courses: every row boundary is a bed joint.
-        row_courses: 3,
-        // The chance a cut leaves its head joint for a crack through bricks, and how far each end
-        // of that crack may move off the joint.
-        crack_chance: 0.2,
-        crack_shift_m: 0.09,
-        // The narrowest a chunk may be at a row's top or bottom.
-        min_width_m: 0.08,
-        // Timber pieces' lengths along their grain: roof boards, then wall plates.
-        board_piece_m: (0.9, 1.6),
-        plate_piece_m: (1.2, 2.0),
-    ),
 )

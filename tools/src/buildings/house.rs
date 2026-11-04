@@ -1,6 +1,7 @@
-//! The house generator: a [`House`] spec to its elements, the split tree's terminals (CGA's
-//! mass → walls → piers, openings, lintels, sills; Müller et al. 2006). Each element is a right
-//! prism with its material and the rule that will cut it ([`Cutter`]).
+//! The house generator: a [`House`] spec to its [`Construction`], whose pieces are the split
+//! tree's terminals (CGA's mass → walls → piers, openings, lintels, sills; Müller et al. 2006).
+//! Each piece is a right prism carrying its part's material, surface frame and cut; the generator
+//! supplies only each cut's frame: a bond's datum and axes, a roof plane's board layout.
 //!
 //! # The house's frame and parts
 //!
@@ -19,57 +20,10 @@
 
 use glam::{DVec2, DVec3};
 use overmatch::buildings::schema::ElementKind;
-use serde::Deserialize;
 
+use super::fracture::{Across, Boards, Courses, Pattern};
 use super::geom::{Frame, Prism};
-use super::spec::{House, Opening};
-
-/// What an element is made of, as a key of `assets/materials/materials.ron`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
-pub enum Material {
-    Brick,
-    Wood,
-}
-
-impl Material {
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Brick => "Brick",
-            Self::Wood => "Wood",
-        }
-    }
-}
-
-/// How the fracture bake cuts an element ([`super::fracture`]).
-#[derive(Debug, Clone, PartialEq)]
-pub enum Cutter {
-    /// Masonry in running bond: courses `course` tall from the foundation plane `base_y`, head
-    /// joints every `module` from the wall's first `u`, `wall_start`.
-    Masonry {
-        base_y: f64,
-        wall_start: f64,
-        course: f64,
-        module: f64,
-    },
-    /// Timber: optional boards across the profile (`axis · p` in steps of `width`, `count` of
-    /// them), then pieces along the depth, the grain, within `piece` metres.
-    Timber {
-        boards: Option<(DVec2, f64, u32)>,
-        piece: (f64, f64),
-    },
-}
-
-/// One element as the generator lays it out.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ElementPlan {
-    pub name: String,
-    pub kind: ElementKind,
-    /// The component it is part of: its wall, or the timber part it is.
-    pub component: String,
-    pub material: Material,
-    pub prism: Prism,
-    pub cutter: Cutter,
-}
+use super::spec::{Construction, House, Opening, Part, PartCut, Piece};
 
 /// The rectangle `[u0, u1] × [y0, y1]`, counter-clockwise.
 fn rectangle(u0: f64, u1: f64, y0: f64, y1: f64) -> Vec<DVec2> {
@@ -91,10 +45,64 @@ struct Wall {
     gable: bool,
 }
 
-/// Every element of `house`, in emission order: the walls (east, west, north, south; along each
-/// wall's `u`, a pier and then each opening's sill and lintel, a gable last), the wall plates, the
-/// roof planes.
-pub fn elements(house: &House) -> Vec<ElementPlan> {
+/// `part`'s cut of an element in `frame`: a bond's datum is the frame's point `datum` (its
+/// component's first `u` and lowest `v`), its axes the frame's `u` and `v`; board pieces run along
+/// the frame's `w`, across `boards` where the element is laid in boards.
+fn pattern(
+    house: &House,
+    part: &Part,
+    frame: Frame,
+    datum: DVec2,
+    boards: Option<Across>,
+) -> Pattern {
+    match &part.cut {
+        PartCut::Whole => Pattern::Whole,
+        PartCut::Courses(rule) => Pattern::Courses(Courses {
+            origin: frame.point(datum, 0.0),
+            along: frame.u,
+            up: frame.v,
+            course_m: house.course_m,
+            module_m: house.module_m,
+            rule: rule.clone(),
+        }),
+        PartCut::Cells(cells) => Pattern::Cells(cells.clone()),
+        PartCut::Boards(range) => Pattern::Boards(Boards {
+            across: boards,
+            along: frame.w(),
+            piece_m: range.0,
+        }),
+    }
+}
+
+/// One element of `part`.
+fn piece(
+    house: &House,
+    part: &Part,
+    (name, kind, component): (String, ElementKind, String),
+    prism: &Prism,
+    datum: DVec2,
+    boards: Option<Across>,
+) -> Piece {
+    Piece {
+        name,
+        kind,
+        component,
+        material: part.material.clone(),
+        surface_frame: part.surface_frame,
+        solid: prism.solid(),
+        pattern: pattern(house, part, prism.frame, datum, boards),
+    }
+}
+
+/// The lowest `(u, v)` of `profile`: a lone element's datum.
+fn lowest(profile: &[DVec2]) -> DVec2 {
+    profile.iter().fold(DVec2::INFINITY, |lo, &p| lo.min(p))
+}
+
+/// `house` as a construction. Its pieces in emission order: the walls (east, west, north, south;
+/// along each wall's `u`, a pier and then each opening's sill and lintel, a gable last), the wall
+/// plates, the roof planes.
+pub fn construction(house: &House) -> Construction {
     let h = house.course_m;
     let base_y = -f64::from(house.foundation_courses) * h;
     let course_y = |k: u32| base_y + f64::from(k) * h;
@@ -145,7 +153,7 @@ pub fn elements(house: &House) -> Vec<ElementPlan> {
             (half_l - t, half_l),
         ),
     ];
-    let mut plans = Vec::new();
+    let mut pieces = Vec::new();
     for ((name, frame, u, depth), (_, openings)) in walls.into_iter().zip(house.walls.iter()) {
         let mut openings = openings.to_vec();
         openings.sort_by(|a, b| a.u.0.total_cmp(&b.u.0));
@@ -166,64 +174,84 @@ pub fn elements(house: &House) -> Vec<ElementPlan> {
                 DVec2::new(-inner_w, underside(inner_w)),
             ]
         });
-        wall_elements(&wall, house, base_y, eaves_y, gable, &mut plans);
+        wall_elements(&wall, house, base_y, eaves_y, gable, &mut pieces);
     }
-    let timber = |piece| Cutter::Timber {
-        boards: None,
-        piece,
-    };
     for (name, u) in [("east", DVec3::X), ("west", DVec3::NEG_X)] {
-        plans.push(ElementPlan {
-            name: format!("{name}/plate"),
-            kind: ElementKind::WallPlate,
-            component: format!("{name}/plate"),
-            material: house.materials.plates,
-            prism: Prism {
-                frame: frame(u),
-                profile: vec![
-                    DVec2::new(inner_w, eaves_y),
-                    DVec2::new(half_w, eaves_y),
-                    DVec2::new(half_w, plate_y),
-                    DVec2::new(inner_w, underside(inner_w)),
-                ],
-                near: -half_l,
-                far: half_l,
-            },
-            cutter: timber(house.cuts.plate_piece_m),
-        });
+        let prism = Prism {
+            frame: frame(u),
+            profile: vec![
+                DVec2::new(inner_w, eaves_y),
+                DVec2::new(half_w, eaves_y),
+                DVec2::new(half_w, plate_y),
+                DVec2::new(inner_w, underside(inner_w)),
+            ],
+            near: -half_l,
+            far: half_l,
+        };
+        let names = (
+            format!("{name}/plate"),
+            ElementKind::WallPlate,
+            format!("{name}/plate"),
+        );
+        let datum = lowest(&prism.profile);
+        pieces.push(piece(
+            house,
+            &house.parts.plates,
+            names,
+            &prism,
+            datum,
+            None,
+        ));
     }
     let slab = f64::from(house.boards_per_slope) * house.board_width_m;
     let thick = house.board_thickness_m;
     for (name, side) in [("east", 1.0), ("west", -1.0)] {
-        plans.push(ElementPlan {
-            name: format!("{name}/roof"),
-            kind: ElementKind::Roof,
-            component: format!("{name}/roof"),
-            material: house.materials.roof,
-            prism: Prism {
-                frame: Frame {
-                    origin: DVec3::new(0.0, ridge_y, 0.0),
-                    u: DVec3::new(side * cos, -sin, 0.0),
-                    v: DVec3::new(side * sin, cos, 0.0),
-                },
-                // Down the slope from the ridge line on the underside; the top corner at the ridge
-                // is mitred onto the ridge's vertical plane, `s cos + t sin = 0`.
-                profile: vec![
-                    DVec2::new(0.0, 0.0),
-                    DVec2::new(slab, 0.0),
-                    DVec2::new(slab, thick),
-                    DVec2::new(-thick * slope, thick),
-                ],
-                near: -half_l - house.gable_overhang_m,
-                far: half_l + house.gable_overhang_m,
+        let prism = Prism {
+            frame: Frame {
+                origin: DVec3::new(0.0, ridge_y, 0.0),
+                u: DVec3::new(side * cos, -sin, 0.0),
+                v: DVec3::new(side * sin, cos, 0.0),
             },
-            cutter: Cutter::Timber {
-                boards: Some((DVec2::X, house.board_width_m, house.boards_per_slope)),
-                piece: house.cuts.board_piece_m,
-            },
-        });
+            // Down the slope from the ridge line on the underside; the top corner at the ridge is
+            // mitred onto the ridge's vertical plane, `s cos + t sin = 0`.
+            profile: vec![
+                DVec2::new(0.0, 0.0),
+                DVec2::new(slab, 0.0),
+                DVec2::new(slab, thick),
+                DVec2::new(-thick * slope, thick),
+            ],
+            near: -half_l - house.gable_overhang_m,
+            far: half_l + house.gable_overhang_m,
+        };
+        // The boards lie side by side down the slope, from the ridge line.
+        let boards = Across {
+            normal: prism.frame.u,
+            start: prism.frame.u.dot(prism.frame.origin),
+            width: house.board_width_m,
+            count: house.boards_per_slope,
+        };
+        let names = (
+            format!("{name}/roof"),
+            ElementKind::Roof,
+            format!("{name}/roof"),
+        );
+        let datum = lowest(&prism.profile);
+        pieces.push(piece(
+            house,
+            &house.parts.roof,
+            names,
+            &prism,
+            datum,
+            Some(boards),
+        ));
     }
-    plans
+    Construction {
+        id: house.id.clone(),
+        foundation_y: base_y,
+        foundation_attachment: house.foundation_attachment.clone(),
+        pieces,
+        joins: house.joins.clone(),
+    }
 }
 
 /// One wall's piers, sills and lintels along its `u`, then its gable (`gable`, the pentagon's
@@ -234,41 +262,33 @@ fn wall_elements(
     base_y: f64,
     eaves_y: f64,
     gable: Option<Vec<DVec2>>,
-    plans: &mut Vec<ElementPlan>,
+    pieces: &mut Vec<Piece>,
 ) {
     let course_y = |k: u32| base_y + f64::from(k) * house.course_m;
-    let cutter = Cutter::Masonry {
-        base_y,
-        wall_start: wall.u.0,
-        course: house.course_m,
-        module: house.module_m,
-    };
+    // A wall's piers, sills, lintels and gable are one component, coursed in one bond from the
+    // wall's first `u` on the foundation.
+    let datum = DVec2::new(wall.u.0, base_y);
     let mut push = |kind: ElementKind, index: usize, profile: Vec<DVec2>| {
         let label = match kind {
             ElementKind::Pier => "pier",
             ElementKind::Sill => "sill",
             ElementKind::Lintel => "lintel",
             ElementKind::Gable => "gable",
-            ElementKind::WallPlate | ElementKind::Roof => unreachable!("a wall is masonry"),
+            ElementKind::WallPlate | ElementKind::Roof => unreachable!("a wall lays no {kind:?}"),
         };
-        plans.push(ElementPlan {
-            name: if kind == ElementKind::Gable {
-                format!("{}/{label}", wall.name)
-            } else {
-                format!("{}/{label}_{index}", wall.name)
-            },
-            kind,
-            // A wall's piers, sills, lintels and gable are one masonry wall, coursed in one bond.
-            component: wall.name.to_owned(),
-            material: house.materials.walls,
-            prism: Prism {
-                frame: wall.frame,
-                profile,
-                near: wall.depth.0,
-                far: wall.depth.1,
-            },
-            cutter: cutter.clone(),
-        });
+        let name = if kind == ElementKind::Gable {
+            format!("{}/{label}", wall.name)
+        } else {
+            format!("{}/{label}_{index}", wall.name)
+        };
+        let prism = Prism {
+            frame: wall.frame,
+            profile,
+            near: wall.depth.0,
+            far: wall.depth.1,
+        };
+        let names = (name, kind, wall.name.to_owned());
+        pieces.push(piece(house, &house.parts.walls, names, &prism, datum, None));
     };
     let mut from = wall.u.0;
     for (index, opening) in wall.openings.iter().enumerate() {

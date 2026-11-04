@@ -1,12 +1,13 @@
-//! The building stage of the map compiler: a house spec (`tools/buildings/<id>.house.ron`) to the
-//! building the game spawns (`assets/buildings/<id>/<id>.building.ron`,
-//! [`overmatch::buildings::schema`]).
+//! The building stage of the map compiler: construction data (`tools/buildings/`) to the building
+//! the game spawns (`assets/buildings/<id>/<id>.building.ron`, [`overmatch::buildings::schema`]).
 //!
-//! Three steps: the generator lays out the house's elements ([`house`]), the fracture bake cuts
-//! each into chunks ([`fracture`]), and the contact search finds the joints between chunks and
-//! the chunks the ground holds ([`contact`]); what holds each joint between two components is the
-//! attachment kind the spec's join for their elements' kinds names ([`spec::Join`]), written by
-//! name: the strengths stay in the shared list, which the game reads. The output is canonical
+//! Three steps: a construction's pieces come from its spec ([`spec`]: a house generator's
+//! parameters through [`house`], or convex pieces stated outright), the common cutter cuts each
+//! piece into chunks by the pattern its data names ([`fracture`]), and the contact search finds the
+//! joints between chunks and the chunks the ground holds ([`contact`]). What holds each joint
+//! between two components is the attachment kind the spec's join for their elements' kinds names
+//! ([`spec::Join`]), written by name: the strengths stay in the shared list, which the game reads;
+//! each chunk's mass is its volume times its material row's density. The output is canonical
 //! ([`write`]): every number rounded to a micrometre (or its unit's millionth) and printed by the
 //! same formatter, every list in a fixed order, so two bakes of one spec are the same bytes.
 
@@ -22,14 +23,16 @@ pub mod house;
 pub mod spec;
 
 use fracture::CutCount;
-use house::Material;
-use spec::House;
+use spec::{Construction, ConstructionSpec, House};
 
 /// The specs' folder, under the repository root.
 pub const SPECS_DIR: &str = "tools/buildings";
 
-/// A spec's file suffix.
-pub const SPEC_SUFFIX: &str = ".house.ron";
+/// A house generator's spec's file suffix ([`House`]).
+pub const HOUSE_SUFFIX: &str = ".house.ron";
+
+/// An explicit construction's file suffix ([`ConstructionSpec`]).
+pub const CONSTRUCTION_SUFFIX: &str = ".construction.ron";
 
 /// One bake's output and what its cut rule did.
 pub struct Baked {
@@ -37,9 +40,10 @@ pub struct Baked {
     pub cuts: CutCount,
 }
 
-/// How far a baked cell's corner may sit off its face's plane, m (Resolution: the clip's own weld,
-/// far under the micrometre the writer rounds to).
-const CELL_PLANE_M: f64 = 1.0e-9;
+/// How far a piece's or a chunk's corner may sit off its face's plane, m (Resolution: the writer
+/// rounds every coordinate to a micrometre, so a corner nearer its plane than that is on it in the
+/// written file).
+pub(crate) const PLANE_M: f64 = 1.0e-6;
 
 /// `value` rounded to a millionth of its unit, with `-0.0` made `0.0`, as f32: the canonical
 /// form of every number the bake writes.
@@ -52,28 +56,31 @@ fn canon3(v: DVec3) -> [f32; 3] {
     [canon(v.x), canon(v.y), canon(v.z)]
 }
 
-/// Bake `house` (module doc). Refuses a house whose materials the shipped registry cannot weigh,
-/// two components' parts touching where no join says what holds them, and a join no two parts
-/// make.
-pub fn bake(house: &House) -> Result<Baked, String> {
-    let plans = house::elements(house);
-    let mut materials: Vec<Material> = plans.iter().map(|plan| plan.material).collect();
-    materials.sort();
+/// Bake `construction` (module doc), weighing each chunk by `density` (kg/m³) of its piece's
+/// material key: the shipped registry's through [`schema::substance_density`]. Refuses a material
+/// `density` refuses, a chunk that is no closed convex cell, two components' parts touching where
+/// no join says what holds them, and a join no two parts make.
+pub fn bake(
+    construction: &Construction,
+    density: impl Fn(&str) -> Result<f64, String>,
+) -> Result<Baked, String> {
+    let pieces = &construction.pieces;
+    let mut materials: Vec<&str> = pieces.iter().map(|piece| piece.material.as_str()).collect();
+    materials.sort_unstable();
     materials.dedup();
-    let density = |material: Material| schema::substance_density(material.key());
-    let index = |material: Material| {
+    let index = |material: &str| {
         u8::try_from(
             materials
                 .iter()
                 .position(|&m| m == material)
-                .expect("every plan's material is in the table"),
+                .expect("every piece's material is in the table"),
         )
-        .expect("two materials")
+        .map_err(|_| "more materials than a u8 names")
     };
     let mut components: Vec<String> = Vec::new();
-    for plan in &plans {
-        if !components.contains(&plan.component) {
-            components.push(plan.component.clone());
+    for piece in pieces {
+        if !components.contains(&piece.component) {
+            components.push(piece.component.clone());
         }
     }
     let mut cuts = CutCount::default();
@@ -81,16 +88,15 @@ pub fn bake(house: &House) -> Result<Baked, String> {
     let mut elements = Vec::new();
     let mut chunks = Vec::new();
     let hull = |solid: &geom::Polyhedron| solid.corners.iter().map(|&p| canon3(p)).collect();
-    for (e, plan) in plans.iter().enumerate() {
-        let material = index(plan.material);
-        let rho = density(plan.material)?;
+    for (e, piece) in pieces.iter().enumerate() {
+        let material = index(&piece.material)?;
+        let rho = density(&piece.material).map_err(|err| format!("{}: {err}", piece.name))?;
         let first = u32::try_from(solids.len()).expect("chunk count fits u32");
-        for prism in fracture::chunks(plan, &house.id, &house.cuts, &mut cuts) {
-            let solid = prism.solid();
-            solid.certify(CELL_PLANE_M).map_err(|err| {
+        for solid in fracture::chunks(piece, &construction.id, &mut cuts) {
+            solid.certify(PLANE_M).map_err(|err| {
                 format!(
-                    "a chunk of {} is no closed convex cell ({err}); fix the cut rule",
-                    plan.name
+                    "a chunk of {} is no closed convex cell ({err}); fix its pattern",
+                    piece.name
                 )
             })?;
             let volume = solid.volume();
@@ -105,32 +111,27 @@ pub fn bake(house: &House) -> Result<Baked, String> {
             solids.push(solid);
         }
         elements.push(schema::Element {
-            name: plan.name.clone(),
-            kind: plan.kind,
+            name: piece.name.clone(),
+            kind: piece.kind,
             component: u16::try_from(
                 components
                     .iter()
-                    .position(|c| *c == plan.component)
-                    .expect("every plan's component is in the table"),
+                    .position(|c| *c == piece.component)
+                    .expect("every piece's component is in the table"),
             )
             .map_err(|_| "more components than a u16 names")?,
             material,
-            surface_frame: match plan.kind {
-                schema::ElementKind::Roof => house.surface_frames.roof,
-                schema::ElementKind::WallPlate => house.surface_frames.plates,
-                _ => house.surface_frames.walls,
-            },
-            hull: hull(&plan.prism.solid()),
+            surface_frame: piece.surface_frame,
+            hull: hull(&piece.solid),
             chunks: [
                 first,
                 u32::try_from(solids.len()).expect("chunk count fits u32"),
             ],
         });
     }
-    let foundation_y = -f64::from(house.foundation_courses) * house.course_m;
     let index32 = |k: usize| u32::try_from(k).expect("chunk count fits u32");
-    let attachments = attachment_kinds(house);
-    let mut used = vec![false; house.joins.len()];
+    let attachments = attachment_kinds(construction);
+    let mut used = vec![false; construction.joins.len()];
     let joints = contact::joints(&solids)
         .into_iter()
         .map(|joint| {
@@ -141,9 +142,8 @@ pub fn bake(house: &House) -> Result<Baked, String> {
                 centroid: canon3(joint.centroid),
                 normal: canon3(joint.normal),
                 bond: bond(
-                    house,
+                    construction,
                     &attachments,
-                    &plans,
                     &chunks,
                     (joint.a, joint.b),
                     &mut used,
@@ -154,27 +154,27 @@ pub fn bake(house: &House) -> Result<Baked, String> {
     if let Some(k) = used.iter().position(|used| !used) {
         return Err(format!(
             "the join of {:?} holds no joint: no two parts of those kinds touch",
-            house.joins[k].kinds
+            construction.joins[k].kinds
         ));
     }
     let foundation_attachment = u8::try_from(
         attachments
             .iter()
-            .position(|kind| kind == &house.foundation_attachment)
+            .position(|kind| kind == &construction.foundation_attachment)
             .expect("the table holds the foundation kind"),
     )
     .map_err(|_| "more attachment kinds than a u8 names")?;
     let asset = BuildingAsset {
-        id: house.id.clone(),
+        id: construction.id.clone(),
         format: schema::FORMAT,
-        foundation_y_m: canon(foundation_y),
-        materials: materials.iter().map(|m| m.key().to_owned()).collect(),
+        foundation_y_m: canon(construction.foundation_y),
+        materials: materials.iter().map(|&m| m.to_owned()).collect(),
         attachments,
         components,
         joints,
         elements,
         chunks,
-        anchors: contact::anchors(&solids, foundation_y)
+        anchors: contact::anchors(&solids, construction.foundation_y)
             .into_iter()
             .map(|anchor| schema::Anchor {
                 chunk: index32(anchor.chunk),
@@ -189,33 +189,36 @@ pub fn bake(house: &House) -> Result<Baked, String> {
 }
 
 /// The attachment kinds the joins and foundation name, each once, in name order.
-fn attachment_kinds(house: &House) -> Vec<String> {
-    let mut kinds: Vec<String> = house.joins.iter().map(|join| join.by.clone()).collect();
-    kinds.push(house.foundation_attachment.clone());
+fn attachment_kinds(construction: &Construction) -> Vec<String> {
+    let mut kinds: Vec<String> = construction
+        .joins
+        .iter()
+        .map(|join| join.by.clone())
+        .collect();
+    kinds.push(construction.foundation_attachment.clone());
     kinds.sort();
     kinds.dedup();
     kinds
 }
 
 /// What holds the joint between chunks `a` and `b`: inside one component its seam; between two,
-/// the kind in `attachments` that the house's join for their elements' kinds names
+/// the kind in `attachments` that the construction's join for their elements' kinds names
 /// ([`spec::Join`]), marked in `used` (one flag per join). Refuses a pair of kinds no join holds.
 fn bond(
-    house: &House,
+    construction: &Construction,
     attachments: &[String],
-    plans: &[house::ElementPlan],
     chunks: &[schema::Chunk],
     (a, b): (usize, usize),
     used: &mut [bool],
 ) -> Result<schema::Bond, String> {
     let (pa, pb) = (
-        &plans[usize::from(chunks[a].element)],
-        &plans[usize::from(chunks[b].element)],
+        &construction.pieces[usize::from(chunks[a].element)],
+        &construction.pieces[usize::from(chunks[b].element)],
     );
     if pa.component == pb.component {
         return Ok(schema::Bond::Seam);
     }
-    let k = house
+    let k = construction
         .joins
         .iter()
         .position(|join| join.joins((pa.kind, pb.kind)))
@@ -228,15 +231,16 @@ fn bond(
     used[k] = true;
     let index = attachments
         .iter()
-        .position(|kind| *kind == house.joins[k].by)
+        .position(|kind| *kind == construction.joins[k].by)
         .expect("the table holds every kind a join names");
     Ok(schema::Bond::Attached(
         u8::try_from(index).map_err(|_| "more attachment kinds than a u8 names")?,
     ))
 }
 
-/// The canonical text of `asset`: RON, one element, chunk, joint or anchor per line.
-pub fn write(asset: &BuildingAsset) -> String {
+/// The canonical text of `asset`, baked from the spec file `spec` (under the repository root):
+/// RON, one element, chunk, joint or anchor per line.
+pub fn write(asset: &BuildingAsset, spec: &str) -> String {
     let config = ron::ser::PrettyConfig::new()
         .depth_limit(2)
         .struct_names(true)
@@ -244,9 +248,8 @@ pub fn write(asset: &BuildingAsset) -> String {
         .indentor("    ");
     let body = ron::ser::to_string_pretty(asset, config).expect("the schema serializes");
     format!(
-        "// Written by the building bake (`tools/`, `bake-buildings`) from `{SPECS_DIR}/{}{SPEC_SUFFIX}`.\n\
-         // Do not edit: change the spec or the bake and bake again.\n{body}\n",
-        asset.id
+        "// Written by the building bake (`tools/`, `bake-buildings`) from `{spec}`.\n\
+         // Do not edit: change the spec or the bake and bake again.\n{body}\n"
     )
 }
 
@@ -257,424 +260,59 @@ pub fn asset_path(root: &Path, id: &str) -> PathBuf {
         .join(format!("{id}.building.ron"))
 }
 
-/// Every spec under the repository root's [`SPECS_DIR`], in name order.
-pub fn specs(root: &Path) -> Result<Vec<(PathBuf, House)>, String> {
+/// One spec under [`SPECS_DIR`]: its path under the repository root, and its construction.
+pub struct Spec {
+    pub path: String,
+    pub construction: Construction,
+}
+
+/// Every spec under the repository root's [`SPECS_DIR`], house generators' and explicit
+/// constructions' alike, in file name order. Refuses a file whose id is not its stem and two
+/// specs of one id.
+pub fn specs(root: &Path) -> Result<Vec<Spec>, String> {
     let dir = root.join(SPECS_DIR);
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
         .map_err(|err| format!("{}: {err}", dir.display()))?
         .map(|entry| {
             entry
-                .map(|entry| entry.path())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
                 .map_err(|err| format!("{}: {err}", dir.display()))
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(SPEC_SUFFIX))
-        })
+        .filter(|name| name.ends_with(HOUSE_SUFFIX) || name.ends_with(CONSTRUCTION_SUFFIX))
         .collect();
-    paths.sort();
-    paths
-        .into_iter()
-        .map(|path| {
-            let text = std::fs::read_to_string(&path)
-                .map_err(|err| format!("{}: {err}", path.display()))?;
-            let house =
-                House::from_ron(&text).map_err(|err| format!("{}: {err}", path.display()))?;
-            let stem = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| name.strip_suffix(SPEC_SUFFIX));
-            if stem != Some(house.id.as_str()) {
-                return Err(format!(
-                    "{}: id {:?} is not the file's stem",
-                    path.display(),
-                    house.id
-                ));
-            }
-            Ok((path, house))
-        })
-        .collect()
+    names.sort();
+    let mut out: Vec<Spec> = Vec::with_capacity(names.len());
+    for name in names {
+        let path = format!("{SPECS_DIR}/{name}");
+        let text =
+            std::fs::read_to_string(root.join(&path)).map_err(|err| format!("{path}: {err}"))?;
+        let (stem, construction) = match name.strip_suffix(HOUSE_SUFFIX) {
+            Some(stem) => (
+                stem,
+                House::from_ron(&text).map(|house| house::construction(&house)),
+            ),
+            None => (
+                name.strip_suffix(CONSTRUCTION_SUFFIX)
+                    .expect("the filter keeps only the two suffixes"),
+                ConstructionSpec::from_ron(&text),
+            ),
+        };
+        let construction = construction.map_err(|err| format!("{path}: {err}"))?;
+        if stem != construction.id {
+            return Err(format!(
+                "{path}: id {:?} is not the file's stem",
+                construction.id
+            ));
+        }
+        if out.iter().any(|spec| spec.construction.id == stem) {
+            return Err(format!("{path}: another spec already bakes {stem}"));
+        }
+        out.push(Spec { path, construction });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use super::*;
-
-    /// The shipped specs, baked once per test.
-    fn shipped() -> Vec<(House, Baked)> {
-        specs(&crate::repo_root())
-            .expect("the shipped specs parse")
-            .into_iter()
-            .map(|(_, house)| {
-                let baked = bake(&house).expect("a shipped spec bakes");
-                (house, baked)
-            })
-            .collect()
-    }
-
-    /// THE BAKE IS CANONICAL, AND THE SHIPPED FILE IS ITS OUTPUT: two bakes of every shipped spec
-    /// write the same bytes, the bytes parse back to the same building through the game's own
-    /// reader, and they are the bytes `assets/` ships. Two peers read those bytes into the map
-    /// digest, so a bake that drifted (a hash-ordered list, an unrounded float, a platform's own
-    /// trigonometry) or a file left stale behind its spec splits the handshake.
-    #[test]
-    fn two_bakes_write_the_same_bytes_and_the_shipped_file_is_one() {
-        let root = crate::repo_root();
-        for (house, baked) in shipped() {
-            let text = write(&baked.asset);
-            let again = write(&bake(&house).unwrap().asset);
-            assert_eq!(text, again, "{}: two bakes differ", house.id);
-            assert_eq!(
-                BuildingAsset::from_ron(&text).as_ref(),
-                Ok(&baked.asset),
-                "{}: the text reads back as written",
-                house.id
-            );
-            let path = asset_path(&root, &house.id);
-            let shipped = std::fs::read_to_string(&path)
-                .unwrap_or_else(|err| panic!("{}: {err} — run bake-buildings", path.display()));
-            assert!(
-                shipped == text,
-                "{} is stale against its spec or the bake — run bake-buildings",
-                path.display()
-            );
-        }
-    }
-
-    /// THE JOINT GRAPH HOLDS THE BUILDING TOGETHER: every joint and anchor has positive area and a
-    /// unit normal, every chunk reaches an anchor through joints (one connected graph), and every
-    /// anchor is a downward chunk face on the foundation plane, of a chunk that reaches that
-    /// plane. The next slice's support law walks from the anchors over the joints; a chunk the
-    /// graph cannot reach would fall the moment anything changed, and an anchor above the
-    /// foundation would hold a wall up in mid-air.
-    #[test]
-    fn every_chunk_is_joined_to_the_ground_and_anchors_lie_on_the_foundation() {
-        for (house, baked) in shipped() {
-            let asset = &baked.asset;
-            let n = asset.chunks.len();
-            assert!(!asset.anchors.is_empty(), "{}: no anchor", house.id);
-            let mut parent: Vec<usize> = (0..n).collect();
-            fn root(parent: &mut [usize], mut k: usize) -> usize {
-                while parent[k] != k {
-                    parent[k] = parent[parent[k]];
-                    k = parent[k];
-                }
-                k
-            }
-            for joint in &asset.joints {
-                assert!(joint.area_m2 > 0.0, "{}: joint {joint:?}", house.id);
-                let normal = glam::Vec3::from_array(joint.normal);
-                assert!((normal.length() - 1.0).abs() < 1e-5, "{joint:?}");
-                let (a, b) = (
-                    root(&mut parent, joint.a as usize),
-                    root(&mut parent, joint.b as usize),
-                );
-                parent[a] = b;
-            }
-            let ground: BTreeSet<usize> = asset
-                .anchors
-                .iter()
-                .map(|anchor| root(&mut parent, anchor.chunk as usize))
-                .collect();
-            for k in 0..n {
-                assert!(
-                    ground.contains(&root(&mut parent, k)),
-                    "{}: chunk {k} ({}) reaches no anchor",
-                    house.id,
-                    asset.elements[usize::from(asset.chunks[k].element)].name
-                );
-            }
-            assert_eq!(ground.len(), 1, "{}: one connected building", house.id);
-            for anchor in &asset.anchors {
-                assert!(anchor.area_m2 > 0.0);
-                assert_eq!(anchor.centroid[1], asset.foundation_y_m, "{anchor:?}");
-                let lowest = asset.chunks[anchor.chunk as usize]
-                    .hull
-                    .iter()
-                    .map(|p| p[1])
-                    .fold(f32::INFINITY, f32::min);
-                assert_eq!(lowest, asset.foundation_y_m, "{anchor:?}");
-            }
-        }
-    }
-
-    /// THE CHUNKS TILE THEIR ELEMENTS: each element's chunks sum to its volume, each chunk lies
-    /// inside its element's bounds, and the chunks are about the size the rule aims at (no
-    /// dimension of a chunk a masonry cutter made past two and a half of that cutter's modules, a
-    /// gable corner's widest). A cut that dropped a sliver, or let two chunks overlap, breaks the
-    /// volume sum; a row that never split breaks the size.
-    #[test]
-    fn the_chunks_tile_each_element() {
-        for (house, baked) in shipped() {
-            let asset = &baked.asset;
-            for (element, plan) in asset.elements.iter().zip(house::elements(&house)) {
-                let [first, end] = element.chunks;
-                let run = &asset.chunks[first as usize..end as usize];
-                let sum: f32 = run.iter().map(|chunk| chunk.volume_m3).sum();
-                let whole = plan.prism.volume() as f32;
-                assert!(
-                    (sum - whole).abs() <= 1e-4 * whole,
-                    "{}: {} chunks sum to {sum} m³ of {whole}",
-                    house.id,
-                    element.name
-                );
-                let corners = element.points();
-                let (lo, hi) = corners.iter().fold(
-                    (glam::Vec3::INFINITY, glam::Vec3::NEG_INFINITY),
-                    |(lo, hi), &p| (lo.min(p), hi.max(p)),
-                );
-                for chunk in run {
-                    for &p in &chunk.hull {
-                        let p = glam::Vec3::from_array(p);
-                        assert!(
-                            p.cmpge(lo - 1e-5).all() && p.cmple(hi + 1e-5).all(),
-                            "{}: a chunk of {} leaves it",
-                            house.id,
-                            element.name
-                        );
-                    }
-                    if let house::Cutter::Masonry { module, .. } = plan.cutter {
-                        let (clo, chi) = chunk.hull.iter().fold(
-                            (glam::Vec3::INFINITY, glam::Vec3::NEG_INFINITY),
-                            |(lo, hi), &p| {
-                                (
-                                    lo.min(glam::Vec3::from_array(p)),
-                                    hi.max(glam::Vec3::from_array(p)),
-                                )
-                            },
-                        );
-                        let size = chi - clo;
-                        assert!(
-                            size.max_element() <= 2.5 * module as f32,
-                            "{}: a chunk of {} spans {size}",
-                            house.id,
-                            element.name
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /// Construction authors rely on crack_chance selecting cracks: zero never cracks, and a
-    /// positive chance produces cracks where the inline fixture leaves room for them.
-    #[test]
-    fn authored_crack_probability_controls_cuts() {
-        let mut house = fixture_house();
-        house.cuts.crack_chance = 0.0;
-        let uncracked = bake(&house).unwrap();
-        assert_eq!(uncracked.cuts.cracks, 0);
-        assert!(uncracked.cuts.joints > 0);
-        house.cuts.crack_chance = 1.0;
-        let cracked = bake(&house).unwrap();
-        assert!(cracked.cuts.cracks > 0);
-    }
-
-    /// THE STREAM IS NAMED, NOT SEQUENCED: the same names draw the same numbers, other names
-    /// others, so one element's cuts never shift when another element is added or re-cut.
-    #[test]
-    fn the_cut_stream_is_a_function_of_its_names() {
-        let draw = |parts: &[&str]| fracture::Stream::new(parts).unit();
-        assert_eq!(
-            draw(&["house_1", "east/pier_0"]),
-            draw(&["house_1", "east/pier_0"])
-        );
-        assert_ne!(
-            draw(&["house_1", "east/pier_0"]),
-            draw(&["house_1", "east/pier_1"])
-        );
-        assert_ne!(
-            draw(&["ab", "c"]),
-            draw(&["a", "bc"]),
-            "the separator counts"
-        );
-        let mut stream = fracture::Stream::new(&["x"]);
-        assert!(
-            (0..1000)
-                .map(|_| stream.unit())
-                .all(|u| (0.0..1.0).contains(&u))
-        );
-    }
-
-    /// FIXTURE DATA: a constructed house with solid walls and a pitched board roof. No shipped
-    /// house is required to keep its openings, joins or attachment choices for mutation tests.
-    fn fixture_house() -> House {
-        House::from_ron(
-            r#"House(
-            id: "fixture", width_m: 4.0, length_m: 6.0, wall_thickness_m: 0.25,
-            course_m: 0.1, module_m: 0.3, foundation_courses: 1, foundation_attachment: "mortared", eaves_course: 20,
-            pitch: (3, 4), plate_height_m: 0.1, board_width_m: 0.2,
-            board_thickness_m: 0.05, boards_per_slope: 14, gable_overhang_m: 0.3,
-            materials: (walls: Brick, plates: Wood, roof: Wood),
-            surface_frames: (walls: Upright, plates: Grain((0.0, 0.0, 1.0)), roof: Grain((0.0, 0.0, 1.0))),
-            walls: (east: [], west: [], north: [], south: []),
-            joins: [
-                (kinds: (Pier, Pier), by: "mortared"),
-                (kinds: (Pier, WallPlate), by: "mortared"),
-                (kinds: (Gable, WallPlate), by: "mortared"),
-                (kinds: (WallPlate, Roof), by: "nailed"),
-                (kinds: (Roof, Roof), by: "nailed"),
-                (kinds: (Gable, Roof), by: "resting"),
-            ],
-            cuts: (row_courses: 3, crack_chance: 0.2, crack_shift_m: 0.09,
-                min_width_m: 0.06, board_piece_m: (0.4, 1.2), plate_piece_m: (0.6, 1.8)),
-        )"#,
-        )
-        .expect("the constructed fixture states a house")
-    }
-
-    /// Construction authors select foundation attachments independently of component joins.
-    #[test]
-    fn anchors_name_the_authored_foundation_attachment() {
-        let mut house = fixture_house();
-        for name in ["mortared", "resting"] {
-            house.foundation_attachment = name.into();
-            let asset = bake(&house).unwrap().asset;
-            assert!(!asset.anchors.is_empty());
-            for anchor in &asset.anchors {
-                assert_eq!(asset.attachments[usize::from(anchor.attachment)], name);
-            }
-        }
-        house.foundation_attachment = "unknown-fixture-kind".into();
-        assert!(house.check().unwrap_err().contains("foundation_attachment"));
-    }
-
-    /// Every joint holds by the spec's declared join between components, or by its own seam
-    /// inside one component. The runtime's fracture law relies on this distinction.
-    fn assert_bond_kinds(house: &House, asset: &BuildingAsset) {
-        use overmatch::buildings::schema::Bond;
-        let element = |c: u32| &asset.elements[usize::from(asset.chunks[c as usize].element)];
-        for joint in &asset.joints {
-            let (a, b) = (element(joint.a), element(joint.b));
-            if a.component == b.component {
-                assert_eq!(joint.bond, Bond::Seam, "{}: {joint:?}", house.id);
-            } else {
-                let declared = house
-                    .joins
-                    .iter()
-                    .find(|join| join.joins((a.kind, b.kind)))
-                    .expect("every baked component pair has its declared join");
-                let Bond::Attached(k) = joint.bond else {
-                    panic!("{}: {joint:?} is no attachment", house.id)
-                };
-                assert_eq!(
-                    asset.attachments[usize::from(k)],
-                    declared.by,
-                    "{}: {joint:?}",
-                    house.id
-                );
-            }
-        }
-    }
-
-    /// The bake takes every component join from data. Iterate every shipped spec and each of
-    /// its joins; a new house with different construction adds no test branch. Switching a join
-    /// to a different declared kind changes those bonds alone, preserving the joint graph.
-    #[test]
-    fn every_bond_between_components_is_the_kind_its_spec_names() {
-        for (house, baked) in shipped() {
-            let asset = &baked.asset;
-            assert_bond_kinds(&house, asset);
-            for (k, join) in house.joins.iter().enumerate() {
-                let mut missing = house.clone();
-                missing.joins.remove(k);
-                let err = bake(&missing).map(|_| ()).unwrap_err();
-                assert!(err.contains("no join holds"), "{}: {err}", house.id);
-                // A spec using only one attachment kind offers no alternate kind to contrast;
-                // its direct mapping and missing-join refusal above still exercise every join.
-                let Some(other) = house.joins.iter().find(|other| other.by != join.by) else {
-                    continue;
-                };
-                let mut changed = house.clone();
-                changed.joins[k].by.clone_from(&other.by);
-                let rebaked = bake(&changed).expect("only the declared holding kind changed");
-                assert_bond_kinds(&changed, &rebaked.asset);
-                assert_eq!(asset.joints.len(), rebaked.asset.joints.len());
-                let mut differences = 0;
-                for (was, now) in asset.joints.iter().zip(&rebaked.asset.joints) {
-                    assert_eq!((was.a, was.b), (now.a, now.b));
-                    let kind = |asset: &BuildingAsset, bond| match bond {
-                        overmatch::buildings::schema::Bond::Seam => None,
-                        overmatch::buildings::schema::Bond::Attached(k) => {
-                            Some(asset.attachments[usize::from(k)].clone())
-                        }
-                    };
-                    differences +=
-                        usize::from(kind(asset, was.bond) != kind(&rebaked.asset, now.bond));
-                }
-                assert!(
-                    differences > 0,
-                    "{}: {join:?} holds an actual joint",
-                    house.id
-                );
-            }
-        }
-    }
-
-    /// Idle joins and unknown attachment kinds are refused before play. FIXTURE DATA supplies
-    /// the intentionally absent sill-to-roof pair; shipped houses need not have that topology.
-    #[test]
-    fn a_join_that_holds_nothing_or_names_no_kind_is_refused() {
-        use overmatch::buildings::attachments::{ATTACHMENTS_PATH, Attachments};
-        use overmatch::buildings::schema::ElementKind;
-        let house = fixture_house();
-        bake(&house).expect("the unmutated construction bakes");
-        let mut idle = house.clone();
-        idle.joins.push(spec::Join {
-            kinds: (ElementKind::Sill, ElementKind::Roof),
-            by: house.joins[0].by.clone(),
-        });
-        let err = bake(&idle).map(|_| ()).unwrap_err();
-        assert!(err.contains("holds no joint"), "{err}");
-        let mut unknown = house;
-        let mut name = "unregistered-fixture-kind".to_owned();
-        while Attachments::shipped_static().holds(&name).is_ok() {
-            name.push('_');
-        }
-        unknown.joins[0].by.clone_from(&name);
-        let err = unknown.check().unwrap_err();
-        for part in [name.as_str(), ATTACHMENTS_PATH, "name one of those"] {
-            assert!(err.contains(part), "{part}: {err}");
-        }
-    }
-
-    /// A HOUSE THE GENERATOR CANNOT LAY OUT IS REFUSED BEFORE ANY GEOMETRY: the generator lays a
-    /// pier before, between and after a wall's openings in `u` order, so an opening past the
-    /// wall's face or one over the next leaves a negative pier, and a timber piece range with no
-    /// finite top is a cut that never ends. Mutant: a check that drops the span, the order or the
-    /// range's top passes one of these to the generator.
-    #[test]
-    fn a_house_the_generator_cannot_lay_out_is_refused() {
-        let mut house = fixture_house();
-        house.walls.east = vec![spec::Opening {
-            u: (-1.0, 0.0),
-            courses: (0, 10),
-        }];
-        house
-            .check()
-            .expect("the constructed opening is inside the wall");
-        let (_, end) = house.wall_span("east");
-        let mut past = house.clone();
-        past.walls.east[0].u.1 = end + 1.0;
-        let mut over = house.clone();
-        over.walls.east.push(spec::Opening {
-            u: (-0.1, 0.1),
-            courses: (0, 10),
-        });
-        let mut endless = house;
-        endless.cuts.plate_piece_m.1 = f64::INFINITY;
-        for (case, broken, field) in [
-            ("past the wall", past, "pier"),
-            ("over the next", over, "pier"),
-            ("an endless piece", endless, "plate_piece_m"),
-        ] {
-            let err = broken.check().unwrap_err();
-            assert!(err.contains(field), "{case}: {err}");
-        }
-    }
-}
+mod tests;

@@ -1,17 +1,20 @@
-//! The building bake: every spec under `tools/buildings/` to its
-//! `assets/buildings/<id>/<id>.building.ron` (`overmatch_tools::buildings`). Writes only a file
-//! whose bytes change, and prints what each bake made.
+//! The building bake, the one entry point for every construction: each spec under
+//! `tools/buildings/` (a house generator's `<id>.house.ron` or an explicit `<id>.construction.ron`)
+//! to its `assets/buildings/<id>/<id>.building.ron` (`overmatch_tools::buildings`). Writes only a
+//! file whose bytes change, and prints what each bake made.
 
+use overmatch::buildings::schema;
 use overmatch_tools::buildings;
 
 fn main() {
     let root = overmatch_tools::repo_root();
     let specs = buildings::specs(&root).unwrap_or_else(|err| panic!("bake-buildings: {err}"));
-    for (spec, house) in specs {
-        let baked = buildings::bake(&house)
-            .unwrap_or_else(|err| panic!("bake-buildings: {}: {err}", spec.display()));
-        let text = buildings::write(&baked.asset);
-        let path = buildings::asset_path(&root, &house.id);
+    for spec in specs {
+        let id = &spec.construction.id;
+        let baked = buildings::bake(&spec.construction, schema::substance_density)
+            .unwrap_or_else(|err| panic!("bake-buildings: {}: {err}", spec.path));
+        let text = buildings::write(&baked.asset, &spec.path);
+        let path = buildings::asset_path(&root, id);
         let unchanged = std::fs::read_to_string(&path).is_ok_and(|old| old == text);
         if !unchanged {
             let dir = path.parent().expect("an asset path has a folder");
@@ -21,10 +24,12 @@ fn main() {
                 .unwrap_or_else(|err| panic!("bake-buildings: {}: {err}", path.display()));
         }
         let asset = &baked.asset;
+        let volume: f64 = asset.chunks.iter().map(|c| f64::from(c.volume_m3)).sum();
+        let mass: f64 = asset.chunks.iter().map(|c| f64::from(c.mass_kg)).sum();
+        let joined: f64 = asset.joints.iter().map(|j| f64::from(j.area_m2)).sum();
         println!(
-            "{}: {} elements, {} chunks, {} joints, {} anchors; {} cuts on head joints, {} \
-             cracks; {} bytes{}",
-            house.id,
+            "{id}: {} elements, {} chunks ({volume:.6} m³, {mass:.3} kg), {} joints \
+             ({joined:.6} m²), {} anchors; {} cuts on head joints, {} cracks; {} bytes{}",
             asset.elements.len(),
             asset.chunks.len(),
             asset.joints.len(),

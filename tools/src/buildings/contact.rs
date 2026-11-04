@@ -18,7 +18,7 @@ const COPLANAR_M: f64 = 1.0e-6;
 
 /// The least overlap (m²) that is a joint: a square millimetre, far above the clip's rounding and
 /// far below any chunk face.
-const MIN_AREA_M2: f64 = 1.0e-6;
+pub(crate) const MIN_AREA_M2: f64 = 1.0e-6;
 
 /// A joint between chunks `a < b`: the shared face's area, centroid and normal from `a` into `b`.
 #[derive(Debug, Clone, PartialEq)]

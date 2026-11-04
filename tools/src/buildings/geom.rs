@@ -11,7 +11,7 @@ use glam::{DVec2, DVec3};
 
 /// Two vertices nearer than this (m) are one, and a corner nearer a cutting plane lies on it: the
 /// clip's own rounding, far below any feature (Resolution).
-const WELD_M: f64 = 1.0e-9;
+pub(crate) const WELD_M: f64 = 1.0e-9;
 
 /// `polygon` (convex, counter-clockwise) cut to the half-plane `normal · p ≤ offset`. Keeps the
 /// winding; empty when nothing of it lies inside.
@@ -57,25 +57,6 @@ pub fn centroid(polygon: &[DVec2]) -> DVec2 {
         sum += (p + q) * p.perp_dot(q);
     }
     sum / (6.0 * area(polygon))
-}
-
-/// The polygon's extent along `u` on the line `v = y`: `None` where the line misses it.
-pub fn span_at(polygon: &[DVec2], y: f64) -> Option<(f64, f64)> {
-    let n = polygon.len();
-    let mut span: Option<(f64, f64)> = None;
-    let mut take = |u: f64| {
-        span = Some(span.map_or((u, u), |(lo, hi)| (lo.min(u), hi.max(u))));
-    };
-    for k in 0..n {
-        let (p, q) = (polygon[k], polygon[(k + 1) % n]);
-        if p.y == y {
-            take(p.x);
-        }
-        if (p.y < y && q.y > y) || (p.y > y && q.y < y) {
-            take(p.x + (q.x - p.x) * ((y - p.y) / (q.y - p.y)));
-        }
-    }
-    span
 }
 
 /// A frame: origin and two orthonormal in-plane axes; the third axis is `u × v`.
@@ -327,6 +308,32 @@ impl Polyhedron {
         Some(Self { corners, faces }.compact())
     }
 
+    /// The solid on `corners` bounded by `faces` (indices into `corners`, counter-clockwise seen
+    /// from outside, each in range): an authored piece. Each face's plane is fitted through its
+    /// corners' mean by Newell's sum, so [`Self::certify`] then reads how far its corners sit off
+    /// it; a degenerate face's normal is NaN, which the certificate refuses.
+    pub fn from_faces(corners: Vec<DVec3>, faces: Vec<Vec<usize>>) -> Self {
+        let faces = faces
+            .into_iter()
+            .map(|ring| {
+                let mean = ring.iter().map(|&i| corners[i]).sum::<DVec3>() / ring.len() as f64;
+                let normal = (0..ring.len())
+                    .map(|k| {
+                        let (p, q) = (corners[ring[k]], corners[ring[(k + 1) % ring.len()]]);
+                        (p - mean).cross(q - mean)
+                    })
+                    .sum::<DVec3>()
+                    .normalize();
+                Facet {
+                    normal,
+                    offset: normal.dot(mean),
+                    corners: ring,
+                }
+            })
+            .collect();
+        Self { corners, faces }
+    }
+
     /// The solid's two parts on either side of the plane `normal · p = offset`: `(≤, ≥)`. Their
     /// cut faces share every corner, bit for bit ([`Self::clip`]).
     pub fn split(&self, normal: DVec3, offset: f64) -> (Option<Self>, Option<Self>) {
@@ -396,6 +403,43 @@ impl Polyhedron {
     /// The volume centroid.
     pub fn centroid(&self) -> DVec3 {
         self.moments().1
+    }
+
+    /// The least and greatest `axis · p` over the corners.
+    pub fn extent(&self, axis: DVec3) -> (f64, f64) {
+        self.corners
+            .iter()
+            .map(|&p| axis.dot(p))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| {
+                (lo.min(x), hi.max(x))
+            })
+    }
+
+    /// The extent along `axis` of the section on the plane `normal · p = offset`: `None` where
+    /// the plane misses the solid.
+    pub fn section_extent(&self, normal: DVec3, offset: f64, axis: DVec3) -> Option<(f64, f64)> {
+        let mut span: Option<(f64, f64)> = None;
+        let mut take = |p: DVec3| {
+            let x = axis.dot(p);
+            span = Some(span.map_or((x, x), |(lo, hi)| (lo.min(x), hi.max(x))));
+        };
+        for face in &self.faces {
+            let m = face.corners.len();
+            for k in 0..m {
+                let (p, q) = (
+                    self.corners[face.corners[k]],
+                    self.corners[face.corners[(k + 1) % m]],
+                );
+                let (sp, sq) = (normal.dot(p) - offset, normal.dot(q) - offset);
+                if sp == 0.0 {
+                    take(p);
+                }
+                if (sp < 0.0 && sq > 0.0) || (sp > 0.0 && sq < 0.0) {
+                    take(p + (q - p) * (sp / (sp - sq)));
+                }
+            }
+        }
+        span
     }
 
     /// The axis-aligned bounds, `(min, max)`.
