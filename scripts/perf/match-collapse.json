@@ -1,0 +1,31 @@
+{
+  "events": [
+    {
+      "at_s": 10,
+      "instances": [
+        "house_0001",
+        "house_0002"
+      ]
+    },
+    {
+      "at_s": 20,
+      "instances": [
+        "house_0003",
+        "house_0004",
+        "house_0005",
+        "house_0006"
+      ]
+    },
+    {
+      "at_s": 30,
+      "instances": [
+        "house_0007",
+        "house_0008",
+        "house_0009",
+        "house_0010",
+        "house_0011",
+        "house_0012"
+      ]
+    }
+  ]
+}

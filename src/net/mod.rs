@@ -50,6 +50,7 @@ mod input_cadence;
 mod interp_delay;
 #[cfg(test)]
 mod link_drop;
+mod loadtest;
 /// The pre-connect Join menu against the matchmaking Worker (matchmaking mode only).
 mod matchmaking;
 mod physics;

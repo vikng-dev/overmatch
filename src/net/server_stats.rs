@@ -10,14 +10,15 @@
 //! JSON fields:
 //! - `period_s`: the wall time the line covers, which can exceed the period by one frame;
 //! - `ticks`, `tick_hz`: fixed ticks run in the period, and per wall second;
-//! - `tick_us`: `p50`, `p95` and `max` of the ticks' wall micros, null when no tick ran;
+//! - `tick_us`: nearest-rank `p50`, `p95`, `p99`, `max` and summed `total` wall micros,
+//!   null when no tick ran;
 //! - `overruns`: ticks longer than the fixed timestep, `budget_us`;
 //! - `clients` (connected links), `tanks`, `projectiles`, `entities`, sampled at the line;
 //! - `cpu_pct`: the process's user + system CPU over the period, as % of one core;
 //! - `rss_mb`: resident memory at the line;
-//! - `physics_us`: `p50`, `p95` and `max` of avian's step (its `PhysicsSchedule`, broad phase
+//! - `physics_us`: the same summary of avian's step (its `PhysicsSchedule`, broad phase
 //!   through finalize), one sample per fixed tick, null when none ran;
-//! - `send_us`: `p50`, `p95` and `max` of the outbound path, one sample per frame that replicated:
+//! - `send_us`: the same summary of the outbound path, one sample per frame that replicated:
 //!   the wall time from before replicon's `ServerSystems::Send` (the change scan and serialisation)
 //!   to after lightyear's `LinkSystems::Send` (the socket flush), null when none ran. It is a
 //!   bracket, so it also holds any unordered `PostUpdate` system the executor ran inside it;
@@ -33,27 +34,34 @@
 //! The tick wall time is the cost recorder's measurement ([`crate::cost::TickClock`]), never a
 //! second timer. `physics_us` sits inside it; `send_us` runs after the fixed loop, outside it.
 //!
-//! Not carried: bytes per client. lightyear 0.30.1 shows a link's queued payloads only through an
-//! `iter` behind its `test_utils` feature, and counts bytes only in gauges behind its `metrics`
-//! feature; neither is on.
+//! `loadtest`, present only for `scripts/perf/collapse.sh --schedule`, carries the recipe,
+//! sequence, clock, construction outcomes, awake dynamic bodies, loose construction chunks and
+//! attempted encrypted send bytes. Bytes exclude IP/UDP headers and do not attest delivery.
 
 use std::time::{Duration, Instant};
 
-use avian3d::prelude::{PhysicsSchedule, PhysicsStepSystems};
+use avian3d::prelude::{PhysicsSchedule, PhysicsStepSystems, RigidBody, Sleeping};
 use bevy::prelude::*;
+use bevy::utils::Parallel;
 use bevy_replicon::prelude::ServerSystems;
 use bevy_replicon::server::server_tick::ServerTick;
 use lightyear::link::LinkSystems;
-use lightyear::prelude::Connected;
 use lightyear::prelude::server::ClientOf;
+use lightyear::prelude::{Connected, ConnectionSystems, Link};
 use serde_json::{Value, json};
 
 use super::debris_stress::DebrisCensus;
 use super::harness::{LeverError, env_text};
+use super::loadtest::Loadtest;
 use super::server_host::{Throttle, read_throttle};
 use crate::ballistics::Projectile;
+use crate::construction::{
+    Body,
+    breakage::{Breakage, Piece, Record},
+};
 use crate::cost::{TickClock, TickClosed, arm_tick_clock};
 use crate::damage_cam::recorder::ShotRecorder;
+use crate::scatter::MapInstance;
 use crate::tank::Tank;
 
 /// The lever: the period in seconds.
@@ -80,6 +88,8 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         cpu_at_start: process_cpu(),
         throttle_at_start: read_throttle(),
         husk_strikes_at_start: 0,
+        sequence: 0,
+        send_bytes: 0,
     });
     app.init_resource::<PhaseStarts>();
     app.add_systems(FixedLast, record_tick.after(TickClosed));
@@ -98,6 +108,14 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         )
             .run_if(resource_changed::<ServerTick>),
     );
+    if app.world().contains_resource::<Loadtest>() {
+        app.add_systems(
+            PostUpdate,
+            count_send_bytes
+                .after(ConnectionSystems::Send)
+                .before(LinkSystems::Send),
+        );
+    }
     app.add_systems(Last, emit_line);
     Ok(())
 }
@@ -136,6 +154,8 @@ struct ServerStats {
     throttle_at_start: Option<Throttle>,
     /// The recorder's husk-strike count when the current period opened.
     husk_strikes_at_start: u64,
+    sequence: u64,
+    send_bytes: u64,
 }
 
 /// The open phase brackets' starts.
@@ -182,6 +202,8 @@ struct TickSummary {
     ticks: usize,
     p50: f64,
     p95: f64,
+    p99: f64,
+    total: f64,
     max: f64,
     /// Ticks strictly longer than the budget.
     overruns: usize,
@@ -208,6 +230,8 @@ impl TickWindow {
             ticks: sorted.len(),
             p50: rank(0.50),
             p95: rank(0.95),
+            p99: rank(0.99),
+            total: sorted.iter().sum(),
             max: sorted[sorted.len() - 1],
             overruns: sorted.iter().filter(|us| **us > budget_us).count(),
         };
@@ -235,6 +259,7 @@ struct Snapshot {
     /// The period's rounds that struck a knocked-out tank (`ShotRecorder::husk_strikes`): a
     /// counter, never a line per strike, so automatic fire into husks cannot flood the log.
     husk_strikes: u64,
+    workload: Option<Value>,
 }
 
 /// One decimal: the line is read by eye as well as parsed.
@@ -252,6 +277,8 @@ fn stats_line(snapshot: &Snapshot) -> String {
             json!({
                 "p50": tenth(summary.p50),
                 "p95": tenth(summary.p95),
+                "p99": tenth(summary.p99),
+                "total": tenth(summary.total),
                 "max": tenth(summary.max),
             })
         })
@@ -277,6 +304,9 @@ fn stats_line(snapshot: &Snapshot) -> String {
         "husk_strikes": snapshot.husk_strikes,
     });
     body["debris"] = snapshot.debris.clone();
+    if let Some(workload) = &snapshot.workload {
+        body["loadtest"] = workload.clone();
+    }
     format!("{PREFIX} {body}")
 }
 
@@ -307,6 +337,35 @@ fn close_send(mut starts: ResMut<PhaseStarts>, mut stats: ResMut<ServerStats>) {
     }
 }
 
+/// Encrypted UDP payload bytes queued for transport, including netcode overhead. Rotating the
+/// FIFO once preserves packet order (lightyear_link 0.30.1 exposes no production iterator).
+/// This counts attempted sends, not IP/UDP headers or delivery; only the load-test user pays it.
+fn count_send_bytes(
+    mut stats: ResMut<ServerStats>,
+    mut links: Query<&mut Link>,
+    mut worker_bytes: Local<Parallel<u64>>,
+) {
+    // Each link owns its FIFO. Integer subtotals commit once, before the transport flush.
+    let worker_bytes = &mut *worker_bytes;
+    links.par_iter_mut().for_each(|mut link| {
+        worker_bytes.scope(|bytes| *bytes += queued_bytes(&mut link));
+    });
+    stats.send_bytes += worker_bytes.iter_mut().map(std::mem::take).sum::<u64>();
+}
+
+fn queued_bytes(link: &mut Link) -> u64 {
+    let mut bytes = 0;
+    for _ in 0..link.send.len() {
+        let packet = link
+            .send
+            .pop()
+            .expect("the FIFO length was sampled before rotation");
+        bytes += packet.len() as u64;
+        link.send.push(packet);
+    }
+    bytes
+}
+
 /// The counts the stats line reads off the world when it prints.
 #[derive(bevy::ecs::system::SystemParam)]
 struct Census<'w, 's> {
@@ -314,6 +373,10 @@ struct Census<'w, 's> {
     tanks: Query<'w, 's, (), With<Tank>>,
     projectiles: Query<'w, 's, (), With<Projectile>>,
     all: Query<'w, 's, Entity>,
+    bodies: Query<'w, 's, &'static RigidBody, Without<Sleeping>>,
+    pieces: Query<'w, 's, &'static Piece, With<Breakage>>,
+    constructions: Query<'w, 's, (&'static MapInstance, &'static Breakage), With<Body>>,
+    battle: Query<'w, 's, &'static super::battle::BattleState>,
 }
 
 /// `Last`: once the period has passed, print its line and open the next one.
@@ -323,8 +386,11 @@ fn emit_line(
     census: Census,
     debris: DebrisCensus,
     recorder: Res<ShotRecorder>,
+    load: Option<Res<Loadtest>>,
+    record: Res<Record>,
 ) {
-    let Some(elapsed) = stats.period.close(Instant::now()) else {
+    let now = Instant::now();
+    let Some(elapsed) = stats.period.close(now) else {
         return;
     };
     let budget_us = fixed.timestep().as_secs_f64() * 1.0e6;
@@ -340,6 +406,34 @@ fn emit_line(
     stats.throttle_at_start = throttle;
     let husk_strikes = recorder.husk_strikes() - stats.husk_strikes_at_start;
     stats.husk_strikes_at_start = recorder.husk_strikes();
+    stats.sequence += 1;
+    let workload = load.map(|load| {
+        let mut value = load.json(&record, &census.constructions, now, elapsed);
+        value["sequence"] = json!(stats.sequence);
+        value["send_bytes"] = json!(std::mem::take(&mut stats.send_bytes));
+        value["awake_bodies"] = json!(
+            census
+                .bodies
+                .iter()
+                .filter(|body| body.is_dynamic())
+                .count()
+        );
+        value["construction_pieces"] = json!(
+            census
+                .pieces
+                .iter()
+                .map(|piece| piece.chunks.len())
+                .sum::<usize>()
+        );
+        value["constructions"] = json!(census.constructions.iter().count());
+        value["combat"] = json!(
+            census
+                .battle
+                .iter()
+                .any(|b| matches!(b.phase, super::battle::BattlePhase::Combat { .. }))
+        );
+        value
+    });
     let snapshot = Snapshot {
         elapsed,
         budget_us,
@@ -355,6 +449,7 @@ fn emit_line(
         rss_bytes: resident_bytes(),
         throttled,
         husk_strikes,
+        workload,
     };
     println!("{}", stats_line(&snapshot));
 }
@@ -428,6 +523,91 @@ fn resident_bytes() -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// The game's destruction census counts authority-owned chunks. Pose carriers repeat Piece
+    /// metadata, and retired carriers retain it; neither is additional physical matter.
+    #[test]
+    fn construction_census_excludes_live_and_retired_pose_carriers() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let kind = crate::construction::tests::column_construction();
+        // Fixture: one authority group and its live/retired network metadata.
+        let piece = Piece {
+            construction: 0,
+            chunks: (0..kind.layout.chunks.len()).map(|c| c as u16).collect(),
+            born: 0,
+            retired: None,
+        };
+        let expected = piece.chunks.len();
+        world.spawn((piece.clone(), Breakage::new(kind, 0, 1.0)));
+        world.spawn(piece.clone());
+        world.spawn(Piece {
+            retired: Some(1),
+            ..piece
+        });
+        let count = world
+            .run_system_once(|census: Census| {
+                census
+                    .pieces
+                    .iter()
+                    .map(|piece| piece.chunks.len())
+                    .sum::<usize>()
+            })
+            .unwrap();
+        assert_eq!(
+            count, expected,
+            "metadata must never double-count construction matter"
+        );
+    }
+
+    /// Players rely on the instrument preserving both packet contents and send order. Counting
+    /// by draining without restoring, or rotating an incomplete turn, changes the transport.
+    #[test]
+    fn byte_census_preserves_the_send_fifo() {
+        let mut app = App::new();
+        app.add_plugins(TaskPoolPlugin::default())
+            .insert_resource(ServerStats {
+                period: Period::new(Duration::from_secs(1), Instant::now()),
+                ticks: TickWindow::default(),
+                physics: TickWindow::default(),
+                send: TickWindow::default(),
+                cpu_at_start: None,
+                throttle_at_start: None,
+                husk_strikes_at_start: 0,
+                sequence: 0,
+                send_bytes: 0,
+            })
+            .add_systems(Update, count_send_bytes);
+        // Fixture: independent links with unequal packets expose missing workers and reordering.
+        let links = 32;
+        let packets = [vec![1], vec![2, 3], vec![4, 5, 6]];
+        for _ in 0..links {
+            let mut link = Link::default();
+            for packet in &packets {
+                link.send.push(packet.clone().into());
+            }
+            app.world_mut().spawn(link);
+        }
+        app.update();
+        let expected = links * packets.iter().map(Vec::len).sum::<usize>() as u64;
+        assert_eq!(app.world().resource::<ServerStats>().send_bytes, expected);
+        for mut link in app
+            .world_mut()
+            .query::<&mut Link>()
+            .iter_mut(app.world_mut())
+        {
+            assert_eq!(
+                link.send.drain().map(|p| p.to_vec()).collect::<Vec<_>>(),
+                packets
+            );
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<ServerStats>().send_bytes,
+            expected,
+            "worker subtotals must reset before the next frame"
+        );
+    }
+
     /// The lever's two readings: unset is off, a positive period is that period. A mutant that
     /// turns an unset lever on prints a line from every server; one that reads a word or a zero as
     /// off or as a default runs a host its operator configured otherwise, unseen.
@@ -491,6 +671,8 @@ mod tests {
                 ticks: 100,
                 p50: 50.0,
                 p95: 95.0,
+                p99: 99.0,
+                total: 5050.0,
                 max: 100.0,
                 overruns: 1,
             }
@@ -516,6 +698,8 @@ mod tests {
                 ticks: 640,
                 p50: 812.34,
                 p95: 1_500.0,
+                p99: 2_000.0,
+                total: 600_000.0,
                 max: 16_000.0,
                 overruns: 1,
             }),
@@ -523,6 +707,8 @@ mod tests {
                 ticks: 640,
                 p50: 301.04,
                 p95: 455.0,
+                p99: 600.0,
+                total: 200_000.0,
                 max: 900.0,
                 overruns: 0,
             }),
@@ -530,6 +716,8 @@ mod tests {
                 ticks: 640,
                 p50: 120.0,
                 p95: 180.06,
+                p99: 200.0,
+                total: 80_000.0,
                 max: 250.0,
                 overruns: 0,
             }),
@@ -545,6 +733,7 @@ mod tests {
                 throttled_usec: 45_000,
             }),
             husk_strikes: 4,
+            workload: None,
         };
         let line = stats_line(&full);
         let json = line
@@ -558,7 +747,7 @@ mod tests {
                 "period_s": 10.0,
                 "ticks": 640,
                 "tick_hz": 64.0,
-                "tick_us": {"p50": 812.3, "p95": 1500.0, "max": 16000.0},
+                "tick_us": {"p50": 812.3, "p95": 1500.0, "p99": 2000.0, "total": 600000.0, "max": 16000.0},
                 "overruns": 1,
                 "budget_us": 15625.0,
                 "clients": 2,
@@ -567,8 +756,8 @@ mod tests {
                 "entities": 1234,
                 "cpu_pct": 37.6,
                 "rss_mb": 200.0,
-                "physics_us": {"p50": 301.0, "p95": 455.0, "max": 900.0},
-                "send_us": {"p50": 120.0, "p95": 180.1, "max": 250.0},
+                "physics_us": {"p50": 301.0, "p95": 455.0, "p99": 600.0, "total": 200000.0, "max": 900.0},
+                "send_us": {"p50": 120.0, "p95": 180.1, "p99": 200.0, "total": 80000.0, "max": 250.0},
                 "throttled_usec": 45000,
                 "nr_throttled": 3,
                 "husk_strikes": 4,
