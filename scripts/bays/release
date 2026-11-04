@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # release — free a bay: detach its HEAD, so `lane/<lane>` keeps its commits and can be merged and
-# deleted, drop its incremental caches, and drop its lease record.
+# deleted, bound its incremental cache, and drop its lease record.
 #
 # Usage: scripts/bays/release [--force] <bay>        <bay>: bay-2, 2, or the bay's path
 #
@@ -61,11 +61,13 @@ if [[ -n $dirt ]]; then
   echo "release: $name's uncommitted work is saved at $ref" >&2
 fi
 
-git -C "$bay" switch -q --detach >&2
-# The pool keeps a bay's dependency builds warm, not its incremental caches (lib.sh, "Disk").
+# The pool lock prevents a new lease, and the build lock excludes compilation
+# while sessions are pruned. A failed prune leaves the bay leased to its owner.
 kb_free() { df -k "$bay" | awk 'NR == 2 {print $4}'; }
 before=$(kb_free)
-rm -rf "$bay"/target/*/incremental
+/usr/bin/lockf -k -t "${OVERMATCH_CARGO_LOCK_WAIT_S:-3600}" /tmp/overmatch-cargo.lock \
+  python3 "$bays_here/prune_incremental.py" "$bay/target"
 freed=$(awk -v a="$before" -v b="$(kb_free)" 'BEGIN {printf "%.1f", (b - a) / 1048576}')
+git -C "$bay" switch -q --detach >&2
 rm -f "$admin/bay-lease"
-echo "release: $name free (was $holder; HEAD detached at $(git -C "$bay" rev-parse --short HEAD); incremental caches dropped, df +$freed GB)" >&2
+echo "release: $name free (was $holder; HEAD detached at $(git -C "$bay" rev-parse --short HEAD); filesystem df delta $freed GiB)" >&2

@@ -9,7 +9,8 @@
 # HERMETIC. Every run builds its own git repository under `mktemp -d`, with the global and system
 # git config shut out, and deletes it. It copies the REAL lease, release, status and lib.sh, and the
 # two hooks in .claude/hooks/ (bay-lease.sh, bay-release.sh), into that repository and runs the
-# copies: they find their pool from their own location, so the copies drive the scratch pool with
+# copies (with the machine build-lock path redirected to a fixture lock): they find their pool
+# from their own location, so the copies drive the scratch pool with
 # exactly the code that ships. Nothing else in this work tree is read, and nothing in it is written.
 #
 # Each case names the mutant that breaks it:
@@ -32,9 +33,8 @@
 #      and exits nonzero, keeping the bay, when it holds work or is not a bay.
 #      Mutants: lease progress printed to stdout (Claude Code would read a wrong path); the
 #      WorktreeRemove hook deleting the directory, or exiting 0 over uncommitted work.
-#   7. `release` drops a bay's incremental caches and keeps the rest of its target/.
-#      Mutants: the drop removed (the caches grow unbounded: lib.sh, "Disk"), or widened to the
-#      whole target/ (every lane rebuilds every dependency).
+#   7. `release` bounds incremental state, retains reusable sessions and keeps other artifacts.
+#      Mutants: delete all incremental state, omit pruning, or delete the whole target/.
 
 set -u
 
@@ -87,7 +87,9 @@ printf '/target\n.claude/worktrees/\n' >"$REPO/.gitignore"
 echo base >"$REPO/README"
 echo lock-v1 >"$REPO/Cargo.lock"
 mkdir -p "$REPO/scripts/bays" "$REPO/.claude/hooks"
-cp "$HERE/lib.sh" "$HERE/lease" "$HERE/release" "$HERE/status" "$REPO/scripts/bays/"
+cp "$HERE/lib.sh" "$HERE/lease" "$HERE/release" "$HERE/status" "$HERE/prune_incremental.py" "$REPO/scripts/bays/"
+# Keep the production locking call while isolating the OS resource from live builds.
+sed "s|/tmp/overmatch-cargo.lock|$WORK/build.lock|g" "$HERE/release" >"$REPO/scripts/bays/release"
 cp "$HOOKS/bay-lease.sh" "$HOOKS/bay-release.sh" "$REPO/.claude/hooks/"
 git -C "$REPO" add -A
 git -C "$REPO" commit -q -m base
@@ -207,17 +209,47 @@ pl=$(lease l)
 is "main's Cargo.lock moved: the target is deleted" no "$(exists "$pl/target")"
 release_all
 
-# ── 7. release drops the incremental caches and keeps every other build ─────────────────────────
+# ── 7. release retains reusable incremental state and keeps every other build ───────────────────
 
-group "7. release drops the incremental caches and keeps every other build"
+group "7. release retains reusable incremental state and keeps every other build"
 pi=$(lease inc)
-mkdir -p "$pi/target/debug/incremental/crate-a" "$pi/target/edit/incremental/crate-b" \
-  "$pi/target/debug/deps"
+for profile in debug edit; do
+  crate=$pi/target/$profile/incremental/crate-abc
+  mkdir -p "$crate/s-10-abc-def" "$crate/s-0z-abc-def" "$crate/s-11-abc-working"
+  touch "$crate/s-10-abc.lock" "$crate/s-0z-abc.lock" "$crate/s-11-abc.lock"
+done
+mkdir -p "$pi/target/debug/deps"
 echo warm >"$pi/target/debug/deps/libdep.rlib"
 release bay-1
-is "every profile's incremental cache is gone" "no no" \
-  "$(exists "$pi/target/debug/incremental") $(exists "$pi/target/edit/incremental")"
+says "release successfully applies the production policy" yes $?
+for profile in debug edit; do
+  crate=$pi/target/$profile/incremental/crate-abc
+  is "$profile: newest published session and its lock survive" "yes yes" \
+    "$(exists "$crate/s-10-abc-def") $(exists "$crate/s-10-abc.lock")"
+  is "$profile: superseded and unfinished sessions go" "no no no no" \
+    "$(exists "$crate/s-0z-abc-def") $(exists "$crate/s-0z-abc.lock") $(exists "$crate/s-11-abc-working") $(exists "$crate/s-11-abc.lock")"
+done
 is "the dependency builds stay" warm "$(cat "$pi/target/debug/deps/libdep.rlib" 2>/dev/null)"
+pi=$(lease inc-reuse)
+is "the next lane inherits the same session in the same bay" yes \
+  "$(exists "$pi/target/edit/incremental/crate-abc/s-10-abc-def")"
+OVERMATCH_BAY_INCREMENTAL_GIB=typo release bay-1
+says "an invalid operator budget refuses release" no $?
+is "a refused prune preserves the lease" inc-reuse "$(leased_to bay-1)"
+large=$pi/target/debug/incremental/other-abc/s-0y-abc-def
+mkdir -p "$large"
+touch "${large%/*}/s-0y-abc.lock"
+# Fixture: a sparse logical file exercises the operator cap without consuming GiB of disk.
+python3 - "$large/query-cache.bin" <<'PY'
+import sys
+with open(sys.argv[1], "wb") as cache:
+    cache.truncate(2 * 1024**3)
+PY
+OVERMATCH_BAY_INCREMENTAL_GIB=1 release bay-1
+says "a valid operator budget releases the bay" yes $?
+is "the oversized old variant is evicted" no "$(exists "${large%/*}")"
+is "the smaller recent session survives budget pressure" yes \
+  "$(exists "$pi/target/edit/incremental/crate-abc/s-10-abc-def")"
 release_all
 
 # Forced release must preserve both versions of a partially staged file for the orchestrator.

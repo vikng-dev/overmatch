@@ -11,14 +11,21 @@
 # same pool. Its path never changes and `target/` sits inside it (`/target` is ignored), so every
 # lane starts with the dependencies the last one built.
 #
-# Disk: `release` drops the bay's incremental caches (`target/*/incremental`) and keeps the rest of
-# target/. Nothing else bounds them: there is one per crate, target and profile, the ones measured
-# each held two sessions, and three bays of them filled the disk in four days (MEASURED 2026-11-01:
-# 33 GB of bay-1's 57 GB target/ was incremental). The price is each lane's first build compiling
-# the workspace crates without one. MEASURED 2026-10-28 at add9115, `scripts/serial-cargo test
-# --lib --features dev_ui,bitprobe --no-run`, build lock free: a new bay warmed from main's target/
-# (rustc discards an incremental cache made in another working directory), 91.1 s; the same bay
-# released and leased again with its cache, at the same main, 1.1 s.
+# Disk: `release`, holding the pool and build locks, retains the newest finalized session and
+# its lock file per crate/hash, across profiles and explicit target triples. It removes unfinished,
+# orphaned and superseded sessions, then evicts the least recently built variants until the
+# retained incremental cache fits OVERMATCH_BAY_INCREMENTAL_GIB (default 12 GiB). The pool operator
+# owns this budget: preserve first-edit reuse while bounding the three bays' cache growth.
+# Dependencies and other target/ contents are untouched. A cold bay has no sessions to retain.
+# The budget charges file lengths or allocated blocks, whichever is larger, counting hard links
+# once per session; shared APFS blocks make this conservative. It is NOT physical disk usage:
+# only df measures that, and release reports its filesystem-wide delta, not a claimed saving.
+# MEASURED sizing input: 33 GB apparent incremental state in a 57 GB apparent target/ (not physical
+# usage). DERIVED sizing expectation: about 24 GB other artifacts + at most 12 GiB retained cache,
+# about 37 GB apparent per bay if other artifacts stay stable; temporary build sessions add to it.
+# MEASURED compiler phases: 69.9 s without state, 14.4–14.8 s with it (dev-loop-speed/research.md).
+# DERIVED first-small-edit expectation: about 15 s in those compiler phases, about 55 s saved,
+# conditional on matching retained units; lockfile/toolchain/configuration changes can make it cold.
 #
 # The invariants, each one a test in test_bays.sh:
 #   1. Three bays, no overflow. A lease with no bay free exits 1 naming every holder; nothing is
