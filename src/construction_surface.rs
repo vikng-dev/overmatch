@@ -122,7 +122,6 @@ pub(crate) fn lane_for_substance(name: &str) -> SurfaceLane {
     })
 }
 
-/// The the secondary palette lane pack's lane of [`Surface`].
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
 pub(crate) struct SurfaceParams {
     /// `x`: the secondary pack's repeats per metre. `yzw`: unused.

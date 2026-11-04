@@ -2019,14 +2019,11 @@ mod tests {
         }
     }
 
-    /// Parking relies on elastic contact retaining strain when separation clips damped load
-    /// to zero. Resetting elements absent from damped-load contacts would erase that strain.
-    #[test]
-    fn element_strain_survives_damped_load_dropout() {
+    /// Fixture: deep contact creeping along a stationary belt builds presliding strain.
+    fn strained_pad() -> (Vec<Vec2>, SideState, GripElements, SideReport) {
         let loop_pts = rect_loop(0.02);
         let mut state = SideState::default();
         let mut elems = GripElements::for_links(25);
-        // Build presliding strain: hull creeping +z against a stationary belt.
         let mut report = rig_tick(&loop_pts, &mut state, &mut elems, 0.0, Vec3::ZERO);
         for _ in 0..20 {
             report = rig_tick(
@@ -2037,6 +2034,14 @@ mod tests {
                 Vec3::new(0.0, 0.0, 0.05),
             );
         }
+        (loop_pts, state, elems, report)
+    }
+
+    /// Parking relies on elastic contact retaining strain when separation clips damped load
+    /// to zero. Resetting elements absent from damped-load contacts would erase that strain.
+    #[test]
+    fn element_strain_survives_damped_load_dropout() {
+        let (loop_pts, mut state, mut elems, report) = strained_pad();
         let enter = rig_params().grip.unwrap().side_weight * GRIP_ELEMENT_ENTER_FRACTION;
         assert!(
             report.contacts.iter().any(|c| c.load_elastic >= enter),
@@ -2113,20 +2118,7 @@ mod tests {
         let enter = side_weight * GRIP_ELEMENT_ENTER_FRACTION;
         let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
 
-        // Phase 1 — deep contact (loads ≫ enter), slipping: accumulate real presliding strain.
-        let deep = rect_loop(0.02);
-        let mut state = SideState::default();
-        let mut elems = GripElements::for_links(25);
-        let mut report = rig_tick(&deep, &mut state, &mut elems, 0.0, Vec3::ZERO);
-        for _ in 0..20 {
-            report = rig_tick(
-                &deep,
-                &mut state,
-                &mut elems,
-                0.0,
-                Vec3::new(0.0, 0.0, 0.05),
-            );
-        }
+        let (_, mut state, mut elems, report) = strained_pad();
         assert!(
             report.contacts.iter().any(|c| c.load_elastic >= enter),
             "rig premise: phase-1 contacts clear the enter bound"

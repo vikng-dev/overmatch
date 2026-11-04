@@ -275,9 +275,6 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// rollout. Wire layouts and client derivation are unchanged; the authority exports resolved paths.
 /// REV 82 (the game's spawn flow): respawn admission and map-pick refusal are independent owner-private facts.
 /// REV 83 (#198, driving model): direct ground grip and nominal-pressure rolling resistance.
-/// REV 86 (the game's environment destruction model): construction ledger and piece ordinal
-/// fields say `construction`; registrations and type definitions use construction names.
-/// Postcard retains the positional field layout; the named wire contract and fingerprint move.
 pub const PROTOCOL_REV: u32 = 86;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
