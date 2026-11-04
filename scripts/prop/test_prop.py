@@ -47,10 +47,6 @@ def node(js, name):
     return next(n for n in js["nodes"] if n.get("name") == name)
 
 
-def positions_of(js, binary, name):
-    index = js["nodes"].index(node(js, name))
-    return build.node_geometry(js, binary, index, name)[0]
-
 
 def rewritten(js, binary, name, attribute, vertex, values) -> bytes:
     """The BIN chunk with one vertex of one attribute of one node's first primitive rewritten."""
