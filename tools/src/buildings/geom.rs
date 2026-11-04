@@ -110,13 +110,8 @@ impl Prism {
             .collect()
     }
 
-    /// The far cap, the near cap, then one side per profile edge.
-    pub fn faces(&self) -> Vec<Face> {
-        self.solid().faces()
-    }
-
     /// The prism as a [`Polyhedron`]: the profile at `near` (corners `0..n`), then at `far`
-    /// (`n..2n`); its faces in [`Prism::faces`]' order.
+    /// (`n..2n`); the far cap, the near cap, then one side per profile edge.
     pub fn solid(&self) -> Polyhedron {
         let n = self.profile.len();
         let corners = self.corners();
@@ -582,7 +577,7 @@ pub(crate) mod tests {
         };
         let centre = prism.solid().centroid();
         assert!((prism.volume() - 0.75).abs() < 1e-12);
-        for face in prism.faces() {
+        for face in prism.solid().faces() {
             assert!(face.normal.dot(face.corners[0] - centre) > 0.0);
             for &corner in &face.corners {
                 assert!((face.normal.dot(corner) - face.offset).abs() < 1e-12);

@@ -4541,16 +4541,12 @@ fn field_geometry_is_independent_of_workers_and_owner_iteration() {
         let (fields, stops) = reduce_geometry(geometry, true);
         assert!(!fields.is_empty());
         assert!(stops.iter().flatten().any(|stop| stop.surface.is_some()));
-        let fields: Vec<_> = fields
-            .into_iter()
-            .map(|(root, field)| {
-                assert_eq!(
-                    field.iter().map(|stop| stop.2).collect::<Vec<_>>(),
-                    vec![1.0, 2.0]
-                );
-                (root, field)
-            })
-            .collect();
+        for (_, field) in &fields {
+            assert_eq!(
+                field.iter().map(|stop| stop.2).collect::<Vec<_>>(),
+                vec![1.0, 2.0]
+            );
+        }
         let mut stops = stops.into_iter();
         let hits = fracture::trace_blast(
             deposit.blast.unwrap().1,

@@ -1741,12 +1741,6 @@ fn reduce_geometry(
     (fields, stops)
 }
 
-/// One blast's rays from `origin` (module doc): each stops, within the blast's reach, on the
-/// nearest of every building's present blockers ([`first_chunk`]), the moving bodies
-/// ([`moving_near`]) and every other surface on [`SURFACES`] (the ground, a standing tree). A ray
-/// on a standing chunk joins its building's take; a ray on a moving body pushes the body through
-/// avian at the point it stops. A trunk stop loads its segment through the tree laws; other
-/// static surfaces only shade the field.
 /// Each chunk and body collider takes the share of its rays' cones its silhouette intercepts
 /// ([`fracture::intercepted`]): a chunk's from its faces, a collider's from its bounds, the
 /// silhouette of the box that holds it. A collider holding `origin` shades nothing and takes
@@ -1760,8 +1754,6 @@ fn cast_blast(
 ) {
     let reach = blast.reach();
     let near = moving_near(p, origin, reach);
-    // The colliders holding the burst point: a ray from inside one leaves it through no face it
-    // meets, so they shade nothing and take no push of the field's.
     let surfaces = SpatialQueryFilter::from_mask(SURFACES);
     let inside = p.spatial.point_intersections(origin, &surfaces);
     let surfaces = surfaces.with_excluded_entities(inside);
@@ -1829,7 +1821,6 @@ fn cast_blast(
                 material: None,
             });
         }
-        // Unbreakable construction shades a ray without receiving a load.
         stop?.surface
     });
     for (target, hit) in hits {
