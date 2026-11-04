@@ -887,33 +887,35 @@ fn read_contacts(
         return;
     }
     *read = transfers.steps();
-    let contacts: Vec<(Entity, Load)> = transfers
+    let mut inputs: Vec<_> = transfers
         .split()
-        .filter_map(|(point, blow, press, mass)| {
-            contact_load(
-                &colliders,
-                &constructions,
-                point,
-                blow,
-                press,
-                mass,
-                transfers.dt(),
-            )
+        .map(|(point, blow, press, mass)| ContactInput {
+            point: *point,
+            blow,
+            press,
+            mass,
+            step: transfers.dt(),
         })
         .collect();
+    let awake = inputs.len();
+    inputs.extend(transfers.resting().iter().map(|rest| ContactInput {
+        point: rest.transfer,
+        blow: Vec3::ZERO,
+        press: rest.press(),
+        // Resting presses carry no blow; no law reads their source mass.
+        mass: rest.transfer.effective_mass,
+        step: rest.dt,
+    }));
+    let converted = prepare_contacts(ComputeTaskPool::get(), &inputs, &colliders, &constructions);
     resting.0.clear();
-    for rest in transfers.resting() {
-        // A resting press has no blow, so no law reads its source mass; the point's own stands.
-        if let Some((root, load)) = contact_load(
-            &colliders,
-            &constructions,
-            &rest.transfer,
-            Vec3::ZERO,
-            rest.press(),
-            rest.transfer.effective_mass,
-            rest.dt,
-        ) {
-            resting.0.entry(root).or_default().push(load);
+    let mut contacts = Vec::new();
+    for (index, load) in converted.into_iter().enumerate() {
+        if let Some((root, load)) = load {
+            if index < awake {
+                contacts.push((root, load));
+            } else {
+                resting.0.entry(root).or_default().push(load);
+            }
         }
     }
     if !contacts.is_empty() {
@@ -922,6 +924,61 @@ fn read_contacts(
             ..default()
         });
     }
+}
+
+#[derive(Clone, Copy)]
+struct ContactInput {
+    point: ContactTransfer,
+    blow: Vec3,
+    press: Vec3,
+    mass: f32,
+    step: f32,
+}
+
+/// Constraint mass splitting precedes dispatch. Each owner converts its contacts in source order;
+/// indexed collection preserves the original awake/resting sequence under any worker assignment.
+fn prepare_contacts(
+    pool: &TaskPool,
+    inputs: &[ContactInput],
+    colliders: &Colliders,
+    constructions: &Query<((&Position, &Rotation), &Breakage, Option<&Piece>)>,
+) -> Vec<Option<(Entity, Load)>> {
+    let mut owners: BTreeMap<Entity, Vec<(usize, &ContactInput)>> = BTreeMap::new();
+    for (index, input) in inputs.iter().enumerate() {
+        owners
+            .entry(input.point.structure)
+            .or_default()
+            .push((index, input));
+    }
+    let mut converted: Vec<_> = pool
+        .scope(|scope| {
+            for inputs in owners.into_values() {
+                scope.spawn(async move {
+                    inputs
+                        .into_iter()
+                        .map(|(index, input)| {
+                            (
+                                index,
+                                contact_load(
+                                    colliders,
+                                    constructions,
+                                    &input.point,
+                                    input.blow,
+                                    input.press,
+                                    input.mass,
+                                    input.step,
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                });
+            }
+        })
+        .into_iter()
+        .flatten()
+        .collect();
+    converted.sort_unstable_by_key(|(index, _)| *index);
+    converted.into_iter().map(|(_, load)| load).collect()
 }
 
 /// The load a body's contact point `transfer` puts on a construction, with `blow` (N·s) and `press`
@@ -2722,9 +2779,90 @@ fn derive_from_record(
     applied.1 = record.entries.len();
 }
 
-/// Every peer: make a changed construction's colliders its shape's — an intact element its own
-/// collider, a swapped element one static collider per standing chunk — spawning and despawning
-/// only what differs. A spawned collider carries its pose so the refit that follows places it.
+/// Prepared structural effects in the owner's original element-then-chunk order.
+enum ColliderChange<E, C> {
+    Despawn(Entity),
+    Element(E),
+    Chunk(C),
+}
+
+fn prepare_reconcile(
+    root: Entity,
+    transform: &Transform,
+    breakage: &Breakage,
+    children: Option<&Children>,
+    elements: &Query<&Element>,
+    chunks: &Query<&ChunkCollider>,
+) -> Vec<ColliderChange<impl Bundle, impl Bundle>> {
+    let mut effects = Vec::new();
+    let kind = &breakage.kind;
+    let shape = breakage.shape();
+    let (mut have_elements, mut have_chunks) = (BTreeMap::new(), BTreeMap::new());
+    for child in children.into_iter().flatten() {
+        if let Ok(&Element(e)) = elements.get(*child) {
+            have_elements.insert(usize::from(e), *child);
+        } else if let Ok(&ChunkCollider(c)) = chunks.get(*child) {
+            have_chunks.insert(usize::from(c), *child);
+        }
+    }
+    let pose = (
+        Position(transform.translation),
+        Rotation(transform.rotation),
+    );
+    for (e, swapped) in shape.swapped.iter().enumerate() {
+        match (swapped, have_elements.get(&e)) {
+            (true, Some(entity)) => effects.push(ColliderChange::Despawn(*entity)),
+            (false, None) => {
+                effects.push(ColliderChange::Element((
+                    ChildOf(root),
+                    super::element_bundle(kind, e, breakage.scale),
+                    pose,
+                )));
+            }
+            _ => {}
+        }
+    }
+    for c in 0..kind.layout.chunks.len() {
+        match (shape.chunk_present(&kind.layout, c), have_chunks.get(&c)) {
+            (false, Some(entity)) => effects.push(ColliderChange::Despawn(*entity)),
+            (true, None) => {
+                effects.push(ColliderChange::Chunk((
+                    ChildOf(root),
+                    Transform::IDENTITY,
+                    chunk_collider(kind, c, breakage.scale, Vec3::ZERO),
+                    super::element_layers(),
+                    kind.chunk_friction(c),
+                    chunk_volume(kind, c),
+                    ChunkCollider(c as u16),
+                    pose,
+                )));
+            }
+            _ => {}
+        }
+    }
+    effects
+}
+
+/// Scoped results retain query order; only collider preparation runs on workers.
+fn prepare_reconciliations(
+    pool: &TaskPool,
+    constructions: &Query<
+        (Entity, &Transform, &Breakage, Option<&Children>),
+        (Changed<Breakage>, Without<Piece>),
+    >,
+    elements: &Query<&Element>,
+    chunks: &Query<&ChunkCollider>,
+) -> Vec<Vec<ColliderChange<impl Bundle, impl Bundle>>> {
+    pool.scope(|scope| {
+        for (root, transform, breakage, children) in constructions {
+            scope.spawn(async move {
+                prepare_reconcile(root, transform, breakage, children, elements, chunks)
+            });
+        }
+    })
+}
+
+/// Every peer: prepare changed owners together, then commit colliders before the same-update refit.
 fn reconcile(
     constructions: Query<
         (Entity, &Transform, &Breakage, Option<&Children>),
@@ -2734,50 +2872,20 @@ fn reconcile(
     chunks: Query<&ChunkCollider>,
     mut commands: Commands,
 ) {
-    for (root, transform, breakage, children) in &constructions {
-        let kind = &breakage.kind;
-        let shape = breakage.shape();
-        let (mut have_elements, mut have_chunks) = (BTreeMap::new(), BTreeMap::new());
-        for child in children.into_iter().flatten() {
-            if let Ok(&Element(e)) = elements.get(*child) {
-                have_elements.insert(usize::from(e), *child);
-            } else if let Ok(&ChunkCollider(c)) = chunks.get(*child) {
-                have_chunks.insert(usize::from(c), *child);
+    let effects =
+        prepare_reconciliations(ComputeTaskPool::get(), &constructions, &elements, &chunks);
+    // Direct scoped submissions collect in query order. All hulls are ready before this flush,
+    // and refit_systems exposes every new collider to spatial queries in the same update.
+    for effect in effects.into_iter().flatten() {
+        match effect {
+            ColliderChange::Despawn(entity) => {
+                commands.entity(entity).despawn();
             }
-        }
-        let pose = (
-            Position(transform.translation),
-            Rotation(transform.rotation),
-        );
-        for (e, swapped) in shape.swapped.iter().enumerate() {
-            match (swapped, have_elements.get(&e)) {
-                (true, Some(entity)) => commands.entity(*entity).despawn(),
-                (false, None) => {
-                    commands.spawn((
-                        ChildOf(root),
-                        super::element_bundle(kind, e, breakage.scale),
-                        pose,
-                    ));
-                }
-                _ => {}
+            ColliderChange::Element(bundle) => {
+                commands.spawn(bundle);
             }
-        }
-        for c in 0..kind.layout.chunks.len() {
-            match (shape.chunk_present(&kind.layout, c), have_chunks.get(&c)) {
-                (false, Some(entity)) => commands.entity(*entity).despawn(),
-                (true, None) => {
-                    commands.spawn((
-                        ChildOf(root),
-                        Transform::IDENTITY,
-                        chunk_collider(kind, c, breakage.scale, Vec3::ZERO),
-                        super::element_layers(),
-                        kind.chunk_friction(c),
-                        chunk_volume(kind, c),
-                        ChunkCollider(c as u16),
-                        pose,
-                    ));
-                }
-                _ => {}
+            ColliderChange::Chunk(bundle) => {
+                commands.spawn(bundle);
             }
         }
     }

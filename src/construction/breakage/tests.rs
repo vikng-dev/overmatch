@@ -4811,3 +4811,179 @@ fn deriving_a_shorter_same_generation_record_is_a_bug() {
     app.world_mut().resource_mut::<Record>().entries.clear();
     app.update();
 }
+
+/// The game's environment destruction model: owner contact conversion keeps source order,
+/// masses and frame conversion across worker assignments, including interleaved resting inputs.
+#[test]
+fn contact_preparation_preserves_source_order_across_workers() {
+    use bevy::ecs::system::SystemState;
+    use bevy::tasks::TaskPoolBuilder;
+    let kind = column_construction();
+    let mut world = World::new();
+    let mut inputs = Vec::new();
+    for ordinal in 0..3 {
+        let root = world
+            .spawn((
+                Position(Vec3::X * ordinal as f32),
+                Rotation::default(),
+                Breakage::new(kind.clone(), ordinal, 1.0),
+            ))
+            .id();
+        let collider = world.spawn((Element(0), ChildOf(root))).id();
+        for sequence in 0..4 {
+            inputs.push(ContactInput {
+                point: ContactTransfer {
+                    structure: root,
+                    structure_collider: collider,
+                    body: root,
+                    body_collider: None,
+                    point: Vec3::X * ordinal as f32 + kind.layout.element_blocks[0].points[0],
+                    normal: Vec3::Y,
+                    impulse: Vec3::ZERO,
+                    effective_mass: 7.0,
+                    closing_speed: 2.0,
+                    rest_speed: 0.1,
+                },
+                blow: Vec3::X * sequence as f32,
+                press: Vec3::Y * (sequence + 1) as f32,
+                mass: (sequence + 2) as f32,
+                step: STEP,
+            });
+        }
+    }
+    // Fixture: interleave owners and both nonzero and zero blows in one source sequence.
+    inputs.rotate_left(3);
+    inputs[4].blow = Vec3::ZERO;
+    let mut state: SystemState<(
+        Colliders,
+        Query<((&Position, &Rotation), &Breakage, Option<&Piece>)>,
+    )> = SystemState::new(&mut world);
+    let (colliders, constructions) = state.get(&world).unwrap();
+    let expected: Vec<_> = inputs
+        .iter()
+        .map(|i| {
+            contact_load(
+                &colliders,
+                &constructions,
+                &i.point,
+                i.blow,
+                i.press,
+                i.mass,
+                i.step,
+            )
+        })
+        .collect();
+    assert!(
+        expected.iter().all(Option::is_some),
+        "the fixture exercises real construction contacts"
+    );
+    for threads in [1, 2] {
+        let pool = TaskPoolBuilder::new().num_threads(threads).build();
+        assert_eq!(
+            prepare_contacts(&pool, &inputs, &colliders, &constructions),
+            expected
+        );
+    }
+}
+
+/// Collider preparation and its committed geometry are independent of worker assignment.
+/// The existing march/refit witness checks same-update visibility through the shipped plugin.
+#[test]
+fn reconciliation_prepares_the_same_ordered_geometry_across_workers() {
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::tasks::TaskPoolBuilder;
+    let run = |threads| {
+        let kind = column_construction();
+        let (mut app, first) = composed_kind(false, &kind);
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, app.world());
+        let second = crate::construction::spawn(
+            &mut commands,
+            &kind,
+            MapInstance {
+                id: "fixture-second".into(),
+                ordinal: 2,
+            },
+            Transform::from_xyz(5.0, 0.0, 0.0),
+        );
+        queue.apply(app.world_mut());
+        {
+            let mut breakage = app.world_mut().get_mut::<Breakage>(first).unwrap();
+            breakage.live.swapped.fill(true);
+            breakage.live.state.fate[0] = Fate::Dust;
+        }
+        // Leave the other owner intact to prepare both element and chunk effects.
+        let children: Vec<_> = app
+            .world()
+            .get::<Children>(second)
+            .unwrap()
+            .iter()
+            .collect();
+        for child in children {
+            app.world_mut().despawn(child);
+        }
+        app.world_mut()
+            .run_system_once(
+                move |owners: Query<
+                    (Entity, &Transform, &Breakage, Option<&Children>),
+                    (Changed<Breakage>, Without<Piece>),
+                >,
+                      elements: Query<&Element>,
+                      chunks: Query<&ChunkCollider>,
+                      mut commands: Commands| {
+                    let pool = TaskPoolBuilder::new().num_threads(threads).build();
+                    for change in prepare_reconciliations(&pool, &owners, &elements, &chunks)
+                        .into_iter()
+                        .flatten()
+                    {
+                        match change {
+                            ColliderChange::Despawn(entity) => {
+                                commands.entity(entity).despawn();
+                            }
+                            ColliderChange::Element(bundle) => {
+                                commands.spawn(bundle);
+                            }
+                            ColliderChange::Chunk(bundle) => {
+                                commands.spawn(bundle);
+                            }
+                        }
+                    }
+                },
+            )
+            .unwrap();
+        let world = app.world_mut();
+        let mut result: Vec<_> = world
+            .query::<(
+                &ChildOf,
+                Option<&Element>,
+                Option<&ChunkCollider>,
+                &Collider,
+                &Position,
+                &Rotation,
+                &Friction,
+            )>()
+            .iter(world)
+            .map(
+                |(parent, element, chunk, collider, position, rotation, friction)| {
+                    let ordinal = world.get::<Breakage>(parent.parent()).unwrap().construction;
+                    let aabb = collider.aabb(position.0, *rotation);
+                    (
+                        ordinal,
+                        element.map(|e| e.0),
+                        chunk.map(|c| c.0),
+                        position.0,
+                        rotation.0,
+                        aabb.min,
+                        aabb.max,
+                        *friction,
+                    )
+                },
+            )
+            .collect();
+        result.sort_by_key(|(ordinal, element, chunk, ..)| (*ordinal, *element, *chunk));
+        assert!(result.iter().any(|(_, element, ..)| element.is_some()));
+        assert!(result.iter().any(|(_, _, chunk, ..)| chunk.is_some()));
+        result
+    };
+    assert_eq!(run(1), run(2));
+}
