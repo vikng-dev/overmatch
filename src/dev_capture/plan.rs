@@ -369,8 +369,8 @@ pub(crate) struct Preview {
 }
 
 /// One preview construction (`dev_capture::wall`): the shipped construction `asset`, named `id`,
-/// standing `offset` metres from the cue's house root along its own x and z, at the house root's
-/// height, turned `yaw_deg` about +Y from the house's heading, at unit scale.
+/// standing `offset` metres from the cue's house root along its own x and z, on the ground there,
+/// turned `yaw_deg` about +Y from the house's heading, at unit scale.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Placed {

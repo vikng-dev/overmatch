@@ -389,9 +389,9 @@ fn aimed_at(
     (-along, at, at)
 }
 
-/// Stand the plan's preview constructions beside the cue's house (module doc), each drawn with the
-/// constructions' one material where the root draws, at unit scale, and frame them with the
-/// preview's camera.
+/// Stand the plan's preview constructions beside the cue's house (module doc), each on the ground at
+/// its own XZ as the map stands its own (the height grid there), drawn with the constructions' one
+/// material where the root draws, at unit scale, and frame them with the preview's camera.
 ///
 /// # Panics
 ///
@@ -401,6 +401,7 @@ fn place_preview(
     mut cue: ResMut<Cue>,
     houses: Houses,
     placed: Query<&MapInstance>,
+    grid: Res<crate::terrain_grid::HeightGrid>,
     look: Option<Res<crate::construction::view::Look>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
@@ -441,8 +442,10 @@ fn place_preview(
             .expect("the preview library loaded every preview asset")
             .clone();
         let (x, z) = placed.offset;
+        let mut at = house.translation + house.rotation * Vec3::new(x, 0.0, z);
+        at.y = grid.height_at(at.x, at.z);
         let pose = Transform {
-            translation: house.translation + house.rotation * Vec3::new(x, 0.0, z),
+            translation: at,
             rotation: house.rotation * Quat::from_rotation_y(placed.yaw_deg.to_radians()),
             scale: Vec3::ONE,
         };

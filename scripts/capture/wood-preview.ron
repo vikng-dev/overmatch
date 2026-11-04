@@ -6,27 +6,31 @@
 // aimed in the house's own frame (an aim that names no instance): one inside a board
 // (`east/board_5`'s centre) and one across the nailed seam between `east/board_5` and
 // `east/board_6`. The preview's camera stands east of the house looking at the slope, a trunk to
-// either side. From the checkout root:
+// either side. From the checkout root, hidden and silent under the machine's build lock:
 //
-//   OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=offscreen \
-//     OVERMATCH_CAPTURE=scripts/capture/wood-preview.ron target/debug/overmatch --offline
+//   OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 \
+//     OVERMATCH_CAPTURE=scripts/capture/wood-preview.ron \
+//     scripts/build-lock target/debug/overmatch --offline
 //
 // writes target/capture/wood-preview-<second>.png at each frame second, then exits. Aim points
 // are house_1 asset metres read from its bake (board 5's section corners (0.8, 3.475),
 // (0.83, 3.515), (0.96, 3.355), (0.99, 3.395); the seam is its lower edge, shared with board 6);
-// the slope's outward normal is (0.6, 0.8, 0). Offsets, camera, times, the charge's mass and the
-// rounds are capture configuration (ASSUMED), chosen to frame the break, never to reach an outcome.
+// the slope's outward normal is (0.6, 0.8, 0). Offsets, camera, frame size, times and the rounds
+// are capture configuration (ASSUMED), chosen to frame what the laws do. The charge's mass is too
+// (ASSUMED), chosen for an outcome: the least of 2, 4, 8 and 16 kg at which the laws turn chunks of
+// the trunk's foot to dust (MEASURED on preview firs beside this house, charged as here: 2 to 8 kg
+// cut dishes only, 16 kg dusts two chunks; 32 kg still fells nothing).
 (
     frames: (
         out: "target/capture/wood-preview.png",
         at: [7.0, 9.5, 11.5, 13.5, 18.0],
-        size: (2560, 1440),
+        size: (3840, 2160),
         ui: false,
         gizmos: false,
     ),
     wall: (
         shots: [
-            Charge(kg: 2.0, core: "88mm_burst_core", at: 8.0, aim: (
+            Charge(kg: 16.0, core: "88mm_burst_core", at: 8.0, aim: (
                 instance: "preview_fir_broken",
                 at: (0.21, 0.0, 0.0),
                 toward: (-1.0, 0.0, 0.0),
@@ -45,8 +49,8 @@
                 (asset: "fir_1", id: "preview_fir_intact", offset: (4.0, -9.0), yaw_deg: 0.0),
                 (asset: "fir_1", id: "preview_fir_broken", offset: (4.0, 9.0), yaw_deg: 0.0),
             ],
-            eye: (24.0, 8.0, 0.0),
-            look: (3.0, 5.0, 0.0),
+            eye: (18.0, 6.5, 0.0),
+            look: (2.0, 2.5, 0.0),
         ),
     ),
 )
