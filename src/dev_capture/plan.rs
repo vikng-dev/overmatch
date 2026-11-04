@@ -308,13 +308,35 @@ impl TryFrom<f64> for FrameStep {
 /// On the first frame at or after app second `at`, the shipped round `round` in fuze mode `mode`
 /// is fired at a real tree or at the ground beside it, and the frames are timed from its burst.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ShotInput")]
 pub(crate) struct Shot {
-    pub(crate) round: String,
-    #[serde(default)]
-    pub(crate) mode: u8,
+    pub(crate) key: String,
+    pub(crate) round: crate::rounds::Round,
     pub(crate) target: ShotTarget,
     pub(crate) at: f32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShotInput {
+    round: String,
+    #[serde(default)]
+    mode: u8,
+    target: ShotTarget,
+    at: f32,
+}
+
+impl TryFrom<ShotInput> for Shot {
+    type Error = super::RoundCueError;
+
+    fn try_from(input: ShotInput) -> Result<Self, Self::Error> {
+        Ok(Self {
+            round: super::resolve_round(&input.round, input.mode, "shot")?,
+            key: input.round,
+            target: input.target,
+            at: input.at,
+        })
+    }
 }
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -658,6 +680,30 @@ mod tests {
         );
     }
 
+    /// The game's damage-model shot cue must refuse operator typos before setup. Fixture:
+    /// an absent key and an out-of-range mode; diagnostics name the field and its repair.
+    #[test]
+    fn shot_rounds_and_modes_are_resolved_at_admission() {
+        let registry = crate::guns::GunRegistry::shipped();
+        let (_, key, _) = registry.fired_rounds().next().unwrap();
+        for (round, mode, field, fix) in [
+            ("missing capture round", 0, "shot.round", "name a round"),
+            (key, u8::MAX, "shot.mode", "authored fuze modes"),
+        ] {
+            let text = format!("(shot: (round: {round:?}, mode: {mode}, target: Tree, at: 0.0))");
+            let error = CapturePlan::parse(&text).unwrap_err().to_string();
+            assert!(error.contains(field) && error.contains(fix), "{error}");
+        }
+        let weapon_round = crate::tank::WeaponRound::resolve(key).unwrap();
+        for mode in 0..weapon_round.fuze_modes().len().max(1) {
+            let mode = u8::try_from(mode).unwrap();
+            let text = format!("(shot: (round: {key:?}, mode: {mode}, target: Tree, at: 0.0))");
+            let shot = CapturePlan::parse(&text).unwrap().shot.unwrap();
+            assert_eq!(shot.key, key);
+            assert_eq!(shot.round, weapon_round.in_mode(mode).unwrap());
+        }
+    }
+
     /// The tracked inspection recipe must remain a valid input to the one scene-selection edge.
     #[test]
     fn the_lod_inspection_recipe_selects_the_showcase() {
@@ -749,8 +795,8 @@ mod tests {
         assert_eq!(
             plan.shot,
             Some(Shot {
-                round: "88mm_HE".into(),
-                mode: 1,
+                key: "88mm_HE".into(),
+                round: super::super::resolve_round("88mm_HE", 1, "shot").unwrap(),
                 target: ShotTarget::Ground,
                 at: 6.0,
             })

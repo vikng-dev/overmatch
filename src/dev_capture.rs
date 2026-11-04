@@ -233,19 +233,46 @@ fn mount(app: &mut App, frames: &plan::Frames) {
     }
 }
 
-/// The shipped round `key` in fuze mode `mode`, as the plan's `field` names it.
-///
-/// # Panics
-///
-/// When no shipped round has that key, or it has no such fuze mode (ADR-0011).
-fn resolve_round(key: &str, mode: u8, field: &str) -> crate::rounds::Round {
+/// The game's damage-model cue refuses unknown rounds and modes at plan admission.
+#[derive(Debug)]
+enum RoundCueError {
+    Round {
+        field: &'static str,
+        error: crate::guns::GunError,
+    },
+    Mode {
+        field: &'static str,
+        round: String,
+        mode: u8,
+    },
+}
+
+impl std::fmt::Display for RoundCueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Round { field, error } => write!(
+                f,
+                "{field}.round: {error}; name a round chambered by one shipped gun"
+            ),
+            Self::Mode { field, round, mode } => write!(
+                f,
+                "{field}.mode: round {round:?} has no mode {mode}; choose 0 for an inert round or one of its authored fuze modes"
+            ),
+        }
+    }
+}
+
+fn resolve_round(
+    key: &str,
+    mode: u8,
+    field: &'static str,
+) -> Result<crate::rounds::Round, RoundCueError> {
     let round = crate::tank::WeaponRound::resolve(key)
-        .unwrap_or_else(|error| panic!("{}: {field}: {error}", plan::VARIABLE));
-    round.in_mode(mode).unwrap_or_else(|| {
-        panic!(
-            "{}: {field}: round {key:?} has no fuze mode {mode}",
-            plan::VARIABLE
-        )
+        .map_err(|error| RoundCueError::Round { field, error })?;
+    round.in_mode(mode).ok_or_else(|| RoundCueError::Mode {
+        field,
+        round: key.into(),
+        mode,
     })
 }
 

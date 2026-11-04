@@ -37,10 +37,9 @@ pub(crate) fn offline_shot_plugin(app: &mut App) {
     let Some(shot) = super::plan().and_then(|plan| plan.shot.as_ref()) else {
         return;
     };
-    let round = super::resolve_round(&shot.round, shot.mode, "shot");
     let cue = Cue {
-        key: shot.round.clone(),
-        round,
+        key: shot.key.clone(),
+        round: shot.round,
         tree: shot.target == super::plan::ShotTarget::Tree,
         at: shot.at,
         fired: false,

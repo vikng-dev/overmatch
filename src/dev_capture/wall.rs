@@ -43,8 +43,7 @@ pub(super) struct Charge {
 
 #[derive(Debug)]
 pub(super) enum CueError {
-    Round(crate::guns::GunError),
-    Mode { round: String, mode: u8 },
+    Round(super::RoundCueError),
     Core(crate::substances::SubstanceError),
     NoBurst { core: String },
     Mass { kg: f32 },
@@ -54,14 +53,7 @@ pub(super) enum CueError {
 impl std::fmt::Display for CueError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Round(error) => write!(
-                f,
-                "wall.shots.round: {error}; name a round chambered by one shipped gun"
-            ),
-            Self::Mode { round, mode } => write!(
-                f,
-                "wall.shots.mode: round {round:?} has no mode {mode}; choose 0 for an inert round or one of its authored fuze modes"
-            ),
+            Self::Round(error) => error.fmt(f),
             Self::Core(error) => write!(
                 f,
                 "wall.shots.core: {error}; name a materials.ron row with burst facts"
@@ -84,11 +76,7 @@ impl std::fmt::Display for CueError {
 
 impl What {
     pub(super) fn round(key: &str, mode: u8) -> Result<Self, CueError> {
-        let round = crate::tank::WeaponRound::resolve(key).map_err(CueError::Round)?;
-        let round = round.in_mode(mode).ok_or_else(|| CueError::Mode {
-            round: key.into(),
-            mode,
-        })?;
+        let round = super::resolve_round(key, mode, "wall.shots").map_err(CueError::Round)?;
         Ok(Self::Round(Box::new(round)))
     }
 
