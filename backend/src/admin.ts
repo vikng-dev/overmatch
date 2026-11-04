@@ -87,7 +87,6 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 
 	const usd = (vcpuMinutes: number) => (vcpuMinutes * cfg.usdPerVcpuMinute).toFixed(2);
 	if (!totals) throw new Error("admin totals: an aggregate without GROUP BY must return one row");
-	const t = totals;
 	const excluded = (count: number) => count ? ` (${count} ${count === 1 ? "session" : "sessions"} excluded: vCPU unknown)` : "";
 	const allServers = live.flatMap((l) => l.servers ?? []);
 	const players = allServers.reduce((n, s) => n + (s.state === "ready" ? s.players : 0), 0);
@@ -139,10 +138,10 @@ th{color:var(--mute);font-weight:500}.n{text-align:right;font-variant-numeric:ta
 <div class="kpi">
 <div><b>${allServers.length}</b><span>live servers</span></div>
 <div><b>${players}</b><span>players</span></div>
-<div><b>${t.month_minutes.toFixed(0)}</b><span>server-minutes this month</span></div>
-<div><b>$${usd(t.month_vcpu_minutes)}</b><span>est. compute this month${excluded(t.month_unknown)}</span></div>
-<div><b>$${usd(t.all_vcpu_minutes)}</b><span>est. compute all time${excluded(t.all_unknown)}</span></div>
-<div><b>${t.failures}/${t.sessions}</b><span>failed starts / sessions</span></div>
+<div><b>${totals.month_minutes.toFixed(0)}</b><span>server-minutes this month</span></div>
+<div><b>$${usd(totals.month_vcpu_minutes)}</b><span>est. compute this month${excluded(totals.month_unknown)}</span></div>
+<div><b>$${usd(totals.all_vcpu_minutes)}</b><span>est. compute all time${excluded(totals.all_unknown)}</span></div>
+<div><b>${totals.failures}/${totals.sessions}</b><span>failed starts / sessions</span></div>
 </div>
 <h2>Live</h2>
 <div class="wrap"><table><tr><th>version</th><th>location</th><th>state</th><th class="n">players</th><th>address</th><th class="n">age</th><th class="n">last heartbeat</th></tr>
