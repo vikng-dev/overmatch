@@ -1640,6 +1640,7 @@ pub struct SpallRay {
 #[derive(Clone)]
 pub struct SpallCone {
     /// The game's damage-model source volumes, retained for authority-local effect attribution.
+    #[cfg(any(test, feature = "dev_ui"))]
     pub(crate) exited: Vec<Entity>,
     pub origin: Vec3,
     pub axis: Dir3,
@@ -3747,6 +3748,7 @@ fn throw_spall_cone(
         );
     let rays = walk_field(&throw, &spread, dose, context, is_box);
     spall.cones.push(SpallCone {
+        #[cfg(any(test, feature = "dev_ui"))]
         exited: source.exited.clone(),
         origin: source.position,
         axis: throw.axis,

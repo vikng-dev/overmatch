@@ -1993,7 +1993,6 @@ pub(crate) fn step(
         &tp.gears_fwd
     };
     let g = ladder[usize::from(st.gear - 1)];
-    let shaft = dir * m;
 
     // The crank carries real inertia; launch slip limits transmitted torque while it spools.
     let omega_idle = tp.engine.idle_rpm * RPM_TO_RAD;
@@ -2110,7 +2109,7 @@ pub(crate) fn step(
     #[cfg(feature = "bitprobe")]
     let bitprobe = TransmissionProbe {
         direction: dir,
-        shaft_speed: shaft,
+        shaft_speed: dir * m,
         gear_reduction: g,
         k,
         omega_idle,

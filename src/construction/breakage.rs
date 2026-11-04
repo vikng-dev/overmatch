@@ -375,6 +375,7 @@ impl Layout {
 
     /// Instrument reconstruction at an admitted scale (`track_sandbox::rubble` and law tests).
     /// Placed gameplay instances retain their checked structure in `ConstructionKind` at map load.
+    #[cfg(any(test, feature = "dev_ui"))]
     pub(crate) fn structure(&self, asset: &ConstructionAsset, scale: f32) -> Structure {
         self.checked_structure(asset, scale)
             .expect("instrument data names an admitted construction scale")
@@ -590,6 +591,7 @@ impl Live {
     }
 
     /// Complete live state built synchronously from a structure and its authored element count.
+    #[cfg(any(test, feature = "dev_ui"))]
     pub(crate) fn from_structure(structure: Structure, elements: usize) -> Self {
         Self::from_shared(Arc::new(structure), elements)
     }

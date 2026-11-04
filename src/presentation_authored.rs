@@ -99,6 +99,9 @@ pub(crate) fn camera_constants(text: &str) -> Result<String, String> {
                 "author a positive finite value in the named unit",
             ));
         }
+        if matches!(constant, "FREE_FLY_SENSITIVITY" | "FREE_FLY_SPEED") {
+            writeln!(out, r#"#[cfg(feature = "dev_ui")]"#).unwrap();
+        }
         writeln!(out, "pub const {constant}: f32 = {};", literal(value)).unwrap();
     }
     if data.orbit_near_m.0 > data.orbit_far_m.0 {
