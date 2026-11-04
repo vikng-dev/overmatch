@@ -107,11 +107,6 @@ def prune(target: Path, budget_bytes: int) -> Retained:
     variants = []
     empty = []
     for root in roots:
-        relative = root.relative_to(target)
-        for ancestor in (relative, *relative.parents):
-            checked = target / ancestor
-            if checked.is_symlink():
-                raise CacheLayoutError(f"{checked}: incremental paths must not contain symlinks")
         # Validate even entries that will be discarded before any mutation.
         accounted_bytes(root)
         for crate in sorted(root.iterdir()):
