@@ -1,4 +1,5 @@
 (
+    lod_budget_px: (1.0, Taste("geometry screen-space detail budget when player settings are absent")),
     pivot_lift_m: (2.5, Taste("orbit camera height above the turret ring")),
     orbit_far_m: (18.0, Taste("third-person wide framing")),
     orbit_near_m: (5.0, Taste("third-person close framing")),

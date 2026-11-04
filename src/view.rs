@@ -106,30 +106,24 @@ pub(crate) struct ViewFacts {
 }
 
 impl ViewFacts {
-    /// Admit finite positive height and FOV in `(0, π)`; otherwise return `None`.
-    /// Nonpositive height is unmeasurable: an unsized window or zero/invalid scale, not a tiny view.
-    /// Zero height collapses thresholds onto radius slack, showing coarse geometry first.
-    /// Invalid FOV corrupts the divisor: NaN ranges draw nothing, negative angles invert chains,
-    /// and ≥π is outside the perspective domain. `spec::TankSpec::validate` gates authored FOV;
-    /// this also guards debug tools and partially initialised cameras.
-    /// Callers hold measured facts ([`Self::settled`]) or remain absent, never substitute a view.
+    /// Admit measurable height; an invalid internal perspective field is a bug in its writer.
+    /// Zero or nonfinite target height is an unmeasurable surface, never a substitute view.
     pub(crate) fn new(vfov_rad: f32, height_px: f32) -> Option<Self> {
-        // `NaN` fails every comparison and is refused by both.
-        (vfov_rad > 0.0
-            && vfov_rad < core::f32::consts::PI
-            && height_px.is_finite()
-            && height_px > 0.0)
-            .then_some(Self {
-                vfov_rad,
-                height_px,
-            })
+        assert!(
+            vfov_rad > 0.0 && vfov_rad < core::f32::consts::PI,
+            "a declared perspective camera has a finite FOV strictly between zero and pi radians"
+        );
+        (height_px.is_finite() && height_px > 0.0).then_some(Self {
+            vfov_rad,
+            height_px,
+        })
     }
 
     /// Pure settling rule for [`track_view_facts`], independent of world/query/error handling.
     /// Return self if unchanged; the caller writes only differences to keep change ticks human-rate.
     /// Hold FOV inside the dead band: adopting each small request would leak range-table entries.
     /// Compare against the held field so subthreshold steps accumulate and eventually cross it.
-    /// Invalid requests ([`Self::new`]) hold the last measurement without inventing a substitute.
+    /// An unmeasurable height ([`Self::new`]) holds the last measurement. Invalid FOV is a bug.
     pub(crate) fn settled(self, vfov_rad: f32, height_px: f32) -> Self {
         let Some(wanted) = Self::new(vfov_rad, height_px) else {
             return self;
@@ -185,7 +179,7 @@ pub(crate) struct ViewProfile {
 
 /// Authored one-pixel budget when player settings are absent, matching the corpus's
 /// `scripts/lod/config.py::REFERENCE_VIEW`. A tuning default, not a substitute view measurement.
-pub(crate) const DEFAULT_BUDGET_PX: f32 = 1.0;
+pub(crate) const DEFAULT_BUDGET_PX: f32 = crate::camera::DEFAULT_LOD_BUDGET_PX;
 
 impl ViewProfile {
     /// Shared facts at a positive finite `budget_px`; callers choose any authored default.
@@ -232,7 +226,10 @@ pub(crate) fn track_view_facts(
             .map_or(0.0, |image| {
                 image.height() as f32 * scale.as_deref().map_or(1.0, |scale| scale.0)
             }),
-        _ => ViewFacts::rendered_height_px(window.single().ok(), scale.as_deref()),
+        _ => ViewFacts::rendered_height_px(
+            crate::state::primary_window(window.single()),
+            scale.as_deref(),
+        ),
     };
     let held = facts.as_deref().copied();
     let wanted = match held {
@@ -333,14 +330,10 @@ mod tests {
         assert!((halved_height.switch_distance_m(0.01, radius) - radius - 0.5 * term).abs() < 1e-2);
     }
 
-    /// Invalid FOV/height cannot masquerade as measurements (e.g. narrow optic/1080 px).
+    /// An unmeasurable surface cannot masquerade as a measured view. Invalid FOV is a writer bug.
     #[test]
     fn an_input_that_is_not_a_measurement_is_not_a_view() {
         for (fov, height) in [
-            (f32::NAN, 1440.0),
-            (0.0, 1440.0),
-            (-0.5, 1440.0),
-            (core::f32::consts::PI, 1440.0),
             (0.12, 0.0),
             (0.12, -1.0),
             (0.12, f32::INFINITY),
@@ -353,6 +346,26 @@ mod tests {
         }
         // A zero-deviation level is the source surface: it owns the camera, not the radius alone.
         assert_eq!(measured(0.12, 1080.0).sub_pixel_distance_m(0.0, 1.0), 0.0);
+    }
+
+    /// Invalid internal fields must stop LOD readers even before the surface becomes measurable.
+    #[test]
+    fn invalid_perspective_fields_are_bugs_even_without_a_surface() {
+        for fov in [f32::NAN, f32::INFINITY, 0.0, -0.5, core::f32::consts::PI] {
+            for height in [0.0, 1440.0] {
+                assert!(std::panic::catch_unwind(|| ViewFacts::new(fov, height)).is_err());
+            }
+        }
+    }
+
+    /// Multiple primary surfaces contradict the declared view; the reader must not hold stale facts.
+    #[test]
+    #[should_panic(expected = "an app has at most one primary window")]
+    fn duplicate_primary_windows_are_a_composition_bug() {
+        let (mut app, _, _) = declared_view_app(0.5, 1440); // Fixture perspective and surface.
+        app.update();
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+        app.update();
     }
 
     /// LOD consumers must not silently replace invalid internal budgets with another selection
@@ -389,8 +402,7 @@ mod tests {
             held.settled(commander * 0.5, 1440.0).vfov_rad,
             commander * 0.5,
         );
-        // Invalid requests retain measured facts.
-        assert_eq!(held.settled(f32::NAN, 1440.0), held);
+        // Surface teardown retains measured facts.
         assert_eq!(held.settled(commander, 0.0), held);
     }
 
@@ -545,10 +557,7 @@ mod tests {
 
         // Fixture optic halves the field and lands on the next frame.
         nudge(&mut app, commander * 0.5);
-        assert_eq!(
-            facts_of(&app),
-            Some(measured(commander * 0.5, 2160.0)),
-        );
+        assert_eq!(facts_of(&app), Some(measured(commander * 0.5, 2160.0)),);
     }
 
     /// Surface teardown under `ExitCondition::DontExit` holds height while still accepting FOV

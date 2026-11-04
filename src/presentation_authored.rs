@@ -13,6 +13,7 @@ struct Camera {
     pivot_lift_m: Sourced<f32>,
     orbit_far_m: Sourced<f32>,
     orbit_near_m: Sourced<f32>,
+    lod_budget_px: Sourced<f32>,
     commander_fov_before_bind_rad: Sourced<f32>,
     orbit_yaw_rad_per_pixel: Sourced<f32>,
     orbit_pitch_rad_per_pixel: Sourced<f32>,
@@ -56,6 +57,11 @@ pub(crate) fn camera_constants(text: &str) -> Result<String, String> {
         ("pivot_lift_m", "PIVOT_LIFT", data.pivot_lift_m.0),
         ("orbit_far_m", "ORBIT_FAR", data.orbit_far_m.0),
         ("orbit_near_m", "ORBIT_NEAR", data.orbit_near_m.0),
+        (
+            "lod_budget_px",
+            "DEFAULT_LOD_BUDGET_PX",
+            data.lod_budget_px.0,
+        ),
         (
             "commander_fov_before_bind_rad",
             "COMMANDER_FOV_BEFORE_BIND",
@@ -249,6 +255,7 @@ mod tests {
             }
         }
         for (field, value) in [
+            ("lod_budget_px", "0.0"),
             ("orbit_near_m", "NaN"),
             ("orbit_near_m", "0.0"),
             ("orbit_near_m", "1e30"),
