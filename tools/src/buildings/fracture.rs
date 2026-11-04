@@ -18,7 +18,7 @@
 //!    datum, so pieces sharing a datum (a wall's piers, sills, lintels and gable) line their rows
 //!    up. A piece's top row shorter than half a row (a gable's apex) joins the row below.
 //! 2. **Cuts.** Each row's candidate cuts are the head joints of its bottom course, kept where the
-//!    chunk on either side stays at least `min_width_m` wide at the row's mid-height. A row of
+//!    chunk on either side stays at least `min_width_m` wide at both row ends. A row of
 //!    three courses then cuts its top course on joints too and its middle course through half a
 //!    unit, and the rows' cuts alternate by half a module, so the chunks lie in a running bond.
 //! 3. **Cracks.** Each candidate draws from a stream seeded by the asset, the piece and its row and
@@ -116,7 +116,7 @@ pub struct CourseRule {
     pub crack_chance: Choice<f64>,
     /// How far each end of a crack may move off its joint, m.
     pub crack_shift_m: Choice<f64>,
-    /// The narrowest a chunk may be at a row's top or bottom, m.
+    /// The least clearance a cut must leave at a row's top and bottom, m.
     pub min_width_m: Choice<f64>,
 }
 
@@ -286,6 +286,10 @@ fn courses(piece: &Piece, asset: &str, bond: &Courses, count: &mut CutCount) -> 
             .section_extent(up, 0.5 * (y0 + y1), along)
             .expect(within);
         let (lo, hi) = (lo + min_width, hi - min_width);
+        let limits = [y0, y1].map(|y| {
+            let (lo, hi) = solid.section_extent(up, y, along).expect(within);
+            (lo + min_width, hi - min_width)
+        });
         let parity = (((y0 - base_y) / course).round() as i64).rem_euclid(2) as f64;
         let mut cuts: Vec<Cut> = Vec::new();
         let first = ((lo - start) / module - 0.5 * parity).ceil() as i64;
@@ -304,7 +308,11 @@ fn courses(piece: &Piece, asset: &str, bond: &Courses, count: &mut CutCount) -> 
                 let clear = cuts.last().is_none_or(|before| {
                     cut.bottom - before.bottom >= min_width && cut.top - before.top >= min_width
                 });
-                clear && [cut.bottom, cut.top].iter().all(|&u| u >= lo && u <= hi)
+                clear
+                    && [cut.bottom, cut.top]
+                        .into_iter()
+                        .zip(limits)
+                        .all(|(u, (lo, hi))| u >= lo && u <= hi)
             };
             let seam = Cut {
                 bottom: joint,
@@ -334,8 +342,8 @@ fn courses(piece: &Piece, asset: &str, bond: &Courses, count: &mut CutCount) -> 
             }
         }
         // Each cut runs from `bottom` at `y0` to `top` at `y1`; the plane through it and the axis
-        // `along × up` keeps its left side as `n · p ≤ c`. Both ends lie in `[lo, hi]`, so every
-        // cut crosses the row's mid-height inside the piece and leaves a chunk either side.
+        // `along × up` keeps its left side as `n · p ≤ c`. Both ends clear the row boundary by
+        // `min_width`, so convexity keeps the whole cut inside and leaves a chunk either side.
         let side = |cut: &Cut| {
             let (du, dy) = (cut.top - cut.bottom, y1 - y0);
             let n = along * dy - up * du;

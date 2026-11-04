@@ -43,10 +43,7 @@
 //!
 //! HOW MANY BUILDING PIECES (DERIVED from `buildings::breakage`): a chunk leaves its building at most once
 //! and every split partitions its owned chunks, so live building bodies never exceed the map's
-//! breakable chunks. The wall design owns the retained carriers' bound and the split model. The shipped map's bound is 86,062 (MEASURED: 1,163 chunks in
-//! `assets/buildings/house_1/house_1.building.ron`, 1,005 brick and 158 wood, every element's
-//! material stating a seam, times the 74 `house_proxy` placements in
-//! `assets/maps/kalinovo/level.json`).
+//! breakable chunks. The wall design owns the retained carriers' bound and the split model.
 //! DERIVED: each tree carrier owns at least one segment, so its live bodies never exceed its
 //! segment count; later cuts partition existing ownership.
 //! Awake pieces are the ones in the solver. A sleeping piece's own per-tick cost and an awake pile

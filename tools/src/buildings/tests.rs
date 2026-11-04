@@ -855,3 +855,62 @@ fn course_chunk_bounds_follow_the_authored_geometry_and_row() {
         }
     }
 }
+
+/// Authors rely on min_width_m at both row ends, not merely the middle. Fixture: a one-row
+/// trapezoid tapers from 1 m to 0.8 m. With 0.26 m modules and a 0.08 m minimum, only the joints
+/// at 0.26 and 0.52 fit; 0.78 would leave 0.02 m at the top. A midpoint-only check accepts it.
+#[test]
+fn course_cuts_leave_the_authored_minimum_at_both_row_ends() {
+    let mut piece = lone(box_piece(
+        "taper",
+        "Pier",
+        "Wood",
+        "Upright",
+        DVec3::ZERO,
+        DVec3::ONE,
+        FIXTURE_COURSES,
+    ));
+    let Pattern::Courses(bond) = &mut piece.pattern else {
+        unreachable!("fixture courses")
+    };
+    bond.course_m = 1.0;
+    bond.rule.row_courses.0 = 1;
+    let minimum = bond.rule.min_width_m.0;
+    piece.solid = geom::Prism {
+        frame: geom::Frame {
+            origin: DVec3::ZERO,
+            u: DVec3::X,
+            v: DVec3::Y,
+        },
+        profile: [(0.0, 0.0), (1.0, 0.0), (0.8, 1.0), (0.0, 1.0)]
+            .map(|(x, y)| glam::DVec2::new(x, y))
+            .to_vec(),
+        near: 0.0,
+        far: 0.2,
+    }
+    .solid();
+    for chance in [0.0, 1.0] {
+        let Pattern::Courses(bond) = &mut piece.pattern else {
+            unreachable!("fixture courses")
+        };
+        bond.rule.crack_chance.0 = chance;
+        let mut count = CutCount::default();
+        let cut = fracture::chunks(&piece, "fixture", &mut count);
+        assert_eq!(
+            count.joints + count.cracks,
+            2,
+            "only two head joints clear both endpoints"
+        );
+        assert_eq!(cut.len(), 3);
+        for chunk in cut {
+            for y in [0.0, 1.0] {
+                let (lo, hi) = chunk.section_extent(DVec3::Y, y, DVec3::X).unwrap();
+                assert!(
+                    hi - lo >= minimum - 1e-9,
+                    "{y}: width {} < {minimum}",
+                    hi - lo
+                );
+            }
+        }
+    }
+}
