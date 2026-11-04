@@ -13,7 +13,6 @@ struct Camera {
     pivot_lift_m: Sourced<f32>,
     orbit_far_m: Sourced<f32>,
     orbit_near_m: Sourced<f32>,
-    gunner_fov_before_bind_rad: Sourced<f32>,
     commander_fov_before_bind_rad: Sourced<f32>,
     orbit_yaw_rad_per_pixel: Sourced<f32>,
     orbit_pitch_rad_per_pixel: Sourced<f32>,
@@ -57,11 +56,6 @@ pub(crate) fn camera_constants(text: &str) -> Result<String, String> {
         ("pivot_lift_m", "PIVOT_LIFT", data.pivot_lift_m.0),
         ("orbit_far_m", "ORBIT_FAR", data.orbit_far_m.0),
         ("orbit_near_m", "ORBIT_NEAR", data.orbit_near_m.0),
-        (
-            "gunner_fov_before_bind_rad",
-            "GUNNER_FOV_FALLBACK",
-            data.gunner_fov_before_bind_rad.0,
-        ),
         (
             "commander_fov_before_bind_rad",
             "COMMANDER_FOV_BEFORE_BIND",
@@ -114,23 +108,12 @@ pub(crate) fn camera_constants(text: &str) -> Result<String, String> {
             "author near <= far for the zoom interval",
         ));
     }
-    for (field, value) in [
-        (
-            "gunner_fov_before_bind_rad",
-            data.gunner_fov_before_bind_rad.0,
-        ),
-        (
+    if data.commander_fov_before_bind_rad.0 >= std::f32::consts::PI {
+        return Err(refuse(
+            CAMERA_FILE,
             "commander_fov_before_bind_rad",
-            data.commander_fov_before_bind_rad.0,
-        ),
-    ] {
-        if value >= std::f32::consts::PI {
-            return Err(refuse(
-                CAMERA_FILE,
-                field,
-                "author a field strictly between zero and pi radians",
-            ));
-        }
+            "author a field strictly between zero and pi radians",
+        ));
     }
     let span: [f32; 3] =
         std::array::from_fn(|i| data.initial_look_m.0[i] - data.initial_eye_m.0[i]);
@@ -266,7 +249,7 @@ mod tests {
             ("orbit_near_m", "NaN"),
             ("orbit_near_m", "0.0"),
             ("orbit_near_m", "1e30"),
-            ("gunner_fov_before_bind_rad", "4.0"),
+            ("commander_fov_before_bind_rad", "4.0"),
         ] {
             let bad = replace_value(camera, field, value);
             let error = camera_constants(&bad).unwrap_err();

@@ -893,7 +893,12 @@ mod tests {
 
     /// The reference view the shipped corpus was cut against: the gunner optic at 4K native.
     fn reference_facts() -> ViewFacts {
-        measured(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)
+        measured(
+            crate::bake::selected_spec().views[&crate::spec::ViewKind::Gunner]
+                .optics
+                .vertical_fov(),
+            2160.0,
+        )
     }
 
     /// The view cannot leave stale ranges on a marker outside the ladder that spawned it.
@@ -1422,7 +1427,9 @@ mod tests {
             let Projection::Perspective(projection) = lens.as_mut() else {
                 panic!("the test camera must carry a perspective projection");
             };
-            projection.fov = crate::camera::GUNNER_FOV_FALLBACK;
+            projection.fov = crate::bake::selected_spec().views[&crate::spec::ViewKind::Gunner]
+                .optics
+                .vertical_fov();
         }
         app.update();
         let optic: Vec<f32> = entities

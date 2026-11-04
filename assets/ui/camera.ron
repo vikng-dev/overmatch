@@ -2,7 +2,6 @@
     pivot_lift_m: (2.5, Taste("orbit camera height above the turret ring")),
     orbit_far_m: (18.0, Taste("third-person wide framing")),
     orbit_near_m: (5.0, Taste("third-person close framing")),
-    gunner_fov_before_bind_rad: (0.12, StandIn("optic framing before authored view binding")),
     commander_fov_before_bind_rad: (0.7853982, StandIn("commander framing before authored view binding")),
     orbit_yaw_rad_per_pixel: (0.004, Taste("horizontal orbit mouse response")),
     orbit_pitch_rad_per_pixel: (0.003, Taste("vertical orbit mouse response")),

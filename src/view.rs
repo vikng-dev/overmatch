@@ -384,11 +384,10 @@ mod tests {
         // Further motion accumulates against held FOV and crosses the band.
         let crossed = commander * (1.0 + FOV_HYSTERESIS * 1.025);
         assert_eq!(half.settled(crossed, 1440.0).vfov_rad, crossed);
-        // The optic toggle is 6.5x and cannot be gated by any dead band worth having.
+        // Fixture optic halves the field, crossing the dead band.
         assert_eq!(
-            held.settled(crate::camera::GUNNER_FOV_FALLBACK, 1440.0)
-                .vfov_rad,
-            crate::camera::GUNNER_FOV_FALLBACK,
+            held.settled(commander * 0.5, 1440.0).vfov_rad,
+            commander * 0.5,
         );
         // Invalid requests retain measured facts.
         assert_eq!(held.settled(f32::NAN, 1440.0), held);
@@ -544,11 +543,11 @@ mod tests {
             "inside the band the WIRED field is held, and the band is measured around it",
         );
 
-        // And the optic toggle, 6.5x, still lands on the very next frame.
-        nudge(&mut app, crate::camera::GUNNER_FOV_FALLBACK);
+        // Fixture optic halves the field and lands on the next frame.
+        nudge(&mut app, commander * 0.5);
         assert_eq!(
             facts_of(&app),
-            Some(measured(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)),
+            Some(measured(commander * 0.5, 2160.0)),
         );
     }
 

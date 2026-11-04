@@ -283,12 +283,9 @@ fn capture_turret_pivot(
     pivot.0 = Some((tank, position));
 }
 
-/// The controlled tank's authored FOV for `kind`, or `fallback` before the rig binds.
-pub fn view_fov(views: &Query<&TankViews, With<Controlled>>, kind: ViewKind, fallback: f32) -> f32 {
-    match crate::tank::controlled_one(views.single()) {
-        Some(views) => views.get(kind).fov,
-        None => fallback, // No local rig before spawn or during a possession gap.
-    }
+/// The controlled tank's authored FOV; absent before spawn or during a possession gap.
+pub fn view_fov(views: &Query<&TankViews, With<Controlled>>, kind: ViewKind) -> Option<f32> {
+    crate::tank::controlled_one(views.single()).map(|views| views.get(kind).fov)
 }
 
 fn spawn_camera(mut commands: Commands) {
@@ -378,7 +375,7 @@ fn orbit_camera(
 
     // Restore the wide commander-view FOV when returning from the gunner optic (which narrows it).
     if let Projection::Perspective(p) = projection.as_mut() {
-        p.fov = view_fov(&views, ViewKind::Commander, COMMANDER_FOV_BEFORE_BIND);
+        p.fov = view_fov(&views, ViewKind::Commander).unwrap_or(COMMANDER_FOV_BEFORE_BIND);
     }
     let (Some(turret_local), Some(tank_transform)) =
         (pivot.offset(), crate::tank::controlled_one(tank.single()))
@@ -557,7 +554,8 @@ fn gunner_camera(
         eye,
         look,
         rotation * Vec3::Y,
-        view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK),
+        view_fov(&views, ViewKind::Gunner)
+            .expect("a complete controlled rig carries its spawn-built TankViews"),
     );
 }
 

@@ -849,7 +849,8 @@ fn place(
     if *transform != want {
         *transform = want;
     }
-    let fov = view_fov(&views, ViewKind::Commander, std::f32::consts::FRAC_PI_4);
+    let fov =
+        view_fov(&views, ViewKind::Commander).unwrap_or(crate::camera::COMMANDER_FOV_BEFORE_BIND);
     if let Projection::Perspective(p) = projection.as_mut()
         && p.fov != fov
     {

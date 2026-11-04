@@ -13,7 +13,7 @@ use bevy::math::Affine3A;
 use bevy::prelude::*;
 
 use crate::aim::{AimCommit, CommittedAim, MAX_RANGE, aim_distance};
-use crate::camera::{GUNNER_FOV_FALLBACK, view_fov};
+use crate::camera::view_fov;
 use crate::command::{AimIntent, TankCommand, TankDeviceSet, gather_commands};
 use crate::damage::{ControlledTank, VolumeOf};
 use crate::firecontrol::{RangeTable, Ranging};
@@ -273,6 +273,13 @@ fn sight_pitch_limits(lay_limits: Option<(f32, f32)>, lob: f32) -> Option<(f32, 
     lay_limits.map(|(min, max)| (min - lob, max - lob))
 }
 
+/// Move mechanical yaw windows into the sight frame modulo a turn: a servo angle is unwrapped,
+/// while the sight's decomposition is a principal angle.
+fn sight_yaw_limits(limits: Option<(f32, f32)>, current: f32, servo: f32) -> Option<(f32, f32)> {
+    let offset = shortest_angle(current - servo);
+    limits.map(|(min, max)| (min + offset, max + offset))
+}
+
 /// The gun's SIGHT LINE as a world direction: its bore (the gun node's −Z) depressed by the
 /// superelevation `theta` about that node's own right axis (+X), undoing the lob
 /// `aim::drive_aim_servos` laid on for the dialed range. This is the line the shell arcs back down
@@ -413,9 +420,9 @@ pub(crate) fn drive_gunner_aim(
     }
 
     // The field the view's authored optic frames (`spec::Optics`) and the viewport it is framed on
-    // together set the cursor's reach. Fallbacks cover the pre-bind frame: `camera.rs`'s field
-    // before `TankViews` lands, a square viewport before the render target is measured.
-    let fov = view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK);
+    // together set the cursor's reach. A square viewport covers an unmeasured render target.
+    let fov = view_fov(&views, ViewKind::Gunner)
+        .expect("a complete controlled rig carries its spawn-built TankViews");
     let aspect = cameras
         .single()
         .ok()
@@ -538,11 +545,14 @@ pub(crate) fn drive_gunner_aim(
             .travel_limits(),
         theta - (g_current - pitch_angle),
     );
-    let yaw_limits = servo_specs
-        .get(yaw)
-        .expect("the Gunner yaw handle names a declared Yaw servo at spawn")
-        .travel_limits()
-        .map(|(min, max)| (min + t_current - yaw_angle, max + t_current - yaw_angle));
+    let yaw_limits = sight_yaw_limits(
+        servo_specs
+            .get(yaw)
+            .expect("the Gunner yaw handle names a declared Yaw servo at spawn")
+            .travel_limits(),
+        t_current,
+        yaw_angle,
+    );
     intent.pitch = clamp_to_travel(intent.pitch, pitch_limits);
     intent.yaw = clamp_to_travel(intent.yaw, yaw_limits);
 
@@ -603,6 +613,22 @@ pub(crate) fn drive_gunner_aim(
 mod tests {
     use super::*;
 
+    /// A multi-turn mechanical window must not shift by a turn when the view wraps its yaw.
+    /// The gunner's clamp must retain an intent still inside the authored travel window.
+    #[test]
+    fn wrapped_sight_yaw_preserves_the_mechanical_window() {
+        let limits = (-200.0_f32.to_radians(), 200.0_f32.to_radians()); // Fixture travel.
+        let window = sight_yaw_limits(
+            Some(limits),
+            -170.0_f32.to_radians(),
+            190.0_f32.to_radians(),
+        )
+        .unwrap();
+        assert!((window.0 - limits.0).abs() < 1e-5 && (window.1 - limits.1).abs() < 1e-5);
+        let intent = 179.0_f32.to_radians(); // Fixture intent within the authored window.
+        assert_eq!(clamp_to_travel(intent, Some(window)), intent);
+    }
+
     /// Optic input must use the separately declared yaw's live angle and travel, whether the
     /// structural assembly has no servo or a different one. Offset sight origins must round-trip.
     #[test]
@@ -633,6 +659,17 @@ mod tests {
                 },
             ))
             .id();
+        // Fixture authored optic: the complete rig always carries both view records at spawn.
+        let optics: crate::spec::Optics = ron::from_str("Unaided(60.0)").unwrap();
+        let fov = optics.vertical_fov();
+        let view = || crate::tank::ViewConfig {
+            fov,
+            requires: default(),
+        };
+        world.entity_mut(tank).insert(TankViews {
+            gunner: view(),
+            commander: view(),
+        });
         let hull = world.spawn((Transform::IDENTITY, ChildOf(tank))).id();
         let assembly = world.spawn((Transform::IDENTITY, ChildOf(hull))).id();
         let yaw = world
@@ -691,15 +728,12 @@ mod tests {
                 base + bearing
             );
             // A large input must stop at this optic's margin about its own yaw, not the assembly's.
-            world.resource_mut::<AccumulatedMouseMotion>().delta = Vec2::new(
-                -1.0 / (look::get().mouse_sensitivity_per_fov.0 * GUNNER_FOV_FALLBACK),
-                0.0,
-            );
+            world.resource_mut::<AccumulatedMouseMotion>().delta =
+                Vec2::new(-1.0 / (look::get().mouse_sensitivity_per_fov.0 * fov), 0.0);
             world.run_system_once(drive_gunner_aim).unwrap();
             let dir = world.resource::<CommittedAim>().get(tank).unwrap() - mount;
             let actual = (-dir.x).atan2(-dir.z);
-            let expected =
-                base + bearing + optic_margin(GUNNER_FOV_FALLBACK, OPTIC_ASPECT_FALLBACK);
+            let expected = base + bearing + optic_margin(fov, OPTIC_ASPECT_FALLBACK);
             assert!(
                 (actual - expected).abs() < 1e-5,
                 "{actual} versus {expected}"

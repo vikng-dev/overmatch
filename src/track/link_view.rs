@@ -1292,8 +1292,13 @@ mod tests {
     /// at 4K native, one pixel of budget (`scripts/lod/config.py::REFERENCE_VIEW`).
     fn reference_view() -> crate::view::ViewProfile {
         crate::view::ViewProfile::of(
-            crate::view::ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)
-                .expect("the reference view is measured"),
+            crate::view::ViewFacts::new(
+                crate::bake::selected_spec().views[&crate::spec::ViewKind::Gunner]
+                    .optics
+                    .vertical_fov(),
+                2160.0,
+            )
+            .expect("the reference view is measured"),
             1.0,
         )
     }
