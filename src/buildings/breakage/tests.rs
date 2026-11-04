@@ -2796,6 +2796,52 @@ fn degenerate_chunk_hulls_are_refused_before_play() {
     }
 }
 
+/// The game's environment destruction model reads reconstructed law blocks, not only the
+/// collider. Fixture thickness is below the law's weld resolution but remains a convex collider;
+/// neither chunk nor element geometry may reach play with a missing boundary.
+#[test]
+fn collider_valid_hulls_with_collapsed_law_boundaries_are_refused_at_load() {
+    let kind = shipped_house();
+    let registry = crate::substances::SubstanceRegistry::shipped_static();
+    let masonry = kind
+        .asset
+        .materials
+        .iter()
+        .map(|name| Masonry::of(registry, name).unwrap())
+        .collect::<Vec<_>>();
+    let thin = (0..8)
+        .map(|i| {
+            [
+                [0.0, 0.08][i & 1],
+                [0.0, 0.08][(i >> 1) & 1],
+                [0.0, 0.00009][i >> 2],
+            ]
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        Collider::convex_hull(thin.iter().copied().map(Vec3::from_array).collect()).is_some(),
+        "the fixture must reach the law-block gate"
+    );
+    let c = kind.layout.chunks[0] as usize;
+    let e = usize::from(kind.asset.chunks[c].element);
+    for chunk in [true, false] {
+        let mut asset = kind.asset.clone();
+        let field = if chunk {
+            asset.chunks[c].hull = thin.clone();
+            format!("chunks[{c}].hull")
+        } else {
+            asset.elements[e].hull = thin.clone();
+            format!("elements[{e}].hull")
+        };
+        let Err(error) = Layout::of(&asset, &masonry, Attachments::shipped_static()) else {
+            panic!("collider admission must also certify the law boundary");
+        };
+        for required in [field.as_str(), "law block", "rebake"] {
+            assert!(error.contains(required), "{error}");
+        }
+    }
+}
+
 /// A TINY CONTACT KEEPS THE SAME PLASTIC SHARE (the game's environment destruction model).
 /// The authority's shared exchange cap must square in f64, not underflow its positive-response
 /// check in f32. Scaling the input changes the launch by that scale, including subnormal inputs.

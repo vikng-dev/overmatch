@@ -378,6 +378,49 @@ impl Block {
         }
     }
 
+    /// Whether the game's environment destruction law reconstructed a closed solid: every
+    /// plane has a face, each edge has its opposite, and the boundary encloses positive volume.
+    pub(crate) fn is_solid(&self) -> bool {
+        let faces = self.faces();
+        if faces.len() < 4
+            || faces.len() != self.planes.len()
+            || !self.inradius().is_finite()
+            || self.inradius() <= 0.0
+        {
+            return false;
+        }
+        let mut edges = std::collections::BTreeMap::<(usize, usize), usize>::new();
+        let centre = self.center().as_dvec3();
+        let mut six_volume = 0.0;
+        for (normal, corners) in &faces {
+            if !normal.is_finite() {
+                return false;
+            }
+            for k in 0..corners.len() {
+                let index = |p| {
+                    self.points
+                        .iter()
+                        .position(|&c| c == p)
+                        .expect("reconstructed faces contain only the block's stored corners")
+                };
+                *edges
+                    .entry((index(corners[k]), index(corners[(k + 1) % corners.len()])))
+                    .or_default() += 1;
+            }
+            let a = corners[0].as_dvec3() - centre;
+            for k in 1..corners.len() - 1 {
+                let b = corners[k].as_dvec3() - centre;
+                let c = corners[k + 1].as_dvec3() - centre;
+                six_volume += a.dot(b.cross(c));
+            }
+        }
+        six_volume.is_finite()
+            && six_volume > 0.0
+            && edges
+                .iter()
+                .all(|(&(a, b), &count)| count == 1 && edges.get(&(b, a)) == Some(&1))
+    }
+
     /// The axis-aligned box `min..max`.
     pub fn cuboid(min: Vec3, max: Vec3) -> Self {
         let corner = |x: bool, y: bool, z: bool| {
@@ -4023,6 +4066,16 @@ pub(crate) fn sample_blocks(
 
 #[cfg(test)]
 mod tests {
+    /// The game's environment destruction model requires a closed law boundary. A missing face
+    /// can leave positive volume and several planes, but its exposed edges cannot enclose a solid.
+    #[test]
+    fn a_law_block_requires_a_closed_boundary_not_only_some_planes() {
+        let mut block = super::Block::cuboid(bevy::math::Vec3::ZERO, bevy::math::Vec3::ONE);
+        assert!(block.is_solid());
+        block.planes.pop();
+        assert!(!block.is_solid());
+    }
+
     use super::*;
 
     /// A cracked anchor belongs to placed construction. A released group's old base cannot

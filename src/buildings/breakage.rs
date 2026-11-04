@@ -236,7 +236,13 @@ impl Layout {
                     "{what} cannot form a convex collider; rebake a finite, nondegenerate solid hull"
                 ));
             }
-            Ok(Block::hull(points))
+            let block = Block::hull(points);
+            if !block.is_solid() {
+                return Err(format!(
+                    "{what} cannot form a closed solid law block at reconstruction precision; rebake a thicker or better-separated hull"
+                ));
+            }
+            Ok(block)
         };
         let blocks = chunks
             .iter()
