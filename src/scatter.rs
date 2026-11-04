@@ -776,16 +776,14 @@ mod tests {
         assert_eq!(world.query::<&Mesh3d>().iter(world).count(), 0);
     }
 
-    /// The game's environment destruction view shares a mesh per admitted kind and one surface
-    /// material. Each view keeps its instance scale while the physical root stays at unit scale.
-    /// Every construction instance shares its kind's skin-and-card mesh and the common material.
+    /// The game's environment destruction view shares a skin-and-card mesh per admitted kind and
+    /// one surface material. Each view keeps its instance scale while the physical root stays at unit scale.
     #[test]
     fn drawing_shares_each_constructions_mesh_and_preserves_instance_scale() {
         let mut manifest = construction_fixture_manifest();
         let originals = manifest.instances.clone();
-        for instance in originals {
-            if let Prototype::Construction { asset } = &manifest.prototypes[&instance.prototype] {
-                let mut second = instance.clone();
+        for mut second in originals {
+            if let Prototype::Construction { asset } = &manifest.prototypes[&second.prototype] {
                 second.id.push_str("_copy");
                 second.translation[0] += 30.0; // Fixture separation.
                 second.scale = [1.3; 3]; // Fixture scale.
