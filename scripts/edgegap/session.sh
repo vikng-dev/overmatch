@@ -30,6 +30,7 @@
 #   status <id> [--json]    one line: phase, ip:port, city, seconds since READY, Edgegap max_duration.
 #   address <id> [--wait S] ip:port once READY, waiting up to S seconds (default 0: answer now).
 #   logs <id> <file|dir>    the container's stdout+stderr, to <file> or <dir>/<id>.server.log.
+#                          Exit 75: HTTP 429 rate limited; retry later, snapshot unchanged.
 #   metrics <id> <file|dir> [--steps 1m]   `?raw=true` metrics JSON, to <file> or <dir>/<id>.metrics.json.
 #   stop <id>               DELETE /v1/stop/<id>; polls until Edgegap reports it terminated or gone and
 #                           the live list no longer holds it; disarms its watchdog. Exit 1 unconfirmed.
@@ -80,6 +81,8 @@ token_file="${EDGEGAP_TOKEN_FILE:-$HOME/.config/overmatch/edgegap.token}"
 session_dir="${EDGEGAP_SESSION_DIR:-${TMPDIR:-/tmp}/overmatch-edgegap}"
 contract="$here/../../backend/contract/server-env.json"
 TAG_PREFIX="profile-"
+# Logs command interface: EX_TEMPFAIL identifies only HTTP 429, never another refusal.
+LOGS_RATE_LIMITED=75
 
 say() { printf '%s\n' "$*" >&2; }
 die() {
@@ -317,6 +320,10 @@ cmd_logs() {
   load_token
   path="$(out_path "$dest" "$id" server.log)"
   code="$(call GET "/v1/deployment/$id/container-logs")"
+  if [[ "$code" == 429 ]]; then
+    say "session.sh: logs $id: rate limited (HTTP 429) $(api_message) — retry later"
+    return "$LOGS_RATE_LIMITED"
+  fi
   [[ "$code" == 200 ]] || die "logs $id: HTTP $code $(api_message) — logs are deleted when a deployment stops"
   jq -r '.logs // ""' "$work/out" >"$path.tmp"
   if [[ "$(jq -r '.crash_logs // empty' "$work/out")" != "" ]]; then

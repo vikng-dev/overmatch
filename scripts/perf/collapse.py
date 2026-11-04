@@ -44,6 +44,13 @@ SAMPLE_SPEED = 0.9
 STATS_PERIOD_S = 1
 # Resolution: bound the log reader's lag without busy-waiting beside the server.
 POLL_S = 0.1
+# Resolution: two log requests per minute reduce API pressure; stats retain server time.
+# This is a conservative reader cadence, not an asserted API quota.
+HOSTED_LOG_POLL_S = 30
+# Resolution: bound one unresponsive log request without consuming the whole run watchdog.
+LOG_FETCH_TIMEOUT_S = 30
+# session.sh logs interface: EX_TEMPFAIL means HTTP 429; all other failures remain fatal.
+LOGS_RATE_LIMITED = 75
 
 
 def recipe_for(path, tanks):
@@ -210,9 +217,26 @@ def run_match(args, out, recipe):
         child = subprocess.Popen([str(args.bin / binary)], cwd=ROOT, env=dict(env, **extra), stdout=log, stderr=subprocess.STDOUT)
         children.append(child)
         return child
-    def snapshot():
+    next_log_poll, log_poll_s = 0.0, HOSTED_LOG_POLL_S
+    def snapshot(deadline):
+        nonlocal next_log_poll, log_poll_s
         if not local:
-            subprocess.run([str(ROOT / "scripts/edgegap/session.sh"), "logs", args.deployment, str(serverlog)], check=True, timeout=30, stdout=subprocess.DEVNULL)
+            now = time.monotonic()
+            if now < next_log_poll or now >= deadline:
+                return None  # Polls never bypass the cadence or the run watchdog.
+            try:
+                subprocess.run([str(ROOT / "scripts/edgegap/session.sh"), "logs", args.deployment, str(serverlog)],
+                               check=True, timeout=min(LOG_FETCH_TIMEOUT_S, deadline - now), stdout=subprocess.DEVNULL)
+            except subprocess.CalledProcessError as error:
+                if error.returncode != LOGS_RATE_LIMITED:
+                    raise
+                # Resolution: exponential backoff reduces pressure until success or the wall deadline.
+                log_poll_s *= 2
+                next_log_poll = time.monotonic() + log_poll_s
+                print(f"Hosted logs rate limited (HTTP 429); retry in {log_poll_s:g} s if within the run deadline.", file=sys.stderr, flush=True)
+                return None
+            log_poll_s = HOSTED_LOG_POLL_S
+            next_log_poll = time.monotonic() + log_poll_s
         return serverlog.read_text() if serverlog.exists() else ""
     start = time.monotonic()
     try:
@@ -221,37 +245,40 @@ def run_match(args, out, recipe):
                 sock.bind(("127.0.0.1", 5888))
             spawn("overmatch-server", serverlog, dict(OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_SERVER_STATS_S="1", OVERMATCH_BOT=str(args.tanks-client_count)))
         # Read the real startup line before spending time admitting clients.
+        admission_deadline = start + args.startup_grace
         while True:
-            text = snapshot()
-            if "server: host available_parallelism=" in text:
+            if any(c.poll() is not None for c in children) or time.monotonic() >= admission_deadline:
+                raise RuntimeError("no verified server startup line before admission deadline")
+            text = snapshot(admission_deadline)
+            if text is not None and "server: host available_parallelism=" in text:
                 verified_host = allocation(text, args.rehearsal)
                 print(verified_host, flush=True)
                 break
-            if any(c.poll() is not None for c in children) or time.monotonic() - start > args.startup_grace:
-                raise RuntimeError("no verified server startup line before admission deadline")
-            time.sleep(POLL_S if local else 2)
+            time.sleep(min(POLL_S, max(0, admission_deadline - time.monotonic())))
         clients = [spawn("overmatch", out / f"client{i}.log", dict(OVERMATCH_SERVER=address, OVERMATCH_HARNESS=str(script))) for i in range(client_count)]
+        deadline = start + 2 * args.startup_grace + args.duration
         while True:
             if any(c.poll() is not None for c in children):
                 raise RuntimeError("server or load client exited before the window closed")
-            text = snapshot()
-            if allocation(text, args.rehearsal) != verified_host:
-                raise RuntimeError("server startup allocation changed during the run")
-            rows = match_rows(text, recipe)
-            windows = complete_windows(rows, recipe, args.duration, client_count)
-            if windows:
-                for i, _ in enumerate(clients):
-                    log = (out / f"client{i}.log").read_text()
-                    if log.count("client: connected (entity") != 1 or "harness: released" not in log:
-                        raise RuntimeError(f"client{i}: requires one connection and synchronized combat release")
-                (out / "rows.json").write_text(json.dumps(rows, indent=2) + "\n")
-                report_match(windows)
-                last = windows[-1]["loadtest"]
-                print(f"COMPLETE: {args.tanks} tanks, {client_count} real links, {last['constructions']} constructions, {len(windows)} complete windows, {last['events_fired']} events; game construction outcomes {json.dumps(last['targets'])}; artifacts: {out}")
-                return
-            if time.monotonic() - start > args.startup_grace + args.duration + args.startup_grace:
+            if time.monotonic() >= deadline:
                 raise RuntimeError("incomplete windows or admission: server did not finish the observation by the wall deadline")
-            time.sleep(POLL_S if local else 2)
+            text = snapshot(deadline)
+            if text is not None:
+                if allocation(text, args.rehearsal) != verified_host:
+                    raise RuntimeError("server startup allocation changed during the run")
+                rows = match_rows(text, recipe)
+                windows = complete_windows(rows, recipe, args.duration, client_count)
+                if windows:
+                    for i, _ in enumerate(clients):
+                        log = (out / f"client{i}.log").read_text()
+                        if log.count("client: connected (entity") != 1 or "harness: released" not in log:
+                            raise RuntimeError(f"client{i}: requires one connection and synchronized combat release")
+                    (out / "rows.json").write_text(json.dumps(rows, indent=2) + "\n")
+                    report_match(windows)
+                    last = windows[-1]["loadtest"]
+                    print(f"COMPLETE: {args.tanks} tanks, {client_count} real links, {last['constructions']} constructions, {len(windows)} complete windows, {last['events_fired']} events; game construction outcomes {json.dumps(last['targets'])}; artifacts: {out}")
+                    return
+            time.sleep(min(POLL_S, max(0, deadline - time.monotonic())))
     except BaseException:
         print(f"MATCH RUN INVALID; server/client logs: {out}", file=sys.stderr)
         raise

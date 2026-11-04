@@ -4,6 +4,7 @@ import contextlib
 import copy
 import io
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -42,6 +43,100 @@ class CollapseTests(unittest.TestCase):
         second.update(period_s=2, ticks=128)
         second["loadtest"].update(sequence=2, elapsed_s=3.1, window_start_s=1.1)
         return recipe, [row, second]
+
+    def run_hosted_batches(self, statuses, *, complete=True, complete_after=2, exit_client=False):
+        # Fixture: server timestamps cover three seconds, fetched tens of seconds later.
+        recipe, rows = self.match_fixture()
+        host = "server: host available_parallelism=2 cpu_quota=2.00 cpus (200000/100000 us) cpuset=0-15"
+        clock, polls, children, timeouts = [0.0], [], [], []
+        args = SimpleNamespace(target="192.0.2.1:5888", deployment="fixture", tanks=2,
+                               clients=1, duration=3, startup_grace=90, rehearsal=False,
+                               bin=Path("/fixture/bin"))
+        class Client:
+            killed = False
+            def poll(self):
+                return 1 if exit_client and clock[0] >= 1 else None
+            def kill(self):
+                self.killed = True
+            def wait(self):
+                return 0
+        def spawn(*args, **kwargs):
+            kwargs["stdout"].write("client: connected (entity fixture)\nharness: released\n")
+            kwargs["stdout"].flush()
+            child = Client()
+            children.append(child)
+            return child
+        def fetch(command, **kwargs):
+            polls.append(clock[0])
+            timeouts.append(kwargs["timeout"])
+            code = statuses[min(len(polls) - 1, len(statuses) - 1)]
+            if code:
+                raise subprocess.CalledProcessError(code, command)
+            text = host
+            if len(polls) > 1:
+                batch = rows if complete and len(polls) >= complete_after else rows[:1]
+                text += "\n" + "\n".join("server_stats " + json.dumps(r) for r in batch)
+            Path(command[-1]).write_text(text)
+            return subprocess.CompletedProcess(command, 0)
+        def sleep(seconds):
+            clock[0] = round(clock[0] + seconds, 6)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch("collapse.subprocess.Popen", side_effect=spawn), \
+             patch("collapse.subprocess.run", side_effect=fetch), \
+             patch("collapse.time.monotonic", side_effect=lambda: clock[0]), \
+             patch("collapse.time.sleep", side_effect=sleep), \
+             contextlib.redirect_stdout(io.StringIO()) as output, \
+             contextlib.redirect_stderr(io.StringIO()) as errors:
+            try:
+                collapse.run_match(args, Path(directory), recipe)
+                self.assertEqual(json.loads((Path(directory) / "rows.json").read_text()), rows)
+                self.assertIn("COMPLETE:", output.getvalue())
+            finally:
+                self.assertTrue(all(c.killed or c.poll() is not None for c in children))
+                self.hosted_polls, self.hosted_clock = polls, clock[0]
+                self.hosted_errors = errors.getvalue()
+                self.hosted_timeouts = timeouts
+                self.hosted_deadline = (2 * args.startup_grace + args.duration
+                                        if children else args.startup_grace)
+        return rows
+
+    def test_hosted_batched_delivery_closes_on_server_time(self):
+        rows = self.run_hosted_batches([0], complete_after=3)
+        self.assertEqual(len(self.hosted_polls), 3, "a delayed prefix cannot close the window")
+        for previous, current in zip(self.hosted_polls, self.hosted_polls[1:]):
+            self.assertGreaterEqual(current - previous, collapse.HOSTED_LOG_POLL_S)
+        self.assertEqual(rows[-1]["loadtest"]["elapsed_s"], 3.1)
+        self.assertGreater(self.hosted_clock, rows[-1]["loadtest"]["elapsed_s"])
+
+    def test_hosted_rate_limit_backs_off_then_completes(self):
+        for statuses in ([0, 75, 0], [75, 0], [0, 75, 0, 75, 0]):
+            with self.subTest(statuses=statuses):
+                self.run_hosted_batches(statuses, complete_after=len(statuses))
+                for limited, status in enumerate(statuses):
+                    if status == 75:
+                        self.assertGreaterEqual(self.hosted_polls[limited + 1] - self.hosted_polls[limited], 2 * collapse.HOSTED_LOG_POLL_S)
+                self.assertIn("rate limited", self.hosted_errors)
+                self.assertNotIn("MATCH RUN INVALID", self.hosted_errors)
+
+    def test_hosted_incomplete_batch_and_repeated_rate_limits_keep_deadline(self):
+        for statuses in ([0], [0, 75], [75]):
+            with self.subTest(statuses=statuses), self.assertRaisesRegex(RuntimeError, "deadline"):
+                self.run_hosted_batches(statuses, complete=False)
+            self.assertEqual(self.hosted_clock, self.hosted_deadline)
+            self.assertTrue(all(0 < timeout <= self.hosted_deadline - polled
+                                for polled, timeout in zip(self.hosted_polls, self.hosted_timeouts)))
+        self.assertEqual(self.hosted_polls, [0, 60], "repeated 429s must increase the retry interval")
+
+    def test_hosted_other_log_errors_fail_fast(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_hosted_batches([0, 1, 0])
+        self.assertEqual(len(self.hosted_polls), 2)
+
+    def test_hosted_client_exit_is_seen_between_log_polls(self):
+        with self.assertRaisesRegex(RuntimeError, "client exited"):
+            self.run_hosted_batches([0], exit_client=True)
+        self.assertLess(self.hosted_clock, 2)
+        self.assertEqual(len(self.hosted_polls), 1)
 
     def test_missing_or_malformed_windows_and_mismatched_recipe_refuse(self):
         recipe, rows = self.match_fixture()

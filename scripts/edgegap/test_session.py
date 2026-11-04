@@ -34,7 +34,10 @@ url = args[args.index('-X') + 2]
 body = json.loads(args[args.index('--data-binary') + 1]) if '--data-binary' in args else None
 with open(os.environ['CALLS'], 'a') as f:
     f.write(json.dumps({'method': method, 'url': url, 'body': body}) + '\\n')
-if '/v1/deployments?' in url:
+if '/container-logs' in url:
+    code = int(os.environ.get('LOG_STATUS', '200'))
+    response = {'logs': 'fixture server log\\n'} if code == 200 else {'message': 'fixture log refusal'}
+elif '/v1/deployments?' in url:
     scenario = os.environ['SCENARIO']
     responses = {'invalid_json': '{', 'missing_data': {'pagination': {'has_next': False}},
                  'missing_pagination': {'data': []}, 'invalid_row': {'data': [None], 'pagination': {'has_next': False}}}
@@ -71,6 +74,22 @@ print(code, end='')
 
     def calls(self):
         return [json.loads(line) for line in self.calls_path.read_text().splitlines()] if self.calls_path.exists() else []
+
+    def test_logs_rate_limit_has_distinct_status_and_preserves_snapshot(self):
+        # Log consumers retry only HTTP 429; every refusal preserves the last good snapshot.
+        dest = self.root / "server.log"
+        for http_status, expected in [(429, 75), (503, 1), (404, 1), (200, 0)]:
+            with self.subTest(http_status=http_status):
+                dest.write_text("previous snapshot")
+                self.env["LOG_STATUS"] = str(http_status)
+                run = subprocess.run(["bash", str(self.script), "logs", "fixture", str(dest)],
+                                     env=self.env, text=True, capture_output=True, timeout=10)
+                self.assertEqual(run.returncode, expected, run.stderr)
+                self.assertEqual(dest.read_text(), "fixture server log\n\n" if http_status == 200 else "previous snapshot")
+                if http_status == 429:
+                    self.assertIn("rate limited", run.stderr)
+                    self.assertIn("HTTP 429", run.stderr)
+                self.assertFalse(dest.with_suffix(".log.tmp").exists())
 
     def test_stats_remains_a_non_hosted_lever(self):
         # Profiling operators can set stats after it becomes part of the Worker's contract.
