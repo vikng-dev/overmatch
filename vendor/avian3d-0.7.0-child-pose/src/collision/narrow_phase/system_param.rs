@@ -51,7 +51,6 @@ struct RigidBodyQuery {
     center_of_mass: Read<ComputedCenterOfMass>,
     linear_velocity: Read<LinearVelocity>,
     angular_velocity: Read<AngularVelocity>,
-    // OVERMATCH PATCH: distinguish sleeping participants from awake wake sources.
     is_sleeping: Has<Sleeping>,
     // TODO: We should define these as purely collider components and not query for them here.
     friction: Option<Read<Friction>>,
@@ -137,7 +136,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
         // Update contacts for all contact pairs.
         self.update_contacts::<H>(delta_secs, hooks, context, commands);
 
-        // OVERMATCH PATCH: a later merge can retire an island ID before wakes are applied.
+        // A later merge can retire an island ID before wakes are applied.
         let mut wake_bodies: Vec<Entity> = Vec::with_capacity(128);
         let mut sleeping_colliders = Vec::new();
         let mut contacts_to_link = Vec::new();
@@ -374,8 +373,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
             self.link_contact_to_island(contact_id, &mut wake_bodies, &mut sleeping_colliders);
         }
 
-        // OVERMATCH PATCH: dormant new contacts belong in the sleeping pair set and
-        // must not leave manifold handles in the active constraint graph.
+        // Dormant contacts leave no active manifold handles.
         sleeping_colliders.sort_unstable();
         sleeping_colliders.dedup();
         for collider in sleeping_colliders {
@@ -419,7 +417,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
         }
     }
 
-    // OVERMATCH PATCH: contact discovery alone is not a wake source. An awake non-static
+    // Contact discovery alone is not a wake source. An awake non-static
     // participant supplies one; otherwise the new sleeping contact stays outside the solver.
     fn link_contact_to_island(
         &mut self,

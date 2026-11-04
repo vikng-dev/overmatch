@@ -150,6 +150,24 @@ fn removing_sleeping_restarts_the_woken_bodys_rest_interval() {
     );
 }
 
+/// Physics users need corrupt island membership refused rather than a partly woken island.
+/// Missing required body state must not terminate the linked-list walk silently.
+#[test]
+#[should_panic(expected = "every linked island body retains BodyIslandNode and SleepTimer")]
+fn a_linked_body_without_sleep_timer_is_refused() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let resting = body(&mut app, Vec3::ZERO);
+    until_asleep(&mut app, resting);
+    let island = app
+        .world()
+        .get::<BodyIslandNode>(resting)
+        .unwrap()
+        .island_id();
+    app.world_mut().entity_mut(resting).remove::<SleepTimer>();
+    WakeIslands(vec![island]).apply(app.world_mut());
+}
+
 /// Solver users need the wake source to survive every merge in one narrow phase. A mutant
 /// carrying an island ID from the first contact can lose it when a later sleeping contact
 /// merges that island into a larger one, leaving finite-mass bodies asleep during the impact.

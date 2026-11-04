@@ -1,8 +1,8 @@
 # Overmatch avian3d patch
 
 This directory is the published `avian3d` 0.7.0 crate (extracted from the `.crate` whose sha256
-matches `Cargo.lock`) with the source changes below, tagged `OVERMATCH PATCH` so the diff against
-pristine 0.7.0 is self-describing. (`Cargo.lock` from the published crate is omitted; it is not read
+matches `Cargo.lock`) with the source changes inventoried below.
+(`Cargo.lock` from the published crate is omitted; it is not read
 for a path dependency.)
 
 ## Child-collider pose writes (`src/collision/collider/collider_transform/plugin.rs`)
@@ -119,6 +119,10 @@ cannot retire a requested wake's destination.
 restart their rest interval; explicit removal of `Sleeping` resets its initiating body's timer
 in the removal hook. The library's thresholds, time to sleep and whole-island eligibility rule
 are unchanged.
+
+Every linked island body retains `BodyIslandNode` and `SleepTimer` until it is unlinked.
+`WakeIslands` refuses a failed body query with an invariant panic instead of silently ending
+the traversal with a partly woken island.
 
 Guard: `src/tests/avian_island_sleep.rs`; production impact and support-loss guards remain in
 `src/debris.rs`. Local upstream draft: `upstream/avian-island-rest-history.md`.
