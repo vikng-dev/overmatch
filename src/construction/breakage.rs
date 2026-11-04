@@ -696,6 +696,106 @@ pub(crate) struct Piece {
     pub(crate) retired: Option<u32>,
 }
 
+/// Geometry admitted once against the selected map before a peer piece reaches the view.
+#[derive(Component, Debug, Clone)]
+pub(crate) struct AdmittedPiece {
+    pub(crate) construction: Entity,
+    pub(crate) kind: Arc<ConstructionKind>,
+    pub(crate) scale: f32,
+    pub(crate) chunks: Vec<u16>,
+    pub(crate) origin: Vec3,
+    born: u32,
+    ordinal: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PieceError {
+    UnknownConstruction(u16),
+    Empty(u16),
+    OutsideLayout(u16, u16),
+    Unordered(u16),
+    Changed(u16),
+}
+
+impl std::fmt::Display for PieceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownConstruction(c) => write!(
+                f,
+                "piece names construction {c}, which this map does not place"
+            ),
+            Self::Empty(c) => write!(f, "construction {c}'s piece has no chunks"),
+            Self::OutsideLayout(c, k) => {
+                write!(f, "piece chunk {k} lies outside construction {c}'s layout")
+            }
+            Self::Unordered(c) => write!(
+                f,
+                "construction {c}'s piece chunks must be unique and ascending"
+            ),
+            Self::Changed(c) => write!(
+                f,
+                "construction {c}'s piece changed its admitted identity (construction, chunks or birth tick)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PieceError {}
+
+impl Piece {
+    pub(crate) fn admitted(
+        &self,
+        construction: Option<(Entity, &Breakage)>,
+    ) -> Result<AdmittedPiece, PieceError> {
+        let (root, breakage) = construction
+            .filter(|(_, b)| b.construction == self.construction)
+            .ok_or(PieceError::UnknownConstruction(self.construction))?;
+        if self.chunks.is_empty() {
+            return Err(PieceError::Empty(self.construction));
+        }
+        if let Some(&c) = self
+            .chunks
+            .iter()
+            .find(|&&c| usize::from(c) >= breakage.kind.layout.chunks.len())
+        {
+            return Err(PieceError::OutsideLayout(self.construction, c));
+        }
+        if self.chunks.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(PieceError::Unordered(self.construction));
+        }
+        let kind = &breakage.kind;
+        let (mut weighted, mut mass) = (DVec3::ZERO, 0.0);
+        for &c in &self.chunks {
+            let chunk = &kind.asset.chunks[kind.layout.chunks[usize::from(c)] as usize];
+            weighted += DVec3::from_array(chunk.centroid.map(f64::from)) * f64::from(chunk.mass_kg);
+            mass += f64::from(chunk.mass_kg);
+        }
+        Ok(AdmittedPiece {
+            construction: root,
+            kind: kind.clone(),
+            scale: breakage.scale,
+            chunks: self.chunks.clone(),
+            origin: (weighted / mass).as_vec3(),
+            born: self.born,
+            ordinal: self.construction,
+        })
+    }
+}
+
+impl AdmittedPiece {
+    /// A carrier's group and birth identity are fixed; only retirement may update on the wire.
+    pub(crate) fn admits_update(&self, piece: &Piece) -> Result<(), PieceError> {
+        if self.ordinal == piece.construction
+            && self.chunks == piece.chunks
+            && self.born == piece.born
+        {
+            Ok(())
+        } else {
+            Err(PieceError::Changed(piece.construction))
+        }
+    }
+}
+
 /// What one shell's march step deposited, in world terms, waiting for [`apply_deposits`].
 #[derive(Debug, Default)]
 struct RawDeposit {
@@ -2577,12 +2677,16 @@ fn derive_from_record(
     mut applied: Local<(u32, usize)>,
     mut constructions: Query<&mut Breakage, Without<Piece>>,
 ) {
-    if applied.0 != record.generation || record.entries.len() < applied.1 {
+    if applied.0 != record.generation {
         constructions
             .par_iter_mut()
             .for_each(|mut breakage| breakage.live.reset());
         *applied = (record.generation, 0);
     }
+    assert!(
+        record.entries.len() >= applied.1,
+        "a construction record never shrinks within its generation"
+    );
     if record.entries.len() == applied.1 {
         return;
     }

@@ -4787,3 +4787,27 @@ fn split_preparation_keeps_child_order_and_state_across_workers() {
     };
     assert_eq!(run(1), run(2));
 }
+
+/// Replicas rely on append-only records within one generation; silently resetting colliders
+/// on a shortening would conceal a broken record writer.
+#[test]
+#[should_panic(expected = "a construction record never shrinks within its generation")]
+fn deriving_a_shorter_same_generation_record_is_a_bug() {
+    let mut app = App::new();
+    app.add_plugins(TaskPoolPlugin::default())
+        .init_resource::<Record>()
+        .add_systems(Update, derive_from_record);
+    app.world_mut()
+        .spawn(Breakage::new(column_construction(), 3, 1.0));
+    app.world_mut()
+        .resource_mut::<Record>()
+        .entries
+        .push(Entry {
+            construction: 3,
+            event: Event::Swap(0),
+            tick: 0,
+        });
+    app.update();
+    app.world_mut().resource_mut::<Record>().entries.clear();
+    app.update();
+}

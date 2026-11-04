@@ -620,7 +620,7 @@ struct OwnMesh {
 fn present_record(
     record: Res<Record>,
     clock: Res<PresentationClock>,
-    mut presented: Local<(u32, usize)>,
+    mut presented: Local<(u32, usize, usize)>,
     mut constructions: Query<
         (
             Entity,
@@ -633,7 +633,7 @@ fn present_record(
     >,
     mut commands: Commands,
 ) {
-    let reset = presented.0 != record.generation || record.entries.len() < presented.1;
+    let reset = presented.0 != record.generation;
     if reset {
         for (_, _, breakage, shown, holes) in &mut constructions {
             if let Some(mut shown) = shown {
@@ -643,8 +643,13 @@ fn present_record(
                 holes.set_if_neq(ShownHoles::default());
             }
         }
-        *presented = (record.generation, 0);
+        *presented = (record.generation, 0, 0);
     }
+    assert!(
+        record.entries.len() >= presented.2,
+        "a construction record never shrinks within its generation"
+    );
+    presented.2 = record.entries.len();
     let due = record.entries[presented.1..]
         .iter()
         .take_while(|entry| {
@@ -838,10 +843,16 @@ fn redraw(
 /// dressed once it holds a pose: an interpolated one takes its first when the cursor reaches it.
 fn dress_pieces(
     pieces: Query<
-        (Entity, &Piece, Option<&crate::world::WorldGeneration>),
+        (
+            Entity,
+            &Piece,
+            Option<&crate::world::WorldGeneration>,
+            Option<&super::breakage::AdmittedPiece>,
+        ),
         (With<Transform>, Without<PieceDressed>),
     >,
     generation: Option<Res<crate::world::CurrentWorld>>,
+    replica: Option<Res<crate::ClientReplica>>,
     constructions: Query<(Entity, &MapInstance, &Breakage), Without<Piece>>,
     look: Option<Res<Look>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -850,7 +861,7 @@ fn dress_pieces(
     let Some(look) = look else {
         return;
     };
-    for (entity, piece, belongs) in &pieces {
+    for (entity, piece, belongs, admitted) in &pieces {
         // Offline pieces are local bodies. A streamed piece waits for its own map construction
         // before resolving the construction root it will retain for its entire presented lifetime.
         if belongs.is_some_and(|belongs| {
@@ -858,25 +869,34 @@ fn dress_pieces(
         }) {
             continue;
         }
-        let Some((construction, _, breakage)) = constructions
-            .iter()
-            .find(|(_, identity, _)| identity.ordinal == piece.construction)
-        else {
-            continue;
+        let local;
+        let admitted = if replica.is_some() || belongs.is_some() {
+            // Admission precedes dressing; a peer carrier can await its selected world or flush.
+            let Some(admitted) = admitted else {
+                continue;
+            };
+            admitted
+        } else {
+            local = piece
+                .admitted(
+                    constructions
+                        .iter()
+                        .find(|(_, identity, _)| identity.ordinal == piece.construction)
+                        .map(|(root, _, breakage)| (root, breakage)),
+                )
+                .expect(
+                    "authority pieces are built from the placed construction's own sorted chunks",
+                );
+            &local
         };
-        let kind = &breakage.kind;
-        let (mut weighted, mut mass) = (Vec3::ZERO, 0.0);
-        for &c in &piece.chunks {
-            let chunk = &kind.asset.chunks[kind.layout.chunks[usize::from(c)] as usize];
-            weighted += Vec3::from_array(chunk.centroid) * chunk.mass_kg;
-            mass += chunk.mass_kg;
-        }
-        let origin = weighted / mass.max(f32::EPSILON);
-        let mesh = meshes.add(piece_mesh(kind, &piece.chunks, origin));
+        let kind = &admitted.kind;
+        let construction = admitted.construction;
+        let origin = admitted.origin;
+        let mesh = meshes.add(piece_mesh(kind, &admitted.chunks, origin));
         let view = commands
             .spawn((
                 ChildOf(entity),
-                Transform::from_scale(Vec3::splat(breakage.scale)),
+                Transform::from_scale(Vec3::splat(admitted.scale)),
                 Mesh3d(mesh),
                 MeshMaterial3d(look.surface.clone()),
                 crate::render_cost::CasterClass::House,
@@ -1330,6 +1350,29 @@ mod tests {
                 .0
                 .swapped[0]
         );
+    }
+
+    /// Even unpresented future entries are append-only. Presentation may reset only on a new
+    /// generation; treating a shortening as a reset would hide an internal record regression.
+    #[test]
+    #[should_panic(expected = "a construction record never shrinks within its generation")]
+    fn a_same_generation_record_cannot_shrink_before_presentation() {
+        use crate::construction::breakage::Entry;
+        let mut world = World::new();
+        world.insert_resource(PresentationClock::Waiting);
+        world.insert_resource(Record {
+            entries: vec![Entry {
+                construction: 3,
+                event: Event::Swap(0),
+                tick: 9,
+            }],
+            ..default()
+        });
+        let mut schedule = Schedule::default();
+        schedule.add_systems(present_record);
+        schedule.run(&mut world);
+        world.resource_mut::<Record>().entries.clear();
+        schedule.run(&mut world);
     }
 
     /// An opening is absent construction: the camera sees through it and meets the surrounding
@@ -1808,6 +1851,13 @@ mod tests {
             ))
             .id();
         world.resource_mut::<CurrentWorld>().0 = Some(WorldGeneration(2));
+        let admitted = world
+            .get::<Piece>(carrier)
+            .unwrap()
+            .admitted(Some((fresh, world.get::<Breakage>(fresh).unwrap())))
+            .unwrap();
+        world.entity_mut(carrier).insert(admitted);
+
         schedule.run(&mut world);
         assert_eq!(
             world.get::<PieceDressed>(carrier).unwrap().construction,

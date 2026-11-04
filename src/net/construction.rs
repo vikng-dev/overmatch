@@ -19,7 +19,10 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::world_reset::AuthorityWorld;
-use crate::construction::breakage::{Breakage, Entry, LawSet, Layout, Piece, Record, ReplicaSet};
+use crate::construction::breakage::{
+    AdmittedPiece, Breakage, Entry, EntryError, LawSet, Layout, Piece, PieceError, Record,
+    ReplicaSet,
+};
 use crate::world::{CurrentWorld, WorldGeneration};
 use std::collections::HashMap;
 
@@ -49,7 +52,14 @@ pub(super) fn install_server(app: &mut App) {
 
 pub(super) fn install_client(app: &mut App) {
     app.init_resource::<CurrentWorld>()
-        .add_systems(Update, receive_ledger.before(ReplicaSet));
+        .add_message::<ConstructionRefusal>()
+        .add_message::<super::matchmaking::ServerGone>()
+        .add_systems(
+            Update,
+            (receive_ledger, receive_pieces, refuse_peer_record)
+                .chain()
+                .before(ReplicaSet),
+        );
 }
 
 fn spawn_ledger(world: &mut World) {
@@ -85,24 +95,16 @@ fn publish_record(
     published.1 = record.entries.len();
 }
 
-/// Replica: only the selected world's ledger enters the record. A new Battle or a new link owns
-/// a new ledger entity and diff history. Replacing that identity replaces the copied record and
-/// moves its generation, so derivations start from intact construction before applying it.
-///
-/// A ledger shorter than what was copied from the same entity is a malformed peer record: the
-/// authority only appends, and a replicon snapshot carries its whole list. It is logged, and the
-/// record is replaced by the list as it now stands, as for another link's.
-///
-/// Each new entry is checked against this map's constructions before the record holds it
-/// ([`Entry::admitted`]): one naming a construction the map does not place, or an element, chunk
-/// or joint past its layout, is a malformed peer entry, refused and logged with its
-/// [`crate::construction::breakage::EntryError`], so every record the derivations read holds only what they can apply.
+/// Replica: admit the selected world's new entries as one batch before mutating its record.
+/// Another ledger identity replaces the record and advances its generation. Within one identity
+/// the authority only appends; duplicates, shrinking and malformed entries refuse the match.
 fn receive_ledger(
-    ledgers: Query<(Entity, &Ledger, &WorldGeneration)>,
+    ledgers: Query<(Entity, Ref<Ledger>, &WorldGeneration)>,
     generation: Res<CurrentWorld>,
     constructions: Query<&Breakage, Without<Piece>>,
     mut copied: Local<(Option<Entity>, usize)>,
     mut record: ResMut<Record>,
+    mut refused: MessageWriter<ConstructionRefusal>,
 ) {
     let mut current = ledgers
         .iter()
@@ -112,43 +114,147 @@ fn receive_ledger(
         // Before the first snapshot, or between links, no authority ledger has arrived yet.
         None => return,
     };
-    assert!(
-        current.next().is_none(),
-        "a replica has one active construction ledger; disconnect cleanup removes the old link's \
-             replicated entities before a replacement arrives"
-    );
-    if copied.0 != Some(ledger) || entries.0.len() < copied.1 {
-        if copied.0 == Some(ledger) {
-            error!(
-                "construction ledger: malformed peer record: {} entries after {} copied from the same \
-                 ledger; replacing the record with it",
-                entries.0.len(),
-                copied.1
-            );
+    if current.next().is_some() {
+        refused.write(ConstructionRefusal::DuplicateLedgers);
+        return;
+    }
+    let replaced = copied.0 != Some(ledger);
+    let from = if replaced { 0 } else { copied.1 };
+    let Some(fresh) = entries.0.get(from..) else {
+        refused.write(ConstructionRefusal::ShrunkLedger {
+            copied: from,
+            received: entries.0.len(),
+        });
+        return;
+    };
+    if !replaced && entries.is_changed() && entries.0[..from] != record.entries {
+        refused.write(ConstructionRefusal::RewrittenLedger);
+        return;
+    }
+    if !replaced && fresh.is_empty() {
+        return;
+    }
+    let layouts: HashMap<u16, &Layout> = constructions
+        .iter()
+        .map(|breakage| (breakage.construction, &breakage.kind.layout))
+        .collect();
+    let admitted = fresh
+        .iter()
+        .map(|entry| entry.admitted(|ordinal| layouts.get(&ordinal).copied()))
+        .collect::<std::result::Result<Vec<_>, _>>();
+    let admitted = match admitted {
+        Ok(entries) => entries,
+        Err(error) => {
+            refused.write(ConstructionRefusal::Entry(error));
+            return;
         }
+    };
+    if replaced {
         record.entries.clear();
         record.generation = record.generation.wrapping_add(1);
-        *copied = (Some(ledger), 0);
     }
-    if entries.0.len() > copied.1 {
-        let layouts: HashMap<u16, &Layout> = constructions
+    record.entries.extend(admitted);
+    *copied = (Some(ledger), entries.0.len());
+}
+
+#[derive(Message, Debug, Clone, PartialEq)]
+enum ConstructionRefusal {
+    DuplicateLedgers,
+    UntaggedPiece,
+    RewrittenLedger,
+    ShrunkLedger { copied: usize, received: usize },
+    Entry(EntryError),
+    Piece(PieceError),
+}
+
+impl std::fmt::Display for ConstructionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Server construction stream refused: ")?;
+        match self {
+            Self::RewrittenLedger => f.write_str("ledger rewrote previously admitted entries"),
+            Self::UntaggedPiece => f.write_str("piece has no world generation"),
+            Self::DuplicateLedgers => f.write_str("multiple ledgers for the selected world"),
+            Self::ShrunkLedger { copied, received } => {
+                write!(f, "ledger shrank from {copied} to {received} entries")
+            }
+            Self::Entry(error) => error.fmt(f),
+            Self::Piece(error) => error.fmt(f),
+        }
+    }
+}
+
+/// A selected CurrentWorld has synchronously reconstructed all map owners. Only a piece of a
+/// different generation waits; a missing ordinal in the selected map is malformed peer input.
+fn receive_pieces(
+    pieces: Query<
+        (
+            Entity,
+            &Piece,
+            Option<&WorldGeneration>,
+            Option<&AdmittedPiece>,
+        ),
+        Or<(
+            Changed<Piece>,
+            Changed<WorldGeneration>,
+            Without<AdmittedPiece>,
+        )>,
+    >,
+    generation: Res<CurrentWorld>,
+    constructions: Query<(Entity, &Breakage), Without<Piece>>,
+    mut refused: MessageWriter<ConstructionRefusal>,
+    mut commands: Commands,
+) {
+    for (entity, piece, belongs, admitted) in &pieces {
+        let Some(belongs) = belongs else {
+            refused.write(ConstructionRefusal::UntaggedPiece);
+            commands.entity(entity).despawn();
+            continue;
+        };
+        if Some(*belongs) != generation.0 {
+            continue;
+        }
+        let selected = constructions
             .iter()
-            .map(|breakage| (breakage.construction, &breakage.kind.layout))
-            .collect();
-        for entry in &entries.0[copied.1..] {
-            match entry.admitted(|construction| layouts.get(&construction).copied()) {
-                Ok(entry) => record.entries.push(entry),
-                Err(error) => error!("construction ledger: peer entry {entry:?} refused: {error}"),
+            .find(|(_, b)| b.construction == piece.construction);
+        let result = match admitted {
+            Some(admitted) => match selected {
+                Some((root, _)) if root == admitted.construction => {
+                    admitted.admits_update(piece).map(|()| None)
+                }
+                _ => Err(PieceError::Changed(piece.construction)),
+            },
+            None => piece.admitted(selected).map(Some),
+        };
+        match result {
+            Ok(Some(admitted)) => {
+                commands.entity(entity).insert(admitted);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                refused.write(ConstructionRefusal::Piece(error));
+                // Flush before ReplicaSet and the view: a malformed carrier must never be indexed.
+                commands.entity(entity).despawn();
             }
         }
-        copied.1 = entries.0.len();
+    }
+}
+
+/// The ordinary match-close path removes the link, stops reconnecting and shows this cause.
+fn refuse_peer_record(
+    mut refused: MessageReader<ConstructionRefusal>,
+    mut gone: MessageWriter<super::matchmaking::ServerGone>,
+) {
+    if let Some(refusal) = refused.read().next() {
+        warn!("client: {refusal}");
+        gone.write(super::matchmaking::ServerGone(refusal.to_string()));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::construction::breakage::{EntryError, Event, Hole};
+    use crate::construction::breakage::{Event, Hole};
+    use lightyear::prelude::client::NetcodeClient;
 
     fn entry(event: Event, tick: u32) -> Entry {
         Entry {
@@ -161,9 +267,8 @@ mod tests {
     /// A replica's receive edge with the shipped house placed as construction 1 (fixture ordinal).
     fn replica() -> App {
         let mut app = App::new();
-        app.init_resource::<CurrentWorld>()
-            .init_resource::<Record>()
-            .add_systems(Update, receive_ledger);
+        app.init_resource::<Record>();
+        install_client(&mut app);
         app.world_mut().spawn(Breakage::new(
             crate::construction::tests::shipped_house(),
             1,
@@ -172,41 +277,54 @@ mod tests {
         app
     }
 
-    /// A PEER ENTRY THE MAP CANNOT HOLD NEVER REACHES THE RECORD: one naming a construction the map
-    /// does not place, or an element, chunk or joint past its layout, is refused where it
-    /// arrives, and the entries around it still land in order. The derivations rely on it: they
-    /// apply every record entry by `expect`, so an admitted bad entry would panic a replica, and
-    /// one silently consumed would leave its construction half-applied.
+    /// A malformed entry refuses the entire batch visibly, preserving the previous admitted
+    /// record. Accepting surrounding entries would leave the player's destruction record incomplete.
     #[test]
     fn a_peer_entry_the_map_cannot_hold_is_refused_at_receipt() {
-        let mut app = replica();
-        let unknown = Entry {
-            construction: 7,
-            ..entry(Event::Swap(0), 4)
-        };
-        let ledger = vec![
-            entry(Event::Swap(0), 3),
-            unknown,
-            entry(Event::Dust(u16::MAX), 5),
-            entry(Event::Crack(u16::MAX), 6),
-            entry(Event::Crack(2), 7),
-        ];
-        app.world_mut()
-            .spawn((Ledger(ledger), WorldGeneration::default()));
-        app.update();
-        assert_eq!(
-            app.world().resource::<Record>().entries,
-            vec![entry(Event::Swap(0), 3), entry(Event::Crack(2), 7)]
-        );
-        let layout = &crate::construction::tests::shipped_house().layout;
-        assert_eq!(
-            unknown.admitted(|_| None),
-            Err(EntryError::UnknownConstruction(7))
-        );
-        assert_eq!(
-            entry(Event::Fall(u16::MAX), 0).admitted(|_| Some(layout)),
-            Err(EntryError::OutsideLayout(1, Event::Fall(u16::MAX)))
-        );
+        for (bad, error) in [
+            (
+                Entry {
+                    construction: 7,
+                    ..entry(Event::Swap(0), 4)
+                },
+                EntryError::UnknownConstruction(7),
+            ),
+            (
+                entry(Event::Dust(u16::MAX), 5),
+                EntryError::OutsideLayout(1, Event::Dust(u16::MAX)),
+            ),
+            (
+                entry(Event::Crack(u16::MAX), 6),
+                EntryError::OutsideLayout(1, Event::Crack(u16::MAX)),
+            ),
+            (
+                entry(Event::Fall(u16::MAX), 7),
+                EntryError::OutsideLayout(1, Event::Fall(u16::MAX)),
+            ),
+        ] {
+            let mut app = replica();
+            let ledger = app
+                .world_mut()
+                .spawn((
+                    Ledger(vec![entry(Event::Swap(0), 3)]),
+                    WorldGeneration::default(),
+                ))
+                .id();
+            app.update();
+            let before = app.world().resource::<Record>().clone();
+            app.world_mut()
+                .get_mut::<Ledger>(ledger)
+                .unwrap()
+                .0
+                .extend([entry(Event::Crack(2), 4), bad, entry(Event::Dust(0), 9)]);
+            app.update();
+            assert_eq!(
+                *app.world().resource::<Record>(),
+                before,
+                "the whole malformed batch is refused"
+            );
+            assert_refused(&mut app, ConstructionRefusal::Entry(error));
+        }
     }
 
     /// THE RECORD IS THE LEDGER, ENTRY FOR ENTRY, AND ANOTHER LEDGER REPLACES IT: a link's ledger
@@ -260,20 +378,210 @@ mod tests {
         app.update();
     }
 
-    /// Two active ledgers would mix authorities' records. A single-query skip mutant would hide
-    /// the composition bug and freeze every replica construction on its previous record.
+    /// Peer-controlled ledger cardinality must close the match, never panic or skip silently.
     #[test]
-    #[should_panic(expected = "a replica has one active construction ledger")]
-    fn a_replica_with_two_construction_ledgers_is_a_bug() {
-        let mut app = App::new();
-        app.init_resource::<CurrentWorld>()
-            .init_resource::<Record>()
-            .add_systems(Update, receive_ledger);
+    fn duplicate_active_ledgers_are_visibly_refused() {
+        let mut app = replica();
         for _ in 0..2 {
             app.world_mut()
                 .spawn((Ledger::default(), WorldGeneration::default()));
         }
         app.update();
+        assert_refused(&mut app, ConstructionRefusal::DuplicateLedgers);
+        assert!(app.world().resource::<Record>().entries.is_empty());
+    }
+
+    /// A peer cannot replace its append-only ledger with a shorter same-identity snapshot.
+    #[test]
+    fn a_shrinking_peer_ledger_is_visibly_refused() {
+        let mut app = replica();
+        let ledger = app
+            .world_mut()
+            .spawn((
+                Ledger(vec![entry(Event::Swap(0), 3)]),
+                WorldGeneration::default(),
+            ))
+            .id();
+        app.update();
+        let before = app.world().resource::<Record>().clone();
+        app.world_mut().get_mut::<Ledger>(ledger).unwrap().0.clear();
+        app.update();
+        assert_eq!(*app.world().resource::<Record>(), before);
+        assert_refused(
+            &mut app,
+            ConstructionRefusal::ShrunkLedger {
+                copied: 1,
+                received: 0,
+            },
+        );
+    }
+
+    /// Append-only admission also refuses a snapshot rewriting its admitted prefix, even when
+    /// the replacement event is individually valid. Otherwise the record silently diverges.
+    #[test]
+    fn a_peer_cannot_rewrite_previously_admitted_entries() {
+        for event in [Event::Dust(0), Event::Dust(u16::MAX)] {
+            let mut app = replica();
+            let ledger = app
+                .world_mut()
+                .spawn((
+                    Ledger(vec![entry(Event::Swap(0), 3)]),
+                    WorldGeneration::default(),
+                ))
+                .id();
+            app.update();
+            let before = app.world().resource::<Record>().clone();
+            app.world_mut().get_mut::<Ledger>(ledger).unwrap().0[0] = entry(event, 3);
+            app.update();
+            assert_eq!(*app.world().resource::<Record>(), before);
+            assert_refused(&mut app, ConstructionRefusal::RewrittenLedger);
+        }
+    }
+
+    /// Peer descriptors are checked before a pose or view exists; neither bad indices nor unknown
+    /// ordinals may reach the view. A future generation waits only until its map is selected.
+    #[test]
+    fn invalid_piece_descriptors_are_refused_at_the_selected_map_edge() {
+        for (ordinal, chunks, error) in [
+            (1, vec![u16::MAX], PieceError::OutsideLayout(1, u16::MAX)),
+            (7, vec![0], PieceError::UnknownConstruction(7)),
+            (1, vec![], PieceError::Empty(1)),
+            (1, vec![0, 0], PieceError::Unordered(1)),
+            (1, vec![1, 0], PieceError::Unordered(1)),
+        ] {
+            let mut app = replica();
+            let piece = app
+                .world_mut()
+                .spawn((
+                    Piece {
+                        construction: ordinal,
+                        chunks,
+                        born: 0,
+                        retired: None,
+                    },
+                    WorldGeneration(2),
+                ))
+                .id();
+            app.update();
+            assert!(app.world().get::<AdmittedPiece>(piece).is_none());
+            assert!(
+                app.world()
+                    .resource::<Messages<super::super::matchmaking::ServerGone>>()
+                    .is_empty()
+            );
+            app.world_mut().resource_mut::<CurrentWorld>().0 = Some(WorldGeneration(2));
+            app.update();
+            assert!(
+                app.world().get_entity(piece).is_err(),
+                "the malformed carrier cannot reach presentation"
+            );
+            assert_refused(&mut app, ConstructionRefusal::Piece(error));
+        }
+    }
+
+    /// Only retirement changes on an admitted carrier. Mutating its identity would invalidate the
+    /// checked mesh while show_pieces still reads the descriptor's group.
+    #[test]
+    fn an_admitted_piece_accepts_retirement_and_refuses_group_mutation() {
+        let mut app = replica();
+        let piece = app
+            .world_mut()
+            .spawn((
+                Piece {
+                    construction: 1,
+                    chunks: vec![0],
+                    born: 3,
+                    retired: None,
+                },
+                WorldGeneration::default(),
+            ))
+            .id();
+        app.update();
+        assert!(app.world().get::<AdmittedPiece>(piece).is_some());
+        app.world_mut().get_mut::<Piece>(piece).unwrap().retired = Some(5);
+        app.update();
+        assert!(app.world().get::<AdmittedPiece>(piece).is_some());
+        app.world_mut().get_mut::<Piece>(piece).unwrap().chunks = vec![u16::MAX];
+        app.update();
+        assert!(app.world().get_entity(piece).is_err());
+        assert_refused(&mut app, ConstructionRefusal::Piece(PieceError::Changed(1)));
+    }
+
+    /// The game's destruction stream must close through the shipped lifecycle and show its cause
+    /// in the lobby. Merely logging a typed refusal, or leaving reconnect alive, fails this witness.
+    #[test]
+    fn a_construction_refusal_closes_the_match_and_reaches_the_players_lobby() {
+        use super::super::matchmaking::MatchClosed;
+        use bevy::ecs::message::MessageCursor;
+        let _udp = super::super::test_harness::lock_real_udp_test();
+        let (mut server, mut client) = super::super::client::match_exit::in_match();
+        client.init_resource::<Record>();
+        install_client(&mut client);
+        let expected = ConstructionRefusal::DuplicateLedgers.to_string();
+        // Fixture: two active peer ledger entities delivered through the installed receive edge.
+        for _ in 0..2 {
+            client
+                .world_mut()
+                .spawn((Ledger::default(), WorldGeneration::default()));
+        }
+        let mut closed = MessageCursor::<MatchClosed>::default();
+        let mut observed = false;
+        for _ in 0..8 {
+            server.update();
+            client.update();
+            let causes: Vec<_> = closed
+                .read(client.world().resource::<Messages<MatchClosed>>())
+                .cloned()
+                .collect();
+            if !causes.is_empty() {
+                assert_eq!(causes, [MatchClosed::Ended(expected.clone())]);
+                observed = true;
+                break;
+            }
+        }
+        assert!(observed, "the receive refusal reaches the match-close path");
+        // The wire entities normally belong to the link; this injected fixture owns their cleanup.
+        let ledgers: Vec<_> = client
+            .world_mut()
+            .query_filtered::<Entity, With<Ledger>>()
+            .iter(client.world())
+            .collect();
+        for entity in ledgers {
+            client.world_mut().despawn(entity);
+        }
+        super::super::client::match_exit::advance_past_reconnect_window(&mut client);
+        for _ in 0..8 {
+            client.update();
+        }
+        assert_eq!(
+            client
+                .world_mut()
+                .query_filtered::<(), With<NetcodeClient>>()
+                .iter(client.world())
+                .count(),
+            0
+        );
+        assert_eq!(
+            *client.world().resource::<State<crate::flow::Flow>>().get(),
+            crate::flow::Flow::Lobby
+        );
+        assert!(
+            client
+                .world_mut()
+                .query::<&Text>()
+                .iter(client.world())
+                .any(|text| text.0.contains(&expected))
+        );
+    }
+
+    fn assert_refused(app: &mut App, expected: ConstructionRefusal) {
+        let causes: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<super::super::matchmaking::ServerGone>>()
+            .drain()
+            .map(|cause| cause.0)
+            .collect();
+        assert_eq!(causes, [expected.to_string()]);
     }
 
     /// A HOLE CROSSES THE WIRE WHOLE, IN A LATE JOINER'S SNAPSHOT TOO: a ledger holding hole
