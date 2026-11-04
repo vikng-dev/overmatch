@@ -4364,6 +4364,32 @@ mod tests {
         }
     }
 
+    /// A BOARD'S SLIVER IS A LAW BLOCK WHILE IT IS THICKER ACROSS THAN THE PLANE TOLERANCE (the
+    /// game's environment destruction model): a cell smaller than a board is thick cuts wedges
+    /// through it, and each is a law block with all its faces while it is thicker across than
+    /// [`ON_PLANE`]; thinner, a plane on one face would hold the other, and it is refused. A
+    /// reconstruction that reads a face as every corner near its plane pulls the thin edge's
+    /// corners into the next face and refuses a wedge the law resolves. Fixture: a 5 cm board's
+    /// section cut to a right-angled wedge 20 cm along the grain, standing 6 m up.
+    #[test]
+    fn a_board_sliver_is_a_law_block_while_thicker_than_the_plane_tolerance() {
+        const BOARD: f32 = 0.05;
+        let wedge = |across: f32| {
+            Block::hull(
+                [Vec3::ZERO, Vec3::X * BOARD, Vec3::new(BOARD, across, 0.0)]
+                    .into_iter()
+                    .flat_map(|p| [p, p + Vec3::Z * 0.2])
+                    .map(|p| p + Vec3::Y * 6.0)
+                    .collect(),
+            )
+        };
+        let block = wedge(4.0 * ON_PLANE).expect("a wedge thicker than the tolerance is a block");
+        let mut rings: Vec<usize> = block.rings.iter().map(Vec::len).collect();
+        rings.sort_unstable();
+        assert_eq!(rings, [3, 3, 4, 4, 4], "two ends and three sides");
+        assert!(wedge(ON_PLANE / 2.0).is_none());
+    }
+
     /// A cracked anchor belongs to placed construction. A released group's old base cannot
     /// defer its sections as if a ground contact still held it. Fixture: a detached row pair.
     #[test]
