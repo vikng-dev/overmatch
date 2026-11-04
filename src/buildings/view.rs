@@ -1207,79 +1207,101 @@ mod tests {
         }
     }
 
-    /// EVERY FACE IS FRAMED IN METRES AND WEARS ITS ELEMENT'S PACK: each corner's UV is its
-    /// position on the face's tangent and image-up axes (the frame the material's vertex stage
-    /// rescales by the instance's scale), wall faces stand their image upright, and the second
-    /// UV marks exactly the timber elements' faces. A UV off the frame stretches the bricks; a
-    /// mark on the wrong faces puts boards on a wall or bricks on the roof.
+    /// The material reader requires metre UVs in each element's declared frame and its own
+    /// palette assignment. Fixture frame choices exercise grain on either palette lane and
+    /// upright mapping without requiring any particular lane to occur in the construction.
     #[test]
     fn every_face_is_framed_in_metres_and_wears_its_element_s_pack() {
+        use crate::building_surface::{SurfaceLane, lane_for_substance};
         let kind = shipped_house();
-        let (asset, layout) = (&kind.asset, &kind.layout);
-        let mesh = mesh(asset, layout);
-        let attribute = |id| match mesh.attribute(id) {
-            Some(VertexAttributeValues::Float32x3(values)) => values
-                .iter()
-                .copied()
-                .map(Vec3::from_array)
-                .collect::<Vec<_>>(),
-            _ => panic!("Float32x3"),
-        };
-        let (positions, normals) = (
-            attribute(Mesh::ATTRIBUTE_POSITION),
-            attribute(Mesh::ATTRIBUTE_NORMAL),
-        );
-        let Some(VertexAttributeValues::Float32x4(tangents)) =
-            mesh.attribute(Mesh::ATTRIBUTE_TANGENT)
-        else {
-            panic!("tangents");
-        };
-        let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0)
-        else {
-            panic!("uvs");
-        };
-        let Some(VertexAttributeValues::Float32x2(packs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_1)
-        else {
-            panic!("packs");
-        };
-        let mut timber_vertices = 0;
-        for k in 0..positions.len() {
-            let (p, n, t) = (positions[k], normals[k], Vec4::from_array(tangents[k]));
-            let b = t.w * n.cross(t.truncate());
-            let uv = Vec2::from_array(uvs[k]);
-            assert!((uv - Vec2::new(p.dot(t.truncate()), -p.dot(b))).length() < 1e-4);
-            assert!(
-                t.truncate().dot(n).abs() < 1e-4,
-                "the tangent lies in the face"
-            );
-            if packs[k][0] == 1.0 {
-                timber_vertices += 1;
-            } else {
-                assert_eq!(packs[k][0], 0.0);
-                if n.y.abs() < 1e-3 {
-                    assert!(
-                        (b - Vec3::Y).length() < 1e-4,
-                        "a wall stands its bricks upright"
+        let mut asset = kind.asset.clone();
+        let layout = &kind.layout;
+        for e in 0..asset.elements.len() {
+            let declared = asset.elements[e].surface_frame;
+            let palette =
+                match lane_for_substance(&asset.materials[usize::from(asset.elements[e].material)])
+                {
+                    SurfaceLane::Primary => 0.0,
+                    SurfaceLane::Secondary => 1.0,
+                };
+            for frame in [
+                declared,
+                SurfaceFrame::Upright,
+                SurfaceFrame::Grain([1.0, 0.0, 0.0]),
+                SurfaceFrame::Grain([0.0, 0.0, 1.0]),
+            ] {
+                asset.elements[e].surface_frame = frame;
+                let mut faces = Faces::default();
+                faces.element(&asset, e);
+                let mesh = faces.mesh();
+                assert_tagged_hulls(&mesh, &[(0.0, &layout.element_blocks[e])], Vec3::ZERO);
+                let attribute = |id| match mesh.attribute(id) {
+                    Some(VertexAttributeValues::Float32x3(values)) => values
+                        .iter()
+                        .copied()
+                        .map(Vec3::from_array)
+                        .collect::<Vec<_>>(),
+                    _ => panic!("Float32x3"),
+                };
+                let positions = attribute(Mesh::ATTRIBUTE_POSITION);
+                let normals = attribute(Mesh::ATTRIBUTE_NORMAL);
+                let Some(VertexAttributeValues::Float32x4(tangents)) =
+                    mesh.attribute(Mesh::ATTRIBUTE_TANGENT)
+                else {
+                    panic!("tangents");
+                };
+                let Some(VertexAttributeValues::Float32x2(uvs)) =
+                    mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+                else {
+                    panic!("uvs");
+                };
+                let Some(VertexAttributeValues::Float32x2(packs)) =
+                    mesh.attribute(Mesh::ATTRIBUTE_UV_1)
+                else {
+                    panic!("packs");
+                };
+                assert_eq!(positions.len(), normals.len());
+                assert_eq!(positions.len(), tangents.len());
+                assert_eq!(positions.len(), uvs.len());
+                assert_eq!(positions.len(), packs.len());
+                for k in 0..positions.len() {
+                    let (p, n, tangent) = (positions[k], normals[k], Vec4::from_array(tangents[k]));
+                    let t = tangent.truncate();
+                    let b = tangent.w * n.cross(t);
+                    let uv = Vec2::from_array(uvs[k]);
+                    assert!((uv - Vec2::new(p.dot(t), -p.dot(b))).length() < 1e-4);
+                    assert!((t.length() - 1.0).abs() < 1e-4 && t.dot(n).abs() < 1e-4);
+                    let grain = match frame {
+                        SurfaceFrame::Grain(axis) => {
+                            let axis = Vec3::from_array(axis);
+                            Some(axis - n * axis.dot(n))
+                        }
+                        SurfaceFrame::Upright => None,
+                    };
+                    if let Some(grain) =
+                        grain.filter(|g| g.length_squared() > FRAME_PROJECTION_MIN_SQUARED)
+                    {
+                        assert!(
+                            (t - grain.normalize()).length() < 1e-4,
+                            "element {e}: authored grain"
+                        );
+                    } else {
+                        let up = Vec3::Y - n * n.y;
+                        if up.length_squared() > FRAME_PROJECTION_MIN_SQUARED {
+                            assert!(
+                                (b - up.normalize()).length() < 1e-4,
+                                "element {e}: upright image"
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        packs[k],
+                        [palette, 0.0],
+                        "element {e}: palette and whole-element tag"
                     );
                 }
             }
         }
-        let expected: usize = (0..asset.elements.len())
-            .filter(|&e| {
-                crate::building_surface::lane_for_substance(
-                    &asset.materials[usize::from(asset.elements[e].material)],
-                ) == crate::building_surface::SurfaceLane::Secondary
-            })
-            .map(|e| {
-                layout.element_blocks[e]
-                    .faces()
-                    .iter()
-                    .map(|(_, c)| c.len())
-                    .sum::<usize>()
-            })
-            .sum();
-        assert!(expected > 0);
-        assert_eq!(timber_vertices, expected, "exactly the timber faces");
     }
 
     /// Every vertex's second UV `y`, the hole lookup's tag.
@@ -1299,13 +1321,72 @@ mod tests {
             .expect("the shipped house has a chunked element")
     }
 
-    /// The corners of law chunk `c`'s hull, as the mesh draws them.
-    fn hull_corners(layout: &Layout, c: usize) -> usize {
-        layout.blocks[c]
-            .faces()
+    /// The shader's tags name authored solids, irrespective of the renderer's vertex topology.
+    /// Every triangle must lie on its tagged hull, and every hull plane must remain represented.
+    fn assert_tagged_hulls(mesh: &Mesh, hulls: &[(f32, &Block)], origin: Vec3) {
+        use crate::buildings::schema::PLANE_TOLERANCE_M;
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("positions");
+        };
+        let Some(Indices::U32(indices)) = mesh.indices() else {
+            panic!("u32 indices");
+        };
+        let tags = tags(mesh);
+        assert_eq!(positions.len(), tags.len());
+        let mut seen: Vec<_> = hulls
             .iter()
-            .map(|(_, corners)| corners.len())
-            .sum()
+            .map(|(_, block)| vec![false; block.planes.len()])
+            .collect();
+        let (triangles, remainder) = indices.as_chunks::<3>();
+        assert!(
+            remainder.is_empty(),
+            "triangle indices form complete triples"
+        );
+        for triangle in triangles {
+            let points: [Vec3; 3] =
+                std::array::from_fn(|k| Vec3::from_array(positions[triangle[k] as usize]) + origin);
+            let tag = tags[triangle[0] as usize];
+            assert!(
+                triangle.iter().all(|&i| tags[i as usize] == tag),
+                "one tag per triangle"
+            );
+            let area_vector = (points[1] - points[0]).cross(points[2] - points[0]);
+            let mut owned = false;
+            for (h, (expected, block)) in hulls.iter().enumerate() {
+                if tag != *expected
+                    || points.iter().any(|p| {
+                        block
+                            .planes
+                            .iter()
+                            .any(|(n, offset)| n.dot(*p) - offset > PLANE_TOLERANCE_M)
+                    })
+                {
+                    continue;
+                }
+                for (f, (n, offset)) in block.planes.iter().enumerate() {
+                    if area_vector.dot(*n) > 0.0
+                        && points
+                            .iter()
+                            .all(|p| (n.dot(*p) - offset).abs() < PLANE_TOLERANCE_M)
+                    {
+                        seen[h][f] = true;
+                        owned = true;
+                    }
+                }
+            }
+            assert!(
+                owned,
+                "triangle {points:?} belongs to no authored hull carrying tag {tag}"
+            );
+        }
+        for (h, faces) in seen.iter().enumerate() {
+            assert!(
+                !faces.is_empty() && faces.iter().all(|&drawn| drawn),
+                "every plane of tagged hull {h} is drawn"
+            );
+        }
     }
 
     /// A FRAGMENT FINDS ITS OWN CHUNK'S HOLES. The shader reads a face's hole header at its tag − 1,
@@ -1319,33 +1400,32 @@ mod tests {
         let (asset, layout) = (&kind.asset, &kind.layout);
         let (e, chunks) = chunked_element(layout);
         let mut shape = Shape::intact(layout);
-        assert!(tags(&mesh(asset, layout)).iter().all(|&tag| tag == 0.0));
+        let intact: Vec<_> = layout
+            .element_blocks
+            .iter()
+            .map(|block| (0.0, block))
+            .collect();
+        assert_tagged_hulls(&mesh(asset, layout), &intact, Vec3::ZERO);
         shape.swapped[e] = true;
-        let tagged = tags(&broken_mesh(asset, layout, &shape));
-        for c in chunks.clone() {
-            let count = tagged.iter().filter(|&&tag| tag == (c + 1) as f32).count();
-            assert_eq!(
-                count,
-                hull_corners(layout, c),
-                "chunk {c}'s hull carries its tag"
-            );
-        }
-        let chunk_corners: usize = chunks.clone().map(|c| hull_corners(layout, c)).sum();
-        assert_eq!(
-            tagged.iter().filter(|&&tag| tag != 0.0).count(),
-            chunk_corners,
-            "only the swapped chunks carry a tag"
-        );
+        let mut standing: Vec<_> = layout
+            .element_blocks
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != e)
+            .map(|(_, block)| (0.0, block))
+            .collect();
+        standing.extend(chunks.clone().map(|c| ((c + 1) as f32, &layout.blocks[c])));
+        assert_tagged_hulls(&broken_mesh(asset, layout, &shape), &standing, Vec3::ZERO);
         let order = [chunks.start + 1, chunks.start];
-        let piece = piece_mesh(asset, layout, &order.map(|c| c as u16), Vec3::ZERO);
-        let tagged = tags(&piece);
-        let first = hull_corners(layout, order[0]);
-        assert_eq!(tagged.len(), first + hull_corners(layout, order[1]));
-        assert!(
-            tagged[..first].iter().all(|&tag| tag == 1.0)
-                && tagged[first..].iter().all(|&tag| tag == 2.0),
-            "a piece's chunks carry their place in it"
-        );
+        // Fixture: a nonzero origin also checks that ownership uses the authored frame.
+        let origin = Vec3::new(0.7, 1.1, -0.4);
+        let piece = piece_mesh(asset, layout, &order.map(|c| c as u16), origin);
+        let fallen: Vec<_> = order
+            .iter()
+            .enumerate()
+            .map(|(k, &c)| ((k + 1) as f32, &layout.blocks[c]))
+            .collect();
+        assert_tagged_hulls(&piece, &fallen, origin);
     }
 
     /// THE TABLE IS WHAT THE SHADER WALKS (`building_holes.wgsl`): chunk `c`'s header at record `c`
