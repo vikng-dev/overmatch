@@ -15,15 +15,9 @@ fn main() {
         let id = &spec.construction.id;
         let baked = construction::bake(&spec.construction, schema::substance_density)
             .unwrap_or_else(|err| panic!("bake-constructions: {}: {err}", spec.path));
-        let text = construction::write(&baked.asset, &spec.path);
+        let text = construction::admitted(&baked.asset, &spec.path)
+            .unwrap_or_else(|err| panic!("bake-constructions: {err}"));
         let path = construction::asset_path(&root, id);
-        overmatch::construction::admit(id, &text).unwrap_or_else(|err| {
-            panic!(
-                "bake-constructions: {}: the game's load gate refuses {}: {err}",
-                spec.path,
-                path.display()
-            )
-        });
         let unchanged = std::fs::read_to_string(&path).is_ok_and(|old| old == text);
         if !unchanged {
             let dir = path.parent().expect("an asset path has a folder");

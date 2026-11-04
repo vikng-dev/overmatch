@@ -300,6 +300,18 @@ impl Polyhedron {
         (self.clip(normal, offset), self.clip(-normal, -offset))
     }
 
+    /// Whether the two solids' interiors meet: `other` clipped by every face of `self` keeps a
+    /// solid. Shared faces, edges and corners, and an overlap no deeper than [`WELD_M`], do not
+    /// meet.
+    pub fn meets(&self, other: &Self) -> bool {
+        self.faces
+            .iter()
+            .try_fold(other.clone(), |part, face| {
+                part.clip(face.normal, face.offset)
+            })
+            .is_some()
+    }
+
     /// The same solid without corners no face names, renumbered in first-use order of the old.
     fn compact(self) -> Self {
         let mut used = vec![false; self.corners.len()];

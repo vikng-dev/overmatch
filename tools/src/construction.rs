@@ -271,6 +271,17 @@ pub fn write(asset: &ConstructionAsset, spec: &str) -> String {
     )
 }
 
+/// The canonical text of `asset` baked from the spec file `spec` ([`write`]), refused, naming `spec`,
+/// unless the game's load gate admits it ([`overmatch::construction::admit`]). [`certify`] proves the
+/// cut in f64; the game reads the f32 the writer rounds to, where a hull far from the frame's origin
+/// can collapse, and the gate's refusal names that hull's field and its repair.
+pub fn admitted(asset: &ConstructionAsset, spec: &str) -> Result<String, String> {
+    let text = write(asset, spec);
+    overmatch::construction::admit(&asset.id, &text)
+        .map_err(|err| format!("{spec}: the game's load gate refuses its bake: {err}"))?;
+    Ok(text)
+}
+
 /// Where the game reads construction `id` from, under the repository root.
 pub fn asset_path(root: &Path, id: &str) -> PathBuf {
     root.join("assets/constructions")

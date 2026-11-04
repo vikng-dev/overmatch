@@ -160,14 +160,7 @@ fn check_holds(foundation_attachment: &str, joins: &[Join]) -> Result<(), String
 pub(super) fn check_disjoint(pieces: &[Piece]) -> Result<(), String> {
     for (k, piece) in pieces.iter().enumerate() {
         for (j, other) in pieces[..k].iter().enumerate() {
-            let intersection = other
-                .solid
-                .faces
-                .iter()
-                .try_fold(piece.solid.clone(), |part, face| {
-                    part.clip(face.normal, face.offset)
-                });
-            if intersection.is_some() {
+            if other.solid.meets(&piece.solid) {
                 return Err(format!(
                     "pieces[{k}] ({}) overlaps pieces[{j}] ({}): author disjoint interiors; \
                      shared boundaries are allowed",

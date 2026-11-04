@@ -844,6 +844,34 @@ fn fastening_never_reads_an_element_name() {
     }
 }
 
+/// A HULL THAT COLLAPSES IN THE GAME'S F32 IS REFUSED BEFORE IT IS WRITTEN: a unit cube authored
+/// at x = 1e8 m (fixture data; f32 spacing there is 8 m, DERIVED) passes the f64 certificate, and
+/// the game's load gate on the text the bake would write refuses it, naming the spec file, the
+/// hull's field and the repair. Mutant: a writer that skips the gate hands every map placing the
+/// construction a refusal at load instead.
+#[test]
+fn a_hull_that_collapses_in_f32_is_refused_before_it_is_written() {
+    let far = DVec3::new(1.0e8, 0.0, 0.0);
+    let cube = box_piece(
+        "cube",
+        "fixture",
+        "Brick",
+        "Upright",
+        far,
+        far + DVec3::ONE,
+        "Whole",
+    );
+    let built = ConstructionSpec::from_ron(&construction(&[cube], ""))
+        .expect("the far cube is a closed convex solid");
+    let baked = bake(&built, schema::substance_density).expect("the f64 certificate admits it");
+    let spec = "tools/constructions/fixture.pieces.ron";
+    let err = admitted(&baked.asset, spec).unwrap_err();
+    assert!(
+        err.contains(spec) && err.contains("chunks[0].hull") && err.contains("rebake"),
+        "{err}"
+    );
+}
+
 /// Idle joins and unknown attachment kinds are refused before play. FIXTURE DATA supplies the
 /// intentionally absent sill-to-roof pair; shipped houses need not have that topology.
 #[test]

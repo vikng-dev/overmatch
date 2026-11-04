@@ -73,13 +73,7 @@ pub fn cut(
                 if lo.cmpgt(hi).any() {
                     continue;
                 }
-                let shared = chunk
-                    .faces
-                    .iter()
-                    .try_fold(chunks[b].clone(), |part, face| {
-                        part.clip(face.normal, face.offset)
-                    });
-                if shared.is_some() {
+                if chunk.meets(&chunks[b]) {
                     return Err(format!("chunks {a} and {b} of {name} overlap"));
                 }
             }
@@ -204,6 +198,11 @@ fn reach(asset: &ConstructionAsset) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use overmatch::construction::schema::SurfaceFrame;
+
+    use super::super::fracture::Pattern;
+    use super::super::geom::tests::cuboid;
+    use super::super::spec::Piece;
     use super::super::{CutCount, Spec, assemble, fracture, schema, specs};
     use super::*;
 
@@ -246,6 +245,32 @@ mod tests {
         (piece, chunk)
     }
 
+    /// FIXTURE DATA: a unit cube of brick on the foundation plane, cut on one declared interface,
+    /// the plane `y = 0.5`: its lower chunk on the ground, its upper one held only across that
+    /// interface. Returns the construction, its cut and the interface's plane.
+    fn stacked() -> (Construction, Vec<Vec<Polyhedron>>, (DVec3, f64)) {
+        let interface = (DVec3::Y, 0.5);
+        let solid = cuboid(DVec3::ZERO, DVec3::ONE);
+        let (below, above) = solid.split(interface.0, interface.1);
+        let construction = Construction {
+            id: "fixture".into(),
+            foundation_y: 0.0,
+            foundation_attachment: "mortared".into(),
+            pieces: vec![Piece {
+                name: "cube".into(),
+                part: "fixture".into(),
+                component: "cube".into(),
+                material: "Brick".into(),
+                surface_frame: SurfaceFrame::Upright,
+                solid,
+                pattern: Pattern::Whole,
+            }],
+            joins: Vec::new(),
+        };
+        let cut = vec![vec![below.unwrap(), above.unwrap()]];
+        (construction, cut, interface)
+    }
+
     /// THE SHIPPED CUTS ARE CERTIFIED, so each mutant below is refused for what it breaks and not
     /// for a construction the certificate never admits.
     #[test]
@@ -261,32 +286,25 @@ mod tests {
         }
     }
 
-    /// A GAP IS REFUSED: one cut face of the largest chunk drawn inward by a hundredth of the
-    /// chunk's own depth along it leaves matter no chunk holds. The support and wear laws read the
+    /// A GAP IS REFUSED: the fixture's lower chunk drawn back from its declared interface by a
+    /// hundredth of its own depth leaves matter no chunk holds. The support and wear laws read the
     /// chunks as the whole piece; a gap would lose mass and joints unseen.
     #[test]
     fn a_gap_is_refused() {
-        for (spec, mut cut) in shipped() {
-            let (p, k) = largest(&cut);
-            let piece = &spec.construction.pieces[p];
-            let chunk = &cut[p][k];
-            let face = chunk
-                .faces
-                .iter()
-                .find(|face| {
-                    !piece.solid.faces.iter().any(|outer| {
-                        outer.normal.dot(face.normal) > 1.0 - PLANE_M
-                            && (outer.offset - face.offset).abs() <= PLANE_M
-                    })
-                })
-                .expect("a piece of several chunks has a cut face");
-            let (lo, hi) = chunk.extent(face.normal);
-            cut[p][k] = chunk
-                .clip(face.normal, face.offset - 0.01 * (hi - lo))
-                .expect("a hundredth of the depth leaves the chunk solid");
-            let err = refusal(&spec.construction, cut);
-            assert!(err.contains("gap"), "{}: {err}", spec.path);
-        }
+        let (construction, mut cut, (normal, offset)) = stacked();
+        assemble(
+            &construction,
+            cut.clone(),
+            schema::substance_density,
+            CutCount::default(),
+        )
+        .expect("the unmutated fixture bakes");
+        let (lo, hi) = cut[0][0].extent(normal);
+        cut[0][0] = cut[0][0]
+            .clip(normal, offset - 0.01 * (hi - lo))
+            .expect("a hundredth of the depth leaves the chunk solid");
+        let err = refusal(&construction, cut);
+        assert!(err.contains("gap"), "{err}");
     }
 
     /// A CHUNK TWICE IS REFUSED: the same matter at two addresses doubles its mass and joints.
@@ -354,34 +372,26 @@ mod tests {
         }
     }
 
-    /// A CHUNK CUT OFF IS REFUSED: with its joints gone its interface is unmatched, and with
-    /// every joint gone a chunk off the ground reaches no anchor.
+    /// A CHUNK CUT OFF IS REFUSED: with the fixture's upper chunk's joints gone its declared
+    /// interface is unmatched, and with every joint gone it, off the ground, reaches no anchor.
     #[test]
     fn a_chunk_cut_off_is_refused() {
-        for (spec, cut) in shipped() {
-            let baked = assemble(
-                &spec.construction,
-                cut.clone(),
-                schema::substance_density,
-                CutCount::default(),
-            )
-            .unwrap();
-            let (p, k) = largest(&cut);
-            let index = cut[..p].iter().map(Vec::len).sum::<usize>() + k;
-            let mut asset = baked.asset.clone();
-            asset
-                .joints
-                .retain(|j| j.a as usize != index && j.b as usize != index);
-            let err = graph(&spec.construction, &cut, &asset).unwrap_err();
-            assert!(err.contains("unmatched"), "{}: {err}", spec.path);
-            let mut asset = baked.asset;
-            asset.joints.clear();
-            let ground: BTreeSet<u32> = asset.anchors.iter().map(|a| a.chunk).collect();
-            if ground.len() < asset.chunks.len() {
-                let err = reach(&asset).unwrap_err();
-                assert!(err.contains("reaches no anchor"), "{}: {err}", spec.path);
-            }
-        }
+        let (construction, cut, _) = stacked();
+        let baked = assemble(
+            &construction,
+            cut.clone(),
+            schema::substance_density,
+            CutCount::default(),
+        )
+        .expect("the unmutated fixture bakes");
+        let mut asset = baked.asset.clone();
+        asset.joints.retain(|j| j.a != 1 && j.b != 1);
+        let err = graph(&construction, &cut, &asset).unwrap_err();
+        assert!(err.contains("unmatched"), "{err}");
+        let mut asset = baked.asset;
+        asset.joints.clear();
+        let err = reach(&asset).unwrap_err();
+        assert!(err.contains("reaches no anchor"), "{err}");
     }
 
     /// AN INERTIA THE GAME CANNOT HOLD IS REFUSED: at a density whose tensor overflows f32 the
