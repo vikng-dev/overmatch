@@ -17,6 +17,8 @@ House(
     course_m: 0.075,
     module_m: 0.26,
     foundation_courses: 6,
+    // ASSUMED construction: the foundation is bedded with the same mortar as the walls.
+    foundation_attachment: "mortared",
     // The eaves: the long walls' top, 2.475 m above the ground point.
     eaves_course: 39,
     // Roof pitch as rise over run, 3 : 4 (36.87°, a 3-4-5 triangle, so every slope is a ratio and

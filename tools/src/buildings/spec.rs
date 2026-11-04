@@ -18,6 +18,8 @@ pub struct House {
     pub course_m: f64,
     pub module_m: f64,
     pub foundation_courses: u32,
+    /// Attachment holding every component's foundation footprint.
+    pub foundation_attachment: String,
     pub eaves_course: u32,
     /// Rise over run, integers so every slope is an exact ratio.
     pub pitch: (u32, u32),
@@ -161,6 +163,9 @@ impl House {
                 return Err(format!("{name} ({low}, {high}) is no length range"));
             }
         }
+        Attachments::shipped_static()
+            .holds_anchor(&self.foundation_attachment)
+            .map_err(|err| format!("foundation_attachment: {err}"))?;
         for (k, join) in self.joins.iter().enumerate() {
             if self.joins[..k].iter().any(|other| other.joins(join.kinds)) {
                 return Err(format!("the join of {:?} is stated twice", join.kinds));

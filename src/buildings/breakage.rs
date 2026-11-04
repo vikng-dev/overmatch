@@ -87,7 +87,7 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::attachments::Attachments;
+use super::attachments::{Attachments, GroundAttachment};
 use super::fracture::{
     self, Blast, Block, Bond, Chunk, Fate, GroupLoads, Joint, Load, Masonry, Origin, SectionCache,
     Side, Structure, WallState,
@@ -132,6 +132,7 @@ pub(crate) struct Layout {
     pub(crate) elements: Vec<Option<(u16, u16)>>,
     /// Per law chunk: its material's values.
     materials: Vec<Masonry>,
+    ground: Vec<(usize, GroundAttachment)>,
     /// The law's joints, chunk pairs first in asset order, then the anchors in asset order.
     pub(crate) joints: Vec<Joint>,
     /// Per law chunk: its hull.
@@ -150,16 +151,12 @@ impl Layout {
         masonry: &[Option<Masonry>],
         attachments: &Attachments,
     ) -> Result<Self, String> {
-        let attached = asset
-            .attachments
-            .iter()
-            .enumerate()
-            .map(|(k, kind)| {
-                attachments
-                    .bond(kind)
-                    .map_err(|err| format!("attachments[{k}]: {err}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        for (k, kind) in asset.attachments.iter().enumerate() {
+            attachments
+                .holds_anchor(kind)
+                .map_err(|err| format!("attachments[{k}]: {err}"))?;
+        }
+        let anchors = attachments.anchors(asset)?;
         let mut chunks = Vec::new();
         let mut element_of = Vec::new();
         let mut materials = Vec::new();
@@ -181,10 +178,19 @@ impl Layout {
         }
         let mut joints = Vec::new();
         for joint in &asset.joints {
+            let attached = match joint.bond {
+                schema::Bond::Seam => None,
+                schema::Bond::Attached(k) => Some(
+                    attachments
+                        .bond(&asset.attachments[usize::from(k)])
+                        .map_err(|err| format!("joint ({}, {}): {err}", joint.a, joint.b))?,
+                ),
+            };
             if let (Some(a), Some(b)) = (law_of[joint.a as usize], law_of[joint.b as usize]) {
-                let bond = match joint.bond {
-                    schema::Bond::Seam => Bond::Bonded(materials[a].seam),
-                    schema::Bond::Attached(k) => attached[usize::from(k)],
+                let bond = match attached {
+                    Some(bond) => bond,
+                    // An intrinsic joint takes its component material's seam.
+                    None => Bond::Bonded(materials[a].seam),
                 };
                 joints.push(Joint {
                     a,
@@ -196,15 +202,17 @@ impl Layout {
                 });
             }
         }
-        for anchor in &asset.anchors {
+        let mut ground = Vec::new();
+        for (anchor, hold) in asset.anchors.iter().zip(anchors) {
             if let Some(a) = law_of[anchor.chunk as usize] {
+                ground.push((joints.len(), hold));
                 joints.push(Joint {
                     a,
                     b: Side::Ground,
                     area: anchor.area_m2,
                     centroid: Vec3::from_array(anchor.centroid),
                     normal: Vec3::Y,
-                    bond: Bond::Bonded(materials[a].seam),
+                    bond: hold.bond(1.0)?,
                 });
             }
         }
@@ -248,6 +256,7 @@ impl Layout {
             chunks,
             element_of,
             materials,
+            ground,
             joints,
             blocks,
             element_blocks: asset
@@ -262,7 +271,7 @@ impl Layout {
     /// volumes and masses × s³.
     pub(crate) fn structure(&self, asset: &BuildingAsset, scale: f32) -> Structure {
         let (s2, s3) = (scale * scale, scale * scale * scale);
-        Structure {
+        let mut structure = Structure {
             chunks: self
                 .chunks
                 .iter()
@@ -287,7 +296,13 @@ impl Layout {
                     ..*joint
                 })
                 .collect(),
+        };
+        for &(index, hold) in &self.ground {
+            structure.joints[index].bond = hold.bond(scale).expect(
+                "admitted footprint must retain a positive finite hold at the instance scale",
+            );
         }
+        structure
     }
 
     /// Whether `event` names an element, law chunk or joint of this layout: what a record entry

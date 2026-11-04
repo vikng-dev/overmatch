@@ -22,7 +22,8 @@
 //!   component its own seam; between two, the attachment kind the building's construction names
 //!   for that pair (mortared, nailed, resting), from the shared list
 //!   ([`super::attachments`]), which holds every joint strength. An [`Anchor`] is a chunk face on
-//!   the foundation plane (Blast's world bond), held by its chunk's own seam.
+//!   the foundation plane (Blast's world bond), held by the attachment it names. Its component
+//!   owns one anchored footprint.
 //!
 //! The simulation reads chunks and joints only; it never reads how the bake chose the cuts.
 //!
@@ -37,7 +38,7 @@ use bevy::math::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 /// The format revision this build reads and writes. A file of another revision is refused.
-pub const FORMAT: u32 = 5;
+pub const FORMAT: u32 = 6;
 
 /// How far a vertex, a centroid or a plane may sit from where the contract places it, metres:
 /// the f32 rounding of a building-sized coordinate, many times over, and far below any modelled
@@ -57,7 +58,7 @@ pub struct BuildingAsset {
     /// The substance keys (`assets/materials/materials.ron`) elements and chunks name, by index.
     pub materials: Vec<String>,
     /// The attachment kinds (`assets/materials/attachments.ron`) the bonds between components
-    /// name, by index ([`Bond::Attached`]).
+    /// and anchors name, by index ([`Bond::Attached`], [`Anchor::attachment`]).
     pub attachments: Vec<String>,
     /// The components' names, unique, by index ([`Element::component`]).
     pub components: Vec<String>,
@@ -246,6 +247,9 @@ pub enum Bond {
 #[serde(deny_unknown_fields)]
 pub struct Anchor {
     pub chunk: u32,
+    /// Index into [`BuildingAsset::attachments`]. All base faces of one component name the
+    /// same kind and share its footprint budget, using that component's total mass.
+    pub attachment: u8,
     /// The face's area on the plane, m².
     pub area_m2: f32,
     /// The face's centroid, on the foundation plane.
@@ -514,7 +518,13 @@ impl BuildingAsset {
             }
             last = Some(pair);
         }
+        self.check_anchors(count)
+    }
+
+    /// Foundation faces are ordered, on their plane, and declare one attachment per footprint.
+    fn check_anchors(&self, count: u32) -> Result<(), String> {
         let mut last: Option<u32> = None;
+        let mut footprint_kinds = std::collections::BTreeMap::new();
         for anchor in &self.anchors {
             if anchor.chunk >= count || last.is_some_and(|last| last >= anchor.chunk) {
                 return Err(format!(
@@ -522,10 +532,30 @@ impl BuildingAsset {
                     anchor.chunk
                 ));
             }
+            if usize::from(anchor.attachment) >= self.attachments.len() {
+                return Err(format!(
+                    "anchor on chunk {} names attachment kind {}, past the table; rebake with a declared attachment",
+                    anchor.chunk, anchor.attachment
+                ));
+            }
+            let component =
+                self.elements[usize::from(self.chunks[anchor.chunk as usize].element)].component;
+            if footprint_kinds
+                .insert(component, anchor.attachment)
+                .is_some_and(|previous| previous != anchor.attachment)
+            {
+                return Err(format!(
+                    "component {component}'s anchors name different attachments; author one kind for its footprint"
+                ));
+            }
             if !(anchor.area_m2.is_finite() && anchor.area_m2 > 0.0) {
                 return Err(format!("anchor on chunk {} has no area", anchor.chunk));
             }
-            if !finite(&anchor.centroid) {
+            if !anchor
+                .centroid
+                .iter()
+                .all(|coordinate| coordinate.is_finite())
+            {
                 return Err(format!(
                     "anchor on chunk {}'s centroid is not finite; rebake the building",
                     anchor.chunk

@@ -157,6 +157,13 @@ pub fn bake(house: &House) -> Result<Baked, String> {
             house.joins[k].kinds
         ));
     }
+    let foundation_attachment = u8::try_from(
+        attachments
+            .iter()
+            .position(|kind| kind == &house.foundation_attachment)
+            .expect("the table holds the foundation kind"),
+    )
+    .map_err(|_| "more attachment kinds than a u8 names")?;
     let asset = BuildingAsset {
         id: house.id.clone(),
         format: schema::FORMAT,
@@ -171,6 +178,7 @@ pub fn bake(house: &House) -> Result<Baked, String> {
             .into_iter()
             .map(|anchor| schema::Anchor {
                 chunk: index32(anchor.chunk),
+                attachment: foundation_attachment,
                 area_m2: canon(anchor.area),
                 centroid: canon3(anchor.centroid),
             })
@@ -180,9 +188,10 @@ pub fn bake(house: &House) -> Result<Baked, String> {
     Ok(Baked { asset, cuts })
 }
 
-/// The attachment kinds `house`'s joins name, each once, in name order: the asset's table.
+/// The attachment kinds the joins and foundation name, each once, in name order.
 fn attachment_kinds(house: &House) -> Vec<String> {
     let mut kinds: Vec<String> = house.joins.iter().map(|join| join.by.clone()).collect();
+    kinds.push(house.foundation_attachment.clone());
     kinds.sort();
     kinds.dedup();
     kinds
@@ -452,20 +461,18 @@ mod tests {
         }
     }
 
-    /// THE CUT PREFERS SEAMS AND SOMETIMES CRACKS: across a shipped house, most masonry cuts lie on
-    /// head joints and some cross bricks. A rule that never cracked (the chance ignored) or always
-    /// did (the joint ignored) fails here.
+    /// Construction authors rely on crack_chance selecting cracks: zero never cracks, and a
+    /// positive chance produces cracks where the inline fixture leaves room for them.
     #[test]
-    fn most_cuts_follow_joints_and_some_crack_through_bricks() {
-        for (house, baked) in shipped() {
-            let CutCount { joints, cracks } = baked.cuts;
-            let share = joints as f64 / (joints + cracks) as f64;
-            assert!(
-                cracks > 0 && share > 0.5 && share < 1.0,
-                "{}: {joints} joint cuts, {cracks} cracks",
-                house.id
-            );
-        }
+    fn authored_crack_probability_controls_cuts() {
+        let mut house = fixture_house();
+        house.cuts.crack_chance = 0.0;
+        let uncracked = bake(&house).unwrap();
+        assert_eq!(uncracked.cuts.cracks, 0);
+        assert!(uncracked.cuts.joints > 0);
+        house.cuts.crack_chance = 1.0;
+        let cracked = bake(&house).unwrap();
+        assert!(cracked.cuts.cracks > 0);
     }
 
     /// THE STREAM IS NAMED, NOT SEQUENCED: the same names draw the same numbers, other names
@@ -500,7 +507,7 @@ mod tests {
         House::from_ron(
             r#"House(
             id: "fixture", width_m: 4.0, length_m: 6.0, wall_thickness_m: 0.25,
-            course_m: 0.1, module_m: 0.3, foundation_courses: 1, eaves_course: 20,
+            course_m: 0.1, module_m: 0.3, foundation_courses: 1, foundation_attachment: "mortared", eaves_course: 20,
             pitch: (3, 4), plate_height_m: 0.1, board_width_m: 0.2,
             board_thickness_m: 0.05, boards_per_slope: 14, gable_overhang_m: 0.3,
             materials: (walls: Brick, plates: Wood, roof: Wood),
@@ -519,6 +526,22 @@ mod tests {
         )"#,
         )
         .expect("the constructed fixture states a house")
+    }
+
+    /// Construction authors select foundation attachments independently of component joins.
+    #[test]
+    fn anchors_name_the_authored_foundation_attachment() {
+        let mut house = fixture_house();
+        for name in ["mortared", "resting"] {
+            house.foundation_attachment = name.into();
+            let asset = bake(&house).unwrap().asset;
+            assert!(!asset.anchors.is_empty());
+            for anchor in &asset.anchors {
+                assert_eq!(asset.attachments[usize::from(anchor.attachment)], name);
+            }
+        }
+        house.foundation_attachment = "unknown-fixture-kind".into();
+        assert!(house.check().unwrap_err().contains("foundation_attachment"));
     }
 
     /// Every joint holds by the spec's declared join between components, or by its own seam

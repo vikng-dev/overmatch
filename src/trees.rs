@@ -62,6 +62,7 @@ use crate::buildings::fracture::{
     WallState,
 };
 use crate::contact_transfer::ContactTransfers;
+#[cfg(test)]
 use crate::physical_laws::gravity_mps2;
 use crate::provenance::Sourced;
 use crate::scatter::MapInstance;
@@ -572,13 +573,7 @@ impl TreeBody {
     /// `fracture::weigh`): a trunk breaks wherever `M(z) / S(z)` beats its seam, no segment
     /// boundary a planted weak joint.
     ///
-    /// The root plate states a critical overturning moment, `C × m` for `C` its coefficient
-    /// (N·m/kg) and `m` the trunk's fresh mass, and no separation work. The anchor holds it as a
-    /// seam of tensile strength `C m / S₀ − m g / A₀` across the base disc (area `A₀`, section
-    /// modulus `S₀ = π r₀³ / 4`): the Navier peak there under the trunk's own weight and a moment
-    /// `M` is `M / S₀ − m g / A₀`, so it opens exactly when `M` reaches `C m` (DERIVED). Its
-    /// fracture energy is ASSUMED zero for rigid-plastic release, not a measured zero: a blow
-    /// that beats its strength pays only the lift over its hinge (`fracture::structural`).
+    /// Root-plate law inputs come from the shared attachment boundary (`RootPlate::seam`).
     fn structure_of(kind: &TreeKind, prefix: &[f32], scale: f32) -> Structure {
         let radius = |k: usize| {
             kind.segments
@@ -604,15 +599,9 @@ impl TreeBody {
             })
             .collect();
         let mass: f32 = chunks.iter().map(|chunk| chunk.mass).sum();
-        let r0 = radius(0);
-        let (area, modulus) = (PI * r0 * r0, PI * r0 * r0 * r0 / 4.0);
-        let anchor =
-            kind.root_plate.overturning_nm_per_kg * mass / modulus - mass * gravity_mps2() / area;
-        // DERIVED: positive while the base radius is under 4 C / g, about 60 m at the shipped
-        // plates' 146 N·m/kg.
-        assert!(
-            anchor.is_finite() && anchor > 0.0,
-            "a root plate holds a moment beyond its trunk's own weight's pressure, {anchor} Pa"
+        let area = PI * radius(0) * radius(0);
+        let anchor = kind.root_plate.seam(area, mass).expect(
+            "a root plate holds a positive finite moment beyond its trunk's own weight pressure",
         );
         let disc = |k: usize, b: Side, seam: Seam| Joint {
             a: k,
@@ -622,20 +611,12 @@ impl TreeBody {
             normal: Vec3::Y,
             bond: Bond::Bonded(seam),
         };
-        let joints = std::iter::once(disc(
-            0,
-            Side::Ground,
-            Seam {
-                tensile: anchor,
-                fracture_energy: 0.0,
-                shear: Shear::OpeningOnly,
-            },
-        ))
-        .chain((1..chunks.len()).map(|k| Joint {
-            a: k - 1,
-            ..disc(k, Side::Chunk(k), kind.grain)
-        }))
-        .collect();
+        let joints = std::iter::once(disc(0, Side::Ground, anchor))
+            .chain((1..chunks.len()).map(|k| Joint {
+                a: k - 1,
+                ..disc(k, Side::Chunk(k), kind.grain)
+            }))
+            .collect();
         Structure { chunks, joints }
     }
 

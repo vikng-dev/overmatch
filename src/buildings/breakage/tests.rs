@@ -1280,7 +1280,7 @@ fn shielding_cube() -> Arc<BuildingKind> {
         format: schema::FORMAT,
         foundation_y_m: 0.0,
         materials: vec!["Brick".to_owned()],
-        attachments: Vec::new(),
+        attachments: vec!["mortared".to_owned()],
         components: vec!["fixture".to_owned()],
         chunks: vec![schema::Chunk {
             element: 0,
@@ -1298,6 +1298,7 @@ fn shielding_cube() -> Arc<BuildingKind> {
         joints: Vec::new(),
         anchors: vec![schema::Anchor {
             chunk: 0,
+            attachment: 0,
             area_m2: 0.04,
             centroid: [0.0; 3],
         }],
