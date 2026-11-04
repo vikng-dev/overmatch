@@ -39,7 +39,8 @@
 //!   contact last held ([`RestingLoads`]): every run of the laws on that building carries the
 //!   press once, and it starts none. Awake contacts' presses likewise join every deposit in
 //!   the physics step, once per point. No body is read by its kind.
-//! * **The order.** The laws run each deposit, building by building, in order: removal and the
+//! * **The order.** Deposits commit in order. Independent owners evaluate together; source
+//!   effects commit by entity, respecting [`owner_batches`]. Each owner runs removal and the
 //!   push rule ([`fracture::strike`]), the structural check ([`fracture::structural`]), the weight
 //!   check on what those changed ([`fracture::weigh`]), support ([`fracture::fall`]).
 //! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses, the cylinder
@@ -545,9 +546,8 @@ impl Shape {
     }
 }
 
-/// A building's live state: the structure the laws read at its instance scale, the laws' state,
-/// its shape, the structural check's sections of the structure, and each chunk's holes. The
-/// shape's fates and cracks are the state's, mirrored as the laws move them.
+/// One owner's scaled construction, law state, drawing holes and reusable assessment storage.
+/// Source addresses survive splits; ownership narrows the graph work.
 #[derive(Clone)]
 pub(crate) struct Live {
     pub(crate) structure: Arc<Structure>,
@@ -589,17 +589,15 @@ impl Live {
 
     /// State for one owned group, retaining the data and wear it had before separation.
     fn group(&self, group: &[usize]) -> Self {
-        let mut child = self.clone();
-        child.sections = SectionCache::default();
-        child.held_presses.clear();
-        child.swapped.fill(true);
-        for (c, fate) in child.state.fate.iter_mut().enumerate() {
-            *fate = if group.binary_search(&c).is_ok() {
-                Fate::Standing
-            } else {
-                Fate::Dust
-            };
-        }
+        let mut child = Self {
+            structure: self.structure.clone(),
+            state: self.state.clone(),
+            swapped: vec![true; self.swapped.len()],
+            sections: SectionCache::default(),
+            held_presses: Vec::new(),
+            holes: self.holes.clone(),
+        };
+        child.state.retain_group(group);
         child
     }
 
@@ -1313,7 +1311,7 @@ struct OwnerEffects {
     events: Vec<WallEvent>,
     returns: Vec<BodyReturn>,
     split: Option<PendingSplit>,
-    departures: Vec<Departure>,
+    departures: Vec<PreparedDeparture>,
 }
 
 /// Immutable inputs for one owner's law run; shared-body effects are staged in `OwnerEffects`.
@@ -1403,7 +1401,7 @@ fn evaluate_owner(
     } else {
         for (group, loads) in changes.groups {
             let launch = launch(&kind, &live.structure, frame.scale, &group, &loads);
-            departures.push(Departure {
+            departures.push(prepare_group(Departure {
                 kind: kind.clone(),
                 building,
                 root: construction,
@@ -1412,7 +1410,7 @@ fn evaluate_owner(
                 group,
                 launch,
                 tick,
-            });
+            }));
         }
         None
     };
@@ -1490,48 +1488,25 @@ fn apply_deposits(mut p: DepositParam) {
     for deposit in std::mem::take(&mut p.queue.0) {
         let mut taken: BTreeMap<Entity, Taken> = BTreeMap::new();
         take_lines(&p, &frames, &deposit, &mut taken);
-        // Each building's shape as the deposit found it, read once per deposit.
-        let mut shapes: BTreeMap<Entity, Shape> = BTreeMap::new();
-        for ray in &deposit.rays {
-            let (end, dir, energy) = (ray.end, Vec3::from(ray.direction), ray.energy);
-            // An angular stratum with zero profile emits no energy or momentum.
-            if energy == 0.0 {
-                continue;
+        // Geometry reads the state left by the preceding deposit. Each owner keeps ray order;
+        // nearest-stop reduction keeps source-entity order, independent of worker completion.
+        if !deposit.rays.is_empty() || deposit.blast.is_some() {
+            let mut geometry = bevy::utils::Parallel::<Vec<OwnerGeometry>>::default();
+            p.buildings
+                .par_iter()
+                .for_each(|(root, _, breakage, piece)| {
+                    let result =
+                        owner_geometry(root, frames[&root], breakage, piece.is_none(), &deposit);
+                    geometry.scope(|results| results.push(result));
+                });
+            let (fields, stops) =
+                reduce_geometry(geometry.drain().collect(), deposit.blast.is_some());
+            for (root, field) in fields {
+                taken.entry(root).or_default().field.extend(field);
             }
-            for (root, frame) in &frames {
-                if !frame.may_hold(end, STOP_TOLERANCE_M) {
-                    continue;
-                }
-                let (_, _, breakage, piece) = p
-                    .buildings
-                    .get(*root)
-                    .expect("frames enumerates this same building query");
-                let placed = piece.is_none();
-                let kind = &breakage.kind;
-                let local = frame.unscaled(end);
-                let (lo, hi) = kind.bounds();
-                let slack = Vec3::splat(STOP_TOLERANCE_M / frame.scale);
-                if local.cmplt(lo - slack).any() || local.cmpgt(hi + slack).any() {
-                    continue;
-                }
-                let turned = frame.turn(dir);
-                let back = 2.0 * STOP_TOLERANCE_M / frame.scale;
-                let shape = shapes.entry(*root).or_insert_with(|| breakage.shape());
-                if let Some((Some(c), t)) =
-                    first_chunk(&kind.layout, shape, placed, local - turned * back, turned)
-                    && (t - back).abs() * frame.scale <= STOP_TOLERANCE_M
-                {
-                    taken.entry(*root).or_default().field.push((
-                        c,
-                        local * frame.scale,
-                        energy,
-                        frame.turn(ray.blow),
-                    ));
-                }
+            if let Some((origin, blast)) = deposit.blast {
+                cast_blast(&mut p, stops, &mut taken, origin, blast);
             }
-        }
-        if let Some((origin, blast)) = deposit.blast {
-            cast_blast(&mut p, &frames, &mut shapes, &mut taken, origin, blast);
         }
         for &(root, load) in &deposit.contacts {
             taken.entry(root).or_default().contacts.push(load);
@@ -1541,12 +1516,9 @@ fn apply_deposits(mut p: DepositParam) {
             let mut effects = bevy::utils::Parallel::<Vec<OwnerEffects>>::default();
             let bodies = &p.bodies;
             let resting = &p.resting.0;
-            p.buildings
-                .par_iter_mut()
-                .for_each(|(root, transform, mut breakage, piece)| {
-                    let Some(taken) = batch.get(&root) else {
-                        return; // This owner received no load in this batch.
-                    };
+            p.buildings.par_iter_many_unique_mut(batch.keys()).for_each(
+                |(root, transform, mut breakage, piece)| {
+                    let taken = &batch[&root];
                     let frame = frames[&root];
                     let construction = breakage.physics_frame(transform);
                     let effect = evaluate_owner(
@@ -1568,7 +1540,8 @@ fn apply_deposits(mut p: DepositParam) {
                         breakage.set_changed();
                     }
                     effects.scope(|effects| effects.push(effect));
-                });
+                },
+            );
             let mut effects: Vec<_> = effects.drain().collect();
             assert_eq!(
                 effects.len(),
@@ -1607,7 +1580,7 @@ fn apply_deposits(mut p: DepositParam) {
             }
         }
         for departure in departures {
-            spawn_group(&mut p.commands, departure, true);
+            spawn_prepared(&mut p.commands, departure, true);
         }
     }
 }
@@ -1633,6 +1606,141 @@ fn blast_loads(
     loads
 }
 
+type FieldStop = (usize, Vec3, f32, Vec3);
+
+struct BlastStop {
+    distance: f32,
+    /// Unbreakable elements shade the ray but receive no game-state load.
+    surface: Option<fracture::BlastSurface<Stop>>,
+}
+
+struct OwnerGeometry {
+    root: Entity,
+    field: Vec<FieldStop>,
+    blast: Vec<(usize, BlastStop)>,
+}
+
+fn owner_geometry(
+    root: Entity,
+    frame: Frame,
+    breakage: &Breakage,
+    placed: bool,
+    deposit: &RawDeposit,
+) -> OwnerGeometry {
+    if !deposit
+        .rays
+        .iter()
+        .any(|ray| ray.energy > 0.0 && frame.may_hold(ray.end, STOP_TOLERANCE_M))
+        && !deposit
+            .blast
+            .is_some_and(|(origin, blast)| frame.may_hold(origin, blast.reach()))
+    {
+        return OwnerGeometry {
+            root,
+            field: Vec::new(),
+            blast: Vec::new(),
+        };
+    }
+    let kind = &breakage.kind;
+    let shape = breakage.shape();
+    let (lo, hi) = kind.bounds();
+    let mut field = Vec::new();
+    for ray in &deposit.rays {
+        let (end, dir, energy) = (ray.end, Vec3::from(ray.direction), ray.energy);
+        if energy == 0.0 || !frame.may_hold(end, STOP_TOLERANCE_M) {
+            continue; // A zero-profile angular stratum emits nothing, or this owner is out of reach.
+        }
+        let local = frame.unscaled(end);
+        let slack = Vec3::splat(STOP_TOLERANCE_M / frame.scale);
+        if local.cmplt(lo - slack).any() || local.cmpgt(hi + slack).any() {
+            continue;
+        }
+        let turned = frame.turn(dir);
+        let back = 2.0 * STOP_TOLERANCE_M / frame.scale;
+        if let Some((Some(c), t)) =
+            first_chunk(&kind.layout, &shape, placed, local - turned * back, turned)
+            && (t - back).abs() * frame.scale <= STOP_TOLERANCE_M
+        {
+            field.push((c, local * frame.scale, energy, frame.turn(ray.blow)));
+        }
+    }
+    let mut faces = BTreeMap::new();
+    let blast = deposit.blast.map_or_else(Vec::new, |(origin, blast)| {
+        let reach = blast.reach();
+        let local = frame.unscaled(origin);
+        let bounds = Block::cuboid(lo, hi);
+        fracture::blast_directions()
+            .iter()
+            .enumerate()
+            .filter_map(|(ray, &(dir, _))| {
+                if !frame.may_meet(origin, dir) {
+                    return None;
+                }
+                let turned = frame.turn(dir);
+                bounds.span(local, turned)?;
+                let (chunk, t) = first_chunk(&kind.layout, &shape, placed, local, turned)?;
+                let distance = t * frame.scale;
+                if distance > reach {
+                    return None;
+                }
+                let surface = chunk.map(|c| {
+                    let block = &kind.layout.blocks[c];
+                    let (_, normal) = block
+                        .entry_face(local, turned)
+                        .expect("the ray's stop is where it enters the chunk");
+                    let shown = fracture::silhouette(
+                        faces.entry(c).or_insert_with(|| block.face_areas()),
+                        turned,
+                    ) * frame.scale
+                        * frame.scale;
+                    fracture::BlastSurface {
+                        target: Stop::Chunk(root, c),
+                        at: (local + turned * t) * frame.scale,
+                        normal,
+                        direction: turned,
+                        distance,
+                        silhouette: shown,
+                        material: Some(kind.layout.materials[c]),
+                    }
+                });
+                Some((ray, BlastStop { distance, surface }))
+            })
+            .collect()
+    });
+    OwnerGeometry { root, field, blast }
+}
+
+/// Strict distance comparison retains the first source entity on a tie, matching deposit order.
+fn reduce_geometry(
+    mut owners: Vec<OwnerGeometry>,
+    blast: bool,
+) -> (Vec<(Entity, Vec<FieldStop>)>, Vec<Option<BlastStop>>) {
+    owners.sort_unstable_by_key(|owner| owner.root);
+    let mut stops: Vec<Option<BlastStop>> = if blast {
+        std::iter::repeat_with(|| None)
+            .take(fracture::blast_directions().len())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut fields = Vec::new();
+    for owner in owners {
+        if !owner.field.is_empty() {
+            fields.push((owner.root, owner.field));
+        }
+        for (ray, candidate) in owner.blast {
+            let nearest = &mut stops[ray];
+            if nearest
+                .as_ref()
+                .is_none_or(|stop| candidate.distance < stop.distance)
+            {
+                *nearest = Some(candidate);
+            }
+        }
+    }
+    (fields, stops)
+}
+
 /// One blast's rays from `origin` (module doc): each stops, within the blast's reach, on the
 /// nearest of every building's present blockers ([`first_chunk`]), the moving bodies
 /// ([`moving_near`]) and every other surface on [`SURFACES`] (the ground, a standing tree). A ray
@@ -1645,8 +1753,7 @@ fn blast_loads(
 /// nothing: what a burst inside a body does to it is no law here.
 fn cast_blast(
     p: &mut DepositParam,
-    frames: &BTreeMap<Entity, Frame>,
-    shapes: &mut BTreeMap<Entity, Shape>,
+    stops: Vec<Option<BlastStop>>,
     taken: &mut BTreeMap<Entity, Taken>,
     origin: Vec3,
     blast: Blast,
@@ -1666,41 +1773,15 @@ fn cast_blast(
                 .get(collider)
                 .is_ok_and(|of| p.buildings.contains(of.body))
     };
-    // Per building a ray may meet: the origin in its frame, and its bounds.
-    let mut views: BTreeMap<Entity, (Vec3, Block)> = BTreeMap::new();
-    let mut faces: BTreeMap<(Entity, usize), Vec<(Vec3, f32)>> = BTreeMap::new();
+    let mut stops = stops.into_iter();
     let hits = fracture::trace_blast(blast, fracture::blast_directions(), |dir| {
-        let mut stop: Option<(Entity, Option<usize>, f32, f32)> = None;
-        for (root, frame) in frames {
-            if !frame.may_meet(origin, dir) {
-                continue;
-            }
-            let (_, _, breakage, piece) = p
-                .buildings
-                .get(*root)
-                .expect("frames enumerates this same building query");
-            let placed = piece.is_none();
-            let kind = &breakage.kind;
-            let (local, bounds) = views.entry(*root).or_insert_with(|| {
-                let (lo, hi) = kind.bounds();
-                (frame.unscaled(origin), Block::cuboid(lo, hi))
-            });
-            let turned = frame.turn(dir);
-            if bounds.span(*local, turned).is_none() {
-                continue;
-            }
-            let shape = shapes.entry(*root).or_insert_with(|| breakage.shape());
-            if let Some((chunk, t)) = first_chunk(&kind.layout, shape, placed, *local, turned)
-                && t * frame.scale <= reach
-                && stop.is_none_or(|(.., d)| t * frame.scale < d)
-            {
-                stop = Some((*root, chunk, t, t * frame.scale));
-            }
-        }
+        let stop = stops
+            .next()
+            .expect("geometry supplies one stop per declared blast ray");
         let surface = p.spatial.cast_ray_predicate(
             origin,
             Dir3::new(dir).expect("the blast field's directions are unit"),
-            stop.map_or(reach, |(.., d)| d),
+            stop.as_ref().map_or(reach, |stop| stop.distance),
             true,
             &surfaces,
             &meets,
@@ -1748,33 +1829,8 @@ fn cast_blast(
                 material: None,
             });
         }
-        let (root, Some(c), t, d) = stop? else {
-            return None;
-        }; // Unbreakable matter shades it.
-        let (_, _, breakage, _) = p
-            .buildings
-            .get(root)
-            .expect("the stop names a queried building");
-        let (frame, local) = (frames[&root], views[&root].0);
-        let turned = frame.turn(dir);
-        let block = &breakage.kind.layout.blocks[c];
-        let (_, normal) = block
-            .entry_face(local, turned)
-            .expect("the ray's stop is where it enters the chunk");
-        let shown = fracture::silhouette(
-            faces.entry((root, c)).or_insert_with(|| block.face_areas()),
-            turned,
-        ) * frame.scale
-            * frame.scale;
-        Some(fracture::BlastSurface {
-            target: Stop::Chunk(root, c),
-            at: (local + turned * t) * frame.scale,
-            normal,
-            direction: turned,
-            distance: d,
-            silhouette: shown,
-            material: Some(breakage.kind.layout.materials[c]),
-        })
+        // Unbreakable construction shades a ray without receiving a load.
+        stop?.surface
     });
     for (target, hit) in hits {
         match target {
@@ -2161,6 +2217,63 @@ struct Departure {
     launch: Launch,
 }
 
+type ContactChunk = (
+    Transform,
+    Collider,
+    (
+        avian3d::prelude::Mass,
+        avian3d::prelude::AngularInertia,
+        avian3d::prelude::CenterOfMass,
+    ),
+    CollisionLayers,
+    avian3d::prelude::Friction,
+    BuildingChunk,
+);
+type OccupiedChunk = (
+    Transform,
+    Collider,
+    Sensor,
+    CollisionLayers,
+    BallisticVolume,
+    BuildingChunk,
+);
+
+struct PreparedDeparture {
+    departure: Departure,
+    chunks: Vec<(ContactChunk, OccupiedChunk)>,
+}
+
+/// Prepare occupied mass and inset contact geometry while the group is independently owned.
+/// Ordered emission only enqueues these complete bundles.
+fn prepare_group(mut departure: Departure) -> PreparedDeparture {
+    let kind = &departure.kind;
+    let origin = departure.launch.centroid;
+    let chunks = std::mem::take(&mut departure.launch.colliders)
+        .into_iter()
+        .map(|(c, hull)| {
+            let contact = (
+                Transform::IDENTITY,
+                loose_collider(&kind.layout.blocks[c], departure.scale, origin),
+                occupied_mass(&hull, kind.layout.materials[c].density),
+                piece_layers(),
+                kind.chunk_friction(c),
+                BuildingChunk(c as u16),
+            );
+            // The game's damage model reads occupied geometry; the sensor adds no solver mass.
+            let occupied = (
+                Transform::IDENTITY,
+                hull,
+                Sensor,
+                CollisionLayers::new([Layer::Armor], LayerMask::NONE),
+                chunk_volume(kind, c),
+                BuildingChunk(c as u16),
+            );
+            (contact, occupied)
+        })
+        .collect();
+    PreparedDeparture { departure, chunks }
+}
+
 /// One loose group's colliders about its chunks' centre of mass (building frame) and departure:
 /// each field blow launches whole, each body blow only its plastic share against the group's free
 /// effective mass at the load point. The rest returns to its source at that point. The wall
@@ -2229,19 +2342,24 @@ fn spawn_piece(
     );
 }
 
-/// Spawn a group from its synchronous construction state, initial or split.
+#[cfg(test)]
 fn spawn_group(commands: &mut Commands, departure: Departure, finalize: bool) {
+    spawn_prepared(commands, prepare_group(departure), finalize);
+}
+
+/// Commit a group from its synchronous, independently prepared construction state.
+fn spawn_prepared(commands: &mut Commands, prepared: PreparedDeparture, finalize: bool) {
+    let PreparedDeparture { departure, chunks } = prepared;
     let Departure {
         kind,
         building,
         root,
         group,
-        mut launch,
+        launch,
         live,
         scale,
         tick,
     } = departure;
-    let colliders = std::mem::take(&mut launch.colliders);
     let Launch {
         centroid,
         velocity,
@@ -2260,7 +2378,7 @@ fn spawn_group(commands: &mut Commands, departure: Departure, finalize: bool) {
             retired: None,
         },
         Breakage {
-            kind: kind.clone(),
+            kind,
             scale,
             construction: building,
             live: Box::new(live),
@@ -2279,25 +2397,9 @@ fn spawn_group(commands: &mut Commands, departure: Departure, finalize: bool) {
         piece.insert(PendingLaunch::new(root, launch));
     }
     piece.with_children(|parent| {
-        for (c, hull) in colliders {
-            parent.spawn((
-                Transform::IDENTITY,
-                loose_collider(&kind.layout.blocks[c], scale, origin),
-                occupied_mass(&hull, kind.layout.materials[c].density),
-                piece_layers(),
-                kind.chunk_friction(c),
-                BuildingChunk(c as u16),
-            ));
-            // The game's damage model reads occupied geometry; the sensor adds no solver
-            // contact or mass beside the separately inset contact hull.
-            parent.spawn((
-                Transform::IDENTITY,
-                hull,
-                Sensor,
-                CollisionLayers::new([Layer::Armor], LayerMask::NONE),
-                chunk_volume(&kind, c),
-                BuildingChunk(c as u16),
-            ));
+        for (contact, occupied) in chunks {
+            parent.spawn(contact);
+            parent.spawn(occupied);
         }
     });
 }
@@ -2333,20 +2435,23 @@ fn split_groups(
     )>,
     mut commands: Commands,
 ) {
-    for (entity, piece, body, breakage, velocity, spin, centre, split) in &parents {
-        let root = breakage.physics_frame(body);
-        let inverse = root.rotation.inverse();
-        for (group, live) in &split.children {
-            let mut launch = launch(&breakage.kind, &live.structure, breakage.scale, group, &[]);
-            // DERIVED rigid velocity field: every new COM gets v + omega cross r; every child
-            // retains omega. Whole occupied child hulls partition the parent's occupied geometry;
-            // contact insets do not enter this mass and inertia calculation.
-            launch.velocity = inverse * velocity.0
-                + (inverse * spin.0).cross(launch.centre - breakage.origin - centre.0);
-            launch.spin = inverse * spin.0;
-            spawn_group(
-                &mut commands,
-                Departure {
+    let mut effects =
+        bevy::utils::Parallel::<Vec<(Entity, u32, Vec<PreparedDeparture>)>>::default();
+    parents.par_iter().for_each(
+        |(entity, piece, body, breakage, velocity, spin, centre, split)| {
+            let mut children = Vec::new();
+            let root = breakage.physics_frame(body);
+            let inverse = root.rotation.inverse();
+            for (group, live) in &split.children {
+                let mut launch =
+                    launch(&breakage.kind, &live.structure, breakage.scale, group, &[]);
+                // DERIVED rigid velocity field: every new COM gets v + omega cross r; every child
+                // retains omega. Whole occupied child hulls partition the parent's occupied geometry;
+                // contact insets do not enter this mass and inertia calculation.
+                launch.velocity = inverse * velocity.0
+                    + (inverse * spin.0).cross(launch.centre - breakage.origin - centre.0);
+                launch.spin = inverse * spin.0;
+                children.push(prepare_group(Departure {
                     kind: breakage.kind.clone(),
                     building: piece.building,
                     root,
@@ -2355,14 +2460,18 @@ fn split_groups(
                     scale: breakage.scale,
                     live: live.clone(),
                     tick: split.tick,
-                },
-                false,
-            );
+                }));
+            }
+            effects.scope(|effects| effects.push((entity, split.tick, children)));
+        },
+    );
+    let mut effects: Vec<_> = effects.drain().collect();
+    effects.sort_unstable_by_key(|(entity, ..)| *entity);
+    for (entity, tick, children) in effects {
+        for child in children {
+            spawn_prepared(&mut commands, child, false);
         }
-        commands.trigger(RetirePiece {
-            entity,
-            tick: split.tick,
-        });
+        commands.trigger(RetirePiece { entity, tick });
         commands.entity(entity).despawn();
     }
 }

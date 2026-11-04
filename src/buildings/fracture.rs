@@ -62,7 +62,7 @@
 //! (`.agents/scratch/destruction-2026-10-30-buildings/wall-prototype/README.md`) owns the
 //! derivations, the values' sources and the verdicts.
 
-use std::{collections::HashSet, f32::consts::PI};
+use std::{cell::RefCell, collections::HashSet, f32::consts::PI, sync::Arc};
 
 use bevy::ecs::entity::Entity;
 use bevy::math::{DVec3, Mat3, Vec3};
@@ -689,6 +689,38 @@ pub(crate) struct WallState {
     pub pool: Vec<f32>,
     pub fate: Vec<Fate>,
     pub cracked: Vec<bool>,
+    topology: Arc<Topology>,
+    members: Vec<usize>,
+    joints: Vec<usize>,
+}
+
+/// Immutable source addresses shared by every owner of a construction. Live edges are filtered
+/// at traversal, so cracks, wear and support loss cannot leave a cached edge behind.
+#[derive(Clone, Debug, PartialEq)]
+struct Topology {
+    incident: Vec<Vec<usize>>,
+    neighbours: Vec<Vec<(usize, usize)>>,
+    anchors: Vec<Vec<usize>>,
+}
+
+impl Topology {
+    fn new(structure: &Structure) -> Self {
+        let mut topology = Self {
+            incident: incident(structure),
+            neighbours: vec![Vec::new(); structure.chunks.len()],
+            anchors: vec![Vec::new(); structure.chunks.len()],
+        };
+        for (j, joint) in structure.joints.iter().enumerate() {
+            match joint.b {
+                Side::Chunk(b) => {
+                    topology.neighbours[joint.a].push((b, j));
+                    topology.neighbours[b].push((joint.a, j));
+                }
+                Side::Ground => topology.anchors[joint.a].push(j),
+            }
+        }
+        topology
+    }
 }
 
 impl WallState {
@@ -698,6 +730,35 @@ impl WallState {
             pool: structure.chunks.iter().map(full_pool).collect(),
             fate: vec![Fate::Standing; structure.chunks.len()],
             cracked: vec![false; structure.joints.len()],
+            topology: Arc::new(Topology::new(structure)),
+            members: (0..structure.chunks.len()).collect(),
+            joints: (0..structure.joints.len()).collect(),
+        }
+    }
+
+    /// Ownership narrows traversal without renumbering the construction's ledger addresses.
+    pub fn retain_group(&mut self, group: &[usize]) {
+        assert!(
+            !group.is_empty() && group.windows(2).all(|w| w[0] < w[1]),
+            "an owned group is nonempty and strictly ordered"
+        );
+        assert!(
+            group.iter().all(|c| self.members.binary_search(c).is_ok()),
+            "a split can retain only chunks its parent owns"
+        );
+        self.members = group.to_vec();
+        self.joints = group
+            .iter()
+            .flat_map(|&c| self.topology.incident[c].iter().copied())
+            .collect();
+        self.joints.sort_unstable();
+        self.joints.dedup();
+        for (c, fate) in self.fate.iter_mut().enumerate() {
+            *fate = if group.binary_search(&c).is_ok() {
+                Fate::Standing
+            } else {
+                Fate::Dust
+            };
         }
     }
 
@@ -710,17 +771,14 @@ impl WallState {
     /// yet opened. Each occupies area where a blast's rear boundary would otherwise be free; an
     /// opened rest or a departed neighbour occupies none.
     pub fn contacts<'a>(&'a self, structure: &'a Structure) -> impl Iterator<Item = Joint> + 'a {
-        structure
-            .joints
-            .iter()
-            .enumerate()
-            .filter_map(|(j, joint)| {
-                let touching = match joint.bond {
-                    Bond::Bonded(_) | Bond::AreaShare { .. } => true,
-                    Bond::Resting => !self.cracked[j],
-                };
-                (touching && self.live(joint)).then_some(*joint)
-            })
+        self.joints.iter().copied().filter_map(|j| {
+            let joint = &structure.joints[j];
+            let touching = match joint.bond {
+                Bond::Bonded(_) | Bond::AreaShare { .. } => true,
+                Bond::Resting => !self.cracked[j],
+            };
+            (touching && self.live(joint)).then_some(*joint)
+        })
     }
 
     /// Whether `joint` still joins standing matter: its chunk and, unless it is an anchor, the
@@ -1108,7 +1166,8 @@ pub(crate) fn crack(structure: &Structure, state: &mut WallState, loads: &[Load]
     }
     let mut radii: Vec<(u32, Vec<f32>)> = Vec::new();
     let mut cracked = Vec::new();
-    for (index, joint) in structure.joints.iter().enumerate() {
+    for &index in &state.joints {
+        let joint = &structure.joints[index];
         let Some(seam) = joint.seam() else {
             continue;
         };
@@ -1139,20 +1198,13 @@ pub(crate) fn crack(structure: &Structure, state: &mut WallState, loads: &[Load]
 /// and cracks finds the same groups.
 pub(crate) fn loose_groups(structure: &Structure, state: &WallState) -> Vec<Vec<usize>> {
     let count = structure.chunks.len();
-    let mut neighbours = vec![Vec::new(); count];
-    let mut grounded: Vec<bool> = structure.chunks.iter().map(|chunk| chunk.buried).collect();
-    for (index, joint) in structure.joints.iter().enumerate() {
-        if state.cracked[index] || !state.live(joint) {
-            continue;
-        }
-        match joint.b {
-            Side::Chunk(b) => {
-                neighbours[joint.a].push(b);
-                neighbours[b].push(joint.a);
-            }
-            Side::Ground => grounded[joint.a] = true,
-        }
-    }
+    let live = graph(structure, state);
+    let grounded = |c: usize| {
+        structure.chunks[c].buried
+            || state.topology.anchors[c]
+                .iter()
+                .any(|&j| !state.cracked[j] && state.live(&structure.joints[j]))
+    };
     let mut seen = vec![false; count];
     let flood = |start: Vec<usize>, seen: &mut Vec<bool>| -> Vec<usize> {
         let mut stack = start;
@@ -1163,19 +1215,26 @@ pub(crate) fn loose_groups(structure: &Structure, state: &WallState) -> Vec<Vec<
             }
             seen[chunk] = true;
             reached.push(chunk);
-            stack.extend(neighbours[chunk].iter().copied().filter(|n| !seen[*n]));
+            stack.extend(
+                live.edges(chunk, false)
+                    .map(|(n, _)| n)
+                    .filter(|n| !seen[*n]),
+            );
         }
         reached.sort_unstable();
         reached
     };
     flood(
-        (0..count)
-            .filter(|i| grounded[*i] && state.standing(*i))
+        state
+            .members
+            .iter()
+            .copied()
+            .filter(|&i| grounded(i) && state.standing(i))
             .collect(),
         &mut seen,
     );
     let mut groups = Vec::new();
-    for chunk in 0..count {
+    for &chunk in &state.members {
         if !seen[chunk] && state.standing(chunk) {
             groups.push(flood(vec![chunk], &mut seen));
         }
@@ -1340,30 +1399,77 @@ pub(crate) fn debit_work(
         .collect()
 }
 
-/// The live, intact bonded joints' graph: each chunk's neighbours with the joint between, each
-/// chunk's live anchors, and whether it is buried (held by the soil, never by a joint a section can
-/// cut). A rest is no edge: it carries no tension, so no section's group hangs on one, and a group
-/// whose only way to the ground is over rests is the rest law's ([`unseat`]).
-type Graph = (Vec<Vec<(usize, usize)>>, Vec<Vec<usize>>, Vec<bool>);
+/// A live view of immutable source adjacency. Assessment walks use bonded edges; support walks
+/// also retain rests. Moving-frame references belong only to this assessment's loads.
+struct Graph<'a> {
+    structure: &'a Structure,
+    state: &'a WallState,
+    references: Vec<bool>,
+    walk: RefCell<Walk>,
+}
 
-fn graph(structure: &Structure, state: &WallState) -> Graph {
-    let count = structure.chunks.len();
-    let mut neighbours = vec![Vec::new(); count];
-    let mut anchors = vec![Vec::new(); count];
-    for (index, joint) in structure.joints.iter().enumerate() {
-        if state.cracked[index] || !state.live(joint) || joint.seam().is_none() {
-            continue;
+/// BFS storage reused across paths and section cuts, and retained by the owner's section cache.
+#[derive(Clone, Debug, Default)]
+struct Walk {
+    seen: Vec<bool>,
+    via: Vec<Option<(usize, usize)>>,
+    queue: Vec<usize>,
+    grown: Vec<bool>,
+}
+
+impl Walk {
+    fn clear(&mut self, count: usize) {
+        for &c in &self.queue {
+            self.seen[c] = false;
+            self.via[c] = None;
         }
-        match joint.b {
-            Side::Chunk(b) => {
-                neighbours[joint.a].push((b, index));
-                neighbours[b].push((joint.a, index));
-            }
-            Side::Ground => anchors[joint.a].push(index),
-        }
+        self.seen.resize(count, false);
+        self.via.resize(count, None);
+        self.queue.clear();
     }
-    let buried = structure.chunks.iter().map(|chunk| chunk.buried).collect();
-    (neighbours, anchors, buried)
+
+    fn start(&mut self, count: usize, start: usize) {
+        self.clear(count);
+        self.seen[start] = true;
+        self.queue.push(start);
+    }
+}
+
+impl Graph<'_> {
+    fn edges(&self, c: usize, bonded: bool) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.state.topology.neighbours[c]
+            .iter()
+            .copied()
+            .filter(move |&(_, j)| {
+                !self.state.cracked[j]
+                    && self.state.live(&self.structure.joints[j])
+                    && (!bonded || self.structure.joints[j].seam().is_some())
+            })
+    }
+
+    fn anchors(&self, c: usize) -> impl Iterator<Item = usize> + '_ {
+        self.state.topology.anchors[c]
+            .iter()
+            .copied()
+            .filter(move |&j| {
+                !self.state.cracked[j]
+                    && self.state.live(&self.structure.joints[j])
+                    && self.structure.joints[j].seam().is_some()
+            })
+    }
+
+    fn buried(&self, c: usize) -> bool {
+        self.structure.chunks[c].buried || self.references.get(c).is_some_and(|&r| r)
+    }
+}
+
+fn graph<'a>(structure: &'a Structure, state: &'a WallState) -> Graph<'a> {
+    Graph {
+        structure,
+        state,
+        references: Vec::new(),
+        walk: RefCell::default(),
+    }
 }
 
 /// The assessment graph roots each accelerating group at one reference chunk: the one its
@@ -1375,8 +1481,9 @@ fn graph(structure: &Structure, state: &WallState) -> Graph {
 /// its whole length with no section to assess. The reference is no tensile anchor: the
 /// support/fall graph never reads it. With no external resultant, centroid order fixes the
 /// reference: uniform free fall has no demand, while spin can still load internal seams.
-fn loaded_graph(structure: &Structure, state: &WallState, loads: &[Load]) -> Graph {
+fn loaded_graph<'a>(structure: &'a Structure, state: &'a WallState, loads: &[Load]) -> Graph<'a> {
     let mut graph = graph(structure, state);
+    graph.references.resize(structure.chunks.len(), false);
     let mut accelerating = vec![false; structure.chunks.len()];
     let mut held = vec![0.0_f32; structure.chunks.len()];
     for load in loads {
@@ -1408,7 +1515,7 @@ fn loaded_graph(structure: &Structure, state: &WallState, loads: &[Load]) -> Gra
                 })
             })
             .expect("an unsupported group contains occupied chunks");
-        graph.2[reference] = true;
+        graph.references[reference] = true;
     }
     graph
 }
@@ -1563,31 +1670,25 @@ pub(crate) fn in_group_frames(
 /// the ground. `None` when a path to the ground remains. Breadth first, stopping at the first
 /// grounded chunk, so a section that holds nothing costs a walk to the nearest anchor. Adds the
 /// chunks it expands to `steps`.
-fn held(
-    start: usize,
-    cut: &[usize],
-    (neighbours, anchors, buried): &Graph,
-    steps: &mut usize,
-) -> Option<Vec<usize>> {
+fn held(start: usize, cut: &[usize], graph: &Graph, steps: &mut usize) -> Option<Vec<usize>> {
     let outside = |joint: &usize| cut.binary_search(joint).is_err();
-    let mut seen = vec![false; neighbours.len()];
-    seen[start] = true;
-    // The queue too: the chunks in the order they were found, `next` the first not yet expanded.
-    let mut reached = vec![start];
+    let mut walk = graph.walk.borrow_mut();
+    walk.start(graph.structure.chunks.len(), start);
     let mut next = 0;
-    while let Some(&chunk) = reached.get(next) {
+    while let Some(&chunk) = walk.queue.get(next) {
         next += 1;
         *steps += 1;
-        if buried[chunk] || anchors[chunk].iter().any(outside) {
+        if graph.buried(chunk) || graph.anchors(chunk).any(|j| outside(&j)) {
             return None;
         }
-        for &(neighbour, joint) in &neighbours[chunk] {
-            if outside(&joint) && !seen[neighbour] {
-                seen[neighbour] = true;
-                reached.push(neighbour);
+        for (neighbour, joint) in graph.edges(chunk, true) {
+            if outside(&joint) && !walk.seen[neighbour] {
+                walk.seen[neighbour] = true;
+                walk.queue.push(neighbour);
             }
         }
     }
+    let mut reached = walk.queue.clone();
     reached.sort_unstable();
     Some(reached)
 }
@@ -1597,34 +1698,29 @@ fn held(
 /// A section that cuts none of these joints leaves the path standing, so it holds nothing of
 /// `start` ([`held`] answers `None`): the structural and weight checks search only the sections
 /// that cut a push's or a touched chunk's path. Adds the chunks it expands to `steps`.
-fn ground_path(
-    start: usize,
-    (neighbours, anchors, buried): &Graph,
-    steps: &mut usize,
-) -> Option<Vec<usize>> {
-    // Per chunk reached: the chunk it was reached from and the joint between; `start`'s is unset.
-    let mut via: Vec<Option<(usize, usize)>> = vec![None; neighbours.len()];
-    let mut seen = vec![false; neighbours.len()];
-    seen[start] = true;
-    let mut queue = std::collections::VecDeque::from([start]);
-    while let Some(chunk) = queue.pop_front() {
+fn ground_path(start: usize, graph: &Graph, steps: &mut usize) -> Option<Vec<usize>> {
+    let mut walk = graph.walk.borrow_mut();
+    walk.start(graph.structure.chunks.len(), start);
+    let mut next = 0;
+    while let Some(&chunk) = walk.queue.get(next) {
+        next += 1;
         *steps += 1;
-        let anchor = anchors[chunk].first();
-        if buried[chunk] || anchor.is_some() {
-            let mut joints: Vec<usize> = anchor.into_iter().copied().collect();
+        let anchor = graph.anchors(chunk).next();
+        if graph.buried(chunk) || anchor.is_some() {
+            let mut joints: Vec<usize> = anchor.into_iter().collect();
             let mut at = chunk;
-            while let Some((from, joint)) = via[at] {
+            while let Some((from, joint)) = walk.via[at] {
                 joints.push(joint);
                 at = from;
             }
             joints.sort_unstable();
             return Some(joints);
         }
-        for &(next, joint) in &neighbours[chunk] {
-            if !seen[next] {
-                seen[next] = true;
-                via[next] = Some((chunk, joint));
-                queue.push_back(next);
+        for (to, joint) in graph.edges(chunk, true) {
+            if !walk.seen[to] {
+                walk.seen[to] = true;
+                walk.via[to] = Some((chunk, joint));
+                walk.queue.push(to);
             }
         }
     }
@@ -1642,7 +1738,8 @@ fn sections(structure: &Structure, state: &WallState) -> Vec<Vec<usize>> {
     // whose offset differs by under a millimetre lies in its bucket or the two either side.
     let mut buckets: std::collections::HashMap<i64, Vec<usize>> = Default::default();
     let mut singles = Vec::new();
-    for (index, joint) in structure.joints.iter().enumerate() {
+    for &index in &state.joints {
+        let joint = &structure.joints[index];
         if state.cracked[index] || !state.live(joint) || joint.seam().is_none() {
             continue;
         }
@@ -1696,6 +1793,7 @@ pub(crate) struct SectionCache {
     sections: Vec<Vec<usize>>,
     /// Per joint, the sections holding it, ascending: at most its single and its plane.
     of_joint: Vec<Vec<usize>>,
+    walk: Walk,
 }
 
 impl SectionCache {
@@ -1787,13 +1885,19 @@ pub(crate) fn structural(
     sections: &mut SectionCache,
 ) -> Vec<Failure> {
     let mut failures = Vec::new();
-    if !inputs.sources.iter().any(|load| load.blow != Vec3::ZERO) {
+    if !state
+        .joints
+        .iter()
+        .any(|&j| state.live(&structure.joints[j]))
+        || !inputs.sources.iter().any(|load| load.blow != Vec3::ZERO)
+    {
         return failures;
     }
     let mut groups = loose_groups(structure, state);
     let mut framed = inputs.framed(structure, state);
     let mut steps = 0;
-    let incident = incident(structure);
+    let topology = state.topology.clone();
+    let incident = &topology.incident;
     // A punch ring grows from where an external blow lands. A group frame's inertial blows
     // reach every chunk of its group; seeded there, the first ring would be the whole group,
     // which has no boundary, and no local punch would be read.
@@ -1811,7 +1915,8 @@ pub(crate) fn structural(
             .into_iter()
             .filter(|&c| state.standing(c))
             .collect();
-        let graph = loaded_graph(structure, state, loads);
+        let mut graph = loaded_graph(structure, state, loads);
+        *graph.walk.get_mut() = std::mem::take(&mut sections.walk);
         let paths: Vec<Option<Vec<usize>>> = pushed
             .iter()
             .map(|&chunk| {
@@ -1860,19 +1965,19 @@ pub(crate) fn structural(
         }
         let ring_loads = RingLoads::new(structure.chunks.len(), loads);
         for group in ring_groups(state, &graph, &struck_at, &mut steps) {
-            if let Some(failure) = ring_failure(structure, state, &incident, &group, &ring_loads) {
+            if let Some(failure) = ring_failure(structure, state, incident, &group, &ring_loads) {
                 let ratio = failure.demand / failure.capacity;
                 if ratio >= 1.0 && worst.as_ref().is_none_or(|(w, _)| ratio > *w) {
                     worst = Some((ratio, failure));
                 }
             }
         }
-        let failure = match worst {
-            Some((_, failure)) => failure,
-            None => match unseated(structure, state, &graph, &pushed, &paths, loads, &mut steps) {
-                Some(failure) => failure,
-                None => break,
-            },
+        let failure = worst
+            .map(|(_, failure)| failure)
+            .or_else(|| unseated(structure, state, &graph, &pushed, &paths, loads, &mut steps));
+        sections.walk = graph.walk.into_inner();
+        let Some(failure) = failure else {
+            break;
         };
         assert!(
             failure.joints.iter().any(|&j| !state.cracked[j]),
@@ -1908,13 +2013,13 @@ fn external(load: &Load) -> bool {
 
 /// The chunks joined to `start` through `graph`'s intact bonded joints, ascending, each marked in
 /// `seen`.
-fn bonded_group(start: usize, (neighbours, ..): &Graph, seen: &mut [bool]) -> Vec<usize> {
+fn bonded_group(start: usize, graph: &Graph, seen: &mut [bool]) -> Vec<usize> {
     seen[start] = true;
     let mut group = vec![start];
     let mut next = 0;
     while let Some(&chunk) = group.get(next) {
         next += 1;
-        for &(neighbour, _) in &neighbours[chunk] {
+        for (neighbour, _) in graph.edges(chunk, true) {
             if !seen[neighbour] {
                 seen[neighbour] = true;
                 group.push(neighbour);
@@ -2184,7 +2289,11 @@ pub(crate) fn weigh(
 ) -> Weighed {
     let mut weighed = Weighed::default();
     // With no live joint, no section or rest can fail and no support path has an edge.
-    if !structure.joints.iter().any(|joint| state.live(joint)) {
+    if !state
+        .joints
+        .iter()
+        .any(|&j| state.live(&structure.joints[j]))
+    {
         return weighed;
     }
     let mut groups = loose_groups(structure, state);
@@ -2208,8 +2317,8 @@ pub(crate) fn weigh(
     touched.sort_unstable();
     touched.dedup();
     // Each chunk's joints, the anchors too: what a held group may bear on besides its section.
-    let incident = incident(structure);
-    weighed.steps += structure.joints.len();
+    let topology = state.topology.clone();
+    let incident = &topology.incident;
     // Rings grow from external presses, as the push check's grow from external blows.
     let pressed = ring_patches(&ring_seeds(structure, loads, |load| load.press));
     // Every pass cracks an intact joint (asserted where it cracks) and none closes again, so
@@ -2233,14 +2342,15 @@ pub(crate) fn weigh(
         if touched.is_empty() {
             break;
         }
-        let graph = loaded_graph(structure, state, loads);
+        let mut graph = loaded_graph(structure, state, loads);
+        *graph.walk.get_mut() = std::mem::take(&mut sections.walk);
         // A disconnected group is about to leave the standing structure. Its contacts cannot
         // be credited as static props while the remaining structure is assessed.
         let mut grounded = vec![true; structure.chunks.len()];
         for chunk in loose_groups(structure, state).into_iter().flatten() {
             grounded[chunk] = false;
         }
-        weighed.steps += structure.chunks.len() + structure.joints.len();
+        weighed.steps += state.members.len() + state.joints.len();
         let paths: Vec<Option<Vec<usize>>> = touched
             .iter()
             .map(|&c| ground_path(c, &graph, &mut weighed.steps))
@@ -2268,7 +2378,7 @@ pub(crate) fn weigh(
                     continue;
                 };
                 let other_contact =
-                    bears_on_contact(structure, state, &incident, &grounded, &group, loads);
+                    bears_on_contact(structure, state, incident, &grounded, &group, loads);
                 if other_contact {
                     for (k, &chunk) in touched.iter().enumerate() {
                         deferred[k] |= group.binary_search(&chunk).is_ok();
@@ -2306,7 +2416,7 @@ pub(crate) fn weigh(
             let failure = ring_force_failure(
                 structure,
                 state,
-                &incident,
+                incident,
                 &group,
                 &ring_loads,
                 Vec3::NEG_Y * gravity_mps2(),
@@ -2318,9 +2428,8 @@ pub(crate) fn weigh(
                 }
             }
         }
-        let failure = match worst {
-            Some((_, failure)) => failure,
-            None => match unseated(
+        let failure = worst.map(|(_, failure)| failure).or_else(|| {
+            unseated(
                 structure,
                 state,
                 &graph,
@@ -2328,24 +2437,26 @@ pub(crate) fn weigh(
                 &paths,
                 loads,
                 &mut weighed.steps,
-            ) {
-                Some(failure) => failure,
-                None => {
-                    // A chunk with no path stands on rests (the rest check held it) or is loose
-                    // and falls; one whose path is empty is buried, the soil's to hold.
-                    weighed.unassessed = touched
-                        .iter()
-                        .zip(&paths)
-                        .zip(assessed.iter().zip(&deferred))
-                        .filter(|((_, path), (assessed, deferred))| {
-                            path.as_ref().is_some_and(|path| !path.is_empty())
-                                && (!**assessed || **deferred)
-                        })
-                        .map(|((&c, _), _)| c)
-                        .collect();
-                    break;
-                }
-            },
+            )
+        });
+        sections.walk = graph.walk.into_inner();
+        let failure = match failure {
+            Some(failure) => failure,
+            None => {
+                // A chunk with no path stands on rests (the rest check held it) or is loose
+                // and falls; one whose path is empty is buried, the soil's to hold.
+                weighed.unassessed = touched
+                    .iter()
+                    .zip(&paths)
+                    .zip(assessed.iter().zip(&deferred))
+                    .filter(|((_, path), (assessed, deferred))| {
+                        path.as_ref().is_some_and(|path| !path.is_empty())
+                            && (!**assessed || **deferred)
+                    })
+                    .map(|((&c, _), _)| c)
+                    .collect();
+                break;
+            }
         };
         assert!(
             failure.joints.iter().any(|&j| !state.cracked[j]),
@@ -2572,8 +2683,9 @@ fn unseat(
     };
     // `Σ A n`, `Σ μ A` and `Σ A c` over the bearing rests.
     let (mut normal, mut grip, mut seat) = (Vec3::ZERO, 0.0, Vec3::ZERO);
-    *steps += structure.joints.len() + group.len();
-    for (index, joint) in structure.joints.iter().enumerate() {
+    *steps += state.joints.len() + group.len();
+    for &index in &state.joints {
+        let joint = &structure.joints[index];
         if joint.seam().is_some() || state.cracked[index] || !state.live(joint) {
             continue;
         }
@@ -2860,17 +2972,11 @@ fn touched(
         .flatten()
         .collect();
     *steps += cracked.len();
-    if !dusted.is_empty() {
-        *steps += structure.joints.len();
-        for (index, joint) in structure.joints.iter().enumerate() {
-            let ends = ends(joint);
-            if !state.cracked[index]
-                && ends
-                    .iter()
-                    .flatten()
-                    .any(|c| dusted.binary_search(c).is_ok())
-            {
-                touched.extend(ends.into_iter().flatten());
+    for &c in dusted {
+        for &j in &state.topology.incident[c] {
+            *steps += 1;
+            if !state.cracked[j] {
+                touched.extend(ends(&structure.joints[j]).into_iter().flatten());
             }
         }
     }
@@ -3214,18 +3320,19 @@ fn ring_patches(seeds: &[(usize, Vec3)]) -> Vec<Vec<usize>> {
 /// Adds the chunks it reaches to `steps`.
 fn ring_groups(
     state: &WallState,
-    (neighbours, ..): &Graph,
+    graph: &Graph,
     patches: &[Vec<usize>],
     steps: &mut usize,
 ) -> Vec<Vec<usize>> {
     let mut groups = Vec::new();
     let mut unique = HashSet::new();
+    let mut walk = graph.walk.borrow_mut();
+    walk.grown.resize(graph.structure.chunks.len(), false);
     for seeds in patches {
-        let mut grown = vec![false; neighbours.len()];
-        let mut members: Vec<usize> = Vec::new();
+        let mut members = Vec::new();
         for &chunk in seeds {
-            if state.standing(chunk) && !grown[chunk] {
-                grown[chunk] = true;
+            if state.standing(chunk) && !walk.grown[chunk] {
+                walk.grown[chunk] = true;
                 members.push(chunk);
             }
         }
@@ -3234,9 +3341,9 @@ fn ring_groups(
             if ring > 0 {
                 let mut next = Vec::new();
                 for &chunk in &frontier {
-                    for &(neighbour, _) in &neighbours[chunk] {
-                        if !grown[neighbour] && state.standing(neighbour) {
-                            grown[neighbour] = true;
+                    for (neighbour, _) in graph.edges(chunk, true) {
+                        if !walk.grown[neighbour] && state.standing(neighbour) {
+                            walk.grown[neighbour] = true;
                             next.push(neighbour);
                         }
                     }
@@ -3247,29 +3354,34 @@ fn ring_groups(
                 members.extend_from_slice(&next);
                 frontier = next;
             }
-            let mut seen = vec![false; neighbours.len()];
+            walk.clear(graph.structure.chunks.len());
             for &start in &members {
-                if seen[start] {
+                if walk.seen[start] {
                     continue;
                 }
-                seen[start] = true;
-                let mut component = vec![start];
-                let mut next = 0;
-                while let Some(&chunk) = component.get(next) {
+                walk.seen[start] = true;
+                let from = walk.queue.len();
+                walk.queue.push(start);
+                let mut next = from;
+                while let Some(&chunk) = walk.queue.get(next) {
                     next += 1;
                     *steps += 1;
-                    for &(neighbour, _) in &neighbours[chunk] {
-                        if grown[neighbour] && !seen[neighbour] {
-                            seen[neighbour] = true;
-                            component.push(neighbour);
+                    for (neighbour, _) in graph.edges(chunk, true) {
+                        if walk.grown[neighbour] && !walk.seen[neighbour] {
+                            walk.seen[neighbour] = true;
+                            walk.queue.push(neighbour);
                         }
                     }
                 }
+                let mut component = walk.queue[from..].to_vec();
                 component.sort_unstable();
                 if unique.insert(component.clone()) {
                     groups.push(component);
                 }
             }
+        }
+        for chunk in members {
+            walk.grown[chunk] = false;
         }
     }
     groups
@@ -4090,6 +4202,98 @@ pub(crate) fn sample_blocks(
 
 #[cfg(test)]
 mod tests {
+    /// The game's destruction graph must reflect each current crack and fate. Section walks
+    /// reuse their queue across starting points; stale visits must never hide a path to support.
+    #[test]
+    fn graph_walks_read_current_supports_and_reuse_no_visited_state() {
+        // Fixture: a three-cube column, its lowest cube held by soil.
+        let structure = cubes(&[[0, 0, 0], [0, 1, 0], [0, 2, 0]], 1, &[], 1.0);
+        let mut state = WallState::new(&structure);
+        let mut walk = Walk::default();
+        for fate in [Fate::Standing, Fate::Dust, Fate::Fallen] {
+            state.fate[1] = fate;
+            let mut graph = graph(&structure, &state);
+            *graph.walk.get_mut() = walk;
+            for start in [2, 1, 2, 0] {
+                if !state.standing(start) {
+                    continue;
+                }
+                let path = ground_path(start, &graph, &mut 0);
+                assert_eq!(path.is_some(), start == 0 || fate == Fate::Standing);
+            }
+            walk = graph.walk.into_inner();
+        }
+        state.fate[1] = Fate::Standing;
+        let path = ground_path(2, &graph(&structure, &state), &mut 0).unwrap();
+        assert!(!path.is_empty(), "the upper cube depends on a joint path");
+        for j in path {
+            state.cracked[j] = true;
+            assert!(ground_path(2, &graph(&structure, &state), &mut 0).is_none());
+            state.cracked[j] = false;
+        }
+    }
+
+    /// The game's destruction owners retain source addresses while assessing every owned chunk.
+    /// A foreign member changes the frame's mass and loads; a missing member loses a load path.
+    #[test]
+    fn owned_groups_keep_all_members_without_traversing_the_source_construction() {
+        // Fixture: three adjacent cubes, with the last pair transferred to a moving owner.
+        let structure = cubes(&[[0, 0, 0], [1, 0, 0], [2, 0, 0]], 0, &[], 1.0);
+        let parent = WallState::new(&structure);
+        let mut child = parent.clone();
+        child.retain_group(&[1, 2]);
+        assert!(Arc::ptr_eq(&parent.topology, &child.topology));
+        assert_eq!(loose_groups(&structure, &child), vec![vec![1, 2]]);
+        let framed = in_group_frames(&structure, &child, &[], Vec3::Z);
+        assert!(framed.iter().all(|load| [1, 2].contains(&load.chunk)));
+        for c in [1, 2] {
+            assert!(
+                framed
+                    .iter()
+                    .any(|load| load.chunk == c && load.press != Vec3::ZERO)
+            );
+        }
+        child.retain_group(&[2]);
+        assert_eq!(loose_groups(&structure, &child), vec![vec![2]]);
+        assert!(graph(&structure, &child).edges(2, true).next().is_none());
+    }
+
+    /// The game's moving-group section reference belongs to this assessment's loads. Reusing a
+    /// previous maximum after a force decreases would select a different section's held side.
+    #[test]
+    fn moving_reference_follows_current_loads_including_force_decreases() {
+        // Fixture: an unsupported three-chunk slab; impulse ranking selects the reference.
+        let structure = unsupported_slab(3);
+        let state = WallState::new(&structure);
+        let source = |chunk, force| Load {
+            chunk,
+            at: structure.chunks[chunk].centroid,
+            press: Vec3::X * force,
+            blow: Vec3::ZERO,
+            peak: None,
+            energy: 0.0,
+            crushed: 0.0,
+            origin: Origin::Contact {
+                other: Entity::PLACEHOLDER,
+                step: 1.0,
+            },
+        };
+        for (a, b, expected) in [(4.0, 2.0, 0), (1.0, 2.0, 2), (4.0, 2.0, 0)] {
+            let loads = in_group_frames(
+                &structure,
+                &state,
+                &[source(0, a), source(2, b)],
+                Vec3::ZERO,
+            );
+            let graph = loaded_graph(&structure, &state, &loads);
+            assert_eq!(
+                graph.references.iter().position(|&root| root),
+                Some(expected)
+            );
+            assert_eq!(graph.references.iter().filter(|&&root| root).count(), 1);
+        }
+    }
+
     /// The game's environment destruction model requires a closed law boundary. A missing face
     /// can leave positive volume and several planes, but its exposed edges cannot enclose a solid.
     #[test]

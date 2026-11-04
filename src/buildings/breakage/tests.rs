@@ -4500,3 +4500,268 @@ fn a_ballistic_sensor_does_not_add_a_second_occupied_mass() {
         "the no-sensor control must expose the duplicate mass: {added} of {extra}"
     );
 }
+
+/// The game's construction field geometry reduces by ray and source entity, independent of
+/// worker assignment or input iteration. Equal-distance stops retain the first source entity.
+#[test]
+fn field_geometry_is_independent_of_workers_and_owner_iteration() {
+    use bevy::tasks::{ParallelSlice, TaskPoolBuilder};
+    // Fixture: overlapping columns provide exact distance ties; a translated column adds nearer
+    // and farther stops. Two field rays pin source order within each owner.
+    let kind = column_construction();
+    let mut world = World::new();
+    let roots: Vec<_> = (0..3).map(|_| world.spawn_empty().id()).collect();
+    let owners: Vec<_> = roots
+        .iter()
+        .enumerate()
+        .map(|(i, &root)| {
+            let breakage = Breakage::new(kind.clone(), i as u16, 1.0);
+            let pose = Transform::from_xyz(if i == 2 { -2.0 } else { 0.0 }, 0.0, 0.0);
+            let frame = Frame::new(&pose, 1.0, kind.bounds());
+            (root, frame, breakage)
+        })
+        .collect();
+    let deposit = RawDeposit {
+        rays: vec![1.0, 2.0]
+            .into_iter()
+            .map(|energy| RayDeposit {
+                end: Vec3::new(0.5, 1.5, 0.0),
+                direction: Dir3::NEG_X,
+                energy,
+                blow: Vec3::NEG_X * energy,
+            })
+            .collect(),
+        blast: Some((
+            Vec3::new(4.0, 1.5, 0.0),
+            Blast::of(CRUSHING_BLAST_J, 0.05, FIT_ONLY_PRODUCTS),
+        )),
+        ..default()
+    };
+    let observe = |geometry| {
+        let (fields, stops) = reduce_geometry(geometry, true);
+        assert!(!fields.is_empty());
+        assert!(stops.iter().flatten().any(|stop| stop.surface.is_some()));
+        let fields: Vec<_> = fields
+            .into_iter()
+            .map(|(root, field)| {
+                assert_eq!(
+                    field.iter().map(|stop| stop.2).collect::<Vec<_>>(),
+                    vec![1.0, 2.0]
+                );
+                (root, field)
+            })
+            .collect();
+        let mut stops = stops.into_iter();
+        let hits = fracture::trace_blast(
+            deposit.blast.unwrap().1,
+            fracture::blast_directions(),
+            |_| stops.next().unwrap().and_then(|stop| stop.surface),
+        );
+        (fields, hits)
+    };
+    let expected = observe(
+        owners
+            .iter()
+            .map(|(root, frame, breakage)| owner_geometry(*root, *frame, breakage, true, &deposit))
+            .collect(),
+    );
+    let first = *roots[..2].iter().min().unwrap();
+    assert!(
+        expected
+            .1
+            .iter()
+            .all(|(stop, _)| !matches!(stop, Stop::Chunk(root, _) if *root != first))
+    );
+    for threads in [1, 2] {
+        let pool = TaskPoolBuilder::new().num_threads(threads).build();
+        for reverse in [false, true] {
+            let mut order: Vec<_> = owners.iter().collect();
+            if reverse {
+                order.reverse();
+            }
+            let geometry = order
+                .par_splat_map(&pool, None, |_, owners| {
+                    owners
+                        .iter()
+                        .map(|(root, frame, breakage)| {
+                            owner_geometry(*root, *frame, breakage, true, &deposit)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .into_iter()
+                .flatten()
+                .collect();
+            assert_eq!(observe(geometry), expected);
+        }
+    }
+}
+
+/// The game's jointless owners still wear, keep drawing holes and launch. An assessment shortcut
+/// may skip section and ring work only; it must not swallow the remaining deposit bookkeeping.
+#[test]
+fn a_jointless_owner_still_wears_keeps_holes_and_launches() {
+    // Fixture: the middle cube of a column, transferred alone with a quarter-volume deposit.
+    let kind = column_construction();
+    let mut live = Live::new(&kind, 1.0).group(&[1]);
+    let pool = live.state.pool[1];
+    let load = Load {
+        chunk: 1,
+        at: live.structure.chunks[1].centroid,
+        crushed: pool / 4.0,
+        energy: 0.0,
+        blow: Vec3::Z,
+        press: Vec3::X,
+        peak: None,
+        origin: Origin::Field,
+    };
+    let hole = Hole {
+        from: [0; 3],
+        to: [1; 3],
+        radius: 1,
+    };
+    let changes = run_laws(
+        &kind.layout.element_of,
+        &mut live,
+        &[load],
+        vec![(1, hole)],
+        Vec3::ZERO,
+    );
+    assert_eq!(live.state.pool[1], pool - load.crushed);
+    assert_eq!(live.holes[1], vec![hole]);
+    assert!(changes.events.contains(&WallEvent::Hole(1, hole)));
+    assert!(changes.events.contains(&WallEvent::Fall(1)));
+    assert_eq!(changes.groups, vec![(vec![1], vec![load])]);
+    assert!(changes.failures.is_empty());
+    assert_eq!(changes.weight_steps, 0);
+}
+
+/// The game's independent construction owners have no cross-owner field effects. Worker count
+/// and owner iteration must not change their law state, record, splits or prepared launches.
+#[test]
+fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
+    use bevy::tasks::{ParallelSliceMut, TaskPoolBuilder};
+    // Fixture: a placed column, a moving pair and a jointless owner, all taking external fields.
+    let kind = column_construction();
+    let mut world = World::new();
+    let roots: Vec<_> = (0..3).map(|_| world.spawn_empty().id()).collect();
+    let run = |threads, reverse| {
+        let mut cases: Vec<_> = roots
+            .iter()
+            .enumerate()
+            .map(|(i, &root)| {
+                let mut breakage = Breakage::new(kind.clone(), i as u16, 1.0);
+                let owned = match i {
+                    0 => None,
+                    1 => Some(vec![1_u16, 2]),
+                    _ => Some(vec![1_u16]),
+                };
+                if let Some(owned) = &owned {
+                    let group: Vec<_> = owned.iter().map(|&c| usize::from(c)).collect();
+                    breakage.live = Box::new(breakage.live.group(&group));
+                }
+                // Pre-cracked partitions exercise launches and splits without a strength calibration.
+                if i < 2 {
+                    breakage.live.state.cracked.fill(true);
+                }
+                let c = if i == 2 { 1 } else { 2 };
+                let taken = Taken {
+                    line_loads: vec![Load {
+                        chunk: c,
+                        at: breakage.live.structure.chunks[c].centroid,
+                        energy: 0.0,
+                        crushed: breakage.live.state.pool[c] / 4.0,
+                        blow: Vec3::X * 1000.0,
+                        press: Vec3::ZERO,
+                        peak: None,
+                        origin: Origin::Field,
+                    }],
+                    ..default()
+                };
+                (root, breakage, owned, taken)
+            })
+            .collect();
+        if reverse {
+            cases.reverse();
+        }
+        let pool = TaskPoolBuilder::new().num_threads(threads).build();
+        let mut results: Vec<_> = cases
+            .par_splat_map_mut(&pool, None, |_, cases| {
+                cases
+                    .iter_mut()
+                    .map(|(root, breakage, owned, taken)| {
+                        let pose = Transform::IDENTITY;
+                        let frame = Frame::new(&pose, 1.0, kind.bounds());
+                        let effect = evaluate_owner(
+                            *root,
+                            breakage,
+                            owned.as_deref(),
+                            pose,
+                            OwnerInputs {
+                                frame,
+                                taken,
+                                pressing: &[],
+                                resting: &[],
+                                spin: Vec3::Z * 4.0,
+                                tick: 1,
+                            },
+                        );
+                        let splits: Vec<_> = effect
+                            .split
+                            .into_iter()
+                            .flat_map(|split| split.children)
+                            .map(|(group, live)| (group, live.state))
+                            .collect();
+                        let departures: Vec<_> = effect
+                            .departures
+                            .into_iter()
+                            .map(|prepared| {
+                                let departure = prepared.departure;
+                                let launch = departure.launch;
+                                (
+                                    departure.group,
+                                    departure.live.state,
+                                    launch.centroid,
+                                    launch.mass,
+                                    launch.inertia,
+                                    launch.velocity,
+                                    launch.spin,
+                                )
+                            })
+                            .collect();
+                        (
+                            *root,
+                            breakage.live.state.clone(),
+                            effect.events,
+                            effect.fields,
+                            effect.returns,
+                            splits,
+                            departures,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .into_iter()
+            .flatten()
+            .collect();
+        results.sort_unstable_by_key(|result| result.0);
+        results
+    };
+    let expected = run(1, false);
+    assert!(
+        expected.iter().any(|result| !result.2.is_empty()),
+        "fields change game state"
+    );
+    assert!(
+        expected.iter().any(|result| !result.6.is_empty()),
+        "a placed owner prepares a launch"
+    );
+    assert!(
+        expected.iter().any(|result| !result.5.is_empty()),
+        "a moving owner prepares a split"
+    );
+    for threads in [1, 2] {
+        for reverse in [false, true] {
+            assert_eq!(run(threads, reverse), expected);
+        }
+    }
+}
