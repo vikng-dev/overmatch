@@ -12,10 +12,10 @@
 //!   uses, with no sampling rate to outrun;
 //! - the **authored blocks** — the union of rounded boxes built from the same transforms that
 //!   spawn the terrain colliders (the sandbox's step-19..25 field, generalized), which is the
-//!   whole surface in the sandbox and the obstacle layer on the map.
+//!   authored course geometry in fixture worlds.
 //!
-//! Geometry that is not a block (a construction's elements and chunks, loose pieces) is an Avian
-//! collider: [`super::rubble::RubbleBodies`] snapshots it for the belt's footprint checks. Those
+//! Solid geometry outside TerrainMap (grayboxes, construction elements and chunks, loose pieces)
+//! is an Avian collider: [`super::rubble::RubbleBodies`] snapshots it for the belt's footprint checks. Those
 //! shapes enter the support law beside this field, rather than through terrain probe lines.
 
 use bevy::math::{Dir3, Mat3, Quat, Vec2, Vec3};

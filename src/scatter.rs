@@ -21,9 +21,8 @@
 //! THE FILE'S Y IS STALE (authored against an older sculpt): every instance is re-projected onto
 //! the live [`HeightGrid`] at its own XZ. Yaw and scale are taken as authored.
 //!
-//! A graybox construction is a cuboid collider and a terrain-field block. Trees and constructions of
-//! the destruction model are colliders outside that immutable field; construction bounds also
-//! supply spawn obstacles.
+//! Graybox constructions, trees and constructions of the destruction model are colliders outside
+//! the immutable terrain field; construction bounds also supply spawn obstacles.
 
 use std::collections::BTreeMap;
 
@@ -52,7 +51,7 @@ pub(crate) struct MapInstance {
 #[derive(Component)]
 pub(crate) struct ScatterProxy;
 
-/// Smallest squared quaternion length [`resolve`] will normalize. Far below any rounding an f32
+/// Resolution: smallest squared quaternion length [`resolve`] will normalize. Far below any rounding an f32
 /// text export produces (those land within ~1e-7 of unit) and far above the point where the
 /// squaring itself underflows, so the only thing it rejects is a quaternion with no direction in it.
 const MIN_ROTATION_LENGTH_SQ: f32 = 1.0e-12;
@@ -91,8 +90,7 @@ fn graybox_friction(substance: &str) -> avian3d::prelude::Friction {
 }
 
 impl Placement<'_> {
-    /// A construction's [`crate::world::TerrainMap`] block form: a unit cube posed and scaled (the
-    /// Avian idiom `world::spawn_block` uses), its centre lifted off the ground pose by the
+    /// A graybox collider and spawn obstacle: a unit cube posed and scaled, its centre lifted by the
     /// prototype's own bounds. `None` for a tree or a structure — a trunk is not a block.
     fn block(&self) -> Option<Transform> {
         match self.shape {
@@ -215,7 +213,7 @@ pub(crate) struct ViewAssets<'a> {
 /// one material per surface. Only built where there is a window to draw into.
 struct ScatterView {
     /// The unit cube per construction prototype, keyed by its id: the cube the block transform scales,
-    /// the same encoding the block list uses, its faces framed for the construction surface
+    /// its faces framed for the construction surface
     /// ([`crate::construction_surface::unit_box`]).
     construction: BTreeMap<String, Handle<Mesh>>,
     /// One merged mesh per construction asset of the destruction model, keyed by the asset id: its
@@ -286,10 +284,8 @@ impl ScatterView {
     }
 }
 
-/// Spawn the scatter into the world the grid describes, appending every graybox construction to
-/// `blocks` (the [`crate::world::TerrainMap`] list the analytic track field is built from), and
-/// return every construction of the destruction model's bounds in that list's encoding: the spawn
-/// obstacles ([`crate::world::SpawnObstacles`]), never the track field's. Colliders spawn in every
+/// Spawn the scatter into the world the grid describes, returning construction bounds as spawn
+/// obstacles ([`crate::world::SpawnObstacles`]), never as analytic terrain. Colliders spawn in every
 /// composition; meshes and the trees' glb views only where `view_assets` offers a server to draw
 /// with — the dedicated server draws nothing, exactly as it skips the terrain's render tiles.
 pub(crate) fn spawn(
@@ -297,7 +293,6 @@ pub(crate) fn spawn(
     meshes: &mut Assets<Mesh>,
     manifest: &MapManifest,
     grid: &HeightGrid,
-    blocks: &mut Vec<Transform>,
     mut view_assets: Option<ViewAssets<'_>>,
 ) -> Vec<Transform> {
     let view = view_assets
@@ -309,7 +304,7 @@ pub(crate) fn spawn(
         view,
         server: view_assets.map(|assets| assets.server.clone()),
     };
-    let obstacles = scene.construct(commands, blocks);
+    let obstacles = scene.construct(commands);
     commands.insert_resource(scene);
     obstacles
 }
@@ -317,12 +312,12 @@ pub(crate) fn spawn(
 /// Run the startup construction again. No scatter in the immutable test-course world.
 pub(crate) fn reconstruct(mut commands: Commands, scene: Option<Res<ScatterScene>>) {
     if let Some(scene) = scene {
-        scene.construct(&mut commands, &mut Vec::new());
+        scene.construct(&mut commands);
     }
 }
 
 impl ScatterScene {
-    fn construct(&self, commands: &mut Commands, blocks: &mut Vec<Transform>) -> Vec<Transform> {
+    fn construct(&self, commands: &mut Commands) -> Vec<Transform> {
         let manifest = &self.manifest;
         let placements = place(
             &resolve(&manifest.instances, &manifest.prototypes),
@@ -392,12 +387,11 @@ impl ScatterScene {
                     let block = placement
                         .block()
                         .expect("a construction placement carries a block transform");
-                    blocks.push(block);
+                    obstacles.push(block);
                     let mut entity = commands.spawn((
                         block,
                         RigidBody::Static,
                         Collider::cuboid(1.0, 1.0, 1.0),
-                        crate::track::terrain::FieldSurface,
                         statics,
                         graybox_friction(substance),
                         crate::substances::SubstanceRegistry::shipped_static()
@@ -419,8 +413,7 @@ impl ScatterScene {
             }
         }
         info!(
-            "scatter: {} instances placed on the live surface — {constructions} graybox constructions (also \
-         TerrainMap blocks), {structures} constructions (a collider per element), {trees} trees",
+            "scatter: {} instances placed on the live surface — {constructions} graybox constructions, {structures} constructions (a collider per element), {trees} trees",
             placements.len(),
         );
         obstacles
@@ -532,10 +525,9 @@ mod tests {
         }
     }
 
-    /// `manifest` spawned on the sloped grid into a fresh app with an asset server, the block list
-    /// it filled and the obstacles it returned; `draw` hands the scatter that server, as a windowed
-    /// composition does.
-    fn spawned(manifest: &MapManifest, draw: bool) -> (App, Vec<Transform>, Vec<Transform>) {
+    /// Spawn on the sloped fixture grid. Physics registers collider requirements before spawning;
+    /// drawing supplies the asset server and shared material stores.
+    fn spawned(manifest: &MapManifest, draw: bool, physics: bool) -> (App, Vec<Transform>) {
         let mut app = App::new();
         app.add_plugins((
             TaskPoolPlugin::default(),
@@ -547,16 +539,22 @@ mod tests {
         .init_asset::<ConstructionMaterial>()
         .init_asset::<bevy::render::storage::ShaderBuffer>()
         .init_asset::<bevy::world_serialization::WorldAsset>();
+        if physics {
+            app.add_plugins((
+                bevy::time::TimePlugin,
+                bevy::transform::TransformPlugin,
+                avian3d::prelude::PhysicsPlugins::default(),
+            ))
+            .insert_resource(bevy::time::TimeUpdateStrategy::FixedTimesteps(1));
+        }
         let grid = sloped_grid();
-        let mut blocks: Vec<Transform> = Vec::new();
         let mut obstacles: Vec<Transform> = Vec::new();
         let server = draw.then(|| app.world().resource::<AssetServer>().clone());
         let world = app.world_mut();
         world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
-            world.resource_scope(|world, _materials: Mut<Assets<StandardMaterial>>| {
-                world.resource_scope(
-                    |world, mut constructions: Mut<Assets<ConstructionMaterial>>| {
-                        world.resource_scope(
+            world.resource_scope(
+                |world, mut constructions: Mut<Assets<ConstructionMaterial>>| {
+                    world.resource_scope(
                         |world, mut buffers: Mut<Assets<bevy::render::storage::ShaderBuffer>>| {
                             let mut queue = bevy::ecs::world::CommandQueue::default();
                             let mut commands = Commands::new(&mut queue, world);
@@ -565,7 +563,6 @@ mod tests {
                                 &mut meshes,
                                 manifest,
                                 &grid,
-                                &mut blocks,
                                 server.as_ref().map(|server| ViewAssets {
                                     server,
                                     construction_materials: &mut constructions,
@@ -575,11 +572,10 @@ mod tests {
                             queue.apply(world);
                         },
                     );
-                    },
-                );
-            });
+                },
+            );
         });
-        (app, blocks, obstacles)
+        (app, obstacles)
     }
 
     /// EVERY CONSTRUCTION WEARS THE ONE MATERIAL, the draw-count invariant the brick-and-timber surface
@@ -604,8 +600,7 @@ mod tests {
         second.translation[0] += 30.0;
         second.scale = [0.6; 3];
         manifest.instances.push(second);
-        let (mut app, blocks, _) = spawned(&manifest, true);
-        assert_eq!(blocks.len(), 2, "both houses are blocks");
+        let (mut app, _) = spawned(&manifest, true, false);
         let world = app.world_mut();
         let drawn: Vec<(AssetId<Mesh>, AssetId<ConstructionMaterial>)> = world
             .query_filtered::<(&Mesh3d, &MeshMaterial3d<ConstructionMaterial>), Without<ChildOf>>()
@@ -621,16 +616,123 @@ mod tests {
         );
     }
 
-    /// The spawn itself, in a real world: every graybox construction reaches the block list and every
-    /// construction of the destruction model the obstacles alone, every instance is one static body
-    /// carrying its identity — a proxy collider for a graybox construction or fir, a root with a
-    /// collider per segment for a tree and one per element for a construction — and a windowless
-    /// composition spawns no mesh and no view. A structure that entered the block list would hand
-    /// the belts a wall to climb (playtest fork F9).
+    /// Belt contacts read a graybox's authored material pair and rigid rolling law, independently
+    /// of the soil below it. Testing only Avian's coefficient would miss FieldSurface exclusion.
     #[test]
-    fn spawn_adds_a_body_per_instance_and_a_block_per_construction() {
+    fn a_graybox_belt_contact_reads_its_substance_instead_of_underlying_soil() {
+        use crate::track::forces::{
+            ForceParams, GripElements, GripParams, SideInput, SideState, TravelField, contact_side,
+            rigid_rolling_resistance, rolling_reference_kpa,
+        };
+        use crate::track::rubble::{PieceData, RubbleBodies, RubbleQuery};
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::math::Affine3A;
         let manifest = mixed_fixture_manifest();
-        let (mut app, blocks, obstacles) = spawned(&manifest, false);
+        let (mut app, _) = spawned(&manifest, false, true);
+        app.finish();
+        app.cleanup();
+        app.update();
+        app.update();
+        let (entity, block) = app
+            .world_mut()
+            .query_filtered::<(Entity, &Transform), With<ScatterProxy>>()
+            .single(app.world())
+            .map(|(e, t)| (e, *t))
+            .unwrap();
+        let expected = manifest
+            .prototypes
+            .values()
+            .find_map(|prototype| match prototype {
+                Prototype::Block { substance, .. } => Some(
+                    crate::substances::SubstanceRegistry::shipped_static()
+                        .contact_friction(substance)
+                        .unwrap(),
+                ),
+                _ => None,
+            })
+            .expect("the fixture declares the graybox's substance");
+        let top = block.translation + block.rotation * Vec3::Y * (block.scale.y / 2.0);
+        let grid = sloped_grid();
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let near = rubble.near(top, 2.0); // Fixture: encloses the pad and its box top.
+                assert!(
+                    near.contains(&entity),
+                    "graybox colliders must enter belt support queries"
+                );
+                let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                // Fixture pad: 0.4 m long, 0.2 m wide, resting 5 mm inside the support envelope.
+                let loop_pts = [
+                    Vec2::new(-0.2, 0.02),
+                    Vec2::new(0.2, 0.02),
+                    Vec2::new(0.2, 1.02),
+                    Vec2::new(-0.2, 1.02),
+                    Vec2::new(-0.2, 0.02),
+                ];
+                let input = SideInput {
+                    loop_pts: &loop_pts,
+                    count: 24,
+                    plane_x: 0.0,
+                    columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)],
+                    travel: TravelField { knots: &[] },
+                };
+                let track = crate::substances::contact_friction(0.7); // Fixture material coefficient.
+                let params = ForceParams {
+                    face_offset: 0.025,
+                    free_travel: 0.0,
+                    support_stiffness_per_m: 2.0e6,
+                    support_damping_per_m: 1.0e5,
+                    engage_depth: 0.002,
+                    probe_reach: 0.5,
+                    grip: Some(GripParams {
+                        track,
+                        nominal_pressure_kpa: rolling_reference_kpa(),
+                        side_weight: 100_000.0,
+                    }),
+                };
+                let pair = track.combine(expected).dynamic_coefficient;
+                for soil in [0.01, 0.99] {
+                    // Fixture: two soils that differ from the solid pair.
+                    let field = crate::track::oracle::BlockField::default()
+                        .with_height(Some(grid.clone()))
+                        .with_ground(Some(crate::ground_field::GroundField::uniform(
+                            crate::ground_field::ContactGround {
+                                grip: soil,
+                                rolling_resistance: soil,
+                            },
+                        )));
+                    let report = contact_side(
+                        &input,
+                        SideState::default(),
+                        Affine3A::from_rotation_translation(block.rotation, top),
+                        1.0 / 64.0,
+                        &params,
+                        &field,
+                        &pieces,
+                        |_| block.rotation * Vec3::Z,
+                        &mut GripElements::for_links(24),
+                    );
+                    assert!(
+                        !report.contacts.is_empty(),
+                        "the fixture pad bears on the graybox"
+                    );
+                    for contact in report.contacts {
+                        assert_eq!(contact.collider, Some(entity));
+                        assert_eq!(contact.mu, pair);
+                        let rolling = contact.rolling_force.length() / contact.load;
+                        assert!((rolling - rigid_rolling_resistance()).abs() < 1e-6);
+                    }
+                }
+            })
+            .unwrap();
+    }
+
+    /// Every scatter instance has its own static body and identity. Construction bounds are spawn
+    /// obstacles; belt support reads their colliders. A windowless composition draws no view.
+    #[test]
+    fn spawn_adds_a_body_per_instance_and_obstacles_for_constructions() {
+        let manifest = mixed_fixture_manifest();
+        let (mut app, obstacles) = spawned(&manifest, false, false);
         let world = app.world_mut();
         let (mut constructions, mut proxies, mut trees, mut segments) = (0, 0, 0, 0);
         let (mut structures, mut elements) = (0, 0);
@@ -657,16 +759,15 @@ mod tests {
             }
         }
         assert_eq!(structures, 1, "the fixture places a construction");
-        assert_eq!(obstacles.len(), structures, "one obstacle per construction");
+        assert_eq!(
+            obstacles.len(),
+            structures + constructions,
+            "every construction is a spawn obstacle"
+        );
         assert_eq!(
             (constructions, proxies, trees),
             (1, 1, 1),
             "the fixture places a graybox house and a data-built tree"
-        );
-        assert_eq!(
-            blocks.len(),
-            constructions,
-            "one block per construction, no trunk"
         );
         let bodies = world
             .query_filtered::<Entity, With<RigidBody>>()
@@ -756,7 +857,7 @@ mod tests {
             .admit_placement(&asset, second.scale)
             .expect("the added fixture placement passes production scale admission");
         manifest.instances.push(second);
-        let (mut app, _, _) = spawned(&manifest, true);
+        let (mut app, _) = spawned(&manifest, true, false);
         let world = app.world_mut();
         let views: Vec<(Entity, Vec3, AssetId<Mesh>, AssetId<ConstructionMaterial>)> = world
             .query::<(
@@ -801,7 +902,7 @@ mod tests {
                 trees += 1;
             }
         }
-        let (mut app, _, _) = spawned(&manifest, true);
+        let (mut app, _) = spawned(&manifest, true, false);
         let world = app.world_mut();
         let views: Vec<(Entity, Vec3)> = world
             .query_filtered::<(&ChildOf, &Transform), With<crate::trees::view::TreeView>>()

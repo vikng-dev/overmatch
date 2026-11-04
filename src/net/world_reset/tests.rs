@@ -23,21 +23,13 @@ use std::net::{Ipv4Addr, SocketAddr};
 fn build_scene(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
     let manifest = crate::map::tests::mixed_fixture_manifest();
     let grid = crate::terrain_grid::HeightGrid::new(vec![0.0; 9].into(), 3, manifest.extent);
-    let mut blocks = Vec::new();
-    let obstacles = crate::scatter::spawn(
-        &mut commands,
-        &mut meshes,
-        &manifest,
-        &grid,
-        &mut blocks,
-        None,
-    );
+    let obstacles = crate::scatter::spawn(&mut commands, &mut meshes, &manifest, &grid, None);
     commands.insert_resource(crate::ground_field::GroundField::unpainted(
         &crate::ground_types::GroundTypes::load_shipped(),
     ));
     commands.insert_resource(crate::world::TerrainMap {
         revision: 0,
-        blocks,
+        blocks: Vec::new(),
     });
     commands.insert_resource(crate::world::SpawnObstacles(obstacles));
     commands.insert_resource(grid);

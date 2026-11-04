@@ -775,11 +775,8 @@ fn spawn_environment(
         }
         // The map's object scatter (`scatter`): proxies and bodies posed from the shipped level file
         // onto THIS grid, colliders on every composition and meshes only where there is a window.
-        // A graybox construction is appended to `blocks` before the resource is inserted, so it enters
-        // the analytic track field through the same list the authored course's cuboids do; a
-        // construction of the destruction model comes back as a spawn obstacle instead. The showcase
-        // world is excluded for the reason its grid is flat: scenery in front of the thing being
-        // looked at.
+        // Construction bounds supply spawn obstacles; belts read their solid colliders.
+        // The showcase world excludes scenery in front of the item being inspected.
         let mut obstacles = Vec::new();
         if let Some(manifest) = manifest.filter(|_| !crate::lod_showcase::enabled()) {
             obstacles = crate::scatter::spawn(
@@ -787,7 +784,6 @@ fn spawn_environment(
                 &mut meshes,
                 &manifest,
                 &grid,
-                &mut blocks,
                 buffers
                     .as_deref_mut()
                     .filter(|_| !windows.is_empty())
