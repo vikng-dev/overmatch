@@ -36,6 +36,11 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod pose;
+
+use pose::WirePose;
+pub(super) use pose::replication as pose_replication;
+
 use super::harness::{LeverError, env_text};
 use super::world_reset::AuthorityWorld;
 use crate::Layer;
@@ -122,6 +127,7 @@ impl Lever {
 
 /// A piece's authoritative world pose, on its replicated carrier.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(try_from = "WirePose")]
 pub(crate) struct DebrisPose {
     pub(crate) position: Vec3,
     pub(crate) rotation: Quat,
@@ -222,8 +228,26 @@ pub(super) fn install_server(app: &mut App) -> Result<(), LeverError> {
 /// Draw every arriving lever carrier as a plain mesh at its pose, and follow every carrier's pose.
 /// Mounted by every client; a client without mesh or material assets draws nothing.
 pub(super) fn install_client(app: &mut App) {
-    app.add_systems(Startup, build_view)
+    app.init_resource::<bevy_replicon::prelude::ReplicationStorage>()
+        .add_message::<super::matchmaking::ServerGone>()
+        .add_systems(
+            PreUpdate,
+            refuse_peer_pose.after(bevy_replicon::prelude::ClientSystems::Receive),
+        )
+        .add_systems(Startup, build_view)
         .add_systems(Update, (attach_view, follow_pose).chain());
+}
+
+/// The ordinary match-close path shows the cause in the lobby and stops reconnecting this link.
+fn refuse_peer_pose(
+    mut storage: ResMut<bevy_replicon::prelude::ReplicationStorage>,
+    mut gone: MessageWriter<super::matchmaking::ServerGone>,
+) {
+    // No refusal is the normal state of a valid stream.
+    if let Some(refusal) = storage.global.remove::<pose::PoseRefusal>() {
+        warn!("client: refusing server debris pose: {refusal}");
+        gone.write(super::matchmaking::ServerGone(refusal.to_string()));
+    }
 }
 
 /// A building piece's carrier: its pose and its group, replicated to every client. The carrier

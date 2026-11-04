@@ -26,7 +26,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 
 | id | P | file::symbol | lens: class | finding, one line with the concrete case | fix, one line | owner |
 |---|---|---|---|---|---|---|
-| net-03 | P2 | `src/net/debris_stress.rs::DebrisPose` | error-handling: Outside input reaching a panic | Deserialized nonfinite positions and invalid quaternions reach interpolation and can panic the client's NaN tripwire. | Parse checked poses at ingress and visibly refuse malformed peer records. | ratchet |
 | net-04 | P2 | `src/net/fire_presentation.rs::recover_unannounced_rounds` | error-handling: Outside input reaching a default | An out-of-range disclosed round index logs refusal but presents index zero instead. | Validate indices against handshake-matched construction at ingress and return a typed refusal. | ratchet |
 | net-05 | P2 | `src/net/spawn_map.rs::spawn_map_overlay` | error-handling: Late check | A decodable 16-bit grayscale `map_ui.png` reaches play and supplies an incompatible integer texture to the UI binding. | Refuse incompatible formats before play, naming the asset and required conversion. | ratchet |
 | net-08 | P2 | `src/net/server_host.rs::host_task_pools` | error-handling: Dropped error | Failure to read available parallelism silently becomes a one-core host measurement. | Preserve the OS error and handle it visibly at startup. | ratchet |

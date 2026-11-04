@@ -275,7 +275,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// rollout. Wire layouts and client derivation are unchanged; the authority exports resolved paths.
 /// REV 82 (the game's spawn flow): respawn admission and map-pick refusal are independent owner-private facts.
 /// REV 83 (#198, driving model): direct ground grip and nominal-pressure rolling resistance.
-pub const PROTOCOL_REV: u32 = 84;
+/// REV 85 (the game environment destruction model): checked debris-pose receive with a terminal
+/// client refusal. Valid pose bytes retain their layout.
+pub const PROTOCOL_REV: u32 = 85;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1108,7 +1110,7 @@ const WIRE_SURFACE_HASH: u64 = 0x5afa185f66009321;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x40bdeb3b0facb3cc;
+const WIRE_TYPES_HASH: u64 = 0xc29bccec38265308;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1151,7 +1153,7 @@ pub(crate) fn plugin(app: &mut App) {
     // piece sends nothing more. A building piece's carrier is interpolated, so it draws at the
     // cursor the hulls draw at; the stress lever's are not, and apply on arrival.
     app.component::<super::debris_stress::DebrisPose>()
-        .replicate()
+        .replicate_with(super::debris_stress::pose_replication())
         .add_interpolation_with(super::debris_stress::debris_pose_lerp);
     super::resync::retain_stream::<super::debris_stress::DebrisPose>(app);
     // The wall ledger (one world entity): appended entries ride as diffs, a late joiner takes the
@@ -2029,6 +2031,7 @@ mod tests {
         ("src/substances/feedback.rs", "SurfaceFeedback"),
         ("src/hull_marks.rs", "MarkKind"),
         ("src/net/debris_stress.rs", "DebrisPose"),
+        ("src/net/debris_stress/pose.rs", "WirePose"),
         ("src/net/walls.rs", "WallLedger"),
         ("src/buildings/breakage.rs", "WallEntry"),
         ("src/buildings/breakage.rs", "WallEvent"),
@@ -2232,7 +2235,11 @@ mod tests {
     /// registered component rides as (`replicate_with`), or the custom netcode refusal code an
     /// application decodes. Each file's whole source, comments and whitespace stripped, folds
     /// into [`WIRE_TYPES_HASH`] after the type definitions. Codec tests live outside this fold.
-    const WIRE_CODEC_SOURCES: &[&str] = &["src/net/wire_quant.rs", "src/net/admission.rs"];
+    const WIRE_CODEC_SOURCES: &[&str] = &[
+        "src/net/wire_quant.rs",
+        "src/net/admission.rs",
+        "src/net/debris_stress/pose.rs",
+    ];
 
     /// FNV-1a over every own wire type's normalized definition, then every codec's normalized
     /// source, each terminated by `\n` (so no two distinct sets collide by concatenation) — the same
