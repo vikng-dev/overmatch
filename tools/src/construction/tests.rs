@@ -915,6 +915,42 @@ fn the_bake_entry_refuses_before_creating_output() {
     );
 }
 
+/// Bakers may create absent output and skip identical bytes, but a failed comparison must name
+/// the output and preserve it. Mutant: treating every read error as changed overwrites invalid UTF-8.
+#[test]
+fn the_bake_entry_distinguishes_absent_unchanged_and_unreadable_output() {
+    let cube = box_piece(
+        "cube",
+        "fixture",
+        "Brick",
+        "Upright",
+        DVec3::ZERO,
+        DVec3::ONE,
+        "Whole",
+    );
+    let spec = Spec {
+        path: "tools/constructions/fixture.pieces.ron".into(),
+        construction: ConstructionSpec::from_ron(&construction(&[cube], "")).unwrap(),
+    };
+    let root = std::env::temp_dir().join(format!("overmatch-bake-output-{}", std::process::id()));
+    assert!(!root.exists(), "the fixture output root must start absent");
+    let path = asset_path(&root, &spec.construction.id);
+    assert!(!bake_to(&root, &spec).unwrap().unchanged);
+    assert!(path.is_file(), "a first bake creates its output");
+    assert!(bake_to(&root, &spec).unwrap().unchanged);
+
+    let unreadable = [0xff]; // Fixture: invalid UTF-8 in a writable output.
+    std::fs::write(&path, unreadable).unwrap();
+    let result = bake_to(&root, &spec);
+    let preserved = std::fs::read(&path).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+    let err = result
+        .err()
+        .expect("a failed output comparison refuses the bake");
+    assert!(err.contains(&path.display().to_string()), "{err}");
+    assert_eq!(preserved, unreadable, "a refused bake preserves the output");
+}
+
 /// Idle joins and unknown attachment kinds are refused before play. FIXTURE DATA supplies the
 /// intentionally absent sill-to-roof pair; shipped houses need not have that topology.
 #[test]

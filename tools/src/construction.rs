@@ -298,6 +298,7 @@ pub fn bake_to(root: &Path, spec: &Spec) -> Result<Written, String> {
     let path = asset_path(root, &spec.construction.id);
     let unchanged = match std::fs::read_to_string(&path) {
         Ok(old) => old == text,
+        // A first bake has no previous output to compare.
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
         Err(err) => return Err(format!("{}: {err}", path.display())),
     };
