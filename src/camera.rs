@@ -732,8 +732,9 @@ mod tests {
         let forward = Dir3::new(Vec3::new(0.2, -0.3, -1.0)).unwrap();
         let free = orbit_body(pivot, forward, ORBIT_FAR, |_, max| max);
         assert!((free - (pivot - *forward * ORBIT_FAR)).length() < 1e-4);
-        let pulled = orbit_body(pivot, forward, ORBIT_FAR, |_, max| max.min(5.0));
-        assert!((pulled.distance(pivot) - 5.0).abs() < 1e-4);
+        let obstruction = ORBIT_FAR * 0.5; // Fixture: the ground lies halfway to the free camera.
+        let pulled = orbit_body(pivot, forward, ORBIT_FAR, |_, max| max.min(obstruction));
+        assert!((pulled.distance(pivot) - obstruction).abs() < 1e-4);
     }
 
     /// The look law turns yaw and pitch by the delta and stops pitch short of vertical.
@@ -741,8 +742,13 @@ mod tests {
     fn the_orbit_look_clamps_pitch() {
         let turned = orbit_rotation(Quat::IDENTITY, Vec2::new(-100.0, 0.0));
         let (yaw, pitch, _) = turned.to_euler(EulerRot::YXZ);
-        assert!((yaw - 100.0 * ORBIT_YAW_SENSITIVITY).abs() < 1e-5 && pitch.abs() < 1e-5);
-        let up = orbit_rotation(Quat::IDENTITY, Vec2::new(0.0, -1.0e6));
+        assert!(
+            shortest_angle(yaw - 100.0 * ORBIT_YAW_SENSITIVITY).abs() < 1e-5 && pitch.abs() < 1e-5
+        );
+        let up = orbit_rotation(
+            Quat::IDENTITY,
+            Vec2::new(0.0, -2.0 * PITCH_LIMIT / ORBIT_PITCH_SENSITIVITY),
+        );
         let (_, pitch, _) = up.to_euler(EulerRot::YXZ);
         assert!((pitch - PITCH_LIMIT).abs() < 1e-4);
     }
