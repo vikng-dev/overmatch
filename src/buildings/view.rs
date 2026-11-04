@@ -75,6 +75,10 @@ fn hull_faces(points: &[Vec3]) -> Vec<(Vec3, Vec<Vec3>)> {
         .collect()
 }
 
+/// Resolution: squared projection floor for unit surface-frame axes; smaller projections
+/// amplify f32 noise when normalized.
+const FRAME_PROJECTION_MIN_SQUARED: f32 = 1e-6;
+
 /// A face's tangent: its element's authored grain projected into its plane; on an end face the
 /// grain crosses, and on every face of an Upright element, the upright image (`Y × n`). A level
 /// face has no upright, so its image runs along its element's level `run` ([`run`]), which lies
@@ -83,12 +87,12 @@ fn tangent(n: Vec3, frame: SurfaceFrame, run: Vec3) -> Vec3 {
     let in_face = |axis: Vec3| axis - n * axis.dot(n);
     if let SurfaceFrame::Grain(grain) = frame {
         let projected = in_face(Vec3::from_array(grain));
-        if projected.length_squared() > 1e-6 {
+        if projected.length_squared() > FRAME_PROJECTION_MIN_SQUARED {
             return projected.normalize();
         }
     }
     let upright = Vec3::Y.cross(n);
-    if upright.length_squared() > 1e-6 {
+    if upright.length_squared() > FRAME_PROJECTION_MIN_SQUARED {
         return upright.normalize();
     }
     in_face(run).normalize()
@@ -320,18 +324,21 @@ fn table(
     (table.len() > headers).then_some(table)
 }
 
-/// A crack line's half width on a wall face, m (Resolution: about a mortar joint's, so a crack
-/// reads at a few tens of metres).
-const CRACK_HALF_WIDTH_M: f32 = 0.006;
-/// How far a crack line stands off the face it marks, m: clear of the face's depth, under any
-/// brick's relief.
-const CRACK_STANDOFF_M: f32 = 0.0015;
+/// Resolution: skip numerically unresolved contact edges (m) before normalizing their direction.
+const CRACK_EDGE_MIN_M: f32 = 1e-4;
+/// Resolution: plane-membership allowance (m) for independently reconstructed f32 element and
+/// joint faces.
+const CRACK_FACE_TOLERANCE_M: f32 = 1e-3;
 
 /// The cracks a broken building shows, in its frame at scale 1: for every cracked joint between
 /// two standing chunks, a dark strip along each edge of their shared face that lies on a bounding
 /// plane of the first chunk's element, where the crack opens to the element's surface. `None` when
 /// no crack shows.
-pub(crate) fn crack_mesh(layout: &Layout, shape: &Shape) -> Option<Mesh> {
+pub(crate) fn crack_mesh(
+    layout: &Layout,
+    shape: &Shape,
+    look: &crate::vfx::BuildingCracks,
+) -> Option<Mesh> {
     let (mut positions, mut normals, mut indices) = (Vec::new(), Vec::new(), Vec::new());
     for (j, joint) in layout.joints.iter().enumerate() {
         let Side::Chunk(b) = joint.b else {
@@ -350,16 +357,16 @@ pub(crate) fn crack_mesh(layout: &Layout, shape: &Shape) -> Option<Mesh> {
         for k in 0..polygon.len() {
             let (p, q) = (polygon[k], polygon[(k + 1) % polygon.len()]);
             let along = q - p;
-            if along.length() < 1e-4 {
+            if along.length() < CRACK_EDGE_MIN_M {
                 continue;
             }
             for &(out, offset) in &element.planes {
-                let on = |x: Vec3| (out.dot(x) - offset).abs() < 1e-3;
+                let on = |x: Vec3| (out.dot(x) - offset).abs() < CRACK_FACE_TOLERANCE_M;
                 if !(on(p) && on(q)) {
                     continue;
                 }
-                let side = out.cross(along.normalize()) * CRACK_HALF_WIDTH_M;
-                let lift = out * CRACK_STANDOFF_M;
+                let side = out.cross(along.normalize()) * look.half_width_m;
+                let lift = out * look.standoff_m;
                 let first = positions.len() as u32;
                 for corner in [p - side, q - side, q + side, p + side] {
                     positions.push((corner + lift).to_array());
@@ -568,7 +575,8 @@ fn redraw(
         }
         let broken = broken_mesh(&kind.asset, &kind.layout, &shown.0);
         let mesh = (broken.count_vertices() > 0).then(|| meshes.add(broken));
-        let cracks = crack_mesh(&kind.layout, &shown.0).map(|m| meshes.add(m));
+        let cracks = crack_mesh(&kind.layout, &shown.0, crate::vfx::building_cracks())
+            .map(|m| meshes.add(m));
         match (&mesh, drawn) {
             (Some(mesh), Some(mut drawn)) => drawn.0 = mesh.clone(),
             (Some(mesh), None) => {
@@ -592,7 +600,9 @@ fn redraw(
             (Some(look), _) => Some(look.0.clone()),
             (None, Some(materials)) => {
                 let handle = materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.05, 0.04, 0.035),
+                    base_color: Color::srgb_from_array(
+                        crate::vfx::building_cracks().color_srgb.to_array(),
+                    ),
                     unlit: true,
                     ..default()
                 });
@@ -964,6 +974,69 @@ mod tests {
                         ));
                     }
                 }
+            }
+        }
+    }
+
+    /// The game's building destruction view reads crack dimensions from their presentation
+    /// owner. Fixture: two unit cubes meet inside one element; scaling the owner's dimensions
+    /// must scale each strip's width and lift. A fixed width or standoff fails either choice.
+    #[test]
+    fn crack_geometry_reads_its_presentation_owner() {
+        let mut layout = shipped_house().layout.clone();
+        layout.chunks = vec![0, 1];
+        layout.element_of = vec![0, 0];
+        layout.blocks = vec![
+            Block::cuboid(Vec3::ZERO, Vec3::ONE),
+            Block::cuboid(Vec3::X, Vec3::new(2.0, 1.0, 1.0)),
+        ];
+        layout.element_blocks = vec![Block::cuboid(Vec3::ZERO, Vec3::new(2.0, 1.0, 1.0))];
+        let mut joint = layout.joints[0];
+        joint.a = 0;
+        joint.b = Side::Chunk(1);
+        joint.area = 1.0;
+        joint.centroid = Vec3::new(1.0, 0.5, 0.5);
+        joint.normal = Vec3::X;
+        layout.joints = vec![joint];
+        let mut shape = Shape::intact(&layout);
+        shape.cracked[0] = true;
+        let owner = crate::vfx::building_cracks();
+        for scale in [0.5, 2.0] {
+            let look = crate::vfx::BuildingCracks {
+                half_width_m: owner.half_width_m * scale,
+                standoff_m: owner.standoff_m * scale,
+                color_srgb: owner.color_srgb,
+            };
+            let mesh =
+                crack_mesh(&layout, &shape, &look).expect("the fixture opens surface cracks");
+            let Some(VertexAttributeValues::Float32x3(positions)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("crack positions");
+            };
+            let Some(VertexAttributeValues::Float32x3(normals)) =
+                mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+            else {
+                panic!("crack normals");
+            };
+            let (quads, remainder) = positions.as_chunks::<4>();
+            assert!(remainder.is_empty(), "each strip has four corners");
+            for (k, quad) in quads.iter().enumerate() {
+                let points: [Vec3; 4] = std::array::from_fn(|i| Vec3::from_array(quad[i]));
+                let width = points[3].distance(points[0]);
+                assert!(
+                    (width - 2.0 * look.half_width_m).abs() < 1e-6,
+                    "width {width}"
+                );
+                let normal = Vec3::from_array(normals[k * 4]);
+                let (_, offset) = layout.element_blocks[0]
+                    .planes
+                    .iter()
+                    .find(|(n, _)| n.dot(normal) > 0.99)
+                    .expect("a strip lies over an element face");
+                let centre = points.iter().sum::<Vec3>() / 4.0;
+                let lift = normal.dot(centre) - offset;
+                assert!((lift - look.standoff_m).abs() < 1e-6, "lift {lift}");
             }
         }
     }

@@ -82,6 +82,9 @@ fn fraction(value: &f32) -> Result<(), &'static str> {
         Err("in [0,1]")
     }
 }
+fn fraction_vec3(value: &Vec3) -> Result<(), &'static str> {
+    value.to_array().iter().try_for_each(fraction)
+}
 fn positive_pair(value: &(f32, f32)) -> Result<(), &'static str> {
     positive(&value.0)?;
     positive(&value.1)
@@ -386,6 +389,15 @@ pub(crate) fn diagram() -> &'static DiagramLook {
     &load().diagram
 }
 
+look_table! { pub(crate) BuildingCracks {
+    half_width_m: f32 => positive,
+    standoff_m: f32 => positive,
+    color_srgb: Vec3 => fraction_vec3,
+}}
+pub(crate) fn building_cracks() -> &'static BuildingCracks {
+    &load().building_cracks
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct VfxLook {
@@ -394,6 +406,7 @@ pub(super) struct VfxLook {
     trail: TrailLook,
     marks: MarksLook,
     diagram: DiagramLook,
+    building_cracks: BuildingCracks,
 }
 
 pub(super) fn load() -> &'static VfxLook {
@@ -426,7 +439,23 @@ fn parse(text: &str) -> Result<VfxLook, String> {
 mod tests {
     use super::*;
 
-    /// Effect consumers require finite authored values and complete data in every build.
+    // Keep provenance valid so a value edit reaches its field's domain gate, independently of
+    // the shipped number's spelling. The presentation table declares one field per line.
+    fn with_value(field: &str, value: &str) -> String {
+        let prefix = format!("{field}:");
+        DATA.lines()
+            .map(|line| {
+                if line.trim_start().starts_with(&prefix) {
+                    format!("{field}: ({value}, Taste(\"admission fixture\")),")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Effect consumers require complete authored values in their declared domains before play.
     #[test]
     fn presentation_is_required_and_checked_before_play() {
         parse(DATA).unwrap();
@@ -436,6 +465,9 @@ mod tests {
             "reach_calibres",
             "line_floor",
             "field_note_px",
+            "half_width_m",
+            "standoff_m",
+            "color_srgb",
         ] {
             let missing = DATA
                 .lines()
@@ -455,30 +487,35 @@ mod tests {
             error.contains(FILE) && error.contains("dust_size"),
             "{error}"
         );
-        for (field, from, to) in [
-            (
-                "ejecta_up_bias",
-                "ejecta_up_bias: (0.55,",
-                "ejecta_up_bias: (0.5,",
-            ),
-            ("splash_plume_aspect", "(0.7, 1.4, 1.0)", "(0.0, 1.4, 1.0)"),
+        for (field, value) in [
+            ("ejecta_up_bias", "0.5"),
+            ("splash_plume_aspect", "(0.0, 1.0, 1.0)"),
+            ("dust_alpha", "NaN"),
+            ("half_width_m", "0.0"),
+            ("standoff_m", "0.0"),
         ] {
-            let error = parse(&DATA.replace(from, to)).unwrap_err();
+            let error = parse(&with_value(field, value)).unwrap_err();
             assert!(error.contains(FILE) && error.contains(field), "{error}");
         }
-        let error = parse(&DATA.replace("Taste(", "Fixture(")).unwrap_err();
+        let error =
+            parse(&with_value("half_width_m", "1.0").replace("Taste(", "Fixture(")).unwrap_err();
         assert!(
             error.contains(FILE) && error.contains("Fixture provenance is test-only"),
             "{error}"
         );
-        let shipped = format!(
-            "dust_alpha: ({:?},",
-            parse(DATA).expect("the shipped look").impact.dust_alpha
-        );
-        let error = parse(&DATA.replace(&shipped, "dust_alpha: (NaN,")).unwrap_err();
-        assert!(
-            error.contains(FILE) && error.contains("dust_alpha"),
-            "{error}"
-        );
+        let cracks = &parse(DATA).unwrap().building_cracks;
+        let rgb = cracks.color_srgb.to_array();
+        for invalid in [f32::NAN, -0.1, 1.1] {
+            for channel in 0..3 {
+                let mut color = rgb;
+                color[channel] = invalid;
+                let value = format!("({}, {}, {})", color[0], color[1], color[2]);
+                let error = parse(&with_value("color_srgb", &value)).unwrap_err();
+                assert!(
+                    error.contains(FILE) && error.contains("color_srgb"),
+                    "{error}"
+                );
+            }
+        }
     }
 }
