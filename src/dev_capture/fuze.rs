@@ -26,7 +26,7 @@ pub(super) struct ShotReady(pub(super) Option<f32>);
 struct Cue {
     key: String,
     round: crate::rounds::Round,
-    construction: bool,
+    aim: ShotAim,
     at: f32,
     fired: bool,
     camera: Option<Transform>,
@@ -37,20 +37,32 @@ pub(crate) fn offline_shot_plugin(app: &mut App) {
     let Some(shot) = super::plan().and_then(|plan| plan.shot.as_ref()) else {
         return;
     };
-    let cue = Cue {
-        key: shot.key.clone(),
-        round: shot.round,
-        construction: shot.target == super::plan::ShotTarget::Construction,
-        at: shot.at,
-        fired: false,
-        camera: None,
-        logged: false,
-    };
+    let shot = shot.clone();
     info!("capture: game's damage model shot {shot:?}");
     app.insert_resource(ShotReady(None))
-        .insert_resource(cue)
         .insert_resource(RetainSpentShells(true))
         .insert_resource(crate::camera::CameraCaptive(true))
+        .add_systems(
+            PostStartup,
+            move |constructions: Query<
+                (&crate::scatter::MapInstance, &Transform),
+                With<crate::construction::Body>,
+            >,
+                  grid: Option<Res<crate::terrain_grid::HeightGrid>>,
+                  mut commands: Commands| {
+                let aim = bind_target(shot.target, grid.as_deref(), constructions.iter())
+                    .unwrap_or_else(|error| super::plan::refuse(error));
+                commands.insert_resource(Cue {
+                    key: shot.key.clone(),
+                    round: shot.round,
+                    aim,
+                    at: shot.at,
+                    fired: false,
+                    camera: None,
+                    logged: false,
+                });
+            },
+        )
         .add_systems(Update, fire_on_cue)
         .add_systems(
             PostUpdate,
@@ -58,19 +70,67 @@ pub(crate) fn offline_shot_plugin(app: &mut App) {
         );
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the cue, its clock and exit, the construction and ground it aims at, the HUD it sets"
-)]
+/// The game's damage-model capture retains its startup-admitted firing pose through the cue.
+#[derive(Clone, Copy)]
+struct ShotAim {
+    target: Vec3,
+    origin: Vec3,
+    direction: Dir3,
+}
+
+fn bind_target<'a>(
+    target_kind: super::plan::ShotTarget,
+    grid: Option<&crate::terrain_grid::HeightGrid>,
+    constructions: impl Iterator<Item = (&'a crate::scatter::MapInstance, &'a Transform)>,
+) -> Result<ShotAim, super::plan::PlanError> {
+    let construction = target_kind == super::plan::ShotTarget::Construction;
+    let grid = grid.ok_or_else(|| {
+        super::plan::PlanError::Field(
+            "shot: the scene supplies no HeightGrid; choose a terrain scene".into(),
+        )
+    })?;
+    // Stable placement identity breaks distance ties independently of ECS iteration order.
+    let (_, transform) = constructions
+        .min_by(|a, b| {
+            let reach = |transform: &Transform| {
+                Vec2::new(transform.translation.x, transform.translation.z).length_squared()
+            };
+            reach(a.1)
+                .total_cmp(&reach(b.1))
+                .then(a.0.ordinal.cmp(&b.0.ordinal))
+        })
+        .ok_or_else(|| {
+            super::plan::PlanError::Field(
+                "shot: the scene has no construction to aim at; choose a map with a construction"
+                    .into(),
+            )
+        })?;
+    // Fixture geometry: the construction 2.5 m up from 10 m off, or the ground 10 m beside it from
+    // 10 m above and 2 m back.
+    let target = if construction {
+        transform.translation + Vec3::Y * 2.5
+    } else {
+        let p = transform.translation + Vec3::X * 10.0;
+        Vec3::new(p.x, grid.height_at(p.x, p.z), p.z)
+    };
+    let origin = if construction {
+        target + Vec3::Z * 10.0
+    } else {
+        target + Vec3::new(0.0, 10.0, 2.0)
+    };
+    let direction = Dir3::new(target - origin)
+        .expect("capture staging gives a nonzero finite firing direction");
+    Ok(ShotAim {
+        target,
+        origin,
+        direction,
+    })
+}
+
 fn fire_on_cue(
     time: Res<Time>,
     mut cue: ResMut<Cue>,
     mut exit: MessageWriter<bevy::app::AppExit>,
-    constructions: Query<
-        (&crate::scatter::MapInstance, &Transform),
-        With<crate::construction::Body>,
-    >,
-    grid: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut tanks: Query<(Entity, &mut WeaponLoads), With<Controlled>>,
     weapons: Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
     mut commands: Commands,
@@ -83,33 +143,11 @@ fn fire_on_cue(
     if cue.fired || time.elapsed_secs() < cue.at {
         return;
     }
-    let grid = grid.expect("capture: shot: the offline scene must supply HeightGrid before its cue; choose a terrain scene");
-    // Stable placement identity breaks distance ties independently of ECS iteration order.
-    let (_, transform) = constructions
-        .iter()
-        .min_by(|a, b| {
-            let reach = |transform: &Transform| {
-                Vec2::new(transform.translation.x, transform.translation.z).length_squared()
-            };
-            reach(a.1)
-                .total_cmp(&reach(b.1))
-                .then(a.0.ordinal.cmp(&b.0.ordinal))
-        })
-        .expect("capture: shot: the scene has no construction to aim at; choose a map with a construction");
-    // Fixture geometry: the construction 2.5 m up from 10 m off, or the ground 10 m beside it from
-    // 10 m above and 2 m back.
-    let target = if cue.construction {
-        transform.translation + Vec3::Y * 2.5
-    } else {
-        let p = transform.translation + Vec3::X * 10.0;
-        Vec3::new(p.x, grid.height_at(p.x, p.z), p.z)
-    };
-    let origin = if cue.construction {
-        target + Vec3::Z * 10.0
-    } else {
-        target + Vec3::new(0.0, 10.0, 2.0)
-    };
-    let direction = Dir3::new(target - origin).unwrap();
+    let ShotAim {
+        target,
+        origin,
+        direction,
+    } = cue.aim;
     commands.trigger(FireShell::of_round(
         &cue.round,
         origin,
@@ -226,6 +264,37 @@ fn show_shot(
     if let Some(pose) = cue.camera {
         for mut camera in &mut cameras {
             *camera = pose;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::plan::{PlanError, ShotTarget};
+    use super::*;
+    use crate::scatter::MapInstance;
+    use crate::terrain_grid::{FIXTURE_EXTENT, HeightGrid};
+
+    /// The game's damage-model shot cue must refuse an incompatible scene at startup, even
+    /// when firing is scheduled far later; both target kinds admit a complete scene.
+    #[test]
+    fn shot_target_admission_requires_scene_geometry() {
+        let identity = MapInstance {
+            id: "fixture".into(),
+            ordinal: 0,
+        };
+        let pose = Transform::from_xyz(3.0, 0.0, 4.0);
+        let grid = HeightGrid::new(vec![0.0; 4].into(), 2, FIXTURE_EXTENT);
+        for target in [ShotTarget::Construction, ShotTarget::Ground] {
+            let missing_grid = bind_target(target, None, std::iter::once((&identity, &pose)));
+            assert!(
+                matches!(&missing_grid, Err(PlanError::Field(error)) if error.contains("HeightGrid") && error.contains("choose a terrain scene"))
+            );
+            let missing_construction = bind_target(target, Some(&grid), std::iter::empty());
+            assert!(
+                matches!(&missing_construction, Err(PlanError::Field(error)) if error.contains("no construction") && error.contains("choose a map"))
+            );
+            assert!(bind_target(target, Some(&grid), std::iter::once((&identity, &pose))).is_ok());
         }
     }
 }
