@@ -34,7 +34,7 @@
 //!
 //! - [`MaterialFacts`]: density, flow strength, Young's modulus and Poisson's ratio, for a substance
 //!   that is a structural metal with a sourced row. `None` where no fact is known — never a guess.
-//! - [`BulkFacts`]: density and fracture toughness, for a non-metal with a sourced row (brick,
+//! - [`BulkFacts`]: density and optional seam and blast facts, for a sourced non-metal (brick,
 //!   timber). A row states either these or [`MaterialFacts`], never both, so its density is stated
 //!   once ([`HardSubstance::density`]).
 //! - [`Resistance`]: how a round's force law is resisted. Exactly one entry is the
@@ -157,8 +157,6 @@ impl MaterialFacts {
 pub struct BulkFacts {
     /// kg/m³.
     pub density: f64,
-    /// Mode I fracture toughness `K_IC`, Pa·√m. No law reads it yet.
-    pub toughness: f64,
     /// The tensile strength across a seam between pre-cut chunks of this substance, Pa: what the
     /// push rule compares the load at a joint with. `None` where none is sourced: the buildings'
     /// laws then refuse the substance as a breakable material (`buildings::fracture::Masonry::of`).
@@ -189,11 +187,9 @@ pub struct BlastFacts {
     /// Quasi-static compressive strength, Pa.
     pub compressive_strength: f64,
     /// The game's damage model applies this dynamic/static compressive-strength ratio at every
-    /// loading rate, a constant stand-in for loading-rate-dependent strength. Its reference rate is
-    /// [`Self::compressive_dif_strain_rate`].
+    /// loading rate, a constant stand-in for loading-rate-dependent strength. Its provenance
+    /// states the reference strain rate.
     pub compressive_dif: f64,
-    /// Strain rate of the stated dynamic ratio, s⁻¹; provenance only, not read by compaction.
-    pub compressive_dif_strain_rate: f64,
     /// Fully dense grain or cell-wall density, kg/m³, greater than the bulk density. This is an
     /// input to a compaction law, not a measured strain at the onset of densification.
     pub solid_density: f64,
@@ -252,11 +248,6 @@ impl SubstanceId {
 /// One substance's entry: matter the walk resists with, a witness the walk never sees, or a
 /// substance no volume wears.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "a load-time table of tens of rows, read in place; a boxed hard row would cost Copy \
-              and an indirection on every walk lookup to save a few hundred bytes"
-)]
 pub enum Substance {
     /// A layer of the walk.
     Hard(HardSubstance),
@@ -413,13 +404,12 @@ impl BurstFile {
     }
 }
 
-/// A non-metal's authored bulk facts: density (kg/m³), fracture toughness (Pa·√m), and an
-/// optional seam's opening and shear strengths (Pa) and fracture energies (J/m²).
+/// A non-metal's authored bulk facts: density (kg/m³) and an optional seam's opening and shear
+/// strengths (Pa) and fracture energies (J/m²).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BulkFile {
     density: Sourced<f64>,
-    toughness: Sourced<f64>,
     #[serde(default)]
     tensile: Option<Sourced<f64>>,
     #[serde(default)]
@@ -444,9 +434,8 @@ impl BulkFile {
             None if breakable => {
                 return Err(format!(
                     "substance {name:?}: bulk.blast is missing from a breakable material: author \
-                     compressive_strength (Pa), compressive_dif and its compressive_dif_strain_rate \
-                     (1/s), solid_density (kg/m³), youngs_modulus (Pa) and tensile_dif, each \
-                     with its material-property source"
+                     compressive_strength (Pa), compressive_dif, solid_density (kg/m³), \
+                     youngs_modulus (Pa) and tensile_dif, each with its material-property source"
                 ));
             }
             // Bulk-only matter is unbreakable, so the blast material laws never read it.
@@ -454,7 +443,6 @@ impl BulkFile {
         };
         Ok(BulkFacts {
             density: self.density.0,
-            toughness: self.toughness.0,
             tensile: self.tensile.map(|value| value.0),
             fracture_energy: self.fracture_energy.map(|value| value.0),
             shear_cohesion: self.shear_cohesion.map(|value| value.0),
@@ -471,7 +459,6 @@ impl BulkFile {
 struct BlastFile {
     compressive_strength: Option<Sourced<f64>>,
     compressive_dif: Option<Sourced<f64>>,
-    compressive_dif_strain_rate: Option<Sourced<f64>>,
     solid_density: Option<Sourced<f64>>,
     youngs_modulus: Option<Sourced<f64>>,
     tensile_dif: Option<Sourced<f64>>,
@@ -501,10 +488,6 @@ impl BlastFile {
         let facts = BlastFacts {
             compressive_strength: required("compressive_strength", self.compressive_strength)?,
             compressive_dif: required("compressive_dif", self.compressive_dif)?,
-            compressive_dif_strain_rate: required(
-                "compressive_dif_strain_rate",
-                self.compressive_dif_strain_rate,
-            )?,
             solid_density: required("solid_density", self.solid_density)?,
             youngs_modulus: required("youngs_modulus", self.youngs_modulus)?,
             tensile_dif: required("tensile_dif", self.tensile_dif)?,
@@ -783,13 +766,12 @@ fn checked_hard(name: &str, substance: HardSubstance) -> Result<HardSubstance, S
         }
         let stated = [
             ("density", Some(bulk.density)),
-            ("toughness", Some(bulk.toughness)),
             ("tensile", bulk.tensile),
             ("fracture_energy", bulk.fracture_energy),
             ("shear_cohesion", bulk.shear_cohesion),
             ("shear_fracture_energy", bulk.shear_fracture_energy),
         ];
-        let seam = &stated[2..];
+        let seam = &stated[1..];
         if seam.iter().any(|(_, value)| value.is_some()) {
             for (field, value) in seam {
                 if value.is_none() {
@@ -1061,11 +1043,9 @@ mod tests {
         )
     }
 
-    /// EVERY SHIPPED ROW HOLDS ITS KIND'S INVARIANTS, whatever the registry carries: a hard row is
-    /// matter that resists something (a finite factor above zero), a witness is matter that resists
-    /// nothing, and an unworn row is no matter and states the burst facts that are all it is for.
-    /// The registry is iterated, so a new or renamed row is checked without this test learning
-    /// its name.
+    /// The game's damage model relies on each kind preserving its walk interface: hard matter
+    /// carries finite nonnegative resistance, witnesses carry none, and unworn rows supply only
+    /// burst facts. Material authors may change or add rows within those domains.
     #[test]
     fn every_shipped_row_holds_its_kinds_invariants() {
         let registry = SubstanceRegistry::shipped();
@@ -1076,8 +1056,8 @@ mod tests {
                 Substance::Hard(hard) => {
                     let factor = hard.factor();
                     assert!(
-                        factor.is_finite() && factor > 0.0,
-                        "{name} resists something (factor {factor})"
+                        factor.is_finite() && factor >= 0.0,
+                        "{name} has finite nonnegative resistance (factor {factor})"
                     );
                     assert!(
                         matches!(substance.matter(), Some(Matter::Hard { .. })),
@@ -1169,13 +1149,13 @@ mod tests {
         }
     }
 
-    /// A ROW STATES ITS DENSITY ONCE: bulk facts give a non-metal its density, which the building
-    /// bake reads for every chunk's mass, and a row stating them beside material facts (each with a
+    /// A ROW STATES ITS DENSITY ONCE: density alone admits bulk-only matter; the building
+    /// bake reads it for every chunk's mass, and a row stating bulk beside material facts (each with a
     /// density) is refused, as is a bulk fact out of its domain. A mutant reading the density off
     /// the wrong block, or letting two densities stand, fails here.
     #[test]
     fn bulk_facts_state_a_non_metal_s_density_once() {
-        let bulk = r#"bulk: Some((density: (1800.0, Fixture("fixture")), toughness: (5.0e5, Fixture("fixture"))))"#;
+        let bulk = r#"bulk: Some((density: (1800.0, Fixture("fixture"))))"#;
         let row = |extra: &str| {
             with(&format!(
                 r#""Clay": Hard(resistance: Effective((20.0, Fixture("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))), debris_half_angle_deg: (26.2, Fixture("fixture")), {extra}),"#
@@ -1193,7 +1173,6 @@ mod tests {
         for refused in [
             both,
             format!("facts: None, {}", bulk.replace("1800.0", "0.0")),
-            format!("facts: None, {}", bulk.replace("5.0e5", "-1.0")),
             format!(
                 "facts: None, {}",
                 bulk.replace(
@@ -1224,12 +1203,10 @@ mod tests {
                 r#""Fixture": Hard(resistance: Effective((20.0, Fixture("fixture"))),
                 visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))), debris_half_angle_deg: (26.2, Fixture("fixture")),
                 bulk: Some((density: (1800.0, Fixture("fixture")),
-                    toughness: (5.0e5, Fixture("fixture")),
                     tensile: Some((1.0e6, Fixture("fixture"))),
                     fracture_energy: Some((10.0, Fixture("fixture"))), {shear},
                     blast: Some((compressive_strength: Some((20e6, Fixture("fixture"))),
                         compressive_dif: Some((2.0, Fixture("fixture"))),
-                        compressive_dif_strain_rate: Some((100.0, Fixture("fixture"))),
                         solid_density: Some((2500.0, Fixture("fixture"))),
                         youngs_modulus: Some((8e9, Fixture("fixture"))),
                         tensile_dif: Some((3.0, Fixture("fixture")))))))),"#,
@@ -1282,14 +1259,13 @@ mod tests {
     /// BREAKABLE BLAST INPUTS ARE COMPLETE AND SOURCED BEFORE PLAY (the game's environment
     /// destruction model). The crush law and the scab law rely on no missing field becoming a
     /// code default, on finite positive inputs in the simulation's f32 units, and on nonzero
-    /// pore volume. Each omission and
-    /// invalid value must name its actual file, row, field and repair. ASSUMED fixture data.
+    /// pore volume. Admission requires only consumed inputs; source context stays in provenance.
+    /// Each omission and invalid value names its file, row, field and repair. Fixture data.
     #[test]
-    fn a_breakable_row_needs_complete_sourced_blast_inputs_at_load() {
+    fn a_breakable_row_needs_only_complete_sourced_blast_inputs_at_load() {
         let fields = [
             ("compressive_strength", "20e6"),
             ("compressive_dif", "2.0"),
-            ("compressive_dif_strain_rate", "100.0"),
             ("solid_density", "2500.0"),
             ("youngs_modulus", "8e9"),
             ("tensile_dif", "3.0"),
@@ -1305,7 +1281,6 @@ mod tests {
                 visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))),
                 debris_half_angle_deg: (26.2, Fixture("fixture")),
                 bulk: Some((density: (1800.0, Fixture("fixture")),
-                    toughness: (5e5, Fixture("fixture")),
                     tensile: Some((1e6, Fixture("fixture"))),
                     fracture_energy: Some((10.0, Fixture("fixture"))),
                     shear_cohesion: Some((200000.0, Fixture("fixture"))),
@@ -1346,14 +1321,14 @@ mod tests {
         }
         for (index, value, field) in [
             (1, "0.5", "compressive_dif"),
-            (3, "1800.0", "solid_density"),
-            (3, "1700.0", "solid_density"),
+            (2, "1800.0", "solid_density"),
+            (2, "1700.0", "solid_density"),
             (0, "1e308", "compressive_strength"),
             (0, "1e40", "compressive_strength"),
             (0, "1e-100", "compressive_strength"),
             (1, "1e40", "compressive_dif"),
-            (5, "0.5", "tensile_dif"),
-            (5, "1e40", "tensile_dif"),
+            (4, "0.5", "tensile_dif"),
+            (4, "1e40", "tensile_dif"),
         ] {
             let mut invalid = authored.clone();
             invalid[index] = authored[index].replace(fields[index].1, value);
@@ -1362,7 +1337,7 @@ mod tests {
         // ASSUMED fixture data: a finite dynamic product cannot rescue a static seam strength
         // that rounds to zero. The simulation stores that static strength independently.
         let mut extreme = authored.clone();
-        extreme[5] = authored[5].replace("3.0", "1e100");
+        extreme[4] = authored[4].replace("3.0", "1e100");
         let text = row(&block(&extreme)).replace("tensile: Some((1e6,", "tensile: Some((1e-100,");
         let error = SubstanceRegistry::from_ron_at(path, &text)
             .unwrap_err()
@@ -1670,25 +1645,28 @@ mod tests {
         );
     }
 
-    /// `-0.0` is canonicalized: "no resistance" gets exactly one bit pattern, because the walk
-    /// coalesces its canonical spans by factor BITS and a second zero would cut a span where the
-    /// field never changed.
+    /// The game's damage model admits zero resistance as hard matter. The walk coalesces spans
+    /// by factor bits, so both signed zeros must share the positive-zero representation.
     #[test]
-    fn negative_zero_is_canonicalized() {
-        let registry = SubstanceRegistry::from_ron(&with(
-            r#""Void": Hard(resistance: Effective((-0.0, Fixture("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))), debris_half_angle_deg: (26.2, Fixture("fixture")), facts: None),"#,
-        ))
-        .expect("zero resistance is legal, it is just nothing");
-        assert_eq!(
-            registry
-                .get("Void")
-                .unwrap()
+    fn zero_resistance_is_admitted_and_canonicalized() {
+        for zero in ["0.0", "-0.0"] {
+            let registry = SubstanceRegistry::from_ron(&with(&format!(
+                r#""Void": Hard(resistance: Effective(({zero}, Fixture("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))), debris_half_angle_deg: (26.2, Fixture("fixture")), facts: None),"#,
+            )))
+            .expect("zero resistance is in the admitted hard-matter domain");
+            let substance = registry.get("Void").unwrap();
+            let hard = substance
                 .hard()
-                .unwrap()
-                .factor()
-                .to_bits(),
-            0.0f32.to_bits()
-        );
+                .expect("zero resistance remains hard matter");
+            assert_eq!(hard.factor().to_bits(), 0.0f32.to_bits());
+            assert_eq!(
+                substance.matter(),
+                Some(Matter::Hard {
+                    factor: 0.0,
+                    debris_ratio: hard.debris_ratio,
+                })
+            );
+        }
     }
 
     /// Every fact out of its domain is refused by entry and by field.
@@ -1783,16 +1761,18 @@ mod tests {
         }
     }
 
-    /// The reference steel's facts give the DERIVED strength term
-    /// `(2/3) · (1 + ln(205e9 / (3 · 0.71 · 1e9))) · 1e9 ≈ 3.711_258_7e9` Pa, to f32 precision.
+    /// The game's force law needs the compressible cavity term at a unit elastic ratio:
+    /// ln(1) = 0 leaves exactly two thirds of flow strength. Fixture facts make that ratio one
+    /// away from the incompressible limit, independently of the shipped reference material.
     #[test]
-    fn the_reference_cavity_strength_is_the_derived_value() {
-        let a = SubstanceRegistry::shipped()
-            .reference_facts()
-            .cavity_strength();
-        assert!(
-            (a / 3.711_258_7e9 - 1.0).abs() < f32::EPSILON as f64,
-            "strength term {a}"
-        );
+    fn cavity_strength_at_unit_elastic_ratio_is_two_thirds_flow_strength() {
+        let facts = MaterialFacts {
+            density: 1.0,
+            flow_strength: 3.0e6,
+            youngs_modulus: 6.75e6,
+            poisson_ratio: 0.25,
+        };
+        let expected = 2.0e6;
+        assert!((facts.cavity_strength() / expected - 1.0).abs() <= f64::EPSILON);
     }
 }

@@ -39,20 +39,20 @@
 //   - TrackSteel, ASTM A128 (Hadfield) analogue: a / a_ref ≈ 0.673 (≈ 673), ρ / ρ_ref ≈ 1.005.
 //   Cast armour has no sourced row.
 //
-// `bulk` = the bulk facts of a non-metal (density kg/m³, mode I fracture toughness K_IC Pa·√m, and
-// optionally a seam between a building's pre-cut chunks: `tensile`, its tensile strength, Pa, and
+// `bulk` = the bulk facts of a non-metal (density kg/m³ and optionally a seam between a
+// building's pre-cut chunks: `tensile`, its tensile strength, Pa, and
 // `fracture_energy`, its mode-I fracture energy G_f, J/m², stated together): the building bake
 // reads the density for each chunk's mass; the buildings' fracture laws read the density, the
-// factor and the seam, and an element of a substance stating no seam never breaks; no law reads
-// the toughness yet. Optional, absent read as `None`, and never
-// stated beside `facts` (each states a density). A breakable seam also requires `shear_cohesion`
-// (c, Pa, without precompression) and `shear_fracture_energy` (cohesive G_II, J/m², excluding
+// factor and the seam, and an element of a substance stating no seam never breaks.
+// Optional, absent read as `None`, and never stated beside `facts` (each states a density).
+// A breakable seam also requires `shear_cohesion` (c, Pa, without precompression) and `shear_fracture_energy` (cohesive G_II, J/m², excluding
 // continuing friction work). All four seam facts are stated together or none is; an incomplete
 // breakable row is refused at load. The punch ring reads the shear facts. A breakable row also
-// states `bulk.blast`: compressive strength (Pa), its dynamic/static ratio and reference strain
-// rate (1/s), fully dense grain/cell-wall density (kg/m³) and Young's modulus (Pa). These inputs
-// are read by the blast's crush law (Law 1: the compression, its ratio and the fully dense density;
-// the modulus awaits the scab law). Missing or unusable inputs are refused at load.
+// states `bulk.blast`: compressive strength (Pa), dynamic/static compressive and tensile ratios,
+// fully dense grain/cell-wall density (kg/m³) and Young's modulus (Pa). The crush law reads the
+// compression, its ratio and the fully dense density; the scab law reads the modulus and tensile
+// ratio. Reference strain rates live in the ratios' provenance. Missing or unusable inputs
+// are refused at load.
 // Sources and analogue limits: .agents/scratch/blast-b3-material-sources.md. A non-metal's
 // effective factor is its compressive (crushing) strength over the reference flow strength
 // (~1 GPa), × 1000: a strength ratio, the reading the steels' DERIVED rows note, not a measured
@@ -398,17 +398,17 @@
                     mass over volume at 12 %; USDA FPL Wood Handbook, FPL-GTR-190, 2010, Table 5-3a,
                     read in a third-party copy of the chapter) × 1000 kg/m³ × 1.12 for the moisture
                     mass")),
-                toughness: (4.2e5, Measured("red spruce, mode I, TL system, 420 kPa·√m: USDA FPL
-                    Wood Handbook, FPL-GTR-190, 2010, Table 5-10, read in a third-party copy of the
-                    chapter. The handbook's mode I range is 220–550 kPa·√m")),
                 tensile: Some((2.4e6, Measured("CLAIMED, not read: red spruce's tension
                     perpendicular to grain at 12 % moisture, about 2.4 MPa (USDA FPL Wood Handbook,
                     FPL-GTR-190, 2010, Table 5-3a, recalled; the spruces span about 2.4–2.6 MPa
                     there). A seam between two chunks of one timber is the timber parting across
                     its grain, the weaker way, and a bond between timbers is no stronger than the
                     wood"))),
-                fracture_energy: Some((370.0, Derived("G = K_IC² / E_T: this row's toughness,
-                    0.42 MPa·√m, over red spruce's tangential modulus, E_T ≈ 0.043 × E_L with E_L ≈
+                fracture_energy: Some((370.0, Derived("G = K_IC² / E_T: MEASURED red spruce
+                    mode I toughness, TL system, 0.42 MPa·√m (USDA FPL Wood Handbook,
+                    FPL-GTR-190, 2010, Table 5-10, read in a third-party copy of the chapter;
+                    mode I range 220–550 kPa·√m), over red spruce's tangential modulus,
+                    E_T ≈ 0.043 × E_L with E_L ≈
                     11.1 GPa at 12 % moisture (CLAIMED, not read: Wood Handbook Tables 5-1 and
                     5-3a, recalled), 0.48 GPa: 370 J/m²"))),
                 // Blast inputs: the crush law reads this block. ASSUMED European-spruce
@@ -424,12 +424,10 @@
                         doi:10.5614/j.eng.technol.sci.2021.53.1.3"))),
                     compressive_dif: Some((5.960714285714286, StandIn("Stand-in for loading-rate-dependent compressive strength: MEASURED tangential yield
                         stress 33.38 MPa at 2400 /s (specimen ST-52, Zulkifli et al. 2021,
-                        Table 7) divided by the same study's quasi-static mean 5.60 MPa (Table 3).
+                        Table 7; tangential tests span 591-2530 /s) divided by the same study's
+                        quasi-static mean 5.60 MPa (Table 3).
                         The current law applies this reference-rate ratio at every loading rate; read
                         primary at the compressive_strength URL. ASSUMED spruce analogue"))),
-                    compressive_dif_strain_rate: Some((2400.0, Measured("2400 /s, tangential
-                        specimen ST-52; Zulkifli et al. 2021, Table 7, read primary at the
-                        compressive_strength URL. The paper's tangential tests span 591-2530 /s"))),
                     solid_density: Some((1500.0, Derived("1.5 g/cm³ x 1000 = 1500 kg/m³, the
                         cell-wall density used as the theoretical fully dense limit in Kamke,
                         Densified Radiata Pine for Structural Composites, Maderas Ciencia y
@@ -493,10 +491,6 @@
                     Densities' (read, secondary; the wall prototype's value,
                     .agents/scratch/destruction-2026-10-30-buildings/wall-prototype/README.md).
                     Range 1765–2165 kg/m³, red facings to engineering")),
-                toughness: (4.9e5, Derived("midpoint of 0.33–0.65 MPa·√m, solid bricks in
-                    three-point bending, notch depth 1/6 to 4/6 (MEASURED: Xiao & Shrive, 'Masonry
-                    Fracture Mechanics Three Point Bending Test of Brick', 9th Canadian Masonry
-                    Symposium, Table 4, read)")),
                 tensile: Some((0.69e6, Measured("CLAIMED: the modulus of rupture normal to bed joints of
                     solid units in portland cement-lime Type N mortar, 690 kPa, Brick Industry
                     Association Technical Note 3A (2024) Table 7, read 2026-10-30 (the wall
@@ -521,13 +515,9 @@
                         https://www.canadamasonrydesigncentre.com/wp-content/uploads/12th_symposium/621.pdf.
                         Fit to measured handmade Galveias brick; ASSUMED rate analogue for this
                         molded-brick row. Published domain 4 < strain rate < 200 /s; this is a
-                        fit evaluated at the declared reference rate, applied as a constant at every
-                        loading rate by the current law"))),
-                    compressive_dif_strain_rate: Some((100.0, Unknown("ASSUMED reference rate
-                        100 /s within Pereira et al. 2013 eq. 1's published domain 4-200 /s;
-                        compressive_dif evaluates that material-property fit at this rate. No law
-                        reads this reference rate. Settled by a measured strain-rate history for
-                        the declared construction"))),
+                        fit evaluated at an ASSUMED reference rate of 100 /s, applied as a constant
+                        at every loading rate by the current law. A measured strain-rate history
+                        for the declared construction would settle the reference rate"))),
                     solid_density: Some((2250.0, Measured("published grade SW brick grain-density
                         parameter, Meyer, ARL-TR-5556 (2011), Table 1, read primary model report:
                         https://www.govinfo.gov/content/pkg/GOVPUB-D101-PURL-gpo10967/pdf/GOVPUB-D101-PURL-gpo10967.pdf.
