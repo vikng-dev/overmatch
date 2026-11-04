@@ -283,6 +283,8 @@ fn element_bundle(kind: &ConstructionKind, k: usize, scale: f32) -> impl Bundle 
 /// Spawn one construction of `kind` at `pose`, the ground pose: the authored XZ, the grid's Y, the
 /// authored yaw and uniform scale. A tilted or non-uniformly scaled instance is refused (ADR-0011):
 /// a construction stands on its foundation plane. Returns the root; the body is whole without a view.
+/// The root carries `Visibility` because a view, where one draws, is its child and inherits
+/// visibility through it.
 pub(crate) fn spawn(
     commands: &mut Commands,
     kind: &Arc<ConstructionKind>,
@@ -311,6 +313,7 @@ pub(crate) fn spawn(
                 rotation: pose.rotation,
                 scale: Vec3::ONE,
             },
+            Visibility::default(),
             RigidBody::Static,
             identity,
             Body,
