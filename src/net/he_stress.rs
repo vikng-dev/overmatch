@@ -154,7 +154,21 @@ fn count_burst(
 
 #[cfg(test)]
 mod tests {
+    use std::future::poll_fn;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Poll, Waker};
+    use std::time::{Duration, Instant};
+
+    use bevy::asset::io::{
+        AssetReader, AssetReaderError, AssetSourceBuilder, AssetSourceId, PathStream, Reader,
+        file::FileAssetReader,
+    };
+
     use super::*;
+
+    // Fixture: flight update budget; async asset admission has no update-count bound.
+    const FLIGHT_UPDATES: usize = 512;
 
     /// Operators rely on refusal before startup and on an off installer mounting nothing.
     #[test]
@@ -190,8 +204,42 @@ mod tests {
     /// ledger with the shipped sim, even while the empty Battle waits for its first player.
     #[test]
     fn armed_empty_server_breaks_through_real_flight() {
-        use crate::buildings::breakage::WallRecord;
+        assert_real_flight(App::new());
+    }
+
+    /// The game's damage model must still fire and burst when spec IO takes more updates than
+    /// flight. The server's admission gate, rather than machine speed, starts this check's clock.
+    #[test]
+    fn asset_io_may_outlast_the_flight_update_budget() {
         let mut app = App::new();
+        let delay = Arc::new(Mutex::new(ReadDelay {
+            updates_left: FLIGHT_UPDATES + 1,
+            waiting: None,
+        }));
+        let reader_delay = delay.clone();
+        app.register_asset_source(
+            AssetSourceId::Default,
+            AssetSourceBuilder::new(move || {
+                Box::new(DelayedSpecReader {
+                    file: FileAssetReader::new(crate::assets::asset_root()),
+                    delay: reader_delay.clone(),
+                })
+            }),
+        )
+        .add_systems(Update, move || {
+            let mut delay = delay.lock().unwrap();
+            delay.updates_left = delay.updates_left.saturating_sub(1);
+            if delay.updates_left == 0
+                && let Some(waiting) = delay.waiting.take()
+            {
+                waiting.wake();
+            }
+        });
+        assert_real_flight(app);
+    }
+
+    fn assert_real_flight(mut app: App) {
+        use crate::buildings::breakage::WallRecord;
         app.add_plugins(crate::server_plugin_floor())
             .add_plugins(super::super::physics::physics_plugins())
             .add_plugins(crate::SimPlugin)
@@ -200,7 +248,7 @@ mod tests {
             })
             .add_plugins(super::super::plugin)
             .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-                super::super::test_harness::TICK,
+                Duration::ZERO,
             ))
             .add_systems(Startup, crate::tank::load_tank_sim_assets)
             .add_systems(Update, super::super::open_gameplay_gate);
@@ -212,7 +260,40 @@ mod tests {
         // Fixture operator recipe: finite shots, not an obligation on emergent piece counts.
         install_value(&mut app, Some("3:0.25")).unwrap();
         super::super::test_harness::finish(&mut app);
-        for _ in 0..512 {
+        // The game's damage model starts its flight budget only after async spec IO and the
+        // shipped admission gate finish. A frozen sim clock leaves the recipe unfired at entry.
+        let started = Instant::now();
+        loop {
+            app.update();
+            if *app
+                .world()
+                .resource::<State<crate::state::AppState>>()
+                .get()
+                == crate::state::AppState::Playing
+            {
+                break;
+            }
+            // Fixture: startup watchdog and IO-worker yield, independent of flight time.
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "server admission timed out before HE flight: state={:?}, spec {}={:?}",
+                app.world()
+                    .resource::<State<crate::state::AppState>>()
+                    .get(),
+                crate::tank::TANK_SPEC_PATH,
+                app.world().resource::<AssetServer>().load_state(
+                    &app.world()
+                        .resource::<crate::tank::PendingTankAssets>()
+                        .spec
+                ),
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(app.world().resource::<HeStress>().fired, 0);
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            super::super::test_harness::TICK,
+        ));
+        for _ in 0..FLIGHT_UPDATES {
             app.update();
             if app.world().resource::<HeStress>().burst == 3 {
                 break;
@@ -256,5 +337,52 @@ mod tests {
             battle.phase,
             super::super::battle::BattlePhase::WaitingForPlayer
         ));
+    }
+
+    struct ReadDelay {
+        updates_left: usize,
+        waiting: Option<Waker>,
+    }
+
+    /// A pending read yields its IO worker; unrelated tests and assets keep loading normally.
+    struct DelayedSpecReader {
+        file: FileAssetReader,
+        delay: Arc<Mutex<ReadDelay>>,
+    }
+
+    impl AssetReader for DelayedSpecReader {
+        async fn read<'a>(&'a self, path: &'a Path) -> Result<impl Reader + 'a, AssetReaderError> {
+            if path == Path::new(crate::tank::TANK_SPEC_PATH) {
+                poll_fn(|cx| {
+                    let mut delay = self.delay.lock().unwrap();
+                    if delay.updates_left == 0 {
+                        Poll::Ready(())
+                    } else {
+                        delay.waiting = Some(cx.waker().clone());
+                        Poll::Pending
+                    }
+                })
+                .await;
+            }
+            self.file.read(path).await
+        }
+
+        async fn read_meta<'a>(
+            &'a self,
+            path: &'a Path,
+        ) -> Result<impl Reader + 'a, AssetReaderError> {
+            self.file.read_meta(path).await
+        }
+
+        async fn read_directory<'a>(
+            &'a self,
+            path: &'a Path,
+        ) -> Result<Box<PathStream>, AssetReaderError> {
+            self.file.read_directory(path).await
+        }
+
+        async fn is_directory<'a>(&'a self, path: &'a Path) -> Result<bool, AssetReaderError> {
+            self.file.is_directory(path).await
+        }
     }
 }
