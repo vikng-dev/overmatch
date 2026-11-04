@@ -959,8 +959,6 @@ mod tests {
             crate::damage::DamageConsequences.intern(),
             SimPhase::RecordedConsequences.intern(),
             crate::construction::breakage::LawSet.intern(),
-            crate::trees::TreeFallSet.intern(),
-            crate::trees::TreeDerived.intern(),
             SimPhase::Publish.intern(),
         ];
         for pair in sets.windows(2) {

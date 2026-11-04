@@ -1,4 +1,4 @@
-//! The driver's two-stage crossing — the hand-off from the entrance corridor to the transit
+//! The game's damage model: the driver's two-stage crossing — the hand-off from entrance to transit
 //! corridor counts every entry exactly once — and the one mechanism: the runtime march and the
 //! §13.6 gate's driver decide the same crossings.
 
@@ -8,7 +8,7 @@ use bevy::ecs::system::RunSystemOnce;
 use super::*;
 use crate::ballistics::march_tests::{box_trimesh, world_with_trimesh_plates};
 use crate::ballistics::walk::FaceHit;
-use crate::ballistics::{BallisticVolume, RoundBody, bound, capability};
+use crate::ballistics::{BallisticVolume, RoundBody, VolumeMaterial, bound, capability};
 
 /// Fixture round and plate: an 88-class disc against 50 mm of steel. Fixture data; nothing below
 /// depends on whether it perforates.
@@ -2749,25 +2749,18 @@ fn a_direction_does_not_dose_the_volume_its_throw_leaves() {
 // A certified convex body is crossed or missed, never a walk failure
 // ---------------------------------------------------------------------------------------------
 
-/// Where the off-centre discs strike the fixture trunk, and its radius there: DERIVED from the
-/// fixture's first segment, 0.3 m tapering to 0.2 m over 2 m (`trees::tests::fixture_asset`).
-const TRUNK_SHOT_HEIGHT: f32 = 1.0;
-const TRUNK_RADIUS_AT_SHOT: f32 = 0.25;
+/// Fixture convex geometry: a twelve-sided frustum, 1.8 m high with 0.4/0.15 m ring radii.
+/// Its middle cross-section has radius (0.4 + 0.15) / 2 = 0.275 m (DERIVED).
+const CONVEX_SHOT_HEIGHT: f32 = 0.9;
+const CONVEX_RADIUS_AT_SHOT: f32 = 0.275;
 
-/// Stand-offs from a march step's anchor to the trunk: up to one tick's travel, DERIVED as
-/// 800 m/s × 15.625 ms = 12.5 m. The anchor's distance sets the scale every corridor parameter is
-/// rounded at, so the sweep covers the range a step can start from.
-const TRUNK_STANDOFFS: [f32; 5] = [0.5, 2.0, 5.3, 9.7, 12.3];
+/// Fixture stand-offs cover a step's possible anchors, up to 800 m/s × 15.625 ms = 12.5 m
+/// (DERIVED). Their scale exercises the rounding of corridor parameters.
+const CONVEX_STANDOFFS: [f32; 5] = [0.5, 2.0, 5.3, 9.7, 12.3];
 
-/// A CERTIFIED CONVEX BODY IS CROSSED WITH A CHORD AT ANY OFFSET AND INCIDENCE (the game's damage
-/// model: a trunk segment is one HP pool, and the line's chord through it carries its dose).
-///
-/// The trees' own 12-gon frustum collider (`trees::spawn`) struck off-centre by the fixture 88's
-/// disc: one disc wholly outboard of the 12-gon's 30° vertex, which meets only the facet whose
-/// normal stands 75° off the line of fire, and discs at 0.70–1.10 of the trunk's radius toward its
-/// 0° vertex. Every disc meets the trunk, and the fixture round bites its low-resistance material, so each must
-/// bite in and lay a positive chord into the trunk. The game's damage model treats a structured
-/// walk contradiction as a bug and panics, so the generic convex collector must pair honestly.
+/// The game's damage model crosses a convex solid with a positive chord at every disc offset
+/// and incidence that meets it. The inline frustum and low resistance are fixture data: the
+/// witness pins collector pairing and hand-off, independently of any asset's construction model.
 ///
 /// What it holds the convex narrow phase to: `collect::collect_convex` reads the hull through
 /// `collect::clip_convex`, one entry strictly before one exit or none, each at the exact plane
@@ -2780,25 +2773,30 @@ const TRUNK_STANDOFFS: [f32; 5] = [0.5, 2.0, 5.3, 9.7, 12.3];
 /// before an entry at a vertical edge is `UnexpectedExit`; one that reads an entry with no exit is
 /// `IncompleteCorridor`. Each is a bug in the game's damage model and panics in gameplay.
 #[test]
-fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
+fn a_convex_solid_is_crossed_with_a_chord_at_any_offset_and_incidence() {
     let mut app = world_with_trimesh_plates(&[]);
-    let segment = {
-        let world = app.world_mut();
-        let mut queue = bevy::ecs::world::CommandQueue::default();
-        let mut commands = Commands::new(&mut queue, world);
-        let tree = crate::trees::spawn(
-            &mut commands,
-            &crate::trees::tests::fixture_kind_of("Wood", 100),
-            crate::scatter::MapInstance {
-                id: "trunk".to_owned(),
-                ordinal: 0,
-            },
+    let points = [(0.0, 0.4), (1.8, 0.15)]
+        .into_iter()
+        .flat_map(|(height, radius)| {
+            (0..12).map(move |k| {
+                let angle = std::f32::consts::TAU * k as f32 / 12.0;
+                Vec3::new(radius * angle.cos(), height, radius * angle.sin())
+            })
+        })
+        .collect();
+    let volume = app
+        .world_mut()
+        .spawn((
             Transform::IDENTITY,
-        );
-        queue.apply(world);
-        // The segment the shot height lies in: the first, 0 to 2 m up.
-        world.get::<Children>(tree).expect("segments")[0]
-    };
+            RigidBody::Static,
+            Collider::convex_hull(points).expect("the fixture's two rings define a convex solid"),
+            CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
+            BallisticVolume {
+                material: VolumeMaterial::fixture(1.0),
+                substance: "RHA".to_owned(),
+            },
+        ))
+        .id();
     for _ in 0..8 {
         app.update();
     }
@@ -2807,15 +2805,15 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
     // Wholly outboard of the 30° vertex by 2 mm, so the disc meets the 75° facet alone.
     let graze = (
         "75° graze".to_owned(),
-        30.0_f32.to_radians().cos() * TRUNK_RADIUS_AT_SHOT + radius + 0.002,
+        30.0_f32.to_radians().cos() * CONVEX_RADIUS_AT_SHOT + radius + 0.002,
     );
     let offsets = [0.70, 0.80, 0.90, 0.95, 1.00, 1.05, 1.10]
-        .map(|frac: f32| (format!("{frac:.2} r"), frac * TRUNK_RADIUS_AT_SHOT));
+        .map(|frac: f32| (format!("{frac:.2} r"), frac * CONVEX_RADIUS_AT_SHOT));
     let direction = Vec3::NEG_Z;
     let mut failures = Vec::new();
     for (pose, x) in std::iter::once(graze).chain(offsets) {
-        for standoff in TRUNK_STANDOFFS {
-            let origin = Vec3::new(x, TRUNK_SHOT_HEIGHT, standoff);
+        for standoff in CONVEX_STANDOFFS {
+            let origin = Vec3::new(x, CONVEX_SHOT_HEIGHT, standoff);
             let chord = app
                 .world_mut()
                 .run_system_once(
@@ -2876,7 +2874,7 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                         )?;
                         Ok::<_, WalkError>(plan.deposits.iter().map(|line| &line.dose).find_map(
                             |dose| match dose.source {
-                                DoseSource::Line { chord, .. } if dose.address == segment => {
+                                DoseSource::Line { chord, .. } if dose.address == volume => {
                                     Some(chord)
                                 }
                                 _ => None,
@@ -2893,9 +2891,9 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
     }
     assert!(
         failures.is_empty(),
-        "every disc that meets the trunk crosses it with a positive chord; {} of {} did not:\n{}",
+        "every disc that meets the solid crosses it with a positive chord; {} of {} did not:\n{}",
         failures.len(),
-        8 * TRUNK_STANDOFFS.len(),
+        8 * CONVEX_STANDOFFS.len(),
         failures.join("\n"),
     );
 }

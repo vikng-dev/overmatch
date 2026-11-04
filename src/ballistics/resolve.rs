@@ -1666,7 +1666,8 @@ pub(crate) struct ResolveContext<'a, 'w, 's> {
             Option<&'static BallisticSurfaces>,
         ),
     >,
-    /// Authority = not a replica: only then does a crossing mutate health.
+    /// Apply pool losses on the authority; read-only instruments leave this false.
+    /// Clients replay public paths.
     pub deposit: bool,
     pub laws: WalkLaws,
 }

@@ -1,0 +1,4 @@
+// The game's damage-model crew-line game unit; game state only.
+(
+    hp_per_reference_mm: (10, Unit("crew-line dose scale: a witness chord times the round's crew line rate converts to shared HP on this scale, independently of hard-material resistance; pools and round coefficients balance in HP")),
+)

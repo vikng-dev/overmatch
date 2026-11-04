@@ -79,6 +79,12 @@ ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 # cannot block on runtime cleanup. Unix server stats also read CPU time and resident size through it.
 libc = "0.2"
 
+[build-dependencies]
+# Required scalar authoring data generates constant interfaces at build time, using the same
+# provenance admission as runtime assets. Both dependencies are already locked for the game.
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
+
 # The Objective-C runtime's own C declarations. Already in the tree through winit's `objc2` (same
 # locked version — this adds no compiled crate); named directly only by `quit::terminate`, which
 # installs one `applicationShouldTerminate:` method on winit's delegate class.

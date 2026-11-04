@@ -45,6 +45,13 @@ pub(crate) mod spall_cone;
 /// The energy-to-HP rate every dose of energy converts at: joules per HP point.
 pub(crate) mod energy_dose;
 
+#[cfg(test)]
+mod authored;
+
+mod authored_constants {
+    include!(concat!(env!("OUT_DIR"), "/ballistics_authored.rs"));
+}
+
 /// The game's damage model: the shared authored crew HP pool and geometry-based pen cam bands.
 pub(crate) mod box_classes;
 
@@ -240,11 +247,9 @@ fn elapsed_ticks(now: u32, then: u32) -> Option<u32> {
     (elapsed <= i32::MAX as u32).then_some(elapsed)
 }
 
-/// CEILING (chosen bound, not derived): the work/absurdity limit on cosmetic shell catch-up. A
-/// cursor-released shot normally ages ~0–1 tick at the cursor crossing; the arrival-clock path
-/// (`net::client::fire_catch_up_ticks`) reads this bound only as the consume-time validity bar
-/// and in the pre-sync arrival-presentation fallback. A fire tick older than the bound is stale
-/// or corrupt off the wire and fails closed rather than drawing a shortened, invented trajectory.
+/// Resolution: maximum fixed steps a cosmetic catch-up may evaluate, bounding per-shot work.
+/// The arrival-clock consumer also refuses older wire cues rather than inventing a shortened
+/// trajectory. Cursor release and the pre-sync arrival path share this work ceiling.
 pub(crate) const MAX_COSMETIC_CATCH_UP_TICKS: u32 = 100;
 
 /// The registry's `Reference` facts (`assets/materials/materials.ron`), parsed once from embedded
@@ -364,26 +369,20 @@ pub(crate) fn round_in_domain(round: RoundBody, speed: f32) -> Result<(), String
     Ok(())
 }
 
-/// HP points per reference-mm of the one dose still authored in reference-mm, a witness's chord at
-/// the round's crew line rate: one HP point is 0.1 reference-mm (design doc §6). RESOLUTION: a
-/// unit, not a balance value. Every other dose is energy: a hard box's line dose and a bounce's
-/// shock convert at the one energy rate ([`energy_dose::joules_per_hp`], [`energy_units`]), every
-/// field deposit at its mechanism's own unit ([`spall_cone::FieldUnit`], [`field_units`]).
-pub(crate) const HP_PER_REFERENCE_MM: u64 = 10;
+/// The game's crew-line HP unit, admitted from `assets/ballistics/crew_line.ron` at build time.
+/// Only witness chord dose uses it; hard line and shock energy use [`energy_units`], fields their
+/// mechanism's unit through [`field_units`].
+pub(crate) const HP_PER_REFERENCE_MM: u64 = authored_constants::HP_PER_REFERENCE_MM;
 
-/// Fixed-point dose units per reference-mm. Every dose contribution is quantized to whole units
-/// before it is summed, so a box's per-shot total is an integer sum: the same for every order its
-/// contributions arrive in. RESOLUTION: 1 unit = 1e-9 reference-mm = 1e-8 HP point, finer than an
-/// f32 dose's own spacing from 0.01 reference-mm up (ulp(0.01) = 9.3e-10, DERIVED), so quantizing
-/// costs no more than the f32 dose already did. Decimal, so an HP point is exactly
-/// [`DOSE_UNITS_PER_HP`] units and a pool unit exactly [`DOSE_UNITS_PER_POOL_UNIT`], and a tie is
-/// an exact integer. A u64 total holds 1.8e10 reference-mm, 1.8e11 HP points (DERIVED). An energy
-/// dose enters in the same units through its HP points ([`energy_units`], [`field_units`]).
-pub(crate) const DOSE_UNITS_PER_REFERENCE_MM: u64 = 1_000_000_000;
+/// Resolution: 1 dose unit = 1e-8 HP bounds each contribution's rounding error at 5e-9 HP
+/// (DERIVED), below the pool resolution while retaining a large accumulator range.
+/// Contributions quantize before summation, making the total independent of arrival order.
+/// Decimal units represent HP and pool units exactly. A u64 holds 1.8e11 HP (DERIVED).
+const DOSE_UNITS_PER_HP: u64 = 100_000_000;
 
-/// Dose units per HP point: [`DOSE_UNITS_PER_REFERENCE_MM`] / [`HP_PER_REFERENCE_MM`], exact.
-const DOSE_UNITS_PER_HP: u64 = DOSE_UNITS_PER_REFERENCE_MM / HP_PER_REFERENCE_MM;
-const _: () = assert!(DOSE_UNITS_PER_HP * HP_PER_REFERENCE_MM == DOSE_UNITS_PER_REFERENCE_MM);
+/// The crew-line unit changes dose magnitude, never the fixed-point HP resolution. Its admitted
+/// u32 scale times the HP resolution fits u64 (DERIVED: at most 4.3e17 units).
+pub(crate) const DOSE_UNITS_PER_REFERENCE_MM: u64 = HP_PER_REFERENCE_MM * DOSE_UNITS_PER_HP;
 
 /// Pool units per HP point: what an HP pool holds ([`ComponentHealth`]), every settle of a shot's
 /// dose and every pool figure a record or the wire carries are whole pool units, a thousandth of a
@@ -728,7 +727,7 @@ impl ShotDose {
 }
 
 /// The game's damage model: hit confirmation counts [`ShotDose::shown_losses`] only on another
-/// tank's [`VolumeOf`] pools, matching its display. Unowned pools (trees) and the shooter's pools
+/// tank's [`VolumeOf`] pools, matching its display. Unowned pools and the shooter's pools
 /// receive dose but confirm no hit; [`walk_field`] reaches volumes regardless of owner.
 fn owned_losses(dose: &ShotDose, owners: &Query<&VolumeOf>, shooter: Option<Entity>) -> u32 {
     dose.shown_losses()
@@ -1008,6 +1007,9 @@ pub(crate) struct MarchProbe {
     pub(crate) reached: Vec<Vec<Option<Entity>>>,
 }
 
+#[cfg(test)]
+pub(crate) use march_tests::assert_occupied_matter_queries;
+
 /// The game's damage model: mount [`probe_march`] after completed collider placement, beside
 /// the production walk, with an empty [`MarchProbe`].
 #[cfg(test)]
@@ -1018,8 +1020,7 @@ pub(crate) fn mount_march_probe(app: &mut App) {
             .after(avian3d::prelude::PhysicsSystems::Writeback)
             .after(SimPhase::ColliderPoses)
             .before(SimPhase::ProjectileMarch)
-            .before(crate::construction::breakage::LawSet)
-            .before(crate::trees::TreeFallSet),
+            .before(crate::construction::breakage::LawSet),
     );
 }
 
@@ -1783,7 +1784,7 @@ pub struct SpallMarks {
 
 /// Catch-up age beyond which muzzle effects and fire audio are suppressed; authority dose is
 /// unaffected.
-pub(crate) const STALE_FIRE_TICKS: u32 = 16;
+pub(crate) const STALE_FIRE_TICKS: u32 = authored_constants::STALE_FIRE_TICKS;
 
 /// This round carries a tracer — a fact of the BELT it came out of ([`FireShell::tracer`]), and so a
 /// simulation fact: it says what the round IS, not that anything is drawn. Flight and collision are
@@ -1954,8 +1955,6 @@ pub fn sim_plugin(app: &mut App) {
             DamageConsequences,
             SimPhase::RecordedConsequences,
             crate::construction::breakage::LawSet,
-            crate::trees::TreeFallSet,
-            crate::trees::TreeDerived,
             SimPhase::Publish,
         )
             .chain(),
@@ -2458,9 +2457,6 @@ fn integrate_projectiles(
     // Optional fixed-tick cost sink (`SPIKE_COST_TRACE` or server stats), covering the whole march.
     // Unarmed runs pay only the Option check.
     mut cost: Option<ResMut<crate::cost::TickClock>>,
-    // The authority's optional shot-lifecycle recorder. Public path playback records on the client
-    // in `path::present`; transport records authority emissions.
-    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     time: Res<Time>,
     mut commands: Commands,
 ) {
@@ -2471,9 +2467,8 @@ fn integrate_projectiles(
     // No clock read unless the cost sink is armed.
     let march_t0 = cost.as_ref().map(|_| Instant::now());
     let dt = time.delta_secs();
-    // Authority = not a replica: only then does a hit actually mutate health here.
-    let deposit = replica.is_none();
-    if !deposit {
+    // Replicas present public paths; only authority constructs and executes a march tick.
+    if replica.is_some() {
         return;
     }
 
@@ -2512,8 +2507,6 @@ fn integrate_projectiles(
         let mut tick = MarchTick {
             now,
             dt,
-            deposit,
-            shot_trace: &mut shot_trace,
             commands: &mut commands,
         };
         let (marks_from, emptied_from) = (shell.marks.log.len(), shell.dose.emptied().len());
@@ -2529,50 +2522,48 @@ fn integrate_projectiles(
             &mut bodies,
             &mut tick,
         );
-        if deposit {
-            recorder.note(
-                entity,
-                &mut shell.projectile.contacted,
-                shot.map(|shot| shot.0),
-                recording,
-                shell.marks,
-                (marks_from, reached_from),
-                shell.dose,
-                emptied_from,
-                &world.owners,
-                &health,
-            );
-            // Each pool this step emptied, with the deposit that did it: its own entry into the
-            // box, never the crossing's entrance, which a neighbouring volume shares.
-            for &address in &shell.dose.emptied()[emptied_from..] {
-                let (at, along) = match shell.dose.emptier(address).expect(
-                    "the game's damage model records the emptying deposit's context when settle \
-                     appends an emptied pool",
-                ) {
-                    DoseContext::Line { entry, along } => (entry, Some(along)),
-                    DoseContext::Field { origin } => (origin, None),
-                };
-                commands.trigger(PoolEmptied {
-                    entity: address,
-                    at,
-                    along,
-                });
-            }
-            // A fuze holds its burst until it bursts, and only bursting leaves it inert.
-            let burst = burst_before.filter(|_| shell.projectile.fuze.burst().is_none());
-            if shell.marks.log.len() > marks_from
-                || shell.spall.cones.len() > cones_from
-                || burst.is_some()
-                || !step.lines.is_empty()
-            {
-                commands.trigger(ShellMarched {
-                    shell: entity,
-                    marks_from,
-                    cones_from,
-                    lines: step.lines,
-                    burst,
-                });
-            }
+        recorder.note(
+            entity,
+            &mut shell.projectile.contacted,
+            shot.map(|shot| shot.0),
+            recording,
+            shell.marks,
+            (marks_from, reached_from),
+            shell.dose,
+            emptied_from,
+            &world.owners,
+            &health,
+        );
+        // Each pool this step emptied, with the deposit that did it: its own entry into the
+        // box, never the crossing's entrance, which a neighbouring volume shares.
+        for &address in &shell.dose.emptied()[emptied_from..] {
+            let (at, along) = match shell.dose.emptier(address).expect(
+                "the game's damage model records the emptying deposit's context when settle \
+                 appends an emptied pool",
+            ) {
+                DoseContext::Line { entry, along } => (entry, Some(along)),
+                DoseContext::Field { origin } => (origin, None),
+            };
+            commands.trigger(PoolEmptied {
+                entity: address,
+                at,
+                along,
+            });
+        }
+        // A fuze holds its burst until it bursts, and only bursting leaves it inert.
+        let burst = burst_before.filter(|_| shell.projectile.fuze.burst().is_none());
+        if shell.marks.log.len() > marks_from
+            || shell.spall.cones.len() > cones_from
+            || burst.is_some()
+            || !step.lines.is_empty()
+        {
+            commands.trigger(ShellMarched {
+                shell: entity,
+                marks_from,
+                cones_from,
+                lines: step.lines,
+                burst,
+            });
         }
 
         shell.transform.translation = step.position;
@@ -2581,8 +2572,7 @@ fn integrate_projectiles(
 
         // HP snapshots lose shot count: route a discrete fact reliably to the fire-time owner
         // through `net::shot_transport`. `owned_losses` keeps its marker aligned with tank displays.
-        if deposit
-            && step.damage_dealt > 0
+        if step.damage_dealt > 0
             && !damage_report.0
             && let Some(shot) = shot
         {
@@ -2634,19 +2624,17 @@ fn integrate_projectiles(
     }
 }
 
-/// The game's damage model: one authority tick's publication stamp, duration, deposit role,
-/// diagnostic sink and command sink, shared by its shells.
-struct MarchTick<'a, 't, 'w, 's> {
+/// The game's damage model: one authority tick's publication stamp, duration and command sink,
+/// shared by its shells.
+struct MarchTick<'a, 'w, 's> {
     now: u32,
     dt: f32,
-    deposit: bool,
-    shot_trace: &'a mut Option<ResMut<'t, crate::shot_trace::ShotTrace>>,
     commands: &'a mut Commands<'w, 's>,
 }
 
 /// AUTHORITY: the witness pass over `legs` (ADR-0040, [`wound::line`]), through the witnesses
 /// `admit` keeps. Doses each witness the line put a chord into, logs one [`ArmourMark::Wound`] and
-/// settles it at its own index; returns the pool units removed. A replica takes nothing.
+/// settles it at its own index; returns the pool units removed.
 ///
 /// The hard world is already resolved when this runs and nothing here reaches back into it, so a
 /// contradiction in the witness walk is a bug and panics in every build.
@@ -2658,9 +2646,6 @@ fn wound_legs(
     speed: f32,
     health: &mut Query<&mut ComponentHealth>,
 ) -> u64 {
-    if !context.deposit {
-        return 0;
-    }
     let (volumes, incoming) = wound::line(context, admit, legs, shell.projectile.wound)
         .unwrap_or_else(|error| error.panic());
     let Some(incoming) = incoming else {
@@ -2701,7 +2686,7 @@ fn march_shell_step(
     bodies: &mut Query<Forces>,
     tick: &mut MarchTick,
 ) -> MarchStep {
-    let MarchTick { dt, deposit, .. } = *tick;
+    let dt = tick.dt;
     world.moment.set(Some(0.0));
     world.sweep.set(None);
     world.contact_motion.set(None);
@@ -2799,7 +2784,7 @@ fn march_shell_step(
     let context = resolve::ResolveContext {
         world,
         colliders,
-        deposit,
+        deposit: true,
         laws: walk::WalkLaws::default(),
     };
     // The game's damage model discovers only outside a pending crossing. A carried result
@@ -2982,12 +2967,10 @@ fn march_shell_step(
                 damage_dealt += wound_legs(shell, &context, &not_own, &[leg], speed, health);
                 // AUTHORITY: the ground stops the round dead, with no chord to resist it over, so
                 // its resisting force is DERIVED unbounded: it functions every impact fuze.
-                if deposit {
-                    shell
-                        .projectile
-                        .fuze
-                        .entered(f64::INFINITY, speed, None, distance);
-                }
+                shell
+                    .projectile
+                    .fuze
+                    .entered(f64::INFINITY, speed, None, distance);
                 strike_ground(shell, entry, normal, tick);
                 budget.fly(f64::from(distance / flight.speed));
                 stop_at(shell, &mut flight, entry, distance);
@@ -3622,9 +3605,7 @@ fn burst_here(
     throw_burst(shell, context, &burst, flight, speed, &|volume| {
         health.contains(volume)
     });
-    let removed = shell
-        .dose
-        .settle(health, context.deposit, shell.marks.log.len() - 1);
+    let removed = shell.dose.settle(health, true, shell.marks.log.len() - 1);
     let ended = if speed > 0.0 {
         let projectile = &mut **shell.projectile;
         projectile.round = bound(nose);
@@ -3636,31 +3617,16 @@ fn burst_here(
     (ended, removed)
 }
 
-/// The ground stops the shell at `entry`: the struck terrain [`Impact`], and on a client the
-/// lifecycle row closing the shot. The caller stops the flight at `entry`.
+/// The ground stops the authority's shell at `entry`, publishing the struck terrain impact.
+/// Client lifecycle recording belongs to public-path presentation. The caller stops the flight.
 fn strike_ground(shell: &MarchingShell, entry: Vec3, normal: Vec3, tick: &mut MarchTick) {
-    let MarchTick { now, deposit, .. } = *tick;
-    let (shot_trace, commands) = (&mut *tick.shot_trace, &mut *tick.commands);
-    let shot = shell.shot;
-    commands.trigger(Impact {
+    tick.commands.trigger(Impact {
         position: entry,
         normal,
         style: shell.projectile.impact_style(),
         surface: ImpactSurface::Terrain,
         outcome: ImpactOutcome::Struck,
     });
-    // A terrain stop is the one shot terminal that needs NO confirm: static, pose-independent
-    // geometry, so both ends already agree (ADR-0021's invariant). Recorded on the client so the
-    // analyzer can close the lifecycle of a shot that simply never reached armor.
-    if !deposit && let Some(shot) = shot {
-        crate::shot_trace::record(
-            shot_trace,
-            "end",
-            now,
-            shot.0,
-            || json!({ "why": "terrain" }),
-        );
-    }
 }
 
 /// What lies ahead of a flight, for the next crossing.
@@ -3923,18 +3889,21 @@ mod tests {
         along: Vec3::NEG_Z,
     };
 
-    /// The game's damage model converts valid dose to the nearest pool unit, ties away from zero.
-    /// Fixture doses (reference-mm, DERIVED 10 HP points each).
+    /// The game's damage model rounds quantized dose to the nearest pool unit, ties away from
+    /// zero. Pool settlement relies on this independently of authored crew-line and energy rates.
     #[test]
     fn a_dose_converts_to_the_nearest_pool_unit() {
-        assert_eq!(pool_units(0.0), 0);
-        assert_eq!(pool_units(0.000_04), 0, "0.4 of a unit");
+        assert_eq!(pool_units_of(0), 0);
+        assert_eq!(pool_units_of(DOSE_UNITS_PER_POOL_UNIT / 2 - 1), 0);
         assert_eq!(
-            pool_units(0.000_05),
+            pool_units_of(DOSE_UNITS_PER_POOL_UNIT / 2),
             1,
-            "half a unit, a tie, rounds away from zero"
+            "a tie rounds away from zero"
         );
-        assert_eq!(pool_units(3.0), 30 * POOL_UNITS_PER_HP);
+        assert_eq!(
+            pool_units_of(30 * DOSE_UNITS_PER_HP),
+            30 * POOL_UNITS_PER_HP
+        );
     }
 
     /// The game's damage model never turns a broken deposit into zero through a saturating cast.
@@ -3951,13 +3920,13 @@ mod tests {
 
     /// A box loses its shot's dose converted once on its total: doses each below half a pool unit
     /// add up before they are converted, a settle mid-shot takes only what the converted total has
-    /// gained since the last, and the pool stops at zero. Fixture doses (reference-mm).
+    /// gained since the last, and the pool stops at zero. Fixture doses are fractions of pool units.
     #[test]
     fn a_shots_dose_is_converted_once_per_box() {
         let mut world = World::new();
         let target = world.spawn(ComponentHealth::full(30)).id();
         world.spawn(ShotDose::default());
-        let dose = |world: &mut World, amounts: &[f32]| -> u64 {
+        let dose = |world: &mut World, amounts: &[u64]| -> u64 {
             let amounts = amounts.to_vec();
             world
                 .run_system_once(
@@ -3965,7 +3934,7 @@ mod tests {
                           mut health: Query<&mut ComponentHealth>| {
                         let mut shot = shot.single_mut().unwrap();
                         for amount in &amounts {
-                            shot.add(target, *amount, FIXTURE_CONTEXT);
+                            shot.add_units(target, *amount, FIXTURE_CONTEXT);
                         }
                         shot.settle(&mut health, true, 0)
                     },
@@ -3974,22 +3943,26 @@ mod tests {
         };
         let full = 30 * POOL_UNITS_PER_HP;
         assert_eq!(
-            dose(&mut world, &[0.000_04; 10]),
+            dose(&mut world, &[DOSE_UNITS_PER_POOL_UNIT * 4 / 10; 10]),
             4,
             "ten 0.4-unit doses take 4 units"
         );
         assert_eq!(
-            dose(&mut world, &[0.000_03]),
+            dose(&mut world, &[DOSE_UNITS_PER_POOL_UNIT * 3 / 10]),
             0,
             "4.3 units converts to the 4 taken"
         );
-        assert_eq!(dose(&mut world, &[0.000_03]), 1, "4.6 units converts to 5");
+        assert_eq!(
+            dose(&mut world, &[DOSE_UNITS_PER_POOL_UNIT * 3 / 10]),
+            1,
+            "4.6 units converts to 5"
+        );
         assert_eq!(
             world.get::<ComponentHealth>(target).unwrap().held(),
             full - 5
         );
         assert_eq!(
-            dose(&mut world, &[100.0]),
+            dose(&mut world, &[100 * DOSE_UNITS_PER_HP]),
             u64::from(full - 5),
             "the pool stops at zero"
         );
@@ -4079,7 +4052,7 @@ mod tests {
 
     /// The game's damage model accumulates sub-half-point shots; every view relies on
     /// [`ComponentHealth::shown`] showing full until a whole point is lost and zero only when empty.
-    /// Fixture: separate [`ShotDose`]s of 0.47 HP (0.047 reference-mm) into a 3-point pool.
+    /// Fixture: separate [`ShotDose`]s of 0.47 HP into a 3-point pool.
     /// Whole-point dose rounding never empties it; rounding the display down or to nearest shows
     /// loss after the first or second shot. Emptying before the full pool is taken also fails.
     #[test]
@@ -4091,7 +4064,7 @@ mod tests {
             world
                 .run_system_once(move |mut health: Query<&mut ComponentHealth>| {
                     let mut shot = ShotDose::default();
-                    shot.add(target, 0.047, FIXTURE_CONTEXT);
+                    shot.add_units(target, 47 * DOSE_UNITS_PER_HP / 100, FIXTURE_CONTEXT);
                     shot.settle(&mut health, true, 0);
                     shot.emptied().contains(&target)
                 })
@@ -4116,8 +4089,8 @@ mod tests {
 
     /// The deposit that empties a pool is the one whose running sum, in the settlement that
     /// emptied it, first reaches what the pool held — never the first of that settlement, never one
-    /// of an earlier settlement. The fall law reads its context (ADR-0016: the consequence derives
-    /// from the cause). Fixture doses (reference-mm) on a 10 HP pool.
+    /// of an earlier settlement. Consequence readers rely on the context of that deposit
+    /// (ADR-0016). Fixture doses are HP on a 10 HP pool.
     #[test]
     fn the_deposit_that_empties_a_pool_is_the_one_that_crosses_what_it_held() {
         use bevy::ecs::system::RunSystemOnce;
@@ -4142,7 +4115,11 @@ mod tests {
                           mut health: Query<&mut ComponentHealth>| {
                         let mut shot = shot.single_mut().unwrap();
                         for (amount, context) in &deposits {
-                            shot.add(target, *amount, *context);
+                            shot.add_units(
+                                target,
+                                (f64::from(*amount) * DOSE_UNITS_PER_HP as f64).round() as u64,
+                                *context,
+                            );
                         }
                         shot.settle(&mut health, true, 0);
                         shot.emptier(target)
@@ -4152,7 +4129,7 @@ mod tests {
         };
         let (mut world, target) = pool();
         assert_eq!(
-            settle(&mut world, target, vec![(0.7, line(-1.0))]),
+            settle(&mut world, target, vec![(7.0, line(-1.0))]),
             None,
             "7 of 10 HP taken: not emptied"
         );
@@ -4160,14 +4137,14 @@ mod tests {
             settle(
                 &mut world,
                 target,
-                vec![(0.1, line(-2.0)), (0.2, field), (0.5, line(-3.0))]
+                vec![(1.0, line(-2.0)), (2.0, field), (5.0, line(-3.0))]
             ),
             Some(field),
             "the 10th point lands with the second deposit of the second settlement"
         );
         let (mut world, target) = pool();
         assert_eq!(
-            settle(&mut world, target, vec![(5.0, field), (0.1, line(-2.0))]),
+            settle(&mut world, target, vec![(50.0, field), (1.0, line(-2.0))]),
             Some(field),
             "the first deposit alone empties the pool: the rest are not the emptier"
         );
@@ -4919,8 +4896,8 @@ pub(crate) mod march_tests {
         }
     }
 
-    /// The march's world with nothing in it: Avian, the transform hierarchy (a tree's colliders are
-    /// its root's children), the asset system, the manual clock and the real march, every plugin
+    /// The march's world with nothing in it: Avian, the transform hierarchy, the asset system,
+    /// the manual clock and the real march, every plugin
     /// mounted, finished and cleaned up. Callers spawn their geometry and [`settle`].
     fn bare_world(view: bool) -> App {
         let mut app = App::new();
@@ -7794,364 +7771,75 @@ pub(crate) mod march_tests {
         );
     }
 
-    /// Every pool a round of this march emptied, with the context the march gave it.
-    #[derive(Resource, Default)]
-    struct EmptiedLog(Vec<(Entity, Vec3, Option<Vec3>)>);
-
-    fn capture_emptied(emptied: On<PoolEmptied>, mut log: ResMut<EmptiedLog>) {
-        log.0.push((emptied.entity, emptied.at, emptied.along));
-    }
-
-    /// A bare world with the trees' fall law listening, as the sim composes it, and every spent
-    /// round kept for its record.
-    fn tree_world() -> App {
-        let mut app = bare_world(false);
-        app.insert_resource(RetainSpentShells(true))
-            .init_resource::<EmptiedLog>()
-            .add_observer(capture_emptied)
-            .add_observer(crate::trees::fell_on_pool_emptied);
-        app
-    }
-
-    /// A standing fixture tree of `kind` with its base at `base`.
-    fn spawn_tree(
-        app: &mut App,
-        kind: &std::sync::Arc<crate::trees::TreeKind>,
-        base: Vec3,
-        ordinal: u16,
-    ) -> Entity {
-        let world = app.world_mut();
-        let mut queue = bevy::ecs::world::CommandQueue::default();
-        let mut commands = Commands::new(&mut queue, world);
-        crate::trees::spawn(
-            &mut commands,
-            kind,
-            crate::scatter::MapInstance {
-                id: format!("fixture_{ordinal}"),
-                ordinal,
-            },
-            Transform::from_translation(base),
-        );
-        queue.apply(world);
-        world
-            .query_filtered::<(Entity, &crate::scatter::MapInstance), With<crate::trees::TreeBody>>(
-            )
-            .iter(world)
-            .find(|(_, identity)| identity.ordinal == ordinal)
-            .map(|(entity, _)| entity)
-            .expect("the tree spawned")
-    }
-
-    /// Fire `round` from `origin` along `dir` and march it `ticks` ticks, whatever it meets.
-    fn march_round(app: &mut App, round: Projectile, origin: Vec3, dir: Vec3, ticks: usize) {
-        app.world_mut().spawn((
-            round,
-            DamageReport::default(),
-            TerminalReport::default(),
-            ShellPath {
-                points: vec![origin],
-                segment_starts: Vec::new(),
-            },
-            PenetrationMarks::default(),
-            SpallMarks::default(),
-            Transform::from_translation(origin).looking_to(dir, Vec3::Y),
-        ));
-        for _ in 0..ticks {
-            app.update();
-        }
-    }
-
-    /// The game's damage model meets occupied wood at its live pose in every state. Flight,
-    /// corridors, fields and aim rely on the same segment; dropping Armor or its volume fails.
-    /// Fixture: one segment, freed upright then settled sideways away from its standing pose.
-    #[test]
-    fn flight_corridors_fields_and_aim_meet_freed_and_settled_wood() {
-        use avian3d::prelude::Gravity;
+    /// The game's damage model: every occupied convex volume must be readable by flight,
+    /// corridor, field and aim queries at its current pose. Callers supply isolated fixture matter
+    /// whose AABB centre is inside its solid, so the test ray crosses it independently of a view.
+    pub(crate) fn assert_occupied_matter_queries(app: &mut App, volume: Entity) {
         use bevy::ecs::system::RunSystemOnce;
-        let mut app = tree_world();
-        app.insert_resource(Gravity::ZERO).add_systems(
-            Update,
-            crate::trees::derive_systems().before(integrate_projectiles),
-        );
-        let root = spawn_tree(
-            &mut app,
-            &crate::trees::tests::fixture_kind(),
-            Vec3::ZERO,
-            0,
-        );
-        settle(&mut app);
-        let segment = app.world().get::<crate::trees::TreeParts>(root).unwrap().0[1];
-        for state in 0..3 {
-            if state == 1 {
-                app.world_mut()
-                    .entity_mut(root)
-                    .insert(crate::trees::TreeState::Down { cut: 1, dir: 0 });
-                settle(&mut app);
-            }
-            let owner = app.world().get::<ChildOf>(segment).unwrap().parent();
-            if state == 2 {
-                let at = Vec3::new(4.0, 1.0, 3.0);
-                let turn = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
-                app.world_mut().entity_mut(owner).insert((
-                    Transform::from_translation(at).with_rotation(turn),
-                    Position(at),
-                    Rotation(turn),
-                    LinearVelocity::ZERO,
-                    AngularVelocity::ZERO,
-                    avian3d::prelude::Sleeping,
-                ));
-                settle(&mut app);
-            }
-            let at = app.world().get::<Position>(segment).unwrap().0;
-            let turn = app.world().get::<Rotation>(segment).unwrap().0;
-            let origin = at + turn * Vec3::Y * 0.5 + Vec3::Z * 2.0;
-            app.world_mut()
-                .run_system_once(move |world: ProjectileMarchWorld| {
-                    let hit =
-                        cast_disc_segment(&world, &[Vec3::ZERO], origin, Dir3::NEG_Z, 4.0, &|_| {
-                            true
-                        });
-                    assert!(
-                        matches!(hit, Some(SegmentHit::Armor(hit)) if hit.entity == segment),
-                        "state {state}: flight must meet the wood"
-                    );
-                    let context = resolve::ResolveContext {
-                        world: &world,
-                        colliders: &world.geometry,
-                        deposit: true,
-                        laws: walk::WalkLaws::default(),
-                    };
-                    let corridor = resolve::build_corridor(
-                        &context,
-                        &|_| true,
-                        origin,
-                        Vec3::ZERO,
-                        Vec3::NEG_Z,
-                        4.0,
-                        walk::DiscFrame::anchored(Vec3::NEG_Z).unwrap(),
-                        0.0,
-                        &[],
-                    )
-                    .unwrap();
-                    assert!(
-                        corridor.samples[0]
-                            .hits
-                            .iter()
-                            .any(|hit| hit.volume == segment),
-                        "state {state}: corridor"
-                    );
-                    let reach = resolve::FieldReach::of_throw(&context, &|_| true, origin);
-                    let (_, field) = resolve::field_presence(&context, &reach, origin, Dir3::NEG_Z)
-                        .unwrap()
-                        .unwrap();
-                    assert!(
-                        field
-                            .layers
-                            .iter()
-                            .any(|layer| layer.present.iter().any(|p| p.volume == segment)),
-                        "state {state}: field"
-                    );
-                    let aimed = crate::aim::aim_distance(
-                        &world.spatial,
-                        Ray3d::new(origin, Dir3::NEG_Z),
-                        4.0,
-                        Entity::PLACEHOLDER,
-                        &world.owners,
-                        &world.parents,
-                    );
-                    assert!(aimed < 2.0, "state {state}: aim must meet the wood");
-                })
-                .unwrap();
-        }
-    }
-
-    /// Where and along what the first of `tree`'s segment pools to empty was emptied; panics
-    /// naming every emptying if none was.
-    fn emptied(app: &App, tree: Entity) -> (Vec3, Option<Vec3>) {
-        let world = app.world();
-        let log = &world.resource::<EmptiedLog>().0;
-        log.iter()
-            .find(|(entity, ..)| {
-                world
-                    .get::<ChildOf>(*entity)
-                    .is_some_and(|parent| parent.parent() == tree)
-            })
-            .map(|&(_, at, along)| (at, along))
-            .unwrap_or_else(|| panic!("no segment of {tree:?} was emptied; emptied: {log:?}"))
-    }
-
-    /// `tree`'s segment pools, from the base.
-    fn segment_pools(app: &App, tree: Entity) -> Vec<ComponentHealth> {
-        let world = app.world();
-        world
-            .get::<Children>(tree)
-            .expect("segments")
-            .iter()
-            .map(|segment| *world.get::<ComponentHealth>(segment).expect("a pool"))
-            .collect()
-    }
-
-    /// Identical fixture 88 rounds fired level down -Z at `height` up the axis of `tree` until it
-    /// falls; how many it took, or `None` if `cap` did not fell it.
-    fn shots_to_fell(app: &mut App, tree: Entity, height: f32, cap: usize) -> Option<usize> {
-        let base = app.world().get::<Transform>(tree).unwrap().translation;
-        (1..=cap).find(|_| {
-            march_round(
-                app,
-                fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0),
-                base + Vec3::new(0.0, height, 7.0),
-                Vec3::NEG_Z,
-                8,
-            );
-            app.world().get::<crate::trees::TreeState>(tree)
-                != Some(&crate::trees::TreeState::Standing)
-        })
-    }
-
-    /// WITH EQUAL SHOTS, A THINNER SEGMENT EMPTIES IN FEWER OF THEM THAN A THICKER ONE (the game's
-    /// damage model, issue 149): identical rounds centred on the fixture trunk's wide base
-    /// segment (mid-height radius 0.25 m) and on its narrow top one (0.075 m), each on a tree of
-    /// its own, fell the top in fewer shots, and each tree breaks at the segment it was shot in.
-    /// A segment's pool grows with its cross-section and a line's dose with its chord, so the
-    /// shots grow with the diameter. One pool for the whole tree takes MORE shots up the thin top
-    /// (its chord is shorter, its pool the same); pools linear in the diameter take about as many
-    /// shots at either. Fixture data: the middle segment holds 200 points, so the base holds 556
-    /// and the top 50 (DERIVED); the fixture 88 deals about 200 HP through the base and about 50
-    /// through the top (DERIVED at about 410 HP per metre of wood chord at 800 m/s).
-    #[test]
-    fn a_thinner_segment_empties_in_fewer_equal_shots() {
-        use crate::trees::{TreeState, tests::fixture_kind_of};
-        let mut app = tree_world();
-        let kind = fixture_kind_of("Wood", 200);
-        let thick = spawn_tree(&mut app, &kind, Vec3::new(0.0, 0.0, -5.0), 0);
-        let thin = spawn_tree(&mut app, &kind, Vec3::new(3.0, 0.0, -5.0), 1);
-        settle(&mut app);
-        let at_base = shots_to_fell(&mut app, thick, 1.0, 20).expect("the base breaks");
-        let at_top = shots_to_fell(&mut app, thin, 5.0, 20).expect("the top breaks");
-        assert!(
-            at_top < at_base,
-            "the thin top takes fewer shots: {at_top} at the top, {at_base} at the base"
-        );
-        assert!(
-            matches!(
-                app.world().get::<TreeState>(thick),
-                Some(TreeState::Down { cut: 0, .. })
-            ) && matches!(
-                app.world().get::<TreeState>(thin),
-                Some(TreeState::Down { cut: 2, .. })
-            ),
-            "each breaks where it was shot"
-        );
-    }
-
-    /// A DOSE TO ONE SEGMENT NEVER REDUCES ANOTHER SEGMENT'S POOL (the game's damage model, issue
-    /// 149): a round through the fixture trunk's middle segment, 3 m up and a metre clear of
-    /// both its boundaries, takes from that segment's pool alone; the segments below and above
-    /// stay full. The break rule relies on it — only the hits at a height count toward the break
-    /// there. A dose charged to the tree as a whole, or shared out along the trunk, reds this.
-    /// Fixture data: pools large enough that no shot empties one.
-    #[test]
-    fn a_dose_to_one_segment_never_reduces_another() {
-        use crate::trees::tests::fixture_kind_of;
-        let mut app = tree_world();
-        let tree = spawn_tree(
-            &mut app,
-            &fixture_kind_of("Wood", 100_000),
-            Vec3::new(0.0, 0.0, -5.0),
-            0,
-        );
-        settle(&mut app);
-        march_round(
-            &mut app,
-            fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0),
-            Vec3::new(0.0, 3.0, 2.0),
-            Vec3::NEG_Z,
-            8,
-        );
-        let pools = segment_pools(&app, tree);
-        assert!(
-            pools[1].held() < pools[1].capacity(),
-            "the struck segment took the dose: {pools:?}"
-        );
-        assert!(
-            pools[0].held() == pools[0].capacity() && pools[2].held() == pools[2].capacity(),
-            "the segments below and above are untouched: {pools:?}"
-        );
-    }
-
-    /// A CHORD ACROSS A SEGMENT SEAM CHARGES BOTH LOCAL POOLS AND CONSERVES ENERGY (the game's
-    /// damage model, issue 149): an oblique line crosses the fixture trunk's base and middle
-    /// segments, in either travel order. Each pool takes its own recorded line dose at the one
-    /// energy rate; together with the trunk exit's cone those doses spend the round's kinetic
-    /// energy drop once (design doc §5, "The energy partition"), and the top
-    /// segment stays full. Local breaks rely on both addresses surviving collection and settlement.
-    /// A shared root address, charging only the entrance segment, or charging the whole crossing
-    /// to both segments reds this. Fixture data: pools large enough that neither empties.
-    #[test]
-    fn a_chord_across_two_segments_charges_each_pool_its_own_energy() {
-        use crate::trees::tests::fixture_kind_of;
-        for direction in [Vec3::new(0.0, 0.6, -0.8), Vec3::new(0.0, -0.6, 0.8)] {
-            let mut app = tree_world();
-            let base = Vec3::new(0.0, 0.0, -5.0);
-            let tree = spawn_tree(&mut app, &fixture_kind_of("Wood", 100_000), base, 0);
-            settle(&mut app);
-            march_round(
-                &mut app,
-                fixture_round(FIXTURE_88, direction * 800.0),
-                base + Vec3::Y * 2.0 - direction * 2.0,
-                direction,
-                3,
-            );
-            let pools = segment_pools(&app, tree);
-            let world = app.world_mut();
-            let segments = world.get::<Children>(tree).unwrap();
-            let addresses = [segments[0], segments[1]];
-            let marks = world.query::<&PenetrationMarks>().single(world).unwrap();
-            let [
-                ArmourMark::Crossing {
-                    speed_in,
-                    volumes,
-                    end: CrossingEnd::Exit { speed, .. },
-                    ..
-                },
-            ] = marks.log.as_slice()
-            else {
-                panic!("one continuous crossing of the seam: {:?}", marks.log);
-            };
-            assert_eq!(volumes.len(), 2, "both segments retain their own address");
-            for (k, address) in addresses.into_iter().enumerate() {
-                let crossed = volumes.iter().find(|v| v.volume == address).unwrap();
-                assert!(crossed.chord > 0.0 && crossed.energy > 0.0);
-                assert_eq!(
-                    pools[k].capacity() - pools[k].held(),
-                    pool_units_of(energy_units(crossed.energy)),
-                    "segment {k} takes only its own line dose, direction {direction:?}"
+        app.world_mut()
+            .run_system_once(move |world: ProjectileMarchWorld| {
+                let (position, rotation, collider, _) = world.geometry.get(volume).unwrap();
+                let bounds = collider.aabb(position.0, *rotation);
+                let centre = (bounds.min + bounds.max) * 0.5;
+                // Fixture query margin, m: start outside the convex solid and finish beyond it.
+                let margin = 1.0;
+                let origin = centre + Vec3::Z * ((bounds.max.z - bounds.min.z) * 0.5 + margin);
+                let length = bounds.max.z - bounds.min.z + 2.0 * margin;
+                let admits = |entity| entity == volume;
+                let hit =
+                    cast_disc_segment(&world, &[Vec3::ZERO], origin, Dir3::NEG_Z, length, &admits);
+                assert!(
+                    matches!(hit, Some(SegmentHit::Armor(hit)) if hit.entity == volume),
+                    "flight must meet occupied matter"
                 );
-            }
-            let lost = 0.5
-                * f64::from(FIXTURE_88.mass)
-                * (f64::from(*speed_in).powi(2) - f64::from(*speed).powi(2));
-            let deposited: f64 = volumes.iter().map(|v| f64::from(v.energy)).sum();
-            let carried: f64 = world
-                .query::<&SpallMarks>()
-                .single(world)
-                .unwrap()
-                .cones
-                .iter()
-                .map(|cone| f64::from(cone.strength * spall_cone::EMITTED_SHARE))
-                .sum();
-            assert!(
-                ((deposited + carried) / lost - 1.0).abs() < 1e-5,
-                "the segment doses and the exit's cone spend the kinetic energy drop once: \
-                 {deposited} J + {carried} J vs {lost} J"
-            );
-            assert_eq!(pools[2].held(), pools[2].capacity(), "the top stays full");
-        }
+                let context = resolve::ResolveContext {
+                    world: &world,
+                    colliders: &world.geometry,
+                    deposit: false,
+                    laws: walk::WalkLaws::default(),
+                };
+                let corridor = resolve::build_corridor(
+                    &context,
+                    &admits,
+                    origin,
+                    Vec3::ZERO,
+                    Vec3::NEG_Z,
+                    length,
+                    walk::DiscFrame::anchored(Vec3::NEG_Z).unwrap(),
+                    0.0,
+                    &[],
+                )
+                .unwrap();
+                assert!(
+                    corridor.samples[0]
+                        .hits
+                        .iter()
+                        .any(|hit| hit.volume == volume),
+                    "corridor must meet occupied matter"
+                );
+                let reach = resolve::FieldReach::of_throw(&context, &admits, origin);
+                let (_, field) = resolve::field_presence(&context, &reach, origin, Dir3::NEG_Z)
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    field
+                        .layers
+                        .iter()
+                        .any(|layer| layer.present.iter().any(|present| present.volume == volume)),
+                    "field must meet occupied matter"
+                );
+                let aimed = crate::aim::aim_distance(
+                    &world.spatial,
+                    Ray3d::new(origin, Dir3::NEG_Z),
+                    length,
+                    Entity::PLACEHOLDER,
+                    &world.owners,
+                    &world.parents,
+                );
+                assert!(aimed < length, "aim must meet occupied matter");
+            })
+            .unwrap();
     }
-
-    /// The fixture trunk's near face at 2.5 m up, on a line down -Z through its axis: DERIVED from
-    /// the taper (0.2 m to 0.1 m over the second 2 m segment, 0.175 m at 0.5 m in).
-    const TRUNK_RADIUS_AT_2_5_M: f32 = 0.175;
 
     /// A shipped house, `house_1`, standing with its ground point at the origin in a bare march
     /// world: every element a collider of its own substance, as the scatter spawns it.
@@ -8203,232 +7891,6 @@ pub(crate) mod march_tests {
             stopped.position.x > 1.75 && stopped.position.x < 2.0,
             "100 m/s: at rest inside the wall, not at {}",
             stopped.position
-        );
-    }
-
-    /// A LINE EMPTYING NAMES THE BOX'S OWN ENTRY (the game's damage model, ADR-0016): a round
-    /// through a pool-less slab welded to a tree — one crossing — empties the tree at the line's
-    /// entry into THE TREE, along its travel, and the tree falls at that height along the line. A
-    /// mutant that hands an emptied pool its crossing's entrance puts the cut on the slab's face.
-    #[test]
-    fn a_line_empties_a_tree_at_its_own_entry() {
-        use crate::trees::{TreeState, tests::fixture_kind_of};
-        let mut app = tree_world();
-        let tree = spawn_tree(
-            &mut app,
-            &fixture_kind_of("Wood", 100),
-            Vec3::new(0.0, 0.0, -5.0),
-            0,
-        );
-        // A pool-less wood slab overlapping the trunk's near face, so the two are one crossing
-        // whose entrance is the slab's face at z = -4.5.
-        app.world_mut().spawn((
-            Transform::from_xyz(0.0, 3.0, -4.7),
-            RigidBody::Static,
-            Collider::cuboid(2.0, 6.0, 0.4),
-            CollisionLayers::new([Layer::Armor], LayerMask::ALL),
-            BallisticVolume {
-                material: walk::VolumeMaterial::fixture(40.0),
-                substance: "Wood".to_string(),
-            },
-        ));
-        settle(&mut app);
-        march_round(
-            &mut app,
-            fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0),
-            Vec3::new(0.0, 2.5, 2.0),
-            Vec3::NEG_Z,
-            8,
-        );
-        let (at, along) = emptied(&app, tree);
-        let entry = Vec3::new(0.0, 2.5, -5.0 + TRUNK_RADIUS_AT_2_5_M);
-        assert!(
-            (at - entry).length() < 0.05,
-            "the tree's own entry {entry}, not the slab's face: {at}"
-        );
-        assert!(
-            along.is_some_and(|along| along.dot(Vec3::NEG_Z) > 0.99),
-            "the line's travel: {along:?}"
-        );
-        assert_eq!(
-            app.world().get::<TreeState>(tree),
-            Some(&TreeState::Down { cut: 1, dir: 192 }),
-            "cut at the entry's height, down the line"
-        );
-    }
-
-    /// TWO TREES IN ONE CROSSING EACH FALL AT THEIR OWN ENTRY: overlapping trunks the round goes
-    /// through together are one crossing with one entrance, and the far tree's pool is emptied at
-    /// the line's entry into IT, inside the near one. A mutant reading the crossing's entrance
-    /// cuts both trees where the near one was entered.
-    #[test]
-    fn overlapping_trees_in_one_crossing_each_fall_at_their_own_entry() {
-        use crate::trees::{TreeState, tests::fixture_kind_of};
-        let mut app = tree_world();
-        let kind = fixture_kind_of("Wood", 100);
-        let near = spawn_tree(&mut app, &kind, Vec3::new(0.0, 0.0, -5.0), 0);
-        let far = spawn_tree(&mut app, &kind, Vec3::new(0.0, 0.0, -5.3), 1);
-        settle(&mut app);
-        march_round(
-            &mut app,
-            fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0),
-            Vec3::new(0.0, 2.5, 2.0),
-            Vec3::NEG_Z,
-            8,
-        );
-        let (at_near, _) = emptied(&app, near);
-        let (at_far, along_far) = emptied(&app, far);
-        assert!(
-            (at_near.z - (-5.0 + TRUNK_RADIUS_AT_2_5_M)).abs() < 0.05,
-            "{at_near}"
-        );
-        assert!(
-            (at_far.z - (-5.3 + TRUNK_RADIUS_AT_2_5_M)).abs() < 0.05,
-            "the far tree's own entry, inside the near one: {at_far}"
-        );
-        assert!(along_far.is_some_and(|along| along.dot(Vec3::NEG_Z) > 0.99));
-        for tree in [near, far] {
-            assert_eq!(
-                app.world().get::<TreeState>(tree),
-                Some(&TreeState::Down { cut: 1, dir: 192 })
-            );
-        }
-    }
-
-    /// A TREE A CONE ALONE EMPTIES BREAKS THERE, AWAY FROM THE APEX: a tree beside the line, inside
-    /// the cone a plate's exit throws, has a segment emptied by a field deposit — no line, the
-    /// apex as its origin — and breaks at that segment, falling away from the apex. A mutant
-    /// reading the crossing's entrance gives it the plate's entrance and the line's direction,
-    /// down the line; one felling a field's tree whole cuts it at the base.
-    #[test]
-    fn a_tree_a_cone_alone_empties_breaks_there_away_from_the_apex() {
-        use crate::trees::{TreeState, azimuth_bin, tests::fixture_kind_of};
-        let mut app = tree_world();
-        // A thin steel plate across the line; its exit throws the cone.
-        app.world_mut().spawn((
-            Transform::from_xyz(0.0, 2.0, -5.0),
-            RigidBody::Static,
-            Collider::cuboid(3.0, 3.0, 0.03),
-            CollisionLayers::new([Layer::Armor], LayerMask::ALL),
-            BallisticVolume {
-                material: walk::VolumeMaterial::fixture(STEEL),
-                substance: "RHA".to_string(),
-            },
-        ));
-        // The middle segment, 2 to 4 m up at the apex's height, holds one point (fixture data):
-        // any deposit of the field empties it; the base segment holds three.
-        let base = Vec3::new(0.6, 0.0, -7.0);
-        let tree = spawn_tree(&mut app, &fixture_kind_of("Wood", 1), base, 0);
-        settle(&mut app);
-        march_round(
-            &mut app,
-            fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0),
-            Vec3::new(0.0, 2.5, 2.0),
-            Vec3::NEG_Z,
-            8,
-        );
-        let (at, along) = emptied(&app, tree);
-        assert_eq!(along, None, "a field has no line");
-        let apex = Vec3::new(0.0, 2.5, -5.015);
-        assert!(
-            (at - apex).length() < 0.05,
-            "the cone's apex, the plate's exit {apex}: {at}"
-        );
-        let lowest = segment_pools(&app, tree)
-            .iter()
-            .position(ComponentHealth::is_empty)
-            .expect("the field emptied at least one segment");
-        assert_eq!(
-            app.world().get::<TreeState>(tree),
-            Some(&TreeState::Down {
-                cut: u8::try_from(lowest).unwrap(),
-                dir: azimuth_bin(base.x - at.x, base.z - at.z),
-            }),
-            "at the emptied segment, away from the apex"
-        );
-    }
-
-    /// The game's damage model: a field-only emptying beside a burst breaks that tree's segment
-    /// away from the burst centre; the tree that armed the round keeps its own line entry.
-    #[test]
-    fn a_burst_breaks_a_neighbouring_tree_where_it_emptied_away_from_its_centre() {
-        use crate::trees::{TreeState, azimuth_bin, tests::fixture_kind_of};
-        let mut app = tree_world();
-        let armed_on = spawn_tree(
-            &mut app,
-            &fixture_kind_of("Wood", 100),
-            Vec3::new(0.0, 0.0, -5.0),
-            0,
-        );
-        // Fixture burst: arms on any body, bursts 4 ms past the exit (3.2 m at 800 m/s), its ring
-        // at ratio about 3.3 (the carried speed over 240 m/s) a band 7–27° off the axis about 17°
-        // (DERIVED, at the shipped 10° half-width); its tree stands 2 m past the burst, 0.6 m off
-        // the axis (17°, DERIVED), clear of the nose piece flying on along the line, its middle
-        // segment (2 to 4 m up, at the burst's height) holding a pool the armed-on tree's own
-        // exit cone cannot empty (DERIVED: the round loses about 0.43 MJ crossing the trunk's 14
-        // reference-mm, so that cone emits about 64 HP points over its whole 26° cone, of which
-        // the beside trunk, 5.2 m from the exit and 0.6 m off its axis, catches roughly a
-        // seventh, near 9 HP points, below the top segment's 4 m bottom) and the 1 MJ burst's
-        // field empties from any one direction.
-        let exit = Vec3::new(0.0, 2.5, -5.0 - TRUNK_RADIUS_AT_2_5_M);
-        let centre = exit + Vec3::NEG_Z * 3.2;
-        let base = Vec3::new(0.6, 0.0, centre.z - 2.0);
-        let beside = spawn_tree(&mut app, &fixture_kind_of("Wood", 25), base, 1);
-        settle(&mut app);
-        let mut projectile = fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0);
-        projectile.fuze = burst::Fuze::of(Some(burst::Burst {
-            trigger: crate::rounds::fuze::Trigger::SpendExit { arming_spend: 1.0 },
-            delay: 0.004,
-            nose: RoundBody {
-                mass: 0.5 * FIXTURE_88.mass,
-                ..FIXTURE_88
-            },
-            sideways_speed: 240.0,
-            energy: 1.0e6,
-            core_mass: 0.5,
-            blast: 0.0,
-            filler_setback: 0.18,
-            charge_radius: 0.04,
-        }));
-        march_round(
-            &mut app,
-            projectile,
-            Vec3::new(0.0, 2.5, 2.0),
-            Vec3::NEG_Z,
-            8,
-        );
-        let (at_line, along_line) = emptied(&app, armed_on);
-        assert!(
-            (at_line.z - (-5.0 + TRUNK_RADIUS_AT_2_5_M)).abs() < 0.05 && along_line.is_some(),
-            "the armed-on tree's own line entry: {at_line} {along_line:?}"
-        );
-        let (at, along) = emptied(&app, beside);
-        assert_eq!(along, None, "a field has no line");
-        // The burst's centre as the round recorded it: the delay's metres at the EXIT speed, down
-        // the drop of the flight — short of the 3.2 m the fixture places the tree by.
-        let recorded = {
-            let world = app.world_mut();
-            world
-                .query::<&SpallMarks>()
-                .iter(world)
-                .find_map(|marks| marks.burst.as_ref().map(|burst| burst.origin))
-                .expect("the round burst")
-        };
-        assert!(
-            (at - recorded).length() < 1e-4 && (recorded - centre).length() < 0.5,
-            "the burst's centre {recorded} (placed at {centre}): {at}"
-        );
-        let lowest = segment_pools(&app, beside)
-            .iter()
-            .position(ComponentHealth::is_empty)
-            .expect("the field emptied at least one segment");
-        assert_eq!(
-            app.world().get::<TreeState>(beside),
-            Some(&TreeState::Down {
-                cut: u8::try_from(lowest).unwrap(),
-                dir: azimuth_bin(base.x - at.x, base.z - at.z),
-            }),
-            "at the emptied segment, away from the centre"
         );
     }
 }

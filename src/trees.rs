@@ -1224,29 +1224,6 @@ pub(crate) mod tests {
         )
     }
 
-    /// The fixture trunk of `substance` whose middle segment — 2 to 4 m up, where the march's
-    /// tests strike — holds `hp` points at scale 1: fixture data for tests that need a trunk a
-    /// round goes through and a pool a given dose empties. Its HP per square metre is `hp` over
-    /// that segment's mid-height cross-section, so [`TreeBody::segment_hp`] reads `hp` back there;
-    /// the wider segment below holds about 2.8 times as much, the narrower one above a quarter.
-    pub(crate) fn fixture_kind_of(substance: &str, hp: u32) -> Arc<TreeKind> {
-        let wood = Wood {
-            substance: substance.to_owned(),
-            ..fixture_wood()
-        };
-        let mut kind =
-            resolve(fixture_asset(), &fixture_table(), &wood).expect("the fixture trunk holds");
-        let r = 0.5 * (kind.segments[1].r_bottom_m + kind.r_top_m(1));
-        kind.hp_per_m2 = hp as f32 / (PI * r * r);
-        let kind = Arc::new(kind);
-        assert_eq!(
-            TreeBody::new(kind.clone(), 1.0).segment_hp(1),
-            hp,
-            "the fixture pool"
-        );
-        kind
-    }
-
     pub(crate) fn fixture_kind() -> Arc<TreeKind> {
         Arc::new(
             resolve(fixture_asset(), &fixture_table(), &fixture_wood())

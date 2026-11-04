@@ -1,0 +1,4 @@
+// The game's cosmetic fire-cue age; authority resolution is independent of presentation age.
+(
+    stale_fire_ticks: (16, Taste("muzzle-cue effect family: suppress delayed muzzle flash and fire audio after this many fixed ticks, so an old catch-up shot does not present as a fresh local cue")),
+)

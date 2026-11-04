@@ -4931,6 +4931,90 @@ fn deriving_a_shorter_same_generation_record_is_a_bug() {
     app.update();
 }
 
+/// The game's damage model reads the same occupied matter while intact, released, and asleep at
+/// a different pose. Flight, field, corridor and aim consumers rely on the common constructors
+/// keeping that geometry readable. Fixture support loss isolates the column's middle chunk.
+#[test]
+fn occupied_matter_queries_follow_common_release_and_sleeping_pose() {
+    let kind = column_construction();
+    let (mut app, root) = composed_kind(false, &kind);
+    app.update();
+    app.update();
+    let occupied = |app: &mut App, owner| {
+        app.world_mut()
+            .query::<(Entity, &ChildOf, &BallisticVolume)>()
+            .iter(app.world())
+            .find(|(_, parent, _)| parent.parent() == owner)
+            .unwrap()
+            .0
+    };
+    let volume = occupied(&mut app, root);
+    crate::ballistics::assert_occupied_matter_queries(&mut app, volume);
+    let chunk = kind.layout.blocks.len() / 2; // Fixture: the column's middle cube.
+    let at = {
+        let mut body = app.world_mut().get_mut::<Breakage>(root).unwrap();
+        let live = &mut body.live;
+        for (index, joint) in live.structure.joints.iter().enumerate() {
+            if joint.a == chunk || joint.b == Side::Chunk(chunk) {
+                live.state.cracked[index] = true;
+            }
+        }
+        live.structure.chunks[chunk].centroid
+    };
+    app.world_mut().resource_mut::<Queue>().0.push(RawDeposit {
+        contacts: vec![(
+            root,
+            Load {
+                chunk,
+                at,
+                energy: 0.0,
+                crushed: 0.0,
+                blow: Vec3::ZERO,
+                press: Vec3::ZERO,
+                peak: None,
+                origin: Origin::Field,
+            },
+        )],
+        ..default()
+    });
+    app.update();
+    app.update();
+    let owner = app
+        .world_mut()
+        .query::<(Entity, &Piece)>()
+        .iter(app.world())
+        .find(|(_, piece)| piece.chunks == [chunk as u16])
+        .expect("common support loss releases the isolated chunk")
+        .0;
+    // Fixture poses separate the released chunk from all other matter, then turn it sideways.
+    for (at, turn, sleeping) in [
+        (Vec3::new(10.0, 5.0, 3.0), Quat::IDENTITY, false),
+        (
+            Vec3::new(15.0, 2.0, 4.0),
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            true,
+        ),
+    ] {
+        app.world_mut().entity_mut(owner).insert((
+            Transform::from_translation(at).with_rotation(turn),
+            Position(at),
+            Rotation(turn),
+            LinearVelocity::ZERO,
+            AngularVelocity::ZERO,
+        ));
+        app.update();
+        app.update();
+        if sleeping {
+            app.world_mut().entity_mut(owner).insert(Sleeping);
+            app.update();
+            app.update();
+            assert!(app.world().get::<Sleeping>(owner).is_some());
+        }
+        let volume = occupied(&mut app, owner);
+        crate::ballistics::assert_occupied_matter_queries(&mut app, volume);
+    }
+}
+
 /// The game's environment destruction model: owner contact conversion keeps source order,
 /// masses and frame conversion across worker assignments, including interleaved resting inputs.
 #[test]
