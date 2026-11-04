@@ -32,16 +32,51 @@ pub enum Job {
     Taste(String),
     /// How finely or stably a law reads the result; gives the cost or stability reason.
     Resolution(String),
-    /// Inline test data.
+    /// A test's inline data; refused in a shipped spec ([`Shipped`]).
     #[cfg(test)]
     Fixture(String),
 }
 
+#[cfg(test)]
+thread_local! {
+    static SHIPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While held, specs read on this thread are shipped files, whose `Fixture` labels are refused in
+/// the test build as in every other: [`super::specs`] holds one.
+pub(super) struct Shipped {
+    #[cfg(test)]
+    was: bool,
+}
+
+impl Shipped {
+    pub(super) fn enter() -> Self {
+        Self {
+            #[cfg(test)]
+            was: SHIPPED.replace(true),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for Shipped {
+    fn drop(&mut self) {
+        SHIPPED.set(self.was);
+    }
+}
+
 impl<T> Choice<T> {
-    /// Refuses a blank reason, naming `field`.
+    /// Refuses a blank reason, and a fixture's in a shipped spec, naming `field`.
     pub fn check(&self, field: &str) -> Result<(), String> {
         let note = match &self.1 {
             Job::Taste(note) | Job::Resolution(note) => note,
+            #[cfg(test)]
+            Job::Fixture(_) if SHIPPED.get() => {
+                return Err(format!(
+                    "{field}: Fixture is a test's label; a shipped spec names its Taste or \
+                     Resolution"
+                ));
+            }
             #[cfg(test)]
             Job::Fixture(note) => note,
         };

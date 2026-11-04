@@ -270,6 +270,7 @@ pub struct Spec {
 /// constructions' alike, in file name order. Refuses a file whose id is not its stem and two
 /// specs of one id.
 pub fn specs(root: &Path) -> Result<Vec<Spec>, String> {
+    let _shipped = spec::Shipped::enter();
     let dir = root.join(SPECS_DIR);
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .map_err(|err| format!("{}: {err}", dir.display()))?

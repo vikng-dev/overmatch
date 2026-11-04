@@ -464,6 +464,24 @@ fn fastening_follows_the_joins_never_the_pattern() {
     }
 }
 
+/// A SHIPPED SPEC CARRIES NO FIXTURE LABEL, IN THE TEST BUILD TOO: the fixture house loads inline,
+/// and the same text read as a shipped spec is refused naming the field. The bake binary has no
+/// fixture label at all, so a shipped spec the tests accepted with one could not be baked.
+/// Mutant: a check that admits fixtures whatever the reader passes it.
+#[test]
+fn a_shipped_spec_refuses_a_fixture_label() {
+    fixture_house();
+    let err = {
+        let _shipped = spec::Shipped::enter();
+        House::from_ron(FIXTURE_HOUSE).unwrap_err()
+    };
+    assert!(
+        err.contains("parts.walls.cut") && err.contains("Fixture"),
+        "{err}"
+    );
+    fixture_house();
+}
+
 /// A CUT STATES ITS JOB, NEVER A STRENGTH: a pattern's size labelled as a measured fact does not
 /// parse, and a Taste with no reason is refused naming its field. Content authors rely on cut
 /// sizes being looks or resolutions, so balance never hides in one.
