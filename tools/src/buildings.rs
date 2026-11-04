@@ -5,10 +5,10 @@
 //! parameters through [`house`], or convex pieces stated outright), the common cutter cuts each
 //! piece into chunks by the pattern its data names ([`fracture`]), and the contact search finds the
 //! joints between chunks and the chunks the ground holds ([`contact`]); nothing is written that
-//! [`certify`] refuses. What holds each joint
-//! between two components is the attachment kind the spec's join for their elements' kinds names
-//! ([`spec::Join`]), written by name: the strengths stay in the shared list, which the game reads;
-//! each chunk's mass is its volume times its material row's density. The output is canonical
+//! [`certify`] refuses. What holds each joint between two components is the attachment kind the
+//! spec's join for their elements' kinds names ([`spec::Join`]), written by name: the strengths
+//! stay in the shared list, which the game reads; each chunk's mass is its volume times its
+//! material row's density. The output is canonical
 //! ([`write`]): every number rounded to a micrometre (or its unit's millionth) and printed by the
 //! same formatter, every list in a fixed order, so two bakes of one spec are the same bytes.
 
