@@ -93,7 +93,7 @@ mod contact_classes;
 #[cfg(test)]
 mod recording_tests;
 
-/// Client-only shell scenes, tracers and hold visibility ([`view::plugin`]). The dedicated server
+/// Client-only shell scenes and tracers ([`view::plugin`]). The dedicated server
 /// mounts only [`sim_plugin`], opening no view artifact and emitting no render component.
 mod view;
 
@@ -4307,21 +4307,13 @@ mod tests {
         );
     }
 
-    /// A FIELD'S HP UNIT MOVES ITS CREW DOSE AND NEVER THE VOLUME IT CRUSHES (the game's damage
-    /// model and environment destruction model, game state only). A cone carries its share of the
-    /// energy its round lost across the body, `κ r` ([`walk::SpallSource::carried`]); a construction
-    /// reads each direction's `S·f_k / N` joules as the energy it crushes with
-    /// (`construction::breakage`'s shell reader, [`crate::construction::fracture::Load::field`]), and a
-    /// crew station's HP pool reads the same joules through the cone's unit, summed by the shot's
-    /// tally ([`ShotDose`]'s field deposit). So the crushed volume is the energy carried over the
-    /// chunk's crushing energy density whatever the unit, and the crew dose is the joules times
-    /// the unit at each of two units. A unit or the line rate entering the strength (the defect
-    /// this pins: a balance unit crushing masonry) moves the crushed volume; a tally converting a
-    /// field deposit at the energy rate, or at no unit, misses the crew dose. Who relies on it:
-    /// every construction a cone meets and every crew pool it doses. Fixture data: 2.7 MJ lost
-    /// through a reference-strength exit (ratio 1) and a softer one (0.2), `λ` 2.4, 64
-    /// directions, a chunk crushed at 1.35e8 J/m³, a crew station every direction reaches, and
-    /// units 1.5e-4 and 3.0e-4 HP per joule, neither the energy rate's 1/3000.
+    /// The game's damage model: a field's HP unit scales crew dose, never crushed volume.
+    /// Construction reads `S*f/N` joules through `Load::field`; crew pools read those joules
+    /// through the field's unit in `ShotDose`. A unit in strength would move crushed volume;
+    /// a tally using the line's energy rate would miss crew dose. Both consumers rely on this.
+    /// Fixture: 2.7 MJ lost, exit ratios 1 and 0.2, lambda 2.4, 64 directions,
+    /// crushing density 1.35e8 J/m³, and a crew station reached by every direction.
+    /// Units: 1.5e-4 and 3.0e-4 HP/J, distinct from the line's 1/3000 HP/J.
     #[test]
     fn a_fields_hp_unit_moves_crew_dose_and_never_crushed_volume() {
         const CRUSH: f32 = 1.35e8; // Fixture data: J/m³.

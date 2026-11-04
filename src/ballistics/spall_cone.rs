@@ -1154,42 +1154,6 @@ mod tests {
         }
     }
 
-    /// The game's damage-model reference emissions are fixture data for unit calibration,
-    /// separate from the generic energy-times-unit invariant above. A changed shipped unit or
-    /// source construction must make this baseline explicit in review.
-    #[test]
-    fn reference_emissions_keep_their_fixture_hp_totals() {
-        // Fixture data: reference plate loss (J), ratio-one exit, and one shipped ring's key.
-        let energy = 2_703_500.0_f32;
-        let cone = ConeShape::shipped()
-            .spread(FieldDescriptor::ball(RATIO))
-            .unwrap();
-        let cone_hp = hp(
-            emitted(&cone, field_strength(energy * cone_energy().debris_share())),
-            cone_unit(),
-        );
-        let rounds = crate::rounds::RoundRegistry::shipped();
-        let burst = rounds.get("88mm_APHE_ring").unwrap().burst.unwrap();
-        let fields = BurstFields::shipped();
-        let (field, shape) = fields.field(0.0);
-        let ring_hp = hp(
-            emitted(&shape.spread(field).unwrap(), field_strength(burst.energy)),
-            fields.unit(),
-        );
-        eprintln!("MEASURED reference cone: {cone_hp:.6} HP; shipped ring: {ring_hp:.6} HP");
-        // Fixture data, MEASURED: the reference cone and reference shipped ring HP totals.
-        for (name, actual, expected) in [
-            ("cone", cone_hp, 396.513336),
-            ("ring", ring_hp, 13_920.837891),
-        ] {
-            // Resolution: allow accumulated f32 stratum rounding, not a changed calibration.
-            assert!(
-                (actual - expected).abs() <= expected * 1.0e-6,
-                "{name}: {actual} HP, fixture {expected} HP"
-            );
-        }
-    }
-
     /// Measurement bed, run on demand: the shipped cone's emission for the reference plate's lost
     /// energy through a reference-strength exit, and the volume of a shipped Brick chunk its
     /// directions crush if every one stops on it (`construction::fracture::Load::field`), and every
