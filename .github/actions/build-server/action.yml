@@ -54,7 +54,7 @@ runs:
     #                                    time. `derived/` is excluded — `map_ui.png` is
     #                                    loaded only by `net::spawn_map`, a client plugin.
     #   maps/*/prototypes.ron            crate::map::read_prototypes, what each id a map places
-    #                                    means (a building's box, a fir's species), and the
+    #                                    means (a block's bounds, a fir's species), and the
     #                                    content digest; `map::load` panics without it
     #   trees/**/*.ron                   crate::trees::TreeLibrary::load: the species table, the wood
     #                                    row and each placed tree's `<id>/<id>.tree.ron`, all folded

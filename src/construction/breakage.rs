@@ -3,7 +3,7 @@
 //! every change, and every peer derives the wall's colliders from that record.
 //!
 //! * **The law's view of a construction** ([`Layout`], once per asset): the chunks of the elements
-//!   whose substance states bulk facts ([`Masonry::of`]), numbered in asset order, and the joints
+//!   whose substance states bulk facts ([`Material::of`]), numbered in asset order, and the joints
 //!   and anchors among them, each holding by the bond the asset gives it ([`Bond`]: a seam inside
 //!   a component; between two, what the attachment kind it names holds by
 //!   ([`super::attachments`]: a seam, or a rest)). A chunk and a joint keep that number on the
@@ -91,7 +91,7 @@ use serde::{Deserialize, Serialize};
 
 use super::attachments::{Attachments, GroundAttachment};
 use super::fracture::{
-    self, Blast, Block, Bond, Chunk, Fate, GroupLoads, Joint, Load, Masonry, Origin, SectionCache,
+    self, Blast, Block, Bond, Chunk, Fate, GroupLoads, Joint, Load, Material, Origin, SectionCache,
     Side, State, Structure,
 };
 use super::schema::{self, ConstructionAsset};
@@ -130,7 +130,7 @@ pub(crate) struct Layout {
     /// Per element: its law chunks `first..end`, `None` for an element that never breaks.
     pub(crate) elements: Vec<Option<(u16, u16)>>,
     /// Per law chunk: its material's values.
-    materials: Vec<Masonry>,
+    materials: Vec<Material>,
     ground: Vec<(GroundAttachment, Vec<usize>)>,
     /// The law's joints, chunk pairs first in asset order, then the anchors in asset order.
     pub(crate) joints: Vec<Joint>,
@@ -141,13 +141,13 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
-    /// The layout of `asset`, its materials' values `masonry` (per asset material, `None` for a
+    /// The layout of `asset`, its materials' values `law_materials` (per asset material, `None` for a
     /// substance that never breaks), its attachment kinds read in `attachments`. Refuses an asset
     /// naming a kind the list does not hold, and one whose law chunks or joints overrun the wire's
     /// 16-bit numbers.
     pub(crate) fn of(
         asset: &ConstructionAsset,
-        masonry: &[Option<Masonry>],
+        law_materials: &[Option<Material>],
         attachments: &Attachments,
     ) -> Result<Self, String> {
         for (k, kind) in asset.attachments.iter().enumerate() {
@@ -162,7 +162,7 @@ impl Layout {
         let mut elements = Vec::with_capacity(asset.elements.len());
         let mut law_of = vec![None; asset.chunks.len()];
         for (index, element) in asset.elements.iter().enumerate() {
-            let Some(material) = masonry[usize::from(element.material)] else {
+            let Some(material) = law_materials[usize::from(element.material)] else {
                 elements.push(None);
                 continue;
             };
@@ -517,7 +517,7 @@ impl Shape {
         let slot = |len: usize, i: u16| {
             assert!(
                 usize::from(i) < len,
-                "a wall record holds only events inside its construction's layout: {event:?}"
+                "a construction record holds only events inside its construction's layout: {event:?}"
             );
             usize::from(i)
         };
@@ -1282,7 +1282,7 @@ fn take_lines(
 /// the solver samples its loads.
 pub(crate) fn resolved_line_loads(
     chunk: usize,
-    material: &Masonry,
+    material: &Material,
     line: &DeliveredLine,
 ) -> Vec<Load> {
     let crossing = line.crossing;
@@ -1884,7 +1884,7 @@ enum Stop {
 /// The holes one deposit cuts (module doc), each with its law chunk, in the baked chunk's frame
 /// ([`Hole`]); `lines` and the blast's loads `blast` ([`Load::blast`]) in the construction frame at
 /// the instance's `scale`. Each is sized by the volume it crushes, the volume its load takes from
-/// the chunk's pool: a line's, its energy over the crush energy ([`Masonry::crush`]); a blast's,
+/// the chunk's pool: a line's, its energy over the crush energy ([`Material::crush`]); a blast's,
 /// its load's Law 1 volume ([`Load::crushed`]). A line's channel runs along its chord, its radius
 /// the narrower of the cylinder about the chord and the ball that hold that volume (so a chord
 /// grazing a corner never cuts a disc wider than the ball); the blast's dish in a chunk is a ball
@@ -2586,7 +2586,7 @@ fn derive_from_record(
     }
     assert!(
         by_ordinal.is_empty(),
-        "a wall record names only constructions this map places: {:?}",
+        "a construction record names only constructions this map places: {:?}",
         by_ordinal.keys().collect::<Vec<_>>()
     );
     applied.1 = record.entries.len();

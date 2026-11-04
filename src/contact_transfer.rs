@@ -217,7 +217,7 @@ impl ContactTransfers {
 
     /// The last step's points, each with the blow and the press the structure took through it,
     /// in Avian's constraint order: each constraint's transfer split at its body's rest speed (the
-    /// wall design, `.agents/docs/design/construction-destruction.md`, "Bodies in contact"). A
+    /// construction design, `.agents/docs/design/construction-destruction.md`, "Bodies in contact"). A
     /// constraint's blow is the momentum its body's closing delivered (N·s): its points' `m_b v_n`
     /// summed over those closing faster than the rest speed, `m_b` each point's effective mass,
     /// and never more than the solver moved along the normal; it falls on the points in shares of
@@ -1158,7 +1158,7 @@ mod tests {
     /// again; each step's blow and press over the step make up its whole transfer. The same
     /// strike by a cube whose `SleepThreshold` puts its rest speed above 3 m/s only presses, and a
     /// cube a steady 5 kN holds on the structure presses 5 kN within 0.5 % with no blow. The
-    /// destruction laws rely on the split (the wall design, "Bodies in contact"): the strength
+    /// destruction laws rely on the split (the construction design, "Bodies in contact"): the strength
     /// limit reads the press, the energy limit and the give-back the blow. A split at a fixed
     /// rest speed (the strike above its body's own), at the whole normal transfer (4500 N·s), or
     /// one that drops a striking step's press fails here. Fixture numbers are fixture data.

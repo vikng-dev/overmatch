@@ -49,7 +49,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use self::baked::Placement;
-use self::model::{Block, Cut, Load, Masonry};
+use self::model::{Block, Cut, Load, Material};
 use super::{FreeFlyCam, SEED_SPEC, UI_LEFT, panel_capturing};
 use crate::ballistics::burst::products_momentum;
 use crate::ballistics::{BallisticVolume, DeliveredLine, FireShell, ShellMarched, SpallMarks};
@@ -69,7 +69,7 @@ const PLACE: Placement = Placement {
     centre_x: 16.0,
     back_z: 3.875,
 };
-/// The substance every chunk wears; its values are its row's ([`Masonry::of`]).
+/// The substance every chunk wears; its values are its row's ([`Material::of`]).
 const SUBSTANCE: &str = "Brick";
 /// Fixture inputs: the blast tool's filler masses, kg, and standoffs, m (the owner's 0.1–5 kg and 0–5 m).
 const MASSES: [f32; 6] = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0];
@@ -180,7 +180,7 @@ struct Wall {
     structural: Vec<bool>,
     entities: Vec<Option<Entity>>,
     meshes: Vec<Handle<Mesh>>,
-    material: Masonry,
+    material: Material,
 }
 
 /// The wall as the bake gives it, set down in the world: its cut and its bounding box.
@@ -641,9 +641,9 @@ fn resolve_case(case: &RangeWallCase, rounds: &[WallRound]) -> Case {
     }
 }
 
-/// The brick as the wall reads it: the shipped registry's `Brick` row ([`Masonry::of`]).
-fn brick() -> Masonry {
-    Masonry::of(SubstanceRegistry::shipped_static(), SUBSTANCE)
+/// The brick as the wall reads it: the shipped registry's `Brick` row ([`Material::of`]).
+fn brick() -> Material {
+    Material::of(SubstanceRegistry::shipped_static(), SUBSTANCE)
         .expect("the shipped registry names Brick")
         .expect("the shipped Brick states its seam")
 }
@@ -1405,7 +1405,7 @@ fn apply_deposits(mut p: ApplyParam) {
             };
             p.commands
                 .spawn((
-                    Name::new("wall piece"),
+                    Name::new("construction piece"),
                     WallPiece,
                     Transform::from_translation(*centroid),
                     Visibility::default(),

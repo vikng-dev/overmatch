@@ -21,7 +21,6 @@
 //! by square root), so no angle and no trigonometry enters the bake.
 
 use glam::{DVec2, DVec3};
-use overmatch::construction::schema::ElementKind;
 
 use super::fracture::{Courses, Pattern};
 use super::geom::{Frame, Prism};
@@ -68,13 +67,13 @@ fn pattern(house: &House, part: &Part, frame: Frame, datum: DVec2) -> Pattern {
 fn piece(
     house: &House,
     part: &Part,
-    (name, kind, component): (String, ElementKind, String),
+    (name, label, component): (String, &str, String),
     prism: &Prism,
     datum: DVec2,
 ) -> Piece {
     Piece {
         name,
-        kind,
+        part: label.to_owned(),
         component,
         material: part.material.clone(),
         surface_frame: part.surface_frame,
@@ -180,7 +179,7 @@ pub fn construction(house: &House) -> Result<Construction, String> {
         };
         let names = (
             format!("{name}/plate"),
-            ElementKind::WallPlate,
+            "wall_plate",
             format!("{name}/plate"),
         );
         let datum = lowest(&prism.profile);
@@ -217,7 +216,7 @@ pub fn construction(house: &House) -> Result<Construction, String> {
             };
             let names = (
                 format!("{name}/board_{board}"),
-                ElementKind::Roof,
+                "roof",
                 format!("{name}/roof"),
             );
             pieces.push(piece(house, &house.parts.roof, names, &prism, datum));
@@ -247,20 +246,11 @@ fn wall_elements(
     // A wall's piers, sills, lintels and gable are one component, coursed in one bond from the
     // wall's first `u` on the foundation.
     let datum = DVec2::new(wall.u.0, base_y);
-    let mut push = |kind: ElementKind, index: usize, profile: Vec<DVec2>| {
-        let label = match kind {
-            ElementKind::Pier => "pier",
-            ElementKind::Sill => "sill",
-            ElementKind::Lintel => "lintel",
-            ElementKind::Gable => "gable",
-            ElementKind::WallPlate | ElementKind::Roof | ElementKind::Trunk => {
-                unreachable!("a wall lays no {kind:?}")
-            }
-        };
-        let name = if kind == ElementKind::Gable {
-            format!("{}/{label}", wall.name)
+    let mut push = |part: &str, index: usize, profile: Vec<DVec2>| {
+        let name = if part == "gable" {
+            format!("{}/{part}", wall.name)
         } else {
-            format!("{}/{label}_{index}", wall.name)
+            format!("{}/{part}_{index}", wall.name)
         };
         let prism = Prism {
             frame: wall.frame,
@@ -268,27 +258,23 @@ fn wall_elements(
             near: wall.depth.0,
             far: wall.depth.1,
         };
-        let names = (name, kind, wall.name.to_owned());
+        let names = (name, part, wall.name.to_owned());
         pieces.push(piece(house, &house.parts.walls, names, &prism, datum));
     };
     let mut from = wall.u.0;
     for (index, opening) in wall.openings.iter().enumerate() {
-        push(
-            ElementKind::Pier,
-            index,
-            rectangle(from, opening.u.0, base_y, eaves_y),
-        );
+        push("pier", index, rectangle(from, opening.u.0, base_y, eaves_y));
         let (bottom, head) = opening.courses;
         if bottom > 0 {
             push(
-                ElementKind::Sill,
+                "sill",
                 index,
                 rectangle(opening.u.0, opening.u.1, base_y, course_y(bottom)),
             );
         }
         if head < house.eaves_course {
             push(
-                ElementKind::Lintel,
+                "lintel",
                 index,
                 rectangle(opening.u.0, opening.u.1, course_y(head), eaves_y),
             );
@@ -296,11 +282,11 @@ fn wall_elements(
         from = opening.u.1;
     }
     push(
-        ElementKind::Pier,
+        "pier",
         wall.openings.len(),
         rectangle(from, wall.u.1, base_y, eaves_y),
     );
     if let Some(profile) = gable {
-        push(ElementKind::Gable, 0, profile);
+        push("gable", 0, profile);
     }
 }

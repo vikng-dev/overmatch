@@ -1,4 +1,4 @@
-//! Buildings and rubble under the running gear, in the game's tank driving physics (game state
+//! Constructions and rubble under the running gear, in the game's tank driving physics (game state
 //! only). The terrain field ([`super::oracle::BlockField`]) is the heightmap and the authored
 //! blocks; a construction's elements and standing chunks and every loose piece are Avian colliders the
 //! field never holds. [`RubbleBodies`] snapshots the nearby colliders shared by every driving source, the belt's support

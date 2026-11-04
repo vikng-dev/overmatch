@@ -165,12 +165,10 @@ mod run_window;
 /// of `GamePlugin`.
 #[cfg(feature = "dev_ui")]
 pub mod sandbox;
-/// The map's object scatter (the map's own `level.json`, resolved through its `prototypes.ron`
-/// library): authored construction and tree placement, each instance carrying its map identity,
-/// spawned from shared data on both binaries rather than over the wire. A construction is a graybox
-/// box with a static collider that joins `world::TerrainMap`'s block list; a damage-model tree is
-/// spawned by `trees` — a static root with a state,
-/// one frustum collider per segment, each segment with its own HP pool.
+/// The map's object scatter (`level.json` resolved through `prototypes.ron`): shared placement
+/// data, with stable map identities on both peers. Graybox blocks enter `world::TerrainMap`;
+/// `construction::spawn` builds complete construction bodies, and `trees::spawn` builds the
+/// segmented trees of the game's environment destruction model.
 mod scatter;
 /// Copy the player's main-pass depth into Bevy's prepass texture after opaque rendering for
 /// soft sprites/hull marks, avoiding a second scene draw. `camera` mounts it and spawns its marker.
@@ -685,7 +683,7 @@ impl Plugin for SimPlugin {
             // the vocabulary both ends explain them in.
             (damage_cam::recorder::plugin, damage_cam::delivery::plugin),
         ));
-        // Buildings breaking (the game's environment destruction): the authority's laws and
+        // Constructions breaking (the game's environment destruction): the authority's laws and
         // record, every peer's colliders from it, the rule loose pieces rest by, and the solver's
         // reading of every structure contact. Separate call: the tuple above is at bevy's
         // 15-plugin arity limit.

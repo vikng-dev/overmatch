@@ -4,7 +4,7 @@
 
 use bevy::math::{Quat, Vec3};
 
-use super::model::{Block, Bond, Chunk, Cut, Joint, Masonry, Side, Structure, clip_polygon};
+use super::model::{Block, Bond, Chunk, Cut, Joint, Material, Side, Structure, clip_polygon};
 use crate::construction::attachments::Attachments;
 use crate::construction::schema::ConstructionAsset;
 
@@ -25,7 +25,7 @@ pub(crate) fn wall_cut(
     asset: &ConstructionAsset,
     wall: &str,
     substance: &str,
-    material: Masonry,
+    material: Material,
     at: Placement,
 ) -> Result<Cut, String> {
     let component = asset

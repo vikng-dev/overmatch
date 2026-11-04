@@ -17,7 +17,7 @@
 //!   and a chunk whose pool is spent is turned to dust. A round's line and a fragment crush their
 //!   energy over the material's crush energy; a blast crushes by Law 1, its rays' impulse through
 //!   a compaction front wherever their peak pressure beats the material's dynamic compressive
-//!   strength ([`Masonry::crushed_by`]), its energy never entering.
+//!   strength ([`Material::crushed_by`]), its energy never entering.
 //! * **Kinetic cavity cracks** ([`crack`]). Each live joint's stress from kinetic loads' energies is
 //!   compared with the seam's tensile strength; a joint at or over it is cracked loose. The stress
 //!   is the elastic one about the cavity a load's energy crushed. Loads superpose; a joint does
@@ -32,7 +32,7 @@
 //! * **Strength** ([`weigh`]). From changed supports and pressed chunks, each group that one
 //!   section alone holds is checked under gravity plus the loads' presses. Their resultant force
 //!   and moment set the section's peak tensile stress. A part held through several sections at
-//!   once stays unassessed and is counted; the wall design's "Structural calculation" owns that
+//!   once stays unassessed and is counted; the construction design's "Structural calculation" owns that
 //!   limit and the alternatives.
 //! * **Rests** ([`unseat`], inside [`weigh`] and [`structural`]). A joint between two components
 //!   the construction's data marks resting ([`Bond::Resting`]: a beam laid on a wall, nothing fixing
@@ -47,7 +47,7 @@
 //!   it meets and pushes the face it meets with the blast's reflected impulse over the patch it
 //!   stands for ([`Blast::push`]), with the peak force of the blast's peak overpressure over the
 //!   same patch ([`Blast::peak`], a load's `peak`, which the section laws read), the chunk taking only
-//!   the share of the ray's cone its own silhouette intercepts ([`intercepted`]). The wall design
+//!   the share of the ray's cone its own silhouette intercepts ([`intercepted`]). The construction design
 //!   (`.agents/docs/design/construction-destruction.md`, "Standoff blast") owns the model.
 //!
 //! A round's line in each chunk becomes loads [`LINE_STEP`] apart along its chord ([`Load::line`]);
@@ -75,9 +75,9 @@ use crate::substances::{BlastFacts, REFERENCE_FACTOR, SubstanceRegistry};
 pub(crate) const LINE_STEP: f32 = 0.05;
 
 /// One material's values, as the laws read them, all from its substance row
-/// ([`Masonry::of`]).
+/// ([`Material::of`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Masonry {
+pub(crate) struct Material {
     /// kg/m³.
     pub density: f32,
     /// The energy a round's line or a fragment spends turning one cubic metre to dust, J/m³: what
@@ -110,7 +110,7 @@ pub(crate) struct Seam {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Shear {
     /// By its shear cohesion `c` without precompression (Pa) and its cohesive mode-II fracture
-    /// energy `G_II` (J/m²): its material row's ([`Masonry::of`]).
+    /// energy `G_II` (J/m²): its material row's ([`Material::of`]).
     Cohesive { cohesion: f32, energy: f32 },
     /// By nothing the laws can read: the seam's data states its opening alone (an attachment kind
     /// stated by its tensile strength and opening work, as the nailed fixing is,
@@ -122,14 +122,14 @@ pub(crate) enum Shear {
 /// How a material crushes under a blast's pulse, about the game's environment destruction (game
 /// state only): Law 1, a rigid–plastic–locking (snowplow) compaction front. A face patch taking
 /// impulse `J` at peak pressure `P` crushes `Δm = J f(σ_c,d / P) / u_c` ([`crush_factor`]);
-/// nothing where `P` does not beat `σ_c,d`, however long the pulse. The wall design ("Standoff
+/// nothing where `P` does not beat `σ_c,d`, however long the pulse. The construction design ("Standoff
 /// blast", Law 1) owns the model.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Compaction {
     /// The dynamic compressive strength `σ_c,d`, Pa: the row's quasi-static compressive strength
     /// times its stated dynamic increase factor at the row's reference rate. ASSUMED effective
     /// plateau: the law supplies no per-pulse strain rate; applicability is a validation limit
-    /// recorded in the wall design's material-data section.
+    /// recorded in the construction design's material-data section.
     pub strength: f32,
     /// The slowest compaction front's speed `u_c = √(σ_c,d ε_v / ρ)`, m/s, `ε_v = 1 − ρ / ρ_s` the
     /// volumetric strain to lock-up at the row's fully dense density `ρ_s` (DERIVED: the locking
@@ -138,7 +138,7 @@ pub(crate) struct Compaction {
 }
 
 /// How a material throws a rear scab under a blast's pulse, about the game's environment
-/// destruction (game state only): Law 2's material inputs ([`scab`]). The wall design ("Standoff
+/// destruction (game state only): Law 2's material inputs ([`scab`]). The construction design ("Standoff
 /// blast", Law 2) owns the model.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Spall {
@@ -176,7 +176,7 @@ impl Compaction {
     }
 }
 
-impl Masonry {
+impl Material {
     /// The volume (m³) a face patch of this material taking impulse `impulse` (N·s, its
     /// magnitude) at peak pressure `pressure` (Pa) crushes: `Δm / ρ`, `Δm = J f(σ_c,d / P) / u_c`
     /// ([`Compaction`]). Linear in the impulse at a fixed pressure, so the volume a face takes is
@@ -252,7 +252,7 @@ pub(crate) struct Chunk {
     pub centroid: Vec3,
     /// kg.
     pub mass: f32,
-    pub material: Masonry,
+    pub material: Material,
     /// Held by the soil: its hull lies wholly below grade, the plane its construction stands on. The
     /// soil bears it as an anchor does and no crack frees it, so a group still joined to it stands
     /// and no body is ever released inside the ground.
@@ -803,7 +803,7 @@ pub(crate) fn wear(structure: &Structure, state: &mut State, chunk: usize, volum
 /// its own law's: a round's line
 /// ([`Load::line`]), a fragment's or spall ray's stop ([`Load::field`]), a blast ray's
 /// ([`Load::blast`]), none of which presses. A body's contact (`super::breakage`) spends no energy,
-/// crushes nothing, and its blow and press are what the solver moved through the point. The wall design owns the
+/// crushes nothing, and its blow and press are what the solver moved through the point. The construction design owns the
 /// model (`.agents/docs/design/construction-destruction.md`, "Bodies in contact").
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Load {
@@ -815,7 +815,7 @@ pub(crate) struct Load {
     /// whose pressure and impulse act through the blast laws, and for a body contact.
     pub energy: f32,
     /// The volume it crushes, m³: a line's or a fragment's energy over its chunk's crush energy
-    /// ([`Masonry::crush`]); a blast's, its rays' Law 1 volumes ([`Masonry::crushed_by`]), which
+    /// ([`Material::crush`]); a blast's, its rays' Law 1 volumes ([`Material::crushed_by`]), which
     /// its energy never enters.
     pub crushed: f32,
     /// N·s.
@@ -855,7 +855,7 @@ pub(crate) enum Origin {
         speed: f32,
         /// The numerical physics step the solver delivered its blow within, s, not a material
         /// contact duration. `blow / step` bounds the contact's peak force from below
-        /// ([`Load::mean_force`]); see the wall design's "Body contact duration" limitation.
+        /// ([`Load::mean_force`]); see the construction design's "Body contact duration" limitation.
         step: f32,
     },
 }
@@ -911,7 +911,7 @@ impl Load {
     /// [`LINE_STEP`], the steps sharing both evenly, each crushing its energy's volume.
     pub(crate) fn line(
         chunk: usize,
-        material: &Masonry,
+        material: &Material,
         entry: Vec3,
         end: Vec3,
         energy: f32,
@@ -1054,7 +1054,7 @@ impl Load {
 
     /// A lower bound on a body contact's peak force (N): its blow over the numerical solver
     /// step, not a resolved contact duration. Increasing the physics rate raises this bound for
-    /// the same blow; the wall design records that approximation. `None` for a field, which
+    /// the same blow; the construction design records that approximation. `None` for a field, which
     /// states its pulse by its peak or not at all.
     fn mean_force(&self) -> Option<Vec3> {
         match self.origin {
@@ -1067,7 +1067,7 @@ impl Load {
 
     /// The radius of the ball this load's energy alone crushes in `material`, m: where its stress
     /// is clamped, since nothing inside it is left to load.
-    fn crushed(&self, material: &Masonry) -> f32 {
+    fn crushed(&self, material: &Material) -> f32 {
         (3.0 * self.energy / (4.0 * PI * material.crush)).cbrt()
     }
 
@@ -1104,7 +1104,7 @@ fn disc(joint: &Joint) -> [(Vec3, f32); 7] {
 }
 
 /// Each source's crushed radius in `material`, in source order ([`Load::crushed`]).
-fn crushed_radii(sources: &[Load], material: &Masonry) -> Vec<f32> {
+fn crushed_radii(sources: &[Load], material: &Material) -> Vec<f32> {
     sources.iter().map(|s| s.crushed(material)).collect()
 }
 
@@ -3464,7 +3464,7 @@ fn translation(push: Vec3, normals: impl Iterator<Item = Vec3> + Clone) -> Optio
 /// faces. Each intact bonded joint of the ring, its normal `n` out of the
 /// group, opens by `⟨−d·n⟩` and slides by `|d − (d·n) n|` per unit of translation `d`; its
 /// strength is `A (f_t ⟨open⟩ + c ⟨slide⟩)` and its work `A (G_I ⟨open⟩ + G_II ⟨slide⟩)`, the
-/// linear mode interaction (the wall design, "Bodies in contact"). A rest, or a seam a
+/// linear mode interaction (the construction design, "Bodies in contact"). A rest, or a seam a
 /// crack opened, adds neither: the friction the group's own weight would clamp it with is
 /// ASSUMED nothing (the wall above's clamp is unknown without a static solve; nothing errs toward
 /// failure). `None` for a group with a buried chunk or an intact anchor, one with no translation
@@ -3667,7 +3667,7 @@ pub(crate) const BLAST_RAYS: usize = 4096;
 const GRAZING_COS: f32 = 0.1;
 
 /// A blast: its energy (J) and its charge `W` (kg of TNT), the TNT that carries that energy
-/// (ASSUMED: impulse equivalence is energy equivalence; the wall design notes they need not agree).
+/// (ASSUMED: impulse equivalence is energy equivalence; the construction design notes they need not agree).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Blast {
     pub energy: f32,
@@ -3839,10 +3839,10 @@ impl Blast {
     /// Law 1's crushed volume and local front depth on the same patch as [`Self::push`]. The
     /// volume takes the intercepted share of the cone; depth is intensive and keeps its value.
     /// A cone expanding behind the face holds that volume between its entry and its front
-    /// ([`Crushing`]); the wall design owns the model and its oblique-projection approximation.
+    /// ([`Crushing`]); the construction design owns the model and its oblique-projection approximation.
     pub(crate) fn crushed(
         &self,
-        material: &Masonry,
+        material: &Material,
         share: f32,
         distance: f32,
         dir: Vec3,
@@ -3869,7 +3869,7 @@ impl Blast {
 /// falling from its peak force to zero over its duration, against the strength as a constant
 /// resistance; `1 − 4r/3` while the section still moves when the pulse ends (`r < ½`),
 /// `(16/3) r (1 − r)³` after, and nothing once the strength holds the peak (`r ≥ 1`). Its two
-/// ends are the wall design's two limits: the impulsive (`g → 1` as the strength vanishes
+/// ends are the construction design's two limits: the impulsive (`g → 1` as the strength vanishes
 /// against the peak) and the quasi-static (`g = 0` where the peak force cannot beat the
 /// strength). The section and rest laws read it ([`section_pulse`], [`unseat`], [`Load::felt`]).
 /// A negative or undefined ratio is a bug: strengths and peak forces are not negative.
@@ -3926,7 +3926,7 @@ pub(crate) struct Crushing {
 pub(crate) struct Backing<'a> {
     pub block: &'a Block,
     pub scale: f32,
-    pub material: Masonry,
+    pub material: Material,
     /// Contacts between standing matter ([`State::contacts`]), in the hits' frame. Their
     /// rear-face area is not a free surface, whether bonded or bearing-only.
     pub contacts: &'a [Joint],
@@ -3954,14 +3954,14 @@ impl Scab {
 }
 
 /// Law 2, the rear scab, on one loaded face (its `rays`, aggregated as `load`) of the chunk
-/// `backing` names; the wall design ("Standoff blast", Law 2) owns the model. The ligament `L` is
+/// `backing` names; the construction design ("Standoff blast", Law 2) owns the model. The ligament `L` is
 /// remaining depth behind the crater to the hull's actual exit. The back point `b` lies the
 /// full hull depth `H` behind the face's load; the patch nearest that load supplies its crater
 /// depth (ASSUMED: nearest-sample reading at the same one back point). The face's compression
 /// reaches `b` as `σ_b`: the solid-angle mean of the face's transmitted stress, the sum over its
 /// patches of `H / (2π R³)` (each patch's solid angle seen from `b`, over `2π`, per area) times
 /// each patch's transmitted force `min(P, σ_c,d) A`; a uniform load over a plane gives back the
-/// load (the #237 study's mean; the wall design names the rejected alternative). The pulse lasts `τ
+/// load (the #237 study's mean; the construction design names the rejected alternative). The pulse lasts `τ
 /// = 2J / F` (`2i / P` of the face's blow and peak force) and is `λ = c τ` long. Reflected at the
 /// free back face as tension, it lifts a scab where `σ_b min(1, 2L / λ) ≥ σ_t,d`, of thickness `δ =
 /// λ σ_t,d / (2 σ_b)` (where the net tension first reaches the strength; at most `L`), at `v =
@@ -4082,7 +4082,7 @@ pub(crate) struct BlastSurface<K> {
     pub direction: Vec3,
     pub distance: f32,
     pub silhouette: f32,
-    pub material: Option<Masonry>,
+    pub material: Option<Material>,
 }
 
 /// The game's one blast-ray driver: geometry supplies the nearest visible surface for each
@@ -4155,7 +4155,7 @@ pub(crate) fn trace_blast<K: Ord + Copy>(
 pub(crate) fn sample_blocks(
     blocks: &[Block],
     standing: impl Fn(usize) -> bool,
-    material: impl Fn(usize) -> Masonry,
+    material: impl Fn(usize) -> Material,
     origin: Vec3,
     blast: Blast,
     directions: &[(Vec3, f32)],
@@ -5432,8 +5432,8 @@ mod tests {
         }
     }
 
-    fn brick() -> Masonry {
-        Masonry::of(SubstanceRegistry::shipped_static(), "Brick")
+    fn brick() -> Material {
+        Material::of(SubstanceRegistry::shipped_static(), "Brick")
             .expect("the shipped registry holds Brick")
             .expect("Brick states a seam strength")
     }
@@ -5448,7 +5448,7 @@ mod tests {
             let Some(hard) = substance.hard() else {
                 continue; // Witnesses and unworn rows are not structural matter.
             };
-            let material = Masonry::of(registry, name);
+            let material = Material::of(registry, name);
             let Some(bulk) = hard.bulk else {
                 assert!(
                     material.unwrap().is_none(),
@@ -5611,7 +5611,7 @@ mod tests {
         let (w, h) = (6, 4);
         let mut structure = grid(w, h);
         let brick = brick();
-        let soft = Masonry {
+        let soft = Material {
             crush: brick.crush / 8.0,
             ..brick
         };
@@ -5635,7 +5635,7 @@ mod tests {
                 origin: Origin::Field,
             };
             let sources = [source(right, energy), source(left, energy / 2.0)];
-            let rule = |material_of: &dyn Fn(&Joint) -> Masonry| -> Vec<usize> {
+            let rule = |material_of: &dyn Fn(&Joint) -> Material| -> Vec<usize> {
                 (0..structure.joints.len())
                     .filter(|&j| {
                         let joint = &structure.joints[j];
@@ -5948,7 +5948,7 @@ mod tests {
     /// `g(0) = f(0) = 1`, `g(1) = f(1) = 0` and both zero past 1, both falling strictly over
     /// `(0, 1)` and meeting their own branches at ½; and `g` is the work a rigid-plastic section
     /// absorbs under the triangular pulse, `J² g(r) / 2m`, integrated here directly within 0.5 %
-    /// (fixture pulse). The section law of #237 relies on `g`'s ends being the wall design's two
+    /// (fixture pulse). The section law of #237 relies on `g`'s ends being the construction design's two
     /// limits (impulsive, and a peak force under the strength moving nothing), the crush law on
     /// `f`'s: a branch flipped or taken at the wrong `r`, a ratio inverted, or a factor that does
     /// not vanish once the strength holds the peak fails here.
@@ -7038,8 +7038,8 @@ mod tests {
     }
 
     /// The shipped wood, as the laws read it.
-    fn wood() -> Masonry {
-        Masonry::of(SubstanceRegistry::shipped_static(), "Wood")
+    fn wood() -> Material {
+        Material::of(SubstanceRegistry::shipped_static(), "Wood")
             .expect("the shipped registry holds Wood")
             .expect("Wood states bulk facts")
     }
@@ -7811,7 +7811,7 @@ mod tests {
     /// pays twice the energy but whose least mean force is short of the strength frees nothing; a
     /// heavy body's slow blow whose force beats the strength many times but whose share pays half
     /// the energy frees nothing; with both met the plug is punched out through exactly its four
-    /// seams. The wall laws rely on both limits for every body contact: a tank's touch that
+    /// seams. The construction laws rely on both limits for every body contact: a tank's touch that
     /// shatters a wall it barely loads, or a brick's bounce that breaks the wall it lands on,
     /// fails here, so a law reading either limit alone fails one case. Masses, speeds and steps are
     /// fixture data.
@@ -8130,7 +8130,7 @@ mod tests {
     /// The patch's own ring (8 sliding seams, `8 A c`, DERIVED) has the highest force-to-strength
     /// ratio of the candidates (the next ring out has 12 seams' perimeter), so 1 % under `8 A c`
     /// frees nothing and 1 % over it frees exactly the patch; doubling every seam's cohesion
-    /// doubles the press needed. The wall laws rely on the breach taking the contact's shape: a
+    /// doubles the press needed. The construction laws rely on the breach taking the contact's shape: a
     /// ring cap that decides the size (the grown ring, or the one past it, which reaches the
     /// buried border and so frees nothing) fails here, as does a ring read on any cohesion but its
     /// seams'. Fixture geometry; the press is fixture data.
@@ -8285,7 +8285,7 @@ mod tests {
             let Some(facts) = bulk.blast else {
                 continue; // Unbreakable bulk matter supplies no scab law.
             };
-            let material = Masonry::of(&registry, name).unwrap().unwrap();
+            let material = Material::of(&registry, name).unwrap().unwrap();
             assert_eq!(
                 material.spall.tensile,
                 (bulk.tensile.unwrap() * facts.tensile_dif) as f32,
@@ -8297,7 +8297,7 @@ mod tests {
     /// One fixture patch at the centre of a 0.25 m slab's lower face, at `material`'s dynamic
     /// compressive strength over 0.1 m², delivering `blow` N·s: a back stress far over every
     /// shipped row's dynamic tensile strength (ASSUMED fixture loading). With the slab.
-    fn scab_face(material: &Masonry, blow: f32) -> (RayHit, Block) {
+    fn scab_face(material: &Material, blow: f32) -> (RayHit, Block) {
         let pressure = material.compaction.strength;
         let hit = RayHit {
             at: Vec3::ZERO,
@@ -8315,7 +8315,7 @@ mod tests {
 
     /// The blow at which `material`'s [`scab_face`] pulse is `lengths` ligaments long:
     /// `λ = c τ`, `τ = 2J / F`.
-    fn scab_blow(material: &Masonry, lengths: f32) -> f32 {
+    fn scab_blow(material: &Material, lengths: f32) -> f32 {
         let force = 0.1 * material.compaction.strength;
         lengths * 0.25 * force / (2.0 * material.spall.bar_speed)
     }
@@ -8673,10 +8673,10 @@ mod tests {
         assert_eq!(text.matches("\"Brick\":").count(), 1);
         let renamed = SubstanceRegistry::from_ron(&text.replacen("\"Brick\":", "\"Clinker\":", 1))
             .expect("the shipped rows load under another name");
-        let clinker = Masonry::of(&renamed, "Clinker")
+        let clinker = Material::of(&renamed, "Clinker")
             .unwrap()
             .expect("the renamed row states bulk facts");
-        let scab = |material: Masonry, loaded: &Masonry| {
+        let scab = |material: Material, loaded: &Material| {
             let (hit, slab) = scab_face(loaded, scab_blow(loaded, 0.1));
             let (_, scabs) = Load::blast(&[(0, hit)], |_| Backing {
                 block: &slab,

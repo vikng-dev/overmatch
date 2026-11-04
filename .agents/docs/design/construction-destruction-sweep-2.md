@@ -260,7 +260,7 @@ subagents.
 | Claude | P3 no centripetal term in the group frame | verified | buildings: load a spinning group's seams by its centripetal pull (#249) |
 | Claude | P3 a child drawn twice with its parent | verified (Codex's P2) | buildings: draw each split chunk by one piece and index the handover (#249) |
 | Claude | P3 per-piece state clones and per-source frame loads | not a defect: a DERIVED cost with no wrong state; the pricing lane measures it | — |
-| Claude | P3 `retire_wall_piece` skips a missing carrier silently | verified | net: expect a chunk group's carrier when its split retires it (#249) |
+| Claude | P3 `retire_construction_piece` skips a missing carrier silently | verified | net: expect a chunk group's carrier when its split retires it (#249) |
 | Claude | P3 `Origin::Contact::normal` read by no law | verified | buildings: drop the contact normal no law reads (#249) |
 | Claude | P3 the free-fall test is vacuous | verified | buildings: make the free-fall test read the frame's gravity cancel (#249) |
 | Claude | P3 no test of a level face's element axes on the mesh path | verified | buildings: test a level face's element axes on the mesh path (#249) |

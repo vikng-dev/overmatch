@@ -1,5 +1,5 @@
 //! The game's environment destruction ledger (game state only): topology changes replicate as
-//! append-only diffs. Freed trunks use the same interpolated pose carrier as wall pieces;
+//! append-only diffs. Freed trunks use the same interpolated pose carrier as construction pieces;
 //! replicas construct static collision copies and never integrate their motion (ADR-0037).
 
 use super::debris_stress::DebrisPose;

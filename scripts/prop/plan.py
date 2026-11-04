@@ -287,7 +287,7 @@ def construction_ron(stem: str, trunk: dict, segment_rows: List[dict], sides: in
         "    pieces: [",
         "        (",
         '            name: "trunk",',
-        "            kind: Trunk,",
+        '            part: "trunk",',
         '            component: "trunk",',
         "            material: {},".format(_ron_string(trunk["material"])),
         "            surface_frame: Grain((0.0, 1.0, 0.0)),",

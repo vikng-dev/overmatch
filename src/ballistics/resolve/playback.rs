@@ -719,7 +719,7 @@ impl Playback {
                     Decision::Clear { .. } => {}
                     Decision::Bounce(bounce) => {
                         apply_bounce(bounce, shell, terminal_emitted, bodies, commands);
-                        // Buildings and trunks read only lines. A skid does all its work at the
+                        // Constructions and trunks read only lines. A skid does all its work at the
                         // face, so its line has no length and is all entrance.
                         lines.push(super::super::DeliveredLine {
                             contacts: Vec::new(),

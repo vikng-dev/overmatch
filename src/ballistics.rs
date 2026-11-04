@@ -6608,7 +6608,7 @@ pub(crate) mod march_tests {
     }
 
     /// The game's damage model must deliver the whole resolved momentum exchange independently
-    /// of its HP dose. Buildings and freed trunks read these lines. Fixture data: head-on and
+    /// of its HP dose. Constructions and freed trunks read these lines. Fixture data: head-on and
     /// oblique perforations of fixture plates, overlapping or spaced on one body or two; entry
     /// and final exit states supply the independent whole-chain budget.
     #[test]

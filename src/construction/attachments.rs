@@ -16,7 +16,7 @@ use std::sync::LazyLock;
 use bevy::math::Vec3;
 use serde::Deserialize;
 
-use super::fracture::{Bond, Masonry, Seam, Shear};
+use super::fracture::{Bond, Material, Seam, Shear};
 use super::schema::ConstructionAsset;
 use crate::keyed_map::KeyedMap;
 use crate::physical_laws::gravity_mps2;
@@ -171,7 +171,7 @@ impl Attachments {
                 };
                 let kind = match row {
                     Row::Seam(substance) => Kind::Joint(Bond::Bonded(
-                        Masonry::of(registry, &substance)
+                        Material::of(registry, &substance)
                             .map_err(|err| format!("kind {name:?}: {err}"))?
                             .ok_or_else(|| {
                                 format!(
@@ -342,7 +342,7 @@ mod tests {
         for (name, row) in rows {
             let expected = match row {
                 Row::Seam(substance) => Kind::Joint(Bond::Bonded(
-                    Masonry::of(registry(), &substance)
+                    Material::of(registry(), &substance)
                         .unwrap()
                         .expect("a declared seam has bulk facts")
                         .seam,
@@ -497,7 +497,7 @@ mod tests {
         };
         let element = Element {
             name: "fixture".into(),
-            kind: ElementKind::Pier,
+            part: "pier".into(),
             component: 0,
             material: 0,
             surface_frame: SurfaceFrame::Upright,
@@ -554,7 +554,7 @@ mod tests {
             assert!(error.contains(part), "{error}");
         }
         let asset = footprint();
-        let masonry = [Masonry::of(registry(), "Brick").unwrap()];
+        let masonry = [Material::of(registry(), "Brick").unwrap()];
         let error = super::super::breakage::Layout::of(&asset, &masonry, &list).unwrap_err();
         assert!(
             error.contains("anchor on chunk") && error.contains("bonded"),
@@ -599,7 +599,7 @@ mod tests {
     fn layout_reads_the_named_anchor_kind() {
         let asset = footprint();
         asset.check().unwrap();
-        let masonry = [Masonry::of(registry(), "Brick").unwrap()];
+        let masonry = [Material::of(registry(), "Brick").unwrap()];
         let row = "Stated(tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))";
         let expected = Bond::Bonded(Seam {
             tensile: 10.0,
@@ -627,7 +627,7 @@ mod tests {
             registry(),
         )
         .unwrap();
-        let mut material = Masonry::of(registry(), "Brick").unwrap().unwrap();
+        let mut material = Material::of(registry(), "Brick").unwrap().unwrap();
         // Fixture internal bonds carry the prescribed couple without opening or punch rings.
         material.density = 100.0;
         material.seam = Seam {

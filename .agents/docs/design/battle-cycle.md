@@ -58,7 +58,7 @@ segments reparented under a trunk, are removed too. Rebuilding reuses stable
 
 Each ledger and environment pose carrier carries `WorldGeneration`, selected by
 the Battle number. The authority replaces ledger entities rather than truncating
-append-only diff histories. Wall publication derives its cursor from the current
+append-only diff histories. Construction publication derives its cursor from the current
 ledger identity. Replica consumers select only the current generation, so a phase
 packet arriving ahead of the new records produces the intact world immediately;
 a record arriving first waits for its Battle. Before any Battle snapshot, and

@@ -352,7 +352,7 @@ mod tests {
     fn assert_controlled_destruction_delivery(app: &mut App) {
         use crate::ballistics::{BallisticVolume, DeliveredLine, PenetrationMarks, VolumeCrossing};
         use crate::construction::breakage::{Event, Record};
-        use crate::construction::fracture::Masonry;
+        use crate::construction::fracture::Material;
         use crate::substances::SubstanceRegistry;
         use std::collections::BTreeSet;
         let kind = crate::construction::tests::column_construction();
@@ -387,7 +387,7 @@ mod tests {
             .0;
         // Fixture: twice the independently derived removal threshold of the unit base cube.
         let base = &kind.asset.chunks[0];
-        let material = Masonry::of(
+        let material = Material::of(
             SubstanceRegistry::shipped_static(),
             &kind.asset.materials[usize::from(base.material)],
         )

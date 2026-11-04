@@ -6,7 +6,7 @@ Construction(
     pieces: [
         (
             name: "trunk",
-            kind: Trunk,
+            part: "trunk",
             component: "trunk",
             material: "GreenNorwaySpruce",
             surface_frame: Grain((0.0, 1.0, 0.0)),

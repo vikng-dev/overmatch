@@ -38,7 +38,7 @@ use bevy::math::Vec3;
 use serde::{Deserialize, Serialize};
 
 /// The format revision this build reads and writes. A file of another revision is refused.
-pub const FORMAT: u32 = 7;
+pub const FORMAT: u32 = 8;
 
 /// How far a vertex, a centroid or a plane may sit from where the contract places it, metres:
 /// the f32 rounding of a construction-sized coordinate, many times over, and far below any modelled
@@ -70,26 +70,6 @@ pub struct ConstructionAsset {
     pub anchors: Vec<Anchor>,
 }
 
-/// What an element is, as its construction data labels it. A label and the key a construction's
-/// joins name, never a law's selector: no law reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ElementKind {
-    /// Full wall height between openings or at a wall's end.
-    Pier,
-    /// Under an opening, from the foundation to the opening's bottom.
-    Sill,
-    /// Over an opening, from the opening's head to the eaves.
-    Lintel,
-    /// A gable wall's part above the eaves, under the roof.
-    Gable,
-    /// The timber beam a roof plane rests on along a wall's top.
-    WallPlate,
-    /// A roof plane: its boards.
-    Roof,
-    /// A tree's trunk, root to tip.
-    Trunk,
-}
-
 /// The authored surface frame: upright image mapping, or grain in the construction frame.
 /// Grain is a unit direction; its projection onto each face sets that face's tangent.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -113,9 +93,10 @@ impl SurfaceFrame {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Element {
-    /// The split-tree path, `<wall>/<kind>_<n>`: unique within the construction.
+    /// The authored element path, unique within the construction.
     pub name: String,
-    pub kind: ElementKind,
+    /// A part label authored by this construction, shared by elements its joins group together.
+    pub part: String,
     /// Index into [`ConstructionAsset::components`]: the component it is part of.
     pub component: u16,
     /// Index into [`ConstructionAsset::materials`].
@@ -247,6 +228,11 @@ impl ConstructionAsset {
         let mut next = 0u32;
         for (index, element) in self.elements.iter().enumerate() {
             let name = &element.name;
+            if element.part.trim().is_empty() {
+                return Err(format!(
+                    "element {name}.part is blank; author its construction part name and rebake"
+                ));
+            }
             material(element.material, name)?;
             if usize::from(element.component) >= self.components.len() {
                 return Err(format!(

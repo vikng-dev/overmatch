@@ -13,7 +13,7 @@
 
 use glam::DVec3;
 use overmatch::construction::attachments::Attachments;
-use overmatch::construction::schema::{ElementKind, SurfaceFrame};
+use overmatch::construction::schema::SurfaceFrame;
 use serde::Deserialize;
 
 use super::fracture::{CourseRule, Pattern};
@@ -105,7 +105,7 @@ pub struct Construction {
 pub struct Piece {
     /// Unique within the construction; seeds its cut's draws.
     pub name: String,
-    pub kind: ElementKind,
+    pub part: String,
     /// The component it is part of: chunks inside one hold by their material's seam.
     pub component: String,
     /// A key of `assets/materials/materials.ron`.
@@ -115,35 +115,41 @@ pub struct Piece {
     pub pattern: Pattern,
 }
 
-/// What holds every joint between an element of one of `kinds` and an element of the other (in
+/// What holds every joint between an element of one of `parts` and an element of the other (in
 /// either order) where the two lie in different components: the attachment kind `by` names
 /// (`assets/materials/attachments.ron`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Join {
-    pub kinds: (ElementKind, ElementKind),
+    pub parts: (String, String),
     pub by: String,
 }
 
 impl Join {
-    /// Whether this join holds the pair of kinds `(a, b)`, in either order.
-    pub fn joins(&self, (a, b): (ElementKind, ElementKind)) -> bool {
-        self.kinds == (a, b) || self.kinds == (b, a)
+    /// Whether this join holds the pair of part names `(a, b)`, in either order.
+    pub fn joins(&self, (a, b): (&str, &str)) -> bool {
+        (self.parts.0 == a && self.parts.1 == b) || (self.parts.0 == b && self.parts.1 == a)
     }
 }
 
-/// Refuses an anchor or join kind the shared list does not hold and a pair of kinds joined twice.
+/// Refuses an anchor or join kind the shared list does not hold and a pair of part names joined twice.
 fn check_holds(foundation_attachment: &str, joins: &[Join]) -> Result<(), String> {
     Attachments::shipped_static()
         .holds_anchor(foundation_attachment)
         .map_err(|err| format!("foundation_attachment: {err}"))?;
     for (k, join) in joins.iter().enumerate() {
-        if joins[..k].iter().any(|other| other.joins(join.kinds)) {
-            return Err(format!("the join of {:?} is stated twice", join.kinds));
+        if join.parts.0.trim().is_empty() || join.parts.1.trim().is_empty() {
+            return Err(format!("joins[{k}].parts: author two non-blank part names"));
+        }
+        if joins[..k]
+            .iter()
+            .any(|other| other.joins((&join.parts.0, &join.parts.1)))
+        {
+            return Err(format!("the join of {:?} is stated twice", join.parts));
         }
         Attachments::shipped_static()
             .holds(&join.by)
-            .map_err(|err| format!("the join of {:?}, by: {err}", join.kinds))?;
+            .map_err(|err| format!("the join of {:?}, by: {err}", join.parts))?;
     }
     Ok(())
 }
@@ -197,7 +203,7 @@ pub struct ConstructionSpec {
 #[serde(deny_unknown_fields)]
 pub struct PieceSpec {
     pub name: String,
-    pub kind: ElementKind,
+    pub part: String,
     pub component: String,
     pub material: String,
     pub surface_frame: SurfaceFrame,
@@ -234,6 +240,9 @@ impl ConstructionSpec {
             if pieces.iter().any(|other: &Piece| other.name == piece.name) {
                 return Err(format!("{what}: its name is taken"));
             }
+            if piece.part.trim().is_empty() {
+                return Err(format!("{what}.part: author a non-blank part name"));
+            }
             check_frame(&what, piece.surface_frame)?;
             piece
                 .pattern
@@ -253,7 +262,7 @@ impl ConstructionSpec {
                 .map_err(|err| format!("{what}: no closed convex solid ({err})"))?;
             pieces.push(Piece {
                 name: piece.name,
-                kind: piece.kind,
+                part: piece.part,
                 component: piece.component,
                 material: piece.material,
                 surface_frame: piece.surface_frame,
@@ -296,7 +305,7 @@ pub struct House {
     /// What each part is made of, how its surface runs and how it is cut.
     pub parts: Parts,
     pub walls: Walls,
-    /// What holds the parts of two components where they touch, by their elements' kinds.
+    /// What holds the parts of two components where they touch, by their elements' part names.
     pub joins: Vec<Join>,
 }
 

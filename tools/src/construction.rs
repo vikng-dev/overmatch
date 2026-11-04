@@ -6,7 +6,7 @@
 //! piece into chunks by the pattern its data names ([`fracture`]), and the contact search finds the
 //! joints between chunks and the chunks the ground holds ([`contact`]); nothing is written that
 //! [`certify`] refuses. What holds each joint between two components is the attachment kind the
-//! spec's join for their elements' kinds names ([`spec::Join`]), written by name: the strengths
+//! spec's join for their elements' part names names ([`spec::Join`]), written by name: the strengths
 //! stay in the shared list, which the game reads; each chunk's mass is its volume times its
 //! material row's density. The output is canonical
 //! ([`write`]): every number rounded to a micrometre (or its unit's millionth) and printed by the
@@ -129,7 +129,7 @@ fn assemble(
         }
         elements.push(schema::Element {
             name: piece.name.clone(),
-            kind: piece.kind,
+            part: piece.part.clone(),
             component: u16::try_from(
                 components
                     .iter()
@@ -170,8 +170,8 @@ fn assemble(
         .collect::<Result<Vec<_>, String>>()?;
     if let Some(k) = used.iter().position(|used| !used) {
         return Err(format!(
-            "the join of {:?} holds no joint: no two parts of those kinds touch",
-            construction.joins[k].kinds
+            "the join of {:?} holds no joint: no two parts of those parts touch",
+            construction.joins[k].parts
         ));
     }
     let foundation_attachment = u8::try_from(
@@ -220,8 +220,8 @@ fn attachment_kinds(construction: &Construction) -> Vec<String> {
 }
 
 /// What holds the joint between chunks `a` and `b`: inside one component its seam; between two,
-/// the kind in `attachments` that the construction's join for their elements' kinds names
-/// ([`spec::Join`]), marked in `used` (one flag per join). Refuses a pair of kinds no join holds.
+/// the kind in `attachments` that the construction's join for their elements' part names names
+/// ([`spec::Join`]), marked in `used` (one flag per join). Refuses a pair of part names no join holds.
 fn bond(
     construction: &Construction,
     attachments: &[String],
@@ -239,11 +239,11 @@ fn bond(
     let k = construction
         .joins
         .iter()
-        .position(|join| join.joins((pa.kind, pb.kind)))
+        .position(|join| join.joins((&pa.part, &pb.part)))
         .ok_or_else(|| {
             format!(
                 "{} and {} touch, and no join holds a {:?} to a {:?}",
-                pa.name, pb.name, pa.kind, pb.kind
+                pa.name, pb.name, pa.part, pb.part
             )
         })?;
     used[k] = true;

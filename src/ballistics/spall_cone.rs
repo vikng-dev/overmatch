@@ -1090,7 +1090,7 @@ mod tests {
     /// the emitted share, a burst's its wall's driven energy over it ([`field_strength`]), so
     /// either field's directions emit exactly that energy, whatever any unit; a cone's emitted HP
     /// is the energy lost times `r` times its authored unit whatever `κ`, a burst's its energy
-    /// times its own, each read from its own slot of the file. Buildings read a direction's joules
+    /// times its own, each read from its own slot of the file. Constructions read a direction's joules
     /// as crushing energy and pools its HP: a unit or the line rate entering the strength, a
     /// second conversion, `κ` left out of the cone's HP unit, or one mechanism's unit read for the
     /// other fails here. Fixture energies span zero and two scales, fixture ratios a reference and
@@ -1218,7 +1218,7 @@ mod tests {
         let joules = emitted(&cone, strength);
         let cone_hp = hp(joules, cone_unit());
         eprintln!("MEASURED cone: {joules:.3} J emitted, {cone_hp:.6} HP");
-        let brick = crate::construction::fracture::Masonry::of(
+        let brick = crate::construction::fracture::Material::of(
             crate::substances::SubstanceRegistry::shipped_static(),
             "Brick",
         )

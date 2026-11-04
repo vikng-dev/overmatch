@@ -1854,7 +1854,7 @@ fn spall_through(volumes: &VolumeTable, slabs: &[Slab]) -> Vec<SpallSource> {
 }
 
 /// The game's damage model emits the debris share times the capped exit-strength ratio of
-/// the core's work. Buildings and pool dose rely on softer exits reducing emission while
+/// the core's work. Constructions and pool dose rely on softer exits reducing emission while
 /// reference-and-harder exits use the same share. All factors and chords are fixture data.
 #[test]
 fn a_softer_exit_reduces_debris_and_reference_strength_caps_the_share() {

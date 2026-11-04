@@ -311,7 +311,7 @@ fn record_arrival_order_cannot_mix_worlds_or_consume_a_snapshot_before_construct
         assert_ne!(
             census(app.world_mut()).elements,
             fresh.elements,
-            "the later Battle's wall records must reach collision construction"
+            "the later Battle's construction records must reach collision construction"
         );
         let previous_construction = roots(app.world_mut());
         app.world_mut().despawn(battle);

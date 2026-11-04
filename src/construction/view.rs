@@ -921,7 +921,7 @@ mod tests {
         let masonry = asset
             .materials
             .iter()
-            .map(|name| super::super::fracture::Masonry::of(registry, name).unwrap())
+            .map(|name| super::super::fracture::Material::of(registry, name).unwrap())
             .collect::<Vec<_>>();
         let _layout = Layout::of(
             &asset,
@@ -1100,27 +1100,23 @@ mod tests {
     /// solids. Fixture geometry is in metres, independent of shipped window placement.
     #[test]
     fn a_window_is_a_hole_and_a_pier_is_solid() {
-        use crate::construction::schema::{self, ElementKind};
+        use crate::construction::schema;
         // Fixture: a wall with an off-centre rectangular opening, one chunk per solid.
         let size = Vec3::new(4.0, 3.0, 0.25);
         let opening_low = Vec3::new(1.0, 0.8, 0.0);
         let opening_high = Vec3::new(2.5, 2.2, size.z);
         let solids = [
-            (
-                Vec3::ZERO,
-                Vec3::new(opening_low.x, size.y, size.z),
-                ElementKind::Pier,
-            ),
-            (Vec3::new(opening_high.x, 0.0, 0.0), size, ElementKind::Pier),
+            (Vec3::ZERO, Vec3::new(opening_low.x, size.y, size.z), "pier"),
+            (Vec3::new(opening_high.x, 0.0, 0.0), size, "pier"),
             (
                 Vec3::new(opening_low.x, 0.0, 0.0),
                 Vec3::new(opening_high.x, opening_low.y, size.z),
-                ElementKind::Sill,
+                "sill",
             ),
             (
                 Vec3::new(opening_low.x, opening_high.y, 0.0),
                 Vec3::new(opening_high.x, size.y, size.z),
-                ElementKind::Lintel,
+                "lintel",
             ),
         ];
         let mut asset = ConstructionAsset {
@@ -1136,7 +1132,7 @@ mod tests {
             anchors: Vec::new(),
         };
         let density = schema::substance_density(&asset.materials[0]).unwrap() as f32;
-        for (index, (low, high, kind)) in solids.into_iter().enumerate() {
+        for (index, (low, high, part)) in solids.into_iter().enumerate() {
             let hull: Vec<_> = Block::cuboid(low, high)
                 .points
                 .iter()
@@ -1146,7 +1142,7 @@ mod tests {
             let volume = span.x * span.y * span.z;
             asset.elements.push(schema::Element {
                 name: format!("solid_{index}"),
-                kind,
+                part: part.to_owned(),
                 component: 0,
                 material: 0,
                 surface_frame: SurfaceFrame::Upright,

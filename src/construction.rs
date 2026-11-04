@@ -107,12 +107,12 @@ impl ConstructionKind {
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), p| {
                 (lo.min(p), hi.max(p))
             });
-        let masonry = asset
+        let law_materials = asset
             .materials
             .iter()
-            .map(|name| fracture::Masonry::of(registry, name))
+            .map(|name| fracture::Material::of(registry, name))
             .collect::<Result<Vec<_>, _>>()?;
-        let layout = breakage::Layout::of(&asset, &masonry, attachments)?;
+        let layout = breakage::Layout::of(&asset, &law_materials, attachments)?;
         let structure = Arc::new(layout.checked_structure(&asset, 1.0)?);
         Ok(Self {
             asset,
@@ -336,7 +336,7 @@ pub(crate) mod tests {
     /// It has no house topology or view asset; all masses derive from the registry's material density.
     pub(crate) fn column_construction() -> Arc<ConstructionKind> {
         let registry = crate::substances::SubstanceRegistry::shipped_static();
-        let density = fracture::Masonry::of(registry, "Brick")
+        let density = fracture::Material::of(registry, "Brick")
             .unwrap()
             .unwrap()
             .density;
@@ -359,7 +359,7 @@ pub(crate) mod tests {
             components: vec!["column".into()],
             elements: vec![schema::Element {
                 name: "column".into(),
-                kind: schema::ElementKind::Pier,
+                part: "pier".into(),
                 component: 0,
                 material: 0,
                 surface_frame: schema::SurfaceFrame::Upright,
@@ -643,6 +643,9 @@ pub(crate) mod tests {
             |id: &str, text: &str| ConstructionKind::resolve(id, text, registry, attachments);
         resolve("house_1", &text).expect("the shipped house holds");
         assert!(resolve("house_2", &text).is_err());
+        let mut asset = ConstructionAsset::from_ron(&text).unwrap();
+        asset.elements[0].part = " ".into();
+        assert!(asset.check().unwrap_err().contains(".part is blank"));
         let mut asset = ConstructionAsset::from_ron(&text).unwrap();
         asset.anchors[0].centroid[1] += 0.1;
         assert!(

@@ -8,7 +8,7 @@
 //! nothing, and logs the camera its capture clients hold as a plan fragment (a `frames.camera`
 //! value), so every peer frames the one break the server made. The wall is chosen by class, the
 //! same on every run: the construction nearest the map's centre (the lowest ordinal on a tie), its
-//! breakable pier of the largest volume (the lowest element on a tie). A round is fired out
+//! breakable element of the largest volume (the lowest element on a tie). A round is fired out
 //! along the pier's outward normal at the chunk nearest the pier's centre; `assets/dev/capture-wall.ron`
 //! owns the staging distances (m). A charge sits on the pier's outer face near its foot, its
 //! energy its named burst core's chemical energy per kilogram
@@ -22,7 +22,6 @@ use bevy::prelude::*;
 use crate::ballistics::FireShell;
 use crate::construction::breakage::{Breakage, Charge as ConstructionCharge};
 use crate::construction::fracture::Blast;
-use crate::construction::schema::ElementKind;
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
 
@@ -233,9 +232,7 @@ fn the_wall((root, breakage): (&Transform, &Breakage)) -> Option<(Vec3, Vec3, Ve
             .sum()
     };
     let e = (0..kind.asset.elements.len())
-        .filter(|&e| {
-            kind.asset.elements[e].kind == ElementKind::Pier && layout.elements[e].is_some()
-        })
+        .filter(|&e| layout.elements[e].is_some())
         .max_by(|&a, &b| volume(a).total_cmp(&volume(b)).then(b.cmp(&a)))?;
     let block = &layout.element_blocks[e];
     let centre = block.center();

@@ -698,7 +698,7 @@ pub(super) fn install_replica_consumers(app: &mut App) {
     // The debris stress lever's fragments and the constructions' fallen pieces, drawn where the
     // server's carriers say they are.
     super::debris_stress::install_client(app);
-    // The wall ledger into the record the constructions derive from.
+    // The construction ledger into the record the constructions derive from.
     super::construction::install_client(app);
     app.add_systems(
         FixedUpdate,

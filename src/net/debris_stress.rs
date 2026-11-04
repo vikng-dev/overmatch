@@ -6,7 +6,7 @@
 //! registered physics components off this stream. Received poses are checked before interpolation;
 //! malformed records go through the client's visible match-close path.
 //!
-//! Building carriers draw at the shared interpolation cursor (ADR-0037); stress carriers apply on
+//! Construction carriers draw at the shared interpolation cursor (ADR-0037); stress carriers apply on
 //! arrival and use the scenario mesh. Neither view runs physics. [`install_server`] owns carriers
 //! and publication; [`install_client`] owns presentation.
 //!
@@ -294,7 +294,7 @@ fn retire_construction_piece(
     });
 }
 
-/// A freed trunk uses the same one-pose interpolated carrier as a wall piece.
+/// A freed trunk uses the same one-pose interpolated carrier as a construction piece.
 fn carry_tree_piece(
     added: On<Add, crate::trees::TreePiece>,
     pieces: Query<(

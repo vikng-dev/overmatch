@@ -159,7 +159,7 @@ pub struct BulkFacts {
     pub density: f64,
     /// The tensile strength across a seam between pre-cut chunks of this substance, Pa: what the
     /// push rule compares the load at a joint with. `None` where none is sourced: the constructions'
-    /// laws then refuse the substance as a breakable material (`construction::fracture::Masonry::of`).
+    /// laws then refuse the substance as a breakable material (`construction::fracture::Material::of`).
     pub tensile: Option<f64>,
     /// The seam's mode-I fracture energy `G_f`, J/m²: the energy that opens a square metre of
     /// seam, what the structural check charges a section. The opening and shear facts are

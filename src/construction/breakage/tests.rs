@@ -10,7 +10,6 @@ use bevy::time::TimeUpdateStrategy;
 use super::*;
 use crate::ballistics::MarchProbe;
 use crate::construction::fracture::FIT_ONLY_PRODUCTS;
-use crate::construction::schema::ElementKind;
 use crate::construction::tests::{column_construction, shipped_house};
 use crate::scatter::MapInstance;
 
@@ -1094,7 +1093,7 @@ fn joined_to(
 /// `Breakage` relies on these distinct limits; shipped roof geometry and material parameters do not pin them.
 #[test]
 fn rests_and_fixings_release_at_their_independent_axial_limits() {
-    let mut material = Masonry::of(
+    let mut material = Material::of(
         crate::substances::SubstanceRegistry::shipped_static(),
         "Brick",
     )
@@ -1288,7 +1287,7 @@ fn moving_cube(app: &mut App, at: Vec3, side: f32, layer: Layer) -> Entity {
         .id()
 }
 
-/// A loose piece: a debris body that is no wall piece.
+/// A loose piece: a debris body that is no construction piece.
 fn loose_cube(app: &mut App, at: Vec3, side: f32) -> Entity {
     let cube = moving_cube(app, at, side, Layer::Debris);
     app.world_mut()
@@ -1345,7 +1344,7 @@ fn shielding_cube() -> Arc<ConstructionKind> {
     let registry = crate::substances::SubstanceRegistry::shipped_static();
     let element = schema::Element {
         name: "fixture/cube".to_owned(),
-        kind: ElementKind::Pier,
+        part: "pier".into(),
         component: 0,
         material: 0,
         surface_frame: schema::SurfaceFrame::Upright,
@@ -1374,7 +1373,7 @@ fn shielding_cube() -> Arc<ConstructionKind> {
                 .collect(),
             volume_m3: volume,
             centroid: [0.0, 0.1, 0.0],
-            mass_kg: volume * Masonry::of(registry, "Brick").unwrap().unwrap().density,
+            mass_kg: volume * Material::of(registry, "Brick").unwrap().unwrap().density,
         }],
         elements: vec![element],
         joints: Vec::new(),
@@ -1568,7 +1567,7 @@ fn the_ground_stops_a_blast_and_a_body_holding_the_burst_shades_nothing() {
     );
 }
 
-/// A SLEEPING LOOSE PIECE WAKES TO A BLAST: a wall piece asleep at rest on a slab is woken by a
+/// A SLEEPING LOOSE PIECE WAKES TO A BLAST: a construction piece asleep at rest on a slab is woken by a
 /// fixture burst beside it, and leaves away from the burst. An impulse that leaves a sleeping body
 /// asleep, or is held back from one, fails here; rubble settled for most of a match relies on it.
 #[test]
@@ -1653,7 +1652,7 @@ fn composed_keeping_contacts() -> (App, Entity) {
 }
 
 /// An implicit belt contact enters the wall's actual queued reading without a source collider.
-/// The wall laws rely on the same load path as solver contacts, with no body-kind exception.
+/// The construction laws rely on the same load path as solver contacts, with no body-kind exception.
 /// FIXTURE DATA: a 20 N press on a breakable outer wall; the source is clear of solver contacts.
 #[test]
 fn an_implicit_belt_press_reaches_the_wall_laws_reading() {
@@ -1754,7 +1753,7 @@ fn wall_face(kind: &ConstructionKind) -> (usize, Vec3, Vec3) {
 }
 
 /// NO BODY'S KIND ENTERS A CONTACT'S LOADS (the game's environment destruction model): a plain
-/// dynamic body (a hull's or a launched turret's stand-in) and a wall piece, alike in shape, mass
+/// dynamic body (a hull's or a launched turret's stand-in) and a construction piece, alike in shape, mass
 /// and motion, striking the shipped house's wall at the same point at 3 m/s, put the same loads on
 /// the house, step by step, each naming its own body; the strike's blow is the cube's closing
 /// momentum into the wall within 1 % (DERIVED: a cube's corner points' effective masses sum to its
@@ -1814,7 +1813,7 @@ fn no_bodys_kind_enters_a_contacts_loads() {
     assert_eq!(
         strip(&plain),
         strip(&piece),
-        "a wall piece's loads are a plain body's"
+        "a construction piece's loads are a plain body's"
     );
     let loads: Vec<Load> = plain.into_iter().flatten().map(|(_, load)| load).collect();
     assert!(!loads.is_empty(), "the cube strikes the wall");
@@ -1844,7 +1843,7 @@ fn no_bodys_kind_enters_a_contacts_loads() {
 /// into the wall within 0.5 % with no blow, its points once, the same every tick it sleeps, while
 /// the reader queues nothing for it, so the laws run on the house only when something else loads
 /// it; once the cube is gone its press goes. The weight check a crack starts relies on a sleeping
-/// pile's press (the wall design, "Bodies in contact"), and the server's per-tick cost of rubble
+/// pile's press (the construction design, "Bodies in contact"), and the server's per-tick cost of rubble
 /// at rest on walls on its starting no run. A reading that drops a sleeping pair (a press of
 /// nothing), keeps it after its body goes, adds it again each tick, or replays it as a new
 /// deposit fails here. Fixture numbers are fixture data.
@@ -2521,12 +2520,12 @@ fn a_break_launches_and_returns_in_one_authority_pass() {
 #[test]
 fn degenerate_chunk_hulls_are_refused_before_play() {
     let kind = shipped_house();
-    let masonry: Vec<Option<Masonry>> = kind
+    let masonry: Vec<Option<Material>> = kind
         .asset
         .materials
         .iter()
         .map(|name| {
-            Masonry::of(crate::substances::SubstanceRegistry::shipped_static(), name).unwrap()
+            Material::of(crate::substances::SubstanceRegistry::shipped_static(), name).unwrap()
         })
         .collect();
     let attachments = Attachments::shipped_static();
@@ -2562,7 +2561,7 @@ fn collider_valid_hulls_with_collapsed_law_boundaries_are_refused_at_load() {
         .asset
         .materials
         .iter()
-        .map(|name| Masonry::of(registry, name).unwrap())
+        .map(|name| Material::of(registry, name).unwrap())
         .collect::<Vec<_>>();
     let thin = (0..8)
         .map(|i| {
@@ -2840,36 +2839,27 @@ fn awake_and_sleeping_presses_join_every_deposit_once() {
     }
 }
 
-/// NO ELEMENT'S KIND OR NAME ENTERS THE LAWS (the game's environment destruction model, the #237
+/// NO ELEMENT'S PART OR NAME ENTERS THE LAWS (the game's environment destruction model, the #237
 /// study's test 8; ADR-0034). A wall chunk and a roof board take one law, from their material rows
 /// and their construction: the law's view of the shipped house (its layout and structure) is the
-/// same whatever its elements are called and whichever kind each is labelled, so one blast's loads
+/// same whatever its elements are called and whatever part label each carries, so one blast's loads
 /// change it identically, while the same field on the house with its elements' materials
-/// swapped wears the volume pools differently. A mutant that reads an element's kind or name into the law's view, or
+/// swapped wears the volume pools differently. A mutant that reads an element's part or name into the law's view, or
 /// branches the laws on either, fails here. The charge and its point are ASSUMED fixture data.
 #[test]
-fn no_elements_kind_or_name_enters_the_laws() {
+fn no_elements_part_or_name_enters_the_laws() {
     let kind = shipped_house();
     let registry = crate::substances::SubstanceRegistry::shipped_static();
-    let masonry: Vec<Option<Masonry>> = kind
+    let masonry: Vec<Option<Material>> = kind
         .asset
         .materials
         .iter()
-        .map(|name| Masonry::of(registry, name).unwrap())
+        .map(|name| Material::of(registry, name).unwrap())
         .collect();
     let attachments = Attachments::shipped_static();
-    let kinds = [
-        ElementKind::Pier,
-        ElementKind::Sill,
-        ElementKind::Lintel,
-        ElementKind::Gable,
-        ElementKind::WallPlate,
-        ElementKind::Roof,
-    ];
     let mut relabelled = kind.asset.clone();
     for (k, element) in relabelled.elements.iter_mut().enumerate() {
-        let at = kinds.iter().position(|&of| of == element.kind).unwrap();
-        element.kind = kinds[(at + 1) % kinds.len()];
+        element.part = format!("arbitrary-part/{k}");
         element.name = format!("relabelled/{k}");
     }
     let mut swapped = kind.asset.clone();
@@ -3513,21 +3503,21 @@ fn the_weight_check_priced_per_change_and_after_a_long_wall_shot() {
     use std::time::Instant;
     let kind = shipped_house();
     let elements = &kind.asset.elements;
-    let of_kind = |kind_of: ElementKind| {
+    let of_part = |part: &str| {
         (0..elements.len())
-            .filter(|&e| elements[e].kind == kind_of)
+            .filter(|&e| elements[e].part == part)
             .collect::<Vec<_>>()
     };
     let base = Live::new(&kind, 1.0);
     let fixed = |joint: &Joint| matches!(joint.bond, Bond::Bonded(_));
     let resting = |joint: &Joint| joint.bond == Bond::Resting;
-    let mut roof: Vec<usize> = of_kind(ElementKind::Roof)
+    let mut roof: Vec<usize> = of_part("roof")
         .into_iter()
         .flat_map(|e| kind.layout.chunks_of(e))
         .collect();
     roof.sort_unstable();
-    let plane = component_chunks(&kind, elements[of_kind(ElementKind::Roof)[0]].component);
-    let plate = of_kind(ElementKind::WallPlate)
+    let plane = component_chunks(&kind, elements[of_part("roof")[0]].component);
+    let plate = of_part("wall_plate")
         .into_iter()
         .map(|e| elements[e].component)
         .find(|c| joined_to(&kind, &base.structure, &plane, false, fixed).contains(c))
@@ -3543,7 +3533,7 @@ fn the_weight_check_priced_per_change_and_after_a_long_wall_shot() {
     .flat_map(|&c| component_chunks(&kind, c))
     .collect();
     let rests = joined_to(&kind, &base.structure, &roof, true, resting);
-    let gables: Vec<usize> = of_kind(ElementKind::Gable)
+    let gables: Vec<usize> = of_part("gable")
         .into_iter()
         .filter(|&e| rests.contains(&elements[e].component))
         .flat_map(|e| kind.layout.chunks_of(e))

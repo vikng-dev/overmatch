@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use glam::DVec3;
-use overmatch::construction::schema::{Bond, ElementKind};
+use overmatch::construction::schema::Bond;
 
 use super::fracture::Pattern;
 use super::geom::{Face, Polyhedron};
@@ -242,7 +242,7 @@ fn each_roof_board_is_its_own_piece() {
         let mut planes: Vec<&str> = built
             .pieces
             .iter()
-            .filter(|piece| piece.kind == ElementKind::Roof)
+            .filter(|piece| piece.part == "roof")
             .map(|piece| piece.component.as_str())
             .collect();
         planes.sort_unstable();
@@ -252,7 +252,7 @@ fn each_roof_board_is_its_own_piece() {
             let boards: Vec<&Piece> = built
                 .pieces
                 .iter()
-                .filter(|piece| piece.kind == ElementKind::Roof && piece.component == plane)
+                .filter(|piece| piece.part == "roof" && piece.component == plane)
                 .collect();
             let what = format!("{}: {plane}", house.id);
             assert_eq!(boards.len(), house.boards_per_slope as usize, "{what}");
@@ -305,12 +305,12 @@ const FIXTURE_HOUSE: &str = r#"House(
     ),
     walls: (east: [], west: [], north: [], south: []),
     joins: [
-        (kinds: (Pier, Pier), by: "mortared"),
-        (kinds: (Pier, WallPlate), by: "mortared"),
-        (kinds: (Gable, WallPlate), by: "mortared"),
-        (kinds: (WallPlate, Roof), by: "nailed"),
-        (kinds: (Roof, Roof), by: "nailed"),
-        (kinds: (Gable, Roof), by: "resting"),
+        (parts: ("pier", "pier"), by: "mortared"),
+        (parts: ("pier", "wall_plate"), by: "mortared"),
+        (parts: ("gable", "wall_plate"), by: "mortared"),
+        (parts: ("wall_plate", "roof"), by: "nailed"),
+        (parts: ("roof", "roof"), by: "nailed"),
+        (parts: ("gable", "roof"), by: "resting"),
     ],
 )"#;
 
@@ -334,7 +334,7 @@ fn cells(size_m: f64, stretch: f64) -> String {
 /// FIXTURE DATA: an authored box piece `lo..hi`, its own component, as construction text.
 fn box_piece(
     name: &str,
-    kind: &str,
+    part: &str,
     material: &str,
     frame: &str,
     lo: DVec3,
@@ -353,7 +353,7 @@ fn box_piece(
         .map(|f| format!("{:?}", f.corners))
         .collect();
     format!(
-        "(name: \"{name}\", kind: {kind}, component: \"{name}\", material: \"{material}\", \
+        "(name: \"{name}\", part: \"{part}\", component: \"{name}\", material: \"{material}\", \
          surface_frame: {frame}, corners: [{}], faces: [{}], pattern: {pattern})",
         corners.join(", "),
         faces.join(", ")
@@ -402,7 +402,7 @@ fn an_additional_material_bakes_from_data_alone() {
             &[
                 box_piece(
                     "block",
-                    "Pier",
+                    "block_part",
                     CLINKER.0,
                     "Upright",
                     DVec3::ZERO,
@@ -411,7 +411,7 @@ fn an_additional_material_bakes_from_data_alone() {
                 ),
                 box_piece(
                     "beam",
-                    "WallPlate",
+                    "beam_part",
                     "Wood",
                     grain,
                     DVec3::new(0.0, 0.9, 0.0),
@@ -419,7 +419,7 @@ fn an_additional_material_bakes_from_data_alone() {
                     beam,
                 ),
             ],
-            "(kinds: (Pier, WallPlate), by: \"nailed\")",
+            "(parts: (\"block_part\", \"beam_part\"), by: \"nailed\")",
         )
     };
     let counts = |block: &str, beam: &str| {
@@ -758,7 +758,7 @@ fn assert_bond_kinds(construction: &Construction, asset: &ConstructionAsset) {
             let declared = construction
                 .joins
                 .iter()
-                .find(|join| join.joins((a.kind, b.kind)))
+                .find(|join| join.joins((&a.part, &b.part)))
                 .expect("every baked component pair has its declared join");
             let Bond::Attached(k) = joint.bond else {
                 panic!("{id}: {joint:?} is no attachment")
@@ -819,7 +819,7 @@ fn every_bond_between_components_is_the_kind_its_spec_names() {
 
 /// FASTENING IS CONSTRUCTION DATA, NEVER AN ELEMENT'S NAME: with every piece renamed (each takes
 /// the next piece's name, so a wall answers to a board's and a board to a wall's), every joint still
-/// holds by the join its elements' kinds declare, or by the seam inside one component. A roof's
+/// holds by the join its elements' part names declare, or by the seam inside one component. A roof's
 /// boards are nailed only because their joins say so. Mutant: a bake that reads nailing, or any
 /// holding kind, from a name fails here.
 #[test]
@@ -855,9 +855,17 @@ fn a_join_that_holds_nothing_or_names_no_kind_is_refused() {
         schema::substance_density,
     )
     .expect("the unmutated construction bakes");
+    let mut blank = house.clone();
+    blank.joins[0].parts.0.clear();
+    assert!(
+        blank
+            .check()
+            .unwrap_err()
+            .contains("parts: author two non-blank part names")
+    );
     let mut idle = house.clone();
     idle.joins.push(spec::Join {
-        kinds: (ElementKind::Sill, ElementKind::Roof),
+        parts: ("sill".into(), "roof".into()),
         by: house.joins[0].by.clone(),
     });
     let err = bake(

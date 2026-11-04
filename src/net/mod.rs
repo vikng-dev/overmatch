@@ -73,7 +73,7 @@ mod shot_explanation;
 mod shot_loss;
 mod shot_transport;
 // `pub(crate)` for `spawn_limit` — the clamp the spawn regression test resolves its corners at.
-/// The wall ledger: every construction change on one globally visible entity, replicated by diff.
+/// The construction ledger: every construction change on one globally visible entity, replicated by diff.
 mod construction;
 pub(crate) mod spawn_map;
 mod spawn_placement;

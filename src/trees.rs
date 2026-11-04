@@ -36,7 +36,7 @@
 //! body ([`TreePiece`]), launched through [`crate::debris::launch`] and simulated only by the
 //! authority. Each piece retains its construction and structural state for subsequent loads.
 //! Replicas partition segments by sorted carrier cuts; every segment retains its HP pool when
-//! it changes body. See the wall design's "Trees are structures by the same laws".
+//! it changes body. See the construction design's "Trees are structures by the same laws".
 
 use crate::construction::fracture::GroupLoads;
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,7 +58,7 @@ use crate::Layer;
 use crate::ballistics::{BallisticVolume, ComponentHealth, PoolEmptied, VolumeMaterial};
 use crate::construction::attachments::{ATTACHMENTS_PATH, Attachments, RootPlate};
 use crate::construction::fracture::{
-    self, Bond, Chunk, Joint, Load, Masonry, Origin, Seam, SectionCache, Shear, Side, State,
+    self, Bond, Chunk, Joint, Load, Material, Origin, Seam, SectionCache, Shear, Side, State,
     Structure,
 };
 use crate::contact_transfer::ContactTransfers;
@@ -285,7 +285,7 @@ pub(crate) struct TreeKind {
     /// ([`TreeBody::segment_hp`]).
     pub(crate) hp_per_m2: f32,
     /// The wood's values as the structure laws read a chunk of it: the substance's bulk facts.
-    pub(crate) masonry: Masonry,
+    pub(crate) masonry: Material,
     /// The seam between two segments of the trunk: the wood along its grain, its modulus of
     /// rupture and its opening work across the fibres. It answers by the opening law alone: no
     /// sourced shear pair holds a section of a trunk, so no punch ring forms in one.
@@ -336,7 +336,7 @@ impl TreeKind {
         let friction = registry
             .contact_friction(&wood.substance)
             .map_err(|err| format!("{WOOD_FILE} substance: {err}"))?;
-        let masonry = Masonry::of(registry, &wood.substance)
+        let masonry = Material::of(registry, &wood.substance)
             .map_err(|err| format!("{WOOD_FILE} substance: {err}"))?
             .ok_or_else(|| {
                 format!(
@@ -942,7 +942,7 @@ fn fell_on_loads(
     });
     for (transfer, blow, press, mass, step, asleep) in awake.chain(resting) {
         let Ok((&TreeSegment(segment), parent)) = segments.get(transfer.structure_collider) else {
-            continue; // Buildings read their own contacts.
+            continue; // Constructions read their own contacts.
         };
         let root = parent.parent();
         let (_, _, body, _, _, piece, (position, rotation)) = trees

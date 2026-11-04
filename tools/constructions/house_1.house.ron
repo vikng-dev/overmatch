@@ -95,24 +95,24 @@ House(
         north: [(u: (-0.5, 0.5), courses: (18, 33))],
         south: [(u: (-0.5, 0.5), courses: (18, 33))],
     ),
-    // How the parts of two components are held where they touch, by their elements' kinds (either
+    // How the parts of two components are held where they touch, by their elements' part names (either
     // order): the attachment kind (`assets/materials/attachments.ron`, which holds every kind's
     // strength); inside a component its chunks hold by its own seam. The bake refuses a touching
     // pair no join names, a join no pair makes, and a kind the list does not hold.
     joins: [
         // The walls coursed into each other at the corners.
-        (kinds: (Pier, Pier), by: "mortared"),
+        (parts: ("pier", "pier"), by: "mortared"),
         // Each wall plate bedded on its long wall, and each gable laid up against a plate's end.
-        (kinds: (Pier, WallPlate), by: "mortared"),
-        (kinds: (Lintel, WallPlate), by: "mortared"),
-        (kinds: (Gable, WallPlate), by: "mortared"),
+        (parts: ("pier", "wall_plate"), by: "mortared"),
+        (parts: ("lintel", "wall_plate"), by: "mortared"),
+        (parts: ("gable", "wall_plate"), by: "mortared"),
         // The rafters skew-nailed to the plates, and each pair nailed at the ridge.
         // The nailed kind has no sourced c or lateral separation work G_II for this fixing.
         // Its seams answer by the opening law alone, and no punch ring forms across them; see
         // .agents/scratch/collision-c6-shear-sources.md. Never substitute solid wood's values.
-        (kinds: (WallPlate, Roof), by: "nailed"),
-        (kinds: (Roof, Roof), by: "nailed"),
+        (parts: ("wall_plate", "roof"), by: "nailed"),
+        (parts: ("roof", "roof"), by: "nailed"),
         // The roof laid on the gables' rakes, nothing fixing it there.
-        (kinds: (Gable, Roof), by: "resting"),
+        (parts: ("gable", "roof"), by: "resting"),
     ],
 )

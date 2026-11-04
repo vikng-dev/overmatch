@@ -207,7 +207,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// in `wire_quant`'s 10-byte belt codec, and its throttle and steer become the owner-only
 /// `DriveSignal`. Surface, own-type graph and REV move.
 ///
-/// REV 41 (walls break): the wall ledger, one globally visible entity whose
+/// REV 41 (walls break): the construction ledger, one globally visible entity whose
 /// [`Ledger`](super::construction::Ledger) lists every construction change as `(construction, event,
 /// tick)` and replicates by diff, and each fallen group's [`Piece`] on its pose carrier.
 /// Surface and own-type graph move.
@@ -1159,7 +1159,7 @@ pub(crate) fn plugin(app: &mut App) {
         .replicate_with(super::debris_stress::pose_replication())
         .add_interpolation_with(super::debris_stress::debris_pose_lerp);
     super::resync::retain_stream::<super::debris_stress::DebrisPose>(app);
-    // The wall ledger (one world entity): appended entries ride as diffs, a late joiner takes the
+    // The construction ledger (one world entity): appended entries ride as diffs, a late joiner takes the
     // list once.
     app.component::<super::construction::Ledger>()
         .replicate_diff();
@@ -1626,7 +1626,7 @@ mod tests {
         assert!(!registry.is_registered::<avian3d::prelude::AngularVelocity>());
     }
 
-    /// A construction's fallen piece draws at the cursor the hulls and the wall record draw at
+    /// A construction's fallen piece draws at the cursor the hulls and the construction record draw at
     /// (ADR-0037): its carrier's pose is registered for interpolation, and the law between two
     /// samples moves the position along the line and turns along the shorter arc. Unregistered,
     /// a client writes each pose on arrival and the piece leads the round that freed it by the

@@ -1,6 +1,6 @@
 //! Free-body momentum exchange in the game's environment physics (game state only).
 //! Walls and trunks supply geometry and loads; this module owns their common plastic launch,
-//! coupled energy bound and give-back. The wall design's "Bodies in contact" owns the derivation.
+//! coupled energy bound and give-back. The construction design's "Bodies in contact" owns the derivation.
 
 use crate::construction::fracture::{Load, Origin};
 use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::{
