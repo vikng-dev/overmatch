@@ -1,42 +1,37 @@
-//! The debris stress lever: a dev-only instrument that prices server-simulated wall fragments,
-//! `OVERMATCH_DEBRIS_STRESS=<pieces>:<period_s>` on the dedicated
-//! server. Unset, empty, `off`, `false` or zero pieces is off, and an off server mounts none of its
-//! releases.
+//! The game's environment destruction model, game state only: shared debris carriers and the
+//! operator stress workload.
 //!
-//! Every `period_s` of fixed time the server releases one breach of `pieces` dynamic fragments
-//! beside one tank, round-robin over every [`Tank`] root: a wall section outside the constructed
-//! hull's flank, its pieces 0–3 m above the ground and thrown toward the hull, so they land on and
-//! against hulls as well as on the terrain. A piece collides with `Layer::Terrain` (the ground,
-//! houses, trunks), `Layer::Vehicle` (the tanks' collision proxies) and the other pieces.
+//! Each server body has one replicated carrier holding its [`DebrisPose`] ([`Carrier`]). Only
+//! moved poses are written, so sleeping pieces stop publishing. Separate carriers keep the body's
+//! registered physics components off this stream. Received poses are checked before interpolation;
+//! malformed records go through the client's visible match-close path.
 //!
-//! REST is the game's own rule ([`crate::debris`]), which a building's fallen chunks follow too.
-//! The lever has no cap on sleeping pieces: a despawn wakes the piece's whole island (avian's
-//! `remove_body_on`), and the oldest pieces sit at the bottom of their piles, so a cap would cause
-//! the wakes the lever measures.
+//! Building carriers draw at the shared interpolation cursor (ADR-0037); stress carriers apply on
+//! arrival and use the scenario mesh. Neither view runs physics. [`install_server`] owns carriers
+//! and publication; [`install_client`] owns presentation.
 //!
-//! REPLICATION: each server piece, the lever's and a building's ([`WallPiece`]) alike, is a
-//! server-only body plus one replicated carrier entity holding its [`DebrisPose`] ([`Carrier`]),
-//! written only when the piece moved (`set_if_neq`), so a sleeping piece's carrier stops changing
-//! and replicon sends it nothing more. A separate carrier, because avian's
-//! `Position`/`Rotation`/velocities replicate from any replicated entity that holds them
-//! (`protocol::plugin`): replicating the body itself would send four components per piece per
-//! tick. Clients draw a lever carrier as a plain mesh at its pose ([`install_client`]) and a
-//! building's from its chunks (`buildings::view`); they run no physics on either. A building's
-//! carrier is interpolated, so its piece draws at the cursor the hulls draw at (ADR-0037); the
-//! lever's apply on arrival, as the instrument has always priced them.
+//! The dedicated-server operator sets `OVERMATCH_DEBRIS_STRESS=<pieces>:<period_s>`. Unset, empty,
+//! `off`, `false` or zero pieces is off. An armed server releases breaches beside tanks in turn,
+//! alternating flanks. Pieces collide with terrain, vehicle proxies and each other. Their rest
+//! rule is [`crate::debris`]'s. Sleeping pieces have no cap: removing a body wakes its contact
+//! island, and removing pieces from the bottom of a pile would create the wakes being observed.
 //!
-//! The lever's piece shape and density are fixture numbers, not a measured stone:
-//! [`FRAGMENT_HULL`], [`DENSITY_KG_M3`].
+//! Required construction and appearance live in `assets/dev/debris-stress.ron`, with every authored
+//! value's job and provenance. Authority and presentation admit it before play.
 
 use avian3d::prelude::*;
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
+use bevy::tasks::{ComputeTaskPool, ParallelSlice};
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 mod pose;
+mod scenario;
+
+use scenario::Scenario;
 
 use pose::WirePose;
 pub(super) use pose::replication as pose_replication;
@@ -49,41 +44,8 @@ use crate::debris::DebrisPiece;
 use crate::tank::Tank;
 use crate::terrain_grid::HeightGrid;
 
-/// The lever.
+/// Operator workloads in `scripts/perf/run-debris-stress.sh` and `scripts/edgegap/session.sh`.
 const LEVER: &str = "OVERMATCH_DEBRIS_STRESS";
-
-/// A pre-cut masonry fragment, the fixture: two irregular hexagons 0.4 m apart, the top one turned
-/// 15°, about 0.53 × 0.49 × 0.40 m. Every one of the 12 points is a vertex of the hull.
-const FRAGMENT_HULL: [Vec3; 12] = [
-    Vec3::new(0.2700, -0.2, 0.0000),
-    Vec3::new(0.1250, -0.2, 0.2165),
-    Vec3::new(-0.1400, -0.2, 0.2425),
-    Vec3::new(-0.2600, -0.2, 0.0000),
-    Vec3::new(-0.1350, -0.2, -0.2338),
-    Vec3::new(0.1200, -0.2, -0.2078),
-    Vec3::new(0.2318, 0.2, 0.0621),
-    Vec3::new(0.0673, 0.2, 0.2511),
-    Vec3::new(-0.1626, 0.2, 0.1626),
-    Vec3::new(-0.2415, 0.2, -0.0647),
-    Vec3::new(-0.0569, 0.2, -0.2125),
-    Vec3::new(0.1768, 0.2, -0.1768),
-];
-
-/// ASSUMED masonry density, kg/m³ (fixture).
-const DENSITY_KG_M3: f32 = 1_800.0;
-
-/// The breach lattice's pitch, m: wider than the fragment's widest footprint at any release turn
-/// (0.62 m, DERIVED: its 0.28 m outer radius plus the ±0.15 rad tilt's lean), so no two pieces start
-/// overlapping.
-const LATTICE_M: f32 = 0.65;
-/// Rows of the breach: piece bottoms from 0.05 m to 2.65 m above the ground.
-const ROWS: u32 = 5;
-/// Columns along the wall at most; more pieces stack further layers outward.
-const COLUMNS: u32 = 10;
-/// A piece's lowest point above the ground at release, m.
-const GROUND_CLEARANCE_M: f32 = 0.05;
-/// The fragment's half height, m ([`FRAGMENT_HULL`]).
-const HALF_HEIGHT_M: f32 = 0.2;
 
 /// The lever's reading.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -156,7 +118,7 @@ pub(crate) struct Carrier(pub(crate) Entity);
 #[derive(Resource)]
 pub(super) struct DebrisStress {
     lever: Lever,
-    collider: Collider,
+    scenario: Scenario,
     next_release_s: f64,
     breaches: u64,
     released: u64,
@@ -164,10 +126,10 @@ pub(super) struct DebrisStress {
 
 impl DebrisStress {
     /// The first breach goes out on the first fixed tick a tank stands.
-    fn new(lever: Lever) -> Self {
+    fn new(lever: Lever, scenario: Scenario) -> Self {
         Self {
             lever,
-            collider: fragment_collider(),
+            scenario,
             next_release_s: 0.0,
             breaches: 0,
             released: 0,
@@ -199,13 +161,37 @@ impl DebrisCensus<'_, '_> {
     }
 }
 
-fn fragment_collider() -> Collider {
-    Collider::convex_hull(FRAGMENT_HULL.to_vec()).expect("the fixture hull is not degenerate")
+#[derive(Debug)]
+pub(super) enum StartupError {
+    Lever(LeverError),
+    Scenario(scenario::ScenarioError),
 }
+
+impl std::fmt::Display for StartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lever(error) => error.fmt(f),
+            Self::Scenario(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for StartupError {}
 
 /// Every server: a carrier for each building piece and every moved piece's pose onto its carrier.
 /// Then the lever, when armed; a malformed value is refused.
-pub(super) fn install_server(app: &mut App) -> Result<(), LeverError> {
+pub(super) fn install_server(app: &mut App) -> Result<(), StartupError> {
+    let value = env_text(LEVER).map_err(StartupError::Lever)?;
+    install_server_from(app, value.as_deref(), scenario::RON)
+}
+
+fn install_server_from(
+    app: &mut App,
+    value: Option<&str>,
+    scenario_text: &str,
+) -> Result<(), StartupError> {
+    let scenario = Scenario::parse(scenario_text).map_err(StartupError::Scenario)?;
+    let lever = Lever::parse(value).map_err(StartupError::Lever)?;
     app.add_observer(carry_wall_piece)
         .add_observer(retire_wall_piece)
         .add_observer(carry_tree_piece)
@@ -213,14 +199,14 @@ pub(super) fn install_server(app: &mut App) -> Result<(), LeverError> {
             FixedPostUpdate,
             publish_poses.in_set(crate::state::SimPhase::Publish),
         );
-    let Some(lever) = Lever::parse(env_text(LEVER)?.as_deref())? else {
+    let Some(lever) = lever else {
         return Ok(());
     };
     info!(
         "server: debris stress — a breach of {} pieces every {} s ({LEVER})",
         lever.pieces, lever.period_s
     );
-    app.insert_resource(DebrisStress::new(lever));
+    app.insert_resource(DebrisStress::new(lever, scenario));
     app.add_systems(FixedUpdate, release_breaches);
     Ok(())
 }
@@ -365,43 +351,64 @@ fn unit(seq: u64, k: u64) -> f32 {
 
 /// One breach's pieces beside a tank at `anchor` heading `heading`, on its `side` (+1 right, −1
 /// left). `ground` is the surface height under an XZ, `None` off the map (that piece is skipped).
-/// Pieces fill rows, then columns centred on the tank, then layers outward. The throw is fixture
-/// data (ASSUMED, a wall section giving way): 1–3.5 m/s toward the hull, up to 0.8 m/s up, ±0.4 m/s
-/// along the wall, up to 2 rad/s of spin per axis, any yaw and a ±0.15 rad tilt.
+/// Pieces fill rows, then columns centred on the tank, then layers outward; the admitted scenario
+/// supplies the release layout and kinetics.
 fn breach(
-    anchor: Vec3,
-    heading: Quat,
+    scenario: &Scenario,
+    (anchor, heading): (Vec3, Quat),
     side: f32,
     radius: f32,
     pieces: u32,
     first_seq: u64,
-    ground: impl Fn(Vec2) -> Option<f32>,
+    ground: impl Fn(Vec2) -> Option<f32> + Sync,
 ) -> Vec<Release> {
-    let right = heading * Vec3::X;
-    let outward = Vec3::new(right.x, 0.0, right.z).normalize_or(Vec3::X) * side;
+    // The operator's release frame uses heading yaw even when the body has rolled onto its side.
+    let yaw = heading.to_euler(EulerRot::YXZ).0;
+    let outward = Quat::from_rotation_y(yaw) * Vec3::X * side;
     let along = Vec3::Y.cross(outward);
-    let columns = pieces.div_ceil(ROWS).clamp(1, COLUMNS);
+    let parameters = &scenario.parameters;
+    let (rows, pitch) = (parameters.rows.0, parameters.lattice_m.0);
+    let columns = pieces.div_ceil(rows).clamp(1, parameters.columns.0);
     let centre = (columns - 1) as f32 * 0.5;
-    (0..pieces)
-        .filter_map(|i| {
-            let seq = first_seq + u64::from(i);
-            let (row, column, layer) = (i % ROWS, (i / ROWS) % columns, i / (ROWS * columns));
-            let xz = anchor
-                + outward * (radius + LATTICE_M + layer as f32 * LATTICE_M)
-                + along * ((column as f32 - centre) * LATTICE_M);
-            let ground = ground(Vec2::new(xz.x, xz.z))?;
-            let y = ground + GROUND_CLEARANCE_M + HALF_HEIGHT_M + row as f32 * LATTICE_M;
-            let jitter = |k| unit(seq, k);
-            Some(Release {
-                position: Vec3::new(xz.x, y, xz.z),
-                rotation: Quat::from_rotation_y(jitter(0) * std::f32::consts::TAU)
-                    * Quat::from_rotation_x((jitter(1) - 0.5) * 0.3),
-                velocity: -outward * (1.0 + 2.5 * jitter(2))
-                    + Vec3::Y * (0.8 * jitter(3))
-                    + along * (0.8 * jitter(4) - 0.4),
-                spin: (Vec3::new(jitter(5), jitter(6), jitter(7)) * 2.0 - Vec3::ONE) * 2.0,
-            })
+    // Evaluate releases independently; ordered spawn commands commit this breach afterwards.
+    let indices: Vec<_> = (0..pieces).collect();
+    indices
+        .par_splat_map(ComputeTaskPool::get(), None, |_, indices| {
+            indices
+                .iter()
+                .filter_map(|&i| {
+                    let seq = first_seq + u64::from(i);
+                    let (row, column, layer) =
+                        (i % rows, (i / rows) % columns, (i / rows) / columns);
+                    let xz = anchor
+                        + outward * (radius + pitch + layer as f32 * pitch)
+                        + along * ((column as f32 - centre) * pitch);
+                    let ground = ground(Vec2::new(xz.x, xz.z))?;
+                    let y = ground
+                        + parameters.ground_clearance_m.0
+                        + scenario.half_height_m
+                        + row as f32 * pitch;
+                    let jitter = |k| unit(seq, k);
+                    let [inward_min, inward_max] = parameters.inward_speed_m_s.0;
+                    Some(Release {
+                        position: Vec3::new(xz.x, y, xz.z),
+                        rotation: Quat::from_rotation_y(jitter(0) * std::f32::consts::TAU)
+                            * Quat::from_rotation_x(
+                                (jitter(1) - 0.5) * (2.0 * parameters.tilt_rad.0),
+                            ),
+                        velocity: -outward * (inward_min + (inward_max - inward_min) * jitter(2))
+                            + Vec3::Y * (parameters.upward_speed_m_s.0 * jitter(3))
+                            + along
+                                * (2.0 * parameters.along_speed_m_s.0 * jitter(4)
+                                    - parameters.along_speed_m_s.0),
+                        spin: (Vec3::new(jitter(5), jitter(6), jitter(7)) * 2.0 - Vec3::ONE)
+                            * parameters.spin_rad_s.0,
+                    })
+                })
+                .collect::<Vec<_>>()
         })
+        .into_iter()
+        .flatten()
         .collect()
 }
 
@@ -420,12 +427,14 @@ fn release_breaches(
         return;
     }
     let count = tanks.iter().count() as u64;
+    // Before the first tank spawns there is no breach anchor.
     if count == 0 {
         return;
     }
-    let Some((anchor, heading)) = tanks.iter().nth((stress.breaches % count) as usize) else {
-        return;
-    };
+    let (anchor, heading) = tanks
+        .iter()
+        .nth((stress.breaches % count) as usize)
+        .expect("a round-robin index below the unchanged tank query count resolves");
     // Each tank's flank alternates from one round of the tanks to the next.
     let side = if (stress.breaches / count).is_multiple_of(2) {
         1.0
@@ -433,14 +442,19 @@ fn release_breaches(
         -1.0
     };
     let ground = |xz: Vec2| match grid.as_deref() {
-        Some(grid) => grid
-            .contains_xz(xz.x, xz.y)
-            .then(|| grid.max_height_in_square(xz.x, xz.y, HALF_HEIGHT_M + LATTICE_M * 0.5)),
+        Some(grid) => grid.contains_xz(xz.x, xz.y).then(|| {
+            grid.max_height_in_square(
+                xz.x,
+                xz.y,
+                stress.scenario.half_height_m + stress.scenario.parameters.lattice_m.0 * 0.5,
+            )
+        }),
+        // The authored flat world (no heightfield) has its ground slab's top at y=0.
         None => Some(0.0),
     };
     let releases = breach(
-        anchor.0,
-        heading.0,
+        &stress.scenario,
+        (anchor.0, heading.0),
         side,
         source.get().contact_radius(),
         stress.lever.pieces,
@@ -453,6 +467,7 @@ fn release_breaches(
         [Layer::Debris],
         [Layer::Terrain, Layer::Vehicle, Layer::Debris],
     );
+    // This structural transaction pairs each body with its carrier before publishing the batch.
     for release in releases {
         stress.released += 1;
         let carrier = commands
@@ -475,8 +490,8 @@ fn release_breaches(
             Position(release.position),
             Rotation(release.rotation),
             RigidBody::Dynamic,
-            stress.collider.clone(),
-            ColliderDensity(DENSITY_KG_M3),
+            stress.scenario.collider.clone(),
+            ColliderDensity(stress.scenario.parameters.density_kg_m3.0),
             layers,
             LinearVelocity(release.velocity),
             AngularVelocity(release.spin),
@@ -509,10 +524,10 @@ struct DebrisView {
     material: Handle<StandardMaterial>,
 }
 
-/// The fixture hull as a flat-shaded triangle list, every face wound outward.
-fn fragment_mesh() -> Mesh {
-    let collider = fragment_collider();
-    let hull = collider
+/// The admitted hull has finite, nonzero face normals; every triangle is wound outward.
+fn fragment_mesh(scenario: &Scenario) -> Mesh {
+    let hull = scenario
+        .collider
         .shape()
         .as_convex_polyhedron()
         .expect("a convex-hull collider is a convex polyhedron");
@@ -522,7 +537,7 @@ fn fragment_mesh() -> Mesh {
     let mut normals = Vec::with_capacity(triangles.len() * 3);
     for [a, b, c] in triangles {
         let (a, mut b, mut c) = (points[a as usize], points[b as usize], points[c as usize]);
-        let mut normal = (b - a).cross(c - a).normalize_or_zero();
+        let mut normal = (b - a).cross(c - a).normalize();
         if normal.dot((a + b + c) / 3.0 - centroid) < 0.0 {
             std::mem::swap(&mut b, &mut c);
             normal = -normal;
@@ -543,14 +558,17 @@ fn build_view(
     materials: Option<ResMut<Assets<StandardMaterial>>>,
     mut commands: Commands,
 ) {
+    let scenario = Scenario::shipped();
+    // A renderer-free client receives poses but has no fragment mesh/material collections.
     let (Some(mut meshes), Some(mut materials)) = (meshes, materials) else {
         return;
     };
+    let [red, green, blue] = scenario.parameters.albedo_srgb.0;
     commands.insert_resource(DebrisView {
-        mesh: meshes.add(fragment_mesh()),
+        mesh: meshes.add(fragment_mesh(&scenario)),
         material: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.56, 0.52, 0.47),
-            perceptual_roughness: 0.95,
+            base_color: Color::srgb(red, green, blue),
+            perceptual_roughness: scenario.parameters.roughness.0,
             ..default()
         }),
     });
@@ -772,10 +790,10 @@ mod tests {
             crate::debris::sim_plugin,
         ))
         .init_asset::<Mesh>()
-        // One fixed tick per update at the fixed clock's default 64 Hz.
-        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
-            15_625,
-        )));
+        // The network fixture clock advances the publication boundary once per update.
+        .insert_resource(TimeUpdateStrategy::ManualDuration(
+            crate::net::test_harness::TICK,
+        ));
         while app.plugins_state() == bevy::app::PluginsState::Adding {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -795,14 +813,23 @@ mod tests {
             FixedPostUpdate,
             publish_poses.after(PhysicsSystems::StepSimulation),
         );
+        let scenario = Scenario::shipped();
+        let radius = scenario
+            .parameters
+            .fragment_hull_m
+            .0
+            .iter()
+            .map(|point| Vec3::from(*point).xz().length())
+            .fold(0.0, f32::max);
+        // Fixture floor thickness and drop height; floor width follows the admitted hull.
         app.world_mut().spawn((
             RigidBody::Static,
             Position(Vec3::new(0.0, -0.5, 0.0)),
-            Collider::cuboid(20.0, 1.0, 20.0),
+            Collider::cuboid(4.0 * radius, 1.0, 4.0 * radius),
             CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
         ));
         let pose = DebrisPose {
-            position: Vec3::Y * 0.6,
+            position: Vec3::Y * (scenario.half_height_m + 0.4),
             rotation: Quat::IDENTITY,
         };
         let carrier = app.world_mut().spawn(pose).id();
@@ -814,8 +841,8 @@ mod tests {
                 Position(pose.position),
                 Rotation(pose.rotation),
                 RigidBody::Dynamic,
-                fragment_collider(),
-                ColliderDensity(DENSITY_KG_M3),
+                scenario.collider.clone(),
+                ColliderDensity(scenario.parameters.density_kg_m3.0),
                 CollisionLayers::new(
                     [Layer::Debris],
                     [Layer::Terrain, Layer::Vehicle, Layer::Debris],
@@ -834,7 +861,7 @@ mod tests {
             .copied()
             .expect("carrier");
         assert!(
-            landed.position.y < 0.5,
+            landed.position.y < pose.position.y,
             "the published pose followed the fall: {landed:?}"
         );
         assert_eq!(
@@ -864,37 +891,77 @@ mod tests {
         );
     }
 
-    /// The breach places every piece 0–3 m above the ground beside the tank's flank and throws it
+    /// The breach places every piece above the ground beside the tank's flank and throws it
     /// toward the hull: a mutant that drops the clearance buries pieces in the terrain, one that
     /// flips the throw sends them away from the tanks they exist to strike.
     #[test]
     fn a_breach_stands_beside_the_flank_and_is_thrown_at_the_hull() {
+        // Fixture coordinates and count exercise rows, columns and outward layers.
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
         let anchor = Vec3::new(10.0, 5.0, -4.0);
         let ground = 4.0;
-        let radius = 7.0; // ASSUMED fixture body radius, deliberately larger than the old offset.
-        let pieces = breach(anchor, Quat::IDENTITY, 1.0, radius, 200, 0, |_| {
-            Some(ground)
-        });
+        let radius = 7.0; // Fixture body radius, deliberately wider than the fragment lattice.
+        let scenario = Scenario::shipped();
+        let pitch = scenario.parameters.lattice_m.0;
+        let pieces = breach(
+            &scenario,
+            (anchor, Quat::IDENTITY),
+            1.0,
+            radius,
+            200,
+            0,
+            |_| Some(ground),
+        );
         assert_eq!(pieces.len(), 200);
         for piece in &pieces {
-            let height = piece.position.y - HALF_HEIGHT_M - ground;
-            assert!((0.0..=3.0).contains(&height), "{piece:?}");
+            let height = piece.position.y - scenario.half_height_m - ground;
+            let top = scenario.parameters.ground_clearance_m.0
+                + (scenario.parameters.rows.0 - 1) as f32 * pitch;
+            // Resolution: allow accumulated f32 translation rounding at the fixture anchor.
+            let tolerance = piece.position.abs().max_element() * f32::EPSILON * 4.0;
+            assert!(
+                height >= scenario.parameters.ground_clearance_m.0 - tolerance
+                    && height <= top + tolerance,
+                "{piece:?}"
+            );
+            for vertex in &scenario.parameters.fragment_hull_m.0 {
+                assert!(
+                    (piece.position + piece.rotation * Vec3::from(*vertex)).y >= ground,
+                    "admitted tilted hull starts above terrain: {piece:?}"
+                );
+            }
             assert!(
                 piece.position.x - anchor.x
                     + piece.position.abs().max_element() * f32::EPSILON * 4.0
-                    >= radius + LATTICE_M,
+                    >= radius + pitch,
                 "{piece:?}"
             );
-            assert!(piece.velocity.x < 0.0, "thrown toward the hull: {piece:?}");
+            assert!(
+                scenario.parameters.inward_speed_m_s.0[0] <= -piece.velocity.x
+                    && -piece.velocity.x <= scenario.parameters.inward_speed_m_s.0[1],
+                "inward release speed follows the scenario: {piece:?}"
+            );
         }
         for (i, a) in pieces.iter().enumerate() {
             for b in &pieces[i + 1..] {
                 assert!(
-                    a.position.distance(b.position) >= LATTICE_M - 1.0e-4,
+                    a.position.distance(b.position) >= pitch - 1.0e-4,
                     "no two pieces start overlapping"
                 );
             }
         }
-        assert!(breach(anchor, Quat::IDENTITY, 1.0, radius, 10, 0, |_| None).is_empty());
+        assert!(
+            breach(
+                &scenario,
+                (anchor, Quat::IDENTITY),
+                1.0,
+                radius,
+                10,
+                0,
+                |_| None
+            )
+            .is_empty()
+        );
     }
 }
