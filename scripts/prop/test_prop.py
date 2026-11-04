@@ -287,6 +287,43 @@ class TrackedTrio(unittest.TestCase):
                                               trio.spec), [])
         self.assertEqual(build.identity_failures(trio.spec.decode(), trio.js, trio.binary), [])
 
+    def test_fir_1_dressing_is_its_canopy_s_and_current(self):
+        """The game gives each card to the chunk holding its base and draws it there, so the
+        tracked dressing must be the view's canopy card for card, and what the glb's recorded
+        seed plans: every outline corner a canopy vertex and every canopy vertex a corner."""
+        trio = tracked()
+        path = build.dressing_path(build.repo_root(), "fir_1")
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertEqual(text, build.dressing(trio.view, TABLE, "fir_1"))
+        self.assertEqual(build.dressing_failures(text, trio.js, trio.binary), [])
+        cards = ron.parse(text)["cards"]
+        self.assertEqual(len(cards), sum(len(w["branches"]) for w in plan.whorls(
+            *self._replanned(trio))))
+        for card in cards:
+            x, _, z = card["base"]
+            self.assertEqual((x, z), (0.0, 0.0), "a card grows from the trunk's axis")
+
+    def _replanned(self, trio):
+        root = trio.js["nodes"][build.root_node(trio.js)]["extras"]
+        row = ron.load(TABLE)[root["tree_species"]]
+        sampled = plan.sample(row, root["tree_seed"])
+        return sampled["height_m"], row, sampled["rng"]
+
+    def test_a_lost_or_moved_card_is_refused(self):
+        """A dressing that dropped a card, or moved one off the canopy, is not the view's."""
+        trio = tracked()
+        text = build.dressing_text(trio.js, TABLE, "fir_1")
+        lines = text.split("\n")
+        first = next(i for i, line in enumerate(lines) if "base:" in line)
+        lost = "\n".join(lines[:first] + lines[first + 1:])
+        self.assertTrue(any("no card's corner" in f
+                            for f in build.dressing_failures(lost, trio.js, trio.binary)))
+        start = text.index("corners: [") + len("corners: [")
+        moved = text[:start] + "(5.0, 5.0, 5.0)" + text[text.index(")", start) + 1:]
+        self.assertTrue(any("no vertex of the view's canopy" in f
+                            for f in build.dressing_failures(moved, trio.js, trio.binary)))
+
 
 # ── mutants: the node contract ───────────────────────────────────────────────────────────────────
 

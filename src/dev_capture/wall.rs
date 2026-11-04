@@ -16,9 +16,16 @@
 //!
 //! When the plan's `frames.camera` places the camera (a pose or a follow), the cue leaves the
 //! camera to it.
+//!
+//! A PREVIEW BESIDE THE HOUSE. The plan's `wall.preview` places shipped constructions (a trunk,
+//! say) beside the cue's house on the offline root alone ([`place_preview`]), dev only: the
+//! shipped map never places them, and the wall stays the house's. A round with an `aim` is fired
+//! at a point the plan names in a named construction's own frame, arriving along the plan's
+//! direction, so a shot is chosen by data and never by the kind of element it meets.
 
 use bevy::prelude::*;
 
+use super::plan::{Aim, Preview};
 use crate::ballistics::FireShell;
 use crate::construction::breakage::{Breakage, Charge as ConstructionCharge};
 use crate::construction::fracture::Blast;
@@ -146,13 +153,26 @@ fn staging() -> &'static Staging {
     &STAGING
 }
 
-/// The cue's shots in order, each with its second and whether it went off; the wall's framing
-/// once found.
+/// The cue's shots in order, each with its second, its aim and whether it went off; the
+/// preview; the framing once found.
 #[derive(Resource)]
 struct Cue {
-    shots: Vec<(What, f32, bool)>,
+    shots: Vec<(What, f32, Option<Aim>, bool)>,
+    preview: Option<Preview>,
     camera: Option<Transform>,
 }
+
+/// A construction the plan's preview placed: never the cue's house.
+#[derive(Component)]
+struct Previewed;
+
+/// The map's constructions the cue may take for its house.
+type Houses<'w, 's> = Query<
+    'w,
+    's,
+    (&'static MapInstance, &'static Transform, &'static Breakage),
+    Without<Previewed>,
+>;
 
 pub(crate) fn offline_wall_plugin(app: &mut App) {
     let Some(cue) = cue_from_plan() else {
@@ -160,7 +180,7 @@ pub(crate) fn offline_wall_plugin(app: &mut App) {
     };
     app.insert_resource(cue)
         .insert_resource(crate::camera::CameraCaptive(true))
-        .add_systems(PostStartup, check_wall_target)
+        .add_systems(PostStartup, (place_preview, check_wall_target).chain())
         .add_systems(Update, fire_on_cue);
     let placed = super::plan()
         .and_then(|plan| plan.frames.as_ref())
@@ -189,11 +209,12 @@ fn cue_from_plan() -> Option<Cue> {
     let shots = wall
         .shots
         .iter()
-        .map(|shot| (shot.what.clone(), shot.at, false))
+        .map(|shot| (shot.what.clone(), shot.at, shot.aim.clone(), false))
         .collect();
     info!("capture: game's environment destruction wall cue {wall:?}");
     Some(Cue {
         shots,
+        preview: wall.preview.clone(),
         camera: None,
     })
 }
@@ -260,9 +281,7 @@ fn the_wall((root, breakage): (&Transform, &Breakage)) -> Option<(Vec3, Vec3, Ve
 }
 
 /// The construction the cue works on (module doc): its pose and breakable state.
-fn the_house<'a>(
-    constructions: &'a Query<(&MapInstance, &Transform, &Breakage)>,
-) -> Option<(&'a Transform, &'a Breakage)> {
+fn the_house<'a>(constructions: &'a Houses) -> Option<(&'a Transform, &'a Breakage)> {
     let reach = |t: &Transform| Vec2::new(t.translation.x, t.translation.z).length_squared();
     constructions
         .iter()
@@ -276,7 +295,7 @@ fn the_house<'a>(
 
 /// The wall, resolved at boot: the map's constructions spawn at `Startup`, from data, so a plan whose
 /// `wall` cue finds no breakable house with a pier fails the run before any frame.
-fn check_wall_target(constructions: Query<(&MapInstance, &Transform, &Breakage)>) {
+fn check_wall_target(constructions: Houses) {
     assert!(
         the_house(&constructions).and_then(the_wall).is_some(),
         "{}: wall: the map has no breakable house with a pier to shoot at",
@@ -293,13 +312,17 @@ fn check_wall_target(constructions: Query<(&MapInstance, &Transform, &Breakage)>
 fn fire_on_cue(
     time: Res<Time>,
     mut cue: ResMut<Cue>,
-    constructions: Query<(&MapInstance, &Transform, &Breakage)>,
+    constructions: Houses,
+    targets: Query<(&MapInstance, &Transform, &Breakage)>,
     mut commands: Commands,
 ) {
     let now = time.elapsed_secs();
-    let Some((outward, aim, foot, inside)) = the_house(&constructions).and_then(the_wall) else {
+    let house = the_house(&constructions);
+    let Some((outward, aim, foot, inside)) = house.and_then(the_wall) else {
         assert!(
-            !cue.shots.iter().any(|(_, at, fired)| !*fired && now >= *at),
+            !cue.shots
+                .iter()
+                .any(|(_, at, _, fired)| !*fired && now >= *at),
             "{}: wall: a shot is due at {now} s and the house's wall is gone",
             super::plan::VARIABLE
         );
@@ -318,14 +341,139 @@ fn fire_on_cue(
         );
         cue.camera = Some(camera);
     }
-    for (what, _, fired) in cue
+    for (what, _, aimed, fired) in cue
         .shots
         .iter_mut()
-        .filter(|(_, at, fired)| !*fired && now >= *at)
+        .filter(|(_, at, _, fired)| !*fired && now >= *at)
     {
         *fired = true;
-        shoot(what, (outward, aim, foot), &mut commands);
+        let wall = match aimed {
+            Some(aimed) => aimed_at(
+                aimed,
+                house.expect("the wall was found on this house"),
+                &targets,
+            ),
+            None => (outward, aim, foot),
+        };
+        shoot(what, wall, &mut commands);
     }
+}
+
+/// A plan-aimed shot as [`shoot`] reads a wall, world: the reverse of its arrival direction, the
+/// aim point, and the aim point again as the charge's foot.
+///
+/// # Panics
+///
+/// When no construction is the named instance: the plan names one the map or its preview places.
+fn aimed_at(
+    aimed: &Aim,
+    house: (&Transform, &Breakage),
+    targets: &Query<(&MapInstance, &Transform, &Breakage)>,
+) -> (Vec3, Vec3, Vec3) {
+    let (root, breakage) = match &aimed.instance {
+        None => house,
+        Some(instance) => targets
+            .iter()
+            .find(|(identity, _, _)| &identity.id == instance)
+            .map(|(_, root, breakage)| (root, breakage))
+            .unwrap_or_else(|| {
+            panic!(
+                "{}: wall.shots.aim: no construction is instance {:?}; name one the map or wall.preview places",
+                super::plan::VARIABLE,
+                instance
+            )
+        }),
+    };
+    let at = root.translation + root.rotation * (Vec3::from(aimed.at) * breakage.scale);
+    let along = (root.rotation * Vec3::from(aimed.toward)).normalize();
+    (-along, at, at)
+}
+
+/// Stand the plan's preview constructions beside the cue's house (module doc), each drawn with the
+/// constructions' one material where the root draws, at unit scale, and frame them with the
+/// preview's camera.
+///
+/// # Panics
+///
+/// When the map has no house, or a preview asset is not a shipped construction the map's load
+/// gate admits: the plan names one.
+fn place_preview(
+    mut cue: ResMut<Cue>,
+    houses: Houses,
+    placed: Query<&MapInstance>,
+    look: Option<Res<crate::construction::view::Look>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut commands: Commands,
+) {
+    let Some(preview) = cue.preview.clone() else {
+        return; // The plan asks for no preview.
+    };
+    let (house, _) = the_house(&houses).unwrap_or_else(|| {
+        panic!(
+            "{}: wall.preview: the map has no house to stand the preview beside",
+            super::plan::VARIABLE
+        )
+    });
+    let assets: std::collections::BTreeSet<&str> = preview
+        .place
+        .iter()
+        .map(|placed| placed.asset.as_str())
+        .collect();
+    let mut library =
+        crate::construction::ConstructionLibrary::load(&crate::assets::asset_root(), assets);
+    let first = placed
+        .iter()
+        .map(|identity| identity.ordinal + 1)
+        .max()
+        .expect("the map places the house");
+    for (ordinal, placed) in (first..).zip(&preview.place) {
+        library
+            .admit_placement(&placed.asset, [1.0; 3])
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: wall.preview {}: {error}",
+                    super::plan::VARIABLE,
+                    placed.id
+                )
+            });
+        let kind = library
+            .get(&placed.asset)
+            .expect("the preview library loaded every preview asset")
+            .clone();
+        let (x, z) = placed.offset;
+        let pose = Transform {
+            translation: house.translation + house.rotation * Vec3::new(x, 0.0, z),
+            rotation: house.rotation * Quat::from_rotation_y(placed.yaw_deg.to_radians()),
+            scale: Vec3::ONE,
+        };
+        let identity = MapInstance {
+            id: placed.id.clone(),
+            ordinal,
+        };
+        let root = crate::construction::spawn(&mut commands, &kind, identity, pose);
+        commands.entity(root).insert(Previewed);
+        if let Some(look) = &look {
+            commands.spawn((
+                ChildOf(root),
+                Transform::IDENTITY,
+                Mesh3d(meshes.add(crate::construction::view::mesh(&kind))),
+                MeshMaterial3d(look.surface.clone()),
+                crate::render_cost::CasterClass::House,
+                crate::construction::view::View,
+            ));
+        }
+        info!(
+            "capture: wall preview {} ({}) stands at {:?}",
+            placed.id, placed.asset, pose.translation
+        );
+    }
+    let world = |p: (f32, f32, f32)| house.translation + house.rotation * Vec3::from(p);
+    let (eye, look) = (world(preview.eye), world(preview.look));
+    info!(
+        "capture: wall preview — camera: Pose(eye: ({:?}, {:?}, {:?}), look: ({:?}, {:?}, {:?})),",
+        eye.x, eye.y, eye.z, look.x, look.y, look.z
+    );
+    cue.camera = Some(Transform::from_translation(eye).looking_at(look, Vec3::Y));
 }
 
 /// Fire `what` at the wall (its outward normal, aim point and foot, world): a round square to it.

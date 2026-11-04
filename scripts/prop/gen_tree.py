@@ -121,25 +121,13 @@ def disc(radius: float, z: float, facing_up: bool):
 
 
 def cards(branches, z_local: float):
-    """Every branch of one whorl as a kite in its own vertical plane: a stem-width base at the
-    trunk, the full width at 40 % of the length, a point at the tip. Three triangles each."""
+    """Every branch of one whorl as its kite (`plan.kite`, the dressing's source too). Three
+    triangles each."""
     verts, faces, uvs = [], [], []
     kite_uv = [(0.5, 0.0), (0.0, 0.4), (0.5, 1.0), (1.0, 0.4), (0.4, 0.0), (0.6, 0.0)]
     for branch in branches:
-        along = (math.cos(branch["azimuth"]) * math.cos(branch["droop"]),
-                 math.sin(branch["azimuth"]) * math.cos(branch["droop"]),
-                 -math.sin(branch["droop"]))
-        side = (-math.sin(branch["azimuth"]), math.cos(branch["azimuth"]), 0.0)
-        length, width = branch["length_m"], branch["width_m"]
-
-        def at(t, s):
-            return (along[0] * t * length + side[0] * s * width,
-                    along[1] * t * length + side[1] * s * width,
-                    z_local + along[2] * t * length + side[2] * s * width)
-
         base = len(verts)
-        verts += [at(0.0, 0.0), at(0.4, -0.5), at(1.0, 0.0), at(0.4, 0.5),
-                  at(0.0, -0.08), at(0.0, 0.08)]
+        verts += plan.kite(branch, z_local)
         uvs += kite_uv
         faces += [(base + 4, base + 1, base + 3, base + 5),
                   (base + 1, base + 2, base + 3)]

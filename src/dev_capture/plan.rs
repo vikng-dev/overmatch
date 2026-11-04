@@ -345,11 +345,51 @@ pub(crate) enum ShotTarget {
     Ground,
 }
 
-/// Shots at one house wall, each at its own second.
+/// Shots at one house wall, each at its own second, and the constructions the offline root
+/// places beside that house for a preview.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Wall {
     pub(crate) shots: Vec<WallShot>,
+    /// Constructions placed beside the cue's house on the offline root alone, dev only: the shipped
+    /// map never places them ([`Preview`]). Default none.
+    #[serde(default)]
+    pub(crate) preview: Option<Preview>,
+}
+
+/// A preview beside the cue's house (`dev_capture::wall`): what it places, and the camera that
+/// frames it, `eye` looking at `look`, both metres in the house's frame. The plan's own
+/// `frames.camera`, when it places one, wins.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Preview {
+    pub(crate) place: Vec<Placed>,
+    pub(crate) eye: (f32, f32, f32),
+    pub(crate) look: (f32, f32, f32),
+}
+
+/// One preview construction (`dev_capture::wall`): the shipped construction `asset`, named `id`,
+/// standing `offset` metres from the cue's house root along its own x and z, at the house root's
+/// height, turned `yaw_deg` about +Y from the house's heading, at unit scale.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Placed {
+    pub(crate) asset: String,
+    pub(crate) id: String,
+    pub(crate) offset: (f32, f32),
+    pub(crate) yaw_deg: f32,
+}
+
+/// Where a shot goes instead of the cue's wall: at `at` in the frame of the construction whose
+/// map instance is `instance`, the cue's house when absent (asset metres at its scale), arriving
+/// along `toward` in that frame.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Aim {
+    #[serde(default)]
+    pub(crate) instance: Option<String>,
+    pub(crate) at: (f32, f32, f32),
+    pub(crate) toward: (f32, f32, f32),
 }
 
 /// One shot at the wall, at app second `at`: a shipped round square at it, or a bare charge of
@@ -360,6 +400,8 @@ pub(crate) struct Wall {
 pub(crate) struct WallShot {
     pub(super) what: super::wall::What,
     pub(super) at: f32,
+    /// The shot's aim; `None` fires at the cue's wall.
+    pub(super) aim: Option<Aim>,
 }
 
 #[derive(Deserialize)]
@@ -370,11 +412,15 @@ enum WallShotInput {
         #[serde(default)]
         mode: u8,
         at: f32,
+        #[serde(default)]
+        aim: Option<Aim>,
     },
     Charge {
         kg: f32,
         core: String,
         at: f32,
+        #[serde(default)]
+        aim: Option<Aim>,
     },
 }
 
@@ -382,13 +428,18 @@ impl TryFrom<WallShotInput> for WallShot {
     type Error = super::wall::CueError;
 
     fn try_from(input: WallShotInput) -> Result<Self, Self::Error> {
-        let (what, at) = match input {
-            WallShotInput::Round { round, mode, at } => {
-                (super::wall::What::round(&round, mode)?, at)
+        let (what, at, aim) = match input {
+            WallShotInput::Round {
+                round,
+                mode,
+                at,
+                aim,
+            } => (super::wall::What::round(&round, mode)?, at, aim),
+            WallShotInput::Charge { kg, core, at, aim } => {
+                (super::wall::What::charge(kg, &core)?, at, aim)
             }
-            WallShotInput::Charge { kg, core, at } => (super::wall::What::charge(kg, &core)?, at),
         };
-        Ok(Self { what, at })
+        Ok(Self { what, at, aim })
     }
 }
 
@@ -569,6 +620,30 @@ impl CapturePlan {
             }
             for shot in &wall.shots {
                 finite_at("wall.shots.at", shot.at)?;
+                if let Some(aim) = &shot.aim
+                    && !(Vec3::from(aim.at).is_finite()
+                        && Vec3::from(aim.toward).is_finite()
+                        && Vec3::from(aim.toward) != Vec3::ZERO)
+                {
+                    return Err(
+                        "wall.shots.aim: a finite point and a finite nonzero direction".into(),
+                    );
+                }
+            }
+            if let Some(preview) = &wall.preview {
+                let (eye, look) = (Vec3::from(preview.eye), Vec3::from(preview.look));
+                if !(eye.is_finite() && look.is_finite() && eye != look) {
+                    return Err("wall.preview: the camera is two distinct finite points".into());
+                }
+                for placed in &preview.place {
+                    let (x, z) = placed.offset;
+                    if !(x.is_finite() && z.is_finite() && placed.yaw_deg.is_finite()) {
+                        return Err(format!(
+                            "wall.preview {}: a finite offset and yaw",
+                            placed.id
+                        ));
+                    }
+                }
             }
         }
         Ok(())
@@ -819,12 +894,15 @@ mod tests {
                     WallShot {
                         what: super::super::wall::What::round("88mm_AP", 0).unwrap(),
                         at: 7.0,
+                        aim: None,
                     },
                     WallShot {
                         what: super::super::wall::What::charge(2.0, "88mm_burst_core").unwrap(),
                         at: 8.0,
+                        aim: None,
                     },
                 ],
+                preview: None,
             })
         );
         assert_eq!(
@@ -1035,6 +1113,33 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/capture/example.ron");
         let plan = CapturePlan::load(&path).unwrap_or_else(|error| panic!("{error}"));
         assert!(plan.frames.is_some() && plan.wall.is_some());
+    }
+
+    /// The wood preview the owner judges is an admitted plan: every shot aimed by data, every
+    /// preview asset a shipped construction the map's load gate admits, and a camera of two
+    /// distinct points. An aim reverted to the wall's own choice, or a stray asset, fails here.
+    #[test]
+    fn the_wood_preview_plan_aims_every_shot_at_admitted_constructions() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/capture/wood-preview.ron");
+        let plan = CapturePlan::load(&path).unwrap_or_else(|error| panic!("{error}"));
+        let wall = plan.wall.expect("the preview is a wall cue");
+        assert!(wall.shots.iter().all(|shot| shot.aim.is_some()));
+        let preview = wall.preview.expect("the preview places constructions");
+        let assets: Vec<&str> = preview.place.iter().map(|p| p.asset.as_str()).collect();
+        let mut library = crate::construction::ConstructionLibrary::load(
+            &crate::map::tests::shipped_assets(),
+            assets.iter().copied(),
+        );
+        for asset in assets {
+            library.admit_placement(asset, [1.0; 3]).unwrap();
+        }
+        for named in wall
+            .shots
+            .iter()
+            .filter_map(|shot| shot.aim.as_ref()?.instance.as_ref())
+        {
+            assert!(preview.place.iter().any(|p| &p.id == named), "{named}");
+        }
     }
 
     /// A raised strike reads its style and its surface from the shipped tables, so a capture

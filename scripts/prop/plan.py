@@ -143,6 +143,57 @@ def whorls(height_m: float, row: dict, rng: random.Random) -> List[dict]:
     return out
 
 
+#: A branch card's kite in its own (along, across) units: its six points as `kite` places them,
+#: the base on the trunk axis first. The generator's faces and the dressing's outline index them.
+KITE = ((0.0, 0.0), (0.4, -0.5), (1.0, 0.0), (0.4, 0.5), (0.0, -0.08), (0.0, 0.08))
+
+#: The kite's outline, in order around its edge, as indices into `KITE`.
+KITE_OUTLINE = (4, 1, 2, 3, 5)
+
+
+def kite(branch: dict, z_m: float) -> List[tuple]:
+    """A branch's card as `KITE`'s six points in Blender's frame (Z up), the trunk axis at x = y = 0
+    and `z_m` the whorl's height in whatever frame the caller places it: a flat kite in the
+    branch's own vertical plane, a stem-width base at the axis, its full width at 40 % of its
+    length and a point at its tip."""
+    along = (math.cos(branch["azimuth"]) * math.cos(branch["droop"]),
+             math.sin(branch["azimuth"]) * math.cos(branch["droop"]),
+             -math.sin(branch["droop"]))
+    side = (-math.sin(branch["azimuth"]), math.cos(branch["azimuth"]), 0.0)
+    length, width = branch["length_m"], branch["width_m"]
+
+    def at(t, s):
+        return (along[0] * t * length + side[0] * s * width,
+                along[1] * t * length + side[1] * s * width,
+                z_m + along[2] * t * length + side[2] * s * width)
+
+    return [at(t, s) for t, s in KITE]
+
+
+def gltf(point: tuple) -> tuple:
+    """A Blender point (Z up) in the glTF frame (+Y up), as the export turns it."""
+    x, y, z = point
+    return (x, z, -y)
+
+
+def dressing_ron(whorl_rows: List[dict], header: str) -> str:
+    """`assets/constructions/<id>/<id>.dressing.ron`, the trunk's view dressing
+    (`construction::view::Dressing`): the `trunk` part skinned with bark, and every branch card of
+    `whorl_rows` as its base on the trunk axis and its outline (`KITE_OUTLINE`), glTF metres. The
+    game gives each card to the law chunk holding its base. `header` leads as a comment."""
+    lines = ["// " + line for line in header.splitlines()]
+    lines += ["(", '    skin: ["trunk"],', "    cards: ["]
+    for whorl in whorl_rows:
+        for branch in whorl["branches"]:
+            points = [gltf(p) for p in kite(branch, whorl["z_m"])]
+            corners = ", ".join("({}, {}, {})".format(*(_num(c) for c in points[i]))
+                                for i in KITE_OUTLINE)
+            lines.append("        (base: ({}, {}, {}), corners: [{}]),".format(
+                *(_num(c) for c in points[0]), corners))
+    lines += ["    ],", ")", ""]
+    return "\n".join(lines)
+
+
 def tree_ron(species: str, segment_rows: List[dict], header: str) -> str:
     """`<id>.tree.ron` in the slice contract's shape (A6: no `dbh_m`; the loader derives DBH
     from the taper at 1.3 m), the header as a leading comment.

@@ -66,6 +66,9 @@ pub(crate) struct ConstructionKind {
     bounds: (Vec3, Vec3),
     /// What the fracture laws read of it.
     pub(crate) layout: breakage::Layout,
+    /// What its view adds to the law geometry, view only: `<id>.dressing.ron`, read with the
+    /// library ([`ConstructionLibrary::load`]); bare for a kind resolved from its text alone.
+    pub(crate) dressing: view::Dressing,
     /// Checked at admission, keyed by the authored uniform scale's bits. Gameplay never
     /// converts an attachment again; instances at the same scale share immutable construction.
     structures: BTreeMap<u32, Arc<fracture::Structure>>,
@@ -115,6 +118,7 @@ impl ConstructionKind {
         let layout = breakage::Layout::of(&asset, &law_materials, attachments)?;
         let structure = Arc::new(layout.checked_structure(&asset, 1.0)?);
         Ok(Self {
+            dressing: view::Dressing::bare(&layout),
             asset,
             materials,
             friction,
@@ -196,8 +200,13 @@ impl ConstructionLibrary {
             let text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
                 panic!("construction: {} cannot be read: {err}", path.display())
             });
-            let kind = ConstructionKind::resolve(id, &text, registry, attachments)
+            let mut kind = ConstructionKind::resolve(id, &text, registry, attachments)
                 .unwrap_or_else(|err| panic!("construction: {}: {err}", path.display()));
+            let dressed = path.with_file_name(format!("{id}.dressing.ron"));
+            kind.dressing = std::fs::read_to_string(&dressed)
+                .map_err(|err| err.to_string())
+                .and_then(|text| view::Dressing::resolve(&text, &kind.asset, &kind.layout))
+                .unwrap_or_else(|err| panic!("construction: {}: {err}", dressed.display()));
             library.texts.push(text);
             library.kinds.insert(id.to_owned(), Arc::new(kind));
         }

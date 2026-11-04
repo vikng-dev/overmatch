@@ -398,6 +398,14 @@ pub(crate) fn construction_cracks() -> &'static ConstructionCracks {
     &load().construction_cracks
 }
 
+look_table! { pub(crate) ConstructionDressing {
+    skin_srgb: Vec3 => fraction_vec3,
+    card_srgb: Vec3 => fraction_vec3,
+}}
+pub(crate) fn construction_dressing() -> &'static ConstructionDressing {
+    &load().construction_dressing
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct VfxLook {
@@ -407,6 +415,7 @@ pub(super) struct VfxLook {
     marks: MarksLook,
     diagram: DiagramLook,
     construction_cracks: ConstructionCracks,
+    construction_dressing: ConstructionDressing,
 }
 
 pub(super) fn load() -> &'static VfxLook {
@@ -468,6 +477,8 @@ mod tests {
             "half_width_m",
             "standoff_m",
             "color_srgb",
+            "skin_srgb",
+            "card_srgb",
             "dust_size",
         ] {
             let missing = DATA

@@ -1,0 +1,52 @@
+// A capture plan (`dev_capture::plan::CapturePlan`), the game's environment destruction (game
+// state only): the wood preview the owner judges. Beside the house the wall cue takes (the one
+// nearest the map's centre), the offline root stands two shipped trunk constructions, dev only and
+// never in the shipped map: `preview_fir_intact`, left whole, and `preview_fir_broken`, whose foot
+// a bare charge bursts against. Two rounds then strike the house's east roof slope square to it,
+// aimed in the house's own frame (an aim that names no instance): one inside a board
+// (`east/board_5`'s centre) and one across the nailed seam between `east/board_5` and
+// `east/board_6`. The preview's camera stands east of the house looking at the slope, a trunk to
+// either side. From the checkout root:
+//
+//   OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=offscreen \
+//     OVERMATCH_CAPTURE=scripts/capture/wood-preview.ron target/debug/overmatch --offline
+//
+// writes target/capture/wood-preview-<second>.png at each frame second, then exits. Aim points
+// are house_1 asset metres read from its bake (board 5's section corners (0.8, 3.475),
+// (0.83, 3.515), (0.96, 3.355), (0.99, 3.395); the seam is its lower edge, shared with board 6);
+// the slope's outward normal is (0.6, 0.8, 0). Offsets, camera, times, the charge's mass and the
+// rounds are capture configuration (ASSUMED), chosen to frame the break, never to reach an outcome.
+(
+    frames: (
+        out: "target/capture/wood-preview.png",
+        at: [7.0, 9.5, 11.5, 13.5, 18.0],
+        size: (2560, 1440),
+        ui: false,
+        gizmos: false,
+    ),
+    wall: (
+        shots: [
+            Charge(kg: 2.0, core: "88mm_burst_core", at: 8.0, aim: (
+                instance: "preview_fir_broken",
+                at: (0.21, 0.0, 0.0),
+                toward: (-1.0, 0.0, 0.0),
+            )),
+            Round(round: "88mm_AP", at: 10.0, aim: (
+                at: (0.895, 3.435, -1.5),
+                toward: (-0.6, -0.8, 0.0),
+            )),
+            Round(round: "88mm_AP", at: 12.0, aim: (
+                at: (0.975, 3.375, 1.5),
+                toward: (-0.6, -0.8, 0.0),
+            )),
+        ],
+        preview: (
+            place: [
+                (asset: "fir_1", id: "preview_fir_intact", offset: (4.0, -9.0), yaw_deg: 0.0),
+                (asset: "fir_1", id: "preview_fir_broken", offset: (4.0, 9.0), yaw_deg: 0.0),
+            ],
+            eye: (24.0, 8.0, 0.0),
+            look: (3.0, 5.0, 0.0),
+        ),
+    ),
+)

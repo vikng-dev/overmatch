@@ -65,7 +65,6 @@ This file only shrinks, and a closed row is deleted, never struck through.
 | dev-17 | P2 | `scripts/tank/test_build.py::TigerCensus`; `ShippedTrio` | base-truths: Asset-specific gate | Named wheel primitives with exactly eight node references, and pinned wheel and ammunition names, go red on a valid construction or naming change. | Derive membership and counts from the document; assert census and dedup relationships. | ratchet |
 | dev-19 | P3 | `scripts/hooks/pushed_assets.sh::assets_push_targets` | code-branching: Kept alternative | The retired pre-push selection and hydration route stays implemented and tested with no production caller; CI uses the range route. | Delete the route, its exclusive helpers and test arms; keep the shared predicates and CI-range evidence. | ratchet |
 | dev-20 | P3 | `scripts/tank/trio.py::coherence` | brevity: Repeated why | The inline paragraph repeats the docstring's reason that hashes exclude certificate-body claims and verification checks constructive laws. | Delete the inline paragraph; net 4 lines (DERIVED). | ratchet |
-| dev-24 | P3 | `src/track_sandbox/rubble.rs` layout/count/orientation constants | base-truths: Bare number in code | Shipped rubble-yard construction remains in Rust under Fixture comments outside cfg(test), including pile/wall layout and piece counts. | Move authored yard construction into required provenance-bearing tool data and reserve Fixture for inline tests. | ratchet |
 
 ## destruction
 

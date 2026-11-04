@@ -632,9 +632,10 @@ fn reset_spots() -> Vec<(f32, f32, &'static str)> {
             .iter()
             .map(|trench| (0.0, -trench.forward_m.0, trench.label.as_str())),
     );
+    let spot = rubble::rubble_spot();
     spots.push((
-        rubble::RUBBLE_SPOT.x,
-        rubble::RUBBLE_SPOT.y,
+        spot.x,
+        spot.y,
         "rubble yard (brick pile ahead, wall section on the left)",
     ));
     spots

@@ -71,6 +71,15 @@ pub(super) struct Scene {
     pub(super) traction_force_srgb: Sourced<[f32; 3]>,
     pub(super) cast_srgb: Sourced<[f32; 3]>,
     pub(super) reference_srgb: Sourced<[f32; 3]>,
+    pub(super) rubble_pile_at_m: Sourced<[f32; 3]>,
+    pub(super) rubble_wall_at_m: Sourced<[f32; 2]>,
+    pub(super) rubble_spot_ahead_m: Sourced<f32>,
+    pub(super) rubble_pile_pieces: Sourced<usize>,
+    pub(super) rubble_pile_row: Sourced<usize>,
+    pub(super) rubble_pile_taper: Sourced<f32>,
+    pub(super) rubble_pile_yaw_rad: Sourced<f32>,
+    pub(super) rubble_piece_srgb: Sourced<[f32; 3]>,
+    pub(super) rubble_wall_srgb: Sourced<[f32; 3]>,
 }
 
 impl Scene {
@@ -108,7 +117,25 @@ impl Scene {
                 return Err(refuse(field, "author a finite positive value"));
             }
         }
+        if self.rubble_pile_pieces.0 == 0 || self.rubble_pile_row.0 == 0 {
+            return Err(refuse(
+                "rubble_pile_pieces / rubble_pile_row",
+                "author at least one piece and one piece per row",
+            ));
+        }
+        let layers = self
+            .rubble_pile_pieces
+            .0
+            .div_ceil(self.rubble_pile_row.0.pow(2));
+        if !(0.0..1.0 / layers as f32).contains(&self.rubble_pile_taper.0) {
+            return Err(refuse(
+                "rubble_pile_taper",
+                "author a nonnegative taper that leaves the top layer a positive width",
+            ));
+        }
         for (field, value) in [
+            ("rubble_spot_ahead_m", self.rubble_spot_ahead_m.0),
+            ("rubble_pile_yaw_rad", self.rubble_pile_yaw_rad.0),
             ("lane_near_m", self.lane_near_m.0),
             ("lane_far_m", self.lane_far_m.0),
             ("trench_floor_y_m", self.trench_floor_y_m.0),
@@ -165,6 +192,7 @@ impl Scene {
             ("camera_eye_m", self.camera_eye_m.0),
             ("camera_target_m", self.camera_target_m.0),
             ("light_eye_m", self.light_eye_m.0),
+            ("rubble_pile_at_m", self.rubble_pile_at_m.0),
         ] {
             if value.iter().any(|v| !v.is_finite()) {
                 return Err(refuse(field, "author finite coordinates"));
@@ -240,6 +268,8 @@ impl Scene {
             ("traction_force_srgb", self.traction_force_srgb.0),
             ("cast_srgb", self.cast_srgb.0),
             ("reference_srgb", self.reference_srgb.0),
+            ("rubble_piece_srgb", self.rubble_piece_srgb.0),
+            ("rubble_wall_srgb", self.rubble_wall_srgb.0),
         ] {
             if value
                 .iter()

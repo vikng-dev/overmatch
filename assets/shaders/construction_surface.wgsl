@@ -60,6 +60,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let image_up = vertex.tangent.w * cross(vertex.normal, vertex.tangent.xyz);
     out.uv = vertex.uv * vec2(length(axes * vertex.tangent.xyz), length(axes * image_up));
     out.uv_b = vertex.uv_b;
+#ifdef VERTEX_COLORS
+    // A dressing's tint (`construction::view`): the standard path multiplies the primary pack by it.
+    out.color = vertex.color;
+#endif
     out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
         world_from_local, vertex.tangent, vertex.instance_index);
 
@@ -94,8 +98,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         let arm = textureSampleGrad(secondary_arm_texture, secondary_sampler, secondary_uv, ddx, ddy).rgb;
         // The material's own factors multiply the secondary pack as they do the primary pack, so the two
         // answer to one material.
+        var tint = vec3(1.0);
+#ifdef VERTEX_COLORS
+        tint = in.color.rgb;
+#endif
         pbr_input.material.base_color = vec4(
-            pbr_bindings::material.base_color.rgb * albedo, pbr_input.material.base_color.a);
+            pbr_bindings::material.base_color.rgb * albedo * tint, pbr_input.material.base_color.a);
         pbr_input.N = pbr_functions::apply_normal_mapping(
             pbr_input.material.flags, TBN, double_sided, is_front, tangent_normal);
         pbr_input.diffuse_occlusion = vec3(arm.r);

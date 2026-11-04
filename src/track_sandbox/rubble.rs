@@ -18,25 +18,18 @@ use crate::debris::DebrisPiece;
 use crate::track::rubble::footprint_radius;
 
 use super::belt::EnvelopeLaw;
+use super::data::scene;
 use super::{RigGeom, Side, belt_loop, contact_probe, force_viz_scale};
 
 /// The construction asset the yard is cut from.
 const HOUSE: &str = "house_1";
-/// Fixture layout: where the pile's base centre stands (world, on the lane's ground at y = 0): on the open flat
-/// ground left of the washboards.
-pub(super) const PILE_AT: Vec3 = Vec3::new(-13.0, 0.0, -8.0);
-/// Fixture layout: where the wall section's chunks' mean stands (xz only; its height is the asset's own).
-const WALL_AT: Vec2 = Vec2::new(-18.0, -8.0);
-/// Fixture count: how many pieces the pile holds.
-const PILE_PIECES: usize = 108;
-/// Fixture layout: pieces per square layer of the drop grid.
-const PILE_ROW: usize = 6;
-/// Fixture layout: the `R` tour's rubble spot: the rig's hull origin (xz), facing −Z at the pile.
-pub(super) const RUBBLE_SPOT: Vec2 = Vec2::new(PILE_AT.x, PILE_AT.z + 9.0);
 
-/// Fixture layout: fractional grid narrowing per layer and per-piece yaw variation, radians.
-const PILE_TAPER: f32 = 0.15;
-const PILE_YAW_RAD: f32 = 0.7;
+/// The `R` tour's rubble spot: the rig's hull origin (xz), facing −Z at the pile, the scene's
+/// `rubble_spot_ahead_m` short of it.
+pub(super) fn rubble_spot() -> Vec2 {
+    let [x, _, z] = scene().rubble_pile_at_m.0;
+    Vec2::new(x, z + scene().rubble_spot_ahead_m.0)
+}
 
 /// The contacts of the last fixed tick that pressed on a body, for the gizmos.
 #[derive(Resource, Default)]
@@ -90,8 +83,11 @@ pub(super) fn spawn_rubble_yard(
     let kind = library.get(HOUSE).expect("the shipped house loads").clone();
     let layout = &kind.layout;
     let structure = layout.structure(&kind.asset, 1.0);
-    let brick = materials.add(Color::srgb(0.62, 0.33, 0.24));
-    let standing = materials.add(Color::srgb(0.55, 0.42, 0.36));
+    let yard = scene();
+    let brick = materials.add(Color::srgb_from_array(yard.rubble_piece_srgb.0));
+    let standing = materials.add(Color::srgb_from_array(yard.rubble_wall_srgb.0));
+    let [wall_x, wall_z] = yard.rubble_wall_at_m.0;
+    let (row_count, taper) = (yard.rubble_pile_row.0, yard.rubble_pile_taper.0);
 
     // The breakable elements, most chunks first: the first is the wall section, the rest feed
     // the pile.
@@ -128,11 +124,10 @@ pub(super) fn spawn_rubble_yard(
     let wall_root = commands
         .spawn((
             Name::new("rubble yard wall"),
-            Transform::from_xyz(WALL_AT.x - mid.x, 0.0, WALL_AT.y - mid.z).with_rotation(turn),
+            Transform::from_xyz(wall_x - mid.x, 0.0, wall_z - mid.z).with_rotation(turn),
             RigidBody::Static,
             Mesh3d(meshes.add(crate::construction::view::piece_mesh(
-                &kind.asset,
-                layout,
+                &kind,
                 &wall_chunks.iter().map(|&c| c as u16).collect::<Vec<_>>(),
                 Vec3::ZERO,
             ))),
@@ -155,7 +150,7 @@ pub(super) fn spawn_rubble_yard(
     let pieces: Vec<usize> = rest
         .iter()
         .flat_map(|&e| layout.chunks_of(e))
-        .take(PILE_PIECES)
+        .take(yard.rubble_pile_pieces.0)
         .collect();
     let spacing = pieces
         .iter()
@@ -177,18 +172,18 @@ pub(super) fn spawn_rubble_yard(
         let centroid = structure.chunks[c].centroid;
         let collider = chunk_collider(&kind, c, 1.0, centroid);
         let (row, col, layer) = (
-            i % PILE_ROW,
-            (i / PILE_ROW) % PILE_ROW,
-            i / (PILE_ROW * PILE_ROW),
+            i % row_count,
+            (i / row_count) % row_count,
+            i / (row_count * row_count),
         );
-        let half = (PILE_ROW as f32 - 1.0) / 2.0;
-        let at = PILE_AT
+        let half = (row_count as f32 - 1.0) / 2.0;
+        let at = Vec3::from_array(yard.rubble_pile_at_m.0)
             + Vec3::new(
-                (row as f32 - half) * spacing * (1.0 - PILE_TAPER * layer as f32),
+                (row as f32 - half) * spacing * (1.0 - taper * layer as f32),
                 spacing * (0.5 + layer as f32),
-                (col as f32 - half) * spacing * (1.0 - PILE_TAPER * layer as f32),
+                (col as f32 - half) * spacing * (1.0 - taper * layer as f32),
             );
-        let turn = Quat::from_rotation_y(i as f32 * PILE_YAW_RAD);
+        let turn = Quat::from_rotation_y(i as f32 * yard.rubble_pile_yaw_rad.0);
         commands.spawn((
             Name::new("rubble yard piece"),
             DebrisPiece,
@@ -201,8 +196,7 @@ pub(super) fn spawn_rubble_yard(
             piece_layers(),
             kind.chunk_friction(c),
             Mesh3d(meshes.add(crate::construction::view::piece_mesh(
-                &kind.asset,
-                layout,
+                &kind,
                 &[c as u16],
                 centroid,
             ))),

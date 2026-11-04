@@ -1,0 +1,6 @@
+// house_1's view dressing (`construction::view::Dressing`): no part wears a skin, so every face
+// draws its substance's own surface, and the house carries no cards.
+(
+    skin: [],
+    cards: [],
+)
