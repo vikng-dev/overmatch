@@ -148,6 +148,31 @@ fn check_holds(foundation_attachment: &str, joins: &[Join]) -> Result<(), String
     Ok(())
 }
 
+/// Refuses two pieces whose interiors meet (at the clip's weld resolution), naming both: a chunk's
+/// mass and the contact search's joints count each volume and each interface once. Shared faces,
+/// edges and corners are allowed.
+pub(super) fn check_disjoint(pieces: &[Piece]) -> Result<(), String> {
+    for (k, piece) in pieces.iter().enumerate() {
+        for (j, other) in pieces[..k].iter().enumerate() {
+            let intersection = other
+                .solid
+                .faces
+                .iter()
+                .try_fold(piece.solid.clone(), |part, face| {
+                    part.clip(face.normal, face.offset)
+                });
+            if intersection.is_some() {
+                return Err(format!(
+                    "pieces[{k}] ({}) overlaps pieces[{j}] ({}): author disjoint interiors; \
+                     shared boundaries are allowed",
+                    piece.name, other.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Refuses a surface frame that is no unit grain, naming `what`.
 fn check_frame(what: &str, frame: SurfaceFrame) -> Result<(), String> {
     frame.is_valid().then_some(()).ok_or_else(|| {
@@ -226,21 +251,6 @@ impl ConstructionSpec {
             solid
                 .certify(super::PLANE_M)
                 .map_err(|err| format!("{what}: no closed convex solid ({err})"))?;
-            for (j, other) in pieces.iter().enumerate() {
-                let intersection = other
-                    .solid
-                    .faces
-                    .iter()
-                    .try_fold(solid.clone(), |part, face| {
-                        part.clip(face.normal, face.offset)
-                    });
-                if intersection.is_some() {
-                    return Err(format!(
-                        "{what} overlaps pieces[{j}] ({}): author disjoint interiors; shared boundaries are allowed",
-                        other.name
-                    ));
-                }
-            }
             pieces.push(Piece {
                 name: piece.name,
                 kind: piece.kind,
@@ -251,6 +261,7 @@ impl ConstructionSpec {
                 pattern: piece.pattern,
             });
         }
+        check_disjoint(&pieces)?;
         Ok(Construction {
             id: self.id,
             foundation_y: self.foundation_y_m,
@@ -319,8 +330,6 @@ pub enum PartCut {
     /// and first corner in the element's frame.
     Courses(CourseRule),
     Cells(super::fracture::Cells),
-    /// Pieces along the grain within this range of lengths, m; a roof plane first into its boards.
-    Boards(Choice<(f64, f64)>),
 }
 
 /// The openings of each wall.
@@ -361,12 +370,6 @@ impl House {
                 PartCut::Whole => Ok(()),
                 PartCut::Courses(rule) => rule.check(),
                 PartCut::Cells(cells) => cells.check(),
-                PartCut::Boards(range) => range.check("Boards").and_then(|()| {
-                    let (low, high) = range.0;
-                    (low.is_finite() && high.is_finite() && 0.0 < low && low <= high)
-                        .then_some(())
-                        .ok_or_else(|| format!("Boards piece_m ({low}, {high}) is no length range"))
-                }),
             }
             .map_err(|err| format!("{name}.cut: {err}"))?;
         }

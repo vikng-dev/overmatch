@@ -34,12 +34,6 @@
 //! other site, distance along the grain counting `1 / stretch` of distance across it, so a chunk
 //! runs about `stretch` times longer along the grain. The grain is the piece's surface frame's
 //! ([`grain`]). A piece holding fewer than two sites is one chunk.
-//!
-//! # Boards: the house generator's timber
-//!
-//! Not authorable outside the house generator ([`Pattern::Boards`]): a roof plane cut into boards
-//! across its slope, then each board, and each wall plate, into pieces along the grain whose
-//! lengths a stream seeded by the asset, the piece and the board draws within the range.
 
 use glam::DVec3;
 use overmatch::buildings::schema::SurfaceFrame;
@@ -83,10 +77,6 @@ pub enum Pattern {
     Whole,
     Courses(Courses),
     Cells(Cells),
-    /// The house generator's roof and plate timber, never read from a file: board layout is
-    /// construction, so explicit pieces state their boards and cut each with [`Self::Cells`].
-    #[serde(skip_deserializing)]
-    Boards(Boards),
 }
 
 /// A running bond (module doc).
@@ -130,27 +120,6 @@ pub struct Cells {
     pub stretch: Choice<f64>,
 }
 
-/// The house generator's timber cut (module doc).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Boards {
-    /// Boards across the piece: board `i` lies between the planes `normal · p = start + i·width`
-    /// and `start + (i + 1)·width`, `count` of them, the first and last open to the piece's edge.
-    pub across: Option<Across>,
-    /// The axis pieces are cut along, unit.
-    pub along: DVec3,
-    /// A piece's length along `along`, m: the shortest and the longest.
-    pub piece_m: (f64, f64),
-}
-
-/// A board layout ([`Boards::across`]).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Across {
-    pub normal: DVec3,
-    pub start: f64,
-    pub width: f64,
-    pub count: u32,
-}
-
 /// The axis a piece's grain runs along: its surface frame's grain, or `+Y` for an upright frame,
 /// whose image runs up the building.
 pub fn grain(frame: SurfaceFrame) -> DVec3 {
@@ -175,7 +144,7 @@ impl Pattern {
     /// field.
     pub fn check(&self) -> Result<(), String> {
         match self {
-            Self::Whole | Self::Boards(_) => Ok(()),
+            Self::Whole => Ok(()),
             Self::Courses(courses) => {
                 for (name, axis) in [("along", courses.along), ("up", courses.up)] {
                     if !(axis.is_finite() && (axis.length() - 1.0).abs() <= UNIT) {
@@ -228,14 +197,13 @@ pub struct CutCount {
 }
 
 /// The chunks of `piece`, in its pattern's order (courses: rows from the datum up, then along the
-/// course; cells: their grid's order; boards: boards, then along the grain). Adds the course cuts
-/// to `count`; `asset` and the piece's name seed every draw.
+/// course; cells: their grid's order). Adds the course cuts to `count`; `asset` and the piece's
+/// name seed every draw.
 pub fn chunks(piece: &Piece, asset: &str, count: &mut CutCount) -> Vec<Polyhedron> {
     match &piece.pattern {
         Pattern::Whole => vec![piece.solid.clone()],
         Pattern::Courses(bond) => courses(piece, asset, bond, count),
         Pattern::Cells(rule) => cells(piece, asset, rule),
-        Pattern::Boards(rule) => boards(piece, asset, rule),
     }
 }
 
@@ -437,74 +405,4 @@ fn cells(piece: &Piece, asset: &str, rule: &Cells) -> Vec<Polyhedron> {
             cell
         })
         .collect()
-}
-
-fn boards(piece: &Piece, asset: &str, rule: &Boards) -> Vec<Polyhedron> {
-    let solid = &piece.solid;
-    let strips: Vec<Polyhedron> = match &rule.across {
-        None => vec![solid.clone()],
-        Some(across) => (0..across.count)
-            .map(|i| {
-                let mut strip = solid.clone();
-                let at = |k: u32| across.start + f64::from(k) * across.width;
-                if i > 0 {
-                    strip = strip
-                        .clip(-across.normal, -at(i))
-                        .expect("a board lies in its piece");
-                }
-                if i + 1 < across.count {
-                    strip = strip
-                        .clip(across.normal, at(i + 1))
-                        .expect("a board lies in its piece");
-                }
-                strip
-            })
-            .collect(),
-    };
-    let mut out = Vec::new();
-    for (i, strip) in strips.into_iter().enumerate() {
-        let mut stream = Stream::new(&[asset, &piece.name, "board", &i.to_string()]);
-        let (near, far) = strip.extent(rule.along);
-        let ends = lengths(near, far, rule.piece_m, &mut stream);
-        for (k, &(_, end)) in ends.iter().enumerate() {
-            let mut length = strip.clone();
-            if k > 0 {
-                length = length
-                    .clip(-rule.along, -ends[k - 1].1)
-                    .expect("a piece lies in its board");
-            }
-            if k + 1 < ends.len() {
-                length = length
-                    .clip(rule.along, end)
-                    .expect("a piece lies in its board");
-            }
-            out.push(length);
-        }
-    }
-    out
-}
-
-/// `[near, far]` split into lengths drawn within `(shortest, longest)`: the last takes what is
-/// left once it fits, and a draw that would leave less than `shortest` splits the rest in two.
-fn lengths(
-    near: f64,
-    far: f64,
-    (shortest, longest): (f64, f64),
-    stream: &mut Stream,
-) -> Vec<(f64, f64)> {
-    let mut out = Vec::new();
-    let mut at = near;
-    loop {
-        let rest = far - at;
-        if rest <= longest {
-            out.push((at, far));
-            return out;
-        }
-        let mut length = shortest + (longest - shortest) * stream.unit();
-        if rest - length < shortest {
-            length = 0.5 * rest;
-        }
-        out.push((at, at + length));
-        at += length;
-    }
 }

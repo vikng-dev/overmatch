@@ -57,15 +57,26 @@ House(
             material: "Wood",
             // ASSUMED authoring choice: plates run along the authored Z ridge.
             surface_frame: Grain((0.0, 0.0, 1.0)),
-            cut: Boards(((1.2, 2.0), Taste("timber break lengths: plate pieces 1.2 to 2 m along
-                the grain"))),
+            cut: Cells((
+                size_m: (0.25, Resolution("about the plate's breadth across the grain: smaller
+                    cells stack sites across its section and cut slivers the game's law blocks
+                    cannot reconstruct")),
+                stretch: (5.0, Taste("timber break look: beam pieces several times their breadth
+                    long, their broken ends running slant along the grain")),
+            )),
         ),
         roof: (
             material: "Wood",
             // ASSUMED authoring choice: boards run along the authored Z ridge.
             surface_frame: Grain((0.0, 0.0, 1.0)),
-            cut: Boards(((0.9, 1.6), Taste("timber break lengths: board pieces 0.9 to 1.6 m along
-                the grain"))),
+            // Each board is its own piece, cut alone.
+            cut: Cells((
+                size_m: (0.2, Resolution("a board's width across the grain: smaller cells stack
+                    sites across the board's thickness and cut slivers the game's law blocks
+                    cannot reconstruct")),
+                stretch: (1.5, Taste("timber break look: a board breaks across its length into
+                    pieces of uneven length, their broken ends running slant along the grain")),
+            )),
         ),
     ),
     // Openings per wall, `u` along the wall in its own frame (east and west: `u` = −z and +z; north

@@ -310,7 +310,7 @@ pub fn specs(root: &Path) -> Result<Vec<Spec>, String> {
         let (stem, construction) = match name.strip_suffix(HOUSE_SUFFIX) {
             Some(stem) => (
                 stem,
-                House::from_ron(&text).map(|house| house::construction(&house)),
+                House::from_ron(&text).and_then(|house| house::construction(&house)),
             ),
             None => (
                 name.strip_suffix(CONSTRUCTION_SUFFIX)

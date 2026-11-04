@@ -111,9 +111,12 @@ fn every_chunk_is_joined_to_the_ground_and_anchors_lie_on_the_foundation() {
     }
 }
 
-/// THE CHUNKS TILE THEIR ELEMENTS: each element's chunks sum to its piece's volume, each chunk
-/// lies inside its element's bounds. The baker relies on conservation of the authored volume;
-/// controlled course fixtures separately check that head joints split each row.
+/// THE CHUNKS TILE THEIR ELEMENTS: each element's chunks sum to its piece's volume, and every
+/// written chunk corner lies inside its own piece, on or under each of the piece's face planes.
+/// The baker relies on conservation of the authored volume, and a roof's users on a board's cut
+/// staying within that board. Mutant: a cut that reaches across a piece's face into the next board
+/// fails, though a box test admits it wherever two boards' bounds overlap. Controlled course
+/// fixtures separately check that head joints split each row.
 #[test]
 fn the_chunks_tile_each_element() {
     for (spec, baked) in shipped() {
@@ -129,27 +132,155 @@ fn the_chunks_tile_each_element() {
                 "{id}: {} chunks sum to {sum} m³ of {whole}",
                 element.name
             );
-            let (lo, hi) = bounds(&element.hull);
             for chunk in run {
-                let (clo, chi) = bounds(&chunk.hull);
-                assert!(
-                    clo.cmpge(lo - 1e-5).all() && chi.cmple(hi + 1e-5).all(),
-                    "{id}: a chunk of {} leaves it",
-                    element.name
-                );
+                for &p in &chunk.hull {
+                    let p = glam::Vec3::from_array(p).as_dvec3();
+                    // The writer rounds every coordinate to a micrometre, then to f32.
+                    assert!(
+                        piece
+                            .solid
+                            .faces
+                            .iter()
+                            .all(|face| face.normal.dot(p) <= face.offset + 1e-5),
+                        "{id}: a chunk of {} leaves it at {p}",
+                        element.name
+                    );
+                }
             }
         }
     }
 }
 
-fn bounds(hull: &[[f32; 3]]) -> (glam::Vec3, glam::Vec3) {
-    hull.iter().fold(
-        (glam::Vec3::INFINITY, glam::Vec3::NEG_INFINITY),
-        |(lo, hi), &p| {
-            let p = glam::Vec3::from_array(p);
-            (lo.min(p), hi.max(p))
-        },
-    )
+/// EVERY INTERFACE IS ONE CONTACT, AT ITS FULL AREA: in every shipped bake each chunk's cut faces,
+/// those on none of its piece's face planes, are exactly its joints to that piece's other chunks,
+/// and its joints to other pieces' chunks never exceed its faces on its piece's surface. The
+/// support law and the seams' and attachments' holds read each joint's area once, so a contact
+/// counted twice holds a board's nailing, or a wall's seam, double. A pair listed twice is refused
+/// by the schema's strict joint order. Mutant: a contact search that counts an overlap from both
+/// faces fails here.
+#[test]
+fn every_interface_is_one_contact() {
+    for (spec, baked) in shipped() {
+        let asset = &baked.asset;
+        let id = &spec.construction.id;
+        let mut inner = vec![0.0; asset.chunks.len()];
+        let mut outer = vec![0.0; asset.chunks.len()];
+        for joint in &asset.joints {
+            let (a, b) = (joint.a as usize, joint.b as usize);
+            let tally = if asset.chunks[a].element == asset.chunks[b].element {
+                &mut inner
+            } else {
+                &mut outer
+            };
+            tally[a] += f64::from(joint.area_m2);
+            tally[b] += f64::from(joint.area_m2);
+        }
+        let solids: Vec<Polyhedron> = spec
+            .construction
+            .pieces
+            .iter()
+            .flat_map(|piece| fracture::chunks(piece, id, &mut CutCount::default()))
+            .collect();
+        assert_eq!(solids.len(), asset.chunks.len(), "{id}: the bake's chunks");
+        for (c, solid) in solids.iter().enumerate() {
+            let piece = &spec.construction.pieces[usize::from(asset.chunks[c].element)];
+            let on_surface = |face: &Face| {
+                piece.solid.faces.iter().any(|side| {
+                    side.normal.dot(face.normal) > 1.0 - 1e-9
+                        && (side.offset - face.offset).abs() < PLANE_M
+                })
+            };
+            let faces = solid.faces();
+            let (surface, cut) = faces.iter().fold((0.0, 0.0), |(surface, cut), face| {
+                if on_surface(face) {
+                    (surface + face.area(), cut)
+                } else {
+                    (surface, cut + face.area())
+                }
+            });
+            // The search drops an overlap under its least joint area, at most one per face; the
+            // writer rounds each joint's area to a millionth.
+            let slack = faces.len() as f64 * (contact::MIN_AREA_M2 + 1e-6);
+            assert!(
+                (inner[c] - cut).abs() <= slack,
+                "{id}: chunk {c}: joints inside its piece {} against its cut faces {cut}",
+                inner[c]
+            );
+            assert!(
+                outer[c] <= surface + slack,
+                "{id}: chunk {c}: joints to other pieces {} against its surface {surface}",
+                outer[c]
+            );
+        }
+    }
+}
+
+/// Every shipped house generator's spec, then the fixture house.
+fn houses() -> Vec<House> {
+    let dir = crate::repo_root().join(SPECS_DIR);
+    let mut houses: Vec<House> = std::fs::read_dir(&dir)
+        .expect("the specs' folder is shipped")
+        .map(|entry| entry.expect("a readable entry").path())
+        .filter(|path| path.to_string_lossy().ends_with(HOUSE_SUFFIX))
+        .map(|path| House::from_ron(&std::fs::read_to_string(&path).unwrap()).unwrap())
+        .collect();
+    houses.push(fixture_house());
+    houses
+}
+
+/// THE ROOF IS LAID IN ITS AUTHORED BOARDS: each roof plane is `boards_per_slope` pieces, every two
+/// neighbours sharing a whole side, `board_thickness_m` deep along the board's length, and each
+/// board with two neighbours `board_width_m` across between them; the cutter cuts each piece alone
+/// (`the_chunks_tile_each_element`). Board layout is construction, so no break crosses from one
+/// board into another; the roof's response and its view rely on that. Widths and lengths are read
+/// from the laid pieces. Mutant: a plane laid as one slab, or two boards as one piece, then cut by
+/// cells, fails here.
+#[test]
+fn each_roof_board_is_its_own_piece() {
+    for house in houses() {
+        let built = house::construction(&house).unwrap();
+        let mut planes: Vec<&str> = built
+            .pieces
+            .iter()
+            .filter(|piece| piece.kind == ElementKind::Roof)
+            .map(|piece| piece.component.as_str())
+            .collect();
+        planes.sort_unstable();
+        planes.dedup();
+        assert!(!planes.is_empty(), "{}: a roof", house.id);
+        for plane in planes {
+            let boards: Vec<&Piece> = built
+                .pieces
+                .iter()
+                .filter(|piece| piece.kind == ElementKind::Roof && piece.component == plane)
+                .collect();
+            let what = format!("{}: {plane}", house.id);
+            assert_eq!(boards.len(), house.boards_per_slope as usize, "{what}");
+            let solids: Vec<Polyhedron> = boards.iter().map(|board| board.solid.clone()).collect();
+            let sides = contact::joints(&solids);
+            assert_eq!(sides.len(), boards.len() - 1, "{what}: a row of boards");
+            for side in &sides {
+                let board = boards[side.a];
+                let (near, far) = board.solid.extent(fracture::grain(board.surface_frame));
+                let whole = house.board_thickness_m * (far - near);
+                assert!((side.area - whole).abs() < 1e-9 * whole, "{what}: {side:?}");
+            }
+            for (k, board) in boards.iter().enumerate() {
+                let mine: Vec<&contact::Joint> = sides
+                    .iter()
+                    .filter(|side| side.a == k || side.b == k)
+                    .collect();
+                if let [one, other] = mine[..] {
+                    let across = (one.centroid - other.centroid).dot(one.normal).abs();
+                    assert!(
+                        (across - house.board_width_m).abs() < 1e-9,
+                        "{what}: {} is {across} m across",
+                        board.name
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// FIXTURE DATA: a constructed house with solid walls and a pitched board roof. No shipped house
@@ -165,10 +296,12 @@ const FIXTURE_HOUSE: &str = r#"House(
             row_courses: (3, Fixture("fixture")), crack_chance: (0.2, Fixture("fixture")),
             crack_shift_m: (0.09, Fixture("fixture")), min_width_m: (0.06, Fixture("fixture")),
         ))),
-        plates: (material: "Wood", surface_frame: Grain((0.0, 0.0, 1.0)),
-            cut: Boards(((0.6, 1.8), Fixture("fixture")))),
-        roof: (material: "Wood", surface_frame: Grain((0.0, 0.0, 1.0)),
-            cut: Boards(((0.4, 1.2), Fixture("fixture")))),
+        plates: (material: "Wood", surface_frame: Grain((0.0, 0.0, 1.0)), cut: Cells((
+            size_m: (0.25, Fixture("fixture")), stretch: (4.0, Fixture("fixture")),
+        ))),
+        roof: (material: "Wood", surface_frame: Grain((0.0, 0.0, 1.0)), cut: Cells((
+            size_m: (0.15, Fixture("fixture")), stretch: (3.0, Fixture("fixture")),
+        ))),
     ),
     walls: (east: [], west: [], north: [], south: []),
     joins: [
@@ -446,7 +579,7 @@ fn fastening_follows_the_joins_never_the_pattern() {
         for join in &mut house.joins {
             join.by = rotate(&join.by).to_owned();
         }
-        let built = house::construction(&house);
+        let built = house::construction(&house).unwrap();
         let asset = bake(&built, schema::substance_density).unwrap().asset;
         assert_bond_kinds(&built, &asset);
     }
@@ -552,9 +685,12 @@ fn authored_crack_probability_controls_cuts() {
             unreachable!("the fixture's walls are coursed")
         };
         rule.crack_chance.0 = value;
-        bake(&house::construction(&house), schema::substance_density)
-            .unwrap()
-            .cuts
+        bake(
+            &house::construction(&house).unwrap(),
+            schema::substance_density,
+        )
+        .unwrap()
+        .cuts
     };
     let uncracked = chance(0.0);
     assert_eq!(uncracked.cracks, 0);
@@ -594,9 +730,12 @@ fn anchors_name_the_authored_foundation_attachment() {
     let mut house = fixture_house();
     for name in ["mortared", "resting"] {
         house.foundation_attachment = name.into();
-        let asset = bake(&house::construction(&house), schema::substance_density)
-            .unwrap()
-            .asset;
+        let asset = bake(
+            &house::construction(&house).unwrap(),
+            schema::substance_density,
+        )
+        .unwrap()
+        .asset;
         assert!(!asset.anchors.is_empty());
         for anchor in &asset.anchors {
             assert_eq!(asset.attachments[usize::from(anchor.attachment)], name);
@@ -678,22 +817,55 @@ fn every_bond_between_components_is_the_kind_its_spec_names() {
     }
 }
 
+/// FASTENING IS CONSTRUCTION DATA, NEVER AN ELEMENT'S NAME: with every piece renamed (each takes
+/// the next piece's name, so a wall answers to a board's and a board to a wall's), every joint still
+/// holds by the join its elements' kinds declare, or by the seam inside one component. A roof's
+/// boards are nailed only because their joins say so. Mutant: a bake that reads nailing, or any
+/// holding kind, from a name fails here.
+#[test]
+fn fastening_never_reads_an_element_name() {
+    let mut built: Vec<Construction> = shipped()
+        .into_iter()
+        .map(|(spec, _)| spec.construction)
+        .collect();
+    built.push(house::construction(&fixture_house()).unwrap());
+    for construction in built {
+        let names: Vec<String> = construction
+            .pieces
+            .iter()
+            .map(|piece| piece.name.clone())
+            .collect();
+        let mut renamed = construction.clone();
+        for (k, piece) in renamed.pieces.iter_mut().enumerate() {
+            piece.name.clone_from(&names[(k + 1) % names.len()]);
+        }
+        let asset = bake(&renamed, schema::substance_density).unwrap().asset;
+        assert_bond_kinds(&renamed, &asset);
+    }
+}
+
 /// Idle joins and unknown attachment kinds are refused before play. FIXTURE DATA supplies the
 /// intentionally absent sill-to-roof pair; shipped houses need not have that topology.
 #[test]
 fn a_join_that_holds_nothing_or_names_no_kind_is_refused() {
     use overmatch::buildings::attachments::{ATTACHMENTS_PATH, Attachments};
     let house = fixture_house();
-    bake(&house::construction(&house), schema::substance_density)
-        .expect("the unmutated construction bakes");
+    bake(
+        &house::construction(&house).unwrap(),
+        schema::substance_density,
+    )
+    .expect("the unmutated construction bakes");
     let mut idle = house.clone();
     idle.joins.push(spec::Join {
         kinds: (ElementKind::Sill, ElementKind::Roof),
         by: house.joins[0].by.clone(),
     });
-    let err = bake(&house::construction(&idle), schema::substance_density)
-        .map(|_| ())
-        .unwrap_err();
+    let err = bake(
+        &house::construction(&idle).unwrap(),
+        schema::substance_density,
+    )
+    .map(|_| ())
+    .unwrap_err();
     assert!(err.contains("holds no joint"), "{err}");
     let mut unknown = house;
     let mut name = "unregistered-fixture-kind".to_owned();
@@ -709,12 +881,12 @@ fn a_join_that_holds_nothing_or_names_no_kind_is_refused() {
 
 /// A HOUSE THE GENERATOR CANNOT LAY OUT IS REFUSED BEFORE ANY GEOMETRY: the generator lays a pier
 /// before, between and after a wall's openings in `u` order, so an opening past the wall's face or
-/// one over the next leaves a negative pier, and a board range with no finite top is a cut that
-/// never ends. Mutant: a check that drops the span, the order or the range's top passes one of
-/// these to the generator.
+/// one over the next leaves a negative pier, and a cell with no finite size is a cut that never
+/// ends. Mutant: a check that drops the span, the order or a part's cut passes one of these to the
+/// generator.
 #[test]
 fn a_house_the_generator_cannot_lay_out_is_refused() {
-    use super::spec::{Choice, Job, PartCut};
+    use super::spec::PartCut;
     let mut house = fixture_house();
     house.walls.east = vec![spec::Opening {
         u: (-1.0, 0.0),
@@ -732,8 +904,10 @@ fn a_house_the_generator_cannot_lay_out_is_refused() {
         courses: (0, 10),
     });
     let mut endless = house;
-    endless.parts.plates.cut =
-        PartCut::Boards(Choice((0.6, f64::INFINITY), Job::Fixture("fixture".into())));
+    let PartCut::Cells(cells) = &mut endless.parts.plates.cut else {
+        unreachable!("the fixture's plates are cut in cells")
+    };
+    cells.size_m.0 = f64::INFINITY;
     for (case, broken, field) in [
         ("past the wall", past, "pier"),
         ("over the next", over, "pier"),
