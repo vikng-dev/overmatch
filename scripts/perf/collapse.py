@@ -245,11 +245,8 @@ def run_match(args, out, recipe):
     children, logs = [], []
     local = args.target == "local"
     address = "127.0.0.1:5888" if local else args.target
-    env = os.environ.copy()
     # Inherited stress/trace levers would silently add a second workload.
-    for key in list(env):
-        if key.startswith(("OVERMATCH_", "SPIKE_")):
-            del env[key]
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("OVERMATCH_", "SPIKE_"))}
     env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1", BEVY_ASSET_ROOT=str(ROOT), NO_COLOR="1")
     env["OVERMATCH_LOADTEST"] = json.dumps(recipe, separators=(",", ":"))
     serverlog = out / "server.log"
