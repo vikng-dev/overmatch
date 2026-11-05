@@ -21,6 +21,7 @@
 //! model.
 
 use bevy::math::{DMat3, DVec3, Vec3};
+use bevy::tasks::{ComputeTaskPool, ParallelSlice, TaskPool};
 use std::collections::BTreeMap;
 
 use super::bondsolve::{Edge, Node, Wrench, accelerating_frame, joint_edge, pair_friction};
@@ -442,8 +443,42 @@ impl Factor {
             fronts.push(front);
         }
         let n = 6 * fronts.len();
-        // Per column (a unit displacement): each row's force, `K[row][column]`.
-        let mut matrix = vec![BTreeMap::<usize, f64>::new(); n];
+        // Per node block: its front's blocks, ascending. A front is eliminated after its node, so
+        // a column's rows are the rest of its own block, then each front block's six.
+        let blocks: Vec<Vec<usize>> = fronts
+            .iter()
+            .map(|front| {
+                let mut bases: Vec<_> = front
+                    .iter()
+                    .map(|&b| map[b].expect("a front node is ordered"))
+                    .collect();
+                bases.sort_unstable();
+                bases
+            })
+            .collect();
+        let mut columns: Vec<Column> = (0..n)
+            .map(|j| {
+                let rows: Vec<_> = (j..6 * (j / 6 + 1))
+                    .chain(blocks[j / 6].iter().flat_map(|&base| base..base + 6))
+                    .collect();
+                Column {
+                    values: vec![0.0; rows.len()],
+                    upper: vec![0.0; rows.len()],
+                    rows,
+                }
+            })
+            .collect();
+        // Where row `i` sits among column `j`'s rows, `i ≥ j`.
+        let slot = |j: usize, i: usize| {
+            if i / 6 == j / 6 {
+                i - j
+            } else {
+                let k = blocks[j / 6]
+                    .binary_search(&(i - i % 6))
+                    .expect("an edge's two free nodes share a front: the pattern holds it");
+                6 - j % 6 + 6 * k + i % 6
+            }
+        };
         // Per coordinate: its stiffness's diagonal without friction, the scale a pivot is judged
         // against. Friction's non-symmetric term can lower a diagonal to zero or below, where
         // a relative test on it would pass a vanishing pivot.
@@ -477,29 +512,19 @@ impl Factor {
                             .into_iter()
                             .enumerate()
                         {
-                            *matrix[column].entry(base + dof).or_default() += value;
+                            // `K[row][column]`: below the diagonal `L`'s column, above it `U`'s
+                            // row; the pivot is both.
+                            let row = base + dof;
+                            let (j, at) = (row.min(column), slot(row.min(column), row.max(column)));
+                            if row >= column {
+                                columns[j].values[at] += value;
+                            }
+                            if row <= column {
+                                columns[j].upper[at] += value;
+                            }
                         }
                     }
                 }
-            }
-        }
-        // An entry absent from the sparse assembly is the matrix's mathematical zero.
-        let entry = |row: usize, column: usize| matrix[column].get(&row).copied().unwrap_or(0.0);
-        let mut columns = Vec::with_capacity(n);
-        for (block, front) in fronts.iter().enumerate() {
-            for axis in 0..6 {
-                let j = 6 * block + axis;
-                let mut rows: Vec<_> = (j..6 * (block + 1)).collect();
-                for &b in front {
-                    let base = map[b].expect("a front node is ordered");
-                    rows.extend(base..base + 6);
-                }
-                rows.sort_unstable();
-                columns.push(Column {
-                    values: vec![0.0; rows.len()],
-                    upper: vec![0.0; rows.len()],
-                    rows,
-                });
             }
         }
         let mut prior = vec![Vec::new(); n];
@@ -511,9 +536,10 @@ impl Factor {
         let (mut lower, mut upper) = (vec![0.0; n], vec![0.0; n]);
         let mut ops = 0;
         for j in 0..n {
-            for &i in &columns[j].rows {
-                lower[i] = entry(i, j);
-                upper[i] = entry(j, i);
+            let c = &columns[j];
+            for ((&i, &l), &u) in c.rows.iter().zip(&c.values).zip(&c.upper) {
+                lower[i] = l;
+                upper[i] = u;
             }
             for &(k, pos) in &prior[j] {
                 let c = &columns[k];
@@ -988,19 +1014,33 @@ impl Assessment {
                     .filter_map(|&(b, _)| self.graph.part[b]),
             ); // A neighbour outside this owner or fallen has no part.
         }
-        let mut failures = Vec::new();
-        for p in beside {
-            if self.graph.parts[p].node.fixed {
-                continue; // The soil holds buried matter.
-            }
-            let chunks = self.graph.parts[p].chunks.clone();
-            let loads = self.boundary(structure, p, &chunks, sources);
-            loop {
-                let kernel = Kernel::of(structure, state, &chunks);
-                let hold = kernel.hold(structure, &loads);
-                self.work += kernel.factor.ops + hold.work;
+        // A part holds no buried chunk, so each joint is an edge of one part's kernel at most: the
+        // parts are solved apart, in parallel, and their verdicts commit in part order.
+        let parts: Vec<(Vec<usize>, Vec<Wrench>)> = beside
+            .into_iter()
+            .filter(|&p| !self.graph.parts[p].node.fixed) // The soil holds buried matter.
+            .map(|p| {
+                let chunks = self.graph.parts[p].chunks.clone();
+                let loads = self.boundary(structure, p, &chunks, sources);
+                (chunks, loads)
+            })
+            .collect();
+        let pool = ComputeTaskPool::get_or_init(TaskPool::default);
+        let mut failures = vec![Vec::new(); parts.len()];
+        let mut open: Vec<usize> = (0..parts.len()).collect();
+        while !open.is_empty() {
+            let field: &State = state;
+            let holds = open.par_chunk_map(pool, 1, |_, part| {
+                let (chunks, loads) = &parts[part[0]];
+                let kernel = Kernel::of(structure, field, chunks);
+                let hold = kernel.hold(structure, loads);
+                (kernel.factor.ops, hold)
+            });
+            let mut still = Vec::new();
+            for (&part, (ops, hold)) in open.iter().zip(holds) {
+                self.work += ops + hold.work;
                 if hold.failures.is_empty() {
-                    break;
+                    continue; // It holds.
                 }
                 for failure in &hold.failures {
                     state.cracked[failure.joint] = true;
@@ -1008,10 +1048,12 @@ impl Assessment {
                 for &j in &hold.separated {
                     state.separated[j] = true;
                 }
-                failures.extend(hold.failures);
+                failures[part].extend(hold.failures);
+                still.push(part);
             }
+            open = still;
         }
-        failures
+        failures.concat()
     }
 
     /// Per chunk of part `p`: the presses of `sources` on it, and the sustained forces the part

@@ -32,6 +32,7 @@ use avian3d::prelude::{
     Position, Rotation, SleepThreshold,
 };
 use bevy::prelude::*;
+use bevy::tasks::{ComputeTaskPool, ParallelSlice};
 use serde::{Deserialize, Serialize};
 
 use crate::construction::Element;
@@ -567,14 +568,30 @@ fn crumble_landings(
             (entity, energy, touches)
         })
         .collect();
-    for (entity, energy, touches) in landings {
+    // Each group crumbles from its own state alone, in parallel; the results commit in landing
+    // order, the order the record and the sheds are written in.
+    let results = {
+        let inputs: Vec<_> = landings
+            .iter()
+            .map(|(entity, energy, touches)| {
+                let (_, piece, breakage, ..) = groups
+                    .get(*entity)
+                    .expect("the landings were filtered to these groups");
+                let owned: Vec<usize> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
+                (&*breakage.live, owned, touches, *energy)
+            })
+            .collect();
+        inputs.par_chunk_map(ComputeTaskPool::get(), 1, |_, landing| {
+            let (live, owned, touches, energy) = &landing[0];
+            crumble(&live.structure, &live.state, owned, touches, *energy)
+        })
+    };
+    for ((entity, ..), result) in landings.into_iter().zip(results) {
         let (_, piece, mut breakage, pose, (velocity, spin, centre), _) = groups
             .get_mut(entity)
             .expect("the landings were filtered to these groups");
         let frame = breakage.physics_frame(pose);
-        let owned: Vec<usize> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
         let live = breakage.live.as_mut();
-        let result = crumble(&live.structure, &live.state, &owned, &touches, energy);
         for &j in &result.cracked {
             live.state.cracked[j] = true;
         }
