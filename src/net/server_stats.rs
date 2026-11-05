@@ -25,6 +25,10 @@
 //! - `contacts_us`: solver-contact readout and resting-contact cache maintenance, included in
 //!   `physics_us`. Intake consumes that readout later in the tick.
 //! - `publish_us`: construction-ledger diff commands prepared inside the tick.
+//! - `sweep_us`: the hull sweep before physics: its shape casts, cuts, holds and plastic
+//!   exchanges, and the departures it routes. The refit it triggers is `refit_us`.
+//! - `crumble_us`: the landing crumble after the deposits: each moving group's landing read,
+//!   judged by its kernel and routed.
 //! - `collector_us`: stats tick sampling after `TickClosed`, outside `tick_us`; includes the
 //!   armed ram census. Clock-read/bracket cost remains inside the measured stages.
 //! - `sleep_us`: Avian's island-sleep bracket, included in `physics_us`. Physics covers all
@@ -947,6 +951,8 @@ mod tests {
                 "intake_us": null,
                 "structure_us": null,
                 "refit_us": null,
+                "sweep_us": null,
+                "crumble_us": null,
                 "physics_us": {"p50": 301.0, "p95": 455.0, "p99": 600.0, "total": 200000.0, "max": 900.0},
                 "send_us": {"p50": 120.0, "p95": 180.1, "p99": 200.0, "total": 80000.0, "max": 250.0},
                 "throttled_usec": 45000,

@@ -2900,12 +2900,18 @@ pub(crate) struct LandingSet;
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ReplicaSet;
 
+/// AUTHORITY: the hull sweep ([`sweep_intake::run`]), timed as its own stage.
+fn sweep(intake: sweep_intake::Intake, stages: Option<Res<Stages>>) {
+    let _sweep = Stages::start(stages.as_deref(), Stage::Sweep);
+    sweep_intake::run(intake);
+}
+
 pub(crate) fn sim_plugin(app: &mut App) {
     app.init_resource::<SweepAccount>()
         .add_message::<crate::debris::crumble::Shed>()
         .add_systems(
             FixedPostUpdate,
-            (sweep_intake::run, reconcile.run_if(sweep_intake::changed))
+            (sweep, reconcile.run_if(sweep_intake::changed))
                 .chain()
                 .before(avian3d::prelude::PhysicsSystems::Prepare)
                 .run_if(not(resource_exists::<ClientReplica>)),

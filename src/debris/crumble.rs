@@ -43,6 +43,7 @@ use crate::construction::fracture::parts::Kernel;
 use crate::construction::fracture::{Cause, Failure, Side, State, Structure};
 use crate::contact_law::{Contactor, peak_force};
 use crate::contact_transfer::ContactTransfers;
+use crate::cost::stages::{Stage, Stages};
 use crate::physical_laws::PhysicalLaws;
 use crate::{Layer, ShotClock};
 
@@ -519,11 +520,13 @@ fn crumble_landings(
     clock: Option<Res<ShotClock>>,
     mut record: ResMut<Record>,
     mut shed: MessageWriter<Shed>,
+    stages: Option<Res<Stages>>,
     mut commands: Commands,
 ) {
     if contacts.transfers.steps() == *contacts.read {
         return;
     }
+    let _crumble = Stages::start(stages.as_deref(), Stage::Crumble);
     *contacts.read = contacts.transfers.steps();
     let landings = landings(&contacts.transfers, |entity| {
         groups.get(entity).is_ok_and(|item| !item.5).then(|| {

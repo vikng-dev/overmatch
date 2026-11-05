@@ -17,14 +17,18 @@ pub(crate) enum Stage {
     Refit,
     Publish,
     Contacts,
+    Sweep,
+    Crumble,
 }
 
-pub(crate) const NAMES: [&str; 5] = [
+pub(crate) const NAMES: [&str; 7] = [
     "intake_us",
     "structure_us",
     "refit_us",
     "publish_us",
     "contacts_us",
+    "sweep_us",
+    "crumble_us",
 ];
 pub(crate) const COUNT: usize = NAMES.len();
 
@@ -71,7 +75,7 @@ mod tests {
         let stages = Stages::default();
         stages.0[Stage::Intake as usize].store(2000, Ordering::Relaxed); // Fixture: ns.
         stages.0[Stage::Refit as usize].store(5000, Ordering::Relaxed);
-        assert_eq!(stages.take_us(), [2.0, 0.0, 5.0, 0.0, 0.0]);
+        assert_eq!(stages.take_us(), [2.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0]);
         assert_eq!(stages.take_us(), [0.0; COUNT]);
         assert!(Stages::start(None, Stage::Intake).is_none());
         let started = Instant::now();
