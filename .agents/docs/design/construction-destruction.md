@@ -360,9 +360,17 @@ to that same patch. Buried matter remains soil-held.
 The patch is the forced source of a directed graph over standing law chunks. Ground endpoints
 and chunks the sweep does not cover (including buried matter) are fixed sinks. Live, unseparated
 joints supply directed capacities for rigid translation along the contact direction `d`. With
-`n_out` pointing from the moving side to its neighbour, a compressed face (`n_out dot d > 0`)
-carries `min(sigma_c,a, sigma_c,b) * A * (n_out dot d)`: bulk crushing of the weaker side. A
-ground endpoint uses its chunk's strength. `sigma_c` is the data's quasi-static
+`n_out` pointing from the moving side to its neighbour, a compressed face has
+`c = n_out dot d > 0` and tangential motion `t = d - c n_out`. Its capacity is
+`C = B c + S |t|`, where `B = min(sigma_c,a, sigma_c,b) A` is weaker-side bulk crushing
+and `S` is the shared `bondsolve::JointStrength` capacity along `t / |t|` under existing
+preload only. A purely normal translation has no sliding term. DERIVED: for unit rigid
+translation, the resisting force equals internal work, the sum of normal and tangential
+traction work (Yastrebov, *Numerical Methods in Contact Mechanics*, 2013,
+[Eq. 4.53 and normal/tangential split Eq. 4.56](https://www.yastrebov.fr/LECTURES/Yastrebov_NMCM_Wiley_ISTE.pdf)).
+This model uses independently limited crushing and sliding tractions at fixed preload;
+`C -> S` as `c -> 0+`, continuously meeting the tangential joint law.
+A ground endpoint uses its chunk's strength. `sigma_c` is the data's quasi-static
 `bulk.blast.compressive_strength`, carried by `fracture::Material::compressive_strength`, not
 cavity work or the dynamic compaction plateau.
 
@@ -381,10 +389,6 @@ through a back layer or around a corner until perimeter joints or bulk crushing 
 Internal joints of `S*` carry no relative motion and contribute no cut capacity. A resting floor
 on anchored joists holds below its bulk crushing capacity; sliding or lifting still reads the
 shared directional joint law.
-
-DERIVED limitation: the compressed-edge capacity tends to zero as `n_out dot d -> 0+`;
-exact tangency reads the joint's shear law. A small direction change across that boundary can
-therefore change the minimum cut.
 
 The demand is the peak force of the hull's impact on the patch plus its drive:
 `F = P(m_eff, v_n) + F_drive,n`, with `P` the Hertz peak force (Johnson 1985, §11.4) that

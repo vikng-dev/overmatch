@@ -372,7 +372,24 @@ impl Geometry {
             let directional = |normal: DVec3| {
                 let compression = -normal.dot(direction.as_dvec3());
                 if compression > 0.0 {
-                    strength * f64::from(joint.area) * compression
+                    // Cross products keep the reconstructed tangent perpendicular even when
+                    // nearly normal motion leaves only roundoff in the tangential component.
+                    let tangent = normal.cross(direction.as_dvec3());
+                    let sliding = tangent.length();
+                    let shear = if sliding > 0.0 {
+                        JointStrength::of(structure, joint, state.cracked[j]).capacity(
+                            f64::from(joint.area),
+                            normal,
+                            tangent.cross(normal) / sliding,
+                            preload[j],
+                        ) * sliding
+                    } else {
+                        0.0
+                    };
+                    // DERIVED: traction dot relative motion (Yastrebov 2013, Eq. 4.53;
+                    // design "Bodies in contact"). Crushing and sliding both do work;
+                    // tangential motion creates no additional friction preload.
+                    strength * f64::from(joint.area) * compression + shear
                 } else {
                     JointStrength::of(structure, joint, state.cracked[j]).capacity(
                         f64::from(joint.area),
@@ -1148,6 +1165,109 @@ mod tests {
             }),
             ..default()
         }
+    }
+
+    /// The game's environment destruction: grazing compression retains shear, so a small
+    /// change of contact direction cannot turn a held boundary into a free cut.
+    #[test]
+    fn grazing_compression_is_continuous_with_tangential_shear() {
+        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, Vec3::X], &[1], &[(0, 1)]);
+        // Fixture: 10 kPa bearing and 16 Pa shear on a unit-area joint, no friction.
+        for chunk in &mut structure.chunks {
+            chunk.material.compressive_strength = 1e4;
+        }
+        let state = State::new(&structure);
+        for approach in [-1e-8, 0.0, 1e-8] {
+            let direction = (Vec3::Y + Vec3::X * approach).normalize();
+            let (_, capacity) =
+                geometry.plug(&structure, &state, &[0], direction, &mut Work::default());
+            // DERIVED: bearing changes by at most 10 kPa * 1 m² * 1e-8 = 1e-4 N;
+            // the shear projection changes only at second order. Allow f32 rounding too.
+            assert!(
+                (capacity - 16.0).abs() < 2e-4,
+                "approach={approach}, capacity={capacity}"
+            );
+        }
+    }
+
+    /// The game's environment destruction: a low side press cannot cut a cohesive boundary
+    /// merely because its inward normal component is small. The sweep owns this class rule;
+    /// the shipped construction's cut remains an observation.
+    #[test]
+    fn a_side_press_below_the_derived_shear_bracket_removes_nothing() {
+        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, Vec3::X], &[1], &[(0, 1)]);
+        // Fixture: unit area, 512 Pa cohesion, 10 kPa compression, zero friction.
+        for chunk in &mut structure.chunks {
+            chunk.material.compressive_strength = 1e4;
+        }
+        let Bond::Bonded(seam) = &mut structure.joints[0].bond else {
+            unreachable!()
+        };
+        seam.shear.cohesion = 512.0;
+        let state = State::new(&structure);
+        let direction = (Vec3::Y + 0.001 * Vec3::X).normalize();
+        // DERIVED: 10,000 * 0.001 / sqrt(1.000001) + 512 / sqrt(1.000001)
+        // lies between 521 and 523 N. The 400 N press holds; 524 N releases it.
+        for (force, broken) in [(400.0, false), (524.0, true)] {
+            let mut patch = contact_patch(&structure, direction, force);
+            geometry.resolve(&structure, &state, &mut patch, 128.0, Vec3::ZERO);
+            assert_eq!(patch.broken, broken, "force={force}");
+            assert!((521.0..523.0).contains(&patch.load.unwrap().capacity));
+        }
+    }
+
+    /// The game's environment destruction: compressed sliding must retain friction from
+    /// gravity, but cannot turn the imposed press into additional friction preload.
+    #[test]
+    fn compressed_sliding_reads_only_existing_gravity_preload() {
+        for cracked in [false, true] {
+            let (mut structure, geometry) =
+                plug_fixture(&[Vec3::ZERO, Vec3::NEG_Y], &[1], &[(0, 1)]);
+            // Fixture: 10 kPa compression, friction 0.5, a unit-mass moving board.
+            for chunk in &mut structure.chunks {
+                chunk.material.compressive_strength = 1e4;
+                chunk.material.friction = 0.5;
+            }
+            if !cracked {
+                structure.joints[0].bond = Bond::Resting;
+            }
+            let mut state = State::new(&structure);
+            state.cracked[0] = cracked;
+            let direction = (Vec3::X - 0.001 * Vec3::Y).normalize();
+            // DERIVED: unit area and mass give B=10,000 N and S=0.5*g N;
+            // both project onto the imposed translation. The bracket tolerates f32 Hertz inversion.
+            let capacity =
+                1e4 * -direction.y + 0.5 * crate::physical_laws::gravity_mps2() * direction.x;
+            for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
+                let mut patch = contact_patch(&structure, direction, capacity * ratio);
+                geometry.resolve(&structure, &state, &mut patch, 128.0, Vec3::ZERO);
+                assert_eq!(patch.broken, broken, "cracked={cracked}, ratio={ratio}");
+            }
+        }
+    }
+
+    /// The game's environment destruction: an oblique joint under normal motion has a finite
+    /// bulk limit. Normalization roundoff must not create a tangential bearing direction and
+    /// an infinite cut; arbitrary construction orientations rely on this.
+    #[test]
+    fn normal_crushing_stays_finite_on_an_oblique_joint() {
+        let direction = Vec3::ONE.normalize();
+        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, direction], &[1], &[(0, 1)]);
+        // Fixture: a frictional rest with a 10 kPa bulk limit and unit area.
+        for chunk in &mut structure.chunks {
+            chunk.material.compressive_strength = 1e4;
+            chunk.material.friction = 0.5;
+        }
+        structure.joints[0].bond = Bond::Resting;
+        let (_, capacity) = geometry.plug(
+            &structure,
+            &State::new(&structure),
+            &[0],
+            direction,
+            &mut Work::default(),
+        );
+        // DERIVED: normal translation costs 10 kPa * 1 m²; allow f32 normalization error.
+        assert!((capacity - 1e4).abs() < 0.01, "capacity={capacity}");
     }
 
     /// The game's environment destruction: bearing transmits a face-on push into the back
