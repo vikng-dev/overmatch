@@ -1889,6 +1889,8 @@ pub(crate) fn structural(
             framed = inputs.framed(structure, state);
         }
         let loads = &framed;
+        #[cfg(test)]
+        carrier_prototype::prepare(structure, state, inputs);
         let pushed: Vec<usize> = pushed(structure, loads)
             .into_iter()
             .filter(|&c| state.standing(c))
@@ -2055,6 +2057,11 @@ fn section_failure(
     loads: &[Load],
     pulse: Reading,
 ) -> Option<Failure> {
+    #[cfg(test)]
+    if let Some(result) = carrier_prototype::override_push(structure, section, group, pulse) {
+        return result;
+    }
+
     let joints: Vec<&Joint> = section.iter().map(|&j| &structure.joints[j]).collect();
     // All levers and centroids share a section-local origin. Translating construction
     // coordinates cannot multiply the load-summation allowance by an absolute position.
@@ -2308,6 +2315,8 @@ pub(crate) fn weigh(
             framed = inputs.framed(structure, state);
         }
         let loads = &framed;
+        #[cfg(test)]
+        carrier_prototype::prepare(structure, state, inputs);
         touched.extend(
             loads
                 .iter()
@@ -3032,6 +3041,11 @@ fn weight_failure(
     gravity: Vec3,
     steps: &mut usize,
 ) -> Option<Failure> {
+    #[cfg(test)]
+    if let Some(result) = carrier_prototype::override_weight(structure, section, group) {
+        return result;
+    }
+
     *steps += loads.len();
     let navier = Navier::of(structure, section, group, steps)?;
     let (force, moment) = force_wrench(structure, group, loads, gravity, navier.centre, |load| {
@@ -3188,6 +3202,11 @@ fn section_pulse(
     loads: &[Load],
     steps: &mut usize,
 ) -> Reading {
+    #[cfg(test)]
+    if let Some(result) = carrier_prototype::override_pulse(structure, section, group) {
+        return result;
+    }
+
     let Some(navier) = Navier::of(structure, section, group, steps) else {
         return Reading::UNRESISTED;
     };
@@ -4177,6 +4196,10 @@ pub(crate) fn sample_blocks(
         })
     })
 }
+
+#[cfg(test)]
+#[path = "carrier_prototype.rs"]
+mod carrier_prototype;
 
 #[cfg(test)]
 mod tests {
