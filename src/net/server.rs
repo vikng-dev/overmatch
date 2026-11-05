@@ -119,10 +119,14 @@ pub fn run() {
             ServerUdpIo::default(),
         ))
         .id();
-    app.add_systems(Startup, move |mut commands: Commands| {
-        commands.trigger(Start { entity: server });
-        info!("server: starting, listening on {bind}:{PORT}");
-    });
+    app.add_systems(
+        PostStartup,
+        (move |mut commands: Commands| {
+            commands.trigger(Start { entity: server });
+            info!("server: starting, listening on {bind}:{PORT}");
+        })
+        .after(super::ram::prepare),
+    );
     // The SIM load: the spec sheet only. The dedicated server opens no view artifact — no scene,
     // no textures, no rungs (ADR-0035); the walk's geometry arrives through `bake`'s extraction of
     // `<id>.sim.glb`.
@@ -840,10 +844,7 @@ fn spawn_pending_tanks(
     // The harness's exact resting-contact instrument keeps its authored pose and lanes. Ordinary
     // joins use map points; Y is resolved from the authority's ground at the moment of spawn.
     let harness_pose = if let Some(ram) = ram.as_deref_mut() {
-        Some(
-            ram.pose(content.spec(), &manifest, height.as_deref())
-                .unwrap_or_else(harness::refuse_start),
-        )
+        Some(ram.pose())
     } else {
         harness::spawn_pose()
     };

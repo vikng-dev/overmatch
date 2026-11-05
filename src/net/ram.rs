@@ -107,6 +107,7 @@ enum End {
 pub(super) struct Ram {
     recipe: Recipe,
     plan: Option<Plan>,
+    started: bool,
     tick: u64,
     pre_speed: f32,
     impact: Option<Value>,
@@ -138,22 +139,14 @@ pub(super) fn install(app: &mut App, stats_on: bool) -> Result<(), LeverError> {
             "set OVERMATCH_SERVER_STATS_S for the ram instrument",
         ));
     }
-    app.insert_resource(Ram {
-        recipe,
-        plan: None,
-        tick: 0,
-        pre_speed: 0.0,
-        impact: None,
-        impact_tick: None,
-        resting_s: 0.0,
-        done: None,
-        target: None,
-        rows: Vec::new(),
-        sends: Vec::new(),
-        last_send_tick: None,
-    });
-    app.add_systems(FixedFirst, sample_speed);
+    install_recipe(app, recipe);
     Ok(())
+}
+
+fn install_recipe(app: &mut App, recipe: Recipe) {
+    app.insert_resource(Ram::new(recipe));
+    app.add_systems(PostStartup, prepare);
+    app.add_systems(FixedFirst, sample_speed);
 }
 
 /// DERIVED ideal run-up: d = v²/(2a), a = T_peak * top_reduction / (r * mass).
@@ -174,21 +167,18 @@ fn runup(spec: &TankSpec, margin: f32) -> (f32, f32) {
     (margin * speed * speed / (2.0 * acceleration), speed)
 }
 
-impl Ram {
-    pub(super) fn pose(
-        &mut self,
+impl Recipe {
+    fn plan(
+        &self,
         spec: &TankSpec,
         manifest: &MapManifest,
         height: Option<&HeightGrid>,
-    ) -> Result<(Vec3, Quat), LeverError> {
-        if let Some(plan) = &self.plan {
-            return Ok((plan.spawn.into(), Quat::from_array(plan.rotation)));
-        }
-        let invalid = |why| LeverError::invalid(LEVER, &self.recipe.instance, why);
+    ) -> Result<Plan, LeverError> {
+        let invalid = |why| LeverError::invalid(LEVER, &self.instance, why);
         let instance = manifest
             .instances
             .iter()
-            .find(|i| i.id == self.recipe.instance)
+            .find(|i| i.id == self.instance)
             .ok_or_else(|| invalid("instance must name a construction in the active map"))?;
         if !matches!(
             manifest.prototypes[&instance.prototype],
@@ -198,9 +188,9 @@ impl Ram {
                 "instance must name a construction in the active map",
             ));
         }
-        let (runup_m, governed_m_s) = runup(spec, self.recipe.runup_margin as f32);
+        let (runup_m, governed_m_s) = runup(spec, self.runup_margin as f32);
         let rotation =
-            Quat::from_rotation_y(self.recipe.heading_deg.rem_euclid(360.0).to_radians() as f32);
+            Quat::from_rotation_y(self.heading_deg.rem_euclid(360.0).to_radians() as f32);
         let direction = rotation * Vec3::NEG_Z;
         let target = Vec3::from_array(instance.translation);
         let xz = (target - direction * runup_m).xz();
@@ -211,16 +201,60 @@ impl Ram {
             ));
         }
         let spawn = spawn_pos(height, xz);
-        let plan = Plan {
+        Ok(Plan {
             spawn: spawn.to_array(),
             rotation: rotation.to_array(),
             runup_m,
             governed_m_s,
-            minimum_m_s: f64::from(governed_m_s) * self.recipe.minimum_speed_fraction,
-        };
-        println!("ram_plan {}", json!({"recipe": self.recipe, "plan": plan}));
-        self.plan = Some(plan);
-        Ok((spawn, rotation))
+            minimum_m_s: f64::from(governed_m_s) * self.minimum_speed_fraction,
+        })
+    }
+}
+
+/// All synchronous tank/map publishers have flushed before PostStartup; no client is admitted yet.
+pub(super) fn prepare(
+    mut ram: ResMut<Ram>,
+    blueprint: Res<crate::bake::TankBlueprint>,
+    manifest: Res<MapManifest>,
+    height: Option<Res<HeightGrid>>,
+) {
+    ram.plan = Some(
+        ram.recipe
+            .plan(&blueprint.spec, &manifest, height.as_deref())
+            .unwrap_or_else(super::harness::refuse_start),
+    );
+    println!(
+        "ram_plan {}",
+        json!({"recipe": ram.recipe, "plan": ram.plan})
+    );
+}
+
+impl Ram {
+    fn new(recipe: Recipe) -> Self {
+        Ram {
+            recipe,
+            plan: None,
+            started: false,
+            tick: 0,
+            pre_speed: 0.0,
+            impact: None,
+            impact_tick: None,
+            resting_s: 0.0,
+            done: None,
+            target: None,
+            rows: Vec::new(),
+            sends: Vec::new(),
+            last_send_tick: None,
+        }
+    }
+
+    pub(super) fn pose(&mut self) -> (Vec3, Quat) {
+        let plan = self
+            .plan
+            .as_ref()
+            .expect("PostStartup checks the ram plan before the server admits clients");
+        self.started = true;
+        (plan.spawn.into(), Quat::from_array(plan.rotation))
     }
 
     pub(super) fn send(&mut self, us: f64) {
@@ -240,7 +274,7 @@ impl Ram {
 }
 
 fn sample_speed(mut ram: ResMut<Ram>, tanks: Query<&LinearVelocity, With<Tank>>) {
-    // Before the first tank spawn the capture has no plan or velocity.
+    // Before the first tank spawn there is no velocity to sample.
     if let Some(velocity) = tanks.iter().next() {
         ram.pre_speed = velocity.xz().length();
     }
@@ -274,7 +308,7 @@ impl Census<'_, '_> {
         let Some(ram) = self
             .ram
             .as_deref_mut()
-            .filter(|r| r.plan.is_some() && r.done.is_none())
+            .filter(|r| r.started && r.done.is_none())
         else {
             return false;
         };
@@ -376,6 +410,80 @@ mod tests {
         );
     }
 
+    fn fixture_spec() -> TankSpec {
+        ron::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron")).unwrap()
+    }
+
+    /// Operators get an unusable route refusal before a join can reach the spawn path.
+    #[test]
+    fn route_admission_refuses_missing_nonconstruction_and_unreachable_instances() {
+        let manifest = crate::map::tests::construction_fixture_manifest();
+        let mut recipe = Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap();
+        let spec = fixture_spec();
+        for instance in ["missing", "house_0001"] {
+            // Fixture: absent and graybox targets.
+            recipe.instance = instance.into();
+            let error = recipe
+                .plan(&spec, &manifest, None)
+                .err()
+                .expect("unusable target refused")
+                .to_string();
+            assert!(
+                error.contains(LEVER) && error.contains("instance"),
+                "{error}"
+            );
+        }
+        recipe.instance = "brick_0001".into(); // Fixture construction from the manifest owner.
+        assert!(recipe.plan(&spec, &manifest, None).is_ok());
+        recipe.runup_margin = f64::MAX; // Fixture: finite input whose derived run-up cannot fit.
+        let error = recipe
+            .plan(&spec, &manifest, None)
+            .err()
+            .expect("unreachable route refused")
+            .to_string();
+        assert!(error.contains("spawn bounds"), "{error}");
+    }
+
+    /// The production installer checks and retains the route without a client, while sampling
+    /// waits for spawn. Starting capture at admission would publish a zero-tank prefix to the runner.
+    #[test]
+    fn startup_retains_the_plan_without_starting_capture() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        let mut recipe = Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap();
+        recipe.instance = "brick_0001".into(); // Fixture construction in the manifest below.
+        app.insert_resource(crate::map::tests::construction_fixture_manifest())
+            .insert_resource(crate::bake::TankBlueprint {
+                file: "fixture".into(),
+                // Fixture: route admission reads spec/terrain only; no rig is spawned.
+                geometry: std::sync::Arc::new(crate::bake::TankGeometry {
+                    nodes: Vec::new(),
+                    by_name: default(),
+                    roadwheels: Vec::new(),
+                    collision_proxies: Vec::new(),
+                    ballistic_volumes: Vec::new(),
+                }),
+                spec: std::sync::Arc::new(fixture_spec()),
+            })
+            .init_resource::<ContactTransfers>();
+        install_recipe(&mut app, recipe);
+        app.update();
+        let ram = app.world().resource::<Ram>();
+        assert!(ram.plan.is_some());
+        assert!(!ram.started);
+        assert!(
+            !app.world_mut()
+                .run_system_once(|mut census: Census| {
+                    census.record(0.0, 0.0, 0.0, [0.0; crate::cost::stages::COUNT], 1.0)
+                })
+                .unwrap()
+        );
+        let mut ram = app.world_mut().resource_mut::<Ram>();
+        let planned = ram.plan.as_ref().unwrap().spawn;
+        assert_eq!(ram.pose().0.to_array(), planned);
+        assert!(ram.started);
+    }
+
     /// A Battle reset must invalidate an armed observation, rather than certify a quiet new
     /// world as the old construction resting. The runner relies on that refusal.
     #[test]
@@ -386,26 +494,17 @@ mod tests {
         world.despawn(target);
         world.init_resource::<ContactTransfers>();
         // Fixture: the route and timing values are irrelevant once its owner is gone.
-        world.insert_resource(Ram {
-            recipe: Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap(),
-            plan: Some(Plan {
-                spawn: [0.0; 3],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                runup_m: 1.0,
-                governed_m_s: 1.0,
-                minimum_m_s: 1.0,
-            }),
-            tick: 0,
-            pre_speed: 0.0,
-            impact: None,
-            impact_tick: None,
-            resting_s: 0.0,
-            done: None,
-            target: Some(target),
-            rows: Vec::new(),
-            sends: Vec::new(),
-            last_send_tick: None,
+        let mut ram = Ram::new(Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap());
+        ram.plan = Some(Plan {
+            spawn: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            runup_m: 1.0,
+            governed_m_s: 1.0,
+            minimum_m_s: 1.0,
         });
+        ram.started = true;
+        ram.target = Some(target);
+        world.insert_resource(ram);
         let captured = world
             .run_system_once(|mut census: Census| {
                 census.record(0.0, 0.0, 0.0, [0.0; crate::cost::stages::COUNT], 1.0)
