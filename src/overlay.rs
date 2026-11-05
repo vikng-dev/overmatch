@@ -270,16 +270,6 @@ pub(crate) fn plugin(app: &mut App) {
         );
 }
 
-/// Bare Esc toggle for composed tests; excludes match flow, cursor ownership and Esc routing.
-/// The caller supplies the router.
-#[cfg(test)]
-pub(crate) fn mount_bare(app: &mut App) {
-    app.init_resource::<Overlays>().add_systems(
-        Update,
-        esc_toggle.in_set(OverlaySet::Toggle).after(EscapeRouted),
-    );
-}
-
 fn clear_overlays(mut overlays: ResMut<Overlays>) {
     *overlays = Overlays::default();
 }
