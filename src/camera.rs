@@ -371,7 +371,10 @@ pub(crate) fn orbit_body(
 }
 
 fn orbit_camera(
-    camera: Single<(&mut Transform, &mut OrbitCamera, &mut Projection), With<PlayerView>>,
+    mut camera: Query<
+        (&mut Transform, Option<&mut OrbitCamera>, &mut Projection),
+        With<PlayerView>,
+    >,
     spatial: SpatialQuery,
     tank: Query<&Transform, (With<Tank>, With<Controlled>, Without<PlayerView>)>,
     views: Query<Option<&TankViews>, With<Controlled>>,
@@ -379,7 +382,11 @@ fn orbit_camera(
     mouse_scroll: Res<AccumulatedMouseScroll>,
     time: Res<Time>,
 ) {
-    let (mut transform, mut orbit, mut projection) = camera.into_inner();
+    let (mut transform, orbit, mut projection) = camera
+        .single_mut()
+        .expect("the installed orbit camera has exactly one declared player view");
+    let mut orbit =
+        orbit.expect("the player camera carries OrbitCamera while orbit placement is active");
 
     // Restore the wide commander-view FOV when returning from the gunner optic (which narrows it).
     if let Projection::Perspective(p) = projection.as_mut() {
@@ -628,6 +635,22 @@ mod tests {
                 view_fov(&views, ViewKind::Commander)
             })
             .unwrap();
+    }
+
+    /// Declaring a player camera without orbit state must fail rather than freeze placement.
+    #[test]
+    #[should_panic(
+        expected = "the player camera carries OrbitCamera while orbit placement is active"
+    )]
+    fn orbit_placement_requires_the_declared_cameras_orbit_state() {
+        let mut app = App::new();
+        app.init_resource::<avian3d::collider_tree::ColliderTrees>()
+            .init_resource::<TurretPivot>()
+            .init_resource::<AccumulatedMouseScroll>()
+            .init_resource::<Time>()
+            .add_systems(Update, orbit_camera);
+        app.world_mut().spawn(PlayerView);
+        app.update();
     }
 
     /// A possession write at the end of Update must reach every camera reader this frame. A
