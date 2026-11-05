@@ -421,8 +421,8 @@ pub(crate) fn drive_gunner_aim(
         .expect("a complete controlled rig carries its spawn-built TankViews");
     let aspect = cameras
         .single()
-        .ok()
-        .and_then(Camera::logical_viewport_size)
+        .expect("optic input requires exactly one player camera")
+        .logical_viewport_size()
         .filter(|size| size.y > 0.0)
         .map_or(look::get().optic_aspect_before_measurement.0, |size| {
             size.x / size.y
@@ -640,6 +640,7 @@ mod tests {
         world.init_resource::<CommittedAim>();
         world.init_resource::<Ranging>();
         world.init_resource::<ColliderTrees>();
+        world.spawn((PlayerView, Camera::default()));
         // Fixture bearings, offset sight and range. This probes input/clamping, not integration.
         let (bearing, offset) = (0.7, Vec3::new(1.0, 2.0, 3.0));
         let tank = world
