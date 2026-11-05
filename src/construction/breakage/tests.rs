@@ -3649,7 +3649,13 @@ fn marched_line(
                 .last()
                 .expect("the shipped shell observer queues its line");
             let mut taken = BTreeMap::new();
-            take_lines(&p, &BTreeMap::from([(root, frame)]), deposit, &mut taken);
+            take_lines(
+                ComputeTaskPool::get(),
+                &p,
+                &BTreeMap::from([(root, frame)]),
+                deposit,
+                &mut taken,
+            );
             taken.remove(&root)
         })
         .unwrap()
@@ -3859,7 +3865,13 @@ fn a_far_collapsed_axis_reads_surviving_contacts_before_its_point() {
             .world_mut()
             .run_system_once(move |p: DepositParam| {
                 let mut taken = BTreeMap::new();
-                take_lines(&p, &BTreeMap::from([(root, frame)]), &deposit, &mut taken);
+                take_lines(
+                    ComputeTaskPool::get(),
+                    &p,
+                    &BTreeMap::from([(root, frame)]),
+                    &deposit,
+                    &mut taken,
+                );
                 taken
                     .remove(&root)
                     .expect("a collapsed line retains its exchange")
@@ -4674,7 +4686,7 @@ fn occupied_matter_queries_follow_common_release_and_sleeping_pose() {
 }
 
 /// The game's environment destruction model: owner contact conversion keeps source order,
-/// masses and frame conversion across worker assignments, including interleaved resting inputs.
+/// masses and frame conversion across worker assignments, including interleaved known point inputs.
 #[test]
 fn contact_preparation_preserves_source_order_across_workers() {
     use bevy::ecs::system::SystemState;
@@ -4741,7 +4753,17 @@ fn contact_preparation_preserves_source_order_across_workers() {
     for threads in [1, 2] {
         let pool = TaskPoolBuilder::new().num_threads(threads).build();
         assert_eq!(
-            prepare_contacts(&pool, &inputs, &colliders, &constructions),
+            prepare_contacts(
+                &pool,
+                &inputs
+                    .iter()
+                    .copied()
+                    .map(ContactSource::Point)
+                    .collect::<Vec<_>>(),
+                &ContactTransfers::default(),
+                &colliders,
+                &constructions
+            ),
             expected
         );
     }

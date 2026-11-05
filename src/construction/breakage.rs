@@ -31,7 +31,7 @@
 //!   moved momentum through between a chunk group (a placed construction's breakable element or chunk,
 //!   or a moving group's chunk) and another body ([`ContactTransfers`]) loads the chunk there (an
 //!   intact element's: the chunk whose hull holds the point, [`contact_load`]) with its blow and
-//!   press, each contact split at its body's rest speed ([`ContactTransfers::split`]), all of a
+//!   press, each contact split at its body's rest speed ([`ContactTransfers::split_points`]), all of a
 //!   step's points one deposit. On a placed construction the source exchanges its blow plastically
 //!   ([`Origin::Body`]); on a moving group the solver already moved both bodies
 //!   ([`Origin::Contact`]). A point on an unbreakable element loads nothing. A body asleep against a construction presses it with what its
@@ -931,26 +931,26 @@ fn read_contacts(
         return;
     }
     *read = transfers.steps();
-    let mut inputs: Vec<_> = transfers
-        .split()
-        .map(|(point, blow, press, mass)| ContactInput {
-            point: *point,
-            blow,
-            press,
-            mass,
-            step: transfers.dt(),
+    let groups: Vec<_> = transfers.groups().collect();
+    let awake = groups.iter().map(|points| points.len()).sum::<usize>();
+    let mut inputs: Vec<_> = groups.into_iter().map(ContactSource::Group).collect();
+    inputs.extend(transfers.resting().iter().map(|rest| {
+        ContactSource::Point(ContactInput {
+            point: rest.transfer,
+            blow: Vec3::ZERO,
+            press: rest.press(),
+            // A retained press has no closing blow, so no law reads its source mass.
+            mass: rest.transfer.effective_mass,
+            step: rest.dt,
         })
-        .collect();
-    let awake = inputs.len();
-    inputs.extend(transfers.resting().iter().map(|rest| ContactInput {
-        point: rest.transfer,
-        blow: Vec3::ZERO,
-        press: rest.press(),
-        // Resting presses carry no blow; no law reads their source mass.
-        mass: rest.transfer.effective_mass,
-        step: rest.dt,
     }));
-    let converted = prepare_contacts(ComputeTaskPool::get(), &inputs, &colliders, &constructions);
+    let converted = prepare_contacts(
+        ComputeTaskPool::get(),
+        &inputs,
+        &transfers,
+        &colliders,
+        &constructions,
+    );
     resting.0.clear();
     let mut contacts = Vec::new();
     for (index, load) in converted.into_iter().enumerate() {
@@ -1025,6 +1025,13 @@ pub(crate) fn watch_contact_intake(
     seen
 }
 
+/// An awake constraint retains its complete distribution until its owner's worker splits and
+/// converts it. A sleeping point already has a known press and needs only frame conversion.
+enum ContactSource<'a> {
+    Group(&'a [ContactTransfer]),
+    Point(ContactInput),
+}
+
 #[derive(Clone, Copy)]
 struct ContactInput {
     point: ContactTransfer,
@@ -1034,40 +1041,62 @@ struct ContactInput {
     step: f32,
 }
 
-/// Constraint mass splitting precedes dispatch. Each owner converts its contacts in source order;
-/// indexed collection preserves the original awake/resting sequence under any worker assignment.
+/// Split and convert complete contact groups on their owner's task. Source-index collection
+/// preserves awake and retained-point order independently of task completion.
 fn prepare_contacts(
     pool: &TaskPool,
-    inputs: &[ContactInput],
+    inputs: &[ContactSource<'_>],
+    transfers: &ContactTransfers,
     colliders: &Colliders,
     constructions: &Query<((&Position, &Rotation), &Breakage, Option<&Piece>)>,
 ) -> Vec<Option<(Entity, Load)>> {
-    let mut owners: BTreeMap<Entity, Vec<(usize, &ContactInput)>> = BTreeMap::new();
+    let mut owners: BTreeMap<Entity, Vec<(usize, &ContactSource<'_>)>> = BTreeMap::new();
     for (index, input) in inputs.iter().enumerate() {
-        owners
-            .entry(input.point.structure)
-            .or_default()
-            .push((index, input));
+        let root = match input {
+            ContactSource::Group(points) => {
+                points
+                    .first()
+                    .expect("retained contact groups are nonempty")
+                    .structure
+            }
+            ContactSource::Point(input) => input.point.structure,
+        };
+        owners.entry(root).or_default().push((index, input));
     }
     let mut converted: Vec<_> = pool
         .scope(|scope| {
             for inputs in owners.into_values() {
                 scope.spawn(async move {
+                    let convert = |input: ContactInput| {
+                        contact_load(
+                            colliders,
+                            constructions,
+                            &input.point,
+                            input.blow,
+                            input.press,
+                            input.mass,
+                            input.step,
+                        )
+                    };
                     inputs
                         .into_iter()
                         .map(|(index, input)| {
-                            (
-                                index,
-                                contact_load(
-                                    colliders,
-                                    constructions,
-                                    &input.point,
-                                    input.blow,
-                                    input.press,
-                                    input.mass,
-                                    input.step,
-                                ),
-                            )
+                            let loads = match input {
+                                ContactSource::Group(points) => transfers
+                                    .split_points(points)
+                                    .map(|(point, blow, press, mass)| {
+                                        convert(ContactInput {
+                                            point: *point,
+                                            blow,
+                                            press,
+                                            mass,
+                                            step: transfers.dt(),
+                                        })
+                                    })
+                                    .collect(),
+                                ContactSource::Point(input) => vec![convert(*input)],
+                            };
+                            (index, loads)
                         })
                         .collect::<Vec<_>>()
                 });
@@ -1077,11 +1106,11 @@ fn prepare_contacts(
         .flatten()
         .collect();
     converted.sort_unstable_by_key(|(index, _)| *index);
-    converted.into_iter().map(|(_, load)| load).collect()
+    converted.into_iter().flat_map(|(_, loads)| loads).collect()
 }
 
 /// The load a body's contact point `transfer` puts on a construction, with `blow` (N·s) and `press`
-/// (N) in world terms, its contact's source mass `mass` (kg, [`ContactTransfers::split`]) and the
+/// (N) in world terms, its contact's source mass `mass` (kg, [`ContactTransfers::split_points`]) and the
 /// physics step `step` (s) the solver moved them within:
 /// on the chunk whose collider the point lies on, or for an intact element
 /// the element's chunk whose hull holds the point (the hull nearest it, by [`Block::outside`],
@@ -1427,40 +1456,71 @@ fn nearest_chunk(layout: &Layout, element: usize, at: Vec3) -> Option<usize> {
     })
 }
 
-/// Map resolved crossings to owned construction chunks, independent of the group's motion.
+/// The game's damage-model intake resolves source ownership before dispatch. Each owner
+/// evaluates its crossings in source order; line/impulse effects assemble in entity order.
+struct LineInput<'a> {
+    line: &'a DeliveredLine,
+    element: Option<Element>,
+    chunk: Option<ChunkCollider>,
+}
+
 fn take_lines(
+    pool: &TaskPool,
     p: &DepositParam,
     frames: &BTreeMap<Entity, Frame>,
     deposit: &RawDeposit,
     taken: &mut BTreeMap<Entity, Taken>,
 ) {
+    let mut owners = BTreeMap::<Entity, Vec<LineInput<'_>>>::new();
     for line in &deposit.crossings {
+        let Ok((element, chunk, parent)) = p.volumes.get(line.crossing.volume) else {
+            continue; // A nonconstruction volume belongs to another law.
+        };
+        owners.entry(parent.parent()).or_default().push(LineInput {
+            line,
+            element: element.copied(),
+            chunk: chunk.copied(),
+        });
+    }
+    let mut evaluated = pool.scope(|scope| {
+        for (root, lines) in owners {
+            let (_, _, breakage, _) = p
+                .constructions
+                .get(root)
+                .expect("every construction collider belongs to its live owner");
+            let layout = &breakage.kind.layout;
+            let frame = frames[&root];
+            scope.spawn(async move { (root, take_owner_lines(layout, frame, &lines)) });
+        }
+    });
+    evaluated.sort_unstable_by_key(|(root, _)| *root);
+    for (root, mut result) in evaluated {
+        if result.lines.is_empty() {
+            continue; // These crossings belong only to unbreakable elements, with no law input.
+        }
+        let into = taken.entry(root).or_default();
+        into.lines.append(&mut result.lines);
+        into.line_loads.append(&mut result.line_loads);
+    }
+}
+
+/// Geometry and work/momentum partition for one owner's resolved crossings, before shared effects.
+fn take_owner_lines(layout: &Layout, frame: Frame, lines: &[LineInput<'_>]) -> Taken {
+    let mut output = Taken::default();
+    for source in lines {
+        let line = source.line;
         let crate::ballistics::VolumeCrossing {
-            volume,
-            entry,
-            end,
-            energy,
-            ..
+            entry, end, energy, ..
         } = line.crossing;
         let entrance_energy = line.entrance_energy;
         let impulse = line.momentum;
         let entrance_impulse = line.entrance_momentum;
-        let Ok((element, chunk, parent)) = p.volumes.get(volume) else {
-            continue; // A volume without a construction element or chunk belongs to another law.
-        };
-        let root = parent.parent();
-        let frame = &frames[&root];
-        let (_, _, breakage, _) = p
-            .constructions
-            .get(root)
-            .expect("a construction element or chunk is a child of its construction's root");
-        let layout = &breakage.kind.layout;
         let (a, b) = (frame.unscaled(entry), frame.unscaled(end));
         let length = a.distance(b);
         let dir = (b - a).normalize_or_zero();
-        let shares: Vec<(usize, f32, f32, f32)> = match (element, chunk) {
-            (_, Some(&ChunkCollider(c))) => vec![(usize::from(c), 0.0, length, length)],
-            (Some(&Element(e)), None) => {
+        let shares: Vec<(usize, f32, f32, f32)> = match (source.element, source.chunk) {
+            (_, Some(ChunkCollider(c))) => vec![(usize::from(c), 0.0, length, length)],
+            (Some(Element(e)), None) => {
                 let chunks: Vec<_> = layout.chunks_of(usize::from(e)).collect();
                 if chunks.is_empty() {
                     continue; // An element that never breaks has no chunk to wear.
@@ -1509,7 +1569,6 @@ fn take_lines(
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .expect("a breakable element or chunk owns the resolved contact");
         let chord: f32 = shares.iter().map(|(_, _, _, weight)| weight).sum();
-        let into = taken.entry(root).or_default();
         let turned = frame.turn(impulse - entrance_impulse);
         for (c, t0, t1, weight) in shares {
             // Rounding can close a single owner's line; it still takes the line whole.
@@ -1533,11 +1592,13 @@ fn take_lines(
                 entrance_energy: entry_energy,
                 entrance_momentum: entry_blow,
             };
-            into.lines.push((c, from, to, part.crossing.energy));
-            into.line_loads
+            output.lines.push((c, from, to, part.crossing.energy));
+            output
+                .line_loads
                 .extend(resolved_line_loads(c, &layout.materials[c], &part));
         }
     }
+    output
 }
 
 /// The game's damage-model construction loads: entrance work and momentum stay at entry;
@@ -1778,7 +1839,7 @@ fn apply_deposits(mut p: DepositParam) {
     let mut taken: BTreeMap<Entity, Taken> = BTreeMap::new();
     for deposit in std::mem::take(&mut p.queue.0) {
         let intake = Stages::start(p.stages.as_deref(), Stage::Intake);
-        take_lines(&p, &frames, &deposit, &mut taken);
+        take_lines(ComputeTaskPool::get(), &p, &frames, &deposit, &mut taken);
         // All deposits read the tick's intake geometry. Each owner keeps ray order;
         // nearest-stop reduction keeps source-entity order, independent of worker completion.
         if !deposit.rays.is_empty() || deposit.blast.is_some() {

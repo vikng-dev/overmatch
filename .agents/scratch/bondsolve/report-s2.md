@@ -63,14 +63,31 @@ identified. The corrected full run passed **2,382 tests, 40 ignored**, followed 
 construction tests** and **50 whole-tree source/bake guards**, including the fixed-clock guard.
 Formatting and workspace/all-target CI clippy passed. Interrupted runs are not passes.
 
+## Parallel intake
+
+Both optional b13 findings are implemented. `read_contacts` keeps complete constraint groups
+until an owner's worker splits the contact mass, blow and press and converts its points.
+Retained sleeping presses join the same owner batching. Source-index assembly preserves the
+original point stream independently of worker completion.
+
+`take_lines` resolves addresses, then evaluates crossing geometry and energy/momentum partition
+from immutable layout/frame inputs per owner. Per-owner line order and entity-ordered effect
+assembly remain explicit. An existing unbreakable-element witness caught an empty-deposit
+staging regression in the trial; the committed path emits no deposit for that legitimate absence.
+
+MEASURED final-batch validation: **284 targeted tests passed, four ignored**, including
+construction, contact transfer, the wall inspector, real-UDP world reset, parked belt reaction,
+and all required source/bake guards. Formatting and workspace/all-target CI clippy passed.
+The same independently checked exchange and source-order inputs passed before and after moving
+the calculations; no historical-output test was added. The **2,382-test full pass predates this
+last intake refactor**; it was not repeated after the final bounded change. No speedup is claimed:
+the structural parallelism conclusion is DERIVED and pricing remains the orchestrator's.
+
 ## Remaining work
 
 - A compression-only, friction-limited contact solve must redistribute reactions before the
   linear trial can decide whether a whole roof can stand. Partial opening and a closed cracked
   seam are contact states, not missing tensile strength. Fixing compliance and directional
   timber facts remain Unknown. Startup cracking is still present.
-- The optional b13 serial `read_contacts` splitting and `take_lines` evaluation findings remain
-  unimplemented. Their owner evaluation/effect ordering was reviewed, but no timing claim or
-  unverified source change was made.
 - The orchestrator owns pricing and play review. This session supplied no frame/tick prices,
   ram runs, stills or captures.

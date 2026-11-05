@@ -26,7 +26,7 @@
 //! WHAT IT HOLDS. The last physics step's points, in Avian's constraint order, until the next step
 //! replaces them, with the step's length and a count of the steps summed, so a reader that keeps
 //! the count it last read reads each step once ([`ContactTransfers::steps`]). Each contact splits at
-//! its body's rest speed into a blow and a press ([`ContactTransfers::split`]).
+//! its body's rest speed into a blow and a press ([`ContactTransfers::split_points`]).
 //!
 //! RESTING CONTACTS. A sleeping body leaves the solver, so a body that comes to rest pressing a
 //! structure (a pile on a wall, a body Avian's `ConstantForce` holds there: neither wakes it) would
@@ -40,7 +40,7 @@
 //! a moving structure receives the impulse it actually took through [`ContactTransfers::stage_on_moving`],
 //! with its tick-start inertia. Both publish with that physics step. Every source's patches on
 //! one collider share a closing budget: the source mass for fixed construction, the pair's reduced
-//! mass for a moving receiver, under that impulse distribution ([`ContactTransfers::split`]): neither splitting a shoe footprint, nor a
+//! mass for a moving receiver, under that impulse distribution ([`ContactTransfers::split_points`]): neither splitting a shoe footprint, nor a
 //! link's rounding of its normal, nor a curved run's turning normals can multiply a blow.
 //! These contacts are refreshed by the belt each tick and never enter the solver's sleeping-pair
 //! cache.
@@ -206,7 +206,7 @@ impl ContactTransfers {
     }
 
     /// Stage the impulse a moving structure actually took, `receiver` its inertia then: its
-    /// closing meets the pair's reduced mass ([`Self::split`]).
+    /// closing meets the pair's reduced mass ([`Self::split_points`]).
     pub(crate) fn stage_on_moving(&mut self, contact: AppliedContact, receiver: BodyInertia) {
         self.staged_receivers.insert(contact.structure, receiver);
         self.pending.push(contact);
@@ -258,6 +258,7 @@ impl ContactTransfers {
     /// hand it up to their count times the exchange. A contact whose solver moved nothing along
     /// its normal has no blow and no blow centroid; its points' mean stands for it, and no law
     /// reads a source mass without a blow.
+    #[cfg(test)]
     pub(crate) fn split(&self) -> impl Iterator<Item = (&ContactTransfer, Vec3, Vec3, f32)> {
         self.groups().flat_map(|points| self.split_points(points))
     }
@@ -287,7 +288,7 @@ impl ContactTransfers {
     /// copies of one patch, a straight run's rounded normals and a curved run's turning ones all
     /// meet the source's mass once; a resting patch takes no share, so its press is never another
     /// face's blow.
-    fn split_points<'a>(
+    pub(crate) fn split_points<'a>(
         &'a self,
         points: &'a [ContactTransfer],
     ) -> impl Iterator<Item = (&'a ContactTransfer, Vec3, Vec3, f32)> + 'a {
@@ -349,7 +350,7 @@ impl ContactTransfers {
         })
     }
 
-    /// One contact's source mass ([`Self::split`]), kg: the source body's effective mass for the
+    /// One contact's source mass ([`Self::split_points`]), kg: the source body's effective mass for the
     /// distribution of unit impulses along its points' normals weighted by `weight`,
     /// `(Σw)² / (wᵀ K w)` with `K` the source's inverse mass matrix between its points. Where the
     /// points share one normal it is the body's effective mass along it at their weighted
@@ -1249,7 +1250,7 @@ mod tests {
         }
     }
 
-    /// Every step's points on `body` split ([`ContactTransfers::split`]) over `ticks` updates: per
+    /// Every step's points on `body` split ([`ContactTransfers::split_points`]) over `ticks` updates: per
     /// step, the blow and press summed and the transfer the structure took (`−impulse`).
     fn splits(app: &mut App, body: Entity, ticks: usize) -> Vec<(Vec3, Vec3, Vec3)> {
         (0..ticks)
