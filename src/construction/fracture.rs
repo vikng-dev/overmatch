@@ -790,7 +790,7 @@ pub(crate) enum Origin {
     Field,
     /// A contact of a moving group with another physics body at this tick. Its actual solver
     /// impulse already changed both bodies' motion; it must never undergo another plastic
-    /// exchange. The laws take a rest's direction from the load, never from the contact's normal.
+    /// exchange. Joint geometry supplies bearing directions; contacts supply applied loads.
     Contact { other: Entity, step: f32 },
     /// A body in contact, by its entity: it shares its blow's momentum with whatever the blow
     /// frees. `mass` is the body's effective mass along the contact normal at the combined
@@ -801,8 +801,8 @@ pub(crate) enum Origin {
         /// Closing speed along the normal at the solver's start, m/s; shared launch caps read it.
         speed: f32,
         /// The numerical physics step the solver delivered its blow within, s, not a material
-        /// contact duration. `blow / step` bounds the contact's peak force from below
-        /// ([`Load::mean_force`]); see the construction design's "Body contact duration" limitation.
+        /// contact duration. Retained contact provenance; the force solve uses its configured
+        /// numerical tick for the average pulse force (the construction design owns that limit).
         step: f32,
     },
 }
