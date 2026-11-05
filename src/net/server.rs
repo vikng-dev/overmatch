@@ -134,11 +134,11 @@ pub fn run() {
     install_battle(&mut app, BattleMode::shipped(), TICK);
     app.insert_resource(bot_count);
     install_spawn_picks(&mut app);
+    install_client_spawns(&mut app);
 
     app.add_systems(
         Update,
         (
-            (handle_new_clients, spawn_pending_tanks.run_if(places_tanks)).chain(),
             spawn_bots.run_if(places_tanks),
             respawn_dead_bots.run_if(in_combat),
             open_gameplay_gate,
@@ -169,6 +169,14 @@ pub fn run() {
     if let Some(hosting) = hosting {
         hosting.finish();
     }
+}
+
+/// The production join-to-spawn boundary: queue each new link once before placing pending tanks.
+fn install_client_spawns(app: &mut App) {
+    app.add_systems(
+        Update,
+        (handle_new_clients, spawn_pending_tanks.run_if(places_tanks)).chain(),
+    );
 }
 
 /// Root replacement publishes before the drive snapshot; no source can disappear between
@@ -1584,6 +1592,10 @@ mod tests {
     /// A real construction fixture keeps placement tests on the production spawn systems. The
     /// shipped vehicle supplies fixture data only; every assertion is a generic spawn invariant.
     fn placement_app() -> App {
+        placement_app_with(None)
+    }
+
+    fn placement_app_with(mode: Option<BattleMode>) -> App {
         let root = crate::assets::asset_root();
         let spec_ron = std::fs::read_to_string(root.join(crate::tank::TANK_SPEC_PATH))
             .expect("the shipped spec sheet");
@@ -1628,19 +1640,18 @@ mod tests {
             .init_resource::<SpawnLane>()
             .init_resource::<CombatantIds>()
             .init_resource::<crate::ShotClock>()
-            .add_systems(
-                Update,
-                (
-                    spawn_pending_tanks.run_if(places_tanks),
-                    player_respawn_system(),
-                )
-                    .chain(),
-            );
-        super::super::score::mount(&mut app, shipped_wait());
-        app.world_mut().spawn((
-            super::super::score::Scoreboard::default(),
-            BattleState::combat_fixture(),
-        ));
+            .add_systems(Update, player_respawn_system().after(spawn_pending_tanks));
+        install_client_spawns(&mut app);
+        if let Some(mode) = mode {
+            install_battle(&mut app, mode, TICK);
+        } else {
+            // Narrow placement/respawn probes hold combat open without advancing the Battle clock.
+            super::super::score::mount(&mut app, shipped_wait());
+            app.world_mut().spawn((
+                super::super::score::Scoreboard::default(),
+                BattleState::combat_fixture(),
+            ));
+        }
         app
     }
 
@@ -1951,29 +1962,20 @@ mod tests {
     fn immediate_combat_places_every_player_once_and_keeps_unchanged_snapshots_clean() {
         use super::super::battle::BattlePhase;
         use super::super::score::Scoreboard;
-        let mut app = placement_app();
         let mode = BattleMode::parse(include_str!("fixtures/battle-short.ron"));
-        app.insert_resource(CycleRules::new(&mode, TICK))
-            .init_resource::<JoinAdmission>()
-            .insert_resource(crate::map::tests::shipped_manifest())
-            .add_systems(
-                Update,
-                (cycle_battles, handle_new_clients)
-                    .chain()
-                    .before(spawn_pending_tanks),
-            );
+        let mut app = placement_app_with(Some(mode));
+        app.insert_resource(crate::map::tests::shipped_manifest());
+        app.update(); // Production Startup owns the scoreboard.
         let board = app
             .world_mut()
             .query_filtered::<Entity, With<Scoreboard>>()
             .single(app.world())
             .expect("one fixture board");
-        *app.world_mut()
-            .get_mut::<BattleState>(board)
-            .expect("Battle") = BattleState::default();
         let link = app
             .world_mut()
             .spawn((RemoteId(PeerId::Netcode(1)), Connected, ClientOf))
             .id();
+        app.world_mut().run_schedule(FixedUpdate);
         app.update();
         assert!(
             app.world().get::<BattleState>(board).unwrap().is_combat(),
@@ -1993,6 +1995,7 @@ mod tests {
         app.world_mut()
             .spawn((RemoteId(PeerId::Netcode(2)), Connected, ClientOf));
         advance(&mut app, 1);
+        app.world_mut().run_schedule(FixedUpdate);
         app.update();
         let roots: Vec<_> = app
             .world_mut()
@@ -2016,6 +2019,7 @@ mod tests {
         );
         app.world_mut().clear_trackers();
         advance(&mut app, 1);
+        app.world_mut().run_schedule(FixedUpdate);
         app.update();
         assert_eq!(
             app.world_mut()
@@ -2045,6 +2049,7 @@ mod tests {
         }
         let now = app.world().resource::<crate::ShotClock>().0;
         advance(&mut app, now.remaining_until(combat_end));
+        app.world_mut().run_schedule(FixedUpdate);
         app.update();
         assert!(
             app.world().get_entity(old_root).is_err(),
@@ -2065,6 +2070,7 @@ mod tests {
             panic!("results started");
         };
         advance(&mut app, combat_end.remaining_until(results_end));
+        app.world_mut().run_schedule(FixedUpdate);
         app.update();
         assert!(
             app.world()
