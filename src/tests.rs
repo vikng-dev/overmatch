@@ -24,6 +24,20 @@ mod gpu_layout;
 mod shape_cast_reachability;
 mod ui_ascii;
 
+/// Open view gates for controlled-rig fixtures; commander framing stays owned by camera data.
+pub(crate) fn tank_views(gunner_fov: f32) -> crate::tank::TankViews {
+    crate::tank::TankViews {
+        gunner: crate::tank::ViewConfig {
+            fov: gunner_fov,
+            requires: Vec::new(),
+        },
+        commander: crate::tank::ViewConfig {
+            fov: crate::camera::COMMANDER_FOV_BEFORE_BIND,
+            requires: Vec::new(),
+        },
+    }
+}
+
 /// `OVERMATCH_BLESS=1`, the one switch of every pinned-output test: set, a test that pins an output
 /// to a file writes today's output to that file, and the diff is the review. Its
 /// users: `ballistics::pen_cam::bless_scenarios`, the field-cast digest

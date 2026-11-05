@@ -601,7 +601,13 @@ mod tests {
             .init_resource::<CommittedAim>();
         mount_pivot_tracking(&mut app);
         let mut rig = |height| {
-            let root = app.world_mut().spawn(Transform::IDENTITY).id();
+            let root = app
+                .world_mut()
+                .spawn((
+                    Transform::IDENTITY,
+                    crate::tests::tank_views(COMMANDER_FOV_BEFORE_BIND),
+                ))
+                .id();
             let turret = app
                 .world_mut()
                 .spawn((ChildOf(root), Transform::from_xyz(0.0, height, 0.0)))
@@ -646,7 +652,11 @@ mod tests {
             .add_systems(Update, capture_turret_pivot);
         let root = app
             .world_mut()
-            .spawn((Controlled, Transform::IDENTITY))
+            .spawn((
+                Controlled,
+                Transform::IDENTITY,
+                crate::tests::tank_views(COMMANDER_FOV_BEFORE_BIND),
+            ))
             .id();
         let turret = app
             .world_mut()
@@ -668,7 +678,11 @@ mod tests {
         assert_eq!(app.world().resource::<TurretPivot>().offset(), None);
         let other = app
             .world_mut()
-            .spawn((Controlled, Transform::IDENTITY))
+            .spawn((
+                Controlled,
+                Transform::IDENTITY,
+                crate::tests::tank_views(COMMANDER_FOV_BEFORE_BIND),
+            ))
             .id();
         let turret = app
             .world_mut()
@@ -705,6 +719,7 @@ mod tests {
         for _ in 0..2 {
             app.world_mut().spawn((
                 Controlled,
+                crate::tests::tank_views(COMMANDER_FOV_BEFORE_BIND),
                 Rig {
                     hull: Entity::PLACEHOLDER,
                     turret: Entity::PLACEHOLDER,

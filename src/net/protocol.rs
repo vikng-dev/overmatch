@@ -1557,7 +1557,10 @@ mod tests {
                 },
             ));
             if owned {
-                root.insert(GameControlled);
+                root.insert((
+                    GameControlled,
+                    crate::tests::tank_views(crate::camera::COMMANDER_FOV_BEFORE_BIND),
+                ));
             }
             (yaw, gun)
         }

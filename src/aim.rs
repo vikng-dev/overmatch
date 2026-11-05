@@ -840,6 +840,8 @@ pub(crate) mod tests {
                 .spawn((
                     Tank,
                     Controlled,
+                    // Fixture optic; use the authored degrees-to-radians conversion.
+                    crate::tests::tank_views(crate::spec::Optics::Unaided(60.0).vertical_fov()),
                     TankCommand::default(),
                     Position(ROOT),
                     Rotation::default(),

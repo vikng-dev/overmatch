@@ -1048,6 +1048,7 @@ mod tests {
             let hull = world.spawn_empty().id();
             world.spawn((
                 Controlled,
+                crate::tests::tank_views(FOV),
                 Rig {
                     hull,
                     turret: hull,
@@ -1493,6 +1494,7 @@ mod tests {
         let tank = world
             .spawn((
                 Controlled,
+                crate::tests::tank_views(FOV),
                 crate::command::TankCommand::default(),
                 Rig {
                     hull,
