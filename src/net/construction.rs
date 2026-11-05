@@ -384,6 +384,10 @@ mod tests {
                 EntryError::OutsideLayout(1, Event::Crack(u16::MAX)),
             ),
             (
+                entry(Event::Separate(u16::MAX), 6),
+                EntryError::OutsideLayout(1, Event::Separate(u16::MAX)),
+            ),
+            (
                 entry(Event::Wear(u16::MAX), 7),
                 EntryError::OutsideLayout(1, Event::Wear(u16::MAX)),
             ),

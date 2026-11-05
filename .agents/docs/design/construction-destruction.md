@@ -584,14 +584,42 @@ moduli. A circle with equal area cannot substitute for that tensor: it changes t
 not merely the final strength readout. `AreaShare` root plates integrate each cell's share over
 the common equivalent disk, preserving their declared footprint contract under refinement.
 
-The assembled equilibrium is `K u = f`. A diagonal-preconditioned conjugate-gradient solve uses
-**Resolution 32 rounds per active tick**, bounding work independently of how many joints fail.
-Displacements and the Krylov direction survive into the next tick. Changed loads restart
-conjugacy from the warm displacement; changed topology remaps it by source chunk address.
-**Resolution relative preconditioned residual 1e-8** identifies equilibrium in f64 arithmetic
-against the f32 asset inputs. `Progress::Iterating` names unfinished equilibrium. A failure stage
-marks changed topology for the next tick; no failure starts another solve inside its own tick.
-An unchanged equilibrated owner performs zero sparse products. Initial gravity is prepared
+Bonded patches assemble `K u = f`. Resting interfaces and closed cracked seams instead
+obey a unilateral contact law at positive-weight quadrature sites:
+
+```text
+p = K_n w min(n dot delta, 0)
+t_trial = K_s w (delta - n (n dot delta))
+t = t_trial min(1, mu (-p) / |t_trial|)
+```
+
+Here n points toward side A, p is the signed compression resultant at a site, w is its
+fractional area and t is the resisting shear. Zero trial shear gives zero shear without a
+division. A site that opens supplies neither normal force nor friction. Each polygon fan
+triangle has weights 1/12 on each vertex and 3/4 on its centroid: a positive quadrature exact
+for the quadratic elastic energy of a full face. Perimeter sites retain the actual support
+polygon when pressure concentrates at an edge. Equivalent disks use **Resolution 32 rim
+sites**, half the weight at their centre and half on the rim; this retains the disk's full-face
+second moments while discretizing its support direction. These are contact-resolution choices,
+not tensile strength or an extra bearing rule.
+
+One active-set solve freezes closed sites and slip forces for an elastic Krylov sequence,
+then tests its projected reactions against the actual loads. A sliding site's shear tangent is
+zero; its friction force remains in the right-hand side. Other contacts can therefore take the
+released reaction. Bounded step reduction controls changes between contact sets. A direction
+with no elastic resistance first activates any open face it would meet. If no face intercepts
+it, it is a contact mechanism: gravity or the applied load can move that group without a static
+balance. `Progress::Mechanism` names that outcome; physical motion belongs to the body solver.
+
+**Resolution 32 rounds per active tick** bounds work independently of how many joints fail.
+Displacements and each frozen set's Krylov direction survive into the next tick. Changed loads
+restart conjugacy from the warm displacement; changed topology remaps it by source chunk
+address. **Resolution relative preconditioned residual 1e-8** identifies contact equilibrium;
+the inner elastic tolerance is 1e-10 so it cannot consume the outer gate. The residual metric
+retains the original full-face compliance: inactive contact coordinates must not magnify
+roundoff by changing the norm. `Progress::Iterating` names unfinished equilibrium. A failure
+stage marks changed topology for the next tick; no failure starts another solve inside its
+own tick. An unchanged equilibrated owner performs zero sparse products. Initial gravity is prepared
 once per admitted construction and scale, before play. Instances share that immutable solution
 until their first change; compiled overloads await the first authoritative failure stage.
 
@@ -602,9 +630,10 @@ presses. A blow J delivered in the numerical tick enters as average force `J / d
 stated peak magnitude as a ceiling where available. The actual configured fixed timestep is
 passed to the law; it is not claimed to be a measured contact duration.
 
-The sustained and pulse load columns share one block-diagonal CG solve of the same stiffness
-operator. Their sum supplies each joint's force and moment; keeping the columns separate also
-identifies the elastic work a finite pulse adds. There is no load-by-chunk expansion.
+Sustained and total (sustained plus pulse) loads share one block-diagonal solve. Contact is
+nonlinear, so independent pulse and gravity reactions cannot be superposed. The total field
+supplies each joint's force and moment; subtracting sustained from total stored elastic work
+identifies what the pulse adds. There is no load-by-chunk expansion.
 For each unsupported connected component, one aggregate force, moment, mass and inertia give
 its rigid acceleration; one node pass subtracts that acceleration. Uniform gravity cancels.
 Spin adds centrifugal and Euler gyroscopic terms. Assessment inertia uses equal-volume spheres
@@ -632,23 +661,17 @@ field **and** add at least `G_I A` or `G_II A` to that patch's elastic work. Ope
 work are integrated separately by the same patch quadrature; no global source-order budget ranks
 which overloaded joint may open. All qualifying joints crack together.
 
-A resting joint has no cohesion. It opens under a tensile resultant, a bending moment exceeding
-compression times the patch's radial bearing lever, or tangential traction exceeding pair friction times
-compression. These are the same solved forces, not a second cut or bearing search. Reversing the
-joint's endpoints leaves the result unchanged. The lever ends at the actual polygon perimeter
-along the required centre-of-pressure direction. **Unresolved contact law:** the linear trial
-still sticks every rest before judging lift, tip or slide. A negative normal reaction means
-that trial contact should be inactive; frictional slip and partial opening should redistribute
-reactions across the other contacts. Deleting an inadmissible trial contact is not a proof that
-the authored construction cannot stand. The gravity audit in `.agents/scratch/bondsolve/gravity-s2.md`
-records this limit without changing strength, friction or initial topology. Attachment compliance
-and directional timber elasticity also remain unsourced; bulk transverse wood compliance cannot
-claim to measure a fixing or longitudinal grain response.
+A rest and a closed cracked seam carry compression and friction through the projected solve.
+Loss of cohesion alone does not remove their contact or release their chunks. When the solve
+finds an escape mechanism, its moving contacts separate; the ledger records `Separate`
+independently of `Crack`. Replicas derive support using those integer causes and never run a
+floating-point equilibrium calculation. Reversing joint endpoints leaves the law unchanged.
 
-Connectivity runs when topology changes. `loose_groups` identifies what has lost all live paths
-to anchors or buried matter; it does not assess strength. The authority releases those groups
-in the current tick. Remaining overloads redistribute on the next tick, so chain reactions have
-one stage per tick. Physics supplies subsequent falling, rocking and contact motion.
+Connectivity runs when topology changes. `loose_groups` identifies what has lost all cohesive
+or closed-contact paths to anchors or buried matter; it does not assess strength. The authority
+releases those groups in the current tick. Remaining overloads redistribute on the next tick,
+so chain reactions have one stage per tick. Physics supplies subsequent falling, rocking and
+contact motion. A separated contact cannot remain as a fallback bond.
 
 Trees are constructions under this same solve. Their intrinsic seams can part anywhere their
 own resultant exceeds their material hold. Root-plate moment data still converts to a footprint's

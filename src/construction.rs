@@ -137,7 +137,12 @@ impl ConstructionKind {
             self.structures.entry(scale.to_bits())
         {
             let structure = Arc::new(self.layout.checked_structure(&self.asset, scale)?);
-            let equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest(&structure)?);
+            let unit = &self.equilibria[&1.0_f32.to_bits()];
+            let equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest_scaled(
+                &structure,
+                unit,
+                f64::from(scale),
+            )?);
             entry.insert(structure);
             self.equilibria.insert(scale.to_bits(), equilibrium);
         }

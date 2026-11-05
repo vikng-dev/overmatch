@@ -241,7 +241,7 @@ pub(crate) enum Bond {
         footprint_area: f32,
         footprint_centroid: Vec3,
     },
-    /// Compression and pair friction only. The solved resultant opens it in lift, tip or slide.
+    /// Compression and pair friction only. A contact mechanism separates it in lift, tip or slide.
     Resting,
 }
 
@@ -625,12 +625,14 @@ pub(crate) enum Fate {
 }
 
 /// A structure's live state: each chunk's pool (m³, the volume left to crush) and fate, and each
-/// joint's crack.
+/// joint's cohesion and contact separation.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct State {
     pub pool: Vec<f32>,
     pub fate: Vec<Fate>,
     pub cracked: Vec<bool>,
+    /// Contact separation is distinct from loss of cohesion: a closed crack still bears load.
+    pub separated: Vec<bool>,
     topology: Arc<Topology>,
     members: Vec<usize>,
     joints: Vec<usize>,
@@ -672,6 +674,7 @@ impl State {
             pool: structure.chunks.iter().map(full_pool).collect(),
             fate: vec![Fate::Standing; structure.chunks.len()],
             cracked: vec![false; structure.joints.len()],
+            separated: vec![false; structure.joints.len()],
             topology: Arc::new(Topology::new(structure)),
             members: (0..structure.chunks.len()).collect(),
             joints: (0..structure.joints.len()).collect(),
@@ -715,10 +718,7 @@ impl State {
     pub fn contacts<'a>(&'a self, structure: &'a Structure) -> impl Iterator<Item = Joint> + 'a {
         self.joints.iter().copied().filter_map(|j| {
             let joint = &structure.joints[j];
-            let touching = match joint.bond {
-                Bond::Bonded(_) | Bond::AreaShare { .. } => true,
-                Bond::Resting => !self.cracked[j],
-            };
+            let touching = !self.separated[j];
             (touching && self.live(joint)).then_some(*joint)
         })
     }
@@ -1055,8 +1055,8 @@ pub(crate) fn crack(structure: &Structure, state: &mut State, loads: &[Load]) ->
     cracked
 }
 
-/// The groups of standing chunks with no path of intact joints to a ground anchor or a buried
-/// chunk, each a list of chunk indices, ascending, the groups ordered by their first chunk. Reads
+/// The groups of standing chunks with no path of cohesive or closed contact joints to a ground
+/// anchor or a buried chunk, each a list of chunk indices, ascending, the groups ordered by their first chunk. Reads
 /// the joint graph and the burial only: no float enters, so every peer that holds the same fates
 /// and cracks finds the same groups.
 pub(crate) fn loose_groups(structure: &Structure, state: &State) -> Vec<Vec<usize>> {
@@ -1065,7 +1065,7 @@ pub(crate) fn loose_groups(structure: &Structure, state: &State) -> Vec<Vec<usiz
         structure.chunks[c].buried
             || state.topology.anchors[c]
                 .iter()
-                .any(|&j| !state.cracked[j] && state.live(&structure.joints[j]))
+                .any(|&j| !state.separated[j] && state.live(&structure.joints[j]))
     };
     let mut seen = vec![false; count];
     let flood = |start: Vec<usize>, seen: &mut Vec<bool>| -> Vec<usize> {
@@ -1082,7 +1082,7 @@ pub(crate) fn loose_groups(structure: &Structure, state: &State) -> Vec<Vec<usiz
                     .iter()
                     .copied()
                     .filter(|&(n, j)| {
-                        !seen[n] && !state.cracked[j] && state.live(&structure.joints[j])
+                        !seen[n] && !state.separated[j] && state.live(&structure.joints[j])
                     })
                     .map(|(n, _)| n),
             );
@@ -1175,7 +1175,8 @@ pub(crate) enum Cause {
     Slide,
 }
 
-/// A failed joint's demand and capacity, in Pa for a bonded joint, N or N m for a rest.
+/// A failed joint. Cohesive causes carry demand/capacity in Pa; contact mechanisms have no
+/// local scalar threshold and carry zero in those fields. Their cause names the free motion.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Failure {
     pub joint: usize,
@@ -3621,6 +3622,7 @@ mod tests {
             "a cracked seam's chunks still touch"
         );
         structure.joints[0].bond = Bond::Resting;
+        state.separated[0] = true;
         assert_eq!(
             thrown(&state.contacts(&structure).collect::<Vec<_>>())
                 .1
@@ -3629,6 +3631,7 @@ mod tests {
             "an opened rest exposes the back"
         );
         state.cracked[0] = false;
+        state.separated[0] = false;
         structure.joints[0].bond = contact.bond;
         for fate in [Fate::Dust, Fate::Fallen] {
             state.fate[1] = fate;

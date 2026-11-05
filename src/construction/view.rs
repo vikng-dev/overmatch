@@ -2078,6 +2078,7 @@ mod tests {
             swapped: vec![true; intact.swapped.len()],
             fate: vec![Fate::Dust; intact.fate.len()],
             cracked: intact.cracked.clone(),
+            separated: intact.separated.clone(),
         };
         assert_eq!(show(&mut world, &gone), None, "nothing stands: no mesh");
         assert!(
@@ -2279,7 +2280,7 @@ mod tests {
             .filter(|(_, joint)| {
                 joint.a == fallen || joint.b == super::super::fracture::Side::Chunk(fallen)
             })
-            .map(|(j, _)| Event::Crack(j as u16));
+            .map(|(j, _)| Event::Separate(j as u16));
         let (kind, firsts) = carded_house(&[fallen, dusted]);
         let kind = std::sync::Arc::new(kind);
         let mut app = App::new();

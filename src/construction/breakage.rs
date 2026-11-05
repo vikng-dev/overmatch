@@ -51,7 +51,7 @@
 //!   than the volume its load crushed, the volume it took from the chunk's pool, so one the size
 //!   of its chunk is a spent pool, recorded as dust. Only the pool decides dust: a chunk holding
 //!   [`HOLES_PER_CHUNK`] holes keeps standing and draws no later one.
-//! * **The record** ([`Record`]): wear, dust, holes and cracks, in authority order,
+//! * **The record** ([`Record`]): wear, dust, holes, cohesion cracks and contact separations, in authority order,
 //!   with its tick. The authority appends; the network carries it ([`crate::net`]'s ledger); a
 //!   replica rebuilds the same state from it ([`derive_from_record`]); the view presents it at the
 //!   presentation clock ([`super::view`]).
@@ -413,7 +413,7 @@ impl Layout {
         let within = |len: usize, i: u16| usize::from(i) < len;
         match event {
             Event::Wear(c) | Event::Dust(c) | Event::Hole(c, _) => within(self.chunks.len(), c),
-            Event::Crack(j) => within(self.joints.len(), j),
+            Event::Crack(j) | Event::Separate(j) => within(self.joints.len(), j),
         }
     }
 
@@ -458,7 +458,7 @@ impl Hole {
 }
 
 /// The game's environment destruction causes, with stable [`Layout`] addresses. Wear disturbs
-/// occupied matter; dust removes it; cracks remove supports; holes carry presentation geometry.
+/// occupied matter; dust removes it; cracks remove cohesion; separation ends contact; holes carry presentation geometry.
 /// Peers derive element replacement and departure from these causes and the admitted graph.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Event {
@@ -466,6 +466,8 @@ pub(crate) enum Event {
     Dust(u16),
     Crack(u16),
     Hole(u16, Hole),
+    /// Loss of compression contact; cohesion alone may already have cracked.
+    Separate(u16),
 }
 
 /// One record entry: which construction (its map ordinal), what changed, and the authority
@@ -536,6 +538,7 @@ pub(crate) struct Shape {
     pub(crate) swapped: Vec<bool>,
     pub(crate) fate: Vec<Fate>,
     pub(crate) cracked: Vec<bool>,
+    pub(crate) separated: Vec<bool>,
 }
 
 impl Shape {
@@ -545,6 +548,7 @@ impl Shape {
             swapped: vec![false; layout.elements.len()],
             fate: vec![Fate::Standing; layout.chunks.len()],
             cracked: vec![false; layout.joints.len()],
+            separated: vec![false; layout.joints.len()],
         }
     }
 
@@ -563,7 +567,10 @@ impl Shape {
                 touch(usize::from(c));
                 self.fate[usize::from(c)] = Fate::Dust;
             }
-            Event::Crack(j) => {
+            Event::Crack(j) | Event::Separate(j) => {
+                if matches!(event, Event::Separate(_)) {
+                    self.separated[usize::from(j)] = true;
+                }
                 self.cracked[usize::from(j)] = true;
                 let joint = &layout.joints[usize::from(j)];
                 touch(joint.a);
@@ -581,6 +588,7 @@ impl Shape {
         let mut state = live.state.clone();
         state.fate.clone_from(&self.fate);
         state.cracked.clone_from(&self.cracked);
+        state.separated.clone_from(&self.separated);
         for c in fracture::fall(&live.structure, &mut state)
             .into_iter()
             .flatten()
@@ -655,6 +663,7 @@ impl Live {
             swapped: self.swapped.clone(),
             fate: self.state.fate.clone(),
             cracked: self.state.cracked.clone(),
+            separated: self.state.separated.clone(),
         }
     }
 }
@@ -2250,8 +2259,8 @@ pub(crate) fn cut_holes(
     channels.chain(dishes).collect()
 }
 
-/// How far inside its chunk's hull a channel's end may sit and still be where the line crosses a
-/// face, m (DERIVED: the walk's crossings meet a face to f32 rounding, far under a millimetre).
+/// Resolution: endpoints within a millimetre of a rounded hull face use the full along-face
+/// opening. This bounds the f32 baked-plane tolerance, never a material or hole-size choice.
 const ON_FACE_M: f32 = 1e-3;
 
 /// A channel's ends `from`–`to` in its chunk's hull `block` (asset frame, scale 1; the instance at
@@ -2391,13 +2400,13 @@ pub(crate) fn run_laws(
         .collect();
     events.extend(struck.dusted.iter().map(|&c| Event::Dust(c as u16)));
     events.extend(holes.iter().map(|&(c, hole)| Event::Hole(c as u16, hole)));
-    events.extend(
-        struck
-            .cracked
-            .iter()
-            .chain(&structural)
-            .map(|&j| Event::Crack(j as u16)),
-    );
+    events.extend(struck.cracked.iter().chain(&structural).map(|&j| {
+        if live.state.separated[j] {
+            Event::Separate(j as u16)
+        } else {
+            Event::Crack(j as u16)
+        }
+    }));
     let groups = departure_loads(&live.structure, groups, &loads, &failures);
     Changes {
         events,
@@ -2925,6 +2934,7 @@ fn derive_from_record(
         live.swapped = shape.swapped;
         live.state.fate = shape.fate;
         live.state.cracked = shape.cracked;
+        live.state.separated = shape.separated;
     }
     assert!(
         by_ordinal.is_empty(),

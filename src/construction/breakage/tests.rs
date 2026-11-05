@@ -269,6 +269,7 @@ fn isolate_chunk(app: &mut App, root: Entity, chunk: usize) {
         for (index, joint) in live.structure.joints.iter().enumerate() {
             if joint.a == chunk || joint.b == Side::Chunk(chunk) {
                 live.state.cracked[index] = true;
+                live.state.separated[index] = true;
             }
         }
         live.structure.chunks[chunk].centroid
@@ -1855,9 +1856,10 @@ fn no_bodys_kind_enters_a_contacts_loads() {
                 "each load names its body and effective mass: {load:?}"
             );
         }
-        ticks
+        let momentum = app.world().get::<LinearVelocity>(cube).unwrap().0 * CUBE_KG;
+        (ticks, momentum)
     };
-    let (plain, piece) = (strike(false), strike(true));
+    let ((plain, final_momentum), (piece, _)) = (strike(false), strike(true));
     let strip = |ticks: &[Vec<(Entity, Load)>]| -> Vec<Vec<Load>> {
         ticks
             .iter()
@@ -1878,11 +1880,12 @@ fn no_bodys_kind_enters_a_contacts_loads() {
     );
     let loads: Vec<Load> = plain.into_iter().flatten().map(|(_, load)| load).collect();
     assert!(!loads.is_empty(), "the cube strikes the wall");
-    let blow: Vec3 = loads.iter().map(|load| load.blow).sum();
+    let blow: Vec3 = loads.iter().map(|load| load.blow + load.press * STEP).sum();
     let closing = CUBE_KG * 3.0;
+    let transferred = w * closing - final_momentum;
     assert!(
-        (blow - w * closing).length() <= 0.01 * closing,
-        "the strike's blow {blow} against its closing momentum {closing} N·s along {w}"
+        (blow - transferred).length() <= 0.01 * closing,
+        "the strike's blow {blow} against its momentum change {transferred} N·s"
     );
     let layout = &kind.layout;
     for load in &loads {
@@ -4361,8 +4364,8 @@ fn field_geometry_is_independent_of_workers_and_owner_iteration() {
     }
 }
 
-/// The game's jointless owners still wear, keep drawing holes and launch. An assessment shortcut
-/// may skip section and ring work only; it must not swallow the remaining deposit bookkeeping.
+/// The game's jointless owners still wear, keep drawing holes and launch. Having no internal
+/// stress degrees of freedom must not swallow the deposit bookkeeping.
 #[test]
 fn a_jointless_owner_still_wears_keeps_holes_and_launches() {
     // Fixture: the middle cube of a column, transferred alone with a quarter-volume deposit.
@@ -4425,9 +4428,10 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
                     let group: Vec<_> = owned.iter().map(|&c| usize::from(c)).collect();
                     breakage.live = Box::new(breakage.live.group(&group));
                 }
-                // Pre-cracked partitions exercise launches and splits without a strength calibration.
+                // Fixture separated partitions exercise launches and splits without a strength calibration.
                 if i < 2 {
                     breakage.live.state.cracked.fill(true);
+                    breakage.live.state.separated.fill(true);
                 }
                 let c = if i == 2 { 1 } else { 2 };
                 let taken = Taken {

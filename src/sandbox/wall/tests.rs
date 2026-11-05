@@ -19,11 +19,9 @@ const FIXTURE_BLAST: Blast = Blast {
     products: FIT_ONLY_PRODUCTS,
 };
 
-/// SUPPORT IS CONNECTIVITY TO AN ANCHOR THROUGH INTACT JOINTS, on the baked wall. An intact wall
-/// has no loose group (a joint the bake missed would drop chunks the moment the wall stands);
-/// cracking every joint across a region's boundary frees exactly that region, as one group; and
-/// cracking every anchor frees the whole wall as one. The sandbox's falls, and the game's later,
-/// rely on it.
+/// Support follows cohesive or closed-contact paths to an anchor. Separating every joint
+/// across a region's boundary frees that region as one group; separating every anchor frees
+/// the whole wall. The sandbox and replica departure derivations rely on this integer graph.
 #[test]
 fn a_group_with_no_intact_path_to_the_ground_falls_as_one() {
     let layout = layout();
@@ -47,6 +45,7 @@ fn a_group_with_no_intact_path_to_the_ground_falls_as_one() {
         };
         if inside(Side::Chunk(joint.a)) != inside(joint.b) {
             state.cracked[j] = true;
+            state.separated[j] = true;
         }
     }
     assert_eq!(loose_groups(structure, &state), vec![region]);
@@ -54,6 +53,7 @@ fn a_group_with_no_intact_path_to_the_ground_falls_as_one() {
     let mut state = State::new(structure);
     for (j, joint) in structure.joints.iter().enumerate() {
         state.cracked[j] = joint.b == Side::Ground;
+        state.separated[j] = state.cracked[j];
     }
     let all: Vec<usize> = (0..structure.chunks.len()).collect();
     assert_eq!(loose_groups(structure, &state), vec![all]);
