@@ -1301,6 +1301,79 @@ mod tests {
 use super::{Bond, Cause, Failure, Load, Side, State, Structure};
 use std::collections::HashMap;
 
+#[cfg(test)]
+mod split;
+
+/// Joint `j` of `structure` as an edge between local nodes `a` (centred at `a_centre`) and `b`.
+/// A `contact` edge is a one-way contact at pair friction; otherwise a fixing's slip slopes
+/// stand beside the bulk bearing, and an intrinsic seam has the bulk compliance alone.
+fn joint_edge(
+    structure: &Structure,
+    j: usize,
+    a: usize,
+    b: Option<usize>,
+    a_centre: DVec3,
+    contact: bool,
+) -> Edge {
+    let joint = &structure.joints[j];
+    let compliance = |c: usize| {
+        let chunk = &structure.chunks[c];
+        // DERIVED representative half-length of the equal-volume cube. Compliance
+        // apportions the bulk, rather than treating a baked cut as a material flaw.
+        let length = f64::from(chunk.volume).cbrt() / 2.0;
+        (
+            length / chunk.material.young,
+            length / chunk.material.shear_modulus,
+        )
+    };
+    let (mut normal, mut shear) = compliance(joint.a);
+    if let Side::Chunk(b) = joint.b {
+        let other = compliance(b);
+        normal += other.0;
+        shear += other.1;
+    }
+    let patch = structure.geometry.patch(joint, j);
+    let area = f64::from(joint.area);
+    // The f32 source direction is normalized again in the arithmetic precision of
+    // the contact law; projection requires an orthonormal normal/shear split.
+    let direction = joint.normal.as_dvec3().normalize();
+    let toward_a = if (a_centre - patch.centre).dot(direction) >= 0.0 {
+        direction
+    } else {
+        -direction
+    };
+    let other_friction = match joint.b {
+        Side::Chunk(c) => structure.chunks[c].material.friction,
+        Side::Ground => structure.chunks[joint.a].material.friction,
+    };
+    let friction = f64::from(crate::substances::pair_friction(
+        structure.chunks[joint.a].material.friction,
+        other_friction,
+    ));
+    let fixing = if contact {
+        None
+    } else {
+        joint.seam().and_then(|s| s.fixing)
+    };
+    Edge {
+        a,
+        b,
+        centre: patch.centre,
+        normal: toward_a,
+        area,
+        patch,
+        contact: contact.then_some(friction),
+        slip: None,
+        bearing: fixing.map(|_| Bearing {
+            normal: area / normal,
+            shear: area / shear,
+            friction,
+        }),
+        normal_stiffness: fixing.map_or(area / normal, |f| area * f64::from(f.normal)),
+        shear_stiffness: fixing.map_or(area / shear, |f| area * f64::from(f.shear)),
+    }
+}
+
 /// One owner's persistent graph and equilibrium state. Source addresses stay in the ledger;
 /// all numerical arrays contain only this owner's standing matter.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1482,63 +1555,15 @@ impl Assessment {
                 Side::Chunk(b) => Some(self.local[&b]),
                 Side::Ground => None,
             };
-            let compliance = |c: usize| {
-                let chunk = &structure.chunks[c];
-                // DERIVED representative half-length of the equal-volume cube. Compliance
-                // apportions the bulk, rather than treating a baked cut as a material flaw.
-                let length = f64::from(chunk.volume).cbrt() / 2.0;
-                (
-                    length / chunk.material.young,
-                    length / chunk.material.shear_modulus,
-                )
-            };
-            let (mut normal, mut shear) = compliance(joint.a);
-            if let Side::Chunk(b) = joint.b {
-                let other = compliance(b);
-                normal += other.0;
-                shear += other.1;
-            }
-            let patch = structure.geometry.patch(joint, j);
-            let area = f64::from(joint.area);
-            // The f32 source direction is normalized again in the arithmetic precision of
-            // the contact law; projection requires an orthonormal normal/shear split.
-            let direction = joint.normal.as_dvec3().normalize();
-            let toward_a = if (self.nodes[a].centre - patch.centre).dot(direction) >= 0.0 {
-                direction
-            } else {
-                -direction
-            };
-            let other_friction = match joint.b {
-                Side::Chunk(c) => structure.chunks[c].material.friction,
-                Side::Ground => structure.chunks[joint.a].material.friction,
-            };
-            let friction = f64::from(crate::substances::pair_friction(
-                structure.chunks[joint.a].material.friction,
-                other_friction,
-            ));
             let contact = state.cracked[j] || matches!(joint.bond, Bond::Resting);
-            let fixing = if contact {
-                None
-            } else {
-                joint.seam().and_then(|s| s.fixing)
-            };
-            self.edges.push(Edge {
+            self.edges.push(joint_edge(
+                structure,
+                j,
                 a,
                 b,
-                centre: patch.centre,
-                normal: toward_a,
-                area,
-                patch,
-                contact: contact.then_some(friction),
-                slip: None,
-                bearing: fixing.map(|_| Bearing {
-                    normal: area / normal,
-                    shear: area / shear,
-                    friction,
-                }),
-                normal_stiffness: fixing.map_or(area / normal, |f| area * f64::from(f.normal)),
-                shear_stiffness: fixing.map_or(area / shear, |f| area * f64::from(f.shear)),
-            });
+                self.nodes[a].centre,
+                contact,
+            ));
             self.joints.push(j);
         }
         // An isolated chunk has no internal stress degrees of freedom; connectivity releases it.
