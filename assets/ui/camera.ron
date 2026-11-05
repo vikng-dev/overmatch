@@ -1,6 +1,7 @@
 (
     lod_budget_px: (1.0, Taste("geometry screen-space detail budget when player settings are absent")),
     terrain_lod_budget_px: (1.0, Taste("terrain screen-space detail budget, independent of model LOD settings because crest error can expose a hull")),
+    terrain_lod_deviation_rungs_m: ([0.0, 0.02, 0.05, 0.10, 0.25, 0.50], Taste("terrain geometry deviation rungs; each rung also supplies an extraction trial, with measured deviation choosing the displayed rung")),
     killcam_record_wait_s: (1.0, Taste("game damage-model replay: wait from the knockout fact for a record before offering replay only")),
     pivot_lift_m: (2.5, Taste("orbit camera height above the turret ring")),
     orbit_far_m: (18.0, Taste("third-person wide framing")),

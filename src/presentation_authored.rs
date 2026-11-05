@@ -15,6 +15,7 @@ struct Camera {
     orbit_near_m: Sourced<f32>,
     lod_budget_px: Sourced<f32>,
     terrain_lod_budget_px: Sourced<f32>,
+    terrain_lod_deviation_rungs_m: Sourced<Vec<f32>>,
     killcam_record_wait_s: Sourced<f32>,
     commander_fov_before_bind_rad: Sourced<f32>,
     orbit_yaw_rad_per_pixel: Sourced<f32>,
@@ -129,6 +130,29 @@ pub(crate) fn camera_constants(text: &str) -> Result<String, String> {
             "author near <= far for the zoom interval",
         ));
     }
+    let rungs = &data.terrain_lod_deviation_rungs_m.0;
+    if rungs.len() < 2
+        || rungs[0] != 0.0
+        || rungs.iter().any(|rung| !rung.is_finite())
+        || rungs.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(refuse(
+            CAMERA_FILE,
+            "terrain_lod_deviation_rungs_m",
+            "author exact rung zero followed by finite strictly increasing deviations in metres",
+        ));
+    }
+    writeln!(
+        out,
+        "pub const TERRAIN_LOD_LADDER: [f32; {}] = [{}];",
+        rungs.len(),
+        rungs
+            .iter()
+            .map(|&rung| literal(rung))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .unwrap();
     if data.commander_fov_before_bind_rad.0 >= std::f32::consts::PI {
         return Err(refuse(
             CAMERA_FILE,
@@ -278,6 +302,11 @@ mod tests {
             ("lod_budget_px", "0.0"),
             ("terrain_lod_budget_px", "0.0"),
             ("killcam_record_wait_s", "NaN"),
+            ("terrain_lod_deviation_rungs_m", "[]"),
+            ("terrain_lod_deviation_rungs_m", "[0.0]"),
+            ("terrain_lod_deviation_rungs_m", "[0.1, 0.2]"),
+            ("terrain_lod_deviation_rungs_m", "[0.0, NaN]"),
+            ("terrain_lod_deviation_rungs_m", "[0.0, 0.1, 0.1]"),
             ("orbit_near_m", "NaN"),
             ("orbit_near_m", "0.0"),
             ("orbit_near_m", "1e30"),

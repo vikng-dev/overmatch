@@ -93,7 +93,7 @@ use crate::view::{ViewFacts, ViewProfile};
 /// MEASURED delivered set on the shipped map: {0, 0.05, 0.10, 0.25, 0.50} m (ratified).
 /// The 2 cm extraction earns no rung itself, but produces some tiles' 5 cm levels; deleting it
 /// loses those levels. One extra extraction preserves them. Tiles keep only distinct meshes.
-pub(crate) const TERRAIN_LOD_LADDER: [f32; 6] = [0.0, 0.02, 0.05, 0.10, 0.25, 0.50];
+pub(crate) use crate::camera::TERRAIN_LOD_LADDER;
 
 /// Pixel budget below which a level's deviation may project before its finer neighbour takes over.
 /// Fixed separately from model LOD settings: terrain error can hide or expose a hull at a crest.
