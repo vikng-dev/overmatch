@@ -679,6 +679,18 @@ fn a_hole_in_a_wall_drops_what_its_joints_cannot_hold_and_the_rest_arches() {
             dropped.len(),
             dropped.len() - inside,
         );
+        // Each course from the top, the opening's middle at the centre: o stands, x dropped.
+        for k in (0..courses).rev() {
+            let row: String = (0..layout.len())
+                .filter(|&c| layout[c].0 == k)
+                .map(|c| match (hole.contains(&c), dropped.contains(&c)) {
+                    (true, _) => ' ',
+                    (false, true) => 'x',
+                    (false, false) => 'o',
+                })
+                .collect();
+            println!("HOLE {label} course {k:2}: {row}");
+        }
         let beside =
             |&(k, x0, x1): &(usize, f32, f32)| (k as f32) * h < head && (x1 <= left || x0 >= right);
         assert!(

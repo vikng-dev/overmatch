@@ -669,6 +669,16 @@ a chunk or cluster whose faces lift, tip or slip as a mechanism separates and co
 releases it. Arching is not authored: compression runs across the running bond's overlaps
 because the bed joints are where the chunks overlap. No masonry flag or per-material rule exists.
 
+MEASURED (`parts::tests`, a fixture 12-course running-bond wall, observations): a hole of 11
+bricks, three courses high and four bricks wide at the base, drops nothing with the shipped brick
+seam; the event costs 1,938,632 scalar operations (the part refactor, and the kernel factor and
+solves over the wall's 139 remaining chunks). With a no-tension, no-cohesion fixture seam, 43
+bricks drop in 22 ticks: all 11 of the 45° triangle over the opening, which NCMA TEK 17-01D
+CLAIMS arching leaves to a lintel, and 32 above it in a chimney three to seven bricks wide to the
+wall's free top. A brick left on half its overlap has its centre of mass over the edge of its
+rest (DERIVED), so corbelling is marginal, and a free top gives the arch no abutment load; the chimney is
+the model's answer, not a pinned one.
+
 **Hand-checkable gates** (`parts::tests`, fixture geometry): a lintel's two pier shares
 `P/2 ± P a s / (2 s² + r²/2)`; a cantilever's interface carrying `W + P` and `W d + P L` and
 cracking at `P* = (f_t r A / 4 − W d) / L`, then tipping; a two-joint wall base cracking whole at
