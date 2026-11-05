@@ -24,9 +24,9 @@
 //! vendored crate is not patched for any of it.
 //!
 //! WHAT IT HOLDS. The last physics step's points, in Avian's constraint order, until the next step
-//! replaces them, with the step's length and a count of the steps summed, so a reader that keeps
-//! the count it last read reads each step once ([`ContactTransfers::steps`]). Each contact splits at
-//! its body's rest speed into a blow and a press ([`ContactTransfers::split_points`]).
+//! replaces them, with the step's length and a count of the steps summed. A reader retaining
+//! [`ContactTransfers::steps`] reads each step once. The structure check receives the whole
+//! transfer divided by that step; hull sweeps own the separate plastic exchange before physics.
 //!
 //! RESTING CONTACTS. A sleeping body leaves the solver, so a body that comes to rest pressing a
 //! structure (a pile on a wall, a body Avian's `ConstantForce` holds there: neither wakes it) would
@@ -38,10 +38,7 @@
 //! IMPLICIT CONTACTS. The belt applies support and traction before physics without collider
 //! constraints. Fixed construction receives its opposite reaction through [`ContactTransfers::stage`];
 //! a moving structure receives the impulse it actually took through [`ContactTransfers::stage_on_moving`],
-//! with its tick-start inertia. Both publish with that physics step. Every source's patches on
-//! one collider share a closing budget: the source mass for fixed construction, the pair's reduced
-//! mass for a moving receiver, under that impulse distribution ([`ContactTransfers::split_points`]): neither splitting a shoe footprint, nor a
-//! link's rounding of its normal, nor a curved run's turning normals can multiply a blow.
+//! with its tick-start inertia.
 //! These contacts are refreshed by the belt each tick and never enter the solver's sleeping-pair
 //! cache.
 //!
@@ -55,8 +52,7 @@ use avian3d::dynamics::solver::contact::{ContactConstraint, ContactConstraintPoi
 use avian3d::dynamics::solver::schedule::{SolverSystems, SubstepSchedule, SubstepSolverSystems};
 use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
 use avian3d::prelude::{
-    ComputedCenterOfMass, ContactGraph, PhysicsLengthUnit, PhysicsSchedule, Position, RigidBody,
-    Rotation, SleepThreshold,
+    ComputedCenterOfMass, ContactGraph, PhysicsSchedule, Position, RigidBody, Rotation,
 };
 use bevy::prelude::*;
 use bevy::tasks::{ComputeTaskPool, ParallelSlice, ParallelSliceMut, TaskPool};
@@ -93,9 +89,6 @@ pub(crate) struct ContactTransfer {
     /// How fast the body closed on the structure along the normal before the solve (m/s);
     /// negative when the two were parting.
     pub(crate) closing_speed: f32,
-    /// The body's rest speed (m/s): Avian's own, under which the library lets the body sleep
-    /// (its `SleepThreshold::linear`, in `PhysicsLengthUnit`s).
-    pub(crate) rest_speed: f32,
 }
 
 /// An implicit contact force applied before physics. Its momentum is the force integrated over
@@ -128,7 +121,7 @@ impl Resting {
 }
 
 /// A contact source's solver inertia at the step's start, in world terms, including locked
-/// axes. Shared by all its contacts: launch must count their combined momentum and torque once.
+/// axes. The transfer witness checks point effective masses against this one snapshot.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BodyInertia {
     pub(crate) centre: Vec3,
@@ -183,7 +176,6 @@ type ContactBodies<'w, 's> = Query<
     'w,
     's,
     (
-        Option<&'static SleepThreshold>,
         Option<&'static SolverBodyInertia>,
         &'static RigidBody,
         &'static Position,
@@ -206,13 +198,28 @@ impl ContactTransfers {
     }
 
     /// Stage the impulse a moving structure actually took, `receiver` its inertia then: its
-    /// closing meets the pair's reduced mass ([`Self::split_points`]).
+    /// receiver provenance is checked when the physics step publishes its transfers.
     pub(crate) fn stage_on_moving(&mut self, contact: AppliedContact, receiver: BodyInertia) {
         self.staged_receivers.insert(contact.structure, receiver);
         self.pending.push(contact);
     }
 
+    /// A pre-physics sweep removes occupied surfaces. Their staged belt forces cease with
+    /// those colliders; the caller cancels each returned force on its source before integration.
+    pub(crate) fn cancel_implicit(
+        &mut self,
+        retired: &std::collections::BTreeSet<Entity>,
+    ) -> Vec<AppliedContact> {
+        let (cancelled, retained) = self
+            .pending
+            .drain(..)
+            .partition(|contact| retired.contains(&contact.structure_collider));
+        self.pending = retained;
+        cancelled
+    }
+
     /// The source inertia recorded with this step's contacts, shared across all its points.
+    #[cfg(test)]
     pub(crate) fn inertia(&self, body: Entity) -> BodyInertia {
         *self
             .inertias
@@ -236,31 +243,13 @@ impl ContactTransfers {
         self.steps
     }
 
-    /// The last step's points, each with the blow and the press the structure took through it,
-    /// in Avian's constraint order: each constraint's transfer split at its body's rest speed (the
-    /// construction design, `.agents/docs/design/construction-destruction.md`, "Bodies in contact"). A
-    /// constraint's blow is the momentum its body's closing delivered (N·s): its points' `m_b v_n`
-    /// summed over those closing faster than the rest speed, `m_b` each point's effective mass,
-    /// and never more than the solver moved along the normal; it falls on the points in shares of
-    /// what the solver moved through each along the normal. A point's press is the rest of its
-    /// transfer, held through the step (N), friction included. The split is the constraint's, not
-    /// the point's: the solver's split of one contact's momentum among its points is its own
-    /// (MEASURED: a cube striking a wall square on at 3 m/s, 106, 67, 112 and 67 N·s through its
-    /// four corners, each corner's closing momentum 88.6 N·s).
-    ///
-    /// The fourth item is the contact's source mass (kg), the same on each of its points: the
-    /// body's effective mass for the weighted distribution of normal impulses, `(Σw)²/(wᵀKw)`
-    /// ([`Self::contact_mass`]), rotation and locked axes included. Co-normal points reduce to
-    /// the effective mass along that normal at their weighted centroid. A plastic share is linear in the blow, so points that each take their share
-    /// of one contact's blow against this mass take the contact's share once; against each
-    /// point's own effective mass (a cube's corner holds a quarter of the cube's along its face's
-    /// normal, DERIVED) the points of one contact would each spend the receiver's whole mass and
-    /// hand it up to their count times the exchange. A contact whose solver moved nothing along
-    /// its normal has no blow and no blow centroid; its points' mean stands for it, and no law
-    /// reads a source mass without a blow.
+    /// Contact forces for this step, in world coordinates. The solver already exchanged the
+    /// impulse; structure checks receive its mean force without another launch budget.
     #[cfg(test)]
-    pub(crate) fn split(&self) -> impl Iterator<Item = (&ContactTransfer, Vec3, Vec3, f32)> {
-        self.groups().flat_map(|points| self.split_points(points))
+    pub(crate) fn presses(&self) -> impl Iterator<Item = (&ContactTransfer, Vec3)> {
+        self.groups()
+            .flatten()
+            .map(|point| (point, -point.impulse / self.dt))
     }
 
     /// Raw contact groups in solver order, then canonical implicit-contact order. Instrumentation
@@ -278,124 +267,6 @@ impl ContactTransfers {
             .map(|(kept, end)| &self.points[kept.first..end])
             .chain(self.applied.values().map(Vec::as_slice))
     }
-
-    /// Solver points carry the constraint's effective masses. A source's implicit patches on one
-    /// collider share one budget whatever their normals: the blow is the impulse that stops the
-    /// source's closing along the distribution of what its closing patches moved, `m_w v_w`,
-    /// where `v_w` is their moved-weighted closing speed and `m_w` the source's effective mass
-    /// for that distribution ([`Self::contact_mass`]); on a moving structure the pair's, its
-    /// inverse the two bodies' inverses summed, as the solver's constraint mass is. Co-normal
-    /// copies of one patch, a straight run's rounded normals and a curved run's turning ones all
-    /// meet the source's mass once; a resting patch takes no share, so its press is never another
-    /// face's blow.
-    pub(crate) fn split_points<'a>(
-        &'a self,
-        points: &'a [ContactTransfer],
-    ) -> impl Iterator<Item = (&'a ContactTransfer, Vec3, Vec3, f32)> + 'a {
-        let first = points
-            .first()
-            .expect("every retained contact has at least one point");
-        let along = |point: &ContactTransfer| point.impulse.dot(point.normal);
-        let moved: f32 = points.iter().map(along).sum();
-        let solver = first.body_collider.is_some();
-        // What shares the blow: every solver point by what it moved, an implicit patch only
-        // while it closes faster than its body's rest speed.
-        let share = move |point: &ContactTransfer| {
-            if solver {
-                along(point)
-            } else if point.closing_speed > point.rest_speed {
-                along(point).max(0.0)
-            } else {
-                0.0
-            }
-        };
-        let shared: f32 = points.iter().map(share).sum();
-        let (mass, blow) = if solver {
-            let mass = if moved > 0.0 {
-                self.contact_mass(points, along)
-            } else {
-                self.contact_mass(points, |_| 1.0) // No blow: its points' mean stands for it.
-            };
-            let closing: f32 = points
-                .iter()
-                .filter(|point| point.closing_speed > point.rest_speed)
-                .map(|point| point.effective_mass * point.closing_speed)
-                .sum();
-            (mass, closing.min(moved))
-        } else if shared > 0.0 {
-            let mass = self.contact_mass(points, share);
-            let pair = match self.receivers.get(&first.structure) {
-                Some(receiver) => {
-                    let (total, inverse) = distribution(receiver, points, share);
-                    (mass.recip() + inverse / (total * total)).recip()
-                }
-                None => mass, // Fixed construction: keep checks every implicit receiver before reading it.
-            };
-            let speed = points
-                .iter()
-                .map(|point| point.closing_speed * share(point))
-                .sum::<f32>()
-                / shared;
-            (mass, (pair * speed).min(shared))
-        } else {
-            (self.contact_mass(points, |_| 1.0), 0.0) // Nothing closes: no blow.
-        };
-        points.iter().map(move |point| {
-            let blow = if shared > 0.0 {
-                point.normal * (blow * share(point) / shared)
-            } else {
-                Vec3::ZERO
-            };
-            (point, -blow, (blow - point.impulse) / self.dt, mass)
-        })
-    }
-
-    /// One contact's source mass ([`Self::split_points`]), kg: the source body's effective mass for the
-    /// distribution of unit impulses along its points' normals weighted by `weight`,
-    /// `(Σw)² / (wᵀ K w)` with `K` the source's inverse mass matrix between its points. Where the
-    /// points share one normal it is the body's effective mass along it at their weighted
-    /// centroid. Rotation and locked axes are included.
-    fn contact_mass(
-        &self,
-        points: &[ContactTransfer],
-        weight: impl Fn(&ContactTransfer) -> f32,
-    ) -> f32 {
-        let first = points
-            .first()
-            .expect("every retained contact has at least one point");
-        let (total, inverse) = distribution(&self.inertia(first.body), points, weight);
-        // Locked axes can prevent all motion along this distribution even on a dynamic body.
-        // Its effective mass is infinite, and Avian's zero effective mass moves no blow.
-        total * total / inverse
-    }
-}
-
-/// A distribution of unit impulses along `points`' normals weighted by `weight`, against a body of
-/// `inertia`: the weights' sum `Σw` and `wᵀ K w`, `K` the body's inverse mass matrix between the
-/// points, rotation and locked axes included.
-fn distribution(
-    inertia: &BodyInertia,
-    points: &[ContactTransfer],
-    weight: impl Fn(&ContactTransfer) -> f32,
-) -> (f32, f32) {
-    let (total, linear, angular) = points.iter().fold(
-        (0.0, Vec3::ZERO, Vec3::ZERO),
-        |(total, linear, angular), point| {
-            let w = weight(point);
-            (
-                total + w,
-                linear + point.normal * w,
-                angular + (point.point - inertia.centre).cross(point.normal) * w,
-            )
-        },
-    );
-    let inverse =
-        linear.dot(inertia.inverse_mass * linear) + angular.dot(inertia.inverse_inertia * angular);
-    assert!(
-        inverse.is_finite() && inverse >= 0.0 && total > 0.0,
-        "a contact's weights are positive and its solver inverse effective mass is finite and nonnegative"
-    );
-    (total, inverse)
 }
 
 /// A point's accumulated friction impulse, in its constraint's tangent basis (N·s); none without
@@ -415,7 +286,6 @@ fn prepare_constraint(
     contacts: &ContactGraph,
     structures: &Query<(), With<StructureBody>>,
     bodies: &ContactBodies,
-    length_unit: f32,
 ) -> Vec<PreparedContact> {
     let mut prepared = Vec::new();
     for structure_first in [true, false] {
@@ -452,7 +322,7 @@ fn prepare_constraint(
                 pair.collider1,
             )
         };
-        let (rest, solver, kind, position, rotation, com) = bodies
+        let (solver, kind, position, rotation, com) = bodies
             .get(body)
             .expect("each contact side is a rigid body with its required pose and centre of mass");
         let inertia = if kind.is_static() {
@@ -460,16 +330,6 @@ fn prepare_constraint(
         } else {
             solver.expect("Avian supplies solver inertia for an active moving contact body")
         };
-        let rest_speed = rest
-            .or_else(|| {
-                bodies
-                    .get(structure)
-                    .expect("the other contact side is a rigid body")
-                    .0
-            })
-            .expect("a solver contact has at least one moving side with a sleep threshold")
-            .linear
-            * length_unit;
         let inertia = BodyInertia {
             centre: position.0 + rotation.0 * com.0,
             inverse_mass: inertia.effective_inv_mass(),
@@ -488,7 +348,6 @@ fn prepare_constraint(
                 impulse: Vec3::ZERO,
                 effective_mass: point.normal_part.effective_mass,
                 closing_speed: -point.normal_speed,
-                rest_speed,
             });
             last.push((point.normal_part.impulse, friction(point)));
         }
@@ -512,17 +371,12 @@ fn prepare_constraint(
 /// Before the substeps: the resting pairs brought up to date, then a record for every point of
 /// every constraint with a structure on one side. `time` is the physics clock Avian runs its
 /// schedule on.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "contact readout reads both graphs, body properties, the physics clock and optional stats"
-)]
 fn keep(
     stages: Option<Res<crate::cost::stages::Stages>>,
     graph: Res<ConstraintGraph>,
     contacts: Res<ContactGraph>,
     structures: Query<(), With<StructureBody>>,
     bodies: ContactBodies,
-    length_unit: Res<PhysicsLengthUnit>,
     time: Res<Time>,
     mut transfers: ResMut<ContactTransfers>,
 ) {
@@ -592,15 +446,7 @@ fn keep(
         constraints
             .iter()
             .flat_map(|&(color, index, constraint)| {
-                prepare_constraint(
-                    color,
-                    index,
-                    constraint,
-                    &contacts,
-                    &structures,
-                    &bodies,
-                    length_unit.0,
-                )
+                prepare_constraint(color, index, constraint, &contacts, &structures, &bodies)
             })
             .collect::<Vec<_>>()
     });
@@ -631,14 +477,13 @@ fn keep(
     let step = *dt;
     let prepared = pending.par_splat_map(ComputeTaskPool::get(), None, |_, pending| {
         pending.iter().map(|contact| {
-            let (_, _, kind, ..) = bodies.get(contact.structure)
+            let (_, kind, ..) = bodies.get(contact.structure)
                 .expect("an implicit structural recipient survives until the contact reading");
             assert_eq!(kind.is_dynamic(), receivers.contains_key(&contact.structure),
                 "a dynamic implicit receiver requires its staged inertia; fixed construction has none");
-            let (rest, solver, _, position, rotation, com) = bodies.get(contact.body).expect(
+            let (solver, _, position, rotation, com) = bodies.get(contact.body).expect(
                 "a source that applied an implicit contact remains a dynamic body through this physics step");
             let solver = solver.expect("an implicit contact source is an active moving body");
-            let rest = rest.expect("a moving implicit contact source has its sleep threshold");
             let inertia = BodyInertia {
                 centre: position.0 + rotation.0 * com.0,
                 inverse_mass: solver.effective_inv_mass(),
@@ -657,7 +502,6 @@ fn keep(
                 impulse: contact.force * step,
                 effective_mass: if inverse > 0.0 { inverse.recip() } else { 0.0 },
                 closing_speed: contact.closing_speed,
-                rest_speed: rest.linear * length_unit.0,
             })
         }).collect::<Vec<_>>()
     });
@@ -789,7 +633,7 @@ mod tests {
 
     use avian3d::prelude::{
         Collider, ColliderDensity, ComputedMass, ConstantForce, Friction, Gravity, LinearVelocity,
-        LockedAxes, Physics, PhysicsPlugins, Restitution, RigidBody, SleepingDisabled,
+        Physics, PhysicsPlugins, Restitution, RigidBody, SleepingDisabled,
     };
     use bevy::time::TimeUpdateStrategy;
 
@@ -818,199 +662,6 @@ mod tests {
                 closing_speed: 1.0,
             });
         app.update();
-    }
-
-    /// Coplanar implicit patches share one closing-momentum budget at their centroid. Structural
-    /// laws rely on a subdivided footprint producing the same blow and press as one patch.
-    /// FIXTURE DATA: source mass 10 kg, closing speed 1 m/s, impulse 20 N·s over 0.1 s.
-    #[test]
-    fn implicit_patch_subdivision_cannot_multiply_the_source_momentum() {
-        let mut world = World::new();
-        let body = world.spawn_empty().id();
-        let structure = world.spawn_empty().id();
-        let collider = world.spawn_empty().id();
-        for copies in [1, 4] {
-            let mut transfers = ContactTransfers {
-                dt: 0.1,
-                ..default()
-            };
-            transfers.inertias.insert(
-                body,
-                BodyInertia {
-                    centre: Vec3::ZERO,
-                    inverse_mass: Vec3::splat(0.1),
-                    inverse_inertia: Mat3::IDENTITY,
-                },
-            );
-            let points = (0..copies)
-                .map(|_| ContactTransfer {
-                    structure,
-                    structure_collider: collider,
-                    body,
-                    body_collider: None,
-                    point: Vec3::ZERO,
-                    normal: Vec3::Y,
-                    impulse: Vec3::Y * (20.0 / copies as f32),
-                    effective_mass: 10.0,
-                    closing_speed: 1.0,
-                    rest_speed: 0.15,
-                })
-                .collect();
-            transfers.applied.insert((collider, body), points);
-            let (mut blow, mut press) = (Vec3::ZERO, Vec3::ZERO);
-            for (_, struck, held, mass) in transfers.split() {
-                assert_eq!(mass, 10.0);
-                blow += struck;
-                press += held;
-            }
-            assert_eq!(blow, Vec3::NEG_Y * 10.0);
-            assert_eq!(press, Vec3::NEG_Y * 100.0);
-        }
-    }
-
-    /// Fixture: a source clear of a wall; only the staged implicit patches transfer momentum.
-    fn implicit_patch_fixture() -> (App, Entity, Entity, Entity, Vec3) {
-        let mut app = world(1.0);
-        let structure = wall(&mut app);
-        let collider = app
-            .world_mut()
-            .query_filtered::<(Entity, &ChildOf), With<Collider>>()
-            .iter(app.world())
-            .find(|(_, parent)| parent.parent() == structure)
-            .map(|(collider, _)| collider)
-            .expect("the wall has its collider");
-        let centre = Vec3::new(3.0, 0.0, 0.0);
-        let body = cube(&mut app, centre, Vec3::ZERO);
-        app.update();
-        (app, structure, collider, body, centre)
-    }
-
-    /// A source pressing one collider through several links delivers at most its own closing
-    /// momentum as a blow, however each link's normal rounds: a straight belt run's links meet a
-    /// wall along normals equal in law but posed link by link. Wall and trunk laws rely on the
-    /// blow being the source's, never one budget per link. FIXTURE DATA: the 1000 kg cube clear
-    /// of the wall, closing at 1 m/s, four 128 kN patches through its centre along normals one
-    /// ulp apart.
-    #[test]
-    fn implicit_patches_with_rounded_normals_share_the_source_momentum() {
-        let (mut app, structure, collider, body, centre) = implicit_patch_fixture();
-        let normals: Vec<Vec3> = (0..4)
-            .map(|ulp| Vec3::new(0.6, f32::from_bits(0.8f32.to_bits() + ulp), 0.0))
-            .collect();
-        for &normal in &normals {
-            app.world_mut()
-                .resource_mut::<ContactTransfers>()
-                .stage(AppliedContact {
-                    structure,
-                    structure_collider: collider,
-                    body,
-                    point: centre,
-                    normal,
-                    force: normal * 128_000.0,
-                    closing_speed: 1.0,
-                });
-        }
-        app.update();
-        let transfers = app.world().resource::<ContactTransfers>();
-        let (mut blow, mut seen) = (Vec3::ZERO, 0);
-        for (point, struck, _, mass) in transfers.split().filter(|(point, ..)| point.body == body) {
-            assert_eq!(point.body_collider, None);
-            assert!(
-                (mass - 1000.0).abs() < 0.1,
-                "the cube's mass at its centre: {mass}"
-            );
-            blow += struck;
-            seen += 1;
-        }
-        assert_eq!(seen, normals.len(), "every staged patch is read");
-        let delivered = -blow.dot(normals[0]);
-        assert!(
-            delivered > 0.0 && delivered <= 1000.0 * (1.0 + 1e-4),
-            "the blow {delivered} N·s exceeds the source's closing momentum 1000 N·s"
-        );
-    }
-
-    /// A curved run's links press one collider along turning normals, and each moves far more
-    /// than the source's closing momentum: the blow is still the source's, met once. Wall and
-    /// trunk laws rely on that for any running gear's arc links, at any spread. FIXTURE DATA: the
-    /// 1000 kg cube closing at 1 m/s, four 128 kN patches through its centre along normals 1°
-    /// apart. DERIVED bound: stopping a source along normals spread 3° takes at most 0.1% more
-    /// than its closing momentum.
-    #[test]
-    fn implicit_patches_along_a_curved_run_share_the_source_momentum() {
-        let (mut app, structure, collider, body, centre) = implicit_patch_fixture();
-        for degrees in 0..4 {
-            let normal =
-                Quat::from_rotation_z((degrees as f32).to_radians()) * Vec3::new(0.6, 0.8, 0.0);
-            app.world_mut()
-                .resource_mut::<ContactTransfers>()
-                .stage(AppliedContact {
-                    structure,
-                    structure_collider: collider,
-                    body,
-                    point: centre,
-                    normal,
-                    force: normal * 128_000.0,
-                    closing_speed: 1.0,
-                });
-        }
-        app.update();
-        let transfers = app.world().resource::<ContactTransfers>();
-        let delivered: f32 = transfers
-            .split()
-            .filter(|(point, ..)| point.body == body)
-            .map(|(_, struck, ..)| struck.length())
-            .sum();
-        println!("MEASURED curved-run blow {delivered} N s against 1000 N s");
-        assert!(
-            delivered > 0.0 && delivered <= 1000.0 * 1.001,
-            "the blow {delivered} N·s exceeds the source's closing momentum 1000 N·s"
-        );
-    }
-
-    /// A resting patch takes no share of the blow. Environment construction relies on a resting
-    /// top-face press staying a press while another face is approached; staging order must not
-    /// choose the source mass. FIXTURE DATA: a cube and two orthogonal
-    /// patches at the same off-centre point, one resting and one closing.
-    #[test]
-    fn implicit_unequal_normals_preserve_resting_press_and_staging_order() {
-        let run = |reverse: bool| {
-            let (mut app, structure, collider, body, centre) = implicit_patch_fixture();
-            let mut patches = [(Vec3::Y, 0.0), (Vec3::X, 1.0)];
-            if reverse {
-                patches.reverse();
-            }
-            for (normal, closing_speed) in patches {
-                app.world_mut()
-                    .resource_mut::<ContactTransfers>()
-                    .stage(AppliedContact {
-                        structure,
-                        structure_collider: collider,
-                        body,
-                        point: centre + Vec3::new(0.0, 1.0, 0.5),
-                        normal,
-                        force: normal * 128_000.0,
-                        closing_speed,
-                    });
-            }
-            app.update();
-            let transfers = app.world().resource::<ContactTransfers>();
-            let mut result = [0; 8];
-            for (point, blow, _, mass) in transfers.split().filter(|(p, ..)| p.body == body) {
-                let slot = if point.normal == Vec3::Y { 0 } else { 4 };
-                if slot == 0 {
-                    assert_eq!(blow, Vec3::ZERO, "a resting face only presses");
-                }
-                result[slot..slot + 3].copy_from_slice(&blow.to_array().map(f32::to_bits));
-                result[slot + 3] = mass.to_bits();
-            }
-            result
-        };
-        assert_eq!(
-            run(false),
-            run(true),
-            "contact order cannot select a normal or mass"
-        );
     }
 
     /// Avian at the game's fixed 64 Hz tick, one tick per update, no gravity, with the reading
@@ -1152,8 +803,9 @@ mod tests {
                 assert!((a + b).length() < 1e-4 * a.length());
                 assert!(
                     reading
-                        .split()
-                        .any(|(p, ..)| p.structure == moving && p.body == fixed)
+                        .groups()
+                        .flatten()
+                        .any(|p| p.structure == moving && p.body == fixed)
                 );
                 observed = true;
             }
@@ -1246,172 +898,5 @@ mod tests {
                 "w {warm_start}: the press's pair names the structure first: {orders:?}"
             );
         }
-    }
-
-    /// Every step's points on `body` split ([`ContactTransfers::split_points`]) over `ticks` updates: per
-    /// step, the blow and press summed and the transfer the structure took (`−impulse`).
-    fn splits(app: &mut App, body: Entity, ticks: usize) -> Vec<(Vec3, Vec3, Vec3)> {
-        (0..ticks)
-            .map(|_| {
-                app.update();
-                let transfers = app.world().resource::<ContactTransfers>();
-                let mut sums = (Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
-                for (point, blow, press, _) in transfers.split().filter(|(p, ..)| p.body == body) {
-                    sums.0 += blow;
-                    sums.1 += press;
-                    sums.2 -= point.impulse;
-                }
-                sums
-            })
-            .collect()
-    }
-
-    /// A CONTACT IS A BLOW ABOVE ITS BODY'S OWN REST SPEED AND A PRESS BELOW IT (the game's
-    /// environment destruction model): a 1000 kg cube striking the structure square on at 3 m/s
-    /// delivers a blow of its closing momentum, 3000 N·s along the normal into the structure
-    /// within 1 % (DERIVED: a cube's corner point has a quarter of its effective mass along a face
-    /// normal, so the four points' `m_b v_n` sum to `m v`), though restitution moves half as much
-    /// again; each step's blow and press over the step make up its whole transfer. The same
-    /// strike by a cube whose `SleepThreshold` puts its rest speed above 3 m/s only presses, and a
-    /// cube a steady 5 kN holds on the structure presses 5 kN within 0.5 % with no blow. The
-    /// destruction laws rely on the split (the construction design, "Bodies in contact"): the strength
-    /// limit reads the press, the energy limit and the give-back the blow. A split at a fixed
-    /// rest speed (the strike above its body's own), at the whole normal transfer (4500 N·s), or
-    /// one that drops a striking step's press fails here. Fixture numbers are fixture data.
-    #[test]
-    fn a_contact_is_a_blow_above_its_bodys_rest_speed_and_a_press_below_it() {
-        let structure_way = Vec3::X;
-        for slow_to_rest in [false, true] {
-            let mut app = world(1.0);
-            wall(&mut app);
-            let striker = cube(&mut app, Vec3::new(-1.3, 0.0, 0.0), Vec3::X * 3.0);
-            if slow_to_rest {
-                app.world_mut().entity_mut(striker).insert(SleepThreshold {
-                    linear: 4.0,
-                    angular: 0.15,
-                });
-            }
-            let steps = splits(&mut app, striker, 30);
-            let dt = app.world().resource::<ContactTransfers>().dt;
-            let blow: Vec3 = steps.iter().map(|(blow, ..)| *blow).sum();
-            let normal: f32 = steps
-                .iter()
-                .map(|(.., taken)| taken.dot(structure_way))
-                .sum();
-            assert!(
-                normal > 1.4 * 3000.0,
-                "rest speed raised {slow_to_rest}: restitution moves more than the closing \
-                 momentum, {normal} N·s"
-            );
-            for (tick, (blow, press, taken)) in steps.iter().enumerate() {
-                assert!(
-                    (*blow + *press * dt - *taken).length() <= 1e-3,
-                    "tick {tick}: blow {blow} and press {press} make up the transfer {taken}"
-                );
-            }
-            if slow_to_rest {
-                assert_eq!(
-                    blow,
-                    Vec3::ZERO,
-                    "a strike under its body's rest speed presses"
-                );
-            } else {
-                assert!(
-                    (blow - structure_way * 3000.0).length() <= 0.01 * 3000.0,
-                    "the strike's blow {blow} against its closing momentum 3000 N·s"
-                );
-            }
-        }
-
-        let mut app = world(1.0);
-        let pressed = cube(&mut app, Vec3::new(-0.75, 0.0, 0.0), Vec3::ZERO);
-        app.world_mut().entity_mut(pressed).insert(SleepingDisabled);
-        app.update();
-        wall(&mut app);
-        app.world_mut()
-            .entity_mut(pressed)
-            .insert(ConstantForce::new(5000.0, 0.0, 0.0));
-        for (tick, (blow, press, _)) in splits(&mut app, pressed, 40).iter().enumerate().skip(20) {
-            assert_eq!(
-                *blow,
-                Vec3::ZERO,
-                "press tick {tick}: a held body delivers no blow"
-            );
-            assert!(
-                (*press - structure_way * 5000.0).length() <= 0.005 * 5000.0,
-                "press tick {tick}: the press {press} against 5 kN"
-            );
-        }
-    }
-
-    /// A CONTACT'S POINTS CARRY ONE SOURCE MASS, THE BODY'S FOR THEIR COMBINED BLOW (the game's
-    /// environment destruction model): a 1000 kg cube striking the structure square on at 3 m/s
-    /// gives every point of its contact the cube's whole mass within 2 %, though each corner's own
-    /// effective mass along the face's normal is a quarter of it (DERIVED for a cube's corner;
-    /// the solver's uneven split among the corners moves the blow's centroid off the face's
-    /// centre by a little, so not exactly). The section, rest and launch laws rely on it: each
-    /// point's plastic share of one blow against one receiver sums to the contact's share once.
-    /// Passing each point's own effective mass reads 250 kg and fails, as does a source mass that
-    /// differs between the points of one contact. Fixture numbers are fixture data.
-    #[test]
-    fn a_contacts_points_carry_its_bodys_mass_for_their_combined_blow() {
-        let mut app = world(1.0);
-        wall(&mut app);
-        let striker = cube(&mut app, Vec3::new(-1.3, 0.0, 0.0), Vec3::X * 3.0);
-        let mut struck = false;
-        for _ in 0..30 {
-            app.update();
-            let transfers = app.world().resource::<ContactTransfers>();
-            let points: Vec<(f32, Vec3, f32)> = transfers
-                .split()
-                .filter(|(point, ..)| point.body == striker)
-                .map(|(point, blow, _, mass)| (point.effective_mass, blow, mass))
-                .collect();
-            if points.iter().all(|(_, blow, _)| *blow == Vec3::ZERO) {
-                continue;
-            }
-            struck = true;
-            assert_eq!(points.len(), 4, "a face on a face meets at four corners");
-            for &(own, _, mass) in &points {
-                assert!(
-                    (own - 250.0).abs() <= 0.01 * 250.0,
-                    "a corner's own effective mass {own} kg is a quarter of the cube's"
-                );
-                assert!(
-                    (mass - 1000.0).abs() <= 0.02 * 1000.0,
-                    "the contact's source mass {mass} kg against the cube's 1000 kg"
-                );
-                assert_eq!(mass, points[0].2, "one source mass for the contact");
-            }
-            println!(
-                "MEASURED square-on contact source mass {:.2} kg, corner effective mass {:.2} kg",
-                points[0].2, points[0].0
-            );
-        }
-        assert!(struck, "the fixture cube strikes the structure");
-    }
-    /// A LOCKED BODY'S ZERO TRANSFER STILL HAS A CONTACT (the game's environment destruction
-    /// model). The contact reader must accept Avian's zero inverse response: the infinite source
-    /// mass carries no blow. Panicking on that constraint would stop the authority's law pass.
-    #[test]
-    fn a_locked_body_can_touch_without_delivering_a_blow() {
-        let mut app = world(1.0);
-        wall(&mut app);
-        let body = cube(&mut app, Vec3::new(-0.7, 0.0, 0.0), Vec3::ZERO);
-        app.world_mut()
-            .entity_mut(body)
-            .insert(LockedAxes::ALL_LOCKED);
-        let mut seen = false;
-        for _ in 0..5 {
-            app.update();
-            let transfers = app.world().resource::<ContactTransfers>();
-            for (_, blow, press, mass) in transfers.split().filter(|(p, ..)| p.body == body) {
-                seen = true;
-                assert_eq!(blow, Vec3::ZERO);
-                assert_eq!(press, Vec3::ZERO);
-                assert_eq!(mass, f32::INFINITY);
-            }
-        }
-        assert!(seen, "Avian keeps a constraint for the locked dynamic body");
     }
 }

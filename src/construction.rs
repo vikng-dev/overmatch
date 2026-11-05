@@ -39,6 +39,7 @@ pub mod attachments;
 pub(crate) mod breakage;
 pub(crate) mod fracture;
 pub mod schema;
+pub(crate) mod sweep;
 pub(crate) mod view;
 
 use attachments::Attachments;
@@ -70,6 +71,7 @@ pub(crate) struct ConstructionKind {
     /// Checked geometry and initial gravity, shared until an instance changes.
     structure: Arc<fracture::Structure>,
     equilibrium: Arc<fracture::bondsolve::Assessment>,
+    pub(crate) sweep: sweep::Geometry,
 }
 
 impl ConstructionKind {
@@ -117,6 +119,7 @@ impl ConstructionKind {
         let structure = Arc::new(layout.checked_structure(&asset)?);
         let equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest(&structure)?);
         Ok(Self {
+            sweep: sweep::Geometry::new(&layout.blocks, &structure),
             dressing: view::Dressing::bare(&layout),
             asset,
             materials,

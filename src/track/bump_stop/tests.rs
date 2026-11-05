@@ -321,7 +321,7 @@ fn side_plate_contacts_reach_the_structure_contact_reader() {
         let world = app.world();
         transferred += world
             .resource::<ContactTransfers>()
-            .split()
+            .presses()
             .filter(|(point, ..)| {
                 point.body == tank
                     && point.structure == wall

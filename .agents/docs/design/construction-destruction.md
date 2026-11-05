@@ -347,103 +347,45 @@ Existing ring geometry may remain an angular sampling stand-in if it passes the 
 
 ### Bodies in contact
 
-**Owner decision (2026-10-31, [#232](https://github.com/vikng-dev/overmatch/issues/232)): the collision model.**
-A body that touches a standing structure loads it through the same laws as a round or a blast.
-No collision scenario is written: no "tank rams wall" rule, no marker for which bodies may break things, no per-object threshold.
+Subject: the game's environment destruction, game state only. A moving body's occupied hull
+makes the hole before the physics contact solver runs (`construction::sweep`). Structural
+collapse remains the part graph's decision. Neither law names a vehicle or construction.
 
-**One load for every source.**
-A round's line, a fragment, a blast ray, any body's contact, the belt's reaction and weight enter the laws as one load on one chunk at one point: a **blow** (N·s), a **press** (N) and an **energy** (J).
-Its origin is a **field**, whose impulse its own law fixes, or a **body**, which shares momentum with whatever it frees.
+For each tick, query the body's translated or rotating convex hull against admitted chunk hulls.
+A per-design bounds tree narrows exact convex casts to nearby chunks. Each intersected standing
+chunk requires normal impulse `J = m_chunk * delta_v` to reach the body's incoming normal
+velocity. Its intact incident joints offer directional capacity
+`C = sum A * (tensile * abs(n dot d) + cohesion * length(n cross d))`.
+The sweep opens those joints when `J / dt > C`; otherwise contact reaches the structure check.
+Buried matter remains soil-held. Separated joints and noncohesive rests offer no bonded capacity.
+Strength and mass come from the admitted data; no speed threshold, contact-time taste or
+construction-specific strength adjustment enters this comparison.
 
-**Contacts are the solver's own transfers.**
-A contact's load is the momentum Avian's solver moved through each contact point in the step, normal and friction.
-Per substep that is the post-relax accumulated impulse less the share of the previous one warm starting did not reapply; restitution adds its increment after the substeps.
-`ContactPoint::normal_impulse` is not that momentum: Avian adds the whole accumulated impulse into it on every solve call, twice per substep.
-**MEASURED** 2026-10-26 on the game's 64 Hz, 6-substep solver, in a capture record not committed: it reads 1.90 × F·dt under a tank's sustained push, 1.56 × the hull's momentum change in a 5 km/h ram, 1.01× and 1.00× at 10 and 20 km/h.
-The reading (`contact_transfer`) sums Avian's public solver state for every contact between a structure and a dynamic body; the vendored crate is not patched.
-Its test holds each step's reading to the body's momentum change; there a 1000 kg cube pressed on a wall by 5 kN reads F·dt to within 10⁻⁵ through the reading and 2.000 × F·dt through `normal_impulse` (**MEASURED**, fixture data).
-A contact's transfer splits at the body's rest speed, Avian's own `SleepThreshold` (0.15 m/s by default), below which the library calls a body at rest.
-The split is a contact's (one manifold: its points `i` share a normal `n`), not a point's:
+All chunks freed by one source in a tick share one plastic rigid-motion exchange, including
+occupied inertia and off-centre torque. DERIVED: with chunk spatial mass matrix `K` about the
+source centre and source inverse response `R`, solve
+`(identity + R*K) * twist_after = twist_before` in six coordinates. Each chunk leaves with
+`v_after + omega_after cross r` and spin `omega_after`; the source takes the opposite total
+linear and angular impulse. DERIVED dissipated energy is half the exchanged spatial impulse
+dotted with the incoming twist. Locked axes route their reactions to the hosting constraint.
+The account exposes removed kinetic energy and outgoing chunk kinetic energy separately.
 
-```text
-v_i     = closing speed at point i along n
-blow    = n · min(Σ_i J_i·n, Σ m_i v_i over the points with v_i above the rest speed)
-blow_i  = blow × J_i·n / Σ_j J_j·n
-press_i = (J_i − blow_i) / dt
-```
+`breakage::sweep_intake::sweep_departure` is the departure boundary: construction/chunk identity, world
+velocity and authoritative tick. Until the decor layer routes fragments by size, it uses the
+existing occupied debris-body path. The standing owner removes the chunks immediately and the
+ledger records the joint separations; clients derive the hole at the same presentation tick.
+A retired element's staged belt reactions are cancelled before integration; surviving surfaces
+receive fresh solver contacts. A sweep never enters the structural pulse/work calculation.
 
-`m_i` is the solver's effective mass of the body along `n` at point `i`.
-The solver's split of one contact's momentum among its points is its own, so a cap point by point reads short: **MEASURED** on a 0.4 m brick cube striking house_1's wall square on at 3 m/s (fixture data), 106, 67, 112 and 67 N·s through four corners whose closing momentum is 88.6 N·s each, which reads 88 % of the cube's 354 N·s capped point by point and 99.5 % capped over the contact.
-A ram's first tick is a blow plus that tick's engine press; a parked push is a press.
+Every remaining solver transfer enters the structure check as its whole mean force `J_solver/dt`.
+Physics already changed those bodies' momenta; contact intake supplies no second blow, source
+mass share, delayed cap or give-back. Sleeping contact forces persist until their contact ends.
+Round and field impulse laws retain their own fracture-work and launch accounts.
 
-A body at rest against a structure (a pile on a wall, or a body Avian's `ConstantForce` holds there, which wakes nothing) leaves the solver when it sleeps, and the solver moves nothing through its contact.
-The reading keeps the points of the last step it did move them, once, while Avian holds the pair sleeping and touching, and drops them when the pair wakes or ends.
-Their press stands on the structure: every run of the laws on it carries the press once, and the press starts no run, so rubble asleep on a wall costs nothing until something else loads the wall.
-
-Contacts reach the laws with their blow and press at each point and one source mass per contact: the body's effective mass along the normal at the blow's centroid, the same on each of its points.
-A plastic share is linear in the blow, so the points of one contact then take its share once; read against each point's own effective mass they would each spend the receiver's whole mass (**DERIVED**: a cube's corner holds a quarter of the cube's mass along its face's normal, so a cube striking square on would hand a held group up to four times its exchange).
-The structural energy check reads the pushing pair's work (`Origin::work_share`) against the held hinge mass; rest lift and slide read it against the translating group's mass.
-A freed group launches against its whole occupied hulls’ mass and inertia, and the source receives the rest at the world contact in the same post-physics law pass, before the next solver step.
-A body blow on dust returns whole: dust has no dynamic carrier. A held chunk returns nothing; the failing tick's press stays with the standing structure. A queued contact whose chunk an earlier deposit already freed also returns whole: that chunk launched as its own body, the next physics step's solver meets it as a dynamic body, and keeping the static stop would take the source's momentum into no body.
-The strength check reads each press alongside each chunk's gravity force, at their respective points, from pressed chunks and changed supports. Navier tension uses the resultant force and moment; rests require compression, a pressure centre inside the bearing hull, and tangent force within friction. For non-coplanar bearing discs, the pressure-centre calculation uses their area-centroid height (**ASSUMED**, the existing horizontal bearing-hull approximation).
-An unchanged set of presses (chunk, point and force) on unchanged topology reuses its held verdict. A changed force or point rechecks, including a decrease or removal (the former loaded chunk remains a check seed): reducing an opposing stabilizing force can expose another load's demand, so a componentwise monotonicity assumption is unsafe. Awake presses join every deposit in the physics step once, including deposits before and after their own contact deposit. Sleeping presses still start no run; they join every run another deposit starts.
-**Built: punch rings and the two-asymptote rule** (`fracture::ring`, `ring_failure`, `ring_force_failure`, `Reading`).
-- Candidates: the loaded chunks, then those grown by one and two rings of neighbours through intact bonded joints, each bonded component a candidate unless it holds a buried chunk or an intact anchor. Rings compete with the sections on the same ratio, the worst first, in both the energy check (blows) and the strength check (gravity and presses).
-- Mechanism: a rigid translation along the summed load, projected off every joint it would press the group into. Each intact seam of the ring opens by `⟨−d·n⟩` and slides by `|d − (d·n) n|`; strength `Σ A (f_t ⟨open⟩ + c ⟨slide⟩)`, work `Σ A (G_I ⟨open⟩ + G_II ⟨slide⟩)`. The friction the group's own weight would clamp a seam with is **ASSUMED** nothing (no static solve; it errs toward failure).
-- Energy: each blow along the translation by its pair-work factor against the group's mass, against `√(2 M W)`. Strength: the force along it, the group's weight included, against the ring's strength.
-- A body's blow meets both limits on every section, ring and rest: its least mean force `blow / step` (the solver's step, `ContactTransfers::dt`) must beat the strength beside gravity and the presses, and its pair work must pay the energy. A blast's blow keeps `g(r)`; a round's line keeps the energy limit alone.
-- A seam whose data states no shear pair (`Shear::OpeningOnly`: every `Stated` attachment kind, the nailed fixing among them) answers by its opening law alone: no ring forms across it, and the section, push and rest laws read it as before. Whether a connection model (nail capacity) supplies one is open.
-- **MEASURED baseline, before the pushing-work term; not re-measured under that term:** on the shipped house (unit scale, gravity off in the harness; fixture body: a 0.4 m cube of hull mass, 46.8 t, its face square on a flat patch of the outer wall; `breakage` test harness at 64 Hz): a steady push settled in contact holds at 118.5 kN and first breaks the wall at 118.75 kN, two chunks punched out through ten joints, the breach growing to seven chunks over the next 32 ticks of the same push. A ram holds at 0.37 m/s and breaks it at 0.38 m/s (19 chunks out, the body going on at 0.377 m/s); a ram under the body's rest speed (0.12 and 0.14 m/s) is read wholly as press, `m v / dt`, and breaks four chunks by strength, while 0.16–0.37 m/s is a blow its share cannot pay: the verdict is not monotone in closing speed.
-- **Built: pushing work.** The source's continued pushing work joins the freed group's own
-  energy on every section, ring and rest. The derivation and fixture evidence live once in
-  `.agents/docs/design/construction-destruction-sweep-2.md`, "Pushing work in the energy limit".
-
-
-**Two limits on every section.**
-A force must beat the section's strength: the weight check generalised, gravity one force beside each press and each blow's least mean force `blow / dt`.
-A blow must also pay the section's energy, its pair work reaching the section through the modal mass below.
-A steady push meets the strength limit alone, so its verdict does not depend on the tick rate.
-The structure is rigid-plastic: a press below strength moves nothing and is read again each tick it persists; sub-threshold blows on a resting part are each read alone and never add (accepted).
-A blast's blow meets both at once through `g(F_R / F_peak)` ("Standoff blast", Law 3): a far burst whose peak force the section's strength holds fails it by no impulse, however large (**DERIVED** by rerunning the #237 study's disc-wall arithmetic on the sourced rows: an 88 mm HE burst's peak force on house_1's east wall stays over its base section's strength out to the burst's 23.2 m reach, so `g(r)` trims the impulse limit only from 15.0 to 13.8 m; the #237 study's ~11 m cut-off came from the misrecalled far row). A round's line keeps the energy limit alone (**ASSUMED**: its blow is over before a section moves).
-
-The disc-wall arithmetic above retains the prototype's no-gravity section capacity; it is not a
-prediction for the current hinged, gravity-loaded wall. The shipped-wall measurement and its
-negative study-burst result are recorded in `.agents/scratch/blast-b3-far-topple.md`. That report
-also preserves a non-monotone production-sampler comparison; the monotone fixed-face section-law
-fixture does not discharge that surface-representation limitation.
-
-**Body contact duration.**
-`Origin::Body::step` is the numerical physics step, not a material contact duration.
-`Load::mean_force` divides the solver's transfer by that step: a lower bound on the contact's
-peak force, not a measured peak. It is sufficient to demonstrate strength exceedance, but
-cannot demonstrate that a contact whose mean is below strength never exceeded it. For a fixed
-blow and inertia, changing the physics rate can change the strength verdict; steady force
-inputs remain rate independent because their per-step transfer scales with the step.
-The contact model has no compliance or separation-time input from which to recover a physical
-peak. Replacing the bound requires that missing material/construction truth, not a fixed
-contact-time constant. The rate-sweep evidence is in
-`.agents/scratch/blast-b3-collision-review.md`.
-
-**Structures stay solid to the physics engine (option B).**
-Avian stops a body against a standing structure as against any static body, and the laws judge every joint from the contact's real transfer.
-A section's energy check includes the pushing work (`construction-destruction-sweep-2.md`, "Pushing work in the energy limit"), using the group's effective mass about its hinge; a field's blow reaches it whole.
-A group that breaks free leaves with the plastic share against its free effective mass, `J_launch = blow × m_f / (m_b + m_f)`.
-The body gets back `blow − J_launch` at the contact point, so a body that breaks through slows by the momentum the freed group took, no more.
-No energy is created (**DERIVED**): the pair would keep `J²/2(m_b + m_f)`, and before the launch each body blow on the freed group is scaled by `√(1 − W/E)` for every energy opening about it (`fracture::debit_work`; the opening read `E = D²/2M` and spent `W = C²/2M`), so the pair leaves with what the work left, the plastic loss `½ m_red v_n²` beside it; the momentum the blow gives up stays with the structure the seams held to.
-The launch reads the free mass, never the hinge mass, which grows without bound near the hinge and would create energy.
-**DERIVED limit check:** at fixed blow, a source mass tending to zero gives the field's whole blow in both demand and launch; an infinite source mass gives a vanishing share.
-
-Simultaneous departures connected by shared source bodies in one contact deposit share a kinetic budget across constructions; disjoint contacts remain independent.
-Each point first takes its free-mass share. Those impulses keep their relative sizes, then one scale caps their combined exchange at the common velocity along that combined impulse.
-**DERIVED:** with scale `s`, total kinetic energy changes by `-s W + s² Q/2`, so the plastic minimum is `s = W/Q`, clamped to the interval from zero to one.
-`W` is the impulses' work against the sources' closing velocities, less the freed groups' field-driven motion; `Q` sums every freed group's linear and angular response and each source body's response to its **combined** impulse and torque.
-The source response uses the solver's recorded inertia, including locked axes. A source is counted once even when it frees several groups; several sources freeing one group count that carrier once.
-Fields keep their whole impulse. The cap can only reduce body shares, and the complement still returns at each contact point.
-This prevents independent shares from creating energy when simultaneous contacts share bodies. It preserves the isolated-contact formula; it does not re-solve the relative contact distribution chosen by the static solver.
-
-**Rejected: option A**, every piece a finite-mass body joined by breakable springs inside the solver: the compliant-seam reference model below, run in Avian with custom joints.
-Its visible result is the same, since masonry does not visibly flex, and no study could bound its cost: **DERIVED** 34,890 bodies and 97,980 joints and anchors with 30 houses in play, from house_1's 1,163 chunks, 3,185 joints and 81 anchors (**MEASURED**, `house_1.construction.ron`).
-Reopen it only for a structure whose bending is visible: a swaying timber barn, a sagging bridge.
+DERIVED sweep work: bounds-tree traversal, one convex cast per overlapping leaf, and incident
+joint visits per intersected chunk; the plastic solve has fixed dimension. Counts are reported
+separately from the current debris creation and structural-check costs. The owner requires the
+hole within two ticks of contact. No operation count is a server-time measurement.
 
 **Trees are constructions by the same laws.**
 The prop generator authors one convex trunk element. The common cutter's grain-stretched
@@ -468,19 +410,6 @@ Wood exterior and foliage belong to the common dressing and follow their owning 
 The shared ledger carries wear, holes, dust and cracks; swaps and departures derive from those
 causes. Pieces use source construction/chunk addresses, and the shared cursor controls their
 membership as described in “One assessment path for fixed and moving chunk groups” below.
-
-**Walls fail locally by punch rings.**
-A punch ring is a patch pushed out through its surrounding joints: the chunks a tick's loads touch, grown by rings through intact bonded joints, each group with no anchor a candidate whose cut set is every live joint to the rest.
-Its capacity reads sourced masonry shear strength `c` and mode-II fracture energy `G_II`, refused at load when absent.
-Planar sections cannot see a local failure: house_1's running bond leaves no single joint, and no coplanar set short of a whole course, that isolates a chunk under a tank's nose.
-
-**Tanks.**
-A contact never doses a tank (decided 2026-10-31): the body takes the opposing momentum, through the solver and the give-back, once.
-
-**Lanes**, in order, each under 90 minutes.
-Walls ([#235](https://github.com/vikng-dev/overmatch/issues/235)): 1, the contact transfer reading; 2, one load type in place of the fracture laws' separate sources, pushes and energies, with no change in behaviour; 3, contacts into constructions, split at the rest speed; 4, the reduced mass, launch and give-back; 5, strength under gravity and presses; 6, sourced masonry shear data; 7, punch rings and the two-limit rule, where walls first break under tanks.
-Trees ([#236](https://github.com/vikng-dev/overmatch/issues/236)): 8, wood grain and root-plate data; 9, trees as structures; 10, the dynamic trunk.
-The blast's crush term is #237's Law 1 ("Standoff blast"); pricing follows the walls.
 
 ## Local response and holes
 
@@ -808,7 +737,7 @@ v = P/M
 
 Use actual surviving geometry in each term.
 A standing structure is rigid to the solver, so no structural response has moved a group before it breaks free.
-The group leaves with the momentum the load that freed it hands it, once, at carrier creation: a body's plastic share, a field's whole (see Bodies in contact).
+The group leaves with its source momentum once: the sweep's resulting velocity field, or the field impulse remaining after fracture work (see Bodies in contact).
 
 A rigid carrier is acceptable while internal relative motion is negligible.
 Retain unresolved elastic energy and seam history.
@@ -852,12 +781,11 @@ keeps it active on following ticks, even when no new deposit arrives. Spin chang
 assessment. Fixed and moving groups share that path; contacts remain applied loads rather than
 invented supports.
 
-A failed seam partitions ownership at the same authoritative tick. `PendingSplit` waits for
-that tick's plastic returns to reach their sources, then creates the children before publication.
+A failed seam partitions ownership at the same authoritative tick. `PendingSplit` creates children after the law stage and before publication.
 Children inherit `v + omega cross r` at their actual occupied centres of mass and the parent's
 angular velocity; their whole occupied hulls partition the parent’s occupied geometry. Contact hulls are inset independently and do not define mass, inertia or ballistic thickness. This adds no kinetic energy. The existing
 fracture-work criterion is a threshold, not a resolved cohesive dissipation/strain model.
-The initial departure's plastic exchange remains the shared launch path.
+The sweep exchanges body momentum before physics; field departures retain their field-impulse launch.
 
 `Piece` carries birth and retirement ticks (protocol revision **60**, a deliberate wire
 change shared with the module repair snapshot). A retired parent's final pose remains
@@ -1049,7 +977,7 @@ A quoted spring force alone supplies none of the missing acceleration coupling.
 |---|---|
 | Small-hole fidelity | **Decided:** a hole is a negative volume, drawn only; rounds, mass and strength ignore it (see Local response and holes). |
 | Rubble persistence and mobility | **Provisional (2026-10-31):** retain gameplay-relevant occupied geometry throughout the match; let mass, friction and track contact determine climbing or pushing. Fine presentation debris may fade. |
-| Collision loads | **Decided (2026-10-31, #232):** one load for every source; contacts read from the solver's transfers; two limits on every section; structures solid to the physics engine, a freed group taking the plastic share of the blow (option B; option A rejected); trees as structures; punch rings (see Bodies in contact). |
+| Collision loads | **Decided:** occupied body sweeps make holes by momentum and joint capacity before physics; remaining contacts feed the structural check as forces (see Bodies in contact). |
 | Contact-damage scope | **Decided (2026-10-31):** wall material never doses a tank, whether it falls, is pushed or is thrown off a hit; walls still fracture on landing and under pushing loads. |
 | Accepted strength-scaled spall | **Decided (2026-10-31):** wall ejecta are debris with no dose; the tanks' strength-scaled spall cone stays (see Spall as ejecta). |
 | Three-property material model | **Provisional (2026-10-31):** keep the summary, add sourced constitutive and attachment profiles; do not infer missing properties from strength. |

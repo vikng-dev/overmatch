@@ -792,7 +792,7 @@ pub(crate) struct Load {
     pub origin: Origin,
 }
 
-/// Where a load comes from: what its blow shares momentum with.
+/// Whether a load supplies a field impulse or a contact force already integrated by physics.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Origin {
     /// A field (a round's line, a fragment, a blast): its blow is its own law's, and it has no
@@ -802,37 +802,6 @@ pub(crate) enum Origin {
     /// impulse already changed both bodies' motion; it must never undergo another plastic
     /// exchange. Joint geometry supplies bearing directions; contacts supply applied loads.
     Contact { other: Entity, step: f32 },
-    /// A body in contact, by its entity: it shares its blow's momentum with whatever the blow
-    /// frees. `mass` is the body's effective mass along the contact normal at the combined
-    /// blow's centroid, kg, shared by that contact's points ([`crate::contact_transfer`]).
-    Body {
-        body: Entity,
-        mass: f32,
-        /// Closing speed along the normal at the solver's start, m/s; shared launch caps read it.
-        speed: f32,
-        /// The numerical physics step the solver delivered its blow within, s, not a material
-        /// contact duration. Retained contact provenance; the force solve uses its configured
-        /// numerical tick for the average pulse force (the construction design owns that limit).
-        step: f32,
-    },
-}
-
-impl Origin {
-    /// The plastic share against a receiver's inverse effective mass (kg⁻¹). DERIVED:
-    /// `m_receiver / (m_source + m_receiver)`, written without an infinite hinge mass when
-    /// a load acts on the hinge. A field is the zero-source-mass limit of this same exchange.
-    pub(crate) fn share(self, inverse_mass: f32) -> f32 {
-        let mass = match self {
-            Self::Field | Self::Contact { .. } => 0.0,
-            Self::Body { mass, .. } => mass,
-        };
-        // A locked source has no response along the contact normal. Its plastic share is the
-        // infinite-source-mass limit, including an inverse hinge mass rounded to zero.
-        if mass.is_infinite() {
-            return 0.0;
-        }
-        1.0 / (1.0 + mass * inverse_mass)
-    }
 }
 
 impl Load {
@@ -1196,8 +1165,7 @@ pub(crate) struct Failure {
     pub work: f32,
 }
 
-/// Deduct an owned share of fracture work from a departing group's field and plastic body
-/// impulses. Sum their coherent force and moment first; splitting one load into points cannot
+/// Deduct an owned share of fracture work from a departing group's field impulses. Sum their coherent force and moment first; splitting one load into points cannot
 /// change the work. Contacts already integrated by physics carry no second launch impulse.
 pub(crate) fn debit_work(
     structure: &Structure,
@@ -1237,10 +1205,7 @@ pub(crate) fn debit_work(
             continue;
         }
         let arm = load.at.as_dvec3() - centre;
-        let direction = load.blow.as_dvec3().normalize();
-        let lever = arm.cross(direction);
-        let response = 1.0 / mass + lever.dot(inverse * lever);
-        let delivered = load.blow.as_dvec3() * f64::from(load.origin.share(response as f32));
+        let delivered = load.blow.as_dvec3();
         impulse += delivered;
         angular += arm.cross(delivered);
     }
@@ -3342,24 +3307,6 @@ mod tests {
         Material::of(SubstanceRegistry::shipped_static(), "Wood")
             .expect("the shipped registry holds Wood")
             .expect("Wood states bulk facts")
-    }
-
-    /// A LOCKED SOURCE NEVER CONTRIBUTES PLASTIC DEMAND (the game's environment destruction
-    /// model). Hinge demand relies on a finite share even when a squared lever underflows to
-    /// zero. ASSUMED fixture inverse masses span zero, subnormal and ordinary responses;
-    /// DERIVED infinite-source-mass share is zero throughout.
-    #[test]
-    fn a_locked_sources_share_is_zero_even_when_hinge_response_underflows() {
-        let locked = Origin::Body {
-            body: Entity::PLACEHOLDER,
-            mass: f32::INFINITY,
-            speed: 0.0,
-            step: STEP,
-        };
-        for inverse in [0.0, 1e-45, 1e-30, 1.0] {
-            assert_eq!(locked.share(inverse), 0.0, "inverse mass {inverse}");
-            assert_eq!(Origin::Field.share(inverse), 1.0);
-        }
     }
 
     /// The game's environment scab reads the same dynamic strength the material load gate

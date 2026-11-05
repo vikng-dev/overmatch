@@ -381,6 +381,41 @@ impl Census<'_, '_> {
 }
 
 #[cfg(test)]
+pub(crate) struct FixturePlan {
+    pub(crate) instance: String,
+    pub(crate) spawn: Vec3,
+    pub(crate) rotation: Quat,
+    pub(crate) minimum_m_s: f32,
+    pub(crate) drive_ticks: usize,
+}
+
+/// Headless witnesses use the operator recipe's real parser and planner without enabling pricing.
+#[cfg(test)]
+pub(crate) fn fixture_plan(app: &App) -> FixturePlan {
+    let recipe = Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap();
+    let plan = recipe
+        .plan(
+            &app.world().resource::<crate::bake::TankBlueprint>().spec,
+            app.world().resource::<MapManifest>(),
+            app.world().get_resource::<HeightGrid>(),
+        )
+        .unwrap();
+    FixturePlan {
+        instance: recipe.instance,
+        spawn: Vec3::from_array(plan.spawn),
+        rotation: Quat::from_array(plan.rotation),
+        minimum_m_s: plan.minimum_m_s as f32,
+        drive_ticks: (recipe.drive_s
+            / app
+                .world()
+                .resource::<Time<Fixed>>()
+                .timestep()
+                .as_secs_f64())
+        .ceil() as usize,
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -535,5 +570,174 @@ mod tests {
         assert_eq!(heavier, 2.0 * distance);
         // Resolution: allow roundoff across the multiplication and divisions in the distance.
         assert!((runup(&spec, 3.0).0 - 3.0 * heavier).abs() <= 4.0 * f32::EPSILON * heavier);
+    }
+    /// The game's environment destruction: the tracked ram recipe must open occupied hull space
+    /// within the owner's two-tick contact bar, and the source must lose the momentum its chunks take.
+    /// Counts and resulting speeds are observations; the gate pins the owner's latency and conservation.
+    #[test]
+    #[ignore = "tracked ram recipe; headless observation on demand"]
+    fn tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum() {
+        use crate::construction::breakage::{Breakage, SweepAccount};
+        use crate::headless_test::{
+            FIXED_TICKS_PER_SECOND, booted_sim_on, drive_tick, start_fixed_clock,
+        };
+        use crate::tank::Controlled;
+        use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
+        let mut app = booted_sim_on(Some(crate::terrain_grid::tests::shipped_grid()));
+        start_fixed_clock(&mut app);
+        let tank = app
+            .world_mut()
+            .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+            .single(app.world())
+            .expect("one controlled ram source");
+        let plan = fixture_plan(&app);
+        let (target, ordinal) = app
+            .world_mut()
+            .query::<(Entity, &crate::scatter::MapInstance, &Breakage)>()
+            .iter(app.world())
+            .find(|(_, instance, _)| instance.id == plan.instance)
+            .map(|(entity, _, state)| (entity, state.construction))
+            .expect("recipe target is spawned");
+        app.world_mut().entity_mut(tank).insert((
+            Position(plan.spawn),
+            Rotation(plan.rotation),
+            Transform::from_translation(plan.spawn).with_rotation(plan.rotation),
+            LinearVelocity::ZERO,
+            AngularVelocity::ZERO,
+        ));
+        // Fixture settling after the planner's normal spawn drop, outside the timed driving stimulus.
+        for _ in 0..FIXED_TICKS_PER_SECOND * 2 {
+            drive_tick(&mut app, tank, 0.0, 0.0);
+        }
+        let boot = app.world().get::<Breakage>(target).unwrap();
+        println!(
+            "MEASURED recipe target at rest: chunks={}, joints={}, cracked={}, absent={}",
+            boot.live.structure.chunks.len(),
+            boot.live.structure.joints.len(),
+            boot.live.state.cracked.iter().filter(|&&c| c).count(),
+            boot.live
+                .state
+                .fate
+                .iter()
+                .filter(|&&f| f != crate::construction::fracture::Fate::Standing)
+                .count()
+        );
+        println!(
+            "DERIVED ram plan: spawn={:?}, rotation={:?}, minimum speed={}, target={:?}",
+            plan.spawn,
+            plan.rotation,
+            plan.minimum_m_s,
+            app.world().get::<Position>(target).unwrap().0
+        );
+        println!(
+            "MEASURED ram start: position={:?}, speed={:?}",
+            app.world().get::<Position>(tank).unwrap().0,
+            app.world().get::<LinearVelocity>(tank).unwrap().0
+        );
+        let mut freed = 0;
+        let mut counts = (0, 0, 0, 0);
+        let mut initial = None;
+        let mut contact = None;
+        let mut losses = Vec::new();
+        for tick in 0..plan.drive_ticks {
+            drive_tick(&mut app, tank, 1.0, 0.0);
+            let account = app.world().resource::<SweepAccount>();
+            if account.contacts.contains(&(tank, ordinal)) && contact.is_none() {
+                contact = Some(tick);
+                println!(
+                    "MEASURED first occupied contact: {:?}",
+                    account
+                        .samples
+                        .iter()
+                        .filter(
+                            |(body, construction, _, _)| *body == tank && *construction == ordinal
+                        )
+                        .collect::<Vec<_>>()
+                );
+            }
+            if contact.is_some_and(|first| tick <= first + 2) {
+                counts.0 += account.work.bounds;
+                counts.1 += account.work.casts;
+                counts.2 += account.work.joints;
+                counts.3 += account.work.queries;
+            }
+            let chunks = account
+                .chunks
+                .iter()
+                .filter(|(construction, _, _)| *construction == ordinal)
+                .count();
+            if chunks > 0 {
+                let outgoing: Vec3 = account
+                    .exchanges
+                    .iter()
+                    .map(|(_, impulse, _)| *impulse)
+                    .sum();
+                let scale: f32 = account
+                    .exchanges
+                    .iter()
+                    .map(|(_, impulse, _)| impulse.length())
+                    .sum();
+                assert!(
+                    (account.outgoing_momentum - outgoing).length() < 1e-4 * scale,
+                    "actual occupied debris mass carries the exchanged momentum"
+                );
+                initial.get_or_insert(tick);
+                freed += chunks;
+                for &(body, before, after, change) in &account.source_changes {
+                    if body != tank {
+                        continue;
+                    }
+                    let impulse = account
+                        .exchanges
+                        .iter()
+                        .find(|(source, _, _)| *source == tank)
+                        .unwrap()
+                        .1;
+                    assert!(
+                        (change - impulse).length() < 1e-3 * impulse.length(),
+                        "swept momentum equals source delta-p before the remaining physics contacts"
+                    );
+                    if losses.is_empty() {
+                        assert!(
+                            before.length() >= plan.minimum_m_s,
+                            "recipe must reach its declared speed before contact: {} < {}",
+                            before.length(),
+                            plan.minimum_m_s
+                        );
+                    }
+                    losses.push((before.length(), after.length(), impulse.length()));
+                }
+            }
+            if initial.is_some_and(|first| tick > first)
+                || contact.is_some_and(|first| tick >= first + 2)
+            {
+                break;
+            }
+        }
+        println!(
+            "MEASURED ram end: position={:?}, speed={:?}, first contact={contact:?}, first sweep={initial:?}, counts={counts:?}",
+            app.world().get::<Position>(tank).unwrap().0,
+            app.world().get::<LinearVelocity>(tank).unwrap().0
+        );
+        assert!(
+            freed > 0,
+            "the tracked recipe must reach and open its target"
+        );
+        let first = initial.unwrap();
+        assert!(
+            first <= contact.expect("the sweep records occupied contact") + 2,
+            "hole appears within two contact ticks"
+        );
+        let state = app.world().get::<Breakage>(target).unwrap();
+        let gone = state
+            .live
+            .state
+            .fate
+            .iter()
+            .filter(|&&f| f != crate::construction::fracture::Fate::Standing)
+            .count();
+        println!(
+            "MEASURED tracked ram: first sweep tick={first}, freed in two ticks={freed}, target chunks absent={gone}, bounds/casts/joints/distance queries={counts:?}, speeds and momentum={losses:?}"
+        );
     }
 }
