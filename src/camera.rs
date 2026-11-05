@@ -408,9 +408,7 @@ fn orbit_camera(
     let ease = 1.0 - (-ORBIT_ZOOM_GLIDE * time.delta_secs()).exp();
     orbit.zoom += (orbit.target_zoom - orbit.zoom) * ease;
 
-    // Orbit around the shared pivot (`orbit_pivot` — the re-aim reconstructs this same point). The
-    // camera sits on the line through the pivot along its view axis; the ground ray pulls it in
-    // near terrain.
+    // Share `orbit_pivot` with optic-exit re-aim.
     let pivot_point = orbit_pivot(tank_transform, turret_local);
     let distance = orbit.radius();
     transform.translation = orbit_body(pivot_point, transform.forward(), distance, |ray, max| {
@@ -521,7 +519,7 @@ pub(crate) fn blended_look(
     reason = "a system spanning the player camera, the controlled rig's gun and hull, the committed aim, the blend and the range tables"
 )]
 fn gunner_camera(
-    camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<PlayerView>>,
+    mut camera: Query<(&mut Transform, &mut GlobalTransform, &mut Projection), With<PlayerView>>,
     controlled: Query<(Entity, &Rig), With<Controlled>>,
     views: Query<Option<&TankViews>, With<Controlled>>,
     view_nodes: Query<&ViewNode>,
@@ -531,8 +529,11 @@ fn gunner_camera(
     ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
 ) {
+    let (mut transform, mut global_transform, mut projection) = camera
+        .single_mut()
+        .expect("gunner placement requires exactly one player camera with its pose and projection");
     let Some((tank, rig)) = crate::tank::controlled_one(controlled.single()) else {
-        return;
+        return; // No controlled tank during a possession gap.
     };
     // The VIEW gun (design §6C): the optic must ride the render-smoothed pose — the sim gun's
     // chain steps at tick rate since the sim/view split.
@@ -542,7 +543,6 @@ fn gunner_camera(
     let hull = hull
         .get(rig.hull)
         .expect("a controlled rig's hull has its global pose");
-    let (mut transform, mut global_transform, mut projection) = camera.into_inner();
 
     let theta = tables
         .get(rig.muzzle)
@@ -606,6 +606,47 @@ mod tests {
     use super::*;
     use crate::sight::BLEND_SAMPLES;
     use bevy::ecs::system::RunSystemOnce;
+
+    fn optic_placement_world(cameras: usize) -> World {
+        let mut world = World::new();
+        world.init_resource::<CommittedAim>();
+        world.init_resource::<Ranging>();
+        for _ in 0..cameras {
+            world.spawn((
+                PlayerView,
+                Transform::IDENTITY,
+                GlobalTransform::IDENTITY,
+                Projection::default(),
+            ));
+        }
+        world
+    }
+
+    /// The optic cannot silently leave the player without a view, even during possession gaps.
+    #[test]
+    #[should_panic(expected = "gunner placement requires exactly one player camera")]
+    fn gunner_placement_requires_a_camera() {
+        optic_placement_world(0)
+            .run_system_once(gunner_camera)
+            .unwrap();
+    }
+
+    /// Two camera owners are a composition bug; the player's optic must not silently freeze.
+    #[test]
+    #[should_panic(expected = "gunner placement requires exactly one player camera")]
+    fn gunner_placement_refuses_duplicate_cameras() {
+        optic_placement_world(2)
+            .run_system_once(gunner_camera)
+            .unwrap();
+    }
+
+    /// A valid camera can wait for possession without requiring a nonexistent rig's view.
+    #[test]
+    fn gunner_placement_allows_a_possession_gap() {
+        optic_placement_world(1)
+            .run_system_once(gunner_camera)
+            .unwrap();
+    }
 
     /// Only a possession gap has no FOV; the camera must read the controlled rig's authored view.
     #[test]
