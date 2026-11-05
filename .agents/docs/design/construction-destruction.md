@@ -911,6 +911,14 @@ terrain height field, then shrinking away. Its lifetime is seeded within
 the oldest going first. It has no body and no collider, so no hull, round or server body meets
 it, and two players drawing one event at one cursor draw one pose.
 
+**MEASURED** on the shipped house: 962 chunks of 0.74–48 kg (median 27 kg), none at the cut-off;
+seam opening work 0.42 J median, 98 J at most. Its element with the most seams (66 chunks,
+1712 kg) holds 69 J of seam work in all, the energy of a 4.1 mm drop (DERIVED `m g h`); a 1 cm
+drop frees all 66 chunks and every one is shed. So every masonry landing ends as decoration and
+leaves no server rubble. **Open (owner):** the law spends a blow's energy on the cheapest seams
+anywhere in the group; the missing truth is likely how much of an impact reaches seams away from
+where it lands, not the cut-off.
+
 ## Rubble settlement and the cap
 
 Rest requires a supported equilibrium, not merely low velocity.
