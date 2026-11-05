@@ -75,8 +75,6 @@ pub(crate) mod plate_capacity;
 /// routes fail by name, unconditionally.
 pub mod fuzz;
 
-/// The game's damage-model field casts over real geometry: finite reaches and nonnegative doses
-/// at rigid poses. Clients receive resolved reaches rather than repeating these casts.
 #[cfg(test)]
 mod field_casts;
 
