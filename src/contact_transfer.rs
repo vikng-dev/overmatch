@@ -869,14 +869,8 @@ mod tests {
         }
     }
 
-    /// A source pressing one collider through several links delivers at most its own closing
-    /// momentum as a blow, however each link's normal rounds: a straight belt run's links meet a
-    /// wall along normals equal in law but posed link by link. Wall and trunk laws rely on the
-    /// blow being the source's, never one budget per link. FIXTURE DATA: the 1000 kg cube clear
-    /// of the wall, closing at 1 m/s, four 128 kN patches through its centre along normals one
-    /// ulp apart.
-    #[test]
-    fn implicit_patches_with_rounded_normals_share_the_source_momentum() {
+    /// Fixture: a source clear of a wall; only the staged implicit patches transfer momentum.
+    fn implicit_patch_fixture() -> (App, Entity, Entity, Entity, Vec3) {
         let mut app = world(1.0);
         let structure = wall(&mut app);
         let collider = app
@@ -889,6 +883,18 @@ mod tests {
         let centre = Vec3::new(3.0, 0.0, 0.0);
         let body = cube(&mut app, centre, Vec3::ZERO);
         app.update();
+        (app, structure, collider, body, centre)
+    }
+
+    /// A source pressing one collider through several links delivers at most its own closing
+    /// momentum as a blow, however each link's normal rounds: a straight belt run's links meet a
+    /// wall along normals equal in law but posed link by link. Wall and trunk laws rely on the
+    /// blow being the source's, never one budget per link. FIXTURE DATA: the 1000 kg cube clear
+    /// of the wall, closing at 1 m/s, four 128 kN patches through its centre along normals one
+    /// ulp apart.
+    #[test]
+    fn implicit_patches_with_rounded_normals_share_the_source_momentum() {
+        let (mut app, structure, collider, body, centre) = implicit_patch_fixture();
         let normals: Vec<Vec3> = (0..4)
             .map(|ulp| Vec3::new(0.6, f32::from_bits(0.8f32.to_bits() + ulp), 0.0))
             .collect();
@@ -933,18 +939,7 @@ mod tests {
     /// than its closing momentum.
     #[test]
     fn implicit_patches_along_a_curved_run_share_the_source_momentum() {
-        let mut app = world(1.0);
-        let structure = wall(&mut app);
-        let collider = app
-            .world_mut()
-            .query_filtered::<(Entity, &ChildOf), With<Collider>>()
-            .iter(app.world())
-            .find(|(_, parent)| parent.parent() == structure)
-            .map(|(collider, _)| collider)
-            .expect("the wall has its collider");
-        let centre = Vec3::new(3.0, 0.0, 0.0);
-        let body = cube(&mut app, centre, Vec3::ZERO);
-        app.update();
+        let (mut app, structure, collider, body, centre) = implicit_patch_fixture();
         for degrees in 0..4 {
             let normal =
                 Quat::from_rotation_z((degrees as f32).to_radians()) * Vec3::new(0.6, 0.8, 0.0);
@@ -981,18 +976,7 @@ mod tests {
     #[test]
     fn implicit_unequal_normals_preserve_resting_press_and_staging_order() {
         let run = |reverse: bool| {
-            let mut app = world(1.0);
-            let structure = wall(&mut app);
-            let collider = app
-                .world_mut()
-                .query_filtered::<(Entity, &ChildOf), With<Collider>>()
-                .iter(app.world())
-                .find(|(_, p)| p.parent() == structure)
-                .unwrap()
-                .0;
-            let centre = Vec3::new(3.0, 0.0, 0.0);
-            let body = cube(&mut app, centre, Vec3::ZERO);
-            app.update();
+            let (mut app, structure, collider, body, centre) = implicit_patch_fixture();
             let mut patches = [(Vec3::Y, 0.0), (Vec3::X, 1.0)];
             if reverse {
                 patches.reverse();
