@@ -1761,7 +1761,7 @@ fn an_implicit_belt_press_reaches_the_wall_laws_reading() {
 }
 
 /// The side of the fixture's cubes, m, and their mass at brick density, kg (fixture data).
-const CUBE_SIDE: f32 = 0.4;
+pub(crate) const CUBE_SIDE: f32 = 0.4;
 const CUBE_KG: f32 = 1845.0 * CUBE_SIDE * CUBE_SIDE * CUBE_SIDE;
 
 /// A dynamic cube of [`CUBE_SIDE`] at brick density, colliding as a loose piece does, centred at
@@ -1785,7 +1785,7 @@ fn contact_cube(app: &mut App, at: Vec3, velocity: Vec3) -> Entity {
 /// the approach and the rays through the centre and the four corners of a [`CUBE_SIDE`] square
 /// about the point all meet that element first at the same depth (the fixture's choice by class,
 /// searched from the middle of the bounds outward).
-fn wall_face(kind: &ConstructionKind) -> (usize, Vec3, Vec3) {
+pub(crate) fn wall_face(kind: &ConstructionKind) -> (usize, Vec3, Vec3) {
     let layout = &kind.layout;
     let (lo, hi) = kind.bounds();
     let dir = Vec3::X;

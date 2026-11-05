@@ -2999,4 +2999,4 @@ pub(crate) fn sim_plugin(app: &mut App) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
