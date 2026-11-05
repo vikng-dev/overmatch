@@ -203,7 +203,9 @@ fn the_killer_card_reads_the_live_shooters_loaded_spec() {
 /// captive camera, then the death screen with the replay held.
 #[test]
 fn either_arrival_order_plays_the_four_beats() {
-    for record_after_s in [-1.0, 0.0, 0.3, 0.8] {
+    // Fixture arrivals leave room for receipt and presentation frames inside the authored window.
+    let timely_s = (RECORD_WAIT_S - 3.0 * STEP_S).max(0.0);
+    for record_after_s in [-STEP_S, 0.0, timely_s / 2.0, timely_s] {
         let (mut app, _, _) = killed(record_after_s);
         assert!(until(&mut app, 0.1, |app| victim(app).run().is_some()));
         // A record later than the hit beat's end opens the lesson at once.
