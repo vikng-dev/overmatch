@@ -352,6 +352,12 @@ class RamTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "malformed"):
                 collapse.ram_summary(bad, recipe)
 
+    def test_slow_impact_refuses_before_observation_deadline(self):
+        recipe, ram = self.fixture()
+        ram.update(done=None, impact=dict(tick=2, speed_m_s=8))
+        with self.assertRaisesRegex(RuntimeError, "full-speed admission"):
+            collapse.ram_summary(self.text(ram), recipe)
+
     def test_ram_waits_for_server_completion_and_accepts_rest_or_deadline(self):
         recipe, ram = self.fixture()
         self.assertIsNone(collapse.ram_summary(self.text(dict(ram, done=None)), recipe))

@@ -368,13 +368,17 @@ def ram_rows(text, recipe):
 
 def ram_summary(text, recipe):
     rows, ticks, sends, last = ram_rows(text, recipe)
-    if last is None or last["done"] is None:
+    if last is None:
         return None
     plan, impact = last["plan"], last["impact"]
-    if not impact or impact["speed_m_s"] < plan["minimum_m_s"]:
+    if impact and impact["speed_m_s"] < plan["minimum_m_s"]:
         raise RuntimeError(f"ram did not reach full-speed admission: impact={impact}, plan={plan}")
+    if last["done"] is None:
+        return None
     if last["done"] not in ("rest", "deadline"):
-        raise RuntimeError("unknown ram completion state")
+        raise RuntimeError(f"ram observation invalidated: {last['done']}")
+    if not impact:
+        raise RuntimeError("completed ram has no measured impact")
     window = [t for t in ticks if t["tick"] >= impact["tick"]]
     if not window:
         raise RuntimeError("ram has no measured contact window")

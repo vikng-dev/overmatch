@@ -27,10 +27,10 @@ const LEVER: &str = "OVERMATCH_RAM";
 #[serde(deny_unknown_fields)]
 pub(super) struct Recipe {
     instance: String,
-    heading_deg: f32,
+    heading_deg: f64,
     /// Operator margin on the ideal constant-top-gear-force acceleration distance.
-    runup_margin: f32,
-    minimum_speed_fraction: f32,
+    runup_margin: f64,
+    minimum_speed_fraction: f64,
     drive_s: f64,
     deadline_s: f64,
     settle_s: f64,
@@ -69,7 +69,7 @@ struct Plan {
     rotation: [f32; 4],
     runup_m: f32,
     governed_m_s: f32,
-    minimum_m_s: f32,
+    minimum_m_s: f64,
 }
 
 #[derive(Serialize)]
@@ -95,6 +95,14 @@ struct Send {
     us: f64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum End {
+    Rest,
+    Deadline,
+    WorldChanged,
+}
+
 #[derive(Resource)]
 pub(super) struct Ram {
     recipe: Recipe,
@@ -104,7 +112,8 @@ pub(super) struct Ram {
     impact: Option<Value>,
     impact_tick: Option<u64>,
     resting_s: f64,
-    done: Option<&'static str>,
+    done: Option<End>,
+    target: Option<Entity>,
     rows: Vec<Tick>,
     sends: Vec<Send>,
     last_send_tick: Option<u64>,
@@ -138,6 +147,7 @@ pub(super) fn install(app: &mut App, stats_on: bool) -> Result<(), LeverError> {
         impact_tick: None,
         resting_s: 0.0,
         done: None,
+        target: None,
         rows: Vec::new(),
         sends: Vec::new(),
         last_send_tick: None,
@@ -188,9 +198,9 @@ impl Ram {
                 "instance must name a construction in the active map",
             ));
         }
-        let (runup_m, governed_m_s) = runup(spec, self.recipe.runup_margin);
+        let (runup_m, governed_m_s) = runup(spec, self.recipe.runup_margin as f32);
         let rotation =
-            Quat::from_rotation_y(self.recipe.heading_deg.rem_euclid(360.0).to_radians());
+            Quat::from_rotation_y(self.recipe.heading_deg.rem_euclid(360.0).to_radians() as f32);
         let direction = rotation * Vec3::NEG_Z;
         let target = Vec3::from_array(instance.translation);
         let xz = (target - direction * runup_m).xz();
@@ -206,7 +216,7 @@ impl Ram {
             rotation: rotation.to_array(),
             runup_m,
             governed_m_s,
-            minimum_m_s: governed_m_s * self.recipe.minimum_speed_fraction,
+            minimum_m_s: f64::from(governed_m_s) * self.recipe.minimum_speed_fraction,
         };
         println!("ram_plan {}", json!({"recipe": self.recipe, "plan": plan}));
         self.plan = Some(plan);
@@ -269,13 +279,23 @@ impl Census<'_, '_> {
             return false;
         };
         ram.tick += 1;
-        if ram.impact_tick.is_none() {
+        let target = if let Some(target) = ram.target {
+            if !self.constructions.contains(target) {
+                ram.done = Some(End::WorldChanged);
+                return false;
+            }
+            target
+        } else {
             let target = self
                 .constructions
                 .iter()
                 .find(|(_, id)| id.id == ram.recipe.instance)
                 .expect("the admitted ram construction exists throughout its capture")
                 .0;
+            ram.target = Some(target);
+            target
+        };
+        if ram.impact_tick.is_none() {
             let normal_speed = self
                 .contacts
                 .split()
@@ -295,9 +315,9 @@ impl Census<'_, '_> {
         if let Some(impact_tick) = ram.impact_tick {
             ram.resting_s = if awake == 0 { ram.resting_s + dt } else { 0.0 };
             if ram.resting_s >= ram.recipe.settle_s {
-                ram.done = Some("rest");
+                ram.done = Some(End::Rest);
             } else if (ram.tick - impact_tick) as f64 * dt >= ram.recipe.deadline_s {
-                ram.done = Some("deadline");
+                ram.done = Some(End::Deadline);
             }
         }
         ram.rows.push(Tick {
@@ -329,6 +349,14 @@ mod tests {
         let text = include_str!("../../scripts/perf/ram.json");
         let valid = Recipe::parse(text).unwrap();
         let value: Value = serde_json::from_str(text).unwrap();
+        let attested = serde_json::to_value(&valid).unwrap();
+        for (key, authored) in value.as_object().unwrap() {
+            if authored.is_number() {
+                assert_eq!(attested[key].as_f64(), authored.as_f64(), "{key}");
+            } else {
+                assert_eq!(&attested[key], authored);
+            }
+        }
         for (field, bad) in [
             ("instance", json!("")),
             ("runup_margin", json!(0.5)),
@@ -346,6 +374,45 @@ mod tests {
             Recipe::parse(&serde_json::to_string(&valid).unwrap()).unwrap(),
             valid
         );
+    }
+
+    /// A Battle reset must invalidate an armed observation, rather than certify a quiet new
+    /// world as the old construction resting. The runner relies on that refusal.
+    #[test]
+    fn removed_target_refuses_the_capture() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let target = world.spawn_empty().id();
+        world.despawn(target);
+        world.init_resource::<ContactTransfers>();
+        // Fixture: the route and timing values are irrelevant once its owner is gone.
+        world.insert_resource(Ram {
+            recipe: Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap(),
+            plan: Some(Plan {
+                spawn: [0.0; 3],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                runup_m: 1.0,
+                governed_m_s: 1.0,
+                minimum_m_s: 1.0,
+            }),
+            tick: 0,
+            pre_speed: 0.0,
+            impact: None,
+            impact_tick: None,
+            resting_s: 0.0,
+            done: None,
+            target: Some(target),
+            rows: Vec::new(),
+            sends: Vec::new(),
+            last_send_tick: None,
+        });
+        let captured = world
+            .run_system_once(|mut census: Census| {
+                census.record(0.0, 0.0, 0.0, [0.0; crate::cost::stages::COUNT], 1.0)
+            })
+            .unwrap();
+        assert!(!captured);
+        assert_eq!(world.resource::<Ram>().done, Some(End::WorldChanged));
     }
 
     /// A second vehicle changes distance through its data, without a vehicle-specific route.
