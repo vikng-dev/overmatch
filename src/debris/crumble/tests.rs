@@ -61,17 +61,21 @@ impl Part {
             .sum()
     }
 
-    /// A flat landing at `speed` m/s: the part's momentum `M v` stopped within one sim step
-    /// (DERIVED, a plastic landing), shared by its lowest course (every chunk whose lowest point
-    /// lies within a millimetre of the part's) at their lowest points, upward. With the kinetic
-    /// energy it dissipates, `½ M v²`.
+    /// A flat landing on the ground at `speed` m/s ([`Self::landing_on`]).
     fn landing(&self, speed: f32) -> (Vec<Touch>, f32) {
+        self.landing_on(speed, Contactor::ground())
+    }
+
+    /// A flat landing on `against` at `speed` m/s, as the solver reads a plastic stop: the part's
+    /// momentum `M v` as one blow, shared by its lowest course (every chunk whose lowest point lies
+    /// within a millimetre of the part's) at their lowest points, upward, through the landing's
+    /// force law ([`landing_force`]). With the kinetic energy it dissipates, `½ M v²`.
+    fn landing_on(&self, speed: f32, against: Contactor) -> (Vec<Touch>, f32) {
         let floor = self.low.iter().copied().fold(f32::INFINITY, f32::min);
         let course: Vec<usize> = (0..self.group.len())
             .filter(|&i| self.low[i] - floor < 1e-3)
             .collect();
-        let dt = crate::sim_tick::sim_timestep().as_secs_f32();
-        let force = Vec3::Y * self.mass() * speed / dt / course.len() as f32;
+        let blow = Vec3::Y * self.mass() * speed / course.len() as f32;
         let touches = course
             .iter()
             .map(|&i| {
@@ -80,7 +84,7 @@ impl Part {
                 Touch {
                     chunk: c,
                     at: Vec3::new(centroid.x, self.low[i], centroid.z),
-                    force,
+                    force: landing_force(&self.structure, c, against, (blow, Vec3::ZERO, speed)),
                 }
             })
             .collect();
@@ -101,31 +105,35 @@ impl Part {
             .failures
     }
 
-    /// The least landing speed at which a bond fails, m/s (DERIVED): the free part's field is
-    /// linear in the contact force (uniform gravity cancels), so at a reference speed every
-    /// failing joint's tension, shear and compression scale by `v / v_ref`. A tension crack starts
-    /// at `v_ref · σ_t / σ`; a shear crack, where `τ = c + μ p`, at `v_ref · c / (τ − μ p)`, with
-    /// `μ p` the capacity's friction share. The seams' strengths come from the data.
-    fn threshold(&self) -> f32 {
+    /// The least speed at which a flat landing on `against` fails a bond, m/s (DERIVED): the free
+    /// part's field is linear in the contact force (uniform gravity cancels), so at a reference
+    /// speed every failing joint's tension, shear and compression scale with the force. A tension
+    /// crack starts at the force share `k = σ_t / σ`; a shear crack, where `τ = c + μ p`, at
+    /// `k = c / (τ − μ p)`, `μ p` the capacity's friction share. The Hertz peak grows as
+    /// `(m v²)^(3/5)`, so the speed scales by `k^(5/6)`. The seams' strengths and the two sides'
+    /// stiffness come from the data.
+    fn threshold(&self, against: Contactor) -> f32 {
         let reference = 100.0;
-        let (touches, _) = self.landing(reference);
-        self.failures(&touches)
+        let (touches, _) = self.landing_on(reference, against);
+        let share = self
+            .failures(&touches)
             .iter()
             .map(|failure| {
                 let seam = self.structure.joints[failure.joint]
                     .seam()
                     .expect("a loaded internal joint of a breakable part is a bond");
                 match failure.cause {
-                    Cause::Tension => reference * failure.capacity / failure.demand,
+                    Cause::Tension => failure.capacity / failure.demand,
                     Cause::Shear => {
                         let cohesion = seam.shear.cohesion;
                         let friction = failure.capacity - cohesion;
-                        reference * cohesion / (failure.demand - friction)
+                        cohesion / (failure.demand - friction)
                     }
                     cause => unreachable!("a bonded part fails by tension or shear, not {cause:?}"),
                 }
             })
-            .fold(f32::INFINITY, f32::min)
+            .fold(f32::INFINITY, f32::min);
+        reference * share.powf(5.0 / 6.0)
     }
 }
 
@@ -136,7 +144,7 @@ impl Part {
 #[test]
 fn a_short_drop_lands_whole() {
     let part = released_part();
-    let speed = part.threshold();
+    let speed = part.threshold(Contactor::ground());
     let g = crate::physical_laws::gravity_mps2();
     let height = speed * speed / (2.0 * g);
     println!(
@@ -159,7 +167,7 @@ fn a_short_drop_lands_whole() {
 #[test]
 fn a_far_drop_cracks_only_where_the_force_runs() {
     let part = released_part();
-    let (touches, energy) = part.landing(4.0 * part.threshold());
+    let (touches, energy) = part.landing(4.0 * part.threshold(Contactor::ground()));
     let result = part.crumble(&touches, energy);
     let first: Vec<usize> = part
         .failures(&touches)
@@ -195,13 +203,63 @@ fn a_far_drop_cracks_only_where_the_force_runs() {
     );
 }
 
+/// A LANDING CRACKS ALIKE AT ANY PHYSICS STEP: the solver reads one plastic stop as one blow
+/// `J = M v` and the held weight as a press, whatever its step, and the landing's force comes
+/// from the contact's stiffness, not the step. So the same far landing read at 1/32, 1/64 and
+/// 1/128 s cracks the same bonds. A force of `J / Δt` (the step's) doubles with each halving and
+/// cracks more.
+#[test]
+fn a_landing_cracks_alike_at_any_physics_step() {
+    let part = released_part();
+    let speed = 2.0 * part.threshold(Contactor::ground());
+    let weight = Vec3::Y * part.mass() * crate::physical_laws::gravity_mps2();
+    let cracks: Vec<Vec<usize>> = [1.0 / 32.0, 1.0 / 64.0, 1.0 / 128.0]
+        .iter()
+        .map(|_step: &f32| {
+            let (mut touches, energy) = part.landing(speed);
+            let share = weight / touches.len() as f32;
+            for touch in &mut touches {
+                touch.force += share; // The press: what the contact holds, in newtons, per step.
+            }
+            part.crumble(&touches, energy).cracked
+        })
+        .collect();
+    assert!(!cracks[0].is_empty(), "the landing cracks");
+    assert!(cracks.iter().all(|c| *c == cracks[0]));
+}
+
+/// SOFT GROUND CRACKS LESS: the Hertz peak scales as `E*^(2/5)` (DERIVED), and the ground's
+/// stiffness data is far below a rigid body's, so a landing that cracks bonds on a rigid floor
+/// cracks none of them on the ground. A mutant ignoring the other side's stiffness cracks both
+/// alike.
+#[test]
+fn a_landing_on_soft_ground_cracks_less_than_on_stiff() {
+    let part = released_part();
+    let chunk = Contactor::chunk(&part.structure, part.group[0]);
+    let ground = Contactor::ground();
+    let ratio = ((chunk.compliance + Contactor::RIGID.compliance)
+        / (chunk.compliance + ground.compliance))
+        .powf(0.4);
+    assert!(ratio < 1.0, "the ground is softer than a rigid floor");
+    let speed = 1.5 * part.threshold(Contactor::RIGID);
+    let (stiff, energy) = part.landing_on(speed, Contactor::RIGID);
+    let (soft, _) = part.landing_on(speed, ground);
+    let peak = |touches: &[Touch]| touches[0].force.length();
+    assert!((peak(&soft) / peak(&stiff) - ratio as f32).abs() < 1e-3);
+    let (stiff, soft) = (
+        part.crumble(&stiff, energy).cracked.len(),
+        part.crumble(&soft, energy).cracked.len(),
+    );
+    assert!(soft < stiff, "soft {soft}, stiff {stiff}");
+}
+
 /// THE ENERGY LAW: the cracks absorb at most the energy the landing dissipated, the most
 /// overloaded first, and stop at the first the rest cannot pay; with enough energy every failure
 /// of the field happens. A mutant overspending, or judging cheapest first, breaks it.
 #[test]
 fn the_cracks_absorb_at_most_the_energy_the_landing_dissipated() {
     let part = released_part();
-    let (touches, _) = part.landing(4.0 * part.threshold());
+    let (touches, _) = part.landing(4.0 * part.threshold(Contactor::ground()));
     let mut failures = part.failures(&touches);
     failures.sort_by(|a, b| {
         overload(b)

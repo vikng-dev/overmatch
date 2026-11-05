@@ -2,8 +2,10 @@
 //! state only). The construction design's "Crumble on landing" owns the narrative.
 //!
 //! THE LAW ([`crumble`]). A landing is a physics step in which a moving chunk group took a blow
-//! past its rest speed ([`ContactTransfers::split_points`]). Each contact point's transfer over
-//! that step, `F = J / Δt`, is a force on the chunk it touches; the group's chunk kernel
+//! past its rest speed ([`ContactTransfers::split_points`]). Each contact point's blow peaks as
+//! two elastic bodies stopping each other do ([`peak_force`], Hertz), from the two sides'
+//! stiffness and curvature, never from the solver's step; with the point's press it is a force on
+//! the chunk it touches. The group's chunk kernel
 //! ([`Kernel::hold`]) balances those forces by the group's rigid acceleration and judges every
 //! joint in the field that leaves: a bond past its strength cracks, a joint pulled apart parts,
 //! and the field is solved again on what is left until it holds. Cracks therefore lie where the
@@ -22,11 +24,13 @@
 
 use std::collections::BTreeMap;
 
-use avian3d::prelude::{AngularVelocity, ComputedCenterOfMass, LinearVelocity, Position, Rotation};
+use avian3d::prelude::{
+    AngularVelocity, CollisionLayers, ComputedCenterOfMass, LinearVelocity, Position, Rotation,
+};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::ShotClock;
+use crate::construction::Element;
 use crate::construction::breakage::{
     Breakage, ChunkCollider, Entry, Event, PendingSplit, Piece, Record,
 };
@@ -35,6 +39,68 @@ use crate::construction::fracture::parts::Kernel;
 use crate::construction::fracture::{Cause, Failure, Side, State, Structure};
 use crate::contact_transfer::ContactTransfers;
 use crate::physical_laws::PhysicalLaws;
+use crate::{Layer, ShotClock};
+
+/// One side of a contact: its plane-strain compliance `(1 − ν²) / E` (1/Pa, zero where rigid) and
+/// its radius of curvature (m, `None` where flat).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Contactor {
+    pub(crate) compliance: f64,
+    pub(crate) radius: Option<f64>,
+}
+
+impl Contactor {
+    /// Chunk `c`: its material's compliance (`ν = E / 2G − 1`, isotropic, from its two moduli) and
+    /// the radius of the sphere of its volume (a StandIn for the contact patch's own curvature,
+    /// which the narrow phase does not report).
+    pub(crate) fn chunk(structure: &Structure, c: usize) -> Self {
+        let chunk = &structure.chunks[c];
+        let (young, shear) = (chunk.material.young, chunk.material.shear_modulus);
+        let poisson = young / (2.0 * shear) - 1.0;
+        Self {
+            compliance: (1.0 - poisson * poisson) / young,
+            radius: Some((3.0 * f64::from(chunk.volume) / (4.0 * std::f64::consts::PI)).cbrt()),
+        }
+    }
+
+    /// The ground, flat, with its data ([`PhysicalLaws::ground_youngs_modulus_pa`]).
+    pub(crate) fn ground() -> Self {
+        let laws = PhysicalLaws::shipped();
+        let poisson = laws.ground_poisson_ratio;
+        Self {
+            compliance: (1.0 - poisson * poisson) / laws.ground_youngs_modulus_pa,
+            radius: None,
+        }
+    }
+
+    /// A body the game states no stiffness for (a hull): rigid and flat, so the chunk's own
+    /// compliance governs. StandIn for the body's material stiffness, which no body data carries.
+    pub(crate) const RIGID: Self = Self {
+        compliance: 0.0,
+        radius: None,
+    };
+}
+
+/// The peak force (N) of an elastic impact closing at `speed` m/s with effective mass `mass` kg
+/// between `a` and `b` (Hertz; K. L. Johnson, *Contact Mechanics*, Cambridge 1985, §11.4):
+/// `1/E* = Σ (1 − ν²)/E`, `1/R = Σ 1/R`, maximum approach `δ = (15 m v² / (16 E* √R))^(2/5)` and
+/// peak force `P = (4/3) E* √R δ^(3/2)`. The contact's own stiffness sets how hard it stops, so
+/// no solver step enters it.
+pub(crate) fn peak_force(mass: f64, speed: f64, a: Contactor, b: Contactor) -> f64 {
+    let stiffness = (a.compliance + b.compliance).recip();
+    let curvature: f64 = [a.radius, b.radius]
+        .iter()
+        .flatten()
+        .map(|r| r.recip())
+        .sum();
+    assert!(
+        curvature > 0.0,
+        "a landing's chunk side is curved: two flat sides make no Hertz contact"
+    );
+    let root = curvature.recip().sqrt();
+    let approach = (15.0 * mass * speed * speed / (16.0 * stiffness * root)).powf(0.4);
+    4.0 / 3.0 * stiffness * root * approach.powf(1.5)
+}
 
 /// One contact on a group, in the construction frame: the chunk it touches, the point (m) and the
 /// force the group takes there (N).
@@ -57,7 +123,7 @@ pub(crate) struct Crumble {
     /// What stays connected over the joints that did not part, each ascending, ordered by its
     /// first chunk.
     pub(crate) fragments: Vec<Vec<usize>>,
-    /// Scalar operations of the group's solve, a DERIVED count ([`Kernel::hold`]).
+    /// Scalar operations of its passes, each kernel's factorization and solve, a DERIVED count.
     pub(crate) work: u64,
 }
 
@@ -170,9 +236,9 @@ pub(crate) fn crumble(
                 ..*touch
             })
             .collect();
-        let hold =
-            Kernel::of(structure, &after, group).hold(structure, &loads(structure, group, &shared));
-        work += hold.work;
+        let kernel = Kernel::of(structure, &after, group);
+        let hold = kernel.hold(structure, &loads(structure, group, &shared));
+        work += kernel.factor.ops + hold.work;
         let mut failures = hold.failures;
         if failures.is_empty() {
             break; // The field holds.
@@ -263,11 +329,23 @@ impl Shed {
     }
 }
 
-/// One physics step's landing on a moving group: each point's collider, world point and the force
-/// the group took there (N, world), and the energy its blows dissipated (J, module doc).
+/// One contact point of a landing: the group's collider, the other side's (`None` for a track
+/// belt), the world point, the blow (N·s) and press (N) the group took there, and its closing speed
+/// (m/s).
+struct Point {
+    collider: Entity,
+    other: Option<Entity>,
+    at: Vec3,
+    blow: Vec3,
+    press: Vec3,
+    closing: f32,
+}
+
+/// One physics step's landing on a moving group: its points and the energy its blows dissipated
+/// (J, module doc).
 #[derive(Default)]
 struct Landing {
-    points: Vec<(Entity, Vec3, Vec3)>,
+    points: Vec<Point>,
     energy: f32,
 }
 
@@ -277,7 +355,6 @@ fn landings(
     transfers: &ContactTransfers,
     moving: impl Fn(Entity) -> bool,
 ) -> BTreeMap<Entity, Landing> {
-    let dt = transfers.dt();
     let mut landings: BTreeMap<Entity, Landing> = BTreeMap::new();
     for points in transfers.groups() {
         let structure = points[0].structure;
@@ -287,13 +364,39 @@ fn landings(
         let landing = landings.entry(structure).or_default();
         for (point, blow, press, _) in transfers.split_points(points) {
             landing.energy += 0.5 * blow.length() * point.closing_speed.max(0.0);
-            landing
-                .points
-                .push((point.structure_collider, point.point, blow / dt + press));
+            landing.points.push(Point {
+                collider: point.structure_collider,
+                other: point.body_collider,
+                at: point.point,
+                blow,
+                press,
+                closing: point.closing_speed,
+            });
         }
     }
     landings.retain(|_, landing| landing.energy > 0.0);
     landings
+}
+
+/// The force (N) a landing's point puts on chunk `chunk`: its blow's peak against `other`, with the
+/// effective mass a plastic stop of it moved, `m = |J| / v` (DERIVED), and its press.
+pub(crate) fn landing_force(
+    structure: &Structure,
+    chunk: usize,
+    other: Contactor,
+    (blow, press, closing): (Vec3, Vec3, f32),
+) -> Vec3 {
+    if blow == Vec3::ZERO || closing <= 0.0 {
+        return press; // No blow at this point: only what it holds.
+    }
+    let mass = f64::from(blow.length() / closing);
+    let peak = peak_force(
+        mass,
+        f64::from(closing),
+        Contactor::chunk(structure, chunk),
+        other,
+    );
+    blow.normalize() * peak as f32 + press
 }
 
 type Moving<'a> = (
@@ -306,21 +409,73 @@ type Moving<'a> = (
         &'a AngularVelocity,
         &'a ComputedCenterOfMass,
     ),
+    Has<PendingSplit>,
 );
 
-/// The physics steps' contacts, read once each, and the chunk each moving collider stands for.
+type ColliderOf<'a> = (
+    Option<&'a ChunkCollider>,
+    Option<&'a Element>,
+    Option<&'a CollisionLayers>,
+    Option<&'a ChildOf>,
+);
+
+/// The physics steps' contacts, read once each, what each collider stands for, and the placed
+/// constructions a landing may meet.
 #[derive(bevy::ecs::system::SystemParam)]
 struct Contacts<'w, 's> {
     transfers: Res<'w, ContactTransfers>,
     read: Local<'s, u64>,
-    colliders: Query<'w, 's, &'static ChunkCollider>,
+    colliders: Query<'w, 's, ColliderOf<'static>>,
+    placed: Query<'w, 's, &'static Breakage, Without<Piece>>,
+}
+
+impl Contacts<'_, '_> {
+    /// What a landing's point meets through `collider`: a construction's chunk (curved) or element
+    /// (flat) by its material, the ground by its data, and any other body (a hull, a track belt
+    /// with no collider) as [`Contactor::RIGID`].
+    fn other(&self, collider: Option<Entity>, moving: &Query<Moving>) -> Contactor {
+        let Some(collider) = collider else {
+            return Contactor::RIGID; // A track belt: a hull's.
+        };
+        let (chunk, element, layers, parent) = self
+            .colliders
+            .get(collider)
+            .expect("a solver contact's other side is a live collider");
+        let owner = parent.map(ChildOf::parent);
+        let breakage = owner.and_then(|owner| match self.placed.get(owner) {
+            Ok(breakage) => Some(breakage),
+            Err(_) => moving.get(owner).ok().map(|item| item.2),
+        });
+        match (chunk, element, breakage) {
+            (Some(&ChunkCollider(c)), _, Some(breakage)) => {
+                Contactor::chunk(&breakage.live.structure, usize::from(c))
+            }
+            (None, Some(&Element(e)), Some(breakage)) => {
+                let first = breakage
+                    .kind
+                    .layout
+                    .element_of
+                    .iter()
+                    .position(|&of| of == e)
+                    .expect("an element has chunks");
+                Contactor {
+                    radius: None, // A whole element's face is flat to the chunk landing on it.
+                    ..Contactor::chunk(&breakage.live.structure, first)
+                }
+            }
+            _ if layers.is_some_and(|layers| layers.memberships.has_all(Layer::Terrain)) => {
+                Contactor::ground()
+            }
+            _ => Contactor::RIGID,
+        }
+    }
 }
 
 /// AUTHORITY: each physics step's landings crumble the moving groups they reach (module doc). A
 /// group a field load already splits this tick keeps that split; its landing is not read twice.
 fn crumble_landings(
     mut contacts: Contacts,
-    mut groups: Query<Moving, Without<PendingSplit>>,
+    mut groups: Query<Moving>,
     clock: Option<Res<ShotClock>>,
     mut record: ResMut<Record>,
     mut shed: MessageWriter<Shed>,
@@ -330,38 +485,57 @@ fn crumble_landings(
         return;
     }
     *contacts.read = contacts.transfers.steps();
-    let colliders = &contacts.colliders;
-    let landings = landings(&contacts.transfers, |entity| groups.contains(entity));
+    let landings = landings(&contacts.transfers, |entity| {
+        groups.get(entity).is_ok_and(|item| !item.5)
+    });
     // An authority without a shot clock (a test fixture's bare sim) is at tick zero.
     let tick = clock.as_deref().map_or(0, |clock| clock.0.raw());
-    for (entity, landing) in landings {
-        let (_, piece, mut breakage, pose, (velocity, spin, centre)) = groups
+    let landings: Vec<(Entity, f32, Vec<Touch>)> = landings
+        .into_iter()
+        .map(|(entity, landing)| {
+            let (_, _, breakage, pose, _, _) = groups
+                .get(entity)
+                .expect("the landings were filtered to these groups");
+            let frame = breakage.physics_frame(pose);
+            let structure = &breakage.live.structure;
+            let touches = landing
+                .points
+                .iter()
+                .map(|point| {
+                    let chunk = usize::from(
+                        contacts
+                            .colliders
+                            .get(point.collider)
+                            .expect("a moving group's contact lies on a live collider")
+                            .0
+                            .expect("a moving group's colliders are its chunks'")
+                            .0,
+                    );
+                    let other = contacts.other(point.other, &groups);
+                    let force = landing_force(
+                        structure,
+                        chunk,
+                        other,
+                        (point.blow, point.press, point.closing),
+                    );
+                    Touch {
+                        chunk,
+                        at: frame.rotation.inverse() * (point.at - frame.translation),
+                        force: frame.rotation.inverse() * force,
+                    }
+                })
+                .collect();
+            (entity, landing.energy, touches)
+        })
+        .collect();
+    for (entity, energy, touches) in landings {
+        let (_, piece, mut breakage, pose, (velocity, spin, centre), _) = groups
             .get_mut(entity)
             .expect("the landings were filtered to these groups");
         let frame = breakage.physics_frame(pose);
-        let touches: Vec<Touch> = landing
-            .points
-            .iter()
-            .map(|&(collider, at, force)| Touch {
-                chunk: usize::from(
-                    colliders
-                        .get(collider)
-                        .expect("a moving group's contact lies on one of its chunk colliders")
-                        .0,
-                ),
-                at: frame.rotation.inverse() * (at - frame.translation),
-                force: frame.rotation.inverse() * force,
-            })
-            .collect();
         let owned: Vec<usize> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
         let live = breakage.live.as_mut();
-        let result = crumble(
-            &live.structure,
-            &live.state,
-            &owned,
-            &touches,
-            landing.energy,
-        );
+        let result = crumble(&live.structure, &live.state, &owned, &touches, energy);
         for &j in &result.cracked {
             live.state.cracked[j] = true;
         }

@@ -869,8 +869,16 @@ Code: `src/debris/crumble.rs` (law and size split), `src/debris/decor.rs` (view)
 
 **Law.** A landing is a physics step in which `contact_transfer` delivers a moving group a blow
 past its rest speed (Avian's linear `SleepThreshold`, the split between a blow and a press). Each
-contact point's transfer over the step, `F = J / Δt` (its blow over the step plus its press), is a
-force on the chunk it touches. The group's chunk kernel (**Inside a standing part**,
+contact point's blow peaks as two elastic bodies stopping each other do (Hertz impact; K. L.
+Johnson, *Contact Mechanics*, 1985, §11.4): `1/E* = Σ (1 − ν²)/E`, `1/R = Σ 1/R`, approach
+`δ = (15 m v² / (16 E* √R))^(2/5)`, peak `P = (4/3) E* √R δ^(3/2)`, with `m = |J| / v` the mass a
+plastic stop of the point moved (DERIVED). The landing chunk's side is its material (`ν` from its
+two moduli) curved as the sphere of its volume (StandIn for the patch's own curvature); the other
+side is the chunk or element it meets by that one's material, the ground by
+`ground_youngs_modulus_pa` and `ground_poisson_ratio` (`Unknown`, `physical_laws.ron`), or a body
+with no stiffness data, such as a hull, as rigid (StandIn). The solver's step enters nowhere: the
+contact's stiffness sets how hard it stops. The peak plus the point's press is a force on the chunk
+it touches. The group's chunk kernel (**Inside a standing part**,
 `Kernel::hold`) balances those forces by the group's rigid acceleration, so uniform gravity
 cancels and the internal forces are the inertial relief, and judges every joint: a bond past its
 tensile strength, or past its cohesion plus friction, cracks and bears only push; a joint the
@@ -912,14 +920,16 @@ the oldest going first. It has no body and no collider, so no hull, round or ser
 it, and two players drawing one event at one cursor draw one pose.
 
 **MEASURED** on the shipped house's element with the most internal joints (66 chunks of
-0.74–48 kg, 1712 kg; no single chunk reaches the cut-off), its impulse stopped within one 1/64 s
-step. A flat landing on its lowest course cracks nothing below a 1.59 m drop (DERIVED from the
-seams' strengths, `a_short_drop_lands_whole`); from 10 m it cracks 10 bonds and parts 3 joints and
-stays one server body. The same impulse through one corner chunk cracks 1 bond from 1 cm; from
-10 cm, 116 cracks part it into 22 fragments, 2 kept as server bodies and 20 shed. From 10 m, 28
-fragments, 1 kept. The cracks absorb 89–126 J of the landing's 1.7–168 kJ. One solve of the whole
-part costs 51,768 scalar operations (DERIVED); a cracking landing's passes cost 0.10–0.32 M, not
-counting each pass's refactoring of the part's kernel.
+0.74–48 kg, 1712 kg; no single chunk reaches the cut-off), landing on the ground. Flat, on its
+lowest course, it cracks nothing below a 0.48 m drop (DERIVED from the seams' strengths and the
+two sides' stiffness, `a_short_drop_lands_whole`; on a rigid floor, 1.1 cm); from 10 m it cracks 28
+bonds, parts 19 joints and stays one server body. Through one corner chunk, a 1 cm drop (28.6 kN
+peak) cracks nothing; 10 cm (114 kN) cracks 119 bonds into 23 fragments, 2 kept as server bodies;
+10 m, 29 fragments, 1 kept. The cracks absorb 87–122 J of the landing's 1.7–168 kJ. The corner's
+peak against this ground is close to the step-based force it replaced, so the corner's breakup
+does not come from the solver's step. A landing that cracks nothing costs 0.55 M scalar
+operations, its kernel's factorization included (DERIVED); a cracking one 1.2–3.2 M over its
+passes.
 
 ## Rubble settlement and the cap
 

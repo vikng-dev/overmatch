@@ -22,6 +22,8 @@ struct File {
     contact_friction: Sourced<f32>,
     floor_m: Sourced<f32>,
     server_fragment_kg: Sourced<f32>,
+    ground_youngs_modulus_pa: Sourced<f64>,
+    ground_poisson_ratio: Sourced<f64>,
 }
 
 #[derive(Debug)]
@@ -41,6 +43,10 @@ pub(crate) struct PhysicalLaws {
     /// The lightest construction fragment the server keeps as a body, kg; a lighter one becomes
     /// the players' decoration (`crate::debris::crumble`).
     pub server_fragment_kg: f32,
+    /// The ground's Young's modulus (Pa) and Poisson's ratio: its side of a landing's contact
+    /// stiffness (`crate::debris::crumble`).
+    pub ground_youngs_modulus_pa: f64,
+    pub ground_poisson_ratio: f64,
 }
 
 impl PhysicalLaws {
@@ -57,12 +63,18 @@ impl PhysicalLaws {
             ("cavity_inertia", file.cavity_inertia.0),
             ("contact_friction", f64::from(file.contact_friction.0)),
             ("server_fragment_kg", f64::from(file.server_fragment_kg.0)),
+            ("ground_youngs_modulus_pa", file.ground_youngs_modulus_pa.0),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!(
                     "{PATH}: {field}: author a finite positive SI value"
                 ));
             }
+        }
+        if !(0.0..0.5).contains(&file.ground_poisson_ratio.0) {
+            return Err(format!(
+                "{PATH}: ground_poisson_ratio: author an isotropic ratio in [0, 0.5)"
+            ));
         }
         file.plate_capacity.0.validate(PATH)?;
         if !file.floor_m.0.is_finite() {
@@ -92,6 +104,8 @@ impl PhysicalLaws {
             contact_friction: file.contact_friction.0,
             floor_m: file.floor_m.0,
             server_fragment_kg: file.server_fragment_kg.0,
+            ground_youngs_modulus_pa: file.ground_youngs_modulus_pa.0,
+            ground_poisson_ratio: file.ground_poisson_ratio.0,
         })
     }
 
@@ -208,6 +222,8 @@ mod tests {
         contact_friction: (0.25, Fixture("fixture")),
         floor_m: (-50.0, Fixture("fixture")),
         server_fragment_kg: (20.0, Fixture("fixture")),
+        ground_youngs_modulus_pa: (3.0e7, Fixture("fixture")),
+        ground_poisson_ratio: (0.25, Fixture("fixture")),
         reflected_impulse: ((from: 1.0, branches: [(2.0, [0.0])]), Fixture("fixture")),
         incident_impulse: ((from: 1.0, branches: [(2.0, [0.0])]), Fixture("fixture")),
         incident_pressure: ((from: 1.0, branches: [(2.0, [0.0])]), Fixture("fixture")),
@@ -228,6 +244,7 @@ mod tests {
             ("cavity_inertia", "2.0"),
             ("contact_friction", "0.25"),
             ("server_fragment_kg", "20.0"),
+            ("ground_youngs_modulus_pa", "3.0e7"),
         ] {
             for bad in ["0.0", "-1.0", "NaN", "inf"] {
                 let text =
