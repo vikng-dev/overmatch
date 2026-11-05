@@ -577,12 +577,28 @@ M = K_n B omega + K_s trace(Q) n (n dot omega)
 These are DERIVED stiffnesses, never tuned strengths. The half-side of the equal-volume cube
 apportions unresolved bulk compliance; it is not a flaw size. E comes from the material's
 Young's modulus, G from required `bulk.shear_modulus`. The latter rows explicitly label their
-isotropic analogues `Unknown`; timber anisotropy and actual fixing compliance remain unresolved.
+isotropic analogues `Unknown`; timber anisotropy remains unresolved.
 Here r is measured from the patch centroid and n is its normal. Triangle fans integrate Q
 exactly; the two directions of a thin rectangular face therefore keep their distinct section
 moduli. A circle with equal area cannot substitute for that tensor: it changes the load sharing,
 not merely the final strength readout. `AreaShare` root plates integrate each cell's share over
 the common equivalent disk, preserving their declared footprint contract under refinement.
+
+A stated attachment supplies its own normal and lateral slip slopes per area. Its fixing
+springs use `K = A k_interface`, not the timber's bulk modulus. Occupied faces separately
+supply bulk compression and friction through the same one-way contact solve, in parallel
+with the fixing; a compliant fixing must not turn solid timber bearing into a soft spring.
+Fixing strength and fracture work apply to the fixing field alone. Friction is not added again
+to its cohesive capacity, because the parallel contact already carries that reaction.
+
+For the reference non-predrilled nail, the attachment data derives the lateral slope from
+EN 1995-1-1 section 7.1's `K_ser = rho_m^1.5 d^0.8 / 30` N/mm per shear plane and fastener,
+using the declared diameter, reference mean density and fastening density. The source and
+unit conversion live with the number in `attachments.ron`. This service slip slope supplies
+elastic compliance, never a strength increase. The axial withdrawal slope remains a labelled
+Unknown lateral analogue: that standard's lateral expression is not an axial measurement.
+The roof's construction audit and owner options are in `.agents/scratch/bondsolve/roof-s3.md`;
+no house geometry, fastening declaration or strength is changed to obtain a passing verdict.
 
 Bonded patches assemble `K u = f`. Resting interfaces and closed cracked seams instead
 obey a unilateral contact law at positive-weight quadrature sites:
@@ -620,7 +636,9 @@ retains the original full-face compliance: inactive contact coordinates must not
 roundoff by changing the norm. `Progress::Iterating` names unfinished equilibrium. A failure
 stage marks changed topology for the next tick; no failure starts another solve inside its
 own tick. An unchanged equilibrated owner performs zero sparse products. Initial gravity is prepared
-once per admitted construction and scale, before play. Instances share that immutable solution
+once per admitted construction and scale, before play. Other scales may reuse an intact
+displacement guess, but still solve their own loads; no cracks, contact separation or verdicts
+are copied. Instances share that immutable solution
 until their first change; compiled overloads await the first authoritative failure stage.
 
 ### Applied loads and blows
@@ -662,8 +680,9 @@ work are integrated separately by the same patch quadrature; no global source-or
 which overloaded joint may open. All qualifying joints crack together.
 
 A rest and a closed cracked seam carry compression and friction through the projected solve.
-Loss of cohesion alone does not remove their contact or release their chunks. When the solve
-finds an escape mechanism, its moving contacts separate; the ledger records `Separate`
+Loss of cohesion alone does not remove their contact or release their chunks. A failed patch
+whose entire solved face is open already has no contact. When the solve finds an escape
+mechanism, its moving contacts separate; the ledger records `Separate`
 independently of `Crack`. Replicas derive support using those integer causes and never run a
 floating-point equilibrium calculation. Reversing joint endpoints leaves the law unchanged.
 

@@ -36,6 +36,8 @@
 //! - `throttled_usec`, `nr_throttled`: the container's CPU-quota throttling over the period, from
 //!   the cgroup's `cpu.stat` (microseconds throttled, enforcement periods throttled); null off
 //!   Linux or where the file is unreadable;
+//! - `construction`: unique recorded joint cracks and separations, and original construction
+//!   chunks departed. These are correctness counts, independent of time brackets.
 //! - `debris`: the `live` (awake) and `sleeping` loose pieces at the line, a construction's and the
 //!   debris stress lever's (`net::debris_stress`); while the lever is armed also its cumulative
 //!   `breaches` and `released`.
@@ -295,6 +297,7 @@ struct Snapshot {
     /// counter, never a line per strike, so automatic fire into husks cannot flood the log.
     husk_strikes: u64,
     workload: Option<Value>,
+    construction: Value,
     ram: Option<Value>,
 }
 
@@ -345,6 +348,7 @@ fn stats_line(snapshot: &Snapshot) -> String {
         body[name] = percentiles(summary.as_ref());
     }
     body["debris"] = snapshot.debris.clone();
+    body["construction"] = snapshot.construction.clone();
     if let Some(workload) = &snapshot.workload {
         body["loadtest"] = workload.clone();
     }
@@ -529,6 +533,35 @@ fn emit_line(
         );
         value
     });
+    let mut cracks = std::collections::BTreeSet::new();
+    let mut separated = std::collections::BTreeSet::new();
+    for entry in &record.entries {
+        match entry.event {
+            crate::construction::breakage::Event::Crack(j) => {
+                cracks.insert((entry.construction, j));
+            }
+            crate::construction::breakage::Event::Separate(j) => {
+                cracks.insert((entry.construction, j));
+                separated.insert((entry.construction, j));
+            }
+            crate::construction::breakage::Event::Wear(_)
+            | crate::construction::breakage::Event::Dust(_)
+            | crate::construction::breakage::Event::Hole(..) => {}
+        }
+    }
+    let departed: usize = census
+        .constructions
+        .iter()
+        .map(|(_, body)| {
+            body.live
+                .state
+                .fate
+                .iter()
+                .filter(|&&f| f == crate::construction::fracture::Fate::Fallen)
+                .count()
+        })
+        .sum();
+    let construction = json!({"cracked_joints": cracks.len(), "separated_joints": separated.len(), "departed_chunks": departed});
     let snapshot = Snapshot {
         elapsed,
         budget_us,
@@ -548,6 +581,7 @@ fn emit_line(
         throttled,
         husk_strikes,
         workload,
+        construction,
         ram: census.ram.as_deref_mut().map(super::ram::Ram::json),
     };
     println!("{}", stats_line(&snapshot));
@@ -882,6 +916,7 @@ mod tests {
             }),
             husk_strikes: 4,
             workload: None,
+            construction: json!({"cracked_joints": 0, "separated_joints": 0, "departed_chunks": 0}),
             ram: None,
         };
         let line = stats_line(&full);
@@ -918,6 +953,7 @@ mod tests {
                 "nr_throttled": 3,
                 "husk_strikes": 4,
                 "debris": {"live": 35, "sleeping": 140},
+                "construction": {"cracked_joints": 0, "separated_joints": 0, "departed_chunks": 0},
             })
         );
 

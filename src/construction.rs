@@ -137,11 +137,18 @@ impl ConstructionKind {
             self.structures.entry(scale.to_bits())
         {
             let structure = Arc::new(self.layout.checked_structure(&self.asset, scale)?);
-            let unit = &self.equilibria[&1.0_f32.to_bits()];
+            let (&bits, warm) = self
+                .equilibria
+                .iter()
+                .min_by(|(a, _), (b, _)| {
+                    (f32::from_bits(**a) - scale)
+                        .abs()
+                        .total_cmp(&(f32::from_bits(**b) - scale).abs())
+                })
+                .expect("construction resolution admits unit scale before any placement");
+            let ratio = f64::from(scale) / f64::from(f32::from_bits(bits));
             let equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest_scaled(
-                &structure,
-                unit,
-                f64::from(scale),
+                &structure, warm, ratio,
             )?);
             entry.insert(structure);
             self.equilibria.insert(scale.to_bits(), equilibrium);

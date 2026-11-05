@@ -15,7 +15,8 @@
 //   `fracture_energy`), the numbers' one source.
 // - `Stated(tensile_pa, fracture_energy_j_per_m2, shear_cohesion_pa, shear_fracture_energy_j_per_m2)`: a seam this list states: its tensile strength
 //   across the joint's area and shear cohesion, Pa, and mode-I and mode-II fracture energies, J/m², each authored
-//   `(value, Kind("source or reason"))` (`src/provenance.rs`). All four are required.
+//   `(value, Kind("source or reason"))` (`src/provenance.rs`). Required normal and shear interface
+//   slopes `*_stiffness_n_per_m3` supply fixing compliance; all six facts are required.
 // - `Resting`: one part laid on the other with nothing fixing it: no pull strength and no fracture
 //   work, held by its weight and the friction of the two materials alone.
 // - `RootPlate(overturning_nm_per_kg)`: a trunk's root plate in its soil, joining the trunk to the
@@ -47,6 +48,8 @@
     // .agents/scratch/collision-c6-shear-sources.md. Explicit Unknown analogues below keep
     // these missing facts visible until matched lateral tests replace them.
     "nailed": Stated(
+        normal_stiffness_n_per_m3: (8335158.158958417, Unknown("StandIn axial withdrawal slope: lateral slip-modulus analogue from shear_stiffness_n_per_m3. EN 1995-1-1 section 7.1 supplies lateral slip, not withdrawal stiffness. Settled by an axial force-displacement test for this fixing and penetration")),
+        shear_stiffness_n_per_m3: (8335158.158958417, Derived("EN 1995-1-1 section 7.1, non-predrilled nail K_ser = rho_m^1.5 d^0.8 / 30 N/mm per shear plane per fastener. Read in Swedish Wood, Design of Timber Structures volume 1 (2022), section 4.16 equation 4.35, https://www.swedishwood.com/siteassets/5-publikationer/pdfer/sw-design-of-timber-structures-vol1-2022.pdf . Reference mean density 448 kg/m3 (Wood row), diameter 3.1 mm, same assumed fastening as tensile_pa. Convert N/mm to N/m and multiply by 2 / 0.6 / 0.3125 nails/m2. Service elastic slip slope, never a strength or an axial withdrawal measurement")),
         tensile_pa: (3240.0, Derived("one nail's withdrawal capacity × 10.7 nails per m² of
             contact. One nail: CLAIMED, not read (EN 1995-1-1:2004 §8.3.2, eqs. 8.24 and 8.25,
             recalled): a smooth nail's characteristic withdrawal strength f_ax = 20e-6 ρ_k² N/mm²,

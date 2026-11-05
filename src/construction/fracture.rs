@@ -56,6 +56,14 @@ pub(crate) struct Seam {
     pub fracture_energy: f32,
     /// How it answers sliding along it.
     pub shear: Shear,
+    /// An authored interface slip slope, N/m³; intrinsic solid seams use bulk compliance.
+    pub fixing: Option<Fixing>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Fixing {
+    pub normal: f32,
+    pub shear: f32,
 }
 
 /// Cohesive shear strength (Pa) and mode-II separation work (J/m²), excluding friction.
@@ -159,6 +167,7 @@ impl Material {
             .map(|((tensile, energy), (cohesion, shear))| {
                 (
                     Seam {
+                        fixing: None,
                         tensile: tensile as f32,
                         fracture_energy: energy as f32,
                         shear: Shear {

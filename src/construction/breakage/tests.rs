@@ -1126,6 +1126,7 @@ fn past_the_cap_a_chunk_stands_until_its_pool_is_spent() {
     for joint in &mut Arc::make_mut(&mut live.structure).joints {
         if let Bond::Bonded(seam) = &mut joint.bond {
             *seam = fracture::Seam {
+                fixing: seam.fixing,
                 tensile: 1e12,
                 fracture_energy: 1e12,
                 shear: fracture::Shear {
@@ -4000,6 +4001,7 @@ fn a_marched_line_keeps_carrier_work_and_bend_at_entry() {
 fn geometry_fixture(kind: &Arc<ConstructionKind>) -> Arc<ConstructionKind> {
     let mut kind = (**kind).clone();
     let seam = fracture::Seam {
+        fixing: None,
         tensile: 1e12,
         fracture_energy: 1e12,
         shear: fracture::Shear {
@@ -4008,7 +4010,10 @@ fn geometry_fixture(kind: &Arc<ConstructionKind>) -> Arc<ConstructionKind> {
         },
     };
     for joint in &mut kind.layout.joints {
-        joint.bond = Bond::Bonded(seam);
+        joint.bond = Bond::Bonded(fracture::Seam {
+            fixing: joint.seam().and_then(|s| s.fixing),
+            ..seam
+        });
     }
     for material in &mut kind.layout.materials {
         material.seam = seam;

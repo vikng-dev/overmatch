@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 use bevy::math::Vec3;
 use serde::Deserialize;
 
-use super::fracture::{Bond, Material, Seam, Shear};
+use super::fracture::{Bond, Fixing, Material, Seam, Shear};
 use super::schema::ConstructionAsset;
 use crate::keyed_map::KeyedMap;
 use crate::physical_laws::gravity_mps2;
@@ -33,6 +33,8 @@ const ATTACHMENTS_RON: &str = include_str!("../../assets/materials/attachments.r
 enum Row {
     Seam(String),
     Stated {
+        normal_stiffness_n_per_m3: Sourced<f64>,
+        shear_stiffness_n_per_m3: Sourced<f64>,
         tensile_pa: Sourced<f64>,
         fracture_energy_j_per_m2: Sourced<f64>,
         shear_cohesion_pa: Sourced<f64>,
@@ -75,6 +77,7 @@ impl RootPlate {
             return Err("root-plate area, mass and converted tensile hold must be positive finite simulation values".into());
         }
         Ok(Seam {
+            fixing: None,
             tensile,
             fracture_energy: self.fracture_energy,
             shear: self.shear,
@@ -156,9 +159,7 @@ impl Attachments {
     fn from_ron(text: &str, registry: &SubstanceRegistry) -> Result<Self, String> {
         let KeyedMap(rows) = ron::from_str::<KeyedMap<Row>>(text).map_err(|err| {
             format!(
-                "{err} — a kind is `Seam(\"<substance>\")`, `Stated(tensile_pa: (value, \
-                 Kind(\"source\")), fracture_energy_j_per_m2: (value, Kind(\"source\")))`, \
-                 `Resting` or `RootPlate(overturning_nm_per_kg: (value, Kind(\"source\")))`"
+                "{err} — in {ATTACHMENTS_PATH}, declare Seam, Resting, RootPlate, or Stated with sourced normal/shear stiffness, strengths and fracture work; every required field must name its source"
             )
         })?;
         let kinds = rows
@@ -188,6 +189,8 @@ impl Attachments {
                             .seam,
                     )),
                     Row::Stated {
+                        normal_stiffness_n_per_m3: Sourced(normal),
+                        shear_stiffness_n_per_m3: Sourced(slip),
                         tensile_pa: Sourced(tensile),
                         fracture_energy_j_per_m2: Sourced(energy),
                         shear_cohesion_pa: Sourced(cohesion),
@@ -196,6 +199,7 @@ impl Attachments {
                         let tensile = positive("tensile_pa", tensile)?;
                         let energy = positive("fracture_energy_j_per_m2", energy)?;
                         Kind::Joint(Bond::Bonded(Seam {
+                            fixing: Some(Fixing { normal: positive("normal_stiffness_n_per_m3", normal)?, shear: positive("shear_stiffness_n_per_m3", slip)? }),
                             tensile,
                             fracture_energy: energy,
                             shear: Shear { cohesion: positive("shear_cohesion_pa", cohesion)?, energy: positive("shear_fracture_energy_j_per_m2", shear_energy)? },
@@ -346,11 +350,17 @@ mod tests {
                         .seam,
                 )),
                 Row::Stated {
+                    normal_stiffness_n_per_m3: Sourced(normal),
+                    shear_stiffness_n_per_m3: Sourced(slip),
                     tensile_pa: Sourced(tensile),
                     fracture_energy_j_per_m2: Sourced(energy),
                     shear_cohesion_pa: Sourced(cohesion),
                     shear_fracture_energy_j_per_m2: Sourced(shear_energy),
                 } => Kind::Joint(Bond::Bonded(Seam {
+                    fixing: Some(Fixing {
+                        normal: normal as f32,
+                        shear: slip as f32,
+                    }),
                     tensile: tensile as f32,
                     fracture_energy: energy as f32,
                     shear: Shear {
@@ -413,21 +423,23 @@ mod tests {
         for (kind, fields) in [
             (
                 "Stated",
-                [
+                &[
+                    ("normal_stiffness_n_per_m3", "1e6"),
+                    ("shear_stiffness_n_per_m3", "1e6"),
                     ("tensile_pa", "3240.0"),
                     ("fracture_energy_j_per_m2", "65.0"),
                     ("shear_cohesion_pa", "1e6"),
                     ("shear_fracture_energy_j_per_m2", "5.0"),
-                ],
+                ][..],
             ),
             (
                 "RootPlate",
-                [
+                &[
                     ("overturning_nm_per_kg", "150.0"),
                     ("fracture_energy_j_per_m2", "1.0"),
                     ("shear_cohesion_pa", "1e6"),
                     ("shear_fracture_energy_j_per_m2", "1.0"),
-                ],
+                ][..],
             ),
         ] {
             let authored: Vec<_> = fields
@@ -488,13 +500,13 @@ mod tests {
             for (row, field) in [
                 (
                     format!(
-                        "Stated(tensile_pa: ({value}, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")), shear_cohesion_pa: (1.0e6, Fixture(\"fixture\")), shear_fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))"
+                        "Stated(normal_stiffness_n_per_m3: (1e6, Fixture(\"fixture\")), shear_stiffness_n_per_m3: (1e6, Fixture(\"fixture\")), tensile_pa: ({value}, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")), shear_cohesion_pa: (1.0e6, Fixture(\"fixture\")), shear_fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))"
                     ),
                     "tensile_pa",
                 ),
                 (
                     format!(
-                        "Stated(tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: ({value}, Fixture(\"fixture\")), shear_cohesion_pa: (1.0e6, Fixture(\"fixture\")), shear_fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))"
+                        "Stated(normal_stiffness_n_per_m3: (1e6, Fixture(\"fixture\")), shear_stiffness_n_per_m3: (1e6, Fixture(\"fixture\")), tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: ({value}, Fixture(\"fixture\")), shear_cohesion_pa: (1.0e6, Fixture(\"fixture\")), shear_fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))"
                     ),
                     "fracture_energy_j_per_m2",
                 ),
@@ -632,8 +644,12 @@ mod tests {
         let asset = footprint();
         asset.check().unwrap();
         let masonry = [Material::of(registry(), "Brick").unwrap()];
-        let row = "Stated(tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")), shear_cohesion_pa: (1.0e6, Fixture(\"fixture\")), shear_fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))";
+        let row = "Stated(normal_stiffness_n_per_m3: (1e6, Fixture(\"fixture\")), shear_stiffness_n_per_m3: (1e6, Fixture(\"fixture\")), tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")), shear_cohesion_pa: (1.0e6, Fixture(\"fixture\")), shear_fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))";
         let expected = Bond::Bonded(Seam {
+            fixing: Some(Fixing {
+                normal: 1e6,
+                shear: 1e6,
+            }),
             tensile: 10.0,
             fracture_energy: 5.0,
             shear: Shear {

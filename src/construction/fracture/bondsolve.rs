@@ -229,12 +229,27 @@ pub(crate) struct Edge {
     pub shear_stiffness: f64,
     /// Pair friction for a one-way contact; bonded patches have no contact projection.
     pub contact: Option<f64>,
+    /// Occupied faces bear through bulk compression/friction in parallel with fixing springs.
+    pub bearing: Option<Bearing>,
+    /// A saturated Coulomb site's tangent keeps transverse stiffness, with none along slip.
+    pub slip: Option<DVec3>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Bearing {
+    normal: f64,
+    shear: f64,
+    friction: f64,
 }
 
 impl Edge {
     fn force(&self, displacement: DVec3) -> DVec3 {
         let normal = self.normal * self.normal.dot(displacement);
-        normal * self.normal_stiffness + (displacement - normal) * self.shear_stiffness
+        let mut shear = displacement - normal;
+        if let Some(direction) = self.slip {
+            shear -= direction * direction.dot(shear);
+        }
+        normal * self.normal_stiffness + shear * self.shear_stiffness
     }
 
     fn couple(&self, rotation: DVec3) -> DVec3 {
@@ -348,14 +363,18 @@ impl Problem<'_> {
 
     fn diagonal(&self) -> Vec<Wrench> {
         let mut diagonal = vec![Wrench::default(); self.nodes.len()];
-        for edge in self.edges {
-            for c in [Some(edge.a), edge.b].into_iter().flatten() {
-                let arm = edge.centre - self.nodes[c].centre;
-                for (axis, direction) in [DVec3::X, DVec3::Y, DVec3::Z].into_iter().enumerate() {
-                    diagonal[c].linear[axis] += direction.dot(edge.force(direction));
-                    let delta = direction.cross(arm);
-                    diagonal[c].angular[axis] +=
-                        delta.dot(edge.force(delta)) + direction.dot(edge.couple(direction));
+        for base in self.edges {
+            let bearing = base.contact_edge().filter(|_| base.contact.is_none());
+            for edge in std::iter::once(base).chain(bearing.as_ref()) {
+                for c in [Some(edge.a), edge.b].into_iter().flatten() {
+                    let arm = edge.centre - self.nodes[c].centre;
+                    for (axis, direction) in [DVec3::X, DVec3::Y, DVec3::Z].into_iter().enumerate()
+                    {
+                        diagonal[c].linear[axis] += direction.dot(edge.force(direction));
+                        let delta = direction.cross(arm);
+                        diagonal[c].angular[axis] +=
+                            delta.dot(edge.force(delta)) + direction.dot(edge.couple(direction));
+                    }
                 }
             }
         }
@@ -543,6 +562,20 @@ impl Krylov {
 /// Contact quadrature integrates every affine full-face spring exactly. Positive weights at
 /// perimeter vertices also retain the authored support polygon when pressure localizes there.
 impl Edge {
+    fn contact_edge(&self) -> Option<Self> {
+        if self.contact.is_some() {
+            return Some(self.clone());
+        }
+        self.bearing.map(|b| Self {
+            normal_stiffness: b.normal,
+            shear_stiffness: b.shear,
+            contact: Some(b.friction),
+            bearing: None,
+            slip: None,
+            ..self.clone()
+        })
+    }
+
     fn samples(&self) -> Vec<(DVec3, f64)> {
         match &self.patch.rim {
             Rim::Polygon(points) => {
@@ -648,39 +681,48 @@ impl Solve {
         self.adjusted = problem.loads.to_vec();
         for edge in problem.edges {
             if edge.contact.is_none() {
-                self.tangent.push(edge.clone());
-                continue;
+                self.tangent.push(Edge {
+                    bearing: None,
+                    slip: None,
+                    ..edge.clone()
+                });
             }
+            let Some(edge) = edge.contact_edge() else {
+                continue;
+            }; // An intrinsic cohesive seam has no separate contact spring.
             for (point, weight) in edge.samples() {
                 let (force, closed, sliding) =
                     edge.contact_force(problem.nodes, &self.answer, point, weight);
                 if !closed {
                     continue;
                 } // An open contact site transmits no force.
-                self.tangent.push(Edge {
+                let delta = edge.relative(problem.nodes, &self.answer, point);
+                let tangent_delta = delta - edge.normal * edge.normal.dot(delta);
+                let shear = force - edge.normal * edge.normal.dot(force);
+                let spring = Edge {
                     centre: point,
                     area: edge.area * weight,
                     patch: Patch::circle(point, edge.normal, 0.0),
                     normal_stiffness: edge.normal_stiffness * weight,
                     shear_stiffness: if sliding {
-                        0.0
+                        shear.length() / tangent_delta.length()
                     } else {
                         edge.shear_stiffness * weight
                     },
                     contact: None,
+                    bearing: None,
+                    slip: sliding.then(|| tangent_delta.normalize()),
                     ..edge.clone()
-                });
-                if sliding {
-                    let shear = force - edge.normal * edge.normal.dot(force);
-                    self.adjusted[edge.a].add(
-                        Wrench::at(shear, point - problem.nodes[edge.a].centre),
-                        -1.0,
-                    );
-                    if let Some(b) = edge.b {
-                        self.adjusted[b]
-                            .add(Wrench::at(shear, point - problem.nodes[b].centre), 1.0);
-                    }
+                };
+                // The affine term makes the frozen tangent equal the current projected
+                // force, including when the slip direction turns between active sets.
+                let bias = force - spring.force(delta);
+                self.adjusted[edge.a]
+                    .add(Wrench::at(bias, point - problem.nodes[edge.a].centre), -1.0);
+                if let Some(b) = edge.b {
+                    self.adjusted[b].add(Wrench::at(bias, point - problem.nodes[b].centre), 1.0);
                 }
+                self.tangent.push(spring);
             }
         }
         self.linear.answer.clone_from(&self.answer);
@@ -691,19 +733,7 @@ impl Solve {
     fn projected_residual(&self, problem: &Problem) -> Vec<Wrench> {
         let mut residual = problem.loads.to_vec();
         for edge in problem.edges {
-            if edge.contact.is_some() {
-                for (point, weight) in edge.samples() {
-                    let (force, _, _) =
-                        edge.contact_force(problem.nodes, &self.answer, point, weight);
-                    residual[edge.a].add(
-                        Wrench::at(force, point - problem.nodes[edge.a].centre),
-                        -1.0,
-                    );
-                    if let Some(b) = edge.b {
-                        residual[b].add(Wrench::at(force, point - problem.nodes[b].centre), 1.0);
-                    }
-                }
-            } else {
+            if edge.contact.is_none() {
                 let force = edge.resultant(problem.nodes, &self.answer);
                 residual[edge.a].add(
                     Wrench {
@@ -722,6 +752,19 @@ impl Solve {
                         },
                         1.0,
                     );
+                }
+            }
+            if let Some(edge) = edge.contact_edge() {
+                for (point, weight) in edge.samples() {
+                    let (force, _, _) =
+                        edge.contact_force(problem.nodes, &self.answer, point, weight);
+                    residual[edge.a].add(
+                        Wrench::at(force, point - problem.nodes[edge.a].centre),
+                        -1.0,
+                    );
+                    if let Some(b) = edge.b {
+                        residual[b].add(Wrench::at(force, point - problem.nodes[b].centre), 1.0);
+                    }
                 }
             }
         }
@@ -782,13 +825,16 @@ impl Solve {
             self.answer.clone_from(&self.linear.answer);
             if self.linear.progress == Progress::Mechanism {
                 assert!(
-                    problem.edges.iter().any(|e| e.contact.is_some()),
+                    problem
+                        .edges
+                        .iter()
+                        .any(|e| e.contact.is_some() || e.bearing.is_some()),
                     "a bonded component has balanced loads outside its rigid nullspace"
                 );
                 // An inactive face can intercept the proposed motion. Activate that face
                 // before calling the direction an escape mechanism.
                 let mut entry = f64::INFINITY;
-                for edge in problem.edges.iter().filter(|e| e.contact.is_some()) {
+                for edge in problem.edges.iter().filter_map(Edge::contact_edge) {
                     for (point, _) in edge.samples() {
                         let gap = edge
                             .relative(problem.nodes, &self.answer, point)
@@ -938,6 +984,8 @@ mod tests {
             area: AREA,
             patch: Patch::circle(centre, normal, AREA),
             contact: None,
+            bearing: None,
+            slip: None,
             normal_stiffness: YOUNG * AREA / length,
             shear_stiffness: SHEAR * AREA / length,
         }
@@ -1380,8 +1428,17 @@ impl Assessment {
             };
             let residual = assessment.solve.projected_residual(&problem);
             let norm = dot(&residual, &residual).sqrt();
+            let mut scaled = residual.clone();
+            precondition(&residual, &assessment.solve.metric, &mut scaled);
+            let mut scaled_load = assessment.loads.clone();
+            precondition(
+                &assessment.loads,
+                &assessment.solve.metric,
+                &mut scaled_load,
+            );
+            let relative = (dot(&residual, &scaled) / dot(&assessment.loads, &scaled_load)).sqrt();
             return Err(format!(
-                "joints: initial gravity equilibrium did not converge within {budget} rounds (projected residual {norm}, state {:?}); review joint areas and material elastic compliance",
+                "joints: initial gravity equilibrium did not converge within {budget} rounds (projected residual {norm}, relative {relative}, state {:?}); review joint areas and material elastic compliance",
                 assessment.solve.progress
             ));
         }
@@ -1502,6 +1559,12 @@ impl Assessment {
                 structure.chunks[joint.a].material.friction,
                 other_friction,
             ));
+            let contact = state.cracked[j] || matches!(joint.bond, Bond::Resting);
+            let fixing = if contact {
+                None
+            } else {
+                joint.seam().and_then(|s| s.fixing)
+            };
             self.edges.push(Edge {
                 a,
                 b,
@@ -1509,10 +1572,15 @@ impl Assessment {
                 normal: toward_a,
                 area,
                 patch,
-                contact: (state.cracked[j] || matches!(joint.bond, Bond::Resting))
-                    .then_some(friction),
-                normal_stiffness: area / normal,
-                shear_stiffness: area / shear,
+                contact: contact.then_some(friction),
+                slip: None,
+                bearing: fixing.map(|_| Bearing {
+                    normal: area / normal,
+                    shear: area / shear,
+                    friction,
+                }),
+                normal_stiffness: fixing.map_or(area / normal, |f| area * f64::from(f.normal)),
+                shear_stiffness: fixing.map_or(area / shear, |f| area * f64::from(f.shear)),
             });
             self.joints.push(j);
         }
@@ -1715,23 +1783,45 @@ impl Assessment {
         let n = self.nodes.len();
         let steady_answer = &self.solve.answer[..n];
         let combined = &self.solve.answer[n..];
+        let directions = [
+            &self.solve.linear.direction[..n.min(self.solve.linear.direction.len())],
+            &self.solve.linear.direction[n.min(self.solve.linear.direction.len())..],
+        ];
+        let motion_at = |edge: &Edge, direction: &[Wrench]| -> f64 {
+            edge.samples()
+                .iter()
+                .map(|(point, _)| edge.relative(&self.nodes, direction, *point).length())
+                .fold(0.0_f64, f64::max)
+        };
+        let reference = if self.solve.progress == Progress::Mechanism {
+            self.edges
+                .iter()
+                .filter(|e| e.contact.is_some())
+                .flat_map(|e| directions.map(|d| motion_at(e, d)))
+                .fold(0.0_f64, f64::max)
+        } else {
+            0.0
+        };
         let mut failures = Vec::new();
         for (&j, edge) in self.joints.iter().zip(&self.edges) {
             let joint = &structure.joints[j];
             if edge.contact.is_some() {
                 if self.solve.progress == Progress::Mechanism {
-                    let direction = &self.solve.linear.direction;
-                    let mut motion = edge.relative(&self.nodes, &direction[..n], edge.centre);
-                    motion += edge.relative(&self.nodes, &direction[n..], edge.centre);
-                    let spin = direction[edge.a].angular + direction[n + edge.a].angular
-                        - edge.b.map_or(DVec3::ZERO, |b| {
-                            direction[b].angular + direction[n + b].angular
-                        });
-                    let reference = direction.iter().map(|w| w.dot(*w)).sum::<f64>().sqrt();
-                    if motion.length() + spin.length() > reference * RELATIVE_RESIDUAL {
-                        let cause = if spin.length() > motion.length() {
+                    let direction =
+                        if motion_at(edge, directions[1]) >= motion_at(edge, directions[0]) {
+                            directions[1]
+                        } else {
+                            directions[0]
+                        };
+                    let motion = edge.relative(&self.nodes, direction, edge.centre);
+                    let spin = direction[edge.a].angular
+                        - edge.b.map_or(DVec3::ZERO, |b| direction[b].angular);
+                    if motion_at(edge, direction) > reference * RELATIVE_RESIDUAL {
+                        let bending = spin - edge.normal * spin.dot(edge.normal);
+                        let rotation_motion = bending.length() * edge.patch.polar.sqrt();
+                        let cause = if rotation_motion > reference * RELATIVE_RESIDUAL {
                             Cause::Tip
-                        } else if motion.dot(edge.normal) > motion.length() * RELATIVE_RESIDUAL {
+                        } else if motion.dot(edge.normal) > reference * RELATIVE_RESIDUAL {
                             Cause::LiftForce
                         } else {
                             Cause::Slide
@@ -1768,10 +1858,14 @@ impl Assessment {
                 Side::Chunk(b) => structure.chunks[b].material.friction,
                 Side::Ground => structure.chunks[joint.a].material.friction,
             };
-            let friction = f64::from(crate::substances::pair_friction(
-                structure.chunks[joint.a].material.friction,
-                other_friction,
-            ));
+            let friction = if edge.bearing.is_some() {
+                0.0
+            } else {
+                f64::from(crate::substances::pair_friction(
+                    structure.chunks[joint.a].material.friction,
+                    other_friction,
+                ))
+            };
             let failure = match joint.bond {
                 Bond::Resting => {
                     unreachable!("resting contacts are projected before cohesive failure")
@@ -1920,6 +2014,45 @@ mod gates {
         assert_eq!(assessment.solve.progress, Progress::Equilibrated);
         assert!(assessment.initial_verdict.is_empty());
         assert!((assessment.edges[0].normal.length_squared() - 1.0).abs() < 8.0 * f64::EPSILON);
+    }
+
+    /// A fixing's slip slope belongs to its attachment data. Changing bulk elasticity must
+    /// change closed-face bearing without stiffening the fixing or changing its strength.
+    #[test]
+    fn fixing_slip_and_bulk_bearing_have_distinct_owners() {
+        let mut structure = resting(0.5);
+        let fixing = super::super::Fixing {
+            normal: 1e6,
+            shear: 2e6,
+        }; // Fixture interface slopes, N/m³.
+        structure.joints[0].bond = Bond::Bonded(super::super::Seam {
+            fixing: Some(fixing),
+            ..material().seam
+        });
+        let mut first = Assessment::default();
+        first.rebuild(&structure, &State::new(&structure));
+        let e = &first.edges[0];
+        assert_eq!(
+            e.normal_stiffness,
+            f64::from(AREA) * f64::from(fixing.normal)
+        );
+        assert_eq!(e.shear_stiffness, f64::from(AREA) * f64::from(fixing.shear));
+        let bearing = e.bearing.unwrap();
+        for chunk in &mut structure.chunks {
+            chunk.material.young *= 2.0; // Fixture perturbation of the bulk owner alone.
+            chunk.material.shear_modulus *= 2.0;
+        }
+        let mut second = Assessment::default();
+        second.rebuild(&structure, &State::new(&structure));
+        let changed = &second.edges[0];
+        assert_eq!(changed.normal_stiffness, e.normal_stiffness);
+        assert_eq!(changed.shear_stiffness, e.shear_stiffness);
+        assert_eq!(changed.bearing.unwrap().normal, 2.0 * bearing.normal);
+        assert_eq!(changed.bearing.unwrap().shear, 2.0 * bearing.shear);
+        assert_eq!(
+            structure.joints[0].seam().unwrap().tensile,
+            material().seam.tensile
+        );
     }
 
     /// The game's resting joints must slide at mu*N and tip at M=N*r, using the pair's friction
@@ -2213,6 +2346,8 @@ mod gates {
                     area,
                     patch: Patch::circle((nodes[a].centre + nodes[b].centre) / 2.0, normal, area),
                     contact: None,
+                    bearing: None,
+                    slip: None,
                     normal_stiffness: 8e9 * area,
                     shear_stiffness: 3e9 * area,
                 });
@@ -2285,6 +2420,8 @@ mod gates {
             area: f64::from(joint.area),
             patch,
             contact: None,
+            bearing: None,
+            slip: None,
             normal_stiffness: material().young,
             shear_stiffness: material().shear_modulus,
         };
