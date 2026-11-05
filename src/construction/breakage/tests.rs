@@ -1641,10 +1641,10 @@ fn keep_queued_contacts(queue: Res<Queue>, mut kept: ResMut<QueuedContacts>) {
     );
 }
 
-/// [`composed`] (the authority's) with each tick's queued contact loads kept between the reader
-/// and the laws ([`QueuedContacts`]), its clocks started.
-fn composed_keeping_contacts() -> (App, Entity) {
-    let (mut app, root) = composed(false);
+/// [`composed_kind`] with queued contact loads retained between the reader and the laws,
+/// its clocks started.
+fn composed_keeping_contacts(kind: &Arc<ConstructionKind>) -> (App, Entity) {
+    let (mut app, root) = composed_kind(false, kind);
     app.init_resource::<QueuedContacts>().add_systems(
         FixedPostUpdate,
         keep_queued_contacts
@@ -1663,8 +1663,8 @@ fn composed_keeping_contacts() -> (App, Entity) {
 /// FIXTURE DATA: a 20 N press on a breakable outer wall; the source is clear of solver contacts.
 #[test]
 fn an_implicit_belt_press_reaches_the_wall_laws_reading() {
-    let (mut app, root) = composed_keeping_contacts();
     let kind = shipped_house();
+    let (mut app, root) = composed_keeping_contacts(&kind);
     let (element, face, into) = wall_face(&kind);
     let source = contact_cube(&mut app, Vec3::splat(50.0), Vec3::ZERO);
     app.update();
@@ -1771,7 +1771,7 @@ fn no_bodys_kind_enters_a_contacts_loads() {
     let (gap, speed) = (0.02, 0.1);
     let start = face - w * (CUBE_SIDE / 2.0 + gap);
     let strike = |construction_piece: bool| {
-        let (mut app, root) = composed_keeping_contacts();
+        let (mut app, root) = composed_keeping_contacts(&kind);
         let cube = contact_cube(&mut app, start, w * speed);
         if construction_piece {
             app.world_mut().entity_mut(cube).insert((
@@ -1841,25 +1841,27 @@ fn no_bodys_kind_enters_a_contacts_loads() {
     }
 }
 
-/// A BODY AT REST AGAINST A CONSTRUCTION PRESSES IT ONCE AND STARTS NO RUN (the game's environment
-/// destruction model): a cube a steady 400 N holds on the shipped house's wall falls asleep
-/// there, and from then on its construction's resting loads ([`RestingLoads`]) hold its press, 400 N
-/// into the wall within 0.5 % with no blow, its points once, the same every tick it sleeps, while
-/// the reader queues nothing for it, so the laws run on the house only when something else loads
-/// it; once the cube is gone its press goes. The weight check a crack starts relies on a sleeping
-/// pile's press (the construction design, "Bodies in contact"), and the server's per-tick cost of rubble
-/// at rest on walls on its starting no run. A reading that drops a sleeping pair (a press of
-/// nothing), keeps it after its body goes, adds it again each tick, or replays it as a new
-/// deposit fails here. Fixture numbers are fixture data.
+/// The game's environment destruction: a sleeping cube's 400 N press stays cached, with no
+/// new queued deposit, until its body leaves. The structure law relies on sleeping piles keeping
+/// their supported press without repeating the work each tick. Fixture: loading the column's
+/// crown puts every supporting joint in compression, below its bulk capacity.
 #[test]
 fn a_body_at_rest_against_a_construction_presses_it_once_and_starts_no_run() {
-    let kind = shipped_house();
-    let (_, face, w) = wall_face(&kind);
-    let (mut app, root) = composed_keeping_contacts();
+    let kind = column_construction();
+    let block = kind.layout.blocks.last().unwrap();
+    let face = Vec3::new(
+        (block.min.x + block.max.x) / 2.0,
+        block.max.y,
+        (block.min.z + block.max.z) / 2.0,
+    );
+    let w = Vec3::NEG_Y;
+    let (mut app, root) = composed_keeping_contacts(&kind);
+    // Fixture: 400 N normal press and 2 mm approach gap, centred on the crown.
+    let force_n = 400.0;
     let cube = contact_cube(&mut app, face - w * (CUBE_SIDE / 2.0 + 0.002), Vec3::ZERO);
     app.world_mut()
         .entity_mut(cube)
-        .insert(ConstantForce(w * 400.0));
+        .insert(ConstantForce(w * force_n));
     (0..640)
         .find(|_| {
             app.update();
@@ -1886,11 +1888,11 @@ fn a_body_at_rest_against_a_construction_presses_it_once_and_starts_no_run() {
             1,
             "tick {tick}: one construction holds a press"
         );
-        assert!(!loads.is_empty(), "tick {tick}: the house holds the press");
+        assert!(!loads.is_empty(), "tick {tick}: the column holds the press");
         let press: Vec3 = loads.iter().map(|load| load.press).sum();
         assert!(
-            (press - w * 400.0).length() <= 0.005 * 400.0,
-            "tick {tick}: the resting press {press} against 400 N along {w}"
+            (press - w * force_n).length() <= 0.005 * force_n,
+            "tick {tick}: the resting press {press} against {force_n} N along {w}"
         );
         for load in &loads {
             assert_eq!(
@@ -2279,7 +2281,7 @@ fn casing_loads_count_each_joule_once_and_carry_their_ejection_momentum() {
 #[ignore = "a measurement bed, run on demand"]
 fn a_heavy_body_push_reports_the_house_release_groups() {
     let kind = shipped_house();
-    let (mut app, _) = composed_keeping_contacts();
+    let (mut app, _) = composed_keeping_contacts(&kind);
     app.insert_resource(Gravity(Vec3::NEG_Y * crate::physical_laws::gravity_mps2()));
     app.world_mut().spawn((
         RigidBody::Static,
@@ -4230,9 +4232,9 @@ fn owners_share_initial_equilibrium_until_their_first_changed_load() {
     assert!(!second.assessment.needs_tick());
 }
 
-/// The game's environment destruction: the production pre-physics sweep removes intersected
-/// occupied chunks on first contact and transfers their momentum once. Static-stop/refund
-/// intake, a delayed structure verdict, or a double physics exchange breaks this witness.
+/// The game's environment destruction: the production pre-physics sweep removes the minimum-cut
+/// plug containing its occupied source patch on first contact and transfers its momentum once.
+/// Static-stop/refund intake, a delayed structure verdict, or a double physics exchange breaks it.
 #[test]
 fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     let kind = column_construction();
@@ -4297,15 +4299,22 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
         .iter()
         .filter(|(ordinal, _, _)| *ordinal == 3)
         .collect();
-    assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].1, 1);
+    assert!(
+        selected.iter().any(|chunk| chunk.1 == 1),
+        "the occupied middle chunk belongs to the plug"
+    );
     let impulse = account
         .exchanges
         .iter()
         .find(|(body, _, _)| *body == source)
         .unwrap()
         .1;
-    let transferred = kind.sweep.part(1, &Transform::IDENTITY).mass as f32 * selected[0].2;
+    let transferred: Vec3 = selected
+        .iter()
+        .map(|&&(_, c, velocity)| {
+            kind.sweep.part(usize::from(c), &Transform::IDENTITY).mass as f32 * velocity
+        })
+        .sum();
     assert!((transferred - impulse).length() < 1e-4 * impulse.length());
     let after = app.world().get::<LinearVelocity>(source).unwrap().0;
     assert!(((Vec3::X * speed - after) * mass - impulse).length() < 1e-3 * impulse.length());
@@ -4323,11 +4332,13 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     }
     let live = Live::new(&kind);
     shape.derive_departures(&kind.layout, &live);
-    assert_eq!(
-        shape.fate[1],
-        Fate::Dust,
-        "the streamed ledger opens the same hole"
-    );
+    for &&(_, c, _) in &selected {
+        assert_eq!(
+            shape.fate[usize::from(c)],
+            Fate::Dust,
+            "the streamed ledger opens the whole exchanged plug"
+        );
+    }
     println!(
         "MEASURED sweep composition: selected={}, casts={}, joints={}, speed {} -> {}, impulse={:?}",
         selected.len(),

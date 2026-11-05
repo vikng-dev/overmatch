@@ -357,16 +357,34 @@ A per-design bounds tree narrows exact convex casts to nearby chunks. All inters
 chunks form one patch per source body and construction; several colliders on one body contribute
 to that same patch. Buried matter remains soil-held.
 
-The cut set contains live, unseparated joints between the patch and its surroundings, including
-ground anchors. Joints inside the patch carry no load when its chunks move together. The cut
-sums each joint's force limit in the contact direction, reading the part solver's
-`bondsolve::JointStrength`: intact seams carry tension and cohesive shear, every closed face
-carries compression in bearing, and shear adds Coulomb friction on compression. Cracked seams
-and rests have no tensile or cohesive strength. DERIVED: each limit is the first crossing of
+The patch is the forced source of a directed graph over standing law chunks. Ground endpoints
+and chunks the sweep does not cover (including buried matter) are fixed sinks. Live, unseparated
+joints supply directed capacities for rigid translation along the contact direction `d`. With
+`n_out` pointing from the moving side to its neighbour, a compressed face (`n_out dot d > 0`)
+carries `min(sigma_c,a, sigma_c,b) * A * (n_out dot d)`: bulk crushing of the weaker side. A
+ground endpoint uses its chunk's strength. `sigma_c` is the data's quasi-static
+`bulk.blast.compressive_strength`, carried by `fracture::Material::compressive_strength`, not
+cavity work or the dynamic compaction plateau.
+
+Otherwise the edge reads the part solver's `bondsolve::JointStrength` directional law: intact
+seams carry tension and cohesive shear; cracked seams and rests carry neither. Coulomb friction
+requires existing compression. DERIVED: the limit is the first crossing of
 `p + F d_n <= A T` or `F |d_t| <= A C + mu max(-p - F d_n, 0)`, with the normal toward the
-moving side. ASSUMED: the translating patch shares its weight by live cut area; its normal
-preload `p` enters this cut without a bending or twisting demand. A compression-only touch
-cannot remove a resting floor; a sideways or lifting touch must pass its friction or weight.
+moving side. ASSUMED: the original occupied patch shares its existing weight by live boundary
+area, without bending or twisting. These preloads stay fixed during optimization; newly exposed
+boundaries have zero preload, and the contact demand does not manufacture one.
+
+Dinic's level graphs and blocking flows find the minimum cut; residual reachability selects its
+source side `S*` (E. A. Dinic, 1970, [original paper](https://www.mathnet.ru/eng/dan35701)).
+The plug can therefore include chunks beyond the occupied patch: compression transmits the push
+through a back layer or around a corner until perimeter joints or bulk crushing give way.
+Internal joints of `S*` carry no relative motion and contribute no cut capacity. A resting floor
+on anchored joists holds below its bulk crushing capacity; sliding or lifting still reads the
+shared directional joint law.
+
+DERIVED limitation: the compressed-edge capacity tends to zero as `n_out dot d -> 0+`;
+exact tangency reads the joint's shear law. A small direction change across that boundary can
+therefore change the minimum cut.
 
 The demand is the peak force of the hull's impact on the patch plus its drive:
 `F = P(m_eff, v_n) + F_drive,n`, with `P` the Hertz peak force (Johnson 1985, §11.4) that
@@ -377,8 +395,8 @@ stiffness). DERIVED: the first inward surface witness supplies the speed and con
 `ContactNormalPart::generate` against a fixed target. The lever `r` starts at the moving centre
 of mass; inertia is in world coordinates at contact time, with Avian's locked-axis response.
 No physics step enters the stop. Inward accumulated and constant
-drive forces add to the demand. If `F > C`, break the cut and remove the whole patch from the
-standing construction. Otherwise move the hull to the first surface, stop its inward contact
+drive forces add to the demand. If `F > C`, break the minimum cut and remove its whole plug
+`S*` from the standing construction. Otherwise move the hull to the first surface, stop its inward contact
 motion, and send that stopping impulse divided by the tick through contact intake to the
 structure check, which reads every contact as its mean force; the peak force decides only the cut. Continuing drive remains in Avian's contacts and
 its mean-force reading, including sleeping contacts; adding it to the explicit stopping load
@@ -406,8 +424,8 @@ dotted with the incoming twist. Locked axes route their reactions to the hosting
 The account exposes removed kinetic energy and outgoing chunk kinetic energy separately.
 
 `breakage::sweep_intake::sweep_departure` is the departure boundary: construction identity, the
-whole patch's chunk identities, world rigid motion and authoritative tick. Internal joints stay
-intact. The hull makes the hole: whatever its mass, the patch leaves the server as dust in the
+whole plug's chunk identities, world rigid motion and authoritative tick. Internal joints stay
+intact. The hull makes the hole: whatever its mass, the plug leaves the server as dust in the
 ledger and reaches the players as decoration, one `Shed` per fragment that stays connected, its
 momentum and energy still in the sweep's account. The hull still pays the plastic exchange. The
 100 kg size route (`debris::crumble::route`) serves what the structure law releases and landings,
@@ -433,12 +451,15 @@ travel is at most `R * min(abs(omega)*dt, 2)`, by arc length and diameter. Expan
 initial AABB by that travel and intersect it with the full rotation-radius envelope. Small spin
 therefore admits only a small local margin; exact nonlinear casts still decide occupied membership.
 
-DERIVED sweep work: bounds-tree traversal, one convex cast per overlapping leaf, and incident
-joint visits for the occupied patch. Hash membership gives expected constant work per endpoint;
-a cut edge appears once because it has exactly one endpoint inside the ordered, unique patch.
-The plastic solve has fixed dimension. Counts are reported
-separately from the current debris creation and structural-check costs. The owner requires the
-hole within two ticks of contact. No operation count is a server-time measurement.
+DERIVED sweep work: bounds-tree traversal and exact casts choose the occupied source patch;
+live construction joints build the directed graph only on an occupied contact event. Dinic's
+worst-case work is `O(V² E)`; each level search and blocking-flow phase shares one residual state
+within its construction, while independent constructions retain their parallel geometry tasks.
+`SweepAccount::work.flow` reports graph nodes, residual edge pairs (including source and anchor
+constraints), blocking-flow phases, residual arcs tested in level/path searches, and augmentations.
+The plastic solve has fixed dimension and exchanges the whole plug's mass. Counts are separate
+from structural-check and decoration work and are not server-time measurements. The owner's
+hole-within-two-contact-ticks gate remains.
 
 **Trees are constructions by the same laws.**
 The prop generator authors one convex trunk element. The common cutter's grain-stretched

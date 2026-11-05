@@ -198,6 +198,7 @@ pub(super) fn run(mut p: Intake) {
         p.account.work.casts += swept.work.casts;
         p.account.work.joints += swept.work.joints;
         p.account.work.queries += swept.work.queries;
+        p.account.work.flow += swept.work.flow;
         by_source
             .entry(body)
             .or_default()
