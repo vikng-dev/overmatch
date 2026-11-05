@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use avian3d::parry::shape::TypedShape;
@@ -155,8 +156,26 @@ pub(super) struct Note {
 #[derive(Resource)]
 pub(super) struct ContactLog {
     notes: Mutex<Vec<Note>>,
+    restart_disagreements: AtomicUsize,
     /// The body whose pose a note carries, for a moving target's own frame.
     tracked: Entity,
+}
+
+/// The game's damage-model witness compares the next line's membership with a lookup on the
+/// preceding line. The volley regression must reach a disagreement before it can guard the march.
+pub(super) fn note_restart(
+    log: &ContactLog,
+    walked: &walk::DiscWalk,
+    next: &resolve::Interior,
+    laws: &walk::WalkLaws,
+) {
+    let t = f64::from((next.origin - walked.origin).dot(walked.axis));
+    if next.seeds.iter().any(|seed| {
+        let previous = walked.walks[seed.sample].inside_at(t, laws);
+        previous.len() != seed.inside.len() || previous.iter().any(|key| !seed.inside.contains(key))
+    }) {
+        log.restart_disagreements.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Note `decision` as [`resolve::decide`] made it. Reads only.
@@ -423,6 +442,7 @@ impl Range {
         let root = app.world().resource::<Mounted>().0;
         app.insert_resource(ContactLog {
             notes: Mutex::new(Vec::new()),
+            restart_disagreements: AtomicUsize::new(0),
             tracked: root,
         });
         let decoy = decoyed.then(|| {
@@ -3178,9 +3198,18 @@ fn a_volley_along_a_long_face_flies_out() {
             .collect();
         range.fire(&round, Vec3::from(volley.muzzle), &headings);
     }
-    let (touched, _) = range
-        .fly_out(ALONG_A_LONG_FACE.len() * 12)
-        .unwrap_or_else(|(message, _)| panic!("{message}"));
+    let flown = range.fly_out(ALONG_A_LONG_FACE.len() * 12);
+    let disagreements = range
+        .app
+        .world()
+        .resource::<ContactLog>()
+        .restart_disagreements
+        .load(Ordering::Relaxed);
+    assert!(
+        disagreements > 0,
+        "the replay must reach a membership disagreement between consecutive corridor lines"
+    );
+    let (touched, _) = flown.unwrap_or_else(|(message, _)| panic!("{message}"));
     assert!(touched > 0, "the volley no longer touches the hull");
 }
 

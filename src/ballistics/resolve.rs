@@ -743,7 +743,7 @@ fn next_starts(
     origin: Vec3,
     axis: Dir3,
 ) -> Result<Interior, WalkError> {
-    certified_samples(
+    let next = certified_samples(
         context,
         not_own,
         AxisStart {
@@ -754,7 +754,12 @@ fn next_starts(
         walked.frame,
         walked.radius,
         walked.offsets.clone(),
-    )
+    )?;
+    #[cfg(test)]
+    if let Some(log) = context.world.contact_log.as_ref() {
+        super::contact_classes::note_restart(log, walked, &next, &context.laws);
+    }
+    Ok(next)
 }
 
 /// The colliders one field throw can reach, read from the broad phase once for all of its
