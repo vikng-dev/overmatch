@@ -1,4 +1,7 @@
 use super::*;
+use avian3d::prelude::{
+    ConstantForce, ConstantLinearAcceleration, ConstantLocalForce, ConstantLocalLinearAcceleration,
+};
 
 /// The sweep's per-tick account, available to headless witnesses and operator instruments.
 #[derive(Resource, Default, Debug)]
@@ -10,7 +13,8 @@ pub(crate) struct SweepAccount {
     pub(crate) outgoing_kinetic_j: f64,
     pub(crate) outgoing_momentum: Vec3,
     pub(crate) contacts: BTreeSet<(Entity, u16)>,
-    pub(crate) samples: Vec<(Entity, u16, f32, Vec<(usize, f32, f32, f32)>)>,
+    pub(crate) samples: Vec<(Entity, u16, f32, (f32, f32, f32))>,
+    pub(super) held: Vec<(Entity, Load)>,
     pub(crate) source_changes: Vec<(Entity, Vec3, Vec3, Vec3)>,
 }
 
@@ -24,6 +28,8 @@ struct SweepSource {
     spin: Vec3,
     layers: CollisionLayers,
     roots: BTreeSet<Entity>,
+    mass: f32,
+    drive: Vec3,
 }
 
 /// Independent geometry queries run per construction. Sources commit in entity order because
@@ -65,12 +71,42 @@ type Hulls<'w, 's> = Query<
     ),
     Without<Sensor>,
 >;
+type Drives<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static ConstantForce>,
+        Option<&'static ConstantLocalForce>,
+        Option<&'static ConstantLinearAcceleration>,
+        Option<&'static ConstantLocalLinearAcceleration>,
+    ),
+>;
+
+fn constant_acceleration(drives: &Drives, body: Entity, rotation: Quat, inverse_mass: f32) -> Vec3 {
+    let (force, local_force, acceleration, local_acceleration) = drives
+        .get(body)
+        .expect("a dynamic source has its optional constant drives");
+    force.map_or(Vec3::ZERO, |f| f.0 * inverse_mass)
+        + rotation * local_force.map_or(Vec3::ZERO, |f| f.0 * inverse_mass)
+        + acceleration.map_or(Vec3::ZERO, |a| a.0)
+        + rotation * local_acceleration.map_or(Vec3::ZERO, |a| a.0)
+}
+
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct Intake<'w, 's> {
     constructions: Owners<'w, 's>,
     bodies: Bodies<'w, 's>,
+    drives: Drives<'w, 's>,
     colliders: Hulls<'w, 's>,
-    body_colliders: Query<'w, 's, (Entity, &'static avian3d::prelude::RigidBodyColliders)>,
+    body_colliders: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static avian3d::prelude::RigidBodyColliders,
+            Has<avian3d::prelude::Sleeping>,
+        ),
+    >,
     spatial: SpatialQuery<'w, 's>,
     transfers: ResMut<'w, ContactTransfers>,
     fixed: Res<'w, Time<Fixed>>,
@@ -89,15 +125,21 @@ pub(super) fn run(mut p: Intake) {
     candidates.sort_by_key(|(body, root, _)| (*body, *root));
     let mut by_source: BTreeMap<Entity, BTreeMap<Entity, BTreeSet<usize>>> = BTreeMap::new();
     for (body, root, swept) in candidates {
-        if swept.contacts > 0 {
+        if let Some(load) = swept.load {
             let (_, _, _, owner) = p
                 .constructions
                 .get(root)
                 .expect("swept owner survives geometry intake");
             p.account.contacts.insert((body, owner.construction));
-            p.account
-                .samples
-                .push((body, owner.construction, swept.incoming, swept.samples));
+            p.account.samples.push((
+                body,
+                owner.construction,
+                swept.incoming,
+                (load.demand, load.capacity, load.threshold),
+            ));
+        }
+        if !swept.broken && !swept.chunks.is_empty() {
+            hold(&mut p, body, root, &swept, dt);
         }
         p.account.work.bounds += swept.work.bounds;
         p.account.work.casts += swept.work.casts;
@@ -108,7 +150,7 @@ pub(super) fn run(mut p: Intake) {
             .or_default()
             .entry(root)
             .or_default()
-            .extend(swept.chunks);
+            .extend(swept.chunks.into_iter().filter(|_| swept.broken));
     }
     let mut departures = Vec::new();
     for (body, owners) in by_source {
@@ -123,7 +165,7 @@ pub(super) fn run(mut p: Intake) {
     let retired = changed
         .into_iter()
         .flat_map(|root| {
-            let (_, handles) = p
+            let (_, handles, _) = p
                 .body_colliders
                 .get(root)
                 .expect("a swept owner retains its collider relationship until refit");
@@ -175,18 +217,23 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
         ref bodies,
         ref colliders,
         ref body_colliders,
+        ref drives,
         ref spatial,
         ..
     } = *p;
     let mut gathered = bevy::utils::Parallel::<Vec<SweepSource>>::default();
     body_colliders
         .par_iter()
-        .for_each(|(body_entity, handles)| {
+        .for_each(|(body_entity, handles, sleeping)| {
             let mut sources = Vec::new();
-            let Ok((forces, body, _, _, com, _)) = bodies.get(body_entity) else {
+            let Ok((forces, body, mass, _, com, _)) = bodies.get(body_entity) else {
                 return; // Unmarked fixed collider roots have no dynamic force state.
             };
+            // A newly spawned body's mass is prepared by Avian after this hook; it has no
+            // rigid-body response yet. Sleeping contacts retain their force in ContactTransfers.
             if !body.is_dynamic()
+                || mass.inverse() == 0.0
+                || sleeping
                 || (forces.linear_velocity() == Vec3::ZERO
                     && forces.angular_velocity() == Vec3::ZERO)
             {
@@ -235,6 +282,15 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                     spin: forces.angular_velocity(),
                     layers: *layers,
                     roots,
+                    mass: mass.value(),
+                    drive: (forces.accumulated_linear_acceleration()
+                        + constant_acceleration(
+                            drives,
+                            body_entity,
+                            forces.rotation().0,
+                            mass.inverse(),
+                        ))
+                        * mass.value(),
                 });
             }
             gathered.scope(|local| local.extend(sources));
@@ -258,28 +314,43 @@ fn geometry(p: &Intake, dt: f32) -> Vec<(Entity, Entity, super::super::sweep::Sw
             scope.spawn(async move {
                 let pose = breakage.physics_frame((position, rotation));
                 let inverse = pose.rotation.inverse();
-                sources
-                    .iter()
-                    .filter(|source| {
-                        source.roots.contains(&root)
-                            && source.body != root
-                            && source.layers.interacts_with(super::super::element_layers())
-                    })
-                    .map(|source| {
-                        let swept = breakage.kind.sweep.swept(
+                let mut patches: BTreeMap<Entity, super::super::sweep::Sweep> = BTreeMap::new();
+                for source in sources.iter().filter(|source| {
+                    source.roots.contains(&root)
+                        && source.body != root
+                        && source.layers.interacts_with(super::super::element_layers())
+                }) {
+                    let swept = breakage.kind.sweep.swept(
+                        &breakage.live.structure,
+                        &breakage.live.state,
+                        super::super::sweep::Motion {
+                            hull: &source.hull,
+                            position: inverse * (source.position - pose.translation),
+                            rotation: inverse * source.rotation,
+                            velocity: inverse * source.velocity,
+                            centre: inverse * (source.centre - pose.translation),
+                            spin: inverse * source.spin,
+                            dt,
+                        },
+                    );
+                    patches.entry(source.body).or_default().merge(swept);
+                }
+                patches
+                    .into_iter()
+                    .map(|(body, mut swept)| {
+                        let source = sources
+                            .iter()
+                            .find(|s| s.body == body)
+                            .expect("a patch has its source body");
+                        breakage.kind.sweep.resolve(
                             &breakage.live.structure,
                             &breakage.live.state,
-                            super::super::sweep::Motion {
-                                hull: &source.hull,
-                                position: inverse * (source.position - pose.translation),
-                                rotation: inverse * source.rotation,
-                                velocity: inverse * source.velocity,
-                                centre: inverse * (source.centre - pose.translation),
-                                spin: inverse * source.spin,
-                                dt,
-                            },
+                            &mut swept,
+                            source.mass,
+                            inverse * source.drive,
+                            dt,
                         );
-                        (source.body, root, swept)
+                        (body, root, swept)
                     })
                     .collect::<Vec<_>>()
             });
@@ -370,54 +441,57 @@ fn commit_source(
             changed: vec![root],
             ..default()
         });
-        for c in chunks {
+        for &c in &chunks {
             let velocity = (result.velocity
                 + result
                     .spin
                     .cross(breakage.kind.sweep.part(c, &pose).centre - source.centre))
             .as_vec3();
-            departures.push(sweep_departure(
-                &mut breakage,
-                pose,
-                c,
-                velocity,
-                result.spin.as_vec3(),
-                tick,
-                &mut p.record,
-            ));
             p.account.freed += 1;
             p.account
                 .chunks
                 .push((breakage.construction, c as u16, velocity));
         }
+        departures.push(sweep_departure(
+            &mut breakage,
+            pose,
+            chunks,
+            ReleasedMotion {
+                velocity: result.velocity.as_vec3(),
+                spin: result.spin.as_vec3(),
+                centre: source.centre.as_vec3(),
+            },
+            tick,
+            &mut p.record,
+        ));
     }
 }
 
-/// Departure boundary for the decor layer: stable chunk identity, world velocity and birth tick.
-/// Until presentation routing replaces it, each chunk uses the existing debris body path.
+pub(super) struct ReleasedMotion {
+    velocity: Vec3,
+    spin: Vec3,
+    centre: Vec3,
+}
+
+/// Departure boundary for decor: one patch, its rigid velocity field and authoritative tick.
 pub(super) fn sweep_departure(
     breakage: &mut Breakage,
     pose: Transform,
-    c: usize,
-    velocity: Vec3,
-    spin: Vec3,
+    group: Vec<usize>,
+    motion: ReleasedMotion,
     tick: u32,
     record: &mut Record,
 ) -> Departure {
+    let ReleasedMotion {
+        velocity,
+        spin,
+        centre,
+    } = motion;
     let kind = breakage.kind.clone();
-    let group = vec![c];
-    let mut live = breakage.live.group(&group);
-    record.entries.push(Entry {
-        construction: breakage.construction,
-        event: Event::Wear(c as u16),
-        tick,
-    });
-    for &j in kind.sweep.joints(c) {
+    for j in kind.sweep.cut(&group) {
         if !breakage.live.state.separated[j] {
             breakage.live.state.cracked[j] = true;
             breakage.live.state.separated[j] = true;
-            live.state.cracked[j] = true;
-            live.state.separated[j] = true;
             let joint = &breakage.live.structure.joints[j];
             breakage.live.swapped[usize::from(kind.layout.element_of[joint.a])] = true;
             if let Side::Chunk(b) = joint.b {
@@ -430,10 +504,19 @@ pub(super) fn sweep_departure(
             });
         }
     }
-    breakage.live.state.fate[c] = Fate::Fallen;
-    breakage.live.swapped[usize::from(kind.layout.element_of[c])] = true;
+    let live = breakage.live.group(&group);
+    for &c in &group {
+        record.entries.push(Entry {
+            construction: breakage.construction,
+            event: Event::Wear(c as u16),
+            tick,
+        });
+        breakage.live.state.fate[c] = Fate::Fallen;
+        breakage.live.swapped[usize::from(kind.layout.element_of[c])] = true;
+    }
     let mut launch = launch(&kind, &live.structure, &group, &[]);
-    launch.velocity = pose.rotation.inverse() * velocity;
+    let world_centre = pose.translation + pose.rotation * launch.centre;
+    launch.velocity = pose.rotation.inverse() * (velocity + spin.cross(world_centre - centre));
     launch.spin = pose.rotation.inverse() * spin;
     Departure {
         kind,
@@ -443,6 +526,106 @@ pub(super) fn sweep_departure(
         group,
         launch,
         tick,
+    }
+}
+
+/// A held cut transmits its stopping press through the same intake as solver contacts. Moving
+/// to the first surface before braking prevents a strong wall being crossed between solver ticks.
+fn hold(p: &mut Intake, body: Entity, root: Entity, swept: &super::super::sweep::Sweep, dt: f32) {
+    let witness = swept.witness.expect("a held patch has an occupied contact");
+    let load = swept
+        .load
+        .expect("a held patch has a resolved cut capacity");
+    let (_, position, rotation, owner) = p
+        .constructions
+        .get(root)
+        .expect("a held construction survives intake");
+    let pose = owner.physics_frame((position, rotation));
+    let normal = pose.rotation * witness.normal;
+    let point = pose.translation + pose.rotation * witness.at;
+    let share = load.demand / swept.chunks.len() as f32;
+    for &c in &swept.chunks {
+        p.account.held.push((
+            root,
+            Load {
+                chunk: c,
+                at: owner.live.structure.chunks[c].centroid,
+                energy: 0.0,
+                crushed: 0.0,
+                blow: Vec3::ZERO,
+                press: witness.normal * share,
+                peak: None,
+                origin: Origin::Contact {
+                    other: body,
+                    step: dt,
+                },
+            },
+        ));
+    }
+    let (mut forces, _, mass, inertia, com, axes) = p
+        .bodies
+        .get_mut(body)
+        .expect("a held source survives intake");
+    let mut forces = forces.non_waking();
+    let position = forces.position().0;
+    let rotation = forces.rotation().0;
+    let centre = position + rotation * com.0;
+    let velocity = forces.linear_velocity();
+    let spin = forces.angular_velocity();
+    let turn = Quat::from_scaled_axis(spin * witness.time);
+    let lever = turn.inverse() * (point - centre - velocity * witness.time);
+    let axes = axes.copied().unwrap_or_default(); // Absence is Avian's unrestricted state.
+    let inverse_mass = Vec3::new(
+        f32::from(!axes.is_translation_x_locked()),
+        f32::from(!axes.is_translation_y_locked()),
+        f32::from(!axes.is_translation_z_locked()),
+    ) * mass.inverse();
+    let response = normal.dot(inverse_mass * normal);
+    let closing = velocity.dot(normal).max(0.0);
+    if closing > 0.0 {
+        assert!(
+            response > 0.0,
+            "inward translation has an unlocked response"
+        );
+        forces.apply_linear_impulse(-normal * closing / response);
+    }
+    let acceleration = (forces.accumulated_linear_acceleration()
+        + constant_acceleration(&p.drives, body, rotation, mass.inverse()))
+    .dot(normal)
+    .max(0.0);
+    if acceleration > 0.0 {
+        assert!(response > 0.0, "inward drive has an unlocked response");
+        forces.apply_force(-normal * acceleration / response);
+    }
+    let angular_mask = Mat3::from_diagonal(Vec3::new(
+        f32::from(!axes.is_rotation_x_locked()),
+        f32::from(!axes.is_rotation_y_locked()),
+        f32::from(!axes.is_rotation_z_locked()),
+    ));
+    let inverse_inertia =
+        angular_mask * inertia.rotated(rotation).inverse().to_mat3() * angular_mask;
+    let torque = lever.cross(normal);
+    let angular_response = torque.dot(inverse_inertia * torque);
+    let angular_closing = (forces.linear_velocity() + spin.cross(lever))
+        .dot(normal)
+        .max(0.0);
+    if angular_closing > 0.0 {
+        assert!(
+            angular_response > 0.0,
+            "inward rotation has an unlocked response"
+        );
+        forces.apply_angular_impulse(-torque * angular_closing / angular_response);
+    }
+    // Pre-integration pose accounts only for motion removed by the surface constraint. Avian
+    // still integrates the surviving tangential twist over the complete step.
+    let next_rotation =
+        Quat::from_scaled_axis(-forces.angular_velocity() * witness.time) * turn * rotation;
+    let next_centre = centre + (velocity - forces.linear_velocity()) * witness.time;
+    let next_position = next_centre + next_rotation * (rotation.inverse() * (position - centre));
+    if next_position != position || next_rotation != rotation {
+        p.commands
+            .entity(body)
+            .insert((Position(next_position), Rotation(next_rotation)));
     }
 }
 

@@ -7,6 +7,8 @@ use avian3d::prelude::*;
 use bevy::math::{DMat3, DVec3};
 use bevy::prelude::*;
 
+use std::collections::BTreeSet;
+
 use super::fracture::{Block, Side, State, Structure};
 
 #[derive(Debug, Clone)]
@@ -14,6 +16,7 @@ pub(crate) struct Geometry {
     hulls: Vec<Collider>,
     parts: Vec<Part>,
     incident: Vec<Vec<usize>>,
+    edges: Vec<(usize, Option<usize>)>,
     tree: Vec<Node>,
 }
 
@@ -21,6 +24,7 @@ impl PartialEq for Geometry {
     fn eq(&self, other: &Self) -> bool {
         self.parts == other.parts
             && self.incident == other.incident
+            && self.edges == other.edges
             && self.tree == other.tree
             && self.hulls.len() == other.hulls.len()
             && self.hulls.iter().zip(&other.hulls).all(|(a, b)| {
@@ -84,6 +88,19 @@ impl Geometry {
             parts,
             incident: vec![Vec::new(); blocks.len()],
             tree: Vec::new(),
+            edges: structure
+                .joints
+                .iter()
+                .map(|j| {
+                    (
+                        j.a,
+                        match j.b {
+                            Side::Chunk(b) => Some(b),
+                            Side::Ground => None,
+                        },
+                    )
+                })
+                .collect(),
         };
         for (j, joint) in structure.joints.iter().enumerate() {
             geometry.incident[joint.a].push(j);
@@ -125,7 +142,7 @@ impl Geometry {
         index
     }
 
-    /// Translation over `dt`, in construction coordinates. Collider scale is already applied.
+    /// Occupied rigid motion over `dt`, in construction coordinates; collider scale is applied.
     /// Avian's pinned convex cast supplies the contact normal; tangent motion transfers no mass.
     pub(crate) fn swept(&self, structure: &Structure, state: &State, motion: Motion<'_>) -> Sweep {
         let Motion {
@@ -171,27 +188,15 @@ impl Geometry {
             if speed <= 0.0 {
                 continue;
             }
-            result.contacts += 1;
-            let direction = normal;
-            let capacity: f32 = self.incident[c]
-                .iter()
-                .map(|&j| {
-                    result.work.joints += 1;
-                    let joint = &structure.joints[j];
-                    if state.cracked[j] || state.separated[j] || !state.live(joint) {
-                        return 0.0;
-                    }
-                    joint.seam().map_or(0.0, |seam| {
-                        let opening = direction.dot(joint.normal).abs();
-                        let sliding = direction.cross(joint.normal).length();
-                        joint.area * (seam.tensile * opening + seam.shear.cohesion * sliding)
-                    })
-                })
-                .sum();
-            let force = self.parts[c].mass as f32 * speed / dt;
-            result.samples.push((c, speed, force, capacity));
-            if force > capacity {
-                result.chunks.push(c);
+            result.chunks.push(c);
+            let witness = Witness {
+                time,
+                normal,
+                at,
+                speed,
+            };
+            if result.witness.is_none_or(|first| time < first.time) {
+                result.witness = Some(witness);
             }
         }
         result.chunks.sort_unstable();
@@ -208,8 +213,58 @@ impl Geometry {
         }
     }
 
-    pub(crate) fn joints(&self, chunk: usize) -> &[usize] {
-        &self.incident[chunk]
+    /// Only edges crossing patch membership resist its common motion. Internal seams carry none.
+    pub(crate) fn cut(&self, chunks: &[usize]) -> Vec<usize> {
+        let patch: BTreeSet<_> = chunks.iter().copied().collect();
+        chunks
+            .iter()
+            .flat_map(|&c| &self.incident[c])
+            .copied()
+            .filter(|&j| {
+                let edge = self.edges[j];
+                patch.contains(&edge.0) != edge.1.is_some_and(|b| patch.contains(&b))
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        structure: &Structure,
+        state: &State,
+        sweep: &mut Sweep,
+        mass: f32,
+        drive: Vec3,
+        dt: f32,
+    ) {
+        let Some(witness) = sweep.witness else {
+            return;
+        }; // No occupied inward motion.
+        let capacity = self
+            .cut(&sweep.chunks)
+            .into_iter()
+            .map(|j| {
+                sweep.work.joints += 1;
+                let joint = &structure.joints[j];
+                if state.cracked[j] || state.separated[j] || !state.live(joint) {
+                    return 0.0;
+                }
+                joint.seam().map_or(0.0, |seam| {
+                    let opening = witness.normal.dot(joint.normal).abs();
+                    let sliding = witness.normal.cross(joint.normal).length();
+                    joint.area * (seam.tensile * opening + seam.shear.cohesion * sliding)
+                })
+            })
+            .sum::<f32>();
+        let drive = drive.dot(witness.normal).max(0.0);
+        let demand = mass * witness.speed / dt + drive;
+        sweep.broken = demand > capacity;
+        sweep.load = Some(PatchLoad {
+            demand,
+            capacity,
+            threshold: (capacity - drive).max(0.0) * dt / mass,
+        });
     }
 }
 
@@ -321,13 +376,48 @@ impl Motion<'_> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Witness {
+    pub(crate) time: f32,
+    pub(crate) normal: Vec3,
+    pub(crate) at: Vec3,
+    pub(crate) speed: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PatchLoad {
+    pub(crate) demand: f32,
+    pub(crate) capacity: f32,
+    pub(crate) threshold: f32,
+}
+
 #[derive(Default, Debug)]
 pub(crate) struct Sweep {
     pub(crate) chunks: Vec<usize>,
-    pub(crate) contacts: usize,
     pub(crate) incoming: f32,
-    pub(crate) samples: Vec<(usize, f32, f32, f32)>,
+    pub(crate) witness: Option<Witness>,
+    pub(crate) broken: bool,
+    pub(crate) load: Option<PatchLoad>,
     pub(crate) work: Work,
+}
+
+impl Sweep {
+    /// A rigid body's several contact hulls define one occupied patch, with no duplicate mass.
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.chunks.extend(other.chunks);
+        self.chunks.sort_unstable();
+        self.chunks.dedup();
+        self.incoming = self.incoming.max(other.incoming);
+        if let Some(witness) = other.witness
+            && self.witness.is_none_or(|first| witness.time < first.time)
+        {
+            self.witness = Some(witness);
+        }
+        self.work.bounds += other.work.bounds;
+        self.work.casts += other.work.casts;
+        self.work.joints += other.work.joints;
+        self.work.queries += other.work.queries;
+    }
 }
 
 /// Occupied mass properties in the frame of an exchange (SI).
@@ -580,36 +670,6 @@ mod tests {
             },
         );
         assert_eq!(swept.chunks, vec![1, 4]);
-    }
-
-    /// The game's environment destruction: demand is m*delta-v/dt against intact capacity, not
-    /// a speed threshold or a contact impulse cap. Presses that cannot free matter stay for parts.
-    #[test]
-    fn slow_motion_and_stronger_joints_hold_by_the_same_force_comparison() {
-        let (mut structure, geometry) = wall(10.0);
-        let hull = Collider::cuboid(0.4, 0.4, 0.4);
-        let sweep = |structure: &Structure, speed| {
-            geometry.swept(
-                structure,
-                &State::new(structure),
-                Motion {
-                    hull: &hull,
-                    position: Vec3::X * -0.31,
-                    rotation: Quat::IDENTITY,
-                    centre: Vec3::X * -0.31,
-                    spin: Vec3::ZERO,
-                    velocity: Vec3::X * speed,
-                    dt: 1.0,
-                },
-            )
-        };
-        // Fixture: 10 kg * 0.1 m/s / 1 s = 1 N; fast is 100 N, capacity 10 N.
-        assert!(sweep(&structure, 0.1).chunks.is_empty());
-        assert_eq!(sweep(&structure, 10.0).chunks, vec![4]);
-        if let Bond::Bonded(ref mut seam) = structure.joints[4].bond {
-            seam.tensile = 1000.0;
-        }
-        assert!(sweep(&structure, 10.0).chunks.is_empty());
     }
 
     /// The game's environment destruction: carriers and source share one plastic velocity.

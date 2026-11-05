@@ -51,7 +51,8 @@ advance(layout, state, timestamped_loads, interval)
     -> state_delta, geometry_edits, body_transfers, receiver_deposits, audit
 ```
 
-Every source, a body's contact included, enters as a load (see Bodies in contact).
+Occupied hull sweeps commit geometry and body transfers before contact solving (see Bodies in contact).
+Other sources enter as loads; held patches transmit their stopping press through contact intake.
 The interface requires SI units, stable identities, event ordering and an explicit source budget.
 Its implementation owns local response, structural response, support assessment and representation changes.
 Callers do not decide which chunks fail.
@@ -352,14 +353,26 @@ makes the hole before the physics contact solver runs (`construction::sweep`). S
 collapse remains the part graph's decision. Neither law names a vehicle or construction.
 
 For each tick, query the body's translated or rotating convex hull against admitted chunk hulls.
-A per-design bounds tree narrows exact convex casts to nearby chunks. Each intersected standing
-chunk requires normal impulse `J = m_chunk * delta_v` to reach the body's incoming normal
-velocity. Its intact incident joints offer directional capacity
-`C = sum A * (tensile * abs(n dot d) + cohesion * length(n cross d))`.
-The sweep opens those joints when `J / dt > C`; otherwise contact reaches the structure check.
-Buried matter remains soil-held. Separated joints and noncohesive rests offer no bonded capacity.
-Strength and mass come from the admitted data; no speed threshold, contact-time taste or
-construction-specific strength adjustment enters this comparison.
+A per-design bounds tree narrows exact convex casts to nearby chunks. All intersected standing
+chunks form one patch per source body and construction; several colliders on one body contribute
+to that same patch. Buried matter remains soil-held.
+
+The cut set contains only intact joints between the patch and its surroundings, including ground
+anchors. Joints inside the patch carry no load when its chunks move together. Its directional
+capacity is `C = sum A * (tensile * abs(n dot d) + cohesion * length(n cross d))`, the support
+of the independent opening and sliding limits in the contact direction `d`. Separated joints,
+cracked seams and noncohesive rests offer no bonded capacity.
+
+The demand is the force that stops the hull within the tick: `F = m_hull * v_n / dt + F_drive,n`.
+The hull's own rigid-body mass supplies `m_hull`; its first inward surface witness supplies `v_n`.
+Positive accumulated drive force along that direction adds to the demand. If `F > C`, break the
+cut and remove the whole patch from the standing construction. Otherwise move the hull to the
+first surface, stop its inward contact motion, and send the stopping press through contact intake
+to the structure check. Remaining tangential motion and physics contacts still belong to Avian.
+
+DERIVED: for a fixed patch, `v_threshold = max(0, C - F_drive,n) * dt / m_hull`.
+Equality holds; motion just above it breaks the cut. Strength, mass and drive come from data and
+rigid-body state; no authored speed threshold or construction-specific adjustment enters the law.
 
 All chunks freed by one source in a tick share one plastic rigid-motion exchange, including
 occupied inertia and off-centre torque. DERIVED: with chunk spatial mass matrix `K` about the
@@ -370,9 +383,9 @@ linear and angular impulse. DERIVED dissipated energy is half the exchanged spat
 dotted with the incoming twist. Locked axes route their reactions to the hosting constraint.
 The account exposes removed kinetic energy and outgoing chunk kinetic energy separately.
 
-`breakage::sweep_intake::sweep_departure` is the departure boundary: construction/chunk identity, world
-velocity and authoritative tick. Until the decor layer routes fragments by size, it uses the
-existing occupied debris-body path. The standing owner removes the chunks immediately and the
+`breakage::sweep_intake::sweep_departure` is the departure boundary: construction identity, the
+whole patch's chunk identities, world rigid motion and authoritative tick. Internal joints stay
+intact. Until the decor layer routes fragments by size, the patch uses one occupied debris body. The standing owner removes the chunks immediately and the
 ledger records the joint separations; clients derive the hole at the same presentation tick.
 A retired element's staged belt reactions are cancelled before integration; surviving surfaces
 receive fresh solver contacts. A sweep never enters the structural pulse/work calculation.
@@ -383,7 +396,8 @@ mass share, delayed cap or give-back. Sleeping contact forces persist until thei
 Round and field impulse laws retain their own fracture-work and launch accounts.
 
 DERIVED sweep work: bounds-tree traversal, one convex cast per overlapping leaf, and incident
-joint visits per intersected chunk; the plastic solve has fixed dimension. Counts are reported
+incident-joint membership visits and cut-joint capacity evaluations; the plastic solve has fixed
+dimension. Counts are reported
 separately from the current debris creation and structural-check costs. The owner requires the
 hole within two ticks of contact. No operation count is a server-time measurement.
 

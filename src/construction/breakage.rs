@@ -27,7 +27,7 @@
 //!   bodies (a hull, a launched turret) and every other surface (the ground); one
 //!   that stops on such a body pushes it the same way, through avian at the point it stops.
 //!   Terrain and other nonstructural surfaces only shade the field.
-//! * **Contacts**: [`sweep_intake::run`] frees intersected chunks before physics, handing each to
+//! * **Contacts**: [`sweep_intake::run`] frees intersected patches before physics, handing each to
 //!   [`sweep_intake::sweep_departure`] with velocity and tick. Unfreed contact transfers enter [`read_contacts`]
 //!   as forces for the structure check. The solver already exchanged their momentum; intake
 //!   never launches or refunds a second body blow. Sleeping presses remain in [`RestingLoads`].
@@ -849,10 +849,10 @@ fn read_contacts(
     mut read: Local<u64>,
     colliders: Colliders,
     constructions: Query<((&Position, &Rotation), &Breakage, Option<&Piece>)>,
-    mut queue: ResMut<Queue>,
-    mut resting: ResMut<RestingLoads>,
+    loads: (ResMut<Queue>, ResMut<RestingLoads>, ResMut<SweepAccount>),
     stages: Option<Res<Stages>>,
 ) {
+    let (mut queue, mut resting, mut sweep) = loads;
     let _intake = Stages::start(stages.as_deref(), Stage::Intake);
     if transfers.steps() == *read {
         return;
@@ -876,7 +876,7 @@ fn read_contacts(
         &constructions,
     );
     resting.0.clear();
-    let mut contacts = Vec::new();
+    let mut contacts = std::mem::take(&mut sweep.held);
     for (index, load) in converted.into_iter().enumerate() {
         if let Some((root, load)) = load {
             if index < awake {
