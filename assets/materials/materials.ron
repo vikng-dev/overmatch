@@ -446,6 +446,7 @@
                         the compressive DIF. Settled by a measured spruce dynamic/static tensile
                         ratio at the stated reference rate"))),
                 )),
+                shear_modulus: Some((47292000.0, Unknown("StandIn isotropic G = E / (2 (1 + nu)), with ASSUMED nu = 0.25 and E from this row's bulk.blast.youngs_modulus. No matched shear-modulus measurement was read; settled by a shear-compliance measurement for this material and construction direction"))),
                 shear_cohesion: Some((8.9e6, Measured("red spruce, clear straight-grained wood,
                     12 % moisture: shear parallel to grain 8900 kPa; USDA Forest Products
                     Laboratory, Wood Handbook FPL-GTR-282 (2021), Chapter 5 Table 5-3a,
@@ -506,6 +507,7 @@
                     youngs_modulus: Some((118.23e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (tangential compression modulus of dry spruce, Zulkifli et al. 2021). Settled by a green Norway spruce measurement of this quantity"))),
                     tensile_dif: Some((1.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (no dynamic tensile ratio read for any spruce). Settled by a green Norway spruce measurement of this quantity"))),
                 )),
+                shear_modulus: Some((47292000.0, Unknown("StandIn isotropic G = E / (2 (1 + nu)), with ASSUMED nu = 0.25 and E from this row's bulk.blast.youngs_modulus. No matched shear-modulus measurement was read; settled by a shear-compliance measurement for this material and construction direction"))),
                 shear_cohesion: Some((8.9e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce shear parallel to grain at 12 % moisture, Wood Handbook FPL-GTR-282 Table 5-3a). Settled by a green Norway spruce measurement of this quantity"))),
                 shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green Norway spruce measurement of this quantity"))),
             )),
@@ -544,6 +546,7 @@
                     youngs_modulus: Some((118.23e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (tangential compression modulus of dry spruce, Zulkifli et al. 2021). Settled by a green Scots pine measurement of this quantity"))),
                     tensile_dif: Some((1.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (no dynamic tensile ratio read for any spruce). Settled by a green Scots pine measurement of this quantity"))),
                 )),
+                shear_modulus: Some((47292000.0, Unknown("StandIn isotropic G = E / (2 (1 + nu)), with ASSUMED nu = 0.25 and E from this row's bulk.blast.youngs_modulus. No matched shear-modulus measurement was read; settled by a shear-compliance measurement for this material and construction direction"))),
                 shear_cohesion: Some((8.9e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce shear parallel to grain at 12 % moisture, Wood Handbook FPL-GTR-282 Table 5-3a). Settled by a green Scots pine measurement of this quantity"))),
                 shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green Scots pine measurement of this quantity"))),
             )),
@@ -585,6 +588,7 @@
                     youngs_modulus: Some((118.23e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (tangential compression modulus of dry spruce, Zulkifli et al. 2021). Settled by a green silver birch measurement of this quantity"))),
                     tensile_dif: Some((1.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (no dynamic tensile ratio read for any spruce). Settled by a green silver birch measurement of this quantity"))),
                 )),
+                shear_modulus: Some((47292000.0, Unknown("StandIn isotropic G = E / (2 (1 + nu)), with ASSUMED nu = 0.25 and E from this row's bulk.blast.youngs_modulus. No matched shear-modulus measurement was read; settled by a shear-compliance measurement for this material and construction direction"))),
                 shear_cohesion: Some((8.9e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce shear parallel to grain at 12 % moisture, Wood Handbook FPL-GTR-282 Table 5-3a). Settled by a green silver birch measurement of this quantity"))),
                 shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green silver birch measurement of this quantity"))),
             )),
@@ -665,6 +669,7 @@
                         rupture, to the scab law's dynamic tensile strength, 2.14 MPa (DERIVED).
                         ASSUMED effective plateau over the pulse's strain rate"))),
                 )),
+                shear_modulus: Some((3440000000.0, Unknown("StandIn isotropic G = E / (2 (1 + nu)), with ASSUMED nu = 0.25 and E from this row's bulk.blast.youngs_modulus. No matched shear-modulus measurement was read; settled by a shear-compliance measurement for this material and construction direction"))),
                 shear_cohesion: Some((0.165e6, Measured("cement-mortar and solid clay brick
                     triplets (TC), Mohr-Coulomb intercept 0.165 MPa: Segura et al. (2021),
                     Experimental comparison of two testing setups for characterizing the shear

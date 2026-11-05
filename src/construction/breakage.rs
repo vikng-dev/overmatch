@@ -38,10 +38,11 @@
 //!   contact last held ([`RestingLoads`]): every run of the laws on that construction carries the
 //!   press once, and it starts none. Awake contacts' presses likewise join every deposit in
 //!   the physics step, once per point. No body is read by its kind.
-//! * **The order.** Deposits commit in order. Independent owners evaluate together; source
-//!   effects commit by entity, respecting [`owner_batches`]. Each owner runs removal and the
-//!   push rule ([`fracture::strike`]), the structural check ([`fracture::structural`]), the weight
-//!   check on what those changed ([`fracture::weigh`]), support ([`fracture::fall`]).
+//! * **The order.** Tick intake reads one geometry snapshot. Each owner runs removal and
+//!   cavity cracks ([`fracture::strike`]), one bounded force solve
+//!   ([`fracture::bondsolve::Assessment`]), then connectivity on change. Independent owners
+//!   evaluate together; effects commit by entity, respecting [`owner_batches`]. Iterating
+//!   owners and changed spin continue next tick without requiring another deposit.
 //! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses, the cylinder
 //!   about its chord, open across each face it crosses ([`open_ends`]), and a blast a dish in each
 //!   chunk its rays stop on ([`holes_of`]); a chunk still standing after the deposit
@@ -60,11 +61,11 @@
 //!   its blow less the work its opening spent ([`fracture::debit_work`]), returning the rest at
 //!   the contact point ([`give_back`]); its spin is the exchanged angular
 //!   momentum over its own inertia tensor; gravity, contact and friction decide whether a group
-//!   a cracked section freed rocks back or topples. A later blast's impulse on it is a write to
+//!   a cracked joint freed rocks back or topples. A later blast's impulse on it is a write to
 //!   its velocity and sleep timer, which wakes it asleep (avian's `wake_on_changed`).
 //! * **A moving group is a chunk group too**: its body carries its own [`Breakage`], its owned
 //!   chunks standing and the rest dust, so the deposits and contacts that reach it run the same
-//!   laws in its accelerating frame ([`fracture::in_group_frames`], its spin read from the body).
+//!   laws with its rigid acceleration removed and its spin read from the body.
 //!   A seam that fails there splits it at that tick: [`PendingSplit`] stages the new groups until
 //!   the tick's plastic returns reach the parent, `split_groups` spawns them with the parent's
 //!   rigid velocity field and despawns it, and [`RetirePiece`] keeps the parent's final pose and
@@ -74,7 +75,7 @@
 //! ([`reconcile`], then avian's refit of moved colliders), so the next tick's march reads it.
 
 use crate::cost::stages::{Stage, Stages};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
@@ -91,8 +92,7 @@ use serde::{Deserialize, Serialize};
 
 use super::attachments::{Attachments, GroundAttachment};
 use super::fracture::{
-    self, Blast, Block, Bond, Chunk, Fate, GroupLoads, Joint, Load, Material, Origin, SectionCache,
-    Side, State, Structure,
+    self, Blast, Block, Bond, Chunk, Fate, Joint, Load, Material, Origin, Side, State, Structure,
 };
 use super::schema::{self, ConstructionAsset};
 use super::{ConstructionKind, Element};
@@ -578,17 +578,16 @@ pub(crate) struct Live {
     pub(crate) structure: Arc<Structure>,
     pub(crate) state: State,
     pub(crate) swapped: Vec<bool>,
-    pub(crate) sections: SectionCache,
-    /// Presses already checked against the current topology: chunk, point (m), force (N).
-    /// Decreases are rechecked too: removing a stabilizing force can expose another's demand.
-    held_presses: Vec<(usize, Vec3, Vec3)>,
+    pub(crate) assessment: Arc<fracture::bondsolve::Assessment>,
     /// Per law chunk: its holes, in record order (module doc).
     pub(crate) holes: Vec<Vec<Hole>>,
 }
 
 impl Live {
     fn new(kind: &ConstructionKind, scale: f32) -> Self {
-        Self::from_shared(kind.structure(scale), kind.layout.elements.len())
+        let mut live = Self::from_shared(kind.structure(scale), kind.layout.elements.len());
+        live.assessment = kind.equilibrium(scale);
+        live
     }
 
     /// Complete live state built synchronously from a structure and its authored element count.
@@ -601,8 +600,7 @@ impl Live {
         Self {
             state: State::new(&structure),
             swapped: vec![false; elements],
-            sections: SectionCache::default(),
-            held_presses: Vec::new(),
+            assessment: Arc::new(fracture::bondsolve::Assessment::default()),
             holes: vec![Vec::new(); structure.chunks.len()],
             structure,
         }
@@ -619,8 +617,7 @@ impl Live {
             structure: self.structure.clone(),
             state: self.state.clone(),
             swapped: vec![true; self.swapped.len()],
-            sections: SectionCache::default(),
-            held_presses: Vec::new(),
+            assessment: Arc::new(fracture::bondsolve::Assessment::default()),
             holes: self.holes.clone(),
         };
         child.state.retain_group(group);
@@ -1270,6 +1267,7 @@ struct DepositParam<'w, 's> {
         ),
     >,
     clock: Option<Res<'w, ShotClock>>,
+    fixed: Res<'w, Time<Fixed>>,
     record: ResMut<'w, Record>,
     commands: Commands<'w, 's>,
     /// The moving bodies a blast's rays meet ([`moving_near`]) and push.
@@ -1318,7 +1316,7 @@ fn moving_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
 fn construction_spin(
     bodies: &Query<(Forces, &RigidBody)>,
     root: Entity,
-    frame: Frame,
+    rotation: Quat,
     moving: bool,
 ) -> Vec3 {
     if !moving {
@@ -1327,7 +1325,7 @@ fn construction_spin(
     let (body, _) = bodies
         .get(root)
         .expect("a moving chunk group is a physics body");
-    frame.rotation.inverse() * body.angular_velocity()
+    rotation.inverse() * body.angular_velocity()
 }
 
 /// The field loads whose blow moves a moving group's body once the laws have run on `state`: a
@@ -1513,6 +1511,7 @@ struct OwnerInputs<'a> {
     resting: &'a [Load],
     spin: Vec3,
     tick: u32,
+    step: f32,
 }
 
 fn evaluate_owner(
@@ -1530,6 +1529,7 @@ fn evaluate_owner(
         resting,
         spin,
         tick,
+        step,
     } = inputs;
     let kind = breakage.kind.clone();
     let construction = breakage.construction;
@@ -1552,7 +1552,7 @@ fn evaluate_owner(
         .chain(pressing.iter().copied())
         .chain(resting.iter().copied())
         .collect();
-    let changes = run_laws(&kind.layout.element_of, live, &loads, holes, spin);
+    let changes = run_laws(&kind.layout.element_of, live, &loads, holes, spin, step);
     // Moving matter already has a carrier; only surviving field loads push it.
     let fields = if moving.is_some() {
         field_blows(&loads, &live.state).copied().collect()
@@ -1652,10 +1652,21 @@ fn owner_batches(taken: BTreeMap<Entity, Taken>) -> impl Iterator<Item = BTreeMa
 /// AUTHORITY: run the tick's deposits through the laws (module doc), record every change and spawn
 /// a body per loose group.
 fn apply_deposits(mut p: DepositParam) {
-    let intake = Stages::start(p.stages.as_deref(), Stage::Intake);
-    if p.queue.0.is_empty() {
+    if p.queue.0.is_empty()
+        && !p.constructions.iter().any(|(root, pose, breakage, piece)| {
+            breakage.live.assessment.needs_tick()
+                || (piece.is_some()
+                    && breakage.live.assessment.spin_changed(construction_spin(
+                        &p.bodies,
+                        root,
+                        breakage.physics_frame(pose).rotation,
+                        true,
+                    )))
+        })
+    {
         return;
-    }
+    } // No changed load, topology, unfinished solve or moving-frame acceleration.
+    let intake = Stages::start(p.stages.as_deref(), Stage::Intake);
     // A press lasts through the physics step, including every other deposit in this pass.
     // The contact deposit retains its blow; its press joins every run exactly once here.
     let mut presses: BTreeMap<Entity, Vec<Load>> = BTreeMap::new();
@@ -1683,11 +1694,12 @@ fn apply_deposits(mut p: DepositParam) {
         })
         .collect();
     drop(intake);
+    let step = p.fixed.timestep().as_secs_f32();
+    let mut taken: BTreeMap<Entity, Taken> = BTreeMap::new();
     for deposit in std::mem::take(&mut p.queue.0) {
         let intake = Stages::start(p.stages.as_deref(), Stage::Intake);
-        let mut taken: BTreeMap<Entity, Taken> = BTreeMap::new();
         take_lines(&p, &frames, &deposit, &mut taken);
-        // Geometry reads the state left by the preceding deposit. Each owner keeps ray order;
+        // All deposits read the tick's intake geometry. Each owner keeps ray order;
         // nearest-stop reduction keeps source-entity order, independent of worker completion.
         if !deposit.rays.is_empty() || deposit.blast.is_some() {
             let mut geometry = bevy::utils::Parallel::<Vec<OwnerGeometry>>::default();
@@ -1711,6 +1723,17 @@ fn apply_deposits(mut p: DepositParam) {
             taken.entry(root).or_default().contacts.push(load);
         }
         drop(intake);
+    }
+    for (root, _, breakage, piece) in p.constructions.iter() {
+        let spin = construction_spin(&p.bodies, root, frames[&root].rotation, piece.is_some());
+        if breakage.live.assessment.needs_tick() || breakage.live.assessment.spin_changed(spin) {
+            taken.entry(root).or_default();
+        }
+    }
+    if taken.is_empty() {
+        return;
+    } // Every owner is equilibrated and received no changed loads.
+    {
         let _structure = Stages::start(p.stages.as_deref(), Stage::Structure);
         let mut departures = Vec::new();
         for batch in owner_batches(taken) {
@@ -1734,8 +1757,9 @@ fn apply_deposits(mut p: DepositParam) {
                             taken,
                             pressing: presses.get(&root).map_or(&[][..], Vec::as_slice),
                             resting: resting.get(&root).map_or(&[][..], Vec::as_slice),
-                            spin: construction_spin(bodies, root, frame, piece.is_some()),
+                            spin: construction_spin(bodies, root, frame.rotation, piece.is_some()),
                             tick,
+                            step,
                         },
                     );
                     // Only recorded changes require a collider refit.
@@ -1752,7 +1776,7 @@ fn apply_deposits(mut p: DepositParam) {
             );
             effects.sort_unstable_by_key(|effect| effect.root);
             // Records, source impulses and carrier creation keep source-entity order,
-            // independent of worker completion. Each deposit commits before the next is cast.
+            // independent of worker completion. Every owner commits once after tick intake.
             for effect in effects {
                 let frame = frames[&effect.root];
                 if !effect.fields.is_empty() {
@@ -2123,41 +2147,31 @@ fn open_ends(block: &Block, from: Vec3, to: Vec3, scale: f32) -> (Vec3, Vec3) {
     )
 }
 
-/// What the laws changed in one construction: its record events in order, each loose group with the
-/// loads on it (construction frame), the structural failures (the push check's, then the weight
-/// check's), and the weight check's unassessed chunks and operation count ([`fracture::Weighed`]).
+/// One owner's recorded causes, released groups and exchanged source impulses in this tick.
+/// `solve_rounds` counts bounded sparse work; zero means an unchanged equilibrium was reused.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Changes {
     pub(crate) events: Vec<Event>,
     pub(crate) groups: Vec<(Vec<usize>, Vec<Load>)>,
     pub(crate) failures: Vec<fracture::Failure>,
-    pub(crate) unassessed: Vec<usize>,
-    pub(crate) weight_steps: usize,
+    pub(crate) solve_rounds: usize,
     /// Body blows on chunks with no carrier in this deposit, returned whole in construction terms:
     /// dust has none, and a chunk an earlier deposit freed already launched as its own body.
     pub(crate) returns: Vec<BodyReturn>,
 }
 
-/// Run one deposit's `loads`, with the `holes` it cuts ([`holes_of`]), through the laws on `live`
-/// (module doc) and record its wear, dust, kept holes and cracks (the push rule's, then the
-/// structural and weight checks'), each ascending but the holes, in deposit order. Replacement
-/// and departure are derived from these causes. A hole is kept only in a chunk standing
-/// after the removal and holding fewer than [`HOLES_PER_CHUNK`], and no law reads one. A field
-/// load on a chunk turned to dust went into crushing it and moves nothing; a body's blow there is
-/// returned whole because dust has no carrier. A queued contact on a chunk an earlier deposit freed is returned whole too:
-/// that chunk launched as its own body, which the next physics step's solver meets as a dynamic
-/// body, so the momentum the static stop took from the source is neither kept nor spent twice.
-/// A held section's energy check reads a body's pair work against its hinge effective mass; a
-/// freed group launches against its free effective mass, each body's blow first reduced by the
-/// work the openings about the group spent ([`fracture::debit_work`]). Gravity plus presses reach the strength and rest
-/// laws from changed supports and pressed chunks. An identical press set on unchanged topology
-/// reuses its held verdict; every changed force or point, including a decrease, rechecks.
+/// Apply one tick's loads and holes, solve each live joint once, and record simultaneous cracks.
+/// Holes are view-only; removal consumes their volume pool. Loads whose carrier was removed
+/// cannot launch it, so body blows there are returned whole. Connectivity follows topology
+/// changes; redistribution and unfinished equilibrium continue on subsequent ticks. The
+/// construction design's "Structural calculation" owns pulse and failure approximations.
 pub(crate) fn run_laws(
     element_of: &[u16],
     live: &mut Live,
     loads: &[Load],
     mut holes: Vec<(usize, Hole)>,
     spin: Vec3,
+    step: f32,
 ) -> Changes {
     let struck = fracture::strike(&live.structure, &mut live.state, loads);
     holes.retain(|&(c, hole)| {
@@ -2177,54 +2191,26 @@ pub(crate) fn run_laws(
         .filter(|load| live.state.standing(load.chunk))
         .copied()
         .collect();
-    let inputs = GroupLoads::new(&loads, spin);
-    let mut failures =
-        fracture::structural(&live.structure, &mut live.state, inputs, &mut live.sections);
-    let pushed: Vec<usize> = struck
-        .cracked
-        .iter()
-        .chain(failures.iter().flat_map(|failure| &failure.joints))
-        .copied()
-        .collect();
-    let presses: Vec<_> = loads
-        .iter()
-        .filter(|load| load.press != Vec3::ZERO)
-        .map(|load| (load.chunk, load.at, load.press))
-        .collect();
-    let unloaded: Vec<_> = live
-        .held_presses
-        .iter()
-        .map(|&(chunk, ..)| chunk)
-        .filter(|chunk| !presses.iter().any(|&(current, ..)| current == *chunk))
-        .collect();
-    // A framed group's frame is this run's own (its motion changes every run), so no held
-    // verdict carries over to it.
-    let recheck = !struck.dusted.is_empty()
-        || !pushed.is_empty()
-        || presses != live.held_presses
-        || !fracture::loose_groups(&live.structure, &live.state).is_empty();
-    let weighed = fracture::weigh(
+    let changed = !struck.dusted.is_empty() || !struck.cracked.is_empty();
+    let (failures, solve_rounds) = Arc::make_mut(&mut live.assessment).advance(
         &live.structure,
         &mut live.state,
-        &struck.dusted,
-        &pushed,
-        if recheck {
-            inputs
-        } else {
-            GroupLoads::new(&[], spin)
-        },
-        &unloaded,
-        &mut live.sections,
+        &loads,
+        spin,
+        step,
+        changed,
     );
-    failures.extend(weighed.failures);
-    let structural: Vec<usize> = failures
+    let structural: Vec<usize> = failures.iter().map(|f| f.joint).collect();
+    let groups: Vec<_> = live
+        .assessment
+        .support
         .iter()
-        .flat_map(|failure| failure.joints.iter().copied())
+        .filter(|group| live.state.standing(group[0]))
+        .cloned()
         .collect();
-    let groups = fracture::fall(&live.structure, &mut live.state);
-    // The strength loop reached a held verdict on the final topology. A fall removes only
-    // groups with no live support path, so it changes no remaining held group's load path.
-    live.held_presses = presses;
+    for &c in groups.iter().flatten() {
+        live.state.fate[c] = Fate::Fallen;
+    }
     let joints = &live.structure.joints;
     let cracked_sides = struck
         .cracked
@@ -2271,25 +2257,62 @@ pub(crate) fn run_laws(
             .chain(&structural)
             .map(|&j| Event::Crack(j as u16)),
     );
-    let groups = groups
-        .into_iter()
-        .map(|group| {
-            let on_group = loads
-                .iter()
-                .filter(|load| group.binary_search(&load.chunk).is_ok())
-                .copied();
-            let on_group = fracture::debit_work(&live.structure, &failures, &group, on_group);
-            (group, on_group)
-        })
-        .collect();
+    let groups = departure_loads(&live.structure, groups, &loads, &failures);
     Changes {
         events,
         groups,
         failures,
-        unassessed: weighed.unassessed,
-        weight_steps: weighed.steps,
+        solve_rounds,
         returns,
     }
+}
+
+/// Partition source loads once by departing ownership. One failed joint's work is shared
+/// between its departing sides, or assigned whole to its only departing side. No source is
+/// copied onto unrelated groups, and no opening is charged twice.
+fn departure_loads(
+    structure: &Structure,
+    groups: Vec<Vec<usize>>,
+    loads: &[Load],
+    failures: &[fracture::Failure],
+) -> Vec<(Vec<usize>, Vec<Load>)> {
+    let owner: HashMap<_, _> = groups
+        .iter()
+        .enumerate()
+        .flat_map(|(g, chunks)| chunks.iter().map(move |&c| (c, g)))
+        .collect();
+    let mut sources = vec![Vec::new(); groups.len()];
+    let mut work = vec![0.0; groups.len()];
+    for &load in loads {
+        if let Some(&g) = owner.get(&load.chunk) {
+            sources[g].push(load);
+        }
+    }
+    for failure in failures {
+        let joint = &structure.joints[failure.joint];
+        let a = owner.get(&joint.a).copied();
+        let b = match joint.b {
+            Side::Chunk(b) => owner.get(&b).copied(),
+            Side::Ground => None,
+        };
+        match (a, b) {
+            (Some(a), Some(b)) if a != b => {
+                work[a] += failure.work / 2.0;
+                work[b] += failure.work / 2.0;
+            }
+            (Some(g), _) | (_, Some(g)) => work[g] += failure.work,
+            (None, None) => {} // Both sides remain supported; no body is launched by this opening.
+        }
+    }
+    groups
+        .into_iter()
+        .zip(sources)
+        .zip(work)
+        .map(|((group, sources), work)| {
+            let loads = fracture::debit_work(structure, &group, work, sources);
+            (group, loads)
+        })
+        .collect()
 }
 
 /// Whether `points` at their material `density` form a body the solver can weigh and turn.

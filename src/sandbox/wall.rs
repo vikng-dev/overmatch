@@ -128,12 +128,12 @@ pub(super) fn plugin(app: &mut App) {
         .add_observer(read_hits)
         .init_gizmo_group::<WallGizmos>()
         .add_systems(Startup, (setup_wall, spawn_readout))
+        .add_systems(FixedUpdate, apply_deposits)
         .add_systems(
             Update,
             (
                 wall_keys.run_if(not(panel_capturing)),
                 fire_burst,
-                apply_deposits,
                 (draw_wall, paint_witness, animate_puffs, update_readout),
             )
                 .chain(),
@@ -480,6 +480,8 @@ struct WallBurst {
 /// A deposit waiting for the model.
 #[derive(Debug)]
 enum Deposit {
+    /// Continue unfinished equilibrium or redistribution without another source.
+    Continue,
     /// One round's crossing of the wall: per chunk the line it cut (entry, end) and the energy it
     /// lost there (J); its travel and the momentum it lost across the wall (N·s).
     Line {
@@ -519,7 +521,7 @@ struct WallLog {
     pending_spall: std::collections::HashMap<Entity, f32>,
 }
 
-/// One deposit's outcome, for the readout.
+/// One numerical source operation's outcome, for the readout.
 #[derive(Clone, Debug, Default)]
 struct Outcome {
     what: String,
@@ -530,12 +532,10 @@ struct Outcome {
     dust: usize,
     local: usize,
     structural: usize,
-    sections: usize,
-    /// The first push failure's and the first weight failure's demand and capacity.
+    /// The first shear failure's and the first tensile failure's demand and capacity.
     worst: Option<(f32, f32)>,
-    weight: Option<(f32, f32)>,
-    unassessed: usize,
-    weight_steps: usize,
+    opening: Option<(f32, f32)>,
+    solve_rounds: usize,
     groups: usize,
     fallen: usize,
     spall: f32,
@@ -1138,9 +1138,8 @@ struct Applied {
     dusted: Vec<usize>,
     local: usize,
     failures: Vec<model::Failure>,
-    /// The weight check's unassessed touched chunks and its operation count ([`model::Weighed`]).
-    unassessed: usize,
-    weight_steps: usize,
+    /// Sparse equilibrium rounds performed in this deposit.
+    solve_rounds: usize,
     /// Each loose group, its centroid, linear and angular velocity, and whether a structural crack
     /// bounds it.
     groups: Vec<(Vec<usize>, Vec3, Vec3, Vec3, bool)>,
@@ -1174,9 +1173,11 @@ fn apply_deposit(
     charge: &Charge,
     field: &[(Vec3, f32)],
     deposit: &Deposit,
+    step: f32,
 ) -> Applied {
     let mut applied = Applied::default();
     let (loads, holes) = match deposit {
+        Deposit::Continue => (Vec::new(), Vec::new()),
         Deposit::Line { lines, .. } => (
             lines
                 .iter()
@@ -1252,6 +1253,7 @@ fn apply_deposit(
         &loads,
         holes,
         Vec3::ZERO,
+        step,
     );
     applied.worn = pools
         .iter()
@@ -1273,18 +1275,10 @@ fn apply_deposit(
         .filter(|event| matches!(event, crate::construction::breakage::Event::Crack(_)))
         .count();
     applied.failures = changes.failures;
-    applied.local = cracks
-        - applied
-            .failures
-            .iter()
-            .map(|f| f.joints.len())
-            .sum::<usize>();
-    applied.unassessed = changes.unassessed.len();
-    applied.weight_steps = changes.weight_steps;
+    applied.local = cracks - applied.failures.len();
+    applied.solve_rounds = changes.solve_rounds;
     for failure in &applied.failures {
-        for &j in &failure.joints {
-            wall.structural[j] = true;
-        }
+        wall.structural[failure.joint] = true;
     }
     for (group, loads) in changes.groups {
         let chunks = &wall.cut.structure.chunks;
@@ -1345,6 +1339,7 @@ struct ApplyParam<'w, 's> {
     assets: Option<Res<'w, WallAssets>>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
     time: Res<'w, Time>,
+    fixed: Res<'w, Time<Fixed>>,
     commands: Commands<'w, 's>,
 }
 
@@ -1352,8 +1347,21 @@ fn apply_deposits(mut p: ApplyParam) {
     let (Some(wall), Some(assets)) = (p.wall.as_deref_mut(), p.assets.as_deref()) else {
         return;
     };
-    for deposit in std::mem::take(&mut p.queue.0) {
-        let applied = apply_deposit(wall, &p.controls, &p.charge, &p.field.0, &deposit);
+    if p.queue.0.is_empty() && wall.live.assessment.needs_tick() {
+        p.queue.0.push(Deposit::Continue);
+    }
+    // This manual instrument delivers one queued source operation per numerical tick.
+    // Further source operations retain input order; an idle tick continues the pending solve.
+    if !p.queue.0.is_empty() {
+        let deposit = p.queue.0.remove(0);
+        let applied = apply_deposit(
+            wall,
+            &p.controls,
+            &p.charge,
+            &p.field.0,
+            &deposit,
+            p.fixed.timestep().as_secs_f32(),
+        );
         info!(
             "wall prototype: shared laws: crushed {:.6e} m3, {} rear scabs",
             applied.crushed, applied.scabs
@@ -1440,6 +1448,7 @@ fn apply_deposits(mut p: ApplyParam) {
                 });
         }
         let what = match &deposit {
+            Deposit::Continue => "structure update".to_owned(),
             Deposit::Line { what, .. } => what.clone(),
             Deposit::Blast { mass, standoff, .. } => format!(
                 "blast {mass:.1} kg {} at {standoff:.1} m",
@@ -1468,12 +1477,10 @@ fn apply_deposits(mut p: ApplyParam) {
             chunks: applied.chunks,
             dust: applied.dusted.len(),
             local: applied.local,
-            structural: applied.failures.iter().map(|f| f.joints.len()).sum(),
-            sections: applied.failures.len(),
-            worst: first(model::Cause::Push),
-            weight: first(model::Cause::Weight),
-            unassessed: applied.unassessed,
-            weight_steps: applied.weight_steps,
+            structural: applied.failures.len(),
+            worst: first(model::Cause::Shear),
+            opening: first(model::Cause::Tension),
+            solve_rounds: applied.solve_rounds,
             groups: applied.groups.len(),
             fallen: applied.groups.iter().map(|(group, ..)| group.len()).sum(),
             spall: match &deposit {
@@ -1488,8 +1495,8 @@ fn apply_deposits(mut p: ApplyParam) {
         if let Some(last) = &p.log.last {
             info!(
                 "wall prototype: {}: {:.0} kinetic J into {} chunks, {} dust, {} local cracks, \
-                 {} structural cracks in {} sections (first push {:?} N s m and first weight {:?} \
-                 Pa demand, capacity), weight check {} steps with {} touched chunks unassessed, \
+                 {} joint cracks (first shear {:?} Pa and first tension {:?} \
+                 Pa demand, capacity), force solve {} rounds, \
                  {} groups fell ({} chunks), exit cones {:.0} J, blast {:?} (audit J, N s)",
                 last.what,
                 last.deposited,
@@ -1497,11 +1504,9 @@ fn apply_deposits(mut p: ApplyParam) {
                 last.dust,
                 last.local,
                 last.structural,
-                last.sections,
                 last.worst,
-                last.weight,
-                last.weight_steps,
-                last.unassessed,
+                last.opening,
+                last.solve_rounds,
                 last.groups,
                 last.fallen,
                 last.spall,
@@ -1690,14 +1695,13 @@ fn detail(
             charge.charge,
         ),
         format!(
-            "last: {}: {} kinetic into {} chunks -> {} dust, {} local cracks, {} structural cracks in {} sections, {} groups fell ({} chunks)",
+            "last: {}: {} kinetic into {} chunks -> {} dust, {} local cracks, {} structural joint cracks, {} groups fell ({} chunks)",
             last.what,
             joules(last.deposited),
             last.chunks,
             last.dust,
             last.local,
             last.structural,
-            last.sections,
             last.groups,
             last.fallen
         ),
@@ -1717,19 +1721,19 @@ fn detail(
     }
     if let Some((demand, capacity)) = last.worst {
         lines.push(format!(
-            "      first structural failure: angular impulse {demand:.0} N s m against sqrt(2 I Gf A) = {capacity:.0} N s m"
+            "      first shear failure: traction {demand:.0} Pa against {capacity:.0} Pa"
         ));
     }
-    if let Some((demand, capacity)) = last.weight {
+    if let Some((demand, capacity)) = last.opening {
         lines.push(format!(
-            "      first weight failure: peak tension {:.0} kPa against the seam's {:.0} kPa",
+            "      first tensile failure: peak tension {:.0} kPa against the seam's {:.0} kPa",
             demand / 1e3,
             capacity / 1e3
         ));
     }
     lines.push(format!(
-        "      weight check: {} steps, {} touched chunks unassessed (held through several sections)",
-        last.weight_steps, last.unassessed
+        "      force solve: {} conjugate-gradient rounds",
+        last.solve_rounds
     ));
     // `+ 0.0`: an empty sum is -0.0, which would print a sign.
     let witness = log.witness.iter().sum::<f32>() + 0.0;

@@ -2,8 +2,8 @@
 //!
 //! [`Solve`] holds rigid-chunk translations and rotations between updates. [`Problem`] supplies
 //! the current owned graph and applied wrenches; a round applies its sparse stiffness once.
-//! Joint patches transmit both force and moment. Four area samples integrate a circular patch's
-//! linear displacement field exactly (area and both second moments), without candidate cuts.
+//! Joint patches transmit both force and moment. Circular area and second moments
+//! integrate the affine displacement field exactly, without candidate cuts.
 //! The construction design's "Structural calculation" owns the model and its limitations.
 
 use bevy::math::{DMat3, DVec3};
@@ -14,6 +14,9 @@ pub(crate) const ROUNDS: usize = 32;
 /// Resolution: relative preconditioned residual at which further f64 work is rounding noise
 /// for the f32 construction data. It is a convergence gate, never a material-strength margin.
 const RELATIVE_RESIDUAL: f64 = 1e-8;
+/// Resolution: bound shared pre-play preparation to eight rank budgets. Finite precision can
+/// lose conjugacy and revisit directions; this permits that work without unbounded asset loading.
+const INITIAL_RANK_PASSES: usize = 8;
 
 /// A force and moment, or a translation and rotation. SI units, with the origin at a node centre.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -46,7 +49,7 @@ impl Wrench {
 
 /// One rigid chunk. The caller fixes buried matter; a free owner has its rigid acceleration
 /// removed from the loads, so its nullspace carries no resultant force or moment.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Node {
     pub centre: DVec3,
     pub fixed: bool,
@@ -55,7 +58,7 @@ pub(crate) struct Node {
 /// An area-integrated linear elastic connection. Compliance is the sum of both sides' lengths
 /// over their moduli: `kn = A / (la/Ea + lb/Eb)`, and likewise for shear with `G`.
 /// A ground connection has only the occupied side's compliance.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Edge {
     pub a: usize,
     pub b: Option<usize>,
@@ -70,36 +73,52 @@ pub(crate) struct Edge {
 }
 
 impl Edge {
-    fn samples(self) -> [DVec3; 4] {
-        let helper = if self.normal.x.abs() < self.normal.y.abs() {
-            DVec3::X
-        } else {
-            DVec3::Y
-        };
-        let u = self.normal.cross(helper).normalize();
-        let v = self.normal.cross(u);
-        // Four equal shares at ±sqrt(2 I/A) integrate <x²> = <y²> = I/A.
-        let radius = (2.0 * self.second_per_area).sqrt();
-        [u, -u, v, -v].map(|axis| self.centre + axis * radius)
-    }
-
-    fn traction(self, displacement: DVec3) -> DVec3 {
+    fn force(self, displacement: DVec3) -> DVec3 {
         let normal = self.normal * self.normal.dot(displacement);
-        (normal * self.normal_stiffness + (displacement - normal) * self.shear_stiffness) / 4.0
+        normal * self.normal_stiffness + (displacement - normal) * self.shear_stiffness
     }
 
-    /// Force and moment carried away from side a, about the patch centre. The caller orients
-    /// the normal toward a when reading tension; the stiffness itself is sign-independent.
+    fn couple(self, rotation: DVec3) -> DVec3 {
+        let twist = self.normal * self.normal.dot(rotation);
+        ((rotation - twist) * self.normal_stiffness + twist * (2.0 * self.shear_stiffness))
+            * self.second_per_area
+    }
+
+    /// Area and circular second moments integrate the affine displacement field exactly.
+    /// The couple is k_n*(I/A)*rotation_in_plane + k_s*(2I/A)*twist_about_normal.
     pub(crate) fn resultant(self, nodes: &[Node], answer: &[Wrench]) -> Wrench {
-        let mut carried = Wrench::default();
-        for point in self.samples() {
-            let mut delta = answer[self.a].point(point - nodes[self.a].centre);
-            if let Some(b) = self.b {
-                delta -= answer[b].point(point - nodes[b].centre);
-            }
-            carried.add(Wrench::at(self.traction(delta), point - self.centre), 1.0);
+        let mut delta = answer[self.a].point(self.centre - nodes[self.a].centre);
+        let mut rotation = answer[self.a].angular;
+        if let Some(b) = self.b {
+            delta -= answer[b].point(self.centre - nodes[b].centre);
+            rotation -= answer[b].angular;
         }
-        carried
+        Wrench {
+            linear: self.force(delta),
+            angular: self.couple(rotation),
+        }
+    }
+
+    /// Recoverable opening and sliding work, J, from the same circular area integrals.
+    fn energy(self, nodes: &[Node], answer: &[Wrench]) -> (f64, f64) {
+        let mut delta = answer[self.a].point(self.centre - nodes[self.a].centre);
+        let mut rotation = answer[self.a].angular;
+        if let Some(b) = self.b {
+            delta -= answer[b].point(self.centre - nodes[b].centre);
+            rotation -= answer[b].angular;
+        }
+        let normal = self.normal.dot(delta);
+        let twist = self.normal.dot(rotation);
+        (
+            self.normal_stiffness
+                * (normal * normal
+                    + self.second_per_area * (rotation - self.normal * twist).length_squared())
+                / 2.0,
+            self.shear_stiffness
+                * ((delta - self.normal * normal).length_squared()
+                    + 2.0 * self.second_per_area * twist * twist)
+                / 2.0,
+        )
     }
 
     /// Peak normal traction (tension positive), and an upper bound on tangential traction, Pa.
@@ -128,18 +147,25 @@ pub(crate) struct Problem<'a> {
 impl Problem<'_> {
     fn apply(&self, input: &[Wrench], output: &mut [Wrench]) {
         output.fill(Wrench::default());
-        for edge in self.edges {
-            for point in edge.samples() {
-                let arm_a = point - self.nodes[edge.a].centre;
-                let mut delta = input[edge.a].point(arm_a);
-                if let Some(b) = edge.b {
-                    delta -= input[b].point(point - self.nodes[b].centre);
-                }
-                let force = edge.traction(delta);
-                output[edge.a].add(Wrench::at(force, arm_a), 1.0);
-                if let Some(b) = edge.b {
-                    output[b].add(Wrench::at(force, point - self.nodes[b].centre), -1.0);
-                }
+        for &edge in self.edges {
+            let carried = edge.resultant(self.nodes, input);
+            output[edge.a].add(
+                Wrench {
+                    linear: carried.linear,
+                    angular: carried.angular
+                        + (edge.centre - self.nodes[edge.a].centre).cross(carried.linear),
+                },
+                1.0,
+            );
+            if let Some(b) = edge.b {
+                output[b].add(
+                    Wrench {
+                        linear: carried.linear,
+                        angular: carried.angular
+                            + (edge.centre - self.nodes[b].centre).cross(carried.linear),
+                    },
+                    -1.0,
+                );
             }
         }
         for (node, result) in self.nodes.iter().zip(output) {
@@ -151,16 +177,14 @@ impl Problem<'_> {
 
     fn diagonal(&self) -> Vec<Wrench> {
         let mut diagonal = vec![Wrench::default(); self.nodes.len()];
-        for edge in self.edges {
-            for point in edge.samples() {
-                for c in [Some(edge.a), edge.b].into_iter().flatten() {
-                    let arm = point - self.nodes[c].centre;
-                    for (axis, direction) in [DVec3::X, DVec3::Y, DVec3::Z].into_iter().enumerate()
-                    {
-                        diagonal[c].linear[axis] += direction.dot(edge.traction(direction));
-                        let delta = direction.cross(arm);
-                        diagonal[c].angular[axis] += delta.dot(edge.traction(delta));
-                    }
+        for &edge in self.edges {
+            for c in [Some(edge.a), edge.b].into_iter().flatten() {
+                let arm = edge.centre - self.nodes[c].centre;
+                for (axis, direction) in [DVec3::X, DVec3::Y, DVec3::Z].into_iter().enumerate() {
+                    diagonal[c].linear[axis] += direction.dot(edge.force(direction));
+                    let delta = direction.cross(arm);
+                    diagonal[c].angular[axis] +=
+                        delta.dot(edge.force(delta)) + direction.dot(edge.couple(direction));
                 }
             }
         }
@@ -179,27 +203,27 @@ pub(crate) enum Progress {
 
 /// Warm displacement field and Krylov history. Unchanged problems keep the search direction
 /// across ticks; a changed load or topology restarts conjugacy while retaining displacement.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Solve {
     pub answer: Vec<Wrench>,
     pub progress: Progress,
+    pub joint_visits: usize,
     residual: Vec<Wrench>,
     direction: Vec<Wrench>,
     inverse_diagonal: Vec<Wrench>,
     product: Vec<Wrench>,
+    preconditioned: Vec<Wrench>,
     rho: f64,
     initial_rho: f64,
 }
 
-fn precondition(input: &[Wrench], inverse: &[Wrench]) -> Vec<Wrench> {
-    input
-        .iter()
-        .zip(inverse)
-        .map(|(r, d)| Wrench {
+fn precondition(input: &[Wrench], inverse: &[Wrench], output: &mut [Wrench]) {
+    for ((r, d), out) in input.iter().zip(inverse).zip(output) {
+        *out = Wrench {
             linear: r.linear * d.linear,
             angular: r.angular * d.angular,
-        })
-        .collect()
+        };
+    }
 }
 
 fn dot(a: &[Wrench], b: &[Wrench]) -> f64 {
@@ -220,6 +244,7 @@ impl Solve {
         }
         self.product.resize(problem.nodes.len(), Wrench::default());
         problem.apply(&self.answer, &mut self.product);
+        self.joint_visits += 2 * problem.edges.len();
         self.residual = problem
             .loads
             .iter()
@@ -253,7 +278,11 @@ impl Solve {
                 }
             })
             .collect();
-        self.direction = precondition(&self.residual, &self.inverse_diagonal);
+        self.direction
+            .resize(problem.nodes.len(), Wrench::default());
+        self.preconditioned
+            .resize(problem.nodes.len(), Wrench::default());
+        precondition(&self.residual, &self.inverse_diagonal, &mut self.direction);
         self.rho = dot(&self.residual, &self.direction);
         self.initial_rho = self.rho;
         self.progress = if self.rho == 0.0 {
@@ -266,6 +295,7 @@ impl Solve {
     /// At most `rounds` sparse products; zero products for an unchanged equilibrated owner.
     /// Returns actual products, an operation count rather than a machine timing.
     pub(crate) fn advance(&mut self, problem: &Problem, rounds: usize) -> usize {
+        self.joint_visits = 0;
         if self.progress == Progress::Changed {
             self.start(problem);
         }
@@ -275,6 +305,7 @@ impl Solve {
                 break;
             }
             problem.apply(&self.direction, &mut self.product);
+            self.joint_visits += problem.edges.len();
             let denominator = dot(&self.direction, &self.product);
             assert!(
                 denominator.is_finite() && denominator > 0.0,
@@ -286,8 +317,12 @@ impl Solve {
                 self.residual[i].add(self.product[i], -alpha);
             }
             performed += 1;
-            let preconditioned = precondition(&self.residual, &self.inverse_diagonal);
-            let rho = dot(&self.residual, &preconditioned);
+            precondition(
+                &self.residual,
+                &self.inverse_diagonal,
+                &mut self.preconditioned,
+            );
+            let rho = dot(&self.residual, &self.preconditioned);
             assert!(
                 rho.is_finite() && rho >= 0.0,
                 "elastic residual stays finite"
@@ -297,7 +332,7 @@ impl Solve {
                 break;
             }
             let beta = rho / self.rho;
-            for (direction, next) in self.direction.iter_mut().zip(preconditioned) {
+            for (direction, next) in self.direction.iter_mut().zip(&self.preconditioned) {
                 direction.linear = next.linear + direction.linear * beta;
                 direction.angular = next.angular + direction.angular * beta;
             }
@@ -597,5 +632,832 @@ mod tests {
             edges[0].resultant(&nodes, &answer.answer).linear.x,
             PUSH * (nodes.len() + 1) as f64,
         );
+    }
+}
+
+use super::{Bond, Cause, Failure, Load, Side, State, Structure};
+use std::collections::HashMap;
+
+/// One owner's persistent graph and equilibrium state. Source addresses stay in the ledger;
+/// all numerical arrays contain only this owner's standing matter.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Assessment {
+    solve: Solve,
+    members: Vec<usize>,
+    local: HashMap<usize, usize>,
+    nodes: Vec<Node>,
+    solve_nodes: Vec<Node>,
+    solve_edges: Vec<Edge>,
+    edges: Vec<Edge>,
+    joints: Vec<usize>,
+    free_groups: Vec<Vec<usize>>,
+    masses: Vec<f64>,
+    own_inertia: Vec<DMat3>,
+    loads: Vec<Wrench>,
+    topology_changed: bool,
+    initialized: bool,
+    last_spin: bevy::math::Vec3,
+    impulsive: bool,
+    /// Compiled gravity overloads await the first authoritative failure stage.
+    initial_verdict: Vec<Failure>,
+    pub(crate) support: Vec<Vec<usize>>,
+}
+
+impl Assessment {
+    #[cfg(test)]
+    pub(crate) fn applied_force(&self) -> DVec3 {
+        self.loads.iter().map(|l| l.linear).sum()
+    }
+
+    pub(crate) fn needs_tick(&self) -> bool {
+        !self.initialized
+            || !self.initial_verdict.is_empty()
+            || self.topology_changed
+            || self.impulsive
+            || self.solve.progress != Progress::Equilibrated
+    }
+
+    pub(crate) fn spin_changed(&self, spin: bevy::math::Vec3) -> bool {
+        self.last_spin != spin
+    }
+
+    /// Compile initial gravity from construction data once per admitted scale. Instances share
+    /// this immutable warm state until their own first change; no view asset or async load enters
+    /// sim construction. Existing overloads are committed by the authority, never during loading.
+    pub(crate) fn at_rest(structure: &Structure) -> Result<Self, String> {
+        let state = State::new(structure);
+        let mut assessment = Self::default();
+        assessment.rebuild(structure, &state);
+        assessment.loads = assessment.gravity();
+        assessment
+            .loads
+            .resize(2 * assessment.nodes.len(), Wrench::default());
+        // Six rigid degrees per chunk set the exact rank; finite-precision CG can revisit them.
+        let budget = INITIAL_RANK_PASSES * 6 * assessment.nodes.len();
+        for _ in 0..budget.div_ceil(ROUNDS).max(1) {
+            assessment.solve.advance(
+                &Problem {
+                    nodes: &assessment.solve_nodes,
+                    edges: &assessment.solve_edges,
+                    loads: &assessment.loads,
+                },
+                ROUNDS,
+            );
+            if assessment.solve.progress == Progress::Equilibrated {
+                break;
+            }
+        }
+        if assessment.solve.progress != Progress::Equilibrated {
+            return Err(format!(
+                "joints: initial gravity equilibrium did not converge within {budget} rounds; review joint areas and material elastic compliance"
+            ));
+        }
+        assessment.initial_verdict = assessment.failures(structure);
+        assessment.support = super::loose_groups(structure, &state);
+        // A disconnected initial component must be released even when its internal stress is zero.
+        if !assessment.support.is_empty() {
+            assessment.topology_changed = true;
+        }
+        Ok(assessment)
+    }
+
+    fn gravity(&self) -> Vec<Wrench> {
+        let mut gravity: Vec<_> = self
+            .masses
+            .iter()
+            .map(|&mass| {
+                Wrench::at(
+                    -DVec3::Y * (f64::from(crate::physical_laws::gravity_mps2()) * mass),
+                    DVec3::ZERO,
+                )
+            })
+            .collect();
+        for group in &self.free_groups {
+            for &c in group {
+                gravity[c] = Wrench::default();
+            }
+        }
+        gravity
+    }
+
+    fn rebuild(&mut self, structure: &Structure, state: &State) {
+        let previous: HashMap<_, _> = self
+            .members
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &c)| {
+                self.solve
+                    .answer
+                    .get(i)
+                    .zip(self.solve.answer.get(self.members.len() + i))
+                    .map(|(&steady, &pulse)| (c, (steady, pulse)))
+            })
+            .collect();
+        self.members = state
+            .members
+            .iter()
+            .copied()
+            .filter(|&c| state.standing(c))
+            .collect();
+        self.local = self
+            .members
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (c, i))
+            .collect();
+        self.nodes = self
+            .members
+            .iter()
+            .map(|&c| Node {
+                centre: structure.chunks[c].centroid.as_dvec3(),
+                fixed: structure.chunks[c].buried,
+            })
+            .collect();
+        self.masses = self
+            .members
+            .iter()
+            .map(|&c| f64::from(structure.chunks[c].mass))
+            .collect();
+        self.own_inertia = self
+            .members
+            .iter()
+            .map(|&c| DMat3::from_diagonal(DVec3::splat(structure.chunks[c].intrinsic_inertia())))
+            .collect();
+        self.edges.clear();
+        self.joints.clear();
+        for &j in &state.joints {
+            let joint = &structure.joints[j];
+            if state.cracked[j] || !state.live(joint) {
+                continue;
+            } // Open or departed matter has no bond.
+            let a = self.local[&joint.a];
+            let b = match joint.b {
+                Side::Chunk(b) => Some(self.local[&b]),
+                Side::Ground => None,
+            };
+            let compliance = |c: usize| {
+                let chunk = &structure.chunks[c];
+                // DERIVED representative half-length of the equal-volume cube. Compliance
+                // apportions the bulk, rather than treating a baked cut as a material flaw.
+                let length = f64::from(chunk.volume).cbrt() / 2.0;
+                (
+                    length / chunk.material.young,
+                    length / chunk.material.shear_modulus,
+                )
+            };
+            let (mut normal, mut shear) = compliance(joint.a);
+            if let Side::Chunk(b) = joint.b {
+                let other = compliance(b);
+                normal += other.0;
+                shear += other.1;
+            }
+            let (centre, footprint) = joint.patch();
+            let area = f64::from(joint.area);
+            self.edges.push(Edge {
+                a,
+                b,
+                centre: centre.as_dvec3(),
+                normal: joint.normal.as_dvec3(),
+                area,
+                second_per_area: f64::from(footprint) / (4.0 * std::f64::consts::PI),
+                normal_stiffness: area / normal,
+                shear_stiffness: area / shear,
+            });
+            self.joints.push(j);
+        }
+        // An isolated chunk has no internal stress degrees of freedom; connectivity releases it.
+        let mut incident = vec![false; self.nodes.len()];
+        for edge in &self.edges {
+            incident[edge.a] = true;
+            if let Some(b) = edge.b {
+                incident[b] = true;
+            }
+        }
+        for (node, incident) in self.nodes.iter_mut().zip(incident) {
+            node.fixed |= !incident;
+        }
+        let mut neighbours = vec![Vec::new(); self.nodes.len()];
+        let mut anchored: Vec<_> = self.nodes.iter().map(|n| n.fixed).collect();
+        for e in &self.edges {
+            if let Some(b) = e.b {
+                neighbours[e.a].push(b);
+                neighbours[b].push(e.a);
+            } else {
+                anchored[e.a] = true;
+            }
+        }
+        self.free_groups.clear();
+        let mut seen = vec![false; self.nodes.len()];
+        for start in 0..self.nodes.len() {
+            if seen[start] {
+                continue;
+            }
+            let mut stack = vec![start];
+            let mut group = Vec::new();
+            let mut held = false;
+            while let Some(c) = stack.pop() {
+                if seen[c] {
+                    continue;
+                }
+                seen[c] = true;
+                held |= anchored[c];
+                group.push(c);
+                stack.extend(neighbours[c].iter().copied().filter(|&n| !seen[n]));
+            }
+            if !held {
+                self.free_groups.push(group);
+            }
+        }
+        // A free component's six rigid modes are gauge freedom, not supports. Fixing one
+        // node's coordinate frame removes that nullspace after its resultant was balanced.
+        for group in &self.free_groups {
+            self.nodes[group[0]].fixed = true;
+        }
+        let n = self.nodes.len();
+        self.solve_nodes = self.nodes.iter().chain(&self.nodes).copied().collect();
+        self.solve_edges = self.edges.clone();
+        self.solve_edges.extend(self.edges.iter().map(|&e| Edge {
+            a: e.a + n,
+            b: e.b.map(|b| b + n),
+            ..e
+        }));
+        // A newly owned node has no previous displacement; existing nodes retain both columns.
+        let warm: Vec<_> = self
+            .members
+            .iter()
+            .map(|c| previous.get(c).copied().unwrap_or_default())
+            .collect();
+        self.solve = Solve {
+            answer: warm
+                .iter()
+                .map(|v| v.0)
+                .chain(warm.iter().map(|v| v.1))
+                .collect(),
+            ..Solve::default()
+        };
+        self.loads.clear();
+        self.topology_changed = false;
+        self.initialized = true;
+    }
+
+    /// One bounded equilibrium solve with sustained and pulse load columns. A pulse enters
+    /// as J/step, capped by its stated peak, and must add G_f A of elastic work to an overloaded
+    /// patch. Force-controlled drivers supply continuing separation work. All qualifying joints
+    /// fail together; the next tick remaps topology and redistributes. This quasi-static pulse
+    /// approximation does not resolve wave propagation or cohesive softening.
+    pub(crate) fn advance(
+        &mut self,
+        structure: &Structure,
+        state: &mut State,
+        sources: &[Load],
+        spin: bevy::math::Vec3,
+        step: f32,
+        changed: bool,
+    ) -> (Vec<Failure>, usize) {
+        assert!(
+            step.is_finite() && step > 0.0,
+            "the structure solve has a positive numerical tick"
+        );
+        self.initial_verdict.clear();
+        self.last_spin = spin;
+        let membership_changed = !self.members.iter().copied().eq(state
+            .members
+            .iter()
+            .copied()
+            .filter(|&c| state.standing(c)));
+        let edges_changed = !self.joints.iter().copied().eq(state
+            .joints
+            .iter()
+            .copied()
+            .filter(|&j| !state.cracked[j] && state.live(&structure.joints[j])));
+        let topology = !self.initialized
+            || self.topology_changed
+            || changed
+            || membership_changed
+            || edges_changed;
+        if topology {
+            self.rebuild(structure, state);
+        }
+        let n = self.nodes.len();
+        let mut steady = vec![Wrench::default(); n];
+        let mut pulse = vec![Wrench::default(); n];
+        self.impulsive = false;
+        for source in sources {
+            let Some(&c) = self.local.get(&source.chunk) else {
+                continue;
+            }; // Removal consumed this carrier.
+            let mut force = source.blow.as_dvec3() / f64::from(step);
+            if let Some(peak) = source.peak {
+                let magnitude = force.length();
+                if magnitude > f64::from(peak.length()) {
+                    force *= f64::from(peak.length()) / magnitude;
+                }
+            }
+            let arm = source.at.as_dvec3() - self.nodes[c].centre;
+            steady[c].add(Wrench::at(source.press.as_dvec3(), arm), 1.0);
+            pulse[c].add(Wrench::at(force, arm), 1.0);
+            self.impulsive |= source.blow != bevy::math::Vec3::ZERO;
+        }
+        for group in &self.free_groups {
+            let nodes: Vec<_> = group.iter().map(|&c| self.nodes[c]).collect();
+            let masses: Vec<_> = group.iter().map(|&c| self.masses[c]).collect();
+            let own: Vec<_> = group.iter().map(|&c| self.own_inertia[c]).collect();
+            let mut framed: Vec<_> = group.iter().map(|&c| steady[c]).collect();
+            let mut impulses: Vec<_> = group.iter().map(|&c| pulse[c]).collect();
+            accelerating_frame(&nodes, &masses, &own, spin.as_dvec3(), &mut framed);
+            accelerating_frame(&nodes, &masses, &own, DVec3::ZERO, &mut impulses);
+            for ((&c, load), impulse) in group.iter().zip(framed).zip(impulses) {
+                steady[c] = load;
+                pulse[c] = impulse;
+            }
+        }
+        for (load, gravity) in steady.iter_mut().zip(self.gravity()) {
+            load.add(gravity, 1.0);
+        }
+        // Two load columns share one block-diagonal CG solve. Keeping the sustained field
+        // separate identifies work added by a finite pulse without repeating any cut search.
+        let loads: Vec<_> = steady.into_iter().chain(pulse).collect();
+        if topology || loads != self.loads {
+            self.solve.changed();
+        }
+        self.loads = loads;
+        let rounds = self.solve.advance(
+            &Problem {
+                nodes: &self.solve_nodes,
+                edges: &self.solve_edges,
+                loads: &self.loads,
+            },
+            ROUNDS,
+        );
+        let failures = self.failures(structure);
+        for failure in &failures {
+            state.cracked[failure.joint] = true;
+        }
+        self.topology_changed = !failures.is_empty();
+        if topology || self.topology_changed {
+            self.support = super::loose_groups(structure, state);
+        }
+        (failures, rounds)
+    }
+    fn failures(&self, structure: &Structure) -> Vec<Failure> {
+        let n = self.nodes.len();
+        let steady_answer = &self.solve.answer[..n];
+        let combined: Vec<_> = steady_answer
+            .iter()
+            .zip(&self.solve.answer[n..])
+            .map(|(&s, &p)| {
+                let mut total = s;
+                total.add(p, 1.0);
+                total
+            })
+            .collect();
+        let mut failures = Vec::new();
+        for (&j, &edge) in self.joints.iter().zip(&self.edges) {
+            let joint = &structure.joints[j];
+            let carried = edge.resultant(&self.nodes, &combined);
+            let sustained = edge.resultant(&self.nodes, steady_answer);
+            let normal = if (self.nodes[edge.a].centre - edge.centre).dot(edge.normal) >= 0.0 {
+                edge.normal
+            } else {
+                -edge.normal
+            };
+            let (tension, shear) = edge.stress(carried, normal);
+            let (steady_tension, steady_shear) = edge.stress(sustained, normal);
+            let total_energy = edge.energy(&self.nodes, &combined);
+            let steady_energy = edge.energy(&self.nodes, steady_answer);
+            let compression = -carried.linear.dot(normal);
+            let other_friction = match joint.b {
+                Side::Chunk(b) => structure.chunks[b].material.friction,
+                Side::Ground => structure.chunks[joint.a].material.friction,
+            };
+            let friction = f64::from(crate::substances::pair_friction(
+                structure.chunks[joint.a].material.friction,
+                other_friction,
+            ));
+            let failure = match joint.bond {
+                Bond::Resting => {
+                    let twist = carried.angular.dot(normal);
+                    let moment = (carried.angular - normal * twist).length();
+                    let rim = (4.0 * edge.second_per_area).sqrt();
+                    if compression < 0.0 {
+                        Some((Cause::LiftForce, -compression, 0.0, 0.0))
+                    } else if moment > compression * rim {
+                        Some((Cause::Tip, moment, compression * rim, 0.0))
+                    } else if shear * edge.area > friction * compression {
+                        Some((Cause::Slide, shear * edge.area, friction * compression, 0.0))
+                    } else {
+                        None
+                    }
+                }
+                Bond::Bonded(seam) | Bond::AreaShare { seam, .. } => {
+                    let cohesion = f64::from(seam.shear.cohesion);
+                    let energy = f64::from(seam.shear.energy);
+                    let opening_work = edge.area * f64::from(seam.fracture_energy);
+                    let sliding_work = edge.area * energy;
+                    let static_shear_capacity =
+                        cohesion + friction * (-sustained.linear.dot(normal) / edge.area).max(0.0);
+                    if steady_tension > f64::from(seam.tensile) {
+                        Some((Cause::Tension, steady_tension, f64::from(seam.tensile), 0.0))
+                    } else if steady_shear > static_shear_capacity {
+                        Some((Cause::Shear, steady_shear, static_shear_capacity, 0.0))
+                    } else if tension > f64::from(seam.tensile)
+                        && total_energy.0 - steady_energy.0 >= opening_work
+                    {
+                        Some((
+                            Cause::Tension,
+                            tension,
+                            f64::from(seam.tensile),
+                            opening_work,
+                        ))
+                    } else if shear > cohesion + friction * (compression / edge.area).max(0.0)
+                        && total_energy.1 - steady_energy.1 >= sliding_work
+                    {
+                        Some((
+                            Cause::Shear,
+                            shear,
+                            cohesion + friction * (compression / edge.area).max(0.0),
+                            sliding_work,
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some((cause, demand, capacity, cost)) = failure {
+                failures.push(Failure {
+                    joint: j,
+                    cause,
+                    demand: demand as f32,
+                    capacity: capacity as f32,
+                    work: cost as f32,
+                });
+            }
+        }
+        failures
+    }
+}
+
+#[cfg(test)]
+mod gates {
+    use super::super::{Chunk, Material};
+    use super::*;
+    use bevy::math::Vec3;
+    use std::f64::consts::PI;
+
+    // Fixture: geometry, mass and tick duration isolate the constitutive limits from shipped assets.
+    const STEP: f32 = 1.0 / 64.0;
+    const AREA: f32 = 1.0;
+    const MASS: f32 = 100.0;
+
+    fn material() -> Material {
+        Material::of(
+            crate::substances::SubstanceRegistry::shipped_static(),
+            "Brick",
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    fn resting(height: f32) -> Structure {
+        let material = material();
+        Structure {
+            chunks: [-height, height]
+                .map(|h| Chunk {
+                    volume: AREA,
+                    mass: MASS,
+                    centroid: Vec3::Y * h,
+                    material,
+                    buried: h < 0.0,
+                })
+                .to_vec(),
+            joints: vec![super::super::Joint {
+                a: 1,
+                b: Side::Chunk(0),
+                area: AREA,
+                centroid: Vec3::ZERO,
+                normal: Vec3::Y,
+                bond: Bond::Resting,
+            }],
+        }
+    }
+
+    fn press(chunk: usize, at: Vec3, force: Vec3) -> Load {
+        Load {
+            chunk,
+            at,
+            press: force,
+            blow: Vec3::ZERO,
+            peak: None,
+            energy: 0.0,
+            crushed: 0.0,
+            origin: super::super::Origin::Field,
+        }
+    }
+
+    /// The game's resting joints must slide at mu*N and tip at M=N*r, using the pair's friction
+    /// and their own bearing lever. A tension-capable rest, or a no-bending point joint, fails.
+    #[test]
+    fn a_beam_on_a_wall_slides_or_tips_at_its_friction_and_bearing_lever() {
+        let mu = crate::substances::pair_friction(material().friction, material().friction);
+        let radius = (f64::from(AREA) / PI).sqrt() as f32;
+        let weight = MASS * crate::physical_laws::gravity_mps2();
+        for (height, limit, cause) in [
+            (radius / (2.0 * mu), mu * weight, Cause::Slide),
+            (2.0 * radius / mu, weight * mu / 2.0, Cause::Tip),
+        ] {
+            for reversed in [false, true] {
+                let mut structure = resting(height);
+                if reversed {
+                    structure.joints[0].a = 0;
+                    structure.joints[0].b = Side::Chunk(1);
+                }
+                for ratio in [0.99, 1.01] {
+                    // Fixture: straddle the independently derived limit.
+                    let mut state = State::new(&structure);
+                    let mut assessment = Assessment::default();
+                    let (failures, _) = assessment.advance(
+                        &structure,
+                        &mut state,
+                        &[press(
+                            1,
+                            structure.chunks[1].centroid,
+                            Vec3::X * (limit * ratio),
+                        )],
+                        Vec3::ZERO,
+                        STEP,
+                        false,
+                    );
+                    assert_eq!(
+                        failures.len(),
+                        usize::from(ratio > 1.0),
+                        "{cause:?}, reversed {reversed}, ratio {ratio}: {failures:?}"
+                    );
+                    if let Some(failure) = failures.first() {
+                        assert_eq!(failure.cause, cause);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The game's finite pulse must beat both traction strength and G_f*A, while a sustained
+    /// driver can supply continuing separation work. This derives the one-patch limits without
+    /// using the solver's answer or a former run as the expected value.
+    #[test]
+    fn a_blow_pays_the_patches_fracture_work_and_a_press_is_force_controlled() {
+        let material = material();
+        let height = 0.5; // Fixture representative half-length, m, of a unit-volume chunk.
+        let structure = Structure {
+            chunks: vec![Chunk {
+                volume: 1.0,
+                mass: MASS,
+                centroid: Vec3::Y * height,
+                material,
+                buried: false,
+            }],
+            joints: vec![super::super::Joint {
+                a: 0,
+                b: Side::Ground,
+                area: AREA,
+                centroid: Vec3::ZERO,
+                normal: Vec3::Y,
+                bond: Bond::Bonded(material.seam),
+            }],
+        };
+        let weight = f64::from(MASS * crate::physical_laws::gravity_mps2());
+        let stiffness = material.young * f64::from(AREA) / f64::from(height);
+        let work = f64::from(material.seam.fracture_energy * AREA);
+        let strength = f64::from(material.seam.tensile * AREA);
+        // DERIVED: U(F-J) - U(-mg) = ((F-mg)^2-(mg)^2)/(2k).
+        let energy_limit = weight + (weight * weight + 2.0 * stiffness * work).sqrt();
+        let limit = energy_limit.max(weight + strength);
+        for ratio in [0.99, 1.01] {
+            let mut source = press(0, structure.chunks[0].centroid, Vec3::ZERO);
+            source.blow = Vec3::Y * (limit * ratio * f64::from(STEP)) as f32;
+            let mut state = State::new(&structure);
+            let (failures, _) = Assessment::default().advance(
+                &structure,
+                &mut state,
+                &[source],
+                Vec3::ZERO,
+                STEP,
+                false,
+            );
+            assert_eq!(
+                failures.len(),
+                usize::from(ratio > 1.0),
+                "ratio {ratio}: {failures:?}"
+            );
+            if let Some(failure) = failures.first() {
+                assert!((f64::from(failure.work) - work).abs() < work * 1e-5);
+            }
+        }
+        let force = (weight + strength) * 1.01; // Fixture: strength exceeded, regardless of pulse work.
+        let (failures, _) = Assessment::default().advance(
+            &structure,
+            &mut State::new(&structure),
+            &[press(
+                0,
+                structure.chunks[0].centroid,
+                Vec3::Y * force as f32,
+            )],
+            Vec3::ZERO,
+            STEP,
+            false,
+        );
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].work, 0.0,
+            "the maintained driver supplies separation work"
+        );
+    }
+
+    /// A running-bond wall admits a staircase displacement jump. The game's solve must recover
+    /// force on exactly the seams crossing that jump, with no coplanar-cut enumeration. Applied
+    /// wrenches are an independent constant-translation patch calculation at seam centres.
+    #[test]
+    fn a_running_bond_wall_can_crack_along_a_staircase_of_seams() {
+        // Fixture: three offset courses, four unit bricks per course, unit depth and height.
+        let mut nodes = Vec::new();
+        let mut shifted = Vec::new();
+        for row in 0..3 {
+            for col in 0..4 {
+                let x = col as f64 + 0.5 + (row % 2) as f64 * 0.5;
+                let moving = x > 1.0 + row as f64 * 0.5;
+                nodes.push(Node {
+                    centre: DVec3::new(x, row as f64 + 0.5, 0.0),
+                    fixed: !moving,
+                });
+                shifted.push(moving);
+            }
+        }
+        let mut edges = Vec::new();
+        for a in 0..nodes.len() {
+            for b in a + 1..nodes.len() {
+                let d = nodes[b].centre - nodes[a].centre;
+                let area = if d.y == 0.0 && d.x == 1.0 {
+                    1.0
+                } else if d.y == 1.0 && d.x.abs() < 1.0 {
+                    1.0 - d.x.abs()
+                } else {
+                    continue;
+                };
+                let normal = if d.y == 0.0 { DVec3::X } else { DVec3::Y };
+                edges.push(Edge {
+                    a,
+                    b: Some(b),
+                    centre: (nodes[a].centre + nodes[b].centre) / 2.0,
+                    normal,
+                    area,
+                    second_per_area: area / (4.0 * PI),
+                    normal_stiffness: 8e9 * area,
+                    shear_stiffness: 3e9 * area,
+                });
+            }
+        }
+        let displacement = DVec3::X * 0.001; // Fixture translation jump, m.
+        let mut loads = vec![Wrench::default(); nodes.len()];
+        let mut expected = Vec::new();
+        for (j, e) in edges.iter().enumerate() {
+            let b = e.b.unwrap();
+            if shifted[e.a] == shifted[b] {
+                continue;
+            }
+            expected.push(j);
+            let delta = displacement * (f64::from(shifted[e.a]) - f64::from(shifted[b]));
+            let normal = e.normal * e.normal.dot(delta);
+            let force = normal * e.normal_stiffness + (delta - normal) * e.shear_stiffness;
+            loads[e.a].add(Wrench::at(force, e.centre - nodes[e.a].centre), 1.0);
+            loads[b].add(Wrench::at(force, e.centre - nodes[b].centre), -1.0);
+        }
+        let mut solve = Solve::default();
+        let problem = Problem {
+            nodes: &nodes,
+            edges: &edges,
+            loads: &loads,
+        };
+        for _ in 0..32 {
+            solve.advance(&problem, ROUNDS);
+            if solve.progress == Progress::Equilibrated {
+                break;
+            }
+        }
+        assert_eq!(solve.progress, Progress::Equilibrated);
+        let strength = 1e6; // Fixture: below E*jump and G*jump, above numerical residuals.
+        let cracked: Vec<_> = edges
+            .iter()
+            .enumerate()
+            .filter_map(|(j, &e)| {
+                let stress = e.stress(e.resultant(&nodes, &solve.answer), -e.normal);
+                (stress.0 > strength || stress.1 > strength).then_some(j)
+            })
+            .collect();
+        assert_eq!(cracked, expected);
+        assert!(cracked.iter().any(|&j| edges[j].normal == DVec3::X));
+        assert!(cracked.iter().any(|&j| edges[j].normal == DVec3::Y));
+    }
+
+    /// Sparse work grows with joint count at fixed round count, including on the shipped graph.
+    /// An equilibrated owner performs no sparse products; no wall-clock timing is asserted.
+    #[test]
+    fn house_and_doubled_house_use_linear_joint_visits_and_idle_is_zero() {
+        let kind = crate::construction::tests::shipped_house();
+        let structure = kind.layout.structure(&kind.asset, 1.0);
+        let mut one = Assessment::default();
+        let (_, rounds) = one.advance(
+            &structure,
+            &mut State::new(&structure),
+            &[],
+            Vec3::ZERO,
+            STEP,
+            false,
+        );
+        let base_visits = one.solve.joint_visits;
+        let problem = Problem {
+            nodes: &one.solve_nodes,
+            edges: &one.solve_edges,
+            loads: &one.loads,
+        };
+        let mut single = Solve::default();
+        single.advance(&problem, 0);
+        single.advance(&problem, 1);
+        println!(
+            "MEASURED one sparse round: {} joint visits",
+            single.joint_visits
+        );
+
+        let mut total_rounds = rounds;
+        for _ in 0..one.nodes.len() * 6 / ROUNDS + 1 {
+            if one.solve.progress == Progress::Equilibrated {
+                break;
+            }
+            total_rounds += one.solve.advance(
+                &Problem {
+                    nodes: &one.solve_nodes,
+                    edges: &one.solve_edges,
+                    loads: &one.loads,
+                },
+                ROUNDS,
+            );
+        }
+        println!(
+            "MEASURED intact gravity: {total_rounds} rounds, state {:?}, {} joint overloads at equilibrium",
+            one.solve.progress,
+            one.failures(&structure).len()
+        );
+        let mut doubled = structure.clone();
+        let n = structure.chunks.len();
+        doubled
+            .chunks
+            .extend(structure.chunks.iter().map(|&c| super::super::Chunk {
+                centroid: c.centroid + Vec3::X * 100.0,
+                ..c
+            }));
+        doubled
+            .joints
+            .extend(structure.joints.iter().map(|&j| super::super::Joint {
+                a: j.a + n,
+                b: match j.b {
+                    Side::Chunk(b) => Side::Chunk(b + n),
+                    Side::Ground => Side::Ground,
+                },
+                centroid: j.centroid + Vec3::X * 100.0,
+                bond: match j.bond {
+                    Bond::AreaShare {
+                        seam,
+                        footprint_area,
+                        footprint_centroid,
+                    } => Bond::AreaShare {
+                        seam,
+                        footprint_area,
+                        footprint_centroid: footprint_centroid + Vec3::X * 100.0,
+                    },
+                    bond => bond,
+                },
+                ..j
+            }));
+        let mut two = Assessment::default();
+        let (_, doubled_rounds) = two.advance(
+            &doubled,
+            &mut State::new(&doubled),
+            &[],
+            Vec3::ZERO,
+            STEP,
+            false,
+        );
+        assert_eq!(rounds, doubled_rounds);
+        assert_eq!(two.solve.joint_visits, 2 * base_visits);
+        println!(
+            "MEASURED sparse visits: house {base_visits}, doubled {}, rounds {rounds}",
+            two.solve.joint_visits
+        );
+        let fixture = resting(0.5);
+        let mut idle = Assessment::default();
+        let mut state = State::new(&fixture);
+        idle.advance(&fixture, &mut state, &[], Vec3::ZERO, STEP, false);
+        let (failures, rounds) = idle.advance(&fixture, &mut state, &[], Vec3::ZERO, STEP, false);
+        assert!(failures.is_empty());
+        assert_eq!(rounds, 0);
+        assert_eq!(idle.solve.joint_visits, 0);
     }
 }

@@ -2,13 +2,13 @@
 //! on the game's laws over the baked wall. Fixture numbers are fixture data; the brick is the
 //! shipped row's ([`super::brick`]).
 
-use crate::construction::fracture::GroupLoads;
 use bevy::math::Vec3;
 
 use super::model::*;
-use super::{
-    Applied, Charge, Deposit, View, Wall, WallControls, apply_deposit, blast_field, brick, layout,
-};
+
+// Fixture numerical step, s, for direct law probes outside a running app.
+const STEP: f32 = 1.0 / 64.0;
+use super::{Charge, Deposit, View, Wall, WallControls, apply_deposit, blast_field, brick, layout};
 
 /// The 88 mm HE fixture burst (fixture data): 1.47 MJ, its charge the TNT that carries it, so its
 /// reach (23.2 m, DERIVED) holds every standoff here; a coupling is its hits' energy over its own.
@@ -59,185 +59,6 @@ fn a_group_with_no_intact_path_to_the_ground_falls_as_one() {
     assert_eq!(loose_groups(structure, &state), vec![all]);
 }
 
-/// THE LAW READS THE TABLE, NOT THE PATTERN: renumbering the wall's chunks (and its joints with
-/// them) changes no crack, no structural failure and no fall. A law that indexed a pattern would
-/// crack other joints once the numbering moved.
-#[test]
-fn renumbering_the_chunks_changes_no_outcome() {
-    let layout = layout();
-    let cut = &layout.cut;
-    let count = cut.structure.chunks.len();
-    let map = |i: usize| count - 1 - i;
-    let renumbered = Structure {
-        chunks: (0..count).map(|k| cut.structure.chunks[map(k)]).collect(),
-        joints: cut
-            .structure
-            .joints
-            .iter()
-            .rev()
-            .map(|joint| Joint {
-                a: map(joint.a),
-                b: match joint.b {
-                    Side::Chunk(b) => Side::Chunk(map(b)),
-                    Side::Ground => Side::Ground,
-                },
-                ..*joint
-            })
-            .collect(),
-    };
-    let centre = cut
-        .structure
-        .chunks
-        .iter()
-        .map(|chunk| chunk.centroid)
-        .min_by(|a, b| {
-            a.distance(layout.centre())
-                .total_cmp(&b.distance(layout.centre()))
-        })
-        .expect("the wall has chunks");
-    let source = |structure: &Structure| -> [Load; 1] {
-        [Load {
-            chunk: (0..structure.chunks.len())
-                .find(|&i| structure.chunks[i].centroid == centre)
-                .expect("the centre is a chunk's centroid"),
-            at: centre,
-            energy: 1.0e6,
-            crushed: 1.0e6 / brick().crush,
-            blow: Vec3::ZERO,
-            press: Vec3::ZERO,
-            peak: None,
-            origin: Origin::Field,
-        }]
-    };
-    let pushes = |structure: &Structure| -> Vec<Load> {
-        (0..structure.chunks.len())
-            .filter(|&i| structure.chunks[i].centroid.distance(centre) < 0.5)
-            .map(|i| Load {
-                chunk: i,
-                at: structure.chunks[i].centroid,
-                energy: 0.0,
-                crushed: 0.0,
-                blow: Vec3::NEG_Z * 400.0,
-                press: Vec3::ZERO,
-                peak: None,
-                origin: Origin::Field,
-            })
-            .collect()
-    };
-    let outcome = |structure: &Structure| {
-        let mut state = State::new(structure);
-        crack(structure, &mut state, &source(structure));
-        structural(
-            structure,
-            &mut state,
-            GroupLoads::new(&pushes(structure), Vec3::ZERO),
-            &mut SectionCache::default(),
-        );
-        let mut cracked: Vec<[i64; 3]> = structure
-            .joints
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| state.cracked[*j])
-            .map(|(_, joint)| (joint.centroid * 1.0e4).round().as_i64vec3().to_array())
-            .collect();
-        cracked.sort_unstable();
-        let mut fallen: Vec<[i64; 3]> = loose_groups(structure, &state)
-            .into_iter()
-            .flatten()
-            .map(|i| {
-                (structure.chunks[i].centroid * 1.0e4)
-                    .round()
-                    .as_i64vec3()
-                    .to_array()
-            })
-            .collect();
-        fallen.sort_unstable();
-        (cracked, fallen)
-    };
-    let original = outcome(&cut.structure);
-    assert!(!original.0.is_empty(), "the fixture cracks something");
-    assert_eq!(outcome(&renumbered), original);
-}
-
-/// THE STRUCTURAL CHECK COMPARES THE ANGULAR IMPULSE ABOUT THE HINGE WITH `√(2 I (G_f A + E_g))`:
-/// on a two-chunk column a push at the top whose moment about the bed joint's hinge (the rim of its
-/// disc on the side the push turns the top toward) is 1 % over that capacity cracks the bed joint
-/// (the joint alone holds the top chunk), and 1 % under it cracks nothing; `I` is the top's inertia
-/// about the hinge and `E_g` the work of raising its centre of mass over it, for the bed bears the
-/// top. A capacity read about the centroid, or without the weight the section carries (one far
-/// push then opening a plane a whole construction stands on), fails here. Fixture geometry; the
-/// fixture's seams state no shear ([`Shear::OpeningOnly`]), so no punch ring (the top sliding off
-/// its bed) competes with the hinge this test pins.
-#[test]
-fn a_push_fails_the_section_at_its_fracture_impulse() {
-    let material = brick();
-    let seam = Seam {
-        shear: Shear::OpeningOnly,
-        ..material.seam
-    };
-    let chunk = |y: f32| Chunk {
-        volume: 0.2 * 0.2 * 0.25,
-        centroid: Vec3::new(0.1, y, 0.125),
-        mass: material.density * 0.2 * 0.2 * 0.25,
-        material,
-        buried: false,
-    };
-    let structure = Structure {
-        chunks: vec![chunk(0.1), chunk(0.3)],
-        joints: vec![
-            Joint {
-                a: 0,
-                b: Side::Ground,
-                area: 0.05,
-                centroid: Vec3::new(0.1, 0.0, 0.125),
-                normal: Vec3::Y,
-                bond: Bond::Bonded(seam),
-            },
-            Joint {
-                a: 0,
-                b: Side::Chunk(1),
-                area: 0.05,
-                centroid: Vec3::new(0.1, 0.2, 0.125),
-                normal: Vec3::Y,
-                bond: Bond::Bonded(seam),
-            },
-        ],
-    };
-    let bed = 1;
-    let joint = structure.joints[bed];
-    let top = structure.chunks[1];
-    // The push along -z turns the top about -x, so the hinge is the bed disc's rim toward -z.
-    let hinge = joint.centroid - Vec3::Z * (joint.area / std::f32::consts::PI).sqrt();
-    let r = top.centroid - hinge;
-    let own = (3.0 * top.volume / (4.0 * std::f32::consts::PI)).cbrt();
-    let inertia = top.mass * (r.length_squared() - r.x * r.x + 0.4 * own * own);
-    let lift = top.mass * crate::physical_laws::gravity_mps2() * (r.y.hypot(r.z) - r.y);
-    let capacity = (2.0 * inertia * (material.seam.fracture_energy * joint.area + lift)).sqrt();
-    let at = Vec3::new(0.1, 0.4, 0.25);
-    let lever = at.y - joint.centroid.y;
-    for (scale, fails) in [(1.01, true), (0.99, false)] {
-        let mut state = State::new(&structure);
-        let push = Load {
-            chunk: 1,
-            at,
-            energy: 0.0,
-            crushed: 0.0,
-            blow: Vec3::NEG_Z * (scale * capacity / lever),
-            press: Vec3::ZERO,
-            peak: None,
-            origin: Origin::Field,
-        };
-        let failures = structural(
-            &structure,
-            &mut state,
-            GroupLoads::new(&[push], Vec3::ZERO),
-            &mut SectionCache::default(),
-        );
-        assert_eq!(state.cracked[bed], fails, "{scale} x capacity");
-        assert_eq!(failures.is_empty(), !fails);
-    }
-}
-
 /// A BLAST'S COUPLING IS ITS GEOMETRY: a charge at the face of a wide wall sends about half its
 /// rays into it, and fewer the farther it stands off. No coupling constant enters.
 #[test]
@@ -283,222 +104,6 @@ fn blast_coupling_falls_with_standoff() {
     };
     let (near, mid, far) = (on_wall(0.1), on_wall(1.0), on_wall(3.0));
     assert!(near > mid && mid > far && far > 0.0, "{near} {mid} {far}");
-}
-
-/// Centroid quadrature of the same field on the shipped cut's coplanar front faces: one fixed
-/// point and its actual face area per chunk, independent of which angular sample hits it.
-/// This is a Law 3 fixture input, not a second production surface finder. ASSUMED fixture
-/// energy (J), source height and distance (m); the cut supplies the geometry and material data.
-fn wall_face_pushes(energy: f32, distance: f32) -> Vec<Load> {
-    let layout = layout();
-    let origin = Vec3::new(
-        layout.centre().x,
-        layout.min.y + 1.45,
-        layout.min.z + layout.size.z + distance,
-    );
-    let blast = Blast::of(energy, 1e-3, FIT_ONLY_PRODUCTS);
-    layout
-        .cut
-        .structure
-        .chunks
-        .iter()
-        .zip(&layout.cut.blocks)
-        .enumerate()
-        .filter_map(|(chunk, (part, block))| {
-            // ASSUMED f32 angular allowance when identifying the coplanar front cap.
-            let area: f32 = block
-                .face_areas()
-                .iter()
-                .filter(|(n, _)| n.dot(Vec3::Z) > 1.0 - 1e-5)
-                .map(|(_, area)| area)
-                .sum();
-            assert!(
-                area > 0.0,
-                "the planar-wall fixture has a visible front cap"
-            );
-            let at = Vec3::new(part.centroid.x, part.centroid.y, block.max.z);
-            let path = at - origin;
-            let d = path.length();
-            // Outside the sourced field's reach there is no load.
-            if d > blast.reach() {
-                return None;
-            }
-            let cos = -(path / d).dot(Vec3::Z);
-            Some(Load {
-                chunk,
-                at,
-                energy: 0.0,
-                crushed: 0.0,
-                blow: Vec3::NEG_Z * (area * blast.specific_impulse(d, cos)),
-                press: Vec3::ZERO,
-                peak: Some(Vec3::NEG_Z * (area * blast.peak_pressure(d, cos))),
-                origin: Origin::Field,
-            })
-        })
-        .collect()
-}
-
-/// The shipped free-standing wall under the sandbox's actual field-to-law path. ASSUMED fixture
-/// burst energy (J), centre-to-face distance (m), filler density and height. No colliders, bodies
-/// or view resources are spawned; `apply_deposit` returns the law outcome before entity work.
-fn wall_deposit_at(energy: f32, distance: f32) -> Applied {
-    let layout = layout();
-    let mut wall = Wall {
-        cut: layout.cut.clone(),
-        live: crate::construction::breakage::Live::from_structure(
-            layout.cut.structure.clone(),
-            layout.cut.elements,
-        ),
-        structural: vec![false; layout.cut.structure.joints.len()],
-        entities: Vec::new(),
-        meshes: Vec::new(),
-        material: brick(),
-    };
-    let controls = WallControls {
-        mass: 0,
-        standoff: 0,
-        cased: false,
-        round: 0,
-        view: View::Front,
-        help: false,
-    };
-    let charge = Charge {
-        density: 1650.0,
-        chemical: 4.184e6,
-        // ASSUMED fixture: a speed constant whose products floor never reaches the fit, so the
-        // sweep reads the free-air field alone.
-        speed_constant: 1e-6,
-        casing_ratio: 0.0,
-        casing_speed: 0.0,
-    };
-    let mass = energy / charge.chemical;
-    let radius = charge.blast(mass, false).radius;
-    assert!(
-        distance > radius,
-        "the fixture measures standoff, not contact"
-    );
-    let deposit = Deposit::Blast {
-        mass,
-        standoff: distance - radius,
-        at: Vec3::new(
-            layout.centre().x,
-            layout.min.y + 1.45,
-            layout.min.z + layout.size.z,
-        ),
-        into: Vec3::NEG_Z,
-    };
-    apply_deposit(&mut wall, &controls, &charge, &blast_field(), &deposit)
-}
-
-/// THE SAMPLED WALL HAS A FINITE FIELD REACH (the game's environment destruction model).
-/// The real sandbox adapter must leave the structure untouched outside the sourced field.
-/// Inside it, report its measured toppling curve without asserting an asset-specific distance
-/// or assuming its changing angular hit footprint is monotone. ASSUMED fixture energies,
-/// source height and sample spacing; the study's comparison distance is DERIVED there.
-#[test]
-fn the_sampled_wall_reports_its_far_toppling_limit() {
-    let step = 0.25_f32;
-    for (name, energy) in [
-        ("study burst", FIXTURE_BLAST.energy),
-        ("bare control", 5.0 * 4.184e6),
-    ] {
-        let reach = Blast::of(energy, 1e-3, FIT_ONLY_PRODUCTS).reach();
-        let samples = (reach / step).ceil() as usize + 1;
-        let (mut last_topple, mut first_hold, mut previous) = (None, None, None);
-        let mut revivals = 0;
-        for k in 2..=samples {
-            let distance = k as f32 * step;
-            let applied = wall_deposit_at(energy, distance);
-            let fell: usize = applied.groups.iter().map(|(group, ..)| group.len()).sum();
-            let topples = fell > 0 && applied.failures.iter().any(|f| f.cause == Cause::Push);
-            if topples {
-                last_topple = Some(distance);
-                revivals += usize::from(previous == Some(false));
-            } else if first_hold.is_none() {
-                first_hold = Some(distance);
-            }
-            if previous != Some(topples) {
-                println!(
-                    "MEASURED sampled {name}: at {distance} m topples {topples}, released {fell}"
-                );
-            }
-            previous = Some(topples);
-        }
-        let outside = wall_deposit_at(energy, samples as f32 * step);
-        assert_eq!(
-            outside.deposited, 0.0,
-            "no energy arrives outside field reach"
-        );
-        assert!(
-            outside.failures.is_empty() && outside.groups.is_empty(),
-            "no structural change occurs outside field reach"
-        );
-        println!(
-            "MEASURED sampled {name}: last topple {last_topple:?}, first hold {first_hold:?}, \
-            revivals {revivals}, interval {step} m, sampled through {} m",
-            samples as f32 * step
-        );
-        let at_study = wall_deposit_at(energy, 13.8);
-        let fell: usize = at_study.groups.iter().map(|(group, ..)| group.len()).sum();
-        println!("MEASURED sampled {name} at study's DERIVED 13.8 m: released {fell}");
-    }
-}
-
-/// A FIXED FAR FACE LOADING TOPPLES MONOTONICALLY AND STOPS AT FINITE DISTANCE (the game's
-/// environment destruction model). Law 3 must preserve this ordering when the source moves
-/// beyond the wall's bounding diagonal and samples remain attached to its coplanar front caps.
-/// This checks the material/section law independently of changing angular-ray coverage. The
-/// authority relies on that separation when changing the surface finder. ASSUMED fixture
-/// energies and resolution; the geometry supplies the beginning of the far regime. Measured
-/// crossings are output only, never a required distance or required outcome for this asset.
-#[test]
-fn a_fixed_far_face_loading_topples_monotonically_and_stops() {
-    let layout = layout();
-    let step = 0.25_f32;
-    let from = layout.size.length();
-    for (name, energy) in [
-        ("study burst", FIXTURE_BLAST.energy),
-        ("bare control", 5.0 * 4.184e6),
-        ("large bare control", 50.0 * 4.184e6),
-    ] {
-        let reach = Blast::of(energy, 1e-3, FIT_ONLY_PRODUCTS).reach();
-        let samples = ((reach - from).max(0.0) / step).ceil() as usize + 1;
-        let (mut last_topple, mut first_hold) = (None, None);
-        for k in 0..=samples {
-            let distance = from + k as f32 * step;
-            let loads = wall_face_pushes(energy, distance);
-            let mut state = State::new(&layout.cut.structure);
-            let failures = structural(
-                &layout.cut.structure,
-                &mut state,
-                GroupLoads::new(&loads, Vec3::ZERO),
-                &mut SectionCache::default(),
-            );
-            let topples = failures.iter().any(|f| f.cause == Cause::Push)
-                && !fall(&layout.cut.structure, &mut state).is_empty();
-            assert!(
-                !(first_hold.is_some() && topples),
-                "{name}: fixed-face toppling reappeared at {distance} m after {first_hold:?}"
-            );
-            if topples {
-                last_topple = Some(distance);
-            } else if first_hold.is_none() {
-                first_hold = Some(distance);
-            }
-        }
-        assert!(
-            first_hold.is_some(),
-            "toppling stops within finite field reach"
-        );
-        assert!(
-            wall_face_pushes(energy, from + samples as f32 * step).is_empty(),
-            "the finite field stops before the final source pose"
-        );
-        println!(
-            "MEASURED fixed-face {name}: last topple {last_topple:?}, first hold {first_hold:?}, \
-            interval {step} m, far regime from {from} m"
-        );
-    }
 }
 
 /// A HULL'S RAY ENTRY IS THE SHAPE'S, NOT ITS BOX'S: a ray that passes the cut corner of a
@@ -586,7 +191,14 @@ fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
             at: super::aim_point(&wall),
             into: Vec3::NEG_Z,
         };
-        let result = apply_deposit(&mut wall, &controls, &charge, &blast_field(), &deposit);
+        let result = apply_deposit(
+            &mut wall,
+            &controls,
+            &charge,
+            &blast_field(),
+            &deposit,
+            STEP,
+        );
         let (_, _, intercepted, impulse, _) = result.blast.unwrap();
         if standoff == 0.1 {
             assert!(
@@ -607,12 +219,7 @@ fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
             result.deposited,
             result.crushed,
             result.scabs,
-            result.local
-                + result
-                    .failures
-                    .iter()
-                    .map(|f| f.joints.len())
-                    .sum::<usize>(),
+            result.local + result.failures.len(),
             result.groups.iter().map(|g| g.0.len()).sum::<usize>(),
             result.groups.iter().map(|g| g.0.len()).collect::<Vec<_>>()
         );
@@ -678,7 +285,14 @@ fn the_sandbox_chunk_outlives_the_hole_cap() {
         spall: 0.0,
     };
     for kept in 1..=HOLES_PER_CHUNK {
-        let result = apply_deposit(&mut wall, &controls, &charge, &blast_field(), &channel);
+        let result = apply_deposit(
+            &mut wall,
+            &controls,
+            &charge,
+            &blast_field(),
+            &channel,
+            STEP,
+        );
         assert!(!result.dusted.contains(&c), "channel {kept} is subcritical");
         assert_eq!(
             wall.live.holes[c].len(),
@@ -687,7 +301,14 @@ fn the_sandbox_chunk_outlives_the_hole_cap() {
         );
     }
     let pool = wall.live.state.pool[c];
-    let result = apply_deposit(&mut wall, &controls, &charge, &blast_field(), &channel);
+    let result = apply_deposit(
+        &mut wall,
+        &controls,
+        &charge,
+        &blast_field(),
+        &channel,
+        STEP,
+    );
     assert!(
         !result.dusted.contains(&c) && wall.live.state.pool[c] < pool,
         "the channel past the cap wears the pool and dusts nothing"

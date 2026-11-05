@@ -23,7 +23,7 @@ pub(crate) struct BodyReturn {
 impl BodyReturn {
     pub(crate) fn of(load: &Load, launched: Vec3) -> Option<Self> {
         match load.origin {
-            Origin::Field | Origin::Contact { .. } | Origin::Inertia { .. } => None,
+            Origin::Field | Origin::Contact { .. } => None,
             Origin::Body { body, .. } if load.blow != Vec3::ZERO => Some(Self {
                 body,
                 at: load.at,

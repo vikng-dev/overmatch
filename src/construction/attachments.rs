@@ -35,26 +35,32 @@ enum Row {
     Stated {
         tensile_pa: Sourced<f64>,
         fracture_energy_j_per_m2: Sourced<f64>,
+        shear_cohesion_pa: Sourced<f64>,
+        shear_fracture_energy_j_per_m2: Sourced<f64>,
     },
     Resting,
     RootPlate {
         overturning_nm_per_kg: Sourced<f64>,
+        fracture_energy_j_per_m2: Sourced<f64>,
+        shear_cohesion_pa: Sourced<f64>,
+        shear_fracture_energy_j_per_m2: Sourced<f64>,
     },
 }
 
 /// A trunk's anchorage to the ground by its root plate: the critical overturning moment it holds
 /// per kilogram of the fresh stem it carries, N·m/kg (a moment per mass, no `g`). It states the
-/// plate's strength alone, no separation work.
+/// plate's moment capacity and the data's opening and sliding work.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RootPlate {
     pub(crate) overturning_nm_per_kg: f32,
+    fracture_energy: f32,
+    shear: Shear,
 }
 
 impl RootPlate {
     /// The game's environment destruction model: equivalent circular footprint. DERIVED:
-    /// S = pi r^3 / 4 and tensile = C m / S - m g / A, so the base opens at moment C m.
+    /// S = pi r^3 / 4 and tensile = C m / S - m g / A, so a rigid footprint opens at C m.
     /// Positive hold requires r < 4 C / g.
-    /// StandIn: rigid-plastic release has no separation work; the source supplies no work fact.
     pub(crate) fn seam(self, area: f32, mass: f32) -> Result<Seam, String> {
         let radius = (area / std::f32::consts::PI).sqrt();
         let modulus = std::f32::consts::PI * radius * radius * radius / 4.0;
@@ -70,8 +76,8 @@ impl RootPlate {
         }
         Ok(Seam {
             tensile,
-            fracture_energy: 0.0,
-            shear: Shear::OpeningOnly,
+            fracture_energy: self.fracture_energy,
+            shear: self.shear,
         })
     }
 }
@@ -176,7 +182,7 @@ impl Attachments {
                                 format!(
                                     "kind {name:?} takes the seam of {substance:?}, whose \
                                      materials.ron row states no bulk facts: name a substance \
-                                     that states a seam, or state the kind's two numbers"
+                                     that states a seam, or state the kind's opening and shear facts"
                                 )
                             })?
                             .seam,
@@ -184,24 +190,29 @@ impl Attachments {
                     Row::Stated {
                         tensile_pa: Sourced(tensile),
                         fracture_energy_j_per_m2: Sourced(energy),
+                        shear_cohesion_pa: Sourced(cohesion),
+                        shear_fracture_energy_j_per_m2: Sourced(shear_energy),
                     } => {
                         let tensile = positive("tensile_pa", tensile)?;
                         let energy = positive("fracture_energy_j_per_m2", energy)?;
-                        // The kind states its opening alone, so its seam answers by the opening
-                        // law alone: no punch ring forms across it.
                         Kind::Joint(Bond::Bonded(Seam {
                             tensile,
                             fracture_energy: energy,
-                            shear: Shear::OpeningOnly,
+                            shear: Shear { cohesion: positive("shear_cohesion_pa", cohesion)?, energy: positive("shear_fracture_energy_j_per_m2", shear_energy)? },
                         }))
                     }
                     Row::Resting => Kind::Joint(Bond::Resting),
                     Row::RootPlate {
                         overturning_nm_per_kg: Sourced(moment),
+                        fracture_energy_j_per_m2: Sourced(energy),
+                        shear_cohesion_pa: Sourced(cohesion),
+                        shear_fracture_energy_j_per_m2: Sourced(shear_energy),
                     } => {
                         let simulation_moment = positive("overturning_nm_per_kg", moment)?;
                         Kind::RootPlate(RootPlate {
                             overturning_nm_per_kg: simulation_moment,
+                            fracture_energy: positive("fracture_energy_j_per_m2", energy)?,
+                            shear: Shear { cohesion: positive("shear_cohesion_pa", cohesion)?, energy: positive("shear_fracture_energy_j_per_m2", shear_energy)? },
                         })
                     }
                 };
@@ -337,16 +348,29 @@ mod tests {
                 Row::Stated {
                     tensile_pa: Sourced(tensile),
                     fracture_energy_j_per_m2: Sourced(energy),
+                    shear_cohesion_pa: Sourced(cohesion),
+                    shear_fracture_energy_j_per_m2: Sourced(shear_energy),
                 } => Kind::Joint(Bond::Bonded(Seam {
                     tensile: tensile as f32,
                     fracture_energy: energy as f32,
-                    shear: Shear::OpeningOnly,
+                    shear: Shear {
+                        cohesion: cohesion as f32,
+                        energy: shear_energy as f32,
+                    },
                 })),
                 Row::Resting => Kind::Joint(Bond::Resting),
                 Row::RootPlate {
                     overturning_nm_per_kg: Sourced(moment),
+                    fracture_energy_j_per_m2: Sourced(energy),
+                    shear_cohesion_pa: Sourced(cohesion),
+                    shear_fracture_energy_j_per_m2: Sourced(shear_energy),
                 } => Kind::RootPlate(RootPlate {
                     overturning_nm_per_kg: moment as f32,
+                    fracture_energy: energy as f32,
+                    shear: Shear {
+                        cohesion: cohesion as f32,
+                        energy: shear_energy as f32,
+                    },
                 }),
             };
             // A joint kind answers a construction's joint and never a trunk's anchorage, and a root
@@ -381,58 +405,78 @@ mod tests {
         assert!(list.holds("unknown-kind").is_err());
     }
 
-    /// A KIND WITHOUT BOTH NUMBERS, OR WITHOUT THEIR SOURCES, DOES NOT LOAD: each of the labelled fixture
-    /// kind's two numbers dropped, its source dropped, a number of no strength, a name
-    /// stated twice, a field the format does not hold, and a seam of a substance that states none
-    /// are each refused, naming the field or the kind; so is a root plate without its moment, its
-    /// source or a positive value. A list that let a kind load with a number missing would hold
-    /// its joints, or a trunk to the ground, by a code default.
+    /// Every attachment's constitutive inputs must be complete, sourced and representable
+    /// before the game's destruction solver reads them. No missing shear or root work becomes
+    /// a code default; these fixtures test the generic file contract independently of shipped values.
     #[test]
     fn a_kind_missing_a_number_or_its_source_is_refused() {
-        let nailed = |fields: &str| format!("{{\"nailed\": Stated({fields})}}");
-        let tensile = "tensile_pa: (3240.0, Fixture(\"fixture\"))";
-        let energy = "fracture_energy_j_per_m2: (65.0, Fixture(\"fixture\"))";
-        Attachments::from_ron(&nailed(&format!("{tensile}, {energy}")), registry())
-            .expect("both numbers, each sourced");
-        for (text, names) in [
-            (nailed(tensile), "fracture_energy_j_per_m2"),
-            (nailed(energy), "tensile_pa"),
+        for (kind, fields) in [
             (
-                nailed(&format!("tensile_pa: 3240.0, {energy}")),
-                "provenance",
+                "Stated",
+                [
+                    ("tensile_pa", "3240.0"),
+                    ("fracture_energy_j_per_m2", "65.0"),
+                    ("shear_cohesion_pa", "1e6"),
+                    ("shear_fracture_energy_j_per_m2", "5.0"),
+                ],
             ),
             (
-                nailed(&format!(
-                    "tensile_pa: (0.0, Fixture(\"fixture\")), {energy}"
-                )),
-                "tensile_pa 0",
-            ),
-            (
-                nailed(&format!("{tensile}, {energy}, spacing_m: 0.6")),
-                "spacing_m",
-            ),
-            (
-                "{\"nailed\": Resting, \"nailed\": Resting}".to_owned(),
-                "twice",
-            ),
-            ("{\"mortared\": Seam(\"RHA\")}".to_owned(), "\"mortared\""),
-            ("{\"mortared\": Seam(\"Adobe\")}".to_owned(), "Adobe"),
-            (
-                "{\"plate\": RootPlate()}".to_owned(),
-                "overturning_nm_per_kg",
-            ),
-            (
-                "{\"plate\": RootPlate(overturning_nm_per_kg: 150.0)}".to_owned(),
-                "provenance",
-            ),
-            (
-                "{\"plate\": RootPlate(overturning_nm_per_kg: (0.0, Fixture(\"fixture\")))}"
-                    .to_owned(),
-                "overturning_nm_per_kg 0",
+                "RootPlate",
+                [
+                    ("overturning_nm_per_kg", "150.0"),
+                    ("fracture_energy_j_per_m2", "1.0"),
+                    ("shear_cohesion_pa", "1e6"),
+                    ("shear_fracture_energy_j_per_m2", "1.0"),
+                ],
             ),
         ] {
-            let err = Attachments::from_ron(&text, registry()).unwrap_err();
-            assert!(err.contains(names), "{text}: {err}");
+            let authored: Vec<_> = fields
+                .iter()
+                .map(|(field, value)| format!("{field}: ({value}, Fixture(\"fixture\"))"))
+                .collect();
+            let row = |fields: &[String]| format!("{{\"fixture\": {kind}({})}}", fields.join(", "));
+            Attachments::from_ron(&row(&authored), registry()).unwrap();
+            for (index, (field, value)) in fields.iter().enumerate() {
+                let missing: Vec<_> = authored
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != index)
+                    .map(|(_, s)| s.clone())
+                    .collect();
+                let error = Attachments::from_ron(&row(&missing), registry()).unwrap_err();
+                assert!(error.contains(field), "{field}: {error}");
+                let mut bare = authored.clone();
+                bare[index] = format!("{field}: {value}");
+                assert!(
+                    Attachments::from_ron(&row(&bare), registry())
+                        .unwrap_err()
+                        .contains("provenance")
+                );
+                for bad in ["0.0", "-1.0", "inf", "NaN", "1e100", "1e-100"] {
+                    let mut invalid = authored.clone();
+                    invalid[index] = format!("{field}: ({bad}, Fixture(\"fixture\"))");
+                    let error = Attachments::from_ron(&row(&invalid), registry()).unwrap_err();
+                    assert!(error.contains(field), "{field}: {error}");
+                }
+            }
+            let mut unknown = authored;
+            unknown.push("spacing_m: 0.6".to_owned());
+            assert!(
+                Attachments::from_ron(&row(&unknown), registry())
+                    .unwrap_err()
+                    .contains("spacing_m")
+            );
+        }
+        for (row, field) in [
+            ("{\"fixture\": Resting, \"fixture\": Resting}", "twice"),
+            ("{\"fixture\": Seam(\"RHA\")}", "fixture"),
+            ("{\"fixture\": Seam(\"Adobe\")}", "Adobe"),
+        ] {
+            assert!(
+                Attachments::from_ron(row, registry())
+                    .unwrap_err()
+                    .contains(field)
+            );
         }
     }
 
@@ -444,18 +488,20 @@ mod tests {
             for (row, field) in [
                 (
                     format!(
-                        "Stated(tensile_pa: ({value}, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))"
+                        "Stated(tensile_pa: ({value}, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")), shear_cohesion_pa: (1.0e6, Fixture(\"fixture\")), shear_fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))"
                     ),
                     "tensile_pa",
                 ),
                 (
                     format!(
-                        "Stated(tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: ({value}, Fixture(\"fixture\")))"
+                        "Stated(tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: ({value}, Fixture(\"fixture\")), shear_cohesion_pa: (1.0e6, Fixture(\"fixture\")), shear_fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))"
                     ),
                     "fracture_energy_j_per_m2",
                 ),
                 (
-                    format!("RootPlate(overturning_nm_per_kg: ({value}, Fixture(\"fixture\")))"),
+                    format!(
+                        "RootPlate(overturning_nm_per_kg: ({value}, Fixture(\"fixture\")), fracture_energy_j_per_m2: (1.0, Fixture(\"fixture\")), shear_cohesion_pa: (1.0e6, Fixture(\"fixture\")), shear_fracture_energy_j_per_m2: (1.0, Fixture(\"fixture\")))"
+                    ),
                     "overturning_nm_per_kg",
                 ),
             ] {
@@ -586,11 +632,14 @@ mod tests {
         let asset = footprint();
         asset.check().unwrap();
         let masonry = [Material::of(registry(), "Brick").unwrap()];
-        let row = "Stated(tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))";
+        let row = "Stated(tensile_pa: (10.0, Fixture(\"fixture\")), fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")), shear_cohesion_pa: (1.0e6, Fixture(\"fixture\")), shear_fracture_energy_j_per_m2: (5.0, Fixture(\"fixture\")))";
         let expected = Bond::Bonded(Seam {
             tensile: 10.0,
             fracture_energy: 5.0,
-            shear: Shear::OpeningOnly,
+            shear: Shear {
+                cohesion: 1.0e6,
+                energy: 5.0,
+            },
         });
         let list = Attachments::from_ron(&format!("{{\"fixture\": {row}}}"), registry()).unwrap();
         let layout = super::super::breakage::Layout::of(&asset, &masonry, &list).unwrap();
@@ -607,50 +656,60 @@ mod tests {
     /// 4 m³ * 100 kg/m³ and its COM over the footprint's centre; a pure couple adds no net force.
     #[test]
     fn root_opening_moment_is_invariant_under_footprint_refinement() {
-        use super::super::fracture::{self, GroupLoads, Load, Origin, SectionCache, State};
-        let list = Attachments::from_ron(
-            r#"{"fixture": RootPlate(overturning_nm_per_kg: (100.0, Fixture("fixture")))}"#,
-            registry(),
-        )
-        .unwrap();
-        let mut material = Material::of(registry(), "Brick").unwrap().unwrap();
-        // Fixture internal bonds carry the prescribed couple without opening or punch rings.
-        material.density = 100.0;
-        material.seam = Seam {
-            tensile: 1e12,
-            fracture_energy: 1e12,
-            shear: Shear::OpeningOnly,
+        use super::super::fracture::{
+            Chunk, Joint, Load, Origin, Side, State, Structure, bondsolve::Assessment,
         };
+        let list = Attachments::from_ron(
+            r#"{"fixture": RootPlate(overturning_nm_per_kg: (100.0, Fixture("fixture")), fracture_energy_j_per_m2: (1.0, Fixture("fixture")), shear_cohesion_pa: (1.0e6, Fixture("fixture")), shear_fracture_energy_j_per_m2: (1.0, Fixture("fixture")))}"#,
+            registry(),
+        ).unwrap();
+        let Kind::RootPlate(plate) = list.kind("fixture").unwrap() else {
+            panic!("fixture declares a plate")
+        };
+        let material = Material::of(registry(), "Brick").unwrap().unwrap();
         for cuts in [
             &[0.0, 2.0][..],
             &[0.0, 1.0, 2.0],
             &[0.0, 0.5, 2.0],
             &[0.0, 0.125, 0.5, 1.0, 2.0],
         ] {
-            let mut asset = footprint_with_cuts(cuts);
-            let upper = asset.chunks.len() - 1;
-            for (k, ends) in cuts.windows(2).enumerate() {
-                asset.joints.push(super::super::schema::Joint {
-                    a: k as u32,
-                    b: upper as u32,
-                    area_m2: ends[1] - ends[0],
-                    centroid: [(ends[0] + ends[1]) / 2.0, 1.0, 0.5],
-                    normal: [0.0, 1.0, 0.0],
-                    bond: super::super::schema::Bond::Seam,
-                });
-            }
-            asset.check().unwrap();
-            let layout =
-                super::super::breakage::Layout::of(&asset, &[Some(material)], &list).unwrap();
             for scale in [0.5_f32, 1.0, 2.0] {
-                let structure = layout.structure(&asset, scale);
+                // Fixture: 4 m³ rigid carrier, density 100 kg/m³; 2 m² footprint.
+                let mass = 400.0 * scale.powi(3);
+                let area = 2.0 * scale.powi(2);
+                let centre = Vec3::new(1.0, 0.0, 0.5) * scale;
+                let chunk = Chunk {
+                    volume: 4.0 * scale.powi(3),
+                    mass,
+                    material,
+                    centroid: centre + Vec3::Y * scale,
+                    buried: false,
+                };
+                let seam = plate.seam(area, mass).unwrap();
+                let structure = Structure {
+                    chunks: vec![chunk],
+                    joints: cuts
+                        .windows(2)
+                        .map(|ends| Joint {
+                            a: 0,
+                            b: Side::Ground,
+                            area: (ends[1] - ends[0]) * scale.powi(2),
+                            centroid: Vec3::new((ends[0] + ends[1]) / 2.0, 0.0, 0.5) * scale,
+                            normal: Vec3::Y,
+                            bond: Bond::AreaShare {
+                                seam,
+                                footprint_area: area,
+                                footprint_centroid: centre,
+                            },
+                        })
+                        .collect(),
+                };
                 for across in [Vec3::X, Vec3::Z] {
                     for ratio in [0.99, 1.01] {
-                        // DERIVED: target couple C*m, m = 4*100*s³; force pair separated by 2*s.
-                        let moment = ratio * 100.0 * (4.0 * 100.0 * scale.powi(3));
+                        let moment = ratio * plate.overturning_nm_per_kg * mass;
                         let loads = [-1.0, 1.0].map(|sign| Load {
-                            chunk: upper,
-                            at: Vec3::new(1.0, 1.5, 0.5) * scale + across * (sign * scale),
+                            chunk: 0,
+                            at: chunk.centroid + across * (sign * scale),
                             energy: 0.0,
                             crushed: 0.0,
                             blow: Vec3::ZERO,
@@ -659,30 +718,18 @@ mod tests {
                             origin: Origin::Field,
                         });
                         let mut state = State::new(&structure);
-                        let weighed = fracture::weigh(
+                        let (failures, _) = Assessment::default().advance(
                             &structure,
                             &mut state,
-                            &[],
-                            &[],
-                            GroupLoads::new(&loads, Vec3::ZERO),
-                            &[],
-                            &mut SectionCache::default(),
+                            &loads,
+                            Vec3::ZERO,
+                            1.0 / 64.0,
+                            false,
                         );
                         assert_eq!(
-                            !weighed.failures.is_empty(),
+                            !failures.is_empty(),
                             ratio > 1.0,
-                            "cuts {cuts:?}, scale {scale}, axis {across:?}, moment/Cm {ratio}: {:?}",
-                            weighed.failures
-                        );
-                        assert!(
-                            state.cracked[..upper].iter().all(|&cracked| !cracked),
-                            "the fixture's internal bonds hold"
-                        );
-                        assert!(
-                            state.cracked[upper..]
-                                .iter()
-                                .all(|&cracked| cracked == (ratio > 1.0)),
-                            "the whole footprint shares one threshold"
+                            "cuts {cuts:?}, scale {scale}, axis {across:?}, moment/Cm {ratio}: {failures:?}"
                         );
                     }
                 }
@@ -699,7 +746,7 @@ mod tests {
         use std::sync::Arc;
         let asset = footprint();
         let list = Attachments::from_ron(
-            r#"{"fixture": RootPlate(overturning_nm_per_kg: (2.0, Fixture("fixture")))}"#,
+            r#"{"fixture": RootPlate(overturning_nm_per_kg: (2.0, Fixture("fixture")), fracture_energy_j_per_m2: (1.0, Fixture("fixture")), shear_cohesion_pa: (1.0e6, Fixture("fixture")), shear_fracture_energy_j_per_m2: (1.0, Fixture("fixture")))}"#,
             registry(),
         )
         .unwrap();
@@ -760,7 +807,7 @@ mod tests {
                 .contains("one kind for its footprint")
         );
         let list = Attachments::from_ron(
-            r#"{"fixture": RootPlate(overturning_nm_per_kg: (1.0e38, Fixture("fixture")))}"#,
+            r#"{"fixture": RootPlate(overturning_nm_per_kg: (1.0e38, Fixture("fixture")), fracture_energy_j_per_m2: (1.0, Fixture("fixture")), shear_cohesion_pa: (1.0e6, Fixture("fixture")), shear_fracture_energy_j_per_m2: (1.0, Fixture("fixture")))}"#,
             registry(),
         )
         .unwrap();

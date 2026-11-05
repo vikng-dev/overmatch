@@ -13,17 +13,17 @@
 // Every kind is one of four:
 // - `Seam("<substance>")`: the seam of that row of `materials.ron` (its bulk `tensile` and
 //   `fracture_energy`), the numbers' one source.
-// - `Stated(tensile_pa, fracture_energy_j_per_m2)`: a seam this list states: its tensile strength
-//   across the joint's area, Pa, and its mode-I fracture energy, J/m², each authored
-//   `(value, Kind("source or reason"))` (`src/provenance.rs`). A kind missing either does not load.
+// - `Stated(tensile_pa, fracture_energy_j_per_m2, shear_cohesion_pa, shear_fracture_energy_j_per_m2)`: a seam this list states: its tensile strength
+//   across the joint's area and shear cohesion, Pa, and mode-I and mode-II fracture energies, J/m², each authored
+//   `(value, Kind("source or reason"))` (`src/provenance.rs`). All four are required.
 // - `Resting`: one part laid on the other with nothing fixing it: no pull strength and no fracture
 //   work, held by its weight and the friction of the two materials alone.
 // - `RootPlate(overturning_nm_per_kg)`: a trunk's root plate in its soil, joining the trunk to the
 //   ground and no two parts: its critical overturning moment per kilogram of FRESH STEM MASS,
 //   N·m/kg, multiplied by a mass in kg with no extra g, authored `(value, Kind("source"))`. An
-//   ultimate moment only. ASSUMED rigid-plastic release with zero separation work: the source
-//   supplies no work measurement, so a blow pays only the lift over the hinge. This is not a
-//   measured zero root-separation energy. Each row binds its species, soil and rooting depth.
+//   ultimate moment is supplemented by opening work, lateral cohesion and sliding work, all
+//   explicitly Unknown where no matched measurement was read. Each row binds its species,
+//   soil and rooting depth.
 //
 // Every root plate here describes unrotted trees on freely draining mineral soil, rooting depth
 // 40-80 cm (MEASURED domain of Nicoll's A2 class). Applying that site profile to the game's trees
@@ -44,8 +44,8 @@
     // m², DERIVED) is a kind of its own once play shows it needs one.
     // Shear cohesion c and mode-II separation work G_II are unsourced for this reference
     // nailing. The material source audit is recorded in
-    // .agents/scratch/collision-c6-shear-sources.md. A stated kind holds no shear pair, so its
-    // seams answer by the opening law alone and no punch ring forms across them.
+    // .agents/scratch/collision-c6-shear-sources.md. Explicit Unknown analogues below keep
+    // these missing facts visible until matched lateral tests replace them.
     "nailed": Stated(
         tensile_pa: (3240.0, Derived("one nail's withdrawal capacity × 10.7 nails per m² of
             contact. One nail: CLAIMED, not read (EN 1995-1-1:2004 §8.3.2, eqs. 8.24 and 8.25,
@@ -59,6 +59,8 @@
             of contact (the density `tensile_pa` states): ASSUMED, its withdrawal force falls
             linearly from its 304 N peak to nothing over its 40 mm penetration, so 6.1 J a nail,
             and 65 J/m²")),
+        shear_cohesion_pa: (3240.0, Unknown("StandIn withdrawal-strength analogue for unresolved lateral fastener resistance per contact area; no matched lateral test read. Settled by measured joint shear capacity and nailing density")),
+        shear_fracture_energy_j_per_m2: (65.0, Unknown("StandIn opening-work analogue for unresolved lateral fastener separation work; settled by a lateral force-displacement test of this fixing")),
     ),
     // Laid on the other part, nothing fixing it: a roof plane on a gable's rake.
     "resting": Resting,
@@ -73,6 +75,9 @@
             includes applied pull and overhanging self-weight; multiply by fresh stem mass in kg,
             not weight in N. Transferred site profile ASSUMED for the game, not universal soil
             anchorage. https://era.ed.ac.uk/server/api/core/bitstreams/bf65a702-ade0-4a94-8a60-e1eaf7e8b79c/content")),
+        fracture_energy_j_per_m2: (1.0, Unknown("StandIn root-plate separation work, not a measured near-zero energy; no uprooting force-displacement curve read. Settled by integrated root-plate work per effective footprint area")),
+        shear_cohesion_pa: (1.0e6, Unknown("StandIn root-soil lateral cohesion per effective footprint area; no lateral pull test read. Settled by root-plate sliding force versus contact area")),
+        shear_fracture_energy_j_per_m2: (1.0, Unknown("StandIn root-soil sliding work per effective footprint area; no sliding force-displacement curve read. Settled by integrated lateral separation work")),
     ),
     // A Scots pine's root plate on freely draining mineral soil, rooting depth 40-80 cm.
     "scots_pine_root_plate": RootPlate(
@@ -83,6 +88,9 @@
             and snapped trees excluded. Total applied-plus-self-weight moment; mass in kg, no
             extra g. Transferred site profile ASSUMED for the game. Same Nicoll thesis URL as
             norway_spruce_root_plate above.")),
+        fracture_energy_j_per_m2: (1.0, Unknown("StandIn root-plate separation work, not a measured near-zero energy; no uprooting force-displacement curve read. Settled by integrated root-plate work per effective footprint area")),
+        shear_cohesion_pa: (1.0e6, Unknown("StandIn root-soil lateral cohesion per effective footprint area; no lateral pull test read. Settled by root-plate sliding force versus contact area")),
+        shear_fracture_energy_j_per_m2: (1.0, Unknown("StandIn root-soil sliding work per effective footprint area; no sliding force-displacement curve read. Settled by integrated lateral separation work")),
     ),
     // A silver birch's root plate on freely draining mineral soil, rooting depth 40-80 cm: the
     // Scots pine's, transferred.
@@ -94,5 +102,8 @@
             anchorage or a bound on it. Site profile also ASSUMED for the game; kg fresh stem mass,
             no extra g. Same Nicoll thesis URL as norway_spruce_root_plate above. Settled by a
             matched silver-birch root-plate moment versus fresh-stem-mass regression")),
+        fracture_energy_j_per_m2: (1.0, Unknown("StandIn root-plate separation work, not a measured near-zero energy; no uprooting force-displacement curve read. Settled by integrated root-plate work per effective footprint area")),
+        shear_cohesion_pa: (1.0e6, Unknown("StandIn root-soil lateral cohesion per effective footprint area; no lateral pull test read. Settled by root-plate sliding force versus contact area")),
+        shear_fracture_energy_j_per_m2: (1.0, Unknown("StandIn root-soil sliding work per effective footprint area; no sliding force-displacement curve read. Settled by integrated lateral separation work")),
     ),
 }

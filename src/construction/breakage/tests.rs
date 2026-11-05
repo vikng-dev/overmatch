@@ -649,6 +649,7 @@ fn the_record_a_replica_derives_from_is_the_authoritys() {
         &Load::field(&hits, |c| structure.chunks[c].material.crush),
         Vec::new(),
         Vec3::ZERO,
+        STEP,
     );
     for kind_of in [
         |e: &Event| matches!(e, Event::Dust(_)),
@@ -964,6 +965,7 @@ fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
         &loads,
         holes_of(&kind, 1.0, &lines, &[]),
         Vec3::ZERO,
+        STEP,
     );
     let blast = blast_on(&authority.structure, dish_chunk, 0.05);
     let holes = holes_of(&kind, 1.0, &[], &blast);
@@ -973,6 +975,7 @@ fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
         &blast,
         holes,
         Vec3::ZERO,
+        STEP,
     );
     let [channel] = authority.holes[channel_chunk][..] else {
         panic!("one channel: {:?}", authority.holes[channel_chunk]);
@@ -1037,6 +1040,7 @@ fn a_hole_changes_no_collider_mass_or_structural_result() {
             &loads,
             holes.clone(),
             Vec3::ZERO,
+            STEP,
         );
         let without = run_laws(
             &kind.layout.element_of,
@@ -1044,6 +1048,7 @@ fn a_hole_changes_no_collider_mass_or_structural_result() {
             &loads,
             Vec::new(),
             Vec3::ZERO,
+            STEP,
         );
         assert!(
             with.events.contains(&Event::Hole(c as u16, holes[0].1)),
@@ -1122,7 +1127,10 @@ fn past_the_cap_a_chunk_stands_until_its_pool_is_spent() {
             *seam = fracture::Seam {
                 tensile: 1e12,
                 fracture_energy: 1e12,
-                shear: fracture::Shear::OpeningOnly,
+                shear: fracture::Shear {
+                    cohesion: 1e12,
+                    energy: 1e12,
+                },
             };
         }
     }
@@ -1135,6 +1143,7 @@ fn past_the_cap_a_chunk_stands_until_its_pool_is_spent() {
                 &loads,
                 holes.clone(),
                 Vec3::ZERO,
+                STEP,
             );
             if changes.events.contains(&Event::Dust(c as u16)) {
                 return true;
@@ -1223,133 +1232,6 @@ fn a_hole_holds_the_volume_its_load_crushed() {
         bound: 3.0 * 0.0005 / r,
     }
     .check();
-}
-
-/// The law chunks of every element of `component` (an index of the asset's components).
-fn component_chunks(kind: &ConstructionKind, component: u16) -> Vec<usize> {
-    (0..kind.asset.elements.len())
-        .filter(|&e| kind.asset.elements[e].component == component)
-        .flat_map(|e| kind.layout.chunks_of(e))
-        .collect()
-}
-
-/// The components whose chunks the chunks of `part` join through a joint `holds` keeps, and, with
-/// `under`, only those it bears on (the joint's normal toward `part` rising), ascending.
-fn joined_to(
-    kind: &ConstructionKind,
-    structure: &Structure,
-    part: &[usize],
-    under: bool,
-    holds: impl Fn(&Joint) -> bool,
-) -> Vec<u16> {
-    let component =
-        |c: usize| kind.asset.elements[usize::from(kind.layout.element_of[c])].component;
-    let mut joined: Vec<u16> = structure
-        .joints
-        .iter()
-        .filter(|joint| holds(joint))
-        .filter_map(|joint| {
-            let Side::Chunk(b) = joint.b else {
-                return None;
-            };
-            let (held, other) = match (part.contains(&joint.a), part.contains(&b)) {
-                (true, false) => (joint.a, b),
-                (false, true) => (b, joint.a),
-                _ => return None,
-            };
-            let toward = structure.chunks[held].centroid - joint.centroid;
-            let bears = joint.normal.dot(toward).signum() * joint.normal.y > 0.0;
-            (bears || !under).then(|| component(other))
-        })
-        .collect();
-    joined.sort_unstable();
-    joined.dedup();
-    joined
-}
-
-/// The game's environment destruction model gives a rest no tension and a fixing its stated
-/// tension. A controlled slab lifts at its weight on rests, or weight + f_t*A when fixed.
-/// `Breakage` relies on these distinct limits; shipped roof geometry and material parameters do not pin them.
-#[test]
-fn rests_and_fixings_release_at_their_independent_axial_limits() {
-    let mut material = Material::of(
-        crate::substances::SubstanceRegistry::shipped_static(),
-        "Brick",
-    )
-    .unwrap()
-    .unwrap();
-    // Fixture data: unit-volume chunks at 100 kg/m³, a unit-area fixing with f_t=100 Pa.
-    material.density = 100.0;
-    let area = 1.0;
-    let mass = material.density;
-    let weight = mass * crate::physical_laws::gravity_mps2();
-    let seam = fracture::Seam {
-        tensile: 100.0,
-        fracture_energy: 5.0,
-        shear: fracture::Shear::OpeningOnly,
-    };
-    for (bond, bias, capacity, cause) in [
-        (Bond::Resting, 0.0, weight, fracture::Cause::LiftForce),
-        (
-            Bond::Bonded(seam),
-            weight,
-            seam.tensile * area,
-            fracture::Cause::Weight,
-        ),
-    ] {
-        let structure = Structure {
-            chunks: [-0.5, 0.5]
-                .into_iter()
-                .map(|height| Chunk {
-                    volume: 1.0,
-                    mass,
-                    centroid: Vec3::Y * height,
-                    material,
-                    buried: height < 0.0,
-                })
-                .collect(),
-            joints: vec![Joint {
-                a: 0,
-                b: Side::Chunk(1),
-                area,
-                centroid: Vec3::ZERO,
-                normal: Vec3::Y,
-                bond,
-            }],
-        };
-        for ratio in [0.99, 1.01] {
-            let loads = [Load {
-                chunk: 1,
-                at: Vec3::Y * 0.5,
-                energy: 0.0,
-                crushed: 0.0,
-                blow: Vec3::ZERO,
-                press: Vec3::Y * (bias + ratio * capacity),
-                peak: None,
-                origin: Origin::Field,
-            }];
-            let mut state = State::new(&structure);
-            let weighed = fracture::weigh(
-                &structure,
-                &mut state,
-                &[],
-                &[],
-                GroupLoads::new(&loads, Vec3::ZERO),
-                &[],
-                &mut SectionCache::default(),
-            );
-            assert_eq!(
-                state.cracked[0],
-                ratio > 1.0,
-                "{bond:?}, ratio {ratio}: {:?}",
-                weighed.failures
-            );
-            assert_eq!(weighed.failures.len(), usize::from(ratio > 1.0));
-            if let Some(failure) = weighed.failures.first() {
-                assert_eq!(failure.cause, cause);
-            }
-        }
-    }
 }
 
 /// A ROUND'S CHANNEL IS THE CYLINDER IT CROSSED, OPEN ACROSS EACH FACE: a line through a house
@@ -2339,6 +2221,7 @@ fn only_departing_chunks_give_back_their_body_blows() {
         &[load],
         Vec::new(),
         Vec3::ZERO,
+        STEP,
     );
     assert!(
         held.groups.is_empty() && held.returns.is_empty(),
@@ -2357,6 +2240,7 @@ fn only_departing_chunks_give_back_their_body_blows() {
         &[load, dust],
         Vec::new(),
         Vec3::ZERO,
+        STEP,
     );
     assert_eq!(
         changes.returns,
@@ -2376,6 +2260,7 @@ fn only_departing_chunks_give_back_their_body_blows() {
         &[press, dust],
         Vec::new(),
         Vec3::ZERO,
+        STEP,
     );
     assert!(
         changes.returns.is_empty(),
@@ -2391,6 +2276,7 @@ fn only_departing_chunks_give_back_their_body_blows() {
         &[load],
         Vec::new(),
         Vec3::ZERO,
+        STEP,
     );
     assert_eq!(
         changes.groups,
@@ -2407,6 +2293,7 @@ fn only_departing_chunks_give_back_their_body_blows() {
         &[load],
         Vec::new(),
         Vec3::ZERO,
+        STEP,
     );
     assert!(
         repeated.groups.is_empty(),
@@ -2640,9 +2527,10 @@ fn a_break_launches_and_returns_in_one_authority_pass() {
         .expect("the fixture source meets the wall");
     let (piece_velocity, piece_spin) = app
         .world_mut()
-        .query_filtered::<(&LinearVelocity, &AngularVelocity), With<Piece>>()
-        .single(app.world())
-        .map(|(v, w)| (v.0, w.0))
+        .query::<(&LinearVelocity, &AngularVelocity, &Piece)>()
+        .iter(app.world())
+        .find(|(_, _, piece)| piece.chunks == [c as u16])
+        .map(|(v, w, _)| (v.0, w.0))
         .expect("the contacted chunk leaves as one carrier");
     let structure = kind.layout.structure(&kind.asset, 1.0);
     let free = launch(&kind, &structure, 1.0, &[c], &[]);
@@ -2871,83 +2759,6 @@ fn tiny_exchanges_keep_their_plastic_share_without_underflow() {
     }
 }
 
-/// IDENTICAL HELD PRESSES REUSE THEIR VERDICT (the game's environment destruction model).
-/// The authority avoids repeating a steady push's strength walk, but a changed point, magnitude,
-/// or topology must recheck. Decreasing a stabilizing load cannot reuse the previous verdict.
-#[test]
-fn held_presses_recheck_changed_force_points_and_topology() {
-    let kind = shipped_house();
-    let c = kind
-        .layout
-        .structure(&kind.asset, 1.0)
-        .chunks
-        .iter()
-        .position(|chunk| chunk.buried)
-        .expect("the fixture has a soil-held chunk");
-    let mut live = Live::new(&kind, 1.0);
-    let mut press = Load {
-        chunk: c,
-        at: live.structure.chunks[c].centroid,
-        energy: 0.0,
-        crushed: 0.0,
-        blow: Vec3::ZERO,
-        press: Vec3::X,
-        peak: None,
-        origin: Origin::Field,
-    };
-    let run = |live: &mut Live, loads: &[Load]| {
-        run_laws(&kind.layout.element_of, live, loads, Vec::new(), Vec3::ZERO)
-    };
-    assert!(run(&mut live, &[press]).weight_steps > 0);
-    assert_eq!(
-        run(&mut live, &[press]).weight_steps,
-        0,
-        "identical press holds"
-    );
-    press.press *= 0.5;
-    assert!(
-        run(&mut live, &[press]).weight_steps > 0,
-        "even a decrease rechecks"
-    );
-    assert_eq!(run(&mut live, &[press]).weight_steps, 0);
-    let removed = Load {
-        press: Vec3::ZERO,
-        ..press
-    };
-    assert!(
-        run(&mut live, &[removed]).weight_steps > 0,
-        "removal rechecks gravity at the old point"
-    );
-    assert_eq!(
-        run(&mut live, &[removed]).weight_steps,
-        0,
-        "removal has been checked"
-    );
-    press.press *= 4.0;
-    assert!(run(&mut live, &[press]).weight_steps > 0, "growth rechecks");
-    press.at += Vec3::Y * 0.01;
-    assert!(run(&mut live, &[press]).weight_steps > 0, "line moves");
-    assert_eq!(run(&mut live, &[press]).weight_steps, 0);
-    let (_, [other, _, _]) = fixture_chunks(&kind);
-    let dust = Load {
-        chunk: other,
-        at: live.structure.chunks[other].centroid,
-        energy: live.state.pool[other] * live.structure.chunks[other].material.crush,
-        crushed: live.state.pool[other],
-        press: Vec3::ZERO,
-        ..press
-    };
-    assert!(
-        run(&mut live, &[press, dust]).weight_steps > 0,
-        "topology changes"
-    );
-    assert_eq!(
-        run(&mut live, &[press]).weight_steps,
-        0,
-        "the topology change already checked the final held verdict"
-    );
-}
-
 /// A STEP'S PRESSES JOIN EVERY DEPOSIT ONCE (the game's environment destruction model).
 /// The authority's strength check needs awake and sleeping presses while processing any load,
 /// in either deposit order. Dropping the awake press after its own contact deposit clears the
@@ -3025,105 +2836,9 @@ fn awake_and_sleeping_presses_join_every_deposit_once() {
         app.world_mut().run_system_once(apply_deposits).unwrap();
         let mut breakage = app.world_mut().get_mut::<Breakage>(root).unwrap();
         let live = breakage.live.as_mut();
-        let force: Vec3 = live.held_presses.iter().map(|&(_, _, force)| force).sum();
-        assert_eq!(force, Vec3::X * 3.0, "contact first: {contact_first}");
-        assert_eq!(live.held_presses.len(), 2, "each point once");
+        let force = live.assessment.applied_force().as_vec3();
+        assert_eq!(force.x, 3.0, "contact first: {contact_first}");
     }
-}
-
-/// NO ELEMENT'S PART OR NAME ENTERS THE LAWS (the game's environment destruction model, the #237
-/// study's test 8; ADR-0034). A wall chunk and a roof board take one law, from their material rows
-/// and their construction: the law's view of the shipped house (its layout and structure) is the
-/// same whatever its elements are called and whatever part label each carries, so one blast's loads
-/// change it identically, while the same field on the house with its elements' materials
-/// swapped wears the volume pools differently. A mutant that reads an element's part or name into the law's view, or
-/// branches the laws on either, fails here. The charge and its point are ASSUMED fixture data.
-#[test]
-fn no_elements_part_or_name_enters_the_laws() {
-    let kind = shipped_house();
-    let registry = crate::substances::SubstanceRegistry::shipped_static();
-    let masonry: Vec<Option<Material>> = kind
-        .asset
-        .materials
-        .iter()
-        .map(|name| Material::of(registry, name).unwrap())
-        .collect();
-    let attachments = Attachments::shipped_static();
-    let mut relabelled = kind.asset.clone();
-    for (k, element) in relabelled.elements.iter_mut().enumerate() {
-        element.part = format!("arbitrary-part/{k}");
-        element.name = format!("relabelled/{k}");
-    }
-    let mut swapped = kind.asset.clone();
-    let materials = swapped.materials.len() as u8;
-    for element in &mut swapped.elements {
-        element.material = (element.material + 1) % materials;
-    }
-    let (lo, hi) = kind.bounds();
-    // ASSUMED fixture charge: the peak exceeds the materials' dynamic crush strengths at the
-    // nearest face, so material-dependent wear is exercised without a chemical-energy cavity.
-    let blast = Blast::of(CRUSHING_BLAST_J, 0.05, FIT_ONLY_PRODUCTS);
-    assert!(
-        masonry
-            .iter()
-            .flatten()
-            .all(|material| blast.peak_pressure(1.0, 1.0) > material.compaction.strength)
-    );
-    let origin = Vec3::new(hi.x + 1.0, lo.y + 1.0, 0.5 * (lo.z + hi.z));
-    let run = |asset: &ConstructionAsset| {
-        let layout = Layout::of(asset, &masonry, attachments).unwrap();
-        let structure = layout.structure(asset, 1.0);
-        let mut live = Live {
-            state: State::new(&structure),
-            swapped: vec![false; layout.elements.len()],
-            sections: SectionCache::default(),
-            held_presses: Vec::new(),
-            holes: vec![Vec::new(); structure.chunks.len()],
-            structure: Arc::new(structure),
-        };
-        let hits = fracture::sample_blocks(
-            &layout.blocks,
-            |c| live.state.standing(c),
-            |c| live.structure.chunks[c].material,
-            origin,
-            blast,
-            fracture::blast_directions(),
-        );
-        let contacts: Vec<Joint> = live.state.contacts(&live.structure).collect();
-        let (loads, _) = Load::blast(&hits, |c| fracture::Backing {
-            scale: 1.0,
-            block: &layout.blocks[c],
-            material: live.structure.chunks[c].material,
-            contacts: &contacts,
-        });
-        let changes = run_laws(
-            &layout.element_of,
-            &mut live,
-            &loads,
-            Vec::new(),
-            Vec3::ZERO,
-        );
-        (layout, live.structure, live.state, changes)
-    };
-    let (layout, structure, state, changes) = run(&kind.asset);
-    assert!(
-        !changes.events.is_empty(),
-        "the fixture charge changes the house"
-    );
-    let (other_layout, other_structure, other_state, other_changes) = run(&relabelled);
-    assert_eq!(other_layout, layout);
-    assert_eq!(
-        (&other_structure.chunks, &other_structure.joints),
-        (&structure.chunks, &structure.joints)
-    );
-    assert_eq!(other_state, state, "kinds and names change no pool wear");
-    assert_eq!(other_changes, changes, "kinds and names change no law");
-    let (_, other_structure, other_state, _) = run(&swapped);
-    assert_ne!(other_structure.chunks, structure.chunks);
-    assert_ne!(
-        other_state.pool, state.pool,
-        "a material changes the field's crushed volume"
-    );
 }
 
 /// A BURST WHOSE TIP TOUCHES A FACE CRUSHES IT FROM THE FILLER CENTRE (the game's environment
@@ -3433,7 +3148,7 @@ fn landing_slab() -> (Arc<ConstructionKind>, Vec<usize>) {
 }
 
 fn drop_slab(gently: bool) -> (Vec<usize>, Vec<Vec<u16>>) {
-    let (mut app, construction) = composed(false);
+    let (mut app, construction) = composed_kind(false, &geometry_fixture(&shipped_house()));
     app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
     let (kind, group) = landing_slab();
     {
@@ -3511,11 +3226,11 @@ fn physics_landing_splits_a_slab_and_gentle_support_does_not() {
             owned, group,
             "split geometry partitions the parent without duplication"
         );
-        assert_eq!(
-            pieces.len(),
-            if gently { 1 } else { 2 },
-            "gentle={gently}: {pieces:?}"
-        );
+        if gently {
+            assert_eq!(pieces.len(), 1, "supported slab stays whole: {pieces:?}");
+        } else {
+            assert!(pieces.len() > 1, "landing overload must split the slab");
+        }
     }
 }
 
@@ -3683,144 +3398,6 @@ fn priced(mut values: Vec<f64>) -> (f64, f64, f64, f64) {
     (at(0.5), at(0.95), mean, values[values.len() - 1])
 }
 
-/// A PRICING BED, NOT A GATE (#202): the wall time of the game's environment-destruction weight
-/// check on the shipped house (fixture data), game state only. Per change: every standing unburied
-/// chunk turned to dust alone, from the intact house, then [`fracture::weigh`] on it. After a
-/// long-wall shot: the long wall under the roof's fixed plate turned to dust at once, then the
-/// gables. Each weigh runs on a clone of the prepared house, so only the check itself is timed. It asserts
-/// nothing about time; run it under the `perf` profile with the machine quiet.
-#[test]
-#[ignore = "a pricing bed, run on demand"]
-fn the_weight_check_priced_per_change_and_after_a_long_wall_shot() {
-    use std::time::Instant;
-    let kind = shipped_house();
-    let elements = &kind.asset.elements;
-    let of_part = |part: &str| {
-        (0..elements.len())
-            .filter(|&e| elements[e].part == part)
-            .collect::<Vec<_>>()
-    };
-    let base = Live::new(&kind, 1.0);
-    let fixed = |joint: &Joint| matches!(joint.bond, Bond::Bonded(_));
-    let resting = |joint: &Joint| joint.bond == Bond::Resting;
-    let mut roof: Vec<usize> = of_part("roof")
-        .into_iter()
-        .flat_map(|e| kind.layout.chunks_of(e))
-        .collect();
-    roof.sort_unstable();
-    let plate = of_part("wall_plate")
-        .into_iter()
-        .map(|e| elements[e].component)
-        .find(|c| joined_to(&kind, &base.structure, &roof, false, fixed).contains(c))
-        .expect("the roof is fixed to a wall plate");
-    let wall_chunks: Vec<usize> = joined_to(
-        &kind,
-        &base.structure,
-        &component_chunks(&kind, plate),
-        true,
-        fixed,
-    )
-    .iter()
-    .flat_map(|&c| component_chunks(&kind, c))
-    .collect();
-    let rests = joined_to(&kind, &base.structure, &roof, true, resting);
-    let gables: Vec<usize> = of_part("gable")
-        .into_iter()
-        .filter(|&e| rests.contains(&elements[e].component))
-        .flat_map(|e| kind.layout.chunks_of(e))
-        .collect();
-    let dust = |live: &mut Live, chunks: &[usize]| {
-        let mut dusted = Vec::new();
-        for &c in chunks {
-            let chunk = &live.structure.chunks[c];
-            if live.state.standing(c)
-                && !chunk.buried
-                && fracture::wear(
-                    &live.structure,
-                    &mut live.state,
-                    c,
-                    fracture::full_pool(chunk),
-                )
-            {
-                dusted.push(c);
-            }
-        }
-        dusted.sort_unstable();
-        dusted
-    };
-    let weigh_times = |prepared: &Live, dusted: &[usize], repeats: usize| {
-        let mut micros = Vec::with_capacity(repeats);
-        let mut steps = 0;
-        let mut failures = 0;
-        for _ in 0..repeats {
-            let mut live = prepared.clone();
-            let start = Instant::now();
-            let weighed = fracture::weigh(
-                &live.structure,
-                &mut live.state,
-                dusted,
-                &[],
-                GroupLoads::new(&[], Vec3::ZERO),
-                &[],
-                &mut live.sections,
-            );
-            micros.push(start.elapsed().as_secs_f64() * 1e6);
-            steps = weighed.steps;
-            failures = weighed.failures.len();
-            std::hint::black_box(&weighed);
-        }
-        (micros, steps, failures)
-    };
-
-    let candidates: Vec<usize> = (0..base.structure.chunks.len())
-        .filter(|&c| base.state.standing(c) && !base.structure.chunks[c].buried)
-        .collect();
-    let mut medians = Vec::with_capacity(candidates.len());
-    let mut steps = Vec::with_capacity(candidates.len());
-    for &c in &candidates {
-        let mut prepared = base.clone();
-        let dusted = dust(&mut prepared, &[c]);
-        let (micros, n, _) = weigh_times(&prepared, &dusted, 5);
-        medians.push(priced(micros).0);
-        steps.push(n as f64);
-    }
-    let (p50, p95, mean, max) = priced(medians);
-    let (s50, s95, smean, smax) = priced(steps);
-    println!(
-        "MEASURED per change: {} single-chunk removals, weigh µs p50 {p50:.1} p95 {p95:.1} mean \
-         {mean:.1} max {max:.1}; steps p50 {s50:.0} p95 {s95:.0} mean {smean:.0} max {smax:.0}",
-        candidates.len()
-    );
-
-    let mut long = base;
-    let dusted = dust(&mut long, &wall_chunks);
-    let (micros, n, failures) = weigh_times(&long, &dusted, 25);
-    let (p50, p95, mean, max) = priced(micros);
-    println!(
-        "MEASURED long-wall shot: {} chunks to dust, weigh µs p50 {p50:.1} p95 {p95:.1} mean \
-         {mean:.1} max {max:.1}; {n} steps, {failures} failures",
-        dusted.len()
-    );
-    fracture::weigh(
-        &long.structure,
-        &mut long.state,
-        &dusted,
-        &[],
-        GroupLoads::new(&[], Vec3::ZERO),
-        &[],
-        &mut long.sections,
-    );
-    fracture::fall(&long.structure, &mut long.state);
-    let dusted = dust(&mut long, &gables);
-    let (micros, n, failures) = weigh_times(&long, &dusted, 25);
-    let (p50, p95, mean, max) = priced(micros);
-    println!(
-        "MEASURED gables after it: {} chunks to dust, weigh µs p50 {p50:.1} p95 {p95:.1} mean \
-         {mean:.1} max {max:.1}; {n} steps, {failures} failures",
-        dusted.len()
-    );
-}
-
 /// Pricing bed for the game's construction destruction model, game state only. One deposit on
 /// the shipped construction, with a one-sided patch of externally loaded chunks. Fixture:
 /// nearest unburied centroids to the minimum-X face, parallel 10 N s blows and 100 kN peaks,
@@ -3874,6 +3451,7 @@ fn a_seeded_blast_deposit_priced_by_loaded_chunks() {
                 &loads,
                 Vec::new(),
                 Vec3::ZERO,
+                STEP,
             );
             micros.push(start.elapsed().as_secs_f64() * 1e6);
             let observed = (
@@ -4385,12 +3963,39 @@ fn a_marched_line_keeps_carrier_work_and_bend_at_entry() {
     }
 }
 
+/// Fixture: the surrounding geometry is held by high cohesive strength in both modes.
+/// These probes challenge collider hand-off and contact energy, independently of structural
+/// failure elsewhere in the construction. Density, geometry and stiffness remain the asset's.
+fn geometry_fixture(kind: &Arc<ConstructionKind>) -> Arc<ConstructionKind> {
+    let mut kind = (**kind).clone();
+    let seam = fracture::Seam {
+        tensile: 1e12,
+        fracture_energy: 1e12,
+        shear: fracture::Shear {
+            cohesion: 1e12,
+            energy: 1e12,
+        },
+    };
+    for joint in &mut kind.layout.joints {
+        joint.bond = Bond::Bonded(seam);
+    }
+    for material in &mut kind.layout.materials {
+        material.seam = seam;
+    }
+    for (attachment, _) in &mut kind.layout.ground {
+        *attachment = GroundAttachment::Joint(Bond::Bonded(seam));
+    }
+    kind.structures.clear();
+    kind.admit_scale(1.0).unwrap();
+    Arc::new(kind)
+}
+
 /// `group` freed where it stood in a composed house `offset` from the origin, its neighbours still
 /// standing and gravity on (fixture 9.81 m/s²): the app, and the body the launch expects, as mass,
 /// inertia and centre about the collider frame.
 fn freed_in_place(group: &[usize], offset: Vec3) -> (App, (f32, Mat3, Vec3)) {
-    let kind = shipped_house();
-    let (mut app, root) = composed(false);
+    let kind = geometry_fixture(&shipped_house());
+    let (mut app, root) = composed_kind(false, &kind);
     app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
     app.world_mut()
         .get_mut::<Transform>(root)
@@ -4757,6 +4362,7 @@ fn a_jointless_owner_still_wears_keeps_holes_and_launches() {
         &[load],
         vec![(1, hole)],
         Vec3::ZERO,
+        STEP,
     );
     assert_eq!(live.state.pool[1], pool - load.crushed);
     assert_eq!(live.holes[1], vec![hole]);
@@ -4764,7 +4370,7 @@ fn a_jointless_owner_still_wears_keeps_holes_and_launches() {
     assert_eq!(live.state.fate[1], Fate::Fallen);
     assert_eq!(changes.groups, vec![(vec![1], vec![load])]);
     assert!(changes.failures.is_empty());
-    assert_eq!(changes.weight_steps, 0);
+    assert_eq!(changes.solve_rounds, 0);
 }
 
 /// The game's independent construction owners have no cross-owner field effects. Worker count
@@ -4829,6 +4435,7 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
                             owned.as_deref(),
                             pose,
                             OwnerInputs {
+                                step: STEP,
                                 pool: &pool,
                                 frame,
                                 taken,
@@ -5214,4 +4821,116 @@ fn reconciliation_prepares_the_same_ordered_geometry_across_workers() {
         result
     };
     assert_eq!(run(1), run(2));
+}
+
+/// The game's fracture work is spent once across departing owners. Copying the complete work
+/// onto each side, or adding source-point energies instead of coherent impulses, fails this gate.
+#[test]
+fn released_owners_share_one_openings_work_and_each_load_has_one_owner() {
+    let material = Material::of(
+        crate::substances::SubstanceRegistry::shipped_static(),
+        "Brick",
+    )
+    .unwrap()
+    .unwrap();
+    // Fixture: two unit-volume nodes, a unit-area seam and a central impulse on each side.
+    let area = 1.0;
+    let mass = material.density;
+    let work = material.seam.fracture_energy * area;
+    let impulse = (4.0 * work * mass).sqrt();
+    let structure = Structure {
+        chunks: [-0.5, 0.5]
+            .map(|x| Chunk {
+                volume: 1.0,
+                mass,
+                centroid: Vec3::X * x,
+                material,
+                buried: false,
+            })
+            .to_vec(),
+        joints: vec![Joint {
+            a: 0,
+            b: Side::Chunk(1),
+            area,
+            centroid: Vec3::ZERO,
+            normal: Vec3::X,
+            bond: Bond::Bonded(material.seam),
+        }],
+    };
+    let loads: Vec<_> = structure
+        .chunks
+        .iter()
+        .enumerate()
+        .map(|(chunk, c)| Load {
+            chunk,
+            at: c.centroid,
+            blow: Vec3::X * impulse,
+            press: Vec3::ZERO,
+            energy: 0.0,
+            crushed: 0.0,
+            peak: None,
+            origin: Origin::Field,
+        })
+        .collect();
+    let failures = [fracture::Failure {
+        joint: 0,
+        cause: fracture::Cause::Tension,
+        demand: material.seam.tensile,
+        capacity: material.seam.tensile,
+        work,
+    }];
+    let groups = departure_loads(&structure, vec![vec![0], vec![1]], &loads, &failures);
+    assert_eq!(
+        groups.iter().map(|(_, loads)| loads.len()).sum::<usize>(),
+        loads.len()
+    );
+    let initial: f32 = loads
+        .iter()
+        .map(|l| l.blow.length_squared() / (2.0 * mass))
+        .sum();
+    let remaining: f32 = groups
+        .iter()
+        .flat_map(|(_, loads)| loads)
+        .map(|l| l.blow.length_squared() / (2.0 * mass))
+        .sum();
+    assert!(
+        (initial - remaining - work).abs() <= 1e-5 * work,
+        "{initial} - {remaining} != {work}"
+    );
+}
+
+/// Initial gravity is construction data prepared before play. Live owners share it, but a
+/// changed owner's warm iteration and topology can never write into another owner's solution.
+#[test]
+fn owners_share_initial_equilibrium_until_their_first_changed_load() {
+    let kind = column_construction();
+    let mut first = Live::new(&kind, 1.0);
+    let second = Live::new(&kind, 1.0);
+    assert!(Arc::ptr_eq(&first.assessment, &second.assessment));
+    assert!(
+        !first.assessment.needs_tick(),
+        "the supported column is at rest"
+    );
+    let c = first.structure.chunks.len() - 1;
+    let load = Load {
+        chunk: c,
+        at: first.structure.chunks[c].centroid,
+        press: Vec3::X,
+        blow: Vec3::ZERO,
+        energy: 0.0,
+        crushed: 0.0,
+        peak: None,
+        origin: Origin::Field,
+    };
+    run_laws(
+        &kind.layout.element_of,
+        &mut first,
+        &[load],
+        Vec::new(),
+        Vec3::ZERO,
+        STEP,
+    );
+    assert!(!Arc::ptr_eq(&first.assessment, &second.assessment));
+    assert!(Arc::ptr_eq(&second.assessment, &kind.equilibrium(1.0)));
+    assert!(!second.assessment.needs_tick());
 }

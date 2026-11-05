@@ -72,6 +72,8 @@ pub(crate) struct ConstructionKind {
     /// Checked at admission, keyed by the authored uniform scale's bits. Gameplay never
     /// converts an attachment again; instances at the same scale share immutable construction.
     structures: BTreeMap<u32, Arc<fracture::Structure>>,
+    /// Initial gravity solved once from admitted data, shared until an instance changes.
+    equilibria: BTreeMap<u32, Arc<fracture::bondsolve::Assessment>>,
 }
 
 impl ConstructionKind {
@@ -117,6 +119,7 @@ impl ConstructionKind {
             .collect::<Result<Vec<_>, _>>()?;
         let layout = breakage::Layout::of(&asset, &law_materials, attachments)?;
         let structure = Arc::new(layout.checked_structure(&asset, 1.0)?);
+        let equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest(&structure)?);
         Ok(Self {
             dressing: view::Dressing::bare(&layout),
             asset,
@@ -125,6 +128,7 @@ impl ConstructionKind {
             bounds,
             layout,
             structures: BTreeMap::from([(1.0_f32.to_bits(), structure)]),
+            equilibria: BTreeMap::from([(1.0_f32.to_bits(), equilibrium)]),
         })
     }
 
@@ -132,7 +136,10 @@ impl ConstructionKind {
         if let std::collections::btree_map::Entry::Vacant(entry) =
             self.structures.entry(scale.to_bits())
         {
-            entry.insert(Arc::new(self.layout.checked_structure(&self.asset, scale)?));
+            let structure = Arc::new(self.layout.checked_structure(&self.asset, scale)?);
+            let equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest(&structure)?);
+            entry.insert(structure);
+            self.equilibria.insert(scale.to_bits(), equilibrium);
         }
         Ok(())
     }
@@ -143,6 +150,13 @@ impl ConstructionKind {
             .expect(
                 "map admission retains the checked structure for every placed construction scale",
             )
+            .clone()
+    }
+
+    fn equilibrium(&self, scale: f32) -> Arc<fracture::bondsolve::Assessment> {
+        self.equilibria
+            .get(&scale.to_bits())
+            .expect("map admission prepares initial gravity for every admitted construction scale")
             .clone()
     }
 

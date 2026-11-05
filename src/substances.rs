@@ -172,6 +172,8 @@ pub struct BulkFacts {
     /// Cohesive mode-II fracture energy `G_II`, J/m², excluding continuing friction work.
     /// Required with [`Self::shear_cohesion`]; the punch-ring law reads it.
     pub shear_fracture_energy: Option<f64>,
+    /// Shear modulus G, Pa, for structural seam compliance; required with a breakable seam.
+    pub shear_modulus: Option<f32>,
     /// Sourced inputs for the blast crush and scab laws, required on every breakable row. The
     /// crush law reads them (`construction::fracture::Compaction`).
     pub blast: Option<BlastFacts>,
@@ -416,6 +418,7 @@ struct BulkFile {
     fracture_energy: Option<Sourced<f64>>,
     shear_cohesion: Option<Sourced<f64>>,
     shear_fracture_energy: Option<Sourced<f64>>,
+    shear_modulus: Option<Sourced<f64>>,
     blast: Option<BlastFile>,
 }
 
@@ -447,6 +450,7 @@ impl BulkFile {
             fracture_energy: self.fracture_energy.map(|value| value.0),
             shear_cohesion: self.shear_cohesion.map(|value| value.0),
             shear_fracture_energy: self.shear_fracture_energy.map(|value| value.0),
+            shear_modulus: self.shear_modulus.map(|value| value.0 as f32),
             blast,
         })
     }
@@ -770,6 +774,7 @@ fn checked_hard(name: &str, substance: HardSubstance) -> Result<HardSubstance, S
             ("fracture_energy", bulk.fracture_energy),
             ("shear_cohesion", bulk.shear_cohesion),
             ("shear_fracture_energy", bulk.shear_fracture_energy),
+            ("shear_modulus", bulk.shear_modulus.map(f64::from)),
         ];
         let seam = &stated[1..];
         if seam.iter().any(|(_, value)| value.is_some()) {
@@ -778,7 +783,7 @@ fn checked_hard(name: &str, substance: HardSubstance) -> Result<HardSubstance, S
                     return Err(format!(
                         "substance {name:?}: bulk.{field} is missing from a breakable seam: \
                          author tensile, fracture_energy, shear_cohesion (c, Pa) and \
-                         shear_fracture_energy (G_II, J/m²) together, each with its material \
+                         shear_fracture_energy (G_II, J/m²) and shear_modulus (G, Pa) together, each with its material \
                          property source; bulk-only matter states none of these"
                     ));
                 }
@@ -1193,7 +1198,8 @@ mod tests {
                 visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))), debris_half_angle_deg: (26.2, Fixture("fixture")),
                 bulk: Some((density: (1800.0, Fixture("fixture")),
                     tensile: Some((1.0e6, Fixture("fixture"))),
-                    fracture_energy: Some((10.0, Fixture("fixture"))), {shear},
+                    fracture_energy: Some((10.0, Fixture("fixture"))),
+                    shear_modulus: Some((3e9, Fixture("fixture"))), {shear},
                     blast: Some((compressive_strength: Some((20e6, Fixture("fixture"))),
                         compressive_dif: Some((2.0, Fixture("fixture"))),
                         solid_density: Some((2500.0, Fixture("fixture"))),
@@ -1272,6 +1278,7 @@ mod tests {
                 bulk: Some((density: (1800.0, Fixture("fixture")),
                     tensile: Some((1e6, Fixture("fixture"))),
                     fracture_energy: Some((10.0, Fixture("fixture"))),
+                    shear_modulus: Some((3e9, Fixture("fixture"))),
                     shear_cohesion: Some((200000.0, Fixture("fixture"))),
                     shear_fracture_energy: Some((30.0, Fixture("fixture"))), {blast}))),
         "#
