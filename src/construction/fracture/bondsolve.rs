@@ -460,38 +460,26 @@ impl JointStrength {
         [self.tensile, self.cohesion + self.friction * compression]
     }
 
-    /// Maximum added force along a unit direction, N. `normal` points toward the moving side;
-    /// `preload` is its existing normal force (positive in tension), with no tangential preload.
-    /// DERIVED: solve `p + F d_n <= A T` and `F |d_t| <= A C + μ max(-p - F d_n, 0)`.
-    pub(crate) fn capacity(&self, area: f64, normal: DVec3, direction: DVec3, preload: f64) -> f64 {
-        let [tensile, cohesion] = self.limits(0.0).map(|stress| stress * area);
-        if preload > tensile {
-            return 0.0;
-        }
+    /// Resistance to a unit rigid translation, N: normal and sliding traction work add
+    /// (Yastrebov 2013, Eq. 4.53 and Eq. 4.56; design "Bodies in contact"). `bearing`
+    /// is the available compressive force; `preload` is positive in tension and stays fixed.
+    pub(crate) fn translation_resistance(
+        &self,
+        area: f64,
+        normal: DVec3,
+        direction: DVec3,
+        preload: f64,
+        bearing: f64,
+    ) -> f64 {
         let opening = direction.dot(normal);
         let sliding = direction.cross(normal).length();
-        let mut capacity = if opening > 0.0 {
-            (tensile - preload) / opening
+        let [tensile, shear] = self.limits((-preload / area).max(0.0));
+        let normal_force = if opening > 0.0 {
+            (tensile * area - preload).max(0.0)
         } else {
-            f64::INFINITY
+            bearing
         };
-        // A shear-limit crossing belongs to either the open or the compressed branch.
-        if sliding > 0.0 {
-            let force = cohesion / sliding;
-            let normal = preload + force * opening;
-            if normal > 0.0 || (normal == 0.0 && opening >= 0.0) {
-                capacity = capacity.min(force);
-            }
-        }
-        let slope = sliding + self.friction * opening;
-        if slope > 0.0 {
-            let force = (cohesion - self.friction * preload) / slope;
-            let normal = preload + force * opening;
-            if force >= 0.0 && (normal < 0.0 || (normal == 0.0 && sliding > 0.0)) {
-                capacity = capacity.min(force);
-            }
-        }
-        capacity
+        normal_force * opening.abs() + shear * area * sliding
     }
 }
 
@@ -503,41 +491,4 @@ pub(crate) fn pair_friction(structure: &super::Structure, joint: &super::Joint) 
         super::Side::Ground => own,
     };
     f64::from(crate::substances::pair_friction(own, other))
-}
-
-#[cfg(test)]
-mod directional_strength_tests {
-    use super::*;
-
-    /// The game's environment destruction: an unloaded face can enter bearing, and a bond
-    /// lifting out of friction still has its tensile strength. The sweep relies on the
-    /// branch immediately beyond a limit, rather than equality at a branch's endpoint.
-    #[test]
-    fn unloaded_bearing_and_exhausted_friction_follow_the_traction_cone() {
-        // Fixture: a rest at friction 0.5, and a bond with 16 N tension and no cohesion.
-        let rest = JointStrength {
-            tensile: 0.0,
-            cohesion: 0.0,
-            friction: 0.5,
-        };
-        assert!(
-            rest.capacity(
-                1.0,
-                DVec3::X,
-                (-DVec3::X + DVec3::Y * 0.25).normalize(),
-                0.0
-            )
-            .is_infinite()
-        );
-        assert_eq!(
-            rest.capacity(1.0, DVec3::X, (-DVec3::X + DVec3::Y).normalize(), 0.0),
-            0.0
-        );
-        let bond = JointStrength {
-            tensile: 16.0,
-            ..rest
-        };
-        assert_eq!(bond.capacity(1.0, DVec3::X, DVec3::X, -8.0), 24.0);
-        assert!(rest.capacity(1.0, DVec3::X, (DVec3::X + DVec3::Y).normalize(), -8.0) > 0.0);
-    }
 }

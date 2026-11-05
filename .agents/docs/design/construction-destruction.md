@@ -360,25 +360,20 @@ to that same patch. Buried matter remains soil-held.
 The patch is the forced source of a directed graph over standing law chunks. Ground endpoints
 and chunks the sweep does not cover (including buried matter) are fixed sinks. Live, unseparated
 joints supply directed capacities for rigid translation along the contact direction `d`. With
-`n_out` pointing from the moving side to its neighbour, a compressed face has
-`c = n_out dot d > 0` and tangential motion `t = d - c n_out`. Its capacity is
-`C = B c + S |t|`, where `B = min(sigma_c,a, sigma_c,b) A` is weaker-side bulk crushing
-and `S` is the shared `bondsolve::JointStrength` capacity along `t / |t|` under existing
-preload only. A purely normal translation has no sliding term. DERIVED: for unit rigid
-translation, the resisting force equals internal work, the sum of normal and tangential
-traction work (Yastrebov, *Numerical Methods in Contact Mechanics*, 2013,
+`n` pointing toward the moving side, let `o = n dot d` and `s = |d cross n|`.
+Both opening and compression measure the force resisting that translation:
+`C = R_n |o| + R_s s`. For compression, `R_n = B`, with weaker-side bulk capacity
+`B = min(sigma_c,a, sigma_c,b) A`; a ground endpoint uses its chunk's strength.
+For opening, `R_n = max(A T - p, 0)`. The shared `bondsolve::JointStrength` law supplies
+`R_s = A cohesion + mu max(-p, 0)` and tensile strength `T`; cracked seams and rests have
+zero cohesion and tension. `p` is existing normal force, positive in tension.
+DERIVED: for unit rigid translation, resistance equals the sum of independently limited
+normal and tangential traction work (Yastrebov, *Numerical Methods in Contact Mechanics*, 2013,
 [Eq. 4.53 and normal/tangential split Eq. 4.56](https://www.yastrebov.fr/LECTURES/Yastrebov_NMCM_Wiley_ISTE.pdf)).
-This model uses independently limited crushing and sliding tractions at fixed preload;
-`C -> S` as `c -> 0+`, continuously meeting the tangential joint law.
-A ground endpoint uses its chunk's strength. `sigma_c` is the data's quasi-static
-`bulk.blast.compressive_strength`, carried by `fracture::Material::compressive_strength`, not
-cavity work or the dynamic compaction plateau.
-
-Otherwise the edge reads the part solver's `bondsolve::JointStrength` directional law: intact
-seams carry tension and cohesive shear; cracked seams and rests carry neither. Coulomb friction
-requires existing compression. DERIVED: the limit is the first crossing of
-`p + F d_n <= A T` or `F |d_t| <= A C + mu max(-p - F d_n, 0)`, with the normal toward the
-moving side. The standing construction's gravity field supplies every joint's preload before optimization:
+Both branches tend continuously to `R_s` at grazing. A purely normal translation has no sliding
+term. `sigma_c` is the data's quasi-static `bulk.blast.compressive_strength`, carried by
+`fracture::Material::compressive_strength`, not cavity work or the dynamic compaction plateau.
+The standing construction's gravity field supplies every joint's preload before optimization:
 part-law interface forces between parts, and `parts::Kernel::hold` under gravity plus those
 interface forces inside each part. Each owner caches this field until its standing chunks,
 cracks or separated joints change. Preloads stay fixed during optimization, including on
@@ -390,7 +385,7 @@ The plug can therefore include chunks beyond the occupied patch: compression tra
 through a back layer or around a corner until perimeter joints or bulk crushing give way.
 Internal joints of `S*` carry no relative motion and contribute no cut capacity. A resting floor
 on anchored joists holds below its bulk crushing capacity; sliding or lifting still reads the
-shared directional joint law.
+shared translation-resistance law.
 
 The demand is the peak force of the hull's impact on the patch plus its drive:
 `F = P(m_eff, v_n) + F_drive,n`, with `P` the Hertz peak force (Johnson 1985, §11.4) that

@@ -352,34 +352,13 @@ impl Geometry {
             };
             let normal = joint_normal(structure, joint);
             let directional = |normal: DVec3| {
-                let compression = -normal.dot(direction.as_dvec3());
-                if compression > 0.0 {
-                    // Cross products keep the reconstructed tangent perpendicular even when
-                    // nearly normal motion leaves only roundoff in the tangential component.
-                    let tangent = normal.cross(direction.as_dvec3());
-                    let sliding = tangent.length();
-                    let shear = if sliding > 0.0 {
-                        JointStrength::of(structure, joint, state.cracked[j]).capacity(
-                            f64::from(joint.area),
-                            normal,
-                            tangent.cross(normal) / sliding,
-                            preload[j],
-                        ) * sliding
-                    } else {
-                        0.0
-                    };
-                    // DERIVED: traction dot relative motion (Yastrebov 2013, Eq. 4.53;
-                    // design "Bodies in contact"). Crushing and sliding both do work;
-                    // tangential motion creates no additional friction preload.
-                    strength * f64::from(joint.area) * compression + shear
-                } else {
-                    JointStrength::of(structure, joint, state.cracked[j]).capacity(
-                        f64::from(joint.area),
-                        normal,
-                        direction.as_dvec3(),
-                        preload[j],
-                    )
-                }
+                JointStrength::of(structure, joint, state.cracked[j]).translation_resistance(
+                    f64::from(joint.area),
+                    normal,
+                    direction.as_dvec3(),
+                    preload[j],
+                    strength * f64::from(joint.area),
+                )
             };
             let forward = directional(normal);
             let backward = directional(-normal);
@@ -1203,6 +1182,43 @@ mod tests {
             if broken {
                 assert_eq!(patch.chunks, [0, 1]);
             }
+        }
+    }
+
+    /// The game's environment destruction: a cut weighs traction work along its prescribed
+    /// translation. A weak shear limit cannot erase the work of opening a strong bond.
+    #[test]
+    fn diagonal_translation_adds_normal_and_shear_resistance_on_both_branches() {
+        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, Vec3::X], &[1], &[(0, 1)]);
+        // Fixture: unit-area face, 1000 N normal limits and 1 N shear; 0.001 kg moving mass
+        // keeps the gravity shear below the fixture's cohesion, with zero normal preload.
+        structure.chunks[0].mass = 0.001;
+        structure.chunks[0].material.density = 0.001;
+        for chunk in &mut structure.chunks {
+            chunk.material.compressive_strength = 1000.0;
+        }
+        let Bond::Bonded(seam) = &mut structure.joints[0].bond else {
+            unreachable!()
+        };
+        seam.tensile = 1000.0;
+        seam.shear.cohesion = 1.0;
+        let state = State::new(&structure);
+        // DERIVED: traction dot unit translation = (1000 + 1) / sqrt(2) N.
+        let expected = 1001.0 / 2.0_f32.sqrt();
+        for normal in [-1.0, 1.0] {
+            let direction = (Vec3::X * normal + Vec3::Z).normalize();
+            let (_, capacity) = geometry.plug(
+                &structure,
+                &state,
+                &preload(&structure, &state),
+                &[0],
+                direction,
+                &mut Work::default(),
+            );
+            assert!(
+                (capacity - expected).abs() < 0.001,
+                "direction={direction}, capacity={capacity}, expected={expected}"
+            );
         }
     }
 
