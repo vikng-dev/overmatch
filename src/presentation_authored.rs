@@ -177,6 +177,8 @@ struct Style {
     overlay_text_srgb: Sourced<[f32; 3]>,
     text_srgb: Sourced<[f32; 3]>,
     text_dim_srgb: Sourced<[f32; 3]>,
+    net_warn_srgb: Sourced<[f32; 3]>,
+    net_alarm_srgb: Sourced<[f32; 3]>,
     panel_srgba: Sourced<[f32; 4]>,
     modal_srgba: Sourced<[f32; 4]>,
     modal_card_srgb: Sourced<[f32; 3]>,
@@ -204,6 +206,12 @@ pub(crate) fn style_constants(text: &str) -> Result<String, String> {
         ),
         ("text_srgb", "TEXT", data.text_srgb.0.as_slice()),
         ("text_dim_srgb", "TEXT_DIM", data.text_dim_srgb.0.as_slice()),
+        ("net_warn_srgb", "NET_WARN", data.net_warn_srgb.0.as_slice()),
+        (
+            "net_alarm_srgb",
+            "NET_ALARM",
+            data.net_alarm_srgb.0.as_slice(),
+        ),
         ("panel_srgba", "PANEL_BG", data.panel_srgba.0.as_slice()),
         ("modal_srgba", "MODAL_BG", data.modal_srgba.0.as_slice()),
         (

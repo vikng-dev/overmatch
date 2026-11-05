@@ -1,8 +1,8 @@
-//! Bottom-right net-client debug panel: ping (RTT), jitter buffer, FPS, frame time, and the
+//! Bottom-right net-client debug panel: ping (RTT), jitter buffer, server tick, FPS, frame time, and the
 //! client's version (`net::CLIENT_VERSION`). Net-only —
 //! ping is meaningless in single-player, so this lives in the net module and is mounted solely by
-//! `NetClientPlugin` (never SP, never the headless server). WIP instrumentation: hardcoded styling
-//! mirrored from `crew_ui`'s top-left status card.
+//! `NetClientPlugin` (never SP, never the headless server). The layout mirrors `crew_ui`'s
+//! top-left status card; colours come from the required UI styling data.
 //!
 //! The card belongs to the match screen (`flow::Flow::InMatch`: spawned on entering it, gone on
 //! leaving), shows only over a connected link, and only while the player's `DEBUG PANEL` setting
@@ -22,33 +22,87 @@
 //! padding — the numbers stay right-aligned and the whole card's left edge never moves as the digit
 //! count changes (`42` -> `138`). The bundled Barlow Condensed font is proportional, so
 //! right-pinning the value column is what keeps the digits from shimmering, not space padding. The
-//! readout is also refreshed at ~1 Hz off a *rolling average* (not the raw per-frame value) so the
-//! numbers are legible instead of churning every frame — the usual game-overlay treatment.
+//! readout refreshes at ~1 Hz. FPS and frame time use rolling averages; server tick uses the
+//! reciprocal of the longest gap between advancing packet ticks in the last refresh interval,
+//! including the gap still in progress. Catch-up cannot erase a stall. This is client-observed
+//! delivery cadence: network delays and client frame stalls also lower it, and packets drained
+//! together share a frame timestamp. It does not measure the server's CPU time.
 
 use core::time::Duration;
+use std::collections::VecDeque;
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
-use lightyear::core::tick::TickDuration;
+use lightyear::core::tick::{Tick, TickDuration};
 use lightyear::prelude::*;
+use lightyear_transport::plugin::PacketReceived;
 
 use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::settings::{DebugPanel, Settings};
-use crate::ui_font::{PANEL_BG, TEXT, TEXT_DIM, UiFonts};
+use crate::ui_font::{NET_ALARM, NET_WARN, PANEL_BG, TEXT, TEXT_DIM, UiFonts};
 
 use super::sync_margin::ArrivalDelay;
 
-/// How often the readout text is rebuilt. Slow enough that the digits are readable, fast enough to
-/// still track the sim — the standard per-second refresh of a game perf overlay.
-const REFRESH_SECS: f32 = 1.0;
+/// Resolution: per-second text refresh keeps digits legible. Tick gaps persist for this interval
+/// so the next refresh can still show a stall after catch-up.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Jitter value at/above one tick of buffered excess. The HUD family's amber (`hud.rs`'s
-/// tank-state card draws the same literal); local per this module's hardcoded-styling charter.
-const JITTER_WARN: Color = Color::srgb(1.0, 0.8, 0.3);
+/// First packets carrying strictly newer ticks define gaps; duplicates and reordered packets do
+/// not end a stall. Retention is by the gap's end, so catch-up keeps the whole stalled interval.
+#[derive(Resource, Default)]
+struct ServerTickGaps {
+    latest: Option<(Tick, Duration)>,
+    gaps: VecDeque<(Duration, Duration)>,
+}
 
-/// Jitter value above two authority intervals. The HUD family's red, same provenance as
-/// [`JITTER_WARN`].
-const JITTER_ALARM: Color = Color::srgb(1.0, 0.3, 0.2);
+impl ServerTickGaps {
+    fn record(&mut self, tick: Tick, now: Duration) {
+        if let Some((latest, at)) = self.latest {
+            if tick <= latest {
+                return;
+            }
+            self.gaps.push_back((now, now - at));
+        }
+        self.latest = Some((tick, now));
+        while self
+            .gaps
+            .front()
+            .is_some_and(|(end, _)| now - *end > REFRESH_INTERVAL)
+        {
+            self.gaps.pop_front();
+        }
+    }
+
+    fn longest_gap(&self, now: Duration) -> Option<Duration> {
+        // No server tick has arrived on this connection yet.
+        let (_, at) = self.latest?;
+        Some(
+            self.gaps
+                .iter()
+                .filter(|(end, _)| now - *end <= REFRESH_INTERVAL)
+                .map(|(_, gap)| *gap)
+                .fold(now - at, Duration::max),
+        )
+    }
+}
+
+fn reset_tick_gaps(_connected: On<Add, Connected>, mut gaps: ResMut<ServerTickGaps>) {
+    *gaps = default();
+}
+
+/// lightyear_transport 0.30.1's `TransportPlugin::buffer_receive` emits the packet header's tick
+/// through `PacketReceived` in PreUpdate. Sample receipt, never a locally extrapolated timeline.
+fn record_tick_arrival(
+    packet: On<PacketReceived>,
+    time: Res<Time<Real>>,
+    connected: Query<(), With<Connected>>,
+    mut gaps: ResMut<ServerTickGaps>,
+) {
+    // Packets before connection or after disconnect do not belong to the displayed session.
+    if connected.contains(packet.entity) {
+        gaps.record(packet.remote_tick, time.elapsed());
+    }
+}
 
 /// The card's root node.
 #[derive(Component)]
@@ -65,6 +119,7 @@ fn card_shown(setting: DebugPanel, connected: bool) -> bool {
 enum Metric {
     Ping,
     Jitter,
+    ServerTick,
     Fps,
     Frame,
 }
@@ -74,7 +129,10 @@ pub fn plugin(app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
     }
     crate::flow::require(app, "net::debug_hud");
-    app.add_systems(OnEnter(Flow::InMatch), spawn_debug_hud)
+    app.init_resource::<ServerTickGaps>()
+        .add_observer(reset_tick_gaps)
+        .add_observer(record_tick_arrival)
+        .add_systems(OnEnter(Flow::InMatch), spawn_debug_hud)
         .add_systems(
             Update,
             (show_debug_card, update_debug_hud).in_set(InMatchSystems),
@@ -130,6 +188,7 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
             for (metric, label) in [
                 (Metric::Ping, "Ping"),
                 (Metric::Jitter, "Jitter"),
+                (Metric::ServerTick, "Server tick"),
                 (Metric::Fps, "FPS"),
                 (Metric::Frame, "Frame"),
             ] {
@@ -194,27 +253,45 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
 /// one additional authority interval warns; more than two alarms.
 fn jitter_readout(spread: Duration, tick: Duration) -> (String, Color) {
     let color = if spread > tick * 2 {
-        JITTER_ALARM
+        NET_ALARM
     } else if spread >= tick {
-        JITTER_WARN
+        NET_WARN
     } else {
         TEXT
     };
     (format!("+{:.0} ms", spread.as_secs_f64() * 1000.0), color)
 }
 
+/// DERIVED bands match jitter's excess-budget bands: a gap of two ticks warns (one extra tick),
+/// above three alarms (more than two extra). Cap at the nominal rate: coalesced arrivals cannot
+/// establish a faster server. Never divide a gap by skipped ticks: catch-up would conceal stalls.
+fn server_tick_readout(gap: Duration, tick: Duration) -> (String, Color) {
+    let color = if gap > tick * 3 {
+        NET_ALARM
+    } else if gap >= tick * 2 {
+        NET_WARN
+    } else {
+        TEXT
+    };
+    (
+        format!("{:.1} Hz", gap.max(tick).as_secs_f64().recip()),
+        color,
+    )
+}
+
 #[expect(
     clippy::too_many_arguments,
-    reason = "a debug readout of time, diagnostics, tick, arrival delay, links and the setting, \
+    reason = "a debug readout of time, diagnostics, tick, arrival delay, tick gaps, links and the setting, \
               with two locals"
 )]
 fn update_debug_hud(
-    time: Res<Time>,
-    mut since_refresh: Local<f32>,
+    time: Res<Time<Real>>,
+    mut since_refresh: Local<Duration>,
     settings: Res<Settings>,
     diagnostics: Res<DiagnosticsStore>,
     tick: Res<TickDuration>,
     estimator: Res<ArrivalDelay>,
+    tick_gaps: Res<ServerTickGaps>,
     // The client connection entity (`client::run`) carries `Link` + `Connected`; one on a client.
     links: Query<&Link, With<Connected>>,
     mut values: Query<(&mut Text, &mut TextColor, &Metric)>,
@@ -222,10 +299,9 @@ fn update_debug_hud(
     // valid, then live for the link even if the digest later regresses.
     mut armed: Local<Option<u64>>,
 ) {
-    // Throttle to ~1 Hz so the numbers are legible instead of churning every frame (repo idiom:
-    // `Local<f32>` accumulator vs. a threshold, cf. `net::diagnostics`).
-    *since_refresh += time.delta_secs();
-    if *since_refresh < REFRESH_SECS {
+    // Wall time keeps a long client frame from being hidden by virtual-time clamping.
+    *since_refresh += time.delta();
+    if *since_refresh < REFRESH_INTERVAL {
         return;
     }
     // A hidden card is not written; its refresh stays due, so it shows current values. The arming
@@ -233,7 +309,7 @@ fn update_debug_hud(
     if !card_shown(settings.debug_panel, !links.is_empty()) {
         return;
     }
-    *since_refresh = 0.0;
+    *since_refresh = Duration::ZERO;
 
     // `Link::stats.rtt` is `Duration::ZERO` until the first pong (~100 ms after connect) — show a
     // placeholder rather than a fake `0 ms`. lightyear already exposes an EMA-smoothed RTT.
@@ -253,6 +329,9 @@ fn update_debug_hud(
     }
     let jitter = (*armed == Some(estimator.link()))
         .then(|| jitter_readout(estimator.stats.spread(), tick.0));
+    let server_tick = tick_gaps
+        .longest_gap(time.elapsed())
+        .map(|gap| server_tick_readout(gap, tick.0));
     // Rolling averages over the diagnostic history buffer (not the raw per-frame value), so a single
     // slow frame doesn't make the number jump. FRAME_TIME is already in milliseconds.
     let fps = diagnostics
@@ -268,6 +347,9 @@ fn update_debug_hud(
         let (value, tint) = match metric {
             Metric::Ping => (ping.clone(), TEXT),
             Metric::Jitter => jitter.clone().unwrap_or_else(|| ("--".to_string(), TEXT)),
+            Metric::ServerTick => server_tick
+                .clone()
+                .unwrap_or_else(|| ("--".to_string(), TEXT)),
             Metric::Fps => (format!("{fps:.0}"), TEXT),
             Metric::Frame => (format!("{frame_ms:.1} ms"), TEXT),
         };
@@ -278,34 +360,148 @@ fn update_debug_hud(
 
 #[cfg(test)]
 mod tests {
-    use core::time::Duration;
+    use super::*;
 
-    use crate::ui_font::TEXT;
+    /// Mount the shipped observers without running UI/layout. The shared network fixture supplies
+    /// the session step; assertions and arrivals read the installed `TickDuration` binding.
+    fn tick_app() -> (App, Entity, Duration) {
+        let mut app = App::new();
+        app.insert_resource(State::new(Flow::Boot))
+            .init_resource::<Time<Real>>()
+            .insert_resource(TickDuration(super::super::test_harness::TICK))
+            .add_plugins(plugin);
+        let link = app
+            .world_mut()
+            .spawn((RemoteId(PeerId::Server), Connected))
+            .id();
+        app.world_mut().flush();
+        let tick = app.world().resource::<TickDuration>().0;
+        (app, link, tick)
+    }
 
-    use super::{JITTER_ALARM, JITTER_WARN, jitter_readout};
+    fn arrive(app: &mut App, link: Entity, tick: u32, at: Duration) {
+        app.world_mut().resource_mut::<Time<Real>>().advance_to(at);
+        app.world_mut().trigger(PacketReceived {
+            entity: link,
+            remote_tick: Tick(tick),
+        });
+        app.world_mut().flush();
+    }
 
-    /// The game's fixed tick (64 Hz), spelled out rather than read from the runtime binding — the
-    /// sibling-test discipline (cf. `net::interp_delay`'s tests).
-    const TICK: Duration = Duration::from_nanos(1_000_000_000 / 64);
+    fn readout(app: &App) -> Option<(String, Color)> {
+        let world = app.world();
+        world
+            .resource::<ServerTickGaps>()
+            .longest_gap(world.resource::<Time<Real>>().elapsed())
+            .map(|gap| server_tick_readout(gap, world.resource::<TickDuration>().0))
+    }
 
-    /// The debug panel reports the exact spread charged by the buffer. Fixture spreads straddle
-    /// the display's authority-interval bands; a hidden extrapolation discount fails the label.
+    /// Players see the nominal rate on evenly spaced tick advances. The display bands are in
+    /// excess tick budgets, so changing the session rate preserves their meaning.
+    #[test]
+    fn steady_ticks_are_healthy_and_bands_follow_the_tick_budget() {
+        let (mut app, link, tick) = tick_app();
+        assert_eq!(readout(&app), None, "no packet yet is a placeholder");
+        // Fixture: two seconds of steady arrivals, crossing the retention boundary.
+        let mut at = Duration::ZERO;
+        let mut remote = 0;
+        while at <= REFRESH_INTERVAL * 2 {
+            arrive(&mut app, link, remote, at);
+            remote += 1;
+            at += tick;
+        }
+        assert_eq!(
+            readout(&app),
+            Some((format!("{:.1} Hz", tick.as_secs_f64().recip()), TEXT))
+        );
+        assert_eq!(server_tick_readout(tick * 2, tick).1, NET_WARN);
+        assert_eq!(server_tick_readout(tick * 3, tick).1, NET_WARN);
+        assert_eq!(
+            server_tick_readout(tick * 3 + Duration::from_nanos(1), tick).1,
+            NET_ALARM
+        );
+    }
+
+    /// Averages hide a freeze followed by catch-up. Players must see the stall while it is in
+    /// progress and for the next refresh interval after receipt, then see recovery.
+    #[test]
+    fn a_stall_then_a_catch_up_burst_stays_visible() {
+        let (mut app, link, tick) = tick_app();
+        arrive(&mut app, link, 0, Duration::ZERO);
+        arrive(&mut app, link, 1, tick);
+        // Fixture: a 300 ms server freeze, then a burst with some intermediate ticks coalesced.
+        let stall = Duration::from_millis(300);
+        let resumed = tick + stall;
+        app.world_mut()
+            .resource_mut::<Time<Real>>()
+            .advance_to(resumed);
+        let stalled = Some((format!("{:.1} Hz", stall.as_secs_f64().recip()), NET_ALARM));
+        assert_eq!(readout(&app), stalled, "silence is already a slowdown");
+        let missed = (stall.as_nanos() / tick.as_nanos()) as u32;
+        for remote in missed..=missed + 2 {
+            arrive(&mut app, link, remote, resumed);
+        }
+        assert_eq!(readout(&app), stalled, "catch-up must not erase the gap");
+        let mut elapsed = tick;
+        let mut remote = missed + 3;
+        while elapsed <= REFRESH_INTERVAL {
+            arrive(&mut app, link, remote, resumed + elapsed);
+            assert_eq!(readout(&app), stalled, "retain for a panel refresh");
+            elapsed += tick;
+            remote += 1;
+        }
+        arrive(&mut app, link, remote, resumed + elapsed);
+        assert_eq!(readout(&app).unwrap().1, TEXT, "expired gaps recover");
+    }
+
+    /// Only new server ticks end a player's observed gap. A reconnect may restart its tick
+    /// numbers; neither the previous stall nor its newest tick may cross that boundary.
+    #[test]
+    fn duplicates_do_not_end_silence_and_a_reconnect_resets_history() {
+        let (mut app, link, tick) = tick_app();
+        arrive(&mut app, link, 10, Duration::ZERO);
+        arrive(&mut app, link, 11, tick);
+        let at = tick * 5;
+        for remote in [11, 10] {
+            arrive(&mut app, link, remote, at);
+        }
+        assert_eq!(
+            app.world().resource::<ServerTickGaps>().longest_gap(at),
+            Some(tick * 4)
+        );
+        app.world_mut().entity_mut(link).remove::<Connected>();
+        arrive(&mut app, link, 12, at);
+        assert_eq!(
+            app.world().resource::<ServerTickGaps>().latest,
+            Some((Tick(11), tick)),
+            "disconnected packets cannot advance the displayed session"
+        );
+        app.world_mut().entity_mut(link).insert(Connected);
+        app.world_mut().flush();
+        assert_eq!(readout(&app), None, "a new session has no samples yet");
+        arrive(&mut app, link, 0, at);
+        arrive(&mut app, link, 1, at + tick);
+        assert_eq!(readout(&app).unwrap().1, TEXT);
+    }
+
+    /// The panel reports the full buffered spread in milliseconds; fixture conversions pin the
+    /// unit while colour bands follow the session's authority interval.
     #[test]
     fn jitter_reports_the_full_buffered_spread() {
-        assert_eq!(jitter_readout(Duration::ZERO, TICK), ("+0 ms".into(), TEXT));
+        let (_, _, tick) = tick_app();
+        assert_eq!(jitter_readout(Duration::ZERO, tick), ("+0 ms".into(), TEXT));
+        for (millis, expected) in [(10, "+10 ms"), (68, "+68 ms")] {
+            assert_eq!(
+                jitter_readout(Duration::from_millis(millis), tick).0,
+                expected
+            );
+        }
+        assert_eq!(jitter_readout(tick / 2, tick).1, TEXT);
+        assert_eq!(jitter_readout(tick, tick).1, NET_WARN);
+        assert_eq!(jitter_readout(tick * 2, tick).1, NET_WARN);
         assert_eq!(
-            jitter_readout(Duration::from_millis(10), TICK),
-            ("+10 ms".into(), TEXT)
-        );
-        assert_eq!(jitter_readout(TICK, TICK).1, JITTER_WARN);
-        assert_eq!(jitter_readout(TICK * 2, TICK).1, JITTER_WARN);
-        assert_eq!(
-            jitter_readout(TICK * 2 + Duration::from_nanos(1), TICK).1,
-            JITTER_ALARM
-        );
-        assert_eq!(
-            jitter_readout(Duration::from_millis(68), TICK),
-            ("+68 ms".into(), JITTER_ALARM)
+            jitter_readout(tick * 2 + Duration::from_nanos(1), tick).1,
+            NET_ALARM
         );
     }
 }

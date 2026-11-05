@@ -817,25 +817,28 @@ mod tests {
     }
 
     /// The compact board lists one line per standing, whole lines only, under headers every page
-    /// keeps. The shipped-size fixtures pin the capacity: a large window lists the full Battle; the
-    /// small high-scale target pages, its last page ending on the last standing. There the board
-    /// takes the region that holds every column over a narrower one beside the vitals card that
-    /// would list more standings with their columns cut. Players rely on reading every listed row
-    /// with its column's label. FIXTURE DATA: thirty standings and the two viewport/scale
-    /// combinations below.
+    /// keeps. Each page fills the available height with whole standings, its last page ending on
+    /// the last standing. Players must read every listed row with its column's label even when a
+    /// fixed panel grows. FIXTURE DATA: thirty standings and the two viewport/scale combinations.
     #[test]
     fn compact_board_names_the_rows_that_fit_at_both_owner_fixtures() {
-        for (width, height, scale, expected_rows) in [(1280, 720, 2.0, 6), (1920, 1080, 1.0, 30)] {
+        for (width, height, scale) in [(1280, 720, 2.0), (1920, 1080, 1.0)] {
             let mut app = hud_layout_app(width, height, scale);
             let rows = listed(app.world_mut());
             eprintln!(
                 "MEASURED compact board {width}x{height} scale {scale}: {rows} standings fit"
             );
-            assert_eq!(
-                rows, expected_rows,
-                "MEASURED fixture capacity must remain readable"
-            );
+            assert!(rows > 0, "the page must leave room for a standing");
             let world = app.world_mut();
+            let (root, card) = board_entities(world);
+            let region = world.get::<ComputedNode>(root).unwrap();
+            let card = world.get::<ComputedNode>(card).unwrap();
+            let spare_height = (region.size().y - card.size().y) * region.inverse_scale_factor;
+            let total = world.query::<&Scoreboard>().single(world).unwrap().0.len();
+            assert!(
+                rows == total || spare_height < ROW_PX,
+                "a page must fill its region before paging: {spare_height} spare logical px"
+            );
             for (part, text, layout) in world
                 .query::<(&Part, &Text, &bevy::text::TextLayoutInfo)>()
                 .iter(world)
