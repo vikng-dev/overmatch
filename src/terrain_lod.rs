@@ -1374,7 +1374,7 @@ mod tests {
 
     /// An optic's narrow field magnifies error, so thresholds must move outward; unchanged facts
     /// must leave them there. Assert direction, not just a change, to catch stale startup-view
-    /// selection. A few hundred entities and human-rate triggers make adaptation cheap.
+    /// selection.
     #[test]
     fn the_adaptive_layer_rewrites_thresholds_when_the_view_changes() {
         // Fixture optics: the gunner field is strictly narrower than the commander's.
@@ -1419,16 +1419,14 @@ mod tests {
             .resolution
             .set_physical_resolution(2560, 1440);
         app.update();
-        let commander: Vec<f32> = entities
-            .iter()
-            .map(|&entity| {
-                app.world()
-                    .get::<VisibilityRange>(entity)
-                    .expect("the adaptive layer must write a range")
-                    .start_margin
-                    .start
-            })
-            .collect();
+        let start = |app: &App, entity| {
+            app.world()
+                .get::<VisibilityRange>(entity)
+                .expect("the adaptive layer must write a range")
+                .start_margin
+                .start
+        };
+        let commander: Vec<f32> = entities.iter().map(|&entity| start(&app, entity)).collect();
 
         // Narrowing the field magnifies the same terrain deviations.
         {
@@ -1442,16 +1440,7 @@ mod tests {
             projection.fov = optic_fov;
         }
         app.update();
-        let optic: Vec<f32> = entities
-            .iter()
-            .map(|&entity| {
-                app.world()
-                    .get::<VisibilityRange>(entity)
-                    .expect("the adaptive layer must write a range")
-                    .start_margin
-                    .start
-            })
-            .collect();
+        let optic: Vec<f32> = entities.iter().map(|&entity| start(&app, entity)).collect();
 
         assert_eq!(commander[0], 0.0, "the exact level always starts at zero");
         assert_eq!(optic[0], 0.0);
@@ -1463,17 +1452,10 @@ mod tests {
                 commander[level],
             );
         }
-        // And the rewrite is idempotent: no view change, no work.
+        // Unchanged view facts preserve the thresholds.
         app.update();
         for (level, &entity) in entities.iter().enumerate() {
-            assert_eq!(
-                app.world()
-                    .get::<VisibilityRange>(entity)
-                    .expect("range")
-                    .start_margin
-                    .start,
-                optic[level],
-            );
+            assert_eq!(start(&app, entity), optic[level]);
         }
     }
 
