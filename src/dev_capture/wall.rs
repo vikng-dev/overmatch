@@ -271,7 +271,7 @@ fn the_wall((root, breakage): (&Transform, &Breakage)) -> Option<(Dir3, Vec3, Ve
         .map(|c| Vec3::from_array(kind.asset.chunks[layout.chunks[c] as usize].centroid))
         .min_by(|a, b| a.distance(centre).total_cmp(&b.distance(centre)))?;
     let foot = Vec3::new(centre.x, block.min.y.max(0.0), centre.z);
-    let world = |p: Vec3| root.translation + root.rotation * (p * breakage.scale);
+    let world = |p: Vec3| root.translation + root.rotation * p;
     let middle = (lo + hi) / 2.0;
     let inside = Vec3::new(middle.x, aim.y, middle.z) - outward * staging().inside_inset_m.0;
     Some((
@@ -386,13 +386,13 @@ fn aimed_at(
     house: (&Transform, &Breakage),
     targets: &Query<(&Transform, &Breakage)>,
 ) -> (Dir3, Vec3, Vec3) {
-    let (root, breakage) = match aimed.target {
+    let (root, _) = match aimed.target {
         None => house,
         Some(entity) => targets
             .get(entity)
             .expect("a bound capture construction stays spawned until its cue fires"),
     };
-    let at = root.translation + root.rotation * (aimed.at * breakage.scale);
+    let at = root.translation + root.rotation * aimed.at;
     (-(root.rotation * aimed.toward), at, at)
 }
 
@@ -427,7 +427,7 @@ fn place_preview(
         .iter()
         .map(|placed| placed.asset.as_str())
         .collect();
-    let mut library =
+    let library =
         crate::construction::ConstructionLibrary::load(&crate::assets::asset_root(), assets);
     let first = placed
         .iter()
@@ -435,26 +435,16 @@ fn place_preview(
         .max()
         .expect("the map places the house");
     for (ordinal, placed) in (first..).zip(&preview.place) {
-        library
-            .admit_placement(&placed.asset, [1.0; 3])
-            .unwrap_or_else(|error| {
-                panic!(
-                    "{}: wall.preview {}: {error}",
-                    super::plan::VARIABLE,
-                    placed.id
-                )
-            });
         let kind = library
             .get(&placed.asset)
             .expect("the preview library loaded every preview asset");
         let (x, z) = placed.offset;
         let mut at = house.translation + house.rotation * Vec3::new(x, 0.0, z);
         at.y = grid.height_at(at.x, at.z);
-        let pose = Transform {
-            translation: at,
-            rotation: house.rotation * Quat::from_rotation_y(placed.yaw_deg.to_radians()),
-            scale: Vec3::ONE,
-        };
+        let pose = Isometry3d::new(
+            at,
+            house.rotation * Quat::from_rotation_y(placed.yaw_deg.to_radians()),
+        );
         let identity = MapInstance {
             id: placed.id.clone(),
             ordinal,

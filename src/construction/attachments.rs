@@ -85,46 +85,6 @@ impl RootPlate {
     }
 }
 
-/// A foundation retains its whole footprint so instance admission converts its hold at the authored scale.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum GroundAttachment {
-    Joint(Bond),
-    RootPlate {
-        plate: RootPlate,
-        area: f32,
-        mass: f32,
-        centroid: Vec3,
-    },
-}
-
-impl GroundAttachment {
-    pub(crate) fn bond(self, scale: f32) -> Result<Bond, String> {
-        match self {
-            Self::Joint(bond) => Ok(bond),
-            Self::RootPlate {
-                plate,
-                area,
-                mass,
-                centroid,
-            } => {
-                let area = area * scale * scale;
-                let centroid = centroid * scale;
-                if !centroid.is_finite() {
-                    return Err(
-                        "root-plate footprint centroid must be finite in simulation precision"
-                            .into(),
-                    );
-                }
-                Ok(Bond::AreaShare {
-                    seam: plate.seam(area, mass * scale * scale * scale)?,
-                    footprint_area: area,
-                    footprint_centroid: centroid,
-                })
-            }
-        }
-    }
-}
-
 /// What one kind fixes: a joint between two parts, or a trunk to the ground.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Kind {
@@ -272,11 +232,8 @@ impl Attachments {
 
     /// The game's environment destruction model resolves each whole footprint once. Each
     /// base cell carries an area share of that same equivalent disk, never its own root circle.
-    /// Returns each anchor's source and checked unit-scale bond, in asset order.
-    pub(crate) fn anchors(
-        &self,
-        asset: &ConstructionAsset,
-    ) -> Result<Vec<(GroundAttachment, Bond)>, String> {
+    /// Each anchor's checked bond at authored size, in asset order.
+    pub(crate) fn anchors(&self, asset: &ConstructionAsset) -> Result<Vec<Bond>, String> {
         let mut footprints = BTreeMap::<u16, (f32, f32, Vec3)>::new();
         let component = |chunk: u32| {
             asset.elements[usize::from(asset.chunks[chunk as usize].element)].component
@@ -302,17 +259,25 @@ impl Attachments {
             let name = &asset.attachments[usize::from(anchor.attachment)];
             self.holds_anchor(name).map_err(|err| format!("anchor on chunk {}: {err}", anchor.chunk))?;
             let (area, mass, weighted) = footprints[&component];
-            let hold = match self.kind(name)? {
-                Kind::Joint(bond) => GroundAttachment::Joint(bond),
-                Kind::RootPlate(plate) => GroundAttachment::RootPlate {
-                    plate, area, mass, centroid: weighted / area,
+            let bond = match self.kind(name)? {
+                Kind::Joint(bond) => Ok(bond),
+                Kind::RootPlate(plate) => {
+                    let centroid = weighted / area;
+                    if !centroid.is_finite() {
+                        Err("root-plate footprint centroid must be finite in simulation precision".into())
+                    } else {
+                        plate.seam(area, mass).map(|seam| Bond::AreaShare {
+                            seam,
+                            footprint_area: area,
+                            footprint_centroid: centroid,
+                        })
+                    }
                 },
-            };
-            let bond = hold.bond(1.0).map_err(|err| {
+            }.map_err(|err| {
                 format!("anchor on chunk {}, attachment {name:?}: {err}; rebake a representable footprint", anchor.chunk)
             })?;
-            resolved.insert(component, (hold, bond));
-            Ok((hold, bond))
+            resolved.insert(component, bond);
+            Ok(bond)
         }).collect()
     }
 
@@ -659,7 +624,7 @@ mod tests {
         });
         let list = Attachments::from_ron(&format!("{{\"fixture\": {row}}}"), registry()).unwrap();
         let layout = super::super::breakage::Layout::of(&asset, &masonry, &list).unwrap();
-        let structure = layout.structure(&asset, 1.0);
+        let structure = layout.structure(&asset);
         assert_eq!(structure.joints.len(), asset.anchors.len());
         for joint in structure.joints {
             assert_eq!(joint.bond, expected);
@@ -754,60 +719,6 @@ mod tests {
         }
     }
 
-    /// The game's environment destruction model refuses an unrepresentable scaled hold at
-    /// placement admission and keeps the checked result. Fixture C=2 admits the unit footprint,
-    /// r=sqrt(2/pi), but at scale two r exceeds 4C/g (DERIVED). A late conversion or a cache that
-    /// forgets the scale would admit that placement or rebuild state instead of sharing it.
-    #[test]
-    fn placement_admission_retains_each_checked_scale_and_refuses_a_negative_root_hold() {
-        use std::sync::Arc;
-        let asset = footprint();
-        let list = Attachments::from_ron(
-            r#"{"fixture": RootPlate(overturning_nm_per_kg: (2.0, Fixture("fixture")), fracture_energy_j_per_m2: (1.0, Fixture("fixture")), shear_cohesion_pa: (1.0e6, Fixture("fixture")), shear_fracture_energy_j_per_m2: (1.0, Fixture("fixture")))}"#,
-            registry(),
-        )
-        .unwrap();
-        let text = ron::ser::to_string(&asset).unwrap();
-        let kind =
-            super::super::ConstructionKind::resolve("fixture", &text, registry(), &list).unwrap();
-        let mut library = super::super::ConstructionLibrary {
-            kinds: BTreeMap::from([("fixture".into(), Arc::new(kind))]),
-            texts: vec![text],
-        };
-        library.admit_placement("fixture", [0.5; 3]).unwrap();
-        let half = library.get("fixture").unwrap().structure(0.5);
-        assert_eq!(
-            half.chunks.iter().map(|chunk| chunk.mass).sum::<f32>(),
-            4.0 * 100.0 * 0.5_f32.powi(3)
-        );
-        library.admit_placement("fixture", [0.5; 3]).unwrap();
-        assert!(Arc::ptr_eq(
-            &half,
-            &library.get("fixture").unwrap().structure(0.5)
-        ));
-        let error = library.admit_placement("fixture", [2.0; 3]).unwrap_err();
-        for required in [
-            "constructions/fixture/fixture.construction.ron",
-            "foundation attachment",
-            "converted tensile",
-            "scale",
-            "rebake",
-        ] {
-            assert!(error.contains(required), "{error}");
-        }
-        assert_eq!(library.get("fixture").unwrap().structures.len(), 2);
-        assert!(Arc::ptr_eq(
-            &half,
-            &library.get("fixture").unwrap().structure(0.5)
-        ));
-        let spawned =
-            super::super::breakage::Breakage::new(library.get("fixture").unwrap().clone(), 0, 0.5);
-        assert!(
-            Arc::ptr_eq(&half, &spawned.live.structure),
-            "spawn retains the admitted structure"
-        );
-    }
-
     /// Bakers and load laws refuse malformed anchor identities and root conversions before play.
     #[test]
     fn invalid_anchor_identity_or_root_hold_is_refused() {
@@ -830,6 +741,16 @@ mod tests {
         .unwrap();
         let error = list.anchors(&footprint()).unwrap_err();
         for part in ["anchor on chunk", "fixture", "converted tensile", "rebake"] {
+            assert!(error.contains(part), "{error}");
+        }
+        // Fixture: finite authored areas whose sum and weighted centroid overflow in f32.
+        // The load refusal must keep the same anchor identity and repair as a bad hold.
+        let mut overflow = footprint();
+        for anchor in &mut overflow.anchors {
+            anchor.area_m2 = f32::MAX;
+        }
+        let error = list.anchors(&overflow).unwrap_err();
+        for part in ["anchor on chunk", "fixture", "centroid", "rebake"] {
             assert!(error.contains(part), "{error}");
         }
         let text = ron::ser::to_string(&footprint()).unwrap();

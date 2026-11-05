@@ -2579,16 +2579,15 @@ mod tests {
             let pose = Transform {
                 translation: Vec3::new(instance.translation[0], 0.0, instance.translation[2]),
                 rotation: Quat::from_array(instance.rotation).normalize(),
-                scale: Vec3::from_array(instance.scale),
+                ..Transform::IDENTITY
             };
             let block = match &manifest.prototypes[&instance.prototype] {
                 crate::map::Prototype::Block { min, max, .. } => {
                     let (min, max) = (Vec3::from_array(*min), Vec3::from_array(*max));
                     Transform {
-                        translation: pose.translation
-                            + pose.rotation * ((min + max) * 0.5 * pose.scale),
+                        translation: pose.translation + pose.rotation * ((min + max) * 0.5),
                         rotation: pose.rotation,
-                        scale: (max - min) * pose.scale,
+                        scale: max - min,
                     }
                 }
                 crate::map::Prototype::Construction { asset } => crate::construction::footprint(
@@ -2596,7 +2595,7 @@ mod tests {
                         .constructions
                         .get(asset)
                         .expect("map load resolved every structure"),
-                    pose,
+                    pose.to_isometry(),
                 ),
             };
             if let Some(footprint) = block_footprint(&block, None, radius) {
@@ -2824,17 +2823,18 @@ mod tests {
 
     /// A HOUSE OF THE DESTRUCTION MODEL STILL REFUSES A SPAWN INSIDE IT: its walls are no terrain
     /// block (playtest fork F9), so its bounds stand in the spawn obstacles, and a request at the
-    /// shipped house's centre (scaled 1.3 and yawed, fixture data) is nudged clear of them. A
+    /// shipped house's centre (yawed, fixture data) is nudged clear of them. A
     /// world that dropped the houses from spawn avoidance with the blocks lands a tank inside one.
     #[test]
     fn a_spawn_inside_a_house_of_the_destruction_model_is_refused() {
         let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
         let desired = Vec2::new(-120.0, 64.0);
         let pose = Transform::from_xyz(desired.x, 0.0, desired.y)
-            .with_rotation(Quat::from_rotation_y(0.4))
-            .with_scale(Vec3::splat(1.3));
-        let house =
-            crate::construction::footprint(&crate::construction::tests::shipped_house(), pose);
+            .with_rotation(Quat::from_rotation_y(0.4));
+        let house = crate::construction::footprint(
+            &crate::construction::tests::shipped_house(),
+            pose.to_isometry(),
+        );
         let walls = block_footprint(&house, None, FIXTURE_BODY_RADIUS_M)
             .expect("a house stands on the map");
         assert!(

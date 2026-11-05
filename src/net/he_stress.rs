@@ -110,9 +110,9 @@ fn fire(
     let (min, max) = body.kind.bounds();
     // DERIVED: the bounds' centre in XZ, one full construction height above its roof. Vertical
     // flight crosses the roof, interior and ground without needing a tank or an aim solver.
-    let centre = (min + max) * 0.5 * body.scale;
-    let birth = pose.translation
-        + pose.rotation * Vec3::new(centre.x, (max.y + max.y - min.y) * body.scale, centre.z);
+    let centre = (min + max) * 0.5;
+    let birth =
+        pose.translation + pose.rotation * Vec3::new(centre.x, max.y + max.y - min.y, centre.z);
     if stress.fired == 0 {
         info!(
             "server: game destruction HE target={} birth={birth:?}",
@@ -369,7 +369,7 @@ mod tests {
                 id: "stress_column_fixture".into(),
                 ordinal,
             },
-            Transform::from_translation(offset),
+            Isometry3d::from_translation(offset),
         );
         app.world_mut().flush();
         app.update();
@@ -428,7 +428,7 @@ mod tests {
                 .iter()
                 .any(|entry| entry.construction == ordinal && entry.event == Event::Dust(0))
         );
-        let fixture = crate::construction::breakage::Breakage::new(kind.clone(), ordinal, 1.0);
+        let fixture = crate::construction::breakage::Breakage::new(kind.clone(), ordinal);
         let mut derived = crate::construction::breakage::Shape::intact(&kind.layout);
         for entry in record
             .entries

@@ -167,18 +167,6 @@ impl Patch {
             rim: Rim::Polygon(corners.into()),
         })
     }
-
-    pub(crate) fn scaled(&self, scale: f64) -> Self {
-        Self {
-            centre: self.centre * scale,
-            bending: self.bending * scale.powi(2),
-            polar: self.polar * scale.powi(2),
-            rim: match &self.rim {
-                Rim::Circle(r) => Rim::Circle(r * scale),
-                Rim::Polygon(points) => Rim::Polygon(points.iter().map(|p| *p * scale).collect()),
-            },
-        }
-    }
 }
 
 /// Authored faces in joint order. Circular test fixtures explicitly declare their geometry;
@@ -1359,44 +1347,13 @@ impl Assessment {
         self.last_spin != spin
     }
 
-    /// Compile initial gravity from construction data once per admitted scale. Instances share
+    /// Compile initial gravity from construction data once per construction asset. Instances share
     /// this immutable warm state until their own first change; no view asset or async load enters
     /// sim construction. Existing overloads are committed by the authority, never during loading.
     pub(crate) fn at_rest(structure: &Structure) -> Result<Self, String> {
-        Self::prepare_gravity(structure, None)
-    }
-
-    /// Reuse only an intact displacement guess, never cracks, contact separation or verdicts.
-    /// DERIVED bulk scaling: force scales as s³, translation as s² and rotation as s. Fixing
-    /// compliance can break that homogeneity; every target scale still solves and passes its
-    /// own equilibrium gate before admission.
-    pub(crate) fn at_rest_scaled(
-        structure: &Structure,
-        unit: &Self,
-        scale: f64,
-    ) -> Result<Self, String> {
-        Self::prepare_gravity(structure, Some((unit, scale)))
-    }
-
-    fn prepare_gravity(structure: &Structure, guess: Option<(&Self, f64)>) -> Result<Self, String> {
         let state = State::new(structure);
         let mut assessment = Self::default();
         assessment.rebuild(structure, &state);
-        if let Some((unit, scale)) = guess {
-            assert_eq!(
-                assessment.members, unit.members,
-                "scales of an admitted construction retain source addresses"
-            );
-            assessment.solve.answer = unit
-                .solve
-                .answer
-                .iter()
-                .map(|w| Wrench {
-                    linear: w.linear * scale.powi(2),
-                    angular: w.angular * scale,
-                })
-                .collect();
-        }
         assessment.loads = assessment.gravity();
         assessment.loads.extend(assessment.loads.clone());
         // Six rigid degrees per chunk set the exact rank; finite-precision CG can revisit them.
@@ -2517,8 +2474,6 @@ mod gates {
                 .0,
                 modulus.recip(),
             );
-            let scaled = edge.patch.scaled(2.0);
-            close(scaled.polar, edge.patch.polar * 4.0);
         }
     }
 
@@ -2527,7 +2482,7 @@ mod gates {
     #[test]
     fn house_and_doubled_house_use_linear_joint_visits_and_idle_is_zero() {
         let kind = crate::construction::tests::shipped_house();
-        let structure = kind.layout.structure(&kind.asset, 1.0);
+        let structure = kind.layout.structure(&kind.asset);
         let mut one = Assessment::default();
         let (_, rounds) = one.advance(
             &structure,
@@ -2649,7 +2604,7 @@ mod gates {
             crate::construction::ConstructionLibrary::load(&root, ids.iter().map(String::as_str));
         for id in &ids {
             let kind = library.get(id).unwrap();
-            let structure = kind.layout.structure(&kind.asset, 1.0);
+            let structure = kind.layout.structure(&kind.asset);
             let mut assessment = Assessment::at_rest(&structure).unwrap();
             println!(
                 "CENSUS {id}: chunks={} joints={} initial={}",
@@ -2713,60 +2668,6 @@ mod gates {
             }
         }
     }
-    fn observed_relative_residual(a: &Assessment) -> f64 {
-        let problem = Problem {
-            nodes: &a.solve_nodes,
-            edges: &a.solve_edges,
-            loads: &a.loads,
-        };
-        let r = a.solve.projected_residual(&problem);
-        let mut z = r.clone();
-        precondition(&r, &a.solve.metric, &mut z);
-        let mut load = a.loads.clone();
-        for (node, load) in a.solve_nodes.iter().zip(&mut load) {
-            if node.fixed {
-                *load = Wrench::default();
-            }
-        }
-        let mut scaled_load = load.clone();
-        precondition(&load, &a.solve.metric, &mut scaled_load);
-        let numerator = dot(&r, &z);
-        let denominator = dot(&load, &scaled_load);
-        if denominator == 0.0 {
-            assert_eq!(numerator, 0.0, "an unloaded equilibrium has no residual");
-            0.0
-        } else {
-            (numerator / denominator).sqrt()
-        }
-    }
-
-    fn observed_cohesive_uses(a: &Assessment, structure: &Structure) -> Vec<(usize, f64, f64)> {
-        a.joints
-            .iter()
-            .zip(&a.edges)
-            .filter_map(|(&j, e)| {
-                let seam = structure.joints[j].seam()?;
-                let force = e.resultant(&a.nodes, &a.solve.answer[..a.nodes.len()]);
-                let (tension, shear) = e.stress(force, e.normal);
-                let other = match structure.joints[j].b {
-                    Side::Chunk(b) => structure.chunks[b].material.friction,
-                    Side::Ground => structure.chunks[structure.joints[j].a].material.friction,
-                };
-                let friction = if e.bearing.is_some() {
-                    0.0
-                } else {
-                    f64::from(crate::substances::pair_friction(
-                        structure.chunks[structure.joints[j].a].material.friction,
-                        other,
-                    ))
-                };
-                let capacity = f64::from(seam.shear.cohesion)
-                    + friction * (-force.linear.dot(e.normal) / e.area).max(0.0);
-                Some((j, tension / f64::from(seam.tensile), shear / capacity))
-            })
-            .collect()
-    }
-
     /// Law-only observations remove the same loose groups as the standing authority. Physical
     /// landings are deliberately outside this instrument.
     fn observe_departures(assessment: &Assessment, state: &mut State) -> usize {
@@ -2781,210 +2682,5 @@ mod gates {
             state.fate[c] = super::super::Fate::Fallen;
         }
         fallen.len()
-    }
-
-    /// Observation of every admitted scale and numerical stage, including the residual of the
-    /// exact field used for judgement. Authored outcomes are observations, never assertions.
-    #[test]
-    #[ignore = "placed-scale gravity census, observational"]
-    fn gravity_placed_scales() {
-        use std::collections::{BTreeMap, BTreeSet};
-
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-        let manifest = crate::map::load(&root);
-        let mut rows = BTreeMap::<String, Vec<(f32, Vec<(usize, usize)>, bool)>>::new();
-        let mut printed = BTreeSet::new();
-        for instance in &manifest.instances {
-            let crate::map::Prototype::Construction { asset } =
-                &manifest.prototypes[&instance.prototype]
-            else {
-                continue;
-            };
-            let kind = manifest.constructions.get(asset).unwrap();
-            if printed.insert(asset) {
-                let structure = kind.structure(1.0);
-                let a = kind.equilibrium(1.0);
-                for (j, tension, shear) in observed_cohesive_uses(&a, &structure) {
-                    let joint = &structure.joints[j];
-                    let label = |c: usize| {
-                        let c = &kind.asset.chunks[kind.layout.chunks[c] as usize];
-                        format!(
-                            "{}:{}",
-                            kind.asset.elements[usize::from(c.element)].name,
-                            kind.asset.materials[usize::from(c.material)]
-                        )
-                    };
-                    let other = match joint.b {
-                        Side::Ground => "ground".to_owned(),
-                        Side::Chunk(c) => label(c),
-                    };
-                    let bond = if j < kind.asset.joints.len() {
-                        match kind.asset.joints[j].bond {
-                            crate::construction::schema::Bond::Seam => "intrinsic",
-                            crate::construction::schema::Bond::Attached(k) => {
-                                &kind.asset.attachments[usize::from(k)]
-                            }
-                        }
-                    } else {
-                        "anchor"
-                    };
-                    println!(
-                        "UNITUSE,{asset},{j},{},{other},{bond},{tension:.9},{shear:.9},{:.6},{:.6},{:.6}",
-                        label(joint.a),
-                        joint.centroid.x,
-                        joint.centroid.y,
-                        joint.centroid.z
-                    );
-                }
-            }
-            let scale = instance.scale[0];
-            let traced = scale
-                == manifest
-                    .instances
-                    .iter()
-                    .filter(|i| i.prototype == instance.prototype)
-                    .map(|i| i.scale[0])
-                    .fold(0.0_f32, f32::max);
-            let structure = kind.structure(scale);
-            let mut assessment = (*kind.equilibrium(scale)).clone();
-            let initial = assessment.initial_verdict.len();
-            println!(
-                "ADMITTED,{},{asset},{scale:.9},{initial},{:?},{:.9e}",
-                instance.id,
-                assessment.solve.progress,
-                observed_relative_residual(&assessment)
-            );
-            let mut ranked = observed_cohesive_uses(&assessment, &structure);
-            ranked.sort_by(|a, b| b.1.max(b.2).total_cmp(&a.1.max(a.2)));
-            for &(j, t, s) in ranked.iter().take(16) {
-                println!("PEAK,{},{scale:.9},{j},{t:.9},{s:.9}", instance.id);
-            }
-            let trace: BTreeSet<_> = ranked.iter().take(8).map(|r| r.0).collect();
-            let mut state = State::new(&structure);
-            let mut stages = Vec::new();
-            let mut ticks = 0;
-            for tick in 0..128 {
-                let (failures, rounds) =
-                    assessment.advance(&structure, &mut state, &[], Vec3::ZERO, STEP, false);
-                let departed = observe_departures(&assessment, &mut state);
-                println!(
-                    "JUDGE,{},{scale:.9},{tick},{},{},{:?},{:.9e},{rounds}",
-                    instance.id,
-                    failures.len(),
-                    departed,
-                    assessment.solve.progress,
-                    observed_relative_residual(&assessment)
-                );
-                for f in &failures {
-                    println!(
-                        "FAIL,{},{tick},{},{:?},{:.6},{:.6}",
-                        instance.id, f.joint, f.cause, f.demand, f.capacity
-                    );
-                }
-                if traced {
-                    for (&j, edge) in assessment
-                        .joints
-                        .iter()
-                        .zip(&assessment.edges)
-                        .filter(|(j, _)| trace.contains(j))
-                    {
-                        let answer = &assessment.solve.answer[..assessment.nodes.len()];
-                        let mut force = if edge.contact.is_none() {
-                            edge.resultant(&assessment.nodes, answer).linear
-                        } else {
-                            DVec3::ZERO
-                        };
-                        let (mut closed, mut sliding) = (0, 0);
-                        if let Some(contact) = edge.contact_edge() {
-                            for (point, weight) in contact.samples() {
-                                let (f, c, s) =
-                                    contact.contact_force(&assessment.nodes, answer, point, weight);
-                                force += f;
-                                closed += usize::from(c);
-                                sliding += usize::from(s);
-                            }
-                        }
-                        // Resultants in N; site counts describe this iterate, not a settled state.
-                        println!(
-                            "TRACE,{},{tick},{j},{},{},{},{closed},{sliding},{:.9},{:.9}",
-                            instance.id,
-                            state.cracked[j],
-                            state.separated[j],
-                            edge.contact.is_some(),
-                            force.dot(edge.normal),
-                            (force - edge.normal * force.dot(edge.normal)).length()
-                        );
-                    }
-                }
-                stages.push((failures.len(), departed));
-                ticks = tick;
-                if !assessment.needs_tick() {
-                    break;
-                }
-            }
-            println!(
-                "PLACEDROW,{},{scale:.9},{initial},{},{},{},{}",
-                instance.id,
-                state.cracked.iter().filter(|&&v| v).count(),
-                state
-                    .fate
-                    .iter()
-                    .filter(|&&f| f == super::super::Fate::Fallen)
-                    .count(),
-                ticks,
-                assessment.needs_tick()
-            );
-            rows.entry(asset.clone())
-                .or_default()
-                .push((scale, stages, assessment.needs_tick()));
-            if traced {
-                // Resolution: bound the largest placement's continuation to 2,048 ticks,
-                // without changing its 128-tick row or imposing a physical crack-count oracle.
-                for tick in 128_usize..2048 {
-                    if !assessment.needs_tick() {
-                        break;
-                    }
-                    let (failures, rounds) =
-                        assessment.advance(&structure, &mut state, &[], Vec3::ZERO, STEP, false);
-                    let departed = observe_departures(&assessment, &mut state);
-                    if !failures.is_empty()
-                        || tick.is_power_of_two()
-                        || !assessment.needs_tick()
-                        || tick == 2047
-                    {
-                        println!(
-                            "CONTINUE,{},{tick},{},{},{:?},{:.9e},{rounds}",
-                            instance.id,
-                            failures.len(),
-                            departed,
-                            assessment.solve.progress,
-                            observed_relative_residual(&assessment)
-                        );
-                    }
-                }
-            }
-        }
-        for (id, rows) in rows {
-            let min_scale = rows.iter().map(|r| r.0).fold(f32::INFINITY, f32::min);
-            let max_scale = rows.iter().map(|r| r.0).fold(0.0_f32, f32::max);
-            let unsettled = rows.iter().filter(|r| r.2).count();
-            println!(
-                "PLACED {id}: instances={} scales={min_scale}..{max_scale} unfinished_after_128={unsettled}",
-                rows.len()
-            );
-            for tick in 0..8 {
-                let counts: Vec<_> = rows
-                    .iter()
-                    .map(|r| r.1.get(tick).copied().unwrap_or((0, 0)))
-                    .collect();
-                println!(
-                    "STAGE {id} {tick}: cracks={}..{} fallen={}..{}",
-                    counts.iter().map(|c| c.0).min().unwrap(),
-                    counts.iter().map(|c| c.0).max().unwrap(),
-                    counts.iter().map(|c| c.1).min().unwrap(),
-                    counts.iter().map(|c| c.1).max().unwrap()
-                );
-            }
-        }
     }
 }

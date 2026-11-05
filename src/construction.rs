@@ -10,8 +10,7 @@
 //! collider (the element's hull) on `[Terrain, Armor]` with filters `ALL`, and its own
 //! [`BallisticVolume`] of the element's substance. Hulls contact an element; the walk slows a
 //! round by chord × factor through every element it crosses, and an opening is no element, so
-//! rounds and sight pass through it. The instance's uniform scale is applied to the points at
-//! spawn and the root's own scale is one.
+//! rounds and sight pass through it. Every construction keeps its authored size; placement supplies only position and yaw.
 //!
 //! MUTABLE STATE EXISTS AT SPAWN. No chunk is a collider while its element is whole; the
 //! first touch swaps the element to its chunks, and the fracture laws ([`fracture`]) wear, crack
@@ -61,19 +60,16 @@ pub(crate) struct ConstructionKind {
     /// Per entry of the asset's material table: the friction its substance's colliders carry
     /// (`substances::HardSubstance::contact_friction`).
     friction: Vec<avian3d::prelude::Friction>,
-    /// The bounds of the elements and of every chunk that tiles them, in the construction frame at
-    /// scale 1, `(min, max)`: every collider the construction ever stands, intact or broken.
+    /// The bounds of the elements and of every chunk that tiles them, in the construction frame, `(min, max)`: every collider the construction ever stands, intact or broken.
     bounds: (Vec3, Vec3),
     /// What the fracture laws read of it.
     pub(crate) layout: breakage::Layout,
     /// What its view adds to the law geometry, view only: `<id>.dressing.ron`, read with the
     /// library ([`ConstructionLibrary::load`]); bare for a kind resolved from its text alone.
     pub(crate) dressing: view::Dressing,
-    /// Checked at admission, keyed by the authored uniform scale's bits. Gameplay never
-    /// converts an attachment again; instances at the same scale share immutable construction.
-    structures: BTreeMap<u32, Arc<fracture::Structure>>,
-    /// Initial gravity solved once from admitted data, shared until an instance changes.
-    equilibria: BTreeMap<u32, Arc<fracture::bondsolve::Assessment>>,
+    /// Checked geometry and initial gravity, shared until an instance changes.
+    structure: Arc<fracture::Structure>,
+    equilibrium: Arc<fracture::bondsolve::Assessment>,
 }
 
 impl ConstructionKind {
@@ -118,7 +114,7 @@ impl ConstructionKind {
             .map(|name| fracture::Material::of(registry, name))
             .collect::<Result<Vec<_>, _>>()?;
         let layout = breakage::Layout::of(&asset, &law_materials, attachments)?;
-        let structure = Arc::new(layout.checked_structure(&asset, 1.0)?);
+        let structure = Arc::new(layout.checked_structure(&asset)?);
         let equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest(&structure)?);
         Ok(Self {
             dressing: view::Dressing::bare(&layout),
@@ -127,49 +123,9 @@ impl ConstructionKind {
             friction,
             bounds,
             layout,
-            structures: BTreeMap::from([(1.0_f32.to_bits(), structure)]),
-            equilibria: BTreeMap::from([(1.0_f32.to_bits(), equilibrium)]),
+            structure,
+            equilibrium,
         })
-    }
-
-    fn admit_scale(&mut self, scale: f32) -> Result<(), String> {
-        if let std::collections::btree_map::Entry::Vacant(entry) =
-            self.structures.entry(scale.to_bits())
-        {
-            let structure = Arc::new(self.layout.checked_structure(&self.asset, scale)?);
-            let (&bits, warm) = self
-                .equilibria
-                .iter()
-                .min_by(|(a, _), (b, _)| {
-                    (f32::from_bits(**a) - scale)
-                        .abs()
-                        .total_cmp(&(f32::from_bits(**b) - scale).abs())
-                })
-                .expect("construction resolution admits unit scale before any placement");
-            let ratio = f64::from(scale) / f64::from(f32::from_bits(bits));
-            let equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest_scaled(
-                &structure, warm, ratio,
-            )?);
-            entry.insert(structure);
-            self.equilibria.insert(scale.to_bits(), equilibrium);
-        }
-        Ok(())
-    }
-
-    fn structure(&self, scale: f32) -> Arc<fracture::Structure> {
-        self.structures
-            .get(&scale.to_bits())
-            .expect(
-                "map admission retains the checked structure for every placed construction scale",
-            )
-            .clone()
-    }
-
-    fn equilibrium(&self, scale: f32) -> Arc<fracture::bondsolve::Assessment> {
-        self.equilibria
-            .get(&scale.to_bits())
-            .expect("map admission prepares initial gravity for every admitted construction scale")
-            .clone()
     }
 
     /// The friction element `k`'s colliders carry, standing or loose: its substance's.
@@ -182,7 +138,7 @@ impl ConstructionKind {
         self.element_friction(usize::from(self.layout.element_of[c]))
     }
 
-    /// The bounds of the elements and their chunks in the construction frame at scale 1,
+    /// The bounds of the elements and their chunks in the construction frame,
     /// `(min, max)`.
     pub(crate) fn bounds(&self) -> (Vec3, Vec3) {
         self.bounds
@@ -190,7 +146,7 @@ impl ConstructionKind {
 }
 
 /// The map's load gate ([`ConstructionLibrary::load`]) on asset `id`'s file text, against the shipped
-/// substances and attachment kinds, at its baked scale: what the bake runs on each asset before it
+/// substances and attachment kinds, at its authored size: what the bake runs on each asset before it
 /// writes it, so a refusal stops there in the game's own words.
 pub fn admit(id: &str, text: &str) -> Result<(), String> {
     ConstructionKind::resolve(
@@ -240,27 +196,6 @@ impl ConstructionLibrary {
         library
     }
 
-    /// The game's environment destruction model resolves each placement before play, retaining
-    /// its checked structure. The caller supplies the manifest and instance in refusal messages.
-    pub(crate) fn admit_placement(&mut self, id: &str, scale: [f32; 3]) -> Result<(), String> {
-        let result = if !(scale.iter().all(|s| s.is_finite() && *s > 0.0)
-            && scale[0] == scale[1]
-            && scale[0] == scale[2])
-        {
-            Err(format!(
-                "scale {scale:?}: author a finite positive uniform scale"
-            ))
-        } else {
-            Arc::make_mut(
-                self.kinds
-                    .get_mut(id)
-                    .expect("the map library loaded every declared construction asset"),
-            )
-            .admit_scale(scale[0])
-        };
-        result.map_err(|error| format!("{CONSTRUCTIONS_DIR}/{id}/{id}.construction.ron: {error}"))
-    }
-
     pub(crate) fn get(&self, id: &str) -> Option<&Arc<ConstructionKind>> {
         self.kinds.get(id)
     }
@@ -287,11 +222,11 @@ pub(crate) fn element_layers() -> CollisionLayers {
     CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL)
 }
 
-/// Element `k`'s collider entity, less its parent: its hull at the instance's `scale`, a
+/// Element `k`'s collider entity, less its parent: its authored hull and a
 /// ballistic volume of its substance.
-fn element_bundle(kind: &ConstructionKind, k: usize, scale: f32) -> impl Bundle {
+fn element_bundle(kind: &ConstructionKind, k: usize) -> impl Bundle {
     let element = &kind.asset.elements[k];
-    let points: Vec<Vec3> = element.points().into_iter().map(|p| p * scale).collect();
+    let points = element.points();
     let material = usize::from(element.material);
     (
         Transform::IDENTITY,
@@ -308,7 +243,7 @@ fn element_bundle(kind: &ConstructionKind, k: usize, scale: f32) -> impl Bundle 
 }
 
 /// Spawn one construction of `kind` at `pose`, the ground pose: the authored XZ, the grid's Y, the
-/// authored yaw and uniform scale. A tilted or non-uniformly scaled instance is refused (ADR-0011):
+/// authored yaw. A tilted instance is refused (ADR-0011):
 /// a construction stands on its foundation plane. Returns the root; the body is whole without a view.
 /// The root carries `Visibility` because a view, where one draws, is its child and inherits
 /// visibility through it.
@@ -316,30 +251,19 @@ pub(crate) fn spawn(
     commands: &mut Commands,
     kind: &Arc<ConstructionKind>,
     identity: MapInstance,
-    pose: Transform,
+    pose: Isometry3d,
 ) -> Entity {
-    let scale = pose.scale.x;
-    assert!(
-        pose.scale.y == scale && pose.scale.z == scale && scale > 0.0,
-        "construction: instance {} has scale {:?}; a construction scales uniformly",
-        identity.id,
-        pose.scale,
-    );
     assert!(
         (pose.rotation * Vec3::Y).y >= 1.0 - UPRIGHT_EPSILON,
         "construction: instance {} is tilted ({:?}); a construction stands upright",
         identity.id,
         pose.rotation,
     );
-    let breakage = breakage::Breakage::new(kind.clone(), identity.ordinal, scale);
+    let breakage = breakage::Breakage::new(kind.clone(), identity.ordinal);
     let root = commands
         .spawn((
             Name::new(format!("construction {}", identity.id)),
-            Transform {
-                translation: pose.translation,
-                rotation: pose.rotation,
-                scale: Vec3::ONE,
-            },
+            Transform::from_isometry(pose),
             Visibility::default(),
             RigidBody::Static,
             identity,
@@ -348,26 +272,24 @@ pub(crate) fn spawn(
         ))
         .id();
     for k in 0..kind.asset.elements.len() {
-        commands.spawn((ChildOf(root), element_bundle(kind, k, scale)));
+        commands.spawn((ChildOf(root), element_bundle(kind, k)));
     }
     root
 }
 
 /// A construction's bounds at `pose`, in the [`crate::world::TerrainMap`] block encoding (a unit cube
 /// posed and scaled): what spawn avoidance refuses a spawn inside of.
-pub(crate) fn footprint(kind: &ConstructionKind, pose: Transform) -> Transform {
+pub(crate) fn footprint(kind: &ConstructionKind, pose: Isometry3d) -> Transform {
     let (min, max) = kind.bounds();
     Transform {
-        translation: pose.translation + pose.rotation * ((min + max) * 0.5 * pose.scale),
+        translation: Vec3::from(pose.translation) + pose.rotation * ((min + max) * 0.5),
         rotation: pose.rotation,
-        scale: (max - min) * pose.scale,
+        scale: max - min,
     }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use avian3d::prelude::SimpleCollider;
-
     use super::*;
     use crate::map::tests::shipped_assets;
 
@@ -466,9 +388,7 @@ pub(crate) mod tests {
             id: "house_0001".to_owned(),
             ordinal: 0,
         };
-        let mut admitted = (**kind).clone();
-        admitted.admit_scale(pose.scale.x).unwrap();
-        let root = spawn(&mut commands, &Arc::new(admitted), identity, pose);
+        let root = spawn(&mut commands, kind, identity, pose.to_isometry());
         queue.apply(&mut world);
         (world, root)
     }
@@ -618,39 +538,6 @@ pub(crate) mod tests {
                 "{pair} against {row}"
             );
         }
-    }
-
-    /// THE INSTANCE'S SCALE SCALES ELEMENTS, NOT THE ROOT: at scale 1.5
-    /// (fixture data) every element's collider spans 1.5 times its authored extent and the root
-    /// stays at unit scale; the footprint spawn avoidance reads is the scaled bounds, posed.
-    #[test]
-    fn the_instance_scale_scales_every_element_and_the_footprint() {
-        let kind = shipped_house();
-        let pose = Transform::from_xyz(5.0, 2.0, -3.0).with_scale(Vec3::splat(1.5));
-        let (mut world, root) = spawned(&kind, pose);
-        assert_eq!(world.get::<Transform>(root).unwrap().scale, Vec3::ONE);
-        let mut colliders = world.query::<(&Element, &Collider)>();
-        for (element, collider) in colliders.iter(&world) {
-            let authored = &kind.asset.elements[usize::from(element.0)];
-            let aabb = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
-            let (lo, hi) = authored
-                .points()
-                .iter()
-                .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), &p| {
-                    (lo.min(p), hi.max(p))
-                });
-            let size = aabb.max - aabb.min;
-            assert!(
-                (size - (hi - lo) * 1.5).abs().max_element() < 1e-3,
-                "{}: {size} against {}",
-                authored.name,
-                (hi - lo) * 1.5
-            );
-        }
-        let block = footprint(&kind, pose);
-        let (min, max) = kind.bounds;
-        assert_eq!(block.scale, (max - min) * 1.5);
-        assert_eq!(block.translation, pose.translation + (min + max) * 0.75);
     }
 
     /// A tilted construction is refused where it is still a pose (ADR-0011): its foundation plane

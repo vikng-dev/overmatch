@@ -157,24 +157,9 @@ impl MapManifest {
             })
     }
 
-    /// The game's environment destruction model admits every authored placement's scaled
-    /// structure at the map edge, with the asset path, instance, field and repair on refusal.
-    fn load_constructions(&mut self, root: &Path, path: &Path) {
-        let mut constructions = ConstructionLibrary::load(root, self.construction_assets());
-        for instance in &self.instances {
-            if let Prototype::Construction { asset } = &self.prototypes[&instance.prototype] {
-                constructions
-                    .admit_placement(asset, instance.scale)
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "map: {} instance {:?} field scale: {error}",
-                            path.display(),
-                            instance.id
-                        )
-                    });
-            }
-        }
-        self.constructions = constructions;
+    /// Resolve each construction once at its authored size before play.
+    fn load_constructions(&mut self, root: &Path) {
+        self.constructions = ConstructionLibrary::load(root, self.construction_assets());
     }
 
     /// The declared heightmap's path.
@@ -203,8 +188,8 @@ pub(crate) struct BoxSurface {
     pub(crate) top_tangent: crate::construction_surface::BoxAxis,
 }
 
-/// What one prototype id resolves to (`prototypes.ron`, module doc). Metres at instance scale 1;
-/// the instance's own scale multiplies the collider as it does the visual.
+/// What one prototype id resolves to (`prototypes.ron`, module doc). Metres at the authored size;
+/// placement supplies only position and rotation.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum Prototype {
@@ -222,15 +207,45 @@ pub(crate) enum Prototype {
     Construction { asset: String },
 }
 
-/// One instance record as authored. `rotation` is XYZW, `translation`/`scale` are XYZ.
+/// One authored placement at prototype size. `rotation` is XYZW, `translation` is XYZ.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(try_from = "InstanceFields")]
 pub(crate) struct InstanceRecord {
     pub(crate) prototype: String,
     pub(crate) translation: [f32; 3],
     pub(crate) rotation: [f32; 4],
-    pub(crate) scale: [f32; 3],
     /// The file's own instance id — the sort key that fixes iteration order.
     pub(crate) id: String,
+}
+
+/// Export metadata is permitted, but placement scaling is refused before it can enter the map.
+#[derive(serde::Deserialize)]
+struct InstanceFields {
+    prototype: String,
+    translation: [f32; 3],
+    rotation: [f32; 4],
+    id: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde::de::IgnoredAny>,
+}
+
+impl TryFrom<InstanceFields> for InstanceRecord {
+    type Error = String;
+
+    fn try_from(raw: InstanceFields) -> Result<Self, Self::Error> {
+        if raw.extra.contains_key("scale") {
+            return Err(format!(
+                "instance {:?} field scale is forbidden; remove the scale field and author a separate size variant in the construction asset",
+                raw.id
+            ));
+        }
+        Ok(Self {
+            prototype: raw.prototype,
+            translation: raw.translation,
+            rotation: raw.rotation,
+            id: raw.id,
+        })
+    }
 }
 
 /// `level.json` as far as this crate reads it. Deliberately NOT `deny_unknown_fields`: the file
@@ -428,7 +443,7 @@ pub(crate) fn load(root: &Path) -> MapManifest {
     let text = read_manifest(&path);
     let library = read_prototypes(root);
     let mut manifest = parse(&text, &library, &path);
-    manifest.load_constructions(root, &path);
+    manifest.load_constructions(root);
     manifest
 }
 
@@ -472,7 +487,7 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
     let text = read_manifest(&path);
     let library = read_prototypes(root);
     let mut manifest = parse(&text, &library, &path);
-    manifest.load_constructions(root, &path);
+    manifest.load_constructions(root);
     let constructions = &manifest.constructions;
     let heightmap = manifest.heightmap_path();
     let bytes = std::fs::read(&heightmap).unwrap_or_else(|err| {
@@ -567,16 +582,6 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
             "map: {} references prototype {id:?}, which {PROTOTYPES_FILE} does not carry",
             path.display(),
         );
-    }
-    for instance in &level.instances {
-        for (axis, value) in instance.scale.iter().enumerate() {
-            assert!(
-                value.is_finite() && *value > 0.0,
-                "map: {} instance {:?} field scale[{axis}] = {value}; author a finite positive scale on every axis",
-                path.display(),
-                instance.id
-            );
-        }
     }
     let heightmap = level.terrain.heightmap;
     let side_m = heightmap.world_extent_xz.side_m(path);
@@ -687,7 +692,7 @@ pub(crate) mod tests {
     /// A single-construction library and a placement that uses it, for the resolution law.
     const HOUSE_LIBRARY: &str = r#"{"house": Block(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick", surface: (faces: (Primary, Primary, Primary, Primary, Secondary, Primary), top_tangent: Z))}"#;
     const HOUSE_INSTANCE: &str = r#"{"prototype":"house","translation":[0,0,0],
-        "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"}"#;
+        "rotation":[0,0,0,1],"id":"house_0001"}"#;
 
     /// The game's environment destruction fixture: one graybox block and two common construction
     /// kinds read from shipped assets, independent of the shipped map's population.
@@ -698,38 +703,46 @@ pub(crate) mod tests {
             "brick": Construction(asset: "house_1"),
         }"#;
         const INSTANCES: &str = r#"{"prototype":"house","translation":[0,0,0],
-            "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"},
+            "rotation":[0,0,0,1],"id":"house_0001"},
             {"prototype":"fir","translation":[0,0,20],
-            "rotation":[0,0,0,1],"scale":[1,1,1],"id":"fir_0001"},
+            "rotation":[0,0,0,1],"id":"fir_0001"},
             {"prototype":"brick","translation":[0,0,-20],
-            "rotation":[0,0,0,1],"scale":[1,1,1],"id":"brick_0001"}"#;
+            "rotation":[0,0,0,1],"id":"brick_0001"}"#;
         let text = manifest_text(500.0, 0.0, 100.0, "+Z").replace(
             r#""instances":[]"#,
             &format!(r#""instances":[{INSTANCES}]"#),
         );
         let mut manifest = parse(&text, LIBRARY, Path::new("fixture/level.json"));
-        manifest.load_constructions(&shipped_assets(), Path::new("fixture/level.json"));
+        manifest.load_constructions(&shipped_assets());
         manifest
     }
 
-    /// The collider-spawning layer relies on the file gate refusing collapsed or inverted
-    /// placements. Every refusal must identify the manifest, instance, field and repair.
+    /// Re-exports must not silently resize constructions, even when the stale scale is unity
+    /// or not an array. The refusal identifies the file, instance, field and repair.
     #[test]
     fn instance_scale_is_refused_at_the_manifest_with_its_repair() {
-        for axis in 0..3 {
-            for bad in [0.0, -1.0] {
-                let mut record: serde_json::Value = serde_json::from_str(HOUSE_INSTANCE).unwrap();
-                record["scale"][axis] = serde_json::json!(bad);
-                let text = manifest_text(500.0, 0.0, 100.0, "+Z")
-                    .replace(r#""instances":[]"#, &format!(r#""instances":[{record}]"#));
-                let refused = std::panic::catch_unwind(|| {
-                    parse(&text, HOUSE_LIBRARY, Path::new("fixture/level.json"));
-                })
-                .expect_err("bad scale must fail before a manifest reaches scatter");
-                let reason = refused.downcast_ref::<String>().unwrap();
-                for required in ["fixture/level.json", "house_0001", "scale[", "author"] {
-                    assert!(reason.contains(required), "{reason}");
-                }
+        for scale in [
+            serde_json::json!([1, 1, 1]),
+            serde_json::json!([2, 1, 1]),
+            serde_json::Value::Null,
+            serde_json::json!({"x": 1}),
+        ] {
+            let mut record: serde_json::Value = serde_json::from_str(HOUSE_INSTANCE).unwrap();
+            record["scale"] = scale;
+            let text = manifest_text(500.0, 0.0, 100.0, "+Z")
+                .replace(r#""instances":[]"#, &format!(r#""instances":[{record}]"#));
+            let refused = std::panic::catch_unwind(|| {
+                parse(&text, HOUSE_LIBRARY, Path::new("fixture/level.json"));
+            })
+            .expect_err("any scale field must fail before scatter");
+            let reason = refused.downcast_ref::<String>().unwrap();
+            for required in [
+                "fixture/level.json",
+                "house_0001",
+                "field scale",
+                "remove the scale field",
+            ] {
+                assert!(reason.contains(required), "{reason}");
             }
         }
     }
@@ -1022,48 +1035,6 @@ pub(crate) mod tests {
             digest_of(&[b"abc", b"d"]),
             "the boundary between two files is part of the digest",
         );
-    }
-
-    /// The game's environment destruction model admits placement scales while loading the map,
-    /// before spawning any body. Removing the placement gate admits this nonuniform fixture.
-    #[test]
-    fn construction_placement_admission_names_the_manifest_instance_asset_and_scale() {
-        let root = shipped_assets();
-        let path = level_path(&root);
-        let mut manifest = load(&root);
-        let index = manifest
-            .instances
-            .iter()
-            .position(|instance| {
-                matches!(
-                    manifest.prototypes[&instance.prototype],
-                    Prototype::Construction { .. }
-                )
-            })
-            .expect("the fixture map places a structure");
-        let instance = &mut manifest.instances[index];
-        instance.scale[0] *= 2.0;
-        let id = instance.id.clone();
-        let Prototype::Construction { asset } = &manifest.prototypes[&instance.prototype] else {
-            unreachable!()
-        };
-        let asset = asset.clone();
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            manifest.load_constructions(&root, &path)
-        }))
-        .unwrap_err();
-        let message = panic
-            .downcast_ref::<String>()
-            .expect("the load refusal carries its context");
-        for required in [
-            path.to_str().unwrap(),
-            &id,
-            &format!("{asset}.construction.ron"),
-            "scale",
-            "uniform",
-        ] {
-            assert!(message.contains(required), "{message}");
-        }
     }
 
     /// Peers derive construction geometry and dressing from the same admitted bytes. Omitting

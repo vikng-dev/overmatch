@@ -90,7 +90,7 @@ use bevy::prelude::*;
 use bevy::tasks::{ComputeTaskPool, TaskPool};
 use serde::{Deserialize, Serialize};
 
-use super::attachments::{Attachments, GroundAttachment};
+use super::attachments::Attachments;
 use super::fracture::{
     self, Blast, Block, Bond, Chunk, Fate, Joint, Load, Material, Origin, Side, State, Structure,
 };
@@ -120,7 +120,7 @@ const ON_GRADE_M: f32 = 1e-4;
 /// record, no law reads it). ASSUMED: no measured cost or look sets its size yet.
 pub(crate) const HOLES_PER_CHUNK: usize = 16;
 
-/// The law's view of one construction asset (module doc), at scale 1 in the construction frame.
+/// The law's view of one construction asset (module doc), at authored size in the construction frame.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Layout {
     /// Per law chunk: its asset chunk.
@@ -131,7 +131,6 @@ pub(crate) struct Layout {
     pub(crate) elements: Vec<Option<(u16, u16)>>,
     /// Per law chunk: its material's values.
     materials: Vec<Material>,
-    ground: Vec<(GroundAttachment, Vec<usize>)>,
     /// The law's joints, chunk pairs first in asset order, then the anchors in asset order.
     pub(crate) joints: Vec<Joint>,
     patches: Vec<fracture::bondsolve::Patch>,
@@ -202,17 +201,8 @@ impl Layout {
                 });
             }
         }
-        let mut ground = BTreeMap::<u16, (GroundAttachment, Vec<usize>)>::new();
-        for (anchor, (hold, bond)) in asset.anchors.iter().zip(anchors) {
+        for (anchor, bond) in asset.anchors.iter().zip(anchors) {
             if let Some(a) = law_of[anchor.chunk as usize] {
-                let component = asset.elements
-                    [usize::from(asset.chunks[anchor.chunk as usize].element)]
-                .component;
-                ground
-                    .entry(component)
-                    .or_insert_with(|| (hold, Vec::new()))
-                    .1
-                    .push(joints.len());
                 joints.push(Joint {
                     a,
                     b: Side::Ground,
@@ -282,7 +272,6 @@ impl Layout {
             chunks,
             element_of,
             materials,
-            ground: ground.into_values().collect(),
             joints,
             patches,
             blocks,
@@ -290,20 +279,9 @@ impl Layout {
         })
     }
 
-    /// The structure the laws read for an instance at uniform `scale`: lengths × s, areas × s²,
-    /// volumes and masses × s³. Refuses a scale at which an element's or a law chunk's collider,
-    /// as spawn and a swap build it ([`super::spawn`], [`chunk_collider`]), loses its finite
-    /// positive mass or inertia.
-    pub(crate) fn checked_structure(
-        &self,
-        asset: &ConstructionAsset,
-        scale: f32,
-    ) -> Result<Structure, String> {
-        if !scale.is_finite() || scale <= 0.0 {
-            return Err(
-                "scale must be finite and positive; author a representable instance scale".into(),
-            );
-        }
+    /// Certify authored hulls as convex colliders with finite positive mass and inertia,
+    /// then retain the structure all instances share. No placement changes its dimensions.
+    pub(crate) fn checked_structure(&self, asset: &ConstructionAsset) -> Result<Structure, String> {
         let elements = asset.elements.iter().enumerate().map(|(e, element)| {
             (
                 element.points(),
@@ -326,21 +304,15 @@ impl Layout {
         for (points, field, material) in elements.chain(chunks) {
             let density =
                 schema::substance_density(&asset.materials[usize::from(material)])? as f32;
-            if !solid_collider(points.into_iter().map(|p| p * scale).collect(), density) {
+            if !solid_collider(points, density) {
                 return Err(format!(
-                    "construction {:?}: {field} at scale {scale} cannot form a convex collider of finite positive mass and invertible inertia at its material density; author a representable instance scale or rebake a nondegenerate hull",
+                    "construction {:?}: {field} cannot form a convex collider of finite positive mass and invertible inertia at its material density; rebake a nondegenerate hull at representable authored dimensions",
                     asset.id
                 ));
             }
         }
-        let (s2, s3) = (scale * scale, scale * scale * scale);
-        let mut structure = Structure {
-            geometry: fracture::bondsolve::Geometry::Faces(
-                self.patches
-                    .iter()
-                    .map(|p| p.scaled(f64::from(scale)))
-                    .collect(),
-            ),
+        Ok(Structure {
+            geometry: fracture::bondsolve::Geometry::Faces(self.patches.clone()),
             chunks: self
                 .chunks
                 .iter()
@@ -348,63 +320,23 @@ impl Layout {
                 .map(|(&c, &material)| {
                     let chunk = &asset.chunks[c as usize];
                     Chunk {
-                        volume: chunk.volume_m3 * s3,
-                        centroid: Vec3::from_array(chunk.centroid) * scale,
-                        mass: chunk.mass_kg * s3,
+                        volume: chunk.volume_m3,
+                        centroid: Vec3::from_array(chunk.centroid),
+                        mass: chunk.mass_kg,
                         material,
                         buried: chunk.hull.iter().all(|p| p[1] <= GRADE_M + ON_GRADE_M),
                     }
                 })
                 .collect(),
-            joints: self
-                .joints
-                .iter()
-                .map(|joint| Joint {
-                    area: joint.area * s2,
-                    centroid: joint.centroid * scale,
-                    ..*joint
-                })
-                .collect(),
-        };
-        if scale != 1.0 {
-            for (hold, indices) in &self.ground {
-                let bond = hold.bond(scale).map_err(|error| format!(
-                    "foundation attachment at joints {indices:?}: {error}; reduce the instance scale or rebake a representable footprint"
-                ))?;
-                for &index in indices {
-                    structure.joints[index].bond = bond;
-                }
-            }
-        }
-        for (index, chunk) in structure.chunks.iter().enumerate() {
-            if !(chunk.volume.is_finite()
-                && chunk.volume > 0.0
-                && chunk.mass.is_finite()
-                && chunk.mass > 0.0
-                && chunk.centroid.is_finite())
-            {
-                return Err(format!(
-                    "chunks[{}] scaled volume, mass and centroid must remain finite and positive where required; author a representable scale",
-                    self.chunks[index]
-                ));
-            }
-        }
-        for (index, joint) in structure.joints.iter().enumerate() {
-            if !(joint.area.is_finite() && joint.area > 0.0 && joint.centroid.is_finite()) {
-                return Err(format!(
-                    "joints[{index}] scaled area and centroid must remain finite and positive where required; author a representable scale"
-                ));
-            }
-        }
-        Ok(structure)
+            joints: self.joints.clone(),
+        })
     }
 
-    /// Instrument reconstruction at an admitted scale (`track_sandbox::rubble` and law tests).
-    /// Placed gameplay instances retain their checked structure in `ConstructionKind` at map load.
+    /// Instruments use the same authored structure as gameplay.
     #[cfg(any(test, feature = "dev_ui"))]
-    pub(crate) fn structure(&self, asset: &ConstructionAsset, scale: f32) -> Structure {
-        self.checked_structure(asset, scale)
-            .expect("instrument data names an admitted construction scale")
+    pub(crate) fn structure(&self, asset: &ConstructionAsset) -> Structure {
+        self.checked_structure(asset)
+            .expect("instrument data names an admitted construction")
     }
 
     /// Whether `event` names an element, law chunk or joint of this layout: what a record entry
@@ -426,10 +358,9 @@ impl Layout {
 /// One hole in one chunk (module doc): the chunk's matter within `radius` of the segment
 /// `from`–`to`. A round's channel runs along its line, each end where the line crosses a face
 /// moved out past the chunk ([`open_ends`]), so it is the cylinder the round crossed; a blast's
-/// dish has `from == to`, a ball about its centre. In millimetres of the asset frame at scale 1,
-/// about the baked chunk's centroid ([`super::schema::Chunk::centroid`]), so it is the same hole
-/// at every instance scale; each coordinate saturates at the `i16` range, ±32.767 m from the
-/// centroid, which a channel's ends, within two of its chunk's widths of the centroid, keep for
+/// dish has `from == to`, a ball about its centre. In millimetres of the asset frame at authored size,
+/// about the baked chunk's centroid ([`super::schema::Chunk::centroid`]); each coordinate saturates
+/// at the `i16` range, ±32.767 m from the centroid, which a channel's ends, within two of its chunk's widths of the centroid, keep for
 /// every chunk under 16 m across.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Hole {
@@ -439,7 +370,7 @@ pub(crate) struct Hole {
 }
 
 impl Hole {
-    /// The hole within `radius` of `from`–`to` (m, asset frame at scale 1) in a chunk whose
+    /// The hole within `radius` of `from`–`to` (m, asset frame at authored size) in a chunk whose
     /// centroid is `centroid`, to the millimetre; `None` for one whose radius rounds to nothing.
     pub(crate) fn cut(centroid: Vec3, from: Vec3, to: Vec3, radius: f32) -> Option<Self> {
         let mm = |p: Vec3| {
@@ -604,7 +535,7 @@ impl Shape {
     }
 }
 
-/// One owner's scaled construction, law state, drawing holes and reusable assessment storage.
+/// One owner's authored construction, law state, drawing holes and reusable assessment storage.
 /// Source addresses survive splits; ownership narrows the graph work.
 #[derive(Clone)]
 pub(crate) struct Live {
@@ -617,9 +548,9 @@ pub(crate) struct Live {
 }
 
 impl Live {
-    fn new(kind: &ConstructionKind, scale: f32) -> Self {
-        let mut live = Self::from_shared(kind.structure(scale), kind.layout.elements.len());
-        live.assessment = kind.equilibrium(scale);
+    fn new(kind: &ConstructionKind) -> Self {
+        let mut live = Self::from_shared(kind.structure.clone(), kind.layout.elements.len());
+        live.assessment = kind.equilibrium.clone();
         live
     }
 
@@ -675,24 +606,18 @@ impl Live {
 #[require(crate::contact_transfer::StructureBody)]
 pub(crate) struct Breakage {
     pub(crate) kind: Arc<ConstructionKind>,
-    pub(crate) scale: f32,
     /// Stable source identity, shared by placed matter and every group it releases.
     pub(crate) construction: u16,
     pub(crate) live: Box<Live>,
-    /// The body's origin in the scaled construction frame; zero for a placed construction.
+    /// The body's origin in the construction frame; zero for a placed construction.
     origin: Vec3,
 }
 
 impl Breakage {
-    pub(crate) fn new(kind: Arc<ConstructionKind>, construction: u16, scale: f32) -> Self {
-        assert!(
-            scale.is_finite() && scale > 0.0,
-            "a construction has positive finite uniform scale"
-        );
-        let live = Box::new(Live::new(&kind, scale));
+    pub(crate) fn new(kind: Arc<ConstructionKind>, construction: u16) -> Self {
+        let live = Box::new(Live::new(&kind));
         Self {
             kind,
-            scale,
             construction,
             live,
             origin: Vec3::ZERO,
@@ -739,7 +664,6 @@ pub(crate) struct Piece {
 pub(crate) struct AdmittedPiece {
     pub(crate) construction: Entity,
     pub(crate) kind: Arc<ConstructionKind>,
-    pub(crate) scale: f32,
     pub(crate) chunks: Vec<u16>,
     pub(crate) origin: Vec3,
     born: u32,
@@ -824,7 +748,6 @@ impl Piece {
         Ok(AdmittedPiece {
             construction: root,
             kind: kind.clone(),
-            scale: breakage.scale,
             chunks: self.chunks.clone(),
             origin: (weighted / mass).as_vec3(),
             born: self.born,
@@ -1145,12 +1068,8 @@ fn contact_load(
         "a construction's collider is its root's child"
     );
     let layout = &breakage.kind.layout;
-    let frame = Frame::new(
-        &breakage.physics_frame(transform),
-        breakage.scale,
-        breakage.kind.bounds(),
-    );
-    let local = frame.unscaled(transfer.point);
+    let frame = Frame::new(&breakage.physics_frame(transform), breakage.kind.bounds());
+    let local = frame.local(transfer.point);
     let chunk = match (element, chunk) {
         (_, Some(&ChunkCollider(c))) => usize::from(c),
         (Some(&Element(e)), None) => nearest_chunk(layout, usize::from(e), local)?,
@@ -1160,7 +1079,7 @@ fn contact_load(
         transfer.structure,
         Load {
             chunk,
-            at: local * frame.scale,
+            at: local,
             energy: 0.0,
             crushed: 0.0,
             blow: frame.turn(blow),
@@ -1261,30 +1180,28 @@ fn read_shell(
 }
 
 /// A construction's pose: world from its frame (the root's translation and rotation; the root is at
-/// unit scale and the instance's scale is in the frame's lengths), and a ball in world that holds
+/// authored size), and a ball in world that holds
 /// its elements' bounds with room to spare ([`Frame::may_meet`]).
 #[derive(Clone, Copy)]
 struct Frame {
     translation: Vec3,
     rotation: Quat,
-    scale: f32,
     /// The ball's centre and radius, m, in f64.
     centre: DVec3,
     radius: f64,
 }
 
 impl Frame {
-    fn new(transform: &Transform, scale: f32, (lo, hi): (Vec3, Vec3)) -> Self {
+    fn new(transform: &Transform, (lo, hi): (Vec3, Vec3)) -> Self {
         let middle = (lo + hi) / 2.0;
-        let centre = transform.translation + transform.rotation * (middle * scale);
-        // The bounds' half-diagonal, grown 5 % and half a metre: far beyond the rounding of every
+        let centre = transform.translation + transform.rotation * middle;
+        // Resolution: the bounds' half-diagonal, grown 5 % and half a metre, exceeds rounding in every
         // test the deposits run in the construction frame (DERIVED: f32 rounding, ~1e-4 m at a
         // kilometre).
-        let radius = f64::from((hi - lo).length() / 2.0 * scale) * 1.05 + 0.5;
+        let radius = f64::from((hi - lo).length() / 2.0) * 1.05 + 0.5;
         Self {
             translation: transform.translation,
             rotation: transform.rotation,
-            scale,
             centre: centre.as_dvec3(),
             radius,
         }
@@ -1309,9 +1226,9 @@ impl Frame {
         self.centre.distance_squared(at.as_dvec3()) <= reach * reach
     }
 
-    /// A world point in the asset's own frame, at scale 1.
-    fn unscaled(&self, p: Vec3) -> Vec3 {
-        self.rotation.inverse() * (p - self.translation) / self.scale
+    /// A world point in the asset's own frame, at authored size.
+    fn local(&self, p: Vec3) -> Vec3 {
+        self.rotation.inverse() * (p - self.translation)
     }
 
     /// A world direction in the construction frame.
@@ -1320,7 +1237,7 @@ impl Frame {
     }
 }
 
-/// The present blockers along a ray in the asset frame (unscaled): the first standing chunk of a
+/// The present blockers along a ray in the asset frame: the first standing chunk of a
 /// breakable element it enters, or an unbreakable element entered first, which stops it with no
 /// deposit. Returns the law chunk and the distance. `placed` says whether the body is the placed
 /// construction, which holds the unbreakable elements; a moving group ([`Piece`]) holds only its
@@ -1355,7 +1272,7 @@ fn first_chunk(
     best
 }
 
-/// What a construction took of one deposit, in its frame (scaled): lines and their loads, field
+/// What a construction took of one deposit, in its frame: lines and their loads, field
 /// stops, blast hits and contacts.
 #[derive(Default)]
 struct Taken {
@@ -1524,7 +1441,7 @@ fn take_owner_lines(layout: &Layout, frame: Frame, lines: &[LineInput<'_>]) -> T
         let entrance_energy = line.entrance_energy;
         let impulse = line.momentum;
         let entrance_impulse = line.entrance_momentum;
-        let (a, b) = (frame.unscaled(entry), frame.unscaled(end));
+        let (a, b) = (frame.local(entry), frame.local(end));
         let length = a.distance(b);
         let dir = (b - a).normalize_or_zero();
         let shares: Vec<(usize, f32, f32, f32)> = match (source.element, source.chunk) {
@@ -1536,7 +1453,7 @@ fn take_owner_lines(layout: &Layout, frame: Frame, lines: &[LineInput<'_>]) -> T
                 }
                 let mut crossed = BTreeMap::<usize, (f32, f32, f32)>::new();
                 for &(from, to) in &line.contacts {
-                    let (from, to) = (frame.unscaled(from), frame.unscaled(to));
+                    let (from, to) = (frame.local(from), frame.local(to));
                     // World f32 rounding can close a resolved chord to a point.
                     let Some(ray) = (to - from).try_normalize() else {
                         continue;
@@ -1588,7 +1505,7 @@ fn take_owner_lines(layout: &Layout, frame: Frame, lines: &[LineInput<'_>]) -> T
             } else {
                 Vec3::ZERO
             };
-            let (from, to) = ((a + dir * t0) * frame.scale, (a + dir * t1) * frame.scale);
+            let (from, to) = ((a + dir * t0), (a + dir * t1));
             let part = DeliveredLine {
                 contacts: line.contacts.clone(),
                 crossing: crate::ballistics::VolumeCrossing {
@@ -1655,7 +1572,6 @@ struct OwnerEffects {
 /// Immutable inputs for one owner's law run; shared-body effects are staged in `OwnerEffects`.
 struct OwnerInputs<'a> {
     pool: &'a TaskPool,
-    frame: Frame,
     taken: &'a Taken,
     pressing: &'a [Load],
     resting: &'a [Load],
@@ -1673,7 +1589,6 @@ fn evaluate_owner(
 ) -> OwnerEffects {
     let OwnerInputs {
         pool,
-        frame,
         taken,
         pressing,
         resting,
@@ -1683,10 +1598,9 @@ fn evaluate_owner(
     } = inputs;
     let kind = breakage.kind.clone();
     let construction = breakage.construction;
-    let scale = breakage.scale;
     let live = breakage.live.as_mut();
-    let blast = blast_loads(&kind, frame.scale, &taken.blast, live);
-    let holes = holes_of(&kind, frame.scale, &taken.lines, &blast);
+    let blast = blast_loads(&kind, &taken.blast, live);
+    let holes = holes_of(&kind, &taken.lines, &blast);
     let loads: Vec<Load> = taken
         .line_loads
         .iter()
@@ -1744,12 +1658,11 @@ fn evaluate_owner(
             let live = &*live;
             for (group, loads) in changes.groups {
                 scope.spawn(async move {
-                    let launch = launch(kind, &live.structure, frame.scale, &group, &loads);
+                    let launch = launch(kind, &live.structure, &group, &loads);
                     prepare_group(Departure {
                         kind: kind.clone(),
                         construction,
                         root: construction_pose,
-                        scale,
                         live: live.group(&group),
                         group,
                         launch,
@@ -1835,11 +1748,7 @@ fn apply_deposits(mut p: DepositParam) {
         .map(|(root, transform, breakage, _)| {
             (
                 root,
-                Frame::new(
-                    &breakage.physics_frame(transform),
-                    breakage.scale,
-                    breakage.kind.bounds(),
-                ),
+                Frame::new(&breakage.physics_frame(transform), breakage.kind.bounds()),
             )
         })
         .collect();
@@ -1903,7 +1812,6 @@ fn apply_deposits(mut p: DepositParam) {
                         construction,
                         OwnerInputs {
                             pool: ComputeTaskPool::get(),
-                            frame,
                             taken,
                             pressing: presses.get(&root).map_or(&[][..], Vec::as_slice),
                             resting: resting.get(&root).map_or(&[][..], Vec::as_slice),
@@ -1962,10 +1870,9 @@ fn apply_deposits(mut p: DepositParam) {
 }
 
 /// A blast's ray hits on one construction as its loads ([`Load::blast`]), each face's Law 2 read on
-/// its chunk's hull at the instance's `scale`.
+/// its chunk's hull at authored size.
 fn blast_loads(
     kind: &ConstructionKind,
-    scale: f32,
     hits: &[(usize, fracture::RayHit)],
     live: &Live,
 ) -> Vec<Load> {
@@ -1975,7 +1882,6 @@ fn blast_loads(
     let contacts: Vec<Joint> = live.state.contacts(&live.structure).collect();
     let (loads, _) = Load::blast(hits, |c| fracture::Backing {
         block: &kind.layout.blocks[c],
-        scale,
         material: kind.layout.materials[c],
         contacts: &contacts,
     });
@@ -2026,24 +1932,24 @@ fn owner_geometry(
         if energy == 0.0 || !frame.may_hold(end, STOP_TOLERANCE_M) {
             continue; // A zero-profile angular stratum emits nothing, or this owner is out of reach.
         }
-        let local = frame.unscaled(end);
-        let slack = Vec3::splat(STOP_TOLERANCE_M / frame.scale);
+        let local = frame.local(end);
+        let slack = Vec3::splat(STOP_TOLERANCE_M);
         if local.cmplt(lo - slack).any() || local.cmpgt(hi + slack).any() {
             continue;
         }
         let turned = frame.turn(dir);
-        let back = 2.0 * STOP_TOLERANCE_M / frame.scale;
+        let back = 2.0 * STOP_TOLERANCE_M;
         if let Some((Some(c), t)) =
             first_chunk(&kind.layout, &shape, placed, local - turned * back, turned)
-            && (t - back).abs() * frame.scale <= STOP_TOLERANCE_M
+            && (t - back).abs() <= STOP_TOLERANCE_M
         {
-            field.push((c, local * frame.scale, energy, frame.turn(ray.blow)));
+            field.push((c, local, energy, frame.turn(ray.blow)));
         }
     }
     let mut faces = BTreeMap::new();
     let blast = deposit.blast.map_or_else(Vec::new, |(origin, blast)| {
         let reach = blast.reach();
-        let local = frame.unscaled(origin);
+        let local = frame.local(origin);
         let bounds = Block::cuboid(lo, hi);
         fracture::blast_directions()
             .iter()
@@ -2055,7 +1961,7 @@ fn owner_geometry(
                 let turned = frame.turn(dir);
                 bounds.span(local, turned)?;
                 let (chunk, t) = first_chunk(&kind.layout, &shape, placed, local, turned)?;
-                let distance = t * frame.scale;
+                let distance = t;
                 if distance > reach {
                     return None;
                 }
@@ -2067,11 +1973,10 @@ fn owner_geometry(
                     let shown = fracture::silhouette(
                         faces.entry(c).or_insert_with(|| block.face_areas()),
                         turned,
-                    ) * frame.scale
-                        * frame.scale;
+                    );
                     fracture::BlastSurface {
                         target: Stop::Chunk(root, c),
-                        at: (local + turned * t) * frame.scale,
+                        at: (local + turned * t),
                         normal,
                         direction: turned,
                         distance,
@@ -2206,7 +2111,7 @@ enum Stop {
 
 /// The holes one deposit cuts (module doc), each with its law chunk, in the baked chunk's frame
 /// ([`Hole`]); `lines` and the blast's loads `blast` ([`Load::blast`]) in the construction frame at
-/// the instance's `scale`. Each is sized by the volume it crushes, the volume its load takes from
+/// authored size. Each is sized by the volume it crushes, the volume its load takes from
 /// the chunk's pool: a line's, its energy over the crush energy ([`Material::crush`]); a blast's,
 /// its load's Law 1 volume ([`Load::crushed`]). A line's channel runs along its chord, its radius
 /// the narrower of the cylinder about the chord and the ball that hold that volume (so a chord
@@ -2216,7 +2121,6 @@ enum Stop {
 /// dish's centre lies on the chunk's face, so half its ball is in the chunk.
 fn holes_of(
     kind: &ConstructionKind,
-    scale: f32,
     lines: &[(usize, Vec3, Vec3, f32)],
     blast: &[Load],
 ) -> Vec<(usize, Hole)> {
@@ -2225,20 +2129,18 @@ fn holes_of(
         &layout.blocks,
         |c| Vec3::from_array(kind.asset.chunks[layout.chunks[c] as usize].centroid),
         |c| layout.materials[c].crush,
-        scale,
         lines,
         blast,
     )
 }
 
 /// [`holes_of`] on any chunk table: each law chunk's hull `blocks`, its baked `centroid` (the
-/// hole's frame) and its material's crush energy `crush`, all at scale 1. The sandbox's wall cuts
+/// hole's frame) and its material's crush energy `crush`, all at authored size. The sandbox's wall cuts
 /// its holes here too, so its deposits reach [`HOLES_PER_CHUNK`] as the game's do.
 pub(crate) fn cut_holes(
     blocks: &[Block],
     centroid: impl Fn(usize) -> Vec3,
     crush: impl Fn(usize) -> f32,
-    scale: f32,
     lines: &[(usize, Vec3, Vec3, f32)],
     blast: &[Load],
 ) -> Vec<(usize, Hole)> {
@@ -2248,13 +2150,13 @@ pub(crate) fn cut_holes(
         let volume = crushed(c, energy);
         let ball = (0.75 * volume / PI).cbrt();
         let radius = (volume / (PI * from.distance(to))).sqrt().min(ball);
-        let (from, to) = open_ends(&blocks[c], from / scale, to / scale, scale);
-        Hole::cut(centroid(c), from, to, radius / scale).map(|hole| (c, hole))
+        let (from, to) = open_ends(&blocks[c], from, to);
+        Hole::cut(centroid(c), from, to, radius).map(|hole| (c, hole))
     });
     let dishes = blast.iter().filter_map(|load| {
         let radius = (1.5 * load.crushed / PI).cbrt();
-        let at = load.at / scale;
-        Hole::cut(centroid(load.chunk), at, at, radius / scale).map(|hole| (load.chunk, hole))
+        let at = load.at;
+        Hole::cut(centroid(load.chunk), at, at, radius).map(|hole| (load.chunk, hole))
     });
     channels.chain(dishes).collect()
 }
@@ -2263,23 +2165,17 @@ pub(crate) fn cut_holes(
 /// opening. This bounds the f32 baked-plane tolerance, never a material or hole-size choice.
 const ON_FACE_M: f32 = 1e-3;
 
-/// A channel's ends `from`–`to` in its chunk's hull `block` (asset frame, scale 1; the instance at
-/// `scale`), each end on the hull's surface moved out along the line to the hull's farthest corner
-/// along it. Inside the chunk the capsule a [`Hole`] draws is then the cylinder about the line:
+/// A channel's ends `from`–`to` in its chunk's hull `block` (asset frame), each surface end moved
+/// out along the line to the hull's farthest corner. Inside the chunk the capsule a [`Hole`] draws is then the cylinder about the line:
 /// every chunk point projects between the ends, so its distance to the segment is its distance to
 /// the line, and each face the line crosses opens across the cylinder's whole ellipse, with no rim
 /// closed by the capsule's rounded end. An end inside the hull (a round at rest there) stays, so
 /// its channel stays closed there. The ends lie within the hull's width of the hull.
-fn open_ends(block: &Block, from: Vec3, to: Vec3, scale: f32) -> (Vec3, Vec3) {
+fn open_ends(block: &Block, from: Vec3, to: Vec3) -> (Vec3, Vec3) {
     let Some(along) = (to - from).try_normalize() else {
         return (from, to);
     };
-    let on_face = |p: Vec3| {
-        block
-            .planes
-            .iter()
-            .any(|&(n, o)| n.dot(p) >= o - ON_FACE_M / scale)
-    };
+    let on_face = |p: Vec3| block.planes.iter().any(|&(n, o)| n.dot(p) >= o - ON_FACE_M);
     let (low, high) = block
         .points
         .iter()
@@ -2488,24 +2384,19 @@ fn solid_collider(points: Vec<Vec3>, density: f32) -> bool {
     })
 }
 
-/// A law chunk's whole hull as a collider for an instance at `scale`, about `origin` (construction
-/// frame, scaled): its occupied volume, so its mass and inertia at its material's density are the
-/// construction's. Admission certified the hull as a solid convex collider at every placed scale
+/// A law chunk's authored hull as a collider about `origin` (construction
+/// frame): its occupied volume, so its mass and inertia at its material's density are the
+/// construction's. Admission certified the hull as a solid convex collider at authored dimensions
 /// ([`Layout::checked_structure`]).
-pub(crate) fn chunk_collider(
-    kind: &ConstructionKind,
-    c: usize,
-    scale: f32,
-    origin: Vec3,
-) -> Collider {
+pub(crate) fn chunk_collider(kind: &ConstructionKind, c: usize, origin: Vec3) -> Collider {
     Collider::convex_hull(
         kind.layout.blocks[c]
             .points
             .iter()
-            .map(|p| *p * scale - origin)
+            .map(|p| *p - origin)
             .collect(),
     )
-    .expect("a load-certified hull at a positive scale stays a solid convex hull")
+    .expect("a load-certified authored hull stays a solid convex hull")
 }
 
 /// How far a freed chunk's contact hull stands inside its whole hull, m (Resolution). A chunk freed
@@ -2518,20 +2409,20 @@ const LOOSE_GAP_M: f32 = 1e-3;
 /// consume a small fragment. This limits contraction, not the fragment's occupied geometry.
 const MIN_INSET_SCALE: f32 = 0.2;
 
-/// A certified hull's points contracted about their mean by `gap` m at `scale`. The nearest face
+/// A certified hull's points contracted about their mean by `gap` m. The nearest face
 /// moves by the gap unless MIN_INSET_SCALE limits contraction; farther faces move proportionally.
 /// Contact separation and visual seams supply independent gaps to this one geometric operation.
-pub(crate) fn inset_point(block: &Block, scale: f32, gap: f32) -> impl Fn(Vec3) -> Vec3 {
+pub(crate) fn inset_point(block: &Block, gap: f32) -> impl Fn(Vec3) -> Vec3 {
     assert!(
         block.points.len() >= 4,
         "a certified solid hull has at least four corners"
     );
     assert!(
-        scale.is_finite() && scale > 0.0 && gap.is_finite() && gap >= 0.0,
-        "a certified hull's scale is positive and its requested inset is nonnegative"
+        gap.is_finite() && gap >= 0.0,
+        "a certified hull's requested inset is finite and nonnegative"
     );
     let middle = block.points.iter().sum::<Vec3>() / block.points.len() as f32;
-    let radius = block.inradius() * scale;
+    let radius = block.inradius();
     assert!(
         radius.is_finite() && radius > 0.0,
         "a certified convex hull's corner mean is strictly inside its bounding planes"
@@ -2543,16 +2434,10 @@ pub(crate) fn inset_point(block: &Block, scale: f32, gap: f32) -> impl Fn(Vec3) 
 /// The hull a freed chunk meets contacts with, inside its whole occupied hull. The nominal
 /// nearest-face gap is LOOSE_GAP_M, reduced by the small-hull cap in inset_point. Mass, inertia
 /// and ballistics read the whole hull instead.
-pub(crate) fn loose_collider(block: &Block, scale: f32, origin: Vec3) -> Collider {
-    let inset = inset_point(block, scale, LOOSE_GAP_M);
-    Collider::convex_hull(
-        block
-            .points
-            .iter()
-            .map(|p| inset(*p) * scale - origin)
-            .collect(),
-    )
-    .expect("a certified hull, scaled and contracted about its mean, stays solid")
+pub(crate) fn loose_collider(block: &Block, origin: Vec3) -> Collider {
+    let inset = inset_point(block, LOOSE_GAP_M);
+    Collider::convex_hull(block.points.iter().map(|p| inset(*p) - origin).collect())
+        .expect("a certified hull contracted about its mean stays solid")
 }
 
 /// The ballistic volume of law chunk `c`: its element's substance.
@@ -2568,7 +2453,6 @@ fn chunk_volume(kind: &ConstructionKind, c: usize) -> BallisticVolume {
 /// A freed carrier staged until every construction in the deposit has answered its contacts.
 /// One source can free groups in several constructions; their combined exchange is bounded once.
 struct Departure {
-    scale: f32,
     live: Live,
     tick: u32,
     kind: Arc<ConstructionKind>,
@@ -2614,7 +2498,7 @@ fn prepare_group(mut departure: Departure) -> PreparedDeparture {
         .map(|(c, hull)| {
             let contact = (
                 Transform::IDENTITY,
-                loose_collider(&kind.layout.blocks[c], departure.scale, origin),
+                loose_collider(&kind.layout.blocks[c], origin),
                 occupied_mass(&hull, kind.layout.materials[c].density),
                 piece_layers(),
                 kind.chunk_friction(c),
@@ -2642,7 +2526,6 @@ fn prepare_group(mut departure: Departure) -> PreparedDeparture {
 pub(crate) fn launch(
     kind: &ConstructionKind,
     structure: &Structure,
-    scale: f32,
     group: &[usize],
     loads: &[Load],
 ) -> Launch {
@@ -2655,7 +2538,7 @@ pub(crate) fn launch(
         / mass;
     let colliders: Vec<(usize, Collider)> = group
         .iter()
-        .map(|&c| (c, chunk_collider(kind, c, scale, centroid)))
+        .map(|&c| (c, chunk_collider(kind, c, centroid)))
         .collect();
     launch_colliders(centroid, colliders, |c| chunks[c].material.density, loads)
 }
@@ -2685,8 +2568,7 @@ fn spawn_piece(
     group: &[usize],
     launch: Launch,
 ) {
-    let scale = root.scale.x;
-    let live = Live::new(kind, scale).group(group);
+    let live = Live::new(kind).group(group);
     spawn_group(
         commands,
         Departure {
@@ -2696,7 +2578,6 @@ fn spawn_piece(
             group: group.to_vec(),
             launch,
             live,
-            scale,
             tick: 0,
         },
         true,
@@ -2718,7 +2599,6 @@ fn spawn_prepared(commands: &mut Commands, prepared: PreparedDeparture, finalize
         group,
         launch,
         live,
-        scale,
         tick,
     } = departure;
     let Launch {
@@ -2740,7 +2620,6 @@ fn spawn_prepared(commands: &mut Commands, prepared: PreparedDeparture, finalize
         },
         Breakage {
             kind,
-            scale,
             construction,
             live: Box::new(live),
             origin,
@@ -2803,8 +2682,7 @@ impl PendingSplit {
         pool.scope(|scope| {
             for (group, live) in &self.children {
                 scope.spawn(async move {
-                    let mut launch =
-                        launch(&breakage.kind, &live.structure, breakage.scale, group, &[]);
+                    let mut launch = launch(&breakage.kind, &live.structure, group, &[]);
                     // DERIVED rigid velocity field: every new COM gets v + omega cross r; every
                     // child retains omega. Occupied hulls partition the parent's mass and inertia;
                     // contact insets do not enter this calculation.
@@ -2819,7 +2697,6 @@ impl PendingSplit {
                         root,
                         group: group.clone(),
                         launch,
-                        scale: breakage.scale,
                         live: live.clone(),
                         tick: self.tick,
                     })
@@ -2996,7 +2873,7 @@ fn prepare_reconcile(
             (false, None) => {
                 effects.push(ColliderChange::Element((
                     ChildOf(root),
-                    super::element_bundle(kind, e, breakage.scale),
+                    super::element_bundle(kind, e),
                     pose,
                 )));
             }
@@ -3010,7 +2887,7 @@ fn prepare_reconcile(
                 effects.push(ColliderChange::Chunk((
                     ChildOf(root),
                     Transform::IDENTITY,
-                    chunk_collider(kind, c, breakage.scale, Vec3::ZERO),
+                    chunk_collider(kind, c, Vec3::ZERO),
                     super::element_layers(),
                     kind.chunk_friction(c),
                     chunk_volume(kind, c),

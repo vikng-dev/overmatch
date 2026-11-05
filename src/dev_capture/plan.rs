@@ -1212,13 +1212,11 @@ mod tests {
         assert!(wall.shots.iter().all(|shot| shot.aim.is_some()));
         let preview = wall.preview.expect("the preview places constructions");
         let assets: Vec<&str> = preview.place.iter().map(|p| p.asset.as_str()).collect();
-        let mut library = crate::construction::ConstructionLibrary::load(
+        let library = crate::construction::ConstructionLibrary::load(
             &crate::map::tests::shipped_assets(),
             assets.iter().copied(),
         );
-        for asset in assets {
-            library.admit_placement(asset, [1.0; 3]).unwrap();
-        }
+        assert!(assets.iter().all(|asset| library.get(asset).is_some()));
         for named in wall
             .shots
             .iter()

@@ -1579,11 +1579,9 @@ pub(crate) struct Crushing {
     pub depth: f32,
 }
 
-/// What Law 2 reads of the chunk a blast face loads ([`Load::blast`]): its hull, the hits' frame's
-/// scale over the hull's (a construction instance's), and its material.
+/// What Law 2 reads of a loaded chunk ([`Load::blast`]): its authored hull and material.
 pub(crate) struct Backing<'a> {
     pub block: &'a Block,
-    pub scale: f32,
     pub material: Material,
     /// Contacts between standing matter ([`State::contacts`]), in the hits' frame. Their
     /// rear-face area is not a free surface, whether bonded or bearing-only.
@@ -1638,8 +1636,7 @@ pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<S
     let material = &backing.material;
     let Spall { bar_speed, tensile } = material.spall;
     let crush = material.compaction.strength;
-    let local = load.at / backing.scale;
-    let depth = backing.block.exit(local, -normal) * backing.scale;
+    let depth = backing.block.exit(load.at, -normal);
     let back = load.at - normal * depth;
     let crater = rays
         .iter()
@@ -1681,13 +1678,13 @@ pub(crate) fn scab(rays: &[&RayHit], load: &Load, backing: &Backing) -> Option<S
     }
     let thickness = length * tensile / (2.0 * stress);
     let speed = (2.0 * stress - tensile) / (material.density * bar_speed);
-    let shadow = silhouette(&backing.block.face_areas(), -normal) * backing.scale.powi(2);
+    let shadow = silhouette(&backing.block.face_areas(), -normal);
     let covered: f32 = backing
         .contacts
         .iter()
         .filter(|joint| {
             (joint.a == load.chunk || joint.b == Side::Chunk(load.chunk))
-                && joint.normal.dot(back - joint.centroid).abs() <= ON_PLANE * backing.scale
+                && joint.normal.dot(back - joint.centroid).abs() <= ON_PLANE
         })
         .map(|joint| joint.area * joint.normal.dot(normal).abs())
         .sum();
@@ -2621,7 +2618,6 @@ mod tests {
             let keyed = hits.map(|hit| (3, hit));
             let (loads, scabs) = Load::blast(&keyed, |_| Backing {
                 block: &slab,
-                scale: 1.0,
                 material: brick(),
                 contacts: &[],
             });
@@ -3035,7 +3031,6 @@ mod tests {
         let hull = Block::cuboid(chunk.centroid - 0.05, chunk.centroid + 0.05);
         let backing = |_: usize| Backing {
             block: &hull,
-            scale: 1.0,
             material: chunk.material,
             contacts: &[],
         };
@@ -3106,7 +3101,6 @@ mod tests {
         let mut state = State::new(&structure);
         let (loads, scabs) = Load::blast(&[(0, heavy)], |_| Backing {
             block: &cube[0],
-            scale: 1.0,
             material: brick(),
             contacts: &[],
         });
@@ -3435,7 +3429,6 @@ mod tests {
         let thrown = |depth| {
             Load::blast(&[(0, RayHit { depth, ..hit })], |_| Backing {
                 block: &slab,
-                scale: 1.0,
                 material,
                 contacts: &[],
             })
@@ -3495,7 +3488,7 @@ mod tests {
     /// A back scab in the game's environment model leaves the actual hull surface. On tapered
     /// geometry the farthest corner's projection lies beyond that surface. Rear contacts and the
     /// ligament gate rely on the true exit; a corner-projection mutant fails this ASSUMED wedge
-    /// fixture at both instance scales.
+    /// fixture at its authored dimensions.
     #[test]
     fn a_scab_leaves_the_hulls_actual_back_face() {
         let material = brick();
@@ -3511,45 +3504,32 @@ mod tests {
             Vec3::new(1.0, 1.0, 0.5),
         ])
         .expect("the wedge is a closed solid");
-        for scale in [1.0_f32, 2.0] {
-            let hit = RayHit {
-                impulse: hit.impulse * scale.powi(2),
-                peak: hit.peak * scale.powi(2),
-                ..hit
-            };
-            let backing = |contacts| Backing {
-                block: &wedge,
-                scale,
-                material,
-                contacts,
-            };
-            let (_, scabs) = Load::blast(&[(0, hit)], |_| backing(&[]));
-            let [scab] = scabs[..] else {
-                panic!("the fixture pulse scabs: {scabs:?}")
-            };
-            assert!((scab.at - Vec3::Z * (0.375 * scale)).length() < 1e-5);
-            assert!(
-                wedge
-                    .planes
-                    .iter()
-                    .all(|(n, o)| n.dot(scab.at / scale) <= o + 1e-5)
-            );
-            let (normal, _) = wedge.planes.iter().find(|(n, _)| n.z > 0.0).unwrap();
-            let contact = Joint {
-                a: 0,
-                b: Side::Ground,
-                area: 4.0 * scale.powi(2) / normal.z,
-                centroid: scab.at,
-                normal: *normal,
-                bond: Bond::Bonded(material.seam),
-            };
-            assert!(
-                Load::blast(&[(0, hit)], |_| backing(std::slice::from_ref(&contact)))
-                    .1
-                    .is_empty(),
-                "a contact on the actual rear plane covers it"
-            );
-        }
+        let backing = |contacts| Backing {
+            block: &wedge,
+            material,
+            contacts,
+        };
+        let (_, scabs) = Load::blast(&[(0, hit)], |_| backing(&[]));
+        let [scab] = scabs[..] else {
+            panic!("the fixture pulse scabs: {scabs:?}")
+        };
+        assert!((scab.at - Vec3::Z * 0.375).length() < 1e-5);
+        assert!(wedge.planes.iter().all(|(n, o)| n.dot(scab.at) <= o + 1e-5));
+        let (normal, _) = wedge.planes.iter().find(|(n, _)| n.z > 0.0).unwrap();
+        let contact = Joint {
+            a: 0,
+            b: Side::Ground,
+            area: 4.0 / normal.z,
+            centroid: scab.at,
+            normal: *normal,
+            bond: Bond::Bonded(material.seam),
+        };
+        assert!(
+            Load::blast(&[(0, hit)], |_| backing(std::slice::from_ref(&contact)))
+                .1
+                .is_empty(),
+            "a contact on the actual rear plane covers it"
+        );
     }
 
     /// A game's environment face load at its face's edge has a rear exit wherever rounding puts
@@ -3567,7 +3547,6 @@ mod tests {
             assert_eq!(slab.exit(at, Vec3::Z), 0.25, "{x}: the slab's thickness");
             let (_, scabs) = Load::blast(&[(0, RayHit { at, ..hit })], |_| Backing {
                 block: &slab,
-                scale: 1.0,
                 material,
                 contacts: &[],
             });
@@ -3603,7 +3582,6 @@ mod tests {
         let thrown = |contacts: &[Joint]| {
             Load::blast(&[(0, hit)], |_| Backing {
                 block: &slab,
-                scale: 1.0,
                 material,
                 contacts,
             })
@@ -3685,7 +3663,6 @@ mod tests {
                     let (hit, slab) = scab_face(&material, scab_blow(&material, lengths));
                     let (_, scabs) = Load::blast(&[(0, hit)], |_| Backing {
                         block: &slab,
-                        scale: 1.0,
                         material,
                         contacts: &[],
                     });
@@ -3728,7 +3705,6 @@ mod tests {
             };
             let (loads, scabs) = Load::blast(&[(0, hit)], |_| Backing {
                 block: &slab,
-                scale: 1.0,
                 material,
                 contacts: &[],
             });
@@ -3767,7 +3743,6 @@ mod tests {
             let (hit, slab) = scab_face(loaded, scab_blow(loaded, 0.1));
             let (_, scabs) = Load::blast(&[(0, hit)], |_| Backing {
                 block: &slab,
-                scale: 1.0,
                 material,
                 contacts: &[],
             });

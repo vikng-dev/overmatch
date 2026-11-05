@@ -727,7 +727,7 @@ mod tests {
             retired: None,
         };
         let expected = piece.chunks.len();
-        world.spawn((piece.clone(), Breakage::new(kind, 0, 1.0)));
+        world.spawn((piece.clone(), Breakage::new(kind, 0)));
         world.spawn(piece.clone());
         world.spawn(Piece {
             retired: Some(1),

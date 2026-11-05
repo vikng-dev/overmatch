@@ -640,10 +640,12 @@ cohesive failure; a certified contact mechanism admits contact separation. A war
 after changed topology is a guess and must pass the same gate. A failure
 stage marks changed topology for the next tick; no failure starts another solve inside its
 own tick. An unchanged equilibrated owner performs zero sparse products. Initial gravity is prepared
-once per admitted construction and scale, before play. Other scales may reuse an intact
-displacement guess, but still solve their own loads; no cracks, contact separation or verdicts
-are copied. Instances share that immutable solution
-until their first change; compiled overloads await the first authoritative failure stage.
+once per admitted construction asset, before play. Every placement keeps its authored size;
+position and yaw are its only placement transforms. Different sizes require separately authored
+assets, preserving stock dimensions and construction facts. A level instance carrying a `scale`
+field is refused at load, with its file, identity and repair. Each asset retains one checked
+structure and one initial equilibrium. Instances share that immutable solution until their
+first change; compiled overloads await the first authoritative failure stage.
 
 ### Applied loads and blows
 

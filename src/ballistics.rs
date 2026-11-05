@@ -7671,7 +7671,7 @@ pub(crate) mod march_tests {
                 id: "fixture_house".to_owned(),
                 ordinal: 0,
             },
-            Transform::IDENTITY,
+            Isometry3d::IDENTITY,
         );
         queue.apply(world);
         settle(&mut app);

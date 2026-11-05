@@ -809,7 +809,7 @@ fn setup_wall(
 
 /// A chunk's drawn mesh, vertices about its bounding box's centre: its faces inset by [`WallTool::seam_m`].
 fn chunk_mesh(block: &Block) -> Mesh {
-    let inset = crate::construction::breakage::inset_point(block, 1.0, wall_tool().seam_m.0);
+    let inset = crate::construction::breakage::inset_point(block, wall_tool().seam_m.0);
     let (mut positions, mut normals, mut indices) = (Vec::new(), Vec::new(), Vec::new());
     for (normal, face) in block.faces() {
         let base = positions.len() as u32;
@@ -1159,7 +1159,6 @@ fn cut_holes(
         &cut.blocks,
         |c| cut.structure.chunks[c].centroid,
         |c| cut.structure.chunks[c].material.crush,
-        1.0,
         lines,
         blast,
     )
@@ -1230,7 +1229,7 @@ fn apply_deposit(
             let contacts: Vec<_> = state.contacts(structure).collect();
             let (loads, scabs) = Load::blast(&hits, |i| model::Backing {
                 block: &wall.cut.blocks[i],
-                scale: 1.0,
+
                 material: structure.chunks[i].material,
                 contacts: &contacts,
             });
@@ -1429,11 +1428,7 @@ fn apply_deposits(mut p: ApplyParam) {
                             Mesh3d(wall.meshes[chunk].clone()),
                             MeshMaterial3d(tint.clone()),
                             Transform::from_translation(block.center() - *centroid),
-                            crate::construction::breakage::loose_collider(
-                                block,
-                                1.0,
-                                block.center(),
-                            ),
+                            crate::construction::breakage::loose_collider(block, block.center()),
                             crate::debris::launch::occupied_mass(
                                 &chunk_collider(block),
                                 wall.material.density,

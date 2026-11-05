@@ -9,8 +9,7 @@
 //!
 //! Each face carries the frame [`crate::construction_surface::unit_box`] uses: outward normal `n`,
 //! tangent `t`, image-up `b = n × t`, `uv = (p·t, −p·b)` at every corner `p`, here in metres of
-//! the construction frame. The material's vertex stage multiplies them by the instance's own scale
-//! along `t` and `b`, so a scaled house keeps real-size bricks. A wall face stands its image
+//! the construction frame, at authored size. A wall face stands its image
 //! upright (`t = Y × n`) when its surface frame declares Upright; a Grain frame projects its
 //! authored direction onto the face; a level face runs along its element's longest level edge
 //! ([`tangent`]). The second UV channel selects the visual's declared palette lane, resolved through
@@ -85,7 +84,7 @@ struct CardFile {
     corners: Vec<[f32; 3]>,
 }
 
-/// One branch card: its owning law chunk and its polygon's corners, construction frame at scale 1.
+/// One branch card: its owning law chunk and its polygon's corners, construction frame at authored size.
 #[derive(Debug, Clone, PartialEq)]
 struct Card {
     owner: usize,
@@ -415,7 +414,7 @@ fn skin_tint(kind: &ConstructionKind, e: usize, n: Vec3, corners: &[Vec3]) -> [f
     }
 }
 
-/// The construction's mesh in its own frame at scale 1 (module doc): every element and every card.
+/// The construction's mesh in its own frame at authored size (module doc): every element and every card.
 pub(crate) fn mesh(kind: &ConstructionKind) -> Mesh {
     let mut faces = Faces::default();
     for e in 0..kind.layout.element_blocks.len() {
@@ -424,7 +423,7 @@ pub(crate) fn mesh(kind: &ConstructionKind) -> Mesh {
     faces.mesh()
 }
 
-/// A broken construction's mesh in its own frame at scale 1: every whole element's hull, and every
+/// A broken construction's mesh in its own frame at authored size: every whole element's hull, and every
 /// standing chunk of each swapped element its hull, so a chunk turned to dust or fallen is a hole;
 /// each card drawn with the matter that owns it.
 pub(crate) fn broken_mesh(kind: &ConstructionKind, shape: &Shape) -> Mesh {
@@ -443,7 +442,7 @@ pub(crate) fn broken_mesh(kind: &ConstructionKind, shape: &Shape) -> Mesh {
     faces.mesh()
 }
 
-/// A fallen group's mesh, its chunks' hulls and cards about `origin` (asset frame, scale 1),
+/// A fallen group's mesh, its chunks' hulls and cards about `origin` (asset frame),
 /// framed where they stood, the `k`-th chunk's faces tagged `k + 1` (module doc).
 pub(crate) fn piece_mesh(kind: &ConstructionKind, chunks: &[u16], origin: Vec3) -> Mesh {
     let mut faces = Faces::default();
@@ -525,7 +524,7 @@ const CRACK_EDGE_MIN_M: f32 = 1e-4;
 /// joint faces.
 const CRACK_FACE_TOLERANCE_M: f32 = 1e-3;
 
-/// The cracks a broken construction shows, in its frame at scale 1: for every cracked joint between
+/// The cracks a broken construction shows, in its frame at authored size: for every cracked joint between
 /// two standing chunks, a dark strip along each edge of their shared face that lies on a bounding
 /// plane of the first chunk's element, where the crack opens to the element's surface. `None` when
 /// no crack shows.
@@ -581,7 +580,7 @@ pub(crate) fn crack_mesh(
 }
 
 /// A construction's drawn child: the entity the scatter gave the construction's mesh and material, at the
-/// instance's scale under its root.
+/// authored size under its root.
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct View;
 
@@ -837,7 +836,7 @@ fn redraw(
 }
 
 /// Dress a fallen group's entity (the body offline, its carrier on a replica) with its chunks'
-/// mesh at its construction's scale, hidden until the record is presented to its fall. A carrier is
+/// mesh at authored size, hidden until the record is presented to its fall. A carrier is
 /// dressed once it holds a pose: an interpolated one takes its first when the cursor reaches it.
 fn dress_pieces(
     pieces: Query<
@@ -894,7 +893,7 @@ fn dress_pieces(
         let view = commands
             .spawn((
                 ChildOf(entity),
-                Transform::from_scale(Vec3::splat(admitted.scale)),
+                Transform::IDENTITY,
                 Mesh3d(mesh),
                 MeshMaterial3d(look.surface.clone()),
                 crate::render_cost::CasterClass::Construction,
@@ -912,7 +911,7 @@ fn dress_pieces(
 }
 
 /// A dressed piece: its construction's root, resolved from the piece's ordinal once, at dressing; its
-/// mesh child; and the point (asset frame, scale 1) its mesh is drawn about.
+/// mesh child; and the point (asset frame) its mesh is drawn about.
 #[derive(Component)]
 struct PieceDressed {
     construction: Entity,
@@ -1329,7 +1328,7 @@ mod tests {
                     id: "fixture".to_owned(),
                     ordinal: 3,
                 },
-                Breakage::new(kind, 3, 1.0),
+                Breakage::new(kind, 3),
             ))
             .id();
         let mut schedule = Schedule::default();
@@ -1810,7 +1809,7 @@ mod tests {
                     id: "fixture_construction".to_owned(),
                     ordinal: 3,
                 },
-                Breakage::new(kind.clone(), 3, 1.0),
+                Breakage::new(kind.clone(), 3),
             ))
             .id();
         let carrier = world
@@ -1845,7 +1844,7 @@ mod tests {
                     id: "fixture_construction".to_owned(),
                     ordinal: 3,
                 },
-                Breakage::new(kind, 3, 1.0),
+                Breakage::new(kind, 3),
             ))
             .id();
         world.resource_mut::<CurrentWorld>().0 = Some(WorldGeneration(2));
@@ -1883,11 +1882,7 @@ mod tests {
             radius: 100,
         });
         let root = world
-            .spawn((
-                Breakage::new(kind.clone(), 3, 1.0),
-                ShownShape(shape),
-                holes,
-            ))
+            .spawn((Breakage::new(kind.clone(), 3), ShownShape(shape), holes))
             .id();
         let view = world
             .spawn((View, MeshMaterial3d(shared.clone()), ChildOf(root)))
@@ -1965,7 +1960,7 @@ mod tests {
                 id: "house_0001".to_owned(),
                 ordinal: 3,
             },
-            Breakage::new(kind.clone(), 3, 1.0),
+            Breakage::new(kind.clone(), 3),
             ShownShape(shape),
             holes.clone(),
         ));
@@ -2055,7 +2050,7 @@ mod tests {
         let shared = world.resource_mut::<Assets<Mesh>>().add(mesh(&kind));
         let intact = Shape::intact(&kind.layout);
         let root = world
-            .spawn((Breakage::new(kind, 3, 1.0), ShownShape(intact.clone())))
+            .spawn((Breakage::new(kind, 3), ShownShape(intact.clone())))
             .id();
         let view = world.spawn((View, Mesh3d(shared), ChildOf(root))).id();
         let mut schedule = Schedule::default();
@@ -2115,7 +2110,7 @@ mod tests {
                 id: "fixture".to_owned(),
                 ordinal: 3,
             },
-            Breakage::new(kind, 3, 1.0),
+            Breakage::new(kind, 3),
             ShownShape(shape),
         ));
         let parent = world
@@ -2269,7 +2264,7 @@ mod tests {
     /// before the cursor. Ticks are fixture data.
     #[test]
     fn each_card_is_drawn_once_by_the_matter_holding_its_base() {
-        let source = Breakage::new(shipped_house(), 3, 1.0);
+        let source = Breakage::new(shipped_house(), 3);
         let structure = &source.live.structure;
         let fallen = structure.chunks.iter().position(|c| !c.buried).unwrap();
         let dusted = structure.chunks.iter().position(|c| c.buried).unwrap();
@@ -2308,7 +2303,7 @@ mod tests {
                     id: "fixture".to_owned(),
                     ordinal: 3,
                 },
-                Breakage::new(kind, 3, 1.0),
+                Breakage::new(kind, 3),
                 Transform::IDENTITY,
             ))
             .id();

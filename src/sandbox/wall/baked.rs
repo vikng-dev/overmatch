@@ -159,7 +159,7 @@ pub(crate) fn wall_cut(
                 id = asset.id,
             )
         })?;
-    for (index, (anchor, (_, bond))) in asset.anchors.iter().zip(anchors).enumerate() {
+    for (index, (anchor, bond)) in asset.anchors.iter().zip(anchors).enumerate() {
         let Some(a) = new_index[anchor.chunk as usize] else {
             continue;
         };
@@ -272,7 +272,7 @@ mod tests {
                 .filter(|joint| joint.b == Side::Ground)
                 .collect();
             let mut checked = 0;
-            for (anchor, (_, bond)) in asset.anchors.iter().zip(expected) {
+            for (anchor, bond) in asset.anchors.iter().zip(expected) {
                 if !selected(&asset, anchor.chunk) {
                     continue;
                 }

@@ -333,7 +333,6 @@ mod tests {
         app.world_mut().spawn(Breakage::new(
             crate::construction::tests::shipped_house(),
             1,
-            1.0,
         ));
         app
     }

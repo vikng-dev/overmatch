@@ -1054,7 +1054,7 @@ mod tests {
                         min[0].abs().max(max[0].abs()),
                         min[2].abs().max(max[2].abs()),
                     );
-                    constructions.push((xz, reach.length() * instance.scale[0]));
+                    constructions.push((xz, reach.length()));
                 }
                 Some(Prototype::Construction { asset }) => {
                     let (min, max) = manifest
@@ -1064,7 +1064,7 @@ mod tests {
                         .bounds();
                     let reach =
                         Vec2::new(min.x.abs().max(max.x.abs()), min.z.abs().max(max.z.abs()));
-                    constructions.push((xz, reach.length() * instance.scale[0]));
+                    constructions.push((xz, reach.length()));
                 }
                 None => {}
             }

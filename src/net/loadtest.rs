@@ -383,7 +383,7 @@ mod tests {
                     id: id.into(),
                     ordinal,
                 },
-                Transform::from_xyz(f32::from(ordinal) * 10.0, 1000.0, 0.0),
+                Isometry3d::from_translation(Vec3::new(f32::from(ordinal) * 10.0, 1000.0, 0.0)),
             );
         }
         app.world_mut().flush();
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn support_selection_includes_buried_matter_without_an_anchor_face() {
         let kind = crate::construction::tests::column_construction();
-        let mut body = Breakage::new(kind, 0, 1.0);
+        let mut body = Breakage::new(kind, 0);
         // Fixture: a second ground-held chunk has no authored anchor face.
         let extra = body.live.structure.chunks.len() - 1;
         std::sync::Arc::make_mut(&mut body.live.structure).chunks[extra].buried = true;

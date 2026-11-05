@@ -3387,7 +3387,7 @@ fn a_shipped_data_hull_push_reports_environment_release_groups() {
             id: "push_fixture".to_owned(),
             ordinal: 60000,
         },
-        Transform::from_translation(house_at),
+        Isometry3d::from_translation(house_at),
     );
     queue.apply(app.world_mut());
     app.world_mut().entity_mut(tank).insert((

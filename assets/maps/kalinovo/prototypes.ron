@@ -2,12 +2,12 @@
 // The game's prototype library for this map: what each prototype id the map's `level.json`
 // references resolves to. The level file's own `prototypes` block is the AUTHOR'S export record
 // (which glb, whether it shipped) and is rewritten on every export, so the game's reading of an id
-// lives here, beside it, keyed by the same ids. Metres at instance scale 1; the instance's own
-// uniform scale multiplies everything.
+// lives here, beside it, keyed by the same ids. Metres at authored size. Placement supplies position
+// and yaw only; different sizes are separately authored assets.
 //
 // `Block(min, max, substance, surface)`: an axis-aligned box in the prototype's local frame
 // around the instance origin; a `min.y` below zero is a skirt that sinks into the surface. A
-// construction is also a `TerrainMap` block (the belts sense it). `substance` is the `materials.ron` row
+// block's collider stays outside the immutable terrain field. `substance` is the `materials.ron` row
 // whose friction its collider carries. `surface` names each face's palette lane (+X, -X, +Z, -Z,
 // +Y, -Y) and the cube edge, `X` or `Z`, its top's tangent runs along.
 // `Construction(asset)`: a construction of the destruction model, `assets/constructions/<asset>/`, baked by

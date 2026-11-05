@@ -58,7 +58,7 @@ fn composed_kind(replica: bool, kind: &Arc<ConstructionKind>) -> (App, Entity) {
             id: "house_0001".to_owned(),
             ordinal: 3,
         },
-        Transform::IDENTITY,
+        Isometry3d::IDENTITY,
     );
     queue.apply(world);
     (app, root)
@@ -609,7 +609,7 @@ fn a_chunk_gone_never_blocks_as_the_intact_element() {
 #[test]
 fn the_record_a_replica_derives_from_is_the_authoritys() {
     let kind = shipped_house();
-    let mut authority = Live::new(&kind, 1.0);
+    let mut authority = Live::new(&kind);
     let structure = authority.structure.clone();
     let anchored: Vec<bool> = (0..structure.chunks.len())
         .map(|c| {
@@ -717,7 +717,7 @@ fn a_round_meets_a_fallen_piece_as_its_substance() {
     let (mut app, _) = composed(false);
     let kind = shipped_house();
     let (e, [c, ..]) = fixture_chunks(&kind);
-    let live = Live::new(&kind, 1.0);
+    let live = Live::new(&kind);
     let lifted = Transform::from_xyz(30.0, 0.0, 0.0);
     {
         let world = app.world_mut();
@@ -728,7 +728,7 @@ fn a_round_meets_a_fallen_piece_as_its_substance() {
             &kind,
             (3, lifted),
             &[c],
-            launch(&kind, &live.structure, 1.0, &[c], &[]),
+            launch(&kind, &live.structure, &[c], &[]),
         );
         queue.apply(world);
     }
@@ -768,7 +768,7 @@ fn a_fallen_piece_comes_to_rest_asleep_a_dynamic_body_still() {
     app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
     let kind = shipped_house();
     let (_, [c, ..]) = fixture_chunks(&kind);
-    let live = Live::new(&kind, 1.0);
+    let live = Live::new(&kind);
     let at = Transform::from_xyz(30.0, 0.0, 0.0);
     {
         let world = app.world_mut();
@@ -785,7 +785,7 @@ fn a_fallen_piece_comes_to_rest_asleep_a_dynamic_body_still() {
             &kind,
             (3, at),
             &[c],
-            launch(&kind, &live.structure, 1.0, &[c], &[]),
+            launch(&kind, &live.structure, &[c], &[]),
         );
         queue.apply(world);
     }
@@ -812,7 +812,7 @@ fn a_fallen_piece_comes_to_rest_asleep_a_dynamic_body_still() {
 }
 
 /// THE DEPOSITS' WORLD BALL NEVER DROPS WHAT THE CONSTRUCTION'S BOUNDS ACCEPT: for the shipped house
-/// (fixture data) at a fixture pose and scale, every blast direction whose ray from a fixture
+/// (fixture data) at a fixture pose, every blast direction whose ray from a fixture
 /// point the bounds' own test meets ([`Block::span`] in the construction frame) passes
 /// [`Frame::may_meet`], from points inside, beside, above and 1.4 km from the house; and every
 /// fixture point the field-stop test admits passes [`Frame::may_hold`]. A ball that clipped the
@@ -822,11 +822,10 @@ fn a_fallen_piece_comes_to_rest_asleep_a_dynamic_body_still() {
 fn the_world_ball_keeps_every_ray_the_bounds_meet() {
     let kind = shipped_house();
     let (lo, hi) = kind.bounds();
-    let scale = 1.137;
     let pose = Transform::from_xyz(312.5, -4.25, -187.0).with_rotation(Quat::from_rotation_y(0.7));
-    let frame = Frame::new(&pose, scale, (lo, hi));
+    let frame = Frame::new(&pose, (lo, hi));
     let bounds = Block::cuboid(lo, hi);
-    let world = |p: Vec3| pose.translation + pose.rotation * (p * scale);
+    let world = |p: Vec3| pose.translation + pose.rotation * p;
     let middle = (lo + hi) / 2.0;
     let origins = [
         world(middle),
@@ -837,7 +836,7 @@ fn the_world_ball_keeps_every_ray_the_bounds_meet() {
     ];
     let mut met = 0;
     for origin in origins {
-        let local = frame.unscaled(origin);
+        let local = frame.local(origin);
         for &(dir, _) in fracture::blast_directions() {
             if bounds.span(local, frame.turn(dir)).is_some() {
                 met += 1;
@@ -852,7 +851,7 @@ fn the_world_ball_keeps_every_ray_the_bounds_meet() {
         met > fracture::BLAST_RAYS,
         "the fixture points meet the bounds"
     );
-    let slack = Vec3::splat(STOP_TOLERANCE_M / scale);
+    let slack = Vec3::splat(STOP_TOLERANCE_M);
     for corner in 0..8 {
         let pick = |bit: usize, a: f32, b: f32| if corner >> bit & 1 == 0 { a } else { b };
         let local = Vec3::new(
@@ -952,7 +951,7 @@ fn held_holes(app: &App, root: Entity) -> Vec<Vec<Hole>> {
 fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
     let kind = shipped_house();
     let (e, [channel_chunk, dish_chunk, _]) = fixture_chunks(&kind);
-    let mut authority = Live::new(&kind, 1.0);
+    let mut authority = Live::new(&kind);
     let lines = [line_through_chunk(
         &authority.structure,
         across(&kind, e),
@@ -964,12 +963,12 @@ fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
         &kind.layout.element_of,
         &mut authority,
         &loads,
-        holes_of(&kind, 1.0, &lines, &[]),
+        holes_of(&kind, &lines, &[]),
         Vec3::ZERO,
         STEP,
     );
     let blast = blast_on(&authority.structure, dish_chunk, 0.05);
-    let holes = holes_of(&kind, 1.0, &[], &blast);
+    let holes = holes_of(&kind, &[], &blast);
     let second = run_laws(
         &kind.layout.element_of,
         &mut authority,
@@ -1015,8 +1014,8 @@ fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
 fn a_hole_changes_no_collider_mass_or_structural_result() {
     let kind = shipped_house();
     let (e, [c, ..]) = fixture_chunks(&kind);
-    let mut cut = Live::new(&kind, 1.0);
-    let mut whole = Live::new(&kind, 1.0);
+    let mut cut = Live::new(&kind);
+    let mut whole = Live::new(&kind);
     let line = line_through_chunk(&cut.structure, across(&kind, e), c, 0.3);
     let push = Load {
         chunk: c,
@@ -1032,7 +1031,7 @@ fn a_hole_changes_no_collider_mass_or_structural_result() {
         .into_iter()
         .chain([push])
         .collect();
-    let holes = holes_of(&kind, 1.0, &[line], &[]);
+    let holes = holes_of(&kind, &[line], &[]);
     let mut record = Vec::new();
     for tick in [7, 9] {
         let with = run_laws(
@@ -1117,10 +1116,10 @@ fn a_hole_changes_no_collider_mass_or_structural_result() {
 fn past_the_cap_a_chunk_stands_until_its_pool_is_spent() {
     let kind = shipped_house();
     let (e, [c, ..]) = fixture_chunks(&kind);
-    let mut live = Live::new(&kind, 1.0);
+    let mut live = Live::new(&kind);
     let to_spend = HOLES_PER_CHUNK + 4;
     let line = line_through_chunk(&live.structure, across(&kind, e), c, 1.0 / to_spend as f32);
-    let holes = holes_of(&kind, 1.0, &[line], &[]);
+    let holes = holes_of(&kind, &[line], &[]);
     assert_eq!(holes.len(), 1);
     let loads = line_loads(&live.structure, &[line]);
     for joint in &mut Arc::make_mut(&mut live.structure).joints {
@@ -1199,12 +1198,12 @@ fn a_hole_holds_the_volume_its_load_crushed() {
     use std::f32::consts::PI;
     let kind = shipped_house();
     let (e, [c, ..]) = fixture_chunks(&kind);
-    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let structure = kind.layout.structure(&kind.asset);
     let crush = structure.chunks[c].material.crush;
     let metres = |p: [i16; 3]| Vec3::from_array(p.map(|v| f32::from(v) / 1000.0));
 
     let line = line_through_chunk(&structure, across(&kind, e), c, 0.01);
-    let [(_, channel)] = holes_of(&kind, 1.0, &[line], &[])[..] else {
+    let [(_, channel)] = holes_of(&kind, &[line], &[])[..] else {
         panic!("one channel");
     };
     let r = f32::from(channel.radius) / 1000.0;
@@ -1224,7 +1223,7 @@ fn a_hole_holds_the_volume_its_load_crushed() {
     .check();
 
     let blast = blast_on(&structure, c, 0.01);
-    let [(_, dish)] = holes_of(&kind, 1.0, &[], &blast)[..] else {
+    let [(_, dish)] = holes_of(&kind, &[], &blast)[..] else {
         panic!("one dish");
     };
     let r = f32::from(dish.radius) / 1000.0;
@@ -1249,7 +1248,7 @@ fn a_channel_is_the_cylinder_it_crossed_open_across_each_face() {
     let kind = shipped_house();
     let (e, [c, ..]) = fixture_chunks(&kind);
     let block = &kind.layout.blocks[c];
-    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let structure = kind.layout.structure(&kind.asset);
     let centroid = Vec3::from_array(kind.asset.chunks[kind.layout.chunks[c] as usize].centroid);
     let w = across(&kind, e);
     // Tilted along the chunk's widest direction across the axis, so both ends sit inside their
@@ -1281,7 +1280,7 @@ fn a_channel_is_the_cylinder_it_crossed_open_across_each_face() {
         let s = ((x - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
         x.distance(a + ab * s)
     };
-    let [(_, channel)] = holes_of(&kind, 1.0, &[(c, entry, exit, energy)], &[])[..] else {
+    let [(_, channel)] = holes_of(&kind, &[(c, entry, exit, energy)], &[])[..] else {
         panic!("one channel");
     };
     let radius = f32::from(channel.radius) / 1000.0;
@@ -1319,7 +1318,7 @@ fn a_channel_is_the_cylinder_it_crossed_open_across_each_face() {
     );
 
     let rest = (entry + exit) / 2.0;
-    let [(_, blind)] = holes_of(&kind, 1.0, &[(c, entry, rest, energy)], &[])[..] else {
+    let [(_, blind)] = holes_of(&kind, &[(c, entry, rest, energy)], &[])[..] else {
         panic!("one blind channel");
     };
     assert!(
@@ -1639,7 +1638,7 @@ fn a_sleeping_loose_piece_wakes_to_a_blast() {
     app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
     let kind = shipped_house();
     let (_, [c, ..]) = fixture_chunks(&kind);
-    let live = Live::new(&kind, 1.0);
+    let live = Live::new(&kind);
     {
         let world = app.world_mut();
         world.spawn((
@@ -1655,7 +1654,7 @@ fn a_sleeping_loose_piece_wakes_to_a_blast() {
             &kind,
             (3, Transform::from_xyz(30.0, 0.0, 0.0)),
             &[c],
-            launch(&kind, &live.structure, 1.0, &[c], &[]),
+            launch(&kind, &live.structure, &[c], &[]),
         );
         queue.apply(world);
     }
@@ -2017,10 +2016,10 @@ fn departure_mass(
 #[test]
 fn a_break_keeps_linear_and_angular_momentum() {
     let kind = shipped_house();
-    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let structure = kind.layout.structure(&kind.asset);
     let (_, [c, other, _]) = fixture_chunks(&kind);
     let group = [c, other];
-    let unloaded = launch(&kind, &structure, 1.0, &group, &[]);
+    let unloaded = launch(&kind, &structure, &group, &[]);
     let props = departure_mass(&structure, &unloaded);
     let com = unloaded.centroid + props.center_of_mass;
     let mut worst = 0.0_f32;
@@ -2042,7 +2041,7 @@ fn a_break_keeps_linear_and_angular_momentum() {
                     step: STEP,
                 },
             };
-            let launched = launch(&kind, &structure, 1.0, &group, &[load]);
+            let launched = launch(&kind, &structure, &group, &[load]);
             assert_eq!(launched.returns.len(), 1);
             let returned = launched.returns[0];
             assert_eq!(returned.at, load.at, "give-back retains the contact point");
@@ -2074,10 +2073,10 @@ fn a_break_keeps_linear_and_angular_momentum() {
 #[test]
 fn a_break_launches_with_free_mass_and_creates_no_energy() {
     let kind = shipped_house();
-    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let structure = kind.layout.structure(&kind.asset);
     let (_, [c, _, _]) = fixture_chunks(&kind);
     let group = [c];
-    let unloaded = launch(&kind, &structure, 1.0, &group, &[]);
+    let unloaded = launch(&kind, &structure, &group, &[]);
     let props = departure_mass(&structure, &unloaded);
     let com = unloaded.centroid + props.center_of_mass;
     let inverse = props.angular_inertia_tensor().inverse();
@@ -2100,7 +2099,7 @@ fn a_break_launches_with_free_mass_and_creates_no_energy() {
                     step: STEP,
                 },
             };
-            let launched = launch(&kind, &structure, 1.0, &group, &[load]);
+            let launched = launch(&kind, &structure, &group, &[load]);
             let arm = (load.at - com).cross(Vec3::Z);
             let free_inverse = 1.0 / props.mass + arm.dot(inverse * arm);
             let expected = load.blow / (1.0 + mass * free_inverse);
@@ -2144,8 +2143,8 @@ fn a_break_launches_with_free_mass_and_creates_no_energy() {
                 },
                 ..load
             };
-            let field = launch(&kind, &structure, 1.0, &group, &[field]);
-            let limit = launch(&kind, &structure, 1.0, &group, &[limit]);
+            let field = launch(&kind, &structure, &group, &[field]);
+            let limit = launch(&kind, &structure, &group, &[limit]);
             assert_eq!(
                 (field.velocity, field.spin),
                 (limit.velocity, limit.spin),
@@ -2166,7 +2165,7 @@ fn give_back_applies_the_world_point_impulse_immediately() {
     use bevy::ecs::system::RunSystemOnce;
     let (mut app, _) = composed(false);
     let pose = Transform::from_xyz(100.0, 30.0, -70.0).with_rotation(Quat::from_rotation_y(0.7));
-    let frame = Frame::new(&pose, 1.0, (Vec3::ZERO, Vec3::ONE));
+    let frame = Frame::new(&pose, (Vec3::ZERO, Vec3::ONE));
     let at = Vec3::new(2.0, 1.0, -3.0);
     let world_at = pose.translation + pose.rotation * at;
     let source_at = world_at + Vec3::new(0.3, -0.2, 0.4);
@@ -2203,7 +2202,7 @@ fn give_back_applies_the_world_point_impulse_immediately() {
 fn only_departing_chunks_give_back_their_body_blows() {
     let kind = shipped_house();
     let (_, [c, _, _]) = fixture_chunks(&kind);
-    let mut live = Live::new(&kind, 1.0);
+    let mut live = Live::new(&kind);
     let load = Load {
         chunk: c,
         at: live.structure.chunks[c].centroid,
@@ -2270,7 +2269,7 @@ fn only_departing_chunks_give_back_their_body_blows() {
         changes.returns.is_empty(),
         "neither a press nor a field is returned"
     );
-    let mut live = Live::new(&kind, 1.0);
+    let mut live = Live::new(&kind);
     live.state.fate.fill(Fate::Dust);
     live.state.fate[c] = Fate::Standing;
     live.state.cracked.fill(true);
@@ -2324,9 +2323,9 @@ fn only_departing_chunks_give_back_their_body_blows() {
 fn simultaneous_exchanges_keep_momentum_and_spend_one_kinetic_budget() {
     use crate::contact_transfer::BodyInertia;
     let kind = shipped_house();
-    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let structure = kind.layout.structure(&kind.asset);
     let (_, [c, _, _]) = fixture_chunks(&kind);
-    let unloaded = launch(&kind, &structure, 1.0, &[c], &[]);
+    let unloaded = launch(&kind, &structure, &[c], &[]);
     let props = departure_mass(&structure, &unloaded);
     let com = unloaded.centroid + props.center_of_mass;
     let mut world = World::new();
@@ -2350,13 +2349,12 @@ fn simultaneous_exchanges_keep_momentum_and_spend_one_kinetic_budget() {
         };
         let departure = |loads: &[Load]| Departure {
             kind: kind.clone(),
-            scale: 1.0,
             tick: 0,
-            live: Live::new(&kind, 1.0).group(&[c]),
+            live: Live::new(&kind).group(&[c]),
             construction: 0,
             root: Transform::IDENTITY,
             group: vec![c],
-            launch: launch(&kind, &structure, 1.0, &[c], loads),
+            launch: launch(&kind, &structure, &[c], loads),
         };
         let source = BodyInertia {
             centre: com,
@@ -2399,7 +2397,7 @@ fn simultaneous_exchanges_keep_momentum_and_spend_one_kinetic_budget() {
         for group in &mut many_groups {
             let mut point_load = load(bodies[0]);
             point_load.blow /= 3.0;
-            group.launch = launch(&kind, &structure, 1.0, &[c], &[point_load]);
+            group.launch = launch(&kind, &structure, &[c], &[point_load]);
         }
         cap_exchanges(&mut many_groups, |_| source);
         let expected = 3.0 * source_mass / (source_mass + 3.0 * props.mass);
@@ -2443,7 +2441,7 @@ fn simultaneous_exchanges_keep_momentum_and_spend_one_kinetic_budget() {
             blow: Vec3::Z * (props.mass * 6.0),
             ..load(bodies[0])
         };
-        let field_only = launch(&kind, &structure, 1.0, &[c], &[field]);
+        let field_only = launch(&kind, &structure, &[c], &[field]);
         let mut mixed = vec![departure(&[field, load(bodies[0])])];
         cap_exchanges(&mut mixed, |_| source);
         assert!(
@@ -2536,8 +2534,8 @@ fn a_break_launches_and_returns_in_one_authority_pass() {
         .find(|(_, _, piece)| piece.chunks == [c as u16])
         .map(|(v, w, _)| (v.0, w.0))
         .expect("the contacted chunk leaves as one carrier");
-    let structure = kind.layout.structure(&kind.asset, 1.0);
-    let free = launch(&kind, &structure, 1.0, &[c], &[]);
+    let structure = kind.layout.structure(&kind.asset);
+    let free = launch(&kind, &structure, &[c], &[]);
     let props = departure_mass(&structure, &free);
     let source_mass = app.world().get::<ComputedMass>(source).unwrap().value();
     let source_velocity = app.world().get::<LinearVelocity>(source).unwrap().0;
@@ -2667,42 +2665,6 @@ fn collider_valid_hulls_with_collapsed_law_boundaries_are_refused_at_load() {
     }
 }
 
-/// EVERY SCALED COLLIDER IS CERTIFIED AT ADMISSION (the game's environment destruction model):
-/// spawn builds each element's collider, and a swap each chunk's, at the placement's scale, so a
-/// scale is admitted only where each keeps a finite positive mass and inertia, the refusal naming
-/// the field. A construction of unbreakable elements alone states no law value a scale could
-/// spoil, so only its hulls refuse the scale. Fixture: the shipped house read with no breakable
-/// substance. Fixture scales exercise positive-mass inverse-inertia underflow and mass underflow.
-#[test]
-fn every_scaled_collider_is_certified_at_admission() {
-    let kind = shipped_house();
-    let unbreakable = vec![None; kind.asset.materials.len()];
-    let layout = Layout::of(&kind.asset, &unbreakable, Attachments::shipped_static())
-        .expect("the house's hulls are admitted");
-    assert!(layout.chunks.is_empty(), "no law chunk to refuse the scale");
-    layout
-        .checked_structure(&kind.asset, 1.0)
-        .expect("the baked scale is admitted");
-    let element = &kind.asset.elements[0];
-    let density = schema::substance_density(&kind.asset.materials[usize::from(element.material)])
-        .unwrap() as f32;
-    let tiny = Collider::convex_hull(element.points().into_iter().map(|p| p * 1e-4).collect())
-        .unwrap()
-        .mass_properties(density);
-    assert!(tiny.mass > 0.0 && tiny.mass.is_finite());
-    assert_eq!(
-        tiny.angular_inertia_tensor().inverse().to_mat3(),
-        Mat3::ZERO
-    );
-    for scale in [1e-4, 1e-20] {
-        let error = layout.checked_structure(&kind.asset, scale).unwrap_err();
-        assert!(
-            error.contains("elements[0].hull at scale") && error.contains("author"),
-            "{error}"
-        );
-    }
-}
-
 /// A TINY CONTACT KEEPS THE SAME PLASTIC SHARE (the game's environment destruction model).
 /// The authority's shared exchange cap must square in f64, not underflow its positive-response
 /// check in f32. Scaling the input changes the launch by that scale, including subnormal inputs.
@@ -2710,9 +2672,9 @@ fn every_scaled_collider_is_certified_at_admission() {
 #[test]
 fn tiny_exchanges_keep_their_plastic_share_without_underflow() {
     let kind = shipped_house();
-    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let structure = kind.layout.structure(&kind.asset);
     let (_, [c, _, _]) = fixture_chunks(&kind);
-    let free = launch(&kind, &structure, 1.0, &[c], &[]);
+    let free = launch(&kind, &structure, &[c], &[]);
     let com = free.centroid + departure_mass(&structure, &free).center_of_mass;
     let body = Entity::PLACEHOLDER;
     for speed in [3.0, 1e-20, 1e-30, f32::from_bits(1)] {
@@ -2733,13 +2695,12 @@ fn tiny_exchanges_keep_their_plastic_share_without_underflow() {
         };
         let mut departures = [Departure {
             kind: kind.clone(),
-            scale: 1.0,
             tick: 0,
-            live: Live::new(&kind, 1.0).group(&[c]),
+            live: Live::new(&kind).group(&[c]),
             construction: 0,
             root: Transform::IDENTITY,
             group: vec![c],
-            launch: launch(&kind, &structure, 1.0, &[c], &[load]),
+            launch: launch(&kind, &structure, &[c], &[load]),
         }];
         cap_exchanges(&mut departures, |_| crate::contact_transfer::BodyInertia {
             centre: com,
@@ -2774,7 +2735,7 @@ fn awake_and_sleeping_presses_join_every_deposit_once() {
     for contact_first in [false, true] {
         let (mut app, root) = composed(false);
         let kind = app.world().get::<Breakage>(root).unwrap().kind.clone();
-        let structure = kind.layout.structure(&kind.asset, 1.0);
+        let structure = kind.layout.structure(&kind.asset);
         let c = structure
             .chunks
             .iter()
@@ -3098,7 +3059,7 @@ fn a_heavy_body_push_reports_the_house_release_groups() {
 /// sharing two seams and a common extrusion. The data supplies every hull and mass.
 fn landing_slab() -> (Arc<ConstructionKind>, Vec<usize>) {
     let mut kind = (*shipped_house()).clone();
-    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let structure = kind.layout.structure(&kind.asset);
     let adjacent = |a: usize, b: usize| {
         kind.layout.element_of[a] == kind.layout.element_of[b]
             && (structure.chunks[a].centroid.y - structure.chunks[b].centroid.y).abs() < 0.001
@@ -3146,8 +3107,8 @@ fn landing_slab() -> (Arc<ConstructionKind>, Vec<usize>) {
         }
     }
     assert_eq!(internal, 2, "the fixture is a chain, not a loop");
-    kind.structures.clear();
-    kind.admit_scale(1.0).unwrap();
+    kind.structure = Arc::new(kind.layout.checked_structure(&kind.asset).unwrap());
+    kind.equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest(&kind.structure).unwrap());
     (Arc::new(kind), group)
 }
 
@@ -3184,8 +3145,8 @@ fn drop_slab(gently: bool) -> (Vec<usize>, Vec<Vec<u16>>, bool) {
         .fold(f32::INFINITY, f32::min);
     let root = Transform::from_xyz(30.0, if gently { 0.005 } else { 3.0 } - low, 0.0)
         .with_rotation(rotation);
-    let live = Live::new(&kind, 1.0).group(&group);
-    let launch = launch(&kind, &live.structure, 1.0, &group, &[]);
+    let live = Live::new(&kind).group(&group);
+    let launch = launch(&kind, &live.structure, &group, &[]);
     {
         let world = app.world_mut();
         world.spawn((
@@ -3203,7 +3164,6 @@ fn drop_slab(gently: bool) -> (Vec<usize>, Vec<Vec<u16>>, bool) {
                 group: group.clone(),
                 root,
                 live,
-                scale: 1.0,
                 tick: 0,
                 construction: 3,
                 launch,
@@ -3262,8 +3222,8 @@ fn split_children_inherit_the_parents_rigid_momentum() {
     let (mut app, _) = composed(false);
     let (kind, group) = landing_slab();
     let root = Transform::from_xyz(30.0, 20.0, 0.0).with_rotation(Quat::from_rotation_y(0.7));
-    let live = Live::new(&kind, 1.0).group(&group);
-    let parent = launch(&kind, &live.structure, 1.0, &group, &[]);
+    let live = Live::new(&kind).group(&group);
+    let parent = launch(&kind, &live.structure, &group, &[]);
     let centre = root.translation + root.rotation * parent.centre;
     let velocity = Vec3::new(2.0, -3.0, 1.0);
     let spin = Vec3::new(0.3, 0.5, -0.2);
@@ -3292,7 +3252,6 @@ fn split_children_inherit_the_parents_rigid_momentum() {
                 root,
                 group,
                 live,
-                scale: 1.0,
                 tick: 0,
                 construction: 3,
                 launch: parent,
@@ -3311,7 +3270,6 @@ fn split_children_inherit_the_parents_rigid_momentum() {
     let exact = launch(
         &kind,
         &breakage.live.as_ref().structure,
-        1.0,
         &app.world()
             .get::<Piece>(entity)
             .unwrap()
@@ -3344,7 +3302,7 @@ fn split_children_inherit_the_parents_rigid_momentum() {
         .iter(world)
     {
         let group: Vec<_> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
-        let geometry = launch(&kind, &breakage.live.as_ref().structure, 1.0, &group, &[]);
+        let geometry = launch(&kind, &breakage.live.as_ref().structure, &group, &[]);
         let r = Mat3::from_quat(rotation.0);
         let inertia = r * geometry.inertia * r.transpose();
         let at = pose.0 + rotation.0 * (geometry.centre - geometry.centroid);
@@ -3392,7 +3350,7 @@ fn an_unbreakable_element_blocks_only_its_placed_construction() {
 fn a_field_blow_on_a_dusted_chunk_moves_no_moving_group() {
     let kind = shipped_house();
     let (_, [a, b, _]) = fixture_chunks(&kind);
-    let live = Live::new(&kind, 1.0);
+    let live = Live::new(&kind);
     let mut state = live.state.clone();
     state.fate[a] = Fate::Dust;
     let blow = |chunk: usize| Load {
@@ -3427,7 +3385,7 @@ fn priced(mut values: Vec<f64>) -> (f64, f64, f64, f64) {
 #[ignore = "a pricing bed, run on demand under perf and the machine lock"]
 fn a_seeded_blast_deposit_priced_by_loaded_chunks() {
     let kind = shipped_house();
-    let base = Live::new(&kind, 1.0);
+    let base = Live::new(&kind);
     let mut candidates: Vec<usize> = (0..base.structure.chunks.len())
         .filter(|&c| !base.structure.chunks[c].buried)
         .collect();
@@ -3507,7 +3465,7 @@ fn a_wall_crushes_with_the_energy_a_cone_carries() {
     use crate::ballistics::spall_cone::{AxisRule, ConeShape, FieldDescriptor, field_strength};
     use crate::ballistics::{SpallCone, SpallRay};
     let kind = shipped_house();
-    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let structure = kind.layout.structure(&kind.asset);
     let (_, [c, ..]) = fixture_chunks(&kind);
     let crush = structure.chunks[c].material.crush;
     let carried = 2_700_000.0_f32; // Fixture data: J.
@@ -3601,7 +3559,7 @@ fn marched_line(
     use crate::ballistics::{DeliveredLine, VolumeCrossing};
     use bevy::ecs::system::RunSystemOnce;
     app.world_mut().get_mut::<Breakage>(root).unwrap().kind = Arc::new(kind.clone());
-    let frame = Frame::new(&Transform::from_rotation(rotation), 1.0, kind.bounds());
+    let frame = Frame::new(&Transform::from_rotation(rotation), kind.bounds());
     let volume = app
         .world_mut()
         .query::<(Entity, &Element, &ChildOf)>()
@@ -3864,7 +3822,7 @@ fn a_far_collapsed_axis_reads_surviving_contacts_before_its_point() {
             }],
             ..default()
         };
-        let frame = Frame::new(&Transform::from_xyz(0.0, 0.0, 1000.0), 1.0, kind.bounds());
+        let frame = Frame::new(&Transform::from_xyz(0.0, 0.0, 1000.0), kind.bounds());
         let taken = app
             .world_mut()
             .run_system_once(move |p: DepositParam| {
@@ -3947,7 +3905,7 @@ fn a_marched_line_keeps_carrier_work_and_bend_at_entry() {
                 .collect::<std::collections::BTreeSet<_>>(),
             std::collections::BTreeSet::from([front, rear])
         );
-        let holes = holes_of(&kind, 1.0, &taken.lines, &[]);
+        let holes = holes_of(&kind, &taken.lines, &[]);
         assert_eq!(holes.len(), 2, "both crossed chunks keep a visual channel");
         for &(c, from, to, _) in &taken.lines {
             let energy = if c == front { 6.0 } else { 1.0 };
@@ -4018,11 +3976,8 @@ fn geometry_fixture(kind: &Arc<ConstructionKind>) -> Arc<ConstructionKind> {
     for material in &mut kind.layout.materials {
         material.seam = seam;
     }
-    for (attachment, _) in &mut kind.layout.ground {
-        *attachment = GroundAttachment::Joint(Bond::Bonded(seam));
-    }
-    kind.structures.clear();
-    kind.admit_scale(1.0).unwrap();
+    kind.structure = Arc::new(kind.layout.checked_structure(&kind.asset).unwrap());
+    kind.equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest(&kind.structure).unwrap());
     Arc::new(kind)
 }
 
@@ -4053,7 +4008,7 @@ fn freed_in_place(group: &[usize], offset: Vec3) -> (App, (f32, Mat3, Vec3)) {
         app.update();
     }
     let piece_live = live.group(group);
-    let launched = launch(&kind, &piece_live.structure, 1.0, group, &[]);
+    let launched = launch(&kind, &piece_live.structure, group, &[]);
     let body = (
         launched.mass,
         launched.inertia,
@@ -4069,7 +4024,6 @@ fn freed_in_place(group: &[usize], offset: Vec3) -> (App, (f32, Mat3, Vec3)) {
             group: group.to_vec(),
             root: Transform::from_translation(offset),
             live: piece_live,
-            scale: 1.0,
             tick: 0,
             construction: 3,
             launch: launched,
@@ -4087,9 +4041,9 @@ fn freed_in_place(group: &[usize], offset: Vec3) -> (App, (f32, Mat3, Vec3)) {
 #[test]
 fn a_freed_chunk_moves_as_the_material_it_occupies() {
     let kind = shipped_house();
-    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let structure = kind.layout.structure(&kind.asset);
     for c in 0..kind.layout.chunks.len() {
-        let mass = launch(&kind, &structure, 1.0, &[c], &[]).mass;
+        let mass = launch(&kind, &structure, &[c], &[]).mass;
         let ratio = mass / structure.chunks[c].mass;
         assert!(
             (ratio - 1.0).abs() < 1e-3,
@@ -4127,7 +4081,7 @@ fn a_freed_chunk_moves_as_the_material_it_occupies() {
 fn a_chunk_freed_in_place_takes_no_energy_from_its_neighbours() {
     let kind = shipped_house();
     let layout = &kind.layout;
-    let structure = layout.structure(&kind.asset, 1.0);
+    let structure = layout.structure(&kind.asset);
     let elements: Vec<usize> = (0..layout.elements.len())
         .filter(|&e| !layout.chunks_of(e).is_empty())
         .collect();
@@ -4183,8 +4137,8 @@ fn a_freed_chunks_ballistic_chord_is_its_occupied_chord() {
         .single(app.world())
         .unwrap()
         .origin;
-    let occupied = chunk_collider(&kind, c, 1.0, origin);
-    let centroid = kind.layout.structure(&kind.asset, 1.0).chunks[c].centroid - origin;
+    let occupied = chunk_collider(&kind, c, origin);
+    let centroid = kind.layout.structure(&kind.asset).chunks[c].centroid - origin;
     let mut volumes = app
         .world_mut()
         .query::<(&Collider, &BallisticVolume, &ChildOf)>();
@@ -4292,9 +4246,9 @@ fn field_geometry_is_independent_of_workers_and_owner_iteration() {
         .iter()
         .enumerate()
         .map(|(i, &root)| {
-            let breakage = Breakage::new(kind.clone(), i as u16, 1.0);
+            let breakage = Breakage::new(kind.clone(), i as u16);
             let pose = Transform::from_xyz(if i == 2 { -2.0 } else { 0.0 }, 0.0, 0.0);
-            let frame = Frame::new(&pose, 1.0, kind.bounds());
+            let frame = Frame::new(&pose, kind.bounds());
             (root, frame, breakage)
         })
         .collect();
@@ -4375,7 +4329,7 @@ fn field_geometry_is_independent_of_workers_and_owner_iteration() {
 fn a_jointless_owner_still_wears_keeps_holes_and_launches() {
     // Fixture: the middle cube of a column, transferred alone with a quarter-volume deposit.
     let kind = column_construction();
-    let mut live = Live::new(&kind, 1.0).group(&[1]);
+    let mut live = Live::new(&kind).group(&[1]);
     let pool = live.state.pool[1];
     let load = Load {
         chunk: 1,
@@ -4423,7 +4377,7 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
             .iter()
             .enumerate()
             .map(|(i, &root)| {
-                let mut breakage = Breakage::new(kind.clone(), i as u16, 1.0);
+                let mut breakage = Breakage::new(kind.clone(), i as u16);
                 let owned = match i {
                     0 => None,
                     1 => Some(vec![1_u16, 2]),
@@ -4465,7 +4419,6 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
                     .iter_mut()
                     .map(|(root, breakage, owned, taken)| {
                         let pose = Transform::IDENTITY;
-                        let frame = Frame::new(&pose, 1.0, kind.bounds());
                         let effect = evaluate_owner(
                             *root,
                             breakage,
@@ -4474,7 +4427,6 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
                             OwnerInputs {
                                 step: STEP,
                                 pool: &pool,
-                                frame,
                                 taken,
                                 pressing: &[],
                                 resting: &[],
@@ -4538,7 +4490,6 @@ fn prepared_group_state(prepared: PreparedDeparture) -> impl std::fmt::Debug + P
         (
             departure.construction,
             departure.root,
-            departure.scale,
             departure.tick,
             departure.group,
             departure.live.state,
@@ -4577,7 +4528,7 @@ fn split_preparation_keeps_child_order_and_state_across_workers() {
     use bevy::tasks::TaskPoolBuilder;
     // Fixture: two groups in deliberately non-address order, with wear on the last cube.
     let kind = column_construction();
-    let mut breakage = Breakage::new(kind, 7, 1.0);
+    let mut breakage = Breakage::new(kind, 7);
     breakage.live.state.pool[2] /= 2.0;
     let groups = [vec![2], vec![0, 1]];
     let split = PendingSplit {
@@ -4621,7 +4572,7 @@ fn deriving_a_shorter_same_generation_record_is_a_bug() {
         .init_resource::<Record>()
         .add_systems(Update, derive_from_record);
     app.world_mut()
-        .spawn(Breakage::new(column_construction(), 3, 1.0));
+        .spawn(Breakage::new(column_construction(), 3));
     app.world_mut()
         .resource_mut::<Record>()
         .entries
@@ -4708,7 +4659,7 @@ fn contact_preparation_preserves_source_order_across_workers() {
             .spawn((
                 Position(Vec3::X * ordinal as f32),
                 Rotation::default(),
-                Breakage::new(kind.clone(), ordinal, 1.0),
+                Breakage::new(kind.clone(), ordinal),
             ))
             .id();
         let collider = world.spawn((Element(0), ChildOf(root))).id();
@@ -4796,7 +4747,7 @@ fn reconciliation_prepares_the_same_ordered_geometry_across_workers() {
                 id: "fixture-second".into(),
                 ordinal: 2,
             },
-            Transform::from_xyz(5.0, 0.0, 0.0),
+            Isometry3d::from_translation(Vec3::new(5.0, 0.0, 0.0)),
         );
         queue.apply(app.world_mut());
         {
@@ -4952,8 +4903,8 @@ fn released_owners_share_one_openings_work_and_each_load_has_one_owner() {
 #[test]
 fn owners_share_initial_equilibrium_until_their_first_changed_load() {
     let kind = column_construction();
-    let mut first = Live::new(&kind, 1.0);
-    let second = Live::new(&kind, 1.0);
+    let mut first = Live::new(&kind);
+    let second = Live::new(&kind);
     assert!(Arc::ptr_eq(&first.assessment, &second.assessment));
     assert!(
         !first.assessment.needs_tick(),
@@ -4979,6 +4930,6 @@ fn owners_share_initial_equilibrium_until_their_first_changed_load() {
         STEP,
     );
     assert!(!Arc::ptr_eq(&first.assessment, &second.assessment));
-    assert!(Arc::ptr_eq(&second.assessment, &kind.equilibrium(1.0)));
+    assert!(Arc::ptr_eq(&second.assessment, &kind.equilibrium));
     assert!(!second.assessment.needs_tick());
 }

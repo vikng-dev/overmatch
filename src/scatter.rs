@@ -19,7 +19,7 @@
 //! a construction's state on the wire — names it by a number both peers derived from the same bytes.
 //!
 //! THE FILE'S Y IS STALE (authored against an older sculpt): every instance is re-projected onto
-//! the live [`HeightGrid`] at its own XZ. Yaw and scale are taken as authored.
+//! the live [`HeightGrid`] at its own XZ. Yaw is taken as authored; every prototype keeps its authored size.
 //!
 //! Graybox blocks and constructions of the destruction model are colliders outside
 //! the immutable terrain field; construction bounds also supply spawn obstacles.
@@ -64,19 +64,18 @@ struct Instance<'a> {
     /// Authored world XZ. The file's Y never leaves [`resolve`].
     xz: Vec2,
     rotation: Quat,
-    scale: Vec3,
     /// The file's own instance id — the sort key that fixes iteration order.
     id: &'a str,
 }
 
 /// One placed instance: its prototype, its identity and its GROUND pose — the authored XZ and
-/// rotation, the Y re-sampled from the grid, the authored scale.
+/// rotation, the Y re-sampled from the grid, at the prototype's authored size.
 #[derive(Debug, Clone, PartialEq)]
 struct Placement<'a> {
     prototype: &'a str,
     shape: &'a Prototype,
     identity: MapInstance,
-    pose: Transform,
+    pose: Isometry3d,
 }
 
 /// The friction a graybox prototype's collider carries: its `substance` row's, which
@@ -97,10 +96,10 @@ impl Placement<'_> {
             Prototype::Block { min, max, .. } => {
                 let (min, max) = (Vec3::from_array(*min), Vec3::from_array(*max));
                 Some(Transform {
-                    translation: self.pose.translation
-                        + self.pose.rotation * ((min + max) * 0.5 * self.pose.scale),
+                    translation: Vec3::from(self.pose.translation)
+                        + self.pose.rotation * ((min + max) * 0.5),
                     rotation: self.pose.rotation,
-                    scale: (max - min) * self.pose.scale,
+                    scale: max - min,
                 })
             }
             Prototype::Construction { .. } => None,
@@ -128,19 +127,10 @@ fn resolve<'a>(
                 raw.rotation[2],
                 raw.rotation[3],
             );
-            let scale = Vec3::from_array(raw.scale);
             assert!(
-                translation.is_finite() && rotation.is_finite() && scale.is_finite(),
+                translation.is_finite() && rotation.is_finite(),
                 "scatter: instance {} has a non-finite pose",
                 raw.id,
-            );
-            // A zero or negative scale is no size: a graybox box would collapse or turn inside
-            // out, and no later gate sees a graybox placement.
-            assert!(
-                scale.cmpgt(Vec3::ZERO).all(),
-                "scatter: instance {} has scale {:?}; every axis of a scale is positive",
-                raw.id,
-                raw.scale,
             );
             // A quaternion the exporter wrote as f32 TEXT is never exactly unit, so an off-unit one
             // is normalized below and welcome. One with no length is not off-unit, it is not a
@@ -159,7 +149,6 @@ fn resolve<'a>(
                 // The Y is DROPPED here, where the stale value cannot leak further.
                 xz: translation.xz(),
                 rotation: rotation.normalize(),
-                scale,
                 id: &raw.id,
             }
         })
@@ -188,15 +177,14 @@ fn place<'a>(instances: &[Instance<'a>], grid: &HeightGrid) -> Vec<Placement<'a>
                 id: instance.id.to_owned(),
                 ordinal: u16::try_from(ordinal).expect("resolve bounded the count"),
             },
-            pose: Transform {
-                translation: Vec3::new(
+            pose: Isometry3d::new(
+                Vec3::new(
                     instance.xz.x,
                     grid.height_at(instance.xz.x, instance.xz.y),
                     instance.xz.y,
                 ),
-                rotation: instance.rotation,
-                scale: instance.scale,
-            },
+                instance.rotation,
+            ),
         })
         .collect()
 }
@@ -345,10 +333,9 @@ impl ScatterScene {
                     );
                     obstacles.push(crate::construction::footprint(kind, placement.pose));
                     if let Some(view) = view {
-                        // The root stands at unit scale; the view, a child, carries the instance's.
                         commands.spawn((
                             ChildOf(root),
-                            Transform::from_scale(placement.pose.scale),
+                            Transform::IDENTITY,
                             Mesh3d(view.structure[asset].clone()),
                             MeshMaterial3d(view.surface.clone()),
                             crate::render_cost::CasterClass::Construction,
@@ -431,7 +418,6 @@ mod tests {
             prototype: "house_proxy".to_owned(),
             translation: [xz.x, stale_y, xz.y],
             rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [1.0, 1.0, 1.0],
             id: id.to_owned(),
         }
     }
@@ -481,22 +467,6 @@ mod tests {
         let mut raw = record("a", Vec2::ZERO, 0.0);
         raw.rotation = [0.0, 0.0, 0.0, 0.0];
         resolve(&[raw], &library());
-    }
-
-    /// A zero or negative scale is finite too, and a graybox placement meets no later gate: its
-    /// box collider would collapse or turn inside out. Refused at the file, on every axis.
-    #[test]
-    fn a_scale_that_is_not_positive_panics() {
-        for axis in 0..3 {
-            for bad in [0.0, -1.0] {
-                let mut raw = record("a", Vec2::ZERO, 0.0);
-                raw.scale[axis] = bad;
-                let refused = std::panic::catch_unwind(|| {
-                    resolve(&[raw], &library());
-                });
-                assert!(refused.is_err(), "scale {bad} on axis {axis} was accepted");
-            }
-        }
     }
 
     /// Spawn on the sloped fixture grid. Physics registers collider requirements before spawning;
@@ -553,7 +523,7 @@ mod tests {
     }
 
     /// EVERY CONSTRUCTION WEARS THE ONE MATERIAL, the draw-count invariant the brick-and-timber surface
-    /// rides on: a second house — another id, another scale (fixture data) — draws with the first
+    /// rides on: a second house — another id and position (fixture data) — draws with the first
     /// one's mesh and material handles, and the world holds one construction material in all. A view
     /// that minted either per instance would split the constructions into a draw each.
     #[test]
@@ -572,7 +542,6 @@ mod tests {
             .clone();
         second.id = "house_0002".to_owned();
         second.translation[0] += 30.0;
-        second.scale = [0.6; 3];
         manifest.instances.push(second);
         let (mut app, _) = spawned(&manifest, true, false);
         let world = app.world_mut();
@@ -777,20 +746,18 @@ mod tests {
     }
 
     /// The game's environment destruction view shares a skin-and-card mesh per admitted kind and
-    /// one surface material. Each view keeps its instance scale while the physical root stays at unit scale.
+    /// one surface material. Each view and physical root keeps the authored geometry.
     #[test]
-    fn drawing_shares_each_constructions_mesh_and_preserves_instance_scale() {
+    fn drawing_shares_each_constructions_authored_mesh() {
         let mut manifest = construction_fixture_manifest();
         let originals = manifest.instances.clone();
         for mut second in originals {
-            if let Prototype::Construction { asset } = &manifest.prototypes[&second.prototype] {
+            if matches!(
+                &manifest.prototypes[&second.prototype],
+                Prototype::Construction { .. }
+            ) {
                 second.id.push_str("_copy");
                 second.translation[0] += 30.0; // Fixture separation.
-                second.scale = [1.3; 3]; // Fixture scale.
-                manifest
-                    .constructions
-                    .admit_placement(asset, second.scale)
-                    .unwrap();
                 manifest.instances.push(second);
             }
         }
@@ -813,7 +780,7 @@ mod tests {
             let body = world
                 .get::<crate::construction::breakage::Breakage>(root)
                 .unwrap();
-            assert_eq!(scale, Vec3::splat(body.scale));
+            assert_eq!(scale, Vec3::ONE);
             assert_eq!(world.get::<Transform>(root).unwrap().scale, Vec3::ONE);
             by_kind
                 .entry(body.kind.asset.id.clone())
@@ -832,7 +799,7 @@ mod tests {
         for views in by_kind.values_mut() {
             views.sort_by(|a, b| a.0.total_cmp(&b.0));
             assert_eq!(views.len(), 2);
-            assert_eq!((views[0].0, views[1].0), (1.0, 1.3));
+            assert!(views.iter().all(|view| view.0 == 1.0));
             assert_eq!(views[0].1, views[1].1);
             assert_eq!(views[0].2, views[1].2);
         }

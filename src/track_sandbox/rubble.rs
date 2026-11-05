@@ -112,7 +112,7 @@ pub(super) fn spawn_rubble_yard(
     let layout = &kind.layout;
     let (wall, pieces) = yard_geometry(source, layout, yard.rubble_pile_pieces.0)
         .unwrap_or_else(|error| panic!("{error}"));
-    let structure = layout.structure(&kind.asset, 1.0);
+    let structure = layout.structure(&kind.asset);
     let brick = materials.add(Color::srgb_from_array(yard.rubble_piece_srgb.0));
     let standing = materials.add(Color::srgb_from_array(yard.rubble_wall_srgb.0));
     let [wall_x, wall_z] = yard.rubble_wall_at_m.0;
@@ -154,7 +154,7 @@ pub(super) fn spawn_rubble_yard(
         ))
         .id();
     for &c in &wall_chunks {
-        let collider = chunk_collider(kind, c, 1.0, Vec3::ZERO);
+        let collider = chunk_collider(kind, c, Vec3::ZERO);
         commands.spawn((
             ChildOf(wall_root),
             Transform::IDENTITY,
@@ -184,7 +184,7 @@ pub(super) fn spawn_rubble_yard(
     );
     for (i, &c) in pieces.iter().enumerate() {
         let centroid = structure.chunks[c].centroid;
-        let collider = chunk_collider(kind, c, 1.0, centroid);
+        let collider = chunk_collider(kind, c, centroid);
         let (row, col, layer) = (
             i % row_count,
             (i / row_count) % row_count,
