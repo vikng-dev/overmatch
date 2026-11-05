@@ -2,17 +2,20 @@
 //! state only). The construction design's "Crumble on landing" owns the narrative.
 //!
 //! THE LAW ([`crumble`]). A landing is a physics step in which a moving chunk group took a blow
-//! past its rest speed (Avian's `SleepThreshold`, [`landings`]). Each contact point's blow peaks as
-//! two elastic bodies stopping each other do ([`peak_force`], [`crate::contact_law`]), from the two sides'
-//! stiffness and curvature, never from the solver's step; with the point's press it is a force on
-//! the chunk it touches. The group's chunk kernel
+//! past its rest speed (Avian's `SleepThreshold`, [`landings`]). The blows one chunk took from one
+//! other collider are one patch, summed before any force law reads them, so the narrow phase's
+//! sampling changes nothing. Each patch's blow peaks as two elastic bodies stopping each other do
+//! ([`peak_force`], [`crate::contact_law`]), from the two sides' stiffness and curvature, never
+//! from the solver's step; it and each point's press are forces on the chunk they touch
+//! ([`touches`]). The group's chunk kernel
 //! ([`Kernel::hold`]) balances those forces by the group's rigid acceleration and judges every
 //! joint in the field that leaves: a bond past its strength cracks, a joint pulled apart parts,
 //! and the field is solved again on what is left until it holds. Cracks therefore lie where the
 //! force runs. Energy conserves: the cracks absorb their fracture
 //! work, each bond's fracture energy in its failing mode over its area ([`crack_work`]), and all of
 //! them together never more than the kinetic energy the landing dissipated, `E = ½ Σ |J_i| v_i`
-//! over its blows and closing speeds (DERIVED, a plastic impact). Past that, the most overloaded
+//! over its blows and closing speeds (DERIVED, a plastic impact), shared with a moving group on the
+//! other side by compliance ([`touches`]). Past that, the most overloaded
 //! crack first, it stops at the first the energy left cannot pay. What stays connected over the
 //! joints that did not part is a fragment.
 //!
@@ -270,28 +273,40 @@ impl Shed {
     }
 }
 
-/// One contact point of a landing: the group's collider, the other side's (`None` for a track
-/// belt), the world point, the blow (N·s) and press (N) the group took there, and its closing speed
-/// (m/s).
-struct Point {
+/// One patch of a landing: the blow (N·s) one of a group's colliders took from one other collider
+/// (`None`, a track belt) over the step, summed over every point the narrow phase sampled it with,
+/// at their blow-weighted centre and closing at their blow-weighted speed (m/s), so its force law
+/// sees one blow however many points sampled it. `struck` is the momentum its points struck with
+/// (N·s), and `shared` says whether the other side is a moving group crumbling from the same
+/// collision.
+struct Patch {
     collider: Entity,
     other: Option<Entity>,
     at: Vec3,
     blow: Vec3,
-    press: Vec3,
+    struck: f32,
     closing: f32,
+    shared: bool,
 }
 
-/// One physics step's landing on a moving group: its points and the energy its blows dissipated
-/// (J, module doc).
+/// What a point held through the step rather than struck: its press (N) on the group's collider
+/// at the point.
+struct Press {
+    collider: Entity,
+    at: Vec3,
+    force: Vec3,
+}
+
+/// One physics step's landing on a moving group: its patches and its points' presses.
 #[derive(Default)]
 struct Landing {
-    points: Vec<Point>,
-    energy: f32,
+    patches: Vec<Patch>,
+    presses: Vec<Press>,
 }
 
 /// Each moving group's landing this physics step; a group whose contacts brought no blow only
-/// rests or slides, and lands nowhere.
+/// rests or slides, and lands nowhere. `rest_speed` is a moving group's rest speed (m/s), `None`
+/// for a body that is not one free to crumble this step.
 fn landings(
     transfers: &ContactTransfers,
     rest_speed: impl Fn(Entity) -> Option<f32>,
@@ -314,24 +329,95 @@ fn landings(
             } else {
                 0.0
             };
-            let blow = -point.normal * struck;
-            let press = -(point.impulse - point.normal * struck) / dt;
-            landing.energy += 0.5 * struck * point.closing_speed.max(0.0);
-            landing.points.push(Point {
+            landing.presses.push(Press {
                 collider: point.structure_collider,
-                other: point.body_collider,
                 at: point.point,
-                blow,
-                press,
-                closing: point.closing_speed,
+                force: -(point.impulse - point.normal * struck) / dt,
             });
+            if struck <= 0.0 {
+                continue;
+            }
+            let at = landing.patches.iter().position(|patch| {
+                patch.collider == point.structure_collider && patch.other == point.body_collider
+            });
+            let patch = match at {
+                Some(at) => &mut landing.patches[at],
+                None => {
+                    landing.patches.push(Patch {
+                        collider: point.structure_collider,
+                        other: point.body_collider,
+                        at: Vec3::ZERO,
+                        blow: Vec3::ZERO,
+                        struck: 0.0,
+                        closing: 0.0,
+                        shared: rest_speed(point.body).is_some(),
+                    });
+                    landing.patches.last_mut().expect("the patch just pushed")
+                }
+            };
+            patch.at += point.point * struck;
+            patch.blow -= point.normal * struck;
+            patch.struck += struck;
+            patch.closing += point.closing_speed * struck;
         }
     }
-    landings.retain(|_, landing| landing.energy > 0.0);
+    landings.retain(|_, landing| !landing.patches.is_empty());
+    for patch in landings
+        .values_mut()
+        .flat_map(|landing| &mut landing.patches)
+    {
+        patch.at /= patch.struck;
+        patch.closing /= patch.struck;
+    }
     landings
 }
 
-/// The force (N) a landing's point puts on chunk `chunk`: its blow's peak against `other`, with the
+/// `landing`'s touches on its group's chunks (`chunk` of each of its colliders), in the
+/// construction frame `frame`, and the energy its blows dissipated that the group may spend (J):
+/// `½ J v` per patch, the whole of it against a side that spends none (the ground, a hull, a
+/// placed construction, whose contact loads carry no energy), and against a moving group
+/// crumbling from the same collision its own compliance's share (DERIVED from Hertz: under one
+/// force each side's approach, and so the work done on it, is in proportion to its compliance;
+/// K. L. Johnson, *Contact Mechanics*, §4.2), so the two spend one collision's energy between
+/// them. `other` is what each patch meets ([`Contacts::other`]).
+fn touches(
+    structure: &Structure,
+    frame: Transform,
+    landing: &Landing,
+    chunk: impl Fn(Entity) -> usize,
+    other: impl Fn(Option<Entity>) -> Contactor,
+) -> (Vec<Touch>, f32) {
+    let local = |chunk: usize, at: Vec3, force: Vec3| Touch {
+        chunk,
+        at: frame.rotation.inverse() * (at - frame.translation),
+        force: frame.rotation.inverse() * force,
+    };
+    let mut touches: Vec<Touch> = landing
+        .presses
+        .iter()
+        .map(|press| local(chunk(press.collider), press.at, press.force))
+        .collect();
+    let mut energy = 0.0;
+    for patch in &landing.patches {
+        let c = chunk(patch.collider);
+        let (own, against) = (Contactor::chunk(structure, c), other(patch.other));
+        let share = if patch.shared {
+            own.compliance / (own.compliance + against.compliance)
+        } else {
+            1.0
+        };
+        energy += 0.5 * patch.struck * patch.closing * share as f32;
+        let blow = (patch.blow, Vec3::ZERO, patch.closing);
+        touches.push(local(
+            c,
+            patch.at,
+            landing_force(structure, c, against, blow),
+        ));
+    }
+    (touches, energy)
+}
+
+/// The force (N) a landing's patch puts on chunk `chunk`: its blow's peak against `other`, with the
 /// effective mass a plastic stop of it moved, `m = |J| / v` (DERIVED), and its press.
 pub(crate) fn landing_force(
     structure: &Structure,
@@ -385,9 +471,8 @@ struct Contacts<'w, 's> {
 }
 
 impl Contacts<'_, '_> {
-    /// What a landing's point meets through `collider`: a construction's chunk (curved) or element
-    /// (flat) by its material, the ground by its data, and any other body (a hull, a track belt
-    /// with no collider) as [`Contactor::RIGID`].
+    /// What a landing's patch meets through `collider` ([`meets`]); a track belt, with no
+    /// collider, is a hull's, [`Contactor::RIGID`].
     fn other(&self, collider: Option<Entity>, moving: &Query<Moving>) -> Contactor {
         let Some(collider) = collider else {
             return Contactor::RIGID; // A track belt: a hull's.
@@ -401,28 +486,28 @@ impl Contacts<'_, '_> {
             Ok(breakage) => Some(breakage),
             Err(_) => moving.get(owner).ok().map(|item| item.2),
         });
-        match (chunk, element, breakage) {
-            (Some(&ChunkCollider(c)), _, Some(breakage)) => {
-                Contactor::chunk(&breakage.live.structure, usize::from(c))
-            }
-            (None, Some(&Element(e)), Some(breakage)) => {
-                let first = breakage
-                    .kind
-                    .layout
-                    .element_of
-                    .iter()
-                    .position(|&of| of == e)
-                    .expect("an element has chunks");
-                Contactor {
-                    radius: None, // A whole element's face is flat to the chunk landing on it.
-                    ..Contactor::chunk(&breakage.live.structure, first)
-                }
-            }
-            _ if layers.is_some_and(|layers| layers.memberships.has_all(Layer::Terrain)) => {
-                Contactor::ground()
-            }
-            _ => Contactor::RIGID,
+        let terrain = layers.is_some_and(|layers| layers.memberships.has_all(Layer::Terrain));
+        meets(chunk, element, terrain, breakage)
+    }
+}
+
+/// What a landing meets on a collider standing for `chunk` or `element` of `breakage`'s
+/// construction, or on the ground (`terrain`): a chunk curved, by its material; a whole element
+/// flat, by its substance's stiffness, whether or not it breaks; the ground by its data; any other
+/// body (a hull) as [`Contactor::RIGID`].
+fn meets(
+    chunk: Option<&ChunkCollider>,
+    element: Option<&Element>,
+    terrain: bool,
+    breakage: Option<&Breakage>,
+) -> Contactor {
+    match (chunk, element, breakage) {
+        (Some(&ChunkCollider(c)), _, Some(breakage)) => {
+            Contactor::chunk(&breakage.live.structure, usize::from(c))
         }
+        (None, Some(&Element(e)), Some(breakage)) => breakage.kind.element_face(usize::from(e)),
+        _ if terrain => Contactor::ground(),
+        _ => Contactor::RIGID,
     }
 }
 
@@ -458,36 +543,25 @@ fn crumble_landings(
             let (_, _, breakage, pose, _, _) = groups
                 .get(entity)
                 .expect("the landings were filtered to these groups");
-            let frame = breakage.physics_frame(pose);
-            let structure = &breakage.live.structure;
-            let touches = landing
-                .points
-                .iter()
-                .map(|point| {
-                    let chunk = usize::from(
-                        contacts
-                            .colliders
-                            .get(point.collider)
-                            .expect("a moving group's contact lies on a live collider")
-                            .0
-                            .expect("a moving group's colliders are its chunks'")
-                            .0,
-                    );
-                    let other = contacts.other(point.other, &groups);
-                    let force = landing_force(
-                        structure,
-                        chunk,
-                        other,
-                        (point.blow, point.press, point.closing),
-                    );
-                    Touch {
-                        chunk,
-                        at: frame.rotation.inverse() * (point.at - frame.translation),
-                        force: frame.rotation.inverse() * force,
-                    }
-                })
-                .collect();
-            (entity, landing.energy, touches)
+            let chunk = |collider: Entity| {
+                usize::from(
+                    contacts
+                        .colliders
+                        .get(collider)
+                        .expect("a moving group's contact lies on a live collider")
+                        .0
+                        .expect("a moving group's colliders are its chunks'")
+                        .0,
+                )
+            };
+            let (touches, energy) = touches(
+                &breakage.live.structure,
+                breakage.physics_frame(pose),
+                &landing,
+                chunk,
+                |other| contacts.other(other, &groups),
+            );
+            (entity, energy, touches)
         })
         .collect();
     for (entity, energy, touches) in landings {

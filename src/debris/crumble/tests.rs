@@ -4,6 +4,19 @@
 
 use super::*;
 use crate::construction::tests::shipped_house;
+use crate::contact_transfer::ContactTransfer;
+
+/// A fixture reading's entity: the moving group, another body, and a chunk's collider at `c + 1`.
+fn entity(raw: u32) -> Entity {
+    Entity::from_raw_u32(raw).expect("a fixture id")
+}
+
+const GROUP: u32 = 1_000_000;
+const GROUND: u32 = 1_000_001;
+
+fn collider(c: usize) -> Entity {
+    entity(u32::try_from(c).unwrap() + 1)
+}
 
 /// A released part: the shipped house's breakable element with the most internal joints, every
 /// joint leaving it parted (as a release leaves it), and each chunk's lowest point (m).
@@ -66,15 +79,54 @@ impl Part {
         self.landing_on(speed, Contactor::ground())
     }
 
-    /// A flat landing on `against` at `speed` m/s, as the solver reads a plastic stop: the part's
-    /// momentum `M v` as one blow, shared by its lowest course (every chunk whose lowest point lies
-    /// within a millimetre of the part's) at their lowest points, upward, through the landing's
-    /// force law ([`landing_force`]). With the kinetic energy it dissipates, `½ M v²`.
-    fn landing_on(&self, speed: f32, against: Contactor) -> (Vec<Touch>, f32) {
+    /// Its lowest course: every chunk (by index into the group) whose lowest point lies within a
+    /// millimetre of the part's.
+    fn course(&self) -> Vec<usize> {
         let floor = self.low.iter().copied().fold(f32::INFINITY, f32::min);
-        let course: Vec<usize> = (0..self.group.len())
+        (0..self.group.len())
             .filter(|&i| self.low[i] - floor < 1e-3)
-            .collect();
+            .collect()
+    }
+
+    /// A ground contact point on chunk `group[i]` at its lowest point, closing at `speed` m/s with
+    /// effective mass `mass` kg, the solver having moved `moved` N·s into the ground through it.
+    fn point(&self, i: usize, speed: f32, mass: f32, moved: f32) -> ContactTransfer {
+        let c = self.group[i];
+        let centroid = self.structure.chunks[c].centroid;
+        ContactTransfer {
+            structure: entity(GROUP),
+            structure_collider: collider(c),
+            body: entity(GROUND),
+            body_collider: Some(entity(GROUND)),
+            point: Vec3::new(centroid.x, self.low[i], centroid.z),
+            normal: Vec3::NEG_Y,
+            impulse: Vec3::NEG_Y * moved,
+            effective_mass: mass,
+            closing_speed: speed,
+        }
+    }
+
+    /// The touches and energy the production adapter ([`landings`], [`touches`]) reads from
+    /// `transfers` on the part, as a moving group at rest speed zero, against the ground.
+    fn read(&self, transfers: &ContactTransfers) -> (Vec<Touch>, f32) {
+        let ids: BTreeMap<Entity, usize> = self.group.iter().map(|&c| (collider(c), c)).collect();
+        let landings = landings(transfers, |body| (body == entity(GROUP)).then_some(0.0));
+        let landing = &landings[&entity(GROUP)];
+        touches(
+            &self.structure,
+            Transform::IDENTITY,
+            landing,
+            |collider| ids[&collider],
+            |_| Contactor::ground(),
+        )
+    }
+
+    /// A flat landing on `against` at `speed` m/s, as the solver reads a plastic stop: the part's
+    /// momentum `M v` as one blow, shared by its lowest course ([`Self::course`]) at their lowest
+    /// points, upward, through the landing's force law ([`landing_force`]). With the kinetic
+    /// energy it dissipates, `½ M v²`.
+    fn landing_on(&self, speed: f32, against: Contactor) -> (Vec<Touch>, f32) {
+        let course = self.course();
         let blow = Vec3::Y * self.mass() * speed / course.len() as f32;
         let touches = course
             .iter()
@@ -203,29 +255,149 @@ fn a_far_drop_cracks_only_where_the_force_runs() {
     );
 }
 
-/// A LANDING CRACKS ALIKE AT ANY PHYSICS STEP: the solver reads one plastic stop as one blow
-/// `J = M v` and the held weight as a press, whatever its step, and the landing's force comes
-/// from the contact's stiffness, not the step. So the same far landing read at 1/32, 1/64 and
-/// 1/128 s cracks the same bonds. A force of `J / Δt` (the step's) doubles with each halving and
-/// cracks more.
+/// A LANDING CRACKS ALIKE AT ANY PHYSICS STEP: the production adapter reads one plastic stop as
+/// one blow `J = M v` and the held weight as a press, whatever its step, and the landing's force
+/// comes from the contact's stiffness, not the step. So the same far landing read at 1/32, 1/64
+/// and 1/128 s cracks the same bonds with the same energy. A force of `J / Δt` (the step's)
+/// doubles with each halving and cracks more. Fixture: the lowest course's points share the
+/// part's mass evenly, as a flat face's do.
 #[test]
 fn a_landing_cracks_alike_at_any_physics_step() {
     let part = released_part();
     let speed = 2.0 * part.threshold(Contactor::ground());
-    let weight = Vec3::Y * part.mass() * crate::physical_laws::gravity_mps2();
-    let cracks: Vec<Vec<usize>> = [1.0 / 32.0, 1.0 / 64.0, 1.0 / 128.0]
-        .iter()
-        .map(|_step: &f32| {
-            let (mut touches, energy) = part.landing(speed);
-            let share = weight / touches.len() as f32;
-            for touch in &mut touches {
-                touch.force += share; // The press: what the contact holds, in newtons, per step.
-            }
-            part.crumble(&touches, energy).cracked
+    let (mass, g) = (part.mass(), crate::physical_laws::gravity_mps2());
+    let course = part.course();
+    let share = mass / course.len() as f32;
+    let read: Vec<(Vec<usize>, f32, Vec3)> = [1.0 / 32.0, 1.0 / 64.0, 1.0 / 128.0]
+        .into_iter()
+        .map(|dt: f32| {
+            let points = course
+                .iter()
+                .map(|&i| part.point(i, speed, share, share * (speed + g * dt)))
+                .collect();
+            let (touches, energy) = part.read(&ContactTransfers::fixture(vec![points], dt));
+            let force = touches.iter().map(|touch| touch.force).sum::<Vec3>();
+            (part.crumble(&touches, energy).cracked, energy, force)
         })
         .collect();
-    assert!(!cracks[0].is_empty(), "the landing cracks");
-    assert!(cracks.iter().all(|c| *c == cracks[0]));
+    let (cracked, energy, force) = &read[0];
+    assert!(!cracked.is_empty(), "the landing cracks");
+    for (other, spent, pushed) in &read {
+        assert_eq!(other, cracked);
+        assert!((spent - energy).abs() <= 1e-4 * energy);
+        assert!((*pushed - *force).length() <= 1e-4 * force.length());
+    }
+}
+
+/// ONE BLOW, ONE PEAK, HOWEVER SAMPLED: one blow on one chunk, read as one point or split evenly
+/// among four about the same centre, is one patch to the adapter, so it puts the same force there
+/// and cracks the same bonds. A mutant converting each point's share alone raises the summed peak
+/// by `n^(2/5)` (DERIVED from `P ∝ m^(3/5)`) and cracks more. Fixture: the lowest course's first
+/// chunk, struck with the part's whole momentum.
+#[test]
+fn one_blow_cracks_alike_however_many_points_sample_it() {
+    let part = released_part();
+    let speed = 4.0 * part.threshold(Contactor::ground());
+    let mass = part.mass();
+    let i = part.course()[0];
+    let read = |n: usize| {
+        let points = (0..n)
+            .map(|k| {
+                let mut point = part.point(i, speed, mass, mass * speed / n as f32);
+                if n > 1 {
+                    let angle = std::f32::consts::TAU * k as f32 / n as f32;
+                    point.point += 0.05 * Vec3::new(angle.cos(), 0.0, angle.sin());
+                }
+                point
+            })
+            .collect();
+        part.read(&ContactTransfers::fixture(vec![points], 1.0 / 64.0))
+    };
+    let ((one, energy), (four, split)) = (read(1), read(4));
+    let force = |touches: &[Touch]| touches.iter().map(|touch| touch.force).sum::<Vec3>();
+    assert!((force(&one) - force(&four)).length() <= 1e-4 * force(&one).length());
+    assert!((energy - split).abs() <= 1e-4 * energy);
+    let cracked = part.crumble(&one, energy).cracked;
+    assert!(!cracked.is_empty(), "the blow cracks");
+    assert_eq!(cracked, part.crumble(&four, split).cracked);
+}
+
+/// ONE COLLISION, ONE BUDGET: two equal moving groups closing on each other each read the
+/// collision from their own side, with its one effective mass `μ` and closing speed `v`; together
+/// they may spend at most the energy it dissipated, `½ μ v²`, each its compliance's share, half.
+/// A mutant giving each side the whole budget spends it twice. Fixture: the part's first chunk on
+/// both sides, `μ` half the part's mass (two equal bodies), closing at 3 m/s.
+#[test]
+fn two_groups_colliding_spend_one_collisions_energy() {
+    let part = released_part();
+    let c = part.group[0];
+    let (mass, speed) = (0.5 * part.mass(), 3.0);
+    let (a, b, ca, cb) = (
+        entity(GROUP),
+        entity(GROUND),
+        collider(c),
+        entity(GROUND + 1),
+    );
+    let side = |structure, own, body, theirs, normal: Vec3| ContactTransfer {
+        structure,
+        structure_collider: own,
+        body,
+        body_collider: Some(theirs),
+        point: part.structure.chunks[c].centroid,
+        normal,
+        impulse: normal * mass * speed,
+        effective_mass: mass,
+        closing_speed: speed,
+    };
+    let transfers = ContactTransfers::fixture(
+        vec![
+            vec![side(a, ca, b, cb, Vec3::X)],
+            vec![side(b, cb, a, ca, Vec3::NEG_X)],
+        ],
+        1.0 / 64.0,
+    );
+    let landings = landings(&transfers, |body| (body == a || body == b).then_some(0.0));
+    assert_eq!(landings.len(), 2, "each side lands");
+    let spent: Vec<f32> = landings
+        .values()
+        .map(|landing| {
+            let chunk = Contactor::chunk(&part.structure, c);
+            touches(
+                &part.structure,
+                Transform::IDENTITY,
+                landing,
+                |_| c,
+                |_| chunk,
+            )
+            .1
+        })
+        .collect();
+    let dissipated = 0.5 * mass * speed * speed;
+    assert!(spent.iter().sum::<f32>() <= dissipated * (1.0 + 1e-5));
+    assert!(
+        spent
+            .iter()
+            .all(|e| (e - 0.5 * dissipated).abs() <= 1e-4 * dissipated)
+    );
+}
+
+/// A LANDING ON AN ELEMENT THAT NEVER BREAKS meets its substance's face, read from the admitted
+/// material data: the element has no law chunk to read one from. A mutant reading its first chunk
+/// panics on the server. Fixture: the shipped house with its wood made of a steel, which never
+/// breaks.
+#[test]
+fn a_landing_on_an_element_that_never_breaks_meets_its_substance() {
+    let kind =
+        std::sync::Arc::new(crate::construction::tests::shipped_house_of("Wood", "RHA").unwrap());
+    let breakage = Breakage::new(kind.clone(), 1);
+    let steel = (0..kind.asset.elements.len())
+        .find(|&k| kind.layout.elements[k].is_none())
+        .expect("the steel elements never break");
+    let element = Element(u16::try_from(steel).unwrap());
+    assert_eq!(
+        meets(None, Some(&element), false, Some(&breakage)),
+        kind.element_face(steel)
+    );
 }
 
 /// SOFT GROUND CRACKS LESS: the Hertz peak scales as `E*^(2/5)` (DERIVED), and the ground's

@@ -61,6 +61,9 @@ pub(crate) struct ConstructionKind {
     /// Per entry of the asset's material table: the friction its substance's colliders carry
     /// (`substances::HardSubstance::contact_friction`).
     friction: Vec<avian3d::prelude::Friction>,
+    /// Per entry of the asset's material table: the flat face its substance's stiffness shows a
+    /// body landing on a whole element of it, breakable or not.
+    faces: Vec<crate::contact_law::Contactor>,
     /// The bounds of the elements and of every chunk that tiles them, in the construction frame, `(min, max)`: every collider the construction ever stands, intact or broken.
     bounds: (Vec3, Vec3),
     /// What the fracture laws read of it.
@@ -115,6 +118,34 @@ impl ConstructionKind {
             .iter()
             .map(|name| fracture::Material::of(registry, name))
             .collect::<Result<Vec<_>, _>>()?;
+        // A breakable substance's moduli are its law's; one that never breaks states a metal's.
+        let faces = asset
+            .materials
+            .iter()
+            .zip(&law_materials)
+            .map(|(name, law)| match law {
+                Some(law) => Ok(crate::contact_law::Contactor::face(
+                    law.young,
+                    law.young / (2.0 * law.shear_modulus) - 1.0,
+                )),
+                None => registry
+                    .hard(name)
+                    .map_err(|err| err.to_string())?
+                    .facts
+                    .map(|facts| {
+                        crate::contact_law::Contactor::face(
+                            facts.youngs_modulus,
+                            facts.poisson_ratio,
+                        )
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "substance {name:?} states neither bulk nor material facts: no \
+                             stiffness for a body landing on an element of it"
+                        )
+                    }),
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let layout = breakage::Layout::of(&asset, &law_materials, attachments)?;
         let structure = Arc::new(layout.checked_structure(&asset)?);
         let equilibrium = Arc::new(fracture::parts::Assessment::at_rest(&structure));
@@ -124,6 +155,7 @@ impl ConstructionKind {
             asset,
             materials,
             friction,
+            faces,
             bounds,
             layout,
             structure,
@@ -134,6 +166,11 @@ impl ConstructionKind {
     /// The friction element `k`'s colliders carry, standing or loose: its substance's.
     pub(crate) fn element_friction(&self, k: usize) -> avian3d::prelude::Friction {
         self.friction[usize::from(self.asset.elements[k].material)]
+    }
+
+    /// The flat face element `k` shows a body landing on it: its substance's stiffness.
+    pub(crate) fn element_face(&self, k: usize) -> crate::contact_law::Contactor {
+        self.faces[usize::from(self.asset.elements[k].material)]
     }
 
     /// The friction law chunk `c`'s collider carries, standing or loose: its element's.
@@ -381,6 +418,43 @@ pub(crate) mod tests {
                     .clone()
             })
             .clone()
+    }
+
+    /// The shipped house with its material table's `from` entry named `to`, resolved through the
+    /// loader: a fixture for a substance no shipped asset places.
+    pub(crate) fn shipped_house_of(from: &str, to: &str) -> Result<ConstructionKind, String> {
+        let path = shipped_assets().join("constructions/house_1/house_1.construction.ron");
+        let text = std::fs::read_to_string(path).expect("the shipped house's file");
+        let (head, table) = text.split_once("materials: [").expect("a material table");
+        let table = table.replacen(&format!("\"{from}\""), &format!("\"{to}\""), 1);
+        ConstructionKind::resolve(
+            "house_1",
+            &format!("{head}materials: [{table}"),
+            SubstanceRegistry::shipped_static(),
+            Attachments::shipped_static(),
+        )
+    }
+
+    /// AN ELEMENT THAT NEVER BREAKS HAS A FACE: a substance with no bulk law states a metal's
+    /// moduli, and a landing on its element reads them; one stating neither is refused before
+    /// play, naming it. A mutant reading a face from the element's law chunks finds none.
+    #[test]
+    fn an_element_that_never_breaks_shows_its_substances_stiffness() {
+        let kind = shipped_house_of("Wood", "RHA").expect("steel elements are admitted");
+        let facts = SubstanceRegistry::shipped_static()
+            .hard("RHA")
+            .unwrap()
+            .facts
+            .expect("RHA states material facts");
+        let steel = (0..kind.asset.elements.len())
+            .find(|&k| kind.layout.elements[k].is_none())
+            .expect("the steel elements never break");
+        assert_eq!(
+            kind.element_face(steel),
+            crate::contact_law::Contactor::face(facts.youngs_modulus, facts.poisson_ratio)
+        );
+        let err = shipped_house_of("Wood", "Cast").unwrap_err();
+        assert!(err.contains("\"Cast\" states neither"), "{err}");
     }
 
     /// `kind` spawned at `pose` into a fresh world; its root.

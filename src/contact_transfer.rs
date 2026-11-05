@@ -191,6 +191,27 @@ impl ContactTransfers {
         &self.pending
     }
 
+    /// A reading of one step of `dt` s holding `groups`, each one constraint's points: what a
+    /// physics step publishes, for a consumer's test.
+    #[cfg(test)]
+    pub(crate) fn fixture(groups: Vec<Vec<ContactTransfer>>, dt: f32) -> Self {
+        let mut transfers = Self {
+            dt,
+            steps: 1,
+            ..Self::default()
+        };
+        for points in groups {
+            transfers.kept.push(Kept {
+                color: 0,
+                index: transfers.kept.len(),
+                first: transfers.points.len(),
+                sign: 1.0,
+            });
+            transfers.points.extend(points);
+        }
+        transfers
+    }
+
     /// Stage a fixed structure's opposite force this tick, before physics integrates it.
     /// Dynamic receivers must use Self::stage_on_moving with their tick-start inertia.
     pub(crate) fn stage(&mut self, contact: AppliedContact) {

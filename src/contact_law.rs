@@ -15,27 +15,30 @@ pub(crate) struct Contactor {
 }
 
 impl Contactor {
-    /// Chunk `c`: its material's compliance (`ν = E / 2G − 1`, isotropic, from its two moduli) and
+    /// A flat face of a material of Young's modulus `young` (Pa) and Poisson's ratio `poisson`.
+    pub(crate) fn face(young: f64, poisson: f64) -> Self {
+        Self {
+            compliance: (1.0 - poisson * poisson) / young,
+            radius: None,
+        }
+    }
+
+    /// Chunk `c`: its material's face (`ν = E / 2G − 1`, isotropic, from its two moduli) curved to
     /// the radius of the sphere of its volume (a StandIn for the contact patch's own curvature,
     /// which the narrow phase does not report).
     pub(crate) fn chunk(structure: &Structure, c: usize) -> Self {
         let chunk = &structure.chunks[c];
         let (young, shear) = (chunk.material.young, chunk.material.shear_modulus);
-        let poisson = young / (2.0 * shear) - 1.0;
         Self {
-            compliance: (1.0 - poisson * poisson) / young,
             radius: Some((3.0 * f64::from(chunk.volume) / (4.0 * std::f64::consts::PI)).cbrt()),
+            ..Self::face(young, young / (2.0 * shear) - 1.0)
         }
     }
 
     /// The ground, flat, with its data ([`PhysicalLaws::ground_youngs_modulus_pa`]).
     pub(crate) fn ground() -> Self {
         let laws = PhysicalLaws::shipped();
-        let poisson = laws.ground_poisson_ratio;
-        Self {
-            compliance: (1.0 - poisson * poisson) / laws.ground_youngs_modulus_pa,
-            radius: None,
-        }
+        Self::face(laws.ground_youngs_modulus_pa, laws.ground_poisson_ratio)
     }
 
     /// A body the game states no stiffness for (a hull): rigid and flat, so the chunk's own
