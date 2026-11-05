@@ -1164,6 +1164,21 @@ fn cut_holes(
     )
 }
 
+/// The cracks among `events` no structural failure among `failures` made: a deposit's own. A
+/// failure may separate a joint an earlier tick cracked, with no crack this tick to count.
+fn local_cracks(
+    events: &[crate::construction::breakage::Event],
+    failures: &[crate::construction::fracture::Failure],
+) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(event, crate::construction::breakage::Event::Crack(j)
+                if !failures.iter().any(|failure| failure.joint == usize::from(*j)))
+        })
+        .count()
+}
+
 /// Run one deposit through the game's laws: the wear, holes and dust, the local cracks, the
 /// structural check, and the loose groups with the velocities the blows on them give.
 fn apply_deposit(
@@ -1268,13 +1283,8 @@ fn apply_deposit(
             _ => None,
         })
         .collect();
-    let cracks = changes
-        .events
-        .iter()
-        .filter(|event| matches!(event, crate::construction::breakage::Event::Crack(_)))
-        .count();
+    applied.local = local_cracks(&changes.events, &changes.failures);
     applied.failures = changes.failures;
-    applied.local = cracks - applied.failures.len();
     applied.solves = changes.solves;
     for failure in &applied.failures {
         wall.structural[failure.joint] = true;

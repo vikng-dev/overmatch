@@ -401,9 +401,9 @@ fn a_landing_on_an_element_that_never_breaks_meets_its_substance() {
 }
 
 /// SOFT GROUND CRACKS LESS: the Hertz peak scales as `E*^(2/5)` (DERIVED), and the ground's
-/// stiffness data is far below a rigid body's, so a landing that cracks bonds on a rigid floor
-/// cracks none of them on the ground. A mutant ignoring the other side's stiffness cracks both
-/// alike.
+/// stiffness data is below a rigid body's, so its onset speed ([`Part::threshold`]) lies above the
+/// rigid floor's; a landing between the two, their geometric mean, cracks bonds on the rigid floor
+/// and none on the ground. A mutant ignoring the other side's stiffness cracks both alike.
 #[test]
 fn a_landing_on_soft_ground_cracks_less_than_on_stiff() {
     let part = released_part();
@@ -413,24 +413,44 @@ fn a_landing_on_soft_ground_cracks_less_than_on_stiff() {
         / (chunk.compliance + ground.compliance))
         .powf(0.4);
     assert!(ratio < 1.0, "the ground is softer than a rigid floor");
-    let speed = 1.5 * part.threshold(Contactor::RIGID);
-    let (stiff, energy) = part.landing_on(speed, Contactor::RIGID);
-    let (soft, _) = part.landing_on(speed, ground);
-    let peak = |touches: &[Touch]| touches[0].force.length();
-    assert!((peak(&soft) / peak(&stiff) - ratio as f32).abs() < 1e-3);
-    let (stiff, soft) = (
-        part.crumble(&stiff, energy).cracked.len(),
-        part.crumble(&soft, energy).cracked.len(),
+    let (rigid, soft) = (part.threshold(Contactor::RIGID), part.threshold(ground));
+    assert!(
+        soft > rigid,
+        "the ground's onset {soft} m/s, the rigid floor's {rigid} m/s"
     );
-    assert!(soft < stiff, "soft {soft}, stiff {stiff}");
+    let speed = (rigid * soft).sqrt();
+    let (stiff, energy) = part.landing_on(speed, Contactor::RIGID);
+    let (yielding, _) = part.landing_on(speed, ground);
+    let peak = |touches: &[Touch]| touches[0].force.length();
+    assert!((peak(&yielding) / peak(&stiff) - ratio as f32).abs() < 1e-3);
+    assert!(!part.crumble(&stiff, energy).cracked.is_empty());
+    assert!(part.crumble(&yielding, energy).cracked.is_empty());
 }
 
 /// THE ENERGY LAW: the cracks absorb at most the energy the landing dissipated, the most
 /// overloaded first, and stop at the first the rest cannot pay; with enough energy every failure
-/// of the field happens. A mutant overspending, or judging cheapest first, breaks it.
+/// of the field happens. Each crack is priced here from the seam data alone, `G_I A` for tension
+/// and `G_II A` for shear (a parting costs nothing), so a mutant overspending, undercharging,
+/// swapping the modes or judging cheapest first breaks it.
 #[test]
 fn the_cracks_absorb_at_most_the_energy_the_landing_dissipated() {
     let part = released_part();
+    let price = |failure: &Failure| {
+        let joint = &part.structure.joints[failure.joint];
+        let seam = joint
+            .seam()
+            .expect("a failing joint of a bonded part is a bond");
+        match failure.cause {
+            Cause::Tension => seam.fracture_energy * joint.area,
+            Cause::Shear => seam.shear.energy * joint.area,
+            _ => 0.0,
+        }
+    };
+    let seam = part.structure.joints[0].seam().expect("a bonded part");
+    assert_ne!(
+        seam.fracture_energy, seam.shear.energy,
+        "the modes price apart"
+    );
     let (touches, _) = part.landing(4.0 * part.threshold(Contactor::ground()));
     let mut failures = part.failures(&touches);
     failures.sort_by(|a, b| {
@@ -438,10 +458,7 @@ fn the_cracks_absorb_at_most_the_energy_the_landing_dissipated() {
             .total_cmp(&overload(a))
             .then(a.joint.cmp(&b.joint))
     });
-    let total: f32 = failures
-        .iter()
-        .map(|failure| crack_work(&part.structure, failure.joint, failure.cause))
-        .sum();
+    let total: f32 = failures.iter().map(price).sum();
     assert!(total > 0.0, "the field cracks bonds");
     for share in [0.0, 0.25, 0.5, 1.0, 2.0] {
         let energy = total * share;
@@ -455,7 +472,7 @@ fn the_cracks_absorb_at_most_the_energy_the_landing_dissipated() {
         let expected: Vec<usize> = failures
             .iter()
             .map_while(|failure| {
-                let work = crack_work(&part.structure, failure.joint, failure.cause);
+                let work = price(failure);
                 (spent + work <= energy).then(|| {
                     spent += work;
                     failure
@@ -470,6 +487,11 @@ fn the_cracks_absorb_at_most_the_energy_the_landing_dissipated() {
             assert_eq!(
                 result.cracked, expected,
                 "{share}: the most overloaded first"
+            );
+            assert!(
+                (result.spent - spent).abs() <= 1e-5 * total,
+                "{share}: spent {} J, priced {spent} J",
+                result.spent
             );
         } else {
             assert_eq!(result.cracked[..expected.len()], expected[..], "{share}");

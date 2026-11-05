@@ -31,6 +31,22 @@ const SEARCH_S: f32 = 1.0 / 64.0;
 /// millimetre the bisection has placed the touch finer than the eye can tell.
 const TOUCH_M: f32 = 1e-3;
 
+/// Resolution: the farthest from the world origin a shed's frame may lie, m: f32 positions there
+/// lie 2^-10 m apart (DERIVED), under [`TOUCH_M`], so the landing search can place a touch.
+const REACH_M: f32 = 8192.0;
+
+/// Resolution: the fastest a shed may fly, m/s: within a life under 16 s (the taste's
+/// `construction_decor.lifetime_s` upper end) an f32 time step is at most 2^-20 s, in which this
+/// speed moves under [`TOUCH_M`] (the bound is 1049 m/s, DERIVED).
+const SPEED_M_S: f32 = 1000.0;
+
+/// Whether `shed`'s frame and speed lie within what the landing search resolves ([`REACH_M`],
+/// [`SPEED_M_S`]); a peer's shed past them is refused where it arrives (`net::construction`).
+pub(crate) fn representable(shed: &Shed) -> bool {
+    Vec3::from_array(shed.at).abs().max_element() <= REACH_M
+        && Vec3::from_array(shed.velocity).length() <= SPEED_M_S
+}
+
 /// A drawn fragment: its flight from the event, its seeded lifetime and its landing.
 #[derive(Component, Debug, Clone, PartialEq)]
 pub(crate) struct Decoration {
@@ -102,6 +118,12 @@ fn landing(
     }
     while above(under) < -TOUCH_M {
         let middle = 0.5 * (clear + under);
+        if middle <= clear || middle >= under {
+            // Precision runs out: `clear` and `under` are adjacent f32 times (a corner crossing a
+            // step in the ground, or a spin past the contract), and `under` is the first one in the
+            // ground. It rests there, deeper than TOUCH_M by what one time step moves it.
+            break;
+        }
         if above(middle) > 0.0 {
             clear = middle;
         } else {

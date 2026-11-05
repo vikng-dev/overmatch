@@ -179,6 +179,33 @@ pub struct BulkFacts {
     pub blast: Option<BlastFacts>,
 }
 
+/// An isotropic solid's plane-strain contact compliance `(1 − ν²) / E`, 1/Pa, with Poisson's ratio
+/// `ν = E / 2G − 1` from its Young's and shear moduli: what an elastic contact law reads of one
+/// side (`contact_law`). Its one constructor holds `ν` within the physical range `(−1, ½]`, so the
+/// compliance is finite and positive.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Compliance(f64);
+
+impl Compliance {
+    /// The compliance of moduli `young` and `shear` (Pa), or why they describe no isotropic solid.
+    pub fn of(young: f64, shear: f64) -> Result<Self, String> {
+        let poisson = young / (2.0 * shear) - 1.0;
+        let compliance = (1.0 - poisson * poisson) / young;
+        if !(poisson > -1.0 && poisson <= 0.5 && compliance.is_finite() && compliance > 0.0) {
+            return Err(format!(
+                "E = {young} Pa and G = {shear} Pa give Poisson's ratio {poisson}, outside an \
+                 isotropic solid's (−1, ½]: G lies between E/3 and E/2 for every ordinary solid"
+            ));
+        }
+        Ok(Self(compliance))
+    }
+
+    /// 1/Pa.
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
 /// Material inputs of the game's environment blast laws. SI units. The crush law (Law 1,
 /// `construction::fracture::Compaction`) reads the compression, its ratio and the fully dense
 /// density; the scab law (Law 2, `construction::fracture::Spall`) reads the modulus and the tensile
@@ -444,6 +471,17 @@ impl BulkFile {
             // Bulk-only matter is unbreakable, so the blast material laws never read it.
             None => None,
         };
+        // The two moduli of one solid, judged together: a contact law reads them as one
+        // compliance (`construction::fracture::Material::contact`).
+        if let (Some(shear), Some(blast)) = (&self.shear_modulus, &blast) {
+            Compliance::of(blast.youngs_modulus, f64::from(shear.0 as f32)).map_err(|reason| {
+                format!(
+                    "substance {name:?}: bulk.shear_modulus against bulk.blast.youngs_modulus: \
+                     {reason}; author the two moduli of one solid, each with its \
+                     material-property source"
+                )
+            })?;
+        }
         Ok(BulkFacts {
             density: self.density.0,
             tensile: self.tensile.map(|value| value.0),
@@ -1188,6 +1226,50 @@ mod tests {
     /// model). The bake and construction loader must refuse an incomplete seam, naming its file,
     /// row, missing field and repair, so the punch ring never reads a code default.
     /// ASSUMED fixture values isolate the contract from changes in shipped material numbers.
+    /// TWO MODULI OF ONE SOLID (the game's environment destruction model): a breakable row's shear
+    /// modulus is judged against its Young's modulus at load, since a contact law reads them
+    /// together. `G = E/8` gives Poisson's ratio 3 (DERIVED) and a negative compliance, a NaN
+    /// contact force downstream; it is refused naming the file, the row, both fields and the
+    /// repair, and `G = 3E/8` (ν = ⅓) loads with its compliance. Fixture data.
+    #[test]
+    fn a_shear_modulus_no_solid_has_beside_its_youngs_is_refused_at_load() {
+        let row = |shear: &str| {
+            with(&format!(
+                r#""Fixture": Hard(resistance: Effective((20.0, Fixture("fixture"))),
+                visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))), debris_half_angle_deg: (26.2, Fixture("fixture")),
+                bulk: Some((density: (1800.0, Fixture("fixture")),
+                    tensile: Some((1.0e6, Fixture("fixture"))),
+                    fracture_energy: Some((10.0, Fixture("fixture"))),
+                    shear_modulus: Some(({shear}, Fixture("fixture"))),
+                    shear_cohesion: Some((200000.0, Fixture("fixture"))),
+                    shear_fracture_energy: Some((30.0, Fixture("fixture"))),
+                    blast: Some((compressive_strength: Some((20e6, Fixture("fixture"))),
+                        compressive_dif: Some((2.0, Fixture("fixture"))),
+                        solid_density: Some((2500.0, Fixture("fixture"))),
+                        youngs_modulus: Some((8e9, Fixture("fixture"))),
+                        tensile_dif: Some((3.0, Fixture("fixture")))))))),"#,
+            ))
+        };
+        let path = std::path::Path::new("fixture/materials.ron");
+        SubstanceRegistry::from_ron_at(path, &row("3e9")).expect("ν = ⅓ loads");
+        let poisson = 8.0 / 6.0 - 1.0;
+        let expected = (1.0 - poisson * poisson) / 8e9;
+        let contact = Compliance::of(8e9, 3e9).expect("ν = ⅓").get();
+        assert!((contact - expected).abs() <= 1e-9 * expected);
+        let err = SubstanceRegistry::from_ron_at(path, &row("1e9"))
+            .unwrap_err()
+            .to_string();
+        for required in [
+            "fixture/materials.ron",
+            "Fixture",
+            "bulk.shear_modulus",
+            "bulk.blast.youngs_modulus",
+            "author",
+        ] {
+            assert!(err.contains(required), "{required}: {err}");
+        }
+    }
+
     #[test]
     fn a_breakable_row_missing_either_shear_fact_is_refused_at_load() {
         let cohesion = r#"shear_cohesion: Some((200000.0, Fixture("fixture")))"#;

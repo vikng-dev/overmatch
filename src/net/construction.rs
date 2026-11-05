@@ -187,7 +187,10 @@ fn admit_shed(
         .flatten()
         .chain(&shed.rotation)
         .all(|x| x.is_finite());
-    if !finite || !Quat::from_array(shed.rotation).is_normalized() {
+    if !finite
+        || !Quat::from_array(shed.rotation).is_normalized()
+        || !crate::debris::decor::representable(&shed)
+    {
         return Err(ConstructionRefusal::Shed(shed.construction));
     }
     Ok(shed)
@@ -870,9 +873,11 @@ mod tests {
         }
     }
 
-    /// A PEER'S SHED REACHES THE DECORATION ONLY AS A DRAWABLE GROUP WITH A FINITE MOTION: the
-    /// decoration indexes the chunks' layout and poses the mesh from the motion unchecked, so a
-    /// mutant that skipped either check would panic or draw NaN on a peer's word.
+    /// A PEER'S SHED REACHES THE DECORATION ONLY AS A DRAWABLE GROUP WITH A FINITE MOTION THE
+    /// LANDING SEARCH RESOLVES: the decoration indexes the chunks' layout and poses the mesh from
+    /// the motion unchecked, so a mutant that skipped a check would panic, draw NaN, or search a
+    /// touch finer than f32 holds on a peer's word. Fixture: 2 km/s and 100 km lie past the
+    /// decoration's contract.
     #[test]
     fn a_peer_shed_the_map_cannot_draw_is_refused() {
         use bevy::ecs::system::RunSystemOnce;
@@ -914,6 +919,20 @@ mod tests {
             (
                 Shed {
                     rotation: [0.0, 0.0, 0.0, 2.0],
+                    ..good.clone()
+                },
+                Some(ConstructionRefusal::Shed(1)),
+            ),
+            (
+                Shed {
+                    velocity: [2.0e3, 0.0, 0.0],
+                    ..good.clone()
+                },
+                Some(ConstructionRefusal::Shed(1)),
+            ),
+            (
+                Shed {
+                    at: [0.0, 0.0, 1.0e5],
                     ..good
                 },
                 Some(ConstructionRefusal::Shed(1)),

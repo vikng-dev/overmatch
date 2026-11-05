@@ -128,6 +128,29 @@ fn a_piece_rests_where_it_meets_the_ground() {
     assert!(clearance(&corners, decoration.flight(lands * 0.5, gravity), &flat) > 0.0);
 }
 
+/// THE LANDING SEARCH ENDS WHERE PRECISION DOES: a corner crossing a step in the ground jumps
+/// from above it to far into it between two adjacent f32 times, so no bisection places the touch
+/// within [`TOUCH_M`]; the search stops there and rests the piece at the first time in the ground.
+/// A mutant bisecting until the tolerance holds never returns, and the player's frame hangs.
+/// Fixture: a box flying level at 1 m/s, no gravity, at a 1 m step 1 m ahead.
+#[test]
+fn a_touch_finer_than_f32_resolves_ends_at_the_first_time_in_the_ground() {
+    let corners = [Vec3::new(-0.1, -0.1, -0.1), Vec3::new(0.1, 0.1, 0.1)];
+    let decoration = Decoration {
+        tick: 0,
+        centre: Vec3::Y * 0.5,
+        rotation: Quat::IDENTITY,
+        velocity: Vec3::X,
+        spin: Vec3::ZERO,
+        lands: None,
+        life: 8.0,
+    };
+    let step = |at: Vec3| if at.x >= 1.0 { 1.0 } else { 0.0 };
+    let lands = landing(&decoration, &corners, Vec3::ZERO, step).expect("it meets the step");
+    assert!((lands - 0.9).abs() < 1e-3, "{lands} s");
+    assert!(clearance(&corners, decoration.flight(lands, Vec3::ZERO), &step) < -TOUCH_M);
+}
+
 /// A PIECE ON THE GROUND FLIES WHEN THROWN OFF IT: a swept ground-floor patch thrown out and up
 /// from where it stood keeps its launch and lands later, further on; one driven into the ground
 /// rests at once. A mutant treating any first touch as a landing freezes the thrown patch where it

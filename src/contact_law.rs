@@ -5,6 +5,7 @@
 
 use crate::construction::fracture::Structure;
 use crate::physical_laws::PhysicalLaws;
+use crate::substances::Compliance;
 
 /// One side of a contact: its plane-strain compliance `(1 − ν²) / E` (1/Pa, zero where rigid) and
 /// its radius of curvature (m, `None` where flat).
@@ -23,15 +24,22 @@ impl Contactor {
         }
     }
 
-    /// Chunk `c`: its material's face (`ν = E / 2G − 1`, isotropic, from its two moduli) curved to
-    /// the radius of the sphere of its volume (a StandIn for the contact patch's own curvature,
-    /// which the narrow phase does not report).
+    /// A flat face of a solid of the checked contact compliance `contact`.
+    pub(crate) fn flat(contact: Compliance) -> Self {
+        Self {
+            compliance: contact.get(),
+            radius: None,
+        }
+    }
+
+    /// Chunk `c`: its material's face ([`Compliance`], from its two moduli) curved to the radius
+    /// of the sphere of its volume (a StandIn for the contact patch's own curvature, which the
+    /// narrow phase does not report).
     pub(crate) fn chunk(structure: &Structure, c: usize) -> Self {
         let chunk = &structure.chunks[c];
-        let (young, shear) = (chunk.material.young, chunk.material.shear_modulus);
         Self {
             radius: Some((3.0 * f64::from(chunk.volume) / (4.0 * std::f64::consts::PI)).cbrt()),
-            ..Self::face(young, young / (2.0 * shear) - 1.0)
+            ..Self::flat(chunk.material.contact)
         }
     }
 

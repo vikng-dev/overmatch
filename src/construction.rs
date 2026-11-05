@@ -124,10 +124,7 @@ impl ConstructionKind {
             .iter()
             .zip(&law_materials)
             .map(|(name, law)| match law {
-                Some(law) => Ok(crate::contact_law::Contactor::face(
-                    law.young,
-                    law.young / (2.0 * law.shear_modulus) - 1.0,
-                )),
+                Some(law) => Ok(crate::contact_law::Contactor::flat(law.contact)),
                 None => registry
                     .hard(name)
                     .map_err(|err| err.to_string())?

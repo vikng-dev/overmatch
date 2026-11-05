@@ -33,6 +33,8 @@ pub(crate) struct Material {
     /// Young's and shear moduli, Pa: authored material compliance, never a failure strength.
     pub young: f64,
     pub shear_modulus: f64,
+    /// The contact compliance the two moduli give (checked at the registry's parse).
+    pub contact: crate::substances::Compliance,
     /// The energy a round's line or a fragment spends turning one cubic metre to dust, J/m³: what
     /// converts their crushing work into the volume their loads take from a pool
     /// ([`Load::crushed`]). A blast's pulse crushes by [`Self::compaction`] instead.
@@ -189,14 +191,15 @@ impl Material {
             format!("substance {name:?} states a seam but no blast facts to crush it by")
         })?;
         let share = f64::from(hard.factor() / REFERENCE_FACTOR);
+        let shear_modulus = bulk.shear_modulus.map(f64::from).ok_or_else(|| {
+            format!("substance {name:?}: bulk.shear_modulus missing; author G (Pa) with its source")
+        })?;
         Ok(Some(Self {
             density: bulk.density as f32,
             young: blast.youngs_modulus,
-            shear_modulus: bulk.shear_modulus.map(f64::from).ok_or_else(|| {
-                format!(
-                    "substance {name:?}: bulk.shear_modulus missing; author G (Pa) with its source"
-                )
-            })?,
+            shear_modulus,
+            contact: crate::substances::Compliance::of(blast.youngs_modulus, shear_modulus)
+                .map_err(|reason| format!("substance {name:?}: {reason}"))?,
             crush: (share * registry.reference_facts().cavity_strength()) as f32,
             compaction: Compaction::of(&blast, bulk.density),
             spall: Spall::of(&blast, bulk.density, static_tensile),
@@ -497,6 +500,8 @@ impl Block {
         for &(n, o) in &self.planes {
             let rate = n.dot(dir);
             let gap = o - n.dot(origin);
+            // Resolution: a unit ray this near parallel to a plane (far under f32's 1.2e-7 for
+            // unit vectors) crosses it nowhere a hull reaches; dividing by it would overflow.
             if rate.abs() < 1e-9 {
                 if gap < 0.0 {
                     return None;
@@ -752,14 +757,19 @@ pub(crate) fn full_pool(chunk: &Chunk) -> f32 {
     chunk.volume
 }
 
-/// Wear `chunk`'s pool by `volume` m³ crushed; a pool spent to a millionth of full turns it to
+/// Resolution: the share of a full pool below which wear has spent it. Repeated f32 subtractions
+/// leave a residue of a few units in the last place of the full pool (ε = 1.2e-7); a millionth,
+/// about eight of them, reads that residue as spent rather than as matter left.
+const SPENT_SHARE: f32 = 1e-6;
+
+/// Wear `chunk`'s pool by `volume` m³ crushed; a pool spent to [`SPENT_SHARE`] of full turns it to
 /// dust. Returns whether it did now.
 pub(crate) fn wear(structure: &Structure, state: &mut State, chunk: usize, volume: f32) -> bool {
     if !state.standing(chunk) {
         return false;
     }
     state.pool[chunk] = (state.pool[chunk] - volume).max(0.0);
-    let dust = state.pool[chunk] <= 1e-6 * full_pool(&structure.chunks[chunk]);
+    let dust = state.pool[chunk] <= SPENT_SHARE * full_pool(&structure.chunks[chunk]);
     if dust {
         state.fate[chunk] = Fate::Dust;
     }
@@ -946,6 +956,8 @@ impl Load {
     fn lame(&self, x: Vec3, n: Vec3, crushed: f32) -> f32 {
         let offset = x - self.at;
         let length = offset.length();
+        // Resolution: within a nanometre of the load the f32 offset states no direction; the
+        // distance is clamped at `crushed` there, so the direction's choice changes no stress.
         let dir = if length > 1e-9 {
             offset / length
         } else {
@@ -2277,11 +2289,24 @@ mod tests {
     /// A spinning group's seams carry its chunks' centripetal pull in its own frame: fast
     /// enough, the weak seam opens under a contact far too light to open it alone. ASSUMED
     /// fixture: the weak-seam slab spun about its middle chunk, which a light contact holds.
-    /// DERIVED: the end chunk pulls `m ω² r` = 3.6 ω² N on the 0.04 m² seam (1e5 Pa), so 60
-    /// rad/s opens it (about 3.2 times its strength) and 5 rad/s does not.
+    /// DERIVED from the fixture's own data: the end chunk pulls `m ω² r` on the seam, which opens
+    /// past `σ_t A`, at `ω_c = √(σ_t A / (m r))`; at half of it the pull is a quarter of the
+    /// strength and holds, at twice it four times and opens.
     #[test]
     fn a_spinning_group_pulls_its_weak_seam_open() {
-        for (omega, opens) in [(5.0, false), (60.0, true)] {
+        let slab = unsupported_slab(3);
+        let mass: f32 = slab.chunks.iter().map(|chunk| chunk.mass).sum();
+        let centre = slab
+            .chunks
+            .iter()
+            .map(|chunk| chunk.centroid * chunk.mass)
+            .sum::<Vec3>()
+            / mass;
+        let end = &slab.chunks[slab.joints[0].a];
+        let r = ((end.centroid - centre) * Vec3::new(1.0, 0.0, 1.0)).length();
+        let seam = slab.joints[0].seam().expect("the weak seam is a bond");
+        let critical = (seam.tensile * slab.joints[0].area / (end.mass * r)).sqrt();
+        for (omega, opens) in [(0.5 * critical, false), (2.0 * critical, true)] {
             for source_survives in [false, true] {
                 let slab = unsupported_slab(3);
                 let mut hold = slab_contact(&slab, 0.01);

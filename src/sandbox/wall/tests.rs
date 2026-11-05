@@ -22,6 +22,29 @@ const FIXTURE_BLAST: Blast = Blast {
 /// Support follows cohesive or closed-contact paths to an anchor. Separating every joint
 /// across a region's boundary frees that region as one group; separating every anchor frees
 /// the whole wall. The sandbox and replica departure derivations rely on this integer graph.
+/// A DEPOSIT'S OWN CRACKS ARE COUNTED, NOT INFERRED: a structural failure that separates a joint
+/// an earlier tick cracked brings no crack this tick, so the inspector's local count is the cracks
+/// no failure made, never cracks less failures. A mutant subtracting underflows (a panic with
+/// overflow checks, a wrapped count without). Fixture: joint 3 separated, joint 5 cracked locally,
+/// joint 7 cracked by a failure.
+#[test]
+fn a_separation_of_an_earlier_crack_counts_no_local_crack() {
+    use crate::construction::breakage::Event;
+    use crate::construction::fracture::{Cause, Failure};
+    let failure = |joint, cause| Failure {
+        joint,
+        cause,
+        demand: 2.0,
+        capacity: 1.0,
+        work: 0.0,
+    };
+    let separated = [failure(3, Cause::LiftForce)];
+    assert_eq!(super::local_cracks(&[Event::Separate(3)], &separated), 0);
+    let events = [Event::Separate(3), Event::Crack(5), Event::Crack(7)];
+    let failures = [failure(3, Cause::LiftForce), failure(7, Cause::Tension)];
+    assert_eq!(super::local_cracks(&events, &failures), 1);
+}
+
 #[test]
 fn a_group_with_no_intact_path_to_the_ground_falls_as_one() {
     let layout = layout();
