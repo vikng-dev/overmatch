@@ -51,6 +51,7 @@ mod construction_surface;
 /// What the physics solver moved through each contact between a standing structure and a dynamic
 /// body, per step (the game's environment destruction): the reading a body's contact load comes
 /// from. Mounted by `SimPlugin`.
+mod contact_law;
 mod contact_transfer;
 /// Fixed-tick wall clock/server stats and `SPIKE_COST_TRACE=<path>` JSONL recorder:
 /// FixedUpdate time, `ballistics::integrate_projectiles` share and entity/projectile counts.

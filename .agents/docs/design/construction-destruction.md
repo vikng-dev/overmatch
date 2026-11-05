@@ -365,7 +365,7 @@ cracked seams and noncohesive rests offer no bonded capacity.
 
 The demand is the peak force of the hull's impact on the patch plus its drive:
 `F = P(m_hull, v_n) + F_drive,n`, with `P` the Hertz peak force (Johnson 1985, §11.4) that
-landings use too (`debris::crumble::peak_force`): the witness chunk's material and volume-sphere
+landings use too (`contact_law::peak_force`): the witness chunk's material and volume-sphere
 radius on one side, the hull rigid and flat on the other (StandIn: no body data carries a hull's
 stiffness). The hull's own rigid-body mass supplies `m_hull`; its first inward surface witness
 supplies `v_n` and the chunk. No physics step enters the stop. Inward accumulated and constant

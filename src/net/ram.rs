@@ -583,7 +583,7 @@ mod tests {
         drive: f32,
     ) {
         use crate::construction::{breakage::Breakage, fracture::Side, sweep::Sweep};
-        use crate::debris::crumble::{Contactor, peak_speed};
+        use crate::contact_law::{Contactor, peak_speed};
         use avian3d::prelude::ComputedMass;
         let owner = app.world().get::<Breakage>(target).unwrap();
         let structure = &owner.live.structure;

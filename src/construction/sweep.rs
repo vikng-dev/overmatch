@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use std::collections::HashSet;
 
 use super::fracture::{Block, Side, State, Structure};
-use crate::debris::crumble::{Contactor, peak_force, peak_speed};
+use crate::contact_law::{Contactor, peak_force, peak_speed};
 
 /// The farthest a chunk hull's vertex may lie from its bounds' centre on any axis, m: ADR-0015's
 /// 10 m figure on the support coordinates of the only colliders a sweep casts against, each cast
