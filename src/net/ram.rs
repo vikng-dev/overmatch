@@ -571,11 +571,98 @@ mod tests {
         // Resolution: allow roundoff across the multiplication and divisions in the distance.
         assert!((runup(&spec, 3.0).0 - 3.0 * heavier).abs() <= 4.0 * f32::EPSILON * heavier);
     }
+    /// The game's environment destruction: independent cut enumeration and force bracketing
+    /// check the shipped wall's threshold for the observed patch. Speeds remain observations.
+    fn check_wall_threshold(
+        app: &App,
+        target: Entity,
+        source: Entity,
+        before: &crate::construction::fracture::State,
+        chunks: &[usize],
+        witness: crate::construction::sweep::Witness,
+        drive: f32,
+    ) {
+        use crate::construction::{breakage::Breakage, fracture::Side, sweep::Sweep};
+        use avian3d::prelude::ComputedMass;
+        let owner = app.world().get::<Breakage>(target).unwrap();
+        let structure = &owner.live.structure;
+        let mass = app.world().get::<ComputedMass>(source).unwrap().value();
+        let dt = app
+            .world()
+            .resource::<Time<Fixed>>()
+            .timestep()
+            .as_secs_f32();
+        let mut capacity = 0.0;
+        let mut cut = 0;
+        for (j, edge) in structure.joints.iter().enumerate() {
+            let a = chunks.contains(&edge.a);
+            let b = matches!(edge.b, Side::Chunk(b) if chunks.contains(&b));
+            if a == b || before.cracked[j] || before.separated[j] || !before.live(edge) {
+                continue;
+            }
+            if let Some(seam) = edge.seam() {
+                cut += 1;
+                capacity += edge.area
+                    * (seam.tensile * witness.normal.dot(edge.normal).abs()
+                        + seam.shear.cohesion * witness.normal.cross(edge.normal).length());
+            }
+        }
+        assert!(
+            capacity > 0.0,
+            "the wall patch has intact boundary strength"
+        );
+        let threshold = capacity * dt / mass;
+        for (speed, broken) in [(threshold * 0.9999, false), (threshold * 1.0001, true)] {
+            let mut trial = Sweep {
+                chunks: chunks.to_vec(),
+                witness: Some(crate::construction::sweep::Witness { speed, ..witness }),
+                ..default()
+            };
+            owner
+                .kind
+                .sweep
+                .resolve(structure, before, &mut trial, mass, Vec3::ZERO, dt);
+            assert_eq!(
+                trial.broken, broken,
+                "the observed wall patch brackets its derived threshold"
+            );
+        }
+        let driven = (capacity - drive).max(0.0) * dt / mass;
+        if driven > 0.0 {
+            // Resolution: bracket above summed f32 force roundoff, including near-balanced drive.
+            let delta = (driven * 1e-4).max(64.0 * f32::EPSILON * capacity * dt / mass);
+            for (speed, broken) in [((driven - delta).max(0.0), false), (driven + delta, true)] {
+                let mut trial = Sweep {
+                    chunks: chunks.to_vec(),
+                    witness: Some(crate::construction::sweep::Witness { speed, ..witness }),
+                    ..default()
+                };
+                owner.kind.sweep.resolve(
+                    structure,
+                    before,
+                    &mut trial,
+                    mass,
+                    witness.normal * drive,
+                    dt,
+                );
+                assert_eq!(
+                    trial.broken, broken,
+                    "the actual inward drive shifts the wall threshold"
+                );
+            }
+        } else {
+            assert!(drive >= capacity, "zero threshold follows from drive alone");
+        }
+        println!(
+            "DERIVED and MEASURED wall threshold: patch={}, cut={cut}, mass={mass}, dt={dt}, capacity={capacity}, inward drive={drive}, unpowered={threshold} m/s, driven={driven} m/s; below holds, above breaks",
+            chunks.len()
+        );
+    }
+
     /// The game's environment destruction: the tracked ram recipe must open occupied hull space
     /// within the owner's two-tick contact bar, and the source must lose the momentum its chunks take.
     /// Counts and resulting speeds are observations; the gate pins the owner's latency and conservation.
     #[test]
-    #[ignore = "tracked ram recipe; headless observation on demand"]
     fn tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum() {
         use crate::construction::breakage::{Breakage, SweepAccount};
         use crate::headless_test::{
@@ -605,7 +692,7 @@ mod tests {
             LinearVelocity::ZERO,
             AngularVelocity::ZERO,
         ));
-        // Fixture settling after the planner's normal spawn drop, outside the timed driving stimulus.
+        // Fixture settling after the planner's normal spawn drop, before the driving stimulus.
         for _ in 0..FIXED_TICKS_PER_SECOND * 2 {
             drive_tick(&mut app, tank, 0.0, 0.0);
         }
@@ -622,28 +709,47 @@ mod tests {
                 .filter(|&&f| f != crate::construction::fracture::Fate::Standing)
                 .count()
         );
-        println!(
-            "DERIVED ram plan: spawn={:?}, rotation={:?}, minimum speed={}, target={:?}",
-            plan.spawn,
-            plan.rotation,
-            plan.minimum_m_s,
-            app.world().get::<Position>(target).unwrap().0
-        );
-        println!(
-            "MEASURED ram start: position={:?}, speed={:?}",
-            app.world().get::<Position>(tank).unwrap().0,
-            app.world().get::<LinearVelocity>(tank).unwrap().0
-        );
         let mut freed = 0;
         let mut counts = (0, 0, 0, 0);
+        let mut per_tick = Vec::new();
+        let mut solver_contacts = Vec::new();
         let mut initial = None;
         let mut contact = None;
         let mut losses = Vec::new();
         for tick in 0..plan.drive_ticks {
+            let previous = contact.is_none().then(|| {
+                app.world()
+                    .get::<Breakage>(target)
+                    .unwrap()
+                    .live
+                    .state
+                    .clone()
+            });
             drive_tick(&mut app, tank, 1.0, 0.0);
             let account = app.world().resource::<SweepAccount>();
             if account.contacts.contains(&(tank, ordinal)) && contact.is_none() {
                 contact = Some(tick);
+                let (_, _, chunks, witness) = account
+                    .patches
+                    .iter()
+                    .find(|(body, construction, _, _)| *body == tank && *construction == ordinal)
+                    .expect("the first occupied contact retains its patch witness");
+                let drive = account
+                    .samples
+                    .iter()
+                    .find(|(body, construction, _, _)| *body == tank && *construction == ordinal)
+                    .unwrap()
+                    .3
+                    .3;
+                check_wall_threshold(
+                    &app,
+                    target,
+                    tank,
+                    previous.as_ref().unwrap(),
+                    chunks,
+                    *witness,
+                    drive,
+                );
                 println!(
                     "MEASURED first occupied contact: {:?}",
                     account
@@ -660,6 +766,25 @@ mod tests {
                 counts.1 += account.work.casts;
                 counts.2 += account.work.joints;
                 counts.3 += account.work.queries;
+                per_tick.push((
+                    tick,
+                    account.work.bounds,
+                    account.work.casts,
+                    account.work.joints,
+                    account.work.queries,
+                ));
+                let wall_impulse: Vec3 = app
+                    .world()
+                    .resource::<crate::contact_transfer::ContactTransfers>()
+                    .presses()
+                    .filter(|(point, _)| point.body == tank && point.structure == target)
+                    .map(|(point, _)| point.impulse)
+                    .sum();
+                solver_contacts.push((
+                    tick,
+                    app.world().get::<LinearVelocity>(tank).unwrap().0,
+                    wall_impulse,
+                ));
             }
             let chunks = account
                 .chunks
@@ -708,14 +833,12 @@ mod tests {
                     losses.push((before.length(), after.length(), impulse.length()));
                 }
             }
-            if initial.is_some_and(|first| tick > first)
-                || contact.is_some_and(|first| tick >= first + 2)
-            {
+            if contact.is_some_and(|first| tick >= first + 2) {
                 break;
             }
         }
         println!(
-            "MEASURED ram end: position={:?}, speed={:?}, first contact={contact:?}, first sweep={initial:?}, counts={counts:?}",
+            "MEASURED ram end: position={:?}, speed={:?}, first contact={contact:?}, first sweep={initial:?}, counts={counts:?}, work by tick={per_tick:?}",
             app.world().get::<Position>(tank).unwrap().0,
             app.world().get::<LinearVelocity>(tank).unwrap().0
         );
@@ -737,7 +860,7 @@ mod tests {
             .filter(|&&f| f != crate::construction::fracture::Fate::Standing)
             .count();
         println!(
-            "MEASURED tracked ram: first sweep tick={first}, freed in two ticks={freed}, target chunks absent={gone}, bounds/casts/joints/distance queries={counts:?}, speeds and momentum={losses:?}"
+            "MEASURED tracked ram: first sweep tick={first}, freed in two ticks={freed}, target chunks absent={gone}, bounds/casts/joints/distance queries={counts:?}, speeds and momentum={losses:?}, post-physics velocities and remaining wall impulses={solver_contacts:?}"
         );
     }
 }

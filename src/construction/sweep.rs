@@ -261,6 +261,7 @@ impl Geometry {
         let demand = mass * witness.speed / dt + drive;
         sweep.broken = demand > capacity;
         sweep.load = Some(PatchLoad {
+            drive,
             demand,
             capacity,
             threshold: (capacity - drive).max(0.0) * dt / mass,
@@ -386,6 +387,7 @@ pub(crate) struct Witness {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PatchLoad {
+    pub(crate) drive: f32,
     pub(crate) demand: f32,
     pub(crate) capacity: f32,
     pub(crate) threshold: f32,
@@ -543,8 +545,8 @@ mod tests {
     use super::*;
     use crate::construction::fracture::{Bond, Chunk, Joint, Material};
 
-    /// Fixture: nine unit-face chunks on a plane, independent equal-capacity anchors. Rows with
-    /// the same geometry can carry different authored strengths without any special case in a law.
+    /// Fixture: nine anchored chunks on a plane. The middle row has strong internal seams;
+    /// their capacity must disappear from the cut when that row moves together.
     fn wall(strength: f32) -> (Structure, Geometry) {
         let mut material = Material::of(
             crate::substances::SubstanceRegistry::shipped_static(),
@@ -588,6 +590,19 @@ mod tests {
                 });
             }
         }
+        for (a, b) in [(3, 4), (4, 5)] {
+            let mut seam = material.seam;
+            seam.tensile = 1e6; // Fixture: internal seams dominate every anchor if counted wrongly.
+            seam.shear.cohesion = 1e6;
+            structure.joints.push(Joint {
+                a,
+                b: Side::Chunk(b),
+                area: 1.0,
+                centroid: (structure.chunks[a].centroid + structure.chunks[b].centroid) / 2.0,
+                normal: Vec3::Z,
+                bond: Bond::Bonded(seam),
+            });
+        }
         let geometry = Geometry::new(&blocks, &structure);
         (structure, geometry)
     }
@@ -595,7 +610,7 @@ mod tests {
     /// The game's environment destruction: the hole is occupied swept geometry, independent of
     /// contact manifold points. A centre-ray or AABB-only approximation breaks the oblique case.
     #[test]
-    fn a_block_frees_exactly_the_chunks_intersecting_its_swept_hull() {
+    fn a_blocks_patch_is_exactly_the_chunks_intersecting_its_swept_hull() {
         let (structure, geometry) = wall(1.0);
         let state = State::new(&structure);
         let hull = Collider::cuboid(0.4, 0.4, 0.4);
@@ -670,6 +685,131 @@ mod tests {
             },
         );
         assert_eq!(swept.chunks, vec![1, 4]);
+    }
+
+    fn driven_patch(
+        structure: &Structure,
+        geometry: &Geometry,
+        speed: f32,
+        mass: f32,
+        drive: f32,
+    ) -> Sweep {
+        // Fixture: middle row, just outside the wall; normal motion crosses the same three chunks.
+        let hull = Collider::cuboid(0.4, 0.4, 2.4);
+        let mut swept = geometry.swept(
+            structure,
+            &State::new(structure),
+            Motion {
+                hull: &hull,
+                position: Vec3::X * -0.31,
+                rotation: Quat::IDENTITY,
+                centre: Vec3::X * -0.31,
+                spin: Vec3::ZERO,
+                velocity: Vec3::X * speed,
+                dt: 1.0,
+            },
+        );
+        // Fixture: the planar wall's analytical normal isolates the cut threshold from convex
+        // cast normal roundoff; the occupancy and production composition tests retain that query.
+        let witness = swept
+            .witness
+            .as_mut()
+            .expect("the driven fixture reaches its wall");
+        witness.normal = Vec3::X;
+        witness.speed = speed;
+        geometry.resolve(
+            structure,
+            &State::new(structure),
+            &mut swept,
+            mass,
+            Vec3::X * drive,
+            1.0,
+        );
+        swept
+    }
+
+    /// The game's environment destruction: occupancy chooses the hole and only boundary joints
+    /// resist it. Server carriers rely on their combined plastic exchange preserving momentum.
+    #[test]
+    fn a_fast_block_frees_its_whole_patch_and_balances_momentum() {
+        let (structure, geometry) = wall(16.0);
+        let patch = driven_patch(&structure, &geometry, 2.0, 100.0, 0.0);
+        assert_eq!(patch.chunks, [3, 4, 5]);
+        assert!(
+            patch.broken,
+            "internal seams cannot hold their own moving patch in place"
+        );
+        assert_eq!(geometry.cut(&patch.chunks), [3, 4, 5]);
+        let body = Body {
+            centre: DVec3::X * -0.31,
+            inverse_mass: DVec3::splat(1.0 / 100.0),
+            inverse_inertia: DMat3::IDENTITY,
+            velocity: DVec3::X * 2.0,
+            spin: DVec3::ZERO,
+        };
+        let parts: Vec<_> = patch
+            .chunks
+            .iter()
+            .map(|&c| geometry.part(c, &Transform::IDENTITY))
+            .collect();
+        let result = exchange(&body, &parts);
+        let taken: DVec3 = parts
+            .iter()
+            .map(|p| p.mass * (result.velocity + result.spin.cross(p.centre - body.centre)))
+            .sum();
+        // Resolution: f64 roundoff in the fixed-coordinate plastic solve.
+        assert!(((body.velocity - result.velocity) * 100.0 - taken).length() < 1e-10);
+        println!(
+            "MEASURED block: patch={:?}, capacity={}, source speed {} -> {}, momentum={taken:?}",
+            patch.chunks,
+            patch.load.unwrap().capacity,
+            body.velocity.x,
+            result.velocity.x
+        );
+    }
+
+    /// The game's environment destruction: a hull's stopping mass and inward drive govern the
+    /// threshold. Counting chunk mass or internal seams, or losing either seam mode, breaks it.
+    #[test]
+    fn crawl_equality_drive_and_stronger_material_follow_the_cut_threshold() {
+        // Fixture: three 16 N anchors, 128 kg hull, one-second tick. DERIVED threshold 48/128.
+        let (structure, geometry) = wall(16.0);
+        let threshold = 48.0 / 128.0;
+        for (speed, broken) in [(0.1, false), (threshold, false), (threshold * 1.0001, true)] {
+            let patch = driven_patch(&structure, &geometry, speed, 128.0, 0.0);
+            assert_eq!(patch.chunks, [3, 4, 5]);
+            assert_eq!(patch.broken, broken, "speed={speed}");
+            assert_eq!(patch.load.unwrap().threshold, threshold);
+        }
+        // Fixture: doubling both material modes doubles the threshold at unchanged mass and dt.
+        let (stronger, stronger_geometry) = wall(32.0);
+        assert!(
+            !driven_patch(
+                &stronger,
+                &stronger_geometry,
+                threshold * 1.0001,
+                128.0,
+                0.0
+            )
+            .broken
+        );
+        let strong = driven_patch(
+            &stronger,
+            &stronger_geometry,
+            2.0 * threshold * 1.0001,
+            128.0,
+            0.0,
+        );
+        assert!(strong.broken);
+        assert_eq!(strong.load.unwrap().threshold, 2.0 * threshold);
+        // Fixture: 8 N drive lowers the threshold by 8/128 m/s; equality still holds.
+        let driven = threshold - 8.0 / 128.0;
+        assert!(!driven_patch(&structure, &geometry, driven, 128.0, 8.0).broken);
+        assert!(driven_patch(&structure, &geometry, driven * 1.0001, 128.0, 8.0).broken);
+        println!(
+            "DERIVED and MEASURED block thresholds: base={threshold}, double-strength={}, driven={driven}",
+            strong.load.unwrap().threshold
+        );
     }
 
     /// The game's environment destruction: carriers and source share one plastic velocity.

@@ -7,13 +7,15 @@ use avian3d::prelude::{
 #[derive(Resource, Default, Debug)]
 pub(crate) struct SweepAccount {
     pub(crate) freed: usize,
+    #[cfg(test)]
+    pub(crate) patches: Vec<(Entity, u16, Vec<usize>, super::super::sweep::Witness)>,
     pub(crate) work: super::super::sweep::Work,
     pub(crate) exchanges: Vec<(Entity, Vec3, f64)>,
     pub(crate) chunks: Vec<(u16, u16, Vec3)>,
     pub(crate) outgoing_kinetic_j: f64,
     pub(crate) outgoing_momentum: Vec3,
     pub(crate) contacts: BTreeSet<(Entity, u16)>,
-    pub(crate) samples: Vec<(Entity, u16, f32, (f32, f32, f32))>,
+    pub(crate) samples: Vec<(Entity, u16, f32, (f32, f32, f32, f32))>,
     pub(super) held: Vec<(Entity, Load)>,
     pub(crate) source_changes: Vec<(Entity, Vec3, Vec3, Vec3)>,
 }
@@ -131,11 +133,20 @@ pub(super) fn run(mut p: Intake) {
                 .get(root)
                 .expect("swept owner survives geometry intake");
             p.account.contacts.insert((body, owner.construction));
+            #[cfg(test)]
+            p.account.patches.push((
+                body,
+                owner.construction,
+                swept.chunks.clone(),
+                swept
+                    .witness
+                    .expect("a resolved patch has an inward witness"),
+            ));
             p.account.samples.push((
                 body,
                 owner.construction,
                 swept.incoming,
-                (load.demand, load.capacity, load.threshold),
+                (load.demand, load.capacity, load.threshold, load.drive),
             ));
         }
         if !swept.broken && !swept.chunks.is_empty() {
@@ -468,9 +479,9 @@ fn commit_source(
 }
 
 pub(super) struct ReleasedMotion {
-    velocity: Vec3,
-    spin: Vec3,
-    centre: Vec3,
+    pub(super) velocity: Vec3,
+    pub(super) spin: Vec3,
+    pub(super) centre: Vec3,
 }
 
 /// Departure boundary for decor: one patch, its rigid velocity field and authoritative tick.

@@ -4288,3 +4288,56 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
         impulse
     );
 }
+
+/// The game's environment destruction: decor receives a whole patch. Opening internal seams
+/// or resetting its state would turn one moving cluster into unrelated new chunks.
+#[test]
+fn a_swept_patch_departs_as_one_cluster_preserving_its_internal_joints() {
+    let kind = column_construction();
+    let (mut app, root) = composed_kind(false, &kind);
+    let mut owner = app.world_mut().get_mut::<Breakage>(root).unwrap();
+    let mut record = Record::default();
+    // Fixture: the upper pair leaves at a rigid twist about the construction origin.
+    let group = vec![1, 2];
+    let velocity = Vec3::X * 2.0;
+    let spin = Vec3::Z;
+    let departure = sweep_intake::sweep_departure(
+        &mut owner,
+        Transform::IDENTITY,
+        group.clone(),
+        sweep_intake::ReleasedMotion {
+            velocity,
+            spin,
+            centre: Vec3::ZERO,
+        },
+        7,
+        &mut record,
+    );
+    assert_eq!(departure.group, group);
+    assert_eq!(departure.launch.colliders.len(), group.len());
+    let internal = kind
+        .layout
+        .joints
+        .iter()
+        .position(|j| group.contains(&j.a) && matches!(j.b, Side::Chunk(b) if group.contains(&b)))
+        .unwrap();
+    assert!(!departure.live.state.separated[internal]);
+    assert!(!owner.live.state.separated[internal]);
+    for &c in &group {
+        assert!(!owner.live.state.standing(c));
+        assert!(departure.live.state.standing(c));
+    }
+    assert!(
+        (departure.launch.velocity - velocity - spin.cross(departure.launch.centre)).length()
+            < 1e-5
+    );
+    assert!(record.entries.iter().all(|e| e.tick == 7));
+    assert_eq!(
+        record
+            .entries
+            .iter()
+            .filter(|e| matches!(e.event, Event::Separate(_)))
+            .count(),
+        1
+    );
+}
