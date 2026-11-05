@@ -15,7 +15,7 @@
 
 use bevy::math::{DMat3, DVec3};
 
-use super::super::bondsolve::{Edge, Node, Wrench, accelerating_frame, joint_edge, pair_friction};
+use super::super::bondsolve::{Edge, Node, Wrench, accelerating_frame, joint_edge};
 use super::super::{Cause, Failure, Side, State, Structure};
 use super::{Factor, IDLE};
 
@@ -236,13 +236,14 @@ impl Kernel {
             // Per verdict: its cause, demand and capacity (Pa for a bond).
             let verdict = match joint.seam().filter(|_| edge.push.is_none()) {
                 None => (pulled > idle).then_some((Cause::LiftForce, 0.0, 0.0)),
-                Some(seam) => {
+                Some(_) => {
                     let (tension, shear) = edge.stress(carried, edge.normal);
                     let compression = (-pulled / edge.area).max(0.0);
-                    let holds = f64::from(seam.shear.cohesion)
-                        + pair_friction(structure, joint) * compression;
-                    if tension > f64::from(seam.tensile) {
-                        Some((Cause::Tension, tension, f64::from(seam.tensile)))
+                    let [tensile, holds] =
+                        super::super::bondsolve::JointStrength::of(structure, joint, false)
+                            .limits(compression);
+                    if tension > tensile {
+                        Some((Cause::Tension, tension, tensile))
                     } else {
                         (shear > holds).then_some((Cause::Shear, shear, holds))
                     }

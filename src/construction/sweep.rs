@@ -279,21 +279,44 @@ impl Geometry {
             .iter()
             .map(|&c| self.incident[c].len())
             .sum::<usize>();
-        let capacity = self
+        let cut: Vec<_> = self
             .cut(&sweep.chunks)
             .into_iter()
+            .filter(|&j| !state.separated[j] && state.live(&structure.joints[j]))
+            .collect();
+        let area = cut
+            .iter()
+            .map(|&j| f64::from(structure.joints[j].area))
+            .sum::<f64>();
+        let weight = -DVec3::Y
+            * f64::from(crate::physical_laws::gravity_mps2())
+            * sweep
+                .chunks
+                .iter()
+                .map(|&c| f64::from(structure.chunks[c].mass))
+                .sum::<f64>();
+        let capacity = cut
+            .into_iter()
             .map(|j| {
+                use super::fracture::bondsolve::{JointStrength, joint_normal};
                 let joint = &structure.joints[j];
-                if state.cracked[j] || state.separated[j] || !state.live(joint) {
-                    return 0.0;
-                }
-                joint.seam().map_or(0.0, |seam| {
-                    let opening = witness.normal.dot(joint.normal).abs();
-                    let sliding = witness.normal.cross(joint.normal).length();
-                    joint.area * (seam.tensile * opening + seam.shear.cohesion * sliding)
-                })
+                let sign = if sweep.chunks.binary_search(&joint.a).is_ok() {
+                    1.0
+                } else {
+                    -1.0
+                };
+                let normal = joint_normal(structure, joint) * sign;
+                // ASSUMED: the translating patch distributes its weight by live boundary area;
+                // only its normal preload enters this cut, without a bending or twisting demand.
+                let preload = weight.dot(normal) * f64::from(joint.area) / area;
+                JointStrength::of(structure, joint, state.cracked[j]).capacity(
+                    f64::from(joint.area),
+                    normal,
+                    witness.normal.as_dvec3(),
+                    preload,
+                )
             })
-            .sum::<f32>();
+            .sum::<f64>() as f32;
         let drive = drive.dot(witness.normal).max(0.0);
         let (mass, patch) = (f64::from(mass), Contactor::chunk(structure, witness.chunk));
         let stop = peak_force(mass, f64::from(witness.speed), patch, Contactor::RIGID) as f32;
@@ -918,6 +941,64 @@ mod tests {
         println!(
             "DERIVED and MEASURED block thresholds: base={base}, double-strength={strong}, driven={driven} m/s"
         );
+    }
+
+    /// The game's environment destruction: a released part cannot sweep away boards pressed
+    /// into their supports. The floor yields only past its friction or lifting load; treating
+    /// cracked seams or rests as absent loses this bearing for every construction using them.
+    #[test]
+    fn resting_boards_keep_bearing_until_the_load_slides_or_lifts_them() {
+        use super::super::fracture::Bond;
+        for cracked in [false, true] {
+            let (mut structure, geometry) = wall(16.0);
+            for joint in &mut structure.joints[..9] {
+                joint.normal = Vec3::Y;
+                joint.centroid = structure.chunks[joint.a].centroid - Vec3::Y * 0.5;
+                if !cracked {
+                    joint.bond = Bond::Resting;
+                }
+            }
+            let mut state = State::new(&structure);
+            state.cracked[..9].fill(cracked);
+            // Fixture: three boards on horizontal supports, a 128 kg released source.
+            let chunks = vec![3, 4, 5];
+            let weight = chunks
+                .iter()
+                .map(|&c| structure.chunks[c].mass)
+                .sum::<f32>()
+                * crate::physical_laws::gravity_mps2();
+            let mu = structure.chunks[4].material.friction;
+            for (normal, force, broken) in [
+                (Vec3::NEG_Y, weight * 100.0, false),
+                (Vec3::X, mu * weight * 0.5, false),
+                (Vec3::X, mu * weight * 2.0, true),
+                (Vec3::Y, weight * 0.5, false),
+                (Vec3::Y, weight * 2.0, true),
+            ] {
+                let speed = peak_speed(
+                    128.0,
+                    f64::from(force),
+                    Contactor::chunk(&structure, 4),
+                    Contactor::RIGID,
+                ) as f32;
+                let mut swept = Sweep {
+                    chunks: chunks.clone(),
+                    witness: Some(Witness {
+                        normal,
+                        speed,
+                        chunk: 4,
+                        time: 0.0,
+                        at: structure.chunks[4].centroid,
+                    }),
+                    ..default()
+                };
+                geometry.resolve(&structure, &state, &mut swept, 128.0, Vec3::ZERO);
+                assert_eq!(
+                    swept.broken, broken,
+                    "cracked={cracked}, direction={normal}"
+                );
+            }
+        }
     }
 
     /// The game's environment destruction: the load gate refuses a chunk reaching past the cast

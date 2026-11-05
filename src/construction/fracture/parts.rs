@@ -23,7 +23,7 @@
 use bevy::math::{DMat3, DVec3, Vec3};
 use std::collections::BTreeMap;
 
-use super::bondsolve::{Edge, Node, Wrench, accelerating_frame, joint_edge, pair_friction};
+use super::bondsolve::{Edge, Node, Wrench, accelerating_frame, joint_edge};
 use super::{Cause, Failure, Load, Side, State, Structure};
 
 mod kernel;
@@ -1118,18 +1118,13 @@ impl Assessment {
             let edge = &self.graph.edges[e];
             let joint = &structure.joints[self.graph.joints[e]];
             let seam = joint.seam().expect("a bonded edge holds by a seam");
-            let friction = pair_friction(structure, joint);
+            let strength = super::bondsolve::JointStrength::of(structure, joint, false);
             let read = |field: &[Wrench]| {
                 let carried = edge.resultant(nodes, field);
                 let (tension, shear) = edge.stress(carried, edge.normal);
                 let compression = (-carried.linear.dot(edge.normal) / edge.area).max(0.0);
-                [
-                    (tension, f64::from(seam.tensile)),
-                    (
-                        shear,
-                        f64::from(seam.shear.cohesion) + friction * compression,
-                    ),
-                ]
+                let [tensile, sliding] = strength.limits(compression);
+                [(tension, tensile), (shear, sliding)]
             };
             let (opening, sliding) = edge.energy(nodes, total);
             let (held_opening, held_sliding) = edge.energy(nodes, steady);

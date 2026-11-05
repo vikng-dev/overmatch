@@ -357,11 +357,16 @@ A per-design bounds tree narrows exact convex casts to nearby chunks. All inters
 chunks form one patch per source body and construction; several colliders on one body contribute
 to that same patch. Buried matter remains soil-held.
 
-The cut set contains only intact joints between the patch and its surroundings, including ground
-anchors. Joints inside the patch carry no load when its chunks move together. Its directional
-capacity is `C = sum A * (tensile * abs(n dot d) + cohesion * length(n cross d))`, the support
-of the independent opening and sliding limits in the contact direction `d`. Separated joints,
-cracked seams and noncohesive rests offer no bonded capacity.
+The cut set contains live, unseparated joints between the patch and its surroundings, including
+ground anchors. Joints inside the patch carry no load when its chunks move together. The cut
+sums each joint's force limit in the contact direction, reading the part solver's
+`bondsolve::JointStrength`: intact seams carry tension and cohesive shear, every closed face
+carries compression in bearing, and shear adds Coulomb friction on compression. Cracked seams
+and rests have no tensile or cohesive strength. DERIVED: each limit is the first crossing of
+`p + F d_n <= A T` or `F |d_t| <= A C + mu max(-p - F d_n, 0)`, with the normal toward the
+moving side. ASSUMED: the translating patch shares its weight by live cut area; its normal
+preload `p` enters this cut without a bending or twisting demand. A compression-only touch
+cannot remove a resting floor; a sideways or lifting touch must pass its friction or weight.
 
 The demand is the peak force of the hull's impact on the patch plus its drive:
 `F = P(m_eff, v_n) + F_drive,n`, with `P` the Hertz peak force (Johnson 1985, §11.4) that
