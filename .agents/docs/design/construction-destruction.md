@@ -395,6 +395,13 @@ receive fresh solver contacts. A sweep never enters the structural pulse/work ca
 Every remaining solver transfer enters the structure check as its whole mean force `J_solver/dt`.
 Physics already changed those bodies' momenta; contact intake supplies no second blow, source
 mass share, delayed cap or give-back. Sleeping contact forces persist until their contact ends.
+
+Exact sweep membership and Avian's speculative contact envelope differ. The sweep casts admitted
+hulls with the tick-start rigid motion; Avian can constrain separated hulls against projected
+contact planes. Such a non-member can transmit solver momentum without receiving a cut-capacity
+verdict. Post-contact speed therefore includes this retained contact response and contacts with
+released bodies, as well as the sweep's plastic exchange.
+
 Round and field impulse laws retain their own fracture-work and launch accounts.
 
 DERIVED angular bounds: with `R` enclosing every hull point about its centre of mass, rotational
