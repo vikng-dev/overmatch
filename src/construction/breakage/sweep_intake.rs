@@ -33,7 +33,40 @@ struct SweepSource {
     layers: CollisionLayers,
     roots: BTreeSet<Entity>,
     mass: f32,
+    inertia: avian3d::prelude::ComputedAngularInertia,
+    body_rotation: Quat,
+    axes: avian3d::prelude::LockedAxes,
     drive: Vec3,
+}
+
+impl SweepSource {
+    /// DERIVED: Avian 0.7 `ContactNormalPart::generate`
+    /// (`dynamics/solver/contact/normal_part.rs`), with a fixed target:
+    /// `m_eff = 1 / (n dot M^-1 n + (r cross n) dot I_world^-1 (r cross n))`.
+    /// The lever and world inertia are evaluated at the witness time. Avian supplies the
+    /// locked-axis response; dominance does not enter the point mass.
+    fn effective_mass(&self, witness: super::super::sweep::Witness, pose: &Transform) -> f32 {
+        use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
+        let normal = pose.rotation * witness.normal;
+        let point = pose.translation + pose.rotation * witness.at;
+        let lever = point - self.centre - self.velocity * witness.time;
+        let rotation = Quat::from_scaled_axis(self.spin * witness.time) * self.body_rotation;
+        let response = SolverBodyInertia::new(
+            self.mass.recip(),
+            self.inertia.rotated(rotation).inverse(),
+            self.axes,
+            0,
+            true,
+        );
+        let torque = lever.cross(normal);
+        let inverse = normal.dot(response.effective_inv_mass() * normal)
+            + torque.dot(response.effective_inv_angular_inertia() * torque);
+        assert!(
+            inverse > 0.0,
+            "an inward sweep source has a free contact response"
+        );
+        inverse.recip()
+    }
 }
 
 /// Independent geometry queries run per construction. Sources commit in entity order because
@@ -222,11 +255,11 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
         .par_iter()
         .for_each(|(body_entity, handles, sleeping)| {
             let mut sources = Vec::new();
-            let Ok((forces, body, mass, _, com, _)) = bodies.get(body_entity) else {
+            let Ok((forces, body, mass, inertia, com, axes)) = bodies.get(body_entity) else {
                 return; // Unmarked fixed collider roots have no dynamic force state.
             };
-            // A newly spawned body's mass is prepared by Avian after this hook; it has no
-            // rigid-body response yet. Sleeping contacts retain their force in ContactTransfers.
+            // The sweep requires finite computed mass. Sleeping contacts retain their force
+            // in ContactTransfers; Avian owns any source this intake does not prepare.
             if !body.is_dynamic()
                 || mass.inverse() == 0.0
                 || sleeping
@@ -279,6 +312,9 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                     layers: *layers,
                     roots,
                     mass: mass.value(),
+                    inertia: *inertia,
+                    body_rotation: forces.rotation().0,
+                    axes: axes.copied().unwrap_or_default(), // Absence is Avian's unrestricted state.
                     drive: (forces.accumulated_linear_acceleration()
                         + constant_acceleration(
                             drives,
@@ -338,13 +374,16 @@ fn geometry(p: &Intake, dt: f32) -> Vec<(Entity, Entity, super::super::sweep::Sw
                             .iter()
                             .find(|s| s.body == body)
                             .expect("a patch has its source body");
-                        breakage.kind.sweep.resolve(
-                            &breakage.live.structure,
-                            &breakage.live.state,
-                            &mut swept,
-                            source.mass,
-                            inverse * source.drive,
-                        );
+                        if let Some(witness) = swept.witness {
+                            let mass = source.effective_mass(witness, &pose);
+                            breakage.kind.sweep.resolve(
+                                &breakage.live.structure,
+                                &breakage.live.state,
+                                &mut swept,
+                                mass,
+                                inverse * source.drive,
+                            );
+                        } // An empty patch has no contact response to resolve.
                         (body, root, swept)
                     })
                     .collect::<Vec<_>>()

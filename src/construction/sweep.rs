@@ -256,7 +256,7 @@ impl Geometry {
 
     /// Break `sweep`'s cut when the hull's stop on its witness chunk, plus its inward `drive`,
     /// exceeds the cut's capacity. The stop is the elastic impact's peak force
-    /// ([`peak_force`]) of the hull's `mass` on that chunk, the hull's side [`Contactor::RIGID`],
+    /// ([`peak_force`]) of the hull's effective contact `mass` on that chunk, its side [`Contactor::RIGID`],
     /// so no physics step enters it.
     pub(crate) fn resolve(
         &self,

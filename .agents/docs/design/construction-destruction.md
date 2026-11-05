@@ -364,11 +364,14 @@ of the independent opening and sliding limits in the contact direction `d`. Sepa
 cracked seams and noncohesive rests offer no bonded capacity.
 
 The demand is the peak force of the hull's impact on the patch plus its drive:
-`F = P(m_hull, v_n) + F_drive,n`, with `P` the Hertz peak force (Johnson 1985, §11.4) that
+`F = P(m_eff, v_n) + F_drive,n`, with `P` the Hertz peak force (Johnson 1985, §11.4) that
 landings use too (`contact_law::peak_force`): the witness chunk's material and volume-sphere
 radius on one side, the hull rigid and flat on the other (StandIn: no body data carries a hull's
-stiffness). The hull's own rigid-body mass supplies `m_hull`; its first inward surface witness
-supplies `v_n` and the chunk. No physics step enters the stop. Inward accumulated and constant
+stiffness). DERIVED: the first inward surface witness supplies the speed and contact mass
+`m_eff = 1 / (1/m + (r cross n) dot I_world^-1 (r cross n))`, as in Avian 0.7's
+`ContactNormalPart::generate` against a fixed target. The lever `r` starts at the moving centre
+of mass; inertia is in world coordinates at contact time, with Avian's locked-axis response.
+No physics step enters the stop. Inward accumulated and constant
 drive forces add to the demand. If `F > C`, break the cut and remove the whole patch from the
 standing construction. Otherwise move the hull to the first surface, stop its inward contact
 motion, and send that stopping impulse divided by the tick through contact intake to the
@@ -384,7 +387,7 @@ stay with the solver. Look-ahead planes on chunks 7 to 10 cm ahead, normals abou
 brake and lift a hull before its cast reaches them. Every other pair keeps its speculative contacts.
 
 DERIVED: for a fixed patch, `v_threshold` is the speed whose peak force is `max(0, C - F_drive,n)`:
-`δ = (3P / (4 E* √R))^(2/3)`, `v = √(16 E* √R δ^(5/2) / (15 m_hull))`; it grows as
+`δ = (3P / (4 E* √R))^(2/3)`, `v = √(16 E* √R δ^(5/2) / (15 m_eff))`; it grows as
 `(C - F_drive,n)^(5/6)`. Motion just above it breaks the cut. Strength, mass and drive come from data and
 rigid-body state; no authored speed threshold or construction-specific adjustment enters the law.
 

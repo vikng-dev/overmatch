@@ -4331,6 +4331,76 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     );
 }
 
+/// The game's environment destruction: an end contact on a slender source rotates it away,
+/// reducing the Hertz demand. The production intake must use that contact response, rather
+/// than total mass, when deciding whether the standing construction holds.
+#[test]
+fn a_sweep_reads_the_slender_sources_contact_mass() {
+    use crate::contact_law::{Contactor, peak_force};
+    // Fixture: M = 128 kg, L = 2 m, transverse inertia ML²/12 = M/3 kg m².
+    // The sphere is a contact proxy centred either at the COM or one metre above it.
+    let mass = 128.0;
+    let speed = 64.0;
+    let mut peaks = Vec::new();
+    for end in [false, true] {
+        let kind = column_construction();
+        let (mut app, _) = composed_kind(false, &kind);
+        for _ in 0..3 {
+            app.update();
+        }
+        let offset = if end { Vec3::NEG_Y } else { Vec3::ZERO };
+        let position = Vec3::new(-1.0, 1.5, 0.0);
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Position(position),
+                Rotation::default(),
+                Collider::sphere(0.1),
+                Mass(mass),
+                NoAutoMass,
+                AngularInertia::new(Vec3::splat(mass / 3.0)),
+                NoAutoAngularInertia,
+                CenterOfMass(offset),
+                NoAutoCenterOfMass,
+                LinearVelocity::ZERO,
+                piece_layers(),
+            ))
+            .id();
+        app.update();
+        app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = Vec3::X * speed;
+        app.update();
+        let account = app.world().resource::<SweepAccount>();
+        let (_, _, _, witness) = account.patches.iter().find(|(b, ..)| *b == body).unwrap();
+        let arm = witness.at - position - offset - Vec3::X * speed * witness.time;
+        let torque = arm.cross(witness.normal);
+        let effective = (mass.recip() + torque.length_squared() / (mass / 3.0)).recip();
+        let expected_mass = if end { mass / 4.0 } else { mass };
+        println!(
+            "DERIVED ideal contact mass={expected_mass}; MEASURED cast witness mass={effective}"
+        );
+        let demand = account
+            .samples
+            .iter()
+            .find(|(b, ..)| *b == body)
+            .unwrap()
+            .3
+            .0;
+        let expected = peak_force(
+            f64::from(effective),
+            f64::from(witness.speed),
+            Contactor::chunk(&kind.structure, witness.chunk),
+            Contactor::RIGID,
+        ) as f32;
+        assert!(
+            (demand / expected - 1.0).abs() < 1e-4,
+            "peak {demand} != {expected}"
+        );
+        peaks.push(demand);
+    }
+    assert!(peaks[1] < peaks[0], "rotation reduces the contact peak");
+}
+
 /// The game's environment destruction: the sweep owns a moving body's pair with a standing
 /// construction until exact occupancy. There a look-ahead point beyond Avian's contact tolerance
 /// is dropped, while a resting one within it and a penetrating one are kept; a pair with no
