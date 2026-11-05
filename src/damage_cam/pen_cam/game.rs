@@ -808,12 +808,17 @@ mod tests {
 
     /// One fixture frame for presentation and wall-clock device input.
     pub(super) fn step(app: &mut App) {
+        step_by(app, STEP_S);
+    }
+
+    /// Advance both presentation and input clocks by the same fixture frame duration.
+    pub(super) fn step_by(app: &mut App, seconds: f32) {
         app.world_mut()
             .resource_mut::<Time>()
-            .advance_by(Duration::from_secs_f32(STEP_S));
+            .advance_by(Duration::from_secs_f32(seconds));
         app.world_mut()
             .resource_mut::<Time<Real>>()
-            .advance_by(Duration::from_secs_f32(STEP_S));
+            .advance_by(Duration::from_secs_f32(seconds));
         app.update();
     }
 

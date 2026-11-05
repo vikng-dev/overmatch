@@ -268,10 +268,9 @@ fn jitter_readout(spread: Duration, tick: Duration) -> (String, Color) {
 /// coalesced arrivals cannot establish a faster server. Never divide a gap by skipped ticks:
 /// catch-up would conceal stalls.
 fn server_tick_readout(gap: Duration, tick: Duration) -> (String, Color) {
-    let color = excess_colour(gap.saturating_sub(tick), tick);
     (
         format!("{:.1} Hz", gap.max(tick).as_secs_f64().recip()),
-        color,
+        excess_colour(gap.saturating_sub(tick), tick),
     )
 }
 
@@ -392,10 +391,9 @@ mod tests {
             .map(|gap| server_tick_readout(gap, world.resource::<TickDuration>().0))
     }
 
-    /// Players see the nominal rate on evenly spaced tick advances. The display bands are in
-    /// excess tick budgets, so changing the session rate preserves their meaning.
+    /// Players see the nominal rate on evenly spaced tick advances.
     #[test]
-    fn steady_ticks_are_healthy_and_bands_follow_the_tick_budget() {
+    fn steady_ticks_are_healthy() {
         let (mut app, link, tick) = tick_app();
         assert_eq!(readout(&app), None, "no packet yet is a placeholder");
         // Fixture: two seconds of steady arrivals, crossing the retention boundary.
@@ -409,22 +407,6 @@ mod tests {
         assert_eq!(
             readout(&app),
             Some((format!("{:.1} Hz", tick.as_secs_f64().recip()), TEXT))
-        );
-        assert_eq!(
-            server_tick_readout(tick * WARN_EXCESS_TICKS + tick, tick).1,
-            NET_WARN
-        );
-        assert_eq!(
-            server_tick_readout(tick * ALARM_EXCESS_TICKS + tick, tick).1,
-            NET_WARN
-        );
-        assert_eq!(
-            server_tick_readout(
-                tick * ALARM_EXCESS_TICKS + tick + Duration::from_nanos(1),
-                tick
-            )
-            .1,
-            NET_ALARM
         );
     }
 
@@ -490,10 +472,10 @@ mod tests {
         assert_eq!(readout(&app).unwrap().1, TEXT);
     }
 
-    /// The panel reports the full buffered spread in milliseconds; fixture conversions pin the
-    /// unit while colour bands follow the session's authority interval.
+    /// The panel reports the full buffered spread in milliseconds. Both readouts' colour bands
+    /// follow the session's authority interval; fixture conversions pin the displayed unit.
     #[test]
-    fn jitter_reports_the_full_buffered_spread() {
+    fn jitter_and_cadence_share_excess_budget_bands() {
         let (_, _, tick) = tick_app();
         assert_eq!(jitter_readout(Duration::ZERO, tick), ("+0 ms".into(), TEXT));
         for (millis, expected) in [(10, "+10 ms"), (68, "+68 ms")] {
@@ -503,11 +485,16 @@ mod tests {
             );
         }
         assert_eq!(jitter_readout(tick / 2, tick).1, TEXT);
-        assert_eq!(jitter_readout(tick * WARN_EXCESS_TICKS, tick).1, NET_WARN);
-        assert_eq!(jitter_readout(tick * ALARM_EXCESS_TICKS, tick).1, NET_WARN);
-        assert_eq!(
-            jitter_readout(tick * ALARM_EXCESS_TICKS + Duration::from_nanos(1), tick).1,
-            NET_ALARM
-        );
+        for (excess, colour) in [
+            (tick * WARN_EXCESS_TICKS, NET_WARN),
+            (tick * ALARM_EXCESS_TICKS, NET_WARN),
+            (
+                tick * ALARM_EXCESS_TICKS + Duration::from_nanos(1),
+                NET_ALARM,
+            ),
+        ] {
+            assert_eq!(jitter_readout(excess, tick).1, colour);
+            assert_eq!(server_tick_readout(excess + tick, tick).1, colour);
+        }
     }
 }

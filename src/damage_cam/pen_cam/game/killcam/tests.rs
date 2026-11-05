@@ -1,29 +1,77 @@
 //! The game's damage-model view tests, game state only.
 
 use super::super::tests::{
-    STEP_S, census, corner_app_with, default_image_kept, receive, stage_of, step,
+    STEP_S as FRAME_S, census, corner_app_with, default_image_kept, receive, stage_of, step_by,
 };
 use bevy::camera::visibility::RenderLayers;
 
 use super::*;
-use crate::command::CrewSwap;
+use crate::command::{AxisKeys, CrewSwap};
 use crate::damage::{CrewStation, KnockoutReason};
 use crate::damage_cam::PenetrationReport;
 use crate::damage_cam::delivery::tests::{SHOOTER, STRUCK, recorded, report, vocabulary};
 use crate::damage_cam::pen_cam::{Exhibits, Surface};
 use crate::damage_cam::wire::{BuiltExplanation, ShotExplanation, ShotVocabulary};
 
-/// The recorded scenario every test kills with: fixture data.
+/// The game's damage-model knockout record: fixture data.
 const RECORD: &str = "s1_through_crew";
 
-/// The lesson's length for [`RECORD`] ([`lesson_length`]); a component's shape never times a
-/// record, so no tank's shapes are needed.
-fn lesson_s() -> f32 {
-    let plan = Plan::new(
-        &report(RECORD),
-        &crate::damage_cam::shapes::TankShapes::default(),
+/// Fixture frames resolve every authored wait, beat and drive tap window with at least eight samples.
+fn frame_s() -> f32 {
+    let beats = Beats {
+        impact: 0.0,
+        shooter: true,
+        lesson_s: demo::LESSON_S,
+    };
+    FRAME_S
+        .min(crate::track::drive::drive_feel().tap_window_s.0 as f32 / 8.0)
+        .min(RECORD_WAIT_S / 8.0)
+        .min(HIT_S / 8.0)
+        .min(demo::LESSON_S / 8.0)
+        .min((beats.death() - beats.killer()) / 8.0)
+}
+
+fn step(app: &mut App) {
+    step_by(app, frame_s());
+}
+
+/// The game's damage-model timing owner reads the plan actually presented by this fixture.
+fn lesson_s(app: &App) -> f32 {
+    let exhibit = app
+        .world()
+        .resource::<Exhibits>()
+        .0
+        .first()
+        .expect("a run presents its record");
+    lesson_length(Some(&exhibit.plan))
+}
+
+/// Two fixture frames allow receipt and presentation after the authored record wait.
+fn deadline(app: &App, beat: Beat) -> f32 {
+    let beats = Beats {
+        impact: 0.0,
+        shooter: true,
+        lesson_s: lesson_s(app),
+    };
+    RECORD_WAIT_S
+        + match beat {
+            Beat::Hit => 0.0,
+            Beat::Lesson => beats.lesson(),
+            Beat::Killer => beats.killer(),
+            Beat::Death => beats.death(),
+        }
+        + 2.0 * frame_s()
+}
+
+fn reach(app: &mut App, target: Beat) {
+    let seconds = deadline(app, target);
+    assert!(
+        until(app, seconds, |app| match target {
+            Beat::Death => victim(app).run().is_none(),
+            _ => beat(app) == Some(target),
+        }),
+        "the run reaches {target:?}"
     );
-    lesson_length(Some(&plan))
 }
 
 /// Where the fixture's shooter fired from, in the record's frame (m): fixture data, so the killer
@@ -65,19 +113,44 @@ fn shot(
     (victim, shooter, vocabulary, report)
 }
 
-/// The kill cam's app: [`corner_app`](super::super::tests::corner_app) with the default keys, the
-/// Esc router and the player's camera.
-fn app(settings: Settings) -> (App, Entity, Entity) {
-    app_with(settings, |_| {})
+/// Fixture presentation choices exercise the replay and corner regardless of player defaults.
+fn replay_settings() -> Settings {
+    Settings {
+        kill_cam: KillCamSetting::On,
+        pen_cam_corner: crate::settings::PenCamCorner::All,
+        reduce_motion: ReduceMotion::Off,
+        ..Settings::default()
+    }
 }
 
-/// [`app`] with `mount` run before the app finishes.
+/// The kill cam's app: [`corner_app`](super::super::tests::corner_app) with fixture keys, the
+/// Esc router and the player's camera.
+fn app(settings: Settings) -> (App, Entity, Entity) {
+    app_with(settings, crate::state::escape_router)
+}
+
+/// [`app`] with `mount` supplying its input owner before the app finishes.
 fn app_with(settings: Settings, mount: impl FnOnce(&mut App)) -> (App, Entity, Entity) {
     let (mut app, player) = corner_app_with(settings, mount);
-    app.insert_resource(Bindings::default())
-        .init_resource::<ButtonInput<KeyCode>>()
-        .init_resource::<ButtonInput<MouseButton>>();
-    crate::state::escape_router(&mut app);
+    // Fixture controls stay independent of the player's default bindings.
+    app.insert_resource(Bindings {
+        throttle: AxisKeys {
+            pos: KeyCode::KeyW,
+            neg: KeyCode::KeyS,
+        },
+        steer: AxisKeys {
+            pos: KeyCode::KeyD,
+            neg: KeyCode::KeyA,
+        },
+        fire_primary: ButtonBinding::Mouse(MouseButton::Left),
+        fire_secondary: ButtonBinding::Key(KeyCode::Space),
+        xray: ButtonBinding::Key(KeyCode::KeyX),
+        kill_cam_hold: ButtonBinding::Key(KeyCode::KeyC),
+        kill_cam_replay: ButtonBinding::Key(KeyCode::Space),
+        ..default()
+    })
+    .init_resource::<ButtonInput<KeyCode>>()
+    .init_resource::<ButtonInput<MouseButton>>();
     let camera = app
         .world_mut()
         .spawn((PlayerView, CameraProfile::BattlefieldThirdPerson))
@@ -121,7 +194,10 @@ fn press(app: &mut App, key: KeyCode) {
 
 /// Run frames until `done` holds or `seconds` pass; whether it held.
 fn until(app: &mut App, seconds: f32, done: impl Fn(&App) -> bool) -> bool {
-    for _ in 0..(seconds / STEP_S).ceil() as usize {
+    if done(app) {
+        return true;
+    }
+    for _ in 0..(seconds / frame_s()).ceil() as usize {
         step(app);
         assert!(
             app.world().resource::<Exhibits>().0.len() <= 1,
@@ -145,7 +221,7 @@ fn run(app: &mut App, seconds: f32) {
 /// A knockout whose killing record arrives `record_after_s` after the fact (negative: before it),
 /// the struck tank's stage view stood in once the slot has closed. The app, the player, the camera.
 fn killed(record_after_s: f32) -> (App, Entity, Entity) {
-    killed_in(app(Settings::default()), record_after_s)
+    killed_in(app(replay_settings()), record_after_s)
 }
 
 /// [`killed`], in `app`.
@@ -171,7 +247,7 @@ fn killed_in(
 /// no disk path. A reparse mutant would lose the in-memory display name this fixture authors.
 #[test]
 fn the_killer_card_reads_the_live_shooters_loaded_spec() {
-    let (mut app, player, camera) = app(Settings::default());
+    let (mut app, player, camera) = app(replay_settings());
     let record = report(RECORD);
     let path = crate::assets::asset_root().join(record.vehicle.as_deref().unwrap());
     let mut spec: TankSpec = crate::provenance::from_shipped_str(
@@ -204,31 +280,35 @@ fn the_killer_card_reads_the_live_shooters_loaded_spec() {
 #[test]
 fn either_arrival_order_plays_the_four_beats() {
     // Fixture arrivals leave room for receipt and presentation frames inside the authored window.
-    let timely_s = (RECORD_WAIT_S - 3.0 * STEP_S).max(0.0);
-    for record_after_s in [-STEP_S, 0.0, timely_s / 2.0, timely_s] {
+    let timely_s = RECORD_WAIT_S - 3.0 * frame_s();
+    for record_after_s in [-frame_s(), 0.0, timely_s / 2.0, timely_s] {
         let (mut app, _, _) = killed(record_after_s);
-        assert!(until(&mut app, 0.1, |app| victim(app).run().is_some()));
+        assert!(until(&mut app, 2.0 * frame_s(), |app| victim(app)
+            .run()
+            .is_some()));
+        let zero = victim(&app).death.as_ref().unwrap().zero;
+        let since = (app.world().resource::<Time>().elapsed_secs_f64() - zero) as f32;
         // A record later than the hit beat's end opens the lesson at once.
-        let first = if record_after_s + 2.0 * STEP_S < HIT_S {
+        let first = if since < HIT_S {
             Beat::Hit
         } else {
             Beat::Lesson
         };
         assert_eq!(beat(&app), Some(first), "{record_after_s}");
         assert!(gate(&app).holds_death_screen);
-        let zero = victim(&app).death.as_ref().unwrap().zero;
         let lesson = victim(&app).run().unwrap().beats.lesson();
         assert!(lesson >= HIT_S, "{record_after_s}: lesson at {lesson}");
-        assert!(lesson + 1e-3 >= record_after_s, "{record_after_s}");
+        assert!(lesson + frame_s() >= record_after_s, "{record_after_s}");
         let length = victim(&app).run().unwrap().beats.lesson_s;
-        assert!(
-            (length - lesson_s()).abs() < 1e-2,
-            "{record_after_s}: the lesson runs {length} s, its record's"
+        assert_eq!(
+            length,
+            lesson_s(&app),
+            "{record_after_s}: the record's length"
         );
 
-        assert!(until(&mut app, 1.5, |app| beat(app) == Some(Beat::Lesson)));
+        reach(&mut app, Beat::Lesson);
         let now = app.world().resource::<Time>().elapsed_secs_f64();
-        assert!((now - zero) as f32 + STEP_S >= HIT_S);
+        assert!((now - zero) as f32 + frame_s() >= HIT_S);
         step(&mut app);
         assert!(captive(&app));
         let showing = app.world().resource::<Corner>().showing;
@@ -238,14 +318,12 @@ fn either_arrival_order_plays_the_four_beats() {
         );
         assert_eq!(app.world().resource::<Exhibits>().0.len(), 1);
 
-        assert!(until(&mut app, lesson_s() + 1.4, |app| {
-            beat(app) == Some(Beat::Killer)
-        }));
+        reach(&mut app, Beat::Killer);
         assert!(captive(&app));
         assert!(app.world().resource::<Corner>().showing.is_none());
         assert!(gate(&app).holds_death_screen);
 
-        assert!(until(&mut app, 5.0, |app| victim(app).run().is_none()));
+        reach(&mut app, Beat::Death);
         assert!(!captive(&app));
         assert!(!gate(&app).holds_death_screen, "the death screen");
         assert!(victim(&app).record.is_some(), "the replay is held");
@@ -281,7 +359,7 @@ fn a_knockout_without_its_killing_record_goes_to_the_death_screen_in_the_window(
         }),
     ];
     for (case, setup) in cases {
-        let (mut app, player, _) = app(Settings::default());
+        let (mut app, player, _) = app(replay_settings());
         setup(&mut app);
         knock_out(&mut app, player);
         step(&mut app);
@@ -289,7 +367,7 @@ fn a_knockout_without_its_killing_record_goes_to_the_death_screen_in_the_window(
         assert!(gate(&app).settling, "{case}");
         run(&mut app, HIT_S);
         assert!(!gate(&app).settling, "{case}: respawn is live");
-        run(&mut app, RECORD_WAIT_S - HIT_S + 2.0 * STEP_S);
+        run(&mut app, (RECORD_WAIT_S - HIT_S).max(0.0) + 2.0 * frame_s());
         assert!(!gate(&app).holds_death_screen, "{case}: the death screen");
         assert!(victim(&app).run().is_none(), "{case}");
         assert!(victim(&app).record.is_none(), "{case}: no replay");
@@ -302,7 +380,7 @@ fn a_knockout_without_its_killing_record_goes_to_the_death_screen_in_the_window(
 /// offers it, and the replay key plays it from the lesson.
 #[test]
 fn a_late_record_is_offered_for_replay() {
-    let (mut app, _, _) = killed(RECORD_WAIT_S + 0.5);
+    let (mut app, _, _) = killed(RECORD_WAIT_S.max(HIT_S) + 2.0 * frame_s());
     step(&mut app);
     assert!(victim(&app).run().is_none());
     assert!(!gate(&app).holds_death_screen);
@@ -310,33 +388,34 @@ fn a_late_record_is_offered_for_replay() {
     press(&mut app, KeyCode::Space);
     assert_eq!(beat(&app), Some(Beat::Lesson));
     assert!(gate(&app).holds_death_screen);
-    assert!(until(&mut app, lesson_s() + 6.4, |app| victim(app)
-        .run()
-        .is_none()));
+    reach(&mut app, Beat::Death);
     assert!(!gate(&app).holds_death_screen);
 }
 
 /// Esc ends a run at the death screen; the hold key freezes its clock while down; the replay key
 /// plays it again; none of them reads before the dead-zone's end.
 #[test]
-fn skip_hold_and_replay() {
+fn skip_hold_and_replay_respect_the_dead_zone_and_run_clock() {
     let (mut app, _, _) = killed(-1.0);
     press(&mut app, KeyCode::Escape);
     assert!(victim(&app).run().is_some(), "no key in the dead-zone");
-    assert!(until(&mut app, 1.0, |app| beat(app) == Some(Beat::Lesson)));
-    run(&mut app, 0.2);
+    reach(&mut app, Beat::Lesson);
 
+    // Keep the held clock inside the lesson, away from its floating-point boundary.
+    let inside_lesson_s = lesson_s(&app) / 8.0;
+    run(&mut app, inside_lesson_s);
     let before = victim(&app).run().unwrap();
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
         .press(KeyCode::KeyC);
-    run(&mut app, 1.0);
+    let held_s = deadline(&app, Beat::Death);
+    run(&mut app, held_s);
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
         .release(KeyCode::KeyC);
     let after = victim(&app).run().unwrap();
-    assert!(after.real - before.real >= 1.0 - STEP_S);
-    assert!(after.t - before.t < STEP_S * 1.5, "the clock held");
+    assert!(after.real - before.real >= held_s - frame_s());
+    assert!(after.t - before.t < frame_s() * 1.5, "the clock held");
     assert_eq!(after.beat(), Beat::Lesson);
 
     press(&mut app, KeyCode::Escape);
@@ -346,9 +425,7 @@ fn skip_hold_and_replay() {
 
     press(&mut app, KeyCode::Space);
     assert_eq!(beat(&app), Some(Beat::Lesson), "replayed");
-    assert!(until(&mut app, lesson_s() + 6.4, |app| victim(app)
-        .run()
-        .is_none()));
+    reach(&mut app, Beat::Death);
     assert!(victim(&app).record.is_some());
 }
 
@@ -358,7 +435,7 @@ fn skip_hold_and_replay() {
 fn the_setting_off_goes_straight_to_the_death_screen() {
     let settings = Settings {
         kill_cam: KillCamSetting::Off,
-        ..Settings::default()
+        ..replay_settings()
     };
     let (mut app, player, _) = app(settings);
     let (explanation, _, vocabulary, _) = shot(STRUCK, player_life(0), true);
@@ -370,7 +447,7 @@ fn the_setting_off_goes_straight_to_the_death_screen() {
     assert!(victim(&app).record.is_some());
 
     let (mut app, _, _) = killed(-1.0);
-    assert!(until(&mut app, 1.0, |app| beat(app) == Some(Beat::Lesson)));
+    reach(&mut app, Beat::Lesson);
     app.world_mut().resource_mut::<Settings>().kill_cam = KillCamSetting::Off;
     step(&mut app);
     assert!(victim(&app).run().is_none());
@@ -389,14 +466,14 @@ fn respawn_or_disconnect_mid_beat_leaves_nothing() {
         ("disconnect", Beat::Lesson),
         ("disconnect", Beat::Killer),
     ] {
-        let (mut app, player, camera) = app(Settings::default());
+        let (mut app, player, camera) = app(replay_settings());
         let baseline = census(&mut app);
         let (explanation, _, vocabulary, report) = shot(STRUCK, player_life(0), true);
         receive(&mut app, explanation, &vocabulary);
         knock_out(&mut app, player);
         step(&mut app);
         stage_of(&mut app, report.vehicle.as_deref().unwrap());
-        assert!(until(&mut app, lesson_s() + 2.4, |app| beat(app) == Some(at)));
+        reach(&mut app, at);
         if at == Beat::Lesson {
             // The captive placement's profile, which runs in `PostUpdate` with the camera plugin.
             app.world_mut()
@@ -421,7 +498,7 @@ fn respawn_or_disconnect_mid_beat_leaves_nothing() {
                 app.world_mut().trigger(CloseCorner);
             }
         }
-        run(&mut app, 0.5);
+        run(&mut app, HIT_S + 2.0 * frame_s());
         assert!(victim(&app).run().is_none(), "{case} at {at:?}");
         assert!(!captive(&app), "{case} at {at:?}");
         let world = app.world();
@@ -453,40 +530,34 @@ fn respawn_or_disconnect_mid_beat_leaves_nothing() {
 #[test]
 fn the_slot_stays_closed_under_the_kill_cam() {
     let (mut app, _, _) = killed(-1.0);
-    assert!(until(&mut app, 1.0, |app| beat(app) == Some(Beat::Lesson)));
+    reach(&mut app, Beat::Lesson);
     let struck = TankLife {
         combatant: STRUCK,
         life: CombatantLife(0),
     };
     let (_, shooter, vocabulary, _) = shot(SHOOTER, struck, false);
     receive(&mut app, shooter, &vocabulary);
-    assert!(until(&mut app, lesson_s() + 6.4, |app| victim(app)
-        .run()
-        .is_none()));
+    reach(&mut app, Beat::Death);
     assert!(app.world().resource::<Corner>().showing.is_none());
 }
 
 /// The kill cam's app with the game's readers of its gate on their own sets: the network client's
-/// death screen and respawn key, and the spawn map, under the overlay sets' chain, in a match. The
+/// death screen and respawn key, and the spawn map, under the shipped overlay plugin. The
 /// player's tank takes commands.
 fn composed() -> (App, Entity, Entity) {
-    let (mut app, player, camera) = app(Settings::default());
-    app.configure_sets(
-        Update,
-        (OverlaySet::Declare, OverlaySet::Toggle, OverlaySet::Cursor).chain(),
-    )
-    .init_resource::<Overlays>()
+    let (mut app, player, camera) = app_with(replay_settings(), |app| {
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .add_message::<bevy::window::WindowFocused>();
+        crate::flow::in_match_plugin(app);
+        crate::overlay::plugin(app);
+    });
     // The death screen's countdown reads the fixed timestep.
-    .init_resource::<Time<Fixed>>()
-    .insert_resource(UiFonts {
+    app.init_resource::<Time<Fixed>>().insert_resource(UiFonts {
         hud: Handle::default(),
         body: Handle::default(),
     });
     crate::net::mount_death_screen(&mut app);
     crate::net::spawn_map::mount_bare(&mut app);
-    app.world_mut()
-        .resource_mut::<Overlays>()
-        .declare_in_match(true);
     app.world_mut()
         .entity_mut(player)
         .insert(TankCommand::default());
@@ -559,10 +630,9 @@ fn the_gate_is_read_on_the_frame_it_is_written() {
 #[test]
 fn esc_skips_the_run_before_it_reaches_the_menu() {
     let menu = |app: &App| app.world().resource::<Overlays>().contains(Overlay::Menu);
-    let (mut app, player, camera) = composed();
-    crate::overlay::mount_bare(&mut app);
+    let (app, player, camera) = composed();
     let (mut app, _, _) = killed_in((app, player, camera), -1.0);
-    assert!(until(&mut app, 1.0, |app| beat(app) == Some(Beat::Lesson)));
+    reach(&mut app, Beat::Lesson);
     press(&mut app, KeyCode::Escape);
     assert!(victim(&app).run().is_none(), "the run ended");
     assert!(!menu(&app), "and the press opened no menu");
@@ -570,7 +640,6 @@ fn esc_skips_the_run_before_it_reaches_the_menu() {
     assert!(menu(&app), "the next press is the menu's");
 
     let (mut app, _, _) = composed();
-    crate::overlay::mount_bare(&mut app);
     press(&mut app, KeyCode::Escape);
     assert!(menu(&app), "with no run the press is the menu's");
 }
@@ -579,7 +648,7 @@ fn esc_skips_the_run_before_it_reaches_the_menu() {
 /// first frame, the third person's on the killer beat's first.
 #[test]
 fn each_beats_channels_resolve_on_its_first_frame() {
-    let (mut app, player, camera) = app(Settings::default());
+    let (mut app, player, camera) = app(replay_settings());
     crate::render_policy::plugin(&mut app);
     app.init_resource::<avian3d::collider_tree::ColliderTrees>()
         .insert_resource(TurretPivot::at(Vec3::Y));
@@ -597,9 +666,7 @@ fn each_beats_channels_resolve_on_its_first_frame() {
         (Beat::Lesson, CameraProfile::KillCamLesson),
         (Beat::Killer, CameraProfile::BattlefieldThirdPerson),
     ] {
-        assert!(until(&mut app, lesson_s() + 2.4, |app| {
-            beat(app) == Some(beat_now)
-        }));
+        reach(&mut app, beat_now);
         assert_eq!(layers(&app), Some(profile.mask()), "{beat_now:?}");
     }
 }
@@ -608,8 +675,12 @@ fn each_beats_channels_resolve_on_its_first_frame() {
 #[derive(Resource, Default)]
 struct DeviceRead(Option<TankCommand>);
 
-fn read_device(mut read: ResMut<DeviceRead>, own: Query<&TankCommand, With<Controlled>>) {
-    read.0 = own.single().ok().copied();
+fn read_device(mut read: ResMut<DeviceRead>, own: Query<Option<&TankCommand>, With<Controlled>>) {
+    // Before `device` completes the fixture, the controlled tank has no command yet.
+    read.0 = own
+        .single()
+        .expect("the device fixture has one controlled tank")
+        .copied();
 }
 
 /// The player's device on its real systems beside the kill cam: the gather, the sight toggle, the
@@ -617,6 +688,7 @@ fn read_device(mut read: ResMut<DeviceRead>, own: Query<&TankCommand, With<Contr
 /// leaves ([`DeviceRead`]). Mounted before the app finishes ([`app_with`]); [`device`] gives them
 /// their world.
 fn mount_device(app: &mut App) {
+    crate::state::escape_router(app);
     // Fixture handles: device ownership reads the widgets without shaping or rendering text.
     app.insert_resource(crate::ui_font::UiFonts {
         hud: Handle::default(),
@@ -770,7 +842,7 @@ fn the_death_flow_owns_the_device() {
         ButtonBinding::Key(KeyCode::Space),
         ButtonBinding::Mouse(MouseButton::Left),
     ] {
-        let (mut app, player, camera) = app_with(Settings::default(), mount_device);
+        let (mut app, player, camera) = app_with(replay_settings(), mount_device);
         app.world_mut().resource_mut::<Bindings>().kill_cam_replay = replay;
         device(&mut app, player, camera);
         let command = |app: &App| *app.world().get::<TankCommand>(player).unwrap();
@@ -819,9 +891,7 @@ fn the_death_flow_owns_the_device() {
         };
         hold_all(&mut app, 8, silent);
         let_go(&mut app);
-        assert!(until(&mut app, lesson_s() + 6.4, |app| victim(app)
-            .run()
-            .is_none()));
+        reach(&mut app, Beat::Death);
         hold_all(&mut app, 8, silent);
         assert_eq!(beat(&app), Some(Beat::Lesson), "{replay:?}: replayed");
         assert_eq!(
@@ -853,7 +923,6 @@ fn the_death_flow_owns_the_device() {
 #[test]
 fn esc_on_the_frame_a_run_starts_is_the_runs() {
     let (mut app, player, _) = composed();
-    crate::overlay::mount_bare(&mut app);
     let (explanation, _, vocabulary, _) = shot(STRUCK, player_life(0), true);
     receive(&mut app, explanation, &vocabulary);
     knock_out(&mut app, player);
@@ -879,11 +948,17 @@ fn esc_on_the_frame_a_run_starts_is_the_runs() {
 fn esc_on_the_frame_a_run_starts_does_not_pause() {
     use crate::state::AppState;
 
-    let (mut app, player, _) = app_with(Settings::default(), |app| {
-        bevy::state::app::StatesPlugin.build(app);
+    let (mut app, player, _) = app_with(replay_settings(), |app| {
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .add_message::<bevy::window::WindowFocused>()
+            .init_resource::<Time<avian3d::prelude::Physics>>()
+            .insert_resource(UiFonts {
+                hud: Handle::default(),
+                body: Handle::default(),
+            });
+        crate::state::sim_plugin(app);
+        crate::state::client_plugin(app);
     });
-    app.init_state::<AppState>();
-    crate::state::mount_pause_bare(&mut app);
     app.world_mut()
         .resource_mut::<NextState<AppState>>()
         .set(AppState::Playing);
@@ -909,7 +984,7 @@ fn esc_on_the_frame_a_run_starts_does_not_pause() {
 /// round. The armour sandbox's range relies on both.
 #[test]
 fn a_free_shooters_held_tank_knocked_out_is_no_death() {
-    let (mut app, held, _) = app(Settings::default());
+    let (mut app, held, _) = app(replay_settings());
     app.world_mut().entity_mut(held).insert(STRUCK);
     app.world_mut()
         .spawn((SHOOTER, CombatantLife(0), FreeShooter));
@@ -924,7 +999,10 @@ fn a_free_shooters_held_tank_knocked_out_is_no_death() {
     receive(&mut app, victim_projection, &vocabulary);
     receive(&mut app, shooter, &vocabulary);
     let mut cornered = false;
-    for _ in 0..(4.0 / STEP_S).ceil() as usize {
+    let plan = Plan::new(&report, &crate::damage_cam::shapes::TankShapes::default());
+    let corner_s = crate::damage_cam::pen_cam::stage::pace(&plan, plan.kind).duration;
+    // Allow receipt and presentation frames around the corner's owned duration.
+    for _ in 0..(((timeline::OPEN_LATENCY_S + corner_s) / frame_s()).ceil() as usize + 2) {
         step(&mut app);
         assert!(victim(&app).death.is_none(), "no death");
         assert!(!captive(&app), "the camera stays the player's");

@@ -932,7 +932,7 @@ mod tests {
         adapt_invalid_marker(0, 0);
     }
 
-    use crate::terrain_grid::{GRID_RESOLUTION, tests::shipped_grid};
+    use crate::terrain_grid::tests::shipped_grid;
 
     /// Terrain normal maps need tangent bases on every published mesh. An OS discovery refusal
     /// must remain an error before any worker runs, never silently select one worker.
@@ -975,17 +975,25 @@ mod tests {
     }
 
     /// Negative-threshold RTIN must match `terrain_mesh_tiles`' triangle set and winding, not
-    /// only its DERIVED `2 · 128²` count. Alternating-bintree main diagonals can keep the count
+    /// only its DERIVED two triangles per cell. Alternating-bintree main diagonals can keep the count
     /// and corner heights while changing the surface; this pins `canonicalize_cell_diagonals`.
     #[test]
     fn rtin_at_zero_error_reproduces_the_canonical_tessellation() {
         let full = MESH_TILE_CELLS + 1;
         let hierarchy = rtin::Rtin::new(full);
-        let grid = shipped_grid();
-        assert_eq!(grid.size(), GRID_RESOLUTION);
+        // FIXTURE DATA: four full tiles with non-coplanar cell corners expose diagonal changes.
+        let size = 2 * MESH_TILE_CELLS + 1;
+        let heights = (0..size * size)
+            .map(|k| ((k % size) * (k / size) % 7) as f32)
+            .collect::<Vec<_>>();
+        let grid = HeightGrid::new(
+            heights.into(),
+            size as u32,
+            crate::terrain_grid::FIXTURE_EXTENT,
+        );
         let ranges = mesh_tile_node_ranges(&grid);
-        assert_eq!(ranges.len(), 64, "the shipped map is 8×8 render tiles");
         let canonical = crate::terrain_grid::terrain_mesh_tiles(&grid);
+        assert_eq!(ranges.len(), canonical.len());
         let mut total = 0usize;
         for (t, (range, mesh)) in ranges.into_iter().zip(&canonical).enumerate() {
             let errors = hierarchy.error_pyramid(&patch(&grid, range));
@@ -996,24 +1004,22 @@ mod tests {
                 "exact extraction must be the full grid"
             );
             total += ours.len();
-            let Some(Indices::U32(indices)) = mesh.indices() else {
-                panic!("the canonical tiler must carry u32 indices");
-            };
-            // Both index the tile's own 129² patch row-major, so the triples are directly
+            let indices: Vec<u32> = mesh
+                .indices()
+                .expect("the canonical tiler must carry triangle indices")
+                .iter()
+                .map(|index| index as u32)
+                .collect();
+            // Both index the tile's own patch row-major, so the triples are directly
             // comparable — once each is rotated to start at its lowest vertex. Rotation preserves
             // winding and is the only freedom a triangle has; emission order is not part of the
             // claim, the tessellation is.
             let normalize = |tri: &mut [u32; 3]| {
                 let first = usize::from(tri[1] < tri[0] && tri[1] < tri[2])
                     + 2 * usize::from(tri[2] < tri[0] && tri[2] < tri[1]);
-                *tri = [tri[first], tri[(first + 1) % 3], tri[(first + 2) % 3]];
+                tri.rotate_left(first);
             };
-            let mut theirs: Vec<[u32; 3]> = indices
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .map(|tri| [tri[0], tri[1], tri[2]])
-                .collect();
+            let mut theirs = indices.as_chunks::<3>().0.to_vec();
             ours.iter_mut().for_each(&normalize);
             theirs.iter_mut().for_each(&normalize);
             ours.sort_unstable();
@@ -1023,7 +1029,7 @@ mod tests {
                 "tile {t}: the exact extraction is not the canonical anti-diagonal tessellation"
             );
         }
-        assert_eq!(total, 2 * 1024 * 1024, "2,097,152 triangles over the map");
+        assert_eq!(total, 2 * (grid.size() as usize - 1).pow(2));
     }
 
     /// Every kept level's continuous deviation must fit its declared rung, which sets its switch
@@ -1344,7 +1350,8 @@ mod tests {
         );
     }
 
-    /// Three kept levels without geometry exercise selection/adaptation without heightmap decode.
+    /// The admitted rungs without geometry exercise selection/adaptation without heightmap decode.
+    /// FIXTURE DATA: a tile's bounds give the projection a nonzero radius.
     fn synthetic_ladder() -> TerrainLod {
         let level = |rung: usize| TerrainLodLevel {
             rung,
@@ -1356,7 +1363,7 @@ mod tests {
         let tile = TerrainLodTile {
             min: Vec3::new(-62.5, 0.0, -62.5),
             max: Vec3::new(62.5, 20.0, 62.5),
-            levels: vec![level(0), level(2), level(4)],
+            levels: (0..TERRAIN_LOD_LADDER.len()).map(level).collect(),
         };
         TerrainLod {
             bounding_radius_m: tile.bounding_radius_m(),
@@ -1367,7 +1374,7 @@ mod tests {
 
     /// An optic's narrow field magnifies error, so thresholds must move outward; unchanged facts
     /// must leave them there. Assert direction, not just a change, to catch stale startup-view
-    /// selection. A few hundred entities and human-rate triggers make adaptation cheap.
+    /// selection.
     #[test]
     fn the_adaptive_layer_rewrites_thresholds_when_the_view_changes() {
         // Fixture optics: the gunner field is strictly narrower than the commander's.
@@ -1376,7 +1383,9 @@ mod tests {
         let mut app = App::new();
         // Mount the shared reader: this module consumes view facts, not cameras or windows.
         app.add_plugins((crate::view::plugin, plugin));
-        app.insert_resource(TerrainLodLadder(synthetic_ladder()));
+        let ladder = synthetic_ladder();
+        let level_count = ladder.tiles[0].levels.len();
+        app.insert_resource(TerrainLodLadder(ladder));
         let world = app.world_mut();
         let window = world
             .spawn((Window::default(), bevy::window::PrimaryWindow))
@@ -1392,7 +1401,7 @@ mod tests {
                 crate::view::PlayerView,
             ))
             .id();
-        let entities: Vec<Entity> = (0..3)
+        let entities: Vec<Entity> = (0..level_count)
             .map(|level| {
                 world
                     .spawn((
@@ -1410,16 +1419,14 @@ mod tests {
             .resolution
             .set_physical_resolution(2560, 1440);
         app.update();
-        let commander: Vec<f32> = entities
-            .iter()
-            .map(|&entity| {
-                app.world()
-                    .get::<VisibilityRange>(entity)
-                    .expect("the adaptive layer must write a range")
-                    .start_margin
-                    .start
-            })
-            .collect();
+        let start = |app: &App, entity| {
+            app.world()
+                .get::<VisibilityRange>(entity)
+                .expect("the adaptive layer must write a range")
+                .start_margin
+                .start
+        };
+        let commander: Vec<f32> = entities.iter().map(|&entity| start(&app, entity)).collect();
 
         // Narrowing the field magnifies the same terrain deviations.
         {
@@ -1433,20 +1440,11 @@ mod tests {
             projection.fov = optic_fov;
         }
         app.update();
-        let optic: Vec<f32> = entities
-            .iter()
-            .map(|&entity| {
-                app.world()
-                    .get::<VisibilityRange>(entity)
-                    .expect("the adaptive layer must write a range")
-                    .start_margin
-                    .start
-            })
-            .collect();
+        let optic: Vec<f32> = entities.iter().map(|&entity| start(&app, entity)).collect();
 
         assert_eq!(commander[0], 0.0, "the exact level always starts at zero");
         assert_eq!(optic[0], 0.0);
-        for level in 1..3 {
+        for level in 1..level_count {
             assert!(
                 optic[level] > commander[level],
                 "the optic must push level {level} out ({} vs {})",
@@ -1454,17 +1452,10 @@ mod tests {
                 commander[level],
             );
         }
-        // And the rewrite is idempotent: no view change, no work.
+        // Unchanged view facts preserve the thresholds.
         app.update();
         for (level, &entity) in entities.iter().enumerate() {
-            assert_eq!(
-                app.world()
-                    .get::<VisibilityRange>(entity)
-                    .expect("range")
-                    .start_margin
-                    .start,
-                optic[level],
-            );
+            assert_eq!(start(&app, entity), optic[level]);
         }
     }
 

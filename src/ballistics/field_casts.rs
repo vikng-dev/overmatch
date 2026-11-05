@@ -1,8 +1,9 @@
 //! The game's damage model: field walks over real fixture geometry at two rigid poses.
 //!
 //! Cone, lattice, grazing and box-directed rays must resolve to finite reaches and nonnegative
-//! doses, and the struck-tank filter must admit a box at each pose. Clients receive these resolved
-//! reaches (`damage_cam::record` and `damage_cam::pen_cam::plan`); they do not repeat the casts.
+//! doses. An unobstructed inline box proves struck-tank filter admission independently of the
+//! selected vehicle. Clients receive these resolved reaches (`damage_cam::record` and
+//! `damage_cam::pen_cam::plan`); they do not repeat the casts.
 //! Cross-platform direction generation remains guarded by `spall_cone`'s independent invariants.
 
 use std::time::Duration;
@@ -225,7 +226,7 @@ fn layout(app: &mut App) -> Layout {
     layout
 }
 
-/// The game's damage model: every ray must walk, and each pose must admit a dosed box.
+/// The game's damage model: every ray must walk at the posed fixture geometry.
 fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) {
     let tank = app.world().resource::<ProbeTank>().0;
     app.world_mut().entity_mut(tank).insert((
@@ -237,7 +238,12 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) {
     for _ in 0..4 {
         app.update();
     }
-    let rays = rays(layout, pose);
+    cast_rays(app, tank, rays(layout, pose));
+}
+
+/// The game's damage model: finite reaches and nonnegative doses for every ray; whether any box
+/// receives a positive dose is an observation unless the fixture independently guarantees access.
+fn cast_rays(app: &mut App, tank: Entity, rays: Vec<WorldRay>) -> bool {
     app.world_mut()
         .run_system_once(
             move |world: ProjectileMarchWorld,
@@ -282,14 +288,56 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) {
                         dosed |= hit.amount > 0.0;
                     }
                 }
-                assert!(
-                    dosed,
-                    "pose {}: the struck-tank filter must admit a dosed box",
-                    pose.label
-                );
+                dosed
             },
         )
-        .expect("the field-cast system runs");
+        .expect("the field-cast system runs")
+}
+
+/// The game's damage model: the field fixture's tank filter admits an unobstructed owned box and
+/// excludes another owner's. This catches both empty and unrestricted filters without tank data.
+/// FIXTURE DATA: a unit cube two metres along -Z, with low resistance and a positive field throw.
+#[test]
+fn field_cast_filter_admits_only_the_struck_tanks_reachable_box() {
+    use super::march_tests::{box_trimesh, world_with_trimesh_plates};
+    use avian3d::prelude::{CollisionLayers, LayerMask, RigidBody};
+
+    let mut app = world_with_trimesh_plates(&[]);
+    let owner = app.world_mut().spawn_empty().id();
+    let other = app.world_mut().spawn_empty().id();
+    app.world_mut().spawn((
+        Transform::from_translation(Vec3::NEG_Z * 2.0),
+        RigidBody::Static,
+        box_trimesh(Vec3::ONE),
+        CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
+        BallisticVolume {
+            material: walk::VolumeMaterial::fixture(1.0),
+            substance: "fixture".to_owned(),
+        },
+        ComponentHealth::full(100),
+        VolumeOf(owner),
+    ));
+    for _ in 0..8 {
+        app.update();
+    }
+    for tank in [owner, other] {
+        let dosed = cast_rays(
+            &mut app,
+            tank,
+            vec![WorldRay {
+                label: "unobstructed owned box".to_owned(),
+                origin: Vec3::ZERO,
+                dir: Dir3::NEG_Z,
+                strength: STRENGTH,
+                weight: 1.0,
+            }],
+        );
+        assert_eq!(
+            dosed,
+            tank == owner,
+            "only the struck tank's box is admitted"
+        );
+    }
 }
 
 /// The game's damage model must walk valid cast families independently of historical outputs.
