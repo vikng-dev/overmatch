@@ -863,20 +863,31 @@ bodies and retained carriers remain for the separate pricing lane to measure.
 
 ### Crumble on landing
 
-Subject: the game's environment destruction, game state only. A released group's landing spends
-its impact on its own seams; its light fragments leave the simulation for the players'
-decoration. Code: `src/debris/crumble.rs` (law and size split), `src/debris/decor.rs` (view).
+Subject: the game's environment destruction, game state only. A released group cracks where its
+landing's force runs; its light fragments leave the simulation for the players' decoration.
+Code: `src/debris/crumble.rs` (law and size split), `src/debris/decor.rs` (view).
 
-**Law.** Each physics step, the blows `contact_transfer` delivers to a moving group past its rest
-speed (Avian's linear `SleepThreshold`, the split between a blow and a press) bring
-`E = ½ Σ |J_i| v_i`, each blow's impulse times its closing speed: the kinetic energy a plastic
-impact removes (DERIVED, restitution zero). `E` opens the group's live internal seams cheapest
-first, each at its opening work `G_I × A` (the seam material's mode-I fracture energy over the
-joint's area, both data), ties by joint index; a rest or an opened seam costs nothing. It stops at
-the first seam the energy left cannot pay, so the work spent never exceeds `E`; what it does not
-spend stays in the solver's contact dissipation. What stays connected over the unopened seams is a
-fragment, and a larger `E` opens a superset of seams. The crumble moves nothing: every fragment
-leaves with the parent's rigid field `v + ω × r`.
+**Law.** A landing is a physics step in which `contact_transfer` delivers a moving group a blow
+past its rest speed (Avian's linear `SleepThreshold`, the split between a blow and a press). Each
+contact point's transfer over the step, `F = J / Δt` (its blow over the step plus its press), is a
+force on the chunk it touches. The group's chunk kernel (**Inside a standing part**,
+`Kernel::hold`) balances those forces by the group's rigid acceleration, so uniform gravity
+cancels and the internal forces are the inertial relief, and judges every joint: a bond past its
+tensile strength, or past its cohesion plus friction, cracks and bears only push; a joint the
+field pulls apart parts. The field is solved again on what is left until it holds (at most 16
+passes, `Resolution`); once a joint parts, a touched fragment takes only its share `m_f / M` of the
+landing's force, the momentum a plastic stop of that fragment alone needs (DERIVED). Cracks lie
+where the force runs, and a short drop cracks nothing.
+
+Energy is conserved, not capped. A crack absorbs its fracture work `G × A`: its seam's fracture
+energy in the failing mode (`fracture_energy`, mode I, for tension; `shear.energy`, mode II, for
+shear; material data with their own labels) over the joint's area. A parting holds by no cohesion
+and costs nothing. All cracks together never absorb more than the kinetic energy the landing
+dissipated, `E = ½ Σ |J_i| v_i` over its blows and closing speeds (DERIVED, a plastic impact).
+Past that they are taken most overloaded first, and the landing stops at the first crack the
+energy left cannot pay; what it does not spend stays in the solver's contact dissipation. What
+stays connected over the joints that did not part is a fragment. The crumble moves nothing: every
+fragment leaves with the parent's rigid field `v + ω × r`.
 
 This replaces the moving group's contact load (the decided **Collision loads** row's "one load for
 every source" now covers fields and placed constructions only); that reading is the owner's to
@@ -885,7 +896,7 @@ confirm.
 **Size split.** A fragment of at least `server_fragment_kg` (`Unit`, 100 kg,
 `assets/ballistics/physical_laws.ron`: a plastic exchange with a hull of 50 t or more moves the
 hull's speed by under 0.2 %, DERIVED `m/M`) stays a server body through the split path
-(`PendingSplit`). A lighter one leaves at the crumble's tick: the record writes its chunks as dust,
+(`PendingSplit`). `route` takes any freed cluster, whatever freed it. A lighter one leaves at the crumble's tick: the record writes its chunks as dust,
 so each replica retires the parent's view of them, and one `Shed` (construction, chunks, frame
 pose, velocity, spin, seed, tick) goes to every player on `DebrisChannel`, reliable and unordered
 (protocol revision **91**). A replica refuses a shed whose chunks its map cannot hold or whose
@@ -900,13 +911,15 @@ terrain height field, then shrinking away. Its lifetime is seeded within
 the oldest going first. It has no body and no collider, so no hull, round or server body meets
 it, and two players drawing one event at one cursor draw one pose.
 
-**MEASURED** on the shipped house: 962 chunks of 0.74–48 kg (median 27 kg), none at the cut-off;
-seam opening work 0.42 J median, 98 J at most. Its element with the most seams (66 chunks,
-1712 kg) holds 69 J of seam work in all, the energy of a 4.1 mm drop (DERIVED `m g h`); a 1 cm
-drop frees all 66 chunks and every one is shed. So every masonry landing ends as decoration and
-leaves no server rubble. **Open (owner):** the law spends a blow's energy on the cheapest seams
-anywhere in the group; the missing truth is likely how much of an impact reaches seams away from
-where it lands, not the cut-off.
+**MEASURED** on the shipped house's element with the most internal joints (66 chunks of
+0.74–48 kg, 1712 kg; no single chunk reaches the cut-off), its impulse stopped within one 1/64 s
+step. A flat landing on its lowest course cracks nothing below a 1.59 m drop (DERIVED from the
+seams' strengths, `a_short_drop_lands_whole`); from 10 m it cracks 10 bonds and parts 3 joints and
+stays one server body. The same impulse through one corner chunk cracks 1 bond from 1 cm; from
+10 cm, 116 cracks part it into 22 fragments, 2 kept as server bodies and 20 shed. From 10 m, 28
+fragments, 1 kept. The cracks absorb 89–126 J of the landing's 1.7–168 kJ. One solve of the whole
+part costs 51,768 scalar operations (DERIVED); a cracking landing's passes cost 0.10–0.32 M, not
+counting each pass's refactoring of the part's kernel.
 
 ## Rubble settlement and the cap
 

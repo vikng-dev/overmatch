@@ -1,13 +1,20 @@
 //! A released part crumbling where it lands, in the game's environment destruction model (game
 //! state only). The construction design's "Crumble on landing" owns the narrative.
 //!
-//! THE LAW ([`crumble`]). An impact on a moving chunk group (a contact whose blow its solver
-//! delivered past the body's rest speed, [`ContactTransfers::split_points`]) spends its energy
-//! `E = ½ Σ |J_i| v_i` on the group's own seams, cheapest first: each costs its opening work, its
-//! seam's mode-I fracture energy over its area, and a rest or an opened seam costs nothing. It stops
-//! at the first seam the energy left cannot pay. What stays connected is a fragment.
+//! THE LAW ([`crumble`]). A landing is a physics step in which a moving chunk group took a blow
+//! past its rest speed ([`ContactTransfers::split_points`]). Each contact point's transfer over
+//! that step, `F = J / Δt`, is a force on the chunk it touches; the group's chunk kernel
+//! ([`Kernel::hold`]) balances those forces by the group's rigid acceleration and judges every
+//! joint in the field that leaves: a bond past its strength cracks, a joint pulled apart parts,
+//! and the field is solved again on what is left until it holds. Cracks therefore lie where the
+//! force runs. Energy conserves: the cracks absorb their fracture
+//! work, each bond's fracture energy in its failing mode over its area ([`crack_work`]), and all of
+//! them together never more than the kinetic energy the landing dissipated, `E = ½ Σ |J_i| v_i`
+//! over its blows and closing speeds (DERIVED, a plastic impact). Past that, the most overloaded
+//! crack first, it stops at the first the energy left cannot pay. What stays connected over the
+//! joints that did not part is a fragment.
 //!
-//! THE SIZE SPLIT ([`server_body`]). A fragment at least [`PhysicalLaws::server_fragment_kg`] stays
+//! THE SIZE SPLIT ([`route`]). A fragment at least [`PhysicalLaws::server_fragment_kg`] stays
 //! a server body, split off through the construction's split path
 //! ([`crate::construction::breakage::PendingSplit`]). A lighter one leaves the simulation: the
 //! record writes its chunks as dust, and one [`Shed`] carries it to the players' decoration
@@ -20,74 +27,83 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::ShotClock;
-use crate::construction::breakage::{Breakage, Entry, Event, PendingSplit, Piece, Record};
-use crate::construction::fracture::{Bond, Side, State, Structure};
+use crate::construction::breakage::{
+    Breakage, ChunkCollider, Entry, Event, PendingSplit, Piece, Record,
+};
+use crate::construction::fracture::bondsolve::Wrench;
+use crate::construction::fracture::parts::Kernel;
+use crate::construction::fracture::{Cause, Failure, Side, State, Structure};
 use crate::contact_transfer::ContactTransfers;
 use crate::physical_laws::PhysicalLaws;
 
-/// What one impact broke in a group.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Crumble {
-    /// The joints it opened, cheapest first.
-    pub(crate) broken: Vec<usize>,
-    /// Their opening work, J: never more than the impact's energy.
-    pub(crate) spent: f32,
-    /// What stays connected, each ascending, ordered by its first chunk.
-    pub(crate) fragments: Vec<Vec<usize>>,
+/// One contact on a group, in the construction frame: the chunk it touches, the point (m) and the
+/// force the group takes there (N).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Touch {
+    pub(crate) chunk: usize,
+    pub(crate) at: Vec3,
+    pub(crate) force: Vec3,
 }
 
-/// The work to open joint `j`, J: its seam's mode-I fracture energy over its area. A rest, a
-/// cracked seam and a separated contact hold by no cohesion and open for nothing.
-fn opening_work(structure: &Structure, state: &State, j: usize) -> f32 {
+/// What one landing broke in a group.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Crumble {
+    /// The bonds it cracked, most overloaded first.
+    pub(crate) cracked: Vec<usize>,
+    /// The joints it parted, ascending.
+    pub(crate) separated: Vec<usize>,
+    /// The cracks' fracture work, J: never more than the landing dissipated.
+    pub(crate) spent: f32,
+    /// What stays connected over the joints that did not part, each ascending, ordered by its
+    /// first chunk.
+    pub(crate) fragments: Vec<Vec<usize>>,
+    /// Scalar operations of the group's solve, a DERIVED count ([`Kernel::hold`]).
+    pub(crate) work: u64,
+}
+
+/// The fracture work to fail joint `j` by `cause`, J: its seam's fracture energy in that mode
+/// (mode I for tension, mode II for shear, both data) over the joint's area. A joint that only
+/// parts holds by no cohesion and costs nothing.
+pub(crate) fn crack_work(structure: &Structure, j: usize, cause: Cause) -> f32 {
     let joint = &structure.joints[j];
-    match joint.bond {
-        Bond::Bonded(seam) | Bond::AreaShare { seam, .. }
-            if !state.cracked[j] && !state.separated[j] =>
-        {
-            seam.fracture_energy * joint.area
-        }
+    match (joint.seam(), cause) {
+        (Some(seam), Cause::Tension) => seam.fracture_energy * joint.area,
+        (Some(seam), Cause::Shear) => seam.shear.energy * joint.area,
         _ => 0.0,
     }
 }
 
-/// Spend `energy` (J) on `group`'s internal seams in `state`, cheapest first (module doc).
-/// `group` is ascending and owned by `state`.
-pub(crate) fn crumble(
-    structure: &Structure,
-    state: &State,
-    group: &[usize],
-    energy: f32,
-) -> Crumble {
-    assert!(
-        energy.is_finite() && energy >= 0.0,
-        "an impact's energy is finite and nonnegative"
-    );
-    let inside = |c: usize| group.binary_search(&c).is_ok();
-    let mut seams: Vec<(f32, usize)> = structure
-        .joints
-        .iter()
-        .enumerate()
-        .filter_map(|(j, joint)| match joint.b {
-            Side::Chunk(b) if inside(joint.a) && inside(b) && state.live(joint) => {
-                Some((opening_work(structure, state, j), j))
-            }
-            _ => None,
-        })
-        .collect();
-    seams.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    let mut spent = 0.0_f32;
-    let mut broken = Vec::new();
-    let mut whole = Vec::new();
-    let mut seams = seams.into_iter();
-    for (work, j) in seams.by_ref() {
-        if spent + work > energy {
-            whole.push(j);
-            break;
-        }
-        spent += work;
-        broken.push(j);
+/// The kernel's loads for `touches` on `group` (ascending): each touch's force about its chunk's
+/// centroid, summed per chunk.
+fn loads(structure: &Structure, group: &[usize], touches: &[Touch]) -> Vec<Wrench> {
+    let mut loads = vec![Wrench::default(); group.len()];
+    for touch in touches {
+        let node = group
+            .binary_search(&touch.chunk)
+            .expect("a landing touches the group's own chunks");
+        let arm = touch.at - structure.chunks[touch.chunk].centroid;
+        loads[node].add(Wrench::at(touch.force.as_dvec3(), arm.as_dvec3()), 1.0);
     }
-    whole.extend(seams.map(|(_, j)| j));
+    loads
+}
+
+/// The overload a failure carries: demand over capacity, unbounded for a joint that only parts.
+fn overload(failure: &Failure) -> f32 {
+    if failure.capacity > 0.0 {
+        failure.demand / failure.capacity
+    } else {
+        f32::INFINITY
+    }
+}
+
+/// Resolution: solves one landing spends letting its field move off what it cracked. Each pass
+/// fails at least one joint or ends the landing, and a part's joints are finite; a field still
+/// cracking after them leaves the rest standing for the next landing.
+const PASSES: usize = 16;
+
+/// What stays connected of `group` (ascending) over its joints `state` has not parted, each
+/// ascending, ordered by its first chunk.
+fn fragments(structure: &Structure, state: &State, group: &[usize]) -> Vec<Vec<usize>> {
     let index: BTreeMap<usize, usize> = group.iter().enumerate().map(|(i, &c)| (c, i)).collect();
     let mut parent: Vec<usize> = (0..group.len()).collect();
     fn root(parent: &mut [usize], mut i: usize) -> usize {
@@ -97,25 +113,99 @@ pub(crate) fn crumble(
         }
         i
     }
-    for j in whole {
-        let joint = &structure.joints[j];
+    for (j, joint) in structure.joints.iter().enumerate() {
         let Side::Chunk(b) = joint.b else {
-            unreachable!("an internal seam joins two chunks");
+            continue; // A ground joint joins no two chunks.
         };
-        let (x, y) = (
-            root(&mut parent, index[&joint.a]),
-            root(&mut parent, index[&b]),
-        );
+        let (Some(&x), Some(&y)) = (index.get(&joint.a), index.get(&b)) else {
+            continue; // A boundary to a chunk outside the group.
+        };
+        if state.separated[j] || !state.live(joint) {
+            continue; // Parted: it holds nothing together.
+        }
+        let (x, y) = (root(&mut parent, x), root(&mut parent, y));
         parent[x.max(y)] = x.min(y);
     }
     let mut fragments: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (i, &c) in group.iter().enumerate() {
         fragments.entry(root(&mut parent, i)).or_default().push(c);
     }
+    fragments.into_values().collect()
+}
+
+/// The landing `touches` on `group` (ascending, owned by `state`), which dissipated `energy` J
+/// (module doc): the field is solved again after each pass's failures, the cracked bonds bearing
+/// only push, until it holds, the energy is spent or [`PASSES`] end. Once a joint parts, a touched
+/// fragment takes only its share `m_f / M` of the landing's force: the momentum a plastic stop of
+/// that fragment alone needs (DERIVED).
+pub(crate) fn crumble(
+    structure: &Structure,
+    state: &State,
+    group: &[usize],
+    touches: &[Touch],
+    energy: f32,
+) -> Crumble {
+    assert!(
+        energy.is_finite() && energy >= 0.0,
+        "a landing's dissipated energy is finite and nonnegative"
+    );
+    let mass = |chunks: &[usize]| -> f32 { chunks.iter().map(|&c| structure.chunks[c].mass).sum() };
+    let whole = mass(group);
+    let mut after = state.clone();
+    let (mut cracked, mut separated) = (Vec::new(), Vec::new());
+    let (mut spent, mut work) = (0.0_f32, 0);
+    'passes: for _ in 0..PASSES {
+        let pieces = fragments(structure, &after, group);
+        let share = |chunk: usize| {
+            let piece = pieces
+                .iter()
+                .find(|piece| piece.binary_search(&chunk).is_ok())
+                .expect("the fragments partition the group");
+            mass(piece) / whole
+        };
+        let shared: Vec<Touch> = touches
+            .iter()
+            .map(|touch| Touch {
+                force: touch.force * share(touch.chunk),
+                ..*touch
+            })
+            .collect();
+        let hold =
+            Kernel::of(structure, &after, group).hold(structure, &loads(structure, group, &shared));
+        work += hold.work;
+        let mut failures = hold.failures;
+        if failures.is_empty() {
+            break; // The field holds.
+        }
+        failures.sort_by(|a, b| {
+            overload(b)
+                .total_cmp(&overload(a))
+                .then(a.joint.cmp(&b.joint))
+        });
+        for failure in failures {
+            let cost = crack_work(structure, failure.joint, failure.cause);
+            if spent + cost > energy {
+                break 'passes; // The energy is spent.
+            }
+            spent += cost;
+            let j = failure.joint;
+            if matches!(failure.cause, Cause::Tension | Cause::Shear) {
+                after.cracked[j] = true;
+                cracked.push(j);
+            }
+            if hold.separated.contains(&j) {
+                after.separated[j] = true;
+                separated.push(j);
+            }
+        }
+    }
+    separated.sort_unstable();
     Crumble {
-        broken,
+        cracked,
+        separated,
         spent,
-        fragments: fragments.into_values().collect(),
+        fragments: fragments(structure, &after, group),
+        work,
     }
 }
 
@@ -173,24 +263,37 @@ impl Shed {
     }
 }
 
-/// The energy (J) one physics step's impacts brought each moving group: `½ |J_i| v_i` per point,
-/// its blow and closing speed (module doc).
-fn impacts(transfers: &ContactTransfers, moving: impl Fn(Entity) -> bool) -> BTreeMap<Entity, f32> {
-    let mut energy = BTreeMap::new();
+/// One physics step's landing on a moving group: each point's collider, world point and the force
+/// the group took there (N, world), and the energy its blows dissipated (J, module doc).
+#[derive(Default)]
+struct Landing {
+    points: Vec<(Entity, Vec3, Vec3)>,
+    energy: f32,
+}
+
+/// Each moving group's landing this physics step; a group whose contacts brought no blow only
+/// rests or slides, and lands nowhere.
+fn landings(
+    transfers: &ContactTransfers,
+    moving: impl Fn(Entity) -> bool,
+) -> BTreeMap<Entity, Landing> {
+    let dt = transfers.dt();
+    let mut landings: BTreeMap<Entity, Landing> = BTreeMap::new();
     for points in transfers.groups() {
         let structure = points[0].structure;
         if !moving(structure) {
             continue;
         }
-        let brought: f32 = transfers
-            .split_points(points)
-            .map(|(point, blow, _, _)| 0.5 * blow.length() * point.closing_speed.max(0.0))
-            .sum();
-        if brought > 0.0 {
-            *energy.entry(structure).or_default() += brought;
+        let landing = landings.entry(structure).or_default();
+        for (point, blow, press, _) in transfers.split_points(points) {
+            landing.energy += 0.5 * blow.length() * point.closing_speed.max(0.0);
+            landing
+                .points
+                .push((point.structure_collider, point.point, blow / dt + press));
         }
     }
-    energy
+    landings.retain(|_, landing| landing.energy > 0.0);
+    landings
 }
 
 type Moving<'a> = (
@@ -205,39 +308,70 @@ type Moving<'a> = (
     ),
 );
 
-/// AUTHORITY: each physics step's impacts crumble the moving groups they reach (module doc). A
-/// group a field load already splits this tick keeps that split; its impact is not read twice.
-fn crumble_impacts(
-    transfers: Res<ContactTransfers>,
-    mut read: Local<u64>,
+/// The physics steps' contacts, read once each, and the chunk each moving collider stands for.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Contacts<'w, 's> {
+    transfers: Res<'w, ContactTransfers>,
+    read: Local<'s, u64>,
+    colliders: Query<'w, 's, &'static ChunkCollider>,
+}
+
+/// AUTHORITY: each physics step's landings crumble the moving groups they reach (module doc). A
+/// group a field load already splits this tick keeps that split; its landing is not read twice.
+fn crumble_landings(
+    mut contacts: Contacts,
     mut groups: Query<Moving, Without<PendingSplit>>,
     clock: Option<Res<ShotClock>>,
     mut record: ResMut<Record>,
     mut shed: MessageWriter<Shed>,
     mut commands: Commands,
 ) {
-    if transfers.steps() == *read {
+    if contacts.transfers.steps() == *contacts.read {
         return;
     }
-    *read = transfers.steps();
-    let energy = impacts(&transfers, |entity| groups.contains(entity));
+    *contacts.read = contacts.transfers.steps();
+    let colliders = &contacts.colliders;
+    let landings = landings(&contacts.transfers, |entity| groups.contains(entity));
     // An authority without a shot clock (a test fixture's bare sim) is at tick zero.
     let tick = clock.as_deref().map_or(0, |clock| clock.0.raw());
-    for (entity, energy) in energy {
+    for (entity, landing) in landings {
         let (_, piece, mut breakage, pose, (velocity, spin, centre)) = groups
             .get_mut(entity)
-            .expect("the impacts were filtered to these groups");
+            .expect("the landings were filtered to these groups");
+        let frame = breakage.physics_frame(pose);
+        let touches: Vec<Touch> = landing
+            .points
+            .iter()
+            .map(|&(collider, at, force)| Touch {
+                chunk: usize::from(
+                    colliders
+                        .get(collider)
+                        .expect("a moving group's contact lies on one of its chunk colliders")
+                        .0,
+                ),
+                at: frame.rotation.inverse() * (at - frame.translation),
+                force: frame.rotation.inverse() * force,
+            })
+            .collect();
         let owned: Vec<usize> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
         let live = breakage.live.as_mut();
-        let result = crumble(&live.structure, &live.state, &owned, energy);
-        for &j in &result.broken {
+        let result = crumble(
+            &live.structure,
+            &live.state,
+            &owned,
+            &touches,
+            landing.energy,
+        );
+        for &j in &result.cracked {
             live.state.cracked[j] = true;
+        }
+        for &j in &result.separated {
+            live.state.separated[j] = true;
         }
         if result.fragments.len() == 1 && server_body(&live.structure, &result.fragments[0]) {
             continue; // Still one body: its seams took the energy, or none could.
         }
         let structure = live.structure.clone();
-        let frame = breakage.physics_frame(pose);
         let motion = (velocity.0, spin.0, pose.0.0 + pose.1.0 * centre.0);
         let kept = route(
             &structure,
@@ -290,7 +424,7 @@ pub(crate) fn route(
 pub(crate) fn sim_plugin(app: &mut App) {
     app.add_message::<Shed>().add_systems(
         FixedPostUpdate,
-        crumble_impacts
+        crumble_landings
             .after(crate::construction::breakage::LawSet)
             .before(super::launch::LaunchSet)
             .run_if(not(resource_exists::<crate::ClientReplica>)),
