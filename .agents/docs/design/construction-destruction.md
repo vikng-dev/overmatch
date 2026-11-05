@@ -814,10 +814,8 @@ A rigid carrier is acceptable while internal relative motion is negligible.
 Retain unresolved elastic energy and seam history.
 Report any energy discarded when replacing internal motion with rigid motion.
 
-Landing contacts return to the same connection calculation.
-An overloaded internal seam splits the carrier.
-Children inherit the parent velocity field plus any resolved internal motion.
-Splitting conserves mass, momentum and angular momentum; newly released energy comes from stored strain or contact work.
+A landing crumbles the carrier (**Crumble on landing**).
+Children inherit the parent velocity field; splitting conserves mass, momentum and angular momentum and adds no kinetic energy.
 
 **Inputs.**
 Use rigid-body mechanics, material profiles and contact geometry.
@@ -835,16 +833,16 @@ Landing and pushing may fracture masonry without creating contact HP dose to tan
 Subject: the game's environment destruction, game state only. A moving body keeps the same
 `Breakage` and `Live` construction state as a placed construction: pools, internal bonds, opened
 joints and holes. The immutable structure table is shared; each group's state names exactly
-its owned chunks. Every deposit, including solver contacts, enters `run_laws`: wear, cavity
-cracks, joint equilibrium and connectivity have one implementation. The laws read
-the solver's `Position` and `Rotation`, never an eased display transform.
+its owned chunks. Every field deposit, and every solver contact on a placed construction, enters
+`run_laws`: wear, cavity cracks, joint equilibrium and connectivity have one implementation. The
+laws read the solver's `Position` and `Rotation`, never an eased display transform.
 
-A solver contact is a transient point resting joint to the other physics body. Its normal,
-point, signed impulse and press come from `contact_transfer`; each structural side receives
-its own opposite reading. A fixed side has zero inverse inertia; a moving side keeps its
-finite inertia. The contact's transferred impulse has already changed their motion, so it
-gets no second plastic exchange or launch. External fields still apply their own impulse.
-There is no landing-fragility factor or switch for a piece's kind.
+A solver contact on a placed construction is a transient point resting joint to the other
+physics body. Its normal, point, signed impulse and press come from `contact_transfer`; the fixed
+side has zero inverse inertia. The contact's transferred impulse has already changed the other
+body's motion, so it gets no second plastic exchange or launch. A moving group's own contacts
+do not enter the laws: they crumble it (**Crumble on landing**). External fields still apply
+their own impulse. There is no landing-fragility factor or switch for a piece's kind.
 
 The force solve and accelerating-frame reduction are specified once in **Structural calculation**.
 Every changed owner runs one bounded stage per tick; unfinished equilibrium or redistribution
@@ -868,12 +866,50 @@ the construction's unbreakable elements stay with the placed construction, and a
 it turns to dust moves no group, as on a standing construction. The replacement bodies are server-only, and the client keeps deriving the standing wall's
 shape from the ledger. Continued holes remain drawn data and do not change occupied geometry.
 
-The required tests use ASSUMED fixture geometry and seam characterization: a strong landing
-opens only the weaker seam, gentle support keeps the slab whole, free fall opens no seam, a
-single chunk has none to open, and a resting joint carries compression from either side but
-never tension. Real Avian contact and split tests complement the law fixtures. These are
-invariant tests, not empirical material or handbook validation. More live bodies and retained
-carriers remain for the separate pricing lane to measure.
+The moving group's force solve still takes field loads; its law fixtures use ASSUMED geometry
+and seam characterization: free fall opens no seam, a single chunk has none to open, an even blow
+along a slab bends no section, and a resting joint carries compression from either side but never
+tension. These are invariant tests, not empirical material or handbook validation. More live
+bodies and retained carriers remain for the separate pricing lane to measure.
+
+### Crumble on landing
+
+Subject: the game's environment destruction, game state only. A released group's landing spends
+its impact on its own seams; its light fragments leave the simulation for the players'
+decoration. Code: `src/debris/crumble.rs` (law and size split), `src/debris/decor.rs` (view).
+
+**Law.** Each physics step, the blows `contact_transfer` delivers to a moving group past its rest
+speed (Avian's linear `SleepThreshold`, the split between a blow and a press) bring
+`E = ½ Σ |J_i| v_i`, each blow's impulse times its closing speed: the kinetic energy a plastic
+impact removes (DERIVED, restitution zero). `E` opens the group's live internal seams cheapest
+first, each at its opening work `G_I × A` (the seam material's mode-I fracture energy over the
+joint's area, both data), ties by joint index; a rest or an opened seam costs nothing. It stops at
+the first seam the energy left cannot pay, so the work spent never exceeds `E`; what it does not
+spend stays in the solver's contact dissipation. What stays connected over the unopened seams is a
+fragment, and a larger `E` opens a superset of seams. The crumble moves nothing: every fragment
+leaves with the parent's rigid field `v + ω × r`.
+
+This replaces the moving group's contact load (the decided **Collision loads** row's "one load for
+every source" now covers fields and placed constructions only); that reading is the owner's to
+confirm.
+
+**Size split.** A fragment of at least `server_fragment_kg` (`Unit`, 100 kg,
+`assets/ballistics/physical_laws.ron`: a plastic exchange with a hull of 50 t or more moves the
+hull's speed by under 0.2 %, DERIVED `m/M`) stays a server body through the split path
+(`PendingSplit`). A lighter one leaves at the crumble's tick: the record writes its chunks as dust,
+so each replica retires the parent's view of them, and one `Shed` (construction, chunks, frame
+pose, velocity, spin, seed, tick) goes to every player on `DebrisChannel`, reliable and unordered
+(protocol revision **91**). A replica refuses a shed whose chunks its map cannot hold or whose
+motion is not finite.
+
+**Decoration.** Each player draws a shed from the event alone at the shared presentation cursor
+(ADR-0037): the chunks' own mesh in the constructions' surface material (holes are not drawn),
+flying the closed form of gravity, velocity and spin, resting where a hull corner first meets the
+terrain height field, then shrinking away. Its lifetime is seeded within
+`construction_decor.lifetime_s` and its fade is `fade_s` (both `Taste`,
+`assets/vfx/presentation.ron`); at most 256 are drawn at once (`Resolution`, a draw-call bound),
+the oldest going first. It has no body and no collider, so no hull, round or server body meets
+it, and two players drawing one event at one cursor draw one pose.
 
 ## Rubble settlement and the cap
 
@@ -1026,7 +1062,7 @@ Measure server cost on deployment hardware before selecting runtime refinement a
 | 8 — universal Lamé field | Restricted embedded-cavity domain; transient local response near boundaries. |
 | 9 — connection mechanisms | Symmetric opening, frictional sliding, crushing and cohesive softening; timber awaits directional data. |
 | 10 — ejecta budget | Ejection response determines mass and velocity; complete energy and momentum accounts constrain it. |
-| 11 — landing rigidity | Preserve internal seams and feed landing contacts back into structural response. |
+| 11 — landing rigidity | Preserve internal seams; a landing's impact energy opens them cheapest first (see Crumble on landing). |
 | 12 — settlement | Supported equilibrium, dependency waking, pre-contact activation and finite-mass overflow. |
 | 13 — sampling and fuze trigger | Adaptive face integration; fuze approximation remains explicitly restricted below. |
 
