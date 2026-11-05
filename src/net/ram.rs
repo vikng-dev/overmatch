@@ -474,7 +474,7 @@ mod tests {
             })
             .init_resource::<ContactTransfers>();
         install_recipe(&mut app, recipe);
-        app.update();
+        app.world_mut().run_schedule(PostStartup);
         let ram = app.world().resource::<Ram>();
         assert!(ram.plan.is_some());
         assert!(!ram.started);
