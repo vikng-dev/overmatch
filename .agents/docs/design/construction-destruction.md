@@ -869,17 +869,22 @@ landing's force runs; its light fragments leave the simulation for the players' 
 Code: `src/debris/crumble.rs` (law and size split), `src/debris/decor.rs` (view).
 
 **Law.** A landing is a physics step in which `contact_transfer` delivers a moving group a blow
-past its rest speed (Avian's linear `SleepThreshold`, the split between a blow and a press). Each
-contact point's blow peaks as two elastic bodies stopping each other do (Hertz impact; K. L.
+past its rest speed (Avian's linear `SleepThreshold`, the split between a blow and a press). The
+blows one chunk takes from one other collider are one patch: summed, at their blow-weighted centre
+and closing speed, before any force law reads them, so the narrow phase's point count changes
+nothing (converting each point alone would multiply the summed peak by `n^(2/5)`, DERIVED). Each
+patch's blow peaks as two elastic bodies stopping each other do (Hertz impact; K. L.
 Johnson, *Contact Mechanics*, 1985, §11.4): `1/E* = Σ (1 − ν²)/E`, `1/R = Σ 1/R`, approach
 `δ = (15 m v² / (16 E* √R))^(2/5)`, peak `P = (4/3) E* √R δ^(3/2)`, with `m = |J| / v` the mass a
-plastic stop of the point moved (DERIVED). The landing chunk's side is its material (`ν` from its
+plastic stop of the patch moved (DERIVED). The landing chunk's side is its material (`ν` from its
 two moduli) curved as the sphere of its volume (StandIn for the patch's own curvature); the other
-side is the chunk or element it meets by that one's material, the ground by
+side is the chunk it meets by that one's material, a whole element flat by its substance's
+stiffness (a breakable one's moduli, or the material facts of one that never breaks; a substance
+stating neither is refused at the load gate), the ground by
 `ground_youngs_modulus_pa` and `ground_poisson_ratio` (`Unknown`, `physical_laws.ron`), or a body
 with no stiffness data, such as a hull, as rigid (StandIn). The solver's step enters nowhere: the
-contact's stiffness sets how hard it stops. The peak plus the point's press is a force on the chunk
-it touches. The group's chunk kernel (**Inside a standing part**,
+contact's stiffness sets how hard it stops. The patch's peak, and each point's press, is a force on
+the chunk it touches. The group's chunk kernel (**Inside a standing part**,
 `Kernel::hold`) balances those forces by the group's rigid acceleration, so uniform gravity
 cancels and the internal forces are the inertial relief, and judges every joint: a bond past its
 tensile strength, or past its cohesion plus friction, cracks and bears only push; a joint the
@@ -893,6 +898,12 @@ energy in the failing mode (`fracture_energy`, mode I, for tension; `shear.energ
 shear; material data with their own labels) over the joint's area. A parting holds by no cohesion
 and costs nothing. All cracks together never absorb more than the kinetic energy the landing
 dissipated, `E = ½ Σ |J_i| v_i` over its blows and closing speeds (DERIVED, a plastic impact).
+When the other side is a moving group crumbling from the same collision, each side reads that one
+collision with its one effective mass and closing speed, so each spends only its own compliance's
+share of it, `c_self / (c_self + c_other)` with `c = (1 − ν²)/E`: under one force each side's
+approach, and so the work done on it, is in proportion to its compliance (DERIVED from Hertz), and
+the two together spend the collision's energy once. Against a side that spends none (the ground, a
+hull, a placed construction, whose contact loads carry no energy) the group may spend all of it.
 Past that they are taken most overloaded first, and the landing stops at the first crack the
 energy left cannot pay; what it does not spend stays in the solver's contact dissipation. What
 stays connected over the joints that did not part is a fragment. The crumble moves nothing: every
@@ -914,7 +925,11 @@ motion is not finite.
 **Decoration.** Each player draws a shed from the event alone at the shared presentation cursor
 (ADR-0037): the chunks' own mesh in the constructions' surface material (holes are not drawn),
 flying the closed form of gravity, velocity and spin, resting where a hull corner first meets the
-terrain height field, then shrinking away. Its lifetime is seeded within
+terrain height field closing on it, then shrinking away. A piece that starts on the ground (a swept
+ground-floor patch) rests there only if its own motion closes on it; moving away or along, it
+flies on until it next closes. A shed of a world not yet selected (one that outran its Battle's
+identity) waits for that world, and one of a world left behind goes; the world boundary retires
+every drawn piece and every shed still due (`decor::reconstruct`). Its lifetime is seeded within
 `construction_decor.lifetime_s` and its fade is `fade_s` (both `Taste`,
 `assets/vfx/presentation.ron`); at most 256 are drawn at once (`Resolution`, a draw-call bound),
 the oldest going first. It has no body and no collider, so no hull, round or server body meets

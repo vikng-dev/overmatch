@@ -127,3 +127,56 @@ fn a_piece_rests_where_it_meets_the_ground() {
     assert_eq!(decoration.flight(lands + 2.0, gravity), rest);
     assert!(clearance(&corners, decoration.flight(lands * 0.5, gravity), &flat) > 0.0);
 }
+
+/// A PIECE ON THE GROUND FLIES WHEN THROWN OFF IT: a swept ground-floor patch thrown out and up
+/// from where it stood keeps its launch and lands later, further on; one driven into the ground
+/// rests at once. A mutant treating any first touch as a landing freezes the thrown patch where it
+/// stood. Fixture: a box whose lowest corners sit on flat ground at its event.
+#[test]
+fn a_piece_on_the_ground_leaves_it_when_thrown_off() {
+    let corners = [Vec3::new(-0.2, -0.1, -0.15), Vec3::new(0.2, 0.1, 0.15)];
+    let gravity = Vec3::NEG_Y * 9.81;
+    let flat = |_: Vec3| 0.0;
+    let on_ground = |velocity: Vec3| Decoration {
+        tick: 0,
+        centre: Vec3::Y * 0.1,
+        rotation: Quat::IDENTITY,
+        velocity,
+        spin: Vec3::ZERO,
+        lands: None,
+        life: 8.0,
+    };
+    let mut thrown = on_ground(Vec3::new(3.0, 1.0, 0.0));
+    let lands = landing(&thrown, &corners, gravity, flat).expect("it comes back down");
+    assert!(lands > 0.1, "{lands} s");
+    thrown.lands = Some(lands);
+    let rest = thrown.flight(lands, gravity);
+    assert!((-TOUCH_M..=0.0).contains(&clearance(&corners, rest, &flat)));
+    assert!(
+        rest.translation.x > 0.3,
+        "it moved on: {}",
+        rest.translation
+    );
+    let driven = on_ground(Vec3::new(3.0, -1.0, 0.0));
+    assert_eq!(landing(&driven, &corners, gravity, flat), Some(0.0));
+}
+
+/// THE WORLD BOUNDARY RETIRES THE DECORATION: after a collapse a reset leaves no drawn piece and no
+/// shed still due, so nothing of the old world stands beside the rebuilt constructions or resolves
+/// against them later. A mutant leaving either draws the old world into the new.
+#[test]
+fn a_reset_after_a_collapse_leaves_no_old_fragments() {
+    let mut app = player(0.0);
+    drawn(&mut app, shed());
+    app.world_mut().write_message(Shed { tick: 41, ..shed() });
+    app.update();
+    reconstruct(app.world_mut());
+    app.update();
+    *app.world_mut().resource_mut::<PresentationClock>() = PresentationClock::At {
+        tick: 41,
+        overstep: 0.0,
+    };
+    app.update();
+    let mut drawn = app.world_mut().query::<&Decoration>();
+    assert_eq!(drawn.iter(app.world()).count(), 0);
+}

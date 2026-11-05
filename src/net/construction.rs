@@ -12,7 +12,8 @@
 //!
 //! A fallen group rides its own carrier (`debris_stress::Carrier`), its chunks on it once. A
 //! fragment a crumble shed goes to every player once, reliably, tagged with its world
-//! ([`WorldShed`]); a late joiner takes none, since decoration is presentation only.
+//! ([`WorldShed`]) and held until that world is selected ([`HeldSheds`]); a late joiner takes
+//! none, since decoration is presentation only.
 
 use crate::debris::PresentationClock;
 use crate::debris::crumble::Shed;
@@ -66,6 +67,7 @@ pub(super) fn install_server(app: &mut App) {
 pub(super) fn install_client(app: &mut App) {
     app.init_resource::<CurrentWorld>()
         .insert_resource(PresentationClock::Waiting)
+        .init_resource::<HeldSheds>()
         .add_message::<ConstructionRefusal>()
         .add_message::<super::matchmaking::ServerGone>()
         .add_message::<Shed>()
@@ -111,28 +113,52 @@ fn publish_sheds(
     }
 }
 
-/// Replica: a shed of the selected world, admitted against its map, becomes the decoration's.
-/// One of another world belongs to a Battle or link that has gone. A malformed one refuses the
-/// match before any view reads it.
+/// Sheds received for a world this player has not selected yet: a next Battle's shed can outrun
+/// its Battle identity (the `DebrisChannel` and replication are separate streams), so each waits
+/// until world selection reaches its world or passes it. Battle numbers rise within one
+/// authority's run (`world_reset::start_next`).
+#[derive(Resource, Default)]
+struct HeldSheds(Vec<WorldShed>);
+
+/// The sheds of world `selected` among `held`, in arrival order: one of a later world stays held,
+/// and one of an earlier world goes, a stale cosmetic of a world this player has left. With no
+/// world selected (before the first Battle) every one waits.
+fn select_sheds(held: &mut Vec<WorldShed>, selected: Option<WorldGeneration>) -> Vec<Shed> {
+    let Some(selected) = selected else {
+        return Vec::new();
+    };
+    let mut due = Vec::new();
+    for WorldShed { world, shed } in std::mem::take(held) {
+        match world.0.cmp(&selected.0) {
+            std::cmp::Ordering::Less => {}
+            std::cmp::Ordering::Equal => due.push(shed),
+            std::cmp::Ordering::Greater => held.push(WorldShed { world, shed }),
+        }
+    }
+    due
+}
+
+/// Replica: a shed of the selected world, admitted against its map, becomes the decoration's; one
+/// of a world not yet selected waits for it ([`HeldSheds`]). A malformed one refuses the match
+/// before any view reads it.
 fn receive_sheds(
     mut receivers: Query<&mut MessageReceiver<WorldShed>>,
     generation: Res<CurrentWorld>,
     constructions: Query<(Entity, &Breakage), Without<Piece>>,
+    mut held: ResMut<HeldSheds>,
     mut admitted: MessageWriter<Shed>,
     mut refused: MessageWriter<ConstructionRefusal>,
 ) {
     for mut receiver in &mut receivers {
-        for WorldShed { world, shed } in receiver.receive() {
-            if Some(world) != generation.0 {
-                continue; // A stale cosmetic of another world.
+        held.0.extend(receiver.receive());
+    }
+    for shed in select_sheds(&mut held.0, generation.0) {
+        match admit_shed(shed, &constructions) {
+            Ok(shed) => {
+                admitted.write(shed);
             }
-            match admit_shed(shed, &constructions) {
-                Ok(shed) => {
-                    admitted.write(shed);
-                }
-                Err(refusal) => {
-                    refused.write(refusal);
-                }
+            Err(refusal) => {
+                refused.write(refusal);
             }
         }
     }
@@ -440,6 +466,49 @@ mod tests {
             1,
         ));
         app
+    }
+
+    /// A NEXT WORLD'S SHED WAITS FOR ITS BATTLE: a shed that arrives before the Battle identity
+    /// selects its world is held, and shown once when that world is selected; one of a world left
+    /// behind goes. A mutant treating every other world's shed as stale loses it, and every player
+    /// it reached first draws a different world. Fixture: the house's first two chunks shed at
+    /// tick 40 in world 2.
+    #[test]
+    fn a_next_worlds_shed_is_shown_once_in_its_world() {
+        let mut app = replica();
+        app.world_mut().resource_mut::<CurrentWorld>().0 = Some(WorldGeneration(1));
+        let shed = Shed {
+            construction: 1,
+            chunks: vec![0, 1],
+            at: [0.0; 3],
+            rotation: Quat::IDENTITY.to_array(),
+            velocity: [0.0; 3],
+            spin: [0.0; 3],
+            seed: 0,
+            tick: 40,
+        };
+        let held = |world: u32| WorldShed {
+            world: WorldGeneration(world),
+            shed: shed.clone(),
+        };
+        app.world_mut().resource_mut::<HeldSheds>().0.push(held(2));
+        let mut cursor = app.world().resource::<Messages<Shed>>().get_cursor();
+        let mut shown = |app: &mut App| {
+            app.update();
+            cursor
+                .read(app.world().resource::<Messages<Shed>>())
+                .count()
+        };
+        assert_eq!(shown(&mut app), 0, "world 2's shed waits for its Battle");
+        app.world_mut().resource_mut::<CurrentWorld>().0 = Some(WorldGeneration(2));
+        assert_eq!(shown(&mut app), 1, "and shows in it");
+        assert_eq!(shown(&mut app), 0, "once");
+        app.world_mut().resource_mut::<HeldSheds>().0.push(held(1));
+        assert_eq!(shown(&mut app), 0);
+        assert!(
+            app.world().resource::<HeldSheds>().0.is_empty(),
+            "a stale shed goes"
+        );
     }
 
     fn admitted_ledger() -> (App, Entity, Record) {

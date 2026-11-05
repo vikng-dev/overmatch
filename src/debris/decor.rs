@@ -3,7 +3,8 @@
 //! material, flying from its event at the shared presentation cursor (ADR-0037). Presentation only:
 //! it has no body and no collider, so no hull, round or server body meets it. Its one obstacle is
 //! the terrain's height field ([`HeightGrid`]): it rests where a hull corner first reaches the
-//! ground, and shrinks away over the end of its seeded lifetime.
+//! ground closing on it, and shrinks away over the end of its seeded lifetime. The world boundary
+//! retires it ([`reconstruct`]).
 //!
 //! Its flight is a closed form of the event alone (gravity, its velocity and spin), so every
 //! player who draws the same event at the same cursor draws the same pose.
@@ -71,7 +72,9 @@ fn clearance(corners: &[Vec3], pose: Transform, ground: &impl Fn(Vec3) -> f32) -
         .fold(f32::INFINITY, f32::min)
 }
 
-/// The first time within `life` its corners reach the ground (module doc), if they do.
+/// The first time within `life` its corners reach the ground closing on it (module doc), if they
+/// do. A piece that starts on the ground lands there only if its motion closes on it; one moving
+/// away or along it (a swept ground-floor patch) flies on until it next closes.
 fn landing(
     decoration: &Decoration,
     corners: &[Vec3],
@@ -79,12 +82,24 @@ fn landing(
     ground: impl Fn(Vec3) -> f32,
 ) -> Option<f32> {
     let above = |t: f32| clearance(corners, decoration.flight(t, gravity), &ground);
-    if above(0.0) <= 0.0 {
+    let start = above(0.0);
+    // Its own motion over one search step, gravity aside, tells closing from leaving.
+    if start <= 0.0 && clearance(corners, decoration.flight(SEARCH_S, Vec3::ZERO), &ground) < start
+    {
         return Some(0.0);
     }
     let steps = (decoration.life / SEARCH_S).ceil() as u32;
-    let touch = (1..=steps).find(|&k| above(k as f32 * SEARCH_S) <= 0.0)?;
+    let mut last = start;
+    let touch = (1..=steps).find(|&k| {
+        let now = above(k as f32 * SEARCH_S);
+        let closing = now < last;
+        last = now;
+        now <= 0.0 && closing
+    })?;
     let (mut clear, mut under) = ((touch - 1) as f32 * SEARCH_S, touch as f32 * SEARCH_S);
+    if above(clear) <= 0.0 {
+        return Some(under); // It never cleared the ground: it rests where it turned to close.
+    }
     while above(under) < -TOUCH_M {
         let middle = 0.5 * (clear + under);
         if above(middle) > 0.0 {
@@ -221,6 +236,23 @@ fn present(
     decor.drawn.retain(|entity| !gone.contains(entity));
     for entity in gone {
         commands.entity(entity).despawn();
+    }
+}
+
+/// The world boundary (`crate::world::reconstruct`): every drawn piece goes, and every shed
+/// received for the world before, drawn or due, so none stands beside or resolves against the next
+/// world's constructions.
+pub(crate) fn reconstruct(world: &mut World) {
+    if !world.contains_resource::<Decor>() {
+        return; // A root that draws no constructions holds no decoration.
+    }
+    world.insert_resource(Decor::default());
+    let drawn: Vec<Entity> = world
+        .query_filtered::<Entity, With<Decoration>>()
+        .iter(world)
+        .collect();
+    for entity in drawn {
+        assert!(world.despawn(entity), "a drawn piece is its own root");
     }
 }
 

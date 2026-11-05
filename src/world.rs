@@ -71,6 +71,7 @@ pub(crate) fn reconstruct(world: &mut World) {
         .expect("the startup scatter recipe remains available for world construction");
     crate::track_prints::reconstruct(world);
     crate::vfx::reconstruct_world(world);
+    crate::debris::decor::reconstruct(world);
 }
 
 /// The world's static terrain as DATA (track architecture §5): every terrain block in authoring
