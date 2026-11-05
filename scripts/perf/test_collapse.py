@@ -312,8 +312,9 @@ class RamTests(unittest.TestCase):
         ticks = [dict(tick=i, tick_us=100*i, physics_us=30, sleep_us=10,
                       intake_us=5, structure_us=15, refit_us=10, publish_us=5, contacts_us=2, collector_us=1, dt_s=0.1, awake=4-i, tanks=1)
                  for i in range(1, 5)]
-        ram = dict(recipe=recipe, plan=dict(minimum_m_s=9),
-                   impact=dict(tick=2, speed_m_s=10), done="deadline", ticks=ticks,
+        ram = dict(recipe=recipe, plan=dict(minimum_m_s=9, governed_m_s=10, runup_m=20,
+                                           spawn=[0, 0, 0], rotation=[0, 0, 0, 1]),
+                   impact=dict(tick=2, speed_m_s=10, normal_speed_m_s=10), done="deadline", ticks=ticks,
                    sends=[dict(tick=1, us=1000), dict(tick=3, us=40)])
         return recipe, ram
 
@@ -335,7 +336,7 @@ class RamTests(unittest.TestCase):
 
     def test_ram_refuses_slow_impact_missing_ticks_and_incompatible_logs(self):
         recipe, ram = self.fixture()
-        for field, value in [("impact", dict(tick=2, speed_m_s=8)), ("done", "unknown")]:
+        for field, value in [("impact", dict(tick=2, speed_m_s=8, normal_speed_m_s=8)), ("done", "unknown")]:
             changed = dict(ram, **{field: value})
             with self.subTest(field=field), self.assertRaises(RuntimeError):
                 collapse.ram_summary(self.text(changed), recipe)
@@ -354,7 +355,7 @@ class RamTests(unittest.TestCase):
 
     def test_slow_impact_refuses_before_observation_deadline(self):
         recipe, ram = self.fixture()
-        ram.update(done=None, impact=dict(tick=2, speed_m_s=8))
+        ram.update(done=None, impact=dict(tick=2, speed_m_s=8, normal_speed_m_s=8))
         with self.assertRaisesRegex(RuntimeError, "full-speed admission"):
             collapse.ram_summary(self.text(ram), recipe)
 
@@ -369,6 +370,30 @@ class RamTests(unittest.TestCase):
         for sends in ([dict(tick=3, us=float("nan"))], [dict(tick=3, us=1), dict(tick=2, us=1)]):
             with self.assertRaisesRegex(RuntimeError, "malformed"):
                 collapse.ram_summary(self.text(dict(ram, sends=sends)), recipe)
+
+    def test_ram_metadata_refuses_nonfinite_values_before_completion(self):
+        # The runner must refuse poisoned admission/impact metadata even in an unfinished prefix.
+        recipe, ram = self.fixture()
+        for section, fields in (("plan", ("minimum_m_s", "governed_m_s", "runup_m", "spawn", "rotation")),
+                                ("impact", ("speed_m_s", "normal_speed_m_s"))):
+            for field in fields:
+                for bad in (float("nan"), float("inf"), float("-inf"), True):
+                    changed = copy.deepcopy(ram)
+                    changed["done"] = None
+                    if field in ("spawn", "rotation"):
+                        changed[section][field][0] = bad
+                    else:
+                        changed[section][field] = bad
+                    with self.subTest(section=section, field=field, bad=bad), self.assertRaisesRegex(RuntimeError, "log line 1.*" + field):
+                        collapse.ram_summary(self.text(changed), recipe)
+
+    def test_ram_impact_requires_membership_in_the_captured_ticks(self):
+        recipe, ram = self.fixture()
+        for bad in (0, -1, 1.5, 5, True, float("nan")):
+            changed = copy.deepcopy(ram)
+            changed["impact"]["tick"] = bad
+            with self.subTest(tick=bad), self.assertRaisesRegex(RuntimeError, "impact.tick"):
+                collapse.ram_summary(self.text(changed), recipe)
 
     def test_local_log_reader_parses_only_new_snapshots(self):
         with tempfile.TemporaryDirectory() as directory:

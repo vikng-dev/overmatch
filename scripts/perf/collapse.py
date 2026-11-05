@@ -359,6 +359,27 @@ def ram_rows(text, recipe):
                 if not isinstance(send["us"], (int, float)) or not math.isfinite(send["us"]) or send["us"] < 0:
                     raise ValueError("invalid send duration")
                 sends.append(send)
+            plan, impact = ram["plan"], ram["impact"]
+            def finite(value, field):
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    raise ValueError(f"invalid {field}: expected a finite number")
+            if plan is not None:
+                for field in ("runup_m", "governed_m_s", "minimum_m_s"):
+                    finite(plan[field], f"plan.{field}")
+                    if plan[field] < 0:
+                        raise ValueError(f"invalid plan.{field}: expected nonnegative distance or speed")
+                for field, size in (("spawn", 3), ("rotation", 4)):
+                    if not isinstance(plan[field], list) or len(plan[field]) != size:
+                        raise ValueError(f"invalid plan.{field}: expected {size} coordinates")
+                    for coordinate in plan[field]:
+                        finite(coordinate, f"plan.{field}")
+            elif ticks or impact is not None or ram["done"] is not None:
+                raise ValueError("ram samples require an admitted plan")
+            if impact is not None:
+                if isinstance(impact["tick"], bool) or not isinstance(impact["tick"], int) or not 0 < impact["tick"] <= len(ticks):
+                    raise ValueError("invalid impact.tick: expected a captured tick")
+                for field in ("speed_m_s", "normal_speed_m_s"):
+                    finite(impact[field], f"impact.{field}")
             rows.append(row)
             last = ram
         except (ValueError, KeyError, TypeError) as error:
