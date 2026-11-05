@@ -462,7 +462,7 @@ impl JointStrength {
 
     /// Resistance to a unit rigid translation, N: normal and sliding traction work add
     /// (Yastrebov 2013, Eq. 4.53 and Eq. 4.56; design "Bodies in contact"). `bearing`
-    /// is the available compressive force; `preload` is positive in tension and stays fixed.
+    /// is unloaded bulk capacity; `preload` is positive in tension and stays fixed.
     pub(crate) fn translation_resistance(
         &self,
         area: f64,
@@ -477,7 +477,7 @@ impl JointStrength {
         let normal_force = if opening > 0.0 {
             (tensile * area - preload).max(0.0)
         } else {
-            bearing
+            (bearing - (-preload).max(0.0)).max(0.0)
         };
         normal_force * opening.abs() + shear * area * sliding
     }

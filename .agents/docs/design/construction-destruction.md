@@ -362,8 +362,9 @@ and chunks the sweep does not cover (including buried matter) are fixed sinks. L
 joints supply directed capacities for rigid translation along the contact direction `d`. With
 `n` pointing toward the moving side, let `o = n dot d` and `s = |d cross n|`.
 Both opening and compression measure the force resisting that translation:
-`C = R_n |o| + R_s s`. For compression, `R_n = B`, with weaker-side bulk capacity
-`B = min(sigma_c,a, sigma_c,b) A`; a ground endpoint uses its chunk's strength.
+`C = R_n |o| + R_s s`. For compression, `R_n = max(B - max(-p, 0), 0)`:
+weaker-side bulk capacity `B = min(sigma_c,a, sigma_c,b) A` minus the compression already
+carried. A ground endpoint uses its chunk's strength.
 For opening, `R_n = max(A T - p, 0)`. The shared `bondsolve::JointStrength` law supplies
 `R_s = A cohesion + mu max(-p, 0)` and tensile strength `T`; cracked seams and rests have
 zero cohesion and tension. `p` is existing normal force, positive in tension.
@@ -384,7 +385,7 @@ source side `S*` (E. A. Dinic, 1970, [original paper](https://www.mathnet.ru/eng
 The plug can therefore include chunks beyond the occupied patch: compression transmits the push
 through a back layer or around a corner until perimeter joints or bulk crushing give way.
 Internal joints of `S*` carry no relative motion and contribute no cut capacity. A resting floor
-on anchored joists holds below its bulk crushing capacity; sliding or lifting still reads the
+on anchored joists holds below its remaining bulk crushing reserve; sliding or lifting still reads the
 shared translation-resistance law.
 
 The demand is the peak force of the hull's impact on the patch plus its drive:

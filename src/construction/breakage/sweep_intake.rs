@@ -353,7 +353,8 @@ fn geometry(
             if !roots.contains(&root) {
                 return; // No prepared source overlaps this owner.
             }
-            let breakage = &mut *breakage;
+            // This pass mutates only derived preload storage, never collider or ledger state.
+            let breakage = breakage.bypass_change_detection();
             let pose = breakage.physics_frame((position, rotation));
             let inverse = pose.rotation.inverse();
             let mut patches: BTreeMap<Entity, super::super::sweep::Sweep> = BTreeMap::new();

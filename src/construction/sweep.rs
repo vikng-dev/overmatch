@@ -1302,10 +1302,10 @@ mod tests {
             let mut state = State::new(&structure);
             state.cracked[0] = cracked;
             let direction = (Vec3::X - 0.001 * Vec3::Y).normalize();
-            // DERIVED: unit area and mass give B=10,000 N and S=0.5*g N;
+            // DERIVED: unit area and mass leave R_n=10,000-g N and R_s=0.5*g N;
             // both project onto the imposed translation. The bracket tolerates f32 Hertz inversion.
-            let capacity =
-                1e4 * -direction.y + 0.5 * crate::physical_laws::gravity_mps2() * direction.x;
+            let gravity = crate::physical_laws::gravity_mps2();
+            let capacity = (1e4 - gravity) * -direction.y + 0.5 * gravity * direction.x;
             for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
                 let mut patch = contact_patch(&structure, direction, capacity * ratio);
                 geometry.resolve(
@@ -1318,6 +1318,35 @@ mod tests {
                 );
                 assert_eq!(patch.broken, broken, "cracked={cracked}, ratio={ratio}");
             }
+        }
+    }
+
+    /// The game's environment destruction: an impact spends the crushing reserve, not the
+    /// capacity already carrying gravity. Otherwise nearly loaded supports stop extra impacts.
+    #[test]
+    fn existing_compression_leaves_only_the_remaining_crushing_reserve() {
+        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, Vec3::NEG_Y], &[1], &[(0, 1)]);
+        // Fixture: a unit-area 10 kN support carrying 9 kN under gravity.
+        for chunk in &mut structure.chunks {
+            chunk.material.compressive_strength = 1e4;
+        }
+        structure.chunks[0].mass = 9000.0 / crate::physical_laws::gravity_mps2();
+        structure.chunks[0].material.density = structure.chunks[0].mass;
+        structure.joints[0].bond = Bond::Resting;
+        let state = State::new(&structure);
+        // DERIVED: 10 kN - 9 kN = 1 kN reserve. The upper impact exceeds it.
+        for (force, broken) in [(2000.0, true), (900.0, false)] {
+            let mut patch = contact_patch(&structure, Vec3::NEG_Y, force);
+            geometry.resolve(
+                &structure,
+                &state,
+                &preload(&structure, &state),
+                &mut patch,
+                128.0,
+                Vec3::ZERO,
+            );
+            assert_eq!(patch.broken, broken, "force={force}, load={:?}", patch.load);
+            assert!((patch.load.unwrap().capacity - 1000.0).abs() < 0.01);
         }
     }
 
@@ -1449,9 +1478,10 @@ mod tests {
                 }
                 let mut state = State::new(&structure);
                 state.cracked[0] = cracked;
-                // DERIVED: min(20 kPa, 10 kPa) * 1 m² * cos(0) = 10 kN.
+                // DERIVED: min(20 kPa, 10 kPa) * 1 m² minus the unit board's weight.
+                let reserve = 1e4 - crate::physical_laws::gravity_mps2();
                 for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
-                    let mut patch = contact_patch(&structure, Vec3::NEG_Y, 1e4 * ratio);
+                    let mut patch = contact_patch(&structure, Vec3::NEG_Y, reserve * ratio);
                     geometry.resolve(
                         &structure,
                         &state,
@@ -1469,7 +1499,7 @@ mod tests {
                         [0],
                         "a buried joist never joins the moving plug"
                     );
-                    assert_eq!(patch.load.unwrap().capacity, 1e4);
+                    assert!((patch.load.unwrap().capacity - reserve).abs() < 0.01);
                 }
             }
         }
