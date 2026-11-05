@@ -85,9 +85,8 @@ use crate::view::PlayerView;
 use crate::world::ground_distance;
 use crate::{CombatantId, CombatantLife, FreeShooter};
 
-/// How long the kill cam waits for the killing record from the knockout fact, real seconds. TUNED:
-/// delivery's impact timeout (`delivery::IMPACT_TIMEOUT_S`), the reference.
-const RECORD_WAIT_S: f32 = 1.0;
+/// The game's damage-model replay wait from the knockout fact, in real seconds; presentation data owns it.
+const RECORD_WAIT_S: f32 = crate::camera::KILLCAM_RECORD_WAIT_S;
 
 /// The replay prompt. ASCII only — it reaches `Text`.
 const REPLAY: &str = "SPACE  REPLAY";

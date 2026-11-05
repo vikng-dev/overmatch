@@ -98,7 +98,7 @@ pub(crate) const TERRAIN_LOD_LADDER: [f32; 6] = [0.0, 0.02, 0.05, 0.10, 0.25, 0.
 /// Pixel budget below which a level's deviation may project before its finer neighbour takes over.
 /// Fixed separately from model LOD settings: terrain error can hide or expose a hull at a crest.
 /// `wired_thresholds_are_the_derivation` catches literal thresholds or unpropagated budget changes.
-pub(crate) const TERRAIN_LOD_BUDGET_PX: f32 = 1.0;
+pub(crate) use crate::camera::TERRAIN_LOD_BUDGET_PX;
 
 /// Shared live view facts at this ladder's [`TERRAIN_LOD_BUDGET_PX`]. Compose rather than store
 /// a profile, so its facts cannot drift from the tank chains' selection view.

@@ -14,6 +14,8 @@ struct Camera {
     orbit_far_m: Sourced<f32>,
     orbit_near_m: Sourced<f32>,
     lod_budget_px: Sourced<f32>,
+    terrain_lod_budget_px: Sourced<f32>,
+    killcam_record_wait_s: Sourced<f32>,
     commander_fov_before_bind_rad: Sourced<f32>,
     orbit_yaw_rad_per_pixel: Sourced<f32>,
     orbit_pitch_rad_per_pixel: Sourced<f32>,
@@ -61,6 +63,16 @@ pub(crate) fn camera_constants(text: &str) -> Result<String, String> {
             "lod_budget_px",
             "DEFAULT_LOD_BUDGET_PX",
             data.lod_budget_px.0,
+        ),
+        (
+            "terrain_lod_budget_px",
+            "TERRAIN_LOD_BUDGET_PX",
+            data.terrain_lod_budget_px.0,
+        ),
+        (
+            "killcam_record_wait_s",
+            "KILLCAM_RECORD_WAIT_S",
+            data.killcam_record_wait_s.0,
         ),
         (
             "commander_fov_before_bind_rad",
@@ -256,6 +268,8 @@ mod tests {
         }
         for (field, value) in [
             ("lod_budget_px", "0.0"),
+            ("terrain_lod_budget_px", "0.0"),
+            ("killcam_record_wait_s", "NaN"),
             ("orbit_near_m", "NaN"),
             ("orbit_near_m", "0.0"),
             ("orbit_near_m", "1e30"),
