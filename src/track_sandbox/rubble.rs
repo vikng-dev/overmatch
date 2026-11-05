@@ -225,23 +225,34 @@ pub(super) fn draw_rubble(
     touches: Res<RubbleTouches>,
     bodies: Query<&GlobalTransform>,
 ) {
+    let yard = scene();
     for touch in &touches.0 {
         let dynamic = touch.dynamic;
-        let color = if dynamic {
-            Color::srgb(1.0, 0.2, 0.2)
+        let [r, g, b] = if dynamic {
+            yard.rubble_dynamic_contact_srgb.0
         } else {
-            Color::srgb(0.2, 0.9, 1.0)
+            yard.rubble_static_contact_srgb.0
         };
-        gizmos.sphere(Isometry3d::from_translation(touch.point), 0.05, color);
+        let color = Color::srgb(r, g, b);
+        gizmos.sphere(
+            Isometry3d::from_translation(touch.point),
+            yard.rubble_contact_radius_m.0,
+            color,
+        );
         // Last tick’s contact telemetry may outlive a piece removed before this render frame.
         if let Ok(body) = bodies.get(touch.body) {
-            gizmos.line(touch.point, body.translation(), color.with_alpha(0.5));
+            gizmos.line(
+                touch.point,
+                body.translation(),
+                color.with_alpha(yard.rubble_contact_link_alpha.0),
+            );
         }
         if dynamic {
+            let [r, g, b] = yard.rubble_reaction_srgb.0;
             gizmos.arrow(
                 touch.point,
                 touch.point + touch.reaction * force_viz_scale(),
-                Color::srgb(1.0, 0.5, 0.1),
+                Color::srgb(r, g, b),
             );
         }
     }

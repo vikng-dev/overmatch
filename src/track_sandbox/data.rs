@@ -81,6 +81,11 @@ pub(super) struct Scene {
     pub(super) rubble_pile_yaw_rad: Sourced<f32>,
     pub(super) rubble_piece_srgb: Sourced<[f32; 3]>,
     pub(super) rubble_wall_srgb: Sourced<[f32; 3]>,
+    pub(super) rubble_dynamic_contact_srgb: Sourced<[f32; 3]>,
+    pub(super) rubble_static_contact_srgb: Sourced<[f32; 3]>,
+    pub(super) rubble_reaction_srgb: Sourced<[f32; 3]>,
+    pub(super) rubble_contact_radius_m: Sourced<f32>,
+    pub(super) rubble_contact_link_alpha: Sourced<f32>,
 }
 
 /// A square drop layer whose nonzero capacity fits the spawning index type.
@@ -151,10 +156,19 @@ impl Scene {
             ("dot_max_growth_m", self.dot_max_growth_m.0),
             ("normal_stub_m", self.normal_stub_m.0),
             ("force_n_per_m", self.force_n_per_m.0),
+            ("rubble_contact_radius_m", self.rubble_contact_radius_m.0),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(refuse(field, "author a finite positive value"));
             }
+        }
+        if !self.rubble_contact_link_alpha.0.is_finite()
+            || !(0.0..=1.0).contains(&self.rubble_contact_link_alpha.0)
+        {
+            return Err(refuse(
+                "rubble_contact_link_alpha",
+                "author a finite opacity in [0, 1]",
+            ));
         }
         if self.rubble_pile_pieces.0 == 0 {
             return Err(refuse("rubble_pile_pieces", "author at least one piece"));
@@ -309,6 +323,15 @@ impl Scene {
             ("reference_srgb", self.reference_srgb.0),
             ("rubble_piece_srgb", self.rubble_piece_srgb.0),
             ("rubble_wall_srgb", self.rubble_wall_srgb.0),
+            (
+                "rubble_dynamic_contact_srgb",
+                self.rubble_dynamic_contact_srgb.0,
+            ),
+            (
+                "rubble_static_contact_srgb",
+                self.rubble_static_contact_srgb.0,
+            ),
+            ("rubble_reaction_srgb", self.rubble_reaction_srgb.0),
         ] {
             if value
                 .iter()
