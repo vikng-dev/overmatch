@@ -62,6 +62,9 @@
 //! (`.agents/scratch/destruction-2026-10-30-constructions/wall-prototype/README.md`) owns the
 //! derivations, the values' sources and the verdicts.
 
+#[cfg(test)]
+mod bondsolve;
+
 use std::{cell::RefCell, collections::HashSet, f32::consts::PI, sync::Arc};
 
 use bevy::ecs::entity::Entity;
