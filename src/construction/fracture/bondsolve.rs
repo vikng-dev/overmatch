@@ -46,7 +46,8 @@ pub(crate) struct Patch {
     pub centre: DVec3,
     /// Integral of the normal-displacement rotation quadratic, divided by area, m².
     bending: DMat3,
-    polar: f64,
+    /// Integral of r² over the area, divided by area, m²: its squared polar radius of gyration.
+    pub polar: f64,
     rim: Rim,
 }
 
@@ -199,6 +200,21 @@ pub(crate) struct Edge {
     pub shear_stiffness: f64,
     /// Pair friction of a push-only joint (a rest or a cracked seam); `None` for a bond.
     pub push: Option<f64>,
+    /// A slipping push-only joint's saturated friction per newton of its compression `N`; its
+    /// tangential stiffness is then zero.
+    pub friction: Option<Friction>,
+}
+
+/// Coulomb friction of a slipping patch, linear in its compression `N`: the carried wrench gains
+/// `force N` at the patch's pressure centre and the couple `twist N` about its normal, so the
+/// pressure-centre offset adds `(M⊥ × n) × force` from the patch's elastic bending `M⊥`
+/// (DERIVED: a force `force N` at `r = (M⊥ × n) / N`). The term is not symmetric.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Friction {
+    /// μ cos φ t, t the unit direction of the patch's slip: carried along it.
+    pub force: DVec3,
+    /// μ sin φ s ρ n, m: the twisting share, about the patch normal.
+    pub twist: DVec3,
 }
 
 impl Edge {
@@ -245,10 +261,18 @@ impl Edge {
             delta -= answer[b].point(self.centre - nodes[b].centre);
             rotation -= answer[b].angular;
         }
-        Wrench {
+        let mut carried = Wrench {
             linear: self.force(delta),
             angular: self.couple(rotation),
-        }
+        };
+        if let Some(friction) = self.friction {
+            let compression = -carried.linear.dot(self.normal);
+            let bend = carried.angular - self.normal * carried.angular.dot(self.normal);
+            carried.linear += friction.force * compression;
+            carried.angular +=
+                friction.twist * compression + bend.cross(self.normal).cross(friction.force);
+        } // A sticking or bonded patch carries through its stiffness alone.
+        carried
     }
 
     /// Recoverable opening and sliding work, J, from the same area integrals.
@@ -402,6 +426,7 @@ pub(crate) fn joint_edge(
         area,
         patch,
         push: push.then(|| pair_friction(structure, joint)),
+        friction: None,
         normal_stiffness: fixing.map_or(area / normal, |f| area * f64::from(f.normal)),
         shear_stiffness: fixing.map_or(area / shear, |f| area * f64::from(f.shear)),
     }
