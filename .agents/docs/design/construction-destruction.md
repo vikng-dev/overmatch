@@ -622,9 +622,16 @@ crack changes topology for the next tick.
   nails). A slip keeps its direction (ASSUMED) and never re-sticks; a rest that joins a slipping
   face slips with it. A slipping face separates only when it lifts or tips, or when its part is
   released. When nothing else holds its part tangentially, the stiffness left is singular (a pivot
-  under Resolution 1e-9 of its diagonal): the part is a mechanism, the slipping rests of every
+  under Resolution 1e-9 of its elastic diagonal, the stiffness without friction: friction's
+  non-symmetric term can lower a diagonal to zero or below, where a vanishing pivot would pass a
+  test on it): the part is a mechanism, the slipping rests of every
   part it reaches through stiff interfaces separate (`Slide`), and connectivity releases it to
-  the physics engine, which owns sliding bodies.
+  the physics engine, which owns sliding bodies. A mechanism no slipping rest made (removal or
+  cracks leave a part on a joint too slight to hold it) separates the joints its free motion
+  moves (`parts::Mechanism`): the mode with the fallen pivot's coordinate moved by one, every
+  later coordinate held and the earlier ones in equilibrium (DERIVED from the factor's own
+  back-substitution); a joint whose sides move apart by more than Resolution √1e-9 of the most
+  any joint does carries it, since the mode moves a stiff joint by about 1e-9 of a free one.
 - Separation is permanent: no re-close. What lifts, tips or slides as a mechanism leaves the
   graph; once released, Avian owns its motion. The ledger records `Crack` and `Separate` per
   joint, and replicas derive support from those causes without any equilibrium; a slip is
@@ -642,7 +649,9 @@ bonds edges at their seam stiffness, its cracked seams and rests push-only edges
 that stick (ASSUMED: once cracks split the part, the part law judges the pieces' sliding with
 Coulomb friction), and its joints to the ground or to buried chunks anchors. A chunk set nothing
 anchors is balanced by its rigid acceleration and gauged at its first chunk. Joints to chunks
-outside the set are no edge: their force is the caller's load. It is factored once per element
+outside the set are no edge: their force is the caller's load. A heavily cracked set can be a
+mechanism: the joints its free motion moves part (`Slide`, as at part scale), every event on it
+reports them, and the rest is factored again. It is factored once per element
 design at load (`Assessment::kernels`) and again only for a part whose chunks changed, and it runs
 only on events through one entry, `Kernel::hold(structure, loads)`: per chunk, the loads beside
 gravity (the forces its other interfaces hand it, contacts, presses), returning each joint's

@@ -6,8 +6,10 @@
 //! (ASSUMED: once cracks split the part, the part law judges the pieces' sliding with Coulomb
 //! friction). Joints to the ground or to buried chunks are its anchors. Joints to chunks outside
 //! its set are no edge: their force is the caller's load. A node set nothing anchors is balanced
-//! by its rigid acceleration and gauged at its first node. It is factored once per element design
-//! at load ([`super::Assessment::kernels`]) and again only for a part whose chunks or bonds
+//! by its rigid acceleration and gauged at its first node. A heavily cracked set can be a
+//! mechanism, its stiffness leaving some chunks' motion free within the factor's resolution: the
+//! joints that motion moves part (`Slide`), and the rest is factored again. It is factored once per element
+//! design at load ([`super::Assessment::kernels`]) and again only for a part whose chunks or bonds
 //! changed; [`Kernel::hold`] is its one event entry. The construction design's "Inside a standing
 //! part" owns the model.
 
@@ -30,6 +32,9 @@ pub(crate) struct Kernel {
     joints: Vec<usize>,
     /// Unanchored node sets, each gauged at its first node.
     free: Vec<Vec<usize>>,
+    /// The joints a mechanism's free motion moved, ascending: they part, the rest is factored
+    /// without them, and every event reports them parted ([`Self::hold`]).
+    loose: Vec<usize>,
     pub(crate) factor: Factor,
 }
 
@@ -37,7 +42,8 @@ pub(crate) struct Kernel {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Hold {
     /// Bonds past their strength crack (`Tension`, `Shear`); push-only joints the field pulls
-    /// apart separate (`LiftForce`), and so does a bond that cracks while pulled.
+    /// apart separate (`LiftForce`), and so does a bond that cracks while pulled; a loose chunk's
+    /// joints separate (`Slide`).
     pub failures: Vec<Failure>,
     /// The joints that separate.
     pub separated: Vec<usize>,
@@ -64,7 +70,6 @@ impl Kernel {
         let soil = |c: usize| structure.chunks[c].buried;
         let mut edges = Vec::new();
         let mut joints = Vec::new();
-        let mut anchored: Vec<bool> = nodes.iter().map(|n| n.fixed).collect();
         for &j in &state.joints {
             let joint = &structure.joints[j];
             if state.separated[j] || !state.live(joint) {
@@ -90,46 +95,64 @@ impl Kernel {
                 _ => None, // A boundary to a chunk outside the set: the caller's load.
             };
             if let Some(edge) = edge {
-                if edge.b.is_none() {
-                    anchored[edge.a] = true;
-                }
                 edges.push(edge);
                 joints.push(j);
             }
         }
-        let mut neighbours = vec![Vec::new(); nodes.len()];
-        for e in &edges {
-            if let Some(b) = e.b {
-                neighbours[e.a].push(b);
-                neighbours[b].push(e.a);
-            } // An anchor joins no node.
-        }
-        let mut free = Vec::new();
-        let mut seen = vec![false; nodes.len()];
-        for start in 0..nodes.len() {
-            if seen[start] {
-                continue; // Already in a set.
+        let buried: Vec<bool> = nodes.iter().map(|n| n.fixed).collect();
+        let mut loose = Vec::new();
+        let (factor, free) = loop {
+            let mut anchored = buried.clone();
+            let mut neighbours = vec![Vec::new(); nodes.len()];
+            for e in &edges {
+                match e.b {
+                    Some(b) => {
+                        neighbours[e.a].push(b);
+                        neighbours[b].push(e.a);
+                    }
+                    None => anchored[e.a] = true,
+                }
             }
-            seen[start] = true;
-            let (mut stack, mut group, mut held) = (vec![start], Vec::new(), false);
-            while let Some(n) = stack.pop() {
-                held |= anchored[n];
-                group.push(n);
-                for &m in &neighbours[n] {
-                    if !seen[m] {
-                        seen[m] = true;
-                        stack.push(m);
+            for (node, &fixed) in nodes.iter_mut().zip(&buried) {
+                node.fixed = fixed;
+            }
+            let mut free = Vec::new();
+            let mut seen = vec![false; nodes.len()];
+            for start in 0..nodes.len() {
+                if seen[start] {
+                    continue; // Already in a set.
+                }
+                seen[start] = true;
+                let (mut stack, mut group, mut held) = (vec![start], Vec::new(), false);
+                while let Some(n) = stack.pop() {
+                    held |= anchored[n];
+                    group.push(n);
+                    for &m in &neighbours[n] {
+                        if !seen[m] {
+                            seen[m] = true;
+                            stack.push(m);
+                        }
+                    }
+                }
+                if !held {
+                    group.sort_unstable();
+                    nodes[group[0]].fixed = true;
+                    free.push(group);
+                }
+            }
+            match Factor::new(&nodes, &edges) {
+                Ok(factor) => break (factor, free),
+                Err(mechanism) => {
+                    // Loose chunks: the joints their free motion moves part, and the rest is
+                    // factored again. Each pass parts at least one joint, so it ends.
+                    for e in mechanism.carriers(&nodes, &edges).into_iter().rev() {
+                        edges.remove(e);
+                        loose.push(joints.remove(e));
                     }
                 }
             }
-            if !held {
-                group.sort_unstable();
-                nodes[group[0]].fixed = true;
-                free.push(group);
-            }
-        }
-        let factor = Factor::new(&nodes, &edges)
-            .expect("an anchored or gauged chunk set with no slipping face is positive definite");
+        };
+        loose.sort_unstable();
         Self {
             masses: chunks
                 .iter()
@@ -146,6 +169,7 @@ impl Kernel {
             edges,
             joints,
             free,
+            loose,
             factor,
         }
     }
@@ -189,6 +213,19 @@ impl Kernel {
             } else {
                 self.factor.solve_ops()
             },
+            // A loose chunk is a mechanism, as a part nothing holds is in the part law: it parts.
+            failures: self
+                .loose
+                .iter()
+                .map(|&joint| Failure {
+                    joint,
+                    cause: Cause::Slide,
+                    demand: 0.0,
+                    capacity: 0.0,
+                    work: 0.0,
+                })
+                .collect(),
+            separated: self.loose.clone(),
             ..Hold::default()
         };
         for (edge, &j) in self.edges.iter().zip(&self.joints) {
