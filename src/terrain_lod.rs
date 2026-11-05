@@ -1370,6 +1370,9 @@ mod tests {
     /// selection. A few hundred entities and human-rate triggers make adaptation cheap.
     #[test]
     fn the_adaptive_layer_rewrites_thresholds_when_the_view_changes() {
+        // Fixture optics: the gunner field is strictly narrower than the commander's.
+        let commander_fov = crate::spec::Optics::Unaided(60.0).vertical_fov();
+        let optic_fov = commander_fov / 2.0;
         let mut app = App::new();
         // Mount the shared reader: this module consumes view facts, not cameras or windows.
         app.add_plugins((crate::view::plugin, plugin));
@@ -1382,7 +1385,7 @@ mod tests {
             .spawn((
                 Camera3d::default(),
                 Projection::Perspective(PerspectiveProjection {
-                    fov: std::f32::consts::FRAC_PI_4,
+                    fov: commander_fov,
                     ..default()
                 }),
                 // The declared view the shared reader resolves — the ladder consumes its facts.
@@ -1418,7 +1421,7 @@ mod tests {
             })
             .collect();
 
-        // Into the optic: the same deviations now cost 6.5× more distance to hide.
+        // Narrowing the field magnifies the same terrain deviations.
         {
             let mut lens = app
                 .world_mut()
@@ -1427,9 +1430,7 @@ mod tests {
             let Projection::Perspective(projection) = lens.as_mut() else {
                 panic!("the test camera must carry a perspective projection");
             };
-            projection.fov = crate::bake::selected_spec().views[&crate::spec::ViewKind::Gunner]
-                .optics
-                .vertical_fov();
+            projection.fov = optic_fov;
         }
         app.update();
         let optic: Vec<f32> = entities
