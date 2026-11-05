@@ -882,7 +882,9 @@ impl Plugin for NetClientPlugin {
 /// each fixed step/frame, re-propagating hierarchies and re-extracting hidden meshes
 /// (`.agents/scratch/perf-2026-10-29/bookkeeping-diagnosis.md`).
 pub(crate) fn offline_physics() -> bevy::app::PluginGroupBuilder {
-    PhysicsPlugins::default().build()
+    PhysicsPlugins::default()
+        .with_collision_hooks::<construction::breakage::SweepContacts<'static, 'static>>()
+        .build()
 }
 
 /// Every moving offline body opts translation/rotation into [`offline_physics`] easing in the

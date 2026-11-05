@@ -4,7 +4,6 @@ use core::time::Duration;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::{Mutex, MutexGuard};
 
-use avian3d::prelude::PhysicsPlugins;
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
@@ -29,7 +28,7 @@ pub(super) fn lock_real_udp_test() -> MutexGuard<'static, ()> {
 /// The plugin floor shared by real-loopback apps: no rig, tank, or renderer, only the assets,
 /// schedules, and physics needed by their production seams. Avian's default physics composition.
 pub(super) fn base_app() -> App {
-    base_app_with(PhysicsPlugins::default().build())
+    base_app_with(crate::offline_physics())
 }
 
 /// [`base_app`] with the NETCODE physics composition (`net::physics::physics_plugins`: avian's own

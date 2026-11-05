@@ -715,6 +715,7 @@ mod tests {
                 .count()
         );
         let mut freed = 0;
+        let mut speeds = Vec::new();
         let mut shed = 0;
         let mut counts = (0, 0, 0, 0);
         let mut per_tick = Vec::new();
@@ -772,13 +773,7 @@ mod tests {
                 counts.1 += account.work.casts;
                 counts.2 += account.work.joints;
                 counts.3 += account.work.queries;
-                per_tick.push((
-                    tick,
-                    account.work.bounds,
-                    account.work.casts,
-                    account.work.joints,
-                    account.work.queries,
-                ));
+                per_tick.push((tick, account.work));
                 let wall_impulse: Vec3 = app
                     .world()
                     .resource::<crate::contact_transfer::ContactTransfers>()
@@ -813,7 +808,7 @@ mod tests {
                     "actual occupied debris mass carries the exchanged momentum"
                 );
                 initial.get_or_insert(tick);
-                freed += chunks;
+                freed += chunks * usize::from(contact.is_some_and(|first| tick <= first + 2));
                 shed += account.shed;
                 for &(body, before, after, change) in &account.source_changes {
                     if body != tank {
@@ -840,7 +835,13 @@ mod tests {
                     losses.push((before.length(), after.length(), impulse.length()));
                 }
             }
-            if contact.is_some_and(|first| tick >= first + 2) {
+            if let Some(after) = contact.map(|first| tick - first)
+                && [1, 2, 5, 10].contains(&after)
+            {
+                let speed = app.world().get::<LinearVelocity>(tank).unwrap().0.length();
+                speeds.push((after, speed));
+            }
+            if contact.is_some_and(|first| tick >= first + 10) {
                 break;
             }
         }
@@ -867,7 +868,7 @@ mod tests {
             .filter(|&&f| f != crate::construction::fracture::Fate::Standing)
             .count();
         println!(
-            "MEASURED tracked ram: first sweep tick={first}, freed in two ticks={freed}, fragments shed as decoration={shed}, target chunks absent={gone}, bounds/casts/incident-joint visits/cast-contact queries={counts:?}, speeds and momentum={losses:?}, post-physics velocities and remaining wall impulses={solver_contacts:?}"
+            "MEASURED tracked ram: first sweep tick={first}, freed in two ticks={freed}, fragments shed as decoration by +10={shed}, speed by ticks after contact={speeds:?}, target chunks absent={gone}, bounds/casts/incident-joint visits/cast-contact queries={counts:?}, speeds and momentum={losses:?}, post-physics velocities and remaining wall impulses={solver_contacts:?}"
         );
     }
 }

@@ -30,6 +30,7 @@ pub(crate) fn plugin(app: &mut App) {
 /// Lightyear, so Avian's own transform and interpolation plugins stay disabled.
 pub fn physics_plugins() -> bevy::app::PluginGroupBuilder {
     avian3d::prelude::PhysicsPlugins::default()
+        .with_collision_hooks::<crate::construction::breakage::SweepContacts<'static, 'static>>()
         .build()
         .disable::<PhysicsTransformPlugin>()
         .disable::<PhysicsInterpolationPlugin>()

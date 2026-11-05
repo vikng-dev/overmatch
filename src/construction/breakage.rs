@@ -76,9 +76,9 @@ use std::sync::Arc;
 
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
-    AngularVelocity, Collider, ColliderAabb, ColliderOf, CollisionLayers, Forces, LayerMask,
-    LinearVelocity, Position, ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery,
-    SpatialQueryFilter, WriteRigidBodyForces,
+    ActiveCollisionHooks, AngularVelocity, Collider, ColliderAabb, ColliderOf, CollisionHooks,
+    CollisionLayers, ContactPair, Forces, LayerMask, LinearVelocity, Position, ReadRigidBodyForces,
+    RigidBody, Rotation, Sensor, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces,
 };
 
 use bevy::math::DVec3;
@@ -843,7 +843,7 @@ type Colliders<'w, 's> = Query<
 >;
 
 mod sweep_intake;
-pub(crate) use sweep_intake::SweepAccount;
+pub(crate) use sweep_intake::{SweepAccount, SweepContacts};
 
 /// AUTHORITY: each physics step's body contacts on the constructions as loads, read once a step
 /// (module doc): every point on a breakable element or chunk queued, the step's as one deposit,
@@ -2824,6 +2824,7 @@ fn prepare_reconcile(
                     kind.chunk_friction(c),
                     chunk_volume(kind, c),
                     ChunkCollider(c as u16),
+                    ActiveCollisionHooks::MODIFY_CONTACTS, // [`SweepContacts`].
                     pose,
                 )));
             }

@@ -637,3 +637,38 @@ fn hold(p: &mut Intake, body: Entity, root: Entity, swept: &super::super::sweep:
 pub(super) fn changed(account: Res<SweepAccount>) -> bool {
     account.freed > 0
 }
+
+/// Avian's contact hook for the sweep (the game's environment destruction): until exact
+/// occupancy the sweep owns a dynamic body's pair with a standing construction, so the narrow
+/// phase's look-ahead points between them, at a positive separation, are dropped; penetrating
+/// points stay. Look-ahead planes on chunks the cast has not reached brake and lift a hull before
+/// its sweep meets them. Every other pair keeps its look-ahead. Standing constructions' colliders
+/// carry [`ActiveCollisionHooks::MODIFY_CONTACTS`], which is what calls it.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct SweepContacts<'w, 's> {
+    owners: Query<'w, 's, &'static ColliderOf>,
+    standing: Query<'w, 's, (), (With<Breakage>, Without<Piece>)>,
+    bodies: Query<'w, 's, &'static RigidBody>,
+}
+
+impl CollisionHooks for SweepContacts<'_, '_> {
+    fn modify_contacts(&self, contacts: &mut ContactPair, _: &mut Commands) -> bool {
+        let standing = |collider| {
+            self.owners
+                .get(collider)
+                .is_ok_and(|of| self.standing.contains(of.body))
+        };
+        let source = |body: Option<Entity>| {
+            body.is_some_and(|b| self.bodies.get(b).is_ok_and(RigidBody::is_dynamic))
+        };
+        if !(standing(contacts.collider1) && source(contacts.body2)
+            || standing(contacts.collider2) && source(contacts.body1))
+        {
+            return true;
+        }
+        for manifold in &mut contacts.manifolds {
+            manifold.points.retain(|point| point.penetration >= 0.0);
+        }
+        contacts.manifolds.iter().any(|m| !m.points.is_empty())
+    }
+}
