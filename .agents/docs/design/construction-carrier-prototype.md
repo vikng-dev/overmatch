@@ -180,9 +180,11 @@ These runs belong to the orchestrator's pricing session, as does hosted two-vCPU
 The corrected archived prototype passed 249 construction tests (seven measurement beds ignored), 48
 whole-tree guards (`doc_citations`, `ui_ascii`, `net_boundary`, `bake::`), its explicit census beds,
 `cargo fmt --all --check`, `git diff --check` and locked workspace/all-target CI clippy with
-`dev_ui,bitprobe`. No matching fracture/prototype backlog rows were found. Final removal gates
-are recorded below after they complete.
+`dev_ui,bitprobe`. Final removal passes 247 construction tests (three pre-existing measurement
+beds ignored), the same 48 whole-tree guards, formatting, diff whitespace and the same strict CI
+clippy command. No matching fracture/prototype backlog rows were found.
 
 Raw evidence stays in `target/carrier/`: `census.log`, `extra-final.log`, `scaling-final.log`,
 `corrected-{construction,guards,clippy,fmt}.log` and the final gate logs. The report is the only
-net addition to the branch. Start: 2026-11-05 10:44:34 +07; final commit precedes the one-hour limit.
+net addition to the branch. Start: 2026-11-05 10:44:34 +07; final gates completed at 11:23:18 +07,
+within the owner's one-hour limit.
