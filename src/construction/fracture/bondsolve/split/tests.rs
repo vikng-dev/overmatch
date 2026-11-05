@@ -327,16 +327,7 @@ impl Authority {
                 tick.changes.extend(found);
             }
         }
-        for &(j, change) in &tick.changes {
-            match change {
-                Change::Cracked(_) => self.state.cracked[j] = true,
-                Change::Opened(_) => {
-                    self.state.cracked[j] = true;
-                    self.state.separated[j] = true;
-                }
-                Change::Contact(contact) => self.contact[j] = contact,
-            }
-        }
+        apply(&mut self.state, &mut self.contact, &tick.changes);
         let groups = groups(&self.structure, &self.state, &self.contact);
         for index in cut.into_iter().rev() {
             let (entity, old) = self.bodies.swap_remove(index);
@@ -930,8 +921,9 @@ fn a_cracked_bed_carries_push_only_and_opens_when_pulled() {
 }
 
 /// THE UNIT HOUSE AS BODIES (observations for the lane report, game state only): its bodies at
-/// spawn, a gravity-only run to rest, and a 300 kN press of a hull-mass block into its wall.
-/// Invariants: every hold converges finite, and a house at rest performs no stress solve.
+/// spawn, a gravity-only run, and a 300 kN press of a hull-mass block into its wall.
+/// Invariants: every hold finds no mechanism and every pose stays finite. Whether the house
+/// comes to rest is observed, not asserted.
 #[test]
 #[ignore = "house observation for the split experiment's report"]
 fn the_unit_house_as_bodies() {
@@ -1018,6 +1010,10 @@ fn the_unit_house_as_bodies() {
             );
         }
         all.extend(report.changes.iter().copied());
+        assert_eq!(
+            report.mechanisms, 0,
+            "every holding joint keeps an edge, so no part of a body moves freely inside it"
+        );
         work.push((report.solved, report.products, report.joint_visits));
         let awake = authority
             .bodies
@@ -1073,6 +1069,7 @@ fn the_unit_house_as_bodies() {
     let mut pressed = Vec::new();
     for tick in 0..192 {
         let report = authority.tick(&mut app);
+        assert_eq!(report.mechanisms, 0, "as under gravity");
         changes += report.changes.len();
         pressed.extend(report.changes.iter().copied());
         spawned.0 += report.spawned.0;

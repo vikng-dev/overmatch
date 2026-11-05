@@ -60,31 +60,34 @@ meant to hand to Avian.
 - Tick 0, cold hold of the whole house: 881 products, 3.07 M joint visits. It changes 226 joints:
   109 nailed bearings stop pressing, 95 push-only parts slip (67 nailed bearings, 28 brick–wood
   rests), 22 rests open.
-- By tick 32: 473 changes, 8 bodies, 3 of them with a **mechanism** (a direction with no stiffness
-  once parts slipped or bearings opened). A mechanism body is left unjudged. By 10 s: 478 changes
-  (51 nails open in tension, 12 in shear, 7 intrinsic wood seams), 11 bodies, about 10 dynamic
-  bodies never asleep.
-- Work stays at about 1,960 products and 5.7 M joint visits **every tick**, mostly mechanism bodies
-  restarting their CG. **Zero solves at rest was not reached.**
+- The changes cascade over the next ticks: 757 by tick 32 (45 bodies), 795 by 10 s (76 bodies):
+  216 bearings open, 240 parts slipping, 139 nails open in tension and 68 in shear, 59 intrinsic
+  wood seams open, 62 brick–wood rests open. The roof comes apart.
+- 62 dynamic bodies are still awake after 10 s, and the walls they touch re-solve every tick:
+  13 bodies held, about 1,020 products and 2.46 M joint visits a tick at 10 s. **Zero solves at rest was not
+  reached.**
+- No body showed a mechanism. (An earlier arm did: a fixing that cracked and lost its bearing in
+  one tick kept joining its group with no edge left in the graph. `split::apply` now separates such
+  a joint.)
 - The contact-inside solve on `lane/bondsolve` found zero cracks at boot for the same data; this
-  gravity collapse is the once-per-tick active set, not a load the data cannot carry.
+  gravity collapse comes from the once-per-tick push-only rule (a part opens or slips on one
+  linear trial and never re-closes or re-sticks), not from a load the data cannot carry.
 
-**Ram-like press** (a 0.4 m block of 46.8 t, gravity off, pressed at 300 kN into the outer wall):
-with the house in mechanism, nothing is judged and nothing changes in 192 ticks. Split costs come
-from the earlier arm of this run, in which a push-only part past friction opened instead of
-slipping (no mechanism arose; its gravity run ended at 673 changes, 68 bodies, about 56 never
-asleep, about 1,100–1,400 products and 2.5 M joint visits a tick). There the press cut the wall:
+**Ram-like press** (a 0.4 m block of 46.8 t, gravity off, pressed at 300 kN into the outer wall,
+after the gravity run): every pose and velocity stays finite, and no hold stalls.
 
-- tick 1: 1,720 joint changes; 1 body with 1,024 colliders despawned; 475 bodies with 1,024
-  colliders spawned;
-- ticks 2–5: 280 more bodies spawned, 1,603 colliders respawned; 845 bodies by tick 133; the most
-  work in a tick 5,235 products (tick 3); every pose and velocity finite.
+- Tick 1: 1,720 joints change at once (mostly intrinsic brick seams opening in tension and shear);
+  1 body with 1,024 colliders despawned, 337 bodies with 1,024 colliders spawned.
+- 192 ticks: 2,688 joint changes; bodies 76 → 864; 914 bodies spawned and 126 despawned, 5,818
+  colliders respawned in all; the most work in a tick 3,633 products and 1.54 M joint visits
+  (tick 2). From tick 10 to tick 191 the work falls from 1,063 products and 91,000 visits a tick
+  to 622 and 44,000.
 
 ## Costs
 
 - **Bodies and colliders**: house at spawn 1 body, 1,122 colliders. A split respawns every collider
   of the cut body, the largest remainder included: its cost scales with the body, not with the
-  crack (the press's first cut respawned 1,024 colliders to free a few hundred chunks).
+  crack (the press's first cut respawned 1,024 colliders; 5,818 over 192 ticks).
 - **Stress-solve work per tick**: asleep 0 (a sleeping body is not held). Awake: 12–25 products a
   tick for the 2- and 4-chunk fixtures; 881 products (3.07 M visits) for the house's cold solve; the
   house touched by awake pieces re-solves every tick. `bob-factor` targets exactly this term.
@@ -102,14 +105,13 @@ then owns the motion.
 
 ## What is left
 
-1. **Mechanisms inside a body.** When push-only parts slip or bearings open, part of the house body
-   loses all stiffness in some direction. That part is motion, so it must leave as its own body;
-   identifying it is not built and the diagnosis (which chunks, through which joints) is unfinished.
-2. **The house is one body.** The owner's model assumed a few bodies (walls anchored, roof resting).
+1. **The house is one body.** The owner's model assumed a few bodies (walls anchored, roof resting).
    With the roof nailed, the contact problem stays inside the body. Either the construction data
    joins the roof by rests (an owner decision on construction facts, never a tuned number), or
    push-only parts need re-close and re-stick, which brings back an iteration across ticks.
-3. Not modelled: re-stick of a slipping part, re-close of an opened bearing, torsional friction,
+2. Not modelled: re-stick of a slipping part, re-close of an opened bearing, torsional friction,
    the pulse energy rule (only sustained strength is judged), a tolerance for unchanged loads
    (a `Resolution` number would be needed).
-4. Pricing by the orchestrator; no house case passed to price.
+3. A split respawns the whole cut body; keeping the largest part's colliders would need a
+   decision against ADR-0014's spawn-only rule (no sim state moves onto the old entity).
+4. Pricing by the orchestrator.

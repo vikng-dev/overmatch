@@ -21,13 +21,13 @@ fn shut(structure: &Structure, state: &State, j: usize) -> bool {
 }
 
 /// Whether joint `j` joins its two sides into one body: an intact seam, or a cracked one still
-/// shut and not slipping: each alone stiffens all six relative motions of its two chunks. A rest
+/// shut and sticking: each alone stiffens all six relative motions of its two chunks. A rest
 /// joins nothing; inside one body it presses as push only, between bodies it is Avian's, as a
 /// slipping cracked seam is.
 fn holding(structure: &Structure, state: &State, contact: &[Contact], j: usize) -> bool {
     structure.joints[j].seam().is_some()
         && shut(structure, state, j)
-        && (!state.cracked[j] || !matches!(contact[j], Contact::Slipping(..)))
+        && (!state.cracked[j] || contact[j] == Contact::Shut)
 }
 
 /// The standing chunks of `structure` grouped by holding joints, each group ascending.
@@ -416,6 +416,22 @@ pub(crate) fn judge(
         }
     }
     changes
+}
+
+/// Commit one tick's [`judge`] changes. A fixing can crack and lose its bearing in one tick; a
+/// cracked joint whose push-only part has opened has no part left, so it separates.
+pub(crate) fn apply(state: &mut State, contact: &mut [Contact], changes: &[(usize, Change)]) {
+    for &(j, change) in changes {
+        match change {
+            Change::Cracked(_) => state.cracked[j] = true,
+            Change::Opened(_) => {
+                state.cracked[j] = true;
+                state.separated[j] = true;
+            }
+            Change::Contact(part) => contact[j] = part,
+        }
+        state.separated[j] |= state.cracked[j] && contact[j] == Contact::Open;
+    }
 }
 
 mod tests;
