@@ -268,10 +268,9 @@ fn jitter_readout(spread: Duration, tick: Duration) -> (String, Color) {
 /// coalesced arrivals cannot establish a faster server. Never divide a gap by skipped ticks:
 /// catch-up would conceal stalls.
 fn server_tick_readout(gap: Duration, tick: Duration) -> (String, Color) {
-    let color = excess_colour(gap.saturating_sub(tick), tick);
     (
         format!("{:.1} Hz", gap.max(tick).as_secs_f64().recip()),
-        color,
+        excess_colour(gap.saturating_sub(tick), tick),
     )
 }
 
