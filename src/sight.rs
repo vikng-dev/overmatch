@@ -384,7 +384,7 @@ pub(crate) fn drive_gunner_aim(
     spatial: SpatialQuery,
     mut committed: ResMut<CommittedAim>,
     controlled: ControlledTank,
-    views: Query<&TankViews, With<Controlled>>,
+    views: Query<Option<&TankViews>, With<Controlled>>,
     cameras: Query<&Camera, With<PlayerView>>,
     servos: LiveServos,
     servo_specs: Query<&ServoSpec>,

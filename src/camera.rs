@@ -284,8 +284,16 @@ fn capture_turret_pivot(
 }
 
 /// The controlled tank's authored FOV; absent before spawn or during a possession gap.
-pub fn view_fov(views: &Query<&TankViews, With<Controlled>>, kind: ViewKind) -> Option<f32> {
-    crate::tank::controlled_one(views.single()).map(|views| views.get(kind).fov)
+pub fn view_fov(
+    views: &Query<Option<&TankViews>, With<Controlled>>,
+    kind: ViewKind,
+) -> Option<f32> {
+    crate::tank::controlled_one(views.single()).map(|views| {
+        views
+            .expect("a controlled tank carries its spawn-built TankViews")
+            .get(kind)
+            .fov
+    })
 }
 
 fn spawn_camera(mut commands: Commands) {
@@ -366,7 +374,7 @@ fn orbit_camera(
     camera: Single<(&mut Transform, &mut OrbitCamera, &mut Projection), With<PlayerView>>,
     spatial: SpatialQuery,
     tank: Query<&Transform, (With<Tank>, With<Controlled>, Without<PlayerView>)>,
-    views: Query<&TankViews, With<Controlled>>,
+    views: Query<Option<&TankViews>, With<Controlled>>,
     pivot: Res<TurretPivot>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
     time: Res<Time>,
@@ -508,7 +516,7 @@ pub(crate) fn blended_look(
 fn gunner_camera(
     camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<PlayerView>>,
     controlled: Query<(Entity, &Rig), With<Controlled>>,
-    views: Query<&TankViews, With<Controlled>>,
+    views: Query<Option<&TankViews>, With<Controlled>>,
     view_nodes: Query<&ViewNode>,
     gun: Query<&GlobalTransform, Without<PlayerView>>,
     hull: Query<&GlobalTransform, (With<Hull>, Without<PlayerView>)>,
@@ -590,6 +598,37 @@ fn place_optic_camera(
 mod tests {
     use super::*;
     use crate::sight::BLEND_SAMPLES;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// Only a possession gap has no FOV; the camera must read the controlled rig's authored view.
+    #[test]
+    fn view_fov_tracks_control_and_names_the_tankless_gap() {
+        let mut world = World::new();
+        let read =
+            |views: Query<Option<&TankViews>, With<Controlled>>| view_fov(&views, ViewKind::Gunner);
+        assert_eq!(world.run_system_once(read).unwrap(), None);
+        // Fixture: an arbitrary admitted optic, independent of the selected tank.
+        let fov = crate::spec::Optics::Unaided(60.0).vertical_fov();
+        let tank = world
+            .spawn((Controlled, crate::tests::tank_views(fov)))
+            .id();
+        assert_eq!(world.run_system_once(read).unwrap(), Some(fov));
+        world.entity_mut(tank).remove::<Controlled>();
+        assert_eq!(world.run_system_once(read).unwrap(), None);
+    }
+
+    /// A malformed controlled rig must not acquire pre-bind framing while input remains active.
+    #[test]
+    #[should_panic(expected = "a controlled tank carries its spawn-built TankViews")]
+    fn view_fov_refuses_a_controlled_tank_without_views() {
+        let mut world = World::new();
+        world.spawn(Controlled);
+        world
+            .run_system_once(|views: Query<Option<&TankViews>, With<Controlled>>| {
+                view_fov(&views, ViewKind::Commander)
+            })
+            .unwrap();
+    }
 
     /// A possession write at the end of Update must reach every camera reader this frame. A
     /// capture in Update could precede that write and retain the previous construction's pivot.

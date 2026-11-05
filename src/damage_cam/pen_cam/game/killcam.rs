@@ -809,7 +809,7 @@ fn place(
     spatial: SpatialQuery,
     tank: Query<&Transform, (With<Tank>, With<Controlled>, Without<PlayerView>)>,
     others: Query<&Transform, (With<Tank>, Without<PlayerView>)>,
-    views: Query<&TankViews, With<Controlled>>,
+    views: Query<Option<&TankViews>, With<Controlled>>,
     mut camera: Query<(Entity, &mut Transform, &mut Projection, &CameraProfile), With<PlayerView>>,
     mut commands: Commands,
 ) {
