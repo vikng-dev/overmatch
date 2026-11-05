@@ -478,14 +478,16 @@ impl JointStrength {
         // A shear-limit crossing belongs to either the open or the compressed branch.
         if sliding > 0.0 {
             let force = cohesion / sliding;
-            if preload + force * opening >= 0.0 {
+            let normal = preload + force * opening;
+            if normal > 0.0 || (normal == 0.0 && opening >= 0.0) {
                 capacity = capacity.min(force);
             }
         }
         let slope = sliding + self.friction * opening;
         if slope > 0.0 {
             let force = (cohesion - self.friction * preload) / slope;
-            if force >= 0.0 && preload + force * opening <= 0.0 {
+            let normal = preload + force * opening;
+            if force >= 0.0 && (normal < 0.0 || (normal == 0.0 && sliding > 0.0)) {
                 capacity = capacity.min(force);
             }
         }
@@ -501,4 +503,41 @@ pub(crate) fn pair_friction(structure: &super::Structure, joint: &super::Joint) 
         super::Side::Ground => own,
     };
     f64::from(crate::substances::pair_friction(own, other))
+}
+
+#[cfg(test)]
+mod directional_strength_tests {
+    use super::*;
+
+    /// The game's environment destruction: an unloaded face can enter bearing, and a bond
+    /// lifting out of friction still has its tensile strength. The sweep relies on the
+    /// branch immediately beyond a limit, rather than equality at a branch's endpoint.
+    #[test]
+    fn unloaded_bearing_and_exhausted_friction_follow_the_traction_cone() {
+        // Fixture: a rest at friction 0.5, and a bond with 16 N tension and no cohesion.
+        let rest = JointStrength {
+            tensile: 0.0,
+            cohesion: 0.0,
+            friction: 0.5,
+        };
+        assert!(
+            rest.capacity(
+                1.0,
+                DVec3::X,
+                (-DVec3::X + DVec3::Y * 0.25).normalize(),
+                0.0
+            )
+            .is_infinite()
+        );
+        assert_eq!(
+            rest.capacity(1.0, DVec3::X, (-DVec3::X + DVec3::Y).normalize(), 0.0),
+            0.0
+        );
+        let bond = JointStrength {
+            tensile: 16.0,
+            ..rest
+        };
+        assert_eq!(bond.capacity(1.0, DVec3::X, DVec3::X, -8.0), 24.0);
+        assert!(rest.capacity(1.0, DVec3::X, (DVec3::X + DVec3::Y).normalize(), -8.0) > 0.0);
+    }
 }
