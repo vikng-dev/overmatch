@@ -385,7 +385,12 @@ fn friction(point: &ContactConstraintPoint) -> Vec2 {
 /// Before the substeps: the resting pairs brought up to date, then a record for every point of
 /// every constraint with a structure on one side. `time` is the physics clock Avian runs its
 /// schedule on.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "contact readout reads both graphs, body properties, the physics clock and optional stats"
+)]
 fn keep(
+    stages: Option<Res<crate::cost::stages::Stages>>,
     graph: Res<ConstraintGraph>,
     contacts: Res<ContactGraph>,
     structures: Query<(), With<StructureBody>>,
@@ -401,6 +406,8 @@ fn keep(
     time: Res<Time>,
     mut transfers: ResMut<ContactTransfers>,
 ) {
+    let _contacts =
+        crate::cost::stages::Stages::start(stages.as_deref(), crate::cost::stages::Stage::Contacts);
     let ContactTransfers {
         points,
         inertias,
@@ -589,7 +596,10 @@ fn add_substep(
     graph: Res<ConstraintGraph>,
     config: Res<SolverConfig>,
     mut transfers: ResMut<ContactTransfers>,
+    stages: Option<Res<crate::cost::stages::Stages>>,
 ) {
+    let _contacts =
+        crate::cost::stages::Stages::start(stages.as_deref(), crate::cost::stages::Stage::Contacts);
     let unapplied = 1.0 - config.warm_start_coefficient;
     let ContactTransfers {
         points, kept, last, ..
@@ -612,7 +622,13 @@ fn add_substep(
 }
 
 /// After restitution: the increment it added along every kept point's normal.
-fn add_restitution(graph: Res<ConstraintGraph>, mut transfers: ResMut<ContactTransfers>) {
+fn add_restitution(
+    graph: Res<ConstraintGraph>,
+    mut transfers: ResMut<ContactTransfers>,
+    stages: Option<Res<crate::cost::stages::Stages>>,
+) {
+    let _contacts =
+        crate::cost::stages::Stages::start(stages.as_deref(), crate::cost::stages::Stage::Contacts);
     let ContactTransfers {
         points, kept, last, ..
     } = &mut *transfers;

@@ -18,7 +18,8 @@ and engine scheduling outside PhysicsSchedule. Send bytes are attempted encrypte
 bytes before transport; raw rows also retain send time, RSS and quota throttling.
 Hosted runs require kernel evidence of two vCPU. --rehearsal is explicitly unpriced local
 plumbing on the recorded host; concurrent lanes make its timings unsuitable for pricing.
-Without --schedule, the existing tankless HE diagnostic remains available.
+Full-speed ram: --ram scripts/perf/ram.json (local or hosted).
+Without --schedule or --ram, the tankless HE diagnostic remains available.
 """
 
 import argparse
@@ -190,6 +191,41 @@ def report_match(rows):
               + f" | {row['budget_us'] / 1000:.3f} | {row['cpu_pct']:.1f} | {share:.1f}/{100-share:.1f} | {load['awake_bodies']} | {load['construction_pieces']} | {load['send_bytes']} | {row['tick_hz']:.1f} |")
 
 
+class ServerLogs:
+    """One polling/backoff/watchdog contract for every hosted recipe."""
+    def __init__(self, path, deployment):
+        self.path, self.deployment = path, deployment
+        self.next_poll, self.poll_s = 0.0, HOSTED_LOG_POLL_S
+        self.local_version = None
+
+    def snapshot(self, deadline):
+        if self.deployment:
+            now = time.monotonic()
+            if now < self.next_poll or now >= deadline:
+                return None
+            try:
+                subprocess.run([str(ROOT / "scripts/edgegap/session.sh"), "logs", self.deployment, str(self.path)],
+                               check=True, timeout=min(LOG_FETCH_TIMEOUT_S, deadline - now), stdout=subprocess.DEVNULL)
+            except subprocess.CalledProcessError as error:
+                if error.returncode != LOGS_RATE_LIMITED:
+                    raise
+                self.poll_s *= 2
+                self.next_poll = time.monotonic() + self.poll_s
+                print(f"Hosted logs rate limited (HTTP 429); retry in {self.poll_s:g} s if within the run deadline.", file=sys.stderr, flush=True)
+                return None
+            self.poll_s = HOSTED_LOG_POLL_S
+            self.next_poll = time.monotonic() + self.poll_s
+        if not self.path.exists():
+            return ""
+        if not self.deployment:
+            stat = self.path.stat()
+            version = stat.st_size, stat.st_mtime_ns
+            if version == self.local_version:
+                return None
+            self.local_version = version
+        return self.path.read_text()
+
+
 def run_match(args, out, recipe):
     """Reuse the online runner's scripted GPU-less links and session.sh log snapshots."""
     import socket
@@ -207,7 +243,7 @@ def run_match(args, out, recipe):
     (out / "rows.json").unlink(missing_ok=True)
     client_count = args.clients or args.tanks
     # DERIVED: the script outlives both admission and observation at the server's tick rate.
-    tick_ns = int(re.search(r"const TICK: Duration = Duration::from_nanos\(([\d_]+)\)", (ROOT / "src/net/server.rs").read_text())[1].replace("_", ""))
+    tick_ns = tick_seconds() * 1e9
     ticks = math.ceil((args.duration + 2 * args.startup_grace + 60) * 1e9 / tick_ns)
     script = out / "load.harness.ron"
     script.write_text(f"(ticks: {ticks}, drive: Arc, aim: Sweep, fire_tick: {ticks})\n")
@@ -217,27 +253,7 @@ def run_match(args, out, recipe):
         child = subprocess.Popen([str(args.bin / binary)], cwd=ROOT, env=dict(env, **extra), stdout=log, stderr=subprocess.STDOUT)
         children.append(child)
         return child
-    next_log_poll, log_poll_s = 0.0, HOSTED_LOG_POLL_S
-    def snapshot(deadline):
-        nonlocal next_log_poll, log_poll_s
-        if not local:
-            now = time.monotonic()
-            if now < next_log_poll or now >= deadline:
-                return None  # Polls never bypass the cadence or the run watchdog.
-            try:
-                subprocess.run([str(ROOT / "scripts/edgegap/session.sh"), "logs", args.deployment, str(serverlog)],
-                               check=True, timeout=min(LOG_FETCH_TIMEOUT_S, deadline - now), stdout=subprocess.DEVNULL)
-            except subprocess.CalledProcessError as error:
-                if error.returncode != LOGS_RATE_LIMITED:
-                    raise
-                # Resolution: exponential backoff reduces pressure until success or the wall deadline.
-                log_poll_s *= 2
-                next_log_poll = time.monotonic() + log_poll_s
-                print(f"Hosted logs rate limited (HTTP 429); retry in {log_poll_s:g} s if within the run deadline.", file=sys.stderr, flush=True)
-                return None
-            log_poll_s = HOSTED_LOG_POLL_S
-            next_log_poll = time.monotonic() + log_poll_s
-        return serverlog.read_text() if serverlog.exists() else ""
+    snapshot = ServerLogs(serverlog, None if local else args.deployment).snapshot
     start = time.monotonic()
     try:
         if local:
@@ -281,6 +297,183 @@ def run_match(args, out, recipe):
             time.sleep(min(POLL_S, max(0, deadline - time.monotonic())))
     except BaseException:
         print(f"MATCH RUN INVALID; server/client logs: {out}", file=sys.stderr)
+        raise
+    finally:
+        for child in reversed(children):
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+        for log in logs:
+            log.close()
+
+
+def ram_recipe(path):
+    """Operator route choices; the server derives speed and run-up from its admitted tank data."""
+    value = json.loads(path.read_text())
+    keys = {"instance", "heading_deg", "runup_margin", "minimum_speed_fraction", "drive_s", "deadline_s", "settle_s"}
+    if not isinstance(value, dict) or set(value) != keys or not isinstance(value["instance"], str) or not value["instance"]:
+        raise ValueError(f"{path}: expected ram recipe fields {sorted(keys)} and a nonempty instance")
+    for key in keys - {"instance"}:
+        v = value[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError(f"{path}: {key} must be finite")
+    if value["runup_margin"] < 1 or not 0 < value["minimum_speed_fraction"] <= 1 or any(value[k] <= 0 for k in ("drive_s", "deadline_s", "settle_s")) or value["settle_s"] >= value["deadline_s"]:
+        raise ValueError(f"{path}: invalid ram margin, speed fraction or timing domain")
+    return value
+
+
+def tick_seconds():
+    """Read the fixed-step owner's duration; refuse if its interface changes."""
+    source = (ROOT / "src/net/server.rs").read_text()
+    match = re.search(r"const TICK: Duration = Duration::from_nanos\(([\d_]+)\)", source)
+    if not match:
+        raise RuntimeError("fixed timestep declaration changed: update tick_seconds against its owner")
+    return int(match[1].replace("_", "")) / 1e9
+
+
+def ram_rows(text, recipe):
+    rows, ticks, sends = [], [], []
+    last = None
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.startswith("server_stats "):
+            continue
+        try:
+            row = json.loads(line.removeprefix("server_stats "))
+            ram = row["ram"]
+            if ram["recipe"] != recipe:
+                raise RuntimeError("server ram recipe differs from requested recipe")
+            for tick in ram["ticks"]:
+                if tick["tick"] != len(ticks) + 1:
+                    raise RuntimeError("missing, duplicated or reordered ram tick")
+                if tick["tanks"] != 1:
+                    raise RuntimeError("ram requires exactly one tank")
+                for field in ("tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "collector_us", "dt_s"):
+                    if not isinstance(tick[field], (int, float)) or not math.isfinite(tick[field]) or tick[field] < 0:
+                        raise ValueError(f"invalid {field}")
+                if tick["dt_s"] <= 0 or tick["sleep_us"] + tick["contacts_us"] > tick["physics_us"]:
+                    raise ValueError("invalid timestep or nested sleep bracket")
+                ticks.append(tick)
+            for send in ram["sends"]:
+                if not isinstance(send["tick"], int) or send["tick"] <= 0 or send["tick"] > len(ticks) or sends and send["tick"] <= sends[-1]["tick"]:
+                    raise ValueError("invalid or reordered send tick")
+                if not isinstance(send["us"], (int, float)) or not math.isfinite(send["us"]) or send["us"] < 0:
+                    raise ValueError("invalid send duration")
+                sends.append(send)
+            rows.append(row)
+            last = ram
+        except (ValueError, KeyError, TypeError) as error:
+            raise RuntimeError(f"server log line {number}: malformed ram stats: {error}") from error
+    return rows, ticks, sends, last
+
+
+def ram_summary(text, recipe):
+    rows, ticks, sends, last = ram_rows(text, recipe)
+    if last is None or last["done"] is None:
+        return None
+    plan, impact = last["plan"], last["impact"]
+    if not impact or impact["speed_m_s"] < plan["minimum_m_s"]:
+        raise RuntimeError(f"ram did not reach full-speed admission: impact={impact}, plan={plan}")
+    if last["done"] not in ("rest", "deadline"):
+        raise RuntimeError("unknown ram completion state")
+    window = [t for t in ticks if t["tick"] >= impact["tick"]]
+    if not window:
+        raise RuntimeError("ram has no measured contact window")
+    dt = window[0]["dt_s"]
+    if any(t["dt_s"] != dt for t in ticks):
+        raise RuntimeError("ram fixed timestep changed during capture")
+    total = sum(t["tick_us"] for t in window)
+    summed = {k: sum(t[k] for t in window) for k in ("intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "physics_us", "sleep_us")}
+    # Contact readout and sleep are nested in shared physics; debit both for additive shares.
+    parts = dict(contacts=summed["contacts_us"], updates=summed["publish_us"], intake=summed["intake_us"], structure=summed["structure_us"], refit=summed["refit_us"],
+                 physics=summed["physics_us"] - summed["sleep_us"] - summed["contacts_us"], sleep=summed["sleep_us"])
+    parts["other"] = total - sum(parts.values())
+    if total <= 0 or parts["other"] < -len(window):
+        raise RuntimeError("stage measurements exceed their containing ticks")
+    ordered = sorted(t["tick_us"] for t in window)
+    send_us = sum(s["us"] for s in sends if window[0]["tick"] <= s["tick"] <= window[-1]["tick"])
+    worst = max(window, key=lambda t: t["tick_us"])
+    return dict(recipe=recipe, plan=plan, impact=impact, end=last["done"],
+                first_tick=window[0]["tick"], last_tick=window[-1]["tick"], window_s=len(window)*dt,
+                worst_tick=worst, p99_us=ordered[math.ceil(0.99*len(ordered))-1],
+                peak_awake=max(t["awake"] for t in window), final_awake=window[-1]["awake"],
+                overruns=sum(t["tick_us"] > dt*1e6 for t in window),
+                collector_mean_us=sum(t["collector_us"] for t in window)/len(window),
+                collector_max_us=max(t["collector_us"] for t in window),
+                share_pct={k: 100*v/total for k,v in parts.items()},
+                send_us=send_us, send_pct_of_tick_time=100*send_us/total, ticks=ticks, rows=rows)
+
+
+def report_ram(result):
+    compact = {k: v for k, v in result.items() if k not in ("ticks", "rows")}
+    print("MEASURED ram (shared physics; send outside fixed ticks): " + json.dumps(compact), flush=True)
+
+
+def run_ram(args, out, recipe):
+    """Same locked runner and hosted log plumbing, with one real full-throttle UDP client."""
+    import socket
+    local = args.target == "local"
+    address = "127.0.0.1:5888" if local else args.target
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("OVERMATCH_", "SPIKE_"))}
+    env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1",
+               BEVY_ASSET_ROOT=str(ROOT), NO_COLOR="1", OVERMATCH_RAM=json.dumps(recipe, separators=(",", ":")),
+               OVERMATCH_BOT="0", OVERMATCH_SERVER_STATS_S="1")
+    dt = tick_seconds()
+    # DERIVED: the client outlives approach, observation and both admission watchdog spans.
+    wall_limit = 2*args.startup_grace + recipe["drive_s"] + recipe["deadline_s"]
+    ticks = math.ceil((wall_limit + 60)/dt)
+    throttle_ticks = math.ceil(recipe["drive_s"]/dt)
+    if ticks > 2**32-1 or throttle_ticks > 2**32-129:
+        raise ValueError("ram duration exceeds harness tick representation")
+    script = out / "ram.harness.ron"
+    script.write_text(f"(ticks: {ticks}, drive: Ram(throttle_ticks: {throttle_ticks}))\n")
+    children, logs = [], []
+    serverlog = out / "server.log"
+    snapshot = ServerLogs(serverlog, None if local else args.deployment).snapshot
+    def spawn(binary, path, extra):
+        log = path.open("w")
+        logs.append(log)
+        child = subprocess.Popen([str(args.bin / binary)], cwd=ROOT, env=dict(env, **extra), stdout=log, stderr=subprocess.STDOUT)
+        children.append(child)
+        return child
+    start = time.monotonic()
+    try:
+        if local:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.bind(("127.0.0.1", 5888))
+            spawn("overmatch-server", serverlog, dict(OVERMATCH_SERVER_BIND="127.0.0.1"))
+        admission_deadline = start + args.startup_grace
+        while True:
+            if any(c.poll() is not None for c in children) or time.monotonic() >= admission_deadline:
+                raise RuntimeError("no verified server startup line before ram admission deadline")
+            text = snapshot(admission_deadline)
+            if text is not None and "server: host available_parallelism=" in text:
+                host = allocation(text, rehearsal=local)
+                print(host, flush=True)
+                break
+            time.sleep(min(POLL_S, max(0, admission_deadline-time.monotonic())))
+        spawn("overmatch", out / "client.log", dict(OVERMATCH_SERVER=address, OVERMATCH_HARNESS=str(script)))
+        deadline = start + wall_limit
+        while True:
+            if any(c.poll() is not None for c in children):
+                raise RuntimeError("ram server or client exited before completion")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("ram incomplete by wall deadline (no contact, slow sim, or missing logs)")
+            text = snapshot(deadline)
+            if text is not None:
+                if allocation(text, rehearsal=local) != host:
+                    raise RuntimeError("server startup allocation changed during ram")
+                result = ram_summary(text, recipe)
+                if result:
+                    log = (out / "client.log").read_text()
+                    if log.count("client: connected (entity") != 1 or "harness: released" not in log:
+                        raise RuntimeError("ram client needs one connection and synchronized combat release")
+                    (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+                    report_ram(result)
+                    print(f"COMPLETE: ram artifacts: {out}", flush=True)
+                    return
+            time.sleep(min(POLL_S, max(0, deadline-time.monotonic())))
+    except BaseException:
+        print(f"RAM RUN INVALID; logs: {out}", file=sys.stderr)
         raise
     finally:
         for child in reversed(children):
@@ -461,10 +654,11 @@ def main():
     parser.add_argument("--period", type=positive, default=1, help="simulation seconds between shots (default 1)")
     parser.add_argument("--sample", action="store_true", help="macOS sample during sustained slowdown, or after bursts if still real time")
     parser.add_argument("--out", type=Path, help="artifact directory; default target/collapse-<timestamp>")
+    parser.add_argument("--ram", type=Path, help="full-speed ram recipe JSON; shared local/hosted runner")
     parser.add_argument("--schedule", type=Path, help="real-match mode: JSON {events: [{at_s, instances}]} for the game's construction workload")
     parser.add_argument("--target", default="local", help="local, or ip:port of a deployment the operator already started")
     parser.add_argument("--deployment", help="existing Edgegap deployment ID; only its logs are read")
-    parser.add_argument("--tanks", type=count, default=30, help="total tanks, including bots and real links (owner workload: 30)")
+    parser.add_argument("--tanks", type=count, help="total tanks, including bots and real links (owner workload: 30)")
     parser.add_argument("--clients", type=count, help="real window-less clients; remaining tanks are bots (default: all tanks)")
     parser.add_argument("--startup-grace", type=positive, default=90, help="admission and trailing-window watchdog seconds")
     parser.add_argument("--bin", type=Path, default=ROOT / "target/debug", help="binary directory (default target/debug; other directories must already be built)")
@@ -473,20 +667,34 @@ def main():
     parser.add_argument("--holding-lock", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.bin = args.bin.resolve()
+    args.tanks = args.tanks if args.tanks is not None else (1 if args.ram else 30)
+    if args.ram and args.tanks != 1:
+        parser.error("--ram requires exactly one tank")
     if args.clients is not None and args.clients > args.tanks:
         parser.error("--clients cannot exceed --tanks")
     if args.rehearsal and args.target != "local":
         parser.error("--rehearsal is local only; hosted runs must verify two vCPU")
-    if args.target != "local" and (not args.schedule or not args.deployment):
-        parser.error("remote runs require --schedule and --deployment")
+    if args.target != "local" and (not (args.schedule or args.ram) or not args.deployment):
+        parser.error("remote runs require --schedule or --ram, and --deployment")
+    if args.ram and (args.schedule or args.sample or args.clients is not None):
+        parser.error("--ram is one client; incompatible with --schedule, --sample and --clients")
+    ram = ram_recipe(args.ram) if args.ram else None
     recipe = recipe_for(args.schedule, args.tanks) if args.schedule else None
     if args.deployment and args.target == "local":
         parser.error("--deployment requires its explicit remote --target IP:PORT")
-    if args.rehearsal and not recipe:
+    if args.rehearsal and not (recipe or ram):
         parser.error("--rehearsal requires a real-match --schedule")
     if recipe and args.sample:
         parser.error("--sample belongs to the tankless diagnostic; match mode observes server windows")
     if args.print_server_env:
+        if ram:
+            print("OVERMATCH_RAM=" + json.dumps(ram, separators=(",", ":")))
+            print("OVERMATCH_BOT=0")
+            print("OVERMATCH_SERVER_STATS_S=1")
+            print("OVERMATCH_UNATTENDED=1")
+            print("OVERMATCH_WINDOW=headless")
+            print("OVERMATCH_MUTE=1")
+            return 0
         if not recipe:
             parser.error("--print-server-env requires --schedule")
         print("OVERMATCH_LOADTEST=" + json.dumps(recipe, separators=(",", ":")))
@@ -500,7 +708,9 @@ def main():
     if args.sample and not Path("/usr/bin/sample").is_file():
         parser.error("--sample needs macOS /usr/bin/sample")
     if args.holding_lock:
-        if recipe:
+        if ram:
+            run_ram(args, out, ram)
+        elif recipe:
             run_match(args, out, recipe)
         else:
             run(args, out)
@@ -509,9 +719,9 @@ def main():
     env["OVERMATCH_CARGO_LOCK_WAIT_S"] = "10800"
     start = time.monotonic()
     build = [str(ROOT / "scripts/serial-cargo"), "build", "--locked"]
-    if not recipe or args.target == "local":
+    if not (recipe or ram) or args.target == "local":
         build.extend(["--bin", "overmatch-server"])
-    if recipe:
+    if recipe or ram:
         build.extend(["--bin", "overmatch"])
     build.extend(["--features", "dev_ui,bitprobe"])
     built = subprocess.run(build, cwd=ROOT, env=env) if args.bin == ROOT / "target/debug" else None

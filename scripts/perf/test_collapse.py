@@ -305,5 +305,87 @@ class CollapseTests(unittest.TestCase):
             self.assertIn("fixture invariant failed", errors.getvalue())
 
 
+class RamTests(unittest.TestCase):
+    def fixture(self):
+        # Fixture: unequal ticks and sends expose percentile-of-percentile and nested-cost bugs.
+        recipe = collapse.ram_recipe(collapse.ROOT / "scripts/perf/ram.json")
+        ticks = [dict(tick=i, tick_us=100*i, physics_us=30, sleep_us=10,
+                      intake_us=5, structure_us=15, refit_us=10, publish_us=5, contacts_us=2, collector_us=1, dt_s=0.1, awake=4-i, tanks=1)
+                 for i in range(1, 5)]
+        ram = dict(recipe=recipe, plan=dict(minimum_m_s=9),
+                   impact=dict(tick=2, speed_m_s=10), done="deadline", ticks=ticks,
+                   sends=[dict(tick=1, us=1000), dict(tick=3, us=40)])
+        return recipe, ram
+
+    def text(self, ram):
+        return "server_stats " + json.dumps(dict(ram=ram))
+
+    def test_ram_percentile_and_additive_split_use_only_contact_ticks(self):
+        recipe, ram = self.fixture()
+        result = collapse.ram_summary(self.text(ram), recipe)
+        self.assertEqual(result["first_tick"], 2)
+        self.assertAlmostEqual(result["window_s"], 0.3)
+        self.assertEqual(result["p99_us"], 400)
+        self.assertEqual(result["worst_tick"]["tick"], 4)
+        self.assertEqual(result["peak_awake"], 2)
+        self.assertEqual(result["send_us"], 40)
+        self.assertAlmostEqual(sum(result["share_pct"].values()), 100)
+        self.assertAlmostEqual(result["share_pct"]["physics"], 100*54/900)
+        self.assertAlmostEqual(result["share_pct"]["sleep"], 100*30/900)
+
+    def test_ram_refuses_slow_impact_missing_ticks_and_incompatible_logs(self):
+        recipe, ram = self.fixture()
+        for field, value in [("impact", dict(tick=2, speed_m_s=8)), ("done", "unknown")]:
+            changed = dict(ram, **{field: value})
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                collapse.ram_summary(self.text(changed), recipe)
+        for change in (lambda r: r["ticks"].pop(1),
+                       lambda r: r["ticks"][0].update(tanks=2),
+                       lambda r: r["ticks"][0].update(physics_us=1),
+                       lambda r: r["ticks"][0].update(tick_us=float("nan")),
+                       lambda r: r.update(recipe={})):
+            changed = copy.deepcopy(ram)
+            change(changed)
+            with self.assertRaises(RuntimeError):
+                collapse.ram_summary(self.text(changed), recipe)
+        for bad in ("server_stats {", self.text({})):
+            with self.assertRaisesRegex(RuntimeError, "malformed"):
+                collapse.ram_summary(bad, recipe)
+
+    def test_ram_waits_for_server_completion_and_accepts_rest_or_deadline(self):
+        recipe, ram = self.fixture()
+        self.assertIsNone(collapse.ram_summary(self.text(dict(ram, done=None)), recipe))
+        for end in ("rest", "deadline"):
+            self.assertEqual(collapse.ram_summary(self.text(dict(ram, done=end)), recipe)["end"], end)
+
+    def test_ram_refuses_nonfinite_or_reordered_send_samples(self):
+        recipe, ram = self.fixture()
+        for sends in ([dict(tick=3, us=float("nan"))], [dict(tick=3, us=1), dict(tick=2, us=1)]):
+            with self.assertRaisesRegex(RuntimeError, "malformed"):
+                collapse.ram_summary(self.text(dict(ram, sends=sends)), recipe)
+
+    def test_local_log_reader_parses_only_new_snapshots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.log"
+            reader = collapse.ServerLogs(path, None)
+            self.assertEqual(reader.snapshot(100), "")
+            path.write_text("first")
+            self.assertEqual(reader.snapshot(100), "first")
+            self.assertIsNone(reader.snapshot(100))
+            path.write_text("second snapshot")
+            self.assertEqual(reader.snapshot(100), "second snapshot")
+
+    def test_ram_recipe_refuses_typos_and_invalid_operator_domains(self):
+        recipe, _ = self.fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ram.json"
+            for key, bad in [("typo", 1), ("instance", ""), ("runup_margin", 0.5),
+                             ("minimum_speed_fraction", 1.1), ("settle_s", 0),
+                             ("deadline_s", -1), ("heading_deg", True)]:
+                path.write_text(json.dumps(dict(recipe, **{key: bad})))
+                with self.subTest(field=key), self.assertRaises(ValueError):
+                    collapse.ram_recipe(path)
+
+
 if __name__ == "__main__":
     unittest.main()

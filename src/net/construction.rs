@@ -96,11 +96,14 @@ fn spawn_ledger(world: &mut World) {
 
 /// Authority: every record entry not yet on the ledger becomes a diff.
 fn publish_record(
+    stages: Option<Res<crate::cost::stages::Stages>>,
     record: Res<Record>,
     ledgers: Query<Entity, With<Ledger>>,
     mut published: Local<(Option<Entity>, usize)>,
     mut commands: Commands,
 ) {
+    let _publish =
+        crate::cost::stages::Stages::start(stages.as_deref(), crate::cost::stages::Stage::Publish);
     let ledger = ledgers.single().expect(
         "authority startup spawns exactly one construction ledger before publishing construction changes",
     );

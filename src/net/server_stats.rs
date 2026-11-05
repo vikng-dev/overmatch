@@ -18,6 +18,17 @@
 //! - `rss_mb`: resident memory at the line;
 //! - `physics_us`: the same summary of avian's step (its `PhysicsSchedule`, broad phase
 //!   through finalize), one sample per fixed tick, null when none ran;
+//! - `intake_us`, `structure_us`, `refit_us`: one sample per tick, including zero for no
+//!   work. Intake converts shell/charge/contact inputs and casts deposit geometry; structure
+//!   evaluates owner laws, prepares launches and commits effects; refit prepares collider changes
+//!   and partitions carriers. Deferred ECS application and AABB updates remain in other tick work.
+//! - `contacts_us`: solver-contact readout and resting-contact cache maintenance, included in
+//!   `physics_us`. Intake consumes that readout later in the tick.
+//! - `publish_us`: construction-ledger diff commands prepared inside the tick.
+//! - `collector_us`: stats tick sampling after `TickClosed`, outside `tick_us`; includes the
+//!   armed ram census. Clock-read/bracket cost remains inside the measured stages.
+//! - `sleep_us`: Avian's island-sleep bracket, included in `physics_us`. Physics covers all
+//!   bodies, including tanks: a shared solver cannot attribute its cost exclusively to loose pieces.
 //! - `send_us`: the same summary of the outbound path, one sample per frame that replicated:
 //!   the wall time from before replicon's `ServerSystems::Send` (the change scan and serialisation)
 //!   to after lightyear's `LinkSystems::Send` (the socket flush), null when none ran. It is a
@@ -59,7 +70,10 @@ use crate::construction::{
     Body,
     breakage::{Breakage, Piece, Record},
 };
-use crate::cost::{TickClock, TickClosed, arm_tick_clock};
+use crate::cost::{
+    TickClock, TickClosed, arm_tick_clock,
+    stages::{COUNT, NAMES, Stages},
+};
 use crate::damage_cam::recorder::ShotRecorder;
 use crate::scatter::MapInstance;
 use crate::tank::Tank;
@@ -72,7 +86,9 @@ const PREFIX: &str = "server_stats";
 
 /// Arm the stats line when the lever is set.
 pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
-    let Some(period) = period_from(env_text(LEVER)?.as_deref())? else {
+    let period = period_from(env_text(LEVER)?.as_deref())?;
+    super::ram::install(app, period.is_some())?;
+    let Some(period) = period else {
         return Ok(());
     };
     info!(
@@ -84,6 +100,9 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         period: Period::new(period, Instant::now()),
         ticks: TickWindow::default(),
         physics: TickWindow::default(),
+        sleep: TickWindow::default(),
+        collector: TickWindow::default(),
+        stages: std::array::from_fn(|_| TickWindow::default()),
         send: TickWindow::default(),
         cpu_at_start: process_cpu(),
         throttle_at_start: read_throttle(),
@@ -92,12 +111,19 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         send_bytes: 0,
     });
     app.init_resource::<PhaseStarts>();
+    app.init_resource::<Stages>();
     app.add_systems(FixedLast, record_tick.after(TickClosed));
     app.add_systems(
         PhysicsSchedule,
         (
             open_physics.in_set(PhysicsStepSystems::First),
             close_physics.in_set(PhysicsStepSystems::Last),
+            open_sleep
+                .after(PhysicsStepSystems::Solver)
+                .before(PhysicsStepSystems::Sleeping),
+            close_sleep
+                .after(PhysicsStepSystems::Sleeping)
+                .before(PhysicsStepSystems::Finalize),
         ),
     );
     app.add_systems(
@@ -146,6 +172,9 @@ struct ServerStats {
     ticks: TickWindow,
     /// The period's avian steps, wall micros.
     physics: TickWindow,
+    sleep: TickWindow,
+    collector: TickWindow,
+    stages: [TickWindow; COUNT],
     /// The period's outbound brackets, wall micros.
     send: TickWindow,
     /// The process's CPU time when the current period opened.
@@ -162,6 +191,9 @@ struct ServerStats {
 #[derive(Resource, Default)]
 struct PhaseStarts {
     physics: Option<Instant>,
+    sleep: Option<Instant>,
+    physics_us: f64,
+    sleep_us: f64,
     send: Option<Instant>,
 }
 
@@ -246,6 +278,9 @@ struct Snapshot {
     budget_us: f64,
     ticks: Option<TickSummary>,
     physics: Option<TickSummary>,
+    sleep: Option<TickSummary>,
+    collector: Option<TickSummary>,
+    stages: [Option<TickSummary>; COUNT],
     send: Option<TickSummary>,
     debris: Value,
     clients: usize,
@@ -260,6 +295,7 @@ struct Snapshot {
     /// counter, never a line per strike, so automatic fire into husks cannot flood the log.
     husk_strikes: u64,
     workload: Option<Value>,
+    ram: Option<Value>,
 }
 
 /// One decimal: the line is read by eye as well as parsed.
@@ -298,22 +334,54 @@ fn stats_line(snapshot: &Snapshot) -> String {
         "cpu_pct": snapshot.cpu_pct.map(tenth),
         "rss_mb": snapshot.rss_bytes.map(|bytes| tenth(bytes as f64 / (1024.0 * 1024.0))),
         "physics_us": percentiles(snapshot.physics.as_ref()),
+        "sleep_us": percentiles(snapshot.sleep.as_ref()),
+        "collector_us": percentiles(snapshot.collector.as_ref()),
         "send_us": percentiles(snapshot.send.as_ref()),
         "throttled_usec": snapshot.throttled.map(|t| t.throttled_usec),
         "nr_throttled": snapshot.throttled.map(|t| t.nr_throttled),
         "husk_strikes": snapshot.husk_strikes,
     });
+    for (name, summary) in NAMES.into_iter().zip(&snapshot.stages) {
+        body[name] = percentiles(summary.as_ref());
+    }
     body["debris"] = snapshot.debris.clone();
     if let Some(workload) = &snapshot.workload {
         body["loadtest"] = workload.clone();
+    }
+    if let Some(ram) = &snapshot.ram {
+        body["ram"] = ram.clone();
     }
     format!("{PREFIX} {body}")
 }
 
 /// `FixedLast`, after the clock closes: add the tick to the period.
-fn record_tick(clock: Res<TickClock>, mut stats: ResMut<ServerStats>) {
+fn record_tick(
+    clock: Res<TickClock>,
+    stages: Res<Stages>,
+    mut stats: ResMut<ServerStats>,
+    starts: Res<PhaseStarts>,
+    mut ram: super::ram::Census,
+    fixed: Res<Time<Fixed>>,
+) {
     if let Some(closed) = clock.closed() {
+        let collect_start = Instant::now();
         stats.ticks.push(closed.us);
+        let measured = stages.take_us();
+        let captured = ram.record(
+            closed.us,
+            starts.physics_us,
+            starts.sleep_us,
+            measured,
+            fixed.timestep().as_secs_f64(),
+        );
+        for (window, us) in stats.stages.iter_mut().zip(measured) {
+            window.push(us);
+        }
+        let collector_us = collect_start.elapsed().as_secs_f64() * 1.0e6;
+        stats.collector.push(collector_us);
+        if captured {
+            ram.collector(collector_us);
+        }
     }
 }
 
@@ -323,17 +391,39 @@ fn open_physics(mut starts: ResMut<PhaseStarts>) {
 
 fn close_physics(mut starts: ResMut<PhaseStarts>, mut stats: ResMut<ServerStats>) {
     if let Some(start) = starts.physics.take() {
-        stats.physics.push(start.elapsed().as_secs_f64() * 1.0e6);
+        starts.physics_us = start.elapsed().as_secs_f64() * 1.0e6;
+        stats.physics.push(starts.physics_us);
     }
+}
+
+fn open_sleep(mut starts: ResMut<PhaseStarts>) {
+    starts.sleep = Some(Instant::now());
+}
+
+fn close_sleep(mut starts: ResMut<PhaseStarts>, mut stats: ResMut<ServerStats>) {
+    let start = starts
+        .sleep
+        .take()
+        .expect("the physics sleep bracket opens before Sleeping");
+    starts.sleep_us = start.elapsed().as_secs_f64() * 1.0e6;
+    stats.sleep.push(starts.sleep_us);
 }
 
 fn open_send(mut starts: ResMut<PhaseStarts>) {
     starts.send = Some(Instant::now());
 }
 
-fn close_send(mut starts: ResMut<PhaseStarts>, mut stats: ResMut<ServerStats>) {
+fn close_send(
+    mut starts: ResMut<PhaseStarts>,
+    mut stats: ResMut<ServerStats>,
+    mut ram: Option<ResMut<super::ram::Ram>>,
+) {
     if let Some(start) = starts.send.take() {
-        stats.send.push(start.elapsed().as_secs_f64() * 1.0e6);
+        let us = start.elapsed().as_secs_f64() * 1.0e6;
+        stats.send.push(us);
+        if let Some(ram) = ram.as_deref_mut() {
+            ram.send(us);
+        }
     }
 }
 
@@ -369,6 +459,7 @@ fn queued_bytes(link: &mut Link) -> u64 {
 /// The counts the stats line reads off the world when it prints.
 #[derive(bevy::ecs::system::SystemParam)]
 struct Census<'w, 's> {
+    ram: Option<ResMut<'w, super::ram::Ram>>,
     clients: Query<'w, 's, (), (With<ClientOf>, With<Connected>)>,
     tanks: Query<'w, 's, (), With<Tank>>,
     projectiles: Query<'w, 's, (), With<Projectile>>,
@@ -383,7 +474,7 @@ struct Census<'w, 's> {
 fn emit_line(
     mut stats: ResMut<ServerStats>,
     fixed: Res<Time<Fixed>>,
-    census: Census,
+    mut census: Census,
     debris: DebrisCensus,
     recorder: Res<ShotRecorder>,
     load: Option<Res<Loadtest>>,
@@ -439,6 +530,9 @@ fn emit_line(
         budget_us,
         ticks: stats.ticks.drain(budget_us),
         physics: stats.physics.drain(budget_us),
+        sleep: stats.sleep.drain(budget_us),
+        collector: stats.collector.drain(budget_us),
+        stages: std::array::from_fn(|i| stats.stages[i].drain(budget_us)),
         send: stats.send.drain(budget_us),
         debris: debris.json(),
         clients: census.clients.iter().count(),
@@ -450,6 +544,7 @@ fn emit_line(
         throttled,
         husk_strikes,
         workload,
+        ram: census.ram.as_deref_mut().map(super::ram::Ram::json),
     };
     println!("{}", stats_line(&snapshot));
 }
@@ -569,6 +664,9 @@ mod tests {
                 period: Period::new(Duration::from_secs(1), Instant::now()),
                 ticks: TickWindow::default(),
                 physics: TickWindow::default(),
+                sleep: TickWindow::default(),
+                collector: TickWindow::default(),
+                stages: std::array::from_fn(|_| TickWindow::default()),
                 send: TickWindow::default(),
                 cpu_at_start: None,
                 throttle_at_start: None,
@@ -721,6 +819,9 @@ mod tests {
                 max: 250.0,
                 overruns: 0,
             }),
+            sleep: None,
+            collector: None,
+            stages: std::array::from_fn(|_| None),
             debris: json!({"live": 35, "sleeping": 140}),
             clients: 2,
             tanks: 6,
@@ -734,6 +835,7 @@ mod tests {
             }),
             husk_strikes: 4,
             workload: None,
+            ram: None,
         };
         let line = stats_line(&full);
         let json = line
@@ -756,6 +858,13 @@ mod tests {
                 "entities": 1234,
                 "cpu_pct": 37.6,
                 "rss_mb": 200.0,
+                "sleep_us": null,
+                "collector_us": null,
+                "publish_us": null,
+                "contacts_us": null,
+                "intake_us": null,
+                "structure_us": null,
+                "refit_us": null,
                 "physics_us": {"p50": 301.0, "p95": 455.0, "p99": 600.0, "total": 200000.0, "max": 900.0},
                 "send_us": {"p50": 120.0, "p95": 180.1, "p99": 200.0, "total": 80000.0, "max": 250.0},
                 "throttled_usec": 45000,

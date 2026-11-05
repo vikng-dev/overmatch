@@ -73,6 +73,7 @@
 //! THE BODY IN THE PHYSICS WORLD. A state change reaches avian's world in the frame it is made
 //! ([`reconcile`], then avian's refit of moved colliders), so the next tick's march reads it.
 
+use crate::cost::stages::{Stage, Stages};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -901,7 +902,9 @@ fn read_contacts(
     constructions: Query<((&Position, &Rotation), &Breakage, Option<&Piece>)>,
     mut queue: ResMut<Queue>,
     mut resting: ResMut<RestingLoads>,
+    stages: Option<Res<Stages>>,
 ) {
+    let _intake = Stages::start(stages.as_deref(), Stage::Intake);
     if transfers.steps() == *read {
         return;
     }
@@ -1073,7 +1076,8 @@ pub(crate) struct Charge {
     pub(crate) blast: Blast,
 }
 
-fn set_off(charge: On<Charge>, mut queue: ResMut<Queue>) {
+fn set_off(charge: On<Charge>, mut queue: ResMut<Queue>, stages: Option<Res<Stages>>) {
+    let _intake = Stages::start(stages.as_deref(), Stage::Intake);
     queue.0.push(RawDeposit {
         blast: Some((charge.at, charge.blast)),
         ..default()
@@ -1089,7 +1093,9 @@ fn read_shell(
     replica: Option<Res<ClientReplica>>,
     shells: Query<(&PenetrationMarks, Option<&SpallMarks>)>,
     mut queue: ResMut<Queue>,
+    stages: Option<Res<Stages>>,
 ) {
+    let _intake = Stages::start(stages.as_deref(), Stage::Intake);
     if replica.is_some() {
         return;
     }
@@ -1249,6 +1255,7 @@ struct Taken {
 
 #[derive(bevy::ecs::system::SystemParam)]
 struct DepositParam<'w, 's> {
+    stages: Option<Res<'w, Stages>>,
     queue: ResMut<'w, Queue>,
     resting: Res<'w, RestingLoads>,
     volumes: Colliders<'w, 's>,
@@ -1645,6 +1652,7 @@ fn owner_batches(taken: BTreeMap<Entity, Taken>) -> impl Iterator<Item = BTreeMa
 /// AUTHORITY: run the tick's deposits through the laws (module doc), record every change and spawn
 /// a body per loose group.
 fn apply_deposits(mut p: DepositParam) {
+    let intake = Stages::start(p.stages.as_deref(), Stage::Intake);
     if p.queue.0.is_empty() {
         return;
     }
@@ -1674,7 +1682,9 @@ fn apply_deposits(mut p: DepositParam) {
             )
         })
         .collect();
+    drop(intake);
     for deposit in std::mem::take(&mut p.queue.0) {
+        let intake = Stages::start(p.stages.as_deref(), Stage::Intake);
         let mut taken: BTreeMap<Entity, Taken> = BTreeMap::new();
         take_lines(&p, &frames, &deposit, &mut taken);
         // Geometry reads the state left by the preceding deposit. Each owner keeps ray order;
@@ -1700,6 +1710,8 @@ fn apply_deposits(mut p: DepositParam) {
         for &(root, load) in &deposit.contacts {
             taken.entry(root).or_default().contacts.push(load);
         }
+        drop(intake);
+        let _structure = Stages::start(p.stages.as_deref(), Stage::Structure);
         let mut departures = Vec::new();
         for batch in owner_batches(taken) {
             let mut effects = bevy::utils::Parallel::<Vec<OwnerEffects>>::default();
@@ -2656,7 +2668,9 @@ fn split_groups(
         &PendingSplit,
     )>,
     mut commands: Commands,
+    stages: Option<Res<Stages>>,
 ) {
+    let _refit = Stages::start(stages.as_deref(), Stage::Refit);
     let mut effects =
         bevy::utils::Parallel::<Vec<(Entity, u32, Vec<PreparedDeparture>)>>::default();
     parents.par_iter().for_each(
@@ -2864,7 +2878,9 @@ fn reconcile(
     elements: Query<&Element>,
     chunks: Query<&ChunkCollider>,
     mut commands: Commands,
+    stages: Option<Res<Stages>>,
 ) {
+    let _refit = Stages::start(stages.as_deref(), Stage::Refit);
     let effects =
         prepare_reconciliations(ComputeTaskPool::get(), &constructions, &elements, &chunks);
     // Direct scoped submissions collect in query order. All hulls are ready before this flush,

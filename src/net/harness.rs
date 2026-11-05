@@ -119,6 +119,8 @@ pub(crate) enum Drive {
     /// the washboard (z≈−82…−90) on the spawn axis, which the arc never leaves the flat pad for.
     /// One primary click at `fire_tick`.
     Straight,
+    /// Operator-duration straight run, used by the tracked full-speed ram recipe. Never fires.
+    Ram { throttle_ticks: u32 },
     /// Never drive, never fire: the tank sits on whatever contact it spawned onto (with
     /// `spawn_pose`, a known resting contact), with no drive input perturbing it.
     Idle,
@@ -239,6 +241,14 @@ impl Script {
     }
 
     fn validate(&self) -> Result<(), ScriptError> {
+        if let Drive::Ram { throttle_ticks } = self.drive
+            && (throttle_ticks == 0 || throttle_ticks > u32::MAX - 128)
+        {
+            return Err(ScriptError::Invalid {
+                field: "drive.Ram.throttle_ticks",
+                problem: "positive ticks leaving room for the initial settling window",
+            });
+        }
         if let Drive::Fire {
             primary: false,
             secondary: false,
@@ -507,6 +517,7 @@ impl SimulateInput {
         let (window, throttle, steer) = match self.drive {
             Drive::Arc => (128..384, 1.0, 0.3),
             Drive::Straight => (128..1088, 1.0, 0.0),
+            Drive::Ram { throttle_ticks } => (128..throttle_ticks + 128, 1.0, 0.0),
             Drive::Idle | Drive::Fire { .. } => (0..0, 0.0, 0.0),
         };
         let driving = window.contains(&t);
@@ -521,7 +532,7 @@ impl SimulateInput {
             ),
             Drive::Arc | Drive::Straight => (t == self.fire_tick, false),
             // A recoil impulse would disturb the resting contact under study.
-            Drive::Idle => (false, false),
+            Drive::Idle | Drive::Ram { .. } => (false, false),
         };
     }
 }
@@ -863,6 +874,31 @@ pub(crate) fn spawn_pose() -> Option<(Vec3, Quat)> {
 
 #[cfg(test)]
 mod tests {
+    /// The ram recipe holds full throttle for its requested interval and never fires. An
+    /// ignored duration or inherited primary click would make its measured workload invalid.
+    #[test]
+    fn ram_duration_and_never_fire_are_the_script_contract() {
+        let script =
+            super::Script::parse("(ticks: 1000, drive: Ram(throttle_ticks: 400), fire_tick: 200)")
+                .unwrap();
+        let sim = super::SimulateInput::new(&script);
+        let mut command = crate::command::TankCommand::default();
+        for tick in 0..1000 {
+            sim.write(tick, &mut command);
+            assert_eq!(
+                command.throttle,
+                if (128..528).contains(&tick) { 1.0 } else { 0.0 }
+            );
+            assert_eq!(command.steer, 0.0);
+            assert!(!command.fire_primary && !command.fire_secondary);
+        }
+        for ticks in [0, u32::MAX] {
+            assert!(
+                super::Script::parse(&format!("(drive: Ram(throttle_ticks: {ticks}))")).is_err()
+            );
+        }
+    }
+
     use core::time::Duration;
 
     use lightyear::core::time::Instant;

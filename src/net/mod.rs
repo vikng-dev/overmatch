@@ -53,6 +53,7 @@ mod loadtest;
 mod matchmaking;
 mod physics;
 mod protocol;
+mod ram;
 mod resync;
 mod rig;
 mod rig_admission;

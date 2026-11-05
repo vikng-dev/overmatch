@@ -825,6 +825,7 @@ fn spawn_pending_tanks(
     source: TankSimSource,
     mut lane: ResMut<SpawnLane>,
     mut placement: ResMut<SpawnPlacement>,
+    mut ram: Option<ResMut<super::ram::Ram>>,
     manifest: Res<crate::map::MapManifest>,
     tanks: Query<&Position, (With<NetTank>, Without<TankKnockedOut>)>,
     connected: Query<(), With<Connected>>,
@@ -838,7 +839,14 @@ fn spawn_pending_tanks(
     let content = source.get();
     // The harness's exact resting-contact instrument keeps its authored pose and lanes. Ordinary
     // joins use map points; Y is resolved from the authority's ground at the moment of spawn.
-    let harness_pose = harness::spawn_pose();
+    let harness_pose = if let Some(ram) = ram.as_deref_mut() {
+        Some(
+            ram.pose(content.spec(), &manifest, height.as_deref())
+                .unwrap_or_else(harness::refuse_start),
+        )
+    } else {
+        harness::spawn_pose()
+    };
     let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
     let mut live: Vec<Vec2> = tanks.iter().map(|position| position.0.xz()).collect();
     for (link, client_id) in std::mem::take(&mut pending.0) {

@@ -9,6 +9,8 @@
 //! Invariant: use a distinct base path from `SPIKE_TRACE`; both recorders otherwise open the same
 //! role-qualified file independently.
 
+pub(crate) mod stages;
+
 use std::time::Instant;
 
 use bevy::prelude::*;
