@@ -50,7 +50,7 @@ class CollapseTests(unittest.TestCase):
         host = "server: host available_parallelism=2 cpu_quota=2.00 cpus (200000/100000 us) cpuset=0-15"
         clock, polls, children, timeouts = [0.0], [], [], []
         args = SimpleNamespace(target="192.0.2.1:5888", deployment="fixture", tanks=2,
-                               clients=1, duration=3, startup_grace=90, rehearsal=False,
+                               clients=1, duration=3, startup_grace=7 * collapse.HOSTED_LOG_POLL_S, rehearsal=False,
                                bin=Path("/fixture/bin"))
         class Client:
             killed = False
@@ -125,7 +125,11 @@ class CollapseTests(unittest.TestCase):
             self.assertEqual(self.hosted_clock, self.hosted_deadline)
             self.assertTrue(all(0 < timeout <= self.hosted_deadline - polled
                                 for polled, timeout in zip(self.hosted_polls, self.hosted_timeouts)))
-        self.assertEqual(self.hosted_polls, [0, 60], "repeated 429s must increase the retry interval")
+        cadence = collapse.HOSTED_LOG_POLL_S
+        intervals = [current - previous for previous, current in zip(self.hosted_polls, self.hosted_polls[1:])]
+        self.assertEqual(intervals, [2 * cadence, 4 * cadence])
+        self.assertTrue(all(current > previous for previous, current in zip(intervals, intervals[1:])),
+                        "repeated 429s must increase the retry interval")
 
     def test_hosted_other_log_errors_fail_fast(self):
         with self.assertRaises(subprocess.CalledProcessError):
