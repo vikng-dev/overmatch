@@ -37,7 +37,12 @@ pub(crate) fn offline_shot_plugin(app: &mut App) {
     let Some(shot) = super::plan().and_then(|plan| plan.shot.as_ref()) else {
         return;
     };
-    let shot = shot.clone();
+    install_shot(app, shot.clone(), super::plan::refuse);
+}
+
+/// The game's damage-model capture admits its scene in startup before any firing cue can run.
+/// The boundary supplies refusal handling; tests can observe it without exiting their process.
+fn install_shot(app: &mut App, shot: super::plan::Shot, refuse: fn(super::plan::PlanError) -> !) {
     info!("capture: game's damage model shot {shot:?}");
     app.insert_resource(ShotReady(None))
         .insert_resource(RetainSpentShells(true))
@@ -51,7 +56,7 @@ pub(crate) fn offline_shot_plugin(app: &mut App) {
                   grid: Option<Res<crate::terrain_grid::HeightGrid>>,
                   mut commands: Commands| {
                 let aim = bind_target(shot.target, grid.as_deref(), constructions.iter())
-                    .unwrap_or_else(|error| super::plan::refuse(error));
+                    .unwrap_or_else(|error| refuse(error));
                 commands.insert_resource(Cue {
                     key: shot.key.clone(),
                     round: shot.round,
@@ -275,10 +280,74 @@ mod tests {
     use crate::scatter::MapInstance;
     use crate::terrain_grid::{FIXTURE_EXTENT, HeightGrid};
 
-    /// The game's damage-model shot cue must refuse an incompatible scene at startup, even
-    /// when firing is scheduled far later; both target kinds admit a complete scene.
+    /// The game's damage-model capture must refuse an incompatible scene in startup even when
+    /// the firing cue is distant. Moving admission to frame time must fail this composition test.
     #[test]
     fn shot_target_admission_requires_scene_geometry() {
+        #[derive(Resource, Default)]
+        struct EnteredFrame(bool);
+        for target in [ShotTarget::Construction, ShotTarget::Ground] {
+            for missing_grid in [true, false] {
+                let mut app = App::new();
+                // Fixture: manual app time, with the cue far beyond the startup update.
+                let mut time = Time::<()>::default();
+                time.advance_by(std::time::Duration::from_secs(1));
+                let at = 600.0;
+                assert!(time.elapsed_secs() < at);
+                app.insert_resource(time)
+                    .init_resource::<EnteredFrame>()
+                    .add_systems(First, |mut frame: ResMut<EnteredFrame>| frame.0 = true);
+                if missing_grid {
+                    app.world_mut().spawn((
+                        MapInstance {
+                            id: "fixture".into(),
+                            ordinal: 0,
+                        },
+                        crate::construction::Body,
+                        Transform::from_xyz(3.0, 0.0, 4.0),
+                    ));
+                } else {
+                    app.insert_resource(HeightGrid::new(vec![0.0; 4].into(), 2, FIXTURE_EXTENT));
+                }
+                install_shot(
+                    &mut app,
+                    super::super::plan::Shot {
+                        key: "88mm_AP".into(),
+                        round: super::super::resolve_round("88mm_AP", 0, "shot").unwrap(),
+                        target,
+                        at,
+                    },
+                    |error| std::panic::panic_any(error),
+                );
+                let refusal =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.update()))
+                        .expect_err("the incompatible scene must be refused before the cue");
+                let error = refusal
+                    .downcast_ref::<PlanError>()
+                    .expect("startup invokes the capture plan's typed refusal boundary");
+                let (cause, fix) = if missing_grid {
+                    ("HeightGrid", "choose a terrain scene")
+                } else {
+                    ("no construction", "choose a map")
+                };
+                assert!(
+                    matches!(error, PlanError::Field(message)
+                    if message.contains(cause) && message.contains(fix)),
+                    "{error}"
+                );
+                assert!(
+                    !app.world().resource::<EnteredFrame>().0,
+                    "refusal belongs to startup, before the first frame"
+                );
+                assert!(app.world().resource::<Time>().elapsed_secs() < at);
+                assert!(!app.world().contains_resource::<Cue>());
+            }
+        }
+    }
+
+    /// The game's damage-model capture admits both target kinds when scene geometry is complete.
+    #[test]
+    fn shot_targets_bind_a_complete_scene() {
         let identity = MapInstance {
             id: "fixture".into(),
             ordinal: 0,
@@ -286,14 +355,6 @@ mod tests {
         let pose = Transform::from_xyz(3.0, 0.0, 4.0);
         let grid = HeightGrid::new(vec![0.0; 4].into(), 2, FIXTURE_EXTENT);
         for target in [ShotTarget::Construction, ShotTarget::Ground] {
-            let missing_grid = bind_target(target, None, std::iter::once((&identity, &pose)));
-            assert!(
-                matches!(&missing_grid, Err(PlanError::Field(error)) if error.contains("HeightGrid") && error.contains("choose a terrain scene"))
-            );
-            let missing_construction = bind_target(target, Some(&grid), std::iter::empty());
-            assert!(
-                matches!(&missing_construction, Err(PlanError::Field(error)) if error.contains("no construction") && error.contains("choose a map"))
-            );
             assert!(bind_target(target, Some(&grid), std::iter::once((&identity, &pose))).is_ok());
         }
     }
