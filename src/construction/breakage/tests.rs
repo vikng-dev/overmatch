@@ -1761,7 +1761,7 @@ fn an_implicit_belt_press_reaches_the_wall_laws_reading() {
 }
 
 /// The side of the fixture's cubes, m, and their mass at brick density, kg (fixture data).
-const CUBE_SIDE: f32 = 0.4;
+pub(crate) const CUBE_SIDE: f32 = 0.4;
 const CUBE_KG: f32 = 1845.0 * CUBE_SIDE * CUBE_SIDE * CUBE_SIDE;
 
 /// A dynamic cube of [`CUBE_SIDE`] at brick density, colliding as a loose piece does, centred at
@@ -1785,7 +1785,7 @@ fn contact_cube(app: &mut App, at: Vec3, velocity: Vec3) -> Entity {
 /// the approach and the rays through the centre and the four corners of a [`CUBE_SIDE`] square
 /// about the point all meet that element first at the same depth (the fixture's choice by class,
 /// searched from the middle of the bounds outward).
-fn wall_face(kind: &ConstructionKind) -> (usize, Vec3, Vec3) {
+pub(crate) fn wall_face(kind: &ConstructionKind) -> (usize, Vec3, Vec3) {
     let layout = &kind.layout;
     let (lo, hi) = kind.bounds();
     let dir = Vec3::X;
@@ -3108,7 +3108,7 @@ fn landing_slab() -> (Arc<ConstructionKind>, Vec<usize>) {
     }
     assert_eq!(internal, 2, "the fixture is a chain, not a loop");
     kind.structure = Arc::new(kind.layout.checked_structure(&kind.asset).unwrap());
-    kind.equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest(&kind.structure).unwrap());
+    kind.equilibrium = Arc::new(fracture::parts::Assessment::at_rest(&kind.structure));
     (Arc::new(kind), group)
 }
 
@@ -4015,7 +4015,7 @@ fn geometry_fixture(kind: &Arc<ConstructionKind>) -> Arc<ConstructionKind> {
         material.seam = seam;
     }
     kind.structure = Arc::new(kind.layout.checked_structure(&kind.asset).unwrap());
-    kind.equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest(&kind.structure).unwrap());
+    kind.equilibrium = Arc::new(fracture::parts::Assessment::at_rest(&kind.structure));
     Arc::new(kind)
 }
 
@@ -4398,7 +4398,7 @@ fn a_jointless_owner_still_wears_keeps_holes_and_launches() {
     assert_eq!(live.state.fate[1], Fate::Fallen);
     assert_eq!(changes.groups, vec![(vec![1], vec![load])]);
     assert!(changes.failures.is_empty());
-    assert_eq!(changes.solve_rounds, 0);
+    assert_eq!(changes.solves, 0);
 }
 
 /// The game's independent construction owners have no cross-owner field effects. Worker count
@@ -4876,6 +4876,7 @@ fn released_owners_share_one_openings_work_and_each_load_has_one_owner() {
     let impulse = (4.0 * work * mass).sqrt();
     let structure = Structure {
         geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
+        part_of: vec![0, 1],
         chunks: [-0.5, 0.5]
             .map(|x| Chunk {
                 volume: 1.0,

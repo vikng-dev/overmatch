@@ -167,6 +167,7 @@ fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
         let material = brick();
         let structure = Structure {
             geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
+            part_of: vec![0],
             chunks: vec![Chunk {
                 volume: 4.0,
                 mass: 4.0 * material.density,
@@ -348,6 +349,7 @@ fn inspector_app(held: bool) -> (bevy::prelude::App, crate::ballistics::Delivere
     chunk.buried = held;
     let structure = Structure {
         geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
+        part_of: vec![0],
         chunks: vec![chunk],
         joints: Vec::new(),
     };

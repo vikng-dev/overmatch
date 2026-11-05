@@ -205,6 +205,10 @@ pub(crate) fn wall_cut(
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             ),
+            part_of: chunks_of
+                .iter()
+                .map(|&c| usize::from(asset.chunks[c].element))
+                .collect(),
             chunks,
             joints,
         },

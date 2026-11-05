@@ -535,7 +535,7 @@ struct Outcome {
     /// The first shear failure's and the first tensile failure's demand and capacity.
     worst: Option<(f32, f32)>,
     opening: Option<(f32, f32)>,
-    solve_rounds: usize,
+    solves: usize,
     groups: usize,
     fallen: usize,
     spall: f32,
@@ -1139,7 +1139,7 @@ struct Applied {
     local: usize,
     failures: Vec<model::Failure>,
     /// Sparse equilibrium rounds performed in this deposit.
-    solve_rounds: usize,
+    solves: usize,
     /// Each loose group, its centroid, linear and angular velocity, and whether a structural crack
     /// bounds it.
     groups: Vec<(Vec<usize>, Vec3, Vec3, Vec3, bool)>,
@@ -1275,7 +1275,7 @@ fn apply_deposit(
         .count();
     applied.failures = changes.failures;
     applied.local = cracks - applied.failures.len();
-    applied.solve_rounds = changes.solve_rounds;
+    applied.solves = changes.solves;
     for failure in &applied.failures {
         wall.structural[failure.joint] = true;
     }
@@ -1475,7 +1475,7 @@ fn apply_deposits(mut p: ApplyParam) {
             structural: applied.failures.len(),
             worst: first(model::Cause::Shear),
             opening: first(model::Cause::Tension),
-            solve_rounds: applied.solve_rounds,
+            solves: applied.solves,
             groups: applied.groups.len(),
             fallen: applied.groups.iter().map(|(group, ..)| group.len()).sum(),
             spall: match &deposit {
@@ -1501,7 +1501,7 @@ fn apply_deposits(mut p: ApplyParam) {
                 last.structural,
                 last.worst,
                 last.opening,
-                last.solve_rounds,
+                last.solves,
                 last.groups,
                 last.fallen,
                 last.spall,
@@ -1726,10 +1726,7 @@ fn detail(
             capacity / 1e3
         ));
     }
-    lines.push(format!(
-        "      force solve: {} conjugate-gradient rounds",
-        last.solve_rounds
-    ));
+    lines.push(format!("      part solve: {} load columns", last.solves));
     // `+ 0.0`: an empty sum is -0.0, which would print a sign.
     let witness = log.witness.iter().sum::<f32>() + 0.0;
     lines.push(format!(

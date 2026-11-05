@@ -551,18 +551,30 @@ Boundary-sensitive cases retain the transient patch.
 **Tanks.**
 Any shared spall source must respect rear surfaces and intervening separations.
 
-## Structural calculation
+## Parts decide what stands
 
-Subject: the game's environment destruction model, game state only. **Owner decision:** each
-standing construction or moving group has one force solve over every live joint. Candidate cuts,
-coplanar section searches, punch rings and independent rest checks have no role in this model.
-A load-sharing lintel, a cantilever and a running-bond wall use the same equations.
+Subject: the game's environment destruction model, game state only. **Owner decision
+(2026-11-05):** structural collapse is decided at the part scale only; released parts crumble on
+their own, and the physics engine owns touching between separate bodies. Candidate cuts, section
+searches, punch rings and a per-chunk force solve have no role in this model.
 
-Each chunk is a rigid node with translation and rotation. Each joint is a compliant patch
-over the actual convex overlap of its authored chunk faces. The load gate reconstructs that
-overlap and refuses an area or centre inconsistent with the bake beyond boundary rounding.
-An equivalent circular footprint remains explicit only for root-plate area shares. Its normal and tangential compliances are the
-sum of its two sides' representative lengths over their moduli (a ground anchor has one side):
+**The part graph** (`fracture::parts::Graph`, built at load from the construction data). A part
+is the standing chunks of one baked element that intact bonds inside it join: one rigid node
+with six degrees at its centre of mass. An element's buried chunks are a fixed part of their own,
+so its section at grade is an interface rather than the inside of an immovable part. An
+interface is every live joint crossing between two parts, or from a part to the ground. Its
+stiffness and capacity are its joints': damage inside a part (removal, a cavity crack that splits
+it into two nodes) reaches an interface only through the joint area that remains, never through a
+factor. MEASURED (`parts::tests`, the shipped data): house_1 has 72 parts (its 55 elements, 17
+split at grade; 18 parts fixed in all), 180 interfaces (44 push-only), 815 bonded and 71 push-only
+joints crossing them, 324 unknowns and 7,362 factor entries; its factorization costs 179,190
+scalar operations and one load column 28,800 (DERIVED loop counts, no timing). fir_1 is one part
+on one root-plate interface, 6 unknowns. The shipped map places 74 houses and 635 firs.
+
+**The joint law** (`fracture::bondsolve::Edge`). Each joint is a compliant patch over the actual
+convex overlap of its authored chunk faces; the load gate reconstructs that overlap and refuses an
+area or centre inconsistent with the bake. Normal and tangential compliances are the sum of the two
+sides' representative lengths over their moduli (a ground anchor has one side):
 
 ```text
 ell_i = cbrt(V_i) / 2
@@ -574,153 +586,130 @@ B = trace(Q) P - Q
 M = K_n B omega + K_s trace(Q) n (n dot omega)
 ```
 
-These are DERIVED stiffnesses, never tuned strengths. The half-side of the equal-volume cube
-apportions unresolved bulk compliance; it is not a flaw size. E comes from the material's
-Young's modulus, G from required `bulk.shear_modulus`. The latter rows explicitly label their
-isotropic analogues `Unknown`; timber anisotropy remains unresolved.
-Here r is measured from the patch centroid and n is its normal. Triangle fans integrate Q
-exactly; the two directions of a thin rectangular face therefore keep their distinct section
-moduli. A circle with equal area cannot substitute for that tensor: it changes the load sharing,
-not merely the final strength readout. `AreaShare` root plates integrate each cell's share over
-the common equivalent disk, preserving their declared footprint contract under refinement.
+These are DERIVED stiffnesses, never tuned strengths; the half-side of the equal-volume cube
+apportions bulk compliance and is not a flaw size. Triangle fans integrate Q exactly; `AreaShare`
+root plates integrate each cell's share over the common equivalent disk. A stated attachment's
+fixing carries the bond's whole stiffness, `K = A k_interface` from its own slip slopes (the nail's
+lateral slope derives from EN 1995-1-1 section 7.1's `K_ser`, sourced in `attachments.ron`); the
+bulk bearing beside it is not a second edge (ASSUMED, the bonded kernel's choice), so the pair
+friction on its compression joins its shear capacity. The roof's construction audit is in
+`.agents/scratch/bondsolve/roof-s3.md`.
 
-A stated attachment supplies its own normal and lateral slip slopes per area. Its fixing
-springs use `K = A k_interface`, not the timber's bulk modulus. Occupied faces separately
-supply bulk compression and friction through the same one-way contact solve, in parallel
-with the fixing; a compliant fixing must not turn solid timber bearing into a soft spring.
-Fixing strength and fracture work apply to the fixing field alone. Friction is not added again
-to its cohesive capacity, because the parallel contact already carries that reaction.
+**Load sharing** (`fracture::parts::Assessment`). An owner's interface joints assemble one
+`K u = f` over its parts, factored by sparse Cholesky ordered by exact minimum degree on part
+blocks (`parts::Factor`, from the bonded-factor experiment), once per design at load. Instances
+share that factor until their first change; a topology change refactors, which at part scale costs
+less than one crack's rank-six downdates would on the chunk graph. Two load columns are solved:
+sustained (gravity and presses) and total (plus each blow as its mean force over the tick, capped
+by its stated peak). Bonded joints are solved exactly; push-only joints (rests and cracked seams)
+join the same linear field with their bulk stiffness, bilaterally, and are re-checked once per
+tick. A free component is balanced by its rigid acceleration (`accelerating_frame`, spin adding
+centrifugal and gyroscopic loading) and gauged at its first part; the gauge is a frame, never a
+support. A solve runs only when topology changed or a part's load moved past `LOAD_TOLERANCE`
+(Resolution 1e-5 of the owner's weight, and of weight times radius of gyration for a moment: 100 ×
+the 1e-7 contact-reading noise MEASURED in `.agents/scratch/bestofboth/bob-split.md`, which defeats
+an exact-equality skip). An owner at rest performs zero work.
 
-For the reference non-predrilled nail, the attachment data derives the lateral slope from
-EN 1995-1-1 section 7.1's `K_ser = rho_m^1.5 d^0.8 / 30` N/mm per shear plane and fastener,
-using the declared diameter, reference mean density and fastening density. The source and
-unit conversion live with the number in `attachments.ron`. This service slip slope supplies
-elastic compliance, never a strength increase. The axial withdrawal slope remains a labelled
-Unknown lateral analogue: that standard's lateral expression is not an axial measurement.
-The roof's construction audit and owner options are in `.agents/scratch/bondsolve/roof-s3.md`;
-no house geometry, fastening declaration or strength is changed to obtain a passing verdict.
+**Verdicts, one stage per tick.** No failure starts another solve inside its own tick.
 
-Bonded patches assemble `K u = f`. Resting interfaces and closed cracked seams instead
-obey a unilateral contact law at positive-weight quadrature sites:
+- A bonded interface cracks whole once one of its joints reaches its strength in the solved
+  field: sustained normal traction over tensile strength, or shear over cohesion plus pair
+  friction on its compression; or the total field over either strength while the pulse adds at
+  least the whole interface's `Σ G_I A` or `Σ G_II A` of elastic work. A force-controlled driver
+  pays its own separation work. Its joints then bear as push-only; when the field pulls the
+  failed interface apart, it separates in the same tick. Traction extremes lie at polygon
+  vertices: normal `N/A + (n cross (B + n n^T)^-1 M_b) dot r / A`, tangential
+  `F_s/A + T (n cross r)/(A trace(Q))`; circular footprints use their analytical rim extrema.
+- A push-only interface (no bond left) bears as one face (ASSUMED): the area-weighted normal and
+  the hull of its corners. It separates when its resultant pulls (lift) or when its pressure
+  centre `r = (M⊥ × n) / N` (DERIVED) leaves the hull (tip). A face carrying less than Resolution
+  1e-9 of the owner's weight is left as it is. While an interface keeps a bond, its bonds decide it
+  and its rests bear beside them.
+- **Coulomb friction** (owner decision, 2026-11-06). A push-only face whose tangential demand
+  passes `μ N` slips (`parts::Slip`). It stays in contact while compressed and carries `μ N`
+  against its slip: the field is solved again in the same tick with the face's tangential stiffness
+  removed and its saturated friction as a pair of loads at its centre, so the excess moves to its
+  parts' other interfaces (a roof board's nails). Friction is read again from each solve and
+  re-solved while it moves past `LOAD_TOLERANCE`, within Resolution 16 solves a tick. A slipping
+  face separates only when it lifts or tips, or when its part is released. When nothing else holds
+  its part tangentially, the stiffness left is singular (a pivot under Resolution 1e-9 of its
+  diagonal): the part is a mechanism, the slipping rests of every part it reaches through stiff
+  interfaces separate (`Slide`), and connectivity releases it to the physics engine, which owns
+  sliding bodies. A slip keeps its direction (ASSUMED) and never re-sticks.
+- Separation is permanent: no re-close. What lifts, tips or slides as a mechanism leaves the
+  graph; once released, Avian owns its motion. The ledger records `Crack` and `Separate` per
+  joint, and replicas derive support from those causes without any equilibrium; a slip is
+  authority state and writes no ledger entry.
 
-```text
-p = K_n w min(n dot delta, 0)
-t_trial = K_s w (delta - n (n dot delta))
-t = t_trial min(1, mu (-p) / |t_trial|)
-```
+**Release.** Connectivity (`loose_groups`) runs on every topology change; each group with no
+path through live joints to the ground or buried matter is released in the same tick and spawned
+as one physics body (ADR-0014: new entities, constructed from data). Every released body,
+whether it left a placed construction or split from a moving one, is built by
+`breakage::prepare_group`, the hand-off to the layer that makes released parts crumble.
 
-Here n points toward side A, p is the signed compression resultant at a site, w is its
-fractional area and t is the resisting shear. Zero trial shear gives zero shear without a
-division. A site that opens supplies neither normal force nor friction. Each polygon fan
-triangle has weights 1/12 on each vertex and 3/4 on its centroid: a positive quadrature exact
-for the quadratic elastic energy of a full face. Perimeter sites retain the actual support
-polygon when pressure concentrates at an edge. Equivalent disks use **Resolution 32 rim
-sites**, half the weight at their centre and half on the rim; this retains the disk's full-face
-second moments while discretizing its support direction. These are contact-resolution choices,
-not tensile strength or an extra bearing rule.
+**Inside a standing part** (`fracture::parts::Kernel`, the one chunk-scale kernel). The kernel
+is the bonded-factor experiment's solve at element size: a part's chunks are nodes, its intact
+bonds edges at their seam stiffness, its cracked seams and rests push-only edges at bulk stiffness
+that stick (ASSUMED: once cracks split the part, the part law judges the pieces' sliding with
+Coulomb friction), and its joints to the ground or to buried chunks anchors. A chunk set nothing
+anchors is balanced by its rigid acceleration and gauged at its first chunk. Joints to chunks
+outside the set are no edge: their force is the caller's load. It is factored once per element
+design at load (`Assessment::kernels`) and again only for a part whose chunks changed, and it runs
+only on events through one entry, `Kernel::hold(structure, loads)`: per chunk, the loads beside
+gravity (the forces its other interfaces hand it, contacts, presses), returning each joint's
+carried wrench, the bonds that crack (tension past `f_t`, or shear past cohesion plus friction on
+compression) and the push-only joints the field pulls apart. A landing's seam cracks read the
+same entry with the landing's contact loads.
 
-One active-set solve freezes closed sites and slip forces for an elastic Krylov sequence,
-then tests its projected reactions against the actual loads. A saturated site's tangent is zero
-along slip and retains transverse stiffness; an affine force term makes the tangent equal its
-current projected force as the slip direction turns. Other contacts can take the released
-reaction. Bounded step reduction controls changes between contact sets. A direction
-with no elastic resistance first activates any open face it would meet. If no face intercepts
-it, it is a contact mechanism: gravity or the applied load can move that group without a static
-balance. `Progress::Mechanism` names that outcome; physical motion belongs to the body solver.
+**Holes.** When chunks are removed, each part beside them is solved at chunk scale for gravity
+and the sustained forces its other interfaces hand it (`Assessment::holes`). A joint that cannot
+hold, mortar tension included, cracks, a pulled one separates, and the part is solved again on
+what is left until it holds. The cracks then split the part, and the part law judges the pieces:
+a chunk or cluster whose faces lift, tip or slip as a mechanism separates and connectivity
+releases it. Arching is not authored: compression runs across the running bond's overlaps
+because the bed joints are where the chunks overlap. No masonry flag or per-material rule exists.
 
-**Resolution 32 rounds per active tick** bounds work independently of how many joints fail.
-Displacements and each frozen set's Krylov direction survive into the next tick. Changed loads
-restart conjugacy from the warm displacement; changed topology remaps it by source chunk
-address. **Resolution relative preconditioned residual 1e-8** identifies contact equilibrium;
-the inner elastic tolerance is 1e-10 so it cannot consume the outer gate. The residual metric
-retains the original full-face compliance: inactive contact coordinates must not magnify
-roundoff by changing the norm. `Progress::Iterating` names unfinished equilibrium: no cohesive
-strength verdict or topology change may read that trial field. Only projected equilibrium admits
-cohesive failure; a certified contact mechanism admits contact separation. A warm displacement
-after changed topology is a guess and must pass the same gate. A failure
-stage marks changed topology for the next tick; no failure starts another solve inside its
-own tick. An unchanged equilibrated owner performs zero sparse products. Initial gravity is prepared
-once per admitted construction asset, before play. Every placement keeps its authored size;
-position and yaw are its only placement transforms. Different sizes require separately authored
-assets, preserving stock dimensions and construction facts. A level instance carrying a `scale`
-field is refused at load, with its file, identity and repair. Each asset retains one checked
-structure and one initial equilibrium. Instances share that immutable solution until their
-first change; compiled overloads await the first authoritative failure stage.
+MEASURED (`parts::tests`, a fixture 12-course running-bond wall, observations): a hole of 11
+bricks, three courses high and four bricks wide at the base, drops nothing with the shipped brick
+seam; the event costs 1,938,632 scalar operations (the part refactor, and the kernel factor and
+solves over the wall's 139 remaining chunks). With a no-tension, no-cohesion fixture seam, 43
+bricks drop in 22 ticks: all 11 of the 45° triangle over the opening, which NCMA TEK 17-01D
+CLAIMS arching leaves to a lintel, and 32 above it in a chimney three to seven bricks wide to the
+wall's free top. A brick left on half its overlap has its centre of mass over the edge of its
+rest (DERIVED), so corbelling is marginal, and a free top gives the arch no abutment load; the chimney is
+the model's answer, not a pinned one.
 
-### Applied loads and blows
+**Hand-checkable gates** (`parts::tests`, fixture geometry): a lintel's two pier shares
+`P/2 ± P a s / (2 s² + r²/2)`; a cantilever's interface carrying `W + P` and `W d + P L` and
+cracking at `P* = (f_t r A / 4 − W d) / L`, then tipping; a two-joint wall base cracking whole at
+its Navier capacity `P* z = (f_t + W/2A) A (2 s² + r²/2) / (s + r)`, then tipping; the same wall
+with one block worn away cracking at its one remaining disk's `P* z = (f_t + W₁/A) A r / 4`; a slab
+resting on two piers bearing `W/2` on each and slipping past `μ W`, a mechanism nothing else
+holds, so it is released. Each holds at 0.98 and changes at 1.02 of its DERIVED limit. A block on a
+slope fixed to a buried post sticks below `atan μ`; above it the rest slips, keeps bearing, carries
+no tangential force through stiffness and `μ N` as friction, and the fixing carries the excess
+`W sin θ − μ N` (DERIVED from the block's equilibrium); once friction settles it costs nothing.
 
-Every source contributes once to its chunk's force and moment. Sustained loads are gravity and
-presses. A blow J delivered in the numerical tick enters as average force `J / dt`, with its
-stated peak magnitude as a ceiling where available. The actual configured fixed timestep is
-passed to the law; it is not claimed to be a measured contact duration.
+**The unit house under gravity** (MEASURED, `parts::tests`, observations). Its 71 roof-board rests
+lie on the gables' 36.87° slopes, where a board needs friction `tan 36.87° = 0.75` against the pair
+friction 0.57 (DERIVED from the slope normal and the shipped wood): every rest slips at load, keeps
+bearing, and hands the excess to the boards' nails. The house stands: no joint fails, nothing is
+released, and it settles in 7 ticks to zero work. In the settled sustained field the most loaded
+bonded joint uses 0.198 of its tensile strength and the most loaded in shear 0.245 of its
+cohesion plus friction (margins 5.1× and 4.1×). Its 55 element kernels cost 4,347,583 scalar
+operations to factor at load; the largest has 66 chunks, 396 unknowns and 13,230 entries, factors
+in 499,530 operations and solves one column in 52,128. A fixture 1 MN press on a wall part's top
+fails parts in tension, shear, lift, tip and slip (as mechanisms) and settles in 22 ticks, every
+value finite.
 
-Sustained and total (sustained plus pulse) loads share one block-diagonal solve. Contact is
-nonlinear, so independent pulse and gravity reactions cannot be superposed. The total field
-supplies each joint's force and moment; subtracting sustained from total stored elastic work
-identifies what the pulse adds. There is no load-by-chunk expansion.
-For each unsupported connected component, one aggregate force, moment, mass and inertia give
-its rigid acceleration; one node pass subtracts that acceleration. Uniform gravity cancels.
-Spin adds centrifugal and Euler gyroscopic terms. Assessment inertia uses equal-volume spheres
-and parallel-axis terms, a geometric stand-in distinct from the exact occupied inertia used by
-physics. A fixed coordinate frame on one node removes each free component's six rigid modes;
-it supplies no physical support and is chosen only after the resultant is balanced.
-
-**Limits.** This is a tick-duration, quasi-static pulse approximation, not a transient elastic-wave
-solve. It does not resolve short contact histories, dynamic mode shapes, or cohesive softening.
-Changing dt can change a blow's verdict; sustained analytical limits are independent of dt.
-The pulse work criterion below is recoverable elastic work, not a measured dynamic fracture law.
-
-### Joint-local failure
-
-The solved patch resultant defines an affine traction field. DERIVED normal traction is
-`N/A + (n cross (B + n n^T)^-1 M_b) dot r / A`; tangential traction is
-`F_s/A + T (n cross r)/(A trace(Q))`. Normal maximum and maximum shear magnitude occur at
-vertices of a convex polygon. Circular root footprints use their analytical rim extrema.
-This is the traction of the compliant interface model, not a Saint-Venant solution for a
-noncircular solid bar's warping. The material or attachment data supplies tensile strength, shear cohesion and both fracture
-energies. Shear capacity is cohesion plus pair friction times positive mean compression.
-A force-controlled sustained load exceeding either strength opens the joint: the maintained
-source supplies separation work. A pulse must exceed the corresponding strength in the summed
-field **and** add at least `G_I A` or `G_II A` to that patch's elastic work. Opening and sliding
-work are integrated separately by the same patch quadrature; no global source-order budget ranks
-which overloaded joint may open. All qualifying joints crack together.
-
-A rest and a closed cracked seam carry compression and friction through the projected solve.
-Loss of cohesion alone does not remove their contact or release their chunks. A failed patch
-whose entire solved face is open already has no contact. When the solve finds an escape
-mechanism, its moving contacts separate; the ledger records `Separate`
-independently of `Crack`. Replicas derive support using those integer causes and never run a
-floating-point equilibrium calculation. Reversing joint endpoints leaves the law unchanged.
-
-Connectivity runs when topology changes. `loose_groups` identifies what has lost all cohesive
-or closed-contact paths to anchors or buried matter; it does not assess strength. The authority
-releases those groups in the current tick. Remaining overloads redistribute on the next tick,
-so chain reactions have one stage per tick. Physics supplies subsequent falling, rocking and
-contact motion. A separated contact cannot remain as a fallback bond.
-
-Trees are constructions under this same solve. Their intrinsic seams can part anywhere their
-own resultant exceeds their material hold. Root-plate moment data still converts to a footprint's
-normal strength; the attachment file now supplies explicitly labelled unknown separation work
-and lateral cohesion instead of silently retaining an opening-only exemption.
-
-### Work and validation
-
-Pulse fracture work follows the opened joints into the common launch debit, split once
-between departing owners. Source loads are partitioned by owner in one pass; coherent impulse
-and angular impulse, rather than a sum of point energies, supply the debit's kinetic budget.
-Assessment uses its equal-volume sphere inertia for this budget; the exact occupied launch and
-coupled source cap still own the physical body's final energy bound. The shared plastic
-exchange and return path retain their momentum and energy bounds. No field energy is converted
-to a press or to crushed volume by this solve; the compaction and kinetic-cavity laws keep their
-own inputs. A resolved cohesive dissipation model is not claimed.
-
-Analytical gates cover wall-base `N/A + M/S`, two-pier load sharing, a cantilever's force and
-moment, resting friction and bearing limits, a staircase seam patch, pulse strength and work,
-cold and warm convergence, and zero idle products. Operation counts on the shipped graph and a
-doubled graph establish linear sparse work at fixed round count. Wall-clock pricing and ram
-captures belong to the orchestrator's machine-locked pricing session; these counts are not
-millisecond forecasts. Play must judge the staged response and changed failure paths without
-using previous verdicts as an oracle.
+**Limits.** The trial is linear and bilateral for one tick, so a lift or tip lags its
+redistribution by a tick; a slip is re-solved within its tick. Friction acts at each slipping
+joint's centre and keeps its first direction; a slip never re-sticks. Inside a part the kernel's
+cracked joints stick, and its event loads come from the rigid part field. A pulse is a tick-duration quasi-static load, not a transient
+elastic wave; changing the tick can change a blow's verdict, while sustained limits are
+independent of it. The pulse work criterion is recoverable elastic work, not a measured dynamic
+fracture law. Pulse fracture work follows the cracked joints into the common launch debit
+(`fracture::debit_work`), split once between departing owners.
 
 ## Energy and momentum budget
 
@@ -844,9 +833,9 @@ body's motion, so it gets no second plastic exchange or launch. A moving group's
 do not enter the laws: they crumble it (**Crumble on landing**). External fields still apply
 their own impulse. There is no landing-fragility factor or switch for a piece's kind.
 
-The force solve and accelerating-frame reduction are specified once in **Structural calculation**.
-Every changed owner runs one bounded stage per tick; unfinished equilibrium or redistribution
-keeps it active on following ticks, even when no new deposit arrives. Spin changes also wake
+The part verdict and accelerating-frame reduction are specified once in **Parts decide what
+stands**. Every changed owner runs one stage per tick; a topology change or an ended pulse keeps
+it active on the following tick, even when no new deposit arrives. Spin changes also wake
 assessment. Fixed and moving groups share that path; contacts remain applied loads rather than
 invented supports.
 
@@ -1038,7 +1027,7 @@ Show incident, reflected and cleared pressure histories on rigid faces.
 Judge peak pressure, impulse, arrival time, resultant force and moment against the selected handbook data.
 Show contact and near-contact loads separately from free-air loads.
 
-**Structural calculation next.**
+**Parts next.**
 Show gravity equilibrium, force paths, opening, sliding, crushing and redistribution.
 Judge the sustained-push and rocking fixtures before coupling explosions.
 Repeat with changed time steps, chunk cuts and depth resolution.
@@ -1099,6 +1088,6 @@ A quoted spring force alone supplies none of the missing acceleration coupling.
 | Three-property material model | **Provisional (2026-10-31):** keep the summary, add sourced constitutive and attachment profiles; do not infer missing properties from strength. |
 | Hard-pool dose | **Provisional (2026-10-31):** exclude outgoing kinetic energy from absorbed damaging work; retain the shared conversion and abstract crew line rate. |
 | Rubble rest | **Decided (2026-10-31):** Avian's island sleep and wake on contact; no body-type switching. The game adds only the wake Avian lacks, when a support goes (see Rubble settlement and the cap). |
-| Structural collapse | **Decided:** components with bonded or resting joints; one warm-started force solve per active owner, with simultaneous cracks and one redistribution stage per tick (see Structural calculation). |
+| Structural collapse | **Decided (2026-11-05):** at the part scale only; one factored solve per changed owner, interfaces failing whole, one stage per tick; between bodies Avian owns contact (see Parts decide what stands). |
 | Debris cap | Cap detailed bodies and use finite-mass overflow; accept that total coarse work still needs a measured limit. No cap applies until a sleeping piece's per-tick cost is measured. |
 | Empirical acceptance data | **Provisional (2026-10-31):** require verified source fixtures before declaring handbook validation complete; do not substitute plausible-looking prototype outcomes. |
