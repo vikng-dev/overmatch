@@ -29,9 +29,7 @@ pub(crate) fn plugin(app: &mut App) {
 /// Plugin set required by `LightyearAvianPlugin`: transform sync and interpolation belong to
 /// Lightyear, so Avian's own transform and interpolation plugins stay disabled.
 pub fn physics_plugins() -> bevy::app::PluginGroupBuilder {
-    avian3d::prelude::PhysicsPlugins::default()
-        .with_collision_hooks::<crate::construction::breakage::SweepContacts<'static, 'static>>()
-        .build()
+    crate::offline_physics()
         .disable::<PhysicsTransformPlugin>()
         .disable::<PhysicsInterpolationPlugin>()
 }

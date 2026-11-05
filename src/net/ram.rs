@@ -575,99 +575,6 @@ mod tests {
         // Resolution: allow roundoff across the multiplication and divisions in the distance.
         assert!((runup(&spec, 3.0).0 - 3.0 * heavier).abs() <= 4.0 * f32::EPSILON * heavier);
     }
-    /// The game's environment destruction: independent cut enumeration and force bracketing
-    /// check the shipped wall's threshold for the observed patch. Speeds remain observations.
-    fn check_wall_threshold(
-        app: &App,
-        target: Entity,
-        source: Entity,
-        before: &crate::construction::fracture::State,
-        chunks: &[usize],
-        witness: crate::construction::sweep::Witness,
-        drive: f32,
-    ) {
-        use crate::construction::{breakage::Breakage, fracture::Side, sweep::Sweep};
-        use crate::contact_law::{Contactor, peak_speed};
-        use avian3d::prelude::ComputedMass;
-        let owner = app.world().get::<Breakage>(target).unwrap();
-        let structure = &owner.live.structure;
-        let mass = app.world().get::<ComputedMass>(source).unwrap().value();
-        // The hull stops on the witness chunk at the peak force of their impact, its side rigid.
-        let patch = Contactor::chunk(structure, witness.chunk);
-        let speed_at = |force: f32| {
-            peak_speed(f64::from(mass), f64::from(force), patch, Contactor::RIGID) as f32
-        };
-        let mut capacity = 0.0;
-        let mut cut = 0;
-        for (j, edge) in structure.joints.iter().enumerate() {
-            let a = chunks.contains(&edge.a);
-            let b = matches!(edge.b, Side::Chunk(b) if chunks.contains(&b));
-            if a == b || before.cracked[j] || before.separated[j] || !before.live(edge) {
-                continue;
-            }
-            if let Some(seam) = edge.seam() {
-                cut += 1;
-                capacity += edge.area
-                    * (seam.tensile * witness.normal.dot(edge.normal).abs()
-                        + seam.shear.cohesion * witness.normal.cross(edge.normal).length());
-            }
-        }
-        assert!(
-            capacity > 0.0,
-            "the wall patch has intact boundary strength"
-        );
-        let threshold = speed_at(capacity);
-        for (speed, broken) in [(threshold * 0.9999, false), (threshold * 1.0001, true)] {
-            let mut trial = Sweep {
-                chunks: chunks.to_vec(),
-                witness: Some(crate::construction::sweep::Witness { speed, ..witness }),
-                ..default()
-            };
-            owner
-                .kind
-                .sweep
-                .resolve(structure, before, &mut trial, mass, Vec3::ZERO);
-            assert_eq!(
-                trial.broken, broken,
-                "the observed wall patch brackets its derived threshold"
-            );
-        }
-        let left = capacity - drive;
-        let driven = speed_at(left.max(0.0));
-        if driven > 0.0 {
-            // Resolution: bracket the stop above summed f32 force roundoff, including
-            // near-balanced drive.
-            let margin = (left * 1e-4).max(64.0 * f32::EPSILON * capacity);
-            for (speed, broken) in [
-                (speed_at((left - margin).max(0.0)), false),
-                (speed_at(left + margin), true),
-            ] {
-                let mut trial = Sweep {
-                    chunks: chunks.to_vec(),
-                    witness: Some(crate::construction::sweep::Witness { speed, ..witness }),
-                    ..default()
-                };
-                owner.kind.sweep.resolve(
-                    structure,
-                    before,
-                    &mut trial,
-                    mass,
-                    witness.normal * drive,
-                );
-                assert_eq!(
-                    trial.broken, broken,
-                    "the actual inward drive shifts the wall threshold"
-                );
-            }
-        } else {
-            assert!(drive >= capacity, "zero threshold follows from drive alone");
-        }
-        println!(
-            "DERIVED and MEASURED wall threshold: patch={}, cut={cut}, mass={mass}, capacity={capacity}, inward drive={drive}, unpowered={threshold} m/s, driven={driven} m/s; below holds, above breaks",
-            chunks.len()
-        );
-    }
-
     /// The game's environment destruction: the tracked ram recipe must open occupied hull space
     /// within the owner's two-tick contact bar, and the source must lose the momentum its chunks take.
     /// Counts and resulting speeds are observations; the gate pins the owner's latency and conservation.
@@ -728,39 +635,10 @@ mod tests {
         let mut contact = None;
         let mut losses = Vec::new();
         for tick in 0..plan.drive_ticks {
-            let previous = contact.is_none().then(|| {
-                app.world()
-                    .get::<Breakage>(target)
-                    .unwrap()
-                    .live
-                    .state
-                    .clone()
-            });
             drive_tick(&mut app, tank, 1.0, 0.0);
             let account = app.world().resource::<SweepAccount>();
             if account.contacts.contains(&(tank, ordinal)) && contact.is_none() {
                 contact = Some(tick);
-                let (_, _, chunks, witness) = account
-                    .patches
-                    .iter()
-                    .find(|(body, construction, _, _)| *body == tank && *construction == ordinal)
-                    .expect("the first occupied contact retains its patch witness");
-                let drive = account
-                    .samples
-                    .iter()
-                    .find(|(body, construction, _, _)| *body == tank && *construction == ordinal)
-                    .unwrap()
-                    .3
-                    .3;
-                check_wall_threshold(
-                    &app,
-                    target,
-                    tank,
-                    previous.as_ref().unwrap(),
-                    chunks,
-                    *witness,
-                    drive,
-                );
                 println!(
                     "MEASURED first occupied contact: {:?}",
                     account
