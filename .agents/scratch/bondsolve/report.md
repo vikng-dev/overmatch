@@ -50,3 +50,10 @@ These are sparse-operation counts, not timing forecasts. The doubled graph is tw
 Session start: 11:33 local time, 2026-11-05. Source implementation is committed and green under the targeted checks above; the unfinished broad headless run was terminated before the 90-minute limit. No game or test process is left running by this lane.
 
 Final edits remove stale retired-law doc links and record the stopped headless run; Rust behavior is unchanged from the passing implementation checks. Formatting was rechecked.
+
+## Session 2 follow-up
+
+The current handoff is [session 2](report-s2.md), with the individual gravity-joint audit and
+pins reconciliation linked there. It supersedes this session's incomplete full-suite status;
+the corrected session-2 library suite passed in full. Startup gravity cracking remains an
+unresolved contact-law limit, not an accepted physical-soundness verdict.

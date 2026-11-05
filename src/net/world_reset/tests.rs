@@ -342,6 +342,10 @@ fn network_client(port: u16, id: u64) -> App {
     environment(&mut app);
     app.init_resource::<crate::ClientReplica>();
     install_client(&mut app);
+    app.init_resource::<ReconstructionSamples>().add_systems(
+        PreUpdate,
+        sample_replica_reconstruction.after(follow_battle),
+    );
     crate::net::construction::install_client(&mut app);
     crate::net::debris_stress::install_client(&mut app);
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
@@ -449,20 +453,60 @@ fn publish_fixture_departures(world: &mut World) {
     }
 }
 
+/// Every construction's explicit fixture release must acquire an admitted current-world
+/// carrier. Subsequent physical departures do not prescribe a carrier count.
 fn admitted_carriers_match_constructions(world: &mut World) -> bool {
-    let carriers = world
+    let selected = world.resource::<crate::world::CurrentWorld>().0;
+    let carriers: std::collections::BTreeSet<_> = world
         .query::<(
             &Piece,
             &crate::construction::breakage::AdmittedPiece,
             &DebrisPose,
+            &WorldGeneration,
         )>()
         .iter(world)
-        .count();
-    carriers
-        == world
-            .query_filtered::<&Breakage, Without<Piece>>()
-            .iter(world)
-            .count()
+        .filter(|(_, _, _, generation)| Some(**generation) == selected)
+        .map(|(piece, _, _, _)| piece.construction)
+        .collect();
+    let constructions = world
+        .query_filtered::<&Breakage, Without<Piece>>()
+        .iter(world)
+        .map(|owner| owner.construction)
+        .collect();
+    carriers == constructions
+}
+
+/// Observe reset construction before structural ticks or received causes can change it.
+#[derive(Resource, Default)]
+struct ReconstructionSamples(std::collections::BTreeMap<u32, (Census, bool)>);
+
+fn sample_authority_reconstruction(world: &mut World) {
+    let generation = world.resource::<AuthorityWorld>().0.0;
+    let fresh = census(world);
+    let empty = world.resource::<Record>().entries.is_empty();
+    world
+        .resource_mut::<ReconstructionSamples>()
+        .0
+        .insert(generation, (fresh, empty));
+}
+
+fn sample_replica_reconstruction(world: &mut World) {
+    let Some((_, generation)) = world.resource::<BuiltWorld>().0 else {
+        return; // No authority Battle has selected this replica's construction yet.
+    };
+    if world
+        .resource::<ReconstructionSamples>()
+        .0
+        .contains_key(&generation)
+    {
+        return;
+    }
+    let fresh = census(world);
+    let empty = world.resource::<Record>().entries.is_empty();
+    world
+        .resource_mut::<ReconstructionSamples>()
+        .0
+        .insert(generation, (fresh, empty));
 }
 
 /// FRESH BATTLE EQUALS STARTUP BY COUNT AND IDENTITY, on authority, connected client and late
@@ -475,6 +519,8 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
     let port = free_port();
     let mut server = crate::net::link_drop::build_server(port);
     environment(&mut server);
+    server.init_resource::<ReconstructionSamples>();
+    register_constructor(&mut server, sample_authority_reconstruction);
     crate::net::construction::install_server(&mut server);
     crate::net::debris_stress::install_server(&mut server).unwrap();
     let mut mode =
@@ -566,8 +612,12 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
             if reconnect_requested
                 && !reconnected
                 && battle(client.world_mut()).is_some_and(|b| b.number == 1)
-                && client.world().resource::<Record>().entries
-                    == server.world().resource::<Record>().entries
+                && !client.world().resource::<Record>().entries.is_empty()
+                && server
+                    .world()
+                    .resource::<Record>()
+                    .entries
+                    .starts_with(&client.world().resource::<Record>().entries)
                 && admitted_carriers_match_constructions(client.world_mut())
             {
                 assert!(
@@ -580,13 +630,19 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
             }
         }
         if state.number == 2 {
-            assert_eq!(&census(server.world_mut()), fresh.as_ref().unwrap());
+            let snapshot = &server.world().resource::<ReconstructionSamples>().0[&state.number];
+            assert_eq!(
+                &snapshot.0,
+                fresh.as_ref().unwrap(),
+                "reset constructs startup before the next structural stage"
+            );
+            assert!(snapshot.1, "the reset boundary clears the old record");
             assert!(
                 old_roots
                     .iter()
                     .all(|root| server.world().get_entity(*root).is_err())
             );
-            assert!(server.world().resource::<Record>().entries.is_empty());
+
             assert!(
                 server
                     .world_mut()
@@ -599,17 +655,36 @@ fn a_destroyed_world_is_startup_again_at_next_battle_over_real_udp() {
                 clients.push(network_client(port, 3));
                 next_joined = true;
             }
-            if clients
-                .iter_mut()
-                .all(|client| battle(client.world_mut()).is_some_and(|b| b.number == 2))
-            {
+            if clients.iter_mut().all(|client| {
+                battle(client.world_mut()).is_some_and(|b| b.number == 2)
+                    && client.world().resource::<crate::world::CurrentWorld>().0
+                        == Some(WorldGeneration(2))
+                    && client
+                        .world()
+                        .resource::<ReconstructionSamples>()
+                        .0
+                        .contains_key(&2)
+            }) {
                 assert!(
                     saw_destroyed && combat_joined && reconnected,
-                    "the first Battle, late join and same-Battle reconnect must observe common construction state"
+                    "the first Battle, late join and reconnect must observe common construction state: first={saw_destroyed}, late={combat_joined}, reconnect={reconnected}"
                 );
                 for client in &mut clients {
-                    assert_eq!(&census(client.world_mut()), fresh.as_ref().unwrap());
-                    assert!(client.world().resource::<Record>().entries.is_empty());
+                    let snapshot =
+                        &client.world().resource::<ReconstructionSamples>().0[&state.number];
+                    assert_eq!(&snapshot.0, fresh.as_ref().unwrap());
+                    assert!(
+                        snapshot.1,
+                        "the replica reconstructs before applying this world's causes"
+                    );
+                    assert!(
+                        server
+                            .world()
+                            .resource::<Record>()
+                            .entries
+                            .starts_with(&client.world().resource::<Record>().entries),
+                        "subsequent causes are the current authority's prefix, not a saved intact outcome"
+                    );
                 }
                 eprintln!(
                     "MEASURED: world cycle rebuilt {} map identities and {} colliders on authority \

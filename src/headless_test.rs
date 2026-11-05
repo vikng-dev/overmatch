@@ -273,6 +273,19 @@ fn booted_sim_on(world: Option<crate::terrain_grid::HeightGrid>) -> BootedSim {
     booted_sim_on_map(world, None)
 }
 
+/// Analytical driving worlds declare an empty placement as well as their surface. Unrelated
+/// construction dynamics cannot be a premise of a brake, traction or drivetrain witness.
+/// The populated-map composition gates select their own placement through `booted_sim_on`.
+fn booted_driving_grid(grid: crate::terrain_grid::HeightGrid) -> BootedSim {
+    let extent = grid.extent();
+    let manifest = crate::map::tests::fixture_manifest(
+        extent.half_extent(),
+        extent.height_offset_m,
+        extent.height_span_m,
+    );
+    booted_sim_on_map(Some(grid), Some(manifest))
+}
+
 /// [`booted_sim_on`] with the map's placement chosen too: a manifest inserted before the first
 /// update is what `terrain_grid::decode_height_grid` publishes in place of the shipped file.
 fn booted_sim_on_map(
@@ -1144,7 +1157,7 @@ fn contact_law_shipped_brakes_hold_below_both_limits_and_move_above_the_lower() 
                 2,
                 extent,
             );
-            let mut app = booted_sim_on(Some(grid));
+            let mut app = booted_driving_grid(grid);
             start_fixed_clock(&mut app);
             app.update();
             let tank = app

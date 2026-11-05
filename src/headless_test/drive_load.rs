@@ -470,7 +470,7 @@ fn perceived_load_and_landing_gaps_on_the_course() {
             2,
             extent,
         );
-        let mut app = booted_sim_on(Some(grid));
+        let mut app = booted_driving_grid(grid);
         start_fixed_clock(&mut app);
         app.update(); // Initialize the physics body before the fixture teleports it.
         let tank = app
@@ -639,7 +639,7 @@ fn perceived_load_during_a_rearward_shot_uphill() {
             2,
             extent,
         );
-        let mut app = booted_sim_on(Some(grid));
+        let mut app = booted_driving_grid(grid);
         start_fixed_clock(&mut app);
         app.update();
         let tank = app
@@ -775,7 +775,7 @@ fn empty_driver_station_coast_and_rollback() {
                 2,
                 extent,
             );
-            let mut app = booted_sim_on(Some(grid));
+            let mut app = booted_driving_grid(grid);
             start_fixed_clock(&mut app);
             app.update();
             let tank = app
@@ -924,7 +924,7 @@ fn shipped_notches_launch_and_sustain_ordered_speed() {
                 2,
                 extent,
             );
-            let mut app = booted_sim_on(Some(grid));
+            let mut app = booted_driving_grid(grid);
             start_fixed_clock(&mut app);
             app.update();
             let tank = app

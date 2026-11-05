@@ -970,37 +970,57 @@ fn read_contacts(
     }
 }
 
-/// Test instrumentation at the production intake boundary, before law evaluation. The witness
-/// requires this source body to deliver a nonzero queued contact to the named construction.
+/// Test instrumentation at production contact intake, before the laws.
+#[cfg(test)]
+#[derive(Resource)]
+struct ContactIntakeWitness {
+    construction: u16,
+    source: Entity,
+    seen: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+fn witness_construction_contact(
+    queue: Res<Queue>,
+    owners: Query<&Breakage>,
+    witness: Res<ContactIntakeWitness>,
+) {
+    if queue
+        .0
+        .iter()
+        .flat_map(|d| &d.contacts)
+        .any(|(root, load)| {
+            matches!(load.origin, Origin::Contact { other, .. } if other == witness.source)
+                && (load.blow != Vec3::ZERO || load.press != Vec3::ZERO)
+                && owners
+                    .get(*root)
+                    .is_ok_and(|owner| owner.construction == witness.construction)
+        })
+    {
+        witness
+            .seen
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Require this source's nonzero queued contact; fracture remains observational.
 #[cfg(test)]
 pub(crate) fn watch_contact_intake(
     app: &mut App,
     construction: u16,
-    body: Entity,
+    source: Entity,
 ) -> Arc<std::sync::atomic::AtomicBool> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let seen = Arc::new(AtomicBool::new(false));
-    let witness = seen.clone();
-    app.add_systems(
+    let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    app.insert_resource(ContactIntakeWitness {
+        construction,
+        source,
+        seen: seen.clone(),
+    })
+    .add_systems(
         FixedPostUpdate,
-        (move |queue: Res<Queue>, owners: Query<&Breakage>| {
-            if queue
-                .0
-                .iter()
-                .flat_map(|d| &d.contacts)
-                .any(|(root, load)| {
-                    matches!(load.origin, Origin::Contact { other, .. } if other == body)
-                        && (load.blow != Vec3::ZERO || load.press != Vec3::ZERO)
-                        && owners
-                            .get(*root)
-                            .is_ok_and(|owner| owner.construction == construction)
-                })
-            {
-                witness.store(true, Ordering::Relaxed);
-            }
-        })
-        .after(read_contacts)
-        .before(apply_deposits),
+        witness_construction_contact
+            .after(read_contacts)
+            .before(apply_deposits),
     );
     seen
 }
