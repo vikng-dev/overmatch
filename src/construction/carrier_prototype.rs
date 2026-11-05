@@ -1032,8 +1032,10 @@ fn doubled(structure: &Structure) -> Structure {
         .iter()
         .map(|c| c.centroid)
         .fold(Vec3::NEG_INFINITY, Vec3::max);
-    // Fixture: disjoint translated copy in every axis, so the double also doubles plane offsets.
-    let offset = (hi - lo + Vec3::ONE) * Vec3::new(2.3, 1.7, 3.1);
+    // Fixture: disjoint horizontal copy preserves grade and every buried flag. Coplanar
+    // horizontal joints share one section across the copies, as the shipped law requires.
+    let mut offset = (hi - lo + Vec3::ONE) * Vec3::new(2.3, 1.7, 3.1);
+    offset.y = 0.0;
     let mut double = structure.clone();
     double.chunks.extend(structure.chunks.iter().map(|c| Chunk {
         centroid: c.centroid + offset,
@@ -1508,15 +1510,20 @@ fn press_timing(carrier: Carrier, structure: &Structure) {
     let mut forward = true;
     let changed = timed(
         || {
-            let change = if forward { delta } else { minus };
-            std::hint::black_box(carrier.press_delta(c, change));
-            std::hint::black_box(&carrier.totals);
-            forward = !forward;
+            // Fixture: batch updates to amortize the measurement clock; each write remains
+            // observable even though the alternating deltas restore the original cache.
+            for _ in 0..256 {
+                let change = if forward { delta } else { minus };
+                std::hint::black_box(carrier.press_delta(c, change));
+                std::hint::black_box(&carrier.totals);
+                forward = !forward;
+            }
         },
         1001,
     );
     println!(
-        "TIMING changed_press_ms={changed:?} path_nodes={}",
+        "TIMING changed_press_batch_256_ms={changed:?} per_update_ms={:?} path_nodes={}",
+        (changed.0 / 256.0, changed.1 / 256.0, changed.2 / 256.0),
         depths[c] + 1
     );
 }
@@ -1527,4 +1534,27 @@ fn carrier_press_probe() {
     let (_, structure) = shipped();
     let carrier = Carrier::new(&structure, &State::new(&structure), &[], Vec3::ZERO);
     press_timing(carrier, &structure);
+}
+
+/// Timing-only repetition with a level-ground double, including shared horizontal planes.
+#[test]
+#[ignore = "one-time carrier scaling and batched incremental timing"]
+fn carrier_scaling_probe() {
+    let (_, structure) = shipped();
+    let chunk = structure.chunks.iter().position(|c| !c.buried).unwrap();
+    // Fixture: one nonzero grounded press; no material or construction chooses its law.
+    let sources = [Load {
+        chunk,
+        at: structure.chunks[chunk].centroid,
+        energy: 0.0,
+        crushed: 0.0,
+        blow: Vec3::ZERO,
+        press: Vec3::X,
+        peak: None,
+        origin: Origin::Contact {
+            other: Entity::PLACEHOLDER,
+            step: 1.0 / 64.0,
+        },
+    }];
+    timings(&structure, &sources);
 }
