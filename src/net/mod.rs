@@ -64,6 +64,7 @@ pub(crate) mod score;
 pub(crate) mod server;
 /// The dedicated server's host: its task-pool sizing, its startup line and its levers.
 pub(crate) mod server_host;
+mod server_runner;
 /// The dedicated server's periodic stats line on stdout (`OVERMATCH_SERVER_STATS_S`).
 mod server_stats;
 /// The pen cam's explanations: the authority's per-recipient send, the client's store.

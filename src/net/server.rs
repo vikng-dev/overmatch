@@ -4,7 +4,6 @@ use core::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use avian3d::prelude::{Position, RigidBody, Rotation};
-use bevy::app::ScheduleRunnerPlugin;
 use bevy::ecs::schedule::ScheduleConfigs;
 use bevy::ecs::system::{ScheduleSystem, SystemParam};
 use bevy::prelude::*;
@@ -44,17 +43,8 @@ use crate::{CombatantId, CombatantLife, SimPlugin};
 
 const PORT: u16 = 5888;
 
-const TICK: Duration = Duration::from_nanos(15_625_000);
-
-/// Headless runner frame period. Packets are read in `PreUpdate` and written in `PostUpdate`, so a
-/// tick runs up to one period after its boundary and an inbound packet waits up to one period in
-/// the socket; clients pay both in their ping RTT and in the arrival spread that sizes their sync
-/// margins and interpolation delay. Every frame costs CPU, connected client or not.
-const FRAME: Duration = Duration::from_millis(4);
-
-// Each tick gets its own frame: lightyear replicates once per frame in which the fixed loop ran, so
-// a frame running two ticks sends one checkpoint for both.
-const _: () = assert!(FRAME.as_nanos() < TICK.as_nanos());
+// Resolution: the authority evaluates gameplay at 64 Hz, shared with Lightyear's timeline.
+pub(super) const TICK: Duration = Duration::from_nanos(15_625_000);
 
 pub fn run() {
     let hosted = match HostedConfig::from_env() {
@@ -84,18 +74,14 @@ pub fn run() {
             bevy::log::DEFAULT_FILTER
         ),
         ..default()
-    }))
-    // Headless composition needs its own application runner.
-    .add_plugins(ScheduleRunnerPlugin::run_loop(FRAME));
+    }));
     super::server_host::log_startup();
     // No GPU supplies compression support. Declare the loaders' existing NONE fallback explicitly;
     // the server allowlist carries only PNG textures and `load_tank_sim_assets` opens no scene.
     app.insert_resource(bevy::image::CompressedImageFormatSupport(
         bevy::image::CompressedImageFormats::NONE,
     ));
-    app.add_plugins(ServerPlugins {
-        tick_duration: TICK,
-    });
+    app.add_plugins(super::server_runner::plugin);
     app.add_plugins(super::plugin);
     super::disclosure::install_server(&mut app);
     super::construction::install_server(&mut app);
@@ -725,7 +711,7 @@ thread_local! {
     static SPAWN_PICK_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Drain at frame rate: Lightyear clears unread messages in `Last`, including frames without a tick.
+/// Drain every frame before Lightyear clears unread messages in `Last`.
 fn install_spawn_picks(app: &mut App) {
     spawn_map::validate_spawn_map_data();
     app.add_systems(Update, receive_spawn_points);

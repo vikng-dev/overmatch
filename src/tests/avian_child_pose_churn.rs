@@ -321,11 +321,9 @@ fn lightyears_child_pass_carries_a_child_re_enabled_after_its_body_moved() {
 }
 
 /// Avian's pre-physics pass carries a child re-enabled in `Update` frames before the next fixed
-/// step, after its body moved. Bevy clears removal messages every frame and the dedicated server
-/// runs about 3.3 frames per fixed tick (MEASURED, `.agents/scratch/perf-2026-11-01/server-tick.md`),
-/// so a pass that read those messages at the step lost the re-enable and kept the child where its
-/// body stood. Who relies on it: the walk, which reads the pose this pass leaves. Fixture cadence:
-/// four frames per tick.
+/// step, after its body moved. Render-driven clients can run several frames between ticks, while
+/// Bevy clears removal messages every frame. The walk relies on the re-enable surviving until the
+/// step so its collider pose follows the body. Fixture cadence: four frames per tick.
 #[test]
 fn avians_pass_carries_a_child_re_enabled_frames_before_the_next_step() {
     #[derive(Resource, Default)]

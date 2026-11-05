@@ -1143,11 +1143,10 @@ mod tests {
     }
 
     /// The game's damage model: a re-enable made in `Update` reaches the next fixed step's
-    /// history however many frames separate them. Bevy clears its removal messages every frame
-    /// (`World::clear_trackers`) and the dedicated server runs about 3.3 frames per fixed tick
-    /// (MEASURED, `server-tick.md`), so a reader of those messages at the step lost the re-enable,
-    /// and the march's expectation of an entry for every collider it meets did not hold. Fixture
-    /// cadence: four frames per tick.
+    /// history however many frames separate them. Bevy clears removal messages every frame
+    /// (`World::clear_trackers`); the march requires history for every collider it meets, including
+    /// a re-enable whose removal message expired before the step. Fixture cadence: four frames
+    /// per tick.
     #[test]
     fn a_re_enable_in_update_frames_before_the_next_step_reaches_its_history() {
         use bevy::ecs::entity_disabling::Disabled;

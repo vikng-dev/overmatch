@@ -7,7 +7,8 @@ Status: decided by the owner on 2026-11-05, until a revisit before the Steam rel
   over-budget tick visible.
 - **Ticks over budget are bugs:** a tick over its 15.625 ms budget is a cost bug to fix at its
   source, never a load the game tolerates as part of play. That includes a building collapse.
-- **One clock:** the tick is the server's only clock (#278); the 4 ms frame loop goes.
+- **One clock:** the tick is the dedicated server's only pacing clock (#278,
+  `src/net/server_runner.rs`); the library's catch-up bound is unchanged.
 
 ## Finding
 
@@ -29,11 +30,12 @@ removed or cached without changing game state.
 
 DERIVED from the locked sources (`Cargo.lock`: Bevy 0.19.1, Lightyear 0.30.1):
 
-- `src/net/server.rs`, `run`, mounts `ScheduleRunnerPlugin::run_loop(FRAME)` and
-  `ServerPlugins { tick_duration: TICK }`. `FRAME` is 4 ms; `TICK` is 15.625 ms.
-- Bevy `bevy_app/src/schedule_runner.rs`, `ScheduleRunnerPlugin::build`, calls
-  `app.update()` synchronously. It sleeps only for the remainder of the frame period.
-  The period cannot interrupt work already running.
+- `src/net/server.rs`, `run`, mounts `server_runner::plugin`: Lightyear's
+  `ServerPlugins { tick_duration: TICK }` and a custom Bevy runner. The fixed step is
+  15.625 ms (Resolution: the existing authority integration cadence).
+- Bevy `bevy_app/src/schedule_runner.rs`, `ScheduleRunnerPlugin::build`, supplies
+  the custom runner's plugin-finish/cleanup and exit-handling pattern. `App::update`
+  remains synchronous; a deadline cannot interrupt work already running.
 - Bevy `bevy_time/src/virt.rs`, `Time<Virtual>::default`, caps the wall delta admitted
   to virtual time at 250 ms. `advance_with_raw_delta` discards excess elapsed wall
   time; this is already slow simulation under sufficiently severe load.
@@ -56,9 +58,54 @@ There is a simulation-time bound, not an absolute wall-time bound. DERIVED: fram
 work resumes after the sum of at most 16 complete tick costs plus the frame's other
 work. Even a one-tick-per-frame policy cannot service packets during that tick.
 
-The `FRAME < TICK` assertion does not prove that each tick gets its own frame. That
-holds only when accumulated elapsed time is less than two ticks. OS scheduling
-jitter and expensive ticks can both create a catch-up batch.
+A normal frame runs exactly one tick when its wake sample is less than one timestep
+past due. OS scheduling jitter and expensive frame work can still create a catch-up
+batch; that is the unchanged overload path.
+
+## Tick-paced authority (#278)
+
+The runner reads the next deadline from `Time<Real>::last_update()` plus
+`Time<Fixed>::timestep() - Time<Fixed>::overstep()`. It rechecks the clock after
+sleeping and supplies that same wake sample through `TimeUpdateStrategy::ManualInstant`.
+Bevy's time system therefore decides which ticks are due from the same sample that
+admitted the frame. There is no separately advancing frame deadline. The dedicated
+server asserts unpaused, unit-speed virtual time; no authority system changes it.
+
+`Time<Real>::update_with_instant` primes the initial zero-delta sample without
+running a frame. The first frame waits for a complete tick. After every frame the
+runner recomputes from the accumulator remainder, including the time spent doing
+frame work. An already-overdue deadline starts immediately; Bevy's virtual cap and
+fixed catch-up loop still own admitted simulation time. The client runner is unchanged.
+
+Verified against locked Bevy 0.19.1's `bevy_app/src/app.rs`, `schedule_runner.rs`,
+`bevy_time/src/lib.rs`, `real.rs`, `virt.rs`, `fixed.rs`, and Lightyear 0.30.1's
+`lightyear_core/src/timeline.rs`. Lightyear sets the timestep and advances its local
+timeline in `FixedFirst`; it does not supply another server clock.
+
+The controlled-clock tests mount the shipped `TickRunner` plugin and its Lightyear
+plugins. Varying sub-budget frame work and scheduler oversleep produce one tick in
+every frame, in receive/tick/send/last order, with no frame before its tick is due.
+A separate test injects overdue frames and verifies immediate catch-up under the
+library's existing admission cap. The normal-frame test goes red with the former
+4 ms runner: its first frame has zero ticks and receive/send/last without tick.
+The old runner and instrumentation are absent from shipped source.
+
+DERIVED from runtime registrations and the locked networking sources: no audited
+system depends on multiple authority frames per tick:
+
+- Netcode keep-alives use elapsed send times (default 100 ms), and timeouts advance
+  from `Time<Real>::delta()`; their checks now run once per tick. Ping handling uses
+  elapsed time too. Receive opportunities are tick-paced, as the owner chose.
+- `server_stats` closes wall-clock periods in `Last`, with the existing possible
+  one-frame overshoot; its tick and send summaries do not require tickless frames.
+- `loadtest::drive` runs in `FixedUpdate`, scheduling from `Instant::elapsed()`.
+- Bot commands run in `FixedUpdate`; spawn and respawn eligibility is checked in
+  `Update`. Neither counts intervening frames.
+- `world_reset::start_next` reconstructs synchronously at the Battle's command flush;
+  it needs no intermediate frame. Hosting timers also read elapsed time.
+- Two test comments cited the former server frame/tick ratio. They now state their
+  actual removal-message/history invariants. The multi-frame test fixtures remain
+  useful for render-driven clients and schedules that admit frames between steps.
 
 ## Supplied evidence
 
@@ -216,7 +263,7 @@ startup, zero tanks and clients, total reported span 74.0 s. Weighted process CP
 DERIVED: the difference is 36.14 percentage points. This is not a measurement of
 frame-loop CPU alone: one quantity sums process thread CPU and the other brackets
 fixed-schedule wall time. A controlled loop-period comparison is needed for that
-attribution. `FRAME` remains the owner's latency/CPU lever.
+attribution. The controlled comparisons below measure whole-process CPU instead.
 
 A controlled local comparison used the same binary and idle world, changing only
 the runner period through a temporary startup control. Probe systems were absent
@@ -237,22 +284,89 @@ tick overruns. DERIVED from the per-window CPU readings: the two 4 ms runs avera
 period is 18.88 percentage points of one core on this local host. This compares
 whole idle processes, rather than subtracting tick wall time from process CPU.
 It does not measure hosted savings or the cost of all frame work, which still runs
-at the longer period. The startup control is removed; no runner edit is needed.
+at the longer period. That diagnosis removed its startup control without changing
+production pacing; #278's tick-paced follow-up is measured below.
 
-## Verification
+## Stall diagnostic verification
 
-The original scheduler source is restored byte-for-byte. Both diagnostic test
-arms, frame markers and startup controls are removed from `src/`; the production
-`FRAME`, library default and construction laws remain unchanged. All processes
-started by the diagnostic runners were terminated and reaped.
+The stall diagnosis restored the original scheduler source and removed its test
+arms, frame markers and startup controls without changing the library default or
+construction laws. All processes started by those diagnostic runners were
+terminated and reaped. The tick-paced follow-up changes only the pacing described
+above, preserving that overload policy.
 
-The original rehearsal still fails as described above. There is no post-fix
-rehearsal or production wall-service regression test because no pacing/capacity
-contract has been selected. The source and timing witnesses are recorded here so
-the follow-up can turn that chosen contract into a regression test.
+The stall diagnosis reproduced the failing rehearsal above. It performed no
+post-fix rehearsal and added no production wall-service regression test because
+no pacing/capacity contract had been selected. The source and timing witnesses
+remain the basis for a future regression test once that contract is chosen.
 
 Passed: `cargo fmt --all --check`, `git diff --check`, strict locked workspace
 clippy on all targets with `dev_ui,bitprobe`, and the targeted server-stats tests
 plus `doc_citations`, `ui_ascii`, `net_boundary` and `bake::` guards (54 passed).
 The locked normal server/client build with the same features also passed, replacing
 the temporary instrumented binaries. The full suite was not run; it belongs to CI.
+
+## Tick-paced local measurements
+
+MEASURED on Apple M4, macOS 26.5.2, ten available cores. Every run was local,
+headless, unattended and muted, under the machine lock. One temporary binary
+selected the former runner or the tick-paced runner at startup; the world and
+other code were identical. The temporary control and probes are removed. No hosted
+capacity or savings claim follows from these local observations.
+
+Idle order: old/new/new/old, 21 wall seconds each, retaining the last 15 complete
+one-second stats windows per run. Every retained window had zero clients/tanks,
+5,962 entities and no tick overruns. CPU is process user+system time as a percentage
+of one core, weighted by each stats window's reported wall span.
+
+Tick lateness brackets the due time through entry to `FixedFirst`. For each tick,
+its due time is the frame's real-time sample minus the remaining fixed overstep
+(after that tick was expended). This is the tick's accumulator boundary, not a
+second periodic clock. Lateness and frame counters cover the last 15 wall seconds;
+their separate schedule brackets can differ by one boundary sample. Quantiles use
+nearest rank over raw samples.
+
+| Idle run | CPU, % of one core | Lateness p50 / p99, ms | Frames with zero / two / more ticks |
+|---|---:|---:|---:|
+| old, first | 49.15 | 2.760 / 5.164 | 2,270 / 0 / 0 |
+| new, first | 24.64 | 3.077 / 3.878 | 0 / 0 / 0 |
+| new, second | 23.96 | 3.104 / 3.933 | 0 / 0 / 0 |
+| old, second | 43.45 | 2.862 / 5.146 | 2,250 / 0 / 0 |
+
+DERIVED from those equally sized windows: old/new mean CPU is 46.30% / 24.30%
+of one core. Pooled raw idle lateness p50/p99 is 2.820/5.146 ms old and
+3.093/3.885 ms new: median lateness increased while the upper tail decreased.
+MEASURED: the paired idle runs counted 4,520 tickless old frames and zero new;
+neither runner had a multi-tick steady idle frame.
+
+One local headless client ran the same Idle input script in a separate old/new
+trial, 36 wall seconds each. The last 15 server stats windows had one tank, one
+client, 6,135 entities and no tick overruns. A temporary `MessageReader` timestamped
+each `MutateTickReceived` after replication receive. These are update application
+arrival times at the client frame, including its drain/replication work, not raw
+socket arrival times. Each trial retained 960 updates over its final 15 seconds.
+
+| Connected observation | old | new |
+|---|---:|---:|
+| Server CPU, % of one core | 32.18 | 21.83 |
+| Tick lateness p50 / p99, ms | 2.669 / 5.060 | 2.948 / 3.672 |
+| Frames with zero / two / more ticks | 2,226 / 0 / 0 | 0 / 0 / 0 |
+| Update interval p1 / p50 / p99, ms | 11.333 / 14.097 / 20.797 | 11.287 / 15.745 / 20.210 |
+| Update interval standard deviation, ms | 2.443 | 1.689 |
+| Update interval p99 minus p1 spread, ms | 9.463 | 8.923 |
+
+Raw logs, measurement summaries, the temporary probe source and harness, and the
+controlled-clock red/green outputs remain locally under `target/tick-clock/`.
+All spawned server/client processes were terminated and reaped. The orchestrator
+owns the two-core hosted measurement and the separate overload policy decision.
+
+
+## Tick-paced verification
+
+Passed: `cargo fmt --all --check`, `git diff --check`, locked strict workspace
+clippy on all targets with `dev_ui,bitprobe`, and targeted Rust tests (458 passed,
+seven ignored) covering `net::`, `cost::`, `trace::`, `avian_child_pose_churn`,
+`ballistics::motion`, `doc_citations`, `ui_ascii`, `net_boundary` and `bake::`.
+The existing `test_online_cost` and `test_collapse` parser/runner suites also passed
+(28 tests, mocked processes). Locked normal server/client binaries were rebuilt
+with the same features after removing instrumentation. The full suite belongs to CI.
