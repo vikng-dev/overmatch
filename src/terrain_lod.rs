@@ -1352,7 +1352,8 @@ mod tests {
         );
     }
 
-    /// Three kept levels without geometry exercise selection/adaptation without heightmap decode.
+    /// The admitted rungs without geometry exercise selection/adaptation without heightmap decode.
+    /// FIXTURE DATA: a tile's bounds give the projection a nonzero radius.
     fn synthetic_ladder() -> TerrainLod {
         let level = |rung: usize| TerrainLodLevel {
             rung,
@@ -1364,7 +1365,7 @@ mod tests {
         let tile = TerrainLodTile {
             min: Vec3::new(-62.5, 0.0, -62.5),
             max: Vec3::new(62.5, 20.0, 62.5),
-            levels: vec![level(0), level(2), level(4)],
+            levels: (0..TERRAIN_LOD_LADDER.len()).map(level).collect(),
         };
         TerrainLod {
             bounding_radius_m: tile.bounding_radius_m(),
@@ -1384,7 +1385,9 @@ mod tests {
         let mut app = App::new();
         // Mount the shared reader: this module consumes view facts, not cameras or windows.
         app.add_plugins((crate::view::plugin, plugin));
-        app.insert_resource(TerrainLodLadder(synthetic_ladder()));
+        let ladder = synthetic_ladder();
+        let level_count = ladder.tiles[0].levels.len();
+        app.insert_resource(TerrainLodLadder(ladder));
         let world = app.world_mut();
         let window = world
             .spawn((Window::default(), bevy::window::PrimaryWindow))
@@ -1400,7 +1403,7 @@ mod tests {
                 crate::view::PlayerView,
             ))
             .id();
-        let entities: Vec<Entity> = (0..3)
+        let entities: Vec<Entity> = (0..level_count)
             .map(|level| {
                 world
                     .spawn((
@@ -1454,7 +1457,7 @@ mod tests {
 
         assert_eq!(commander[0], 0.0, "the exact level always starts at zero");
         assert_eq!(optic[0], 0.0);
-        for level in 1..3 {
+        for level in 1..level_count {
             assert!(
                 optic[level] > commander[level],
                 "the optic must push level {level} out ({} vs {})",
