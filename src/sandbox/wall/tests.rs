@@ -335,6 +335,7 @@ fn inspector_app(held: bool) -> (bevy::prelude::App, crate::ballistics::Delivere
     let mut chunk = cut.structure.chunks[c];
     chunk.buried = held;
     let structure = Structure {
+        geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
         chunks: vec![chunk],
         joints: Vec::new(),
     };

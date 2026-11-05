@@ -687,6 +687,7 @@ mod tests {
                 };
                 let seam = plate.seam(area, mass).unwrap();
                 let structure = Structure {
+                    geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
                     chunks: vec![chunk],
                     joints: cuts
                         .windows(2)

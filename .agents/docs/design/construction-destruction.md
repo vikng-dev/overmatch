@@ -558,24 +558,31 @@ standing construction or moving group has one force solve over every live joint.
 coplanar section searches, punch rings and independent rest checks have no role in this model.
 A load-sharing lintel, a cantilever and a running-bond wall use the same equations.
 
-Each chunk is a rigid node with translation and rotation. Each joint is a compliant circular
-patch, with the authored contact area and centre. Its normal and tangential compliances are the
+Each chunk is a rigid node with translation and rotation. Each joint is a compliant patch
+over the actual convex overlap of its authored chunk faces. The load gate reconstructs that
+overlap and refuses an area or centre inconsistent with the bake beyond boundary rounding.
+An equivalent circular footprint remains explicit only for root-plate area shares. Its normal and tangential compliances are the
 sum of its two sides' representative lengths over their moduli (a ground anchor has one side):
 
 ```text
 ell_i = cbrt(V_i) / 2
 K_n = A / sum(ell_i / E_i)
 K_s = A / sum(ell_i / G_i)
-I / A = A_footprint / (4 pi)
+Q = integral(r r^T dA) / A
+P = identity - n n^T
+B = trace(Q) P - Q
+M = K_n B omega + K_s trace(Q) n (n dot omega)
 ```
 
 These are DERIVED stiffnesses, never tuned strengths. The half-side of the equal-volume cube
 apportions unresolved bulk compliance; it is not a flaw size. E comes from the material's
 Young's modulus, G from required `bulk.shear_modulus`. The latter rows explicitly label their
 isotropic analogues `Unknown`; timber anisotropy and actual fixing compliance remain unresolved.
-The affine displacement field is integrated analytically using area and circular second
-moments. This is exactly the four-point area quadrature, with its repeated sampling eliminated. `AreaShare` foundations integrate
-each cell's share over the common footprint, preserving its area moments under refinement.
+Here r is measured from the patch centroid and n is its normal. Triangle fans integrate Q
+exactly; the two directions of a thin rectangular face therefore keep their distinct section
+moduli. A circle with equal area cannot substitute for that tensor: it changes the load sharing,
+not merely the final strength readout. `AreaShare` root plates integrate each cell's share over
+the common equivalent disk, preserving their declared footprint contract under refinement.
 
 The assembled equilibrium is `K u = f`. A diagonal-preconditioned conjugate-gradient solve uses
 **Resolution 32 rounds per active tick**, bounding work independently of how many joints fail.
@@ -612,9 +619,12 @@ The pulse work criterion below is recoverable elastic work, not a measured dynam
 
 ### Joint-local failure
 
-For each patch, DERIVED Navier tension is `N/A + |M_b| r/I`; tangential demand is bounded by
-`|F_s|/A + |T| r/(2I)`. The latter is the triangle bound on translation plus circular torsion.
-The material or attachment data supplies tensile strength, shear cohesion and both fracture
+The solved patch resultant defines an affine traction field. DERIVED normal traction is
+`N/A + (n cross (B + n n^T)^-1 M_b) dot r / A`; tangential traction is
+`F_s/A + T (n cross r)/(A trace(Q))`. Normal maximum and maximum shear magnitude occur at
+vertices of a convex polygon. Circular root footprints use their analytical rim extrema.
+This is the traction of the compliant interface model, not a Saint-Venant solution for a
+noncircular solid bar's warping. The material or attachment data supplies tensile strength, shear cohesion and both fracture
 energies. Shear capacity is cohesion plus pair friction times positive mean compression.
 A force-controlled sustained load exceeding either strength opens the joint: the maintained
 source supplies separation work. A pulse must exceed the corresponding strength in the summed
@@ -623,10 +633,17 @@ work are integrated separately by the same patch quadrature; no global source-or
 which overloaded joint may open. All qualifying joints crack together.
 
 A resting joint has no cohesion. It opens under a tensile resultant, a bending moment exceeding
-compression times the patch radius, or tangential traction exceeding pair friction times
+compression times the patch's radial bearing lever, or tangential traction exceeding pair friction times
 compression. These are the same solved forces, not a second cut or bearing search. Reversing the
-joint's endpoints leaves the result unchanged. The circular bearing footprint is a shape
-approximation; sustained contact redistribution within a footprint is not resolved.
+joint's endpoints leaves the result unchanged. The lever ends at the actual polygon perimeter
+along the required centre-of-pressure direction. **Unresolved contact law:** the linear trial
+still sticks every rest before judging lift, tip or slide. A negative normal reaction means
+that trial contact should be inactive; frictional slip and partial opening should redistribute
+reactions across the other contacts. Deleting an inadmissible trial contact is not a proof that
+the authored construction cannot stand. The gravity audit in `.agents/scratch/bondsolve/gravity-s2.md`
+records this limit without changing strength, friction or initial topology. Attachment compliance
+and directional timber elasticity also remain unsourced; bulk transverse wood compliance cannot
+claim to measure a fixing or longitudinal grain response.
 
 Connectivity runs when topology changes. `loose_groups` identifies what has lost all live paths
 to anchors or buried matter; it does not assess strength. The authority releases those groups

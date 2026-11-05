@@ -2,8 +2,8 @@
 //!
 //! [`Solve`] holds rigid-chunk translations and rotations between updates. [`Problem`] supplies
 //! the current owned graph and applied wrenches; a round applies its sparse stiffness once.
-//! Joint patches transmit both force and moment. Circular area and second moments
-//! integrate the affine displacement field exactly, without candidate cuts.
+//! Joint patches transmit force and moment over the authored contact polygon. Area moments
+//! integrate affine displacement; vertices bound traction. Root plates declare equivalent disks.
 //! The construction design's "Structural calculation" owns the model and its limitations.
 
 use bevy::math::{DMat3, DVec3};
@@ -55,38 +55,202 @@ pub(crate) struct Node {
     pub fixed: bool,
 }
 
+/// Area moments and boundary of one authored contact face, in the construction frame.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Patch {
+    pub centre: DVec3,
+    /// Integral of the normal-displacement rotation quadratic, divided by area, m².
+    bending: DMat3,
+    polar: f64,
+    rim: Rim,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Rim {
+    Circle(f64),
+    Polygon(std::sync::Arc<[DVec3]>),
+}
+
+fn outer(v: DVec3) -> DMat3 {
+    DMat3::from_cols(v * v.x, v * v.y, v * v.z)
+}
+
+impl Patch {
+    /// Equivalent circular footprints are explicit root-plate data; analytical fixtures also
+    /// use disks. Authored chunk contacts use their actual polygon through `Self::face`.
+    fn circle(centre: DVec3, normal: DVec3, area: f64) -> Self {
+        let second = area / (4.0 * std::f64::consts::PI);
+        Self {
+            centre,
+            bending: (DMat3::IDENTITY - outer(normal)) * second,
+            polar: 2.0 * second,
+            rim: Rim::Circle((area / std::f64::consts::PI).sqrt()),
+        }
+    }
+
+    /// Integrate a convex face by triangle fans. The load gate checks the baked area and
+    /// centre against the hull overlap; disagreement beyond boundary rounding requires rebaking.
+    pub(crate) fn face(joint: &super::Joint, face: &[bevy::math::Vec3]) -> Result<Self, String> {
+        if let Bond::AreaShare {
+            footprint_area,
+            footprint_centroid,
+            ..
+        } = joint.bond
+        {
+            return Ok(Self::circle(
+                footprint_centroid.as_dvec3(),
+                joint.normal.as_dvec3(),
+                f64::from(footprint_area),
+            ));
+        }
+        if face.len() < 3 {
+            return Err(
+                "centroid/normal: no shared contact polygon; rebake the interface on both hulls"
+                    .into(),
+            );
+        }
+        let normal = joint.normal.as_dvec3();
+        let origin = face[0].as_dvec3();
+        let mut area = 0.0;
+        let mut first = DVec3::ZERO;
+        for pair in face[1..].windows(2) {
+            let (p, q) = (pair[0].as_dvec3() - origin, pair[1].as_dvec3() - origin);
+            let triangle = normal.dot(p.cross(q)).abs() / 2.0;
+            area += triangle;
+            first += (p + q) * (triangle / 3.0);
+        }
+        let perimeter: f64 = face
+            .iter()
+            .zip(face.iter().cycle().skip(1))
+            .map(|(p, q)| f64::from(p.distance(*q)))
+            .sum();
+        let tolerance = f64::from(super::ON_PLANE);
+        if !area.is_finite()
+            || area <= 0.0
+            || (area - f64::from(joint.area)).abs() > perimeter * tolerance
+        {
+            return Err(format!(
+                "area: baked {} m², hull overlap {area} m²; rebake the interface",
+                joint.area
+            ));
+        }
+        let centre = origin + first / area;
+        if centre.distance(joint.centroid.as_dvec3()) > tolerance {
+            return Err(format!(
+                "centroid: baked {:?}, hull overlap {centre}; rebake the interface",
+                joint.centroid
+            ));
+        }
+        let corners: Vec<_> = face.iter().map(|p| p.as_dvec3() - centre).collect();
+        let mut second = DMat3::ZERO;
+        for (p, q) in corners.iter().zip(corners.iter().cycle().skip(1)) {
+            let triangle = normal.dot(p.cross(*q)).abs() / 2.0;
+            second += (outer(*p) + outer(*q) + outer(*p + *q)) * (triangle / 12.0);
+        }
+        second /= area;
+        let polar = second.x_axis.x + second.y_axis.y + second.z_axis.z;
+        let bending = (DMat3::IDENTITY - outer(normal)) * polar - second;
+        if !(bending + outer(normal)).determinant().is_finite()
+            || (bending + outer(normal)).determinant() <= 0.0
+        {
+            return Err(
+                "area moments: degenerate contact polygon; rebake a nondegenerate interface".into(),
+            );
+        }
+        Ok(Self {
+            centre,
+            bending,
+            polar,
+            rim: Rim::Polygon(corners.into()),
+        })
+    }
+
+    pub(crate) fn scaled(&self, scale: f64) -> Self {
+        Self {
+            centre: self.centre * scale,
+            bending: self.bending * scale.powi(2),
+            polar: self.polar * scale.powi(2),
+            rim: match &self.rim {
+                Rim::Circle(r) => Rim::Circle(r * scale),
+                Rim::Polygon(points) => Rim::Polygon(points.iter().map(|p| *p * scale).collect()),
+            },
+        }
+    }
+
+    fn lever(&self, direction: DVec3, normal: DVec3) -> f64 {
+        match &self.rim {
+            Rim::Circle(radius) => *radius,
+            Rim::Polygon(points) => points
+                .iter()
+                .zip(points.iter().cycle().skip(1))
+                .filter_map(|(p, q)| {
+                    let outward = (*q - *p).cross(normal);
+                    let along = outward.dot(direction);
+                    (along > 0.0).then(|| outward.dot(*p) / along)
+                })
+                .fold(f64::INFINITY, f64::min),
+        }
+    }
+}
+
+/// Authored faces in joint order. Circular test fixtures explicitly declare their geometry;
+/// a production graph cannot silently substitute a disk for a missing face.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Geometry {
+    Faces(Vec<Patch>),
+    #[cfg(test)]
+    CircularFixture,
+}
+
+impl Default for Geometry {
+    fn default() -> Self {
+        Self::Faces(Vec::new())
+    }
+}
+
+impl Geometry {
+    fn patch(&self, _joint: &super::Joint, index: usize) -> Patch {
+        match self {
+            Self::Faces(patches) => patches[index].clone(),
+            #[cfg(test)]
+            Self::CircularFixture => {
+                let (centre, area) = _joint.patch();
+                Patch::circle(centre.as_dvec3(), _joint.normal.as_dvec3(), f64::from(area))
+            }
+        }
+    }
+}
+
 /// An area-integrated linear elastic connection. Compliance is the sum of both sides' lengths
 /// over their moduli: `kn = A / (la/Ea + lb/Eb)`, and likewise for shear with `G`.
 /// A ground connection has only the occupied side's compliance.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Edge {
     pub a: usize,
     pub b: Option<usize>,
     pub centre: DVec3,
     pub normal: DVec3,
     pub area: f64,
-    /// Second moment of each in-plane axis divided by area, m².
-    pub second_per_area: f64,
+    pub patch: Patch,
     /// Normal and tangential stiffness integrated over the area, N/m.
     pub normal_stiffness: f64,
     pub shear_stiffness: f64,
 }
 
 impl Edge {
-    fn force(self, displacement: DVec3) -> DVec3 {
+    fn force(&self, displacement: DVec3) -> DVec3 {
         let normal = self.normal * self.normal.dot(displacement);
         normal * self.normal_stiffness + (displacement - normal) * self.shear_stiffness
     }
 
-    fn couple(self, rotation: DVec3) -> DVec3 {
+    fn couple(&self, rotation: DVec3) -> DVec3 {
         let twist = self.normal * self.normal.dot(rotation);
-        ((rotation - twist) * self.normal_stiffness + twist * (2.0 * self.shear_stiffness))
-            * self.second_per_area
+        self.patch.bending * rotation * self.normal_stiffness
+            + twist * (self.shear_stiffness * self.patch.polar)
     }
 
-    /// Area and circular second moments integrate the affine displacement field exactly.
-    /// The couple is k_n*(I/A)*rotation_in_plane + k_s*(2I/A)*twist_about_normal.
-    pub(crate) fn resultant(self, nodes: &[Node], answer: &[Wrench]) -> Wrench {
+    /// Integrate the affine displacement over the authored area and its tensor of second moments.
+    pub(crate) fn resultant(&self, nodes: &[Node], answer: &[Wrench]) -> Wrench {
         let mut delta = answer[self.a].point(self.centre - nodes[self.a].centre);
         let mut rotation = answer[self.a].angular;
         if let Some(b) = self.b {
@@ -99,8 +263,8 @@ impl Edge {
         }
     }
 
-    /// Recoverable opening and sliding work, J, from the same circular area integrals.
-    fn energy(self, nodes: &[Node], answer: &[Wrench]) -> (f64, f64) {
+    /// Recoverable opening and sliding work, J, from the same area integrals.
+    fn energy(&self, nodes: &[Node], answer: &[Wrench]) -> (f64, f64) {
         let mut delta = answer[self.a].point(self.centre - nodes[self.a].centre);
         let mut rotation = answer[self.a].angular;
         if let Some(b) = self.b {
@@ -110,31 +274,44 @@ impl Edge {
         let normal = self.normal.dot(delta);
         let twist = self.normal.dot(rotation);
         (
-            self.normal_stiffness
-                * (normal * normal
-                    + self.second_per_area * (rotation - self.normal * twist).length_squared())
+            self.normal_stiffness * (normal * normal + rotation.dot(self.patch.bending * rotation))
                 / 2.0,
             self.shear_stiffness
                 * ((delta - self.normal * normal).length_squared()
-                    + 2.0 * self.second_per_area * twist * twist)
+                    + self.patch.polar * twist * twist)
                 / 2.0,
         )
     }
 
-    /// Peak normal traction (tension positive), and an upper bound on tangential traction, Pa.
-    /// DERIVED: Navier `N/A + |M_b| r/I`; Saint-Venant circular torsion `|T| r/(2I)`.
-    /// Tangential translation and torsion use the triangle bound, conservative for mixed shear.
-    pub(crate) fn stress(self, carried: Wrench, toward_a: DVec3) -> (f64, f64) {
+    /// Peak normal and tangential traction, Pa, of the affine spring field. A convex polygon's
+    /// extrema lie at vertices. A declared circular footprint has the analytical rim extrema.
+    pub(crate) fn stress(&self, carried: Wrench, toward_a: DVec3) -> (f64, f64) {
         let axial = carried.linear.dot(toward_a);
         let twist = carried.angular.dot(toward_a);
         let bend = carried.angular - toward_a * twist;
-        let rim = (4.0 * self.second_per_area).sqrt();
-        let inertia = self.area * self.second_per_area;
-        (
-            axial / self.area + bend.length() * rim / inertia,
-            (carried.linear - toward_a * axial).length() / self.area
-                + twist.abs() * rim / (2.0 * inertia),
-        )
+        let force = (carried.linear - toward_a * axial) / self.area;
+        let gradient =
+            toward_a.cross((self.patch.bending + outer(toward_a)).inverse() * bend) / self.area;
+        match &self.patch.rim {
+            Rim::Circle(radius) => (
+                axial / self.area + gradient.length() * radius,
+                force.length() + twist.abs() * radius / (self.area * self.patch.polar),
+            ),
+            Rim::Polygon(corners) => {
+                corners
+                    .iter()
+                    .fold((f64::NEG_INFINITY, 0.0_f64), |(tension, shear), &r| {
+                        (
+                            tension.max(axial / self.area + gradient.dot(r)),
+                            shear.max(
+                                (force
+                                    + toward_a.cross(r) * (twist / (self.area * self.patch.polar)))
+                                    .length(),
+                            ),
+                        )
+                    })
+            }
+        }
     }
 }
 
@@ -147,7 +324,7 @@ pub(crate) struct Problem<'a> {
 impl Problem<'_> {
     fn apply(&self, input: &[Wrench], output: &mut [Wrench]) {
         output.fill(Wrench::default());
-        for &edge in self.edges {
+        for edge in self.edges {
             let carried = edge.resultant(self.nodes, input);
             output[edge.a].add(
                 Wrench {
@@ -177,7 +354,7 @@ impl Problem<'_> {
 
     fn diagonal(&self) -> Vec<Wrench> {
         let mut diagonal = vec![Wrench::default(); self.nodes.len()];
-        for &edge in self.edges {
+        for edge in self.edges {
             for c in [Some(edge.a), edge.b].into_iter().flatten() {
                 let arm = edge.centre - self.nodes[c].centre;
                 for (axis, direction) in [DVec3::X, DVec3::Y, DVec3::Z].into_iter().enumerate() {
@@ -414,7 +591,7 @@ mod tests {
             centre,
             normal,
             area: AREA,
-            second_per_area: AREA / (4.0 * PI),
+            patch: Patch::circle(centre, normal, AREA),
             normal_stiffness: YOUNG * AREA / length,
             shear_stiffness: SHEAR * AREA / length,
         }
@@ -811,15 +988,15 @@ impl Assessment {
                 normal += other.0;
                 shear += other.1;
             }
-            let (centre, footprint) = joint.patch();
+            let patch = structure.geometry.patch(joint, j);
             let area = f64::from(joint.area);
             self.edges.push(Edge {
                 a,
                 b,
-                centre: centre.as_dvec3(),
+                centre: patch.centre,
                 normal: joint.normal.as_dvec3(),
                 area,
-                second_per_area: f64::from(footprint) / (4.0 * std::f64::consts::PI),
+                patch,
                 normal_stiffness: area / normal,
                 shear_stiffness: area / shear,
             });
@@ -876,10 +1053,10 @@ impl Assessment {
         let n = self.nodes.len();
         self.solve_nodes = self.nodes.iter().chain(&self.nodes).copied().collect();
         self.solve_edges = self.edges.clone();
-        self.solve_edges.extend(self.edges.iter().map(|&e| Edge {
+        self.solve_edges.extend(self.edges.iter().map(|e| Edge {
             a: e.a + n,
             b: e.b.map(|b| b + n),
-            ..e
+            ..e.clone()
         }));
         // A newly owned node has no previous displacement; existing nodes retain both columns.
         let warm: Vec<_> = self
@@ -1012,7 +1189,7 @@ impl Assessment {
             })
             .collect();
         let mut failures = Vec::new();
-        for (&j, &edge) in self.joints.iter().zip(&self.edges) {
+        for (&j, edge) in self.joints.iter().zip(&self.edges) {
             let joint = &structure.joints[j];
             let carried = edge.resultant(&self.nodes, &combined);
             let sustained = edge.resultant(&self.nodes, steady_answer);
@@ -1038,7 +1215,14 @@ impl Assessment {
                 Bond::Resting => {
                     let twist = carried.angular.dot(normal);
                     let moment = (carried.angular - normal * twist).length();
-                    let rim = (4.0 * edge.second_per_area).sqrt();
+                    let rim = if moment > 0.0 {
+                        edge.patch.lever(
+                            (carried.angular - normal * twist).cross(normal) / moment,
+                            edge.normal,
+                        )
+                    } else {
+                        0.0
+                    };
                     if compression < 0.0 {
                         Some((Cause::LiftForce, -compression, 0.0, 0.0))
                     } else if moment > compression * rim {
@@ -1121,6 +1305,7 @@ mod gates {
     fn resting(height: f32) -> Structure {
         let material = material();
         Structure {
+            geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
             chunks: [-height, height]
                 .map(|h| Chunk {
                     volume: AREA,
@@ -1208,6 +1393,7 @@ mod gates {
         let material = material();
         let height = 0.5; // Fixture representative half-length, m, of a unit-volume chunk.
         let structure = Structure {
+            geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
             chunks: vec![Chunk {
                 volume: 1.0,
                 mass: MASS,
@@ -1309,7 +1495,7 @@ mod gates {
                     centre: (nodes[a].centre + nodes[b].centre) / 2.0,
                     normal,
                     area,
-                    second_per_area: area / (4.0 * PI),
+                    patch: Patch::circle((nodes[a].centre + nodes[b].centre) / 2.0, normal, area),
                     normal_stiffness: 8e9 * area,
                     shear_stiffness: 3e9 * area,
                 });
@@ -1347,7 +1533,7 @@ mod gates {
         let cracked: Vec<_> = edges
             .iter()
             .enumerate()
-            .filter_map(|(j, &e)| {
+            .filter_map(|(j, e)| {
                 let stress = e.stress(e.resultant(&nodes, &solve.answer), -e.normal);
                 (stress.0 > strength || stress.1 > strength).then_some(j)
             })
@@ -1355,6 +1541,64 @@ mod gates {
         assert_eq!(cracked, expected);
         assert!(cracked.iter().any(|&j| edges[j].normal == DVec3::X));
         assert!(cracked.iter().any(|&j| edges[j].normal == DVec3::Y));
+    }
+
+    /// Thin faces retain both section moduli and their bearing levers. A circular replacement
+    /// changes bending stiffness and strength in opposite directions along these two axes.
+    /// Fixture: a 2 m by 0.1 m face, with pure couples about each in-plane axis.
+    #[test]
+    fn rectangular_faces_read_their_own_second_moments_and_perimeter() {
+        let (width, thickness) = (2.0_f32, 0.1_f32);
+        let joint = super::super::Joint {
+            a: 0,
+            b: Side::Ground,
+            area: width * thickness,
+            centroid: Vec3::ZERO,
+            normal: Vec3::Y,
+            bond: Bond::Resting,
+        };
+        let corners = [(-1.0, -1.0), (-1.0, 1.0), (1.0, 1.0), (1.0, -1.0)]
+            .map(|(x, z)| Vec3::new(x * width / 2.0, 0.0, z * thickness / 2.0));
+        let patch = Patch::face(&joint, &corners).unwrap();
+        let edge = Edge {
+            a: 0,
+            b: None,
+            centre: DVec3::ZERO,
+            normal: DVec3::Y,
+            area: f64::from(joint.area),
+            patch,
+            normal_stiffness: material().young,
+            shear_stiffness: material().shear_modulus,
+        };
+        // Fixture: unit couple. I = b*h³/12 and S = b*h²/6, independently of the solver.
+        for (axis, breadth, depth) in [(DVec3::X, width, thickness), (DVec3::Z, thickness, width)] {
+            let second = f64::from(depth).powi(2) / 12.0;
+            let modulus = f64::from(breadth) * f64::from(depth).powi(2) / 6.0;
+            let close = |actual: f64, expected: f64| {
+                assert!(
+                    (actual / expected - 1.0).abs() < 1e-6,
+                    "{actual} vs {expected}"
+                )
+            };
+            close(edge.couple(axis).dot(axis), edge.normal_stiffness * second);
+            close(
+                edge.stress(
+                    Wrench {
+                        linear: DVec3::ZERO,
+                        angular: axis,
+                    },
+                    DVec3::Y,
+                )
+                .0,
+                modulus.recip(),
+            );
+            close(
+                edge.patch.lever(axis.cross(DVec3::Y), DVec3::Y),
+                f64::from(depth) / 2.0,
+            );
+            let scaled = edge.patch.scaled(2.0);
+            close(scaled.polar, edge.patch.polar * 4.0);
+        }
     }
 
     /// Sparse work grows with joint count at fixed round count, including on the shipped graph.
@@ -1406,6 +1650,12 @@ mod gates {
             one.failures(&structure).len()
         );
         let mut doubled = structure.clone();
+        if let Geometry::Faces(patches) = &mut doubled.geometry {
+            patches.extend(patches.clone().into_iter().map(|mut p| {
+                p.centre += DVec3::X * 100.0;
+                p
+            }));
+        }
         let n = structure.chunks.len();
         doubled
             .chunks
@@ -1459,5 +1709,164 @@ mod gates {
         assert!(failures.is_empty());
         assert_eq!(rounds, 0);
         assert_eq!(idle.solve.joint_visits, 0);
+    }
+    /// Observation tool: lists current gravity demands; no shipped outcome is a pass condition.
+    #[test]
+    #[ignore = "gravity census, observational"]
+    fn gravity_census() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        let mut ids: Vec<_> = std::fs::read_dir(root.join("constructions"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|id| {
+                root.join(format!("constructions/{id}/{id}.construction.ron"))
+                    .exists()
+            })
+            .collect();
+        ids.sort();
+        let library =
+            crate::construction::ConstructionLibrary::load(&root, ids.iter().map(String::as_str));
+        for id in &ids {
+            let kind = library.get(id).unwrap();
+            let structure = kind.layout.structure(&kind.asset, 1.0);
+            let mut assessment = Assessment::at_rest(&structure).unwrap();
+            println!(
+                "CENSUS {id}: chunks={} joints={} initial={}",
+                structure.chunks.len(),
+                structure.joints.len(),
+                assessment.initial_verdict.len()
+            );
+            for f in &assessment.initial_verdict {
+                let j = &structure.joints[f.joint];
+                let label = |c: usize| {
+                    let c = &kind.asset.chunks[kind.layout.chunks[c] as usize];
+                    format!(
+                        "{}:{}",
+                        kind.asset.elements[usize::from(c.element)].name,
+                        kind.asset.materials[usize::from(c.material)]
+                    )
+                };
+                let other = match j.b {
+                    Side::Ground => "ground".to_owned(),
+                    Side::Chunk(c) => label(c),
+                };
+                let bond = if f.joint < kind.asset.joints.len() {
+                    match kind.asset.joints[f.joint].bond {
+                        crate::construction::schema::Bond::Seam => "intrinsic",
+                        crate::construction::schema::Bond::Attached(a) => {
+                            &kind.asset.attachments[usize::from(a)]
+                        }
+                    }
+                } else {
+                    "anchor"
+                };
+                println!(
+                    "JOINT,{id},{},{},{},{},{:?},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
+                    f.joint,
+                    label(j.a),
+                    other,
+                    bond,
+                    f.cause,
+                    f.demand,
+                    f.capacity,
+                    j.area,
+                    j.centroid.x,
+                    j.centroid.y,
+                    j.centroid.z
+                );
+            }
+            let mut state = State::new(&structure);
+            for tick in 0..128 {
+                let (failures, rounds) =
+                    assessment.advance(&structure, &mut state, &[], Vec3::ZERO, STEP, false);
+                let fallen: Vec<_> = assessment
+                    .support
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|&c| state.standing(c))
+                    .collect();
+                for &c in &fallen {
+                    state.fate[c] = super::super::Fate::Fallen;
+                }
+                println!(
+                    "TICK {id} {tick} cracks={} fallen={} rounds={rounds} progress={:?}",
+                    failures.len(),
+                    fallen.len(),
+                    assessment.solve.progress
+                );
+                if !assessment.needs_tick() {
+                    break;
+                }
+            }
+        }
+    }
+    /// All placed scales use their admitted initial gravity field. Observations include each
+    /// authoritative crack stage, with no assertion that an authored asset must stand.
+    #[test]
+    #[ignore = "placed-scale gravity census, observational"]
+    fn gravity_placed_scales() {
+        use std::collections::BTreeMap;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+        let manifest = crate::map::load(&root);
+        let mut rows = BTreeMap::<String, Vec<(f32, Vec<(usize, usize)>, usize)>>::new();
+        for instance in &manifest.instances {
+            let crate::map::Prototype::Construction { asset } =
+                &manifest.prototypes[&instance.prototype]
+            else {
+                continue;
+            };
+            let kind = manifest.constructions.get(asset).unwrap();
+            let scale = instance.scale[0];
+            let structure = kind.structure(scale);
+            let mut assessment = (*kind.equilibrium(scale)).clone();
+            let mut state = State::new(&structure);
+            let mut stages = Vec::new();
+            let mut ticks = 0;
+            for tick in 0..128 {
+                let (failures, _) =
+                    assessment.advance(&structure, &mut state, &[], Vec3::ZERO, STEP, false);
+                let fallen: Vec<_> = assessment
+                    .support
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .filter(|&c| state.standing(c))
+                    .collect();
+                for &c in &fallen {
+                    state.fate[c] = super::super::Fate::Fallen;
+                }
+                stages.push((failures.len(), fallen.len()));
+                ticks = tick;
+                if !assessment.needs_tick() {
+                    break;
+                }
+            }
+            rows.entry(asset.clone())
+                .or_default()
+                .push((scale, stages, ticks));
+        }
+        for (id, rows) in rows {
+            let min_scale = rows.iter().map(|r| r.0).fold(f32::INFINITY, f32::min);
+            let max_scale = rows.iter().map(|r| r.0).fold(0.0_f32, f32::max);
+            let unsettled = rows.iter().filter(|r| r.2 == 127).count();
+            println!(
+                "PLACED {id}: instances={} scales={min_scale}..{max_scale} unfinished_after_128={unsettled}",
+                rows.len()
+            );
+            for tick in 0..8 {
+                let counts: Vec<_> = rows
+                    .iter()
+                    .map(|r| r.1.get(tick).copied().unwrap_or((0, 0)))
+                    .collect();
+                println!(
+                    "STAGE {id} {tick}: cracks={}..{} fallen={}..{}",
+                    counts.iter().map(|c| c.0).min().unwrap(),
+                    counts.iter().map(|c| c.0).max().unwrap(),
+                    counts.iter().map(|c| c.1).min().unwrap(),
+                    counts.iter().map(|c| c.1).max().unwrap()
+                );
+            }
+        }
     }
 }

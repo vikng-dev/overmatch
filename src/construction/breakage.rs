@@ -134,6 +134,7 @@ pub(crate) struct Layout {
     ground: Vec<(GroundAttachment, Vec<usize>)>,
     /// The law's joints, chunk pairs first in asset order, then the anchors in asset order.
     pub(crate) joints: Vec<Joint>,
+    patches: Vec<fracture::bondsolve::Patch>,
     /// Per law chunk: its hull.
     pub(crate) blocks: Vec<Block>,
     /// Per element: its hull.
@@ -256,6 +257,23 @@ impl Layout {
             .enumerate()
             .map(|(e, element)| solid(element.points(), format!("elements[{e}].hull")))
             .collect::<Result<Vec<_>, _>>()?;
+        let patches = joints
+            .iter()
+            .enumerate()
+            .map(|(j, joint)| {
+                let a = blocks[joint.a].face_on(joint.centroid, joint.normal);
+                let face = match joint.b {
+                    Side::Chunk(b) => fracture::clip_polygon(
+                        &a,
+                        &blocks[b].face_on(joint.centroid, joint.normal),
+                        joint.normal,
+                    ),
+                    Side::Ground => a,
+                };
+                fracture::bondsolve::Patch::face(joint, &face)
+                    .map_err(|error| format!("joints[{j}].{error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             elements: elements
                 .into_iter()
@@ -266,6 +284,7 @@ impl Layout {
             materials,
             ground: ground.into_values().collect(),
             joints,
+            patches,
             blocks,
             element_blocks,
         })
@@ -316,6 +335,12 @@ impl Layout {
         }
         let (s2, s3) = (scale * scale, scale * scale * scale);
         let mut structure = Structure {
+            geometry: fracture::bondsolve::Geometry::Faces(
+                self.patches
+                    .iter()
+                    .map(|p| p.scaled(f64::from(scale)))
+                    .collect(),
+            ),
             chunks: self
                 .chunks
                 .iter()

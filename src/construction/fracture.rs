@@ -286,6 +286,7 @@ impl Joint {
 pub(crate) struct Structure {
     pub chunks: Vec<Chunk>,
     pub joints: Vec<Joint>,
+    pub geometry: bondsolve::Geometry,
 }
 
 /// A convex chunk shape as the collision library reconstructs its hull ([`Block::hull`]): its
@@ -1976,7 +1977,11 @@ mod tests {
             normal: Vec3::Y,
             bond: Bond::Bonded(material.seam),
         });
-        Structure { chunks, joints }
+        Structure {
+            chunks,
+            joints,
+            geometry: bondsolve::Geometry::CircularFixture,
+        }
     }
 
     /// ASSUMED characterization: a three-chunk slab with one weaker opening seam. These
@@ -2417,7 +2422,11 @@ mod tests {
                 }
             }
         }
-        Structure { chunks, joints }
+        Structure {
+            chunks,
+            joints,
+            geometry: bondsolve::Geometry::CircularFixture,
+        }
     }
 
     fn brick() -> Material {

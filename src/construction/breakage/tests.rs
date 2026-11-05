@@ -4839,6 +4839,7 @@ fn released_owners_share_one_openings_work_and_each_load_has_one_owner() {
     let work = material.seam.fracture_energy * area;
     let impulse = (4.0 * work * mass).sqrt();
     let structure = Structure {
+        geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
         chunks: [-0.5, 0.5]
             .map(|x| Chunk {
                 volume: 1.0,

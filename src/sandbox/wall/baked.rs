@@ -195,7 +195,19 @@ pub(crate) fn wall_cut(
         faces.push(polygon);
     }
     Ok(Cut {
-        structure: Structure { chunks, joints },
+        structure: Structure {
+            geometry: crate::construction::fracture::bondsolve::Geometry::Faces(
+                joints
+                    .iter()
+                    .zip(&faces)
+                    .map(|(joint, face)| {
+                        crate::construction::fracture::bondsolve::Patch::face(joint, face)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            chunks,
+            joints,
+        },
         blocks,
         faces,
         element_of: chunks_of.iter().map(|&c| asset.chunks[c].element).collect(),
