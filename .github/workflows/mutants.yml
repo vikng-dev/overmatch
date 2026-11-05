@@ -79,8 +79,7 @@ jobs:
           tool: cargo-mutants@27.1.0
 
       # `-f` takes a glob, and a directory matches nothing until it ends in `**`. The lib suite only
-      # (`--lib` on every cargo call, so each mutant builds one test binary), minus the field-cast
-      # measurement the `tests` job skips too.
+      # (`--lib` on every cargo call, so each mutant builds one test binary).
       - name: cargo mutants
         timeout-minutes: ${{ fromJSON(inputs.timeout) }}
         env:
@@ -95,8 +94,7 @@ jobs:
             echo "::error::No mutants under '${MUTANTS_PATH}' (glob '${glob}')"
             exit 1
           fi
-          cargo mutants --in-place -f "${glob}" --features dev_ui,bitprobe --cargo-arg=--lib -- -- \
-            --skip ballistics::field_casts::
+          cargo mutants --in-place -f "${glob}" --features dev_ui,bitprobe --cargo-arg=--lib
 
       - name: Mutation report
         if: ${{ !cancelled() }}

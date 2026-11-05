@@ -1,20 +1,16 @@
 name: Field casts
 
-# The spall-cone casts digested to the bit on every shipped target, against the macOS arm64 pin
-# (`src/ballistics/field_casts.rs`). A MEASUREMENT for the owner's decision on whether a client may
-# re-cast a field itself, not a gate on the tree: a red leg says this target's casts differ, and the
-# test's failure names the first differing ray. Hence a workflow of its own, no required context,
-# and no part of `ci.yml`'s `check`. The cone's direction pin (`ballistics::spall_cone::`) rides
-# along so each target reports it too.
+# The game's damage model: real-geometry field-walk invariants and the direction generator's
+# cross-platform pin. Clients receive resolved reaches; only directions are derived again.
+# This separate workflow exercises every shipped target without adding a required CI context.
 
 on:
-  # A release tag dispatches it on the tag (`release.yml`), so every shipped build is measured.
+  # A release tag dispatches it on the tag (`release.yml`), covering every shipped build.
   workflow_dispatch:
   # Only a push that can move a cast: the compiler, the dependency graph, the patched crates, the
   # ballistics module whole (its root file included), the ballistics data the cone embeds
-  # (`spall_cone.rs` carries `assets/ballistics/spall_cone.ron` by `include_str!`), the round the
-  # casts fire (its file, its type, the gun that gives it its speed, and `build.rs`, which embeds
-  # both directories), and this file.
+  # (`spall_cone.rs` carries `assets/ballistics/spall_cone.ron` by `include_str!`), the armaments
+  # loaded by the fixture world, their build-time embedding, and this file.
   push:
     branches: [main]
     paths:
@@ -33,8 +29,7 @@ on:
       - 'build.rs'
       - '.github/workflows/field-casts.yml'
 
-# A newer run cancels an older one on the same ref: the casts are a measurement of the tree, so the
-# newer one covers the older commit.
+# A newer run on the same ref covers the older tree.
 concurrency:
   group: field-casts-${{ github.ref }}
   cancel-in-progress: true
@@ -55,7 +50,7 @@ jobs:
         os: [ubuntu-24.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     # A cold Windows build of the lib test binary ran past 45 min (MEASURED 2026-10-22), and a leg
-    # cut short saves no cache, so the next cold run is cold again. A measurement waits it out.
+    # cut short saves no cache, so the next cold run is cold again. Let it finish.
     timeout-minutes: 90
     name: field casts (${{ matrix.os }})
     steps:
@@ -91,6 +86,6 @@ jobs:
         with:
           shared-key: codegen-dev-tools-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
 
-      - name: Field casts against the pin
+      - name: Field-walk invariants and direction pin
         shell: bash
         run: "cargo test --locked --lib --features dev_ui,bitprobe -- ballistics::field_casts:: ballistics::spall_cone:: --nocapture"

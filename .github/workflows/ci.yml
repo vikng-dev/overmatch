@@ -3,8 +3,8 @@ name: CI
 # The tree's verdict on every push to main and every PR: formatting, the supply chain, lints and
 # tests must pass. Keeps the tree fmt-clean and clippy-green so drift can't reaccumulate (the
 # release workflow assumes a healthy tree). Two lanes are workflows of their own: the asset door
-# (`assets.yml`), which judges a push's range, and the field casts (`field-casts.yml`), a
-# measurement rather than a gate.
+# (`assets.yml`), which judges a push's range, and supplemental cross-platform field checks
+# (`field-casts.yml`). The library's field invariants also run in the ordinary tests below.
 
 on:
   push:
@@ -165,16 +165,15 @@ jobs:
       - name: Tests
         if: matrix.task == 'tests'
         run: |
-          cargo test --locked --workspace --features dev_ui,bitprobe -- --skip ballistics::field_casts::
+          cargo test --locked --workspace --features dev_ui,bitprobe
 
   # One context that is green iff EVERY lane a push or a PR runs here is green — `fmt` included,
   # because a summary that omits a lane is a summary that can go green over its failure, whatever
   # branch protection happens to require alongside it today.
   #
   # The asset door is not a lane here: it is `assets.yml`, its own workflow and its own required
-  # context (`assets`), because it judges a push's range and must never be cancelled. The field
-  # casts (`field-casts.yml`) are a measurement for a design decision, and their red is a finding,
-  # not a broken tree.
+  # context (`assets`), because it judges a push's range and must never be cancelled. Supplemental
+  # cross-platform field checks (`field-casts.yml`) keep their own workflow status.
   check:
     name: check
     needs: [fmt, deny, checks]

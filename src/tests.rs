@@ -40,8 +40,8 @@ pub(crate) fn tank_views(gunner_fov: f32) -> crate::tank::TankViews {
 
 /// `OVERMATCH_BLESS=1`, the one switch of every pinned-output test: set, a test that pins an output
 /// to a file writes today's output to that file, and the diff is the review. Its
-/// users: `ballistics::pen_cam::bless_scenarios`, the field-cast digest
-/// (`ballistics::field_casts`) and the spall cone's direction bits (`ballistics::spall_cone`).
+/// users: `ballistics::pen_cam::bless_scenarios` and the spall cone's direction bits
+/// (`ballistics::spall_cone`).
 pub(crate) fn bless() -> bool {
     crate::env_flag("OVERMATCH_BLESS", false).unwrap_or_else(crate::refuse_start)
 }

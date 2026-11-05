@@ -185,9 +185,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
 
-  # Tag pushes only: the field casts (`field-casts.yml`) measured on the tag, so every shipped build
-  # has its casts measured on every target. DISPATCHED rather than called: a called workflow's red
-  # leg is this run's red, and a measurement must never colour a release. No job needs this one.
+  # Tag pushes dispatch supplemental cross-platform field invariants (`field-casts.yml`).
+  # Dispatch keeps that coverage's status separate from the release; no job depends on this one.
   field-casts:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
