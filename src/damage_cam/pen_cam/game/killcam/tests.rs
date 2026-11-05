@@ -1,7 +1,7 @@
 //! The game's damage-model view tests, game state only.
 
 use super::super::tests::{
-    STEP_S, census, corner_app_with, default_image_kept, receive, stage_of, step,
+    STEP_S as FRAME_S, census, corner_app_with, default_image_kept, receive, stage_of, step_by,
 };
 use bevy::camera::visibility::RenderLayers;
 
@@ -15,6 +15,18 @@ use crate::damage_cam::wire::{BuiltExplanation, ShotExplanation, ShotVocabulary}
 
 /// The recorded scenario every test kills with: fixture data.
 const RECORD: &str = "s1_through_crew";
+
+/// The game's damage-model view fixture reserves eight frames inside the authored record wait,
+/// so receipt remains timely even when that taste is shorter than the nominal fixture frame.
+const STEP_S: f32 = if FRAME_S < RECORD_WAIT_S / 8.0 {
+    FRAME_S
+} else {
+    RECORD_WAIT_S / 8.0
+};
+
+fn step(app: &mut App) {
+    step_by(app, STEP_S);
+}
 
 /// The lesson's length for [`RECORD`] ([`lesson_length`]); a component's shape never times a
 /// record, so no tank's shapes are needed.
@@ -204,7 +216,7 @@ fn the_killer_card_reads_the_live_shooters_loaded_spec() {
 #[test]
 fn either_arrival_order_plays_the_four_beats() {
     // Fixture arrivals leave room for receipt and presentation frames inside the authored window.
-    let timely_s = (RECORD_WAIT_S - 3.0 * STEP_S).max(0.0);
+    let timely_s = RECORD_WAIT_S - 3.0 * STEP_S;
     for record_after_s in [-STEP_S, 0.0, timely_s / 2.0, timely_s] {
         let (mut app, _, _) = killed(record_after_s);
         assert!(until(&mut app, 0.1, |app| victim(app).run().is_some()));
