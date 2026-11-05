@@ -841,7 +841,9 @@ fn place(
     };
     let hit = run.hit.unwrap_or(transform.rotation);
     let (centre, look) = rig.orbit_drifting(run.beats, run.t, run.real, hit, hit, reduce);
-    let forward = Dir3::new(look * Vec3::NEG_Z).unwrap_or(Dir3::NEG_Z);
+    let forward = Dir3::new(look * Vec3::NEG_Z).expect(
+        "the game's damage-model captive camera rotation defines a finite, nonzero look direction",
+    );
     let body = orbit_body(centre, forward, run.radius, |ray, max| {
         ground_distance(&spatial, ray, max)
     });
@@ -849,8 +851,9 @@ fn place(
     if *transform != want {
         *transform = want;
     }
-    let fov =
-        view_fov(&views, ViewKind::Commander).unwrap_or(crate::camera::COMMANDER_FOV_BEFORE_BIND);
+    let fov = view_fov(&views, ViewKind::Commander).expect(
+        "the game's damage-model captive camera has a controlled tank with spawn-built views",
+    );
     if let Projection::Perspective(p) = projection.as_mut()
         && p.fov != fov
     {

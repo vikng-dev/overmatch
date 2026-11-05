@@ -581,9 +581,11 @@ fn each_beats_channels_resolve_on_its_first_frame() {
     crate::render_policy::plugin(&mut app);
     app.init_resource::<avian3d::collider_tree::ColliderTrees>()
         .insert_resource(TurretPivot::at(Vec3::Y));
-    app.world_mut()
-        .entity_mut(player)
-        .insert((Tank, Transform::IDENTITY));
+    app.world_mut().entity_mut(player).insert((
+        Tank,
+        Transform::IDENTITY,
+        crate::tests::tank_views(crate::camera::COMMANDER_FOV_BEFORE_BIND),
+    ));
     app.world_mut()
         .entity_mut(camera)
         .insert((Transform::from_xyz(0.0, 3.0, 10.0), Projection::default()));
