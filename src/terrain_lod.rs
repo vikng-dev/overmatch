@@ -1004,9 +1004,12 @@ mod tests {
                 "exact extraction must be the full grid"
             );
             total += ours.len();
-            let Some(Indices::U32(indices)) = mesh.indices() else {
-                panic!("the canonical tiler must carry u32 indices");
-            };
+            let indices: Vec<u32> = mesh
+                .indices()
+                .expect("the canonical tiler must carry triangle indices")
+                .iter()
+                .map(|index| index as u32)
+                .collect();
             // Both index the tile's own patch row-major, so the triples are directly
             // comparable — once each is rotated to start at its lowest vertex. Rotation preserves
             // winding and is the only freedom a triangle has; emission order is not part of the
@@ -1014,14 +1017,9 @@ mod tests {
             let normalize = |tri: &mut [u32; 3]| {
                 let first = usize::from(tri[1] < tri[0] && tri[1] < tri[2])
                     + 2 * usize::from(tri[2] < tri[0] && tri[2] < tri[1]);
-                *tri = [tri[first], tri[(first + 1) % 3], tri[(first + 2) % 3]];
+                tri.rotate_left(first);
             };
-            let mut theirs: Vec<[u32; 3]> = indices
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .map(|tri| [tri[0], tri[1], tri[2]])
-                .collect();
+            let mut theirs = indices.as_chunks::<3>().0.to_vec();
             ours.iter_mut().for_each(&normalize);
             theirs.iter_mut().for_each(&normalize);
             ours.sort_unstable();
