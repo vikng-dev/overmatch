@@ -28,7 +28,8 @@
 //!   that stops on such a body pushes it the same way, through avian at the point it stops.
 //!   Terrain and other nonstructural surfaces only shade the field.
 //! * **Contacts**: [`sweep_intake::run`] frees intersected patches before physics, handing each to
-//!   [`sweep_intake::sweep_departure`] with velocity and tick. Unfreed contact transfers on a placed
+//!   [`sweep_intake::sweep_departure`] with velocity and tick, which routes what stays connected of
+//!   it by size ([`crate::debris::crumble::route`]). Unfreed contact transfers on a placed
 //!   construction enter [`read_contacts`] as forces for the structure check. The solver already
 //!   exchanged their momentum; intake never launches or refunds a second body blow. Sleeping
 //!   presses remain in [`RestingLoads`]. A moving group's contacts load no law here: its landings
@@ -2900,6 +2901,7 @@ pub(crate) struct ReplicaSet;
 
 pub(crate) fn sim_plugin(app: &mut App) {
     app.init_resource::<SweepAccount>()
+        .add_message::<crate::debris::crumble::Shed>()
         .add_systems(
             FixedPostUpdate,
             (sweep_intake::run, reconcile.run_if(sweep_intake::changed))

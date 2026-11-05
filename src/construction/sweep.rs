@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use std::collections::HashSet;
 
 use super::fracture::{Block, Side, State, Structure};
+use crate::debris::crumble::{Contactor, peak_force, peak_speed};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Geometry {
@@ -195,6 +196,7 @@ impl Geometry {
                 normal,
                 at,
                 speed,
+                chunk: c,
             };
             if result.witness.is_none_or(|first| time < first.time) {
                 result.witness = Some(witness);
@@ -234,6 +236,10 @@ impl Geometry {
             .collect()
     }
 
+    /// Break `sweep`'s cut when the hull's stop on its witness chunk, plus its inward `drive`,
+    /// exceeds the cut's capacity. The stop is the elastic impact's peak force
+    /// ([`peak_force`]) of the hull's `mass` on that chunk, the hull's side [`Contactor::RIGID`],
+    /// so no physics step enters it.
     pub(crate) fn resolve(
         &self,
         structure: &Structure,
@@ -241,7 +247,6 @@ impl Geometry {
         sweep: &mut Sweep,
         mass: f32,
         drive: Vec3,
-        dt: f32,
     ) {
         let Some(witness) = sweep.witness else {
             return;
@@ -267,13 +272,16 @@ impl Geometry {
             })
             .sum::<f32>();
         let drive = drive.dot(witness.normal).max(0.0);
-        let demand = mass * witness.speed / dt + drive;
+        let (mass, patch) = (f64::from(mass), Contactor::chunk(structure, witness.chunk));
+        let stop = peak_force(mass, f64::from(witness.speed), patch, Contactor::RIGID) as f32;
+        let demand = stop + drive;
         sweep.broken = demand > capacity;
+        let left = f64::from((capacity - drive).max(0.0));
         sweep.load = Some(PatchLoad {
             drive,
             demand,
             capacity,
-            threshold: (capacity - drive).max(0.0) * dt / mass,
+            threshold: peak_speed(mass, left, patch, Contactor::RIGID) as f32,
         });
     }
 }
@@ -397,6 +405,8 @@ pub(crate) struct Witness {
     pub(crate) normal: Vec3,
     pub(crate) at: Vec3,
     pub(crate) speed: f32,
+    /// The chunk the hull meets first, whose material and size stop it.
+    pub(crate) chunk: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -760,6 +770,7 @@ mod tests {
         drive: f32,
     ) -> Sweep {
         // Fixture: middle row, just outside the wall; normal motion crosses the same three chunks.
+        // A one-metre travel window reaches the wall at any speed; the stop reads no step.
         let hull = Collider::cuboid(0.4, 0.4, 2.4);
         let mut swept = geometry.swept(
             structure,
@@ -771,7 +782,7 @@ mod tests {
                 centre: Vec3::X * -0.31,
                 spin: Vec3::ZERO,
                 velocity: Vec3::X * speed,
-                dt: 1.0,
+                dt: 1.0 / speed,
             },
         );
         // Fixture: the planar wall's analytical normal isolates the cut threshold from convex
@@ -788,7 +799,6 @@ mod tests {
             &mut swept,
             mass,
             Vec3::X * drive,
-            1.0,
         );
         swept
     }
@@ -833,47 +843,46 @@ mod tests {
         );
     }
 
-    /// The game's environment destruction: a hull's stopping mass and inward drive govern the
-    /// threshold. Counting chunk mass or internal seams, or losing either seam mode, breaks it.
+    /// The game's environment destruction: a hull's stopping mass, the chunk it meets and its
+    /// inward drive govern the threshold through the impact's peak force. Counting chunk mass or
+    /// internal seams, losing either seam mode, or a stop read off a step breaks it.
     #[test]
-    fn crawl_equality_drive_and_stronger_material_follow_the_cut_threshold() {
-        // Fixture: three 16 N anchors, 128 kg hull, one-second tick. DERIVED threshold 48/128.
+    fn crawl_drive_and_stronger_material_follow_the_cut_threshold() {
+        // Fixture: three 16 N anchors and a 128 kg hull. The middle row's chunks share one
+        // material and volume, so whichever the witness names stops the hull alike.
         let (structure, geometry) = wall(16.0);
-        let threshold = 48.0 / 128.0;
-        for (speed, broken) in [(0.1, false), (threshold, false), (threshold * 1.0001, true)] {
-            let patch = driven_patch(&structure, &geometry, speed, 128.0, 0.0);
-            assert_eq!(patch.chunks, [3, 4, 5]);
-            assert_eq!(patch.broken, broken, "speed={speed}");
-            assert_eq!(patch.load.unwrap().threshold, threshold);
-        }
-        // Fixture: doubling both material modes doubles the threshold at unchanged mass and dt.
-        let (stronger, stronger_geometry) = wall(32.0);
-        assert!(
-            !driven_patch(
-                &stronger,
-                &stronger_geometry,
-                threshold * 1.0001,
+        let speed_at = |structure: &Structure, force: f64| {
+            peak_speed(
                 128.0,
-                0.0
-            )
-            .broken
-        );
-        let strong = driven_patch(
-            &stronger,
-            &stronger_geometry,
-            2.0 * threshold * 1.0001,
-            128.0,
-            0.0,
-        );
-        assert!(strong.broken);
-        assert_eq!(strong.load.unwrap().threshold, 2.0 * threshold);
-        // Fixture: 8 N drive lowers the threshold by 8/128 m/s; equality still holds.
-        let driven = threshold - 8.0 / 128.0;
-        assert!(!driven_patch(&structure, &geometry, driven, 128.0, 8.0).broken);
-        assert!(driven_patch(&structure, &geometry, driven * 1.0001, 128.0, 8.0).broken);
+                force,
+                Contactor::chunk(structure, 4),
+                Contactor::RIGID,
+            ) as f32
+        };
+        let bracket = |structure: &Structure, geometry: &Geometry, speed: f32, drive: f32| {
+            [(0.9999, false), (1.0001, true)].map(|(scale, broken)| {
+                let patch = driven_patch(structure, geometry, speed * scale, 128.0, drive);
+                assert_eq!(patch.chunks, [3, 4, 5]);
+                assert_eq!(patch.broken, broken, "speed={}", speed * scale);
+                patch.load.unwrap().threshold
+            })
+        };
+        // DERIVED: the speed whose peak force is the cut's 48 N.
+        let base = speed_at(&structure, 48.0);
+        let reported = bracket(&structure, &geometry, base, 0.0);
+        // Resolution: one f64-to-f32 rounding of the same inverse.
+        assert!(reported.iter().all(|&t| (t / base - 1.0).abs() < 1e-6));
+        // DERIVED: the peak force grows as v^(6/5), so doubling both seam modes raises the
+        // threshold by 2^(5/6) at unchanged mass.
+        let (stronger, stronger_geometry) = wall(32.0);
+        let strong = speed_at(&stronger, 96.0);
+        assert!((strong / base / 2f32.powf(5.0 / 6.0) - 1.0).abs() < 1e-5);
+        bracket(&stronger, &stronger_geometry, strong, 0.0);
+        // Fixture: an 8 N drive leaves 40 N for the stop.
+        let driven = speed_at(&structure, 40.0);
+        bracket(&structure, &geometry, driven, 8.0);
         println!(
-            "DERIVED and MEASURED block thresholds: base={threshold}, double-strength={}, driven={driven}",
-            strong.load.unwrap().threshold
+            "DERIVED and MEASURED block thresholds: base={base}, double-strength={strong}, driven={driven} m/s"
         );
     }
 

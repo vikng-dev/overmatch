@@ -583,15 +583,16 @@ mod tests {
         drive: f32,
     ) {
         use crate::construction::{breakage::Breakage, fracture::Side, sweep::Sweep};
+        use crate::debris::crumble::{Contactor, peak_speed};
         use avian3d::prelude::ComputedMass;
         let owner = app.world().get::<Breakage>(target).unwrap();
         let structure = &owner.live.structure;
         let mass = app.world().get::<ComputedMass>(source).unwrap().value();
-        let dt = app
-            .world()
-            .resource::<Time<Fixed>>()
-            .timestep()
-            .as_secs_f32();
+        // The hull stops on the witness chunk at the peak force of their impact, its side rigid.
+        let patch = Contactor::chunk(structure, witness.chunk);
+        let speed_at = |force: f32| {
+            peak_speed(f64::from(mass), f64::from(force), patch, Contactor::RIGID) as f32
+        };
         let mut capacity = 0.0;
         let mut cut = 0;
         for (j, edge) in structure.joints.iter().enumerate() {
@@ -611,7 +612,7 @@ mod tests {
             capacity > 0.0,
             "the wall patch has intact boundary strength"
         );
-        let threshold = capacity * dt / mass;
+        let threshold = speed_at(capacity);
         for (speed, broken) in [(threshold * 0.9999, false), (threshold * 1.0001, true)] {
             let mut trial = Sweep {
                 chunks: chunks.to_vec(),
@@ -621,17 +622,22 @@ mod tests {
             owner
                 .kind
                 .sweep
-                .resolve(structure, before, &mut trial, mass, Vec3::ZERO, dt);
+                .resolve(structure, before, &mut trial, mass, Vec3::ZERO);
             assert_eq!(
                 trial.broken, broken,
                 "the observed wall patch brackets its derived threshold"
             );
         }
-        let driven = (capacity - drive).max(0.0) * dt / mass;
+        let left = capacity - drive;
+        let driven = speed_at(left.max(0.0));
         if driven > 0.0 {
-            // Resolution: bracket above summed f32 force roundoff, including near-balanced drive.
-            let delta = (driven * 1e-4).max(64.0 * f32::EPSILON * capacity * dt / mass);
-            for (speed, broken) in [((driven - delta).max(0.0), false), (driven + delta, true)] {
+            // Resolution: bracket the stop above summed f32 force roundoff, including
+            // near-balanced drive.
+            let margin = (left * 1e-4).max(64.0 * f32::EPSILON * capacity);
+            for (speed, broken) in [
+                (speed_at((left - margin).max(0.0)), false),
+                (speed_at(left + margin), true),
+            ] {
                 let mut trial = Sweep {
                     chunks: chunks.to_vec(),
                     witness: Some(crate::construction::sweep::Witness { speed, ..witness }),
@@ -643,7 +649,6 @@ mod tests {
                     &mut trial,
                     mass,
                     witness.normal * drive,
-                    dt,
                 );
                 assert_eq!(
                     trial.broken, broken,
@@ -654,7 +659,7 @@ mod tests {
             assert!(drive >= capacity, "zero threshold follows from drive alone");
         }
         println!(
-            "DERIVED and MEASURED wall threshold: patch={}, cut={cut}, mass={mass}, dt={dt}, capacity={capacity}, inward drive={drive}, unpowered={threshold} m/s, driven={driven} m/s; below holds, above breaks",
+            "DERIVED and MEASURED wall threshold: patch={}, cut={cut}, mass={mass}, capacity={capacity}, inward drive={drive}, unpowered={threshold} m/s, driven={driven} m/s; below holds, above breaks",
             chunks.len()
         );
     }
@@ -710,6 +715,7 @@ mod tests {
                 .count()
         );
         let mut freed = 0;
+        let mut shed = 0;
         let mut counts = (0, 0, 0, 0);
         let mut per_tick = Vec::new();
         let mut solver_contacts = Vec::new();
@@ -808,6 +814,7 @@ mod tests {
                 );
                 initial.get_or_insert(tick);
                 freed += chunks;
+                shed += account.shed;
                 for &(body, before, after, change) in &account.source_changes {
                     if body != tank {
                         continue;
@@ -860,7 +867,7 @@ mod tests {
             .filter(|&&f| f != crate::construction::fracture::Fate::Standing)
             .count();
         println!(
-            "MEASURED tracked ram: first sweep tick={first}, freed in two ticks={freed}, target chunks absent={gone}, bounds/casts/incident-joint visits/cast-contact queries={counts:?}, speeds and momentum={losses:?}, post-physics velocities and remaining wall impulses={solver_contacts:?}"
+            "MEASURED tracked ram: first sweep tick={first}, freed in two ticks={freed}, fragments shed as decoration={shed}, target chunks absent={gone}, bounds/casts/incident-joint visits/cast-contact queries={counts:?}, speeds and momentum={losses:?}, post-physics velocities and remaining wall impulses={solver_contacts:?}"
         );
     }
 }

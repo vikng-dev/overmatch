@@ -1753,15 +1753,18 @@ pub(crate) fn wall_face(kind: &ConstructionKind) -> (usize, Vec3, Vec3) {
 
 /// The game's environment destruction: equal motion and geometry produce equal contact forces
 /// for a plain body and a construction carrier. The structure check relies on no body-kind gate;
-/// the unbroken fixture is deliberately too light to sweep its wall.
+/// the unbroken fixture is deliberately too slow to sweep its wall: its stop's peak force at
+/// 0.1 m/s stays under the struck patch's cut.
 #[test]
 fn no_bodys_kind_enters_a_contacts_loads() {
     let kind = shipped_house();
     let (e, face, w) = wall_face(&kind);
-    let start = face - w * (CUBE_SIDE / 2.0 + 0.3);
+    // Fixture: 2 cm short of the face at 0.1 m/s, so the cube meets it within the run.
+    let (gap, speed) = (0.02, 0.1);
+    let start = face - w * (CUBE_SIDE / 2.0 + gap);
     let strike = |construction_piece: bool| {
         let (mut app, root) = composed_keeping_contacts();
-        let cube = contact_cube(&mut app, start, w * 3.0);
+        let cube = contact_cube(&mut app, start, w * speed);
         if construction_piece {
             app.world_mut().entity_mut(cube).insert((
                 Piece {
@@ -1810,7 +1813,7 @@ fn no_bodys_kind_enters_a_contacts_loads() {
     let loads: Vec<Load> = plain.into_iter().flatten().map(|(_, load)| load).collect();
     assert!(!loads.is_empty(), "the cube strikes the wall");
     let blow: Vec3 = loads.iter().map(|load| load.blow + load.press * STEP).sum();
-    let closing = CUBE_KG * 3.0;
+    let closing = CUBE_KG * speed;
     let transferred = w * closing - final_momentum;
     assert!(
         (blow - transferred).length() <= 0.01 * closing,
@@ -4314,7 +4317,7 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     shape.derive_departures(&kind.layout, &live);
     assert_eq!(
         shape.fate[1],
-        Fate::Fallen,
+        Fate::Dust,
         "the streamed ledger opens the same hole"
     );
     println!(
@@ -4328,55 +4331,48 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     );
 }
 
-/// The game's environment destruction: decor receives a whole patch. Opening internal seams
-/// or resetting its state would turn one moving cluster into unrelated new chunks.
+/// The game's environment destruction: the hull makes the hole. A swept patch leaves the
+/// server as dust whatever its mass, and reaches the players as one cluster moving on its rigid
+/// field. Opening internal seams would turn it into unrelated chunks; routing it by size would keep
+/// a server body pinned between the hull and the standing construction.
 #[test]
-fn a_swept_patch_departs_as_one_cluster_preserving_its_internal_joints() {
+fn a_swept_patch_leaves_as_one_dust_cluster_whatever_its_mass() {
     let kind = column_construction();
     let (mut app, root) = composed_kind(false, &kind);
     let mut owner = app.world_mut().get_mut::<Breakage>(root).unwrap();
     let mut record = Record::default();
-    // Fixture: the upper pair leaves at a rigid twist about the construction origin.
+    // Fixture: the upper pair, past the server cut-off, leaves at a rigid twist about the origin.
     let group = vec![1, 2];
-    let velocity = Vec3::X * 2.0;
-    let spin = Vec3::Z;
-    let departure = sweep_intake::sweep_departure(
+    assert!(crate::debris::crumble::server_body(
+        &owner.live.structure,
+        &group
+    ));
+    let sheds = sweep_intake::sweep_departure(
         &mut owner,
         Transform::IDENTITY,
         group.clone(),
         sweep_intake::ReleasedMotion {
-            velocity,
-            spin,
+            velocity: Vec3::X * 2.0,
+            spin: Vec3::Z,
             centre: Vec3::ZERO,
         },
         7,
         &mut record,
     );
-    assert_eq!(departure.group, group);
-    assert_eq!(departure.launch.colliders.len(), group.len());
+    assert_eq!(sheds.len(), 1, "one connected patch is one cluster");
+    assert_eq!(sheds[0].chunks, [1, 2]);
     let internal = kind
         .layout
         .joints
         .iter()
         .position(|j| group.contains(&j.a) && matches!(j.b, Side::Chunk(b) if group.contains(&b)))
         .unwrap();
-    assert!(!departure.live.state.separated[internal]);
     assert!(!owner.live.state.separated[internal]);
     for &c in &group {
-        assert!(!owner.live.state.standing(c));
-        assert!(departure.live.state.standing(c));
+        assert_eq!(owner.live.state.fate[c], Fate::Dust);
     }
-    assert!(
-        (departure.launch.velocity - velocity - spin.cross(departure.launch.centre)).length()
-            < 1e-5
-    );
     assert!(record.entries.iter().all(|e| e.tick == 7));
-    assert_eq!(
-        record
-            .entries
-            .iter()
-            .filter(|e| matches!(e.event, Event::Separate(_)))
-            .count(),
-        1
-    );
+    let count = |f: fn(&Event) -> bool| record.entries.iter().filter(|e| f(&e.event)).count();
+    assert_eq!(count(|e| matches!(e, Event::Separate(_))), 1);
+    assert_eq!(count(|e| matches!(e, Event::Dust(_))), group.len());
 }

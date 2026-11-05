@@ -18,7 +18,11 @@ pub(crate) struct Launch {
     pub(crate) colliders: Vec<(usize, Collider)>,
     pub(crate) velocity: Vec3,
     pub(crate) spin: Vec3,
+    /// The occupied mass and inertia about `centre`, which tests hold spawned bodies to; Avian
+    /// sums the same colliders for the body itself.
+    #[cfg(test)]
     pub(crate) mass: f32,
+    #[cfg(test)]
     pub(crate) inertia: Mat3,
 }
 
@@ -68,7 +72,9 @@ pub(crate) fn launch_colliders(
         colliders,
         velocity: impulse / total.mass,
         spin: inverse_inertia * angular,
+        #[cfg(test)]
         mass: total.mass,
+        #[cfg(test)]
         inertia: total.angular_inertia_tensor().to_mat3(),
     }
 }

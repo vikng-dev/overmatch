@@ -363,17 +363,22 @@ capacity is `C = sum A * (tensile * abs(n dot d) + cohesion * length(n cross d))
 of the independent opening and sliding limits in the contact direction `d`. Separated joints,
 cracked seams and noncohesive rests offer no bonded capacity.
 
-The demand is the force that stops the hull within the tick: `F = m_hull * v_n / dt + F_drive,n`.
-The hull's own rigid-body mass supplies `m_hull`; its first inward surface witness supplies `v_n`.
-Inward accumulated and constant drive forces add to the demand. If `F > C`, break the
-cut and remove the whole patch from the standing construction. Otherwise move the hull to the
-first surface, stop its inward contact motion, and send that stopping impulse divided by the tick
-through contact intake to the structure check. Continuing drive remains in Avian's contacts and
+The demand is the peak force of the hull's impact on the patch plus its drive:
+`F = P(m_hull, v_n) + F_drive,n`, with `P` the Hertz peak force (Johnson 1985, §11.4) that
+landings use too (`debris::crumble::peak_force`): the witness chunk's material and volume-sphere
+radius on one side, the hull rigid and flat on the other (StandIn: no body data carries a hull's
+stiffness). The hull's own rigid-body mass supplies `m_hull`; its first inward surface witness
+supplies `v_n` and the chunk. No physics step enters the stop. Inward accumulated and constant
+drive forces add to the demand. If `F > C`, break the cut and remove the whole patch from the
+standing construction. Otherwise move the hull to the first surface, stop its inward contact
+motion, and send that stopping impulse divided by the tick through contact intake to the
+structure check, which reads every contact as its mean force; the peak force decides only the cut. Continuing drive remains in Avian's contacts and
 its mean-force reading, including sleeping contacts; adding it to the explicit stopping load
 would count it twice. Remaining tangential motion and physics contacts still belong to Avian.
 
-DERIVED: for a fixed patch, `v_threshold = max(0, C - F_drive,n) * dt / m_hull`.
-Equality holds; motion just above it breaks the cut. Strength, mass and drive come from data and
+DERIVED: for a fixed patch, `v_threshold` is the speed whose peak force is `max(0, C - F_drive,n)`:
+`δ = (3P / (4 E* √R))^(2/3)`, `v = √(16 E* √R δ^(5/2) / (15 m_hull))`; it grows as
+`(C - F_drive,n)^(5/6)`. Motion just above it breaks the cut. Strength, mass and drive come from data and
 rigid-body state; no authored speed threshold or construction-specific adjustment enters the law.
 
 All chunks freed by one source in a tick share one plastic rigid-motion exchange, including
@@ -387,7 +392,11 @@ The account exposes removed kinetic energy and outgoing chunk kinetic energy sep
 
 `breakage::sweep_intake::sweep_departure` is the departure boundary: construction identity, the
 whole patch's chunk identities, world rigid motion and authoritative tick. Internal joints stay
-intact. Until the decor layer routes fragments by size, the patch uses one occupied debris body. The standing owner removes the chunks immediately and the
+intact. The hull makes the hole: whatever its mass, the patch leaves the server as dust in the
+ledger and reaches the players as decoration, one `Shed` per fragment that stays connected, its
+momentum and energy still in the sweep's account. The hull still pays the plastic exchange. The
+100 kg size route (`debris::crumble::route`) serves what the structure law releases and landings,
+never a swept hole. The standing owner removes the chunks immediately and the
 ledger records the joint separations; clients derive the hole at the same presentation tick.
 A retired element's staged belt reactions are cancelled before integration; surviving surfaces
 receive fresh solver contacts. A sweep never enters the structural pulse/work calculation.

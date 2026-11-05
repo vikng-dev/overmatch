@@ -7,6 +7,8 @@ use avian3d::prelude::{
 #[derive(Resource, Default, Debug)]
 pub(crate) struct SweepAccount {
     pub(crate) freed: usize,
+    /// Freed fragments shed to the players as decoration.
+    pub(crate) shed: usize,
     #[cfg(test)]
     pub(crate) patches: Vec<(Entity, u16, Vec<usize>, super::super::sweep::Witness)>,
     pub(crate) work: super::super::sweep::Work,
@@ -116,6 +118,7 @@ pub(super) struct Intake<'w, 's> {
     record: ResMut<'w, Record>,
     queue: ResMut<'w, Queue>,
     account: ResMut<'w, SweepAccount>,
+    shed: MessageWriter<'w, crate::debris::crumble::Shed>,
     commands: Commands<'w, 's>,
 }
 
@@ -163,9 +166,8 @@ pub(super) fn run(mut p: Intake) {
             .or_default()
             .extend(swept.chunks.into_iter().filter(|_| swept.broken));
     }
-    let mut departures = Vec::new();
     for (body, owners) in by_source {
-        commit_source(&mut p, body, owners, tick, &mut departures);
+        commit_source(&mut p, body, owners, tick);
     }
     let changed = p
         .queue
@@ -202,23 +204,6 @@ pub(super) fn run(mut p: Intake) {
             .get_mut(cancelled.body)
             .expect("implicit source survives its same-tick sweep");
         source.apply_force_at_point(-cancelled.force, cancelled.point);
-    }
-    let prepared = ComputeTaskPool::get().scope(|scope| {
-        for departure in departures {
-            scope.spawn(async move { prepare_group(departure) });
-        }
-    });
-    for departure in prepared {
-        let launch = &departure.departure.launch;
-        p.account.outgoing_momentum +=
-            departure.departure.root.rotation * launch.velocity * launch.mass;
-        p.account.outgoing_kinetic_j += 0.5
-            * (f64::from(launch.mass) * launch.velocity.as_dvec3().length_squared()
-                + launch
-                    .spin
-                    .as_dvec3()
-                    .dot(launch.inertia.as_dmat3() * launch.spin.as_dvec3()));
-        spawn_prepared(&mut p.commands, departure);
     }
 }
 
@@ -359,7 +344,6 @@ fn geometry(p: &Intake, dt: f32) -> Vec<(Entity, Entity, super::super::sweep::Sw
                             &mut swept,
                             source.mass,
                             inverse * source.drive,
-                            dt,
                         );
                         (body, root, swept)
                     })
@@ -377,7 +361,6 @@ fn commit_source(
     body: Entity,
     owners: BTreeMap<Entity, BTreeSet<usize>>,
     tick: u32,
-    departures: &mut Vec<Departure>,
 ) {
     let parts: Vec<_> = owners
         .iter()
@@ -463,10 +446,10 @@ fn commit_source(
                 .chunks
                 .push((breakage.construction, c as u16, velocity));
         }
-        departures.push(sweep_departure(
+        let sheds = sweep_departure(
             &mut breakage,
             pose,
-            chunks,
+            chunks.clone(),
             ReleasedMotion {
                 velocity: result.velocity.as_vec3(),
                 spin: result.spin.as_vec3(),
@@ -474,7 +457,19 @@ fn commit_source(
             },
             tick,
             &mut p.record,
-        ));
+        );
+        // The patch's momentum and energy leave with the players' decoration, on the rigid field
+        // the exchange gave every freed chunk.
+        for c in chunks {
+            let part = breakage.kind.sweep.part(c, &pose);
+            let velocity = result.velocity + result.spin.cross(part.centre - source.centre);
+            p.account.outgoing_momentum += (velocity * part.mass).as_vec3();
+            p.account.outgoing_kinetic_j += 0.5
+                * (part.mass * velocity.length_squared()
+                    + result.spin.dot(part.inertia * result.spin));
+        }
+        p.account.shed += sheds.len();
+        p.shed.write_batch(sheds);
     }
 }
 
@@ -484,7 +479,11 @@ pub(super) struct ReleasedMotion {
     pub(super) centre: Vec3,
 }
 
-/// Departure boundary for decor: one patch, its rigid velocity field and authoritative tick.
+/// One freed patch, its rigid velocity field and authoritative tick: the hull makes the hole.
+/// Whatever its mass, the patch leaves the server as dust in the record and reaches the players
+/// as decoration, one [`crate::debris::crumble::Shed`] per fragment that stays connected; the
+/// hull has paid its exchange. The size route is for what the structure law releases and for
+/// landings, never for a swept hole.
 pub(super) fn sweep_departure(
     breakage: &mut Breakage,
     pose: Transform,
@@ -492,7 +491,7 @@ pub(super) fn sweep_departure(
     motion: ReleasedMotion,
     tick: u32,
     record: &mut Record,
-) -> Departure {
+) -> Vec<crate::debris::crumble::Shed> {
     let ReleasedMotion {
         velocity,
         spin,
@@ -515,38 +514,39 @@ pub(super) fn sweep_departure(
             });
         }
     }
-    let live = breakage.live.group(&group);
+    let fragments =
+        crate::debris::crumble::fragments(&breakage.live.structure, &breakage.live.state, &group);
     for &c in &group {
         record.entries.push(Entry {
             construction: breakage.construction,
-            event: Event::Wear(c as u16),
+            event: Event::Dust(c as u16),
             tick,
         });
-        breakage.live.state.fate[c] = Fate::Fallen;
+        breakage.live.state.fate[c] = Fate::Dust;
         breakage.live.swapped[usize::from(kind.layout.element_of[c])] = true;
     }
-    let mut launch = launch(&kind, &live.structure, &group, &[]);
-    let world_centre = pose.translation + pose.rotation * launch.centre;
-    launch.velocity = pose.rotation.inverse() * (velocity + spin.cross(world_centre - centre));
-    launch.spin = pose.rotation.inverse() * spin;
-    Departure {
-        kind,
-        construction: breakage.construction,
-        root: pose,
-        live,
-        group,
-        launch,
-        tick,
-    }
+    fragments
+        .iter()
+        .map(|fragment| {
+            crate::debris::crumble::Shed::of(
+                &breakage.live.structure,
+                (breakage.construction, pose),
+                fragment,
+                (velocity, spin, centre),
+                tick,
+            )
+        })
+        .collect()
 }
 
 /// A held cut transmits its stopping press through the same intake as solver contacts. Moving
 /// to the first surface before braking prevents a strong wall being crossed between solver ticks.
 fn hold(p: &mut Intake, body: Entity, root: Entity, swept: &super::super::sweep::Sweep, dt: f32) {
     let witness = swept.witness.expect("a held patch has an occupied contact");
-    let load = swept
-        .load
-        .expect("a held patch has a resolved cut capacity");
+    let (_, _, mass, ..) = p.bodies.get(body).expect("a held source survives intake");
+    // The structure check reads every contact as its mean force over the tick, as it reads the
+    // solver's; the stop's peak force decided only that the cut holds (`sweep::Geometry::resolve`).
+    let stop = mass.value() * witness.speed / dt;
     let (_, position, rotation, owner) = p
         .constructions
         .get(root)
@@ -556,7 +556,7 @@ fn hold(p: &mut Intake, body: Entity, root: Entity, swept: &super::super::sweep:
     let point = pose.translation + pose.rotation * witness.at;
     // Ongoing drive reaches the wall through Avian's contacts. Only the impulse removed
     // before physics needs an extra intake load; counting drive here would duplicate its press.
-    let share = (load.demand - load.drive) / swept.chunks.len() as f32;
+    let share = stop / swept.chunks.len() as f32;
     for &c in &swept.chunks {
         p.account.held.push((
             root,

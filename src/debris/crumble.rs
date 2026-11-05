@@ -82,13 +82,9 @@ impl Contactor {
     };
 }
 
-/// The peak force (N) of an elastic impact closing at `speed` m/s with effective mass `mass` kg
-/// between `a` and `b` (Hertz; K. L. Johnson, *Contact Mechanics*, Cambridge 1985, §11.4):
-/// `1/E* = Σ (1 − ν²)/E`, `1/R = Σ 1/R`, maximum approach `δ = (15 m v² / (16 E* √R))^(2/5)` and
-/// peak force `P = (4/3) E* √R δ^(3/2)`. The contact's own stiffness sets how hard it stops, so
-/// no solver step enters it.
-pub(crate) fn peak_force(mass: f64, speed: f64, a: Contactor, b: Contactor) -> f64 {
-    let stiffness = (a.compliance + b.compliance).recip();
+/// `E*` (Pa) and `√R` (√m) of the contact between `a` and `b` (Hertz; K. L. Johnson, *Contact
+/// Mechanics*, Cambridge 1985, §11.4): `1/E* = Σ (1 − ν²)/E`, `1/R = Σ 1/R`.
+fn hertz(a: Contactor, b: Contactor) -> (f64, f64) {
     let curvature: f64 = [a.radius, b.radius]
         .iter()
         .flatten()
@@ -96,11 +92,30 @@ pub(crate) fn peak_force(mass: f64, speed: f64, a: Contactor, b: Contactor) -> f
         .sum();
     assert!(
         curvature > 0.0,
-        "a landing's chunk side is curved: two flat sides make no Hertz contact"
+        "a contact's chunk side is curved: two flat sides make no Hertz contact"
     );
-    let root = curvature.recip().sqrt();
+    (
+        (a.compliance + b.compliance).recip(),
+        curvature.recip().sqrt(),
+    )
+}
+
+/// The peak force (N) of an elastic impact closing at `speed` m/s with effective mass `mass` kg
+/// between `a` and `b` ([`hertz`]): maximum approach `δ = (15 m v² / (16 E* √R))^(2/5)` and peak
+/// force `P = (4/3) E* √R δ^(3/2)`. The contact's own stiffness sets how hard it stops, so no
+/// solver step enters it. One law for a landing and a hull's ram (`construction::sweep`).
+pub(crate) fn peak_force(mass: f64, speed: f64, a: Contactor, b: Contactor) -> f64 {
+    let (stiffness, root) = hertz(a, b);
     let approach = (15.0 * mass * speed * speed / (16.0 * stiffness * root)).powf(0.4);
     4.0 / 3.0 * stiffness * root * approach.powf(1.5)
+}
+
+/// The closing speed (m/s) at which [`peak_force`] reaches `force` N, its inverse:
+/// `δ = (3P / (4 E* √R))^(2/3)` and `v = √(16 E* √R δ^(5/2) / (15 m))`.
+pub(crate) fn peak_speed(mass: f64, force: f64, a: Contactor, b: Contactor) -> f64 {
+    let (stiffness, root) = hertz(a, b);
+    let approach = (3.0 * force / (4.0 * stiffness * root)).powf(2.0 / 3.0);
+    (16.0 * stiffness * root * approach.powf(2.5) / (15.0 * mass)).sqrt()
 }
 
 /// One contact on a group, in the construction frame: the chunk it touches, the point (m) and the
@@ -170,7 +185,7 @@ const PASSES: usize = 16;
 
 /// What stays connected of `group` (ascending) over its joints `state` has not parted, each
 /// ascending, ordered by its first chunk.
-fn fragments(structure: &Structure, state: &State, group: &[usize]) -> Vec<Vec<usize>> {
+pub(crate) fn fragments(structure: &Structure, state: &State, group: &[usize]) -> Vec<Vec<usize>> {
     let index: BTreeMap<usize, usize> = group.iter().enumerate().map(|(i, &c)| (c, i)).collect();
     let mut parent: Vec<usize> = (0..group.len()).collect();
     fn root(parent: &mut [usize], mut i: usize) -> usize {
@@ -569,15 +584,15 @@ fn crumble_landings(
         }
         let structure = live.structure.clone();
         let motion = (velocity.0, spin.0, pose.0.0 + pose.1.0 * centre.0);
-        let kept = route(
+        let (kept, sheds) = route(
             &structure,
             (piece.construction, frame),
             result.fragments,
             motion,
             tick,
             &mut record,
-            &mut shed,
         );
+        shed.write_batch(sheds);
         commands
             .entity(entity)
             .insert(PendingSplit::of(&breakage, kept, tick));
@@ -586,7 +601,7 @@ fn crumble_landings(
 
 /// The size split of `fragments` of `construction` at `tick` (module doc), each moving with the
 /// rigid field `motion` (as [`Shed::of`]): a light one goes to the record as dust and to the
-/// players as one [`Shed`]; the rest, returned, stay server bodies.
+/// players as one [`Shed`], returned for the caller to send; the rest, returned, stay server bodies.
 pub(crate) fn route(
     structure: &Structure,
     (construction, frame): (u16, Transform),
@@ -594,32 +609,29 @@ pub(crate) fn route(
     motion: (Vec3, Vec3, Vec3),
     tick: u32,
     record: &mut Record,
-    shed: &mut MessageWriter<Shed>,
-) -> Vec<Vec<usize>> {
+) -> (Vec<Vec<usize>>, Vec<Shed>) {
     let (kept, light): (Vec<_>, Vec<_>) = fragments
         .into_iter()
         .partition(|fragment| server_body(structure, fragment));
-    for fragment in &light {
-        record.entries.extend(fragment.iter().map(|&c| Entry {
-            construction,
-            event: Event::Dust(c as u16),
-            tick,
-        }));
-        shed.write(Shed::of(
-            structure,
-            (construction, frame),
-            fragment,
-            motion,
-            tick,
-        ));
-    }
-    kept
+    let sheds = light
+        .iter()
+        .map(|fragment| {
+            record.entries.extend(fragment.iter().map(|&c| Entry {
+                construction,
+                event: Event::Dust(c as u16),
+                tick,
+            }));
+            Shed::of(structure, (construction, frame), fragment, motion, tick)
+        })
+        .collect();
+    (kept, sheds)
 }
 
 /// Mount the crumble on the authority in [`crate::construction::breakage::LandingSet`]: after the
 /// deposits whose splits it keeps, before the refit that despawns colliders its contacts name.
+/// [`Shed`] is registered with the breakage, whose sweep routes too.
 pub(crate) fn sim_plugin(app: &mut App) {
-    app.add_message::<Shed>().add_systems(
+    app.add_systems(
         FixedPostUpdate,
         crumble_landings
             .in_set(crate::construction::breakage::LandingSet)
