@@ -52,6 +52,22 @@ fn axis(index: usize) -> Vec3 {
     Vec3::AXES[index % 3]
 }
 
+/// Fixture poses shared by the game's damage-model field invariants and their pricing bed.
+fn fixture_poses() -> [Pose; 2] {
+    [
+        Pose {
+            label: "A",
+            translation: PROBE_TANK_AT,
+            rotation: Quat::IDENTITY,
+        },
+        Pose {
+            label: "B",
+            translation: PROBE_TANK_AT + Vec3::new(-3.25, 0.5, 2.75),
+            rotation: Quat::from_xyzw(0.02, 0.31, -0.015, 0.95).normalize(),
+        },
+    ]
+}
+
 /// Every ray of one pose. Tank-local points and directions go to world by the pose alone; cone
 /// directions are generated in world from the world axis, as the sim generates them.
 fn rays(layout: &Layout, pose: Pose) -> Vec<WorldRay> {
@@ -284,18 +300,7 @@ fn field_casts_walk_real_geometry_at_both_poses() {
         16,
     )));
     let layout = layout(&mut app);
-    for pose in [
-        Pose {
-            label: "A",
-            translation: PROBE_TANK_AT,
-            rotation: Quat::IDENTITY,
-        },
-        Pose {
-            label: "B",
-            translation: PROBE_TANK_AT + Vec3::new(-3.25, 0.5, 2.75),
-            rotation: Quat::from_xyzw(0.02, 0.31, -0.015, 0.95).normalize(),
-        },
-    ] {
+    for pose in fixture_poses() {
         cast_pose(&mut app, &layout, pose);
     }
 }
@@ -319,20 +324,8 @@ fn the_shipped_cone_sampler_priced_per_cone() {
     )));
     let layout = layout(&mut app);
     let tank = app.world().resource::<ProbeTank>().0;
-    let poses = [
-        Pose {
-            label: "A",
-            translation: PROBE_TANK_AT,
-            rotation: Quat::IDENTITY,
-        },
-        Pose {
-            label: "B",
-            translation: PROBE_TANK_AT + Vec3::new(-3.25, 0.5, 2.75),
-            rotation: Quat::from_xyzw(0.02, 0.31, -0.015, 0.95).normalize(),
-        },
-    ];
     let mut prices: Vec<(String, usize, f64)> = Vec::new();
-    for pose in poses {
+    for pose in fixture_poses() {
         app.world_mut().entity_mut(tank).insert((
             Position(pose.translation),
             Rotation(pose.rotation),
