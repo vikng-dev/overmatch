@@ -245,10 +245,6 @@ fn apply_sight_camera_profile(
     }
 }
 
-/// Viewport aspect (width / height) before the camera's render target has one — square, the aspect
-/// at which the two half-extents coincide.
-const OPTIC_ASPECT_FALLBACK: f32 = 1.0;
-
 /// The cursor's angular reach off the gun's sight line for vertical field `fov` over a viewport of
 /// `aspect` (width / height): ONE angle, equal at every bearing.
 ///
@@ -420,7 +416,7 @@ pub(crate) fn drive_gunner_aim(
     }
 
     // The field the view's authored optic frames (`spec::Optics`) and the viewport it is framed on
-    // together set the cursor's reach. A square viewport covers an unmeasured render target.
+    // together set the cursor's reach. Sight data supplies a stand-in until the target is measured.
     let fov = view_fov(&views, ViewKind::Gunner)
         .expect("a complete controlled rig carries its spawn-built TankViews");
     let aspect = cameras
@@ -428,7 +424,9 @@ pub(crate) fn drive_gunner_aim(
         .ok()
         .and_then(Camera::logical_viewport_size)
         .filter(|size| size.y > 0.0)
-        .map_or(OPTIC_ASPECT_FALLBACK, |size| size.x / size.y);
+        .map_or(look::get().optic_aspect_before_measurement.0, |size| {
+            size.x / size.y
+        });
     let margin = optic_margin(fov, aspect);
 
     // Scaling mouse gain with the field preserves comparable screen travel across optics.
@@ -660,16 +658,8 @@ mod tests {
             ))
             .id();
         // Fixture authored optic: the complete rig always carries both view records at spawn.
-        let optics: crate::spec::Optics = ron::from_str("Unaided(60.0)").unwrap();
-        let fov = optics.vertical_fov();
-        let view = || crate::tank::ViewConfig {
-            fov,
-            requires: default(),
-        };
-        world.entity_mut(tank).insert(TankViews {
-            gunner: view(),
-            commander: view(),
-        });
+        let fov = crate::spec::Optics::Unaided(60.0).vertical_fov();
+        world.entity_mut(tank).insert(crate::tests::tank_views(fov));
         let hull = world.spawn((Transform::IDENTITY, ChildOf(tank))).id();
         let assembly = world.spawn((Transform::IDENTITY, ChildOf(hull))).id();
         let yaw = world
@@ -733,7 +723,8 @@ mod tests {
             world.run_system_once(drive_gunner_aim).unwrap();
             let dir = world.resource::<CommittedAim>().get(tank).unwrap() - mount;
             let actual = (-dir.x).atan2(-dir.z);
-            let expected = base + bearing + optic_margin(fov, OPTIC_ASPECT_FALLBACK);
+            let expected =
+                base + bearing + optic_margin(fov, look::get().optic_aspect_before_measurement.0);
             assert!(
                 (actual - expected).abs() < 1e-5,
                 "{actual} versus {expected}"

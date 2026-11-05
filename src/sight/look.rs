@@ -25,6 +25,7 @@ pub(crate) struct SightLook {
     /// aiming and servo commands are independent of it.
     pub(crate) gunner_blend: Sourced<f32>,
     pub(crate) mouse_sensitivity_per_fov: Sourced<f32>,
+    pub(crate) optic_aspect_before_measurement: Sourced<f32>,
     /// Diameter / larger viewport axis, also cursor reach / projected half-extent.
     pub(crate) optic_span_fraction: Sourced<f32>,
     /// Broad surround blur, as a fraction of radius; distinct edges keep smoothstep defined.
@@ -111,6 +112,10 @@ impl SightLook {
         for (field, value) in [
             ("toast_seconds", self.toast_seconds.0),
             (
+                "optic_aspect_before_measurement",
+                self.optic_aspect_before_measurement.0,
+            ),
+            (
                 "mouse_sensitivity_per_fov",
                 self.mouse_sensitivity_per_fov.0,
             ),
@@ -180,6 +185,7 @@ mod tests {
         for field in [
             "gunner_blend",
             "mouse_sensitivity_per_fov",
+            "optic_aspect_before_measurement",
             "optic_span_fraction",
             "optic_feather_fraction",
             "optic_surround_linear_rgba",
@@ -206,6 +212,7 @@ mod tests {
         for (field, value) in [
             ("gunner_blend", "2.0"),
             ("mouse_sensitivity_per_fov", "0.0"),
+            ("optic_aspect_before_measurement", "0.0"),
             ("optic_span_fraction", "0.0"),
             ("optic_feather_fraction", "0.0"),
             ("toast_seconds", "NaN"),

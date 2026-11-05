@@ -2,6 +2,7 @@
 (
     gunner_blend: (0.8, Taste("optic view: mostly follow intent while the bore's lag remains visible")),
     mouse_sensitivity_per_fov: (0.004166667, Taste("optic cursor: 0.0005 rad/count at a 0.12 rad field, scaled by vertical field for comparable screen travel")),
+    optic_aspect_before_measurement: (1.0, StandIn("optic cursor: square viewport until the camera render target is measured; keeps input available during view startup")),
     optic_span_fraction: (0.9, Taste("optic: shared glass diameter and cursor projected reach")),
     optic_feather_fraction: (0.10, Taste("optic: soft surround edge as a fraction of glass radius")),
     optic_surround_linear_rgba: ((0.0, 0.0, 0.0, 1.0), Taste("optic: opaque black surround")),
