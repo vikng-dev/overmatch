@@ -1579,7 +1579,8 @@ mod tests {
         assert_eq!(along.axis(Some(normal), oblique), oblique);
     }
 
-    /// The directions and weights are the same bits on every target: pinned raw IEEE bits of a
+    /// The game's damage-model clients rebuild field directions in `damage_cam::wire::decode_cone`;
+    /// the directions and weights must be the same bits on every target: pinned raw IEEE bits of a
     /// few directions for two fixture axes, in [`PINNED_BITS_PATH`]. MEASURED on macOS arm64; a red
     /// run on another target means the generator is not reproducible there. `OVERMATCH_BLESS=1`
     /// ([`crate::tests::bless`]) rewrites the file from this run; bless only on macOS arm64, and
