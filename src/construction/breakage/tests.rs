@@ -4332,8 +4332,9 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
 }
 
 /// The game's environment destruction: the sweep owns a moving body's pair with a standing
-/// construction until exact occupancy. There a look-ahead point (positive separation) is dropped
-/// and a penetrating one kept; a pair with no standing construction keeps both.
+/// construction until exact occupancy. There a look-ahead point beyond Avian's contact tolerance
+/// is dropped, while a resting one within it and a penetrating one are kept; a pair with no
+/// standing construction keeps all three.
 #[test]
 fn a_sweep_source_loses_only_its_look_ahead_points_on_a_standing_construction() {
     use avian3d::collision::contact_types::ContactId;
@@ -4349,13 +4350,19 @@ fn a_sweep_source_loses_only_its_look_ahead_points_on_a_standing_construction() 
         .expect("a standing element collider");
     let body = app.world_mut().spawn(RigidBody::Dynamic).id();
     let other = app.world_mut().spawn(RigidBody::Dynamic).id();
-    // Fixture: one look-ahead point 5 cm short of the surface and one 1 mm into it.
+    let tolerance = app
+        .world()
+        .resource::<NarrowPhaseConfig>()
+        .contact_tolerance
+        * app.world().resource::<PhysicsLengthUnit>().0;
+    // Fixture: a look-ahead point 5 cm short of the surface, a resting one at half the tolerance
+    // and one 1 mm into it.
+    let fixture = [-0.05, -tolerance / 2.0, 0.001];
     let pair = |(collider1, body1): (Entity, Entity), (collider2, body2): (Entity, Entity)| {
         let mut pair = ContactPair::new(collider1, collider2, ContactId(0));
         (pair.body1, pair.body2) = (Some(body1), Some(body2));
         pair.manifolds = vec![ContactManifold::new(
-            [-0.05, 0.001]
-                .map(|depth| ContactPoint::new(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, depth)),
+            fixture.map(|depth| ContactPoint::new(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, depth)),
             Vec3::X,
         )];
         pair
@@ -4378,11 +4385,11 @@ fn a_sweep_source_loses_only_its_look_ahead_points_on_a_standing_construction() 
         pair((body, body), (wall, root)),
     ] {
         assert!(hooks.modify_contacts(&mut owned, &mut commands));
-        assert_eq!(depths(&owned), [0.001]);
+        assert_eq!(depths(&owned), fixture[1..]);
     }
     let mut free = pair((body, body), (other, other));
     assert!(hooks.modify_contacts(&mut free, &mut commands));
-    assert_eq!(depths(&free), [-0.05, 0.001]);
+    assert_eq!(depths(&free), fixture);
 }
 
 /// The game's environment destruction: the hull makes the hole. A swept patch leaves the

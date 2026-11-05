@@ -640,15 +640,19 @@ pub(super) fn changed(account: Res<SweepAccount>) -> bool {
 
 /// Avian's contact hook for the sweep (the game's environment destruction): until exact
 /// occupancy the sweep owns a dynamic body's pair with a standing construction, so the narrow
-/// phase's look-ahead points between them, at a positive separation, are dropped; penetrating
-/// points stay. Look-ahead planes on chunks the cast has not reached brake and lift a hull before
-/// its sweep meets them. Every other pair keeps its look-ahead. Standing constructions' colliders
-/// carry [`ActiveCollisionHooks::MODIFY_CONTACTS`], which is what calls it.
+/// phase's look-ahead points between them, separated by more than Avian's contact tolerance
+/// (`NarrowPhaseConfig::contact_tolerance` × `PhysicsLengthUnit`), are dropped. Touching points,
+/// within it, and penetrating ones stay, so a body resting against a wall keeps its contacts.
+/// Look-ahead planes on chunks the cast has not reached brake and lift a hull before its sweep
+/// meets them. Every other pair keeps its look-ahead. Standing constructions' colliders carry
+/// [`ActiveCollisionHooks::MODIFY_CONTACTS`], which is what calls it.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct SweepContacts<'w, 's> {
     owners: Query<'w, 's, &'static ColliderOf>,
     standing: Query<'w, 's, (), (With<Breakage>, Without<Piece>)>,
     bodies: Query<'w, 's, &'static RigidBody>,
+    config: Res<'w, avian3d::prelude::NarrowPhaseConfig>,
+    length_unit: Res<'w, avian3d::prelude::PhysicsLengthUnit>,
 }
 
 impl CollisionHooks for SweepContacts<'_, '_> {
@@ -666,8 +670,11 @@ impl CollisionHooks for SweepContacts<'_, '_> {
         {
             return true;
         }
+        let tolerance = self.config.contact_tolerance * self.length_unit.0;
         for manifold in &mut contacts.manifolds {
-            manifold.points.retain(|point| point.penetration >= 0.0);
+            manifold
+                .points
+                .retain(|point| point.penetration >= -tolerance);
         }
         contacts.manifolds.iter().any(|m| !m.points.is_empty())
     }
