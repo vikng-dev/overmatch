@@ -6,18 +6,19 @@
 //! the ground; its stiffness and capacity are its joints', so damage inside a part reaches an
 //! interface only through the joint area that remains.
 //!
-//! [`Assessment`] holds one owner's part graph, its sparse Cholesky factor and the loads it last
+//! [`Assessment`] holds one owner's part graph, its sparse LU factor and the loads it last
 //! solved. Bonded joints and push-only joints (rests and cracked seams) share one exact linear
-//! solve; push-only interfaces are judged on that trial. An interface whose bonded joints reach
-//! their strength cracks whole and bears on as push-only. A push-only interface whose tangential
-//! demand passes Coulomb friction slips ([`Slip`]): it keeps bearing while compressed, carries
-//! its saturated friction against the slip and no tangential stiffness, and the field is solved
-//! again so the excess moves to its parts' other interfaces. A push-only interface that lifts or
-//! tips separates, and so do the slipping rests of a part nothing else holds tangentially (a
-//! mechanism); connectivity ([`super::loose_groups`]) then releases what lost its support, and the
-//! physics engine owns contact between separate bodies. Unchanged loads within
-//! [`LOAD_TOLERANCE`] on unchanged topology cost nothing. [`Kernel`] is the chunk-scale bonded
-//! solve inside one part. The construction design's "Parts decide what stands" owns the model.
+//! solve. Each tick first settles the contact active set: a push-only face whose friction wrench
+//! passes its Coulomb capacity slips ([`Slip`]), keeping its normal stiffness and carrying
+//! `μ N` against its slip as a term of the system itself, and a face that lifts or tips opens;
+//! each change is solved again, and a face only goes stick to slip to open, so the set is final
+//! within one pass per face. A part nothing else holds tangentially is a mechanism: its slipping
+//! rests open. Only then are bonds judged: an interface whose bonded joints reach their strength
+//! cracks whole and bears on as push-only. Connectivity ([`super::loose_groups`]) releases what
+//! lost its support, and the physics engine owns contact between separate bodies. Unchanged loads
+//! within [`LOAD_TOLERANCE`] on unchanged topology cost nothing. [`Kernel`] is the chunk-scale
+//! bonded solve inside one part. The construction design's "Parts decide what stands" owns the
+//! model.
 
 use bevy::math::{DMat3, DVec3, Vec3};
 use std::collections::BTreeMap;
@@ -43,15 +44,10 @@ pub(crate) const LOAD_TOLERANCE: f64 = 1e-5;
 /// house's factor (`.agents/scratch/bestofboth/bob-factor.md`).
 const IDLE: f64 = 1e-9;
 
-/// Resolution: a Cholesky pivot below this fraction of its own diagonal is singular within
-/// roundoff, a mechanism. It is 400 × the 2.5e-12 relative equation residual MEASURED for the
-/// house's factor (`.agents/scratch/bestofboth/bob-factor.md`).
+/// Resolution: a pivot below this fraction of its own diagonal is singular within roundoff, a
+/// mechanism. It is 400 × the 2.5e-12 relative equation residual MEASURED for the house's factor
+/// (`.agents/scratch/bestofboth/bob-factor.md`).
 const MECHANISM: f64 = 1e-9;
-
-/// Resolution: solves one tick spends settling slips and saturated friction; a field still
-/// moving past [`LOAD_TOLERANCE`] after them settles on the next tick. Each pass either starts a
-/// slip, which is finite, or moves friction toward its fixed point.
-const PASSES: usize = 16;
 
 /// One rigid part of an owner.
 #[derive(Clone, Debug, PartialEq)]
@@ -77,20 +73,19 @@ pub(crate) struct Interface {
     pub bonded: Vec<usize>,
     /// Indices of its push-only edges.
     pub push: Vec<usize>,
-    /// Some of its rests slip: they bear normal to their face and carry their saturated friction,
-    /// with no tangential stiffness.
-    pub slipping: bool,
 }
 
-/// A push-only joint sliding at Coulomb friction.
+/// A push-only joint sliding at Coulomb friction, fixed at its slip's start (ASSUMED: a slip
+/// keeps its direction and never re-sticks). Its friction is `μ N` times these, `N` its own
+/// compression in the solved field ([`bondsolve::Friction`](super::bondsolve::Friction)).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Slip {
-    /// Unit direction the joint's chunk `a` moves relative to its far side, in the tangent plane
-    /// of its face at the slip's start.
-    pub direction: DVec3,
-    /// Its area share of the face's saturated friction μN, N: in the sustained field, then in
-    /// the total field.
-    pub friction: [f64; 2],
+    /// cos φ t: `t` the unit direction its chunk `a` moves relative to its far side, φ its
+    /// face's slip angle between sliding and twisting.
+    pub force: DVec3,
+    /// sin φ s ρ n, m: `s` the twist's sense, ρ the patch's polar reach about its face's
+    /// pressure centre, `n` its normal toward chunk `a`.
+    pub twist: DVec3,
 }
 
 /// One owner's part graph.
@@ -221,22 +216,17 @@ impl Graph {
                 &mut interfaces[i].bonded
             };
             list.push(edges.len());
-            edges.push(joint_edge(structure, j, a, b, push));
+            let mut edge = joint_edge(structure, j, a, b, push);
+            if let Some(slip) = slipping.get(&j).filter(|_| push) {
+                let mu = edge.push.expect("a push edge states its friction");
+                edge.shear_stiffness = 0.0;
+                edge.friction = Some(super::bondsolve::Friction {
+                    force: slip.force * mu,
+                    twist: slip.twist * mu,
+                });
+            } // A bond or a sticking rest holds through its stiffness.
+            edges.push(edge);
             joints.push(j);
-        }
-        for interface in &mut interfaces {
-            for &e in &interface.push {
-                if slipping.contains_key(&joints[e]) {
-                    edges[e].shear_stiffness = 0.0;
-                    interface.slipping = true;
-                }
-            }
-            // Parts only split, so the rests a slip started on never share an interface with a
-            // bond: no bond joined their parts.
-            assert!(
-                !interface.slipping || interface.bonded.is_empty(),
-                "a slipping interface holds no bond"
-            );
         }
         let mut neighbours = vec![Vec::new(); parts.len()];
         let mut anchored: Vec<_> = parts.iter().map(|p| p.node.fixed).collect();
@@ -357,13 +347,18 @@ fn at_node(e: &Edge, nodes: &[Node], carried: Wrench, node: usize) -> Wrench {
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Column {
     rows: Vec<usize>,
+    /// The pivot, then `L` below it across `rows`.
     values: Vec<f64>,
+    /// The pivot, then this row of `U` across `rows`.
+    upper: Vec<f64>,
 }
 
-/// The sparse Cholesky factor of a node graph's stiffness (parts, or one part's chunks), ordered
-/// by exact minimum degree on node blocks; fixed nodes are eliminated. Anchored or gauged stiffness
-/// is positive definite; only a slipping face removes stiffness, and no regularization or
-/// invented support stands in for what it removed.
+/// The sparse LU factor of a node graph's stiffness (parts, or one part's chunks), ordered by
+/// exact minimum degree on node blocks on its symmetric pattern, without pivoting; fixed nodes
+/// are eliminated. Bonded and sticking stiffness is symmetric positive definite, where this is
+/// `L D Lᵀ`; a slipping patch removes its tangential stiffness and adds its friction's
+/// non-symmetric term (ASSUMED: a perturbation the order's pivots absorb). No regularization or
+/// invented support stands in for what slip removed.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Factor {
     columns: Vec<Column>,
@@ -406,6 +401,7 @@ impl Factor {
             fronts.push(front);
         }
         let n = 6 * fronts.len();
+        // Per column (a unit displacement): each row's force, `K[row][column]`.
         let mut matrix = vec![BTreeMap::<usize, f64>::new(); n];
         let mut input = vec![Wrench::default(); nodes.len()];
         for e in edges {
@@ -428,14 +424,14 @@ impl Factor {
                             .into_iter()
                             .enumerate()
                         {
-                            if base + dof >= column {
-                                *matrix[column].entry(base + dof).or_default() += value;
-                            }
+                            *matrix[column].entry(base + dof).or_default() += value;
                         }
                     }
                 }
             }
         }
+        // An entry absent from the sparse assembly is the matrix's mathematical zero.
+        let entry = |row: usize, column: usize| matrix[column].get(&row).copied().unwrap_or(0.0);
         let mut columns = Vec::with_capacity(n);
         for (block, front) in fronts.iter().enumerate() {
             for axis in 0..6 {
@@ -448,6 +444,7 @@ impl Factor {
                 rows.sort_unstable();
                 columns.push(Column {
                     values: vec![0.0; rows.len()],
+                    upper: vec![0.0; rows.len()],
                     rows,
                 });
             }
@@ -458,31 +455,38 @@ impl Factor {
                 prior[i].push((j, pos));
             }
         }
-        let mut work = vec![0.0; n];
+        let (mut lower, mut upper) = (vec![0.0; n], vec![0.0; n]);
         let mut ops = 0;
         for j in 0..n {
             for &i in &columns[j].rows {
-                // An entry absent from the sparse assembly is the matrix's mathematical zero.
-                work[i] = matrix[j].get(&i).copied().unwrap_or(0.0);
+                lower[i] = entry(i, j);
+                upper[i] = entry(j, i);
             }
-            let own = work[j];
+            let own = lower[j];
             for &(k, pos) in &prior[j] {
                 let c = &columns[k];
-                let ljk = c.values[pos];
-                for (&i, &lik) in c.rows[pos..].iter().zip(&c.values[pos..]) {
-                    work[i] -= ljk * lik;
-                    ops += 2;
+                let (ljk, ukj) = (c.values[pos], c.upper[pos]);
+                for ((&i, &lik), &uki) in c.rows[pos..]
+                    .iter()
+                    .zip(&c.values[pos..])
+                    .zip(&c.upper[pos..])
+                {
+                    lower[i] -= lik * ukj;
+                    upper[i] -= ljk * uki;
+                    ops += 4;
                 }
             }
-            assert!(work[j].is_finite(), "a finite stiffness has finite pivots");
-            if work[j] <= MECHANISM * own {
+            assert!(lower[j].is_finite(), "a finite stiffness has finite pivots");
+            if lower[j] <= MECHANISM * own {
                 return Err(order[j / 6]);
             }
-            let diagonal = work[j].sqrt();
+            let pivot = lower[j];
             let c = &mut columns[j];
-            c.values[0] = diagonal;
-            for (&i, value) in c.rows.iter().zip(&mut c.values).skip(1) {
-                *value = work[i] / diagonal;
+            c.values[0] = pivot;
+            c.upper[0] = pivot;
+            for ((&i, value), up) in c.rows.iter().zip(&mut c.values).zip(&mut c.upper).skip(1) {
+                *value = lower[i] / pivot;
+                *up = upper[i];
             }
             ops += c.rows.len() as u64;
         }
@@ -494,14 +498,14 @@ impl Factor {
         self.columns.len()
     }
 
-    /// Stored lower-triangle entries.
+    /// Stored entries of `L` and of `U` each, the pivots counted once in each.
     pub(crate) fn entries(&self) -> usize {
         self.columns.iter().map(|c| c.rows.len()).sum()
     }
 
     /// Scalar operations of one load column's two triangular solves, a DERIVED count.
     pub(crate) fn solve_ops(&self) -> u64 {
-        (4 * (self.entries() - self.unknowns()) + 2 * self.unknowns()) as u64
+        (4 * (self.entries() - self.unknowns()) + self.unknowns()) as u64
     }
 
     fn solve(&self, loads: &[Wrench]) -> Vec<Wrench> {
@@ -512,16 +516,15 @@ impl Factor {
             } // A fixed node is buried matter or a free component's gauge.
         }
         for (j, c) in self.columns.iter().enumerate() {
-            x[j] /= c.values[0];
             for (&i, &l) in c.rows.iter().zip(&c.values).skip(1) {
                 x[i] -= l * x[j];
             }
         }
         for (j, c) in self.columns.iter().enumerate().rev() {
-            for (&i, &l) in c.rows.iter().zip(&c.values).skip(1) {
-                x[j] -= l * x[i];
+            for (&i, &u) in c.rows.iter().zip(&c.upper).skip(1) {
+                x[j] -= u * x[i];
             }
-            x[j] /= c.values[0];
+            x[j] /= c.upper[0];
         }
         self.map
             .iter()
@@ -578,8 +581,6 @@ pub(crate) struct Assessment {
     /// Every push-only joint sliding at Coulomb friction. It slips until its face lifts or tips,
     /// or its part is released.
     pub(crate) slipping: BTreeMap<usize, Slip>,
-    /// Friction still moved past [`LOAD_TOLERANCE`] after the last tick's [`PASSES`].
-    unsettled: bool,
     /// Per element: the chunk-scale kernel of its unburied chunks, factored once per design at
     /// load and shared by its instances; the event entry for an intact element.
     pub(crate) kernels: std::sync::Arc<Vec<Kernel>>,
@@ -604,7 +605,6 @@ impl Assessment {
             || !self.initial_verdict.is_empty()
             || self.topology_changed
             || self.impulsive
-            || self.unsettled
     }
 
     pub(crate) fn spin_changed(&self, spin: Vec3) -> bool {
@@ -750,7 +750,7 @@ impl Assessment {
                 load.linear -= DVec3::Y * (g * part.mass);
             } // Uniform gravity cancels from a free component's internal demand.
         }
-        let mut total: Vec<_> = steady
+        let total: Vec<_> = steady
             .iter()
             .zip(pulse)
             .map(|(&s, p)| {
@@ -759,23 +759,6 @@ impl Assessment {
                 sum
             })
             .collect();
-        // A slipping joint's saturated friction is a pair of loads at its centre, against the
-        // slip of its `a` side: internal, so it leaves a free component's acceleration alone.
-        for (edge, j) in self.graph.edges.iter().zip(&self.graph.joints) {
-            let Some(slip) = self.slipping.get(j).filter(|_| edge.push.is_some()) else {
-                continue; // It sticks or holds by a bond: its stiffness carries its share.
-            };
-            for (column, loads) in [&mut steady, &mut total].into_iter().enumerate() {
-                let on_a = -slip.direction * slip.friction[column];
-                loads[edge.a].add(
-                    Wrench::at(on_a, edge.centre - parts[edge.a].node.centre),
-                    1.0,
-                );
-                if let Some(b) = edge.b {
-                    loads[b].add(Wrench::at(-on_a, edge.centre - parts[b].node.centre), 1.0);
-                } // The ground takes the far half.
-            }
-        }
         steady.into_iter().chain(total).collect()
     }
 
@@ -803,10 +786,10 @@ impl Assessment {
         2
     }
 
-    /// One tick: rebuild and refactor on changed topology, solve when a part's loads moved
-    /// past [`LOAD_TOLERANCE`], judge every interface and record its failures. A failure
-    /// changes topology for the next tick; no failure starts another solve in its own tick.
-    /// Returns the failures and the number of load columns solved.
+    /// One tick: rebuild and refactor on changed topology, and when a part's loads moved past
+    /// [`LOAD_TOLERANCE`], settle the contacts and judge the bonds ([`Self::settle`]), then solve
+    /// the holes removal opened. A crack changes topology for the next tick. Returns the failures
+    /// and the number of load columns solved.
     pub(crate) fn advance(
         &mut self,
         structure: &Structure,
@@ -842,14 +825,13 @@ impl Assessment {
         let (failures, columns) = if !lost.is_empty() {
             (lost, 0) // A mechanism's rests left; the next tick solves what stands.
         } else if !topology && !pending && self.within_tolerance(&loads) {
-            self.unsettled = false;
             return (Vec::new(), 0);
         } else {
             self.loads = loads;
             let (mut failures, columns) = self.settle(structure, state, sources, spin, step);
             if failures.is_empty() && !self.removed.is_empty() {
                 let removed = std::mem::take(&mut self.removed);
-                failures = self.holes(structure, state, &removed);
+                failures = self.holes(structure, state, &removed, sources);
             } // A failure changes topology first: the holes wait for the field that follows.
             (failures, columns)
         };
@@ -860,10 +842,12 @@ impl Assessment {
         (failures, columns)
     }
 
-    /// Solve and judge until the field holds or fails. A face found slipping is solved again
-    /// without its tangential stiffness and with its saturated friction, and friction is solved
-    /// again while it moves past [`LOAD_TOLERANCE`], within [`PASSES`] solves. A failure ends
-    /// the tick: it changes topology. Returns the failures and the load columns solved.
+    /// Settle the contact active set, then judge the bonds on the final field. Each pass solves,
+    /// opens every push-only face that lifts or tips and starts every face whose friction wrench
+    /// passes its Coulomb capacity slipping; a face only goes stick to slip to open, so the passes
+    /// end within one per face. A part a slip leaves a mechanism opens its slipping rests. A
+    /// cohesive failure commits only on the final field. Returns the failures and the load columns
+    /// solved.
     fn settle(
         &mut self,
         structure: &Structure,
@@ -873,48 +857,45 @@ impl Assessment {
         step: f32,
     ) -> (Vec<Failure>, usize) {
         let mut columns = 0;
-        self.unsettled = false;
-        for _ in 0..PASSES {
+        let mut failures = Vec::new();
+        loop {
             columns += self.solve();
-            let verdict = self.judge(structure);
-            self.slipping.extend(verdict.slips);
-            if !verdict.failures.is_empty() {
-                for failure in &verdict.failures {
-                    state.cracked[failure.joint] = true;
-                }
-                for j in &verdict.separated {
-                    state.separated[*j] = true;
-                    self.slipping.remove(j);
-                }
-                return (verdict.failures, columns);
+            let contact = self.contact();
+            if contact.opened.is_empty() && contact.slips.is_empty() {
+                break;
             }
-            if verdict.started {
-                let lost = self.rebuild(structure, state);
-                if !lost.is_empty() {
-                    return (lost, columns);
-                }
+            for failure in &contact.opened {
+                state.cracked[failure.joint] = true;
+                state.separated[failure.joint] = true;
             }
-            let loads = self.loads_of(sources, spin, step);
-            if !verdict.started && self.within_tolerance(&loads) {
-                return (Vec::new(), columns);
-            }
-            self.loads = loads;
+            failures.extend(contact.opened);
+            self.slipping.extend(contact.slips);
+            failures.extend(self.rebuild(structure, state));
+            self.loads = self.loads_of(sources, spin, step);
         }
-        self.unsettled = true;
-        self.loads.clear(); // Its last loads are unsolved: the next tick solves them.
-        (Vec::new(), columns)
+        let (cracks, separated) = self.bonds(structure);
+        for failure in &cracks {
+            state.cracked[failure.joint] = true;
+        }
+        for &j in &separated {
+            state.separated[j] = true;
+        }
+        failures.extend(cracks);
+        (failures, columns)
     }
 
     /// Holes: each unburied part beside a chunk in `removed` is solved at chunk scale ([`Kernel`],
-    /// factored again for its remaining chunks) for gravity and the sustained forces its other
-    /// interfaces hand it, slipping friction included. Its joints that cannot hold crack or
-    /// separate, and it is solved again on what is left until it holds; each pass changes a joint
-    /// for good, so it ends. The part law judges the pieces from the next tick.
+    /// factored again for its remaining chunks) for gravity, the presses of `sources` on its
+    /// chunks and the sustained forces its other interfaces hand it, friction included. Its joints
+    /// that cannot hold crack or separate, and it is solved again on what is left until it holds;
+    /// each pass changes a joint for good, so it ends. The part law judges the pieces from the
+    /// next tick.
     fn holes(
         &mut self,
         structure: &Structure,
         state: &mut State,
         removed: &[usize],
+        sources: &[Load],
     ) -> Vec<Failure> {
         let mut beside = std::collections::BTreeSet::new();
         for &r in removed {
@@ -930,7 +911,7 @@ impl Assessment {
                 continue; // The soil holds buried matter.
             }
             let chunks = self.graph.parts[p].chunks.clone();
-            let loads = self.boundary(structure, p, &chunks);
+            let loads = self.boundary(structure, p, &chunks, sources);
             loop {
                 let kernel = Kernel::of(structure, state, &chunks);
                 let hold = kernel.hold(structure, &loads);
@@ -950,14 +931,27 @@ impl Assessment {
         failures
     }
 
-    /// Per chunk of part `p`: the sustained forces the part graph's edges to other unburied parts
-    /// hand it, slipping friction included, about its centroid. The ground and buried parts are
-    /// the kernel's anchors, not loads.
-    fn boundary(&self, structure: &Structure, p: usize, chunks: &[usize]) -> Vec<Wrench> {
+    /// Per chunk of part `p`: the presses of `sources` on it, and the sustained forces the part
+    /// graph's edges to other unburied parts hand it (friction included), about its centroid. The
+    /// ground and buried parts are the kernel's anchors, not loads.
+    fn boundary(
+        &self,
+        structure: &Structure,
+        p: usize,
+        chunks: &[usize],
+        sources: &[Load],
+    ) -> Vec<Wrench> {
         let steady = &self.answer[..self.graph.parts.len()];
         let index: BTreeMap<usize, usize> =
             chunks.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+        let centroid = |c: usize| structure.chunks[c].centroid.as_dvec3();
         let mut loads = vec![Wrench::default(); chunks.len()];
+        for source in sources {
+            if let Some(&i) = index.get(&source.chunk) {
+                let arm = source.at.as_dvec3() - centroid(source.chunk);
+                loads[i].add(Wrench::at(source.press.as_dvec3(), arm), 1.0);
+            } // A press on another part reaches this one through its interfaces.
+        }
         for (e, edge) in self.graph.edges.iter().enumerate() {
             let (far, sign) = match edge.b {
                 Some(b) if edge.a == p => (b, -1.0),
@@ -967,24 +961,17 @@ impl Assessment {
             if self.graph.parts[far].node.fixed {
                 continue; // Buried matter is an anchor.
             }
-            let j = self.graph.joints[e];
-            let joint = &structure.joints[j];
+            let joint = &structure.joints[self.graph.joints[e]];
             let chunk = match joint.b {
                 Side::Chunk(b) if sign > 0.0 => b,
                 _ => joint.a,
             };
             let carried = edge.resultant(&self.graph.nodes, steady);
-            // A joint that sticks hands its force through stiffness alone.
-            let friction = self
-                .slipping
-                .get(&j)
-                .map_or(DVec3::ZERO, |slip| slip.direction * slip.friction[0]);
-            let force = (carried.linear + friction) * sign;
-            let centroid = structure.chunks[chunk].centroid.as_dvec3();
+            let force = carried.linear * sign;
             loads[index[&chunk]].add(
                 Wrench {
                     linear: force,
-                    angular: carried.angular * sign + (edge.centre - centroid).cross(force),
+                    angular: carried.angular * sign + (edge.centre - centroid(chunk)).cross(force),
                 },
                 1.0,
             );
@@ -992,42 +979,37 @@ impl Assessment {
         loads
     }
 
-    /// Every interface's verdict on the solved field. A failed bond whose interface the field
-    /// pulls apart separates in the same tick.
-    fn judge(&self, structure: &Structure) -> Verdict {
+    /// Every bonded interface's verdict on the settled field: its cracks, and the joints that
+    /// separate. A failed bond whose interface the field pulls apart separates in the same tick.
+    fn bonds(&self, structure: &Structure) -> (Vec<Failure>, Vec<usize>) {
         let n = self.graph.parts.len();
         let (steady, total) = self.answer.split_at(n);
-        let mut verdict = Verdict::default();
+        let (mut failures, mut separated) = (Vec::new(), Vec::new());
         for interface in &self.graph.interfaces {
             let (cracks, field) = self.bonded_verdict(structure, interface, steady, total);
-            if !cracks.is_empty() {
-                let all: Vec<_> = interface
-                    .bonded
-                    .iter()
-                    .chain(&interface.push)
-                    .copied()
-                    .collect();
-                if self.face(interface, &all, field).compression < -IDLE * self.scale.0 {
-                    verdict
-                        .separated
-                        .extend(all.iter().map(|&e| self.graph.joints[e]));
-                    verdict
-                        .failures
-                        .extend(interface.push.iter().map(|&e| Failure {
-                            joint: self.graph.joints[e],
-                            cause: Cause::LiftForce,
-                            demand: 0.0,
-                            capacity: 0.0,
-                            work: 0.0,
-                        }));
-                }
-                verdict.failures.extend(cracks);
+            if cracks.is_empty() {
+                continue; // Every bond holds.
             }
-            self.push_verdict(interface, steady, total, &mut verdict);
+            let all: Vec<_> = interface
+                .bonded
+                .iter()
+                .chain(&interface.push)
+                .copied()
+                .collect();
+            if self.face(interface, &all, field).compression < -IDLE * self.scale.0 {
+                separated.extend(all.iter().map(|&e| self.graph.joints[e]));
+                failures.extend(interface.push.iter().map(|&e| Failure {
+                    joint: self.graph.joints[e],
+                    cause: Cause::LiftForce,
+                    demand: 0.0,
+                    capacity: 0.0,
+                    work: 0.0,
+                }));
+            }
+            failures.extend(cracks);
         }
-        verdict
+        (failures, separated)
     }
-
     /// The interface's bonded joints crack together once one reaches its strength: a sustained
     /// field (gravity and presses) over its tensile strength or its cohesion plus friction on its
     /// compression; or the total field over either strength while the pulse adds at least the
@@ -1137,10 +1119,12 @@ impl Assessment {
         let normal = normal.normalize();
         let compression = -force.dot(normal);
         Face {
+            centre,
             normal,
             compression,
             shear: force + normal * compression,
             bend: moment - normal * moment.dot(normal),
+            twist: moment.dot(normal),
             corners: edges
                 .iter()
                 .flat_map(|&e| self.graph.edges[e].corners())
@@ -1149,137 +1133,171 @@ impl Assessment {
         }
     }
 
-    /// A push-only interface (no intact bond left) bears on faces: its joints whose normals,
-    /// read from its `a` side, lean the same way as a face's first joint (a positive dot) are one
-    /// face (ASSUMED), so a part wedged between two faces of another is judged on each. While an
-    /// interface keeps a bond, its bonds decide it and its push-only joints bear beside them in
-    /// the linear field (ASSUMED: bilateral until the bond fails).
-    fn push_verdict(
-        &self,
-        interface: &Interface,
-        steady: &[Wrench],
-        total: &[Wrench],
-        verdict: &mut Verdict,
-    ) {
-        if !interface.bonded.is_empty() {
-            return;
-        }
+    /// Every push-only face's contact verdict on the solved total field, whatever bonds share its
+    /// interface: a rest bears on its own and never borrows a bond's tension. A face is an
+    /// interface's push-only joints whose normals, read from its `a` side, lean the same way as
+    /// the face's first joint (a positive dot; ASSUMED), so a part wedged between two faces of
+    /// another is judged on each.
+    fn contact(&self) -> Contact {
+        let total = &self.answer[self.graph.parts.len()..];
         let edges = &self.graph.edges;
-        let toward_a =
-            |e: usize| edges[e].normal * if edges[e].a == interface.a { 1.0 } else { -1.0 };
-        let mut faces: Vec<Vec<usize>> = Vec::new();
-        for &e in &interface.push {
-            match faces
-                .iter_mut()
-                .find(|face| toward_a(face[0]).dot(toward_a(e)) > 0.0)
-            {
-                Some(face) => face.push(e),
-                None => faces.push(vec![e]),
+        let mut contact = Contact::default();
+        for interface in &self.graph.interfaces {
+            let toward_a =
+                |e: usize| edges[e].normal * if edges[e].a == interface.a { 1.0 } else { -1.0 };
+            let mut faces: Vec<Vec<usize>> = Vec::new();
+            for &e in &interface.push {
+                match faces
+                    .iter_mut()
+                    .find(|face| toward_a(face[0]).dot(toward_a(e)) > 0.0)
+                {
+                    Some(face) => face.push(e),
+                    None => faces.push(vec![e]),
+                }
+            }
+            for face in &faces {
+                self.face_verdict(interface, face, total, &mut contact);
             }
         }
-        for face in &faces {
-            self.face_verdict(interface, face, steady, total, verdict);
-        }
+        contact
     }
 
-    /// One face bears as a whole (ASSUMED): the area-weighted normal, and the hull of its
-    /// corners projected on it. Its joints separate together when its resultant pulls (lift) or
-    /// its pressure centre leaves the hull (tip). Coulomb friction: a face whose tangential force
-    /// passes μ on its compression slips, and a slipping face carries μN against its slip, read
-    /// again from each field. A face carrying less than [`IDLE`] is left.
+    /// One face bears as a whole (ASSUMED): it opens when its resultant pulls (lift) or its
+    /// pressure centre leaves the hull of its corners (tip). Coulomb friction bounds its whole
+    /// friction wrench, about its pressure centre `p`: each patch `i` presses with `Nᵢ` (its own
+    /// normal force) at friction `μᵢ`, so the face holds a sliding force up to `F = Σ μᵢ Nᵢ`
+    /// and a twist up to `T = Σ μᵢ Nᵢ ρᵢ`, where `ρᵢ² = Qᵢ + |cᵢ − p|²` is the patch's polar
+    /// radius of gyration (`Qᵢ`, from its geometry) moved to `p` (DERIVED for uniform pressure as
+    /// the root-mean-square reach, which bounds the mean reach by Cauchy–Schwarz). It slips past
+    /// the elliptic limit `(f / F)² + (τ / T)² = 1` (ASSUMED: the elliptic approximation of the
+    /// limit surface), `f` its sliding and `τ` its twisting demand. A slip keeps the direction
+    /// `(cos φ t, sin φ s)` the demand had at its start, `tan φ = (τ / T) / (f / F)`. A face
+    /// carrying less than [`IDLE`] is left.
     fn face_verdict(
         &self,
         interface: &Interface,
         joints: &[usize],
-        steady: &[Wrench],
         total: &[Wrench],
-        verdict: &mut Verdict,
+        contact: &mut Contact,
     ) {
         let edges = &self.graph.edges;
         let face = self.face(interface, joints, total);
-        let area: f64 = joints.iter().map(|&e| edges[e].area).sum();
-        let friction: f64 = joints
-            .iter()
-            .map(|&e| {
-                edges[e].push.expect("a push edge states its friction") * edges[e].area / area
-            })
-            .sum();
         let (idle, idle_moment) = (IDLE * self.scale.0, IDLE * self.scale.1);
-        let cause = if face.compression < -idle {
-            Some(Cause::LiftForce)
+        let sign = |e: usize| if edges[e].a == interface.a { 1.0 } else { -1.0 };
+        let (cause, offset) = if face.compression < -idle {
+            (Some(Cause::LiftForce), DVec3::ZERO)
         } else if face.compression <= idle {
             // No compression holds it: a bending moment it carries tips it.
-            (face.bend.length() > idle_moment).then_some(Cause::Tip)
+            let cause = (face.bend.length() > idle_moment).then_some(Cause::Tip);
+            (cause, DVec3::ZERO)
         } else {
             // DERIVED: a normal force N at offset r about the centre has the in-plane moment
             // r × (−N n), so r = (M⊥ × n) / N.
             let offset = face.bend.cross(face.normal) / face.compression;
-            (!inside(&face.corners, face.normal, offset)).then_some(Cause::Tip)
+            let cause = (!inside(&face.corners, face.normal, offset)).then_some(Cause::Tip);
+            (cause, offset)
         };
         if let Some(cause) = cause {
+            contact.opened.extend(joints.iter().map(|&e| Failure {
+                joint: self.graph.joints[e],
+                cause,
+                demand: 0.0,
+                capacity: 0.0,
+                work: 0.0,
+            }));
+            return;
+        }
+        let under_way = joints.iter().find_map(|&e| {
+            let slip = self.slipping.get(&self.graph.joints[e])?;
+            Some((slip.force * sign(e), slip.twist * sign(e)))
+        });
+        if let Some((force, twist)) = under_way {
+            // A rest that joins a slipping face slips with it (ASSUMED: at the reach of the
+            // rest it joined).
             for &e in joints {
-                verdict.separated.push(self.graph.joints[e]);
-                verdict.failures.push(Failure {
-                    joint: self.graph.joints[e],
-                    cause,
-                    demand: 0.0,
-                    capacity: 0.0,
-                    work: 0.0,
-                });
+                let joint = self.graph.joints[e];
+                if !self.slipping.contains_key(&joint) {
+                    contact.slips.push((
+                        joint,
+                        Slip {
+                            force: force * sign(e),
+                            twist: twist * sign(e),
+                        },
+                    ));
+                }
             }
             return;
         }
-        let saturated = [steady, total]
-            .map(|field| friction * self.face(interface, joints, field).compression.max(0.0));
-        let share = |e: usize| saturated.map(|f| f * edges[e].area / area);
-        let sign = |e: usize| if edges[e].a == interface.a { 1.0 } else { -1.0 };
-        // The face's slip, read from its `a` side: a slip under way keeps its direction.
-        let under_way = joints.iter().find_map(|&e| {
-            self.slipping
-                .get(&self.graph.joints[e])
-                .map(|slip| slip.direction * sign(e))
-        });
-        let direction = match under_way {
-            Some(direction) => direction,
-            None if face.shear.length() > saturated[1].max(idle) => face.shear.normalize(),
-            None => return, // Friction holds it.
-        };
+        let pressure = face.centre + offset;
+        let flat = |r: DVec3| r - face.normal * r.dot(face.normal);
+        let mut reach = Vec::with_capacity(joints.len());
+        let (mut sliding, mut twisting) = (0.0, 0.0);
         for &e in joints {
-            let joint = self.graph.joints[e];
-            // A rest that joins a slipping face slips with it: its stiffness changes.
-            verdict.started |= !self.slipping.contains_key(&joint);
-            let slip = Slip {
-                direction: direction * sign(e),
-                friction: share(e),
-            };
-            verdict.slips.push((joint, slip));
+            let edge = &edges[e];
+            let pressing = -edge
+                .resultant(&self.graph.nodes, total)
+                .linear
+                .dot(edge.normal);
+            let rho = (edge.patch.polar + flat(edge.centre - pressure).length_squared()).sqrt();
+            let held = edge.push.expect("a push edge states its friction") * pressing.max(0.0);
+            sliding += held;
+            twisting += held * rho;
+            reach.push(rho);
+        }
+        let f = face.shear.length();
+        // The twist about the pressure centre: the face's own, less its shear's moment there.
+        let tau = face.twist - flat(offset).cross(face.shear).dot(face.normal);
+        let lever = if sliding > idle {
+            twisting / sliding
+        } else {
+            reach.iter().sum::<f64>() / reach.len() as f64
+        };
+        let holds = if sliding > idle {
+            (f / sliding).powi(2) + (tau / twisting).powi(2) <= 1.0
+        } else {
+            f <= idle && tau.abs() <= idle_moment
+        };
+        if holds {
+            return; // Friction holds it.
+        }
+        let demand = DVec3::new(f, tau.abs() / lever, 0.0).normalize();
+        let along = if f > 0.0 { face.shear / f } else { DVec3::ZERO };
+        for (&e, rho) in joints.iter().zip(reach) {
+            contact.slips.push((
+                self.graph.joints[e],
+                Slip {
+                    force: along * (demand.x * sign(e)),
+                    twist: face.normal * (demand.y * tau.signum() * rho * sign(e)),
+                },
+            ));
         }
     }
 }
 
-/// One reading of a solved field.
+/// One contact pass's changes.
 #[derive(Default)]
-struct Verdict {
-    failures: Vec<Failure>,
-    /// Joints that separate.
-    separated: Vec<usize>,
-    /// Slips started, and slipping faces' friction read again.
+struct Contact {
+    /// Faces that lift or tip: their joints separate.
+    opened: Vec<Failure>,
+    /// Joints that start slipping.
     slips: Vec<(usize, Slip)>,
-    /// A face started slipping: the field is solved again.
-    started: bool,
 }
 
 /// What a set of an interface's joints carries, as one face.
 struct Face {
+    /// Its area-weighted centre.
+    centre: DVec3,
     /// Area-weighted unit normal, toward the interface's `a` part.
     normal: DVec3,
     /// N, positive pressing.
     compression: f64,
     /// The force in its plane, N, from its `a` part's side: along that part's slip.
     shear: DVec3,
-    /// The moment about the face's centre in its plane, N·m.
+    /// The moment about its centre in its plane, N·m.
     bend: DVec3,
-    /// Its joints' corners, relative to its area-weighted centre.
+    /// The moment about its normal through its centre, N·m.
+    twist: f64,
+    /// Its joints' corners, relative to its centre.
     corners: Vec<DVec3>,
 }
 
