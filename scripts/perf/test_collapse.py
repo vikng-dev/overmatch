@@ -371,19 +371,24 @@ class RamTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "malformed"):
                 collapse.ram_summary(self.text(dict(ram, sends=sends)), recipe)
 
-    def test_ram_metadata_refuses_nonfinite_values_before_completion(self):
-        # The runner must refuse poisoned admission/impact metadata even in an unfinished prefix.
+    def test_ram_refuses_nonfinite_numbers_before_completion(self):
+        # The runner must refuse invalid numbers in samples and metadata in an unfinished prefix.
         recipe, ram = self.fixture()
         for section, fields in (("plan", ("minimum_m_s", "governed_m_s", "runup_m", "spawn", "rotation")),
-                                ("impact", ("speed_m_s", "normal_speed_m_s"))):
+                                ("impact", ("speed_m_s", "normal_speed_m_s")),
+                                ("ticks", ("tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "collector_us", "dt_s")),
+                                ("sends", ("us",))):
             for field in fields:
-                for bad in (float("nan"), float("inf"), float("-inf"), True):
+                for bad in (float("nan"), float("inf"), float("-inf"), True, 10**400, -(10**400)):
                     changed = copy.deepcopy(ram)
                     changed["done"] = None
+                    values = changed[section]
+                    if isinstance(values, list):
+                        values = values[0]
                     if field in ("spawn", "rotation"):
-                        changed[section][field][0] = bad
+                        values[field][0] = bad
                     else:
-                        changed[section][field] = bad
+                        values[field] = bad
                     with self.subTest(section=section, field=field, bad=bad), self.assertRaisesRegex(RuntimeError, "log line 1.*" + field):
                         collapse.ram_summary(self.text(changed), recipe)
 

@@ -334,6 +334,14 @@ def tick_seconds():
 
 
 def ram_rows(text, recipe):
+    def finite(value, field):
+        try:
+            if not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value):
+                return
+        except OverflowError:
+            pass
+        raise ValueError(f"invalid {field}: expected a finite number")
+
     rows, ticks, sends = [], [], []
     last = None
     for number, line in enumerate(text.splitlines(), 1):
@@ -350,7 +358,8 @@ def ram_rows(text, recipe):
                 if tick["tanks"] != 1:
                     raise RuntimeError("ram requires exactly one tank")
                 for field in ("tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "collector_us", "dt_s"):
-                    if not isinstance(tick[field], (int, float)) or not math.isfinite(tick[field]) or tick[field] < 0:
+                    finite(tick[field], f"ticks.{field}")
+                    if tick[field] < 0:
                         raise ValueError(f"invalid {field}")
                 if tick["dt_s"] <= 0 or tick["sleep_us"] + tick["contacts_us"] > tick["physics_us"]:
                     raise ValueError("invalid timestep or nested sleep bracket")
@@ -358,13 +367,11 @@ def ram_rows(text, recipe):
             for send in ram["sends"]:
                 if not isinstance(send["tick"], int) or send["tick"] <= 0 or send["tick"] > len(ticks) or sends and send["tick"] <= sends[-1]["tick"]:
                     raise ValueError("invalid or reordered send tick")
-                if not isinstance(send["us"], (int, float)) or not math.isfinite(send["us"]) or send["us"] < 0:
+                finite(send["us"], "sends.us")
+                if send["us"] < 0:
                     raise ValueError("invalid send duration")
                 sends.append(send)
             plan, impact = ram["plan"], ram["impact"]
-            def finite(value, field):
-                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-                    raise ValueError(f"invalid {field}: expected a finite number")
             if plan is not None:
                 for field in ("runup_m", "governed_m_s", "minimum_m_s"):
                     finite(plan[field], f"plan.{field}")
