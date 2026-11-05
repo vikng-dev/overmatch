@@ -135,7 +135,7 @@ fn topology(world: &mut World) -> Vec<Entry> {
                 })
                 .map(|(j, _)| Entry {
                     construction: identity.ordinal,
-                    event: Event::Crack(j as u16),
+                    event: Event::Separate(j as u16),
                     tick: 0,
                 }),
         );
@@ -433,6 +433,7 @@ fn publish_fixture_departures(world: &mut World) {
         breakage.live.swapped = shape.swapped;
         breakage.live.state.fate = shape.fate;
         breakage.live.state.cracked = shape.cracked;
+        breakage.live.state.separated = shape.separated;
     }
     world.resource_mut::<Record>().entries.extend(entries);
     for piece in releases {

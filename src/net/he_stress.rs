@@ -261,9 +261,10 @@ mod tests {
         super::super::test_harness::finish(&mut app);
         // The game's damage model starts its flight budget only after async spec IO and the
         // shipped admission gate finish. A frozen sim clock leaves the recipe unfired at entry.
+        // The game's damage model admits map data synchronously before timing async spec IO.
+        app.update();
         let started = Instant::now();
         loop {
-            app.update();
             if *app
                 .world()
                 .resource::<State<crate::state::AppState>>()
@@ -287,6 +288,7 @@ mod tests {
                 ),
             );
             std::thread::sleep(Duration::from_millis(1));
+            app.update();
         }
         assert_eq!(app.world().resource::<HeStress>().fired, 0);
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(

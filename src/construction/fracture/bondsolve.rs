@@ -654,8 +654,8 @@ impl Edge {
 /// Active-set contact and the warm elastic Krylov sequence share one bounded round budget.
 /// A closed cracked seam has the same contact law as an authored rest. The active set freezes
 /// compression and slip directions during a linear solve, then tests the actual projected
-/// traction before declaring equilibrium. A sliding site's friction is a frozen force; its
-/// tangent has no shear stiffness, so unsupported sliding is a mechanism, never tensile hold.
+/// traction before declaring equilibrium. A saturated site has no tangent stiffness along
+/// slip; transverse stiffness and the affine force term retain changes in slip direction.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Solve {
     pub answer: Vec<Wrench>,
@@ -1662,8 +1662,8 @@ impl Assessment {
     /// One bounded equilibrium solve with sustained and pulse load columns. A pulse enters
     /// as J/step, capped by its stated peak, and must add G_f A of elastic work to an overloaded
     /// patch. Force-controlled drivers supply continuing separation work. All qualifying joints
-    /// fail together; the next tick remaps topology and redistributes. This quasi-static pulse
-    /// approximation does not resolve wave propagation or cohesive softening.
+    /// fail together only after equilibrium; the next tick remaps topology and redistributes.
+    /// This quasi-static pulse approximation does not resolve waves or cohesive softening.
     pub(crate) fn advance(
         &mut self,
         structure: &Structure,
@@ -1780,6 +1780,9 @@ impl Assessment {
         (failures, rounds)
     }
     fn failures(&self, structure: &Structure) -> Vec<Failure> {
+        if matches!(self.solve.progress, Progress::Changed | Progress::Iterating) {
+            return Vec::new();
+        } // Unfinished equilibrium resumes next tick; its trial stresses cannot change topology.
         let n = self.nodes.len();
         let steady_answer = &self.solve.answer[..n];
         let combined = &self.solve.answer[n..];
@@ -1974,6 +1977,73 @@ mod gates {
             crushed: 0.0,
             origin: super::super::Origin::Field,
         }
+    }
+
+    /// A warm guess can carry obsolete force after a load or topology change. The authority
+    /// must preserve cohesion while equilibrium is unfinished, even when that guess overloads
+    /// a joint. The hanging chain's actual maximum tension is its total weight over area.
+    #[test]
+    fn an_unfinished_warm_solve_cannot_commit_a_crack() {
+        const CHUNKS: usize = 3 * ROUNDS; // Fixture: axial rank exceeds the per-tick round budget.
+        let material = material();
+        let structure = Structure {
+            geometry: Geometry::CircularFixture,
+            chunks: (0..CHUNKS)
+                .map(|i| Chunk {
+                    volume: AREA,
+                    mass: MASS,
+                    centroid: -Vec3::Y * (i as f32 + 0.5),
+                    material,
+                    buried: false,
+                })
+                .collect(),
+            joints: (0..CHUNKS)
+                .map(|i| super::super::Joint {
+                    a: i,
+                    b: if i == 0 {
+                        Side::Ground
+                    } else {
+                        Side::Chunk(i - 1)
+                    },
+                    area: AREA,
+                    centroid: -Vec3::Y * i as f32,
+                    normal: Vec3::Y,
+                    bond: Bond::Bonded(material.seam),
+                })
+                .collect(),
+        };
+        let actual_tension = CHUNKS as f32 * MASS * crate::physical_laws::gravity_mps2() / AREA;
+        assert!(actual_tension < material.seam.tensile);
+        let mut state = State::new(&structure);
+        let mut assessment = Assessment::default();
+        assessment.rebuild(&structure, &state);
+        // Fixture: an obsolete axial stretch, deliberately beyond the bond's strength.
+        for column in assessment.solve.answer.chunks_mut(CHUNKS) {
+            for (i, w) in column.iter_mut().enumerate() {
+                w.linear = -DVec3::Y * (i as f64 + 1.0);
+            }
+        }
+        let (failures, rounds) =
+            assessment.advance(&structure, &mut state, &[], Vec3::ZERO, STEP, true);
+        assert_eq!(rounds, ROUNDS);
+        assert_eq!(assessment.solve.progress, Progress::Iterating);
+        assert!(
+            failures.is_empty(),
+            "unfinished trial reactions cannot commit {} cracks",
+            failures.len()
+        );
+        assert!(state.cracked.iter().all(|&cracked| !cracked));
+        assert!(assessment.needs_tick());
+        for _ in 0..CHUNKS {
+            let (failures, _) =
+                assessment.advance(&structure, &mut state, &[], Vec3::ZERO, STEP, false);
+            assert!(failures.is_empty());
+            if !assessment.needs_tick() {
+                break;
+            }
+        }
+        assert_eq!(assessment.solve.progress, Progress::Equilibrated);
+        assert!(state.cracked.iter().all(|&cracked| !cracked));
     }
 
     /// Contact pressure is still support after cohesion is lost. The game's record and loose
@@ -2630,20 +2700,11 @@ mod gates {
             for tick in 0..128 {
                 let (failures, rounds) =
                     assessment.advance(&structure, &mut state, &[], Vec3::ZERO, STEP, false);
-                let fallen: Vec<_> = assessment
-                    .support
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .filter(|&c| state.standing(c))
-                    .collect();
-                for &c in &fallen {
-                    state.fate[c] = super::super::Fate::Fallen;
-                }
+                let departed = observe_departures(&assessment, &mut state);
                 println!(
                     "TICK {id} {tick} cracks={} fallen={} rounds={rounds} progress={:?}",
                     failures.len(),
-                    fallen.len(),
+                    departed,
                     assessment.solve.progress
                 );
                 if !assessment.needs_tick() {
@@ -2652,15 +2713,87 @@ mod gates {
             }
         }
     }
-    /// All placed scales use their admitted initial gravity field. Observations include each
-    /// authoritative crack stage, with no assertion that an authored asset must stand.
+    fn observed_relative_residual(a: &Assessment) -> f64 {
+        let problem = Problem {
+            nodes: &a.solve_nodes,
+            edges: &a.solve_edges,
+            loads: &a.loads,
+        };
+        let r = a.solve.projected_residual(&problem);
+        let mut z = r.clone();
+        precondition(&r, &a.solve.metric, &mut z);
+        let mut load = a.loads.clone();
+        for (node, load) in a.solve_nodes.iter().zip(&mut load) {
+            if node.fixed {
+                *load = Wrench::default();
+            }
+        }
+        let mut scaled_load = load.clone();
+        precondition(&load, &a.solve.metric, &mut scaled_load);
+        let numerator = dot(&r, &z);
+        let denominator = dot(&load, &scaled_load);
+        if denominator == 0.0 {
+            assert_eq!(numerator, 0.0, "an unloaded equilibrium has no residual");
+            0.0
+        } else {
+            (numerator / denominator).sqrt()
+        }
+    }
+
+    fn observed_cohesive_uses(a: &Assessment, structure: &Structure) -> Vec<(usize, f64, f64)> {
+        a.joints
+            .iter()
+            .zip(&a.edges)
+            .filter_map(|(&j, e)| {
+                let seam = structure.joints[j].seam()?;
+                let force = e.resultant(&a.nodes, &a.solve.answer[..a.nodes.len()]);
+                let (tension, shear) = e.stress(force, e.normal);
+                let other = match structure.joints[j].b {
+                    Side::Chunk(b) => structure.chunks[b].material.friction,
+                    Side::Ground => structure.chunks[structure.joints[j].a].material.friction,
+                };
+                let friction = if e.bearing.is_some() {
+                    0.0
+                } else {
+                    f64::from(crate::substances::pair_friction(
+                        structure.chunks[structure.joints[j].a].material.friction,
+                        other,
+                    ))
+                };
+                let capacity = f64::from(seam.shear.cohesion)
+                    + friction * (-force.linear.dot(e.normal) / e.area).max(0.0);
+                Some((j, tension / f64::from(seam.tensile), shear / capacity))
+            })
+            .collect()
+    }
+
+    /// Law-only observations remove the same loose groups as the standing authority. Physical
+    /// landings are deliberately outside this instrument.
+    fn observe_departures(assessment: &Assessment, state: &mut State) -> usize {
+        let fallen: Vec<_> = assessment
+            .support
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|&c| state.standing(c))
+            .collect();
+        for &c in &fallen {
+            state.fate[c] = super::super::Fate::Fallen;
+        }
+        fallen.len()
+    }
+
+    /// Observation of every admitted scale and numerical stage, including the residual of the
+    /// exact field used for judgement. Authored outcomes are observations, never assertions.
     #[test]
     #[ignore = "placed-scale gravity census, observational"]
     fn gravity_placed_scales() {
-        use std::collections::BTreeMap;
+        use std::collections::{BTreeMap, BTreeSet};
+
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
         let manifest = crate::map::load(&root);
-        let mut rows = BTreeMap::<String, Vec<(f32, Vec<(usize, usize)>, usize)>>::new();
+        let mut rows = BTreeMap::<String, Vec<(f32, Vec<(usize, usize)>, bool)>>::new();
+        let mut printed = BTreeSet::new();
         for instance in &manifest.instances {
             let crate::map::Prototype::Construction { asset } =
                 &manifest.prototypes[&instance.prototype]
@@ -2668,39 +2801,173 @@ mod gates {
                 continue;
             };
             let kind = manifest.constructions.get(asset).unwrap();
+            if printed.insert(asset) {
+                let structure = kind.structure(1.0);
+                let a = kind.equilibrium(1.0);
+                for (j, tension, shear) in observed_cohesive_uses(&a, &structure) {
+                    let joint = &structure.joints[j];
+                    let label = |c: usize| {
+                        let c = &kind.asset.chunks[kind.layout.chunks[c] as usize];
+                        format!(
+                            "{}:{}",
+                            kind.asset.elements[usize::from(c.element)].name,
+                            kind.asset.materials[usize::from(c.material)]
+                        )
+                    };
+                    let other = match joint.b {
+                        Side::Ground => "ground".to_owned(),
+                        Side::Chunk(c) => label(c),
+                    };
+                    let bond = if j < kind.asset.joints.len() {
+                        match kind.asset.joints[j].bond {
+                            crate::construction::schema::Bond::Seam => "intrinsic",
+                            crate::construction::schema::Bond::Attached(k) => {
+                                &kind.asset.attachments[usize::from(k)]
+                            }
+                        }
+                    } else {
+                        "anchor"
+                    };
+                    println!(
+                        "UNITUSE,{asset},{j},{},{other},{bond},{tension:.9},{shear:.9},{:.6},{:.6},{:.6}",
+                        label(joint.a),
+                        joint.centroid.x,
+                        joint.centroid.y,
+                        joint.centroid.z
+                    );
+                }
+            }
             let scale = instance.scale[0];
+            let traced = scale
+                == manifest
+                    .instances
+                    .iter()
+                    .filter(|i| i.prototype == instance.prototype)
+                    .map(|i| i.scale[0])
+                    .fold(0.0_f32, f32::max);
             let structure = kind.structure(scale);
             let mut assessment = (*kind.equilibrium(scale)).clone();
+            let initial = assessment.initial_verdict.len();
+            println!(
+                "ADMITTED,{},{asset},{scale:.9},{initial},{:?},{:.9e}",
+                instance.id,
+                assessment.solve.progress,
+                observed_relative_residual(&assessment)
+            );
+            let mut ranked = observed_cohesive_uses(&assessment, &structure);
+            ranked.sort_by(|a, b| b.1.max(b.2).total_cmp(&a.1.max(a.2)));
+            for &(j, t, s) in ranked.iter().take(16) {
+                println!("PEAK,{},{scale:.9},{j},{t:.9},{s:.9}", instance.id);
+            }
+            let trace: BTreeSet<_> = ranked.iter().take(8).map(|r| r.0).collect();
             let mut state = State::new(&structure);
             let mut stages = Vec::new();
             let mut ticks = 0;
             for tick in 0..128 {
-                let (failures, _) =
+                let (failures, rounds) =
                     assessment.advance(&structure, &mut state, &[], Vec3::ZERO, STEP, false);
-                let fallen: Vec<_> = assessment
-                    .support
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .filter(|&c| state.standing(c))
-                    .collect();
-                for &c in &fallen {
-                    state.fate[c] = super::super::Fate::Fallen;
+                let departed = observe_departures(&assessment, &mut state);
+                println!(
+                    "JUDGE,{},{scale:.9},{tick},{},{},{:?},{:.9e},{rounds}",
+                    instance.id,
+                    failures.len(),
+                    departed,
+                    assessment.solve.progress,
+                    observed_relative_residual(&assessment)
+                );
+                for f in &failures {
+                    println!(
+                        "FAIL,{},{tick},{},{:?},{:.6},{:.6}",
+                        instance.id, f.joint, f.cause, f.demand, f.capacity
+                    );
                 }
-                stages.push((failures.len(), fallen.len()));
+                if traced {
+                    for (&j, edge) in assessment
+                        .joints
+                        .iter()
+                        .zip(&assessment.edges)
+                        .filter(|(j, _)| trace.contains(j))
+                    {
+                        let answer = &assessment.solve.answer[..assessment.nodes.len()];
+                        let mut force = if edge.contact.is_none() {
+                            edge.resultant(&assessment.nodes, answer).linear
+                        } else {
+                            DVec3::ZERO
+                        };
+                        let (mut closed, mut sliding) = (0, 0);
+                        if let Some(contact) = edge.contact_edge() {
+                            for (point, weight) in contact.samples() {
+                                let (f, c, s) =
+                                    contact.contact_force(&assessment.nodes, answer, point, weight);
+                                force += f;
+                                closed += usize::from(c);
+                                sliding += usize::from(s);
+                            }
+                        }
+                        // Resultants in N; site counts describe this iterate, not a settled state.
+                        println!(
+                            "TRACE,{},{tick},{j},{},{},{},{closed},{sliding},{:.9},{:.9}",
+                            instance.id,
+                            state.cracked[j],
+                            state.separated[j],
+                            edge.contact.is_some(),
+                            force.dot(edge.normal),
+                            (force - edge.normal * force.dot(edge.normal)).length()
+                        );
+                    }
+                }
+                stages.push((failures.len(), departed));
                 ticks = tick;
                 if !assessment.needs_tick() {
                     break;
                 }
             }
+            println!(
+                "PLACEDROW,{},{scale:.9},{initial},{},{},{},{}",
+                instance.id,
+                state.cracked.iter().filter(|&&v| v).count(),
+                state
+                    .fate
+                    .iter()
+                    .filter(|&&f| f == super::super::Fate::Fallen)
+                    .count(),
+                ticks,
+                assessment.needs_tick()
+            );
             rows.entry(asset.clone())
                 .or_default()
-                .push((scale, stages, ticks));
+                .push((scale, stages, assessment.needs_tick()));
+            if traced {
+                // Resolution: bound the largest placement's continuation to 2,048 ticks,
+                // without changing its 128-tick row or imposing a physical crack-count oracle.
+                for tick in 128_usize..2048 {
+                    if !assessment.needs_tick() {
+                        break;
+                    }
+                    let (failures, rounds) =
+                        assessment.advance(&structure, &mut state, &[], Vec3::ZERO, STEP, false);
+                    let departed = observe_departures(&assessment, &mut state);
+                    if !failures.is_empty()
+                        || tick.is_power_of_two()
+                        || !assessment.needs_tick()
+                        || tick == 2047
+                    {
+                        println!(
+                            "CONTINUE,{},{tick},{},{},{:?},{:.9e},{rounds}",
+                            instance.id,
+                            failures.len(),
+                            departed,
+                            assessment.solve.progress,
+                            observed_relative_residual(&assessment)
+                        );
+                    }
+                }
+            }
         }
         for (id, rows) in rows {
             let min_scale = rows.iter().map(|r| r.0).fold(f32::INFINITY, f32::min);
             let max_scale = rows.iter().map(|r| r.0).fold(0.0_f32, f32::max);
-            let unsettled = rows.iter().filter(|r| r.2 == 127).count();
+            let unsettled = rows.iter().filter(|r| r.2).count();
             println!(
                 "PLACED {id}: instances={} scales={min_scale}..{max_scale} unfinished_after_128={unsettled}",
                 rows.len()

@@ -620,9 +620,10 @@ second moments while discretizing its support direction. These are contact-resol
 not tensile strength or an extra bearing rule.
 
 One active-set solve freezes closed sites and slip forces for an elastic Krylov sequence,
-then tests its projected reactions against the actual loads. A sliding site's shear tangent is
-zero; its friction force remains in the right-hand side. Other contacts can therefore take the
-released reaction. Bounded step reduction controls changes between contact sets. A direction
+then tests its projected reactions against the actual loads. A saturated site's tangent is zero
+along slip and retains transverse stiffness; an affine force term makes the tangent equal its
+current projected force as the slip direction turns. Other contacts can take the released
+reaction. Bounded step reduction controls changes between contact sets. A direction
 with no elastic resistance first activates any open face it would meet. If no face intercepts
 it, it is a contact mechanism: gravity or the applied load can move that group without a static
 balance. `Progress::Mechanism` names that outcome; physical motion belongs to the body solver.
@@ -633,7 +634,10 @@ restart conjugacy from the warm displacement; changed topology remaps it by sour
 address. **Resolution relative preconditioned residual 1e-8** identifies contact equilibrium;
 the inner elastic tolerance is 1e-10 so it cannot consume the outer gate. The residual metric
 retains the original full-face compliance: inactive contact coordinates must not magnify
-roundoff by changing the norm. `Progress::Iterating` names unfinished equilibrium. A failure
+roundoff by changing the norm. `Progress::Iterating` names unfinished equilibrium: no cohesive
+strength verdict or topology change may read that trial field. Only projected equilibrium admits
+cohesive failure; a certified contact mechanism admits contact separation. A warm displacement
+after changed topology is a guess and must pass the same gate. A failure
 stage marks changed topology for the next tick; no failure starts another solve inside its
 own tick. An unchanged equilibrated owner performs zero sparse products. Initial gravity is prepared
 once per admitted construction and scale, before play. Other scales may reuse an intact

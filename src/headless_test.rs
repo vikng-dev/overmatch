@@ -15,11 +15,9 @@ use crate::spec::TankSpec;
 use crate::state::AppState;
 use crate::tank::{Controlled, PendingTankAssets, TANK_GLB_PATH, Tank};
 
-/// Backstop only — NOT a performance budget. With the boots serialized (see [`BOOT_LEASE`]) a boot
-/// has the whole box to itself, so it finishes in seconds; this bound exists purely so a genuine
-/// hang (a wiring bug that never reaches `Playing`) fails with the diagnosis below instead of
-/// sitting until the CI job timeout. It is generous on purpose: the loop exits the instant the sim
-/// is up, so a wide bound costs a healthy run exactly nothing.
+/// Resolution: backstop for async asset/state polling after synchronous Startup admission,
+/// never a performance budget. A missing gate fails with its asset diagnosis rather than
+/// waiting until the CI timeout. Bounded construction preparation is synchronous work.
 const BOOT_DEADLINE: Duration = Duration::from_secs(60);
 
 /// The simulation clock configured by the netcode composition. Fixtures advance it by one exact
@@ -306,15 +304,18 @@ fn booted_sim_on_map(
     // to those IO threads: a bare CPU-bound spin starves them. The sleep is WALL-CLOCK only — the
     // clock is `ManualDuration(ZERO)` here, so no sim tick advances and the frozen-load invariant
     // above holds untouched.
+    // Startup admits construction data synchronously; the watchdog measures the subsequent
+    // async asset/state wait, with the simulation clock still frozen.
+    app.update();
     let started = Instant::now();
     loop {
-        app.update();
         if *app.world().resource::<State<AppState>>().get() == AppState::Playing {
             break;
         }
         let elapsed = started.elapsed();
         assert!(elapsed < BOOT_DEADLINE, "{}", boot_diagnosis(&app, elapsed));
         std::thread::sleep(Duration::from_millis(1));
+        app.update();
     }
 
     // Still real-time asset IO (sim clock frozen): wait for the scene to instantiate and the rigs to
