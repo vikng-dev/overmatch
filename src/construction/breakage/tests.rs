@@ -4425,6 +4425,8 @@ fn sweep_installers_keep_every_contact_outside_prepared_coverage() {
     }
     let installers: &[(&str, fn() -> bevy::app::PluginGroupBuilder)] = &[
         ("offline", crate::offline_physics),
+        #[cfg(feature = "bitprobe")]
+        ("bitprobe", crate::bitprobe::physics_plugins),
     ];
     for &(name, install) in installers {
         for case in [

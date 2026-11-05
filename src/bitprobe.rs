@@ -9,10 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use avian3d::prelude::{
-    AngularVelocity, LinearVelocity, PhysicsInterpolationPlugin, PhysicsPlugins, Position,
-    RigidBody, Rotation,
+    AngularVelocity, LinearVelocity, PhysicsInterpolationPlugin, Position, RigidBody, Rotation,
 };
-use bevy::app::{PluginGroup, PluginsState};
+use bevy::app::PluginsState;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use flate2::Compression;
@@ -440,6 +439,10 @@ fn scripted_input(tick: u32) -> (f32, f32) {
     }
 }
 
+pub(crate) fn physics_plugins() -> bevy::app::PluginGroupBuilder {
+    crate::offline_physics().disable::<PhysicsInterpolationPlugin>()
+}
+
 fn build_app() -> App {
     let mut app = App::new();
     // The network authority's plugin floor, so the fixture tank simulates beside the same bevy
@@ -451,10 +454,7 @@ fn build_app() -> App {
     // disabled, islands enabled. The standalone probe retains PhysicsTransformPlugin because
     // Lightyear is intentionally absent and therefore cannot own transform synchronization as it
     // does in the deployed composition.
-    let physics = PhysicsPlugins::default()
-        .build()
-        .disable::<PhysicsInterpolationPlugin>();
-    app.add_plugins(physics)
+    app.add_plugins(physics_plugins())
         .add_plugins(SimPlugin)
         // The probe's scripted scenario (settle/ramp/climb/cruise phases) is fixtured on the
         // authored course + flat slab; keep the heightmap world out of the instrument.
