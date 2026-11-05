@@ -1158,6 +1158,136 @@ fn a_press_beside_a_hole_loads_the_ligament_next_to_it() {
     }
 }
 
+/// A fixture block pair hung on a sliver: chunk 0 buried, chunk 1 on it by a disk joint of
+/// `sliver` m², chunk 2 beside chunk 1 on a 0.04 m² joint, each chunk its own element. Both
+/// joints bond at a fixture strength nothing reaches.
+fn hung(sliver: f32) -> Structure {
+    let side = 0.4_f32;
+    let bond = Bond::Bonded(seam(1e12, 1e12));
+    structure(
+        vec![
+            cube(Vec3::new(0.0, -side / 2.0, 0.0), side, true),
+            cube(Vec3::new(0.0, side / 2.0, 0.0), side, false),
+            cube(Vec3::new(side, side / 2.0, 0.0), side, false),
+        ],
+        vec![0, 1, 2],
+        vec![
+            joint(1, Side::Chunk(0), Vec3::ZERO, Vec3::Y, sliver, bond),
+            joint(
+                2,
+                Side::Chunk(1),
+                Vec3::new(side / 2.0, side / 2.0, 0.0),
+                Vec3::X,
+                0.04,
+                bond,
+            ),
+        ],
+    )
+}
+
+/// A disk's rocking stiffness is `K_n A / 4π`, `K_n ∝ A` (bondsolve's joint law), so it scales
+/// as `A²`. DERIVED: a 1e-8 m² sliver rocks 6e-14 as stiffly as the 0.04 m² joint beside it,
+/// below the factor's 1e-9 mechanism resolution; a 1e-3 m² one rocks 6e-4 as stiffly, above it.
+const SLIVERS: [(f32, bool); 2] = [(1e-8, true), (1e-3, false)];
+
+/// A CHUNK SET HUNG ON A SLIVER IS A MECHANISM, AND THE SLIVER PARTS. The kernel of chunks 1 and 2
+/// rocks freely on the sliver joint (DERIVED, [`SLIVERS`]): the joint its free motion moves, the
+/// sliver, parts (`Slide`) in every event and the rest factors without it, the stiff joint
+/// between the two chunks kept. Where the sliver holds, nothing parts. The crumble and the hole
+/// solve both read this kernel; a mechanism is a game state, never a refusal.
+#[test]
+fn a_kernel_hung_on_a_sliver_parts_the_sliver() {
+    for (sliver, loose) in SLIVERS {
+        let structure = hung(sliver);
+        let state = State::new(&structure);
+        let kernel = Kernel::of(&structure, &state, &[1, 2]);
+        let hold = kernel.hold(&structure, &[Wrench::default(); 2]);
+        let parted: Vec<_> = hold
+            .failures
+            .iter()
+            .filter(|f| f.cause == Cause::Slide)
+            .map(|f| f.joint)
+            .collect();
+        let expected = if loose { vec![0] } else { vec![] };
+        assert_eq!(
+            parted, expected,
+            "a {sliver} m² sliver: {:?}",
+            hold.failures
+        );
+        assert_eq!(hold.separated.contains(&0), loose, "a {sliver} m² sliver");
+        assert!(
+            hold.carried.iter().any(|&(j, _)| j == 1),
+            "the stiff joint stays an edge"
+        );
+    }
+}
+
+/// A PART HUNG ON A SLIVER BY NO SLIPPING FACE IS A MECHANISM, AND THE SLIVER PARTS. The part law
+/// on the same fixture: parts 1 and 2 rock freely on the sliver, which no slipping rest made, so
+/// the joint the free motion moves separates (`Slide`) and connectivity releases both parts.
+#[test]
+fn a_part_hung_on_a_sliver_parts_the_sliver_and_is_released() {
+    for (sliver, loose) in SLIVERS {
+        let structure = hung(sliver);
+        let mut state = State::new(&structure);
+        let mut assessment = Assessment::default();
+        let failures = tick(&structure, &mut state, &mut assessment, &[]);
+        let parted: Vec<_> = failures
+            .iter()
+            .filter(|f| f.cause == Cause::Slide)
+            .map(|f| f.joint)
+            .collect();
+        let expected = if loose { vec![0] } else { vec![] };
+        assert_eq!(parted, expected, "a {sliver} m² sliver: {failures:?}");
+        assert_eq!(state.separated[0], loose, "a {sliver} m² sliver");
+        assert!(!state.separated[1], "the stiff joint holds");
+        let released = if loose { vec![vec![1, 2]] } else { vec![] };
+        assert_eq!(assessment.support, released, "a {sliver} m² sliver");
+    }
+}
+
+/// A SLIPPING REST WHOSE FRICTION TURNS A DIAGONAL NEGATIVE IS STILL A MECHANISM. A block bears on
+/// the ground by two slipping rests: one on a steep face `n = (0.96, 0.28, 0)` slipping up it,
+/// along `t = (−0.28, 0.96, 0)`, one on a vertical face across `z`. DERIVED: the steep rest's
+/// translation stiffness is `K_n (n − μ t) nᵀ`, rank one, so the block is free along `t`; its
+/// `y` diagonal `K_n n_y (n_y − μ t_y)` is negative for the pair friction `μ > 0.29`, so a pivot
+/// judged against it would pass the vanishing `y` pivot. Judged against its elastic diagonal
+/// `K_n n_y²`, the factor finds the mechanism, and its free motion runs along `t`.
+#[test]
+fn a_friction_lowered_diagonal_still_finds_the_mechanism() {
+    let side = 0.4_f32;
+    let steep = Vec3::new(0.96, 0.28, 0.0);
+    let chunks = vec![cube(Vec3::new(0.0, side / 2.0, 0.0), side, false)];
+    let joints = vec![
+        joint(0, Side::Ground, Vec3::ZERO, steep, 0.04, Bond::Resting),
+        joint(
+            0,
+            Side::Ground,
+            Vec3::new(0.0, side / 2.0, -side / 2.0),
+            Vec3::Z,
+            0.04,
+            Bond::Resting,
+        ),
+    ];
+    let structure = structure(chunks, vec![0], joints);
+    let mu = bondsolve::pair_friction(&structure, &structure.joints[0]);
+    let up = DVec3::new(-0.28, 0.96, 0.0);
+    assert!(mu * up.y > 0.28, "the fixture friction turns the diagonal");
+    let slip = |force: DVec3| Slip {
+        force,
+        twist: DVec3::ZERO,
+    };
+    let slipping = BTreeMap::from([(0, slip(up)), (1, slip(DVec3::X))]);
+    let graph = Graph::of(&structure, &State::new(&structure), &slipping);
+    let mechanism = Factor::new(&graph.nodes, &graph.edges).expect_err("the block is free along t");
+    let motion = mechanism.mode[0].linear;
+    let normal = graph.edges[0].normal;
+    assert!(
+        motion.dot(normal).abs() <= 1e-9 * motion.length(),
+        "the free motion runs along the steep rest: {motion} against {normal}"
+    );
+}
+
 fn shipped(id: &str) -> crate::construction::ConstructionLibrary {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
     crate::construction::ConstructionLibrary::load(&root, [id])

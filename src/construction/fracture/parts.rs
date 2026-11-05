@@ -44,9 +44,10 @@ pub(crate) const LOAD_TOLERANCE: f64 = 1e-5;
 /// house's factor (`.agents/scratch/bestofboth/bob-factor.md`).
 const IDLE: f64 = 1e-9;
 
-/// Resolution: a pivot below this fraction of its own diagonal is singular within roundoff, a
-/// mechanism. It is 400 × the 2.5e-12 relative equation residual MEASURED for the house's factor
-/// (`.agents/scratch/bestofboth/bob-factor.md`).
+/// Resolution: a pivot below this fraction of its coordinate's elastic diagonal (its stiffness
+/// without friction, never zero or below where any stiffness holds it) is singular within
+/// roundoff, a mechanism. It is 400 × the 2.5e-12 relative equation residual MEASURED for the
+/// house's factor (`.agents/scratch/bestofboth/bob-factor.md`).
 const MECHANISM: f64 = 1e-9;
 
 /// One rigid part of an owner.
@@ -367,9 +368,49 @@ pub(crate) struct Factor {
     pub ops: u64,
 }
 
+/// A node graph's stiffness that leaves a motion free within [`MECHANISM`].
+#[derive(Clone, Debug, PartialEq)]
+struct Mechanism {
+    /// The node whose pivot fell.
+    node: usize,
+    /// Per node, the free motion: that pivot's coordinate moved by one, every node ordered
+    /// after it held, and the nodes before it in equilibrium. A fixed node does not move.
+    mode: Vec<Wrench>,
+}
+
+impl Mechanism {
+    /// The edges that carry its motion: those whose two sides move apart, over their patch, by
+    /// more than `√MECHANISM` of the most any edge does (Resolution: the mode moves a stiff
+    /// edge by about [`MECHANISM`] of a free one, so the geometric mean parts the two).
+    fn carriers(&self, nodes: &[Node], edges: &[Edge]) -> Vec<usize> {
+        let motion = |e: &Edge| {
+            let at = |n: usize| {
+                let w = self.mode[n];
+                w.linear + w.angular.cross(e.centre - nodes[n].centre)
+            };
+            let (mut shift, mut turn) = (at(e.a), self.mode[e.a].angular);
+            if let Some(b) = e.b {
+                shift -= at(b);
+                turn -= self.mode[b].angular;
+            }
+            // The patch's radius of gyration turns a rotation into the motion over its area.
+            shift.length() + turn.length() * e.patch.polar.sqrt()
+        };
+        let motions: Vec<f64> = edges.iter().map(motion).collect();
+        let most = motions.iter().copied().fold(0.0, f64::max);
+        assert!(
+            most > 0.0,
+            "a mechanism's mode moves its pivot's node against an anchor or a held node"
+        );
+        (0..edges.len())
+            .filter(|&e| motions[e] > MECHANISM.sqrt() * most)
+            .collect()
+    }
+}
+
 impl Factor {
-    /// The factor, or the node whose pivot fell below [`MECHANISM`] of its diagonal: a mechanism.
-    fn new(nodes: &[Node], edges: &[Edge]) -> Result<Self, usize> {
+    /// The factor, or the mechanism whose pivot fell below [`MECHANISM`] of its elastic diagonal.
+    fn new(nodes: &[Node], edges: &[Edge]) -> Result<Self, Mechanism> {
         let mut graph = vec![std::collections::BTreeSet::new(); nodes.len()];
         for e in edges {
             if let Some(b) = e.b
@@ -403,8 +444,16 @@ impl Factor {
         let n = 6 * fronts.len();
         // Per column (a unit displacement): each row's force, `K[row][column]`.
         let mut matrix = vec![BTreeMap::<usize, f64>::new(); n];
+        // Per coordinate: its stiffness's diagonal without friction, the scale a pivot is judged
+        // against. Friction's non-symmetric term can lower a diagonal to zero or below, where
+        // a relative test on it would pass a vanishing pivot.
+        let mut elastic = vec![0.0; n];
         let mut input = vec![Wrench::default(); nodes.len()];
         for e in edges {
+            let bare = e.friction.map(|_| Edge {
+                friction: None,
+                ..e.clone()
+            });
             let ends: Vec<_> = [Some(e.a), e.b]
                 .into_iter()
                 .flatten()
@@ -416,8 +465,12 @@ impl Factor {
                     unit[axis] = 1.0;
                     input[a] = wrench(&unit);
                     let carried = e.resultant(nodes, &input);
+                    let stiff = bare
+                        .as_ref()
+                        .map_or(carried, |b| b.resultant(nodes, &input));
                     input[a] = Wrench::default();
                     let column = map[a].expect("a free node is ordered") + axis;
+                    elastic[column] += coordinates(at_node(e, nodes, stiff, a))[axis];
                     for &b in &ends {
                         let base = map[b].expect("a free node is ordered");
                         for (dof, value) in coordinates(at_node(e, nodes, carried, b))
@@ -462,7 +515,6 @@ impl Factor {
                 lower[i] = entry(i, j);
                 upper[i] = entry(j, i);
             }
-            let own = lower[j];
             for &(k, pos) in &prior[j] {
                 let c = &columns[k];
                 let (ljk, ukj) = (c.values[pos], c.upper[pos]);
@@ -476,9 +528,34 @@ impl Factor {
                     ops += 4;
                 }
             }
-            assert!(lower[j].is_finite(), "a finite stiffness has finite pivots");
-            if lower[j] <= MECHANISM * own {
-                return Err(order[j / 6]);
+            assert!(
+                lower[j].is_finite(),
+                "a finite stiffness whose pivots each passed MECHANISM of their elastic diagonal \
+                 has finite pivots"
+            );
+            if lower[j] <= MECHANISM * elastic[j] {
+                // DERIVED: rows before `j` of `K x = 0`, with `x_j = 1` and every later
+                // coordinate held, are `U₁₁ x₁ = −U₁₂ e_j`: the factor's own back-substitution.
+                let mut x = vec![0.0; n];
+                x[j] = 1.0;
+                for c in (0..j).rev() {
+                    let column = &columns[c];
+                    let sum: f64 = column
+                        .rows
+                        .iter()
+                        .zip(&column.upper)
+                        .skip(1)
+                        .map(|(&i, &u)| u * x[i])
+                        .sum();
+                    x[c] = -sum / column.upper[0];
+                }
+                return Err(Mechanism {
+                    node: order[j / 6],
+                    mode: map
+                        .iter()
+                        .map(|&base| base.map_or_else(Wrench::default, |b| wrench(&x[b..b + 6])))
+                        .collect(),
+                });
             }
             let pivot = lower[j];
             let c = &mut columns[j];
@@ -646,7 +723,8 @@ impl Assessment {
     }
 
     /// Rebuild the part graph and factor it. A mechanism separates the slipping rests that leave
-    /// it without a tangential hold; returns those failures.
+    /// it without a tangential hold or, where it reaches none, the joints its free motion moves
+    /// ([`Mechanism::carriers`]); returns those failures.
     fn rebuild(&mut self, structure: &Structure, state: &mut State) -> Vec<Failure> {
         let mut lost = Vec::new();
         // A slip ends with its joint: once it opens or its chunks fall.
@@ -659,12 +737,17 @@ impl Assessment {
                     self.factor = factor;
                     break;
                 }
-                Err(node) => {
-                    let joints = self.graph.mechanism(node);
-                    assert!(
-                        !joints.is_empty(),
-                        "only a slipping face leaves a part without a tangential hold"
-                    );
+                Err(mechanism) => {
+                    let mut joints = self.graph.mechanism(mechanism.node);
+                    if joints.is_empty() {
+                        // No slip made it: the joints its free motion moves are too slight to
+                        // hold it (a remnant of removed or cracked matter), and they part.
+                        joints = mechanism
+                            .carriers(&self.graph.nodes, &self.graph.edges)
+                            .into_iter()
+                            .map(|e| self.graph.joints[e])
+                            .collect();
+                    }
                     for j in joints {
                         state.cracked[j] = true;
                         state.separated[j] = true;
