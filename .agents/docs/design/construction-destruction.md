@@ -365,10 +365,12 @@ cracked seams and noncohesive rests offer no bonded capacity.
 
 The demand is the force that stops the hull within the tick: `F = m_hull * v_n / dt + F_drive,n`.
 The hull's own rigid-body mass supplies `m_hull`; its first inward surface witness supplies `v_n`.
-Positive accumulated drive force along that direction adds to the demand. If `F > C`, break the
+Inward accumulated and constant drive forces add to the demand. If `F > C`, break the
 cut and remove the whole patch from the standing construction. Otherwise move the hull to the
-first surface, stop its inward contact motion, and send the stopping press through contact intake
-to the structure check. Remaining tangential motion and physics contacts still belong to Avian.
+first surface, stop its inward contact motion, and send that stopping impulse divided by the tick
+through contact intake to the structure check. Continuing drive remains in Avian's contacts and
+its mean-force reading, including sleeping contacts; adding it to the explicit stopping load
+would count it twice. Remaining tangential motion and physics contacts still belong to Avian.
 
 DERIVED: for a fixed patch, `v_threshold = max(0, C - F_drive,n) * dt / m_hull`.
 Equality holds; motion just above it breaks the cut. Strength, mass and drive come from data and
@@ -395,9 +397,15 @@ Physics already changed those bodies' momenta; contact intake supplies no second
 mass share, delayed cap or give-back. Sleeping contact forces persist until their contact ends.
 Round and field impulse laws retain their own fracture-work and launch accounts.
 
+DERIVED angular bounds: with `R` enclosing every hull point about its centre of mass, rotational
+travel is at most `R * min(abs(omega)*dt, 2)`, by arc length and diameter. Expand the translated
+initial AABB by that travel and intersect it with the full rotation-radius envelope. Small spin
+therefore admits only a small local margin; exact nonlinear casts still decide occupied membership.
+
 DERIVED sweep work: bounds-tree traversal, one convex cast per overlapping leaf, and incident
-incident-joint membership visits and cut-joint capacity evaluations; the plastic solve has fixed
-dimension. Counts are reported
+joint visits for the occupied patch. Hash membership gives expected constant work per endpoint;
+a cut edge appears once because it has exactly one endpoint inside the ordered, unique patch.
+The plastic solve has fixed dimension. Counts are reported
 separately from the current debris creation and structural-check costs. The owner requires the
 hole within two ticks of contact. No operation count is a server-time measurement.
 

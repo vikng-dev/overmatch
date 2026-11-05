@@ -860,7 +860,7 @@ mod tests {
             .filter(|&&f| f != crate::construction::fracture::Fate::Standing)
             .count();
         println!(
-            "MEASURED tracked ram: first sweep tick={first}, freed in two ticks={freed}, target chunks absent={gone}, bounds/casts/joints/distance queries={counts:?}, speeds and momentum={losses:?}, post-physics velocities and remaining wall impulses={solver_contacts:?}"
+            "MEASURED tracked ram: first sweep tick={first}, freed in two ticks={freed}, target chunks absent={gone}, bounds/casts/incident-joint visits/cast-contact queries={counts:?}, speeds and momentum={losses:?}, post-physics velocities and remaining wall impulses={solver_contacts:?}"
         );
     }
 }

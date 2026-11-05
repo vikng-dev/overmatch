@@ -67,3 +67,51 @@ contact response remains visible for the orchestrator's play/capture assessment;
 removed nor attributed to patch mass. Debris routing still belongs to decor. New source bodies
 must have their physics mass prepared before this pre-physics hook; decor should construct that
 response at spawn when reconciling its cluster path.
+
+## Bounds and pressure refinement
+
+The angular envelope now expands with angular travel, bounded by arc length and diameter,
+intersected with the full rotation envelope. A fixture checks occupied poses through large angles
+and full turns, and requires negligible spin to have only rounding-scale bound expansion.
+Cut membership uses a hash set, while ordered chunk/incident traversal defines the reduction and
+ledger order. Its expected membership work is linear in the visited incident references; internal
+edges have two references, cut edges one. The counter now includes all of these references.
+
+The tighter geometry exposed a held-drive accounting defect: cancelling the drive before physics
+could let a body sleep with too little force in its cached solver contact. The explicit intake
+now carries only the pre-physics stopping impulse divided by the tick. Continuing drive remains
+in Avian's contact reading. It still contributes to the cut's demand, and reaches the structure
+once. The existing production-plugin witness for the Fixture 400 N sleeping press passes.
+
+MEASURED final ram decision work:
+
+| Tick from first contact | Bounds nodes | Candidate casts | Incident references | Cast/contact API calls |
+|---|---:|---:|---:|---:|
+| 0 | 203 | 34 | 64 | 46 |
+| +1 | 609 | 40 | 38 | 47 |
+| +2 | 941 | 90 | 163 | 130 |
+| Total | 1753 | 164 | 265 | 223 |
+
+The earlier joint counter counted cut capacity evaluations, so its values must not be compared
+with the new incident-reference counter. Bounds, casts and API-call definitions are unchanged.
+These are workload counts, not elapsed time; broad-phase calls, internal GJK iterations,
+departure creation and the structure check remain outside them.
+
+One before/after comparison of the recorded ram confirms the same first contact/hole tick,
+49 freed chunks and all three printed pre/post exchange velocities, exchanged momenta and
+post-physics contact observations. Candidate casts fell from 6919 to 164 over those three ticks.
+No historical-output assertion was added; path containment, threshold bracketing and momentum
+conservation are the retained invariants. The remaining placed-wall slowdown is unchanged.
+
+MEASURED final gates: 464 targeted module/caller/headless/acceptance and whole-tree guard tests
+passed, six observational beds ignored. Ten focused refinement witnesses passed. Formatting and
+CI workspace/all-target clippy passed. The checks include every edited Rust module, contact and
+driving callers, the entire headless module, and `doc_citations`, `ui_ascii`, `net_boundary`,
+`bake::`. Raw logs are under `target/sweep2-{step1-focused,step2-gates,refinement-focused,final-gates,final-clippy}.log`.
+
+Self-review covered all six lenses; no backlog row names an edited file. No asset strengths,
+attachments, geometry or drive settings changed. No timing run or capture was taken.
+Final merge seams remain the held-contact intake in `breakage`, the patch cluster signature and
+motion in `sweep_intake`, and the immutable joint endpoints in the geometry cache. Decor owns
+routing and complete physics response at spawn; parts owns structural assessment. The remaining
+wall-contact braking needs the orchestrator's play/capture assessment.

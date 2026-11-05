@@ -554,7 +554,9 @@ fn hold(p: &mut Intake, body: Entity, root: Entity, swept: &super::super::sweep:
     let pose = owner.physics_frame((position, rotation));
     let normal = pose.rotation * witness.normal;
     let point = pose.translation + pose.rotation * witness.at;
-    let share = load.demand / swept.chunks.len() as f32;
+    // Ongoing drive reaches the wall through Avian's contacts. Only the impulse removed
+    // before physics needs an extra intake load; counting drive here would duplicate its press.
+    let share = (load.demand - load.drive) / swept.chunks.len() as f32;
     for &c in &swept.chunks {
         p.account.held.push((
             root,
@@ -599,14 +601,6 @@ fn hold(p: &mut Intake, body: Entity, root: Entity, swept: &super::super::sweep:
             "inward translation has an unlocked response"
         );
         forces.apply_linear_impulse(-normal * closing / response);
-    }
-    let acceleration = (forces.accumulated_linear_acceleration()
-        + constant_acceleration(&p.drives, body, rotation, mass.inverse()))
-    .dot(normal)
-    .max(0.0);
-    if acceleration > 0.0 {
-        assert!(response > 0.0, "inward drive has an unlocked response");
-        forces.apply_force(-normal * acceleration / response);
     }
     let angular_mask = Mat3::from_diagonal(Vec3::new(
         f32::from(!axes.is_rotation_x_locked()),

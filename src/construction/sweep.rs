@@ -7,7 +7,7 @@ use avian3d::prelude::*;
 use bevy::math::{DMat3, DVec3};
 use bevy::prelude::*;
 
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 use super::fracture::{Block, Side, State, Structure};
 
@@ -52,6 +52,7 @@ struct Node {
 pub(crate) struct Work {
     pub(crate) bounds: usize,
     pub(crate) casts: usize,
+    /// Incident references examined for patch membership, including internal edges twice.
     pub(crate) joints: usize,
     pub(crate) queries: usize,
 }
@@ -215,7 +216,13 @@ impl Geometry {
 
     /// Only edges crossing patch membership resist its common motion. Internal seams carry none.
     pub(crate) fn cut(&self, chunks: &[usize]) -> Vec<usize> {
-        let patch: BTreeSet<_> = chunks.iter().copied().collect();
+        assert!(
+            chunks.windows(2).all(|pair| pair[0] < pair[1]),
+            "swept patch identities are strictly ordered and unique"
+        );
+        let patch: HashSet<_> = chunks.iter().copied().collect();
+        // Each cut edge has exactly one endpoint inside; ordered chunks and authored incident
+        // lists therefore visit it once, in an order independent of the hash table's iteration.
         chunks
             .iter()
             .flat_map(|&c| &self.incident[c])
@@ -224,8 +231,6 @@ impl Geometry {
                 let edge = self.edges[j];
                 patch.contains(&edge.0) != edge.1.is_some_and(|b| patch.contains(&b))
             })
-            .collect::<BTreeSet<_>>()
-            .into_iter()
             .collect()
     }
 
@@ -241,11 +246,15 @@ impl Geometry {
         let Some(witness) = sweep.witness else {
             return;
         }; // No occupied inward motion.
+        sweep.work.joints += sweep
+            .chunks
+            .iter()
+            .map(|&c| self.incident[c].len())
+            .sum::<usize>();
         let capacity = self
             .cut(&sweep.chunks)
             .into_iter()
             .map(|j| {
-                sweep.work.joints += 1;
                 let joint = &structure.joints[j];
                 if state.cracked[j] || state.separated[j] || !state.live(joint) {
                     return 0.0;
@@ -304,9 +313,14 @@ impl Motion<'_> {
                 .abs()
                 .max((aabb.max - centre).abs())
                 .length();
+            // DERIVED: every point's rotational travel is at most R*min(|omega|*dt, 2),
+            // bounded by arc length and diameter. Intersect with the whole rotation envelope.
+            let margin = Vec3::splat(radius * (spin.length() * dt).min(2.0));
             (
-                centre.min(centre + travel) - Vec3::splat(radius),
-                centre.max(centre + travel) + Vec3::splat(radius),
+                (aabb.min.min(aabb.min + travel) - margin)
+                    .max(centre.min(centre + travel) - Vec3::splat(radius)),
+                (aabb.max.max(aabb.max + travel) + margin)
+                    .min(centre.max(centre + travel) + Vec3::splat(radius)),
             )
         };
         ColliderAabb { min, max }
@@ -685,6 +699,57 @@ mod tests {
             },
         );
         assert_eq!(swept.chunks, vec![1, 4]);
+    }
+
+    /// The game's environment destruction: bounds must contain the complete occupied path,
+    /// while vanishing spin must not admit distant chunks. The server's local query cost relies on both.
+    #[test]
+    fn angular_travel_bounds_contain_the_path_and_shrink_with_spin() {
+        // Fixture: offset COM, rotated long hull, translation and angular travel across full turns.
+        let hull = Collider::cuboid(0.2, 4.0, 0.4);
+        let motion = Motion {
+            hull: &hull,
+            position: Vec3::new(-1.0, 0.2, 0.3),
+            rotation: Quat::from_rotation_y(0.3),
+            centre: Vec3::new(0.1, 0.8, -0.2),
+            velocity: Vec3::new(1.0, -0.3, 0.7),
+            spin: Vec3::ZERO,
+            dt: 0.5,
+        };
+        let linear = motion.bounds();
+        let radius = (linear.max - linear.min).length();
+        // Resolution: f32 pose composition and AABB rounding, scaled to the fixture's extent.
+        let tolerance = 64.0 * f32::EPSILON * radius;
+        let axis = Vec3::new(0.2, 1.0, -0.3).normalize();
+        for speed in [0.0, f32::EPSILON, 0.01, 1.0, 6.0, 20.0] {
+            let motion = Motion {
+                spin: axis * speed,
+                ..motion
+            };
+            let bounds = motion.bounds();
+            for step in 0..=128 {
+                let time = motion.dt * step as f32 / 128.0;
+                let turn = Quat::from_scaled_axis(motion.spin * time);
+                let position = motion.centre
+                    + motion.velocity * time
+                    + turn * (motion.position - motion.centre);
+                let at = hull.aabb(position, turn * motion.rotation);
+                assert!(
+                    at.min.cmpge(bounds.min - tolerance).all()
+                        && at.max.cmple(bounds.max + tolerance).all(),
+                    "speed={speed}, time={time}"
+                );
+            }
+            if speed == f32::EPSILON {
+                let expansion = (bounds.min - linear.min)
+                    .abs()
+                    .max((bounds.max - linear.max).abs());
+                assert!(
+                    expansion.cmple(Vec3::splat(tolerance)).all(),
+                    "a negligible angular path has only rounding-scale bound expansion"
+                );
+            }
+        }
     }
 
     fn driven_patch(
