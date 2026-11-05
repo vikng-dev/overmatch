@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 
 use avian3d::dynamics::solver::SolverConfig;
 use avian3d::dynamics::solver::constraint_graph::ConstraintGraph;
-use avian3d::dynamics::solver::contact::ContactConstraintPoint;
+use avian3d::dynamics::solver::contact::{ContactConstraint, ContactConstraintPoint};
 use avian3d::dynamics::solver::schedule::{SolverSystems, SubstepSchedule, SubstepSolverSystems};
 use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
 use avian3d::prelude::{
@@ -59,6 +59,7 @@ use avian3d::prelude::{
     Rotation, SleepThreshold,
 };
 use bevy::prelude::*;
+use bevy::tasks::{ComputeTaskPool, ParallelSlice, ParallelSliceMut, TaskPool};
 
 use crate::ClientReplica;
 
@@ -170,6 +171,27 @@ struct Kept {
     sign: f32,
 }
 
+struct PreparedContact {
+    at: Kept,
+    body: Entity,
+    inertia: BodyInertia,
+    points: Vec<ContactTransfer>,
+    last: Vec<(f32, Vec2)>,
+}
+
+type ContactBodies<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static SleepThreshold>,
+        Option<&'static SolverBodyInertia>,
+        &'static RigidBody,
+        &'static Position,
+        &'static Rotation,
+        &'static ComputedCenterOfMass,
+    ),
+>;
+
 impl ContactTransfers {
     /// Pre-physics staging order, before the solver reading canonicalizes contact geometry.
     #[cfg(test)]
@@ -237,6 +259,12 @@ impl ContactTransfers {
     /// its normal has no blow and no blow centroid; its points' mean stands for it, and no law
     /// reads a source mass without a blow.
     pub(crate) fn split(&self) -> impl Iterator<Item = (&ContactTransfer, Vec3, Vec3, f32)> {
+        self.groups().flat_map(|points| self.split_points(points))
+    }
+
+    /// Raw contact groups in solver order, then canonical implicit-contact order. Instrumentation
+    /// can inspect metadata without evaluating the mass, blow and press laws.
+    pub(crate) fn groups(&self) -> impl Iterator<Item = &[ContactTransfer]> {
         let ends = self
             .kept
             .iter()
@@ -246,12 +274,8 @@ impl ContactTransfers {
         self.kept
             .iter()
             .zip(ends)
-            .flat_map(move |(kept, end)| self.split_points(&self.points[kept.first..end]))
-            .chain(
-                self.applied
-                    .values()
-                    .flat_map(|points| self.split_points(points)),
-            )
+            .map(|(kept, end)| &self.points[kept.first..end])
+            .chain(self.applied.values().map(Vec::as_slice))
     }
 
     /// Solver points carry the constraint's effective masses. A source's implicit patches on one
@@ -382,6 +406,108 @@ fn friction(point: &ContactConstraintPoint) -> Vec2 {
         .map_or(Vec2::ZERO, |part| part.impulse)
 }
 
+/// Each constraint reads immutable solver state; only collection assigns global point slots.
+fn prepare_constraint(
+    color: usize,
+    index: usize,
+    constraint: &ContactConstraint,
+    contacts: &ContactGraph,
+    structures: &Query<(), With<StructureBody>>,
+    bodies: &ContactBodies,
+    length_unit: f32,
+) -> Vec<PreparedContact> {
+    let mut prepared = Vec::new();
+    for structure_first in [true, false] {
+        if !structures.contains(if structure_first {
+            constraint.body1
+        } else {
+            constraint.body2
+        }) {
+            continue; // Neither side need be a construction.
+        }
+        let (_, pair) = contacts
+            .get_by_id(constraint.contact_id)
+            .expect("a contact constraint is built from a pair in the contact graph");
+        let manifold = &pair.manifolds[constraint.manifold_index];
+        assert_eq!(
+            manifold.points.len(),
+            constraint.points.len(),
+            "a contact constraint holds its manifold's points one for one"
+        );
+        let (sign, structure, structure_collider, body, body_collider) = if structure_first {
+            (
+                1.0,
+                constraint.body1,
+                pair.collider1,
+                constraint.body2,
+                pair.collider2,
+            )
+        } else {
+            (
+                -1.0,
+                constraint.body2,
+                pair.collider2,
+                constraint.body1,
+                pair.collider1,
+            )
+        };
+        let (rest, solver, kind, position, rotation, com) = bodies
+            .get(body)
+            .expect("each contact side is a rigid body with its required pose and centre of mass");
+        let inertia = if kind.is_static() {
+            &SolverBodyInertia::DUMMY
+        } else {
+            solver.expect("Avian supplies solver inertia for an active moving contact body")
+        };
+        let rest_speed = rest
+            .or_else(|| {
+                bodies
+                    .get(structure)
+                    .expect("the other contact side is a rigid body")
+                    .0
+            })
+            .expect("a solver contact has at least one moving side with a sleep threshold")
+            .linear
+            * length_unit;
+        let inertia = BodyInertia {
+            centre: position.0 + rotation.0 * com.0,
+            inverse_mass: inertia.effective_inv_mass(),
+            inverse_inertia: inertia.effective_inv_angular_inertia().to_mat3(),
+        };
+        let mut points = Vec::with_capacity(constraint.points.len());
+        let mut last = Vec::with_capacity(constraint.points.len());
+        for (point, contact) in constraint.points.iter().zip(&manifold.points) {
+            points.push(ContactTransfer {
+                structure,
+                structure_collider,
+                body,
+                body_collider: Some(body_collider),
+                point: contact.point,
+                normal: sign * constraint.normal,
+                impulse: Vec3::ZERO,
+                effective_mass: point.normal_part.effective_mass,
+                closing_speed: -point.normal_speed,
+                rest_speed,
+            });
+            last.push((point.normal_part.impulse, friction(point)));
+        }
+
+        prepared.push(PreparedContact {
+            at: Kept {
+                color,
+                index,
+                first: 0,
+                sign,
+            },
+            body,
+            inertia,
+            points,
+            last,
+        });
+    }
+    prepared
+}
+
 /// Before the substeps: the resting pairs brought up to date, then a record for every point of
 /// every constraint with a structure on one side. `time` is the physics clock Avian runs its
 /// schedule on.
@@ -394,14 +520,7 @@ fn keep(
     graph: Res<ConstraintGraph>,
     contacts: Res<ContactGraph>,
     structures: Query<(), With<StructureBody>>,
-    bodies: Query<(
-        Option<&SleepThreshold>,
-        Option<&SolverBodyInertia>,
-        &RigidBody,
-        &Position,
-        &Rotation,
-        &ComputedCenterOfMass,
-    )>,
+    bodies: ContactBodies,
     length_unit: Res<PhysicsLengthUnit>,
     time: Res<Time>,
     mut transfers: ResMut<ContactTransfers>,
@@ -421,16 +540,6 @@ fn keep(
         staged_receivers,
         receivers,
     } = &mut *transfers;
-    for contact in pending.iter() {
-        let (_, _, kind, ..) = bodies
-            .get(contact.structure)
-            .expect("an implicit structural recipient survives until the contact reading");
-        assert_eq!(
-            kind.is_dynamic(),
-            staged_receivers.contains_key(&contact.structure),
-            "a dynamic implicit receiver requires its staged inertia; fixed construction has none"
-        );
-    }
     let asleep = |transfer: &ContactTransfer| {
         contacts
             .get(
@@ -443,105 +552,64 @@ fn keep(
     };
     // A pair that woke or ended drops its rest; one whose body slept after the last step rests
     // with that step's transfer. A sleeping pair builds no constraint, so no pair is both.
-    resting.retain(|rest| asleep(&rest.transfer));
-    resting.extend(
+    let retained = resting.par_splat_map(ComputeTaskPool::get(), None, |_, rests| {
+        rests
+            .iter()
+            .filter(|rest| asleep(&rest.transfer))
+            .copied()
+            .collect::<Vec<_>>()
+    });
+    let newly_resting = points.par_splat_map(ComputeTaskPool::get(), None, |_, points| {
         points
             .iter()
             .filter(|point| asleep(point))
-            .map(|&transfer| Resting { transfer, dt: *dt }),
-    );
+            .map(|&transfer| Resting { transfer, dt: *dt })
+            .collect::<Vec<_>>()
+    });
+    resting.clear();
+    resting.extend(retained.into_iter().flatten());
+    resting.extend(newly_resting.into_iter().flatten());
     points.clear();
     inertias.clear();
     kept.clear();
     last.clear();
     *dt = time.delta_secs();
     *steps += 1;
-    for (color, colored) in graph.colors.iter().enumerate() {
-        for (index, constraint) in colored.contact_constraints.iter().enumerate() {
-            let sides: Vec<_> = [true, false]
-                .into_iter()
-                .filter(|&first| {
-                    structures.contains(if first {
-                        constraint.body1
-                    } else {
-                        constraint.body2
-                    })
-                })
-                .collect();
-            for structure_first in sides {
-                let (_, pair) = contacts
-                    .get_by_id(constraint.contact_id)
-                    .expect("a contact constraint is built from a pair in the contact graph");
-                let manifold = &pair.manifolds[constraint.manifold_index];
-                assert_eq!(
-                    manifold.points.len(),
-                    constraint.points.len(),
-                    "a contact constraint holds its manifold's points one for one"
-                );
-                let (sign, structure, structure_collider, body, body_collider) = if structure_first
-                {
-                    (
-                        1.0,
-                        constraint.body1,
-                        pair.collider1,
-                        constraint.body2,
-                        pair.collider2,
-                    )
-                } else {
-                    (
-                        -1.0,
-                        constraint.body2,
-                        pair.collider2,
-                        constraint.body1,
-                        pair.collider1,
-                    )
-                };
-                kept.push(Kept {
+    let constraints: Vec<_> = graph
+        .colors
+        .iter()
+        .enumerate()
+        .flat_map(|(color, colored)| {
+            colored
+                .contact_constraints
+                .iter()
+                .enumerate()
+                .map(move |(index, constraint)| (color, index, constraint))
+        })
+        .collect();
+    let prepared = constraints.par_splat_map(ComputeTaskPool::get(), None, |_, constraints| {
+        constraints
+            .iter()
+            .flat_map(|&(color, index, constraint)| {
+                prepare_constraint(
                     color,
                     index,
-                    first: points.len(),
-                    sign,
-                });
-                let (rest, solver, kind, position, rotation, com) = bodies.get(body).expect(
-                    "each contact side is a rigid body with its required pose and centre of mass",
-                );
-                let inertia = if kind.is_static() {
-                    &SolverBodyInertia::DUMMY
-                } else {
-                    solver.expect("Avian supplies solver inertia for an active moving contact body")
-                };
-                let rest_speed = rest
-                    .or_else(|| {
-                        bodies
-                            .get(structure)
-                            .expect("the other contact side is a rigid body")
-                            .0
-                    })
-                    .expect("a solver contact has at least one moving side with a sleep threshold")
-                    .linear
-                    * length_unit.0;
-                inertias.entry(body).or_insert_with(|| BodyInertia {
-                    centre: position.0 + rotation.0 * com.0,
-                    inverse_mass: inertia.effective_inv_mass(),
-                    inverse_inertia: inertia.effective_inv_angular_inertia().to_mat3(),
-                });
-                for (point, contact) in constraint.points.iter().zip(&manifold.points) {
-                    points.push(ContactTransfer {
-                        structure,
-                        structure_collider,
-                        body,
-                        body_collider: Some(body_collider),
-                        point: contact.point,
-                        normal: sign * constraint.normal,
-                        impulse: Vec3::ZERO,
-                        effective_mass: point.normal_part.effective_mass,
-                        closing_speed: -point.normal_speed,
-                        rest_speed,
-                    });
-                    last.push((point.normal_part.impulse, friction(point)));
-                }
-            }
-        }
+                    constraint,
+                    &contacts,
+                    &structures,
+                    &bodies,
+                    length_unit.0,
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    // Constraint order owns publication; workers never choose accumulator offsets or map order.
+    for mut contact in prepared.into_iter().flatten() {
+        contact.at.first = points.len();
+        kept.push(contact.at);
+        inertias.entry(contact.body).or_insert(contact.inertia);
+        points.extend(contact.points);
+        last.extend(contact.last);
     }
     applied.clear();
     *receivers = std::mem::take(staged_receivers);
@@ -559,36 +627,74 @@ fn keep(
         };
         key(a).cmp(&key(b))
     });
-    for contact in pending.drain(..) {
-        let (rest, solver, _, position, rotation, com) = bodies.get(contact.body).expect(
-            "a source that applied an implicit contact remains a dynamic body through this physics step",
-        );
-        let solver = solver.expect("an implicit contact source is an active moving body");
-        let rest = rest.expect("a moving implicit contact source has its sleep threshold");
-        let inertia = *inertias.entry(contact.body).or_insert_with(|| BodyInertia {
-            centre: position.0 + rotation.0 * com.0,
-            inverse_mass: solver.effective_inv_mass(),
-            inverse_inertia: solver.effective_inv_angular_inertia().to_mat3(),
-        });
-        let arm = (contact.point - inertia.centre).cross(contact.normal);
-        let inverse = contact.normal.dot(inertia.inverse_mass * contact.normal)
-            + arm.dot(inertia.inverse_inertia * arm);
-        applied
-            .entry((contact.structure_collider, contact.body))
-            .or_default()
-            .push(ContactTransfer {
+    let step = *dt;
+    let prepared = pending.par_splat_map(ComputeTaskPool::get(), None, |_, pending| {
+        pending.iter().map(|contact| {
+            let (_, _, kind, ..) = bodies.get(contact.structure)
+                .expect("an implicit structural recipient survives until the contact reading");
+            assert_eq!(kind.is_dynamic(), receivers.contains_key(&contact.structure),
+                "a dynamic implicit receiver requires its staged inertia; fixed construction has none");
+            let (rest, solver, _, position, rotation, com) = bodies.get(contact.body).expect(
+                "a source that applied an implicit contact remains a dynamic body through this physics step");
+            let solver = solver.expect("an implicit contact source is an active moving body");
+            let rest = rest.expect("a moving implicit contact source has its sleep threshold");
+            let inertia = BodyInertia {
+                centre: position.0 + rotation.0 * com.0,
+                inverse_mass: solver.effective_inv_mass(),
+                inverse_inertia: solver.effective_inv_angular_inertia().to_mat3(),
+            };
+            let arm = (contact.point - inertia.centre).cross(contact.normal);
+            let inverse = contact.normal.dot(inertia.inverse_mass * contact.normal)
+                + arm.dot(inertia.inverse_inertia * arm);
+            (inertia, ContactTransfer {
                 structure: contact.structure,
                 structure_collider: contact.structure_collider,
                 body: contact.body,
                 body_collider: None,
                 point: contact.point,
                 normal: contact.normal,
-                impulse: contact.force * *dt,
+                impulse: contact.force * step,
                 effective_mass: if inverse > 0.0 { inverse.recip() } else { 0.0 },
                 closing_speed: contact.closing_speed,
                 rest_speed: rest.linear * length_unit.0,
-            });
+            })
+        }).collect::<Vec<_>>()
+    });
+    pending.clear();
+    for (inertia, contact) in prepared.into_iter().flatten() {
+        inertias.entry(contact.body).or_insert(inertia);
+        applied
+            .entry((contact.structure_collider, contact.body))
+            .or_default()
+            .push(contact);
     }
+}
+
+/// Substeps depend on the preceding reading of each point; separate constraints own disjoint
+/// accumulator slices. All workers finish before the next solver pass can change its inputs.
+fn update_contacts(
+    pool: &TaskPool,
+    kept: &[Kept],
+    points: &mut [ContactTransfer],
+    last: &mut [(f32, Vec2)],
+    update: impl Fn(&Kept, &mut [ContactTransfer], &mut [(f32, Vec2)]) + Send + Sync,
+) {
+    let total = points.len();
+    let (mut points, mut last) = (points, last);
+    let mut slots = Vec::with_capacity(kept.len());
+    for (index, at) in kept.iter().enumerate() {
+        let end = kept.get(index + 1).map_or(total, |next| next.first);
+        let count = end - at.first;
+        let (owned_points, remaining_points) = points.split_at_mut(count);
+        let (owned_last, remaining_last) = last.split_at_mut(count);
+        slots.push((at, owned_points, owned_last));
+        (points, last) = (remaining_points, remaining_last);
+    }
+    slots.par_splat_map_mut(pool, None, |_, slots| {
+        for (at, points, last) in slots {
+            update(at, points, last);
+        }
+    });
 }
 
 /// After a substep's relax pass: the momentum the substep moved through every kept point.
@@ -604,21 +710,27 @@ fn add_substep(
     let ContactTransfers {
         points, kept, last, ..
     } = &mut *transfers;
-    for constraint_at in kept.iter() {
-        let constraint =
-            &graph.colors[constraint_at.color].contact_constraints[constraint_at.index];
-        let [tangent1, tangent2] = constraint.tangent_directions();
-        for (offset, point) in constraint.points.iter().enumerate() {
-            let slot = constraint_at.first + offset;
-            let (normal_now, friction_now) = (point.normal_part.impulse, friction(point));
-            let (normal_before, friction_before) = last[slot];
-            let normal = normal_now - unapplied * normal_before;
-            let tangent = friction_now - unapplied * friction_before;
-            points[slot].impulse += constraint_at.sign
-                * (normal * constraint.normal + tangent.x * tangent1 + tangent.y * tangent2);
-            last[slot] = (normal_now, friction_now);
-        }
-    }
+    update_contacts(
+        ComputeTaskPool::get(),
+        kept,
+        points,
+        last,
+        |constraint_at, points, last| {
+            let constraint =
+                &graph.colors[constraint_at.color].contact_constraints[constraint_at.index];
+            let [tangent1, tangent2] = constraint.tangent_directions();
+            for (offset, point) in constraint.points.iter().enumerate() {
+                let slot = offset;
+                let (normal_now, friction_now) = (point.normal_part.impulse, friction(point));
+                let (normal_before, friction_before) = last[slot];
+                let normal = normal_now - unapplied * normal_before;
+                let tangent = friction_now - unapplied * friction_before;
+                points[slot].impulse += constraint_at.sign
+                    * (normal * constraint.normal + tangent.x * tangent1 + tangent.y * tangent2);
+                last[slot] = (normal_now, friction_now);
+            }
+        },
+    );
 }
 
 /// After restitution: the increment it added along every kept point's normal.
@@ -632,17 +744,23 @@ fn add_restitution(
     let ContactTransfers {
         points, kept, last, ..
     } = &mut *transfers;
-    for constraint_at in kept.iter() {
-        let constraint =
-            &graph.colors[constraint_at.color].contact_constraints[constraint_at.index];
-        for (offset, point) in constraint.points.iter().enumerate() {
-            let slot = constraint_at.first + offset;
-            let normal_now = point.normal_part.impulse;
-            points[slot].impulse +=
-                constraint_at.sign * (normal_now - last[slot].0) * constraint.normal;
-            last[slot].0 = normal_now;
-        }
-    }
+    update_contacts(
+        ComputeTaskPool::get(),
+        kept,
+        points,
+        last,
+        |constraint_at, points, last| {
+            let constraint =
+                &graph.colors[constraint_at.color].contact_constraints[constraint_at.index];
+            for (offset, point) in constraint.points.iter().enumerate() {
+                let slot = offset;
+                let normal_now = point.normal_part.impulse;
+                points[slot].impulse +=
+                    constraint_at.sign * (normal_now - last[slot].0) * constraint.normal;
+                last[slot].0 = normal_now;
+            }
+        },
+    );
 }
 
 /// Mount the reading in Avian's solver.
