@@ -4,6 +4,7 @@
 
 use avian3d::prelude::{LinearVelocity, Sleeping};
 use bevy::prelude::*;
+use bevy::tasks::{ComputeTaskPool, ParallelSlice};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -14,6 +15,7 @@ use crate::{
         breakage::{Breakage, Piece},
     },
     contact_transfer::ContactTransfers,
+    cost::stages::Stage,
     map::{MapManifest, Prototype},
     scatter::MapInstance,
     spec::TankSpec,
@@ -284,13 +286,12 @@ fn sample_speed(mut ram: ResMut<Ram>, tanks: Query<&LinearVelocity, With<Tank>>)
 pub(super) struct Census<'w, 's> {
     ram: Option<ResMut<'w, Ram>>,
     tanks: Query<'w, 's, Entity, With<Tank>>,
-    pieces: Query<'w, 's, Option<&'static Sleeping>, (With<Piece>, With<Breakage>)>,
+    pieces: Query<'w, 's, (), (With<Piece>, With<Breakage>, Without<Sleeping>)>,
     constructions: Query<'w, 's, (Entity, &'static MapInstance), With<Body>>,
     contacts: Res<'w, ContactTransfers>,
 }
 
 impl Census<'_, '_> {
-    /// The collector runs after TickClosed, so its measured cost is reported separately.
     pub(super) fn collector(&mut self, us: f64) {
         if let Some(row) = self.ram.as_deref_mut().and_then(|ram| ram.rows.last_mut()) {
             row.collector_us = us;
@@ -330,13 +331,19 @@ impl Census<'_, '_> {
             target
         };
         if ram.impact_tick.is_none() {
-            let normal_speed = self
-                .contacts
-                .split()
-                .filter(|(point, _, _, _)| {
-                    point.structure == target && self.tanks.contains(point.body)
+            let groups: Vec<_> = self.contacts.groups().collect();
+            let tanks = &self.tanks;
+            let normal_speed = groups
+                .par_splat_map(ComputeTaskPool::get(), None, |_, groups| {
+                    groups
+                        .iter()
+                        .flat_map(|points| points.iter())
+                        .filter(|point| point.structure == target && tanks.contains(point.body))
+                        .map(|point| point.closing_speed)
+                        .reduce(f32::max)
                 })
-                .map(|(point, _, _, _)| point.closing_speed)
+                .into_iter()
+                .flatten()
                 .reduce(f32::max);
             if let Some(normal_speed) = normal_speed {
                 ram.impact_tick = Some(ram.tick);
@@ -345,7 +352,7 @@ impl Census<'_, '_> {
                 );
             }
         }
-        let awake = self.pieces.iter().filter(Option::is_none).count();
+        let awake = self.pieces.iter().len();
         if let Some(impact_tick) = ram.impact_tick {
             ram.resting_s = if awake == 0 { ram.resting_s + dt } else { 0.0 };
             if ram.resting_s >= ram.recipe.settle_s {
@@ -359,14 +366,14 @@ impl Census<'_, '_> {
             tick_us,
             physics_us,
             sleep_us,
-            intake_us: stages[0],
-            structure_us: stages[1],
-            refit_us: stages[2],
-            publish_us: stages[3],
-            contacts_us: stages[4],
+            intake_us: stages[Stage::Intake as usize],
+            structure_us: stages[Stage::Structure as usize],
+            refit_us: stages[Stage::Refit as usize],
+            publish_us: stages[Stage::Publish as usize],
+            contacts_us: stages[Stage::Contacts as usize],
             collector_us: 0.0,
             awake,
-            tanks: self.tanks.iter().count(),
+            tanks: self.tanks.iter().len(),
             dt_s: dt,
         });
         true
