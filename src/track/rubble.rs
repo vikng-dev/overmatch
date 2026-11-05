@@ -1427,16 +1427,15 @@ mod tests {
         app.update();
         let transfers = app.world().resource::<ContactTransfers>();
         let mut reaction = Vec3::ZERO;
-        let mut blow = Vec3::ZERO;
         let mut seen = 0;
-        for (point, struck, press, _) in
-            transfers.split().filter(|(point, ..)| point.body == source)
+        for (point, press) in transfers
+            .presses()
+            .filter(|(point, ..)| point.body == source)
         {
             assert_eq!(point.structure, root);
             assert_eq!(point.structure_collider, collider);
             assert_eq!(point.body_collider, None);
-            reaction += struck + press * transfers.dt();
-            blow += struck;
+            reaction += press * transfers.dt();
             seen += 1;
         }
         assert!(seen > 1, "the reading must include the footprint's patches");
@@ -1444,19 +1443,11 @@ mod tests {
         assert!((reaction + impulse).length() < 1e-4 * impulse.length());
         let after = app.world().get::<LinearVelocity>(source).unwrap().0;
         assert!(((after - before) * mass + reaction).length() < 1e-4 * impulse.length());
-        if closing > 0.0 {
-            assert!(
-                blow.y < 0.0 && -blow.y <= mass * closing * (1.0 + 1e-4),
-                "the horizontal surface cannot take more than the source's closing momentum: {blow}"
-            );
-        } else {
-            assert_eq!(blow, Vec3::ZERO, "a resting press must not invent a blow");
-        }
         app.update();
         assert!(
             !app.world()
                 .resource::<ContactTransfers>()
-                .split()
+                .presses()
                 .any(|(point, ..)| point.body == source),
             "an implicit contact must be refreshed each tick, never retained as a sleeping pair"
         );
@@ -1471,11 +1462,8 @@ mod tests {
 
     /// A belt driving over a moving structure (a fallen chunk group) loads that structure's laws
     /// with the impulse the structure actually took, named with its source: the reading holds a
-    /// contact on the moving body whose blow and press sum to the pushes, and whose blow is the
-    /// pair's plastic exchange, never more than the closing momentum of their reduced mass. Moving
-    /// groups rely on it to judge what drives over them; staging only fixed construction, or
-    /// sizing the blow against the source's mass alone (twice the bound for equal masses), fails
-    /// here. FIXTURE DATA: a 14.4 kg source box closing at 1 m/s on a free 2 × 0.6 × 2 m slab
+    /// contact force whose time integral equals the pushes. Moving groups rely on this
+    /// applied load to assess their internal joints without a second momentum exchange. FIXTURE DATA: a 14.4 kg source box closing at 1 m/s on a free 2 × 0.6 × 2 m slab
     /// of the same mass, topped at 0.6 m.
     #[test]
     fn a_belt_on_a_moving_structure_loads_its_reading_by_the_impulse_it_took() {
@@ -1498,7 +1486,7 @@ mod tests {
             .insert(LinearVelocity(Vec3::NEG_Y * closing));
         app.update();
         app.update();
-        let (pushes, masses) = app
+        let pushes = app
             .world_mut()
             .run_system_once(
                 move |rubble: RubbleQuery,
@@ -1527,8 +1515,7 @@ mod tests {
                     );
                     pieces.record_moving_contacts(&pushes, &mut transfers, DT);
                     apply_pushes(&pushes, &mut bodies);
-                    let mass = |body| bodies.get(body).unwrap().2.value();
-                    (pushes, (mass(source), mass(slab)))
+                    pushes
                 },
             )
             .unwrap();
@@ -1538,28 +1525,16 @@ mod tests {
         );
         app.update();
         let transfers = app.world().resource::<ContactTransfers>();
-        let (mut load, mut blow) = (Vec3::ZERO, Vec3::ZERO);
-        for (point, struck, press, _) in transfers.split().filter(|(p, ..)| p.structure == slab) {
+        let mut load = Vec3::ZERO;
+        for (point, press) in transfers.presses().filter(|(p, ..)| p.structure == slab) {
             assert_eq!(point.body, source, "the contact is named with its source");
             assert_eq!(point.body_collider, None);
-            load += struck + press * transfers.dt();
-            blow += struck;
+            load += press * transfers.dt();
         }
         let took: Vec3 = pushes.iter().map(|push| push.impulse).sum();
         assert!(
             (load - took).length() <= 1e-4 * took.length(),
             "the slab's reading {load} must be the impulse it took, {took}"
-        );
-        // DERIVED: effective masses never exceed the bodies' masses.
-        let reduced = masses.0 * masses.1 / (masses.0 + masses.1);
-        println!(
-            "MEASURED moving-structure blow {blow} N s, took {took} N s, reduced-mass bound {} N s",
-            reduced * closing
-        );
-        assert!(
-            blow.y < 0.0 && -blow.y <= reduced * closing * (1.0 + 1e-4),
-            "the blow {blow} exceeds the pair's closing momentum {}",
-            reduced * closing
         );
     }
 
@@ -1930,12 +1905,12 @@ mod tests {
             .unwrap();
     }
 
-    /// Footprint subdivision must not alter the structure's blow. The contact reader relies on
+    /// Footprint subdivision must not alter the structure's transferred momentum. The contact reader relies on
     /// every patch retaining the closing speed before any recipient impulse, even though the
     /// clamp sizes each impulse against the updated velocity. FIXTURE: two 1000 kg bodies,
-    /// COM-normal reaction 800 N s, closing 1 m/s. DERIVED reduced-mass blow: 500 N s.
+    /// COM-normal reaction 800 N s, closing 1 m/s. Each structure force must integrate to the actual transferred impulse.
     #[test]
-    fn subdividing_a_reaction_preserves_the_pre_solve_closing_and_blow() {
+    fn subdividing_a_reaction_preserves_the_pre_solve_closing_and_transfer() {
         for copies in [1, 2] {
             let mut app = physics();
             let slab = piece(&mut app, 0.0, 0.0);
@@ -1979,21 +1954,14 @@ mod tests {
                 )
                 .unwrap();
             app.update();
-            let blow: f32 = app
-                .world()
-                .resource::<ContactTransfers>()
-                .split()
-                .filter(|(p, ..)| p.structure == slab && p.body == source)
-                .map(|(_, blow, ..)| blow.length())
+            let reading = app.world().resource::<ContactTransfers>();
+            let transferred: Vec3 = reading
+                .presses()
+                .filter(|(p, _)| p.structure == slab && p.body == source)
+                .map(|(_, press)| press * reading.dt())
                 .sum();
-            println!(
-                "MEASURED {copies} patches: blow {blow} N s, closing {:?}",
-                pushes.iter().map(|p| p.closing_speed).collect::<Vec<_>>()
-            );
-            assert!(
-                (blow - 500.0).abs() < 1e-3,
-                "{copies} patches read {blow} N s"
-            );
+            let took: Vec3 = pushes.iter().map(|p| p.impulse).sum();
+            assert!((transferred - took).length() < 1e-3);
             assert!(pushes.iter().all(|p| (p.closing_speed - 1.0).abs() < 1e-6));
         }
     }

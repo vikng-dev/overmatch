@@ -22,7 +22,7 @@ const BOOT_DEADLINE: Duration = Duration::from_secs(60);
 
 /// The simulation clock configured by the netcode composition. Fixtures advance it by one exact
 /// fixed loop per [`App::update`], so every bound and elapsed-time report is stated in ticks.
-const FIXED_TICKS_PER_SECOND: usize = 64;
+pub(crate) const FIXED_TICKS_PER_SECOND: usize = 64;
 
 pub(crate) fn start_fixed_clock(app: &mut App) {
     // Verified against Bevy 0.19: one `App::update` runs exactly one fixed loop.
@@ -90,7 +90,7 @@ fn assert_range_table_at_add(
 
 /// A booted headless sim, plus the lease that serialized its boot. Derefs to the [`App`], so tests
 /// use it exactly like one; keep it alive for the whole test (dropping it early releases the lease).
-struct BootedSim {
+pub(crate) struct BootedSim {
     app: App,
     _lease: MutexGuard<'static, ()>,
 }
@@ -267,7 +267,7 @@ fn booted_sim() -> BootedSim {
 }
 
 /// [`booted_sim`] over an explicitly chosen world — see [`headless_app_on`].
-fn booted_sim_on(world: Option<crate::terrain_grid::HeightGrid>) -> BootedSim {
+pub(crate) fn booted_sim_on(world: Option<crate::terrain_grid::HeightGrid>) -> BootedSim {
     booted_sim_on_map(world, None)
 }
 
@@ -652,7 +652,7 @@ fn nominal_pressure(app: &App) -> f32 {
 }
 
 /// Write the drive command and advance one exact fixed tick; this harness has no device gather.
-fn drive_tick(app: &mut App, tank: Entity, throttle: f32, steer: f32) {
+pub(crate) fn drive_tick(app: &mut App, tank: Entity, throttle: f32, steer: f32) {
     {
         let mut cmd = app
             .world_mut()
@@ -1579,14 +1579,14 @@ fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
         fastest_late = fastest_late.max(speed);
         let press: f32 = world
             .resource::<ContactTransfers>()
-            .split()
-            .filter(|(point, _, _, _)| {
+            .presses()
+            .filter(|(point, _)| {
                 point.body == tank
                     && point
                         .body_collider
                         .is_some_and(|collider| world.get::<BumpStop>(collider).is_some())
             })
-            .map(|(_, _, press, _)| -press.y)
+            .map(|(_, press)| -press.y)
             .sum();
         if press > 0.0 {
             pressed_ticks += 1;
@@ -1681,10 +1681,10 @@ fn a_parked_tank_loads_fixed_structure_through_its_belt() {
         let transfers = app.world().resource::<ContactTransfers>();
         let dt = transfers.dt();
         let mut tick_lift = 0.0;
-        for (point, struck, press, _) in transfers.split() {
+        for (point, press) in transfers.presses() {
             if point.body == tank && point.body_collider.is_none() {
                 assert_eq!(point.structure, slab, "the belt bears on the slab alone");
-                tick_lift -= struck.y / dt + press.y;
+                tick_lift -= press.y;
             }
         }
         if tick_lift > 0.0 {

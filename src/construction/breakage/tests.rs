@@ -443,69 +443,6 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
     }
 }
 
-/// The game's environment destruction model: a moving owner's strength check reads spin after
-/// earlier owners' plastic returns. Independent owners can evaluate together; crossing this
-/// dependency or serializing every independent owner violates the evaluation contract.
-/// Fixture: four owners and one source blow, with no contact geometry involved.
-#[test]
-fn owner_evaluation_waits_only_for_earlier_source_returns() {
-    let mut world = World::new();
-    let mut roots: Vec<_> = (0..4).map(|_| world.spawn_empty().id()).collect();
-    roots.sort_unstable();
-    let load = Load {
-        chunk: 0,
-        at: Vec3::ZERO,
-        energy: 0.0,
-        crushed: 0.0,
-        blow: Vec3::X,
-        press: Vec3::ZERO,
-        peak: None,
-        origin: Origin::Body {
-            body: roots[2],
-            mass: 1.0,
-            speed: 1.0,
-            step: STEP,
-        },
-    };
-    let taken = roots
-        .iter()
-        .map(|&root| {
-            (
-                root,
-                Taken {
-                    contacts: if root == roots[0] {
-                        vec![load]
-                    } else {
-                        Vec::new()
-                    },
-                    ..default()
-                },
-            )
-        })
-        .collect();
-    let batches: Vec<_> = owner_batches(taken).collect();
-    let batch_of = |root| {
-        batches
-            .iter()
-            .position(|batch| batch.contains_key(&root))
-            .unwrap()
-    };
-    assert!(
-        batch_of(roots[0]) < batch_of(roots[2]),
-        "returns commit before their receiver reads spin"
-    );
-    assert_eq!(
-        batch_of(roots[0]),
-        batch_of(roots[1]),
-        "an independent owner shares the first batch"
-    );
-    assert_eq!(
-        batch_of(roots[2]),
-        batch_of(roots[3]),
-        "an independent owner shares the next batch"
-    );
-}
-
 /// A breakable element with at least three chunks, and its three chunks whose centroids lie
 /// nearest the element's centre, nearest first: the fixture's choice by class.
 fn fixture_chunks(kind: &ConstructionKind) -> (usize, [usize; 3]) {
@@ -1748,7 +1685,7 @@ fn an_implicit_belt_press_reaches_the_wall_laws_reading() {
     let loads: Vec<_> = queued
         .iter()
         .flatten()
-        .filter(|(_, load)| matches!(load.origin, Origin::Body { body, .. } if body == source))
+        .filter(|(_, load)| matches!(load.origin, Origin::Contact { other, .. } if other == source))
         .collect();
     assert_eq!(
         loads.len(),
@@ -1814,17 +1751,9 @@ pub(crate) fn wall_face(kind: &ConstructionKind) -> (usize, Vec3, Vec3) {
     panic!("the shipped house shows a flat patch of breakable wall to +x");
 }
 
-/// NO BODY'S KIND ENTERS A CONTACT'S LOADS (the game's environment destruction model): a plain
-/// dynamic body (a hull's or a launched turret's stand-in) and a construction piece, alike in shape, mass
-/// and motion, striking the shipped house's wall at the same point at 3 m/s, put the same loads on
-/// the house, step by step, each naming its own body; the strike's blow is the cube's closing
-/// momentum into the wall within 1 % (DERIVED: a cube's corner points' effective masses sum to its
-/// own) and each load lies on a chunk of the struck element, on the chunk's hull within the step's
-/// approach (fixture data, 5 cm), and spends no energy. The collision model rests on it (#232: no
-/// marker for which bodies may break things): a reader that reads a marker (a piece's, a tank's)
-/// to keep, drop or scale a contact fails here, as does a contact loaded off its chunk, and a
-/// blow capped point by point (88 % of the closing momentum here, MEASURED: the solver's own split
-/// of the contact among the corners, [`ContactTransfers::split`]).
+/// The game's environment destruction: equal motion and geometry produce equal contact forces
+/// for a plain body and a construction carrier. The structure check relies on no body-kind gate;
+/// the unbroken fixture is deliberately too light to sweep its wall.
 #[test]
 fn no_bodys_kind_enters_a_contacts_loads() {
     let kind = shipped_house();
@@ -1852,7 +1781,7 @@ fn no_bodys_kind_enters_a_contacts_loads() {
         for (on, load) in ticks.iter().flatten() {
             assert_eq!(*on, root, "the house takes the loads");
             assert!(
-                matches!(load.origin, Origin::Body { body, mass, .. } if body == cube && mass > 0.0),
+                matches!(load.origin, Origin::Contact { other, .. } if other == cube),
                 "each load names its body and effective mass: {load:?}"
             );
         }
@@ -1958,9 +1887,7 @@ fn a_body_at_rest_against_a_construction_presses_it_once_and_starts_no_run() {
                 (Vec3::ZERO, 0.0),
                 "tick {tick}: a resting load is its body's press alone"
             );
-            assert!(
-                matches!(load.origin, Origin::Body { body, mass, .. } if body == cube && mass > 0.0)
-            );
+            assert!(matches!(load.origin, Origin::Contact { other, .. } if other == cube));
         }
         match &held {
             Some(held) => assert_eq!(held, &loads, "tick {tick}: the press stands unchanged"),
@@ -1989,598 +1916,6 @@ fn a_march_without_its_shell_is_a_bug() {
         lines: Vec::new(),
         burst: None,
     });
-}
-
-/// The exact departure mass properties, about the collider frame (fixture data); the tests use
-/// their tensor to audit both linear and angular momentum, including an asymmetric group's COM.
-fn departure_mass(
-    structure: &Structure,
-    launch: &Launch,
-) -> avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::MassProperties3d {
-    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::{
-        ComputeMassProperties3d, MassProperties3d,
-    };
-    launch
-        .colliders
-        .iter()
-        .map(|(c, shape)| shape.mass_properties(structure.chunks[*c].material.density))
-        .fold(MassProperties3d::default(), |sum, part| sum + part)
-}
-
-/// MOMENTUM IS KEPT THROUGH A BREAK (the game's environment destruction model). A source
-/// stopped by the rigid solver regains only the blow beyond the free group's plastic share.
-/// The source's net loss plus the departure is zero in linear AND angular momentum. The
-/// authority's source body and spawned carrier rely on it; a missing, doubled or reversed
-/// give-back, or one applied at the COM instead of the contact point, fails the sweep.
-/// Mass ratios and off-centre contact heights are ASSUMED fixture data, not asset pass criteria.
-#[test]
-fn a_break_keeps_linear_and_angular_momentum() {
-    let kind = shipped_house();
-    let structure = kind.layout.structure(&kind.asset);
-    let (_, [c, other, _]) = fixture_chunks(&kind);
-    let group = [c, other];
-    let unloaded = launch(&kind, &structure, &group, &[]);
-    let props = departure_mass(&structure, &unloaded);
-    let com = unloaded.centroid + props.center_of_mass;
-    let mut worst = 0.0_f32;
-    for ratio in [0.001, 0.1, 1.0, 10.0, 1000.0] {
-        for height in [0.0, 1e-4, 0.1, 1.0, 5.0] {
-            let mass = props.mass * ratio;
-            let load = Load {
-                chunk: c,
-                at: com + Vec3::Y * height,
-                energy: 0.0,
-                crushed: 0.0,
-                blow: Vec3::Z * (mass * 3.0),
-                press: Vec3::ZERO,
-                peak: None,
-                origin: Origin::Body {
-                    body: Entity::PLACEHOLDER,
-                    mass,
-                    speed: 3.0,
-                    step: STEP,
-                },
-            };
-            let launched = launch(&kind, &structure, &group, &[load]);
-            assert_eq!(launched.returns.len(), 1);
-            let returned = launched.returns[0];
-            assert_eq!(returned.at, load.at, "give-back retains the contact point");
-            let net = returned.impulse - load.blow;
-            let departure = launched.velocity * props.mass;
-            let error = (net + departure).length() / load.blow.length();
-            worst = worst.max(error);
-            assert!(
-                error < 2e-6,
-                "ratio {ratio}, height {height}: momentum residual {error}"
-            );
-            let angular = load.at.cross(net)
-                + com.cross(departure)
-                + props.angular_inertia_tensor() * launched.spin;
-            assert!(
-                angular.length() < 2e-5 * load.blow.length() * (1.0 + load.at.length()),
-                "ratio {ratio}, height {height}: angular residual {angular}"
-            );
-        }
-    }
-    println!("MEASURED break sweep maximum relative momentum residual: {worst:e}");
-}
-
-/// NO ENERGY IS CREATED THROUGH A BREAK (the game's environment destruction model). Across
-/// light and heavy sources and contact points arbitrarily close to a held hinge, the actual
-/// free carrier's translation plus spin never exceeds the source's kinetic energy loss.
-/// Carrier physics relies on using free effective mass, never hinge mass. DERIVED: the plastic
-/// loss is half the reduced mass times closing speed squared. Sweep numbers are fixture data.
-#[test]
-fn a_break_launches_with_free_mass_and_creates_no_energy() {
-    let kind = shipped_house();
-    let structure = kind.layout.structure(&kind.asset);
-    let (_, [c, _, _]) = fixture_chunks(&kind);
-    let group = [c];
-    let unloaded = launch(&kind, &structure, &group, &[]);
-    let props = departure_mass(&structure, &unloaded);
-    let com = unloaded.centroid + props.center_of_mass;
-    let inverse = props.angular_inertia_tensor().inverse();
-    let mut least_loss = f64::INFINITY;
-    for ratio in [0.001, 0.1, 1.0, 10.0, 1000.0] {
-        for height in [0.0, 1e-6, 1e-4, 0.1, 1.0, 5.0] {
-            let mass = props.mass * ratio;
-            let load = Load {
-                chunk: c,
-                at: com + Vec3::Y * height,
-                energy: 0.0,
-                crushed: 0.0,
-                blow: Vec3::Z * (mass * 3.0),
-                press: Vec3::ZERO,
-                peak: None,
-                origin: Origin::Body {
-                    body: Entity::PLACEHOLDER,
-                    mass,
-                    speed: 3.0,
-                    step: STEP,
-                },
-            };
-            let launched = launch(&kind, &structure, &group, &[load]);
-            let arm = (load.at - com).cross(Vec3::Z);
-            let free_inverse = 1.0 / props.mass + arm.dot(inverse * arm);
-            let expected = load.blow / (1.0 + mass * free_inverse);
-            let actual = launched.velocity * props.mass;
-            assert!(
-                (actual - expected).length() <= 2e-6 * expected.length(),
-                "ratio {ratio}, height {height}: free-mass share {actual} vs {expected}"
-            );
-            let source_before = load.blow.as_dvec3().length_squared() / (2.0 * f64::from(mass));
-            let source_after =
-                launched.returns[0].impulse.as_dvec3().length_squared() / (2.0 * f64::from(mass));
-            let freed = 0.5 * f64::from(props.mass) * launched.velocity.as_dvec3().length_squared()
-                + 0.5
-                    * f64::from(
-                        launched
-                            .spin
-                            .dot(props.angular_inertia_tensor() * launched.spin),
-                    );
-            let lost = source_before - source_after;
-            assert!(
-                freed <= lost + 2e-5 * source_before,
-                "ratio {ratio}, height {height}: carrier {freed} J exceeds source loss {lost} J"
-            );
-            let plastic = 0.5 * f64::from(mass / (1.0 + mass * free_inverse)) * 9.0;
-            assert!(
-                (lost - freed - plastic).abs() <= 2e-5 * source_before,
-                "ratio {ratio}, height {height}: plastic budget {} vs {plastic}",
-                lost - freed
-            );
-            least_loss = least_loss.min((lost - freed) / source_before);
-            let field = Load {
-                origin: Origin::Field,
-                ..load
-            };
-            let limit = Load {
-                origin: Origin::Body {
-                    body: Entity::PLACEHOLDER,
-                    mass: 1e-12,
-                    speed: 3.0,
-                    step: STEP,
-                },
-                ..load
-            };
-            let field = launch(&kind, &structure, &group, &[field]);
-            let limit = launch(&kind, &structure, &group, &[limit]);
-            assert_eq!(
-                (field.velocity, field.spin),
-                (limit.velocity, limit.spin),
-                "a field is the zero-source-mass limit for launch, too"
-            );
-            assert!(field.returns.is_empty(), "a field has no body to return to");
-        }
-    }
-    println!("MEASURED break sweep least plastic loss / initial source energy: {least_loss:e}");
-}
-
-/// GIVE-BACK CHANGES THE SOURCE AT THE WORLD CONTACT IN THE LAW PASS (the game's environment
-/// destruction model). The authority relies on the actual Avian point impulse, including torque
-/// and a rotated, translated construction frame. A return deferred to another tick, rotated twice,
-/// applied at the construction origin or changing linear velocity alone fails here. Fixture data.
-#[test]
-fn give_back_applies_the_world_point_impulse_immediately() {
-    use bevy::ecs::system::RunSystemOnce;
-    let (mut app, _) = composed(false);
-    let pose = Transform::from_xyz(100.0, 30.0, -70.0).with_rotation(Quat::from_rotation_y(0.7));
-    let frame = Frame::new(&pose, (Vec3::ZERO, Vec3::ONE));
-    let at = Vec3::new(2.0, 1.0, -3.0);
-    let world_at = pose.translation + pose.rotation * at;
-    let source_at = world_at + Vec3::new(0.3, -0.2, 0.4);
-    let source = moving_cube(&mut app, source_at, CUBE_SIDE, Layer::Debris);
-    app.update();
-    app.update();
-    let returned = BodyReturn {
-        body: source,
-        at,
-        impulse: Vec3::Z * 50.0,
-    };
-    let mass = app.world().get::<ComputedMass>(source).unwrap().value();
-    let inertia = *app.world().get::<ComputedAngularInertia>(source).unwrap();
-    let impulse = pose.rotation * returned.impulse;
-    let expected_spin = inertia.inverse() * (world_at - source_at).cross(impulse);
-    app.world_mut()
-        .run_system_once(move |mut bodies: Query<(Forces, &RigidBody)>| {
-            give_back(&mut bodies, frame, &[returned]);
-        })
-        .unwrap();
-    let velocity = app.world().get::<LinearVelocity>(source).unwrap().0;
-    let spin = app.world().get::<AngularVelocity>(source).unwrap().0;
-    assert!((velocity - impulse / mass).length() < 1e-6);
-    assert!(
-        (spin - expected_spin).length() < 1e-5,
-        "{spin} vs {expected_spin}"
-    );
-}
-
-/// ONLY DEPARTING CHUNKS GIVE BACK A BODY'S BLOW (the game's environment destruction model).
-/// The authority must leave held contacts with the solver, return dust's whole blow (no carrier),
-/// and send fallen chunks' loads to launch once. Presses and fields supply no give-back.
-#[test]
-fn only_departing_chunks_give_back_their_body_blows() {
-    let kind = shipped_house();
-    let (_, [c, _, _]) = fixture_chunks(&kind);
-    let mut live = Live::new(&kind);
-    let load = Load {
-        chunk: c,
-        at: live.structure.chunks[c].centroid,
-        energy: 0.0,
-        crushed: 0.0,
-        blow: Vec3::Z * 0.001,
-        press: Vec3::X * 1000.0,
-        peak: None,
-        origin: Origin::Body {
-            body: Entity::PLACEHOLDER,
-            mass: 1000.0,
-            speed: 3.0,
-            step: STEP,
-        },
-    };
-    let held = run_laws(
-        &kind.layout.element_of,
-        &mut live,
-        &[load],
-        Vec::new(),
-        Vec3::ZERO,
-        STEP,
-    );
-    assert!(
-        held.groups.is_empty() && held.returns.is_empty(),
-        "a held wall keeps the solver's blow"
-    );
-    let dust = Load {
-        energy: live.state.pool[c] * live.structure.chunks[c].material.crush,
-        crushed: live.state.pool[c],
-        origin: Origin::Field,
-        blow: Vec3::ZERO,
-        ..load
-    };
-    let changes = run_laws(
-        &kind.layout.element_of,
-        &mut live,
-        &[load, dust],
-        Vec::new(),
-        Vec3::ZERO,
-        STEP,
-    );
-    assert_eq!(
-        changes.returns,
-        vec![BodyReturn {
-            body: Entity::PLACEHOLDER,
-            at: load.at,
-            impulse: load.blow
-        }]
-    );
-    let press = Load {
-        blow: Vec3::ZERO,
-        ..load
-    };
-    let changes = run_laws(
-        &kind.layout.element_of,
-        &mut live,
-        &[press, dust],
-        Vec::new(),
-        Vec3::ZERO,
-        STEP,
-    );
-    assert!(
-        changes.returns.is_empty(),
-        "neither a press nor a field is returned"
-    );
-    let mut live = Live::new(&kind);
-    live.state.fate.fill(Fate::Dust);
-    live.state.fate[c] = Fate::Standing;
-    live.state.cracked.fill(true);
-    let changes = run_laws(
-        &kind.layout.element_of,
-        &mut live,
-        &[load],
-        Vec::new(),
-        Vec3::ZERO,
-        STEP,
-    );
-    assert_eq!(
-        changes.groups,
-        vec![(vec![c], vec![load])],
-        "a freed chunk takes its body load to launch once"
-    );
-    assert!(
-        changes.returns.is_empty(),
-        "a fallen load returns only after launch chooses its share"
-    );
-    let repeated = run_laws(
-        &kind.layout.element_of,
-        &mut live,
-        &[load],
-        Vec::new(),
-        Vec3::ZERO,
-        STEP,
-    );
-    assert!(
-        repeated.groups.is_empty(),
-        "a chunk freed by an earlier deposit launches once"
-    );
-    assert_eq!(
-        repeated.returns,
-        vec![BodyReturn {
-            body: Entity::PLACEHOLDER,
-            at: load.at,
-            impulse: load.blow
-        }],
-        "a later deposit on the departed chunk returns the whole body blow: kept, the static \
-         stop would take the source's momentum into no body"
-    );
-}
-
-/// SIMULTANEOUS EXCHANGES SHARE ONE KINETIC BUDGET (the game's environment destruction
-/// model). Carriers and source bodies rely on a plastic common velocity: several bodies freeing
-/// one group, or one body freeing several groups, cannot each spend the same momentum again.
-/// Independent launch shares, or a cap applied separately per carrier/source point, fail here.
-/// Sweep ratios and speed are ASSUMED fixture data; common velocities are DERIVED.
-#[test]
-fn simultaneous_exchanges_keep_momentum_and_spend_one_kinetic_budget() {
-    use crate::contact_transfer::BodyInertia;
-    let kind = shipped_house();
-    let structure = kind.layout.structure(&kind.asset);
-    let (_, [c, _, _]) = fixture_chunks(&kind);
-    let unloaded = launch(&kind, &structure, &[c], &[]);
-    let props = departure_mass(&structure, &unloaded);
-    let com = unloaded.centroid + props.center_of_mass;
-    let mut world = World::new();
-    let bodies: Vec<Entity> = (0..3).map(|_| world.spawn_empty().id()).collect();
-    for ratio in [0.01, 0.1, 1.0, 10.0, 1000.0] {
-        let source_mass = props.mass * ratio;
-        let load = |body| Load {
-            chunk: c,
-            at: com,
-            energy: 0.0,
-            crushed: 0.0,
-            blow: Vec3::Z * (source_mass * 3.0),
-            press: Vec3::ZERO,
-            peak: None,
-            origin: Origin::Body {
-                body,
-                mass: source_mass,
-                speed: 3.0,
-                step: STEP,
-            },
-        };
-        let departure = |loads: &[Load]| Departure {
-            kind: kind.clone(),
-            tick: 0,
-            live: Live::new(&kind).group(&[c]),
-            construction: 0,
-            root: Transform::IDENTITY,
-            group: vec![c],
-            launch: launch(&kind, &structure, &[c], loads),
-        };
-        let source = BodyInertia {
-            centre: com,
-            inverse_mass: Vec3::splat(1.0 / source_mass),
-            inverse_inertia: Mat3::ZERO,
-        };
-        let mut many_sources = vec![departure(
-            &bodies.iter().map(|&b| load(b)).collect::<Vec<_>>(),
-        )];
-        cap_exchanges(&mut many_sources, |_| source);
-        let launched = &many_sources[0].launch;
-        let expected = 3.0 * (3.0 * source_mass) / (3.0 * source_mass + props.mass);
-        assert!(
-            (launched.velocity.z - expected).abs() <= 2e-6 * expected,
-            "ratio {ratio}: several sources give common velocity {}, expected {expected}",
-            launched.velocity.z
-        );
-        let source_after: Vec<Vec3> = launched
-            .returns
-            .iter()
-            .map(|r| r.impulse / source_mass)
-            .collect();
-        let momentum =
-            launched.velocity * props.mass + source_after.iter().sum::<Vec3>() * source_mass;
-        assert!((momentum - Vec3::Z * (9.0 * source_mass)).length() <= 2e-6 * 9.0 * source_mass);
-        let before = 3.0 * 0.5 * source_mass * 9.0;
-        let after = 0.5 * props.mass * launched.velocity.length_squared()
-            + source_after
-                .iter()
-                .map(|v| 0.5 * source_mass * v.length_squared())
-                .sum::<f32>();
-        assert!(
-            after <= before * (1.0 + 2e-6),
-            "several sources: {after} J vs {before} J"
-        );
-
-        let mut many_groups: Vec<Departure> =
-            (0..3).map(|_| departure(&[load(bodies[0])])).collect();
-        // The solver's one source blow is shared over these contacts, never repeated whole.
-        for group in &mut many_groups {
-            let mut point_load = load(bodies[0]);
-            point_load.blow /= 3.0;
-            group.launch = launch(&kind, &structure, &[c], &[point_load]);
-        }
-        cap_exchanges(&mut many_groups, |_| source);
-        let expected = 3.0 * source_mass / (source_mass + 3.0 * props.mass);
-        // A cap never adds impulse: the split source blow can supply less than the coupled
-        // exchange, and then the nominal shares remain unchanged.
-        let nominal = source_mass / (source_mass + props.mass);
-        let expected = expected.min(nominal);
-        for group in &many_groups {
-            assert!(
-                (group.launch.velocity.z - expected).abs() <= 3e-6 * expected,
-                "ratio {ratio}: several groups give {}, expected {expected}",
-                group.launch.velocity.z
-            );
-        }
-        let returned: Vec3 = many_groups
-            .iter()
-            .flat_map(|g| &g.launch.returns)
-            .map(|r| r.impulse)
-            .sum();
-        let source_velocity = returned / source_mass;
-        let carrier_momentum: Vec3 = many_groups
-            .iter()
-            .map(|g| g.launch.velocity * props.mass)
-            .sum();
-        assert!(
-            (carrier_momentum + returned - Vec3::Z * (3.0 * source_mass)).length()
-                < 2e-6 * 3.0 * source_mass
-        );
-        let after = 0.5 * source_mass * source_velocity.length_squared()
-            + many_groups
-                .iter()
-                .map(|g| 0.5 * props.mass * g.launch.velocity.length_squared())
-                .sum::<f32>();
-        assert!(
-            after <= 0.5 * source_mass * 9.0 * (1.0 + 2e-6),
-            "several groups: kinetic budget"
-        );
-
-        let field = Load {
-            origin: Origin::Field,
-            blow: Vec3::Z * (props.mass * 6.0),
-            ..load(bodies[0])
-        };
-        let field_only = launch(&kind, &structure, &[c], &[field]);
-        let mut mixed = vec![departure(&[field, load(bodies[0])])];
-        cap_exchanges(&mut mixed, |_| source);
-        assert!(
-            (mixed[0].launch.velocity - field_only.velocity).length() < 2e-6,
-            "a group already moving away faster than its source keeps its field blow only"
-        );
-        assert_eq!(
-            mixed[0].launch.returns[0].impulse,
-            load(bodies[0]).blow,
-            "a body exchanges nothing with a faster departing group"
-        );
-        let unrelated_load = load(bodies[1]);
-        let unrelated = departure(&[unrelated_load]);
-        let unrelated_velocity = unrelated.launch.velocity;
-        let mut disjoint = vec![departure(&[field, load(bodies[0])]), unrelated];
-        cap_exchanges(&mut disjoint, |_| source);
-        assert!(
-            (disjoint[0].launch.velocity - field_only.velocity).length() < 2e-6,
-            "an unrelated source cannot subsidize a separating contact"
-        );
-        assert!(
-            (disjoint[1].launch.velocity - unrelated_velocity).length() < 2e-6,
-            "an unrelated separating contact cannot reduce this source's exchange"
-        );
-    }
-}
-
-/// A BREAK LAUNCHES AND RETURNS IN ONE AUTHORITY PASS (the game's environment destruction
-/// model). The composition relies on the real contact reader, source inertia, law pass, carrier
-/// spawn and Avian give-back agreeing. After the solver's strike, releasing the contacted fixture
-/// chunk conserves momentum including the wall's retained press, and never raises kinetic energy;
-/// an empty subsequent queue returns
-/// nothing twice. No strength assertion is made: this fixture opens the bonds explicitly.
-#[test]
-fn a_break_launches_and_returns_in_one_authority_pass() {
-    use bevy::ecs::system::RunSystemOnce;
-    #[derive(Resource, Default)]
-    struct Released(Option<usize>);
-    let kind = shipped_house();
-    let (_, face, direction) = wall_face(&kind);
-    let (mut app, root) = composed_keeping_contacts();
-    let source = contact_cube(
-        &mut app,
-        face - direction * (CUBE_SIDE / 2.0 + 0.3),
-        direction * 3.0,
-    );
-    app.init_resource::<Released>().add_systems(
-        FixedPostUpdate,
-        (move |queue: Res<Queue>,
-               mut constructions: Query<&mut Breakage>,
-               mut released: ResMut<Released>| {
-            if released.0.is_some() {
-                return;
-            }
-            let Some(load) = queue
-                .0
-                .iter()
-                .flat_map(|d| &d.contacts)
-                .filter(|(r, _)| *r == root)
-                .map(|(_, load)| load)
-                .find(|load| load.blow != Vec3::ZERO)
-            else {
-                return;
-            };
-            let mut breakage = constructions.get_mut(root).unwrap();
-            let live = breakage.live.as_mut();
-            live.state.fate.fill(Fate::Dust);
-            live.state.fate[load.chunk] = Fate::Standing;
-            live.state.cracked.fill(true);
-            released.0 = Some(load.chunk);
-        })
-        .after(keep_queued_contacts)
-        .before(apply_deposits),
-    );
-    for _ in 0..30 {
-        app.update();
-        if app.world().resource::<Released>().0.is_some() {
-            break;
-        }
-    }
-    let c = app
-        .world()
-        .resource::<Released>()
-        .0
-        .expect("the fixture source meets the wall");
-    let (piece_velocity, piece_spin) = app
-        .world_mut()
-        .query::<(&LinearVelocity, &AngularVelocity, &Piece)>()
-        .iter(app.world())
-        .find(|(_, _, piece)| piece.chunks == [c as u16])
-        .map(|(v, w, _)| (v.0, w.0))
-        .expect("the contacted chunk leaves as one carrier");
-    let structure = kind.layout.structure(&kind.asset);
-    let free = launch(&kind, &structure, &[c], &[]);
-    let props = departure_mass(&structure, &free);
-    let source_mass = app.world().get::<ComputedMass>(source).unwrap().value();
-    let source_velocity = app.world().get::<LinearVelocity>(source).unwrap().0;
-    let source_spin = app.world().get::<AngularVelocity>(source).unwrap().0;
-    let inertia = app.world().get::<ComputedAngularInertia>(source).unwrap();
-    let press: Vec3 = app
-        .world()
-        .resource::<QueuedContacts>()
-        .0
-        .last()
-        .unwrap()
-        .iter()
-        .map(|(_, load)| load.press)
-        .sum();
-    let held_impulse = press * app.world().resource::<Time<Fixed>>().delta_secs();
-    let momentum = source_velocity * source_mass + piece_velocity * props.mass + held_impulse;
-    assert!(
-        (momentum - direction * (source_mass * 3.0)).length() < 2e-6 * source_mass * 3.0,
-        "source, carrier and the press retained by the wall conserve momentum: {momentum}"
-    );
-    let kinetic = 0.5 * source_mass * source_velocity.length_squared()
-        + 0.5 * source_spin.dot(inertia.value() * source_spin)
-        + 0.5 * props.mass * piece_velocity.length_squared()
-        + 0.5 * piece_spin.dot(props.angular_inertia_tensor() * piece_spin);
-    assert!(
-        kinetic <= 0.5 * source_mass * 9.0,
-        "the actual source and carrier retain the energy bound"
-    );
-    assert!(
-        piece_velocity.dot(direction) > 0.0 && source_velocity.dot(direction) > 0.0,
-        "both bodies depart in the approach direction"
-    );
-    assert!(app.world().resource::<Queue>().0.is_empty());
-    app.world_mut().run_system_once(apply_deposits).unwrap();
-    assert_eq!(
-        app.world().get::<LinearVelocity>(source).unwrap().0,
-        source_velocity,
-        "the next empty law pass replays no give-back"
-    );
-    println!(
-        "MEASURED composed break: momentum residual {:.6e}, source + carrier kinetic {:.3} / initial {:.3} J",
-        (momentum - direction * (source_mass * 3.0)).length() / (source_mass * 3.0),
-        kinetic,
-        0.5 * source_mass * 9.0
-    );
 }
 
 /// DEGENERATE CHUNK HULLS ARE REFUSED BEFORE PLAY (the game's environment destruction model).
@@ -2662,65 +1997,6 @@ fn collider_valid_hulls_with_collapsed_law_boundaries_are_refused_at_load() {
         for required in [field.as_str(), "law block", "rebake"] {
             assert!(error.contains(required), "{error}");
         }
-    }
-}
-
-/// A TINY CONTACT KEEPS THE SAME PLASTIC SHARE (the game's environment destruction model).
-/// The authority's shared exchange cap must square in f64, not underflow its positive-response
-/// check in f32. Scaling the input changes the launch by that scale, including subnormal inputs.
-/// Speeds and mass ratio below are ASSUMED fixture data.
-#[test]
-fn tiny_exchanges_keep_their_plastic_share_without_underflow() {
-    let kind = shipped_house();
-    let structure = kind.layout.structure(&kind.asset);
-    let (_, [c, _, _]) = fixture_chunks(&kind);
-    let free = launch(&kind, &structure, &[c], &[]);
-    let com = free.centroid + departure_mass(&structure, &free).center_of_mass;
-    let body = Entity::PLACEHOLDER;
-    for speed in [3.0, 1e-20, 1e-30, f32::from_bits(1)] {
-        let load = Load {
-            chunk: c,
-            at: com,
-            energy: 0.0,
-            crushed: 0.0,
-            blow: Vec3::Z * speed,
-            press: Vec3::ZERO,
-            peak: None,
-            origin: Origin::Body {
-                body,
-                mass: 1.0,
-                speed,
-                step: STEP,
-            },
-        };
-        let mut departures = [Departure {
-            kind: kind.clone(),
-            tick: 0,
-            live: Live::new(&kind).group(&[c]),
-            construction: 0,
-            root: Transform::IDENTITY,
-            group: vec![c],
-            launch: launch(&kind, &structure, &[c], &[load]),
-        }];
-        cap_exchanges(&mut departures, |_| crate::contact_transfer::BodyInertia {
-            centre: com,
-            inverse_mass: Vec3::ONE,
-            inverse_inertia: Mat3::ZERO,
-        });
-        let launched = &departures[0].launch;
-        assert!(launched.velocity.is_finite() && launched.spin.is_finite());
-        let expected = f64::from(speed) / (1.0 + f64::from(launched.mass));
-        let error = (f64::from(launched.velocity.z) - expected).abs();
-        assert!(
-            error <= expected * 2e-5 + f64::from(f32::from_bits(1)),
-            "speed {speed}: {error}"
-        );
-        assert!(
-            (launched.returns[0].impulse + launched.velocity * launched.mass - load.blow)
-                .as_dvec3()
-                .length()
-                <= f64::from(speed) * 2e-5 + f64::from(f32::from_bits(1))
-        );
     }
 }
 
@@ -2984,18 +2260,6 @@ fn casing_loads_count_each_joule_once_and_carry_their_ejection_momentum() {
     }
 }
 
-/// Convert construction fixture departures to the shared mechanics input.
-fn cap_exchanges(
-    departures: &mut [Departure],
-    inertia: impl Fn(Entity) -> crate::contact_transfer::BodyInertia,
-) {
-    let mut motions: Vec<_> = departures
-        .iter_mut()
-        .map(|departure| (&departure.root, &mut departure.launch))
-        .collect();
-    crate::debris::launch::cap_exchanges(&mut motions, inertia);
-}
-
 /// A reproducible shove into the shipped house through the production contact reader and
 /// laws, with no view or timing measurement. ASSUMED fixture body: a heavy cuboid at the
 /// capture's closing speed. Group counts are evidence, never an asset-specific pass condition,
@@ -3177,7 +2441,6 @@ fn drop_slab() -> (
                 construction: 3,
                 launch,
             },
-            false,
         );
         queue.apply(world);
     }
@@ -3294,7 +2557,6 @@ fn split_children_inherit_the_parents_rigid_momentum() {
                 construction: 3,
                 launch: parent,
             },
-            false,
         );
         queue.apply(world);
     }
@@ -4066,7 +3328,6 @@ fn freed_in_place(group: &[usize], offset: Vec3) -> (App, (f32, Mat3, Vec3)) {
             construction: 3,
             launch: launched,
         },
-        false,
     );
     queue.apply(world);
     (app, body)
@@ -4488,7 +3749,6 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
                             breakage.live.state.clone(),
                             effect.events,
                             effect.fields,
-                            effect.returns,
                             splits,
                             departures,
                         )
@@ -4507,11 +3767,11 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
         "fields change game state"
     );
     assert!(
-        expected.iter().any(|result| !result.6.is_empty()),
+        expected.iter().any(|result| !result.5.is_empty()),
         "a placed owner prepares a launch"
     );
     assert!(
-        expected.iter().any(|result| !result.5.is_empty()),
+        expected.iter().any(|result| !result.4.is_empty()),
         "a moving owner prepares a split"
     );
     for threads in [1, 2] {
@@ -4713,18 +3973,14 @@ fn contact_preparation_preserves_source_order_across_workers() {
                     impulse: Vec3::ZERO,
                     effective_mass: 7.0,
                     closing_speed: 2.0,
-                    rest_speed: 0.1,
                 },
-                blow: Vec3::X * sequence as f32,
                 press: Vec3::Y * (sequence + 1) as f32,
-                mass: (sequence + 2) as f32,
                 step: STEP,
             });
         }
     }
-    // Fixture: interleave owners and both nonzero and zero blows in one source sequence.
+    // Fixture: interleave owners while retaining each source sequence.
     inputs.rotate_left(3);
-    inputs[4].blow = Vec3::ZERO;
     let mut state: SystemState<(
         Colliders,
         Query<((&Position, &Rotation), &Breakage, Option<&Piece>)>,
@@ -4732,17 +3988,7 @@ fn contact_preparation_preserves_source_order_across_workers() {
     let (colliders, constructions) = state.get(&world).unwrap();
     let expected: Vec<_> = inputs
         .iter()
-        .map(|i| {
-            contact_load(
-                &colliders,
-                &constructions,
-                &i.point,
-                i.blow,
-                i.press,
-                i.mass,
-                i.step,
-            )
-        })
+        .map(|i| contact_load(&colliders, &constructions, &i.point, i.press, i.step))
         .collect();
     assert!(
         expected.iter().all(Option::is_some),
@@ -4971,4 +4217,166 @@ fn owners_share_initial_equilibrium_until_their_first_changed_load() {
     assert!(!Arc::ptr_eq(&first.assessment, &second.assessment));
     assert!(Arc::ptr_eq(&second.assessment, &kind.equilibrium));
     assert!(!second.assessment.needs_tick());
+}
+
+/// The game's environment destruction: the production pre-physics sweep removes intersected
+/// occupied chunks on first contact and transfers their momentum once. Static-stop/refund
+/// intake, a delayed structure verdict, or a double physics exchange breaks this witness.
+#[test]
+fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
+    let kind = column_construction();
+    let (mut app, root) = composed_kind(false, &kind);
+    for _ in 0..3 {
+        app.update();
+    }
+    // Fixture: a centred 0.4 m cube crossing only the middle of the three unit chunks.
+    let speed = 128.0;
+    let mass = 1e6;
+    let source = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Position(Vec3::new(-1.0, 1.5, 0.0)),
+            Rotation::default(),
+            Collider::cuboid(0.4, 0.4, 0.4),
+            Mass(mass),
+            NoAutoMass,
+            AngularInertia::new(Vec3::splat(mass)),
+            CenterOfMass::default(),
+            LinearVelocity(Vec3::X * speed),
+            piece_layers(),
+        ))
+        .id();
+    // First preparation creates the collider hierarchy; start outside this tick's sweep.
+    app.world_mut().get_mut::<LinearVelocity>(source).unwrap().0 = Vec3::ZERO;
+    app.update();
+    use bevy::ecs::system::RunSystemOnce;
+    let old = app
+        .world_mut()
+        .query::<(Entity, &Element, &ChildOf)>()
+        .iter(app.world())
+        .find(|(_, _, parent)| parent.parent() == root)
+        .unwrap()
+        .0;
+    let force = Vec3::NEG_X * 1e7; // Fixture: a stale belt reaction exposes a missed cancellation.
+    app.world_mut()
+        .run_system_once(move |mut bodies: Query<Forces>| {
+            bodies
+                .get_mut(source)
+                .unwrap()
+                .apply_force_at_point(force, Vec3::new(-1.0, 1.5, 0.0));
+        })
+        .unwrap();
+    app.world_mut().resource_mut::<ContactTransfers>().stage(
+        crate::contact_transfer::AppliedContact {
+            structure: root,
+            structure_collider: old,
+            body: source,
+            point: Vec3::new(0.0, 1.5, 0.0),
+            normal: Vec3::NEG_X,
+            force,
+            closing_speed: speed,
+        },
+    );
+    app.world_mut().get_mut::<LinearVelocity>(source).unwrap().0 = Vec3::X * speed;
+    app.update();
+    let account = app.world().resource::<SweepAccount>();
+    let selected: Vec<_> = account
+        .chunks
+        .iter()
+        .filter(|(ordinal, _, _)| *ordinal == 3)
+        .collect();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].1, 1);
+    let impulse = account
+        .exchanges
+        .iter()
+        .find(|(body, _, _)| *body == source)
+        .unwrap()
+        .1;
+    let transferred = kind.sweep.part(1, &Transform::IDENTITY).mass as f32 * selected[0].2;
+    assert!((transferred - impulse).length() < 1e-4 * impulse.length());
+    let after = app.world().get::<LinearVelocity>(source).unwrap().0;
+    assert!(((Vec3::X * speed - after) * mass - impulse).length() < 1e-3 * impulse.length());
+    assert!(
+        !app.world()
+            .get::<Breakage>(root)
+            .unwrap()
+            .live
+            .state
+            .standing(1)
+    );
+    let mut shape = Shape::intact(&kind.layout);
+    for entry in &app.world().resource::<Record>().entries {
+        shape.apply(entry.event, &kind.layout);
+    }
+    let live = Live::new(&kind);
+    shape.derive_departures(&kind.layout, &live);
+    assert_eq!(
+        shape.fate[1],
+        Fate::Fallen,
+        "the streamed ledger opens the same hole"
+    );
+    println!(
+        "MEASURED sweep composition: selected={}, casts={}, joints={}, speed {} -> {}, impulse={:?}",
+        selected.len(),
+        account.work.casts,
+        account.work.joints,
+        speed,
+        after.x,
+        impulse
+    );
+}
+
+/// The game's environment destruction: decor receives a whole patch. Opening internal seams
+/// or resetting its state would turn one moving cluster into unrelated new chunks.
+#[test]
+fn a_swept_patch_departs_as_one_cluster_preserving_its_internal_joints() {
+    let kind = column_construction();
+    let (mut app, root) = composed_kind(false, &kind);
+    let mut owner = app.world_mut().get_mut::<Breakage>(root).unwrap();
+    let mut record = Record::default();
+    // Fixture: the upper pair leaves at a rigid twist about the construction origin.
+    let group = vec![1, 2];
+    let velocity = Vec3::X * 2.0;
+    let spin = Vec3::Z;
+    let departure = sweep_intake::sweep_departure(
+        &mut owner,
+        Transform::IDENTITY,
+        group.clone(),
+        sweep_intake::ReleasedMotion {
+            velocity,
+            spin,
+            centre: Vec3::ZERO,
+        },
+        7,
+        &mut record,
+    );
+    assert_eq!(departure.group, group);
+    assert_eq!(departure.launch.colliders.len(), group.len());
+    let internal = kind
+        .layout
+        .joints
+        .iter()
+        .position(|j| group.contains(&j.a) && matches!(j.b, Side::Chunk(b) if group.contains(&b)))
+        .unwrap();
+    assert!(!departure.live.state.separated[internal]);
+    assert!(!owner.live.state.separated[internal]);
+    for &c in &group {
+        assert!(!owner.live.state.standing(c));
+        assert!(departure.live.state.standing(c));
+    }
+    assert!(
+        (departure.launch.velocity - velocity - spin.cross(departure.launch.centre)).length()
+            < 1e-5
+    );
+    assert!(record.entries.iter().all(|e| e.tick == 7));
+    assert_eq!(
+        record
+            .entries
+            .iter()
+            .filter(|e| matches!(e.event, Event::Separate(_)))
+            .count(),
+        1
+    );
 }

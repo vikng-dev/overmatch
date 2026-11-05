@@ -2,7 +2,7 @@
 //! state only). The construction design's "Crumble on landing" owns the narrative.
 //!
 //! THE LAW ([`crumble`]). A landing is a physics step in which a moving chunk group took a blow
-//! past its rest speed ([`ContactTransfers::split_points`]). Each contact point's blow peaks as
+//! past its rest speed (Avian's `SleepThreshold`, [`landings`]). Each contact point's blow peaks as
 //! two elastic bodies stopping each other do ([`peak_force`], Hertz), from the two sides'
 //! stiffness and curvature, never from the solver's step; with the point's press it is a force on
 //! the chunk it touches. The group's chunk kernel
@@ -25,7 +25,8 @@
 use std::collections::BTreeMap;
 
 use avian3d::prelude::{
-    AngularVelocity, CollisionLayers, ComputedCenterOfMass, LinearVelocity, Position, Rotation,
+    AngularVelocity, CollisionLayers, ComputedCenterOfMass, LinearVelocity, PhysicsLengthUnit,
+    Position, Rotation, SleepThreshold,
 };
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -353,17 +354,29 @@ struct Landing {
 /// rests or slides, and lands nowhere.
 fn landings(
     transfers: &ContactTransfers,
-    moving: impl Fn(Entity) -> bool,
+    rest_speed: impl Fn(Entity) -> Option<f32>,
 ) -> BTreeMap<Entity, Landing> {
+    let dt = transfers.dt();
     let mut landings: BTreeMap<Entity, Landing> = BTreeMap::new();
     for points in transfers.groups() {
         let structure = points[0].structure;
-        if !moving(structure) {
-            continue;
-        }
+        let Some(rest) = rest_speed(structure) else {
+            continue; // Not a moving group free to crumble this step.
+        };
         let landing = landings.entry(structure).or_default();
-        for (point, blow, press, _) in transfers.split_points(points) {
-            landing.energy += 0.5 * blow.length() * point.closing_speed.max(0.0);
+        for point in points {
+            // A point closing past the group's rest speed (Avian's `SleepThreshold`) strikes with
+            // the momentum its closing brings, `m v`, never more than the solver moved along the
+            // normal; the rest of its transfer is held through the step, a press.
+            let moved = point.impulse.dot(point.normal).max(0.0);
+            let struck = if point.closing_speed > rest {
+                (point.effective_mass * point.closing_speed).min(moved)
+            } else {
+                0.0
+            };
+            let blow = -point.normal * struck;
+            let press = -(point.impulse - point.normal * struck) / dt;
+            landing.energy += 0.5 * struck * point.closing_speed.max(0.0);
             landing.points.push(Point {
                 collider: point.structure_collider,
                 other: point.body_collider,
@@ -427,6 +440,8 @@ struct Contacts<'w, 's> {
     read: Local<'s, u64>,
     colliders: Query<'w, 's, ColliderOf<'static>>,
     placed: Query<'w, 's, &'static Breakage, Without<Piece>>,
+    rests: Query<'w, 's, &'static SleepThreshold>,
+    length_unit: Res<'w, PhysicsLengthUnit>,
 }
 
 impl Contacts<'_, '_> {
@@ -486,7 +501,14 @@ fn crumble_landings(
     }
     *contacts.read = contacts.transfers.steps();
     let landings = landings(&contacts.transfers, |entity| {
-        groups.get(entity).is_ok_and(|item| !item.5)
+        groups.get(entity).is_ok_and(|item| !item.5).then(|| {
+            contacts
+                .rests
+                .get(entity)
+                .expect("a moving group's dynamic body carries its sleep threshold")
+                .linear
+                * contacts.length_unit.0
+        })
     });
     // An authority without a shot clock (a test fixture's bare sim) is at tick zero.
     let tick = clock.as_deref().map_or(0, |clock| clock.0.raw());
@@ -594,13 +616,13 @@ pub(crate) fn route(
     kept
 }
 
-/// Mount the crumble on the authority: after the construction laws, before launches and splits.
+/// Mount the crumble on the authority in [`crate::construction::breakage::LandingSet`]: after the
+/// deposits whose splits it keeps, before the refit that despawns colliders its contacts name.
 pub(crate) fn sim_plugin(app: &mut App) {
     app.add_message::<Shed>().add_systems(
         FixedPostUpdate,
         crumble_landings
-            .after(crate::construction::breakage::LawSet)
-            .before(super::launch::LaunchSet)
+            .in_set(crate::construction::breakage::LandingSet)
             .run_if(not(resource_exists::<crate::ClientReplica>)),
     );
 }
