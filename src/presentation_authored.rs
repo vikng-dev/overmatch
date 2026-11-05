@@ -363,11 +363,18 @@ mod tests {
             ("net_debug_refresh_s", "0.0"),
             ("net_debug_refresh_s", "1e100"),
             ("net_warn_excess_ticks", "0"),
-            ("net_warn_excess_ticks", "4294967295"),
         ] {
             let error = style_constants(&replace_value(style, field, value)).unwrap_err();
             assert!(error.contains(field) && error.contains("author"), "{error}");
         }
+        // Fixture: reversed bands must be refused independently of the shipped UI tastes.
+        let reversed = replace_value(style, "net_alarm_excess_ticks", "1");
+        let reversed = replace_value(&reversed, "net_warn_excess_ticks", "2");
+        let error = style_constants(&reversed).unwrap_err();
+        assert!(
+            error.contains("net_warn_excess_ticks") && error.contains("author"),
+            "{error}"
+        );
     }
 
     fn replace_value(text: &str, field: &str, value: &str) -> String {

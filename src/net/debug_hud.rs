@@ -411,16 +411,16 @@ mod tests {
             Some((format!("{:.1} Hz", tick.as_secs_f64().recip()), TEXT))
         );
         assert_eq!(
-            server_tick_readout(tick * (WARN_EXCESS_TICKS + 1), tick).1,
+            server_tick_readout(tick * WARN_EXCESS_TICKS + tick, tick).1,
             NET_WARN
         );
         assert_eq!(
-            server_tick_readout(tick * (ALARM_EXCESS_TICKS + 1), tick).1,
+            server_tick_readout(tick * ALARM_EXCESS_TICKS + tick, tick).1,
             NET_WARN
         );
         assert_eq!(
             server_tick_readout(
-                tick * (ALARM_EXCESS_TICKS + 1) + Duration::from_nanos(1),
+                tick * ALARM_EXCESS_TICKS + tick + Duration::from_nanos(1),
                 tick
             )
             .1,
