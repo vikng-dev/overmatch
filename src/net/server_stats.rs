@@ -390,10 +390,12 @@ fn open_physics(mut starts: ResMut<PhaseStarts>) {
 }
 
 fn close_physics(mut starts: ResMut<PhaseStarts>, mut stats: ResMut<ServerStats>) {
-    if let Some(start) = starts.physics.take() {
-        starts.physics_us = start.elapsed().as_secs_f64() * 1.0e6;
-        stats.physics.push(starts.physics_us);
-    }
+    let start = starts
+        .physics
+        .take()
+        .expect("the physics bracket opens in PhysicsStepSystems::First before it closes in Last");
+    starts.physics_us = start.elapsed().as_secs_f64() * 1.0e6;
+    stats.physics.push(starts.physics_us);
 }
 
 fn open_sleep(mut starts: ResMut<PhaseStarts>) {
@@ -418,12 +420,14 @@ fn close_send(
     mut stats: ResMut<ServerStats>,
     mut ram: Option<ResMut<super::ram::Ram>>,
 ) {
-    if let Some(start) = starts.send.take() {
-        let us = start.elapsed().as_secs_f64() * 1.0e6;
-        stats.send.push(us);
-        if let Some(ram) = ram.as_deref_mut() {
-            ram.send(us);
-        }
+    let start = starts
+        .send
+        .take()
+        .expect("the send bracket opens before ServerSystems::Send under the same ServerTick gate");
+    let us = start.elapsed().as_secs_f64() * 1.0e6;
+    stats.send.push(us);
+    if let Some(ram) = ram.as_deref_mut() {
+        ram.send(us);
     }
 }
 
@@ -618,6 +622,62 @@ fn resident_bytes() -> Option<u64> {
 mod tests {
     use super::*;
 
+    fn fixture_stats() -> ServerStats {
+        // Fixture: an arbitrary reporting period, with empty sampling windows.
+        ServerStats {
+            period: Period::new(Duration::from_secs(1), Instant::now()),
+            ticks: TickWindow::default(),
+            physics: TickWindow::default(),
+            sleep: TickWindow::default(),
+            collector: TickWindow::default(),
+            stages: std::array::from_fn(|_| TickWindow::default()),
+            send: TickWindow::default(),
+            cpu_at_start: None,
+            throttle_at_start: None,
+            husk_strikes_at_start: 0,
+            sequence: 0,
+            send_bytes: 0,
+        }
+    }
+
+    fn bracket_world() -> World {
+        let mut world = World::new();
+        world.init_resource::<PhaseStarts>();
+        world.insert_resource(fixture_stats());
+        world
+    }
+
+    /// Operators rely on every physics close consuming its matching opening, never stale data.
+    #[test]
+    #[should_panic(expected = "the physics bracket opens in PhysicsStepSystems::First")]
+    fn physics_close_requires_its_opening() {
+        use bevy::ecs::system::RunSystemOnce;
+        bracket_world().run_system_once(close_physics).unwrap();
+    }
+
+    /// A missing send opening must refuse the measurement rather than hide a broken bracket.
+    #[test]
+    #[should_panic(expected = "the send bracket opens before ServerSystems::Send")]
+    fn send_close_requires_its_opening() {
+        use bevy::ecs::system::RunSystemOnce;
+        bracket_world().run_system_once(close_send).unwrap();
+    }
+
+    /// Each installed pair records once and consumes its opening, for the stats reader.
+    #[test]
+    fn paired_brackets_record_and_consume_their_openings() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = bracket_world();
+        world.run_system_once(open_physics).unwrap();
+        world.run_system_once(close_physics).unwrap();
+        world.run_system_once(open_send).unwrap();
+        world.run_system_once(close_send).unwrap();
+        assert!(world.resource::<PhaseStarts>().physics.is_none());
+        assert!(world.resource::<PhaseStarts>().send.is_none());
+        assert_eq!(world.resource::<ServerStats>().physics.0.len(), 1);
+        assert_eq!(world.resource::<ServerStats>().send.0.len(), 1);
+    }
+
     /// The game's destruction census counts authority-owned chunks. Pose carriers repeat Piece
     /// metadata, and retired carriers retain it; neither is additional physical matter.
     #[test]
@@ -660,20 +720,7 @@ mod tests {
     fn byte_census_preserves_the_send_fifo() {
         let mut app = App::new();
         app.add_plugins(TaskPoolPlugin::default())
-            .insert_resource(ServerStats {
-                period: Period::new(Duration::from_secs(1), Instant::now()),
-                ticks: TickWindow::default(),
-                physics: TickWindow::default(),
-                sleep: TickWindow::default(),
-                collector: TickWindow::default(),
-                stages: std::array::from_fn(|_| TickWindow::default()),
-                send: TickWindow::default(),
-                cpu_at_start: None,
-                throttle_at_start: None,
-                husk_strikes_at_start: 0,
-                sequence: 0,
-                send_bytes: 0,
-            })
+            .insert_resource(fixture_stats())
             .add_systems(Update, count_send_bytes);
         // Fixture: independent links with unequal packets expose missing workers and reordering.
         let links = 32;
