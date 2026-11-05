@@ -3108,7 +3108,7 @@ fn landing_slab() -> (Arc<ConstructionKind>, Vec<usize>) {
     }
     assert_eq!(internal, 2, "the fixture is a chain, not a loop");
     kind.structure = Arc::new(kind.layout.checked_structure(&kind.asset).unwrap());
-    kind.equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest(&kind.structure).unwrap());
+    kind.equilibrium = Arc::new(fracture::parts::Assessment::at_rest(&kind.structure));
     (Arc::new(kind), group)
 }
 
@@ -3977,7 +3977,7 @@ fn geometry_fixture(kind: &Arc<ConstructionKind>) -> Arc<ConstructionKind> {
         material.seam = seam;
     }
     kind.structure = Arc::new(kind.layout.checked_structure(&kind.asset).unwrap());
-    kind.equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest(&kind.structure).unwrap());
+    kind.equilibrium = Arc::new(fracture::parts::Assessment::at_rest(&kind.structure));
     Arc::new(kind)
 }
 
@@ -4360,7 +4360,7 @@ fn a_jointless_owner_still_wears_keeps_holes_and_launches() {
     assert_eq!(live.state.fate[1], Fate::Fallen);
     assert_eq!(changes.groups, vec![(vec![1], vec![load])]);
     assert!(changes.failures.is_empty());
-    assert_eq!(changes.solve_rounds, 0);
+    assert_eq!(changes.solves, 0);
 }
 
 /// The game's independent construction owners have no cross-owner field effects. Worker count
@@ -4838,6 +4838,7 @@ fn released_owners_share_one_openings_work_and_each_load_has_one_owner() {
     let impulse = (4.0 * work * mass).sqrt();
     let structure = Structure {
         geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
+        part_of: vec![0, 1],
         chunks: [-0.5, 0.5]
             .map(|x| Chunk {
                 volume: 1.0,

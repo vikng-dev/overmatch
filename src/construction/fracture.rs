@@ -1,15 +1,16 @@
 //! The game's environment destruction laws (game state only). [`wear`] consumes volume,
-//! [`crack`] opens kinetic-cavity seams, [`bondsolve::Assessment`] solves every live joint's
-//! equilibrium force and moment, and [`loose_groups`] releases matter disconnected from support.
+//! [`crack`] opens kinetic-cavity seams, [`parts::Assessment`] decides at the part scale which
+//! interfaces fail, and [`loose_groups`] releases matter disconnected from support.
 //! The authority records their effects; replicas derive geometry from that record.
 //!
 //! [`Structure`] supplies chunk volume, mass, centroid and material, and the joints' area, centre,
 //! normal and attachment kind. [`Load`] supplies crushed volume, cavity energy, impulse and press
 //! at a chunk-local point in the construction frame. [`trace_blast`] is the field's nearest-stop
 //! reduction; [`Blast`] and the material's compaction and scab laws supply its surface response.
-//! The construction design's "Structural calculation" and "Standoff blast" own the derivations.
+//! The construction design's "Parts decide what stands" and "Standoff blast" own the derivations.
 
 pub(crate) mod bondsolve;
+pub(crate) mod parts;
 
 use std::{f32::consts::PI, sync::Arc};
 
@@ -294,6 +295,8 @@ impl Joint {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Structure {
     pub chunks: Vec<Chunk>,
+    /// Per chunk: its part, the element it was baked in ([`parts::Part`]).
+    pub part_of: Vec<usize>,
     pub joints: Vec<Joint>,
     pub geometry: bondsolve::Geometry,
 }
@@ -764,7 +767,7 @@ pub(crate) fn wear(structure: &Structure, state: &mut State, chunk: usize, volum
 
 /// One source at one point in the game's environment destruction model (game state only).
 /// Crushed volume consumes the pool, cavity energy enters [`crack`], and impulse and press enter
-/// [`bondsolve::Assessment`]. Field loads never press; physics contacts supply their resolved
+/// [`parts::Assessment`]. Field loads never press; physics contacts supply their resolved
 /// blow and press without cavity energy. The construction design owns their derivations.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Load {
@@ -1957,7 +1960,7 @@ mod tests {
     /// anchored: fixture geometry, the shipped brick's values.
     fn row(n: usize) -> Structure {
         let material = brick();
-        let chunks = (0..n)
+        let chunks: Vec<Chunk> = (0..n)
             .map(|i| Chunk {
                 volume: 0.01,
                 centroid: Vec3::new(0.2 * i as f32, 0.1, 0.0),
@@ -1985,6 +1988,8 @@ mod tests {
             bond: Bond::Bonded(material.seam),
         });
         Structure {
+            // Each fixture chunk is its own part.
+            part_of: (0..chunks.len()).collect(),
             chunks,
             joints,
             geometry: bondsolve::Geometry::CircularFixture,
@@ -2352,7 +2357,7 @@ mod tests {
         let size = 0.25_f32;
         let volume = size.powi(3);
         let at = |col: f32, row: f32| Vec3::new(col * size, row * size, 0.0);
-        let chunks = (0..w * h)
+        let chunks: Vec<Chunk> = (0..w * h)
             .map(|i| Chunk {
                 volume,
                 centroid: at((i % w) as f32 + 0.5, (i / w) as f32 + 0.5),
@@ -2399,6 +2404,8 @@ mod tests {
             }
         }
         Structure {
+            // Each fixture chunk is its own part.
+            part_of: (0..chunks.len()).collect(),
             chunks,
             joints,
             geometry: bondsolve::Geometry::CircularFixture,

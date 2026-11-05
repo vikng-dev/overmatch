@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn root_opening_moment_is_invariant_under_footprint_refinement() {
         use super::super::fracture::{
-            Chunk, Joint, Load, Origin, Side, State, Structure, bondsolve::Assessment,
+            Chunk, Joint, Load, Origin, Side, State, Structure, parts::Assessment,
         };
         let list = Attachments::from_ron(
             r#"{"fixture": RootPlate(overturning_nm_per_kg: (100.0, Fixture("fixture")), fracture_energy_j_per_m2: (1.0, Fixture("fixture")), shear_cohesion_pa: (1.0e6, Fixture("fixture")), shear_fracture_energy_j_per_m2: (1.0, Fixture("fixture")))}"#,
@@ -669,6 +669,7 @@ mod tests {
                 let seam = plate.seam(area, mass).unwrap();
                 let structure = Structure {
                     geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
+                    part_of: vec![0],
                     chunks: vec![chunk],
                     joints: cuts
                         .windows(2)

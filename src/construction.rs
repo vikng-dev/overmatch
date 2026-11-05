@@ -69,7 +69,7 @@ pub(crate) struct ConstructionKind {
     pub(crate) dressing: view::Dressing,
     /// Checked geometry and initial gravity, shared until an instance changes.
     structure: Arc<fracture::Structure>,
-    equilibrium: Arc<fracture::bondsolve::Assessment>,
+    equilibrium: Arc<fracture::parts::Assessment>,
 }
 
 impl ConstructionKind {
@@ -115,7 +115,7 @@ impl ConstructionKind {
             .collect::<Result<Vec<_>, _>>()?;
         let layout = breakage::Layout::of(&asset, &law_materials, attachments)?;
         let structure = Arc::new(layout.checked_structure(&asset)?);
-        let equilibrium = Arc::new(fracture::bondsolve::Assessment::at_rest(&structure)?);
+        let equilibrium = Arc::new(fracture::parts::Assessment::at_rest(&structure));
         Ok(Self {
             dressing: view::Dressing::bare(&layout),
             asset,

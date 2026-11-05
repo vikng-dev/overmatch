@@ -39,10 +39,11 @@
 //!   press once, and it starts none. Awake contacts' presses likewise join every deposit in
 //!   the physics step, once per point. No body is read by its kind.
 //! * **The order.** Tick intake reads one geometry snapshot. Each owner runs removal and
-//!   cavity cracks ([`fracture::strike`]), one bounded force solve
-//!   ([`fracture::bondsolve::Assessment`]), then connectivity on change. Independent owners
-//!   evaluate together; effects commit by entity, respecting [`owner_batches`]. Iterating
-//!   owners and changed spin continue next tick without requiring another deposit.
+//!   cavity cracks ([`fracture::strike`]), the part-scale verdict
+//!   ([`fracture::parts::Assessment`]), then connectivity on change. Independent owners
+//!   evaluate together; effects commit by entity, respecting [`owner_batches`]. Owners whose
+//!   topology changed or whose pulse ended, and changed spin, continue next tick without requiring
+//!   another deposit.
 //! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses, the cylinder
 //!   about its chord, open across each face it crosses ([`open_ends`]), and a blast a dish in each
 //!   chunk its rays stop on ([`holes_of`]); a chunk still standing after the deposit
@@ -313,6 +314,7 @@ impl Layout {
         }
         Ok(Structure {
             geometry: fracture::bondsolve::Geometry::Faces(self.patches.clone()),
+            part_of: self.element_of.iter().map(|&e| usize::from(e)).collect(),
             chunks: self
                 .chunks
                 .iter()
@@ -542,7 +544,7 @@ pub(crate) struct Live {
     pub(crate) structure: Arc<Structure>,
     pub(crate) state: State,
     pub(crate) swapped: Vec<bool>,
-    pub(crate) assessment: Arc<fracture::bondsolve::Assessment>,
+    pub(crate) assessment: Arc<fracture::parts::Assessment>,
     /// Per law chunk: its holes, in record order (module doc).
     pub(crate) holes: Vec<Vec<Hole>>,
 }
@@ -564,7 +566,7 @@ impl Live {
         Self {
             state: State::new(&structure),
             swapped: vec![false; elements],
-            assessment: Arc::new(fracture::bondsolve::Assessment::default()),
+            assessment: Arc::new(fracture::parts::Assessment::default()),
             holes: vec![Vec::new(); structure.chunks.len()],
             structure,
         }
@@ -581,7 +583,7 @@ impl Live {
             structure: self.structure.clone(),
             state: self.state.clone(),
             swapped: vec![true; self.swapped.len()],
-            assessment: Arc::new(fracture::bondsolve::Assessment::default()),
+            assessment: Arc::new(fracture::parts::Assessment::default()),
             holes: self.holes.clone(),
         };
         child.state.retain_group(group);
@@ -2194,23 +2196,23 @@ fn open_ends(block: &Block, from: Vec3, to: Vec3) -> (Vec3, Vec3) {
 }
 
 /// One owner's recorded causes, released groups and exchanged source impulses in this tick.
-/// `solve_rounds` counts bounded sparse work; zero means an unchanged equilibrium was reused.
+/// `solves` counts the part solve's load columns; zero means the last field was reused.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct Changes {
     pub(crate) events: Vec<Event>,
     pub(crate) groups: Vec<(Vec<usize>, Vec<Load>)>,
     pub(crate) failures: Vec<fracture::Failure>,
-    pub(crate) solve_rounds: usize,
+    pub(crate) solves: usize,
     /// Body blows on chunks with no carrier in this deposit, returned whole in construction terms:
     /// dust has none, and a chunk an earlier deposit freed already launched as its own body.
     pub(crate) returns: Vec<BodyReturn>,
 }
 
-/// Apply one tick's loads and holes, solve each live joint once, and record simultaneous cracks.
-/// Holes are view-only; removal consumes their volume pool. Loads whose carrier was removed
-/// cannot launch it, so body blows there are returned whole. Connectivity follows topology
-/// changes; redistribution and unfinished equilibrium continue on subsequent ticks. The
-/// construction design's "Structural calculation" owns pulse and failure approximations.
+/// Apply one tick's loads and holes, judge every part interface once, and record simultaneous
+/// failures. Holes are view-only; removal consumes their volume pool. Loads whose carrier was
+/// removed cannot launch it, so body blows there are returned whole. Connectivity follows topology
+/// changes; redistribution continues on subsequent ticks. The construction design's "Parts decide
+/// what stands" owns pulse and failure approximations.
 pub(crate) fn run_laws(
     element_of: &[u16],
     live: &mut Live,
@@ -2238,7 +2240,7 @@ pub(crate) fn run_laws(
         .copied()
         .collect();
     let changed = !struck.dusted.is_empty() || !struck.cracked.is_empty();
-    let (failures, solve_rounds) = Arc::make_mut(&mut live.assessment).advance(
+    let (failures, solves) = Arc::make_mut(&mut live.assessment).advance(
         &live.structure,
         &mut live.state,
         &loads,
@@ -2308,7 +2310,7 @@ pub(crate) fn run_laws(
         events,
         groups,
         failures,
-        solve_rounds,
+        solves,
         returns,
     }
 }
