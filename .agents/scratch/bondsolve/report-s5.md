@@ -68,6 +68,17 @@ MEASURED by the retained all-asset census: fir_1 has 37 chunks and 132 joints; h
 Equilibrated with zero sparse rounds at their first authoritative law stage. These are observations,
 not asset-specific pass conditions.
 
+## Optional contact review
+
+The b14 parallel-work P2 is already addressed: production contact groups split inside owner
+workers in `prepare_contacts`, with source-index collection before ordered effects. The serial
+`ContactTransfers::split` adapter is test-only; no duplicate parallel route was added.
+
+Both `add_substep` and `add_restitution` enumerate `slot` directly. DERIVED savings: two Rust
+lines. Before/after comparison: the point sequence, array indices and impulse arithmetic are
+identical; the existing contact-budget and ordering witnesses passed in both full runs. Final
+gates above include this cleanup. No test or output pin was added.
+
 ## Remaining ownership
 
 The owner's three separately authored house and fir variants belong to other asset rows. This

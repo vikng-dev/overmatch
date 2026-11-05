@@ -720,8 +720,7 @@ fn add_substep(
             let constraint =
                 &graph.colors[constraint_at.color].contact_constraints[constraint_at.index];
             let [tangent1, tangent2] = constraint.tangent_directions();
-            for (offset, point) in constraint.points.iter().enumerate() {
-                let slot = offset;
+            for (slot, point) in constraint.points.iter().enumerate() {
                 let (normal_now, friction_now) = (point.normal_part.impulse, friction(point));
                 let (normal_before, friction_before) = last[slot];
                 let normal = normal_now - unapplied * normal_before;
@@ -753,8 +752,7 @@ fn add_restitution(
         |constraint_at, points, last| {
             let constraint =
                 &graph.colors[constraint_at.color].contact_constraints[constraint_at.index];
-            for (offset, point) in constraint.points.iter().enumerate() {
-                let slot = offset;
+            for (slot, point) in constraint.points.iter().enumerate() {
                 let normal_now = point.normal_part.impulse;
                 points[slot].impulse +=
                     constraint_at.sign * (normal_now - last[slot].0) * constraint.normal;
