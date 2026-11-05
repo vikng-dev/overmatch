@@ -227,6 +227,67 @@ fn a_cantilever_carries_its_load_and_falls_past_its_navier_limit() {
     assert_eq!(assessment.support, vec![vec![1]]);
 }
 
+/// DAMAGE INSIDE A PART LOWERS ITS INTERFACE'S CAPACITY ONLY THROUGH THE JOINT AREA LEFT. The
+/// two-cube wall part below loses one cube to wear; its base interface keeps one ground disk, under
+/// the remaining cube's centre. DERIVED single-disk capacity, pushed at height z: P* z =
+/// (f_t + W₁ / A) A r / 4, below the intact two-disk capacity.
+#[test]
+fn damage_inside_a_part_lowers_its_base_capacity_through_the_joints_left() {
+    let (s, side, area, tensile) = (0.2_f32, 0.4_f32, 0.04_f32, 1.0e5_f32);
+    let bond = Bond::Bonded(seam(tensile, 1e9));
+    let chunks = vec![
+        cube(Vec3::new(-s, side / 2.0, 0.0), side, false),
+        cube(Vec3::new(s, side / 2.0, 0.0), side, false),
+    ];
+    let joints = vec![
+        joint(
+            0,
+            Side::Chunk(1),
+            Vec3::new(0.0, side / 2.0, 0.0),
+            Vec3::X,
+            0.16,
+            bond,
+        ),
+        joint(
+            0,
+            Side::Ground,
+            Vec3::new(-s, 0.0, 0.0),
+            Vec3::Y,
+            area,
+            bond,
+        ),
+        joint(1, Side::Ground, Vec3::new(s, 0.0, 0.0), Vec3::Y, area, bond),
+    ];
+    let structure = structure(chunks, vec![0, 0], joints);
+    let mut state = State::new(&structure);
+    let volume = structure.chunks[0].volume;
+    assert!(super::super::wear(&structure, &mut state, 0, volume));
+    let weight = f64::from(structure.chunks[1].mass) * g();
+    let (a, z) = (f64::from(area), f64::from(side));
+    let r = (a / std::f64::consts::PI).sqrt();
+    let limit = (f64::from(tensile) + weight / a) * a * r / (4.0 * z);
+    let s64 = f64::from(s);
+    let intact =
+        (f64::from(tensile) + weight / a) * a * (2.0 * s64 * s64 + r * r / 2.0) / ((s64 + r) * z);
+    assert!(limit < intact, "{limit} N against the intact {intact} N");
+    let push = |factor: f64| {
+        press(
+            1,
+            Vec3::new(s, side, 0.0),
+            Vec3::X * (factor * limit) as f32,
+        )
+    };
+    let mut assessment = Assessment::default();
+    assert!(tick(&structure, &mut state, &mut assessment, &[push(0.98)]).is_empty());
+    let interface = &assessment.graph.interfaces[0];
+    assert_eq!((interface.b, interface.bonded.len()), (None, 1));
+    let failures = tick(&structure, &mut state, &mut assessment, &[push(1.02)]);
+    assert!(
+        failures.len() == 1 && failures[0].cause == Cause::Tension,
+        "{failures:?}"
+    );
+}
+
 /// A WALL PART IS PUSHED OVER AT ITS BASE INTERFACE'S CAPACITY. Two cubes are one part on two
 /// ground disks at x = ±s. DERIVED Navier capacity of that two-disk section, pushed at height z:
 /// P* z = (f_t + W / 2A) A (2 s² + r²/2) / (s + r). Below it nothing changes and a held press

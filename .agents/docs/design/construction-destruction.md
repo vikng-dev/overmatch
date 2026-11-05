@@ -643,9 +643,10 @@ and lap) the construction data does not state.
 **Hand-checkable gates** (`parts::tests`, fixture geometry): a lintel's two pier shares
 `P/2 ± P a s / (2 s² + r²/2)`; a cantilever's interface carrying `W + P` and `W d + P L` and
 cracking at `P* = (f_t r A / 4 − W d) / L`, then tipping; a two-joint wall base cracking whole at
-its Navier capacity `P* z = (f_t + W/2A) A (2 s² + r²/2) / (s + r)`, then tipping; a slab resting
-on two piers bearing `W/2` on each and sliding past `μ W`. Each holds at 0.98 and changes at 1.02
-of its DERIVED limit.
+its Navier capacity `P* z = (f_t + W/2A) A (2 s² + r²/2) / (s + r)`, then tipping; the same wall
+with one block worn away cracking at its one remaining disk's `P* z = (f_t + W₁/A) A r / 4`; a slab
+resting on two piers bearing `W/2` on each and sliding past `μ W`. Each holds at 0.98 and changes
+at 1.02 of its DERIVED limit.
 
 **The unit house under gravity** (MEASURED, `parts::tests`, observations). Its 71 roof-board rests
 lie on the gables' 36.87° slopes, where a board needs friction `tan 36.87° = 0.75` against the pair
