@@ -70,10 +70,15 @@ struct Node {
 pub(crate) struct Work {
     pub(crate) bounds: usize,
     pub(crate) casts: usize,
-    /// Incident membership checks plus construction joint candidates for the flow graph.
+    /// Construction joint candidates for the flow graph.
     pub(crate) joints: usize,
     pub(crate) queries: usize,
     pub(crate) flow: mincut::Work,
+}
+
+struct Demand {
+    direction: Vec3,
+    force: f64,
 }
 
 impl Geometry {
@@ -277,22 +282,32 @@ impl Geometry {
         let Some(witness) = sweep.witness else {
             return;
         }; // No occupied inward motion.
-        let (plug, capacity) = self.plug(
-            structure,
-            state,
-            preload,
-            &sweep.chunks,
-            witness.normal,
-            &mut sweep.work,
-        );
         let drive = drive.dot(witness.normal).max(0.0);
         let (mass, patch) = (f64::from(mass), Contactor::chunk(structure, witness.chunk));
         let stop = peak_force(mass, f64::from(witness.speed), patch, Contactor::RIGID) as f32;
         let demand = stop + drive;
-        sweep.broken = demand > capacity;
-        if sweep.broken {
-            sweep.chunks = plug;
-        }
+        let cut = self.plug(
+            structure,
+            state,
+            preload,
+            &sweep.chunks,
+            Demand {
+                direction: witness.normal,
+                force: f64::from(demand),
+            },
+            &mut sweep.work,
+        );
+        let capacity = match cut {
+            mincut::Cut::Held => {
+                sweep.broken = false;
+                demand
+            }
+            mincut::Cut::Released { inside, capacity } => {
+                sweep.broken = true;
+                sweep.chunks = (0..structure.chunks.len()).filter(|&c| inside[c]).collect();
+                capacity as f32
+            }
+        };
         let left = f64::from((capacity - drive).max(0.0));
         sweep.load = Some(PatchLoad {
             drive,
@@ -310,9 +325,9 @@ impl Geometry {
         state: &State,
         preload: &[f64],
         patch: &[usize],
-        direction: Vec3,
+        demand: Demand,
         work: &mut Work,
-    ) -> (Vec<usize>, f32) {
+    ) -> mincut::Cut {
         use super::fracture::bondsolve::{JointStrength, joint_normal};
         let live = |j: usize| !state.separated[j] && state.live(&structure.joints[j]);
         assert_eq!(
@@ -335,7 +350,6 @@ impl Geometry {
             );
             graph.edge(source, c, f64::INFINITY, 0.0);
         }
-        let mut edges = Vec::new();
         for (j, joint) in structure.joints.iter().enumerate() {
             work.joints += 1;
             if !live(j) {
@@ -355,7 +369,7 @@ impl Geometry {
                 JointStrength::of(structure, joint, state.cracked[j]).translation_resistance(
                     f64::from(joint.area),
                     normal,
-                    direction.as_dvec3(),
+                    demand.direction.as_dvec3(),
                     preload[j],
                     strength * f64::from(joint.area),
                 )
@@ -363,20 +377,10 @@ impl Geometry {
             let forward = directional(normal);
             let backward = directional(-normal);
             graph.edge(joint.a, b, forward, backward);
-            edges.push((joint.a, b, forward, backward));
         }
-        let (inside, flow) = graph.cut(source, sink);
+        let (cut, flow) = graph.cut(source, sink, demand.force);
         work.flow += flow;
-        let capacity = edges
-            .into_iter()
-            .map(|(a, b, forward, backward)| match (inside[a], inside[b]) {
-                (true, false) => forward,
-                (false, true) => backward,
-                _ => 0.0,
-            })
-            .sum::<f64>();
-        let plug = (0..sink).filter(|&c| inside[c]).collect();
-        (plug, capacity as f32)
+        cut
     }
 }
 
@@ -518,7 +522,9 @@ pub(crate) struct Witness {
 pub(crate) struct PatchLoad {
     pub(crate) drive: f32,
     pub(crate) demand: f32,
+    /// Exact for a released plug; a certified lower bound when held.
     pub(crate) capacity: f32,
+    /// Speed at the reported capacity, likewise a lower bound when held.
     pub(crate) threshold: f32,
 }
 
@@ -675,6 +681,13 @@ pub(crate) fn exchange(body: &Body, parts: &[Part]) -> Exchange {
 mod tests {
     use super::*;
     use crate::construction::fracture::{Bond, Chunk, Joint, Material};
+
+    fn cut_capacity(cut: mincut::Cut) -> f32 {
+        let mincut::Cut::Released { capacity, .. } = cut else {
+            panic!("an unlimited demand exhausts the fixture's finite cut");
+        };
+        capacity as f32
+    }
 
     fn preload(structure: &Structure, state: &State) -> Vec<f64> {
         super::super::fracture::parts::Gravity::default()
@@ -987,8 +1000,11 @@ mod tests {
         // DERIVED: the speed whose peak force is the cut's 48 N.
         let base = speed_at(&structure, 48.0);
         let reported = bracket(&structure, &geometry, base, 0.0);
-        // Resolution: one f64-to-f32 rounding of the same inverse.
-        assert!(reported.iter().all(|&t| (t / base - 1.0).abs() < 1e-6));
+        // DERIVED: a holding certificate lies between the tested demand and the full cut;
+        // a releasing cut reports the full threshold. Resolution: f64-to-f32 inverse rounding.
+        assert!(reported[0] >= base * 0.9999 * (1.0 - 1e-6));
+        assert!(reported[0] <= base * (1.0 + 1e-6));
+        assert!((reported[1] / base - 1.0).abs() < 1e-6);
         // DERIVED: the peak force grows as v^(6/5), so doubling both seam modes raises the
         // threshold by 2^(5/6) at unchanged mass.
         let (stronger, stronger_geometry) = wall(32.0);
@@ -1207,14 +1223,17 @@ mod tests {
         let expected = 1001.0 / 2.0_f32.sqrt();
         for normal in [-1.0, 1.0] {
             let direction = (Vec3::X * normal + Vec3::Z).normalize();
-            let (_, capacity) = geometry.plug(
+            let capacity = cut_capacity(geometry.plug(
                 &structure,
                 &state,
                 &preload(&structure, &state),
                 &[0],
-                direction,
+                Demand {
+                    direction,
+                    force: f64::INFINITY,
+                },
                 &mut Work::default(),
-            );
+            ));
             assert!(
                 (capacity - expected).abs() < 0.001,
                 "direction={direction}, capacity={capacity}, expected={expected}"
@@ -1234,14 +1253,17 @@ mod tests {
         let state = State::new(&structure);
         for approach in [-1e-8, 0.0, 1e-8] {
             let direction = (Vec3::Y + Vec3::X * approach).normalize();
-            let (_, capacity) = geometry.plug(
+            let capacity = cut_capacity(geometry.plug(
                 &structure,
                 &state,
                 &preload(&structure, &state),
                 &[0],
-                direction,
+                Demand {
+                    direction,
+                    force: f64::INFINITY,
+                },
                 &mut Work::default(),
-            );
+            ));
             // DERIVED: bearing changes by at most 10 kPa * 1 m² * 1e-8 = 1e-4 N;
             // the shear projection changes only at second order. Allow f32 rounding too.
             assert!(
@@ -1280,7 +1302,9 @@ mod tests {
                 Vec3::ZERO,
             );
             assert_eq!(patch.broken, broken, "force={force}");
-            assert!((521.0..523.0).contains(&patch.load.unwrap().capacity));
+            if broken {
+                assert!((521.0..523.0).contains(&patch.load.unwrap().capacity));
+            }
         }
     }
 
@@ -1346,7 +1370,9 @@ mod tests {
                 Vec3::ZERO,
             );
             assert_eq!(patch.broken, broken, "force={force}, load={:?}", patch.load);
-            assert!((patch.load.unwrap().capacity - 1000.0).abs() < 0.01);
+            if broken {
+                assert!((patch.load.unwrap().capacity - 1000.0).abs() < 0.01);
+            }
         }
     }
 
@@ -1363,14 +1389,17 @@ mod tests {
             chunk.material.friction = 0.5;
         }
         structure.joints[0].bond = Bond::Resting;
-        let (_, capacity) = geometry.plug(
+        let capacity = cut_capacity(geometry.plug(
             &structure,
             &State::new(&structure),
             &preload(&structure, &State::new(&structure)),
             &[0],
-            direction,
+            Demand {
+                direction,
+                force: f64::INFINITY,
+            },
             &mut Work::default(),
-        );
+        ));
         // DERIVED: normal translation costs 10 kPa * 1 m²; allow f32 normalization error.
         assert!((capacity - 1e4).abs() < 0.01, "capacity={capacity}");
     }
@@ -1499,7 +1528,9 @@ mod tests {
                         [0],
                         "a buried joist never joins the moving plug"
                     );
-                    assert!((patch.load.unwrap().capacity - reserve).abs() < 0.01);
+                    if broken {
+                        assert!((patch.load.unwrap().capacity - reserve).abs() < 0.01);
+                    }
                 }
             }
         }

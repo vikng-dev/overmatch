@@ -30,6 +30,13 @@ struct Arc {
     residual: f64,
 }
 
+/// An exact releasing cut, or a certificate that the demanded flow can be carried.
+#[derive(Debug)]
+pub(super) enum Cut {
+    Held,
+    Released { inside: Vec<bool>, capacity: f64 },
+}
+
 pub(super) struct Network {
     arcs: Vec<Vec<Arc>>,
     work: Work,
@@ -83,12 +90,20 @@ impl Network {
         level
     }
 
-    pub(super) fn cut(mut self, source: usize, sink: usize) -> (Vec<bool>, Work) {
+    pub(super) fn cut(mut self, source: usize, sink: usize, demand: f64) -> (Cut, Work) {
+        assert!(demand >= 0.0, "a contact demands nonnegative force");
+        let mut total = 0.0;
+        if total >= demand {
+            return (Cut::Held, self.work);
+        }
         loop {
             let level = self.levels(source);
             if level[sink] == usize::MAX {
                 return (
-                    level.into_iter().map(|l| l != usize::MAX).collect(),
+                    Cut::Released {
+                        inside: level.into_iter().map(|l| l != usize::MAX).collect(),
+                        capacity: total,
+                    },
                     self.work,
                 );
             }
@@ -101,7 +116,7 @@ impl Network {
                     let flow = path[..path.len() - 1]
                         .iter()
                         .map(|&node| self.arcs[node][cursor[node]].residual)
-                        .fold(f64::INFINITY, f64::min);
+                        .fold(demand - total, f64::min);
                     assert!(
                         flow.is_finite() && flow > 0.0,
                         "the construction has a finite cut"
@@ -113,6 +128,10 @@ impl Network {
                         self.arcs[to][reverse].residual += flow;
                     }
                     self.work.augmentations += 1;
+                    total += flow;
+                    if total >= demand {
+                        return (Cut::Held, self.work);
+                    }
                     path.truncate(1);
                     continue;
                 }
@@ -160,13 +179,23 @@ mod tests {
         for &(a, b, capacity) in &edges {
             graph.edge(a, b, capacity, 0.0);
         }
-        let (inside, _) = graph.cut(0, 5);
+        let (
+            Cut::Released {
+                inside,
+                capacity: flow,
+            },
+            _,
+        ) = graph.cut(0, 5, f64::INFINITY)
+        else {
+            panic!("an unlimited demand exhausts this finite cut");
+        };
         let capacity: f64 = edges
             .iter()
             .filter(|&&(a, b, _)| inside[a] && !inside[b])
             .map(|&(_, _, capacity)| capacity)
             .sum();
         assert_eq!(capacity, 1.5);
+        assert_eq!(flow, capacity);
     }
 
     /// The game's environment destruction: asymmetric joint capacities and residual cancellation
@@ -201,9 +230,61 @@ mod tests {
             let expected = (0..4)
                 .map(|bits| capacity(&[true, bits & 1 != 0, bits & 2 != 0, false]))
                 .fold(f64::INFINITY, f64::min);
-            let (inside, _) = graph.cut(4, 5);
+            let (
+                Cut::Released {
+                    inside,
+                    capacity: flow,
+                },
+                _,
+            ) = graph.cut(4, 5, f64::INFINITY)
+            else {
+                panic!("an unlimited demand exhausts this finite cut");
+            };
             assert!(inside[0] && !inside[3]);
             assert_eq!(capacity(&inside), expected, "seed={seed}");
+            assert_eq!(flow, expected, "seed={seed}");
+        }
+    }
+    /// The game's environment destruction: a light press needs only a holding certificate,
+    /// not the full capacity of a compression chain with successively farther ground supports.
+    #[test]
+    fn a_light_press_stops_at_its_first_holding_certificate() {
+        // Fixture: 128 exposed chunks, each grounded at 1 N, with 1000 N bearing between them.
+        let chunks = 128;
+        let (source, sink) = (chunks, chunks + 1);
+        let mut graph = Network::new(chunks + 2);
+        for c in 0..chunks {
+            graph.edge(c, sink, 1.0, 0.0);
+            if c + 1 < chunks {
+                graph.edge(c, c + 1, 1000.0, 0.0);
+            }
+        }
+        graph.edge(source, 0, f64::INFINITY, 0.0);
+        let (cut, work) = graph.cut(source, sink, 0.25);
+        assert!(matches!(cut, Cut::Held));
+        // DERIVED: one level pass scans 4*N residual arcs; the direct path tests two more.
+        // Its first augmentation proves the demand holds, independent of the far supports.
+        assert!(work.scans <= 4 * chunks + 2, "{work:?}");
+        assert_eq!(work.phases, 1);
+        assert_eq!(work.augmentations, 1);
+        println!("MEASURED light-press flow work: {work:?}");
+    }
+    /// The game's environment destruction: demand equal to capacity holds; a larger demand
+    /// must return the exact cut, so early termination cannot manufacture a releasing plug.
+    #[test]
+    fn equality_holds_and_excess_demand_returns_the_exact_cut() {
+        // Fixture: one joint with unit capacity in either direction.
+        for demand in [0.0, 1.0, 2.0] {
+            let mut graph = Network::new(2);
+            graph.edge(0, 1, 1.0, 1.0);
+            match graph.cut(0, 1, demand).0 {
+                Cut::Held => assert!(demand <= 1.0),
+                Cut::Released { inside, capacity } => {
+                    assert_eq!(demand, 2.0);
+                    assert_eq!(inside, [true, false]);
+                    assert_eq!(capacity, 1.0);
+                }
+            }
         }
     }
 }

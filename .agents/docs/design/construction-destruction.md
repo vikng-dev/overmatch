@@ -382,6 +382,9 @@ supports beyond the seed patch; contact demand does not manufacture one.
 
 Dinic's level graphs and blocking flows find the minimum cut; residual reachability selects its
 source side `S*` (E. A. Dinic, 1970, [original paper](https://www.mathnet.ru/eng/dan35701)).
+The solve stops as soon as accumulated flow reaches the contact demand: this certifies that the
+patch holds without finding the entire cut. Held-contact capacity and threshold telemetry are
+certified lower bounds; a releasing plug reports the exact exhausted flow and its source side.
 The plug can therefore include chunks beyond the occupied patch: compression transmits the push
 through a back layer or around a corner until perimeter joints or bulk crushing give way.
 Internal joints of `S*` carry no relative motion and contribute no cut capacity. A resting floor
