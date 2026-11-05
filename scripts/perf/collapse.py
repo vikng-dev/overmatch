@@ -226,6 +226,19 @@ class ServerLogs:
         return self.path.read_text()
 
 
+def admit_server(snapshot, children, deadline, rehearsal):
+    """Verify the real server allocation before admitting any clients."""
+    while True:
+        if any(child.poll() is not None for child in children) or time.monotonic() >= deadline:
+            raise RuntimeError("no verified server startup line before admission deadline")
+        text = snapshot(deadline)
+        if text is not None and "server: host available_parallelism=" in text:
+            host = allocation(text, rehearsal)
+            print(host, flush=True)
+            return host
+        time.sleep(min(POLL_S, max(0, deadline - time.monotonic())))
+
+
 def run_match(args, out, recipe):
     """Reuse the online runner's scripted GPU-less links and session.sh log snapshots."""
     import socket
@@ -243,8 +256,7 @@ def run_match(args, out, recipe):
     (out / "rows.json").unlink(missing_ok=True)
     client_count = args.clients or args.tanks
     # DERIVED: the script outlives both admission and observation at the server's tick rate.
-    tick_ns = tick_seconds() * 1e9
-    ticks = math.ceil((args.duration + 2 * args.startup_grace + 60) * 1e9 / tick_ns)
+    ticks = math.ceil((args.duration + 2 * args.startup_grace + 60) / tick_seconds())
     script = out / "load.harness.ron"
     script.write_text(f"(ticks: {ticks}, drive: Arc, aim: Sweep, fire_tick: {ticks})\n")
     def spawn(binary, logpath, extra):
@@ -260,17 +272,7 @@ def run_match(args, out, recipe):
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.bind(("127.0.0.1", 5888))
             spawn("overmatch-server", serverlog, dict(OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_SERVER_STATS_S="1", OVERMATCH_BOT=str(args.tanks-client_count)))
-        # Read the real startup line before spending time admitting clients.
-        admission_deadline = start + args.startup_grace
-        while True:
-            if any(c.poll() is not None for c in children) or time.monotonic() >= admission_deadline:
-                raise RuntimeError("no verified server startup line before admission deadline")
-            text = snapshot(admission_deadline)
-            if text is not None and "server: host available_parallelism=" in text:
-                verified_host = allocation(text, args.rehearsal)
-                print(verified_host, flush=True)
-                break
-            time.sleep(min(POLL_S, max(0, admission_deadline - time.monotonic())))
+        verified_host = admit_server(snapshot, children, start + args.startup_grace, args.rehearsal)
         clients = [spawn("overmatch", out / f"client{i}.log", dict(OVERMATCH_SERVER=address, OVERMATCH_HARNESS=str(script))) for i in range(client_count)]
         deadline = start + 2 * args.startup_grace + args.duration
         while True:
@@ -466,16 +468,7 @@ def run_ram(args, out, recipe):
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.bind(("127.0.0.1", 5888))
             spawn("overmatch-server", serverlog, dict(OVERMATCH_SERVER_BIND="127.0.0.1"))
-        admission_deadline = start + args.startup_grace
-        while True:
-            if any(c.poll() is not None for c in children) or time.monotonic() >= admission_deadline:
-                raise RuntimeError("no verified server startup line before ram admission deadline")
-            text = snapshot(admission_deadline)
-            if text is not None and "server: host available_parallelism=" in text:
-                host = allocation(text, rehearsal=local)
-                print(host, flush=True)
-                break
-            time.sleep(min(POLL_S, max(0, admission_deadline-time.monotonic())))
+        host = admit_server(snapshot, children, start + args.startup_grace, local)
         spawn("overmatch", out / "client.log", dict(OVERMATCH_SERVER=address, OVERMATCH_HARNESS=str(script)))
         deadline = start + wall_limit
         while True:
