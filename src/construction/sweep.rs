@@ -12,9 +12,19 @@ use std::collections::HashSet;
 use super::fracture::{Block, Side, State, Structure};
 use crate::debris::crumble::{Contactor, peak_force, peak_speed};
 
+/// The farthest a chunk hull's vertex may lie from its bounds' centre on any axis, m: ADR-0015's
+/// 10 m figure on the support coordinates of the only colliders a sweep casts against, each cast
+/// run in its target's frame about that centre. Resolution: parry 0.27's GJK shape cast returns
+/// its hit short by an error that grows with those coordinates; ADR-0015 MEASURED 0.25 mm at 5 m
+/// and 139–172 mm at 500 m, so error ∝ extent^1.37–1.42 (DERIVED from the two), at most
+/// 0.25 mm × 2^1.42 ≈ 0.67 mm at this bound.
+pub(crate) const CAST_HALF_EXTENT_M: f32 = 10.0;
+
 #[derive(Debug, Clone)]
 pub(crate) struct Geometry {
+    /// Each chunk's hull about its bounds' centre, `centres[c]`: the frame its casts run in.
     hulls: Vec<Collider>,
+    centres: Vec<Vec3>,
     parts: Vec<Part>,
     incident: Vec<Vec<usize>>,
     edges: Vec<(usize, Option<usize>)>,
@@ -59,34 +69,42 @@ pub(crate) struct Work {
 }
 
 impl Geometry {
-    pub(crate) fn new(blocks: &[Block], structure: &Structure) -> Self {
+    /// Bake the sweep's chunk hulls, each about its bounds' centre, refusing a chunk whose hull
+    /// reaches past [`CAST_HALF_EXTENT_M`] from it: the load gate's refusal, its caller naming the
+    /// file.
+    pub(crate) fn new(blocks: &[Block], structure: &Structure) -> Result<Self, String> {
         use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
-        let hulls: Vec<_> = blocks
-            .iter()
-            .map(|b| {
-                Collider::convex_hull(b.points.clone())
-                    .expect("admitted chunks have solid convex hulls")
-            })
-            .collect();
-        let parts = blocks
-            .iter()
-            .zip(&structure.chunks)
-            .map(|(block, chunk)| {
-                // Occupied physics mass uses the same centred hull as the departure path.
-                let hull = Collider::convex_hull(
-                    block.points.iter().map(|p| *p - chunk.centroid).collect(),
-                )
-                .expect("admitted chunk hulls remain solid about their centroids");
-                let props = hull.mass_properties(chunk.material.density);
-                Part {
-                    mass: f64::from(props.mass),
-                    centre: (chunk.centroid + props.center_of_mass).as_dvec3(),
-                    inertia: props.angular_inertia_tensor().to_mat3().as_dmat3(),
-                }
-            })
-            .collect();
+        let mut hulls = Vec::with_capacity(blocks.len());
+        let mut centres = Vec::with_capacity(blocks.len());
+        let mut parts = Vec::with_capacity(blocks.len());
+        for (c, (block, chunk)) in blocks.iter().zip(&structure.chunks).enumerate() {
+            let centre = (block.min + block.max) / 2.0;
+            let reach = ((block.max - block.min) / 2.0).max_element();
+            if reach > CAST_HALF_EXTENT_M {
+                return Err(format!(
+                    "chunk {c} reaches {reach:.2} m from its bounds' centre, past the \
+                     {CAST_HALF_EXTENT_M} m within which a sweep's shape cast holds its accuracy \
+                     (ADR-0015): split it into chunks at most {} m across",
+                    2.0 * CAST_HALF_EXTENT_M
+                ));
+            }
+            let about = |origin: Vec3| {
+                Collider::convex_hull(block.points.iter().map(|p| *p - origin).collect())
+                    .expect("admitted chunk hulls stay solid about any origin")
+            };
+            // Occupied physics mass uses the same centroid-centred hull as the departure path.
+            let props = about(chunk.centroid).mass_properties(chunk.material.density);
+            parts.push(Part {
+                mass: f64::from(props.mass),
+                centre: (chunk.centroid + props.center_of_mass).as_dvec3(),
+                inertia: props.angular_inertia_tensor().to_mat3().as_dmat3(),
+            });
+            hulls.push(about(centre));
+            centres.push(centre);
+        }
         let mut geometry = Self {
             hulls,
+            centres,
             parts,
             incident: vec![Vec::new(); blocks.len()],
             tree: Vec::new(),
@@ -113,7 +131,7 @@ impl Geometry {
         if !blocks.is_empty() {
             geometry.build(blocks, &mut (0..blocks.len()).collect::<Vec<_>>());
         }
-        geometry
+        Ok(geometry)
     }
 
     fn build(&mut self, blocks: &[Block], chunks: &mut [usize]) -> usize {
@@ -182,7 +200,7 @@ impl Geometry {
                 continue;
             }
             result.work.casts += 1;
-            let hit = motion.hit(&self.hulls[c], &mut result.work);
+            let hit = motion.hit(&self.hulls[c], self.centres[c], &mut result.work);
             let Some((time, normal, at)) = hit else {
                 continue;
             };
@@ -334,7 +352,13 @@ impl Motion<'_> {
         ColliderAabb { min, max }
     }
 
-    fn hit(&self, target: &Collider, work: &mut Work) -> Option<(f32, Vec3, Vec3)> {
+    /// The first hit of this motion on chunk `target`, a hull about `origin`, in construction
+    /// coordinates. The casts are parry's GJK shape casts (ADR-0015's defect): they run in the
+    /// target's frame about `origin`, so its support coordinates stay within the load gate's
+    /// [`CAST_HALF_EXTENT_M`], and only chunk hulls are ever targets, never terrain. DERIVED error
+    /// at the largest shipped chunk (fir_1's chunk 35, 5.67 m half-extent, MEASURED): with
+    /// [`CAST_HALF_EXTENT_M`]'s scaling, 0.25 mm × (5.67 / 5)^1.37–1.42 ≈ 0.30 mm short.
+    fn hit(&self, target: &Collider, origin: Vec3, work: &mut Work) -> Option<(f32, Vec3, Vec3)> {
         let Self {
             hull,
             position,
@@ -344,6 +368,7 @@ impl Motion<'_> {
             spin,
             dt,
         } = *self;
+        let (position, centre) = (position - origin, centre - origin);
         if spin == Vec3::ZERO {
             work.queries += 1;
             time_of_impact(
@@ -358,7 +383,7 @@ impl Motion<'_> {
                 dt,
             )
             .expect("construction sweeps require supported collider shapes")
-            .map(|hit| (hit.time_of_impact, -hit.normal2, hit.point2))
+            .map(|hit| (hit.time_of_impact, -hit.normal2, hit.point2 + origin))
         } else {
             use avian3d::parry::{
                 math::Pose3,
@@ -393,7 +418,11 @@ impl Motion<'_> {
                 )
                 .expect("construction sweeps require supported contact shapes")
                 .expect("bounded convex sweep shapes have a closest contact at their cast pose");
-                (hit.time_of_impact, -contact.normal2, contact.point2)
+                (
+                    hit.time_of_impact,
+                    -contact.normal2,
+                    contact.point2 + origin,
+                )
             })
         }
     }
@@ -627,7 +656,7 @@ mod tests {
                 bond: Bond::Bonded(seam),
             });
         }
-        let geometry = Geometry::new(&blocks, &structure);
+        let geometry = Geometry::new(&blocks, &structure).expect("the fixture's chunks are small");
         (structure, geometry)
     }
 
@@ -884,6 +913,54 @@ mod tests {
         println!(
             "DERIVED and MEASURED block thresholds: base={base}, double-strength={strong}, driven={driven} m/s"
         );
+    }
+
+    /// The game's environment destruction: the load gate refuses a chunk reaching past the cast
+    /// bound, naming it, so no sweep casts against a collider whose extent parry's shape cast
+    /// misjudges (ADR-0015). Dropping the check lets the stretched chunk through.
+    #[test]
+    fn the_load_gate_refuses_a_chunk_past_the_cast_bound() {
+        let material = Material::of(
+            crate::substances::SubstanceRegistry::shipped_static(),
+            "Brick",
+        )
+        .unwrap()
+        .unwrap();
+        // Fixture: one block reaching twice the bound along x from its centroid.
+        let reach = 2.0 * CAST_HALF_EXTENT_M;
+        let points = [-reach, reach]
+            .into_iter()
+            .flat_map(|x| {
+                [-0.5, 0.5]
+                    .into_iter()
+                    .flat_map(move |y| [-0.5, 0.5].map(move |z| Vec3::new(x, y, z)))
+            })
+            .collect::<Vec<_>>();
+        let mut structure = Structure::default();
+        structure.chunks.push(Chunk {
+            volume: 2.0 * reach,
+            mass: 1.0,
+            centroid: Vec3::ZERO,
+            material,
+            buried: false,
+        });
+        let refusal = Geometry::new(&[Block::hull(points).unwrap()], &structure).unwrap_err();
+        assert!(refusal.contains("chunk 0"), "{refusal}");
+        // MEASURED: the shipped constructions' largest chunk half-extent.
+        let library = crate::construction::ConstructionLibrary::load(
+            &crate::map::tests::shipped_assets(),
+            ["house_1", "fir_1"],
+        );
+        for id in ["house_1", "fir_1"] {
+            let kind = library.get(id).unwrap();
+            let farthest = kind
+                .layout
+                .blocks
+                .iter()
+                .map(|block| ((block.max - block.min) / 2.0).max_element())
+                .fold(0.0, f32::max);
+            println!("MEASURED {id}: largest chunk half-extent {farthest} m");
+        }
     }
 
     /// The game's environment destruction: carriers and source share one plastic velocity.

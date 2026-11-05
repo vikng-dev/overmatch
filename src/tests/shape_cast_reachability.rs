@@ -1,5 +1,5 @@
-//! Guard: `src/` contains no shape-cast call site. An INVERTED tripwire — it fires when the first
-//! one appears.
+//! Guard: `src/` holds a shape-cast call site only where ADR-0015's rule is armed for it. A
+//! tripwire: it fires when a cast appears anywhere else.
 //!
 //! parry3d 0.27.0's GJK shape cast (`minkowski_ray_cast`) takes a stagnation exit: when the upper
 //! TOI bound stops moving under float cancellation against a large shape's support coordinates, the
@@ -9,21 +9,14 @@
 //! trimesh BVH descent are analytic, and the GJK raycast shapes in this tree (tree trunks,
 //! tank-part hulls) are metre-scale in their local frames.
 //!
-//! ADR-0015 answers the defect with a map-authoring rule — *prefer tiling large static colliders to
-//! ≤10 m extents* — which is currently DORMANT and unenforced: the kalinovo terrain is one 1500 m
-//! heightfield and the fallback slab is 1000 m, both raycast-only. The workaround that once made
-//! the rule live (witness-geometry distance reconstruction in the raycast-era suspension probe) was
-//! deleted with that suspension, not because parry shipped a fix, and parry 0.27.0 still ships the
-//! defect.
+//! ADR-0015 answers the defect with a bound on what a cast hits. It is ARMED for one consumer: the
+//! construction sweep (`construction::sweep`) casts only against construction chunk hulls, each in
+//! its own frame about its bounds' centre, and the load gate refuses a chunk past
+//! `sweep::CAST_HALF_EXTENT_M`. Its file is admitted while its code names that bound.
 //!
-//! **So the rule has no live consumer to guard, and the first shape cast to land inherits the
-//! defect immediately.** If this test fails: the ≤10 m rule is live again. Re-arm it — size the
-//! collider the new cast hits, or reconstruct distance from the hit's witness geometry
-//! (`point1`/`normal1` stay exact when the TOI is wrong) — and update ADR-0015's dormancy
-//! annotation before adding the call site to this scan's expectations.
-//!
-//! No allowlist. A shape cast is not something to grandfather in a table; it is a decision to take
-//! deliberately, with the defect in hand.
+//! If this test fails elsewhere: a new cast inherits the defect. Bound the extent of whatever it
+//! hits, or reconstruct distance from the hit's witness geometry (`point1`/`normal1` stay exact
+//! when the TOI is wrong), update ADR-0015, and only then admit it in [`ARMED`].
 //!
 //! Only *code* is scanned — comments are stripped first, so prose about parry (this file's own
 //! neighbours in the design record included) is documentation, not a call site.
@@ -34,6 +27,7 @@ use std::path::{Path, PathBuf};
 /// caster component, and the parry-facing option and result types. Any one of them means a cast
 /// through `minkowski_ray_cast`.
 const SHAPE_CAST_TOKENS: &[&str] = &[
+    "contact_query::time_of_impact",
     "cast_shape",
     "cast_shapes",
     "shape_hits",
@@ -42,6 +36,10 @@ const SHAPE_CAST_TOKENS: &[&str] = &[
     "ShapeCastOptions",
     "ShapeHitData",
 ];
+
+/// Each file whose casts ADR-0015's rule is armed for, and the bound its code must name: the
+/// admission holds only while the bound does.
+const ARMED: &[(&str, &str)] = &[("src/construction/sweep.rs", "CAST_HALF_EXTENT_M")];
 
 /// This file, which the scan skips: the token table above and the scanner's own fixture spell every
 /// token, and the scan reads string literals as code.
@@ -130,7 +128,7 @@ fn hits(src: &str) -> Vec<(usize, &'static str)> {
 }
 
 #[test]
-fn src_contains_no_shape_cast_call_site() {
+fn src_holds_shape_casts_only_where_their_bound_is_armed() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     collect_rs_files(&root.join("src"), &mut files);
@@ -149,7 +147,19 @@ fn src_contains_no_shape_cast_call_site() {
         let rel = relative(&root, path);
         let src = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-        for (line, token) in hits(&src) {
+        let hits = hits(&src);
+        if let Some((_, bound)) = ARMED.iter().find(|(file, _)| *file == rel) {
+            assert!(
+                !hits.is_empty(),
+                "{rel} is admitted for shape casts it no longer makes: drop it from ARMED"
+            );
+            assert!(
+                strip_comments(&src).contains(bound),
+                "{rel} casts without naming its bound {bound} in code: ADR-0015's rule is unarmed"
+            );
+            continue;
+        }
+        for (line, token) in hits {
             found.push(format!("{rel}:{line}: {token}"));
         }
     }
@@ -158,11 +168,10 @@ fn src_contains_no_shape_cast_call_site() {
         found.is_empty(),
         "a shape cast has entered the sim. parry3d 0.27.0's GJK stagnation exit returns an \
          unrefined lower bound against large shapes, so this cast's distance is short by an error \
-         that scales with the collider it hits (139–172 mm at 500 m half-extent). ADR-0015's \
-         map-authoring rule — tile large static colliders to 10 m extents — was written for this \
-         exact moment and has been dormant since the last shape-cast consumer was deleted. Re-arm \
-         it: bound the extent of whatever this cast hits, or reconstruct the distance from the \
-         hit's witness geometry, then update ADR-0015 and this file.\n{}",
+         that scales with the collider it hits (139–172 mm at 500 m half-extent). ADR-0015's rule \
+         is armed only for the construction sweep. Arm it for this cast: bound the extent of \
+         whatever it hits, or reconstruct the distance from the hit's witness geometry, then update \
+         ADR-0015 and this file's ARMED table.\n{}",
         found.join("\n")
     );
 }

@@ -119,7 +119,7 @@ impl ConstructionKind {
         let structure = Arc::new(layout.checked_structure(&asset)?);
         let equilibrium = Arc::new(fracture::parts::Assessment::at_rest(&structure));
         Ok(Self {
-            sweep: sweep::Geometry::new(&layout.blocks, &structure),
+            sweep: sweep::Geometry::new(&layout.blocks, &structure)?,
             dressing: view::Dressing::bare(&layout),
             asset,
             materials,

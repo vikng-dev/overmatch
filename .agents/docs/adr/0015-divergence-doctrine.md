@@ -27,6 +27,17 @@ none conjectured.
 > moment it lands; `tests/shape_cast_reachability.rs` fails at exactly that moment. The workaround
 > that once made the rule live went out with the raycast-era suspension (9758d97).
 
+> **Re-armed:** the construction sweep (`construction::sweep`) is the rule's consumer. It shape
+> casts only against construction chunk hulls, each cast run in its target's frame about the
+> chunk's bounds' centre, and the construction load gate refuses, before play, a chunk whose
+> half-extent passes `sweep::CAST_HALF_EXTENT_M` (10 m: the figure below, on the cast frame's
+> support coordinates), naming the file, the chunk and the split that fixes it. The two
+> measurements give error ∝ extent^1.37–1.42 (DERIVED), so at most ≈ 0.67 mm at that bound and
+> ≈ 0.30 mm at the largest shipped chunk (fir_1's chunk 35, 5.67 m half-extent, MEASURED).
+> `tests/shape_cast_reachability.rs` admits the sweep while its code names the bound and still
+> fails on a cast anywhere else. fir_1's chunk 35 spans 11.34 m, past the ≤10 m tiling
+> preference below; the construction bake owns that split.
+
 ## Context: what divergence actually is here
 
 We run state replication + prediction ([[0004-avian-physics]] world, lightyear 0.28): the server
