@@ -378,9 +378,11 @@ Otherwise the edge reads the part solver's `bondsolve::JointStrength` directiona
 seams carry tension and cohesive shear; cracked seams and rests carry neither. Coulomb friction
 requires existing compression. DERIVED: the limit is the first crossing of
 `p + F d_n <= A T` or `F |d_t| <= A C + mu max(-p - F d_n, 0)`, with the normal toward the
-moving side. ASSUMED: the original occupied patch shares its existing weight by live boundary
-area, without bending or twisting. These preloads stay fixed during optimization; newly exposed
-boundaries have zero preload, and the contact demand does not manufacture one.
+moving side. The standing construction's gravity field supplies every joint's preload before optimization:
+part-law interface forces between parts, and `parts::Kernel::hold` under gravity plus those
+interface forces inside each part. Each owner caches this field until its standing chunks,
+cracks or separated joints change. Preloads stay fixed during optimization, including on
+supports beyond the seed patch; contact demand does not manufacture one.
 
 Dinic's level graphs and blocking flows find the minimum cut; residual reachability selects its
 source side `S*` (E. A. Dinic, 1970, [original paper](https://www.mathnet.ru/eng/dan35701)).

@@ -269,6 +269,7 @@ impl Geometry {
         &self,
         structure: &Structure,
         state: &State,
+        preload: &[f64],
         sweep: &mut Sweep,
         mass: f32,
         drive: Vec3,
@@ -279,6 +280,7 @@ impl Geometry {
         let (plug, capacity) = self.plug(
             structure,
             state,
+            preload,
             &sweep.chunks,
             witness.normal,
             &mut sweep.work,
@@ -306,38 +308,18 @@ impl Geometry {
         &self,
         structure: &Structure,
         state: &State,
+        preload: &[f64],
         patch: &[usize],
         direction: Vec3,
         work: &mut Work,
     ) -> (Vec<usize>, f32) {
         use super::fracture::bondsolve::{JointStrength, joint_normal};
         let live = |j: usize| !state.separated[j] && state.live(&structure.joints[j]);
-        let boundary: Vec<_> = self.cut(patch).into_iter().filter(|&j| live(j)).collect();
-        work.joints += patch.iter().map(|&c| self.incident[c].len()).sum::<usize>();
-        let area = boundary
-            .iter()
-            .map(|&j| f64::from(structure.joints[j].area))
-            .sum::<f64>();
-        let weight = -DVec3::Y
-            * f64::from(crate::physical_laws::gravity_mps2())
-            * patch
-                .iter()
-                .map(|&c| f64::from(structure.chunks[c].mass))
-                .sum::<f64>();
-        let mut preload = vec![0.0; structure.joints.len()];
-        for j in boundary {
-            let joint = &structure.joints[j];
-            let sign = if patch.binary_search(&joint.a).is_ok() {
-                1.0
-            } else {
-                -1.0
-            };
-            // ASSUMED: the original patch's weight shares its live boundary by area, without
-            // bending or twisting. This existing preload stays fixed during cut optimization;
-            // movement creates no friction preload on newly exposed boundaries.
-            preload[j] =
-                weight.dot(joint_normal(structure, joint) * sign) * f64::from(joint.area) / area;
-        }
+        assert_eq!(
+            preload.len(),
+            structure.joints.len(),
+            "one standing preload per joint"
+        );
         let sink = structure.chunks.len();
         let source = sink + 1;
         let mut graph = mincut::Network::new(source + 1);
@@ -715,6 +697,12 @@ mod tests {
     use super::*;
     use crate::construction::fracture::{Bond, Chunk, Joint, Material};
 
+    fn preload(structure: &Structure, state: &State) -> Vec<f64> {
+        super::super::fracture::parts::Gravity::default()
+            .get(structure, state)
+            .to_vec()
+    }
+
     /// Fixture: nine anchored chunks on a plane. The middle row has strong internal seams;
     /// their capacity must disappear from the cut when that row moves together.
     fn wall(strength: f32) -> (Structure, Geometry) {
@@ -773,6 +761,8 @@ mod tests {
                 bond: Bond::Bonded(seam),
             });
         }
+        structure.part_of = (0..structure.chunks.len()).collect();
+        structure.geometry = super::super::fracture::bondsolve::Geometry::CircularFixture;
         let geometry = Geometry::new(&blocks, &structure).expect("the fixture's chunks are small");
         (structure, geometry)
     }
@@ -942,6 +932,7 @@ mod tests {
         geometry.resolve(
             structure,
             &State::new(structure),
+            &preload(structure, &State::new(structure)),
             &mut swept,
             mass,
             Vec3::X * drive,
@@ -1082,7 +1073,14 @@ mod tests {
                     }),
                     ..default()
                 };
-                geometry.resolve(&structure, &state, &mut swept, 128.0, Vec3::ZERO);
+                geometry.resolve(
+                    &structure,
+                    &state,
+                    &preload(&structure, &state),
+                    &mut swept,
+                    128.0,
+                    Vec3::ZERO,
+                );
                 assert_eq!(
                     swept.broken, broken,
                     "cracked={cracked}, direction={normal}"
@@ -1143,6 +1141,8 @@ mod tests {
                 bond: Bond::Bonded(seam),
             });
         }
+        structure.part_of = (0..structure.chunks.len()).collect();
+        structure.geometry = super::super::fracture::bondsolve::Geometry::CircularFixture;
         let geometry = Geometry::new(&blocks, &structure).unwrap();
         (structure, geometry)
     }
@@ -1167,6 +1167,45 @@ mod tests {
         }
     }
 
+    /// The game's environment destruction: expanding a plug must retain the weight of every
+    /// standing support. This catches a zero-preload ground edge outside the touched seed.
+    #[test]
+    fn an_expanded_stack_must_overcome_both_blocks_ground_friction() {
+        let (mut structure, geometry) = plug_fixture(&[Vec3::Y, Vec3::ZERO], &[], &[(0, 1)]);
+        // Fixture: two unit-mass resting cubes; the upper contact's pair friction is 3,
+        // the lower cube's ground friction is 1, so the cheaper cut moves both cubes.
+        structure.chunks[0].material.friction = 9.0;
+        structure.chunks[1].material.friction = 1.0;
+        structure.joints[0].bond = Bond::Resting;
+        structure.joints.push(Joint {
+            a: 1,
+            b: Side::Ground,
+            area: 1.0,
+            centroid: Vec3::NEG_Y * 0.5,
+            normal: Vec3::Y,
+            bond: Bond::Resting,
+        });
+        let state = State::new(&structure);
+        // DERIVED: the ground carries two unit masses, so the cut is 2*g N;
+        // the upper interface costs sqrt(9*1)*g = 3*g N.
+        let capacity = 2.0 * crate::physical_laws::gravity_mps2();
+        for (ratio, broken) in [(0.99, false), (1.01, true)] {
+            let mut patch = contact_patch(&structure, Vec3::X, capacity * ratio);
+            geometry.resolve(
+                &structure,
+                &state,
+                &preload(&structure, &state),
+                &mut patch,
+                128.0,
+                Vec3::ZERO,
+            );
+            assert_eq!(patch.broken, broken, "ratio={ratio}, load={:?}", patch.load);
+            if broken {
+                assert_eq!(patch.chunks, [0, 1]);
+            }
+        }
+    }
+
     /// The game's environment destruction: grazing compression retains shear, so a small
     /// change of contact direction cannot turn a held boundary into a free cut.
     #[test]
@@ -1179,8 +1218,14 @@ mod tests {
         let state = State::new(&structure);
         for approach in [-1e-8, 0.0, 1e-8] {
             let direction = (Vec3::Y + Vec3::X * approach).normalize();
-            let (_, capacity) =
-                geometry.plug(&structure, &state, &[0], direction, &mut Work::default());
+            let (_, capacity) = geometry.plug(
+                &structure,
+                &state,
+                &preload(&structure, &state),
+                &[0],
+                direction,
+                &mut Work::default(),
+            );
             // DERIVED: bearing changes by at most 10 kPa * 1 m² * 1e-8 = 1e-4 N;
             // the shear projection changes only at second order. Allow f32 rounding too.
             assert!(
@@ -1210,7 +1255,14 @@ mod tests {
         // lies between 521 and 523 N. The 400 N press holds; 524 N releases it.
         for (force, broken) in [(400.0, false), (524.0, true)] {
             let mut patch = contact_patch(&structure, direction, force);
-            geometry.resolve(&structure, &state, &mut patch, 128.0, Vec3::ZERO);
+            geometry.resolve(
+                &structure,
+                &state,
+                &preload(&structure, &state),
+                &mut patch,
+                128.0,
+                Vec3::ZERO,
+            );
             assert_eq!(patch.broken, broken, "force={force}");
             assert!((521.0..523.0).contains(&patch.load.unwrap().capacity));
         }
@@ -1240,7 +1292,14 @@ mod tests {
                 1e4 * -direction.y + 0.5 * crate::physical_laws::gravity_mps2() * direction.x;
             for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
                 let mut patch = contact_patch(&structure, direction, capacity * ratio);
-                geometry.resolve(&structure, &state, &mut patch, 128.0, Vec3::ZERO);
+                geometry.resolve(
+                    &structure,
+                    &state,
+                    &preload(&structure, &state),
+                    &mut patch,
+                    128.0,
+                    Vec3::ZERO,
+                );
                 assert_eq!(patch.broken, broken, "cracked={cracked}, ratio={ratio}");
             }
         }
@@ -1262,6 +1321,7 @@ mod tests {
         let (_, capacity) = geometry.plug(
             &structure,
             &State::new(&structure),
+            &preload(&structure, &State::new(&structure)),
             &[0],
             direction,
             &mut Work::default(),
@@ -1306,6 +1366,7 @@ mod tests {
             geometry.resolve(
                 &structure,
                 &State::new(&structure),
+                &preload(&structure, &State::new(&structure)),
                 &mut patch,
                 128.0,
                 Vec3::ZERO,
@@ -1339,6 +1400,7 @@ mod tests {
             geometry.resolve(
                 &structure,
                 &State::new(&structure),
+                &preload(&structure, &State::new(&structure)),
                 &mut patch,
                 128.0,
                 Vec3::ZERO,
@@ -1374,7 +1436,14 @@ mod tests {
                 // DERIVED: min(20 kPa, 10 kPa) * 1 m² * cos(0) = 10 kN.
                 for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
                     let mut patch = contact_patch(&structure, Vec3::NEG_Y, 1e4 * ratio);
-                    geometry.resolve(&structure, &state, &mut patch, 128.0, Vec3::ZERO);
+                    geometry.resolve(
+                        &structure,
+                        &state,
+                        &preload(&structure, &state),
+                        &mut patch,
+                        128.0,
+                        Vec3::ZERO,
+                    );
                     assert_eq!(
                         patch.broken, broken,
                         "reversed={reversed}, cracked={cracked}"

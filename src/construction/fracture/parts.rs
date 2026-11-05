@@ -638,6 +638,63 @@ impl Signature {
     }
 }
 
+/// The game's environment destruction: gravity-only joint preloads, in N (positive tension).
+/// An owner's topology fixes this field; contact demand never creates preload for its cut.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Gravity {
+    cached: Option<(Signature, Vec<f64>)>,
+}
+
+impl Gravity {
+    pub(crate) fn get(&mut self, structure: &Structure, state: &State) -> &[f64] {
+        let signature = Signature::of(structure, state);
+        if self
+            .cached
+            .as_ref()
+            .is_none_or(|(old, _)| *old != signature)
+        {
+            let mut standing = state.clone();
+            let mut equilibrium = Assessment::default();
+            equilibrium.rebuild(structure, &mut standing);
+            equilibrium.loads = equilibrium.loads_of(&[], Vec3::ZERO, 1.0);
+            equilibrium.settle(structure, &mut standing, &[], Vec3::ZERO, 1.0);
+            let mut normal = vec![0.0; structure.joints.len()];
+            let graph = &equilibrium.graph;
+            let field = &equilibrium.answer[..graph.parts.len()];
+            for (edge, &j) in graph.edges.iter().zip(&graph.joints) {
+                normal[j] = edge.resultant(&graph.nodes, field).linear.dot(edge.normal);
+            }
+            for (p, part) in graph
+                .parts
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| !p.node.fixed)
+            {
+                let loads = equilibrium.boundary(structure, p, &part.chunks, &[]);
+                let kernel = Kernel::of(structure, &standing, &part.chunks);
+                let hold = kernel.hold(structure, &loads);
+                for (j, carried) in hold.carried {
+                    let joint = &structure.joints[j];
+                    // Interfaces belong to the part field; only internal edges use the kernel.
+                    if let Side::Chunk(b) = joint.b
+                        && graph.part[joint.a] == graph.part[b]
+                    {
+                        normal[j] = carried
+                            .linear
+                            .dot(super::bondsolve::joint_normal(structure, joint));
+                    }
+                }
+            }
+            self.cached = Some((signature, normal));
+        }
+        &self
+            .cached
+            .as_ref()
+            .expect("gravity was prepared for this topology")
+            .1
+    }
+}
+
 /// One owner's part graph, factor and last solved field. Source addresses stay in the ledger.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Assessment {

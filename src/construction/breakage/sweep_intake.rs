@@ -165,7 +165,7 @@ pub(super) fn run(mut p: Intake) {
     let sources = sources(&p, dt);
     p.account.prepared = sources.iter().map(|source| source.collider).collect();
     p.account.prepared_at = Some(p.fixed.elapsed());
-    let mut candidates = geometry(&p, dt, &sources);
+    let mut candidates = geometry(&mut p, dt, &sources);
     candidates.sort_by_key(|(body, root, _)| (*body, *root));
     let mut by_source: BTreeMap<Entity, BTreeMap<Entity, BTreeSet<usize>>> = BTreeMap::new();
     for (body, root, swept) in candidates {
@@ -338,68 +338,80 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
 }
 
 fn geometry(
-    p: &Intake,
+    p: &mut Intake,
     dt: f32,
     sources: &[SweepSource],
 ) -> Vec<(Entity, Entity, super::super::sweep::Sweep)> {
-    let constructions = &p.constructions;
-    let pool = ComputeTaskPool::get();
-    pool.scope(|scope| {
-        let roots = sources
-            .iter()
-            .flat_map(|source| source.roots.iter().copied())
-            .collect::<BTreeSet<_>>();
-        for (root, position, rotation, breakage) in constructions.iter_many(roots) {
-            scope.spawn(async move {
-                let pose = breakage.physics_frame((position, rotation));
-                let inverse = pose.rotation.inverse();
-                let mut patches: BTreeMap<Entity, super::super::sweep::Sweep> = BTreeMap::new();
-                for source in sources.iter().filter(|source| {
-                    source.roots.contains(&root)
-                        && source.body != root
-                        && source.layers.interacts_with(super::super::element_layers())
-                }) {
-                    let swept = breakage.kind.sweep.swept(
-                        &breakage.live.structure,
-                        &breakage.live.state,
-                        super::super::sweep::Motion {
-                            hull: &source.hull,
-                            position: inverse * (source.position - pose.translation),
-                            rotation: inverse * source.rotation,
-                            velocity: inverse * source.velocity,
-                            centre: inverse * (source.centre - pose.translation),
-                            spin: inverse * source.spin,
-                            dt,
-                        },
-                    );
-                    patches.entry(source.body).or_default().merge(swept);
-                }
-                patches
-                    .into_iter()
-                    .map(|(body, mut swept)| {
-                        let source = sources
-                            .iter()
-                            .find(|s| s.body == body)
-                            .expect("a patch has its source body");
-                        if let Some(witness) = swept.witness {
-                            let mass = source.effective_mass(witness, &pose);
-                            breakage.kind.sweep.resolve(
-                                &breakage.live.structure,
-                                &breakage.live.state,
-                                &mut swept,
-                                mass,
-                                inverse * source.drive,
-                            );
-                        } // An empty patch has no contact response to resolve.
-                        (body, root, swept)
-                    })
-                    .collect::<Vec<_>>()
-            });
-        }
-    })
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
+    let roots = sources
+        .iter()
+        .flat_map(|source| source.roots.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let mut gathered = bevy::utils::Parallel::<Vec<_>>::default();
+    p.constructions
+        .par_iter_mut()
+        .for_each(|(root, position, rotation, mut breakage)| {
+            if !roots.contains(&root) {
+                return; // No prepared source overlaps this owner.
+            }
+            let breakage = &mut *breakage;
+            let pose = breakage.physics_frame((position, rotation));
+            let inverse = pose.rotation.inverse();
+            let mut patches: BTreeMap<Entity, super::super::sweep::Sweep> = BTreeMap::new();
+            for source in sources.iter().filter(|source| {
+                source.roots.contains(&root)
+                    && source.body != root
+                    && source.layers.interacts_with(super::super::element_layers())
+            }) {
+                let swept = breakage.kind.sweep.swept(
+                    &breakage.live.structure,
+                    &breakage.live.state,
+                    super::super::sweep::Motion {
+                        hull: &source.hull,
+                        position: inverse * (source.position - pose.translation),
+                        rotation: inverse * source.rotation,
+                        velocity: inverse * source.velocity,
+                        centre: inverse * (source.centre - pose.translation),
+                        spin: inverse * source.spin,
+                        dt,
+                    },
+                );
+                patches.entry(source.body).or_default().merge(swept);
+            }
+            let kind = &breakage.kind;
+            let Live {
+                structure,
+                state,
+                gravity,
+                ..
+            } = &mut *breakage.live;
+            let preload = patches
+                .values()
+                .any(|s| s.witness.is_some())
+                .then(|| gravity.get(structure, state));
+            let results = patches
+                .into_iter()
+                .map(|(body, mut swept)| {
+                    let source = sources
+                        .iter()
+                        .find(|s| s.body == body)
+                        .expect("a patch has its source body");
+                    if let Some(witness) = swept.witness {
+                        let mass = source.effective_mass(witness, &pose);
+                        kind.sweep.resolve(
+                            structure,
+                            state,
+                            preload.expect("an inward witness prepared gravity"),
+                            &mut swept,
+                            mass,
+                            inverse * source.drive,
+                        );
+                    } // An empty patch has no contact response to resolve.
+                    (body, root, swept)
+                })
+                .collect::<Vec<_>>();
+            gathered.scope(|local| local.extend(results));
+        });
+    gathered.drain().collect()
 }
 
 fn commit_source(

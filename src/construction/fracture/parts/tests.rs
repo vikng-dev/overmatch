@@ -1536,3 +1536,41 @@ fn the_shipped_map_census_at_spawn() {
     }
     println!("CENSUS placements={placed:?} joint_failures_at_spawn={failing}");
 }
+
+/// The game's environment destruction: cut preloads include internal bonded joints and loads
+/// handed in from another part. Removal, cracks and separation invalidate the owner's cache.
+#[test]
+fn gravity_preloads_cover_internal_joints_and_refresh_after_structure_changes() {
+    // Fixture: three unit-mass cubes, the bottom two one bonded part, the top another.
+    let mut chunks: Vec<_> = (0..3)
+        .map(|y| cube(Vec3::Y * y as f32, 1.0, false))
+        .collect();
+    for chunk in &mut chunks {
+        chunk.mass = 1.0;
+    }
+    let bond = Bond::Bonded(seam(1e6, 1e6));
+    let structure = structure(
+        chunks,
+        vec![0, 0, 1],
+        vec![
+            joint(1, Side::Chunk(0), Vec3::Y * 0.5, Vec3::Y, 1.0, bond),
+            joint(2, Side::Chunk(1), Vec3::Y * 1.5, Vec3::Y, 1.0, bond),
+            joint(0, Side::Ground, Vec3::NEG_Y * 0.5, Vec3::Y, 1.0, bond),
+        ],
+    );
+    let mut state = State::new(&structure);
+    let mut gravity = Gravity::default();
+    let check = |actual: &[f64], masses: [f64; 3]| {
+        for (&actual, mass) in actual.iter().zip(masses) {
+            close(actual, -mass * g(), "weight carried by joint");
+        }
+    };
+    check(gravity.get(&structure, &state), [2.0, 1.0, 3.0]);
+    check(gravity.get(&structure, &state), [2.0, 1.0, 3.0]);
+    state.fate[2] = super::super::Fate::Dust;
+    check(gravity.get(&structure, &state), [1.0, 0.0, 2.0]);
+    state.cracked[0] = true;
+    check(gravity.get(&structure, &state), [1.0, 0.0, 2.0]);
+    state.separated[0] = true;
+    check(gravity.get(&structure, &state), [0.0, 0.0, 1.0]);
+}
