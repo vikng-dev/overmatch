@@ -8,6 +8,9 @@
 
 use bevy::math::{DMat3, DVec3};
 
+#[cfg(test)]
+mod factor_experiment;
+
 /// Resolution: bounded sparse work per active tick; unfinished equilibrium resumes next tick.
 /// The budget bounds cost independently of the number of joints that fail together.
 pub(crate) const ROUNDS: usize = 32;
