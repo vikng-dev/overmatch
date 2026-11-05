@@ -203,6 +203,9 @@ struct Style {
     text_dim_srgb: Sourced<[f32; 3]>,
     net_warn_srgb: Sourced<[f32; 3]>,
     net_alarm_srgb: Sourced<[f32; 3]>,
+    net_debug_refresh_s: Sourced<f64>,
+    net_warn_excess_ticks: Sourced<u32>,
+    net_alarm_excess_ticks: Sourced<u32>,
     panel_srgba: Sourced<[f32; 4]>,
     modal_srgba: Sourced<[f32; 4]>,
     modal_card_srgb: Sourced<[f32; 3]>,
@@ -222,6 +225,26 @@ pub(crate) fn style_constants(text: &str) -> Result<String, String> {
         "const OVERLAY_FONT_PX: f32 = {:?};\n",
         data.overlay_font_px.0
     );
+    let refresh_ns = std::time::Duration::try_from_secs_f64(data.net_debug_refresh_s.0)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+        .filter(|&nanos| nanos > 0)
+        .ok_or_else(|| {
+            refuse(
+                STYLE_FILE,
+                "net_debug_refresh_s",
+                "author a positive finite duration representable in u64 nanoseconds",
+            )
+        })?;
+    let (warn, alarm) = (data.net_warn_excess_ticks.0, data.net_alarm_excess_ticks.0);
+    if warn == 0 || warn > alarm {
+        return Err(refuse(
+            STYLE_FILE,
+            "net_warn_excess_ticks / net_alarm_excess_ticks",
+            "author positive warning ticks <= alarm ticks",
+        ));
+    }
+    writeln!(out, "pub(crate) const NET_DEBUG_REFRESH: std::time::Duration = std::time::Duration::from_nanos({refresh_ns});\npub(crate) const NET_WARN_EXCESS_TICKS: u32 = {warn};\npub(crate) const NET_ALARM_EXCESS_TICKS: u32 = {alarm};").unwrap();
     for (field, constant, channels) in [
         (
             "overlay_text_srgb",
@@ -335,6 +358,16 @@ mod tests {
         let error =
             style_constants(&replace_value(style, "text_srgb", "(NaN, 0.0, 0.0)")).unwrap_err();
         assert!(error.contains("text_srgb"));
+        for (field, value) in [
+            ("net_debug_refresh_s", "NaN"),
+            ("net_debug_refresh_s", "0.0"),
+            ("net_debug_refresh_s", "1e100"),
+            ("net_warn_excess_ticks", "0"),
+            ("net_warn_excess_ticks", "4294967295"),
+        ] {
+            let error = style_constants(&replace_value(style, field, value)).unwrap_err();
+            assert!(error.contains(field) && error.contains("author"), "{error}");
+        }
     }
 
     fn replace_value(text: &str, field: &str, value: &str) -> String {

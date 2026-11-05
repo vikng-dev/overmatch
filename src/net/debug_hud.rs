@@ -10,19 +10,16 @@
 //!
 //! Jitter is the full receipt spread buffered by `net::interp_delay`, from the same estimator.
 //! The placeholder remains until `ArrivalStats::warmed`, latched like the delay law. The value
-//! warns at one authority tick and alarms above two ticks (DERIVED display bands in tick units).
+//! uses the authored warning/alarm bands in excess authority tick budgets.
 //!
 //! RTT comes from lightyear's `Link::stats` on the connected client entity; FPS/frame time from
 //! `FrameTimeDiagnosticsPlugin`, which is NOT in `DefaultPlugins` and is therefore registered by
 //! THIS plugin — the sole registrar today; the `is_plugin_added` guard is insurance for a second
 //! windowed root, since `add_plugins` PANICS on a duplicate unique plugin.
 //!
-//! Anti-jitter: the card is a **fixed-width** row of label/value columns. Each metric is its own
-//! two-column flex row (`SpaceBetween`), so the value's *right* edge is pinned to the card's right
-//! padding — the numbers stay right-aligned and the whole card's left edge never moves as the digit
-//! count changes (`42` -> `138`). The bundled Barlow Condensed font is proportional, so
-//! right-pinning the value column is what keeps the digits from shimmering, not space padding. The
-//! readout refreshes at ~1 Hz. FPS and frame time use rolling averages; server tick uses the
+//! Fixed-width `SpaceBetween` rows pin each value to the right padding; Barlow's proportional
+//! digits cannot align through spaces. Refresh cadence comes from UI taste data. FPS and frame
+//! time use rolling averages; server tick uses the
 //! reciprocal of the longest gap between advancing packet ticks in the last refresh interval,
 //! including the gap still in progress. Catch-up cannot erase a stall. This is client-observed
 //! delivery cadence: network delays and client frame stalls also lower it, and packets drained
@@ -39,13 +36,12 @@ use lightyear_transport::plugin::PacketReceived;
 
 use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::settings::{DebugPanel, Settings};
-use crate::ui_font::{NET_ALARM, NET_WARN, PANEL_BG, TEXT, TEXT_DIM, UiFonts};
+use crate::ui_font::{
+    NET_ALARM, NET_ALARM_EXCESS_TICKS as ALARM_EXCESS_TICKS, NET_DEBUG_REFRESH as REFRESH_INTERVAL,
+    NET_WARN, NET_WARN_EXCESS_TICKS as WARN_EXCESS_TICKS, PANEL_BG, TEXT, TEXT_DIM, UiFonts,
+};
 
 use super::sync_margin::ArrivalDelay;
-
-/// Resolution: per-second text refresh keeps digits legible. Tick gaps persist for this interval
-/// so the next refresh can still show a stall after catch-up.
-const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// First packets carrying strictly newer ticks define gaps; duplicates and reordered packets do
 /// not end a stall. Retention is by the gap's end, so catch-up keeps the whole stalled interval.
@@ -249,30 +245,30 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
         });
 }
 
-/// The buffered receipt spread, without a physics-dependent discount. DERIVED display bands:
-/// one additional authority interval warns; more than two alarms.
-fn jitter_readout(spread: Duration, tick: Duration) -> (String, Color) {
-    let color = if spread > tick * 2 {
+/// DERIVED excess budgets: jitter uses receipt spread; cadence uses gap less its nominal tick.
+fn excess_colour(excess: Duration, tick: Duration) -> Color {
+    if excess > tick * ALARM_EXCESS_TICKS {
         NET_ALARM
-    } else if spread >= tick {
+    } else if excess >= tick * WARN_EXCESS_TICKS {
         NET_WARN
     } else {
         TEXT
-    };
-    (format!("+{:.0} ms", spread.as_secs_f64() * 1000.0), color)
+    }
 }
 
-/// DERIVED bands match jitter's excess-budget bands: a gap of two ticks warns (one extra tick),
-/// above three alarms (more than two extra). Cap at the nominal rate: coalesced arrivals cannot
-/// establish a faster server. Never divide a gap by skipped ticks: catch-up would conceal stalls.
+/// The full buffered receipt spread, without a physics-dependent discount.
+fn jitter_readout(spread: Duration, tick: Duration) -> (String, Color) {
+    (
+        format!("+{:.0} ms", spread.as_secs_f64() * 1000.0),
+        excess_colour(spread, tick),
+    )
+}
+
+/// Jitter and cadence share the authored excess-budget bands. Cap at the nominal rate:
+/// coalesced arrivals cannot establish a faster server. Never divide a gap by skipped ticks:
+/// catch-up would conceal stalls.
 fn server_tick_readout(gap: Duration, tick: Duration) -> (String, Color) {
-    let color = if gap > tick * 3 {
-        NET_ALARM
-    } else if gap >= tick * 2 {
-        NET_WARN
-    } else {
-        TEXT
-    };
+    let color = excess_colour(gap.saturating_sub(tick), tick);
     (
         format!("{:.1} Hz", gap.max(tick).as_secs_f64().recip()),
         color,
@@ -414,10 +410,20 @@ mod tests {
             readout(&app),
             Some((format!("{:.1} Hz", tick.as_secs_f64().recip()), TEXT))
         );
-        assert_eq!(server_tick_readout(tick * 2, tick).1, NET_WARN);
-        assert_eq!(server_tick_readout(tick * 3, tick).1, NET_WARN);
         assert_eq!(
-            server_tick_readout(tick * 3 + Duration::from_nanos(1), tick).1,
+            server_tick_readout(tick * (WARN_EXCESS_TICKS + 1), tick).1,
+            NET_WARN
+        );
+        assert_eq!(
+            server_tick_readout(tick * (ALARM_EXCESS_TICKS + 1), tick).1,
+            NET_WARN
+        );
+        assert_eq!(
+            server_tick_readout(
+                tick * (ALARM_EXCESS_TICKS + 1) + Duration::from_nanos(1),
+                tick
+            )
+            .1,
             NET_ALARM
         );
     }
@@ -429,8 +435,8 @@ mod tests {
         let (mut app, link, tick) = tick_app();
         arrive(&mut app, link, 0, Duration::ZERO);
         arrive(&mut app, link, 1, tick);
-        // Fixture: a 300 ms server freeze, then a burst with some intermediate ticks coalesced.
-        let stall = Duration::from_millis(300);
+        // Fixture: a freeze above the authored alarm, then a burst of coalesced ticks.
+        let stall = tick * ALARM_EXCESS_TICKS + tick * 2;
         let resumed = tick + stall;
         app.world_mut()
             .resource_mut::<Time<Real>>()
@@ -497,10 +503,10 @@ mod tests {
             );
         }
         assert_eq!(jitter_readout(tick / 2, tick).1, TEXT);
-        assert_eq!(jitter_readout(tick, tick).1, NET_WARN);
-        assert_eq!(jitter_readout(tick * 2, tick).1, NET_WARN);
+        assert_eq!(jitter_readout(tick * WARN_EXCESS_TICKS, tick).1, NET_WARN);
+        assert_eq!(jitter_readout(tick * ALARM_EXCESS_TICKS, tick).1, NET_WARN);
         assert_eq!(
-            jitter_readout(tick * 2 + Duration::from_nanos(1), tick).1,
+            jitter_readout(tick * ALARM_EXCESS_TICKS + Duration::from_nanos(1), tick).1,
             NET_ALARM
         );
     }
