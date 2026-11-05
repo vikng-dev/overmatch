@@ -2,8 +2,12 @@
 
 Subject: the video game's server scheduler during environment destruction; game state only.
 
-Status: owner decision required. The scheduler uses the library default; no
-production pacing policy has been changed.
+Status: decided by the owner on 2026-11-05, until a revisit before the Steam release (#279).
+- **Overload policy:** catch up, the library default (option 1 in the table below), with every
+  over-budget tick visible.
+- **Ticks over budget are bugs:** a tick over its 15.625 ms budget is a cost bug to fix at its
+  source, never a load the game tolerates as part of play. That includes a building collapse.
+- **One clock:** the tick is the server's only clock (#278); the 4 ms frame loop goes.
 
 ## Finding
 
