@@ -627,7 +627,8 @@ pub(crate) fn clip_polygon(a: &[Vec3], b: &[Vec3], normal: Vec3) -> Vec<Vec3> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Fate {
     Standing,
-    /// Turned to dust: its pool was spent.
+    /// Gone from the simulation: its pool was spent, or a crumble shed it to the players'
+    /// decoration (`crate::debris::crumble`).
     Dust,
     /// Fell with a loose group.
     Fallen,
@@ -798,10 +799,6 @@ pub(crate) enum Origin {
     /// A field (a round's line, a fragment, a blast): its blow is its own law's, and it has no
     /// mass to share with what it frees.
     Field,
-    /// A contact of a moving group with another physics body at this tick. Its actual solver
-    /// impulse already changed both bodies' motion; it must never undergo another plastic
-    /// exchange. Joint geometry supplies bearing directions; contacts supply applied loads.
-    Contact { other: Entity, step: f32 },
     /// A body in contact, by its entity: it shares its blow's momentum with whatever the blow
     /// frees. `mass` is the body's effective mass along the contact normal at the combined
     /// blow's centroid, kg, shared by that contact's points ([`crate::contact_transfer`]).
@@ -823,7 +820,7 @@ impl Origin {
     /// a load acts on the hinge. A field is the zero-source-mass limit of this same exchange.
     pub(crate) fn share(self, inverse_mass: f32) -> f32 {
         let mass = match self {
-            Self::Field | Self::Contact { .. } => 0.0,
+            Self::Field => 0.0,
             Self::Body { mass, .. } => mass,
         };
         // A locked source has no response along the contact normal. Its plastic share is the
@@ -1198,7 +1195,7 @@ pub(crate) struct Failure {
 
 /// Deduct an owned share of fracture work from a departing group's field and plastic body
 /// impulses. Sum their coherent force and moment first; splitting one load into points cannot
-/// change the work. Contacts already integrated by physics carry no second launch impulse.
+/// change the work.
 pub(crate) fn debit_work(
     structure: &Structure,
     group: &[usize],
@@ -1233,7 +1230,7 @@ pub(crate) fn debit_work(
     let mut impulse = DVec3::ZERO;
     let mut angular = DVec3::ZERO;
     for load in &loads {
-        if matches!(load.origin, Origin::Contact { .. }) || load.blow == Vec3::ZERO {
+        if load.blow == Vec3::ZERO {
             continue;
         }
         let arm = load.at.as_dvec3() - centre;
@@ -1251,9 +1248,7 @@ pub(crate) fn debit_work(
         0.0
     };
     for load in &mut loads {
-        if !matches!(load.origin, Origin::Contact { .. }) {
-            load.blow *= kept;
-        }
+        load.blow *= kept;
     }
     loads
 }
@@ -2014,10 +2009,7 @@ mod tests {
             blow: Vec3::Y * impulse,
             press: Vec3::ZERO,
             peak: None,
-            origin: Origin::Contact {
-                other: Entity::PLACEHOLDER,
-                step: STEP,
-            },
+            origin: Origin::Field,
         }
     }
 

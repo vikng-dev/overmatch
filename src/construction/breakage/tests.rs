@@ -3112,14 +3112,28 @@ fn landing_slab() -> (Arc<ConstructionKind>, Vec<usize>) {
     (Arc::new(kind), group)
 }
 
-fn drop_slab(gently: bool) -> (Vec<usize>, Vec<Vec<u16>>, bool) {
+/// The sheds the authority wrote, in order.
+#[derive(Resource, Default)]
+struct Sheds(Vec<crate::debris::crumble::Shed>);
+
+fn keep_sheds(mut written: MessageReader<crate::debris::crumble::Shed>, mut kept: ResMut<Sheds>) {
+    kept.0.extend(written.read().cloned());
+}
+
+/// [`landing_slab`]'s group released tilted, its lowest corner 3 m over flat ground (fixture
+/// placement), and run 3 s on the shipped sim with the crumble mounted: the group, the live pieces
+/// then, the sheds and the record.
+fn drop_slab() -> (
+    Arc<ConstructionKind>,
+    Vec<usize>,
+    Vec<Piece>,
+    Vec<crate::debris::crumble::Shed>,
+    Record,
+) {
     let (mut app, construction) = composed_kind(false, &geometry_fixture(&shipped_house()));
-    app.init_resource::<QueuedContacts>().add_systems(
-        FixedPostUpdate,
-        keep_queued_contacts
-            .after(read_contacts)
-            .before(apply_deposits),
-    );
+    crate::debris::crumble::sim_plugin(&mut app);
+    app.init_resource::<Sheds>()
+        .add_systems(FixedPostUpdate, keep_sheds.after(LawSet));
     app.insert_resource(Gravity(Vec3::NEG_Y * crate::physical_laws::gravity_mps2()));
     let (kind, group) = landing_slab();
     {
@@ -3133,18 +3147,13 @@ fn drop_slab(gently: bool) -> (Vec<usize>, Vec<Vec<u16>>, bool) {
             live.swapped[usize::from(kind.layout.element_of[c])] = true;
         }
     }
-    let rotation = if gently {
-        Quat::IDENTITY
-    } else {
-        Quat::from_rotation_x(0.25)
-    } * Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    let rotation = Quat::from_rotation_x(0.25) * Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
     let low = group
         .iter()
         .flat_map(|&c| kind.layout.blocks[c].points.iter())
         .map(|p| (rotation * *p).y)
         .fold(f32::INFINITY, f32::min);
-    let root = Transform::from_xyz(30.0, if gently { 0.005 } else { 3.0 } - low, 0.0)
-        .with_rotation(rotation);
+    let root = Transform::from_xyz(30.0, 3.0 - low, 0.0).with_rotation(rotation);
     let live = Live::new(&kind).group(&group);
     let launch = launch(&kind, &live.structure, &group, &[]);
     {
@@ -3160,7 +3169,7 @@ fn drop_slab(gently: bool) -> (Vec<usize>, Vec<Vec<u16>>, bool) {
         spawn_group(
             &mut commands,
             Departure {
-                kind,
+                kind: kind.clone(),
                 group: group.clone(),
                 root,
                 live,
@@ -3179,39 +3188,68 @@ fn drop_slab(gently: bool) -> (Vec<usize>, Vec<Vec<u16>>, bool) {
         .world_mut()
         .query::<&Piece>()
         .iter(app.world())
-        .map(|piece| piece.chunks.clone())
+        .cloned()
         .collect();
-    let delivered = app
-        .world()
-        .resource::<QueuedContacts>()
-        .0
-        .iter()
-        .flatten()
-        .any(|(root, load)| {
-            *root != construction && (load.blow != Vec3::ZERO || load.press != Vec3::ZERO)
-        });
-    (group, pieces, delivered)
+    assert!(app.world().get_entity(construction).is_ok());
+    let sheds = std::mem::take(&mut app.world_mut().resource_mut::<Sheds>().0);
+    (
+        kind,
+        group,
+        pieces,
+        sheds,
+        app.world().resource::<Record>().clone(),
+    )
 }
 
-/// Real Avian contacts must enter the construction queue; the resulting groups partition the
-/// occupied data. The law's independently bracketed axial tests own the fracture threshold;
-/// this integration witness makes no assertion about a particular landing's piece count.
+/// A RELEASED PART LANDS, CRUMBLES AND SHEDS ITS SMALL FRAGMENTS, end to end on the authority's
+/// shipped plugins and real Avian contacts: the live bodies and the sheds partition the part,
+/// each live body reaches the cut-off and each shed falls short of it, and the record writes
+/// every shed chunk as dust at its shed's tick, so every player's view hands the parent's chunks
+/// over. A mutant that drops the sheds, keeps a light fragment as a body or leaves a shed chunk
+/// standing in the record breaks it. Which fragments form is the law's (its own tests); this
+/// witness asserts no count.
 #[test]
-fn physics_landing_delivers_contacts_and_preserves_owned_matter() {
-    for gently in [false, true] {
-        let (group, pieces, delivered) = drop_slab(gently);
-        let mut owned: Vec<_> = pieces.iter().flatten().map(|&c| usize::from(c)).collect();
-        owned.sort_unstable();
-        assert_eq!(
-            owned, group,
-            "split geometry partitions the parent without duplication"
-        );
-        assert!(delivered, "the physical landing must reach law intake");
-        println!(
-            "MEASURED landing gently={gently}: {} groups {pieces:?}",
-            pieces.len()
-        );
+fn a_released_part_lands_crumbles_and_sheds_its_small_fragments() {
+    let cut = crate::physical_laws::PhysicalLaws::shipped().server_fragment_kg;
+    let (kind, group, pieces, sheds, record) = drop_slab();
+    let mass = |chunks: &[u16]| {
+        chunks
+            .iter()
+            .map(|&c| kind.structure.chunks[usize::from(c)].mass)
+            .sum::<f32>()
+    };
+    assert!(!sheds.is_empty(), "the landing shed its light fragments");
+    let mut owned: Vec<usize> = pieces
+        .iter()
+        .flat_map(|piece| &piece.chunks)
+        .chain(sheds.iter().flat_map(|shed| &shed.chunks))
+        .map(|&c| usize::from(c))
+        .collect();
+    owned.sort_unstable();
+    assert_eq!(
+        owned, group,
+        "the bodies and sheds partition the released part"
+    );
+    for piece in &pieces {
+        assert!(mass(&piece.chunks) >= cut, "a kept body {:?}", piece.chunks);
     }
+    for shed in &sheds {
+        assert!(mass(&shed.chunks) < cut, "a shed {:?}", shed.chunks);
+        for &c in &shed.chunks {
+            assert!(record.entries.contains(&Entry {
+                construction: 3,
+                event: Event::Dust(c),
+                tick: shed.tick,
+            }));
+        }
+    }
+    println!(
+        "MEASURED landing: {} bodies {:?}, {} sheds {:?}",
+        pieces.len(),
+        pieces.iter().map(|piece| &piece.chunks).collect::<Vec<_>>(),
+        sheds.len(),
+        sheds.iter().map(|shed| &shed.chunks).collect::<Vec<_>>()
+    );
 }
 
 /// Splitting preserves the occupied collider mass, linear momentum, angular momentum and

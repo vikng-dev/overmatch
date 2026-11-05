@@ -5,6 +5,10 @@
         standoff_m: (0.0015, Taste("construction seam cracks: ASSUMED lift in asset metres to separate the dark strip from the wall surface")),
         color_srgb: ((0.05, 0.04, 0.035), Taste("construction seam cracks: ASSUMED near-black unlit shadow colour in sRGB")),
     ),
+    construction_decor: (
+        lifetime_s: ((6.0, 12.0), Taste("construction decoration: ASSUMED seconds a shed fragment stays drawn, its share of the range picked by its event's seed so a heap thins out piece by piece")),
+        fade_s: (1.0, Taste("construction decoration: ASSUMED seconds a shed fragment takes to shrink away at the end of its life")),
+    ),
     construction_dressing: (
         skin_srgb: ((0.42, 0.34, 0.28), Taste("construction dressing: ASSUMED sRGB tint over a skinned part's own surface on its original exterior, so a trunk's bark reads darker and duller than its exposed wood")),
         card_srgb: ((0.24, 0.42, 0.2), Taste("construction dressing: ASSUMED sRGB tint over a branch card's surface, so a fir's needles read green")),

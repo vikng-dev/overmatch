@@ -406,6 +406,14 @@ pub(crate) fn construction_dressing() -> &'static ConstructionDressing {
     &load().construction_dressing
 }
 
+look_table! { pub(crate) ConstructionDecor {
+    lifetime_s: (f32, f32) => sampled_pair,
+    fade_s: f32 => positive,
+}}
+pub(crate) fn construction_decor() -> &'static ConstructionDecor {
+    &load().construction_decor
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct VfxLook {
@@ -416,6 +424,7 @@ pub(super) struct VfxLook {
     diagram: DiagramLook,
     construction_cracks: ConstructionCracks,
     construction_dressing: ConstructionDressing,
+    construction_decor: ConstructionDecor,
 }
 
 pub(super) fn load() -> &'static VfxLook {

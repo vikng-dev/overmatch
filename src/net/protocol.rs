@@ -37,8 +37,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 
 /// Every wire change bumps this revision and re-pins the affected manifest hashes (ADR-0018).
 /// The game's environment destruction model carries shared causes and chunk-addressed groups;
-/// replacement and departure derive from the admitted graph on each peer.
-pub const PROTOCOL_REV: u32 = 90;
+/// replacement and departure derive from the admitted graph on each peer; a crumble's light
+/// fragments reach players as decoration events.
+pub const PROTOCOL_REV: u32 = 91;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -422,6 +423,12 @@ pub struct ShotExplanationChannel;
 /// The authority keeps the last received choice, so order must preserve clicks A-then-B;
 /// unordered delivery could settle on the stale A. Low rate makes head-of-line blocking negligible.
 pub struct SpawnChannel;
+
+/// Public reliable channel for the fragments a crumble sheds to the players' decoration
+/// (`net::construction::WorldShed`), in the game's environment destruction model. Reliable:
+/// the record already writes a shed chunk as dust, so a lost shed would leave a gap where it
+/// flew. Unordered: each shed carries its own tick.
+pub struct DebrisChannel;
 
 /// The game's damage model: one `TankVolumes` filter/order for publishing and applying
 /// [`NetCrew`] and mapping its indices to world-space hit-feel cues (`net::hit_feel`).
@@ -877,12 +884,14 @@ const WIRE_SURFACE: &[&str] = &[
     "DamageChannel|UnorderedReliable|ServerToClient",
     "ShotExplanationChannel|UnorderedReliable|ServerToClient",
     "SpawnChannel|OrderedReliable|ClientToServer",
+    "DebrisChannel|UnorderedReliable|ServerToClient",
     "FireVisualBatch",
     "FireEvent",
     "FlightOutcome",
     "DamageConfirm",
     "ShotExplanation",
     "SetSpawnPoint",
+    "WorldShed",
     // The input protocol — `InputPlugin::<TankCommand>`:
     "TankCommand",
     // Replicated sim-state components, in order:
@@ -898,7 +907,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x8ce64195b777b742;
+const WIRE_SURFACE_HASH: u64 = 0x71ba39380c57d0bd;
 
 // Wire coverage: `plugin_registrations_match_wire_surface` binds registration order and channel
 // semantics to `WIRE_SURFACE`; `wire_surface_is_pinned` binds that list to the handshake. Neither
@@ -912,7 +921,7 @@ const WIRE_SURFACE_HASH: u64 = 0x8ce64195b777b742;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xf6e9bf5ac2ddf7c5;
+const WIRE_TYPES_HASH: u64 = 0x0f25208f6dc71445;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -994,6 +1003,11 @@ pub(crate) fn plugin(app: &mut App) {
         ..default()
     })
     .add_direction(NetworkDirection::ClientToServer);
+    app.add_channel::<DebrisChannel>(ChannelSettings {
+        mode: ChannelMode::UnorderedReliable(ReliableSettings::default()),
+        ..default()
+    })
+    .add_direction(NetworkDirection::ServerToClient);
 
     app.register_message::<FireVisualBatch>()
         .add_map_entities()
@@ -1015,6 +1029,9 @@ pub(crate) fn plugin(app: &mut App) {
     // client-named entity.
     app.register_message::<SetSpawnPoint>()
         .add_direction(NetworkDirection::ClientToServer);
+    // No entity references: a shed names its construction by map ordinal and its chunks by index.
+    app.register_message::<super::construction::WorldShed>()
+        .add_direction(NetworkDirection::ServerToClient);
 
     app.add_plugins(input::native::InputPlugin::<TankCommand>::default());
 
@@ -1873,6 +1890,9 @@ mod tests {
         ("src/net/protocol.rs", "DamageChannel"),
         ("src/net/protocol.rs", "ShotExplanationChannel"),
         ("src/net/protocol.rs", "SpawnChannel"),
+        ("src/net/protocol.rs", "DebrisChannel"),
+        ("src/net/construction.rs", "WorldShed"),
+        ("src/debris/crumble.rs", "Shed"),
         ("src/net/protocol.rs", "FireVisualBatch"),
         ("src/net/protocol.rs", "FireVisualFact"),
         ("src/net/protocol.rs", "FireEvent"),

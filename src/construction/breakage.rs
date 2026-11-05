@@ -28,13 +28,12 @@
 //!   that stops on such a body pushes it the same way, through avian at the point it stops.
 //!   Terrain and other nonstructural surfaces only shade the field.
 //! * **Contacts** (the authority's, each physics step, [`read_contacts`]): every point the solver
-//!   moved momentum through between a chunk group (a placed construction's breakable element or chunk,
-//!   or a moving group's chunk) and another body ([`ContactTransfers`]) loads the chunk there (an
-//!   intact element's: the chunk whose hull holds the point, [`contact_load`]) with its blow and
-//!   press, each contact split at its body's rest speed ([`ContactTransfers::split_points`]), all of a
-//!   step's points one deposit. On a placed construction the source exchanges its blow plastically
-//!   ([`Origin::Body`]); on a moving group the solver already moved both bodies
-//!   ([`Origin::Contact`]). A point on an unbreakable element loads nothing. A body asleep against a construction presses it with what its
+//!   moved momentum through between a placed construction's breakable element or chunk and another
+//!   body ([`ContactTransfers`]) loads the chunk there (an intact element's: the chunk whose hull
+//!   holds the point, [`contact_load`]) with its blow and press, each contact split at its body's
+//!   rest speed ([`ContactTransfers::split_points`]), all of a step's points one deposit; the source
+//!   exchanges its blow plastically ([`Origin::Body`]). A moving group's contacts load no law here:
+//!   their impacts crumble it ([`crate::debris::crumble`]). A point on an unbreakable element loads nothing. A body asleep against a construction presses it with what its
 //!   contact last held ([`RestingLoads`]): every run of the laws on that construction carries the
 //!   press once, and it starts none. Awake contacts' presses likewise join every deposit in
 //!   the physics step, once per point. No body is read by its kind.
@@ -631,7 +630,7 @@ impl Breakage {
     }
 
     /// Laws use the solver pose, never the eased display transform of a moving body.
-    fn physics_frame(&self, (position, rotation): (&Position, &Rotation)) -> Transform {
+    pub(crate) fn physics_frame(&self, (position, rotation): (&Position, &Rotation)) -> Transform {
         self.frame(&Transform::from_translation(position.0).with_rotation(rotation.0))
     }
 
@@ -922,7 +921,7 @@ fn witness_construction_contact(
         .iter()
         .flat_map(|d| &d.contacts)
         .any(|(root, load)| {
-            matches!(load.origin, Origin::Contact { other, .. } if other == witness.source)
+            matches!(load.origin, Origin::Body { body, .. } if body == witness.source)
                 && (load.blow != Vec3::ZERO || load.press != Vec3::ZERO)
                 && owners
                     .get(*root)
@@ -1047,8 +1046,8 @@ fn prepare_contacts(
 /// on the chunk whose collider the point lies on, or for an intact element
 /// the element's chunk whose hull holds the point (the hull nearest it, by [`Block::outside`],
 /// ties to the lower index), turned into the construction's frame; with the construction's root. `None`
-/// for bodies without construction state and elements that never break, which these laws do not
-/// read. Reads the body's entity only to name the load's origin.
+/// for bodies without construction state, moving groups and elements that never break, which
+/// these laws do not read. Reads the body's entity only to name the load's origin.
 fn contact_load(
     colliders: &Colliders,
     constructions: &Query<((&Position, &Rotation), &Breakage, Option<&Piece>)>,
@@ -1059,6 +1058,9 @@ fn contact_load(
     step: f32,
 ) -> Option<(Entity, Load)> {
     let (transform, breakage, moving) = constructions.get(transfer.structure).ok()?;
+    if moving.is_some() {
+        return None; // A moving group's impacts crumble it (`crate::debris::crumble`).
+    }
     let (element, chunk, parent) = colliders.get(transfer.structure_collider).expect(
         "a construction collider the last physics step touched stands until the laws' next refit",
     );
@@ -1085,18 +1087,11 @@ fn contact_load(
             blow: frame.turn(blow),
             press: frame.turn(press),
             peak: None,
-            origin: if moving.is_some() {
-                Origin::Contact {
-                    other: transfer.body,
-                    step,
-                }
-            } else {
-                Origin::Body {
-                    body: transfer.body,
-                    mass,
-                    speed: transfer.closing_speed,
-                    step,
-                }
+            origin: Origin::Body {
+                body: transfer.body,
+                mass,
+                speed: transfer.closing_speed,
+                step,
             },
         },
     ))
@@ -2657,7 +2652,7 @@ pub(crate) struct RetirePiece {
 /// same-tick plastic returns have reached it: no source disappears before a simultaneous launch
 /// finishes exchanging with it. `split_groups` spawns them at `tick`.
 #[derive(Component)]
-struct PendingSplit {
+pub(crate) struct PendingSplit {
     children: Vec<(Vec<usize>, Live)>,
     tick: u32,
 }
@@ -2671,6 +2666,20 @@ struct SplitMotion {
 }
 
 impl PendingSplit {
+    /// A crumble's split of moving group `breakage` into `groups` at `tick`
+    /// ([`crate::debris::crumble`]): each keeps its share of the parent's state, and an owned
+    /// chunk in no group leaves the simulation with the parent's retirement.
+    pub(crate) fn of(breakage: &Breakage, groups: Vec<Vec<usize>>, tick: u32) -> Self {
+        let children = groups
+            .into_iter()
+            .map(|group| {
+                let live = breakage.live.group(&group);
+                (group, live)
+            })
+            .collect();
+        Self { children, tick }
+    }
+
     fn prepare(
         &self,
         pool: &TaskPool,

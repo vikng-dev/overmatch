@@ -47,6 +47,8 @@
 //! Awake pieces are the ones in the solver. A sleeping piece's own per-tick cost and an awake pile
 //! held by a tank's island (above) are both unpriced.
 
+pub(crate) mod crumble;
+pub(crate) mod decor;
 pub(crate) mod launch;
 
 use avian3d::prelude::*;
