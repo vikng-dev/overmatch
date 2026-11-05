@@ -1385,6 +1385,93 @@ mod gates {
         }
     }
 
+    /// A cantilever's circular root carries M=m*g*lever; its section modulus is A*r/4.
+    /// The game's release path must straddle that independently derived bending threshold.
+    #[test]
+    fn a_cantilever_past_its_derived_limit_falls_and_one_within_it_stands() {
+        let material = material();
+        let lever = 2.0_f32; // Fixture cantilever COM lever, m.
+        let radius = (AREA / std::f32::consts::PI).sqrt();
+        let limit = material.seam.tensile * AREA * radius
+            / (4.0 * crate::physical_laws::gravity_mps2() * lever);
+        assert!(
+            limit * crate::physical_laws::gravity_mps2() / AREA < material.seam.shear.cohesion,
+            "bending is the fixture's first limit"
+        );
+        for ratio in [0.98, 1.02] {
+            let structure = Structure {
+                geometry: Geometry::CircularFixture,
+                chunks: vec![Chunk {
+                    volume: 1.0,
+                    mass: limit * ratio,
+                    centroid: Vec3::X * lever,
+                    material,
+                    buried: false,
+                }],
+                joints: vec![super::super::Joint {
+                    a: 0,
+                    b: Side::Ground,
+                    area: AREA,
+                    centroid: Vec3::ZERO,
+                    normal: Vec3::X,
+                    bond: Bond::Bonded(material.seam),
+                }],
+            };
+            let mut live = crate::construction::breakage::Live::from_structure(structure, 1);
+            let changes = crate::construction::breakage::run_laws(
+                &[0],
+                &mut live,
+                &[],
+                Vec::new(),
+                Vec3::ZERO,
+                STEP,
+            );
+            assert_eq!(live.state.cracked[0], ratio > 1.0);
+            assert_eq!(changes.groups.len(), usize::from(ratio > 1.0));
+        }
+    }
+
+    /// Two identical overhead attachments share the panel weight. Direct tension reaches
+    /// sigma at total mass 2*A*sigma/g, independently of stiffness and the numerical step.
+    #[test]
+    fn a_hanging_panel_holds_up_to_its_derived_limit() {
+        let material = material();
+        let limit = 2.0 * AREA * material.seam.tensile / crate::physical_laws::gravity_mps2();
+        for ratio in [0.98, 1.02] {
+            let structure = Structure {
+                geometry: Geometry::CircularFixture,
+                chunks: vec![Chunk {
+                    volume: 1.0,
+                    mass: limit * ratio,
+                    centroid: Vec3::NEG_Y,
+                    material,
+                    buried: false,
+                }],
+                joints: [-1.0, 1.0]
+                    .map(|x| super::super::Joint {
+                        a: 0,
+                        b: Side::Ground,
+                        area: AREA,
+                        centroid: Vec3::X * x,
+                        normal: Vec3::Y,
+                        bond: Bond::Bonded(material.seam),
+                    })
+                    .to_vec(),
+            };
+            let mut live = crate::construction::breakage::Live::from_structure(structure, 1);
+            let changes = crate::construction::breakage::run_laws(
+                &[0],
+                &mut live,
+                &[],
+                Vec::new(),
+                Vec3::ZERO,
+                STEP,
+            );
+            assert_eq!(live.state.cracked, vec![ratio > 1.0; 2]);
+            assert_eq!(changes.groups.len(), usize::from(ratio > 1.0));
+        }
+    }
+
     /// The game's finite pulse must beat both traction strength and G_f*A, while a sustained
     /// driver can supply continuing separation work. This derives the one-patch limits without
     /// using the solver's answer or a former run as the expected value.

@@ -2028,34 +2028,85 @@ mod tests {
         (live.state, changes)
     }
 
-    /// Landing contacts must reach internal seams before support emits the new bodies. A
-    /// permanently rigid loose-body mutant leaves this slab whole despite its resolved blow.
-    #[test]
-    fn a_landing_slab_splits_at_its_weakest_seam() {
-        let slab = unsupported_slab(3);
-        let load = slab_contact(&slab, 1000.0);
-        let (state, changes) = assess_slab(slab, &[load]);
-        assert_eq!(state.cracked, vec![true, false]);
-        assert_eq!(
-            changes
-                .groups
-                .iter()
-                .map(|(group, _)| group.clone())
-                .collect::<Vec<_>>(),
-            vec![vec![0], vec![1, 2]]
-        );
+    /// Fixture: equal unit cubes, an axial unit-area seam, no physical support. This keeps
+    /// relative acceleration and finite pulse work analytically separable from bending.
+    fn axial_pair() -> Structure {
+        let mut pair = unsupported_slab(2);
+        for (c, chunk) in pair.chunks.iter_mut().enumerate() {
+            chunk.centroid = Vec3::X * c as f32;
+            chunk.volume = 1.0;
+            chunk.mass = chunk.material.density;
+        }
+        let joint = &mut pair.joints[0];
+        joint.area = 1.0;
+        joint.centroid = Vec3::X * 0.5;
+        joint.bond = Bond::Bonded(pair.chunks[0].material.seam);
+        pair
     }
 
-    /// Contact alone is not failure: the same slab under a small resolved blow retains every
-    /// seam. Runtime splitting must be conditional on the common force/work limits.
+    /// DERIVED axial resultant threshold: T = sigma*A for a press; a pulse also needs
+    /// T²/(2k) >= G_f*A, where k = A / sum(half_cube_length/E).
+    fn axial_limit(pair: &Structure, sustained: bool) -> f32 {
+        let joint = &pair.joints[0];
+        let seam = joint.seam().unwrap();
+        let strength = seam.tensile * joint.area;
+        if sustained {
+            return strength;
+        }
+        let compliance: f64 = pair
+            .chunks
+            .iter()
+            .map(|c| f64::from(c.volume).cbrt() / (2.0 * c.material.young))
+            .sum();
+        let stiffness = f64::from(joint.area) / compliance;
+        strength.max((2.0 * stiffness * f64::from(seam.fracture_energy * joint.area)).sqrt() as f32)
+    }
+
+    /// An accelerating pair carries T = |F_left-F_right|/2 for equal masses. Single-ended,
+    /// opposed and codirectional contacts straddle the same independently derived traction/work
+    /// threshold; a uniform acceleration carries no internal force. Runtime splitting relies on it.
     #[test]
-    fn a_gently_set_down_slab_stays_whole() {
-        let slab = unsupported_slab(3);
-        let load = slab_contact(&slab, 0.001);
-        let (state, changes) = assess_slab(slab, &[load]);
-        assert_eq!(state.cracked, vec![false, false]);
-        assert_eq!(changes.groups.len(), 1);
-        assert_eq!(changes.groups[0].0, vec![0, 1, 2]);
+    fn axial_contacts_cross_the_relative_acceleration_threshold() {
+        for sustained in [false, true] {
+            for (left, right, differential) in [
+                (-2.0, 0.0, true),
+                (-1.0, 1.0, true),
+                (-3.0, -1.0, true),
+                (-2.0, -2.0, false),
+            ] {
+                for ratio in [0.99, 1.01] {
+                    let pair = axial_pair();
+                    let force = axial_limit(&pair, sustained) * ratio;
+                    let loads = [left, right]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(c, share)| Load {
+                            chunk: c,
+                            at: pair.chunks[c].centroid,
+                            blow: if sustained {
+                                Vec3::ZERO
+                            } else {
+                                Vec3::X * (force * share * STEP)
+                            },
+                            press: if sustained {
+                                Vec3::X * (force * share)
+                            } else {
+                                Vec3::ZERO
+                            },
+                            ..slab_contact(&pair, 0.0)
+                        })
+                        .collect::<Vec<_>>();
+                    let (state, changes) = assess_slab(pair, &loads);
+                    let opens = differential && ratio > 1.0;
+                    assert_eq!(
+                        state.cracked[0], opens,
+                        "sustained={sustained} shares={left},{right} ratio={ratio}: {:?}",
+                        changes.failures
+                    );
+                    assert_eq!(changes.groups.len(), if opens { 2 } else { 1 });
+                }
+            }
+        }
     }
 
     /// Uniform free fall has no relative gravitational demand (DERIVED): in a group's frame its
@@ -2140,123 +2191,39 @@ mod tests {
         }
     }
 
-    /// An external blow that pulls one chunk straight off its group meets the seam between them
-    /// in tension with no bending: only that chunk's own punch ring reads it. Seeding rings from
-    /// the frame's inertial blows (on every chunk) leaves the whole group as the only ring, with
-    /// no boundary, and the seam holds whatever the blow. ASSUMED fixture: the weak-seam slab.
+    /// Contact presence creates no support. Adding uniform acceleration or zero reactions
+    /// preserves an axial pair's independently calculated differential tension.
     #[test]
-    fn an_outward_contact_pulls_its_chunk_off_the_group() {
-        // Binary-exact coordinates: the pull's line meets the seam's centre exactly, so no
-        // rounding lends the section law a bending axis to read it by.
-        let mut slab = unsupported_slab(2);
-        for (i, chunk) in slab.chunks.iter_mut().enumerate() {
-            chunk.centroid = Vec3::new(0.25 * i as f32, 0.5, 0.0);
-            chunk.volume = 0.015625;
-            chunk.mass = chunk.material.density * chunk.volume;
-        }
-        slab.joints[0].centroid = Vec3::new(0.125, 0.5, 0.0);
-        slab.joints[0].area = 0.0625;
-        let mut load = slab_contact(&slab, 0.0);
-        load.blow = Vec3::NEG_X * 1000.0;
-        let (state, changes) = assess_slab(slab, &[load]);
-        assert_eq!(state.cracked, vec![true]);
-        assert_eq!(changes.groups.len(), 2);
-    }
-
-    /// Opposed axial contacts separate a bonded pair even though their resultant is zero.
-    /// The moving-group law must assess each loaded neighbourhood, not just their union.
-    /// Fixture: binary-exact geometry keeps this a pull with no bending axis.
-    #[test]
-    fn opposed_contacts_pull_a_pair_apart() {
-        let mut slab = unsupported_slab(2);
-        for (c, chunk) in slab.chunks.iter_mut().enumerate() {
-            chunk.centroid = Vec3::new(c as f32 * 0.25, 0.5, 0.0);
-            chunk.volume = 0.015625;
-            chunk.mass = chunk.material.density * chunk.volume;
-        }
-        slab.joints[0].centroid = Vec3::new(0.125, 0.5, 0.0);
-        slab.joints[0].area = 0.0625;
-        let mut left = slab_contact(&slab, 0.0);
-        left.blow = Vec3::NEG_X * 1000.0;
-        let right = Load {
-            chunk: 1,
-            at: slab.chunks[1].centroid,
-            blow: -left.blow,
-            ..left
-        };
-        let (state, changes) = assess_slab(slab, &[left, right]);
-        assert_eq!(state.cracked, vec![true]);
-        assert_eq!(changes.groups.len(), 2);
-    }
-
-    /// A moving pair's relative load is set by unequal acceleration, including when both
-    /// external sources point the same way. Uniform translation opens nothing. The impulse
-    /// arm requires local punch candidates; the sustained-force arm independently exercises
-    /// direct axial section tension.
-    /// Fixture: binary-exact pair geometry, equal masses, and axial end loads.
-    #[test]
-    fn unequal_codirectional_contacts_separate_a_pair() {
-        for sustained in [false, true] {
-            for (far, opens) in [(1.0, true), (1000.0, false)] {
-                let mut slab = unsupported_slab(2);
-                for (c, chunk) in slab.chunks.iter_mut().enumerate() {
-                    chunk.centroid = Vec3::new(c as f32 * 0.25, 0.5, 0.0);
-                    chunk.volume = 0.015625;
-                    chunk.mass = chunk.material.density * chunk.volume;
+    fn contacts_cannot_erase_internal_demand_or_turn_zero_reactions_into_support() {
+        for common in [0.0, 4.0] {
+            for zeros in [false, true] {
+                let pair = axial_pair();
+                let force = axial_limit(&pair, true) * 1.01; // Fixture: above the direct-tension threshold.
+                let mut loads: Vec<_> = [-2.0 - common, -common]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(c, share)| Load {
+                        chunk: c,
+                        at: pair.chunks[c].centroid,
+                        press: Vec3::X * (force * share),
+                        ..slab_contact(&pair, 0.0)
+                    })
+                    .collect();
+                let expected =
+                    (loads[0].press.x - loads[1].press.x).abs() / (2.0 * pair.joints[0].area);
+                if zeros {
+                    loads.extend((0..2).map(|c| Load {
+                        chunk: c,
+                        at: pair.chunks[c].centroid,
+                        ..slab_contact(&pair, 0.0)
+                    }));
                 }
-                slab.joints[0].centroid = Vec3::new(0.125, 0.5, 0.0);
-                slab.joints[0].area = 0.0625;
-                let axial = |magnitude| {
-                    if sustained {
-                        Vec3::ZERO
-                    } else {
-                        Vec3::NEG_X * magnitude
-                    }
-                };
-                let press = |magnitude| {
-                    if sustained {
-                        Vec3::NEG_X * (magnitude / STEP)
-                    } else {
-                        Vec3::ZERO
-                    }
-                };
-                let left = Load {
-                    blow: axial(1000.0),
-                    press: press(1000.0),
-                    ..slab_contact(&slab, 0.0)
-                };
-                let right = Load {
-                    chunk: 1,
-                    at: slab.chunks[1].centroid,
-                    blow: axial(far),
-                    press: press(far),
-                    ..left
-                };
-                let (state, changes) = assess_slab(slab, &[left, right]);
-                assert_eq!(
-                    state.cracked[0], opens,
-                    "sustained {sustained}, far {far}: {changes:?}"
-                );
+                let (state, changes) = assess_slab(pair, &loads);
+                assert!(state.cracked[0]);
+                assert_eq!(changes.failures.len(), 1);
+                assert!((changes.failures[0].demand / expected - 1.0).abs() < 1e-5);
             }
         }
-    }
-
-    /// A group touching along its whole length still has sections: its contacts are known
-    /// loads, and one reference fixes the side each section holds. Rooting every loaded chunk
-    /// left this slab with no section to assess, however hard its end was struck. ASSUMED
-    /// fixture: the weak-seam slab, a hard end contact and two light ones.
-    #[test]
-    fn a_contact_on_every_chunk_still_loads_its_sections() {
-        let slab = unsupported_slab(3);
-        let impact = slab_contact(&slab, 1000.0);
-        let mut light = slab_contact(&slab, 0.01);
-        light.chunk = 1;
-        light.at = slab.chunks[1].centroid;
-        let mut another = light;
-        another.chunk = 2;
-        another.at = slab.chunks[2].centroid;
-        let (state, _) = assess_slab(slab, &[impact, light, another]);
-        assert_eq!(state.cracked, vec![true, false]);
     }
 
     /// A slab set down evenly along its length takes each chunk's share of the blow where that
@@ -2278,40 +2245,58 @@ mod tests {
         assert_eq!(changes.groups.len(), 1);
     }
 
-    /// A moving group lying on its support feels its weight in its own frame: a part resting
-    /// on it leaves only when a blow pays to lift it over its hinge or shove it off against
-    /// that weight, as a standing rest's does. Zeroing the frame's weight in those energy terms
-    /// (exact only in free fall) opened the rest under any blow at all. ASSUMED fixture: two
-    /// row chunks stacked on one rest, the ground's press holding both up.
+    /// Ground press accelerates the free stack's frame upward; its upper mass therefore bears
+    /// with m*g. Equal opposed side loads at the seam add no rigid torque. Slide at mu*m*g and
+    /// lift at m*g follow independently of the solve and of any earlier contact outcome.
     #[test]
-    fn a_rest_on_a_lying_group_holds_by_its_weight() {
-        for (blow, stays) in [(0.01, true), (100.0, false)] {
-            let mut stack = unsupported_slab(2);
-            stack.chunks[1].centroid = Vec3::new(0.0, 0.3, 0.0);
-            stack.joints[0].centroid = Vec3::new(0.0, 0.2, 0.0);
-            stack.joints[0].normal = Vec3::Y;
-            stack.joints[0].bond = Bond::Resting;
-            let weight: f32 =
-                stack.chunks.iter().map(|chunk| chunk.mass).sum::<f32>() * gravity_mps2();
-            let mut ground = slab_contact(&stack, 0.0);
-            ground.press = Vec3::Y * weight;
-            let struck = Load {
-                chunk: 1,
-                at: stack.chunks[1].centroid,
-                energy: 0.0,
-                crushed: 0.0,
-                blow: Vec3::X * blow,
-                press: Vec3::ZERO,
-                peak: None,
-                origin: Origin::Field,
-            };
-            let (_, changes) = assess_slab(stack, &[ground, struck]);
-            assert_eq!(
-                changes.groups.len(),
-                if stays { 1 } else { 2 },
-                "{blow} N s: {:?}",
-                changes.failures
-            );
+    fn a_supported_moving_rest_obeys_its_friction_and_lift_thresholds() {
+        for lift in [false, true] {
+            for ratio in [0.99, 1.01] {
+                let mut stack = unsupported_slab(2);
+                stack.chunks[1].centroid = Vec3::Y * 0.3;
+                stack.joints[0].centroid = Vec3::Y * 0.2;
+                stack.joints[0].normal = Vec3::Y;
+                stack.joints[0].bond = Bond::Resting;
+                let weight = stack.chunks[1].mass * gravity_mps2();
+                let mu = crate::substances::pair_friction(
+                    stack.chunks[0].material.friction,
+                    stack.chunks[1].material.friction,
+                );
+                let force = if lift {
+                    Vec3::Y * weight
+                } else {
+                    Vec3::X * (mu * weight)
+                } * ratio;
+                let ground = Load {
+                    press: Vec3::Y
+                        * (stack.chunks.iter().map(|c| c.mass).sum::<f32>() * gravity_mps2()),
+                    ..slab_contact(&stack, 0.0)
+                };
+                let upper = Load {
+                    chunk: 1,
+                    at: stack.joints[0].centroid,
+                    press: force,
+                    ..slab_contact(&stack, 0.0)
+                };
+                let lower = Load {
+                    chunk: 0,
+                    press: -force,
+                    ..upper
+                };
+                let (state, changes) = assess_slab(stack, &[ground, lower, upper]);
+                assert_eq!(
+                    state.cracked[0],
+                    ratio > 1.0,
+                    "lift={lift} ratio={ratio}: {:?}",
+                    changes.failures
+                );
+                if ratio > 1.0 {
+                    assert_eq!(
+                        changes.failures[0].cause,
+                        if lift { Cause::LiftForce } else { Cause::Slide }
+                    );
+                }
+            }
         }
     }
 
@@ -2350,22 +2335,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// A speculative contact carrying zero reaction is no load path. Pinning every zero
-    /// solver point would make a single-end impact appear supported across the whole slab.
-    #[test]
-    fn a_zero_reaction_does_not_anchor_a_free_section() {
-        let slab = unsupported_slab(3);
-        let impact = slab_contact(&slab, 1000.0);
-        let mut zero = slab_contact(&slab, 0.0);
-        zero.chunk = 1;
-        zero.at = slab.chunks[1].centroid;
-        let mut another = zero;
-        another.chunk = 2;
-        another.at = slab.chunks[2].centroid;
-        let (state, _) = assess_slab(slab, &[impact, zero, another]);
-        assert_eq!(state.cracked, vec![true, false]);
     }
 
     /// A fixture wall `w` chunks wide and `h` high of 0.25 m cubes in the xy plane, each joined to
@@ -2512,41 +2481,42 @@ mod tests {
         assert_eq!(state.fate, vec![Fate::Standing, Fate::Dust, Fate::Fallen]);
     }
 
-    /// THE PUSH RULE CRACKS A SEAM AT ITS STRENGTH: a lone source on a joint's line, at a distance
-    /// where its load is just over the seam's tensile strength, cracks it; at the distance where
-    /// it is just under, nothing cracks. The load is `3E/(8π d³) (1 − 3cos²θ)` averaged over the
-    /// joint's disc, so the fixture takes a source in the joint's plane (θ = 90°) and finds the
-    /// distance by bisection on [`joint_load`] itself.
+    /// The game's kinetic-cavity law reaches a seam at its independently integrated Lamé
+    /// traction. The source and seven circular quadrature points share the seam plane, so every
+    /// point has cos(theta)=0. No production stress call supplies the expected threshold.
     #[test]
     fn a_seam_cracks_where_the_push_reaches_its_strength() {
         let structure = row(2);
         let joint = structure.joints[0];
         let material = structure.chunks[0].material;
-        let source = |d: f32| Load {
-            chunk: 0,
-            at: joint.centroid + Vec3::Y * d,
-            energy: 1.0e5,
-            crushed: 1.0e5 / material.crush,
-            blow: Vec3::ZERO,
-            press: Vec3::ZERO,
-            peak: None,
-            origin: Origin::Field,
-        };
-        let (mut near, mut far) = (0.0_f32, 5.0_f32);
-        for _ in 0..60 {
-            let mid = 0.5 * (near + far);
-            let sources = [source(mid)];
-            let crushed = crushed_radii(&sources, &material);
-            if joint_load(&joint, &material.seam, &sources, &crushed).0 >= material.seam.tensile {
-                near = mid;
-            } else {
-                far = mid;
-            }
-        }
-        for (d, cracks) in [(near * 0.99, true), (far * 1.01, false)] {
+        let distance = 2.0_f64; // Fixture source offset in the joint plane, m.
+        let ring = (f64::from(joint.area) * 2.0 / (3.0 * std::f64::consts::PI)).sqrt();
+        let mean = 0.25 / distance.powi(3)
+            + (0..6)
+                .map(|k| {
+                    let angle = k as f64 * std::f64::consts::PI / 3.0;
+                    0.125
+                        / (distance.powi(2) + ring.powi(2) - 2.0 * distance * ring * angle.cos())
+                            .powf(1.5)
+                })
+                .sum::<f64>();
+        let limit = f64::from(material.seam.tensile) * 8.0 * std::f64::consts::PI / (3.0 * mean);
+        for (ratio, opens) in [(0.99, false), (1.01, true)] {
+            let energy = limit * ratio;
+            let radius =
+                (3.0 * energy / (4.0 * std::f64::consts::PI * f64::from(material.crush))).cbrt();
+            assert!(
+                radius < distance - ring,
+                "the analytical field lies outside its crushed core"
+            );
+            let load = Load {
+                chunk: 0,
+                at: joint.centroid + Vec3::Z * distance as f32,
+                energy: energy as f32,
+                ..slab_contact(&structure, 0.0)
+            };
             let mut state = State::new(&structure);
-            let cracked = crack(&structure, &mut state, &[source(d)]);
-            assert_eq!(cracked.contains(&0), cracks, "at {d} m");
+            assert_eq!(crack(&structure, &mut state, &[load]).contains(&0), opens);
         }
     }
 
@@ -3722,66 +3692,47 @@ mod tests {
         }
     }
 
-    /// A SCAB'S MOMENTUM COMES OFF ITS FACE'S PUSH (the game's environment destruction model, Law
-    /// 2). A near burst's rays on one brick face: the pushed chunk keeps the face's blow less the
-    /// scab's momentum, so the two sum to the rays' delivered impulse, both along it; the scab's
-    /// volume leaves the pool as a load at the back point with no blow. The structural check and a
-    /// freed piece's launch read the kept blow; a mutant that throws a scab without taking it off
-    /// the push, or takes it off twice, fails here. ASSUMED fixture slabs; the charge is the
-    /// 88 mm HE fixture burst's energy and charge radius (DERIVED), its filler centre 0.178 m off
-    /// the face.
+    /// The game's environment destruction model conserves the delivered face impulse and
+    /// removed volume. Fixture rays guarantee admission analytically: rear stress 2*sigma_t,
+    /// pulse length one slab thickness, no crater, and an exposed rear face.
     #[test]
     fn a_scab_takes_its_momentum_off_its_faces_push() {
-        let blast = Blast::of(1.47e6, 0.0513, FIT_ONLY_PRODUCTS);
-        let directions = ball_directions(4096);
         let material = brick();
         for thickness in [0.12_f32, 0.25, 0.5] {
-            let slab = [Block::cuboid(
-                Vec3::new(-1.0, -1.0, 0.0),
-                Vec3::new(1.0, 1.0, thickness),
-            )];
-            let hits = sample_blocks(
-                &slab,
-                |_| true,
-                |_| material,
-                Vec3::new(0.0, 0.0, -0.178),
-                blast,
-                &directions,
-            );
-            let (loads, scabs) = Load::blast(&hits, |_| Backing {
-                block: &slab[0],
+            let slab = Block::cuboid(Vec3::new(-1.0, -1.0, 0.0), Vec3::new(1.0, 1.0, thickness));
+            let stress = 2.0 * material.spall.tensile;
+            // DERIVED central Boussinesq stress F/(2*pi*t²); lambda=c*2J/F=t.
+            let force = stress * 2.0 * PI * thickness.powi(2);
+            let impulse = thickness * force / (2.0 * material.spall.bar_speed);
+            let hit = RayHit {
+                at: Vec3::ZERO,
+                normal: Vec3::NEG_Z,
+                energy: 0.0,
+                impulse: Vec3::Z * impulse,
+                peak: Vec3::Z * force,
+                pressure: material.compaction.strength,
+                crushed: 0.0,
+                depth: 0.0,
+            };
+            let (loads, scabs) = Load::blast(&[(0, hit)], |_| Backing {
+                block: &slab,
                 scale: 1.0,
                 material,
                 contacts: &[],
             });
             let [scab] = scabs[..] else {
-                panic!("the near burst scabs the {thickness} m slab's back: {scabs:?}");
+                panic!("the independently admitted pulse emits one rear scab: {scabs:?}");
             };
-            let delivered: Vec3 = hits.iter().map(|(_, hit)| hit.impulse).sum();
-            let kept: Vec3 = loads.iter().map(|load| load.blow).sum();
-            assert!(
-                (kept + scab.momentum() - delivered).length() <= 1e-4 * delivered.length(),
-                "{thickness} m: kept {kept} + scab {} vs {delivered}",
-                scab.momentum()
-            );
-            assert!(kept.dot(delivered) > 0.0 && scab.momentum().dot(delivered) > 0.0);
-            let [_, removal] = loads[..] else {
-                panic!("one face load and one removal: {loads:?}");
-            };
+            let kept: Vec3 = loads.iter().map(|l| l.blow).sum();
+            assert!((kept + scab.momentum() - hit.impulse).length() <= 1e-4 * impulse);
+            assert!(kept.dot(hit.impulse) > 0.0 && scab.momentum().dot(hit.impulse) > 0.0);
+            let removal = loads
+                .iter()
+                .find(|l| l.crushed > 0.0)
+                .expect("the scab removes its occupied volume");
             assert_eq!((removal.at, removal.blow), (scab.at, Vec3::ZERO));
             assert!((removal.crushed * material.density / scab.mass - 1.0).abs() < 1e-5);
-            assert!(
-                (scab.at.z - thickness).abs() < 1e-5,
-                "it leaves the back face"
-            );
-            println!(
-                "MEASURED brick {thickness} m slab, 88 mm HE fixture burst at 0.178 m: scab \
-                 {:.3} kg at {:.2} m/s, {:.1} of the face's {:.1} N s",
-                scab.mass,
-                scab.velocity.length(),
-                scab.momentum().length(),
-                delivered.length()
-            );
+            assert!((scab.at.z - thickness).abs() < 1e-5);
         }
     }
 

@@ -970,6 +970,41 @@ fn read_contacts(
     }
 }
 
+/// Test instrumentation at the production intake boundary, before law evaluation. The witness
+/// requires this source body to deliver a nonzero queued contact to the named construction.
+#[cfg(test)]
+pub(crate) fn watch_contact_intake(
+    app: &mut App,
+    construction: u16,
+    body: Entity,
+) -> Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let seen = Arc::new(AtomicBool::new(false));
+    let witness = seen.clone();
+    app.add_systems(
+        FixedPostUpdate,
+        (move |queue: Res<Queue>, owners: Query<&Breakage>| {
+            if queue
+                .0
+                .iter()
+                .flat_map(|d| &d.contacts)
+                .any(|(root, load)| {
+                    matches!(load.origin, Origin::Contact { other, .. } if other == body)
+                        && (load.blow != Vec3::ZERO || load.press != Vec3::ZERO)
+                        && owners
+                            .get(*root)
+                            .is_ok_and(|owner| owner.construction == construction)
+                })
+            {
+                witness.store(true, Ordering::Relaxed);
+            }
+        })
+        .after(read_contacts)
+        .before(apply_deposits),
+    );
+    seen
+}
+
 #[derive(Clone, Copy)]
 struct ContactInput {
     point: ContactTransfer,

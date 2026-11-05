@@ -143,39 +143,53 @@ fn the_blast_tool_refuses_missing_casing_construction_at_initialization() {
     Charge::of(&[]);
 }
 
-/// The game's environment blast tool shares the production ray driver and deposit pass.
-/// ASSUMED fixture placement; the charge uses the tool's cased round's construction, not a fitted
-/// chemical-energy-to-wear conversion. Pressure can remove volume while cavity energy is zero.
+/// The game's environment blast inspector forwards pressure through the shared ray driver
+/// and deposit pass. A single central ray on a planar fixture supplies known incidence and
+/// distance: removal is required only when its input pressure beats the material's plateau.
+/// Rear-scab counts remain observations; their analytical admission is tested by the law.
 #[test]
 fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
-    let layout = layout();
     let rounds = super::wall_rounds();
     let he = rounds
         .iter()
-        .find(|round| round.key == super::wall_tool().cased_round)
-        .expect("the tool's cased round is shipped");
+        .find(|r| r.key == super::wall_tool().cased_round)
+        .unwrap();
     let charge = Charge::of(std::slice::from_ref(he));
-    let mass = he
-        .round
-        .burst
-        .expect("the fixture states a burst")
-        .core_mass;
+    let core_mass = he.round.burst.unwrap().core_mass;
     for (mass, cased, standoff) in [
-        (mass, true, 0.1),
-        (mass, true, 0.3),
-        (mass, true, 2.0),
+        (core_mass, true, 0.1),
+        (core_mass, true, 0.3),
+        (core_mass, true, 2.0),
         (0.9, false, 0.1),
     ] {
+        // Fixture: fixed planar 4 m by 4 m panel, 0.25 m thick, one central normal ray.
+        let block = Block::cuboid(Vec3::new(-2.0, -2.0, -0.25), Vec3::new(2.0, 2.0, 0.0));
+        let material = brick();
+        let structure = Structure {
+            geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
+            chunks: vec![Chunk {
+                volume: 4.0,
+                mass: 4.0 * material.density,
+                centroid: block.center(),
+                material,
+                buried: true,
+            }],
+            joints: Vec::new(),
+        };
+        let live = crate::construction::breakage::Live::from_structure(structure.clone(), 1);
         let mut wall = Wall {
-            cut: layout.cut.clone(),
-            live: crate::construction::breakage::Live::from_structure(
-                layout.cut.structure.clone(),
-                layout.cut.elements,
-            ),
-            structural: vec![false; layout.cut.structure.joints.len()],
+            cut: Cut {
+                structure,
+                blocks: vec![block],
+                faces: Vec::new(),
+                element_of: vec![0],
+                elements: 1,
+            },
+            live,
+            structural: Vec::new(),
             entities: Vec::new(),
             meshes: Vec::new(),
-            material: brick(),
+            material,
         };
         let controls = WallControls {
             mass: 0,
@@ -185,25 +199,28 @@ fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
             view: View::Front,
             help: false,
         };
-        let deposit = Deposit::Blast {
-            mass,
-            standoff,
-            at: super::aim_point(&wall),
-            into: Vec3::NEG_Z,
-        };
+        let blast = charge.blast(mass, cased);
+        let pressure = super::model::Blast::of(blast.energy, blast.radius, blast.products)
+            .peak_pressure(standoff + blast.radius, 1.0);
         let result = apply_deposit(
             &mut wall,
             &controls,
             &charge,
-            &blast_field(),
-            &deposit,
+            &[(Vec3::NEG_Z, 1.0)],
+            &Deposit::Blast {
+                mass,
+                standoff,
+                at: Vec3::ZERO,
+                into: Vec3::NEG_Z,
+            },
             STEP,
         );
         let (_, _, intercepted, impulse, _) = result.blast.unwrap();
-        if standoff == 0.1 {
+        if pressure > material.compaction.strength {
             assert!(
-                result.crushed > 0.0 || result.scabs > 0,
-                "a near-contact field on the aimed solid face must exercise pressure removal"
+                result.crushed > 0.0,
+                "pressure {pressure} exceeds plateau {}",
+                material.compaction.strength
             );
         }
         assert_eq!(
@@ -212,16 +229,11 @@ fn the_shared_blast_path_reports_pressure_work_and_rear_scabs() {
         );
         assert!(
             result.chunks > 0 && impulse > 0.0,
-            "the charge reaches the wall"
+            "the ray reaches the panel"
         );
         println!(
-            "MEASURED shared sandbox: {mass:.3} kg, cased {cased}, standoff {standoff:.2} m: kinetic {} J, audit {intercepted:.1} J, impulse {impulse:.1} N s, crushed {:.6e} m3, scabs {}, cracks {}, freed {} groups {:?}",
-            result.deposited,
-            result.crushed,
-            result.scabs,
-            result.local + result.failures.len(),
-            result.groups.iter().map(|g| g.0.len()).sum::<usize>(),
-            result.groups.iter().map(|g| g.0.len()).collect::<Vec<_>>()
+            "MEASURED shared inspector: mass={mass} cased={cased} standoff={standoff} pressure={pressure} audit={intercepted} impulse={impulse} crushed={} scabs={}",
+            result.crushed, result.scabs
         );
     }
 }
