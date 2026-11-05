@@ -621,13 +621,25 @@ an exact-equality skip). An owner at rest performs zero work.
   vertices: normal `N/A + (n cross (B + n n^T)^-1 M_b) dot r / A`, tangential
   `F_s/A + T (n cross r)/(A trace(Q))`; circular footprints use their analytical rim extrema.
 - A push-only interface (no bond left) bears as one face (ASSUMED): the area-weighted normal and
-  the hull of its corners. It separates when its resultant pulls (lift), when its pressure centre
-  `r = (M⊥ × n) / N` (DERIVED) leaves the hull (tip), or when its tangential force passes `μ N`
-  (slide). A face carrying less than Resolution 1e-9 of the owner's weight is left as it is. While
-  an interface keeps a bond, its bonds decide it and its rests bear beside them.
-- Separation is permanent: no re-close, no re-stick, no frozen friction. What slides or tips
-  leaves the graph; once released, Avian owns its motion. The ledger records `Crack` and
-  `Separate` per joint, and replicas derive support from those causes without any equilibrium.
+  the hull of its corners. It separates when its resultant pulls (lift) or when its pressure
+  centre `r = (M⊥ × n) / N` (DERIVED) leaves the hull (tip). A face carrying less than Resolution
+  1e-9 of the owner's weight is left as it is. While an interface keeps a bond, its bonds decide it
+  and its rests bear beside them.
+- **Coulomb friction** (owner decision, 2026-11-06). A push-only face whose tangential demand
+  passes `μ N` slips (`parts::Slip`). It stays in contact while compressed and carries `μ N`
+  against its slip: the field is solved again in the same tick with the face's tangential stiffness
+  removed and its saturated friction as a pair of loads at its centre, so the excess moves to its
+  parts' other interfaces (a roof board's nails). Friction is read again from each solve and
+  re-solved while it moves past `LOAD_TOLERANCE`, within Resolution 16 solves a tick. A slipping
+  face separates only when it lifts or tips, or when its part is released. When nothing else holds
+  its part tangentially, the stiffness left is singular (a pivot under Resolution 1e-9 of its
+  diagonal): the part is a mechanism, the slipping rests of every part it reaches through stiff
+  interfaces separate (`Slide`), and connectivity releases it to the physics engine, which owns
+  sliding bodies. A slip keeps its direction (ASSUMED) and never re-sticks.
+- Separation is permanent: no re-close. What lifts, tips or slides as a mechanism leaves the
+  graph; once released, Avian owns its motion. The ledger records `Crack` and `Separate` per
+  joint, and replicas derive support from those causes without any equilibrium; a slip is
+  authority state and writes no ledger entry.
 
 **Release.** Connectivity (`loose_groups`) runs on every topology change; each group with no
 path through live joints to the ground or buried matter is released in the same tick and spawned
@@ -635,30 +647,55 @@ as one physics body (ADR-0014: new entities, constructed from data). Every relea
 whether it left a placed construction or split from a moving one, is built by
 `breakage::prepare_group`, the hand-off to the layer that makes released parts crumble.
 
-**Inside a standing part.** A part that removal or a cavity crack cuts in two becomes two nodes,
-and a node with no interface path to support is released by connectivity as a fragment. Arching
-over a gap inside a masonry part is not built yet: it needs a bond-geometry fact (course height
-and lap) the construction data does not state.
+**Inside a standing part** (`fracture::parts::Kernel`, the one chunk-scale kernel). The kernel
+is the bonded-factor experiment's solve at element size: a part's chunks are nodes, its intact
+bonds edges at their seam stiffness, its cracked seams and rests push-only edges at bulk stiffness
+that stick (ASSUMED: once cracks split the part, the part law judges the pieces' sliding with
+Coulomb friction), and its joints to the ground or to buried chunks anchors. A chunk set nothing
+anchors is balanced by its rigid acceleration and gauged at its first chunk. Joints to chunks
+outside the set are no edge: their force is the caller's load. It is factored once per element
+design at load (`Assessment::kernels`) and again only for a part whose chunks changed, and it runs
+only on events through one entry, `Kernel::hold(structure, loads)`: per chunk, the loads beside
+gravity (the forces its other interfaces hand it, contacts, presses), returning each joint's
+carried wrench, the bonds that crack (tension past `f_t`, or shear past cohesion plus friction on
+compression) and the push-only joints the field pulls apart. A landing's seam cracks read the
+same entry with the landing's contact loads.
+
+**Holes.** When chunks are removed, each part beside them is solved at chunk scale for gravity
+and the sustained forces its other interfaces hand it (`Assessment::holes`). A joint that cannot
+hold, mortar tension included, cracks, a pulled one separates, and the part is solved again on
+what is left until it holds. The cracks then split the part, and the part law judges the pieces:
+a chunk or cluster whose faces lift, tip or slip as a mechanism separates and connectivity
+releases it. Arching is not authored: compression runs across the running bond's overlaps
+because the bed joints are where the chunks overlap. No masonry flag or per-material rule exists.
 
 **Hand-checkable gates** (`parts::tests`, fixture geometry): a lintel's two pier shares
 `P/2 ± P a s / (2 s² + r²/2)`; a cantilever's interface carrying `W + P` and `W d + P L` and
 cracking at `P* = (f_t r A / 4 − W d) / L`, then tipping; a two-joint wall base cracking whole at
 its Navier capacity `P* z = (f_t + W/2A) A (2 s² + r²/2) / (s + r)`, then tipping; the same wall
 with one block worn away cracking at its one remaining disk's `P* z = (f_t + W₁/A) A r / 4`; a slab
-resting on two piers bearing `W/2` on each and sliding past `μ W`. Each holds at 0.98 and changes
-at 1.02 of its DERIVED limit.
+resting on two piers bearing `W/2` on each and slipping past `μ W`, a mechanism nothing else
+holds, so it is released. Each holds at 0.98 and changes at 1.02 of its DERIVED limit. A block on a
+slope fixed to a buried post sticks below `atan μ`; above it the rest slips, keeps bearing, carries
+no tangential force through stiffness and `μ N` as friction, and the fixing carries the excess
+`W sin θ − μ N` (DERIVED from the block's equilibrium); once friction settles it costs nothing.
 
 **The unit house under gravity** (MEASURED, `parts::tests`, observations). Its 71 roof-board rests
 lie on the gables' 36.87° slopes, where a board needs friction `tan 36.87° = 0.75` against the pair
-friction 0.57 (DERIVED from the slope normal and the shipped wood): the linear trial gives each
-rest `T / N ≈ 0.75`, and every rest slides on the first tick. The boards then hang on their nails;
-over 10 ticks 172 of their joints crack in tension and 16 in shear, and 86 chunks in
-18 bodies are released, after which the house does zero work. The asset is unchanged: hand-made
-houses with real roofs are planned. A fixture 1 MN press on a wall part's top fails parts in
-tension, shear, lift, tip and slide and settles in 12 ticks, every value finite.
+friction 0.57 (DERIVED from the slope normal and the shipped wood): every rest slips at load, keeps
+bearing, and hands the excess to the boards' nails. The house stands: no joint fails, nothing is
+released, and it settles in 7 ticks to zero work. In the settled sustained field the most loaded
+bonded joint uses 0.198 of its tensile strength and the most loaded in shear 0.245 of its
+cohesion plus friction (margins 5.1× and 4.1×). Its 55 element kernels cost 4,347,583 scalar
+operations to factor at load; the largest has 66 chunks, 396 unknowns and 13,230 entries, factors
+in 499,530 operations and solves one column in 52,128. A fixture 1 MN press on a wall part's top
+fails parts in tension, shear, lift, tip and slip (as mechanisms) and settles in 22 ticks, every
+value finite.
 
-**Limits.** The trial is linear and bilateral for one tick, so a push-only joint's verdict lags
-its redistribution by a tick. A pulse is a tick-duration quasi-static load, not a transient
+**Limits.** The trial is linear and bilateral for one tick, so a lift or tip lags its
+redistribution by a tick; a slip is re-solved within its tick. Friction acts at each slipping
+joint's centre and keeps its first direction; a slip never re-sticks. Inside a part the kernel's
+cracked joints stick, and its event loads come from the rigid part field. A pulse is a tick-duration quasi-static load, not a transient
 elastic wave; changing the tick can change a blow's verdict, while sustained limits are
 independent of it. The pulse work criterion is recoverable elastic work, not a measured dynamic
 fracture law. Pulse fracture work follows the cracked joints into the common launch debit

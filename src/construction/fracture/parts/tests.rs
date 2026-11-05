@@ -369,11 +369,13 @@ fn a_wall_part_is_pushed_over_at_its_base_capacity() {
     assert_eq!(assessment.support, vec![vec![0, 1]]);
 }
 
-/// A PART RESTING ON TWO OTHERS BEARS HALF ITS WEIGHT ON EACH, AND SLIDES PAST FRICTION. A slab
+/// A PART RESTING ON TWO OTHERS BEARS HALF ITS WEIGHT ON EACH, AND SLIPS PAST FRICTION. A slab
 /// rests (no bond) on two buried piers at x = ±s. DERIVED: each rest bears W / 2; a push P in the
-/// rests' plane loads each with P / 2 of shear, so both slide once P > μ W, μ the pair friction.
+/// rests' plane loads each with P / 2 of shear, so both slip once P > μ W, μ the pair friction.
+/// Nothing else holds the slab tangentially, so the slip is a mechanism: its rests separate and
+/// it is released.
 #[test]
-fn a_part_resting_on_two_others_bears_and_slides_at_friction() {
+fn a_part_resting_on_two_others_bears_and_slips_at_friction() {
     let (s, side, area) = (1.0_f32, 0.4_f32, 0.04_f32);
     let chunks = vec![
         cube(Vec3::new(-s, -side / 2.0, 0.0), side, true),
@@ -423,6 +425,269 @@ fn a_part_resting_on_two_others_bears_and_slides_at_friction() {
     assert_eq!(assessment.support, vec![vec![2]]);
 }
 
+/// A REST THAT SLIPS CARRIES COULOMB FRICTION AND HANDS THE EXCESS TO ITS PART'S OTHER
+/// INTERFACE. A block rests on a slope of angle θ and is fixed to a buried post uphill by a soft
+/// fixture fixing (1/1000 of the bulk slope), so the rest carries nearly all of the shear while it
+/// sticks.
+/// DERIVED: below θ = atan μ the rest sticks; above it the rest slips, carries no tangential
+/// stiffness and μN against the slip, and the fixing carries the rest of the downhill weight,
+/// W sin θ − μN, by the block's equilibrium. It keeps bearing, nothing separates, and once
+/// friction settles the block costs nothing.
+#[test]
+fn a_slipping_rest_carries_friction_and_hands_the_excess_to_its_fixing() {
+    let (side, rest_area, fixing_area) = (0.4_f32, 0.16_f32, 0.01_f32);
+    let soft = Bond::Bonded(Seam {
+        fixing: Some(super::super::Fixing {
+            normal: 5.0e7,
+            shear: 5.0e7,
+        }),
+        ..seam(1e9, 1e9)
+    });
+    let slope = |theta: f64| {
+        let n = Vec3::new(-theta.sin() as f32, theta.cos() as f32, 0.0);
+        let u = Vec3::new(theta.cos() as f32, theta.sin() as f32, 0.0);
+        let centre = n * side / 2.0;
+        structure(
+            vec![
+                cube(centre, side, false),
+                cube(centre + u * side, side, true),
+            ],
+            vec![0, 1],
+            vec![
+                joint(0, Side::Ground, Vec3::ZERO, n, rest_area, Bond::Resting),
+                joint(
+                    0,
+                    Side::Chunk(1),
+                    centre + u * side / 2.0,
+                    u,
+                    fixing_area,
+                    soft,
+                ),
+            ],
+        )
+    };
+    let probe = slope(0.0);
+    let mu = bondsolve::pair_friction(&probe, &probe.joints[0]);
+    let weight = f64::from(probe.chunks[0].mass) * g();
+    let carried = |assessment: &Assessment, joint: usize| {
+        let graph = &assessment.graph;
+        let n = graph.parts.len();
+        let e = graph
+            .joints
+            .iter()
+            .position(|&j| j == joint)
+            .expect("the joint is an edge");
+        let edge = &graph.edges[e];
+        (
+            edge.resultant(&graph.nodes, &assessment.answer[n..]),
+            edge.normal,
+        )
+    };
+
+    let stick = slope(0.8 * mu.atan());
+    let mut state = State::new(&stick);
+    let mut assessment = Assessment::default();
+    assert!(tick(&stick, &mut state, &mut assessment, &[]).is_empty());
+    assert!(
+        assessment.slipping.is_empty(),
+        "below atan μ the rest sticks"
+    );
+
+    let theta = 1.2 * mu.atan();
+    let slip = slope(theta);
+    let mut state = State::new(&slip);
+    let mut assessment = Assessment::default();
+    let failures = tick(&slip, &mut state, &mut assessment, &[]);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        assessment.slipping.contains_key(&0) && !assessment.slipping.contains_key(&1),
+        "the rest slips, the fixing holds"
+    );
+    let (rest, normal) = carried(&assessment, 0);
+    let pressing = -rest.linear.dot(normal);
+    assert!(pressing > 0.0, "a slipping rest keeps bearing");
+    assert!(
+        (rest.linear + normal * pressing).length() <= 1e-9 * weight,
+        "a slipping rest carries no tangential force through stiffness: {rest:?}"
+    );
+    let friction = assessment.slipping[&0].friction[1];
+    assert!(
+        (friction - mu * pressing).abs() <= 1e-4 * weight,
+        "saturated friction {friction} N against μN {} N",
+        mu * pressing
+    );
+    let (fixing, _) = carried(&assessment, 1);
+    let uphill = DVec3::new(theta.cos(), theta.sin(), 0.0);
+    let excess = weight * theta.sin() - friction;
+    assert!(
+        excess > 0.0,
+        "friction alone does not hold the block above atan μ"
+    );
+    assert!(
+        (-fixing.linear.dot(uphill) - excess).abs() <= 1e-4 * weight,
+        "the fixing carries the excess: {} N against {excess} N",
+        -fixing.linear.dot(uphill)
+    );
+    let (failures, solves) = assessment.advance(&slip, &mut state, &[], Vec3::ZERO, STEP, false);
+    assert!(failures.is_empty());
+    assert_eq!(
+        (solves, assessment.work),
+        (0, 0),
+        "a settled slip costs nothing"
+    );
+}
+
+/// A fixture running-bond wall of the game's environment destruction model: `courses` courses of
+/// `bricks` bricks (length 0.24 m, height 0.08 m, thickness 0.12 m, fixture data), one element,
+/// every joint bonded by `seam`, course 0 on the ground. Odd courses shift half a brick, with half
+/// bricks at their ends. Returns it and each chunk's (course, left x, right x).
+fn wall(courses: usize, bricks: usize, seam: Seam) -> (Structure, Vec<(usize, f32, f32)>) {
+    let (l, h, t) = (0.24_f32, 0.08_f32, 0.12_f32);
+    let material = brick();
+    let mut chunks = Vec::new();
+    let mut layout = Vec::new();
+    for k in 0..courses {
+        let cuts: Vec<f32> = if k % 2 == 0 {
+            (0..=bricks).map(|i| i as f32 * l).collect()
+        } else {
+            std::iter::once(0.0)
+                .chain((0..bricks).map(|i| (i as f32 + 0.5) * l))
+                .chain(std::iter::once(bricks as f32 * l))
+                .collect()
+        };
+        for w in cuts.windows(2) {
+            let volume = (w[1] - w[0]) * h * t;
+            chunks.push(Chunk {
+                volume,
+                centroid: Vec3::new((w[0] + w[1]) / 2.0, h * (k as f32 + 0.5), 0.0),
+                mass: material.density * volume,
+                material,
+                buried: false,
+            });
+            layout.push((k, w[0], w[1]));
+        }
+    }
+    let bond = Bond::Bonded(seam);
+    let mut joints = Vec::new();
+    for (a, &(k, x0, x1)) in layout.iter().enumerate() {
+        let y = h * k as f32;
+        if k == 0 {
+            joints.push(joint(
+                a,
+                Side::Ground,
+                Vec3::new((x0 + x1) / 2.0, 0.0, 0.0),
+                Vec3::Y,
+                (x1 - x0) * t,
+                bond,
+            ));
+        }
+        for (b, &(kb, y0, y1)) in layout.iter().enumerate() {
+            if kb == k && y0 == x1 {
+                joints.push(joint(
+                    a,
+                    Side::Chunk(b),
+                    Vec3::new(x1, y + h / 2.0, 0.0),
+                    Vec3::X,
+                    h * t,
+                    bond,
+                ));
+            }
+            let (lo, hi) = (x0.max(y0), x1.min(y1));
+            if kb + 1 == k && hi > lo {
+                joints.push(joint(
+                    a,
+                    Side::Chunk(b),
+                    Vec3::new((lo + hi) / 2.0, y, 0.0),
+                    Vec3::Y,
+                    (hi - lo) * t,
+                    bond,
+                ));
+            }
+        }
+    }
+    let part_of = vec![0; chunks.len()];
+    (structure(chunks, part_of, joints), layout)
+}
+
+/// A HOLE IN A STANDING WALL: THE CHUNKS ITS JOINTS CANNOT HOLD DROP OUT, AND THE REST ARCHES. A
+/// fixture running-bond wall loses the middle bricks of its lowest courses. The part's chunk
+/// graph is solved for gravity, its joints judged at chunk scale (mortar tension included), and
+/// the part law then judges the pieces. Cross-check, CLAIMED (NCMA TEK 17-01D): arching carries
+/// the masonry above a 45° triangle over the opening, so at most that triangle's bricks load a
+/// lintel. The bricks that drop, by where they sit against that triangle, are printed for the
+/// report: observations, never pins. Invariant: the cascade ends with a finite field, and the
+/// wall beside the opening, below its head, keeps standing.
+#[test]
+fn a_hole_in_a_wall_drops_what_its_joints_cannot_hold_and_the_rest_arches() {
+    let (courses, bricks) = (12, 12);
+    let (l, h) = (0.24_f32, 0.08_f32);
+    for (label, mortar) in [
+        ("shipped mortar", brick().seam),
+        ("no-tension fixture mortar", seam(0.0, 0.0)),
+    ] {
+        let (structure, layout) = wall(courses, bricks, mortar);
+        let mut live = crate::construction::breakage::Live::from_structure(structure, 1);
+        let element_of = vec![0_u16; layout.len()];
+        let (quiet, causes, _) = settle(&element_of, &mut live, |_| Vec::new());
+        assert!(
+            causes.is_empty(),
+            "{label}: the intact wall stands: {causes:?}"
+        );
+        let (left, right, head) = (4.0 * l, 8.0 * l, 3.0 * h);
+        let opening = |&(k, x0, x1): &(usize, f32, f32)| {
+            (k as f32) * h < head && x0 >= left - 1e-4 && x1 <= right + 1e-4
+        };
+        let hole: Vec<usize> = (0..layout.len()).filter(|&c| opening(&layout[c])).collect();
+        for &c in &hole {
+            let volume = live.structure.chunks[c].volume;
+            assert!(super::super::wear(
+                &live.structure,
+                &mut live.state,
+                c,
+                volume
+            ));
+        }
+        let event = crate::construction::breakage::run_laws(
+            &element_of,
+            &mut live,
+            &[],
+            Vec::new(),
+            Vec3::ZERO,
+            STEP,
+        );
+        let event_work = live.assessment.work;
+        let (ticks, mut causes, released) = settle(&element_of, &mut live, |_| Vec::new());
+        for failure in &event.failures {
+            *causes.entry(format!("{:?}", failure.cause)).or_default() += 1;
+        }
+        let middle = (left + right) / 2.0;
+        let in_triangle = |&(k, x0, x1): &(usize, f32, f32)| {
+            let y = (k as f32 + 0.5) * h - head;
+            let x = (x0 + x1) / 2.0;
+            y > 0.0 && (x - middle).abs() < (right - left) / 2.0 - y
+        };
+        let dropped: Vec<usize> = (0..layout.len())
+            .filter(|&c| !hole.contains(&c) && !live.state.standing(c))
+            .collect();
+        let triangle = (0..layout.len())
+            .filter(|&c| in_triangle(&layout[c]))
+            .count();
+        let inside = dropped.iter().filter(|&&c| in_triangle(&layout[c])).count();
+        println!(
+            "HOLE {label}: removed={} quiet_after={quiet} ticks={ticks} failures={causes:?} released={released:?} dropped={} triangle_bricks={triangle} dropped_in_triangle={inside} dropped_outside={} event_work={event_work}",
+            hole.len(),
+            dropped.len(),
+            dropped.len() - inside,
+        );
+        let beside =
+            |&(k, x0, x1): &(usize, f32, f32)| (k as f32) * h < head && (x1 <= left || x0 >= right);
+        assert!(
+            dropped.iter().all(|&c| !beside(&layout[c])),
+            "{label}: the piers beside the opening stand"
+        );
+    }
+}
+
 fn shipped(id: &str) -> crate::construction::ConstructionLibrary {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
     crate::construction::ConstructionLibrary::load(&root, [id])
@@ -431,14 +696,14 @@ fn shipped(id: &str) -> crate::construction::ConstructionLibrary {
 /// Run the game's law pass on `live` with `loads` each tick until eight quiet ticks, asserting
 /// a finite field; returns the ticks taken, the failures by cause and the released groups.
 fn settle(
-    kind: &crate::construction::ConstructionKind,
+    element_of: &[u16],
     live: &mut crate::construction::breakage::Live,
     loads: impl Fn(&crate::construction::breakage::Live) -> Vec<Load>,
 ) -> (usize, BTreeMap<String, usize>, Vec<usize>) {
     let (mut causes, mut released, mut quiet) = (BTreeMap::new(), Vec::new(), 0);
     for t in 0..256 {
         let changes = crate::construction::breakage::run_laws(
-            &kind.layout.element_of,
+            element_of,
             live,
             &loads(live),
             Vec::new(),
@@ -507,8 +772,49 @@ fn the_unit_house_settles_under_gravity_and_rests_at_zero_work() {
         at_rest.initial_verdict,
     );
     let mut live = live_of(kind);
-    let (ticks, causes, released) = settle(kind, &mut live, |_| Vec::new());
+    let (ticks, causes, released) = settle(&kind.layout.element_of, &mut live, |_| Vec::new());
     println!("HOUSE GRAVITY ticks={ticks} failures={causes:?} released_group_sizes={released:?}");
+    let assessment = &live.assessment;
+    let graph = &assessment.graph;
+    let n = graph.parts.len();
+    // Each bonded joint's demand over its capacity in the settled sustained field.
+    let (mut tension, mut shear) = ((0.0_f64, 0), (0.0_f64, 0));
+    for interface in &graph.interfaces {
+        for &e in &interface.bonded {
+            let edge = &graph.edges[e];
+            let joint = &kind.structure.joints[graph.joints[e]];
+            let seam = joint.seam().expect("a bonded edge holds by a seam");
+            let carried = edge.resultant(&graph.nodes, &assessment.answer[..n]);
+            let (t, s) = edge.stress(carried, edge.normal);
+            let compression = (-carried.linear.dot(edge.normal) / edge.area).max(0.0);
+            let holds = f64::from(seam.shear.cohesion)
+                + bondsolve::pair_friction(&kind.structure, joint) * compression;
+            for (worst, ratio) in [
+                (&mut tension, t / f64::from(seam.tensile)),
+                (&mut shear, s / holds),
+            ] {
+                if ratio > worst.0 {
+                    *worst = (ratio, graph.joints[e]);
+                }
+            }
+        }
+    }
+    let kernels = &kind.equilibrium.kernels;
+    let largest = kernels
+        .iter()
+        .max_by_key(|k| k.factor.unknowns())
+        .expect("the house has elements");
+    println!(
+        "HOUSE MARGINS slipping_joints={} worst_tension_utilisation={tension:?} worst_shear_utilisation={shear:?} kernels={} kernel_factor_ops_total={} largest_kernel chunks={} unknowns={} entries={} factor_ops={} solve_ops={}",
+        assessment.slipping.len(),
+        kernels.len(),
+        kernels.iter().map(|k| k.factor.ops).sum::<u64>(),
+        largest.chunks.len(),
+        largest.factor.unknowns(),
+        largest.factor.entries(),
+        largest.factor.ops,
+        largest.factor.solve_ops(),
+    );
     for _ in 0..3 {
         let changes = crate::construction::breakage::run_laws(
             &kind.layout.element_of,
@@ -554,7 +860,7 @@ fn a_press_past_capacity_fails_house_parts_without_a_stall() {
         .expect("a part holds chunks");
     let mut live = live_of(kind);
     let at = kind.structure.chunks[chunk].centroid;
-    let (ticks, causes, released) = settle(kind, &mut live, |live| {
+    let (ticks, causes, released) = settle(&kind.layout.element_of, &mut live, |live| {
         [press(chunk, at, Vec3::X * 1.0e6)]
             .into_iter()
             .filter(|l| live.state.standing(l.chunk))
