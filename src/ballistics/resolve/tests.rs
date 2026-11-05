@@ -1571,38 +1571,45 @@ fn field_doses_of(
     dose
 }
 
-/// CLASS INVARIANT 2, RESOLUTION STABILITY: a box's dose converges as the direction count grows —
-/// in the convergence regime the change from N to 4N shrinks with every step — and at the shipped
-/// count it lies within a stated tolerance of the converged value. Fixture: a soft box off the
-/// axis, a metre down. A direction's dose not scaled by its `1/N` share, or a stratum weight that
-/// is not its stratum's share, fails it.
+/// The game's damage model: every resolution integrates a soft box within an independently
+/// derived allowance, so a lost `1/N` share or incorrect emission cannot change the dose law.
+/// Fixture: a centred square face of half-width a at distance d in a uniform spherical field.
+/// Its exact solid angle is `4 atan(a² / (d sqrt(d² + 2a²)))`; dose is `S Ω / (8π)`.
 ///
-/// The steps are taken from 384 directions up. Below that the strata the box's edges cut are noise
-/// of a stratum's weight, not a trend, and the axis strata the box covers carry the field's
-/// heaviest weights: MEASURED on this fixture, 96 → 384 → 1536 changed the dose by 0.016 then
-/// 0.055 (of ~1.83), then 0.027 and 0.004.
+/// DERIVED allowance: the face contains the cap through its edge midpoint and is contained by
+/// the cap through its corner. Only that annulus has uncertain azimuthal coverage. Each cap's
+/// boundary cuts at most one equal-solid-angle stratum, costing at most `S/(2N)`; no monotone
+/// convergence is assumed. This conservative geometric bound holds for every azimuth sequence.
 #[test]
 fn a_box_dose_is_stable_under_resolution() {
-    let (mut app, boxes) =
-        field_world(|app| vec![below(app, Vec3::new(0.4, 0.05, 0.4), 1.0, 0.15, 0.0, true)]);
-    let counts = [384, 1536, 6144, 24576];
-    let doses: Vec<f64> = counts
-        .iter()
-        .map(|&n| field_doses(&mut app, &boxes, 10.0, n)[0])
-        .collect();
-    let changes: Vec<f64> = doses.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
-    assert!(
-        changes.windows(2).all(|w| w[1] <= w[0]),
-        "the change shrinks as N quadruples: doses {doses:?}, changes {changes:?}"
-    );
-    let converged = doses[doses.len() - 1];
-    let shipped = ConeShape::shipped().directions_count();
-    let at_shipped = field_doses(&mut app, &boxes, 10.0, shipped)[0];
-    // Fixture tolerance: a tenth of the converged dose at the shipped resolution.
-    assert!(
-        (at_shipped - converged).abs() <= 0.1 * converged,
-        "N = {shipped}: {at_shipped} against {converged}"
-    );
+    // Fixture dimensions (m), strength and counts; the near face is exactly d from the origin.
+    let (a, d, thickness, strength) = (1.0f64, 1.0f64, 0.05f32, 10.0f32);
+    let (mut app, boxes) = field_world(|app| {
+        vec![below(
+            app,
+            Vec3::new(2.0 * a as f32, thickness, 2.0 * a as f32),
+            d as f32 + thickness / 2.0,
+            0.0,
+            0.0,
+            true,
+        )]
+    });
+    let omega = 4.0 * (a * a / (d * (d * d + 2.0 * a * a).sqrt())).atan();
+    let exact = f64::from(strength) * omega / (8.0 * std::f64::consts::PI);
+    let cap_dose =
+        |radius: f64| f64::from(strength) / 4.0 * (1.0 - d / (d * d + radius * radius).sqrt());
+    let geometric_error = (exact - cap_dose(a)).max(cap_dose(2.0f64.sqrt() * a) - exact);
+    for n in [96, 384, 1536, ConeShape::shipped().directions_count()] {
+        let dose = field_doses_of(&mut app, &boxes, FieldDescriptor::ball(0.0), strength, n)[0];
+        // DERIVED: one boundary stratum plus f32 direction/weight/dose rounding slack.
+        let allowance = geometric_error
+            + f64::from(strength) / (2.0 * n as f64)
+            + f64::from(strength) * f64::from(f32::EPSILON) * 16.0;
+        assert!(
+            (dose - exact).abs() <= allowance,
+            "N = {n}: dose {dose}, exact integral {exact}, allowance {allowance}"
+        );
+    }
 }
 
 /// CLASS INVARIANT 3, HOMOGENEITY: scaling the strength `S` scales every dose by the same factor.
