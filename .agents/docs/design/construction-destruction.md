@@ -379,12 +379,12 @@ structure check, which reads every contact as its mean force; the peak force dec
 its mean-force reading, including sleeping contacts; adding it to the explicit stopping load
 would count it twice. Remaining tangential motion and physics contacts still belong to Avian.
 
-The sweep owns a dynamic body's pair with a standing construction's element or chunk collider until
-exact occupancy. Avian's look-ahead (speculative) points there, those at a positive separation, are
-dropped by `breakage::SweepContacts` (`CollisionHooks::modify_contacts`, registered in every physics
-composition; standing colliders carry `ActiveCollisionHooks::MODIFY_CONTACTS`); penetrating points
-stay with the solver. Look-ahead planes on chunks 7 to 10 cm ahead, normals about 0.94 up, otherwise
-brake and lift a hull before its cast reaches them. Every other pair keeps its speculative contacts.
+`breakage::SweepContacts` suppresses Avian's look-ahead only against colliders the sweep prepared
+in the current fixed tick, at points on standing, exposed law chunks. The sweep and hook share
+`sweep::covered`; an element without law chunks, buried matter and an unprepared source retain
+speculation. Points within Avian's contact tolerance and penetrating points always remain.
+Standing colliders enable `ActiveCollisionHooks::MODIFY_CONTACTS`; the offline composition
+registers the hook through `offline_physics`. Network physics also registers the hook.
 
 DERIVED: for a fixed patch, `v_threshold` is the speed whose peak force is `max(0, C - F_drive,n)`:
 `δ = (3P / (4 E* √R))^(2/3)`, `v = √(16 E* √R δ^(5/2) / (15 m_eff))`; it grows as

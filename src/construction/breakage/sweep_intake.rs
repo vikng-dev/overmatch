@@ -6,6 +6,8 @@ use avian3d::prelude::{
 /// The sweep's per-tick account, available to headless witnesses and operator instruments.
 #[derive(Resource, Default, Debug)]
 pub(crate) struct SweepAccount {
+    prepared: BTreeSet<Entity>,
+    prepared_at: Option<std::time::Duration>,
     pub(crate) freed: usize,
     /// Freed fragments shed to the players as decoration.
     pub(crate) shed: usize,
@@ -24,6 +26,7 @@ pub(crate) struct SweepAccount {
 
 struct SweepSource {
     body: Entity,
+    collider: Entity,
     hull: Collider,
     position: Vec3,
     rotation: Quat,
@@ -159,7 +162,10 @@ pub(super) fn run(mut p: Intake) {
     *p.account = SweepAccount::default();
     let dt = p.fixed.timestep().as_secs_f32();
     let tick = p.clock.as_deref().map_or(0, |clock| clock.0.raw());
-    let mut candidates = geometry(&p, dt);
+    let sources = sources(&p, dt);
+    p.account.prepared = sources.iter().map(|source| source.collider).collect();
+    p.account.prepared_at = Some(p.fixed.elapsed());
+    let mut candidates = geometry(&p, dt, &sources);
     candidates.sort_by_key(|(body, root, _)| (*body, *root));
     let mut by_source: BTreeMap<Entity, BTreeMap<Entity, BTreeSet<usize>>> = BTreeMap::new();
     for (body, root, swept) in candidates {
@@ -298,11 +304,9 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                             .then_some(other.body)
                     })
                     .collect::<BTreeSet<_>>();
-                if roots.is_empty() {
-                    continue;
-                }
                 sources.push(SweepSource {
                     body: owner.body,
+                    collider: handle,
                     hull: hull.clone(),
                     position,
                     rotation,
@@ -332,8 +336,11 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
     sources
 }
 
-fn geometry(p: &Intake, dt: f32) -> Vec<(Entity, Entity, super::super::sweep::Sweep)> {
-    let sources = sources(p, dt);
+fn geometry(
+    p: &Intake,
+    dt: f32,
+    sources: &[SweepSource],
+) -> Vec<(Entity, Entity, super::super::sweep::Sweep)> {
     let constructions = &p.constructions;
     let pool = ComputeTaskPool::get();
     pool.scope(|scope| {
@@ -342,7 +349,6 @@ fn geometry(p: &Intake, dt: f32) -> Vec<(Entity, Entity, super::super::sweep::Sw
             .flat_map(|source| source.roots.iter().copied())
             .collect::<BTreeSet<_>>();
         for (root, position, rotation, breakage) in constructions.iter_many(roots) {
-            let sources = &sources;
             scope.spawn(async move {
                 let pose = breakage.physics_frame((position, rotation));
                 let inverse = pose.rotation.inverse();
@@ -677,43 +683,76 @@ pub(super) fn changed(account: Res<SweepAccount>) -> bool {
     account.freed > 0
 }
 
-/// Avian's contact hook for the sweep (the game's environment destruction): until exact
-/// occupancy the sweep owns a dynamic body's pair with a standing construction, so the narrow
-/// phase's look-ahead points between them, separated by more than Avian's contact tolerance
-/// (`NarrowPhaseConfig::contact_tolerance` × `PhysicsLengthUnit`), are dropped. Touching points,
-/// within it, and penetrating ones stay, so a body resting against a wall keeps its contacts.
-/// Look-ahead planes on chunks the cast has not reached brake and lift a hull before its sweep
-/// meets them. Every other pair keeps its look-ahead. Standing constructions' colliders carry
-/// [`ActiveCollisionHooks::MODIFY_CONTACTS`], which is what calls it.
+/// The game's environment destruction: suppress look-ahead only on exposed law chunks against
+/// colliders the sweep prepared this tick. Touching points within Avian's tolerance and all
+/// uncovered points retain the solver's protection. Standing colliders enable the hook with
+/// [`ActiveCollisionHooks::MODIFY_CONTACTS`].
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct SweepContacts<'w, 's> {
-    owners: Query<'w, 's, &'static ColliderOf>,
-    standing: Query<'w, 's, (), (With<Breakage>, Without<Piece>)>,
-    bodies: Query<'w, 's, &'static RigidBody>,
+    owners: Query<
+        'w,
+        's,
+        (
+            &'static ColliderOf,
+            Option<&'static Element>,
+            Option<&'static ChunkCollider>,
+        ),
+    >,
+    standing: Query<
+        'w,
+        's,
+        (
+            &'static Breakage,
+            &'static Position,
+            &'static Rotation,
+            &'static avian3d::prelude::ComputedCenterOfMass,
+        ),
+        Without<Piece>,
+    >,
+    account: Option<Res<'w, SweepAccount>>,
+    fixed: Res<'w, Time<Fixed>>,
     config: Res<'w, avian3d::prelude::NarrowPhaseConfig>,
     length_unit: Res<'w, avian3d::prelude::PhysicsLengthUnit>,
 }
 
 impl CollisionHooks for SweepContacts<'_, '_> {
     fn modify_contacts(&self, contacts: &mut ContactPair, _: &mut Commands) -> bool {
-        let standing = |collider| {
-            self.owners
-                .get(collider)
-                .is_ok_and(|of| self.standing.contains(of.body))
-        };
-        let source = |body: Option<Entity>| {
-            body.is_some_and(|b| self.bodies.get(b).is_ok_and(RigidBody::is_dynamic))
-        };
-        if !(standing(contacts.collider1) && source(contacts.body2)
-            || standing(contacts.collider2) && source(contacts.body1))
-        {
+        // Physics-only apps and replica ticks prepare no sweeps and own no speculative point.
+        let Some(account) = self
+            .account
+            .as_deref()
+            .filter(|a| a.prepared_at == Some(self.fixed.elapsed()))
+        else {
             return true;
-        }
+        };
+        let covered = |collider, source, anchor: Vec3| {
+            if !account.prepared.contains(&source) {
+                return false;
+            }
+            let Ok((of, element, chunk)) = self.owners.get(collider) else {
+                return false;
+            };
+            let Ok((owner, position, rotation, com)) = self.standing.get(of.body) else {
+                return false;
+            };
+            let pose = owner.physics_frame((position, rotation));
+            // Avian 0.7 ContactPoint anchors are world-space offsets from the body COM.
+            let point = position.0 + rotation.0 * com.0 + anchor;
+            let at = pose.rotation.inverse() * (point - pose.translation);
+            let chunk = chunk.map(|c| usize::from(c.0)).or_else(|| {
+                element.and_then(|e| nearest_chunk(&owner.kind.layout, usize::from(e.0), at))
+            });
+            chunk.is_some_and(|c| {
+                super::super::sweep::covered(&owner.live.structure, &owner.live.state, c)
+            })
+        };
         let tolerance = self.config.contact_tolerance * self.length_unit.0;
         for manifold in &mut contacts.manifolds {
-            manifold
-                .points
-                .retain(|point| point.penetration >= -tolerance);
+            manifold.points.retain(|point| {
+                point.penetration >= -tolerance
+                    || !(covered(contacts.collider1, contacts.collider2, point.anchor1)
+                        || covered(contacts.collider2, contacts.collider1, point.anchor2))
+            });
         }
         contacts.manifolds.iter().any(|m| !m.points.is_empty())
     }

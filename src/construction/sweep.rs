@@ -20,6 +20,11 @@ use crate::contact_law::{Contactor, peak_force, peak_speed};
 /// 0.25 mm × 2^1.42 ≈ 0.67 mm at this bound.
 pub(crate) const CAST_HALF_EXTENT_M: f32 = 10.0;
 
+/// The game's environment destruction: only standing, exposed law chunks belong to the sweep.
+pub(crate) fn covered(structure: &Structure, state: &State, chunk: usize) -> bool {
+    state.standing(chunk) && !structure.chunks[chunk].buried
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Geometry {
     /// Each chunk's hull about its bounds' centre, `centres[c]`: the frame its casts run in.
@@ -196,7 +201,7 @@ impl Geometry {
                 continue;
             }
             let c = node.chunk;
-            if !state.standing(c) || structure.chunks[c].buried {
+            if !covered(structure, state, c) {
                 continue;
             }
             result.work.casts += 1;

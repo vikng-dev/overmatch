@@ -24,12 +24,20 @@ fn composed(replica: bool) -> (App, Entity) {
 }
 
 fn composed_kind(replica: bool, kind: &Arc<ConstructionKind>) -> (App, Entity) {
+    composed_kind_with_physics(replica, kind, crate::offline_physics())
+}
+
+fn composed_kind_with_physics(
+    replica: bool,
+    kind: &Arc<ConstructionKind>,
+    physics: bevy::app::PluginGroupBuilder,
+) -> (App, Entity) {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
         bevy::transform::TransformPlugin,
         AssetPlugin::default(),
-        crate::offline_physics(),
+        physics,
         sim_plugin,
         crate::debris::sim_plugin,
         crate::contact_transfer::sim_plugin,
@@ -4401,65 +4409,107 @@ fn a_sweep_reads_the_slender_sources_contact_mass() {
     assert!(peaks[1] < peaks[0], "rotation reduces the contact peak");
 }
 
-/// The game's environment destruction: the sweep owns a moving body's pair with a standing
-/// construction until exact occupancy. There a look-ahead point beyond Avian's contact tolerance
-/// is dropped, while a resting one within it and a penetrating one are kept; a pair with no
-/// standing construction keeps all three.
+/// The game's environment destruction: the production installers must suppress speculation only
+/// where a prepared sweep owns the point. Unbreakable and buried matter, new sources, touching
+/// points and penetration still rely on Avian. Calling the hook directly cannot prove registration.
 #[test]
-fn a_sweep_source_loses_only_its_look_ahead_points_on_a_standing_construction() {
-    use avian3d::collision::contact_types::ContactId;
-    let kind = column_construction();
-    let (mut app, root) = composed_kind(false, &kind);
-    app.update();
-    let wall = app
-        .world_mut()
-        .query_filtered::<(Entity, &ColliderOf), With<Element>>()
-        .iter(app.world())
-        .find(|(_, of)| of.body == root)
-        .map(|(e, _)| e)
-        .expect("a standing element collider");
-    let body = app.world_mut().spawn(RigidBody::Dynamic).id();
-    let other = app.world_mut().spawn(RigidBody::Dynamic).id();
-    let tolerance = app
-        .world()
-        .resource::<NarrowPhaseConfig>()
-        .contact_tolerance
-        * app.world().resource::<PhysicsLengthUnit>().0;
-    // Fixture: a look-ahead point 5 cm short of the surface, a resting one at half the tolerance
-    // and one 1 mm into it.
-    let fixture = [-0.05, -tolerance / 2.0, 0.001];
-    let pair = |(collider1, body1): (Entity, Entity), (collider2, body2): (Entity, Entity)| {
-        let mut pair = ContactPair::new(collider1, collider2, ContactId(0));
-        (pair.body1, pair.body2) = (Some(body1), Some(body2));
-        pair.manifolds = vec![ContactManifold::new(
-            fixture.map(|depth| ContactPoint::new(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, depth)),
-            Vec3::X,
-        )];
-        pair
-    };
-    let depths = |pair: &ContactPair| -> Vec<f32> {
-        pair.manifolds[0]
-            .points
-            .iter()
-            .map(|p| p.penetration)
-            .collect()
-    };
-    let mut state = bevy::ecs::system::SystemState::<SweepContacts>::new(app.world_mut());
-    let hooks = state
-        .get(app.world())
-        .expect("the sweep's hook reads only queries");
-    let mut queue = bevy::ecs::world::CommandQueue::default();
-    let mut commands = Commands::new(&mut queue, app.world());
-    for mut owned in [
-        pair((wall, root), (body, body)),
-        pair((body, body), (wall, root)),
-    ] {
-        assert!(hooks.modify_contacts(&mut owned, &mut commands));
-        assert_eq!(depths(&owned), fixture[1..]);
+fn sweep_installers_keep_every_contact_outside_prepared_coverage() {
+    #[derive(Clone, Copy, Debug)]
+    enum Case {
+        Covered,
+        Unbreakable,
+        Buried,
+        Unprepared,
+        Resting,
+        Penetrating,
     }
-    let mut free = pair((body, body), (other, other));
-    assert!(hooks.modify_contacts(&mut free, &mut commands));
-    assert_eq!(depths(&free), fixture);
+    let installers: &[(&str, fn() -> bevy::app::PluginGroupBuilder)] = &[
+        ("offline", crate::offline_physics),
+    ];
+    for &(name, install) in installers {
+        for case in [
+            Case::Covered,
+            Case::Unbreakable,
+            Case::Buried,
+            Case::Unprepared,
+            Case::Resting,
+            Case::Penetrating,
+        ] {
+            let mut kind = column_construction();
+            if matches!(case, Case::Unbreakable) {
+                // Fixture: the standing collider's layout declares no breakable matter.
+                Arc::make_mut(&mut kind).layout.elements[0] = None;
+            }
+            let (mut app, root) =
+                composed_kind_with_physics(matches!(case, Case::Unprepared), &kind, install());
+            for _ in 0..3 {
+                app.update();
+            }
+            if matches!(case, Case::Buried) {
+                let mut owner = app.world_mut().get_mut::<Breakage>(root).unwrap();
+                for chunk in &mut Arc::make_mut(&mut owner.live.structure).chunks {
+                    chunk.buried = true;
+                }
+            }
+            let tolerance = app
+                .world()
+                .resource::<NarrowPhaseConfig>()
+                .contact_tolerance
+                * app.world().resource::<PhysicsLengthUnit>().0;
+            // Fixture: separated by 5 cm, within contact tolerance, or penetrating by 1 mm.
+            let separation = match case {
+                Case::Resting => tolerance / 2.0,
+                Case::Penetrating => -0.001,
+                _ => 0.05,
+            };
+            let body = app
+                .world_mut()
+                .spawn((
+                    RigidBody::Dynamic,
+                    Position(Vec3::new(-0.6 - separation, 1.5, 0.0)),
+                    Rotation::default(),
+                    Collider::cuboid(0.2, 0.2, 0.2),
+                    Mass(128.0),
+                    NoAutoMass,
+                    LinearVelocity::ZERO,
+                    piece_layers(),
+                ))
+                .id();
+            app.update();
+            // Fixture: tangential travel admits speculative points while inward travel is zero.
+            app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = Vec3::Z * 10.0;
+            app.update();
+            let points: Vec<_> = app
+                .world()
+                .resource::<ContactGraph>()
+                .iter_active()
+                .filter(|pair| {
+                    (pair.body1 == Some(body) && pair.body2 == Some(root))
+                        || (pair.body2 == Some(body) && pair.body1 == Some(root))
+                })
+                .flat_map(|pair| &pair.manifolds)
+                .flat_map(|manifold| &manifold.points)
+                .map(|point| point.penetration)
+                .collect();
+            if matches!(case, Case::Covered) {
+                assert!(
+                    points.is_empty(),
+                    "{name} {case:?}: look-ahead escaped the installer: {points:?}"
+                );
+            } else {
+                assert!(
+                    !points.is_empty(),
+                    "{name} {case:?}: Avian must keep its contacts"
+                );
+                if !matches!(case, Case::Resting | Case::Penetrating) {
+                    assert!(
+                        points.iter().any(|&depth| depth < -tolerance),
+                        "{name} {case:?}: the witness must contain speculation: {points:?}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// The game's environment destruction: the hull makes the hole. A swept patch leaves the
