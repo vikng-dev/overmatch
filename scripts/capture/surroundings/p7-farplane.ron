@@ -1,0 +1,6 @@
+// Frame 7: p7-farplane. OVERMATCH_START: unset (default offline spawn; no OVERMATCH_START line in the survey log).
+// From the bay, after scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch:
+// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env -u OVERMATCH_START OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/surroundings/p7-farplane.ron target/debug/overmatch --offline
+// Sky and horizon survey: high over the south-west corner, looking away from the sun across the map,
+// to see whether terrain past the camera's 1000 m far plane is culled.
+(frames: (out: "target/capture/sky/p7-farplane.png", at: [12.0], size: (1280, 720), scale_factor: 1.0, ui: false, gizmos: false, step_s: 0.015625, camera: Pose(eye: (-740.0, 260.0, 740.0), look: (400.0, 0.0, -400.0))))
