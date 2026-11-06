@@ -1,0 +1,9 @@
+// The play area: a closed simple polygon in world XZ metres, counter-clockwise in XZ,
+// between a floor and a ceiling. The closing vertex is implicit.
+(
+    polygon: ([(-750.0, -750.0), (750.0, -750.0), (750.0, 750.0), (-750.0, 750.0)],
+        StandIn("play area: the terrain square's edge; replaced by the natural border the map's art builds (#200)")),
+    floor_m: (-100.0, StandIn("play area floor: where simulation ends below the terrain; replaced by authored vertical bounds")),
+    ceiling_m: (1000.0, StandIn("wall top: provisional authored bound; replaced by a ceiling informed by logged escapes; launched pieces have no speed ceiling")),
+    friction: (0.0, Taste("boundary feel: no grip, so a tank grinding into the wall slides along it and cannot rear up or climb it")),
+)

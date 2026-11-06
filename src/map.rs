@@ -1,4 +1,4 @@
-//! The map manifest: `assets/maps/<id>/level.json`, the ONE file that says what a map is.
+//! Map admission: root data in `assets/maps/<id>/`, published as one checked snapshot.
 //!
 //! ONE MAP IS ONE DIRECTORY. The exporter writes a single file per map carrying the terrain block
 //! (which heightmap, the square it hangs at, how its pixels decode to metres), the author's object
@@ -8,7 +8,13 @@
 //!
 //! ONE PARSE. [`crate::terrain_grid::decode_height_grid`] reads the file at Startup and publishes
 //! [`MapManifest`]; the terrain decode takes its extent and heightmap from that resource and
-//! [`crate::scatter`] takes its instances from the same one. Nothing else opens the file.
+//! [`crate::scatter`] takes its instances from the same one. [`content_digest`] delegates to
+//! [`load`], so compatibility checks cannot bypass admission.
+//!
+//! PROVISIONAL: the square play-area polygon stands in for the natural border (#200); its floor
+//! and ceiling stand in for authored vertical bounds informed by logged escapes. Height and mask
+//! decoders still reread files; the R6 remainder and replacements live in
+//! `.agents/docs/design/map-surroundings.md`.
 //!
 //! THE LIBRARY IS THE GAME'S, THE PLACEMENT IS THE MAP'S. What a prototype id the placement
 //! references MEANS to the game — a construction's box, a fir's size — is `prototypes.ron` beside the
@@ -39,6 +45,10 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 
+mod play_area;
+
+pub(crate) use play_area::PlayArea;
+
 use crate::construction::ConstructionLibrary;
 use crate::terrain_grid::{RowOrder, TerrainExtent};
 
@@ -56,12 +66,12 @@ const LEVEL_FILE: &str = "level.json";
 /// The game's prototype library inside a map's directory (module doc). REQUIRED beside a manifest:
 /// a placement whose ids resolve to nothing is present-but-broken (ADR-0011).
 const PROTOTYPES_FILE: &str = "prototypes.ron";
+const BOUNDARY_FILE: &str = "boundary.ron";
 
 /// Map asset ownership (best practice): root files are authored inputs both binaries read,
 /// belonging in the content digest and server pack. `view/` holds authored client-only
 /// data; `derived/` holds generated client products (the UI map image). Neither client folder
-/// enters the digest or server pack. The existing mask omission from the digest is the
-/// design's W1a lane. See `.agents/docs/design/map-surroundings.md`.
+/// enters the digest or server pack. See `.agents/docs/design/map-surroundings.md`.
 const DERIVED_DIR: &str = "derived";
 
 /// `<root>/maps/<id>` — the map's directory.
@@ -91,10 +101,13 @@ pub(crate) fn derived_asset(name: &str) -> String {
     format!("{MAPS_DIR}/{MAP_ID}/{DERIVED_DIR}/{name}")
 }
 
-/// One map's `level.json`, parsed and checked. The extent is a claim the map's author makes about
-/// their export, never something derived from the pixels.
+/// One map's admitted root data. The terrain extent is the author's declaration, never something
+/// derived from pixels; the play area is checked against that extent before publication.
 #[derive(Resource, Debug, Clone, PartialEq)]
 pub(crate) struct MapManifest {
+    pub(crate) play_area: PlayArea,
+    /// Compatibility digest of the exact bytes admitted by `load`.
+    pub(crate) digest: u64,
     /// The manifest's own directory — what every asset name in it resolves against.
     dir: PathBuf,
     /// Heightmap file name, as declared.
@@ -150,21 +163,6 @@ impl SpawnPoints {
 }
 
 impl MapManifest {
-    /// The construction asset ids the library names, each once.
-    fn construction_assets(&self) -> impl Iterator<Item = &str> {
-        self.prototypes
-            .values()
-            .filter_map(|prototype| match prototype {
-                Prototype::Construction { asset } => Some(asset.as_str()),
-                Prototype::Block { .. } => None,
-            })
-    }
-
-    /// Resolve each construction once at its authored size before play.
-    fn load_constructions(&mut self, root: &Path) {
-        self.constructions = ConstructionLibrary::load(root, self.construction_assets());
-    }
-
     /// The declared heightmap's path.
     pub(crate) fn heightmap_path(&self) -> PathBuf {
         self.dir.join(&self.heightmap)
@@ -431,8 +429,8 @@ impl ExtentXz {
         );
         let side = max_x - min_x;
         assert!(
-            side > 0.0,
-            "map: {} declares a {side} m world",
+            side.is_finite() && side > 0.0,
+            "map: {} field world_extent_xz declares a {side} m world — author a finite positive side",
             path.display(),
         );
         side
@@ -445,9 +443,41 @@ pub(crate) fn load(root: &Path) -> MapManifest {
     let path = level_path(root);
     let text = read_manifest(&path);
     let library = read_prototypes(root);
-    let mut manifest = parse(&text, &library, &path);
-    manifest.load_constructions(root);
-    manifest
+    let boundary_path = path.with_file_name(BOUNDARY_FILE);
+    let boundary = std::fs::read_to_string(&boundary_path).unwrap_or_else(|err| {
+        panic!(
+            "map: {} field boundary: {err} — restore the required boundary.ron",
+            boundary_path.display()
+        )
+    });
+    let parsed = parse(&text, &library, &path);
+    let read = |field: &str, name: &str| {
+        let file = parsed.dir.join(name);
+        std::fs::read(&file).unwrap_or_else(|err| {
+            panic!(
+                "map: {} field {field}: {}: {err} — restore the declared image",
+                path.display(),
+                file.display()
+            )
+        })
+    };
+    let heightmap = read(
+        "terrain.heightmap.asset",
+        &parsed.level.terrain.heightmap.asset,
+    );
+    let masks = read("terrain.masks.asset", &parsed.level.terrain.masks.asset);
+    let constructions = ConstructionLibrary::load(root, construction_assets(&parsed.prototypes));
+    let play_area = PlayArea::checked(&boundary, parsed.extent, &boundary_path);
+    let mut files = vec![
+        text.as_bytes(),
+        library.as_bytes(),
+        boundary.as_bytes(),
+        heightmap.as_slice(),
+        masks.as_slice(),
+    ];
+    files.extend(constructions.texts());
+    let digest = digest_of(&files);
+    parsed.publish(play_area, constructions, digest)
 }
 
 /// The selected map's prototype library text. Only read beside a manifest that exists, so there is
@@ -475,35 +505,17 @@ fn read_manifest(path: &Path) -> String {
     }
 }
 
-/// The CONTENT digest of the world this process will build: the manifest's own bytes, its prototype
-/// library's, the bytes of its heightmap, and every construction and dressing file it names —
-/// the files that decide the terrain
-/// and the scatter, none of which crosses the wire.
-///
-/// CONTENT, not the id: two peers can select the same map name over different files (a stale
-/// checkout, a half-pulled LFS object, a hand-edited `level.json`), and the id would happily agree
-/// while the ground disagreed. `crate::net::protocol::protocol_id` folds this into the handshake.
-///
-/// Same failure law as [`load`]: a manifest that is absent or does not hold panics.
+/// The map's compatibility term, after every load-gate check. Both peers derive their world
+/// from these root bytes; client-only `view/` and `derived/` products do not participate.
 pub(crate) fn content_digest(root: &Path) -> u64 {
-    let path = level_path(root);
-    let text = read_manifest(&path);
-    let library = read_prototypes(root);
-    let mut manifest = parse(&text, &library, &path);
-    manifest.load_constructions(root);
-    let constructions = &manifest.constructions;
-    let heightmap = manifest.heightmap_path();
-    let bytes = std::fs::read(&heightmap).unwrap_or_else(|err| {
-        panic!(
-            "map: {} names heightmap {} — {}: {err}",
-            path.display(),
-            manifest.heightmap(),
-            heightmap.display(),
-        )
-    });
-    let mut files = vec![text.as_bytes(), library.as_bytes(), bytes.as_slice()];
-    files.extend(constructions.texts());
-    digest_of(&files)
+    load(root).digest
+}
+
+fn construction_assets(prototypes: &BTreeMap<String, Prototype>) -> impl Iterator<Item = &str> {
+    prototypes.values().filter_map(|prototype| match prototype {
+        Prototype::Construction { asset } => Some(asset.as_str()),
+        Prototype::Block { .. } => None,
+    })
 }
 
 /// The fold itself, pure: [`crate::fingerprint`]'s FNV-1a, byte-driven and integer-only, so every
@@ -512,7 +524,7 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
 fn digest_of(files: &[&[u8]]) -> u64 {
     use crate::fingerprint::{FNV_OFFSET_BASIS, fnv1a_64};
     files.iter().fold(
-        fnv1a_64(FNV_OFFSET_BASIS, b"overmatch-map-content-v2"),
+        fnv1a_64(FNV_OFFSET_BASIS, b"overmatch-map-content-v3"),
         |hash, bytes| {
             let hash = fnv1a_64(hash, &(bytes.len() as u64).to_le_bytes());
             fnv1a_64(hash, bytes)
@@ -558,8 +570,8 @@ fn check_prototype(id: &str, prototype: &Prototype, library: &Path) {
 /// Parse and check one manifest's text against its prototype library's text. `path` is where the
 /// manifest came from — both the directory every asset name resolves against and the name every
 /// refusal carries.
-pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
-    let level: LevelFile = serde_json::from_str(text)
+fn parse(text: &str, library: &str, path: &Path) -> ParsedMap {
+    let mut level: LevelFile = serde_json::from_str(text)
         .unwrap_or_else(|err| panic!("map: {} failed to parse: {err}", path.display()));
     level.coordinate_system.check(path);
     let prototypes: BTreeMap<String, Prototype> = ron::from_str(library).unwrap_or_else(|err| {
@@ -586,7 +598,7 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
             path.display(),
         );
     }
-    let heightmap = level.terrain.heightmap;
+    let heightmap = &level.terrain.heightmap;
     let side_m = heightmap.world_extent_xz.side_m(path);
     let rows = heightmap.row_order(path);
     let (offset_m, scale_m) = (
@@ -596,32 +608,70 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
     // A zero span is legal — that is a deliberately level map; a negative or non-finite one NaNs
     // every sample the grid hands the sim.
     assert!(
-        offset_m.is_finite() && scale_m.is_finite() && scale_m >= 0.0,
-        "map: {} declares height_decode offset {offset_m} / scale {scale_m}",
+        offset_m.is_finite()
+            && scale_m.is_finite()
+            && scale_m >= 0.0
+            && (offset_m + scale_m).is_finite(),
+        "map: {} field height_decode offset {offset_m} / scale {scale_m} — author a finite range with nonnegative scale and finite offset + scale",
         path.display(),
     );
-    let masks = level.terrain.masks;
+    let masks = &level.terrain.masks;
     assert!(
         masks.resolution[0] > 0 && masks.resolution[1] > 0,
         "map: {} declares masks resolution {:?}, which is no image",
         path.display(),
         masks.resolution,
     );
-    MapManifest {
-        dir: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
-        heightmap: heightmap.asset,
+    let spawn_points =
+        SpawnPoints::checked(std::mem::take(&mut level.spawn_points), side_m * 0.5, path);
+    ParsedMap {
+        dir: path
+            .parent()
+            .expect("a manifest path has a containing directory")
+            .to_path_buf(),
         extent: TerrainExtent {
             world_size_m: side_m,
             height_offset_m: offset_m,
             height_span_m: scale_m,
         },
         rows,
-        masks: masks.asset,
-        masks_resolution: masks.resolution,
-        spawn_points: SpawnPoints::checked(level.spawn_points, side_m * 0.5, path),
-        instances: level.instances,
+        spawn_points,
         prototypes,
-        constructions: ConstructionLibrary::default(),
+        level,
+    }
+}
+
+/// Parsed inputs stay private until construction resolution and cross-file admission finish.
+struct ParsedMap {
+    dir: PathBuf,
+    extent: TerrainExtent,
+    rows: RowOrder,
+    spawn_points: SpawnPoints,
+    prototypes: BTreeMap<String, Prototype>,
+    level: LevelFile,
+}
+
+impl ParsedMap {
+    fn publish(
+        self,
+        play_area: PlayArea,
+        constructions: ConstructionLibrary,
+        digest: u64,
+    ) -> MapManifest {
+        MapManifest {
+            dir: self.dir,
+            heightmap: self.level.terrain.heightmap.asset,
+            extent: self.extent,
+            rows: self.rows,
+            masks: self.level.terrain.masks.asset,
+            masks_resolution: self.level.terrain.masks.resolution,
+            spawn_points: self.spawn_points,
+            instances: self.level.instances,
+            prototypes: self.prototypes,
+            constructions,
+            play_area,
+            digest,
+        }
     }
 }
 
@@ -629,6 +679,18 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
 // `pub(crate)` so every layer that asserts against the SHIPPED map reads it through the one loader.
 pub(crate) mod tests {
     use super::*;
+
+    fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
+        let parsed = super::parse(text, library, path);
+        let boundary = play_area::tests::boundary_text(parsed.extent);
+        let area = PlayArea::checked(
+            &boundary,
+            parsed.extent,
+            &path.with_file_name(BOUNDARY_FILE),
+        );
+        let digest = digest_of(&[text.as_bytes(), library.as_bytes(), boundary.as_bytes()]);
+        parsed.publish(area, ConstructionLibrary::default(), digest)
+    }
 
     /// The repo's `assets/` — what the shipped map is read out of, in tests, without an asset root.
     pub(crate) fn shipped_assets() -> PathBuf {
@@ -716,7 +778,8 @@ pub(crate) mod tests {
             &format!(r#""instances":[{INSTANCES}]"#),
         );
         let mut manifest = parse(&text, LIBRARY, Path::new("fixture/level.json"));
-        manifest.load_constructions(&shipped_assets());
+        manifest.constructions =
+            ConstructionLibrary::load(&shipped_assets(), construction_assets(&manifest.prototypes));
         manifest
     }
 
@@ -1050,8 +1113,17 @@ pub(crate) mod tests {
         let library = read_prototypes(&root);
         let manifest = load(&root);
         let heightmap = std::fs::read(manifest.heightmap_path()).unwrap();
-        let mut files = vec![text.as_bytes(), library.as_bytes(), heightmap.as_slice()];
-        let assets: std::collections::BTreeSet<_> = manifest.construction_assets().collect();
+        let boundary = std::fs::read(path.with_file_name(BOUNDARY_FILE)).unwrap();
+        let masks = std::fs::read(manifest.dir.join(&manifest.masks)).unwrap();
+        let mut files = vec![
+            text.as_bytes(),
+            library.as_bytes(),
+            boundary.as_slice(),
+            heightmap.as_slice(),
+            masks.as_slice(),
+        ];
+        let assets: std::collections::BTreeSet<_> =
+            construction_assets(&manifest.prototypes).collect();
         let construction_texts: Vec<_> = assets
             .iter()
             .flat_map(|asset| {
@@ -1083,6 +1155,120 @@ pub(crate) mod tests {
         }
         files.extend(construction_files);
         assert_eq!(shipped, digest_of(&files));
+    }
+
+    struct MapFixture(PathBuf);
+
+    impl MapFixture {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "overmatch-wall-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let dir = map_dir(&root);
+            std::fs::create_dir_all(&dir).unwrap();
+            let extent = TerrainExtent {
+                world_size_m: 20.0,
+                height_offset_m: -2.0,
+                height_span_m: 5.0,
+            };
+            std::fs::write(dir.join(LEVEL_FILE), manifest_text(10.0, -2.0, 5.0, "+Z")).unwrap();
+            std::fs::write(dir.join(PROTOTYPES_FILE), EMPTY_LIBRARY).unwrap();
+            std::fs::write(
+                dir.join(BOUNDARY_FILE),
+                play_area::tests::boundary_text(extent),
+            )
+            .unwrap();
+            image::GrayImage::new(4, 4).save(dir.join("h.png")).unwrap();
+            image::RgbImage::new(4, 4).save(dir.join("m.png")).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for MapFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).expect("remove the isolated map fixture");
+        }
+    }
+
+    /// Compatibility must change with boundary or mask bytes, including edits that still pass
+    /// admission. Both consumers use the same snapshot and neither may skip its checks.
+    #[test]
+    fn boundary_and_mask_mutations_change_the_admitted_digest() {
+        let fixture = MapFixture::new();
+        let root = &fixture.0;
+        let base = load(root).digest;
+        assert_eq!(content_digest(root), base);
+        let path = map_dir(root).join(BOUNDARY_FILE);
+        let boundary = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, boundary.replace("ceiling_m: (4", "ceiling_m: (5")).unwrap();
+        assert_ne!(
+            content_digest(root),
+            base,
+            "boundary edit changes the compatibility term"
+        );
+        std::fs::write(&path, boundary).unwrap();
+        let masks = map_dir(root).join("m.png");
+        let mut image = image::RgbImage::new(4, 4);
+        image.put_pixel(0, 0, image::Rgb([1, 0, 0])); // Fixture: a different valid mask sample.
+        image.save(masks).unwrap();
+        assert_ne!(
+            content_digest(root),
+            base,
+            "mask edit changes the compatibility term"
+        );
+    }
+
+    /// A handshake must refuse the same broken boundary as map startup, rather than mint a tag
+    /// for data the simulation will reject. The file, field and fix survive through both edges.
+    #[test]
+    fn digest_cannot_bypass_boundary_admission() {
+        let fixture = MapFixture::new();
+        let path = map_dir(&fixture.0).join(BOUNDARY_FILE);
+        let boundary = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, boundary.replace("floor_m: (-3", "floor_m: (-2")).unwrap();
+        for digest_only in [false, true] {
+            let refusal = std::panic::catch_unwind(|| {
+                if digest_only {
+                    content_digest(&fixture.0);
+                } else {
+                    load(&fixture.0);
+                }
+            })
+            .expect_err("both entry points refuse a floor at the lowest decodable height");
+            let reason = refusal.downcast_ref::<String>().unwrap();
+            for part in ["boundary.ron", "floor_m", "below height_decode.offset_m"] {
+                assert!(reason.contains(part), "{reason}");
+            }
+        }
+    }
+
+    /// Finite source coordinates can still overflow a derived range. Terrain and boundary
+    /// consumers rely on finite metres, so the descriptor gate must refuse before publication.
+    #[test]
+    fn derived_terrain_ranges_must_remain_finite() {
+        // Fixture: representable inputs whose side or offset + scale overflows f32.
+        for (text, field) in [
+            (manifest_text(f32::MAX, 0.0, 1.0, "+Z"), "world_extent_xz"),
+            (
+                manifest_text(10.0, f32::MAX, f32::MAX, "+Z"),
+                "height_decode",
+            ),
+        ] {
+            let refusal = match std::panic::catch_unwind(|| {
+                super::parse(&text, EMPTY_LIBRARY, Path::new("fixture/level.json"))
+            }) {
+                Ok(_) => panic!("overflowing ranges must be refused"),
+                Err(refusal) => refusal,
+            };
+            let reason = refusal.downcast_ref::<String>().unwrap();
+            for part in ["fixture/level.json", field, "author a finite"] {
+                assert!(reason.contains(part), "{reason}");
+            }
+        }
     }
 
     /// The column index IS X — the decode walks a row-major image, so a `-X` export describes

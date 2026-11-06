@@ -479,13 +479,13 @@ culling witness (§3.1). An optic traverse shows the parallax. Draw count and ms
 pack carries it as a root `.ron`):
 
 ```ron
-// The play area: a closed simple polygon in world XZ metres, counter-clockwise seen from +Y,
+// The play area: a closed simple polygon in world XZ metres, counter-clockwise in XZ (positive signed area),
 // between a floor and a ceiling.
 (
     polygon: ([(-750.0, -750.0), (750.0, -750.0), (750.0, 750.0), (-750.0, 750.0)],
         StandIn("play area: the terrain square's edge; replaced by the natural border the map's art builds (#200)")),
     floor_m: (-100.0, StandIn("play area floor: where simulation ends below the terrain; replaced by authored vertical bounds")),
-    ceiling_m: (…, StandIn("wall top: admitted, not derived; launched pieces have no speed ceiling (debris/launch.rs:73)")),
+    ceiling_m: (1000.0, StandIn("wall top: provisional authored bound; replaced by a ceiling informed by logged escapes; launched pieces have no speed ceiling")),
     friction: (0.0, Taste("boundary feel: no grip, so a tank grinding into the wall slides along it and cannot rear up or climb it")),
 )
 ```
@@ -642,8 +642,9 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
 | Outland | stitched, attribute-continuous view mesh to 1.25·V | odd-reflection height; mirrored mask | authored outland, or terrain past the boundary (#221) |
 | Clouds, sun disk | baked, static; one shared solar radius | none | none |
 | Distant life | instanced clumps bound to constructions in data | seeded placement | authored placement in the instance format (#221) |
-| Boundary | polygon, edge boxes, load gate, floor law, no grip (owner `Taste`) | square polygon; square spawn limit; invisible; routed landing response | the natural border's polygon (#200); a polygon-inset spawn limit; generic contact materials |
-| Map load | one admitted sequence and digest (R6) | the decoders' second read (R6 remainder) | the snapshot carrying the bytes, with destruction-05 and destruction-09 |
+| Boundary data (W1a delivered) | `boundary.ron`, checked `PlayArea`, gate checks 1–2; no grip is an owner `Taste` | square polygon; floor and ceiling bounds | the natural border's polygon (#200); authored vertical bounds, informed by logged escapes |
+| Boundary consumers | planned: cross-file gate, edge boxes, floor law | square spawn limit; invisible; routed landing response | a polygon-inset spawn limit; generic contact materials |
+| Map load (W1a delivered) | one admitted sequence and digest, including boundary and masks (R6); height-decode range must remain finite | the decoders' second read (R6 remainder) | the snapshot carrying the bytes, with destruction-05 and destruction-09 |
 | Map sources | tracked, reproducible, admitted generators | off-repo Houdini scene and TIFF; `map_ui.png` recipe | #221's pipeline; a startup derivation |
 
 ---
