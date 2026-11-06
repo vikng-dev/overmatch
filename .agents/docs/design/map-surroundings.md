@@ -519,14 +519,11 @@ project's one pair rule. It replaces borrowing the terrain's solver stand-in
   - Every friction in the game is `PAIR_RULE` or Avian's `Average` default (`DefaultFriction`,
     `rubble.rs:163-169`); no `Max`, `Multiply` or `Min` exists (grep). So every hull, bump stop,
     debris piece and default collider pairs to zero.
-- **The track's own grip law.** Collider support reads `mu: grip.pair(pieces.friction(collider))`
-  (`src/track/forces.rs:1298-1301`), where `pair` is Avian's `combine` of the track's substance
-  friction (`spec.rs:800-804`, `PAIR_RULE`) with the wall's (`forces.rs:161-163`). That gives zero.
-  The successor on `lane/trackworld` is the same expression
-  (`lane/trackworld:src/track/world_contact.rs:358-361`).
-- Zero grip removes traction along the wall. It does not remove the fictitious upward *normal*
-  that the belt-normal contact lends a vertical face (below), so W1c still waits for the convex
-  adapter.
+- **The track's own grip law.** `track::world_contact::surface_under` reads
+  `grip.pair(pieces.friction(collider))`; `track::forces::GripParams::pair` combines the track's
+  substance friction with the collider's through Avian's `combine`. The wall therefore gives zero.
+- `track::world_contact::patch_contact` returns each clipped face's own point and normal;
+  zero grip and the actual vertical normal prevent a wall from lending upward belt support.
 - Refused before play: `friction` not finite, or < 0.
 
 **Landing response (P).** `Terrain` membership still makes a debris landing read soil compliance
@@ -540,7 +537,7 @@ answer: one representation and one constructor. The square is a four-vertex poly
 Rejected:
 - four boxes from the terrain square: a second path the irregular border would replace;
 - `Collider::polyline` or a trimesh: the belt admits only boxes and convex polyhedra
-  (`lane/trackworld:src/track/world_contact/admission.rs:35-44`), and a surface with no thickness can
+  (`track::world_contact::admission::refuse_unsupported`), and a surface with no thickness can
   tunnel;
 - raising the heightmap at the edge: it changes the sim terrain, cannot be invisible, and is art's
   to do.
@@ -550,24 +547,19 @@ Rejected:
 | Body | Meets it | Why |
 |---|---|---|
 | hull proxies, bump stops | yes | `[Vehicle]`, filter `ALL` (`src/tank/spawn.rs:938`, `src/track/bump_stop.rs:162`) |
-| belt support | admitted as an ordinary solid | `world_contact::solid` admits any non-sensor collider that is Vehicle-compatible (`lane/trackworld:src/track/world_contact/admission.rs:13-15`). The solid-admission contract requires no category-specific registration (#198). |
-| track side slices | no | their filter omits `Terrain` (`bump_stop.rs:136-147`); trackworld deletes them |
+| belt support | admitted as an ordinary solid | `track::world_contact::admission::solid` admits any non-sensor collider that is Vehicle-compatible. The solid-admission contract requires no category-specific registration (#198). |
+| track side slices | no | their filter omits `Terrain` (`track::bump_stop::side_plate_layers`) |
 | debris pieces | yes | `piece_layers` includes `Terrain` (`src/construction/breakage.rs:2688-2699`) |
 | a burst's push rays (game's damage model) | yes, as a static surface | `SURFACES` includes `Terrain` (`breakage.rs:1293-1301`) |
 | orbit camera | yes | `ground_distance` casts against `Terrain` (`world::ground_distance`) |
 | aim ray | no, after A1 | A1 gives aim the march's first-surface query |
 | rounds | no | the march meets `Armor` colliders and the height grid (`ballistics.rs:747-757`, `:784-789`) |
 
-**The belt's contact must use the wall's face (blocks W1c).**
-- Admitted is not the same as correct. On main and on `lane/trackworld` alike, a collider patch's
-  contact normal is the belt's own `-out`, not the face it meets, and its depth is the slab overlap:
-  - main: `src/track/forces.rs:1256-1270`, `rubble.rs:766`;
-  - lane: `lane/trackworld:src/track/world_contact.rs:316-330`.
-- A vertical wall overlapping the belt would therefore lend upward support and traction: the same
-  perch the house snag showed.
-- Trackworld session 3, the convex adapter, returns the actual clipped faces and normals per belt
-  element. **W1c spawns the wall only after that adapter lands on main.** No wall-specific exclusion
-  is added in the meantime; the root fix is already the next lane of its chain and adds no compute.
+**The belt's contact uses the wall's face.**
+- `track::world_contact::convex::clip_faces` retains actual clipped surface normals;
+  `track::world_contact::patch_contact` returns the struck face's pressure centroid and normal.
+- The terrain adapter (`track::world_contact::terrain::faces`) uses the same face representation.
+- The convex and terrain adapters are on main. W1c adds no wall-specific exclusion.
 
 **Escape and the floor.**
 - **Ceiling.** Admitted, not derived: launch speed is impulse over mass with no ceiling
@@ -644,7 +636,8 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
 | Distant life | instanced clumps bound to constructions in data | seeded placement | authored placement in the instance format (#221) |
 | Boundary data (W1a delivered) | `boundary.ron`, checked `PlayArea`, gate checks 1–2; no grip is an owner `Taste` | square polygon; floor and ceiling bounds | the natural border's polygon (#200); authored vertical bounds, informed by logged escapes |
 | Boundary admission (W1b delivered) | cross-file gate checks 3–5: spawns, resolved placement footprints and outward edge boxes; startup and compatibility share every refusal | square spawn limit | a polygon-inset spawn picker (#200) |
-| Boundary consumers | planned: edge boxes, floor law | invisible; routed landing response | map art; generic contact materials |
+| Boundary wall (W1c delivered) | admitted finite wall dimensions; `PlayArea::wall_boxes` supplies outward edge solids at Startup on every map composition; `Terrain` layer, friction through `substances::contact_friction`; camera, debris and pair-path witnesses | invisible; routed landing response | map art; generic contact materials (#200) |
+| Boundary floor consumers | planned: floor law | none new | W2, W3 |
 | Map load (W1a delivered) | one admitted sequence and digest, including boundary and masks (R6); height-decode range must remain finite | the decoders' second read (R6 remainder) | the snapshot carrying the bytes, with destruction-05 and destruction-09 |
 | Map sources | tracked, reproducible, admitted generators | off-repo Houdini scene and TIFF; `map_ui.png` recipe | #221's pipeline; a startup derivation |
 
@@ -713,9 +706,8 @@ The plan's L6 (an `Atmosphere` spike) is out: settled.
 
 ## 5. Owner decisions left
 
-1. **When the wall arrives.** W1c waits for trackworld session 3, the convex adapter, on main.
-   Spawning it earlier would let a tank's belt find upward support on an invisible vertical face:
-   a perch. **Recommended:** wait. Until then a tank can still drive off the edge, as today.
+1. **Wall driving verdict.** W1c supplies the edge solids after the convex and terrain adapters;
+   W1d still owes the hull-driving witnesses and the owner's visual verdict.
 2. **Haze default.** 12 km under the playtest fork (alternatives 8 km and 20 km). Settled in play;
    nothing is needed before L2a.
 3. **When the outland gets authored land.** Odd-reflection height now; an authored outland, or

@@ -7,6 +7,11 @@ use avian3d::prelude::{
 };
 use bevy::prelude::*;
 
+mod boundary;
+/// Identifies the boundary data as this collider's material source; contact laws use no tag.
+#[derive(Component)]
+pub(crate) struct BoundaryWall;
+
 use crate::Layer;
 
 /// The world's construction generation. Streamed environment pieces belong to exactly this
@@ -273,6 +278,10 @@ fn spawn_environment(
     // only what stands ON it (the scatter's constructions, below), on the same revision semantics
     // `TrackField` rebuilds from.
     if let Some(grid) = grid {
+        let map = manifest
+            .as_deref()
+            .expect("a decoded height grid comes from an admitted map");
+        boundary::spawn(&mut commands, map);
         // The view layer's parry cap must reach across the map the grid actually is (ADR-0011): a
         // world wider than [`VIEW_CAST_MAX_M`]'s diagonal clips aim and camera picks at the cap
         // instead of at the ground, and the clip is invisible — the miss fallback looks like sky.

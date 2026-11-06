@@ -3,6 +3,8 @@
 
 use std::path::Path;
 
+use bevy::prelude::*;
+
 use crate::{provenance::Sourced, terrain_grid::TerrainExtent};
 
 /// Resolution: a thick solid for discrete collision detection; the reference case of 100 m/s
@@ -114,6 +116,15 @@ impl PlayArea {
             area.friction().is_finite() && area.friction() >= 0.0,
             "map: {file} field friction — author a finite nonnegative contact friction"
         );
+        for (index, wall) in area.wall_boxes().enumerate() {
+            assert!(
+                wall.translation.is_finite()
+                    && wall.rotation.is_finite()
+                    && wall.scale.is_finite()
+                    && (wall.scale * 0.5).cmpgt(Vec3::ZERO).all(),
+                "map: {file} fields polygon edge {index}, floor_m/ceiling_m — shorten the edge or vertical span so every wall box has finite, nonzero half-extents in simulation precision"
+            );
+        }
         area.check_outward_boxes(path);
         area
     }
@@ -165,6 +176,34 @@ impl PlayArea {
                 path.display(),
             );
         }
+    }
+
+    /// Unit-cube transforms: local X follows the edge, local Z points inward. The whole
+    /// thickness lies outside the polygon; the inner face runs exactly between its vertices.
+    pub(crate) fn wall_boxes(&self) -> impl Iterator<Item = Transform> + '_ {
+        self.polygon
+            .iter()
+            .zip(self.polygon.iter().cycle().skip(1))
+            .map(|(a, b)| {
+                // Widen before differences, norms and midpoints; admission checks the narrowed box.
+                let (a, b) = (a.map(f64::from), b.map(f64::from));
+                let edge = [b[0] - a[0], b[1] - a[1]];
+                let length = edge[0].hypot(edge[1]);
+                let half_depth = f64::from(WALL_THICKNESS_M) * 0.5;
+                Transform {
+                    translation: Vec3::new(
+                        ((a[0] + b[0]) * 0.5 + edge[1] / length * half_depth) as f32,
+                        ((f64::from(self.floor_m) + f64::from(self.ceiling_m)) * 0.5) as f32,
+                        ((a[1] + b[1]) * 0.5 - edge[0] / length * half_depth) as f32,
+                    ),
+                    rotation: Quat::from_rotation_y(-edge[1].atan2(edge[0]) as f32),
+                    scale: Vec3::new(
+                        length as f32,
+                        (f64::from(self.ceiling_m) - f64::from(self.floor_m)) as f32,
+                        WALL_THICKNESS_M,
+                    ),
+                }
+            })
     }
 
     pub(crate) fn polygon(&self) -> &[[f32; 2]] {
@@ -421,6 +460,7 @@ pub(super) mod tests {
                 "nonnegative",
             ),
             ("friction: (0.0", "friction: (NaN", "friction", "finite"),
+            ("friction: (0.0", "friction: (inf", "friction", "finite"),
             (
                 "Taste(\"fixture grip\")",
                 "Fixture(\"fixture grip\")",
@@ -441,6 +481,58 @@ pub(super) mod tests {
             ),
         ] {
             refusal(&valid.replace(from, to), field, fix);
+        }
+    }
+
+    /// Collider consumers require representable half-extents even when each authored bound is
+    /// finite. A mutant that admits their overflowing difference publishes invalid geometry.
+    #[test]
+    fn wall_dimensions_are_refused_before_publication() {
+        let invalid = boundary_text(EXTENT)
+            .replace("floor_m: (-3", "floor_m: (-3e38")
+            .replace("ceiling_m: (4", "ceiling_m: (3e38");
+        refusal(
+            &invalid,
+            "floor_m/ceiling_m",
+            "finite, nonzero half-extents",
+        );
+    }
+
+    /// Every edge, including oblique and reflex edges, has its inner face at the admitted
+    /// vertices. The wall spawner relies on this shared geometry rather than the terrain square.
+    #[test]
+    fn wall_faces_follow_the_polygon_and_extrude_outward() {
+        // Fixture: an oblique edge and a wide concave corner; all coordinates are metres.
+        let extent = TerrainExtent {
+            world_size_m: 200.0,
+            ..EXTENT
+        };
+        let text = polygon_text(
+            extent,
+            "[(-90,-90), (90,-70), (90,90), (0,90), (0,0), (-90,0)]",
+        );
+        let area = PlayArea::checked(&text, extent, Path::new("fixture/boundary.ron"));
+        let tolerance = avian3d::prelude::NarrowPhaseConfig::default().contact_tolerance
+            * avian3d::prelude::PhysicsLengthUnit::default().0;
+        for ((a, b), wall) in area
+            .polygon()
+            .iter()
+            .zip(area.polygon().iter().cycle().skip(1))
+            .zip(area.wall_boxes())
+        {
+            for (x, expected) in [(-0.5, a), (0.5, b)] {
+                let inner = wall.transform_point(Vec3::new(x, 0.0, 0.5));
+                assert!((inner.xz() - Vec2::from_array(*expected)).length() <= tolerance);
+            }
+            let outer = wall.transform_point(Vec3::new(0.0, 0.0, -0.5));
+            let edge = Vec2::from_array(*b) - Vec2::from_array(*a);
+            let relative = outer.xz() - Vec2::from_array(*a);
+            assert!(
+                edge.perp_dot(relative) < 0.0,
+                "the outer face is on the polygon's right"
+            );
+            assert_eq!(wall.translation.y - wall.scale.y * 0.5, area.floor_m());
+            assert_eq!(wall.translation.y + wall.scale.y * 0.5, area.ceiling_m());
         }
     }
 

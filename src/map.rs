@@ -165,6 +165,10 @@ impl SpawnPoints {
 }
 
 impl MapManifest {
+    pub(crate) fn boundary_path(&self) -> PathBuf {
+        self.dir.join(BOUNDARY_FILE)
+    }
+
     /// The declared heightmap's path.
     pub(crate) fn heightmap_path(&self) -> PathBuf {
         self.dir.join(&self.heightmap)
