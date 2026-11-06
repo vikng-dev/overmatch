@@ -3089,6 +3089,14 @@ fn refit_systems() -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::Sc
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct LawSet;
 
+/// Hull sweep and its reconciliation, before physics consumes the changed colliders.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct SweepSet;
+
+/// Carrier splits after the laws, flushed before publication reads the resulting groups.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct SplitSet;
+
 /// Inside [`LawSet`], after the deposits and before the refit: the step's contacts still name
 /// live colliders here, since the refit despawns the ones a deposit retired.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -3113,6 +3121,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
             FixedPostUpdate,
             (sweep, reconcile.run_if(sweep_intake::changed))
                 .chain()
+                .in_set(SweepSet)
                 .before(avian3d::prelude::PhysicsSystems::Prepare)
                 .run_if(not(resource_exists::<ClientReplica>)),
         )
@@ -3138,6 +3147,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
         .add_systems(
             FixedPostUpdate,
             split_groups
+                .in_set(SplitSet)
                 .after(LawSet)
                 .before(crate::state::SimPhase::Publish)
                 .run_if(not(resource_exists::<ClientReplica>)),

@@ -271,6 +271,20 @@ pub(crate) fn booted_sim_on(world: Option<crate::terrain_grid::HeightGrid>) -> B
     booted_sim_on_map(world, None)
 }
 
+/// Fixture: an uninterrupted plane tilted along Z. Its declared height interval encloses
+/// both ends, so the admitted map floor is below the whole surface for either slope sign.
+fn driving_plane(angle: f32) -> crate::terrain_grid::HeightGrid {
+    let base = crate::terrain_grid::FIXTURE_EXTENT;
+    let height = base.half_extent() * angle.tan();
+    let extent = crate::terrain_grid::TerrainExtent {
+        height_offset_m: -height.abs(),
+        // A flat plane still needs a positive decode span to admit its fixture manifest.
+        height_span_m: (2.0 * height.abs()).max(base.height_span_m),
+        ..base
+    };
+    crate::terrain_grid::HeightGrid::new(vec![height, height, -height, -height].into(), 2, extent)
+}
+
 /// Analytical driving worlds declare an empty placement as well as their surface. Unrelated
 /// construction dynamics cannot be a premise of a brake, traction or drivetrain witness.
 /// The populated-map composition gates select their own placement through `booted_sim_on`.
@@ -1245,13 +1259,7 @@ fn contact_law_shipped_brakes_hold_below_both_limits_and_move_above_the_lower() 
                 1.0_f32.to_radians() // Fixture sliding slope when no static interval exists.
             };
             let angle = limit + if above { margin } else { -margin };
-            let extent = crate::terrain_grid::FIXTURE_EXTENT;
-            let height = extent.half_extent() * angle.tan();
-            let grid = crate::terrain_grid::HeightGrid::new(
-                vec![height, height, -height, -height].into(),
-                2,
-                extent,
-            );
+            let grid = driving_plane(angle);
             let mut app = booted_driving_grid(grid);
             start_fixed_clock(&mut app);
             app.update();

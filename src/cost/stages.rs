@@ -9,6 +9,7 @@ use std::sync::{
 use std::time::Instant;
 
 use bevy::prelude::Resource;
+use serde::{Serialize, Serializer, ser::SerializeMap};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Stage {
@@ -36,6 +37,9 @@ pub(crate) const COUNT: usize = NAMES.len();
 pub(crate) struct Stages(Arc<[AtomicU64; COUNT]>);
 
 impl Stages {
+    pub(super) fn total_ns(&self) -> u64 {
+        self.0.iter().map(|ns| ns.load(Ordering::Relaxed)).sum()
+    }
     /// An absent resource means instrumentation is off, without reading the clock.
     pub(crate) fn start(stages: Option<&Self>, stage: Stage) -> Option<Bracket> {
         stages.map(|stages| Bracket {
@@ -47,6 +51,29 @@ impl Stages {
 
     pub(crate) fn take_us(&self) -> [f64; COUNT] {
         std::array::from_fn(|i| self.0[i].swap(0, Ordering::Relaxed) as f64 / 1000.0)
+    }
+}
+
+/// Serialize stage names from their owner, so consumers can include newly added stages.
+#[derive(Clone, Copy)]
+pub(crate) struct NamedTimes<const N: usize> {
+    names: &'static [&'static str; N],
+    pub(crate) values: [f64; N],
+}
+
+impl<const N: usize> NamedTimes<N> {
+    pub(crate) fn new(names: &'static [&'static str; N], values: [f64; N]) -> Self {
+        Self { names, values }
+    }
+}
+
+impl<const N: usize> Serialize for NamedTimes<N> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(N))?;
+        for (name, us) in self.names.iter().zip(self.values) {
+            map.serialize_entry(name, &us)?;
+        }
+        map.end()
     }
 }
 

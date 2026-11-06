@@ -462,14 +462,7 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
 fn perceived_load_and_landing_gaps_on_the_course() {
     for degrees in [10.0_f32, 20.0, 30.0] {
         let angle = degrees.to_radians();
-        // Fixture: one plane over the synthetic world's extent, rising toward -Z.
-        let extent = crate::terrain_grid::FIXTURE_EXTENT;
-        let height = extent.half_extent() * angle.tan();
-        let grid = crate::terrain_grid::HeightGrid::new(
-            vec![height, height, -height, -height].into(),
-            2,
-            extent,
-        );
+        let grid = driving_plane(angle);
         let mut app = booted_driving_grid(grid);
         start_fixed_clock(&mut app);
         app.update(); // Initialize the physics body before the fixture teleports it.
@@ -632,13 +625,7 @@ fn perceived_load_during_a_rearward_shot_uphill() {
     let run = |fire: bool| {
         let angle = 20.0_f32.to_radians();
         // Fixture: an uninterrupted incline; recoil cannot move a patch across a ramp edge.
-        let extent = crate::terrain_grid::FIXTURE_EXTENT;
-        let height = extent.half_extent() * angle.tan();
-        let grid = crate::terrain_grid::HeightGrid::new(
-            vec![height, height, -height, -height].into(),
-            2,
-            extent,
-        );
+        let grid = driving_plane(angle);
         let mut app = booted_driving_grid(grid);
         start_fixed_clock(&mut app);
         app.update();
@@ -768,13 +755,7 @@ fn empty_driver_station_coast_and_rollback() {
     for degrees in [-10.0_f32, 10.0] {
         for launch_gear in [true, false] {
             let angle = degrees.to_radians();
-            let extent = crate::terrain_grid::FIXTURE_EXTENT;
-            let height = extent.half_extent() * angle.tan();
-            let grid = crate::terrain_grid::HeightGrid::new(
-                vec![height, height, -height, -height].into(),
-                2,
-                extent,
-            );
+            let grid = driving_plane(angle);
             let mut app = booted_driving_grid(grid);
             start_fixed_clock(&mut app);
             app.update();
@@ -917,13 +898,7 @@ fn shipped_notches_launch_and_sustain_ordered_speed() {
         for index in 1..=count {
             let pedal = f32::from(index) / f32::from(count);
             let angle = degrees.to_radians();
-            let extent = crate::terrain_grid::FIXTURE_EXTENT;
-            let height = extent.half_extent() * angle.tan();
-            let grid = crate::terrain_grid::HeightGrid::new(
-                vec![height, height, -height, -height].into(),
-                2,
-                extent,
-            );
+            let grid = driving_plane(angle);
             let mut app = booted_driving_grid(grid);
             start_fixed_clock(&mut app);
             app.update();
