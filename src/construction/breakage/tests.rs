@@ -4480,11 +4480,56 @@ fn sweep_installers_keep_every_contact_outside_prepared_coverage() {
     }
 }
 
+/// Fixture: keep unit-column proportions while each chunk exceeds the authored rubble floor.
+fn resolved_column() -> Arc<ConstructionKind> {
+    let scale = crate::physical_laws::PhysicalLaws::shipped()
+        .server_rubble_min_size_m
+        .max(1.0)
+        * 2.0;
+    let mut asset = column_construction().asset.clone();
+    let point = |p: &mut [f32; 3]| {
+        for x in p {
+            *x *= scale;
+        }
+    };
+    asset.foundation_y_m *= scale;
+    for element in &mut asset.elements {
+        for p in &mut element.hull {
+            point(p);
+        }
+    }
+    for chunk in &mut asset.chunks {
+        for p in &mut chunk.hull {
+            point(p);
+        }
+        point(&mut chunk.centroid);
+        chunk.volume_m3 *= scale.powi(3);
+        chunk.mass_kg *= scale.powi(3);
+    }
+    for joint in &mut asset.joints {
+        point(&mut joint.centroid);
+        joint.area_m2 *= scale.powi(2);
+    }
+    for anchor in &mut asset.anchors {
+        point(&mut anchor.centroid);
+        anchor.area_m2 *= scale.powi(2);
+    }
+    Arc::new(
+        ConstructionKind::resolve(
+            &asset.id,
+            &ron::ser::to_string(&asset).unwrap(),
+            crate::substances::SubstanceRegistry::shipped_static(),
+            Attachments::shipped_static(),
+        )
+        .unwrap(),
+    )
+}
+
 /// The game's environment destruction keeps a resolved hull plug's matter and rigid motion.
 /// The server body must retain occupied mass; internal seams and contact hooks stay untouched.
 #[test]
 fn a_swept_patch_keeps_its_server_body_mass_and_rigid_motion() {
-    let kind = column_construction();
+    let kind = resolved_column();
     let (mut app, root) = composed_kind(false, &kind);
     crate::headless_test::start_fixed_clock(&mut app);
     app.update(); // Bevy's first real-time update initializes its clock with zero delta.
@@ -4792,7 +4837,7 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
 #[test]
 fn the_law_installer_reuses_departing_standing_colliders() {
     use bevy::ecs::system::RunSystemOnce;
-    let kind = column_construction();
+    let kind = resolved_column();
     let (mut app, root) = composed_kind(false, &kind);
     app.update();
     app.update();
@@ -4971,4 +5016,52 @@ fn absorbed_cut_and_unsupported_matter_keep_their_combined_momentum() {
     assert!((after_p - before_p).length() < tolerance * before_p.length());
     assert!((after_l - before_l).length() < tolerance * before_l.length());
     assert!(after_energy <= before_energy * (1.0 + tolerance));
+}
+
+/// The game's environment physics: prepared contact mass survives insertion and follows shape,
+/// scale and density changes. Occupied overrides remain separate from this contact-shape cache.
+#[test]
+fn prepared_contact_mass_is_valid_at_insertion_and_invalidates_with_its_inputs() {
+    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
+    // Fixture: an asymmetric convex box exposes centre and inertia as well as mass.
+    let points = [0.0, 1.0]
+        .into_iter()
+        .flat_map(|x| {
+            [0.0, 2.0]
+                .into_iter()
+                .flat_map(move |y| [0.0, 3.0].map(move |z| Vec3::new(x, y, z)))
+        })
+        .collect();
+    let hull = Collider::convex_hull(points).unwrap();
+    let density = ColliderDensity::default().0;
+    let expected = hull.mass_properties(density);
+    let cached = hull.clone().with_mass_properties_cache(density);
+    let mut app = App::new();
+    app.add_plugins((MinimalPlugins, crate::offline_physics()));
+    app.finish();
+    app.cleanup();
+    let entity = app.world_mut().spawn((Transform::default(), cached)).id();
+    assert_eq!(
+        *app.world().get::<ColliderMassProperties>(entity).unwrap(),
+        ColliderMassProperties::from(expected)
+    );
+    let mut cached = app.world().get::<Collider>(entity).unwrap().clone();
+    assert_eq!(
+        cached.mass_properties(density * 2.0),
+        hull.mass_properties(density * 2.0)
+    );
+    cached.set_scale(Vec3::splat(2.0), 10);
+    let mut scaled = hull;
+    scaled.set_scale(Vec3::splat(2.0), 10);
+    assert_eq!(
+        cached.mass_properties(density),
+        scaled.mass_properties(density)
+    );
+    cached.set_shape(Collider::sphere(1.0).shape().clone());
+    let mut replaced = Collider::sphere(1.0);
+    replaced.set_scale(Vec3::splat(2.0), 10);
+    assert_eq!(
+        cached.mass_properties(density),
+        replaced.mass_properties(density)
+    );
 }

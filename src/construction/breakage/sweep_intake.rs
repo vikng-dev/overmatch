@@ -4,6 +4,7 @@ use avian3d::prelude::{
     Sensor,
 };
 use bevy::math::DMat3;
+use bevy::tasks::ParallelSliceMut;
 
 /// The sweep's per-tick account, available to headless witnesses and operator instruments.
 #[derive(Resource, Default, Debug)]
@@ -364,63 +365,81 @@ fn geometry(
             // This pass mutates only derived preload storage, never collider or ledger state.
             let breakage = breakage.bypass_change_detection();
             let pose = breakage.physics_frame((position, rotation));
-            let inverse = pose.rotation.inverse();
-            let mut patches: BTreeMap<Entity, super::super::sweep::Sweep> = BTreeMap::new();
-            for source in sources.iter().filter(|source| {
-                source.roots.contains(&root)
-                    && source.body != root
-                    && source.layers.interacts_with(super::super::element_layers())
-            }) {
-                let swept = breakage.kind.sweep.swept(
-                    &breakage.live.structure,
-                    &breakage.live.state,
-                    super::super::sweep::Motion {
-                        hull: &source.hull,
-                        position: inverse * (source.position - pose.translation),
-                        rotation: inverse * source.rotation,
-                        velocity: inverse * source.velocity,
-                        centre: inverse * (source.centre - pose.translation),
-                        spin: inverse * source.spin,
-                        dt,
-                    },
-                );
-                patches.entry(source.body).or_default().merge(swept);
-            }
-            let kind = &breakage.kind;
-            let Live {
-                structure,
-                state,
-                gravity,
-                ..
-            } = &mut *breakage.live;
-            let preload = patches
-                .values()
-                .any(|s| s.witness.is_some())
-                .then(|| gravity.get(structure, state, &kind.equilibrium));
-            let results = patches
-                .into_iter()
-                .map(|(body, mut swept)| {
+            let results = owner_geometry(root, breakage, pose, sources, dt);
+            gathered.scope(|local| local.extend(results));
+        });
+    gathered.drain().collect()
+}
+
+fn owner_geometry(
+    root: Entity,
+    breakage: &mut Breakage,
+    pose: Transform,
+    sources: &[SweepSource],
+    dt: f32,
+) -> Vec<(Entity, Entity, super::super::sweep::Sweep)> {
+    let inverse = pose.rotation.inverse();
+    let mut patches: BTreeMap<Entity, super::super::sweep::Sweep> = BTreeMap::new();
+    for source in sources.iter().filter(|source| {
+        source.roots.contains(&root)
+            && source.body != root
+            && source.layers.interacts_with(super::super::element_layers())
+    }) {
+        let swept = breakage.kind.sweep.swept(
+            &breakage.live.structure,
+            &breakage.live.state,
+            super::super::sweep::Motion {
+                hull: &source.hull,
+                position: inverse * (source.position - pose.translation),
+                rotation: inverse * source.rotation,
+                velocity: inverse * source.velocity,
+                centre: inverse * (source.centre - pose.translation),
+                spin: inverse * source.spin,
+                dt,
+            },
+        );
+        patches.entry(source.body).or_default().merge(swept);
+    }
+    let pool = ComputeTaskPool::get();
+    let kind = &breakage.kind;
+    let Live {
+        structure,
+        state,
+        gravity,
+        ..
+    } = &mut *breakage.live;
+    let preload = patches
+        .values()
+        .any(|s| s.witness.is_some())
+        .then(|| gravity.get(structure, state, &kind.equilibrium));
+    let mut patches: Vec<_> = patches.into_iter().collect();
+    // Body patches read the same topology and preload; only their ordered effects interact.
+    patches
+        .par_splat_map_mut(pool, None, |_, patches| {
+            patches
+                .iter_mut()
+                .map(|(body, swept)| {
                     let source = sources
                         .iter()
-                        .find(|s| s.body == body)
+                        .find(|s| s.body == *body)
                         .expect("a patch has its source body");
                     if let Some(witness) = swept.witness {
-                        let mass = source.effective_mass(witness, &pose);
                         kind.sweep.resolve(
                             structure,
                             state,
                             preload.expect("an inward witness prepared gravity"),
-                            &mut swept,
-                            mass,
+                            swept,
+                            source.effective_mass(witness, &pose),
                             inverse * source.drive,
                         );
                     } // An empty patch has no contact response to resolve.
-                    (body, root, swept)
+                    (*body, root, std::mem::take(swept))
                 })
-                .collect::<Vec<_>>();
-            gathered.scope(|local| local.extend(results));
-        });
-    gathered.drain().collect()
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 fn commit_source(
@@ -532,22 +551,14 @@ fn commit_source(
             changed: vec![root],
             ..default()
         });
-        for &c in &chunks {
-            let velocity = (result.velocity
-                + result
-                    .spin
-                    .cross(breakage.kind.sweep.part(c, &pose).centre - source.centre))
-            .as_vec3();
-            p.account.freed += 1;
-            p.account
-                .chunks
-                .push((breakage.construction, c as u16, velocity));
-        }
-        // Ordered reduction of the momentum and energy transferred to all freed matter,
-        // whether retained on server bodies or handed to decor.
+        // One ordered reduction accounts for all freed matter, on server bodies or decor.
         for c in chunks {
             let part = breakage.kind.sweep.part(c, &pose);
             let velocity = result.velocity + result.spin.cross(part.centre - source.centre);
+            p.account.freed += 1;
+            p.account
+                .chunks
+                .push((breakage.construction, c as u16, velocity.as_vec3()));
             p.account.outgoing_momentum += (velocity * part.mass).as_vec3();
             p.account.outgoing_kinetic_j += 0.5
                 * (part.mass * velocity.length_squared()

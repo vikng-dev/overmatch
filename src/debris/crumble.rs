@@ -32,7 +32,6 @@ use avian3d::prelude::{
     Position, Rotation, SleepThreshold,
 };
 use bevy::prelude::*;
-use bevy::tasks::{ComputeTaskPool, ParallelSlice};
 use serde::{Deserialize, Serialize};
 
 use crate::construction::Element;
@@ -617,7 +616,7 @@ fn crumble_landings(
     });
     // An authority without a shot clock (a test fixture's bare sim) is at tick zero.
     let tick = clock.as_deref().map_or(0, |clock| clock.0.raw());
-    let landings: Vec<(Entity, f32, Vec<Touch>)> = landings
+    let landings: std::collections::BTreeMap<_, _> = landings
         .into_iter()
         .map(|(entity, landing)| {
             let (_, _, breakage, pose, _, _) = groups
@@ -641,65 +640,54 @@ fn crumble_landings(
                 chunk,
                 |other| contacts.other(other, &groups),
             );
-            (entity, energy, touches)
+            (entity, (energy, touches))
         })
         .collect();
-    // Each group crumbles from its own state alone, in parallel; the results commit in landing
-    // order, the order the record and the sheds are written in.
-    let results = {
-        let inputs: Vec<_> = landings
-            .iter()
-            .map(|(entity, energy, touches)| {
-                let (_, piece, breakage, ..) = groups
-                    .get(*entity)
-                    .expect("the landings were filtered to these groups");
-                let owned: Vec<usize> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
-                (&*breakage.live, owned, touches, *energy)
-            })
-            .collect();
-        inputs.par_chunk_map(ComputeTaskPool::get(), 1, |_, landing| {
-            let (live, owned, touches, energy) = &landing[0];
-            let mut result = crumble(&live.structure, &live.state, owned, touches, *energy);
-            let mut retained = live.rubble_joints.clone();
+    let mut prepared = bevy::utils::Parallel::<Vec<_>>::default();
+    // Owners update their own seams and prepare children together. Only the ledger, messages
+    // and structural changes commit in entity order after every owner's calculation completes.
+    groups.par_iter_many_unique_mut(landings.keys()).for_each(
+        |(entity, piece, mut breakage, pose, (velocity, spin, centre), _)| {
+            let (energy, touches) = &landings[&entity];
+            let owned: Vec<usize> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
+            let frame = breakage.physics_frame(pose);
+            let live = breakage.live.as_mut();
+            let mut result = crumble(&live.structure, &live.state, &owned, touches, *energy);
             result.fragments = merge_fragments(
                 &live.structure,
                 result.fragments,
                 &result.separated,
-                &mut retained,
+                &mut live.rubble_joints,
             );
-            (result, retained)
-        })
-    };
-    for ((entity, ..), (result, retained)) in landings.into_iter().zip(results) {
-        let (_, piece, mut breakage, pose, (velocity, spin, centre), _) = groups
-            .get_mut(entity)
-            .expect("the landings were filtered to these groups");
-        let frame = breakage.physics_frame(pose);
-        let live = breakage.live.as_mut();
-        live.rubble_joints = retained;
-        for &j in &result.cracked {
-            live.state.cracked[j] = true;
-        }
-        for &j in &result.separated {
-            live.state.separated[j] = true;
-        }
-        if result.fragments.len() == 1 && server_body(&live.structure, &result.fragments[0]) {
-            continue; // Still one body: its seams took the energy, or none could.
-        }
-        let structure = live.structure.clone();
-        let motion = (velocity.0, spin.0, pose.0.0 + pose.1.0 * centre.0);
-        let (kept, sheds) = route(
-            &structure,
-            (piece.construction, frame),
-            result.fragments,
-            motion,
-            tick,
-            &mut record,
-        );
+            for &j in &result.cracked {
+                live.state.cracked[j] = true;
+            }
+            for &j in &result.separated {
+                live.state.separated[j] = true;
+            }
+            if result.fragments.len() == 1 && server_body(&live.structure, &result.fragments[0]) {
+                return; // Still one body: its seams took the energy, or none could.
+            }
+            let motion = (velocity.0, spin.0, pose.0.0 + pose.1.0 * centre.0);
+            let mut record = Record::default();
+            let (kept, sheds) = route(
+                &live.structure,
+                (piece.construction, frame),
+                result.fragments,
+                motion,
+                tick,
+                &mut record,
+            );
+            let pending = PendingSplit::of(&breakage, kept, tick);
+            prepared.scope(|local| local.push((entity, pending, sheds, record.entries)));
+        },
+    );
+    let mut prepared: Vec<_> = prepared.drain().collect();
+    prepared.sort_unstable_by_key(|(entity, ..)| *entity);
+    for (entity, pending, sheds, entries) in prepared {
+        record.entries.extend(entries);
         shed.write_batch(sheds);
-        commands
-            .entity(entity)
-            .insert(PendingSplit::of(&breakage, kept, tick));
+        commands.entity(entity).insert(pending);
     }
 }
 

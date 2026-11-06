@@ -2466,10 +2466,8 @@ pub(crate) fn chunk_collider(kind: &ConstructionKind, c: usize, origin: Vec3) ->
     .expect("a load-certified authored hull stays a solid convex hull")
 }
 
-/// Resolution: the contact hull stands 1 mm inside occupied matter to separate coplanar faces
-/// beyond Parry's zero-distance GJK/EPA ambiguity. The game's damage-model rounds meet this
-/// same hull: its nearest face moves 1 mm, farther faces proportionally (inset_point caps small
-/// hulls). Mass, inertia and centre use the whole hull.
+/// Resolution: separate coplanar faces beyond Parry's zero-distance GJK/EPA ambiguity.
+/// The game's damage-model rounds meet a chunk 1 mm inside its occupied hull.
 const LOOSE_GAP_M: f32 = 1e-3;
 
 /// Resolution: preserve a solid, numerically resolved hull when the requested inset would
@@ -2498,8 +2496,7 @@ pub(crate) fn inset_point(block: &Block, gap: f32) -> impl Fn(Vec3) -> Vec3 {
     move |point| middle + (point - middle) * shrink
 }
 
-/// A chunk's permanent contact and ballistic hull. The nearest-face gap is LOOSE_GAP_M,
-/// reduced by the small-hull cap in inset_point; occupied mass uses the whole hull.
+/// A chunk's permanent contact and ballistic hull; mass, inertia and centre use the whole hull.
 pub(crate) fn loose_collider(block: &Block, origin: Vec3) -> Collider {
     let inset = inset_point(block, LOOSE_GAP_M);
     Collider::convex_hull(block.points.iter().map(|p| inset(*p) - origin).collect())
@@ -2547,7 +2544,8 @@ type ReusableColliders = BTreeMap<u16, Entity>;
 fn chunk_physics(kind: &ConstructionKind, c: usize) -> ChunkPhysics {
     let origin = kind.structure.chunks[c].centroid;
     (
-        loose_collider(&kind.layout.blocks[c], origin),
+        loose_collider(&kind.layout.blocks[c], origin)
+            .with_mass_properties_cache(avian3d::prelude::ColliderDensity::default().0),
         occupied_mass(
             &chunk_collider(kind, c, origin),
             kind.layout.materials[c].density,

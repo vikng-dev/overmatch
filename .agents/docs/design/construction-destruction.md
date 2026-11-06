@@ -457,14 +457,16 @@ linear and angular impulse. DERIVED dissipated energy is half the exchanged spat
 dotted with the incoming twist. Locked axes route their reactions to the hosting constraint.
 The account exposes removed kinetic energy and outgoing chunk kinetic energy separately.
 
-`breakage::sweep_intake::sweep_departure` is the departure boundary: construction identity, the
-whole plug's chunk identities, world rigid motion and authoritative tick. Internal joints stay
-intact. The hull makes the hole: whatever its mass, the plug leaves the server as dust in the
-ledger and reaches the players as decoration, one `Shed` per fragment that stays connected, its
-momentum and energy still in the sweep's account. The hull still pays the plastic exchange. The
-100 kg size route (`debris::crumble::route`) serves what the structure law releases and landings,
-never a swept hole. The standing owner removes the chunks immediately and the
-ledger records the joint separations; clients derive the hole at the same presentation tick.
+`breakage::sweep_intake::sweep_departure` is the departure boundary: construction identity,
+chunk identities, world rigid motion and authoritative tick. Internal joints stay intact. The
+cut also frees matter already disconnected from every ground path, before standing refit.
+Swept matter inherits the hull's plastic exchange; an unsupported remainder starts at rest.
+D3 absorption projects their combined linear and angular momentum onto the merged rigid body.
+All freed fragments use the shared volume-based size route described under **Size split**;
+resolved rubble stays on the server and meets the hull through ordinary Avian contacts. The
+standing owner removes the chunks immediately; clients derive the hole from the joint ledger
+at the same presentation tick. Dust-only hull departures are rejected: they remove matter from
+the tank's path.
 A retired element's staged belt reactions are cancelled before integration; surviving surfaces
 receive fresh solver contacts. A sweep never enters the structural pulse/work calculation.
 
@@ -988,13 +990,17 @@ This replaces the moving group's contact load (the decided **Collision loads** r
 every source" now covers fields and placed constructions only); that reading is the owner's to
 confirm.
 
-**Size split.** A fragment of at least `server_fragment_kg` (`Unit`, 100 kg,
-`assets/ballistics/physical_laws.ron`: a plastic exchange with a hull of 50 t or more moves the
-hull's speed by under 0.2 %, DERIVED `m/M`) stays a server body through the split path
-(`PendingSplit`). `route` takes any freed cluster, whatever freed it. A lighter one leaves at the crumble's tick: the record writes its chunks as dust,
-so each replica retires the parent's view of them, and one `Shed` (construction, chunks, frame
-pose, velocity, spin, seed, tick) goes to every player on `DebrisChannel`, reliable and unordered
-(protocol revision **91**). A replica refuses a shed whose chunks its map cannot hold or whose
+**Size split.** `server_rubble_min_size_m` (`Unit`,
+`assets/ballistics/physical_laws.ron`) is the server's rubble resolution, shared by every material.
+A fragment's size is the cube root of its occupied volume. Below-floor fragments merge through
+joints parted in this event into another departing fragment, processing joint identities in
+order; retained absorption joints preserve grouping without restoring strength. A fragment with
+no such neighbour becomes decor. The shared `route` serves hull cuts, structure releases and
+landings: resolved fragments stay server bodies; decor writes its chunks as dust at the event's
+tick and sends one `Shed` (construction, chunks, frame pose, velocity, spin, seed, tick) to every
+player on `DebrisChannel`, reliable and unordered. The rejected mass floor tied resolution to
+material density.
+A replica refuses a shed whose chunks its map cannot hold or whose
 motion is not finite.
 
 **Decoration.** Each player draws a shed from the event alone at the shared presentation cursor

@@ -1,0 +1,275 @@
+{
+  "method": "MEASURED transport-free lifecycle observations; fixed-clock ticks, not wall-clock pricing. Counters: Collider Add/Remove, RigidBody Add, entity first Add/final Despawn. Each scenario ends at first contact +320.",
+  "standing-first-with-pre-drive-pause": [
+    {
+      "bodies_created": 0,
+      "colliders_created": 131,
+      "colliders_deleted": 2,
+      "entities_despawned": 2,
+      "entities_spawned": 131,
+      "tick": 1263
+    },
+    {
+      "bodies_created": 0,
+      "colliders_created": 78,
+      "colliders_deleted": 10,
+      "entities_despawned": 10,
+      "entities_spawned": 78,
+      "tick": 1264
+    },
+    {
+      "bodies_created": 3,
+      "colliders_created": 882,
+      "colliders_deleted": 51,
+      "entities_despawned": 51,
+      "entities_spawned": 888,
+      "tick": 1265
+    },
+    {
+      "bodies_created": 21,
+      "colliders_created": 0,
+      "colliders_deleted": 30,
+      "entities_despawned": 33,
+      "entities_spawned": 42,
+      "tick": 1266
+    },
+    {
+      "bodies_created": 2,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 1,
+      "entities_spawned": 4,
+      "tick": 1267
+    },
+    {
+      "bodies_created": 11,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 5,
+      "entities_spawned": 22,
+      "tick": 1268
+    },
+    {
+      "bodies_created": 3,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 1,
+      "entities_spawned": 6,
+      "tick": 1269
+    },
+    {
+      "bodies_created": 3,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 1,
+      "entities_spawned": 6,
+      "tick": 1270
+    },
+    {
+      "bodies_created": 2,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 1,
+      "entities_spawned": 4,
+      "tick": 1298
+    },
+    {
+      "bodies_created": 2,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 1,
+      "entities_spawned": 4,
+      "tick": 1308
+    },
+    {
+      "bodies_created": 2,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 1,
+      "entities_spawned": 4,
+      "tick": 1309
+    },
+    {
+      "bodies_created": 2,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 1,
+      "entities_spawned": 4,
+      "tick": 1351
+    }
+  ],
+  "immediate-disconnection-with-pre-drive-pause": [
+    {
+      "bodies_created": 0,
+      "colliders_created": 131,
+      "colliders_deleted": 2,
+      "entities_despawned": 2,
+      "entities_spawned": 131,
+      "tick": 1263
+    },
+    {
+      "bodies_created": 0,
+      "colliders_created": 78,
+      "colliders_deleted": 10,
+      "entities_despawned": 10,
+      "entities_spawned": 78,
+      "tick": 1264
+    },
+    {
+      "bodies_created": 3,
+      "colliders_created": 882,
+      "colliders_deleted": 51,
+      "entities_despawned": 51,
+      "entities_spawned": 888,
+      "tick": 1265
+    },
+    {
+      "bodies_created": 21,
+      "colliders_created": 0,
+      "colliders_deleted": 22,
+      "entities_despawned": 25,
+      "entities_spawned": 42,
+      "tick": 1266
+    },
+    {
+      "bodies_created": 10,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 5,
+      "entities_spawned": 20,
+      "tick": 1268
+    },
+    {
+      "bodies_created": 4,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 2,
+      "entities_spawned": 8,
+      "tick": 1269
+    },
+    {
+      "bodies_created": 4,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 2,
+      "entities_spawned": 8,
+      "tick": 1271
+    },
+    {
+      "bodies_created": 2,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 1,
+      "entities_spawned": 4,
+      "tick": 1296
+    },
+    {
+      "bodies_created": 2,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 1,
+      "entities_spawned": 4,
+      "tick": 1301
+    },
+    {
+      "bodies_created": 4,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 2,
+      "entities_spawned": 8,
+      "tick": 1306
+    },
+    {
+      "bodies_created": 4,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 2,
+      "entities_spawned": 8,
+      "tick": 1361
+    },
+    {
+      "bodies_created": 2,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 1,
+      "entities_spawned": 4,
+      "tick": 1436
+    },
+    {
+      "bodies_created": 2,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 1,
+      "entities_spawned": 4,
+      "tick": 1457
+    }
+  ],
+  "immediate-drive-serial-patches": [
+    {
+      "bodies_created": 1,
+      "colliders_created": 136,
+      "colliders_deleted": 2,
+      "entities_despawned": 2,
+      "entities_spawned": 138,
+      "tick": 1162
+    },
+    {
+      "bodies_created": 15,
+      "colliders_created": 966,
+      "colliders_deleted": 51,
+      "entities_despawned": 53,
+      "entities_spawned": 996,
+      "tick": 1163
+    },
+    {
+      "bodies_created": 18,
+      "colliders_created": 6,
+      "colliders_deleted": 4,
+      "entities_despawned": 8,
+      "entities_spawned": 42,
+      "tick": 1164
+    },
+    {
+      "bodies_created": 8,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 2,
+      "entities_spawned": 16,
+      "tick": 1165
+    }
+  ],
+  "immediate-drive-parallel-patches": [
+    {
+      "bodies_created": 1,
+      "colliders_created": 136,
+      "colliders_deleted": 2,
+      "entities_despawned": 2,
+      "entities_spawned": 138,
+      "tick": 1162
+    },
+    {
+      "bodies_created": 15,
+      "colliders_created": 966,
+      "colliders_deleted": 51,
+      "entities_despawned": 53,
+      "entities_spawned": 996,
+      "tick": 1163
+    },
+    {
+      "bodies_created": 18,
+      "colliders_created": 6,
+      "colliders_deleted": 4,
+      "entities_despawned": 8,
+      "entities_spawned": 42,
+      "tick": 1164
+    },
+    {
+      "bodies_created": 8,
+      "colliders_created": 0,
+      "colliders_deleted": 0,
+      "entities_despawned": 2,
+      "entities_spawned": 16,
+      "tick": 1165
+    }
+  ]
+}

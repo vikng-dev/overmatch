@@ -1,8 +1,8 @@
 // Functional observation of the game's environment destruction model, game state only.
 use super::*;
 use crate::construction::breakage::{Breakage, SweepAccount};
-use crate::headless_test::{booted_sim_on, drive_tick, start_fixed_clock};
-use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
+use crate::headless_test::{booted_sim_on, drive_tick};
+use avian3d::prelude::LinearVelocity;
 
 #[test]
 #[ignore = "functional ram observations, no pricing"]
@@ -10,72 +10,13 @@ fn tracked_ram_rubble_observation() {
     let mut app = booted_sim_on(Some(crate::terrain_grid::tests::shipped_grid()));
     app.init_resource::<Sheds>()
         .add_systems(FixedPostUpdate, keep_sheds.after(LawSet));
-    start_fixed_clock(&mut app);
-    let recipe: serde_json::Value =
-        serde_json::from_str(include_str!("../../../../scripts/perf/ram.json")).unwrap();
-    let instance = recipe["instance"].as_str().unwrap();
-    let spec = &app.world().resource::<crate::bake::TankBlueprint>().spec;
-    let drive = spec
-        .track
-        .nominal_transmission_params(&spec.roadwheels)
-        .unwrap();
-    let governed = drive.governed_speed(false);
-    let acceleration = drive.torque_at(drive.peak_torque_rpm) * drive.gears_fwd.last().unwrap()
-        / drive.sprocket_radius
-        / spec.mass;
-    let runup = recipe["runup_margin"].as_f64().unwrap() as f32 * governed * governed
-        / (2.0 * acceleration);
-    let rotation = Quat::from_rotation_y(
-        recipe["heading_deg"]
-            .as_f64()
-            .unwrap()
-            .rem_euclid(360.0)
-            .to_radians() as f32,
-    );
-    let target = app
-        .world()
-        .resource::<crate::map::MapManifest>()
-        .instances
-        .iter()
-        .find(|i| i.id == instance)
-        .unwrap();
-    let xz = (Vec3::from_array(target.translation) - rotation * Vec3::NEG_Z * runup).xz();
-    let spawn = crate::terrain_grid::spawn_pos(
-        app.world()
-            .get_resource::<crate::terrain_grid::HeightGrid>(),
-        xz,
-    );
-    println!(
-        "MEASURED ram spawn: {}",
-        serde_json::json!({"pos": spawn.to_array(), "rot": rotation.to_array()})
-    );
-    let dt = app
-        .world()
-        .resource::<Time<Fixed>>()
-        .timestep()
-        .as_secs_f64();
-    let tank = app
-        .world_mut()
-        .query_filtered::<Entity, (With<crate::tank::Tank>, With<crate::tank::Controlled>)>()
-        .single(app.world())
-        .unwrap();
-    let (target, ordinal) = app
-        .world_mut()
-        .query::<(Entity, &crate::scatter::MapInstance, &Breakage)>()
-        .iter(app.world())
-        .find(|(_, i, _)| i.id == instance)
-        .map(|(e, _, b)| (e, b.construction))
-        .unwrap();
-    app.world_mut().entity_mut(tank).insert((
-        Position(spawn),
-        Rotation(rotation),
-        Transform::from_translation(spawn).with_rotation(rotation),
-        LinearVelocity::ZERO,
-        AngularVelocity::ZERO,
-    ));
-    for _ in 0..(recipe["settle_s"].as_f64().unwrap() / dt).ceil() as usize {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
+    let crate::headless_test::TrackedRamSetup {
+        tank,
+        target,
+        ordinal,
+        drive_ticks,
+        deadline_ticks,
+    } = crate::headless_test::prepare_tracked_ram(&mut app);
     let masses: Vec<_> = app
         .world()
         .get::<Breakage>(target)
@@ -90,8 +31,7 @@ fn tracked_ram_rubble_observation() {
     let mut bodies_thirty = (0, 0.0_f32);
     let mut contact = None;
     let mut speeds = Vec::new();
-    let drive_ticks = (recipe["drive_s"].as_f64().unwrap() / dt).ceil() as usize;
-    for tick in 0..drive_ticks + (recipe["deadline_s"].as_f64().unwrap() / dt).ceil() as usize {
+    for tick in 0..drive_ticks + deadline_ticks {
         drive_tick(&mut app, tank, f32::from(tick < drive_ticks), 0.0);
         let account = app.world().resource::<SweepAccount>();
         if contact.is_none() && account.contacts.contains_key(&(tank, ordinal)) {

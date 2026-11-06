@@ -1166,6 +1166,26 @@ mod tests {
         }
     }
 
+    fn resolved_contact(
+        geometry: &Geometry,
+        structure: &Structure,
+        state: &State,
+        direction: Vec3,
+        force: f32,
+    ) -> Sweep {
+        let mut patch = contact_patch(structure, direction, force);
+        // Fixture source mass matches contact_patch's Hertz inverse.
+        geometry.resolve(
+            structure,
+            state,
+            &preload(structure, state),
+            &mut patch,
+            128.0,
+            Vec3::ZERO,
+        );
+        patch
+    }
+
     /// The game's environment destruction: expanding a plug must retain the weight of every
     /// standing support. This catches a zero-preload ground edge outside the touched seed.
     #[test]
@@ -1189,15 +1209,7 @@ mod tests {
         // the upper interface costs sqrt(9*1)*g = 3*g N.
         let capacity = 2.0 * crate::physical_laws::gravity_mps2();
         for (ratio, broken) in [(0.99, false), (1.01, true)] {
-            let mut patch = contact_patch(&structure, Vec3::X, capacity * ratio);
-            geometry.resolve(
-                &structure,
-                &state,
-                &preload(&structure, &state),
-                &mut patch,
-                128.0,
-                Vec3::ZERO,
-            );
+            let patch = resolved_contact(&geometry, &structure, &state, Vec3::X, capacity * ratio);
             assert_eq!(patch.broken, broken, "ratio={ratio}, load={:?}", patch.load);
             if broken {
                 assert_eq!(patch.chunks, [0, 1]);
@@ -1296,15 +1308,7 @@ mod tests {
         // DERIVED: 10,000 * 0.001 / sqrt(1.000001) + 512 / sqrt(1.000001)
         // lies between 521 and 523 N. The 400 N press holds; 524 N releases it.
         for (force, broken) in [(400.0, false), (524.0, true)] {
-            let mut patch = contact_patch(&structure, direction, force);
-            geometry.resolve(
-                &structure,
-                &state,
-                &preload(&structure, &state),
-                &mut patch,
-                128.0,
-                Vec3::ZERO,
-            );
+            let patch = resolved_contact(&geometry, &structure, &state, direction, force);
             assert_eq!(patch.broken, broken, "force={force}");
             if broken {
                 assert!((521.0..523.0).contains(&patch.load.unwrap().capacity));
@@ -1335,15 +1339,8 @@ mod tests {
             let gravity = crate::physical_laws::gravity_mps2();
             let capacity = (1e4 - gravity) * -direction.y + 0.5 * gravity * direction.x;
             for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
-                let mut patch = contact_patch(&structure, direction, capacity * ratio);
-                geometry.resolve(
-                    &structure,
-                    &state,
-                    &preload(&structure, &state),
-                    &mut patch,
-                    128.0,
-                    Vec3::ZERO,
-                );
+                let patch =
+                    resolved_contact(&geometry, &structure, &state, direction, capacity * ratio);
                 assert_eq!(patch.broken, broken, "cracked={cracked}, ratio={ratio}");
             }
         }
@@ -1364,15 +1361,7 @@ mod tests {
         let state = State::new(&structure);
         // DERIVED: 10 kN - 9 kN = 1 kN reserve. The upper impact exceeds it.
         for (force, broken) in [(2000.0, true), (900.0, false)] {
-            let mut patch = contact_patch(&structure, Vec3::NEG_Y, force);
-            geometry.resolve(
-                &structure,
-                &state,
-                &preload(&structure, &state),
-                &mut patch,
-                128.0,
-                Vec3::ZERO,
-            );
+            let patch = resolved_contact(&geometry, &structure, &state, Vec3::NEG_Y, force);
             assert_eq!(patch.broken, broken, "force={force}, load={:?}", patch.load);
             if broken {
                 assert!((patch.load.unwrap().capacity - 1000.0).abs() < 0.01);

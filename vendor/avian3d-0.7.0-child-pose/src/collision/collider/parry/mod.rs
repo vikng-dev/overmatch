@@ -373,6 +373,9 @@ pub struct Collider {
     scaled_shape: SharedShape,
     /// The global scale used for the collider shape.
     scale: Vector,
+    // OVERMATCH PATCH: prepared mass belongs to this shape at its current scale and density.
+    #[cfg_attr(feature = "serialize", serde(skip))]
+    mass_cache: Option<(f32, MassProperties)>,
 }
 
 impl From<SharedShape> for Collider {
@@ -381,6 +384,7 @@ impl From<SharedShape> for Collider {
             shape: value.clone(),
             scaled_shape: value,
             scale: Vector::ONE,
+            mass_cache: None,
         }
     }
 }
@@ -464,6 +468,12 @@ impl ComputeMassProperties for Collider {
     }
 
     fn mass_properties(&self, density: f32) -> MassProperties {
+        // OVERMATCH PATCH: insertion and update hooks read the prepared value without triangulation.
+        if let Some((cached_density, properties)) = self.mass_cache
+            && cached_density == density
+        {
+            return properties;
+        }
         let props = self.shape_scaled().mass_properties(density as Scalar);
 
         MassProperties {
@@ -506,6 +516,12 @@ impl ComputeMassProperties for Collider {
     }
 
     fn mass_properties(&self, density: f32) -> MassProperties {
+        // OVERMATCH PATCH: insertion and update hooks read the prepared value without triangulation.
+        if let Some((cached_density, properties)) = self.mass_cache
+            && cached_density == density
+        {
+            return properties;
+        }
         let props = self.shape_scaled().mass_properties(density as Scalar);
 
         MassProperties {
@@ -532,6 +548,14 @@ impl ScalableCollider for Collider {
 }
 
 impl Collider {
+    /// Prepares mass properties for the current shape and scale before structural insertion.
+    /// Shape or scale mutation invalidates the cache; another density computes normally.
+    // OVERMATCH PATCH: worker preparation for the backend's mass-property hooks.
+    pub fn with_mass_properties_cache(mut self, density: f32) -> Self {
+        self.mass_cache = Some((density, self.mass_properties(density)));
+        self
+    }
+
     /// Returns the raw unscaled shape of the collider.
     pub fn shape(&self) -> &SharedShape {
         &self.shape
@@ -539,6 +563,7 @@ impl Collider {
 
     /// Returns a mutable reference to the raw unscaled shape of the collider.
     pub fn shape_mut(&mut self) -> &mut SharedShape {
+        self.mass_cache = None; // OVERMATCH PATCH: the shape may change.
         &mut self.shape
     }
 
@@ -549,6 +574,7 @@ impl Collider {
 
     /// Sets the unscaled shape of the collider. The collider's scale will be applied to this shape.
     pub fn set_shape(&mut self, shape: SharedShape) {
+        self.mass_cache = None; // OVERMATCH PATCH: the shape changes.
         self.shape = shape;
 
         // TODO: The number of subdivisions probably shouldn't be hard-coded
@@ -576,6 +602,7 @@ impl Collider {
             return;
         }
 
+        self.mass_cache = None; // OVERMATCH PATCH: the scaled shape may change.
         if scale == Vector::ONE {
             // Trivial case.
             self.scaled_shape = self.shape.clone();

@@ -762,66 +762,71 @@ impl Gravity {
                 .filter(|&p| !graph.parts[p].node.fixed)
                 .collect();
             let pool = ComputeTaskPool::get_or_init(TaskPool::default);
-            let solved = free.par_chunk_map(pool, 1, |_, p| {
-                let p = p[0];
-                let part = &graph.parts[p];
-                let mut solved = PartPreload::default();
-                let loads: Vec<_> = part.chunks.iter().map(|&c| boundary[c]).collect();
-                let intact = design.kernels.get(part.element).filter(|kernel| {
-                    kernel.chunks == part.chunks
-                        && part.chunks.iter().all(|&c| {
-                            standing.topology.incident[c].iter().all(|&j| {
-                                #[cfg(test)]
-                                {
-                                    solved.visits += 1;
-                                }
-                                let joint = &structure.joints[j];
-                                let belongs = match joint.b {
-                                    Side::Ground => true,
-                                    Side::Chunk(b) => {
-                                        let other = if joint.a == c { b } else { joint.a };
-                                        structure.chunks[other].buried
-                                            || graph.part[other] == Some(p)
-                                    }
-                                };
-                                // External interfaces supply loads, not kernel stiffness.
-                                !belongs
-                                    || (!standing.cracked[j]
-                                        && !standing.separated[j]
-                                        && standing.live(joint))
-                            })
-                        })
-                });
-                let changed;
-                let kernel = if let Some(kernel) = intact {
-                    kernel
-                } else {
-                    changed = Kernel::of(structure, &standing, &part.chunks);
-                    #[cfg(test)]
-                    {
-                        solved.built = true;
-                        solved.visits += changed.joint_visits;
-                    }
-                    &changed
-                };
-                let hold = kernel.hold(structure, &loads);
-                for (j, carried) in hold.carried {
-                    let joint = &structure.joints[j];
-                    // Interfaces belong to the part field; only internal edges use the kernel.
-                    if let Side::Chunk(b) = joint.b
-                        && graph.part[joint.a] == graph.part[b]
-                    {
-                        solved.normal.push((
-                            j,
-                            carried
-                                .linear
-                                .dot(super::bondsolve::joint_normal(structure, joint)),
-                        ));
-                    }
-                }
-                solved
+            // Worker-sized batches bound dispatch for tiny parts; results retain part order.
+            let solved = free.par_splat_map(pool, None, |_, parts| {
+                parts
+                    .iter()
+                    .map(|&p| {
+                        let part = &graph.parts[p];
+                        let mut solved = PartPreload::default();
+                        let loads: Vec<_> = part.chunks.iter().map(|&c| boundary[c]).collect();
+                        let intact = design.kernels.get(part.element).filter(|kernel| {
+                            kernel.chunks == part.chunks
+                                && part.chunks.iter().all(|&c| {
+                                    standing.topology.incident[c].iter().all(|&j| {
+                                        #[cfg(test)]
+                                        {
+                                            solved.visits += 1;
+                                        }
+                                        let joint = &structure.joints[j];
+                                        let belongs = match joint.b {
+                                            Side::Ground => true,
+                                            Side::Chunk(b) => {
+                                                let other = if joint.a == c { b } else { joint.a };
+                                                structure.chunks[other].buried
+                                                    || graph.part[other] == Some(p)
+                                            }
+                                        };
+                                        // External interfaces supply loads, not kernel stiffness.
+                                        !belongs
+                                            || (!standing.cracked[j]
+                                                && !standing.separated[j]
+                                                && standing.live(joint))
+                                    })
+                                })
+                        });
+                        let changed;
+                        let kernel = if let Some(kernel) = intact {
+                            kernel
+                        } else {
+                            changed = Kernel::of(structure, &standing, &part.chunks);
+                            #[cfg(test)]
+                            {
+                                solved.built = true;
+                                solved.visits += changed.joint_visits;
+                            }
+                            &changed
+                        };
+                        let hold = kernel.hold(structure, &loads);
+                        for (j, carried) in hold.carried {
+                            let joint = &structure.joints[j];
+                            // Interfaces belong to the part field; only internal edges use the kernel.
+                            if let Side::Chunk(b) = joint.b
+                                && graph.part[joint.a] == graph.part[b]
+                            {
+                                solved.normal.push((
+                                    j,
+                                    carried
+                                        .linear
+                                        .dot(super::bondsolve::joint_normal(structure, joint)),
+                                ));
+                            }
+                        }
+                        solved
+                    })
+                    .collect::<Vec<_>>()
             });
-            for part in solved {
+            for part in solved.into_iter().flatten() {
                 #[cfg(test)]
                 {
                     self.work.kernel_visits += part.visits;
