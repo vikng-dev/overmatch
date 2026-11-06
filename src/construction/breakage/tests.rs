@@ -4594,6 +4594,7 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
     fn facts(world: &mut World) -> Vec<Fact> {
         let mut facts: Vec<_> = world
             .query::<(
+                Entity,
                 &ChildOf,
                 &ChunkCollider,
                 &Collider,
@@ -4610,6 +4611,7 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
             .iter(world)
             .filter_map(
                 |(
+                    entity,
                     parent,
                     chunk,
                     collider,
@@ -4629,6 +4631,7 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
                         parent.parent(),
                         "physics and hierarchy name the same owner"
                     );
+                    assert_eq!(world.get::<Transform>(entity), Some(&Transform::IDENTITY));
                     Some(Fact {
                         owner: piece.chunks.clone(),
                         chunk: chunk.0,
@@ -4656,6 +4659,16 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
     let run = |reuse: bool| {
         let kind = column_construction();
         let (mut app, root) = composed_kind(false, &kind);
+        // Fixture: a nontrivial parent pose challenges world-to-local initialization.
+        let frame =
+            Transform::from_xyz(20.0, 7.0, -13.0).with_rotation(Quat::from_rotation_y(0.37));
+        app.world_mut().entity_mut(root).insert((
+            frame,
+            Position(frame.translation),
+            Rotation(frame.rotation),
+        ));
+        app.update();
+        app.update();
         app.world_mut()
             .get_mut::<Breakage>(root)
             .unwrap()
@@ -4683,7 +4696,7 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
             Departure {
                 kind: kind.clone(),
                 construction: body.construction,
-                root: Transform::IDENTITY,
+                root: frame,
                 live: body.live.group(&group),
                 launch: launch(&kind, &body.live.structure, &group, &[]),
                 group,

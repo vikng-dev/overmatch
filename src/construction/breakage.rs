@@ -2600,6 +2600,9 @@ fn spawn_prepared(
         Rotation(root.rotation),
         GlobalTransform::from(Transform::from_translation(at).with_rotation(root.rotation)),
     );
+    // Fresh colliders derive identity-local transforms through Avian's add hook; reused
+    // colliders have already run it and need the new world's pose explicitly.
+    let fresh_pose = (Position::PLACEHOLDER, Rotation::PLACEHOLDER, pose.2);
     for (contact, occupied) in chunks {
         let chunk = contact.5.0;
         if let Some(entity) = reusable.remove(&(chunk, false)) {
@@ -2611,7 +2614,7 @@ fn spawn_prepared(
                 .insert((ChildOf(piece), contact, pose));
         } else {
             // An element can release before its per-chunk colliders have ever existed.
-            commands.spawn((ChildOf(piece), contact, pose));
+            commands.spawn((ChildOf(piece), contact, fresh_pose));
         }
         if let Some(entity) = reusable.remove(&(chunk, true)) {
             commands
@@ -2619,7 +2622,7 @@ fn spawn_prepared(
                 .insert((ChildOf(piece), occupied, pose));
         } else {
             // A standing chunk has no separate occupied sensor yet.
-            commands.spawn((ChildOf(piece), occupied, pose));
+            commands.spawn((ChildOf(piece), occupied, fresh_pose));
         }
     }
 }
