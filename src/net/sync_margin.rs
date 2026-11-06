@@ -75,12 +75,13 @@ use bevy::prelude::*;
 use lightyear::core::tick::{Tick, TickDuration};
 use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimeline};
 use lightyear::prelude::client::InputDelayConfig;
-use lightyear::prelude::{InputTimelineConfig, Interpolated, SyncConfig, SyncSystems};
+use lightyear::prelude::{
+    Controlled as NetControlled, InputTimelineConfig, Interpolated, SyncConfig, SyncSystems,
+};
 use lightyear_transport::plugin::PacketReceived;
 
 use super::protocol::NetTank;
 use crate::state::AppState;
-use crate::tank::Controlled;
 
 /// Half of one content interval, in ticks — the mean of the uniform phase between per-tick content
 /// (authored inputs up, replicated keyframes down) and the consuming clock's boundary. A term of
@@ -428,7 +429,7 @@ fn derive_input_margins(
     own: Query<
         (),
         (
-            With<Controlled>,
+            With<NetControlled>,
             With<NetTank>,
             With<Interpolated>,
             Without<ChildOf>,
@@ -483,6 +484,40 @@ mod tests {
             max_error_margin: 12.5,
             ..SyncConfig::default()
         }
+    }
+
+    /// Input synchronization follows the wire role before presentation can claim a complete body.
+    #[test]
+    fn input_margins_arm_before_body_attachment() {
+        use bevy::prelude::{DetectChanges, Update};
+        use lightyear::prelude::{Controlled, InputTimelineConfig, Interpolated};
+        let mut app = App::new();
+        let input_delay = crate::net::client::shipping_input_delay();
+        app.insert_resource(super::InputSyncBase {
+            sync: installed(),
+            input_delay,
+        })
+        .insert_resource(TickDuration(TICK))
+        .init_resource::<ArrivalDelay>()
+        .insert_resource(InputTimelineConfig::new(installed(), input_delay))
+        .add_systems(Update, super::derive_input_margins);
+        app.update();
+        let before = app
+            .world()
+            .get_resource_ref::<InputTimelineConfig>()
+            .unwrap()
+            .last_changed();
+        app.world_mut()
+            .spawn((Controlled, super::NetTank, Interpolated));
+        app.update();
+        assert_ne!(
+            app.world()
+                .get_resource_ref::<InputTimelineConfig>()
+                .unwrap()
+                .last_changed(),
+            before,
+            "the input clock must adopt its stream margins without waiting for a local body"
+        );
     }
 
     fn assert_close(actual: f32, expected: f32, what: &str) {
