@@ -1376,6 +1376,31 @@ mod tests {
         }
     }
 
+    /// The game's environment destruction: closing first unloads tension before spending
+    /// bulk capacity. Suspended members rely on the signed preload in the cut reserve.
+    #[test]
+    fn closing_a_tensioned_member_spends_the_signed_reserve() {
+        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, Vec3::Y], &[1], &[(0, 1)]);
+        // Fixture: unit area, 20 kN tensile and 10 kN bulk capacity, 9 kN gravity tension.
+        let mut seam = structure.joints[0].seam().unwrap();
+        seam.tensile = 2e4;
+        structure.joints[0].bond = Bond::Bonded(seam);
+        for chunk in &mut structure.chunks {
+            chunk.material.compressive_strength = 1e4;
+        }
+        structure.chunks[0].mass = 9000.0 / crate::physical_laws::gravity_mps2();
+        structure.chunks[0].material.density = structure.chunks[0].mass;
+        let state = State::new(&structure);
+        let preload = preload(&structure, &state);
+        assert!((preload[0] - 9000.0).abs() < 0.01);
+        // DERIVED: 10 + 9 = 19 kN closing reserve; 15 kN leaves 6 kN compression.
+        for (force, broken) in [(15000.0, false), (19001.0, true)] {
+            let mut patch = contact_patch(&structure, Vec3::Y, force);
+            geometry.resolve(&structure, &state, &preload, &mut patch, 128.0, Vec3::ZERO);
+            assert_eq!(patch.broken, broken, "force={force}");
+        }
+    }
+
     /// The game's environment destruction: an oblique joint under normal motion has a finite
     /// bulk limit. Normalization roundoff must not create a tangential bearing direction and
     /// an infinite cut; arbitrary construction orientations rely on this.

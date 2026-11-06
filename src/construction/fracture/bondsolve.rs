@@ -477,7 +477,7 @@ impl JointStrength {
         let normal_force = if opening > 0.0 {
             (tensile * area - preload).max(0.0)
         } else {
-            (bearing - (-preload).max(0.0)).max(0.0)
+            (bearing + preload).max(0.0)
         };
         normal_force * opening.abs() + shear * area * sliding
     }
