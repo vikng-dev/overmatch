@@ -691,7 +691,11 @@ mod tests {
 
     fn preload(structure: &Structure, state: &State) -> Vec<f64> {
         super::super::fracture::parts::Gravity::default()
-            .get(structure, state)
+            .get(
+                structure,
+                state,
+                &super::super::fracture::parts::Assessment::at_rest(structure),
+            )
             .to_vec()
     }
 

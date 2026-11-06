@@ -388,7 +388,7 @@ fn geometry(
             let preload = patches
                 .values()
                 .any(|s| s.witness.is_some())
-                .then(|| gravity.get(structure, state));
+                .then(|| gravity.get(structure, state, &kind.equilibrium));
             let results = patches
                 .into_iter()
                 .map(|(body, mut swept)| {

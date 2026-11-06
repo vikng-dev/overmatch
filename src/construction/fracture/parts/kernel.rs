@@ -36,6 +36,8 @@ pub(crate) struct Kernel {
     /// without them, and every event reports them parted ([`Self::hold`]).
     loose: Vec<usize>,
     pub(crate) factor: Factor,
+    #[cfg(test)]
+    pub(super) joint_visits: usize,
 }
 
 /// One event's verdict at chunk scale.
@@ -56,10 +58,8 @@ pub(crate) struct Hold {
 impl Kernel {
     /// The chunk graph of `chunks`, standing chunks of one owner, under `state`.
     pub(crate) fn of(structure: &Structure, state: &State, chunks: &[usize]) -> Self {
-        let mut node = vec![None; structure.chunks.len()];
-        for (i, &c) in chunks.iter().enumerate() {
-            node[c] = Some(i);
-        }
+        let node: std::collections::HashMap<_, _> =
+            chunks.iter().enumerate().map(|(i, &c)| (c, i)).collect();
         let mut nodes: Vec<Node> = chunks
             .iter()
             .map(|&c| Node {
@@ -70,33 +70,49 @@ impl Kernel {
         let soil = |c: usize| structure.chunks[c].buried;
         let mut edges = Vec::new();
         let mut joints = Vec::new();
-        for &j in &state.joints {
-            let joint = &structure.joints[j];
-            if state.separated[j] || !state.live(joint) {
-                continue; // Open or gone: it carries nothing.
-            }
-            let push = state.cracked[j] || joint.seam().is_none();
-            let far = match joint.b {
-                Side::Chunk(b) => Some(b),
-                Side::Ground => None,
-            };
-            let edge = match (node[joint.a], far.map(|b| (b, node[b]))) {
-                (Some(a), Some((_, Some(b)))) => Some(joint_edge(structure, j, a, Some(b), push)),
-                (Some(a), None) => Some(joint_edge(structure, j, a, None, push)),
-                (Some(a), Some((b, None))) => {
-                    soil(b).then(|| joint_edge(structure, j, a, None, push))
+        #[cfg(test)]
+        let mut joint_visits = 0;
+        for &c in chunks {
+            for &j in &state.topology.incident[c] {
+                #[cfg(test)]
+                {
+                    joint_visits += 1;
                 }
-                (None, Some((_, Some(b)))) if soil(joint.a) => {
-                    // The soil side is the joint's `a`: the edge reads from the set's chunk.
-                    let mut edge = joint_edge(structure, j, b, None, push);
-                    edge.normal = -edge.normal;
-                    Some(edge)
+                let joint = &structure.joints[j];
+                if joint.a != c && node.contains_key(&joint.a) {
+                    continue; // An internal joint is assembled once, from its a endpoint.
                 }
-                _ => None, // A boundary to a chunk outside the set: the caller's load.
-            };
-            if let Some(edge) = edge {
-                edges.push(edge);
-                joints.push(j);
+                if state.separated[j] || !state.live(joint) {
+                    continue; // Open or gone: it carries nothing.
+                }
+                let push = state.cracked[j] || joint.seam().is_none();
+                let far = match joint.b {
+                    Side::Chunk(b) => Some(b),
+                    Side::Ground => None,
+                };
+                let edge = match (
+                    node.get(&joint.a).copied(),
+                    far.map(|b| (b, node.get(&b).copied())),
+                ) {
+                    (Some(a), Some((_, Some(b)))) => {
+                        Some(joint_edge(structure, j, a, Some(b), push))
+                    }
+                    (Some(a), None) => Some(joint_edge(structure, j, a, None, push)),
+                    (Some(a), Some((b, None))) => {
+                        soil(b).then(|| joint_edge(structure, j, a, None, push))
+                    }
+                    (None, Some((_, Some(b)))) if soil(joint.a) => {
+                        // The soil side is the joint's `a`: the edge reads from the set's chunk.
+                        let mut edge = joint_edge(structure, j, b, None, push);
+                        edge.normal = -edge.normal;
+                        Some(edge)
+                    }
+                    _ => None, // A boundary to a chunk outside the set: the caller's load.
+                };
+                if let Some(edge) = edge {
+                    edges.push(edge);
+                    joints.push(j);
+                }
             }
         }
         let buried: Vec<bool> = nodes.iter().map(|n| n.fixed).collect();
@@ -171,6 +187,8 @@ impl Kernel {
             free,
             loose,
             factor,
+            #[cfg(test)]
+            joint_visits,
         }
     }
 

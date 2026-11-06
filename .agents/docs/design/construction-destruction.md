@@ -380,6 +380,12 @@ part-law interface forces between parts, and `parts::Kernel::hold` under gravity
 interface forces inside each part. Each owner caches this field until its standing chunks,
 cracks or separated joints change. Preloads stay fixed during optimization, including on
 supports beyond the seed patch; contact demand does not manufacture one.
+The pristine field reuses the design's part equilibrium and factored chunk kernels. After a
+structure change, only changed chunk kernels refactor. One interface pass assembles all boundary
+loads; kernels visit their chunks' own joint adjacency, with local hash indices. DERIVED: expected
+`O(chunks + joints)` indexing/traversal work per cold field, plus the gravity part solve and
+chunk triangular solves/factorisations; unchanged fields need only the linear topology signature.
+The grounded-singleton operation witness counts visits and forbids intact-kernel refactorisation.
 
 Dinic's level graphs and blocking flows find the minimum cut; residual reachability selects its
 source side `S*` (E. A. Dinic, 1970, [original paper](https://www.mathnet.ru/eng/dan35701)).
