@@ -41,7 +41,7 @@ Where code and prose disagree, the code wins, and the row says so.
 |---|---|---|---|---|
 | `level.json` | Houdini export, format `overmatch_bevy_level` v1, hand-edited since. The Houdini scene is not in the repo. | `map::parse` (`src/map.rs:558-623`); the content digest (`map.rs:485-504`); `scripts/lod/config.py:80-124` (the LOD certificate's right wall, the map diagonal); the server pack (`.github/actions/build-server/action.yml:114-115`) | **P**: the source is off-repo and edits land on the exported product. Replaced by #221's pipeline with tracked source. The provisional marks are already in the data: `"placeholder": true` on `house_proxy` and `church_proxy`, `spawn_points_note: "ASSUMED…"`. | 709 instances. MEASURED: `fir_a_0201` stands at x = 749.9 m, 0.09 m from the edge; 26 instances stand within 10 m. Houses are ≥ 117.9 m from the edge, spawn points ≥ 30 m. `church_proxy` has 0 instances. |
 | `terrain_height.png` | the same off-repo export | `decode_height_grid` reads the bytes itself (`src/terrain_grid.rs:569`) and decodes them (`grid_from_png`, `:593`); the digest reads them again (`map.rs:493`) | Product **B** (LFS, `.gitattributes:20`); source **P**, as above. | Decoded once and downsampled once to 1025² (`terrain_grid.rs:90`). |
-| `terrain_masks.png` | `scripts/map/extract_masks.py`, from a TIFF kept off-repo (`extract_masks.py:6-8`, `:39`) | `ground_field` for sim ground types (`src/ground_field.rs:145-213`); the view's mask image, built from that decode (`src/world.rs:514`, `:684-687`) | Product **B**. Script **P**: its source is off-repo, replaced by #221. **U**: the server reads the masks but the digest does not fold them (`map.rs:485-504`); W1a folds them (R1). | The script refuses misalignment at full resolution before writing (`extract_masks.py:17-20`). |
+| `terrain_masks.png` | `scripts/map/extract_masks.py`, from a TIFF kept off-repo (`extract_masks.py:6-8`, `:39`) | `ground_field` for sim ground types (`src/ground_field.rs:145-213`); the view's mask image, built from that decode (`world::ground_mask_image`) | Product **B**. Script **P**: its source is off-repo, replaced by #221. **U**: the server reads the masks but the digest does not fold them (`map.rs:485-504`); W1a folds them (R1). | The script refuses misalignment at full resolution before writing (`extract_masks.py:17-20`). |
 | `prototypes.ron` | hand-authored, game-owned | `map::parse` (`map.rs:562-584`), `check_prototype` (`:524`), the digest | **B** | Every id the placement uses or the author declares must resolve, or `map::parse` panics (`map.rs:571-584`). |
 | `derived/map_ui.png` | a python/PIL recipe written only in a doc comment (`src/net/spawn_map.rs:46-61`) | `net::spawn_map`, a client plugin; excluded from the server pack (`action.yml:114-115`); pushed-asset list (`scripts/hooks/test_pushed_assets.sh:382`) | **P**: untracked generator. Replaced by a startup derivation from `HeightGrid` (R3a), a pure 1024² downshift, which deletes the recipe and the LFS product. No lane here does it. | `derived/` is "what WE generate from the authored data" (`map.rs:59-62`, `:86-89`). |
 
@@ -65,8 +65,8 @@ Where code and prose disagree, the code wins, and the row says so.
 | `src/terrain_blend.rs` | the ground material | **B**, except `BLEND_LAYERS`, `BASE_GROUND` and the appearance consts (`:87-106`, `:190-216`): backlog rows destruction-05 and destruction-08 (**P**) | `prints_world` has no sampler of its own; it is read through the mask's clamping sampler (`:297-302`). §3.3 depends on this. |
 | `src/ground_field.rs` | decodes the masks into ground types for the sim (`:145-213`), reading the file itself (`:196`) | **B** | |
 | `src/scatter.rs` | places instances on every composition; both peers derive them, nothing is replicated (`:1-24`) | **B**. Graybox `Block`s are placeholders (`"placeholder": true`). | Statics are `[Terrain]` (`:318`). |
-| `src/world.rs`, `src/world/look.rs` | sun, analytic sky, environment light, environment spawn | sky law **B**; sky data home **P** (moved by V0) | Sky data is `include_str!` of `assets/world/lighting.ron` (`look.rs:5-6`): global, not per map. `sky_radiance` (`world.rs:176-200`) is baked to 128² `Rgba8Unorm` (`:219-252`) and filtered once (`:256-415`). **A bug**: the bake evaluates radiance at cubemap coordinates (`:204-217`, `:228`), but Bevy samples every cubemap at (x, y, −z) of the world direction (`bevy_core_pipeline-0.19.1/src/skybox/skybox.wgsl:78-79`; vendored `light_probe/environment_map.wgsl:92-93`). Today's fill glow therefore sits mirrored across the XY plane: the sun is at azimuth +45° and the glow at −45° (DERIVED). L1a fixes it. **U**: the sun's `DirectionalLight` spawns on every composition, the server included (`:584-597`), and `world::plugin` parses the lighting file on the server (`:421`). That is view data on the server; V0 moves it. |
-| `assets/world/lighting.ron` | 12 `Taste` rows (`:3-14`) | **P**: moves per map (V0) | `look.rs:72` admits `sky_intensity_cd_m2 = 0` and `look.rs:86-99` admits zero colour channels, which the new derivations divide by (§3.2, §3.4). |
+| `src/world.rs`, `src/world/look.rs` | sun, analytic sky, environment light, environment spawn | sky law **B**; sky data home **P** (moved by V0) | Sky data is `include_str!` of `assets/world/lighting.ron` : global, not per map. `sky_radiance` (V1 moved it to `sky::sky_radiance`) is baked to 128² `Rgba8Unorm` and filtered once (`sky::light_battlefield_views`). **A bug**: the bake evaluates radiance at cubemap coordinates, but Bevy samples every cubemap at (x, y, −z) of the world direction (`bevy_core_pipeline-0.19.1/src/skybox/skybox.wgsl:78-79`; vendored `light_probe/environment_map.wgsl`, `compute_cubemap_sample_dir`). Today's fill glow therefore sits mirrored across the XY plane: the sun is at azimuth +45° and the glow at −45° (DERIVED). L1a fixes it (`sky::world_direction`). **U**: the sun's `DirectionalLight` spawns on every composition, the server included, and `world::plugin` parses the lighting file on the server. That is view data on the server; V0 moves it. |
+| `assets/world/lighting.ron` | 12 `Taste` rows | **P**: moves per map (V0) | Its parse admits `sky_intensity_cd_m2 = 0` (refused since L1a) and zero colour channels, which the new derivations divide by (§3.2, §3.4). |
 | `src/net/spawn_map.rs`, `assets/ui/spawn_map.ron:2` | the spawn clamp, 0.95 of the half-extent as a `Unit` (`spawn_map.rs:41-44`) | **B** while the play area is the terrain square; **P** the day it is irregular (§3.6) | Backlog rows net-05, net-09, net-10. No lane here edits the file. |
 | `assets/ballistics/physical_laws.ron:12` | `floor_m: -100`, `StandIn("Finite play boundary until maps author vertical play bounds…")` | **P**, replacement named; W2 retires it into the play area | Read at `src/ballistics.rs:2495`. |
 | `src/aim.rs` | aim distance | **U**: the doc at `:41-42` claims the "same `Terrain \| Armor` mask the live shell marches against", but the march meets only `Armor`-member colliders plus the height grid (`ballistics.rs:747-757`, `:784-789`). Code wins: the aim ray stops on `Terrain`-only colliders that rounds pass through. A1 fixes it. | |
@@ -162,9 +162,9 @@ numbers, each with its reason.
   their labels, and the old file is deleted. The file is read from `map_dir(asset_root)/view/` at
   first use, client only.
 - The sun's `DirectionalLight` spawns under the window guard, as the terrain mesh does
-  (`world.rs:637`), and `world::plugin` stops parsing at build (`:421`). The server parses and
+  (`world::spawn_environment`), and `world::plugin` stops parsing at build. The server parses and
   spawns nothing of the sky.
-- V1 moves the parse, `sky_radiance`, the bakes and the filter-once light out of `world.rs:164-415`
+- V1 moves the parse, `sky_radiance`, the bakes and the filter-once light out of `world.rs`
   and `world/look.rs` into a client-only `src/sky.rs`, with no behaviour change. `world.rs` keeps the
   ground, the scatter and the colliders. The world passes `sky::toward_sun()` to `terrain_shadow::install`; the shadow module already
   takes a direction rather than calling the sky itself. The sandbox calls `sky::sun_light` and
@@ -179,15 +179,15 @@ sampled for: `(c.x, c.y, −c.z)` of the cube direction `c`, the inverse of Bevy
   azimuth.
 - Face-size and Cube-view tests cannot catch this.
 
-**Law.** One radiance function, two bakes: `sky_radiance(dir, Bake)`, where
-`enum Bake { Light, Drawn }`.
+**Law.** One radiance function, two bakes: `sky_radiance(look, toward_sun, dir, Bake)`, where
+`enum Bake { Light, Drawn }`; L1a added `Bake` with `Light`, and L1b adds `Drawn`, its first user.
 
 | | `Light` (filtered into the environment light) | `Drawn` (`Skybox`) |
 |---|---|---|
-| Face size | 128², as today (`world.rs:169`) | 512². `Resolution`: 0.18° per texel. The optic's 25° field over about 1080 px is 0.023°/px, about 7.6× texel magnification (DERIVED); the gradient and the haze-faded clouds stay smooth at that. |
+| Face size | 128², as today (`sky::Bake::face_px`) | 512². `Resolution`: 0.18° per texel. The optic's 25° field over about 1080 px is 0.023°/px, about 7.6× texel magnification (DERIVED); the gradient and the haze-faded clouds stay smooth at that. |
 | Format | `Rgba16Float` (L1a). The generator's copy pass converts formats (vendored `light_probe/generate.rs:409`) and builds its own `D2Array` views (`:605-608`, `:781-787`). | `Rgba16Float`, with a `TextureViewDimension::Cube` view descriptor (`bevy_image-0.19.1/src/image.rs:641`) |
 | Sun disk | absent: the `DirectionalLight` carries the sun's light. A disk here would add the sun's illuminance twice (DERIVED: disk radiance × disk solid angle = illuminance). | present (§3.4) |
-| Below the horizon | ground bounce, today's law (`world.rs:197-199`) | the horizon value of the same azimuth: infinitely distant ground under haze, Koschmieder's limit, which the fog converges to (§3.2) |
+| Below the horizon | ground bounce, today's law (`sky::sky_radiance`) | the horizon value of the same azimuth: infinitely distant ground under haze, Koschmieder's limit, which the fog converges to (§3.2) |
 | GPU memory (DERIVED) | 0.8 MB | 12.6 MB (512²·6·8 B) |
 
 **Drawn (L1b).**
@@ -195,11 +195,11 @@ sampled for: `(c.x, c.y, −c.z)` of the cube direction `c`, the inverse of Bevy
   (`bevy_light-0.19.1/src/probe.rs:228-256`, exported as `bevy::light::Skybox`).
 - It goes on every view whose `CameraProfile::draws_battlefield()` holds
   (`render_policy.rs:338-343`): commander, optic, kill cam lesson. It is attached by the system that
-  attaches the environment light (`world.rs:316-350`).
+  attaches the environment light (`sky::light_battlefield_views`).
 - The pen cam inset keeps its own clear colour (`src/damage_cam/pen_cam/stage.rs:286`).
 
 **Brightness.** One number, `sky_intensity_cd_m2`: the `Skybox` brightness and the environment
-intensity (`world.rs:341`).
+intensity (`sky::light_battlefield_views`).
 - Bevy scales the skybox by the view's exposure (`skybox/mod.rs:63-80`).
 - L1b reports the drawn sky's luminance against the lit ground in frame 1. Raising the number also
   raises the fill; that is the settled trade.
@@ -249,7 +249,7 @@ on the shipped composition.
 - DERIVED for today's rows: (0.51, 0.39, 0.25) linear.
 
 **Toward the sun: one unshadowed scattering law for sky and fog (L2b).**
-- The sky's glow moves from azimuth-only (`world.rs:189-196`) onto a 3-D forward lobe,
+- The sky's glow moves from azimuth-only (`sky::sky_radiance`) onto a 3-D forward lobe,
   `max(dot(dir, toward_sun), 0)^glow_exponent`, keeping its `(1 − t)` fade above the horizon.
 - The fog uses the same lobe through `directional_light_color`, set per channel to
   `(glow − haze) × glow_strength × sky_intensity / (sun_linear × sun_illuminance)` (DERIVED).
@@ -364,7 +364,7 @@ tracer at range in the optic.
   the far outland is view. The margin is the map author's call (#221).
 
 **Spawn (L3b).**
-- Spawned in `spawn_environment`'s windowed branch beside `terrain_lod::spawn` (`world.rs:766-777`),
+- Spawned in `spawn_environment`'s windowed branch beside `terrain_lod::spawn` (`world::spawn_environment`),
   so the server builds none. The owner is `src/outland.rs`.
 - Drawn with the terrain's own material handle (no new material yet).
 - A new `VisualScope::OUTLAND`, `BattlefieldWorld` plus `ReceiveOnly`.
@@ -375,7 +375,7 @@ tracer at range in the optic.
 - A new `CasterClass::Outland` (`render_cost.rs:163-167`), ablate key `outland`.
 
 **Colour (L3c).** A second `TerrainMaterial` asset, cloned from the terrain's in `outland.rs`:
-- `masks` is a second image from `ground_mask_image` (`world.rs:514`) whose sampler mirrors
+- `masks` is a second image from `world::ground_mask_image` whose sampler mirrors
   (`ImageAddressMode::MirrorRepeat`, `bevy_image-0.19.1/src/image.rs:726-742`). C0 at the seam is
   all colour needs.
 - `prints_world` and `prints_near` are empty images. Through the shared clamping sampler
@@ -497,9 +497,9 @@ below. `MapManifest` carries it.
 - **Corners.** At a convex vertex the two boxes' inner faces meet on the vertex line, leaving no gap
   on the play side. At a reflex vertex their outward parts overlap.
 - `RigidBody::Static`, `CollisionLayers::new([Layer::Terrain], LayerMask::ALL)`, like every static
-  ground solid (`world.rs:632`, `scatter.rs:318`).
+  ground solid (`world::spawn_environment`, `scatter.rs:318`).
 - No `FieldSurface`, no `TerrainMap` block, no spawn obstacle, no mesh.
-- Spawned at Startup on every composition, beside the heightfield (`world.rs:626-636`).
+- Spawned at Startup on every composition, beside the heightfield (`world::spawn_environment`).
 
 **No grip (owner decision, a `Taste`).** The wall's `friction` row is 0 and goes on its colliders
 as `substances::contact_friction(friction)` (`src/substances.rs:70-77`), which carries the
@@ -551,7 +551,7 @@ Rejected:
 | track side slices | no | their filter omits `Terrain` (`bump_stop.rs:136-147`); trackworld deletes them |
 | debris pieces | yes | `piece_layers` includes `Terrain` (`src/construction/breakage.rs:2688-2699`) |
 | a burst's push rays (game's damage model) | yes, as a static surface | `SURFACES` includes `Terrain` (`breakage.rs:1293-1301`) |
-| orbit camera | yes | `ground_distance` casts against `Terrain` (`world.rs:941-954`) |
+| orbit camera | yes | `ground_distance` casts against `Terrain` (`world::ground_distance`) |
 | aim ray | no, after A1 | A1 gives aim the march's first-surface query |
 | rounds | no | the march meets `Armor` colliders and the height grid (`ballistics.rs:747-757`, `:784-789`) |
 

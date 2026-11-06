@@ -1,4 +1,4 @@
-//! Best practice: client-only, per-map sky admission, sun and analytic environment light.
+//! Client-only, per-map sky admission, sun and analytic environment light.
 //! `sun_light`, `sun_transform` and `level_ground_irradiance_lux` share one admitted sky;
 //! `spawn_sun` is called only behind the world's window guard. The environment is filtered once
 //! and shared by battlefield views. Each [`Bake`] holds the sky in world orientation
