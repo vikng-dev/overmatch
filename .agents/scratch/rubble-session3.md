@@ -112,4 +112,4 @@ Final source gates: formatting and CI clippy pass; 135 targeted tests and whole-
 with four manual tests ignored; the final transport-free census passes. The new cut-off-matter
 witness proves immediate departure, absence of a standing collider and agreement with the shared
 ledger. The absorption witness independently accounts for linear/angular momentum and kinetic
-energy. The completed full-suite result is recorded separately from these targeted gates.
+energy. The final full library suite was stopped at the 60-minute session cap; it did not complete. No test failure was reported before termination. The required completed full-suite run remains outstanding.
