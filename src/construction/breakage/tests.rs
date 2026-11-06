@@ -2565,11 +2565,12 @@ fn split_children_inherit_the_parents_rigid_momentum() {
     let velocity = Vec3::new(2.0, -3.0, 1.0);
     let spin = Vec3::new(0.3, 0.5, -0.2);
     let inertia = Mat3::from_quat(root.rotation)
-        * parent.inertia
+        * parent.mass_properties.angular_inertia_tensor().to_mat3()
         * Mat3::from_quat(root.rotation).transpose();
-    let energy = 0.5 * parent.mass * velocity.length_squared() + 0.5 * spin.dot(inertia * spin);
-    let total_mass = parent.mass;
-    let momentum = parent.mass * velocity;
+    let energy = 0.5 * parent.mass_properties.mass * velocity.length_squared()
+        + 0.5 * spin.dot(inertia * spin);
+    let total_mass = parent.mass_properties.mass;
+    let momentum = parent.mass_properties.mass * velocity;
     let angular = inertia * spin;
     let children = [group[..1].to_vec(), group[1..].to_vec()]
         .into_iter()
@@ -2640,13 +2641,14 @@ fn split_children_inherit_the_parents_rigid_momentum() {
         let group: Vec<_> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
         let geometry = launch(&kind, &breakage.live.as_ref().structure, &group, &[]);
         let r = Mat3::from_quat(rotation.0);
-        let inertia = r * geometry.inertia * r.transpose();
+        let inertia =
+            r * geometry.mass_properties.angular_inertia_tensor().to_mat3() * r.transpose();
         let at = pose.0 + rotation.0 * (geometry.centre - geometry.centroid);
-        sum_mass += geometry.mass;
-        sum_p += geometry.mass * velocity.0;
-        sum_l += inertia * spin.0 + (at - centre).cross(geometry.mass * velocity.0);
-        sum_e +=
-            0.5 * geometry.mass * velocity.0.length_squared() + 0.5 * spin.0.dot(inertia * spin.0);
+        sum_mass += geometry.mass_properties.mass;
+        sum_p += geometry.mass_properties.mass * velocity.0;
+        sum_l += inertia * spin.0 + (at - centre).cross(geometry.mass_properties.mass * velocity.0);
+        sum_e += 0.5 * geometry.mass_properties.mass * velocity.0.length_squared()
+            + 0.5 * spin.0.dot(inertia * spin.0);
     }
     assert!((sum_p - momentum).length() <= 1e-4 * momentum.length());
     assert!((sum_l - angular).length() <= 1e-4 * angular.length());
@@ -3346,8 +3348,8 @@ fn freed_in_place(group: &[usize], offset: Vec3) -> (App, (f32, Mat3, Vec3)) {
     let piece_live = live.group(group);
     let launched = launch(&kind, &piece_live.structure, group, &[]);
     let body = (
-        launched.mass,
-        launched.inertia,
+        launched.mass_properties.mass,
+        launched.mass_properties.angular_inertia_tensor().to_mat3(),
         launched.centre - launched.centroid,
     );
     let world = app.world_mut();
@@ -3378,7 +3380,7 @@ fn a_freed_chunk_moves_as_the_material_it_occupies() {
     let kind = shipped_house();
     let structure = kind.layout.structure(&kind.asset);
     for c in 0..kind.layout.chunks.len() {
-        let mass = launch(&kind, &structure, &[c], &[]).mass;
+        let mass = launch(&kind, &structure, &[c], &[]).mass_properties.mass;
         let ratio = mass / structure.chunks[c].mass;
         assert!(
             (ratio - 1.0).abs() < 1e-3,
@@ -3754,8 +3756,8 @@ fn prepared_group_state(prepared: PreparedDeparture) -> impl std::fmt::Debug + P
         (
             launch.centroid,
             launch.centre,
-            launch.mass,
-            launch.inertia,
+            launch.mass_properties.mass,
+            launch.mass_properties.angular_inertia_tensor().to_mat3(),
             launch.velocity,
             launch.spin,
         ),
@@ -4714,6 +4716,49 @@ fn chunk_facts(world: &mut World) -> Vec<ChunkFact> {
     facts
 }
 
+/// Driving and sweeps read these before Avian prepares physics. Every fresh or reused
+/// departure must already hold its complete occupied properties, including split children.
+fn assert_spawned_group_properties(world: &mut World) {
+    for (piece, owner, mass, inertia, com) in world
+        .query::<(
+            &Piece,
+            &Breakage,
+            &ComputedMass,
+            &avian3d::prelude::ComputedAngularInertia,
+            &avian3d::prelude::ComputedCenterOfMass,
+        )>()
+        .iter(world)
+    {
+        let group: Vec<_> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
+        let expected = launch(&owner.kind, &owner.live.structure, &group, &[]).mass_properties;
+        // Resolution: convex integration, diagonalization and f32 quaternion rounding at fixture scale.
+        let tolerance = 1e-5;
+        assert!(
+            (mass.value() - expected.mass).abs() <= expected.mass * tolerance,
+            "complete occupied mass is ready at spawn: {} vs {}",
+            mass.value(),
+            expected.mass
+        );
+        let expected_inertia = expected.angular_inertia_tensor().to_mat3();
+        let scale = expected_inertia
+            .to_cols_array()
+            .into_iter()
+            .map(f32::abs)
+            .fold(0.0, f32::max);
+        assert!(
+            (inertia.tensor().to_mat3() - expected_inertia)
+                .to_cols_array()
+                .into_iter()
+                .all(|v| v.abs() <= scale * tolerance),
+            "complete occupied inertia is ready at spawn"
+        );
+        assert!(
+            (com.0 - expected.center_of_mass).length() <= tolerance,
+            "occupied COM is ready in the new body's frame"
+        );
+    }
+}
+
 /// The game's environment destruction model: bookkeeping may reuse entity IDs, but every
 /// physics tick retains the same chunk shapes, ownership, material and solver properties.
 /// Fresh departure is also exercised: an intact element has no per-chunk entities to reuse.
@@ -4783,6 +4828,7 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
             &mut reusable,
         );
         queue.apply(app.world_mut());
+        assert_spawned_group_properties(app.world_mut());
         app.world_mut().run_system_once(reconcile).unwrap();
         if reuse {
             assert!(
@@ -4832,6 +4878,7 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
             .entity_mut(parent)
             .insert(PendingSplit { children, tick: 1 });
         app.world_mut().run_system_once(split_groups).unwrap();
+        assert_spawned_group_properties(app.world_mut());
         assert!(
             old.iter()
                 .all(|&e| app.world().get::<Collider>(e).is_some()),

@@ -2712,6 +2712,19 @@ fn spawn_prepared(
             Visibility::default(),
             crate::debris::DebrisPiece,
             crate::eased_dynamic_body(),
+            // The whole group owns its occupied properties at spawn. Child rehoming cannot
+            // expose a partial aggregate to driving or sweeps before Avian's prepare phase.
+            (
+                avian3d::prelude::Mass(launch.mass_properties.mass),
+                avian3d::prelude::AngularInertia::new_with_local_frame(
+                    launch.mass_properties.principal_angular_inertia,
+                    launch.mass_properties.local_inertial_frame,
+                ),
+                avian3d::prelude::CenterOfMass(launch.mass_properties.center_of_mass),
+                avian3d::prelude::NoAutoMass,
+                avian3d::prelude::NoAutoAngularInertia,
+                avian3d::prelude::NoAutoCenterOfMass,
+            ),
             LinearVelocity(root.rotation * *velocity),
             AngularVelocity(root.rotation * *spin),
         ))

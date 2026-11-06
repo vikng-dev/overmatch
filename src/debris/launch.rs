@@ -17,11 +17,8 @@ pub(crate) struct Launch {
     pub(crate) centre: Vec3,
     pub(crate) velocity: Vec3,
     pub(crate) spin: Vec3,
-    /// Occupied mass and inertia about `centre`; contact insets carry these whole-hull properties.
-    #[cfg(test)]
-    pub(crate) mass: f32,
-    #[cfg(test)]
-    pub(crate) inertia: Mat3,
+    /// Complete occupied properties in the body frame, ready before any contact reader runs.
+    pub(crate) mass_properties: MassProperties3d,
 }
 
 /// What a collider contributes to its body's mass, inertia and centre: the occupied `hull`'s at
@@ -69,9 +66,6 @@ pub(crate) fn launch_colliders(
         centre: com,
         velocity: impulse / total.mass,
         spin: inverse_inertia * angular,
-        #[cfg(test)]
-        mass: total.mass,
-        #[cfg(test)]
-        inertia: total.angular_inertia_tensor().to_mat3(),
+        mass_properties: total,
     }
 }
