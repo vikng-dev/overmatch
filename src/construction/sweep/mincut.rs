@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 
-/// Operation counts, not elapsed time. Scans include residual arcs in all searches and relabels.
+/// Operation counts, not elapsed time. Scans include capacity preparation and residual visits.
 #[derive(Default, Debug, Clone, Copy)]
 pub(crate) struct Work {
     pub(crate) nodes: usize,
@@ -29,10 +29,11 @@ impl std::ops::AddAssign for Work {
 struct Arc {
     to: usize,
     reverse: usize,
-    residual: f64,
+    capacity: f64,
+    residual: u128,
 }
 
-/// An exact releasing cut, or a certificate that the demanded flow can be carried.
+/// A releasing cut within the capacity-grid resolution, or a conservative holding certificate.
 #[derive(Debug)]
 pub(super) enum Cut {
     Held,
@@ -66,14 +67,50 @@ impl Network {
         self.arcs[a].push(Arc {
             to: b,
             reverse: br,
-            residual: forward,
+            capacity: forward,
+            residual: 0,
         });
         self.arcs[b].push(Arc {
             to: a,
             reverse: ar,
-            residual: backward,
+            capacity: backward,
+            residual: 0,
         });
         self.work.edges += 1;
+    }
+
+    /// Resolution: a 120-bit total leaves room in u128 for reverse capacities and supply.
+    /// Power-of-two scaling is exact in f64; truncation only lowers a finite capacity.
+    /// Design "Bodies in contact" defines the resulting force tolerance.
+    fn quantum(&self) -> f64 {
+        const CAPACITY_BITS: i32 = 120;
+        let (count, maximum) = self
+            .arcs
+            .iter()
+            .flatten()
+            .map(|arc| arc.capacity)
+            .filter(|c| c.is_finite() && *c > 0.0)
+            .fold((0_usize, 0.0_f64), |(count, maximum), c| {
+                (count + 1, maximum.max(c))
+            });
+        if count == 0 {
+            return f64::from_bits(1);
+        }
+        let bits = maximum.to_bits();
+        let exponent = if maximum.is_normal() {
+            (bits >> 52) as i32 - 1023
+        } else {
+            63 - bits.leading_zeros() as i32 - 1074
+        };
+        // DERIVED: each capacity is below 2^(exponent+1); rounding count upward to a
+        // power of two bounds their integer sum below 2^CAPACITY_BITS.
+        let exponent =
+            (exponent + 1 + count.next_power_of_two().ilog2() as i32 - CAPACITY_BITS).max(-1074);
+        if exponent >= -1022 {
+            f64::from_bits(((exponent + 1023) as u64) << 52)
+        } else {
+            f64::from_bits(1 << (exponent + 1074))
+        }
     }
 
     fn reachable(&mut self, source: usize) -> Vec<bool> {
@@ -83,7 +120,7 @@ impl Network {
         while let Some(a) = queue.pop_front() {
             for arc in &self.arcs[a] {
                 self.work.scans += 1;
-                if arc.residual > 0.0 && !seen[arc.to] {
+                if arc.residual > 0 && !seen[arc.to] {
                     seen[arc.to] = true;
                     queue.push_back(arc.to);
                 }
@@ -110,7 +147,7 @@ impl Network {
                 self.work.scans += 1;
                 if arc.to != source
                     && distance[arc.to] == n + 1
-                    && self.arcs[arc.to][arc.reverse].residual > 0.0
+                    && self.arcs[arc.to][arc.reverse].residual > 0
                 {
                     distance[arc.to] = distance[a] + 1;
                     queue.push_back(arc.to);
@@ -125,7 +162,7 @@ impl Network {
         self.work.global_relabels += 1;
     }
 
-    fn push(&mut self, a: usize, index: usize, flow: f64) -> usize {
+    fn push(&mut self, a: usize, index: usize, flow: u128) -> usize {
         let arc = &mut self.arcs[a][index];
         arc.residual -= flow;
         let (to, reverse) = (arc.to, arc.reverse);
@@ -142,60 +179,66 @@ impl Network {
         if demand == 0.0 {
             return (Cut::Held, self.work);
         }
-        // A finite supply avoids infinite preflows on forced-membership arcs. For an exact-cut
-        // diagnostic, the sum of finite directed capacities bounds every finite cut from above.
-        let supply = if demand.is_finite() {
-            demand
-        } else {
-            let mut bound = 0.0_f64;
-            for arcs in &self.arcs {
-                for arc in arcs {
-                    self.work.scans += 1;
-                    if arc.residual.is_finite() && arc.residual > 0.0 {
-                        // Resolution: outward rounding keeps the inlet above the true sum,
-                        // even when a small parallel capacity is below a large one's ULP.
-                        bound = (bound + arc.residual).next_up();
-                    }
-                }
+        let quantum = self.quantum();
+        self.work.scans += 2 * self.work.edges;
+        let mut total = 0_u128;
+        for arc in self.arcs.iter_mut().flatten() {
+            self.work.scans += 1;
+            if arc.capacity.is_finite() {
+                arc.residual = (arc.capacity / quantum) as u128;
+                total += arc.residual;
             }
+        }
+        // A finite cut costs at most total units; one more makes every infinite arc
+        // uncuttable. The same bound limits diagnostic supply without overflowing a preflow.
+        let bound = total + 1;
+        for arc in self.arcs.iter_mut().flatten() {
+            self.work.scans += 1;
+            if arc.capacity.is_infinite() {
+                arc.residual = bound;
+            }
+        }
+        let supply = if demand.is_finite() {
+            // Positive demand below the grid (including scaling underflow) still needs one
+            // unit. Rounding up makes every holding certificate conservative in force units.
+            ((demand / quantum).ceil() as u128).clamp(1, bound)
+        } else {
             bound
         };
-        assert!(
-            supply.is_finite(),
-            "an admitted construction has a finite capacity sum"
-        );
         let inlet = self.arcs.len();
         self.arcs.push(Vec::new());
         self.work.nodes += 1;
-        self.edge(inlet, source, supply, 0.0);
+        self.edge(inlet, source, 0.0, 0.0);
+        self.arcs[inlet][0].residual = supply;
         let n = self.arcs.len();
-        let mut excess = vec![0.0; n];
+        let mut excess = vec![0_u128; n];
         let mut height = vec![0; n];
         let mut cursor = vec![0; n];
         let mut active = VecDeque::new();
-        if supply > 0.0 {
-            self.push(inlet, 0, supply);
-            excess[source] = supply;
-            active.push_back(source);
-        }
+        self.push(inlet, 0, supply);
+        excess[source] = supply;
+        active.push_back(source);
         self.global_relabel(inlet, sink, &mut height, &mut cursor);
         // Resolution: refresh after one graph-sized amount of discharge work, amortising
         // distance updates against local scans. Two residual arcs belong to each edge pair.
         let interval = n + 2 * self.work.edges;
         let mut refresh = self.work.scans + interval;
         while let Some(a) = active.pop_front() {
-            while excess[a] > 0.0 {
+            while excess[a] > 0 {
                 if cursor[a] == self.arcs[a].len() {
-                    let mut next = usize::MAX;
-                    for arc in &self.arcs[a] {
-                        self.work.scans += 1;
-                        if arc.residual > 0.0 {
-                            next = next.min(height[arc.to] + 1);
-                        }
-                    }
+                    let next = self.arcs[a]
+                        .iter()
+                        .filter_map(|arc| {
+                            self.work.scans += 1;
+                            (arc.residual > 0).then_some(height[arc.to] + 1)
+                        })
+                        .min()
+                        .expect(
+                            "integer excess retains a positive reverse flow arc to its supplier",
+                        );
                     assert!(
-                        next != usize::MAX && next > height[a],
-                        "an active vertex has a reverse flow arc and strictly relabels"
+                        next > height[a],
+                        "valid residual labels strictly increase on relabel"
                     );
                     height[a] = next;
                     cursor[a] = 0;
@@ -204,17 +247,17 @@ impl Network {
                 }
                 self.work.scans += 1;
                 let arc = &self.arcs[a][cursor[a]];
-                if arc.residual > 0.0 && height[a] == height[arc.to] + 1 {
+                if arc.residual > 0 && height[a] == height[arc.to] + 1 {
                     let flow = excess[a].min(arc.residual);
                     let to = self.push(a, cursor[a], flow);
-                    if excess[to] == 0.0 && to != inlet && to != sink {
+                    if excess[to] == 0 && to != inlet && to != sink {
                         active.push_back(to);
                     }
                     excess[a] -= flow;
                     excess[to] += flow;
                     // Sink inflow in a preflow certifies a feasible flow of at least that value:
                     // all remaining surplus can return to the inlet along reverse flow arcs.
-                    if excess[sink] >= demand {
+                    if excess[sink] >= supply {
                         return (Cut::Held, self.work);
                     }
                 } else {
@@ -227,26 +270,149 @@ impl Network {
             }
         }
         // Discharging surplus back to the inlet leaves a feasible maximum flow. Forward
-        // reachability selects the smallest source-side minimum cut, excluding unrelated matter.
+        // reachability selects the smallest grid cut's source side, excluding unrelated matter.
         let mut inside = self.reachable(source);
         assert!(
             !inside[sink],
-            "exhausted preflow reaches an exact finite construction cut"
+            "exact integer discharge exhausts every source-to-sink residual path"
+        );
+        let capacity: f64 = self.arcs[..inlet]
+            .iter()
+            .enumerate()
+            .filter(|(a, _)| inside[*a])
+            .flat_map(|(_, arcs)| arcs)
+            .filter(|arc| !inside[arc.to])
+            .map(|arc| arc.capacity)
+            .sum();
+        assert!(
+            capacity.is_finite(),
+            "an admitted construction has a finite cut"
         );
         inside.truncate(inlet);
-        (
-            Cut::Released {
-                inside,
-                capacity: excess[sink],
-            },
-            self.work,
-        )
+        (Cut::Released { inside, capacity }, self.work)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's environment destruction: fractional flow splitting must certify a held
+    /// contact without relying on rounded sink accumulation equalling its inlet supply.
+    #[test]
+    fn fractional_parallel_supports_hold_without_roundoff_panic() {
+        // Fixture: forced seed 1, three supported chunks, source 0 and ground 5.
+        let mut graph = Network::new(6);
+        graph.edge(0, 1, f64::INFINITY, 0.0);
+        for (chunk, capacity) in [(2, 29.9), (3, 39.8), (4, 93.4)] {
+            graph.edge(1, chunk, capacity, capacity);
+            graph.edge(chunk, 5, 200.0, 200.0);
+        }
+        // DERIVED: all three supports in parallel carry 163.1 N, above the 100 N demand.
+        assert!(matches!(graph.cut(0, 5, 100.0).0, Cut::Held));
+    }
+
+    /// The game's environment destruction: rounding must never turn an insufficient support
+    /// into a holding certificate, even when the deficit is a single representable step.
+    #[test]
+    fn a_one_ulp_capacity_deficit_releases() {
+        // Fixture: subnormal, normal-boundary, unit, large and maximum finite capacities.
+        for capacity in [f64::from_bits(1), f64::MIN_POSITIVE, 1.0, 1e100, f64::MAX] {
+            let mut graph = Network::new(2);
+            graph.edge(0, 1, capacity, capacity);
+            assert!(matches!(
+                graph.cut(0, 1, capacity.next_up()).0,
+                Cut::Released { .. }
+            ));
+        }
+    }
+
+    /// The game's environment destruction: contact verdicts and returned plugs must agree
+    /// with exact integer-tenths cuts, including fractional cyclic and asymmetric networks.
+    #[test]
+    fn fractional_cuts_match_randomised_exact_reference() {
+        // Fixture: deterministic LCG, small enough to enumerate every source-side subset.
+        let mut random = 0x0005_eed6_u64;
+        let mut next = || {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            random
+        };
+        for case in 0..2048 {
+            let nodes = 3 + (next() % 6) as usize;
+            let sink = nodes - 1;
+            let scale = 2.0_f64.powi([-80, 0, 80][case % 3]);
+            let force = |units: u64| units as f64 / 10.0 * scale;
+            let mut edges = Vec::new();
+            for a in 0..nodes {
+                for b in a + 1..nodes {
+                    if next() % 4 != 0 {
+                        edges.push((a, b, next() % 2001, next() % 2001));
+                    }
+                }
+            }
+            let cut_units = |inside: &[bool]| {
+                edges
+                    .iter()
+                    .map(|&(a, b, forward, backward)| match (inside[a], inside[b]) {
+                        (true, false) => forward,
+                        (false, true) => backward,
+                        _ => 0,
+                    })
+                    .sum::<u64>()
+            };
+            // Source 0 forces seed 1; sink stays outside. Integer sums are exact.
+            let expected = (0..1 << nodes)
+                .filter(|bits| bits & 3 == 3 && bits & (1 << sink) == 0)
+                .map(|bits| {
+                    cut_units(&(0..nodes).map(|n| bits & (1 << n) != 0).collect::<Vec<_>>())
+                })
+                .min()
+                .unwrap();
+            for demand in [
+                0.0,
+                force(expected / 2),
+                force(expected),
+                force(expected + 1),
+                f64::INFINITY,
+            ] {
+                let mut graph = Network::new(nodes);
+                graph.edge(0, 1, f64::INFINITY, 0.0);
+                for &(a, b, forward, backward) in &edges {
+                    graph.edge(a, b, force(forward), force(backward));
+                }
+                let finite: Vec<_> = graph
+                    .arcs
+                    .iter()
+                    .flatten()
+                    .map(|arc| arc.capacity)
+                    .filter(|c| c.is_finite() && *c > 0.0)
+                    .collect();
+                // DERIVED: grid loss plus input/output summation error, as stated in design.
+                let k = finite.len() as f64 + 1.0;
+                let gamma = k * f64::EPSILON / (1.0 - k * f64::EPSILON);
+                let tolerance = k * graph.quantum() + gamma * finite.iter().sum::<f64>();
+                match graph.cut(0, sink, demand).0 {
+                    Cut::Held => assert!(
+                        demand <= force(expected) + tolerance,
+                        "case={case}, demand={demand}, expected={expected} tenths"
+                    ),
+                    Cut::Released { inside, capacity } => {
+                        assert!(inside[0] && inside[1] && !inside[sink]);
+                        assert!(demand + tolerance >= force(expected), "case={case}");
+                        assert!(
+                            (capacity - force(expected)).abs() <= tolerance,
+                            "case={case}, capacity={capacity}, expected={}, tolerance={tolerance}",
+                            force(expected)
+                        );
+                        assert!(
+                            (capacity - force(cut_units(&inside))).abs() <= tolerance,
+                            "case={case}: returned capacity must describe the returned plug"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     /// The game's environment destruction: a globally cheapest plug can require cancelling
     /// earlier flow. A path-only greedy cut returns 2 N here; source capacities bound the
@@ -389,8 +555,8 @@ mod tests {
         let (cut, work) = graph.cut(source, sink, 0.25);
         assert!(matches!(cut, Cut::Held));
         // DERIVED: one reverse-distance pass and the direct two-arc path suffice; the
-        // allowance includes the synthetic inlet. Far supports need no individual routing.
-        assert!(work.scans <= 2 * (work.nodes + 2 * work.edges), "{work:?}");
+        // allowance includes the inlet and three grid passes. Far supports need no routing.
+        assert!(work.scans <= 5 * (work.nodes + 2 * work.edges), "{work:?}");
         assert_eq!(work.global_relabels, 1);
         assert!(work.pushes <= 3);
         println!("MEASURED light-press flow work: {work:?}");
