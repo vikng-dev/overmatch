@@ -33,7 +33,7 @@ use crate::command::{DeviceCommand, TankCommand};
 use crate::run_window::RunWindow;
 use crate::state::{AppState, GameplaySet};
 use crate::tank::{
-    Controlled as GameControlled, Muzzle, PendingTankAssets, TankRoot, TankSim, Weapon,
+    Controlled as GameControlled, Muzzle, PendingTankAssets, Rig, TankRoot, TankSim, Weapon,
     WeaponIndex, load_tank_assets,
 };
 use crate::ui_font::UiFonts;
@@ -667,7 +667,7 @@ pub(super) fn install_replica_consumers(app: &mut App) {
         .add_observer(reset_shot_receive_state)
         .add_observer(reset_link_state)
         .add_observer(retire_link_shells)
-        .add_observer(claim_input_slot)
+        .add_plugins(control_claim_plugin)
         .add_systems(
             Update,
             (
@@ -1260,13 +1260,30 @@ where
     }
 }
 
-/// Claim the locally controlled replicated tank for input and presentation.
+/// Input can precede the body; player-facing ownership cannot. `Rig` and `TankViews` enter
+/// together in `tank::spawn::insert_root_components`, after the body's children are assembled.
+fn control_claim_plugin(app: &mut App) {
+    app.add_observer(claim_input_slot)
+        .add_observer(claim_complete_tank);
+}
+
+fn claim_complete_tank(
+    add: On<Add, (NetControlled, Rig)>,
+    complete: Query<(), (With<NetControlled>, With<Rig>)>,
+    mut commands: Commands,
+) {
+    // Either ownership or the body may arrive first. Until both exist, there is no local tank.
+    if complete.contains(add.entity) {
+        commands.entity(add.entity).insert(GameControlled);
+    }
+}
+
+/// File input from Lightyear ownership even while interpolation has not attached the body.
 fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
     info!("client: controlled entity {} — input slot", add.entity);
     commands.entity(add.entity).insert((
         InputMarker::<TankCommand>::default(),
         ActionState::<TankCommand>::default(),
-        GameControlled,
     ));
 }
 
@@ -2315,6 +2332,68 @@ pub(super) mod match_exit;
 /// unavailable to external integration tests. Recoil probes exercise the local-spec derivation.
 #[cfg(test)]
 mod tests {
+    /// Lightyear ownership can precede the body; the player's camera must survive that join gap.
+    #[test]
+    fn joining_before_body_attachment_keeps_the_camera_alive() {
+        use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<avian3d::collider_tree::ColliderTrees>()
+            .init_resource::<AccumulatedMouseMotion>()
+            .init_resource::<AccumulatedMouseScroll>()
+            .init_resource::<crate::sight::SightMode>()
+            .init_resource::<crate::aim::CommittedAim>()
+            .init_resource::<crate::firecontrol::Ranging>()
+            .add_plugins(crate::camera::plugin)
+            .add_plugins(control_claim_plugin);
+        let own = app.world_mut().spawn((NetControlled, NetTank)).id();
+        app.update();
+        assert!(app.world().get::<InputMarker<TankCommand>>(own).is_some());
+        assert!(app.world().get::<GameControlled>(own).is_none());
+        attach_control_fixture(app.world_mut(), own);
+        assert!(app.world().get::<GameControlled>(own).is_some());
+        app.update();
+    }
+
+    fn attach_control_fixture(world: &mut World, root: Entity) {
+        let turret = world.spawn((ChildOf(root), Transform::IDENTITY)).id();
+        // Fixture: any admitted optic; the ownership contract is independent of vehicle data.
+        let views = crate::tests::tank_views(crate::spec::Optics::Unaided(60.0).vertical_fov());
+        world.entity_mut(root).insert((
+            Transform::IDENTITY,
+            views,
+            Rig {
+                hull: root,
+                turret,
+                gun: turret,
+                muzzle: turret,
+            },
+        ));
+    }
+
+    /// A body arriving before ownership must remain remote, then claim immediately when owned.
+    /// The servo pump relies on that claim being visible with the complete rig.
+    #[test]
+    fn ownership_after_body_attachment_claims_the_complete_tank() {
+        let mut app = App::new();
+        app.add_plugins(control_claim_plugin);
+        let remote = app.world_mut().spawn(NetTank).id();
+        attach_control_fixture(app.world_mut(), remote);
+        assert!(app.world().get::<GameControlled>(remote).is_none());
+        app.world_mut().entity_mut(remote).insert(NetControlled);
+        assert!(app.world().get::<GameControlled>(remote).is_some());
+        assert!(
+            app.world()
+                .get::<InputMarker<TankCommand>>(remote)
+                .is_some()
+        );
+        assert!(
+            app.world()
+                .get::<ActionState<TankCommand>>(remote)
+                .is_some()
+        );
+    }
+
     /// Loading needs the own bound view and a playable snapshot, in either arrival order.
     /// Another tank's view cannot release it; later tank removal retains the once-ready latch.
     #[test]

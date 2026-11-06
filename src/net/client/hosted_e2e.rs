@@ -138,7 +138,7 @@ fn client_app(api: &str, log: bool) -> App {
     app.add_observer(diagnostics::log_connected)
         .add_observer(reset_shot_receive_state)
         .add_observer(reset_link_state)
-        .add_observer(claim_input_slot)
+        .add_plugins(control_claim_plugin)
         .add_systems(
             Update,
             (
