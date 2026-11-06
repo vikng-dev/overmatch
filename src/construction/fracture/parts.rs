@@ -11,8 +11,8 @@
 //! solve. Each tick first settles the contact active set: a push-only face whose friction wrench
 //! passes its Coulomb capacity slips ([`Slip`]), keeping its normal stiffness and carrying
 //! `μ N` against its slip as a term of the system itself, and a face that lifts or tips opens;
-//! each change is solved again, and a face only goes stick to slip to open, so the set is final
-//! within one pass per face. A part nothing else holds tangentially is a mechanism: its slipping
+//! each change is solved again. Joints only advance from stick through slip to open, so settling
+//! terminates. A part nothing else holds tangentially is a mechanism: its slipping
 //! rests open. Only then are bonds judged: an interface whose bonded joints reach their strength
 //! cracks whole and bears on as push-only. Connectivity ([`super::loose_groups`]) releases what
 //! lost its support, and the physics engine owns contact between separate bodies. Unchanged loads
@@ -185,8 +185,6 @@ impl Graph {
         }
         let mut edges = Vec::new();
         let mut joints = Vec::new();
-        let mut interfaces: Vec<Interface> = Vec::new();
-        let mut by_pair = BTreeMap::new();
         for &j in &live {
             let joint = &structure.joints[j];
             let a = part[joint.a].expect("a live joint's chunk stands in its owner");
@@ -200,39 +198,70 @@ impl Graph {
                 continue; // Inside one part: rigid.
             }
             let push = !bonded(j);
-            let key = match b {
-                Some(b) => (a.min(b), Some(a.max(b))),
-                None => (a, None),
-            };
-            let i = *by_pair.entry(key).or_insert_with(|| {
-                interfaces.push(Interface {
-                    a: key.0,
-                    b: key.1,
-                    ..Interface::default()
-                });
-                interfaces.len() - 1
-            });
-            let list = if push {
-                &mut interfaces[i].push
-            } else {
-                &mut interfaces[i].bonded
-            };
-            list.push(edges.len());
-            let mut edge = joint_edge(structure, j, a, b, push);
-            if let Some(slip) = slipping.get(&j).filter(|_| push) {
-                let mu = edge.push.expect("a push edge states its friction");
+            let edge = joint_edge(structure, j, a, b, push);
+            edges.push(edge);
+            joints.push(j);
+        }
+        let mut graph = Self {
+            parts,
+            interfaces: Vec::new(),
+            edges,
+            joints,
+            part,
+            free: Vec::new(),
+            nodes: Vec::new(),
+        };
+        graph.frame(slipping);
+        graph
+    }
+
+    /// Contact changes leave the bonded parts and their occupied properties unchanged.
+    /// Retained edges keep their geometry; openings remove edges and slips change friction.
+    fn refresh_contacts(&mut self, state: &State, slipping: &BTreeMap<usize, Slip>) {
+        let mut joints = self.joints.iter();
+        self.edges.retain(|_| {
+            let joint = joints.next().expect("each contact edge retains its joint");
+            !state.separated[*joint]
+        });
+        self.joints.retain(|&j| !state.separated[j]);
+        self.frame(slipping);
+    }
+
+    /// Open contacts can free a component; its gauge is a frame, never support.
+    fn frame(&mut self, slipping: &BTreeMap<usize, Slip>) {
+        self.interfaces.clear();
+        let mut by_pair = BTreeMap::new();
+        for (e, edge) in self.edges.iter_mut().enumerate() {
+            if let Some(mu) = edge.push
+                && let Some(slip) = slipping.get(&self.joints[e])
+            {
                 edge.shear_stiffness = 0.0;
                 edge.friction = Some(super::bondsolve::Friction {
                     force: slip.force * mu,
                     twist: slip.twist * mu,
                 });
-            } // A bond or a sticking rest holds through its stiffness.
-            edges.push(edge);
-            joints.push(j);
+            } // Slips only advance; a topology rebuild supplies any new sticking edges.
+            let key = match edge.b {
+                Some(b) => (edge.a.min(b), Some(edge.a.max(b))),
+                None => (edge.a, None),
+            };
+            let i = *by_pair.entry(key).or_insert_with(|| {
+                self.interfaces.push(Interface {
+                    a: key.0,
+                    b: key.1,
+                    ..Interface::default()
+                });
+                self.interfaces.len() - 1
+            });
+            if edge.push.is_some() {
+                self.interfaces[i].push.push(e);
+            } else {
+                self.interfaces[i].bonded.push(e);
+            }
         }
-        let mut neighbours = vec![Vec::new(); parts.len()];
-        let mut anchored: Vec<_> = parts.iter().map(|p| p.node.fixed).collect();
-        for e in &edges {
+        let mut neighbours = vec![Vec::new(); self.parts.len()];
+        let mut anchored: Vec<_> = self.parts.iter().map(|p| p.node.fixed).collect();
+        for e in &self.edges {
             match e.b {
                 Some(b) => {
                     neighbours[e.a].push(b);
@@ -242,8 +271,8 @@ impl Graph {
             }
         }
         let mut free = Vec::new();
-        let mut seen = vec![false; parts.len()];
-        for start in 0..parts.len() {
+        let mut seen = vec![false; self.parts.len()];
+        for start in 0..self.parts.len() {
             if seen[start] {
                 continue; // Already in a component.
             }
@@ -266,19 +295,12 @@ impl Graph {
                 free.push(group);
             }
         }
-        let mut nodes: Vec<_> = parts.iter().map(|p| p.node).collect();
+        let mut nodes: Vec<_> = self.parts.iter().map(|p| p.node).collect();
         for group in &free {
             nodes[group[0]].fixed = true;
         }
-        Self {
-            parts,
-            interfaces,
-            edges,
-            joints,
-            part,
-            free,
-            nodes,
-        }
+        self.free = free;
+        self.nodes = nodes;
     }
 
     /// The slipping joints that leave `node` a mechanism: those touching the parts `node`
@@ -409,9 +431,21 @@ impl Mechanism {
     }
 }
 
-impl Factor {
-    /// The factor, or the mechanism whose pivot fell below [`MECHANISM`] of its elastic diagonal.
-    fn new(nodes: &[Node], edges: &[Edge]) -> Result<Self, Mechanism> {
+/// Sparse ordering depends only on free-node adjacency and the fixed-node set. Contact
+/// settling reuses it and its coefficient buffers; every refactor reassembles all coefficients.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct FactorPattern {
+    adjacency: Vec<std::collections::BTreeSet<usize>>,
+    fixed: Vec<bool>,
+    order: Vec<usize>,
+    blocks: Vec<Vec<usize>>,
+    prior: Vec<Vec<(usize, usize)>>,
+    #[cfg(test)]
+    builds: usize,
+}
+
+impl FactorPattern {
+    fn prepare(&mut self, factor: &mut Factor, nodes: &[Node], edges: &[Edge]) {
         let mut graph = vec![std::collections::BTreeSet::new(); nodes.len()];
         for e in edges {
             if let Some(b) = e.b
@@ -422,52 +456,88 @@ impl Factor {
                 graph[b].insert(e.a);
             }
         }
-        let mut live: std::collections::BTreeSet<_> =
-            (0..nodes.len()).filter(|&i| !nodes[i].fixed).collect();
-        let mut fronts = Vec::new();
-        let mut order = Vec::new();
-        let mut map = vec![None; nodes.len()];
-        while let Some(&a) = live.iter().min_by_key(|&&i| (graph[i].len(), i)) {
-            order.push(a);
-            let front: Vec<_> = graph[a].iter().copied().collect();
-            for (offset, &b) in front.iter().enumerate() {
-                graph[b].remove(&a);
-                for &c in &front[offset + 1..] {
-                    if graph[b].insert(c) {
-                        graph[c].insert(b);
+        let fixed: Vec<_> = nodes.iter().map(|node| node.fixed).collect();
+        if self.adjacency != graph || self.fixed != fixed || factor.map.len() != nodes.len() {
+            self.adjacency = graph.clone();
+            self.fixed = fixed;
+            #[cfg(test)]
+            {
+                self.builds += 1;
+            }
+            let mut live: std::collections::BTreeSet<_> =
+                (0..nodes.len()).filter(|&i| !nodes[i].fixed).collect();
+            let mut fronts = Vec::new();
+            let mut order = Vec::new();
+            let mut map = vec![None; nodes.len()];
+            while let Some(&a) = live.iter().min_by_key(|&&i| (graph[i].len(), i)) {
+                order.push(a);
+                let front: Vec<_> = graph[a].iter().copied().collect();
+                for (offset, &b) in front.iter().enumerate() {
+                    graph[b].remove(&a);
+                    for &c in &front[offset + 1..] {
+                        if graph[b].insert(c) {
+                            graph[c].insert(b);
+                        }
                     }
                 }
+                live.remove(&a);
+                map[a] = Some(6 * fronts.len());
+                fronts.push(front);
             }
-            live.remove(&a);
-            map[a] = Some(6 * fronts.len());
-            fronts.push(front);
-        }
-        let n = 6 * fronts.len();
-        // Per node block: its front's blocks, ascending. A front is eliminated after its node, so
-        // a column's rows are the rest of its own block, then each front block's six.
-        let blocks: Vec<Vec<usize>> = fronts
-            .iter()
-            .map(|front| {
-                let mut bases: Vec<_> = front
-                    .iter()
-                    .map(|&b| map[b].expect("a front node is ordered"))
-                    .collect();
-                bases.sort_unstable();
-                bases
-            })
-            .collect();
-        let mut columns: Vec<Column> = (0..n)
-            .map(|j| {
-                let rows: Vec<_> = (j..6 * (j / 6 + 1))
-                    .chain(blocks[j / 6].iter().flat_map(|&base| base..base + 6))
-                    .collect();
-                Column {
-                    values: vec![0.0; rows.len()],
-                    upper: vec![0.0; rows.len()],
-                    rows,
+            let n = 6 * fronts.len();
+            // Per node block: its front's blocks, ascending. A front is eliminated after its node, so
+            // a column's rows are the rest of its own block, then each front block's six.
+            let blocks: Vec<Vec<usize>> = fronts
+                .iter()
+                .map(|front| {
+                    let mut bases: Vec<_> = front
+                        .iter()
+                        .map(|&b| map[b].expect("a front node is ordered"))
+                        .collect();
+                    bases.sort_unstable();
+                    bases
+                })
+                .collect();
+            let columns: Vec<Column> = (0..n)
+                .map(|j| {
+                    let rows: Vec<_> = (j..6 * (j / 6 + 1))
+                        .chain(blocks[j / 6].iter().flat_map(|&base| base..base + 6))
+                        .collect();
+                    Column {
+                        values: vec![0.0; rows.len()],
+                        upper: vec![0.0; rows.len()],
+                        rows,
+                    }
+                })
+                .collect();
+            let mut prior = vec![Vec::new(); n];
+            for (j, c) in columns.iter().enumerate() {
+                for (pos, &i) in c.rows.iter().enumerate().skip(1) {
+                    prior[i].push((j, pos));
                 }
-            })
-            .collect();
+            }
+            self.order = order;
+            self.blocks = blocks;
+            self.prior = prior;
+            factor.columns = columns;
+            factor.map = map;
+        }
+    }
+
+    fn refactor(
+        &mut self,
+        factor: &mut Factor,
+        nodes: &[Node],
+        edges: &[Edge],
+    ) -> Result<(), Mechanism> {
+        self.prepare(factor, nodes, edges);
+        let Factor { columns, map, .. } = factor;
+        let (blocks, prior, order) = (&self.blocks, &self.prior, &self.order);
+        let n = columns.len();
+        for column in columns.iter_mut() {
+            column.values.fill(0.0);
+            column.upper.fill(0.0);
+        }
         // Where row `i` sits among column `j`'s rows, `i ≥ j`.
         let slot = |j: usize, i: usize| {
             if i / 6 == j / 6 {
@@ -525,12 +595,6 @@ impl Factor {
                         }
                     }
                 }
-            }
-        }
-        let mut prior = vec![Vec::new(); n];
-        for (j, c) in columns.iter().enumerate() {
-            for (pos, &i) in c.rows.iter().enumerate().skip(1) {
-                prior[i].push((j, pos));
             }
         }
         let (mut lower, mut upper) = (vec![0.0; n], vec![0.0; n]);
@@ -593,7 +657,17 @@ impl Factor {
             }
             ops += c.rows.len() as u64;
         }
-        Ok(Self { columns, map, ops })
+        factor.ops = ops;
+        Ok(())
+    }
+}
+
+impl Factor {
+    /// The factor, or the mechanism whose pivot fell below [`MECHANISM`] of its elastic diagonal.
+    fn new(nodes: &[Node], edges: &[Edge]) -> Result<Self, Mechanism> {
+        let mut factor = Self::default();
+        FactorPattern::default().refactor(&mut factor, nodes, edges)?;
+        Ok(factor)
     }
 
     /// Unknown coordinates: six per free part.
@@ -855,6 +929,7 @@ impl Gravity {
 pub(crate) struct Assessment {
     pub(crate) graph: Graph,
     pub(crate) factor: Factor,
+    ordering: FactorPattern,
     signature: Signature,
     /// The solved loads per part: sustained, then sustained plus this tick's pulse.
     loads: Vec<Wrench>,
@@ -938,17 +1013,22 @@ impl Assessment {
     /// it without a tangential hold or, where it reaches none, the joints its free motion moves
     /// ([`Mechanism::carriers`]); returns those failures.
     fn rebuild(&mut self, structure: &Structure, state: &mut State) -> Vec<Failure> {
+        self.graph = Graph::of(structure, state, &self.slipping);
+        self.refactor(structure, state)
+    }
+
+    /// A mechanism removes interfaces; rigid membership changes only at the next topology rebuild.
+    fn refactor(&mut self, structure: &Structure, state: &mut State) -> Vec<Failure> {
         let mut lost = Vec::new();
         // A slip ends with its joint: once it opens or its chunks fall.
         self.slipping
             .retain(|&j, _| !state.separated[j] && state.live(&structure.joints[j]));
         loop {
-            self.graph = Graph::of(structure, state, &self.slipping);
-            match Factor::new(&self.graph.nodes, &self.graph.edges) {
-                Ok(factor) => {
-                    self.factor = factor;
-                    break;
-                }
+            let refactored =
+                self.ordering
+                    .refactor(&mut self.factor, &self.graph.nodes, &self.graph.edges);
+            match refactored {
+                Ok(()) => break,
                 Err(mechanism) => {
                     let mut joints = self.graph.mechanism(mechanism.node);
                     if joints.is_empty() {
@@ -972,6 +1052,7 @@ impl Assessment {
                             work: 0.0,
                         });
                     }
+                    self.graph.refresh_contacts(state, &self.slipping);
                 }
             }
         }
@@ -1137,12 +1218,9 @@ impl Assessment {
         (failures, columns)
     }
 
-    /// Settle the contact active set, then judge the bonds on the final field. Each pass solves,
-    /// opens every push-only face that lifts or tips and starts every face whose friction wrench
-    /// passes its Coulomb capacity slipping; a face only goes stick to slip to open, so the passes
-    /// end within one per face. A part a slip leaves a mechanism opens its slipping rests. A
-    /// cohesive failure commits only on the final field. Returns the failures and the load columns
-    /// solved.
+    /// Settle contacts, then judge bonds on the final field. Contact changes keep rigid membership
+    /// fixed; mechanisms remove the interfaces that leave them free. Returns failures and solved
+    /// load columns.
     fn settle(
         &mut self,
         structure: &Structure,
@@ -1165,7 +1243,8 @@ impl Assessment {
             }
             failures.extend(contact.opened);
             self.slipping.extend(contact.slips);
-            failures.extend(self.rebuild(structure, state));
+            self.graph.refresh_contacts(state, &self.slipping);
+            failures.extend(self.refactor(structure, state));
             self.loads = self.loads_of(sources, spin, step);
         }
         let (cracks, separated) = self.bonds(structure);

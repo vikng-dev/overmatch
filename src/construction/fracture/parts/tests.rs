@@ -1648,3 +1648,114 @@ fn grounded_singletons_prepare_preload_with_linear_joint_visits() {
     assert_eq!(gravity.work.reused, count - 1);
     println!("MEASURED changed singleton preload: {:?}", gravity.work);
 }
+
+/// The game's environment destruction needs fresh coefficients when a contact changes stiffness,
+/// even while its sparse pattern is reused. A changed fixed set must rebuild the pattern.
+#[test]
+fn a_reused_pattern_reassembles_stiffness_and_tracks_anchors() {
+    // Fixture: one unit cube bonded to the ground, then twice the normal stiffness.
+    let structure = structure(
+        vec![cube(Vec3::ZERO, 1.0, false)],
+        vec![0],
+        vec![joint(
+            0,
+            Side::Ground,
+            Vec3::NEG_Y * 0.5,
+            Vec3::Y,
+            1.0,
+            Bond::Bonded(seam(1e9, 1e9)),
+        )],
+    );
+    let state = State::new(&structure);
+    let mut graph = Graph::of(&structure, &state, &BTreeMap::new());
+    let mut factor = Factor::default();
+    let mut ordering = FactorPattern::default();
+    let loads = [Wrench::at(DVec3::NEG_Y, DVec3::ZERO)];
+    ordering
+        .refactor(&mut factor, &graph.nodes, &graph.edges)
+        .unwrap();
+    let before = factor.solve(&loads);
+    graph.edges[0].normal_stiffness *= 2.0;
+    ordering
+        .refactor(&mut factor, &graph.nodes, &graph.edges)
+        .unwrap();
+    let after = factor.solve(&loads);
+    close(
+        after[0].linear.y * 2.0,
+        before[0].linear.y,
+        "inverse stiffness response",
+    );
+    close(
+        graph.edges[0].resultant(&graph.nodes, &after).linear.y,
+        -1.0,
+        "ground reaction",
+    );
+    assert_eq!(
+        ordering.builds, 1,
+        "unchanged adjacency reuses its ordering"
+    );
+    graph.nodes[0].fixed = true;
+    ordering
+        .refactor(&mut factor, &graph.nodes, &graph.edges)
+        .unwrap();
+    assert_eq!(
+        ordering.builds, 2,
+        "a newly fixed node changes the ordering"
+    );
+    assert_eq!(
+        factor.unknowns(),
+        0,
+        "a fixed node has no unknown coordinates"
+    );
+}
+
+/// The game's environment destruction: a new interface between previously independent parts
+/// changes sparse fill even when neither node's fixed state changes.
+#[test]
+fn a_new_interface_invalidates_the_factor_pattern() {
+    // Fixture: two separately grounded cubes; then a bonded interface joins them.
+    let bond = Bond::Bonded(seam(1e9, 1e9));
+    let structure = structure(
+        vec![cube(Vec3::ZERO, 1.0, false), cube(Vec3::X, 1.0, false)],
+        vec![0, 1],
+        vec![
+            joint(0, Side::Ground, Vec3::NEG_Y * 0.5, Vec3::Y, 1.0, bond),
+            joint(1, Side::Ground, Vec3::X - Vec3::Y * 0.5, Vec3::Y, 1.0, bond),
+            joint(0, Side::Chunk(1), Vec3::X * 0.5, Vec3::NEG_X, 1.0, bond),
+        ],
+    );
+    let state = State::new(&structure);
+    let graph = Graph::of(&structure, &state, &BTreeMap::new());
+    let mut ordering = FactorPattern::default();
+    let mut factor = Factor::default();
+    let loads = [Wrench::at(DVec3::NEG_Y, DVec3::ZERO), Wrench::default()];
+    ordering
+        .refactor(&mut factor, &graph.nodes, &graph.edges[..2])
+        .unwrap();
+    assert_eq!(
+        factor.solve(&loads)[1],
+        Wrench::default(),
+        "no interface carries the other part's load"
+    );
+    ordering
+        .refactor(&mut factor, &graph.nodes, &graph.edges)
+        .unwrap();
+    let answer = factor.solve(&loads);
+    assert_eq!(
+        ordering.builds, 2,
+        "changed free-node adjacency rebuilds the pattern"
+    );
+    assert!(
+        answer[1].linear.y < 0.0,
+        "the new interface shares the vertical load"
+    );
+    let ground: f64 = graph.edges[..2]
+        .iter()
+        .map(|edge| edge.resultant(&graph.nodes, &answer).linear.y)
+        .sum();
+    close(
+        ground,
+        -1.0,
+        "the two ground reactions balance the applied load",
+    );
+}
