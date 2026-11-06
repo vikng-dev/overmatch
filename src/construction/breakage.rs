@@ -638,7 +638,7 @@ impl Breakage {
     }
 }
 
-/// One law chunk's static collider entity, a child of its construction's root: its law index.
+/// A chunk collider's source law index, under its current standing or moving owner.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 #[component(immutable)]
 pub(crate) struct ChunkCollider(pub(crate) u16);
@@ -1289,6 +1289,8 @@ struct DepositParam<'w, 's> {
     /// The moving bodies a blast's rays meet ([`moving_near`]) and push.
     spatial: SpatialQuery<'w, 's>,
     collider_of: Query<'w, 's, &'static ColliderOf>,
+    children: Query<'w, 's, &'static Children>,
+    chunk_entities: ChunkChildren<'w, 's>,
     aabbs: Query<'w, 's, &'static ColliderAabb>,
     bodies: Query<'w, 's, (Forces, &'static RigidBody)>,
 }
@@ -1751,7 +1753,10 @@ fn apply_deposits(mut p: DepositParam) {
         let mut departures = Vec::new();
         {
             let batch = taken;
-            let mut effects = bevy::utils::Parallel::<Vec<OwnerEffects>>::default();
+            let mut effects =
+                bevy::utils::Parallel::<Vec<(OwnerEffects, ReusableColliders)>>::default();
+            let children = &p.children;
+            let chunk_entities = &p.chunk_entities;
             let bodies = &p.bodies;
             let resting = &p.resting.0;
             p.constructions
@@ -1779,7 +1784,12 @@ fn apply_deposits(mut p: DepositParam) {
                     if !effect.events.is_empty() {
                         breakage.set_changed();
                     }
-                    effects.scope(|effects| effects.push(effect));
+                    let reusable = if effect.departures.is_empty() {
+                        BTreeMap::new()
+                    } else {
+                        reusable_colliders(children.get(root).ok(), chunk_entities)
+                    };
+                    effects.scope(|effects| effects.push((effect, reusable)));
                 });
             let mut effects: Vec<_> = effects.drain().collect();
             assert_eq!(
@@ -1787,10 +1797,10 @@ fn apply_deposits(mut p: DepositParam) {
                 batch.len(),
                 "every deposit owner has complete construction state and a physics pose"
             );
-            effects.sort_unstable_by_key(|effect| effect.root);
+            effects.sort_unstable_by_key(|(effect, _)| effect.root);
             // Records, source impulses and carrier creation keep source-entity order,
             // independent of worker completion. Every owner commits once after tick intake.
-            for effect in effects {
+            for (effect, reusable) in effects {
                 let frame = frames[&effect.root];
                 if !effect.fields.is_empty() {
                     let (mut body, _) = p
@@ -1814,11 +1824,15 @@ fn apply_deposits(mut p: DepositParam) {
                 if let Some(split) = effect.split {
                     p.commands.entity(effect.root).insert(split);
                 }
-                departures.extend(effect.departures);
+                if !effect.departures.is_empty() {
+                    departures.push((effect.departures, reusable));
+                }
             }
         }
-        for departure in departures {
-            spawn_prepared(&mut p.commands, departure);
+        for (batch, mut reusable) in departures {
+            for departure in batch {
+                spawn_prepared(&mut p.commands, departure, &mut reusable);
+            }
         }
     }
 }
@@ -2427,6 +2441,23 @@ type OccupiedChunk = (
     ChunkCollider,
 );
 
+type ChunkChildren<'w, 's> = Query<'w, 's, (&'static ChunkCollider, Has<Sensor>)>;
+type ReusableColliders = BTreeMap<(u16, bool), Entity>;
+
+/// Existing contact and occupied colliders, indexed once per departing owner.
+fn reusable_colliders(children: Option<&Children>, chunks: &ChunkChildren) -> ReusableColliders {
+    let mut reusable = BTreeMap::new();
+    for &entity in children.into_iter().flatten() {
+        if let Ok((chunk, sensor)) = chunks.get(entity) {
+            assert!(
+                reusable.insert((chunk.0, sensor), entity).is_none(),
+                "an owner has one collider per chunk and role"
+            );
+        } // Element and view children have no chunk address.
+    }
+    reusable
+}
+
 struct PreparedDeparture {
     departure: Departure,
     chunks: Vec<(ContactChunk, OccupiedChunk)>,
@@ -2511,11 +2542,15 @@ fn spawn_piece(
 
 #[cfg(test)]
 fn spawn_group(commands: &mut Commands, departure: Departure) {
-    spawn_prepared(commands, prepare_group(departure));
+    spawn_prepared(commands, prepare_group(departure), &mut BTreeMap::new());
 }
 
 /// Commit a group from its synchronous, independently prepared construction state.
-fn spawn_prepared(commands: &mut Commands, prepared: PreparedDeparture) {
+fn spawn_prepared(
+    commands: &mut Commands,
+    prepared: PreparedDeparture,
+    reusable: &mut ReusableColliders,
+) {
     let PreparedDeparture { departure, chunks } = prepared;
     let Departure {
         kind,
@@ -2535,35 +2570,58 @@ fn spawn_prepared(commands: &mut Commands, prepared: PreparedDeparture) {
     let origin = *centroid;
     let at = root.translation + root.rotation * origin;
     // `Position`/`Rotation` before the body: it never flushes with avian's placeholder pose.
-    let mut piece = commands.spawn((
-        Name::new("Piece"),
-        Piece {
-            construction,
-            chunks: group.iter().map(|&c| c as u16).collect(),
-            born: tick,
-            retired: None,
-        },
-        Breakage {
-            kind,
-            construction,
-            live: Box::new(live),
-            origin,
-        },
-        Transform::from_translation(at).with_rotation(root.rotation),
+    let piece = commands
+        .spawn((
+            Name::new("Piece"),
+            Piece {
+                construction,
+                chunks: group.iter().map(|&c| c as u16).collect(),
+                born: tick,
+                retired: None,
+            },
+            Breakage {
+                kind,
+                construction,
+                live: Box::new(live),
+                origin,
+            },
+            Transform::from_translation(at).with_rotation(root.rotation),
+            Position(at),
+            Rotation(root.rotation),
+            Visibility::default(),
+            crate::debris::DebrisPiece,
+            crate::eased_dynamic_body(),
+            LinearVelocity(root.rotation * *velocity),
+            AngularVelocity(root.rotation * *spin),
+        ))
+        .id();
+    let pose = (
         Position(at),
         Rotation(root.rotation),
-        Visibility::default(),
-        crate::debris::DebrisPiece,
-        crate::eased_dynamic_body(),
-        LinearVelocity(root.rotation * *velocity),
-        AngularVelocity(root.rotation * *spin),
-    ));
-    piece.with_children(|parent| {
-        for (contact, occupied) in chunks {
-            parent.spawn(contact);
-            parent.spawn(occupied);
+        GlobalTransform::from(Transform::from_translation(at).with_rotation(root.rotation)),
+    );
+    for (contact, occupied) in chunks {
+        let chunk = contact.5.0;
+        if let Some(entity) = reusable.remove(&(chunk, false)) {
+            // ChildOf updates ColliderOf in Avian 0.7's ColliderHierarchyPlugin. The
+            // rehome rule drops pairs still naming the old body before its next physics step.
+            commands
+                .entity(entity)
+                .remove::<(BallisticVolume, ActiveCollisionHooks)>()
+                .insert((ChildOf(piece), contact, pose));
+        } else {
+            // An element can release before its per-chunk colliders have ever existed.
+            commands.spawn((ChildOf(piece), contact, pose));
         }
-    });
+        if let Some(entity) = reusable.remove(&(chunk, true)) {
+            commands
+                .entity(entity)
+                .insert((ChildOf(piece), occupied, pose));
+        } else {
+            // A standing chunk has no separate occupied sensor yet.
+            commands.spawn((ChildOf(piece), occupied, pose));
+        }
+    }
 }
 
 /// A split retiring its parent group's body at `tick`, triggered as `split_groups` despawns it:
@@ -2651,15 +2709,18 @@ fn split_groups(
         &AngularVelocity,
         &avian3d::prelude::ComputedCenterOfMass,
         &PendingSplit,
+        &Children,
     )>,
+    chunks: ChunkChildren,
     mut commands: Commands,
     stages: Option<Res<Stages>>,
 ) {
     let _refit = Stages::start(stages.as_deref(), Stage::Refit);
-    let mut effects =
-        bevy::utils::Parallel::<Vec<(Entity, u32, Vec<PreparedDeparture>)>>::default();
+    let mut effects = bevy::utils::Parallel::<
+        Vec<(Entity, u32, Vec<PreparedDeparture>, ReusableColliders)>,
+    >::default();
     parents.par_iter().for_each(
-        |(entity, piece, body, breakage, velocity, spin, centre, split)| {
+        |(entity, piece, body, breakage, velocity, spin, centre, split, colliders)| {
             let root = breakage.physics_frame(body);
             let inverse = root.rotation.inverse();
             let children = split.prepare(
@@ -2673,14 +2734,15 @@ fn split_groups(
                     centre: centre.0,
                 },
             );
-            effects.scope(|effects| effects.push((entity, split.tick, children)));
+            let reusable = reusable_colliders(Some(colliders), &chunks);
+            effects.scope(|effects| effects.push((entity, split.tick, children, reusable)));
         },
     );
     let mut effects: Vec<_> = effects.drain().collect();
     effects.sort_unstable_by_key(|(entity, ..)| *entity);
-    for (entity, tick, children) in effects {
+    for (entity, tick, children, mut reusable) in effects {
         for child in children {
-            spawn_prepared(&mut commands, child);
+            spawn_prepared(&mut commands, child, &mut reusable);
         }
         commands.trigger(RetirePiece { entity, tick });
         commands.entity(entity).despawn();
@@ -2910,6 +2972,7 @@ fn sweep(intake: sweep_intake::Intake, stages: Option<Res<Stages>>) {
 }
 
 pub(crate) fn sim_plugin(app: &mut App) {
+    crate::collider_rehome::plugin(app);
     app.init_resource::<SweepAccount>()
         .add_message::<crate::debris::crumble::Shed>()
         .add_systems(

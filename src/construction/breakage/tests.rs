@@ -4570,3 +4570,228 @@ fn a_swept_patch_leaves_as_one_dust_cluster_whatever_its_mass() {
     assert_eq!(count(|e| matches!(e, Event::Separate(_))), 1);
     assert_eq!(count(|e| matches!(e, Event::Dust(_))), group.len());
 }
+
+/// The game's environment destruction model: bookkeeping may reuse entity IDs, but every
+/// physics tick retains the same chunk shapes, ownership, material and solver properties.
+/// Fresh departure is also exercised: an intact element has no per-chunk entities to reuse.
+#[test]
+fn departure_and_split_preserve_each_chunks_collider_contract() {
+    use bevy::ecs::system::{RunSystemOnce, SystemState};
+    #[derive(Debug, PartialEq)]
+    struct Fact {
+        owner: Vec<u16>,
+        chunk: u16,
+        sensor: bool,
+        points: Vec<Vec3>,
+        layers: CollisionLayers,
+        mass: Option<f32>,
+        inertia: Option<Mat3>,
+        centre: Option<Vec3>,
+        friction: Option<Friction>,
+        volume: Option<(String, crate::ballistics::VolumeMaterial)>,
+        cached_mass: ColliderMassProperties,
+    }
+    fn facts(world: &mut World) -> Vec<Fact> {
+        let mut facts: Vec<_> = world
+            .query::<(
+                &ChildOf,
+                &ChunkCollider,
+                &Collider,
+                &CollisionLayers,
+                Has<Sensor>,
+                Option<&Mass>,
+                Option<&AngularInertia>,
+                Option<&CenterOfMass>,
+                Option<&Friction>,
+                Option<&BallisticVolume>,
+                &ColliderOf,
+                &ColliderMassProperties,
+            )>()
+            .iter(world)
+            .filter_map(
+                |(
+                    parent,
+                    chunk,
+                    collider,
+                    layers,
+                    sensor,
+                    mass,
+                    inertia,
+                    centre,
+                    friction,
+                    volume,
+                    of,
+                    cached_mass,
+                )| {
+                    let piece = world.get::<Piece>(parent.parent())?;
+                    assert_eq!(
+                        of.body,
+                        parent.parent(),
+                        "physics and hierarchy name the same owner"
+                    );
+                    Some(Fact {
+                        owner: piece.chunks.clone(),
+                        chunk: chunk.0,
+                        sensor,
+                        points: collider
+                            .shape_scaled()
+                            .as_convex_polyhedron()
+                            .unwrap()
+                            .points()
+                            .to_vec(),
+                        layers: *layers,
+                        mass: mass.map(|m| m.0),
+                        inertia: inertia.map(|i| i.tensor().to_mat3()),
+                        centre: centre.map(|c| c.0),
+                        friction: friction.copied(),
+                        volume: volume.map(|v| (v.substance.clone(), v.material)),
+                        cached_mass: *cached_mass,
+                    })
+                },
+            )
+            .collect();
+        facts.sort_by_key(|f| (f.chunk, f.sensor));
+        facts
+    }
+    let run = |reuse: bool| {
+        let kind = column_construction();
+        let (mut app, root) = composed_kind(false, &kind);
+        app.world_mut()
+            .get_mut::<Breakage>(root)
+            .unwrap()
+            .live
+            .swapped
+            .fill(true);
+        app.world_mut().run_system_once(reconcile).unwrap();
+        // Fixture: the upper two members leave together, then split into individual bodies.
+        let group = vec![1, 2];
+        let mut query = SystemState::<ChunkChildren>::new(app.world_mut());
+        let mut reusable = reusable_colliders(
+            app.world().get::<Children>(root),
+            &query.get(app.world()).unwrap(),
+        );
+        let old: Vec<_> = reusable
+            .iter()
+            .filter(|((chunk, _), _)| group.contains(&usize::from(*chunk)))
+            .map(|(_, &entity)| entity)
+            .collect();
+        let departure = {
+            let mut body = app.world_mut().get_mut::<Breakage>(root).unwrap();
+            for &c in &group {
+                body.live.state.fate[c] = Fate::Fallen;
+            }
+            Departure {
+                kind: kind.clone(),
+                construction: body.construction,
+                root: Transform::IDENTITY,
+                live: body.live.group(&group),
+                launch: launch(&kind, &body.live.structure, &group, &[]),
+                group,
+                tick: 0,
+            }
+        };
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, app.world());
+        if !reuse {
+            reusable.clear();
+        }
+        spawn_prepared(&mut commands, prepare_group(departure), &mut reusable);
+        queue.apply(app.world_mut());
+        app.world_mut().run_system_once(reconcile).unwrap();
+        if reuse {
+            assert!(
+                old.iter()
+                    .all(|&e| app.world().get::<Collider>(e).is_some()),
+                "departing chunk entities survive the handoff"
+            );
+        }
+        let mut snapshots = vec![facts(app.world_mut())];
+        assert_eq!(
+            snapshots[0].len(),
+            4,
+            "each chunk retains contact and occupied geometry"
+        );
+        for _ in 0..2 {
+            app.update();
+            snapshots.push(facts(app.world_mut()));
+        }
+        let parent = app
+            .world_mut()
+            .query_filtered::<Entity, With<Piece>>()
+            .single(app.world())
+            .unwrap();
+        let old: Vec<_> = app
+            .world()
+            .get::<Children>(parent)
+            .unwrap()
+            .iter()
+            .collect();
+        let children = {
+            let body = app.world().get::<Breakage>(parent).unwrap();
+            [vec![1], vec![2]]
+                .into_iter()
+                .map(|g| {
+                    let live = body.live.group(&g);
+                    (g, live)
+                })
+                .collect()
+        };
+        app.world_mut()
+            .entity_mut(parent)
+            .insert(PendingSplit { children, tick: 1 });
+        app.world_mut().run_system_once(split_groups).unwrap();
+        assert!(
+            old.iter()
+                .all(|&e| app.world().get::<Collider>(e).is_some()),
+            "split children survive their previous body's retirement"
+        );
+        snapshots.push(facts(app.world_mut()));
+        for _ in 0..2 {
+            app.update();
+            snapshots.push(facts(app.world_mut()));
+        }
+        assert!(snapshots.iter().all(|snapshot| snapshot.len() == 4));
+        snapshots
+    };
+    assert_eq!(run(false), run(true));
+}
+
+/// The game's environment destruction model: the shipped law/refit chain must transfer a
+/// standing collider before reconciliation can delete it; direct helper coverage is insufficient.
+#[test]
+fn the_law_installer_reuses_departing_standing_colliders() {
+    use bevy::ecs::system::RunSystemOnce;
+    let kind = column_construction();
+    let (mut app, root) = composed_kind(false, &kind);
+    app.update();
+    app.update();
+    app.world_mut()
+        .get_mut::<Breakage>(root)
+        .unwrap()
+        .live
+        .swapped
+        .fill(true);
+    app.world_mut().run_system_once(reconcile).unwrap();
+    // Fixture: the upper member is free when its sole support seam separates.
+    let chunk = 2;
+    let old = app
+        .world()
+        .get::<Children>(root)
+        .unwrap()
+        .iter()
+        .find(|&e| {
+            app.world()
+                .get::<ChunkCollider>(e)
+                .is_some_and(|c| c.0 == chunk)
+        })
+        .unwrap();
+    isolate_chunk(&mut app, root, usize::from(chunk));
+    app.update();
+    let parent = app
+        .world()
+        .get::<ChildOf>(old)
+        .expect("a departing collider survives reconciliation")
+        .parent();
+    assert!(app.world().get::<Piece>(parent).is_some());
+    assert_eq!(app.world().get::<ColliderOf>(old).unwrap().body, parent);
+}
