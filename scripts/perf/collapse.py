@@ -247,7 +247,7 @@ def run_match(args, out, recipe):
     address = "127.0.0.1:5888" if local else args.target
     # Inherited stress/trace levers would silently add a second workload.
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OVERMATCH_", "SPIKE_"))}
-    env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1", BEVY_ASSET_ROOT=str(ROOT), NO_COLOR="1")
+    env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1", NO_COLOR="1")
     env["OVERMATCH_LOADTEST"] = json.dumps(recipe, separators=(",", ":"))
     serverlog = out / "server.log"
     (out / "rows.json").unlink(missing_ok=True)
@@ -492,7 +492,7 @@ def run_ram(args, out, recipe):
     address = "127.0.0.1:5888" if local else args.target
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OVERMATCH_", "SPIKE_"))}
     env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1",
-               BEVY_ASSET_ROOT=str(ROOT), NO_COLOR="1", OVERMATCH_RAM=json.dumps(recipe, separators=(",", ":")),
+               NO_COLOR="1", OVERMATCH_RAM=json.dumps(recipe, separators=(",", ":")),
                OVERMATCH_BOT="0", OVERMATCH_SERVER_STATS_S="1")
     dt = tick_seconds()
     # DERIVED: the client outlives approach, observation and both admission watchdog spans.
@@ -639,7 +639,7 @@ def run(args, out):
     env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1",
                OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_BOT="0", OVERMATCH_DEBRIS_STRESS="off",
                OVERMATCH_SERVER_STATS_S=str(STATS_PERIOD_S), OVERMATCH_HE_STRESS=f"{args.bursts}:{args.period}",
-               BEVY_ASSET_ROOT=str(ROOT), RUST_BACKTRACE="1")
+               RUST_BACKTRACE="1")
     # Refuse a busy port before the child can fail, without contacting another server.
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:

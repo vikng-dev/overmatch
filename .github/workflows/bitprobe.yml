@@ -49,8 +49,6 @@ jobs:
         run: cargo build --release --locked --features bitprobe --bin bitprobe
 
       - name: Run deterministic fixture
-        env:
-          BEVY_ASSET_ROOT: ${{ github.workspace }}
         run: ./target/release/bitprobe bitprobe-linux-x86_64.obp.gz
 
       - uses: actions/upload-artifact@v4

@@ -10,7 +10,7 @@ downstream seam diverges and how its f32 error grows.
 From the repository root on macOS aarch64, with the fixture's Git LFS asset present:
 
 ```sh
-BEVY_ASSET_ROOT="$PWD" cargo run --release --locked --features bitprobe --bin bitprobe -- \
+cargo run --release --locked --features bitprobe --bin bitprobe -- \
   bitprobe-macos-aarch64.obp.gz
 ```
 

@@ -48,7 +48,7 @@ def main():
                 "OVERMATCH_CAPTURE", "OVERMATCH_HARNESS", "OVERMATCH_BOT",
                 "OVERMATCH_SERVER_STATS_S"):
         env.pop(key, None)
-    env.update(BEVY_ASSET_ROOT=str(root), OVERMATCH_SERVER_BIND="127.0.0.1",
+    env.update(OVERMATCH_SERVER_BIND="127.0.0.1",
                OVERMATCH_SERVER="127.0.0.1:5888")
     harness = out / "fire.ron"
     # ASSUMED workload length: 256 combat ticks. The first click deliberately tests tick zero.

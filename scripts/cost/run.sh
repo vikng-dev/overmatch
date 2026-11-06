@@ -58,7 +58,7 @@ start_server() {
   READY="$OUT/$base.ready"
   rm -f "$READY" "$OUT/$base.server.jsonl" "$OUT/$base.server.log" || return 1
   env SPIKE_WORKLOAD_READY="$READY" SPIKE_COST_TRACE="$OUT/$base.jsonl" SPIKE_COST_WARMUP="$WARMUP" \
-    BEVY_ASSET_ROOT="$REPO" "$SERVER" >"$OUT/$base.server.log" 2>&1 &
+    "$SERVER" >"$OUT/$base.server.log" 2>&1 &
   SERVER_PID=$!
   # ASSUMED readiness allowance: 150 polls at 0.2 s = 30 s.
   for t in {1..150}; do
@@ -74,7 +74,7 @@ start_client() {
   local base="$1" ticks="$2" fields="$3"
   printf '(ticks: %s, %s)\n' "$ticks" "$fields" >"$OUT/$base.harness.ron" || return 1
   env SPIKE_WORKLOAD_READY="$READY" OVERMATCH_HARNESS="$OUT/$base.harness.ron" SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 \
-    SPIKE_COST_TRACE="$OUT/$base.jsonl" SPIKE_COST_WARMUP="$WARMUP" BEVY_ASSET_ROOT="$REPO" \
+    SPIKE_COST_TRACE="$OUT/$base.jsonl" SPIKE_COST_WARMUP="$WARMUP" \
     "$CLIENT" >"$OUT/$base.client.log" 2>&1 &
   CLIENT_PID=$!
 }
