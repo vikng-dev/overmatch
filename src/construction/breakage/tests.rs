@@ -4828,3 +4828,147 @@ fn the_law_installer_reuses_departing_standing_colliders() {
 }
 
 mod rubble_observation;
+
+/// The game's environment destruction: removing a middle support frees the crown immediately,
+/// before reconciliation can construct a standing collider for it. Only the swept chunk inherits
+/// the hull's exchange; an unsupported neighbour starts at rest and meets the hull through Avian.
+#[test]
+fn a_cut_frees_unsupported_matter_without_building_standing_colliders() {
+    use bevy::ecs::system::RunSystemOnce;
+    let kind = column_construction();
+    let (mut app, root) = composed_kind(false, &kind);
+    app.update();
+    app.update();
+    let mut record = Record::default();
+    let (departures, sheds) = {
+        let mut owner = app.world_mut().get_mut::<Breakage>(root).unwrap();
+        sweep_intake::sweep_departure(
+            &mut owner,
+            Transform::IDENTITY,
+            vec![1],
+            sweep_intake::ReleasedMotion {
+                velocity: Vec3::X * 2.0,
+                spin: Vec3::ZERO,
+                centre: Vec3::ZERO,
+            },
+            7,
+            &mut record,
+            &BTreeMap::new(),
+        )
+    };
+    let freed: Vec<_> = departures
+        .iter()
+        .flat_map(|p| p.departure.group.iter().copied())
+        .chain(
+            sheds
+                .iter()
+                .flat_map(|shed| shed.chunks.iter().map(|&c| usize::from(c))),
+        )
+        .collect();
+    assert_eq!(
+        freed.len(),
+        2,
+        "every freed chunk leaves exactly once through the size route"
+    );
+    assert_eq!(
+        freed.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([1, 2]),
+        "the cut and the matter it disconnected both leave before reconciliation"
+    );
+    let quiet = sweep_intake::fragment_motion(
+        &kind,
+        &Transform::IDENTITY,
+        &[2],
+        &BTreeSet::from([1]),
+        sweep_intake::ReleasedMotion {
+            velocity: Vec3::X * 2.0,
+            spin: Vec3::Z,
+            centre: Vec3::ZERO,
+        },
+    );
+    assert_eq!(quiet.velocity, Vec3::ZERO);
+    assert_eq!(quiet.spin, Vec3::ZERO);
+    let mut queue = bevy::ecs::world::CommandQueue::default();
+    let mut commands = Commands::new(&mut queue, app.world());
+    for departure in departures {
+        spawn_prepared(&mut commands, departure, &mut BTreeMap::new());
+    }
+    queue.apply(app.world_mut());
+    app.world_mut().run_system_once(reconcile).unwrap();
+    for (chunk, parent) in app
+        .world_mut()
+        .query::<(&ChunkCollider, &ChildOf)>()
+        .iter(app.world())
+    {
+        assert_eq!(
+            app.world().get::<Piece>(parent.parent()).is_some(),
+            chunk.0 != 0,
+            "only grounded matter needs a standing collider"
+        );
+    }
+    let mut shape = Shape::intact(&kind.layout);
+    for entry in record.entries {
+        shape.apply(entry.event, &kind.layout);
+    }
+    shape.derive_departures(&kind.layout, &Live::new(&kind));
+    assert_eq!(
+        shape.fate,
+        app.world().get::<Breakage>(root).unwrap().live.state.fate,
+        "the shared ledger derives every immediate departure"
+    );
+}
+
+/// The game's environment destruction: D3 absorption of a moving cut and stationary unsupported
+/// matter preserves their combined momentum without adding kinetic energy. This fixture drives
+/// one of two equal unit cubes; mass and inertia come from the admitted occupied geometry.
+#[test]
+fn absorbed_cut_and_unsupported_matter_keep_their_combined_momentum() {
+    let kind = column_construction();
+    // Fixture translation, rotation and rigid motion exercise both COM and spin terms.
+    let pose = Transform::from_xyz(20.0, 7.0, -13.0).with_rotation(Quat::from_rotation_y(0.37));
+    let group = [1, 2];
+    let driven = BTreeSet::from([1]);
+    let motion = sweep_intake::ReleasedMotion {
+        velocity: Vec3::X * 2.0,
+        spin: Vec3::Z * 0.3,
+        centre: pose.translation,
+    };
+    let merged = sweep_intake::fragment_motion(&kind, &pose, &group, &driven, motion);
+    let centre = merged.centre.as_dvec3();
+    let totals = |after: bool| {
+        let mut p = DVec3::ZERO;
+        let mut l = DVec3::ZERO;
+        let mut energy = 0.0;
+        for c in group {
+            let part = kind.sweep.part(c, &pose);
+            let (v, w) = if after {
+                (
+                    merged.velocity.as_dvec3() + merged.spin.as_dvec3().cross(part.centre - centre),
+                    merged.spin.as_dvec3(),
+                )
+            } else if driven.contains(&c) {
+                (
+                    motion.velocity.as_dvec3()
+                        + motion
+                            .spin
+                            .as_dvec3()
+                            .cross(part.centre - motion.centre.as_dvec3()),
+                    motion.spin.as_dvec3(),
+                )
+            } else {
+                (DVec3::ZERO, DVec3::ZERO)
+            };
+            p += part.mass * v;
+            l += part.inertia * w + (part.centre - centre).cross(part.mass * v);
+            energy += 0.5 * (part.mass * v.length_squared() + w.dot(part.inertia * w));
+        }
+        (p, l, energy)
+    };
+    let (before_p, before_l, before_energy) = totals(false);
+    let (after_p, after_l, after_energy) = totals(true);
+    // Resolution: f32 world-pose and twist rounding; the independent accounting is f64.
+    let tolerance = 1e-5;
+    assert!((after_p - before_p).length() < tolerance * before_p.length());
+    assert!((after_l - before_l).length() < tolerance * before_l.length());
+    assert!(after_energy <= before_energy * (1.0 + tolerance));
+}

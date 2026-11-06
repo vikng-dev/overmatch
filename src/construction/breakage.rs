@@ -2701,6 +2701,9 @@ fn spawn_prepared(
             AngularVelocity(root.rotation * *spin),
         ))
         .id();
+    let mut layers = piece_layers();
+    // The game's damage-model queries read the same construction collider as contacts.
+    layers.memberships.add(Layer::Armor);
     for (chunk, local, fresh) in chunks {
         let world = Transform::from_translation(at + root.rotation * local.translation)
             .with_rotation(root.rotation);
@@ -2715,14 +2718,14 @@ fn spawn_prepared(
             commands
                 .entity(entity)
                 .remove::<ActiveCollisionHooks>()
-                .insert((ChildOf(piece), local, piece_layers(), pose));
+                .insert((ChildOf(piece), local, layers, pose));
         } else {
             // Fresh colliders run Avian's local-pose initialization hook once.
             commands.spawn((
                 ChildOf(piece),
                 local,
                 fresh.expect("a chunk without a reusable collider prepared its physics"),
-                piece_layers(),
+                layers,
                 (Position::PLACEHOLDER, Rotation::PLACEHOLDER, pose.2),
             ));
         }
@@ -2860,10 +2863,10 @@ fn split_groups(
 }
 
 /// A loose chunk's contact filter: debris meets ground, constructions, hulls and other pieces,
-/// never a tank's armour volumes. The same hull supplies the game's ballistic geometry.
+/// never a tank's armour volumes. Construction chunks add their ballistic membership at spawn.
 pub(crate) fn piece_layers() -> CollisionLayers {
     CollisionLayers::new(
-        [Layer::Debris, Layer::Armor],
+        [Layer::Debris],
         [
             Layer::Terrain,
             Layer::Vehicle,

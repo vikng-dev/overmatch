@@ -103,6 +103,116 @@
           "tick": 1351
         }
       ]
+    },
+    "immediate_disconnection": {
+      "source": "construction: free disconnected rubble before standing refit (#235)",
+      "first_contact_tick": 1263,
+      "events": [
+        {
+          "bodies_created": 0,
+          "colliders_created": 131,
+          "colliders_deleted": 2,
+          "entities_despawned": 2,
+          "entities_spawned": 131,
+          "tick": 1263
+        },
+        {
+          "bodies_created": 0,
+          "colliders_created": 78,
+          "colliders_deleted": 10,
+          "entities_despawned": 10,
+          "entities_spawned": 78,
+          "tick": 1264
+        },
+        {
+          "bodies_created": 3,
+          "colliders_created": 882,
+          "colliders_deleted": 51,
+          "entities_despawned": 51,
+          "entities_spawned": 888,
+          "tick": 1265
+        },
+        {
+          "bodies_created": 21,
+          "colliders_created": 0,
+          "colliders_deleted": 22,
+          "entities_despawned": 25,
+          "entities_spawned": 42,
+          "tick": 1266
+        },
+        {
+          "bodies_created": 10,
+          "colliders_created": 0,
+          "colliders_deleted": 0,
+          "entities_despawned": 5,
+          "entities_spawned": 20,
+          "tick": 1268
+        },
+        {
+          "bodies_created": 4,
+          "colliders_created": 0,
+          "colliders_deleted": 0,
+          "entities_despawned": 2,
+          "entities_spawned": 8,
+          "tick": 1269
+        },
+        {
+          "bodies_created": 4,
+          "colliders_created": 0,
+          "colliders_deleted": 0,
+          "entities_despawned": 2,
+          "entities_spawned": 8,
+          "tick": 1271
+        },
+        {
+          "bodies_created": 2,
+          "colliders_created": 0,
+          "colliders_deleted": 0,
+          "entities_despawned": 1,
+          "entities_spawned": 4,
+          "tick": 1296
+        },
+        {
+          "bodies_created": 2,
+          "colliders_created": 0,
+          "colliders_deleted": 0,
+          "entities_despawned": 1,
+          "entities_spawned": 4,
+          "tick": 1301
+        },
+        {
+          "bodies_created": 4,
+          "colliders_created": 0,
+          "colliders_deleted": 0,
+          "entities_despawned": 2,
+          "entities_spawned": 8,
+          "tick": 1306
+        },
+        {
+          "bodies_created": 4,
+          "colliders_created": 0,
+          "colliders_deleted": 0,
+          "entities_despawned": 2,
+          "entities_spawned": 8,
+          "tick": 1361
+        },
+        {
+          "bodies_created": 2,
+          "colliders_created": 0,
+          "colliders_deleted": 0,
+          "entities_despawned": 1,
+          "entities_spawned": 4,
+          "tick": 1436
+        },
+        {
+          "bodies_created": 2,
+          "colliders_created": 0,
+          "colliders_deleted": 0,
+          "entities_despawned": 1,
+          "entities_spawned": 4,
+          "tick": 1457
+        }
+      ]
     }
   }
 }

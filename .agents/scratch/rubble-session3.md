@@ -71,14 +71,14 @@ MEASURED lifecycle observations use the same transport-free census as session 2.
 `colliders created/deleted; bodies created; entities spawned/despawned`. These are event counts,
 not duration measurements or obligations on subsequent physics. Contact is at fixture tick 1263.
 
-| Tick | Before | One permanent collider |
-|---|---|---|
-| 1263, contact | 131/2; 0; 131/2 | 131/2; 0; 131/2 |
-| 1264, +1 | 78/10; 0; 78/10 | 78/10; 0; 78/10 |
-| 1265, +2 | 1098/51; 7; 1112/53 | 882/51; 3; 888/51 |
-| 1266, +3 | 691/22; 20; 731/27 | 0/30; 21; 42/33 |
-| 1301, +38 | 0/0; 0; 0/0 | 0/0; 0; 0/0 |
-| Through +320 | 1998/85; 56; 2110/105 | 1091/93; 51; 1193/108 |
+| Tick | Before | One permanent collider | Immediate disconnection |
+|---|---|---|---|
+| 1263, contact | 131/2; 0; 131/2 | 131/2; 0; 131/2 | 131/2; 0; 131/2 |
+| 1264, +1 | 78/10; 0; 78/10 | 78/10; 0; 78/10 | 78/10; 0; 78/10 |
+| 1265, +2 | 1098/51; 7; 1112/53 | 882/51; 3; 888/51 | 882/51; 3; 888/51 |
+| 1266, +3 | 691/22; 20; 731/27 | 0/30; 21; 42/33 | 0/22; 21; 42/25 |
+| 1301, +38 | 0/0; 0; 0/0 | 0/0; 0; 0/0 | 0/0; 2; 4/1 |
+| Through +320 | 1998/85; 56; 2110/105 | 1091/93; 51; 1193/108 | 1091/85; 58; 1207/105 |
 
 [Per-tick counts](rubble-session3-counts.json); the original and sweepfix runs remain in
 [rubble-session2-counts.json](rubble-session2-counts.json). The permanent collider changes
@@ -87,3 +87,29 @@ not imply identical physical events.
 
 CI clippy passes. After extracting the reuse witness's collider query to meet the function-length
 limit, that witness and all three citation guards pass again (four tests).
+
+## Cut before standing reconciliation
+
+The cut now determines the remainder's connectivity immediately, before reconciliation can build
+standing colliders. Swept matter inherits the hull exchange. Other chunks already disconnected
+from every ground path start at rest as free bodies; support that still needs a later force solve
+continues through the normal law pass. There is no speculative release of future failures.
+
+D3 sees all fragments leaving in this cut event, including those disconnected indirectly. If its
+resolution grouping combines driven and stationary matter, the resulting rigid field conserves
+their combined linear and angular momentum using cached occupied mass properties. Pure driven
+or stationary groups need no mass-matrix reduction. This projection can dissipate energy, never
+supply it. Workers prepare fragments independently; ordered application retains fragment order
+for their departures, decor and ledger entries.
+
+The creation peak remains 882 colliders at tick 1265. Every retained chunk still needs its one
+collider; immediate disconnection removes an unnecessary standing phase only when the cut
+already proves support is gone. It cannot anticipate subsequent load failures. The census has
+the same 1,091 total creations after this ordering change; later body/deletion counts move as
+physical contacts evolve. No timing or identical-output claim is made.
+
+Final source gates: formatting and CI clippy pass; 135 targeted tests and whole-tree guards pass,
+with four manual tests ignored; the final transport-free census passes. The new cut-off-matter
+witness proves immediate departure, absence of a standing collider and agreement with the shared
+ledger. The absorption witness independently accounts for linear/angular momentum and kinetic
+energy. The completed full-suite result is recorded separately from these targeted gates.

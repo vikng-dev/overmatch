@@ -3,6 +3,7 @@ use avian3d::prelude::{
     ConstantForce, ConstantLinearAcceleration, ConstantLocalForce, ConstantLocalLinearAcceleration,
     Sensor,
 };
+use bevy::math::DMat3;
 
 /// The sweep's per-tick account, available to headless witnesses and operator instruments.
 #[derive(Resource, Default, Debug)]
@@ -560,31 +561,79 @@ fn commit_source(
     }
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct ReleasedMotion {
     pub(super) velocity: Vec3,
     pub(super) spin: Vec3,
     pub(super) centre: Vec3,
 }
 
-/// Free a patch on the exchange's rigid field. Resolved fragments stay as server bodies;
-/// only isolated below-floor matter leaves as decor. Avian owns subsequent body contacts.
-pub(super) fn sweep_departure(
-    breakage: &mut Breakage,
-    pose: Transform,
-    group: Vec<usize>,
+/// A cut's swept matter inherits its exchange; matter losing its last support starts at rest.
+/// D3 absorption can join both: project their combined linear and angular momentum onto one
+/// rigid field, using occupied mass properties. Pure fields require no mass-matrix reduction.
+pub(super) fn fragment_motion(
+    kind: &ConstructionKind,
+    pose: &Transform,
+    group: &[usize],
+    driven: &BTreeSet<usize>,
     motion: ReleasedMotion,
+) -> ReleasedMotion {
+    let count = group.iter().filter(|&&c| driven.contains(&c)).count();
+    if count == group.len() {
+        return motion;
+    }
+    if count == 0 {
+        return ReleasedMotion {
+            velocity: Vec3::ZERO,
+            spin: Vec3::ZERO,
+            centre: pose.translation,
+        };
+    }
+    let parts: Vec<_> = group.iter().map(|&c| kind.sweep.part(c, pose)).collect();
+    let mass: f64 = parts.iter().map(|p| p.mass).sum();
+    let centre: DVec3 = parts.iter().map(|p| p.centre * p.mass).sum::<DVec3>() / mass;
+    let mut inertia = DMat3::ZERO;
+    let mut momentum = DVec3::ZERO;
+    let mut angular = DVec3::ZERO;
+    let spin = motion.spin.as_dvec3();
+    for (&c, part) in group.iter().zip(parts) {
+        let r = part.centre - centre;
+        // Parallel-axis theorem: I_about_centre = I_own + m (|r|² identity - r rᵀ).
+        inertia += part.inertia
+            + part.mass
+                * (DMat3::IDENTITY * r.length_squared()
+                    - DMat3::from_cols(r * r.x, r * r.y, r * r.z));
+        if driven.contains(&c) {
+            let velocity =
+                motion.velocity.as_dvec3() + spin.cross(part.centre - motion.centre.as_dvec3());
+            let p = part.mass * velocity;
+            momentum += p;
+            angular += part.inertia * spin + r.cross(p);
+        }
+    }
+    let inverse = inertia.inverse();
+    assert!(
+        inverse.is_finite(),
+        "admitted occupied solids give a merged fragment invertible inertia"
+    );
+    ReleasedMotion {
+        velocity: (momentum / mass).as_vec3(),
+        spin: (inverse * angular).as_vec3(),
+        centre: centre.as_vec3(),
+    }
+}
+
+/// Commit the cut before collider reconciliation. Connectivity already identifies unsupported
+/// matter; it needs no standing collider or later force solve to establish that it is free.
+fn cut_fragments(
+    breakage: &mut Breakage,
+    group: &[usize],
     tick: u32,
     record: &mut Record,
-    reusable: &ReusableColliders,
-) -> (Vec<PreparedDeparture>, Vec<crate::debris::crumble::Shed>) {
-    let ReleasedMotion {
-        velocity,
-        spin,
-        centre,
-    } = motion;
-    let kind = breakage.kind.clone();
+) -> Vec<Vec<usize>> {
+    let kind = &breakage.kind;
     let mut parted = Vec::new();
-    for j in kind.sweep.cut(&group) {
+    for j in kind.sweep.cut(group) {
         if !breakage.live.state.separated[j] {
             parted.push(j);
             breakage.live.state.cracked[j] = true;
@@ -601,55 +650,97 @@ pub(super) fn sweep_departure(
             });
         }
     }
-    let fragments =
-        crate::debris::crumble::fragments(&breakage.live.structure, &breakage.live.state, &group);
+    let mut fragments =
+        crate::debris::crumble::fragments(&breakage.live.structure, &breakage.live.state, group);
+    for &c in group {
+        breakage.live.state.fate[c] = Fate::Fallen;
+    }
+    fragments.extend(fracture::loose_groups(
+        &breakage.live.structure,
+        &breakage.live.state,
+    ));
     let fragments = crate::debris::crumble::merge_fragments(
         &breakage.live.structure,
         fragments,
         &parted,
         &mut breakage.live.rubble_joints,
     );
-    let (kept, sheds) = crate::debris::crumble::route(
-        &breakage.live.structure,
-        (breakage.construction, pose),
-        fragments,
-        (velocity, spin, centre),
-        tick,
-        record,
-    );
-    for &c in &group {
+    for &c in fragments.iter().flatten() {
         breakage.live.state.fate[c] = Fate::Fallen;
         breakage.live.swapped[usize::from(kind.layout.element_of[c])] = true;
     }
-    for shed in &sheds {
-        for &c in &shed.chunks {
-            breakage.live.state.fate[usize::from(c)] = Fate::Dust;
-        }
-    }
-    let departures = ComputeTaskPool::get().scope(|scope| {
+    fragments
+}
+
+/// Free the cut and its unsupported remainder together before physics. Size routing and D3
+/// absorption share this event; Avian owns subsequent contacts between the resulting bodies.
+pub(super) fn sweep_departure(
+    breakage: &mut Breakage,
+    pose: Transform,
+    group: Vec<usize>,
+    motion: ReleasedMotion,
+    tick: u32,
+    record: &mut Record,
+    reusable: &ReusableColliders,
+) -> (Vec<PreparedDeparture>, Vec<crate::debris::crumble::Shed>) {
+    let fragments = cut_fragments(breakage, &group, tick, record);
+    let driven: BTreeSet<_> = group.into_iter().collect();
+    // Each fragment prepares independently; scoped results and their ledger entries retain
+    // fragment order. Root state changes only after all workers have finished reading it.
+    let results = ComputeTaskPool::get().scope(|scope| {
         let breakage = &*breakage;
-        for group in kept {
-            let kind = &kind;
+        let driven = &driven;
+        for group in fragments {
             scope.spawn(async move {
-                let mut launch = launch(kind, &breakage.live.structure, &group, &[]);
-                let at = pose.transform_point(launch.centre);
-                launch.velocity = pose.rotation.inverse() * (velocity + spin.cross(at - centre));
-                launch.spin = pose.rotation.inverse() * spin;
-                prepare_group(
-                    Departure {
-                        kind: kind.clone(),
-                        construction: breakage.construction,
-                        root: pose,
-                        live: breakage.live.group(&group),
-                        group,
-                        launch,
-                        tick,
-                    },
-                    reusable,
-                )
+                let kind = &breakage.kind;
+                let motion = fragment_motion(kind, &pose, &group, driven, motion);
+                let mut record = Record::default();
+                let (kept, sheds) = crate::debris::crumble::route(
+                    &breakage.live.structure,
+                    (breakage.construction, pose),
+                    vec![group],
+                    (motion.velocity, motion.spin, motion.centre),
+                    tick,
+                    &mut record,
+                );
+                let departures = kept
+                    .into_iter()
+                    .map(|group| {
+                        let mut launch = launch(kind, &breakage.live.structure, &group, &[]);
+                        let at = pose.transform_point(launch.centre);
+                        launch.velocity = pose.rotation.inverse()
+                            * (motion.velocity + motion.spin.cross(at - motion.centre));
+                        launch.spin = pose.rotation.inverse() * motion.spin;
+                        prepare_group(
+                            Departure {
+                                kind: kind.clone(),
+                                construction: breakage.construction,
+                                root: pose,
+                                live: breakage.live.group(&group),
+                                group,
+                                launch,
+                                tick,
+                            },
+                            reusable,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (departures, sheds, record.entries)
             });
         }
     });
+    let mut departures = Vec::new();
+    let mut sheds = Vec::new();
+    for (bodies, decor, entries) in results {
+        for shed in &decor {
+            for &c in &shed.chunks {
+                breakage.live.state.fate[usize::from(c)] = Fate::Dust;
+            }
+        }
+        record.entries.extend(entries);
+        departures.extend(bodies);
+        sheds.extend(decor);
+    }
     (departures, sheds)
 }
 
