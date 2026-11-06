@@ -57,6 +57,7 @@ struct Instance<'a> {
     shape: &'a Prototype,
     pose: crate::map::PlacementPose,
     id: &'a str,
+    ordinal: u16,
 }
 
 /// One placed instance: its prototype, its identity and its GROUND pose — the authored XZ and
@@ -79,32 +80,24 @@ fn graybox_friction(substance: &str) -> avian3d::prelude::Friction {
         })
 }
 
-/// Resolve admitted records against the library and sort by instance id for peer identity.
+/// Resolve admitted records against the library, retaining their admitted identity.
 fn resolve<'a>(
     records: &'a [InstanceRecord],
     library: &'a BTreeMap<String, Prototype>,
 ) -> Vec<Instance<'a>> {
-    let mut instances: Vec<Instance<'a>> = records
+    records
         .iter()
         .map(|raw| {
             // `map::parse` already refused any id outside the library.
-            let shape = &library[&raw.prototype];
             Instance {
                 prototype: &raw.prototype,
-                shape,
+                shape: &library[&raw.prototype],
                 pose: raw.pose,
                 id: &raw.id,
+                ordinal: raw.ordinal,
             }
         })
-        .collect();
-    // The file's own ids are the fixed order every peer spawns in.
-    instances.sort_by(|a, b| a.id.cmp(b.id));
-    assert!(
-        instances.len() <= usize::from(u16::MAX) + 1,
-        "scatter: {} instances, more than a MapInstance ordinal can name",
-        instances.len(),
-    );
-    instances
+        .collect()
 }
 
 /// Project every instance onto `grid`: the authored XZ and rotation kept, the Y taken from the
@@ -113,13 +106,12 @@ fn resolve<'a>(
 fn place<'a>(instances: &[Instance<'a>], grid: &HeightGrid) -> Vec<Placement<'a>> {
     instances
         .iter()
-        .enumerate()
-        .map(|(ordinal, instance)| Placement {
+        .map(|instance| Placement {
             prototype: instance.prototype,
             shape: instance.shape,
             identity: MapInstance {
                 id: instance.id.to_owned(),
-                ordinal: u16::try_from(ordinal).expect("resolve bounded the count"),
+                ordinal: instance.ordinal,
             },
             pose: instance
                 .pose
@@ -354,10 +346,11 @@ mod tests {
 
     /// One instance record of `prototype`, posed with a deliberately WRONG Y.
     fn record(id: &str, xz: Vec2, stale_y: f32) -> InstanceRecord {
-        serde_json::from_value(serde_json::json!({
+        crate::map::tests::fixture_records(serde_json::json!([{
             "prototype":"house_proxy", "id":id,
             "translation":[xz.x,stale_y,xz.y], "rotation":[0,0,0,1]
-        }))
+        }]))
+        .pop()
         .unwrap()
     }
 
@@ -382,11 +375,12 @@ mod tests {
     /// hand `b` ordinal 0 here.
     #[test]
     fn ordinals_follow_the_id_order_whatever_the_file_order() {
-        let records = [
-            record("b", Vec2::ZERO, 0.0),
-            record("c", Vec2::X, 0.0),
-            record("a", Vec2::Y, 0.0),
-        ];
+        let records = crate::map::tests::fixture_records(serde_json::json!(["b", "c", "a"].map(
+            |id| serde_json::json!({
+                "prototype":"house_proxy", "id":id,
+                "translation":[0,0,0], "rotation":[0,0,0,1]
+            })
+        )));
         let library = library();
         let placed = place(&resolve(&records, &library), &sloped_grid());
         let identities: Vec<(&str, u16)> = placed

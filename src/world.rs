@@ -301,12 +301,6 @@ fn spawn_environment(
         // The render mesh is view-only: windowed compositions have a primary window; the
         // dedicated server (and the headless harness) has none and must not pay for it.
         if !windows.is_empty() {
-            // The map's manifest is what the mask block and the world extent are read out of, so
-            // the blend cannot be built without it. Absent ⇒ no grid either, which is the branch
-            // above; present-and-unreadable already panicked in `map::parse`.
-            let manifest = manifest
-                .as_deref()
-                .expect("a decoded height grid comes from a parsed manifest");
             // The BASE ground surface pack (Poly Haven, CC0 — see the pack folder's `cc.txt`),
             // world-space tiled by the mesh's UVs every `terrain_grid::TEXTURE_TILE_M`.
             let diffuse = surface_map(
@@ -350,7 +344,7 @@ fn spawn_environment(
             let field = ground_field
                 .as_ref()
                 .expect("heightmap rendering requires the ground field decoded with its map");
-            let masks = images.add(ground_mask_image(field, manifest.rows));
+            let masks = images.add(ground_mask_image(field, map.rows));
             commands.insert_resource(TerrainMaps([
                 diffuse.id(),
                 normal.id(),
@@ -391,7 +385,7 @@ fn spawn_environment(
                         .as_deref()
                         .map(|ablate| ablate.terrain_ablate())
                         .unwrap_or_default(),
-                    params: crate::terrain_blend::params(manifest, &ground),
+                    params: crate::terrain_blend::params(map, &ground),
                     layer_albedo,
                     layer_normal,
                     layer_arm,
@@ -406,14 +400,14 @@ fn spawn_environment(
                 prints,
                 material.clone(),
                 field.as_ref().clone(),
-                manifest.extent.world_size_m,
+                map.extent.world_size_m,
                 ground,
             );
             info!(
                 "terrain surface: base pack every {} m, masks {} at {:?}, blend layers {}",
                 crate::terrain_grid::TEXTURE_TILE_M,
-                manifest.masks_asset(),
-                manifest.masks_resolution,
+                map.masks_asset(),
+                map.masks_resolution,
                 crate::terrain_blend::layer_census(),
             );
             // The ONE-SURFACE invariant (terrain_grid module doc): the drawn ground is built

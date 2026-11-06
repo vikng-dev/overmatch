@@ -522,8 +522,7 @@ project's one pair rule. It replaces borrowing the terrain's solver stand-in
 - **The track's own grip law.** `track::world_contact::surface_under` reads
   `grip.pair(pieces.friction(collider))`; `track::forces::GripParams::pair` combines the track's
   substance friction with the collider's through Avian's `combine`. The wall therefore gives zero.
-- `track::world_contact::patch_contact` returns each clipped face's own point and normal;
-  zero grip and the actual vertical normal prevent a wall from lending upward belt support.
+- Zero grip and a vertical face prevent upward belt support.
 - Refused before play: `friction` not finite, or < 0.
 
 **Landing response (P).** `Terrain` membership still makes a debris landing read soil compliance
@@ -637,6 +636,7 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
 | Boundary data (W1a delivered) | `boundary.ron`, checked `PlayArea`, gate checks 1–2; no grip is an owner `Taste` | square polygon; floor and ceiling bounds | the natural border's polygon (#200); authored vertical bounds, informed by logged escapes |
 | Boundary admission (W1b delivered) | cross-file gate checks 3–5: spawns, resolved placement footprints and outward edge boxes; startup and compatibility share every refusal | square spawn limit | a polygon-inset spawn picker (#200) |
 | Boundary wall (W1c delivered) | admitted finite wall dimensions; `PlayArea::wall_boxes` supplies outward edge solids at Startup on every map composition; `Terrain` layer, friction through `substances::contact_friction`; camera, debris and pair-path witnesses | invisible; routed landing response | map art; generic contact materials (#200) |
+| Placement Y | finite authored Y is admitted | scatter replaces Y with terrain height because the export is stale | #221: restore the off-repo Houdini source, export truthful world XYZ against the shipped height decode (including moved XZ), then retain authored Y; hand-resampling the product alone would be overwritten on export |
 | Boundary floor consumers | planned: floor law | none new | W2, W3 |
 | Map load (W1a delivered) | one admitted sequence and digest, including boundary and masks (R6); height-decode range must remain finite | the decoders' second read (R6 remainder) | the snapshot carrying the bytes, with destruction-05 and destruction-09 |
 | Map sources | tracked, reproducible, admitted generators | off-repo Houdini scene and TIFF; `map_ui.png` recipe | #221's pipeline; a startup derivation |

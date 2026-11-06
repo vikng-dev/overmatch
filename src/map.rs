@@ -127,7 +127,7 @@ pub(crate) struct MapManifest {
     pub(crate) masks_resolution: [u32; 2],
     /// Nonempty, finite horizontal spawn points inside the declared map square.
     pub(crate) spawn_points: SpawnPoints,
-    /// The author's object placement, in file order.
+    /// Admitted placements in id order, with their peer-stable ordinals.
     pub(crate) instances: Vec<InstanceRecord>,
     /// The game's library, keyed by the ids the placement uses. Every instance's prototype and
     /// every id the author's block declares resolves here; [`parse`] checked it.
@@ -270,13 +270,21 @@ impl PlacementPose {
 }
 
 /// One authored placement at prototype size.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[serde(try_from = "InstanceFields")]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct InstanceRecord {
+    pub(crate) ordinal: u16,
     pub(crate) prototype: String,
     pub(crate) pose: PlacementPose,
     /// The file's own instance id — the sort key that fixes iteration order.
     pub(crate) id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(try_from = "InstanceFields")]
+struct ParsedInstance {
+    prototype: String,
+    pose: PlacementPose,
+    id: String,
 }
 
 /// Export metadata is permitted, but placement scaling is refused before it can enter the map.
@@ -290,7 +298,7 @@ struct InstanceFields {
     extra: BTreeMap<String, serde::de::IgnoredAny>,
 }
 
-impl TryFrom<InstanceFields> for InstanceRecord {
+impl TryFrom<InstanceFields> for ParsedInstance {
     type Error = String;
 
     fn try_from(raw: InstanceFields) -> Result<Self, Self::Error> {
@@ -308,6 +316,32 @@ impl TryFrom<InstanceFields> for InstanceRecord {
     }
 }
 
+/// Admit the identity space once; every peer numbers the same id-sorted placements.
+fn deserialize_instances<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<InstanceRecord>, D::Error> {
+    use serde::{Deserialize, de::Error};
+    let mut records = Vec::<ParsedInstance>::deserialize(deserializer)?;
+    let maximum = usize::from(u16::MAX) + 1;
+    if records.len() > maximum {
+        return Err(D::Error::custom(format!(
+            "field instances has {} placements — reduce to at most {maximum} so every instance has a u16 ordinal",
+            records.len()
+        )));
+    }
+    records.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(records
+        .into_iter()
+        .zip(0..=u16::MAX)
+        .map(|(raw, ordinal)| InstanceRecord {
+            prototype: raw.prototype,
+            pose: raw.pose,
+            id: raw.id,
+            ordinal,
+        })
+        .collect())
+}
+
 /// `level.json` as far as this crate reads it. Deliberately NOT `deny_unknown_fields`: the file
 /// also carries per-asset shipping state, which describes the author's export rather than the
 /// world we build.
@@ -316,6 +350,7 @@ struct LevelFile {
     coordinate_system: CoordinateSystem,
     terrain: TerrainBlock,
     spawn_points: Vec<[f32; 2]>,
+    #[serde(deserialize_with = "deserialize_instances")]
     instances: Vec<InstanceRecord>,
     /// The author's prototype registry, read for its KEYS only (module doc). An export may omit
     /// the block.
@@ -1324,6 +1359,44 @@ pub(crate) mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).expect("remove the isolated map fixture");
         }
+    }
+
+    /// Both server startup and compatibility must refuse an unnameable instance before spawn.
+    #[test]
+    fn instance_ordinals_are_admitted_at_load_and_digest() {
+        let fixture = MapFixture::new();
+        std::fs::write(map_dir(&fixture.0).join(PROTOTYPES_FILE), HOUSE_LIBRARY).unwrap();
+        let maximum = usize::from(u16::MAX) + 1;
+        let records: Vec<_> = (0..maximum)
+            .rev()
+            .map(|i| {
+                serde_json::json!({
+                    "prototype":"house", "id":format!("house_{i:05}"),
+                    "translation":[0,0,0], "rotation":[0,0,0,1]
+                })
+            })
+            .collect();
+        fixture.edit_level(|level| level["instances"] = serde_json::json!(records));
+        let admitted = load(&fixture.0);
+        assert_eq!(content_digest(&fixture.0), admitted.digest);
+        for (instance, ordinal) in admitted.instances.iter().zip(0..=u16::MAX) {
+            assert_eq!(instance.ordinal, ordinal);
+            assert_eq!(instance.id, format!("house_{ordinal:05}"));
+        }
+        fixture.edit_level(|level| {
+            level["instances"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "prototype":"house", "id":"overflow", "translation":[0,0,0],
+                    "rotation":[0,0,0,1]
+                }));
+        });
+        fixture.refuses(&["level.json", "field instances", "reduce to at most 65536"]);
+    }
+
+    pub(crate) fn fixture_records(value: serde_json::Value) -> Vec<InstanceRecord> {
+        deserialize_instances(value).unwrap()
     }
 
     /// Authority spawn selection relies on admission to enclose every authored candidate.
