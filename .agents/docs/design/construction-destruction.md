@@ -389,13 +389,31 @@ The grounded-singleton operation witness counts visits and forbids intact-kernel
 
 Goldberg–Tarjan push-relabel finds the minimum cut, with FIFO discharge and periodic global
 reverse-residual distance updates ([1988 paper](https://doi.org/10.1145/48014.61051)).
-A synthetic inlet caps the supplied preflow at demand; infinite-demand diagnostics use an
-outward-rounded sum of finite directed capacities, an upper bound on any finite cut. Sink inflow reaching demand
-certifies that the patch holds: remaining surplus can return along reverse flow arcs.
-Otherwise all surplus returns to the inlet, leaving a feasible maximum flow; forward residual
-reachability selects the smallest source-side minimum cut `S*`. The construction graph is
-untruncated, so this gives up no cut exactness. Held-contact capacity and threshold telemetry are
-certified lower bounds; a releasing plug reports the exact exhausted flow and its source side.
+Capacities round down and demand rounds up on a shared power-of-two force grid; push-relabel
+stores residuals and excess as `u128` grid units. Resolution: a 120-bit total capacity budget
+leaves integer headroom for reverse capacities and inlet supply. This chooses numerical
+precision, never material strength. Let `K` count positive finite directed capacities, `M` be
+their maximum, `e = floor(log2(M))`, and `l = ceil(log2(K))`. The quantum is
+`q = 2^max(e + 1 + l - 120, -1074)` N; an all-zero graph uses the smallest positive f64.
+DERIVED: their scaled integer sum is below `2^120`; each capacity loses less than `q`.
+Power-of-two scaling is exact except subnormal underflow, which also loses less than one unit.
+Every residual operation is exact integer arithmetic. One unit above the finite integer sum
+replaces infinity and bounds inlet supply; no finite minimum cut can cross such an arc.
+
+A synthetic inlet supplies the rounded demand, capped by that finite bound for diagnostic or
+larger demands. Sink inflow reaching supply certifies holding against the original demand:
+finite capacities were only lowered, and a cut below the inlet bound exists. Otherwise surplus
+returns to the inlet; residual reachability selects the smallest source-side grid minimum cut
+`S*`. No graph region is omitted. Its capacity is reported by summing original crossing
+capacities, rather than rounded flow. DERIVED tolerance: the chosen cut exceeds the true
+minimum by at most `K q` before reporting roundoff. The held/released uncertainty band is
+at most `(K + 1) q`, always biased toward release; holding has no upward tolerance.
+For comparison against exact decimal fixtures, including their
+input conversion and the reported sum, use `T = (K + 1) q + gamma_(K+1) Sigma`, where `Sigma`
+is the sum of all positive finite directed capacities, `gamma_j = j eps / (1 - j eps)`, and
+`eps = f64::EPSILON`. This bounds numerical resolution relative to the graph's capacities,
+not to an asset-specific force. Held-contact capacity and threshold telemetry remain certified
+lower bounds. The fractional-graph reference and single-ULP deficit witnesses guard both contracts.
 The plug can therefore include chunks beyond the occupied patch: compression transmits the push
 through a back layer or around a corner until perimeter joints or bulk crushing give way.
 Internal joints of `S*` carry no relative motion and contribute no cut capacity. A resting floor
