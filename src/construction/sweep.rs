@@ -413,31 +413,20 @@ pub(crate) struct Motion<'a> {
 }
 
 impl Motion<'_> {
-    /// Conservative occupied-motion bounds, including the curved path between endpoint hulls.
+    /// Bounds of the corner arcs of the hull's local box; only exact hull casts admit matter.
     pub(crate) fn bounds(&self) -> ColliderAabb {
-        let Self {
-            hull,
-            position,
-            rotation,
-            velocity,
-            centre,
-            spin,
-            dt,
-        } = *self;
-        let aabb = hull.aabb(position, rotation);
-        if spin == Vec3::ZERO {
-            return aabb.merged(ColliderAabb {
-                min: aabb.min + velocity * dt,
-                max: aabb.max + velocity * dt,
-            });
-        }
-
-        let turn = Quat::from_scaled_axis(spin * dt);
-        let end = hull.aabb(
-            centre + velocity * dt + turn * (position - centre),
-            turn * rotation,
+        let local = self.hull.aabb(Vec3::ZERO, Quat::IDENTITY);
+        let envelope = rotation_bounds(
+            local,
+            self.position,
+            self.rotation,
+            self.centre,
+            self.spin * self.dt,
         );
-        curved_bounds(aabb, end, centre, velocity, spin, dt)
+        envelope.merged(ColliderAabb {
+            min: envelope.min + self.velocity * self.dt,
+            max: envelope.max + self.velocity * self.dt,
+        })
     }
 
     /// The first hit of this motion on chunk `target`, a hull about `origin`, in construction
@@ -516,31 +505,65 @@ impl Motion<'_> {
     }
 }
 
-/// DERIVED: |x''| <= R*|omega|² bounds deviation from the endpoint chord by
-/// R*(|omega|*dt)²/8; linear COM travel adds no curvature. The full orbit caps long paths.
-fn curved_bounds(
-    start: ColliderAabb,
-    end: ColliderAabb,
+/// Resolution: f32 quaternion composition and support/AABB rounding at the occupied radius.
+const MOTION_ROUNDING_SCALE: f32 = 32.0 * f32::EPSILON;
+
+/// DERIVED: a corner's coordinate under fixed-axis rotation is c + a*cos(t) + b*sin(t).
+/// Its extrema are the endpoints and the two stationary phases, independent of turn count.
+/// These are query bounds, never a contact hull. Linear COM travel is added by the caller.
+fn rotation_bounds(
+    local: ColliderAabb,
+    position: Vec3,
+    rotation: Quat,
     centre: Vec3,
-    velocity: Vec3,
-    spin: Vec3,
-    dt: f32,
+    turn: Vec3,
 ) -> ColliderAabb {
-    let travel = velocity * dt;
-    if spin == Vec3::ZERO {
-        return start.merged(end);
+    let angle = turn.as_dvec3().length();
+    if angle == 0.0 {
+        let matrix = Mat3::from_quat(rotation);
+        let extents = Mat3::from_cols(
+            matrix.x_axis.abs(),
+            matrix.y_axis.abs(),
+            matrix.z_axis.abs(),
+        ) * (local.size() / 2.0);
+        return ColliderAabb::new(position + rotation * local.center(), extents);
     }
-    let radius = (start.min - centre)
-        .abs()
-        .max((start.max - centre).abs())
-        .length();
-    let angle = spin.length() * dt;
-    let margin = Vec3::splat(radius * angle * angle / 8.0);
+    let axis = turn.as_dvec3() / angle;
+    let (sin, cos) = angle.sin_cos();
+    let mut min = DVec3::INFINITY;
+    let mut max = DVec3::NEG_INFINITY;
+    let mut radius: f64 = 0.0;
+    for x in [local.min.x, local.max.x] {
+        for y in [local.min.y, local.max.y] {
+            for z in [local.min.z, local.max.z] {
+                let r = (position - centre + rotation * Vec3::new(x, y, z)).as_dvec3();
+                radius = radius.max(r.length());
+                let fixed = axis * axis.dot(r);
+                let a = r - fixed;
+                let b = axis.cross(r);
+                let end = a * cos + b * sin;
+                let mut lo = a.min(end);
+                let mut hi = a.max(end);
+                for i in 0..3 {
+                    let amplitude = a[i].hypot(b[i]);
+                    let phase = b[i].atan2(a[i]).rem_euclid(std::f64::consts::TAU);
+                    if angle >= phase {
+                        hi[i] = amplitude;
+                    }
+                    if angle >= (phase + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) {
+                        lo[i] = -amplitude;
+                    }
+                }
+                min = min.min(fixed + lo);
+                max = max.max(fixed + hi);
+            }
+        }
+    }
+    // Resolution: enclose f32 quaternion composition and support/AABB rounding at this radius.
+    let pad = Vec3::splat(MOTION_ROUNDING_SCALE * radius as f32);
     ColliderAabb {
-        min: (start.min.min(end.min) - margin)
-            .max(centre.min(centre + travel) - Vec3::splat(radius)),
-        max: (start.max.max(end.max) + margin)
-            .min(centre.max(centre + travel) + Vec3::splat(radius)),
+        min: centre + min.as_vec3() - pad,
+        max: centre + max.as_vec3() + pad,
     }
 }
 
@@ -864,6 +887,91 @@ mod tests {
             },
         );
         assert_eq!(swept.chunks, (0..9).collect::<Vec<_>>());
+    }
+
+    /// The game's environment destruction: rotation cannot move matter along its own axis.
+    /// The sweep must reject that empty space before exact casts, at any angular travel.
+    #[test]
+    fn spinning_does_not_cast_into_unreachable_axial_space() {
+        let (structure, geometry) = wall(1.0);
+        let mut state = State::new(&structure);
+        for c in 0..structure.chunks.len() {
+            if c != 5 {
+                state.fate[c] = super::super::fracture::Fate::Dust;
+            }
+        }
+        // Fixture: target 5 is at z=1; the moving box occupies only |z| <= 0.1.
+        let tree = SourceTree::new(vec![Hull {
+            hull: Collider::cuboid(0.2, 4.0, 0.2),
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+        }]);
+        for turns in [0.25, 1.0, 4.0] {
+            // Fixture angular travel, including repeated full turns.
+            let result = geometry.swept(
+                &structure,
+                &state,
+                &tree,
+                RigidMotion {
+                    position: Vec3::NEG_X,
+                    centre: Vec3::NEG_X,
+                    rotation: Quat::IDENTITY,
+                    velocity: Vec3::ZERO,
+                    spin: Vec3::Z * std::f32::consts::TAU * turns,
+                    dt: 1.0,
+                },
+            );
+            assert!(result.chunks.is_empty());
+            assert_eq!(
+                result.work.casts, 0,
+                "axially unreachable matter needs no exact cast at {turns} turns"
+            );
+        }
+    }
+
+    /// The game's environment destruction: once an inward leaf occupies a target now, later
+    /// leaves cannot improve its witness. Angular travel must not multiply their exact casts.
+    #[test]
+    fn an_inward_hit_prunes_later_rotating_leaves() {
+        let (structure, geometry) = wall(1.0);
+        let mut state = State::new(&structure);
+        for c in 0..structure.chunks.len() {
+            if c != 4 {
+                state.fate[c] = super::super::fracture::Fate::Dust;
+            }
+        }
+        // Fixture: the first cube overlaps the front face; the rest start clear along Y.
+        let tree = SourceTree::new(
+            (0..16)
+                .map(|i| Hull {
+                    hull: Collider::cuboid(0.2, 0.2, 0.2),
+                    position: Vec3::new(-0.19, i as f32 * 2.0, 0.0),
+                    rotation: Quat::IDENTITY,
+                })
+                .collect(),
+        );
+        for turns in [0.0, 0.25, 1.0, 4.0] {
+            // Fixture angular travel around the contact normal.
+            let result = geometry.swept(
+                &structure,
+                &state,
+                &tree,
+                RigidMotion {
+                    position: Vec3::ZERO,
+                    centre: Vec3::ZERO,
+                    rotation: Quat::IDENTITY,
+                    velocity: Vec3::X * 2.0,
+                    spin: Vec3::X * std::f32::consts::TAU * turns,
+                    dt: 1.0,
+                },
+            );
+            assert_eq!(result.chunks, [4]);
+            assert_eq!(result.witness.unwrap().time, 0.0);
+            assert_eq!(
+                result.work.casts, 1,
+                "later leaves cannot improve a time-zero inward witness at {turns} turns"
+            );
+        }
     }
 
     /// The game's environment destruction: rotating occupied matter sweeps even with a

@@ -89,37 +89,43 @@ impl SourceTree {
             }
             .bounds();
         }
-        let at = |turn: Quat| {
-            let rotation = turn * motion.rotation;
-            let position = motion.centre + turn * (motion.position - motion.centre);
-            let centre = position + rotation * ((node.min + node.max) / 2.0);
-            let matrix = Mat3::from_quat(rotation);
-            let extents = Mat3::from_cols(
-                matrix.x_axis.abs(),
-                matrix.y_axis.abs(),
-                matrix.z_axis.abs(),
-            ) * ((node.max - node.min) / 2.0);
-            ColliderAabb::new(centre, extents)
-        };
-        let start = at(Quat::IDENTITY);
-        let end = at(Quat::from_scaled_axis(motion.spin * motion.dt));
-        curved_bounds(
-            start,
-            end,
+        rotation_bounds(
+            ColliderAabb {
+                min: node.min,
+                max: node.max,
+            },
+            motion.position,
+            motion.rotation,
             motion.centre,
-            Vec3::ZERO,
-            motion.spin,
-            motion.dt,
+            motion.spin * motion.dt,
         )
     }
 
     pub(super) fn query(&self, motion: RigidMotion) -> QueryTree<'_> {
+        let mut envelopes = vec![ColliderAabb::INVALID; self.nodes.len()];
+        let mut starts = envelopes.clone();
+        let mut radii = vec![0.0_f32; self.nodes.len()];
+        for i in (0..self.nodes.len()).rev() {
+            if let Some((a, b)) = self.nodes[i].children {
+                envelopes[i] = envelopes[a].merged(envelopes[b]);
+                starts[i] = starts[a].merged(starts[b]);
+                radii[i] = radii[a].max(radii[b]);
+            } else {
+                envelopes[i] = self.envelope(i, motion);
+                let leaf = motion.leaf(&self.hulls[self.nodes[i].chunk]);
+                starts[i] = leaf.hull.aabb(leaf.position, leaf.rotation);
+                radii[i] = (starts[i].min - motion.centre)
+                    .abs()
+                    .max((starts[i].max - motion.centre).abs())
+                    .length();
+            }
+        }
         QueryTree {
             tree: self,
             motion,
-            envelopes: (0..self.nodes.len())
-                .map(|i| self.envelope(i, motion))
-                .collect(),
+            envelopes,
+            starts,
+            radii,
         }
     }
 }
@@ -152,6 +158,8 @@ pub(super) struct QueryTree<'a> {
     tree: &'a SourceTree,
     motion: RigidMotion,
     envelopes: Vec<ColliderAabb>,
+    starts: Vec<ColliderAabb>,
+    radii: Vec<f32>,
 }
 
 impl QueryTree<'_> {
@@ -177,7 +185,32 @@ impl QueryTree<'_> {
                 }
             }
         }
-        Some(enter)
+        if self.motion.spin == Vec3::ZERO {
+            return Some(enter);
+        }
+        // DERIVED: |v_i| + |omega cross e_i|*R bounds any occupied point's axis speed.
+        // Unlike a full-tick envelope, this orders rotation and lets an inward hit prune later leaves.
+        let start = self.starts[source];
+        let omega = self.motion.spin;
+        let speed = self.motion.velocity.abs()
+            + Vec3::new(
+                omega.y.hypot(omega.z),
+                omega.z.hypot(omega.x),
+                omega.x.hypot(omega.y),
+            ) * self.radii[source];
+        for axis in 0..3 {
+            // Resolution: f32 contact/pose rounding, consistent with `rotation_bounds`.
+            let pad = MOTION_ROUNDING_SCALE * self.radii[source];
+            let gap =
+                (target.min[axis] - start.max[axis]).max(start.min[axis] - target.max[axis]) - pad;
+            if gap > 0.0 {
+                if speed[axis] == 0.0 {
+                    return None;
+                }
+                enter = enter.max(gap / speed[axis]);
+            }
+        }
+        (enter <= exit).then_some(enter)
     }
 
     /// First *inward* leaf, not first geometric touch. Tangent/outward hits cannot prune any
