@@ -32,6 +32,11 @@ pub trait DepthOracle {
     /// (buried origin saturates to `reach`, like a contact cast). Positive = past the surface,
     /// negative = clearance.
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32;
+
+    /// Sampled support excludes geometry supplied as exact facets; view depth retains it.
+    fn profile_depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+        self.depth_along(station, out, reach)
+    }
 }
 
 /// The simulation needs both contracts; depth-only view adapters never implement this trait.
@@ -70,6 +75,15 @@ pub trait ContactOracle {
     }
 
     fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact;
+
+    /// No grid means this oracle consists entirely of sampled analytic surfaces.
+    fn height_grid(&self) -> Option<&HeightGrid> {
+        None
+    }
+
+    fn profile_contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
+        self.contact_along(station, out, reach)
+    }
 }
 
 /// `Resolution`: edge rounding radius (m) of the block field, smoothing its contact direction.
@@ -431,6 +445,17 @@ impl BlockField {
         reach: f32,
         lowering_m: f32,
     ) -> TerrainContact {
+        self.contact_with_grid(station, out, reach, self.height.as_ref(), lowering_m)
+    }
+
+    fn contact_with_grid(
+        &self,
+        station: Vec3,
+        out: Vec3,
+        reach: f32,
+        grid: Option<&HeightGrid>,
+        lowering_m: f32,
+    ) -> TerrainContact {
         let t_max = 2.0 * reach;
         let origin = station - out * reach;
         let end = origin + out * t_max;
@@ -450,7 +475,7 @@ impl BlockField {
         // between two hypothetical marching samples. The collider's anti-diagonal split and
         // the cast's facet normal are the same surface. Outside the grid span there is no
         // ground; height_at's clamped placement height must never extend collision there.
-        if let Some(grid) = &self.height {
+        if let Some(grid) = grid {
             let ground_origin = origin + Vec3::Y * lowering_m;
             if grid.contains_xz(ground_origin.x, ground_origin.z)
                 && ground_origin.y <= grid.height_at(ground_origin.x, ground_origin.z)
@@ -481,6 +506,14 @@ impl BlockField {
 }
 
 impl ContactOracle for BlockField {
+    fn height_grid(&self) -> Option<&HeightGrid> {
+        self.height.as_ref()
+    }
+
+    fn profile_contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
+        self.contact_with_grid(station, out, reach, None, 0.0)
+    }
+
     fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
         self.contact_along_lowered_ground(station, out, reach, 0.0)
     }
@@ -492,6 +525,10 @@ impl ContactOracle for BlockField {
 }
 
 impl DepthOracle for BlockField {
+    fn profile_depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+        self.profile_contact_along(station, out, reach).depth(reach)
+    }
+
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
         self.depth_along_lowered_ground(station, out, reach, 0.0)
     }

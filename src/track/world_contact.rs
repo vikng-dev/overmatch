@@ -1,7 +1,7 @@
 //! World-contact patches for the game's running gear (game state only).
 //! `patches` resolves coverage; `sample` supplies geometry, material and point motion to the
 //! mechanical law. Collider identity addresses the tick-start snapshot's owner and reaction.
-//! The convex adapter preserves clipped face geometry; the field uses sampled profiles.
+//! Grid and convex adapters share clipped faces; rounded analytic surfaces use sampled profiles.
 
 use super::forces::{ForceParams, GripParams, profile_resultant, rigid_rolling_resistance};
 use super::oracle::{TerrainContact, TerrainOracle};
@@ -10,6 +10,7 @@ use bevy::prelude::*;
 
 mod admission;
 pub(super) mod convex;
+mod terrain;
 pub(crate) use admission::{plugin, solid};
 
 /// One shoe column's world-contact envelope and sampled free-travel profile, in metres.
@@ -38,7 +39,14 @@ pub(crate) fn patches<O: TerrainOracle>(
         pen,
         travel,
     } = query;
-    let affected = convex::raised_faces(overlaps, strip, slab.len, pen, travel);
+    let grid_faces = oracle
+        .height_grid()
+        .map_or_else(Vec::new, |grid| terrain::faces(grid, slab));
+    let faces = overlaps
+        .iter()
+        .flat_map(|hit| hit.faces.iter().map(move |face| (Some(hit.piece), face)))
+        .chain(grid_faces.iter().map(|face| (None, face)));
+    let affected = convex::raised_faces(faces, strip, slab.len, pen, travel);
     let field_patch = SupportPatch {
         origin: slab.origin + slab.lat * field_offset,
         len: slab.len,
@@ -79,7 +87,7 @@ pub(crate) fn sample<O: TerrainOracle>(
     pieces: &RubbleBodies,
 ) -> Option<SurfaceSample> {
     let (point, normal) = patch_contact(patch, axis, out, centroid, params, oracle)?;
-    let collider = patch.face.as_ref().map(|face| face.collider);
+    let collider = patch.face.as_ref().and_then(|face| face.collider);
     let surface = surface_under(params.grip, collider, point, oracle, pieces);
     Some(SurfaceSample {
         point,
@@ -91,9 +99,7 @@ pub(crate) fn sample<O: TerrainOracle>(
     })
 }
 
-/// Sample the three-point piecewise-linear profile (`v` at `0`, `len/2`, `len`) at `x` — the
-/// same two-half interpolation the pressure profile itself is built from, so the penetration
-/// and the travel datum at the centroid are read off ONE shape.
+/// Interpolate `v` at `0`, `len/2`, `len`, keeping penetration and travel on the same shape.
 fn sample_halves(x: f32, len: f32, v: [f32; 3]) -> f32 {
     let half = len / 2.0;
     if x <= half {
@@ -159,7 +165,7 @@ fn terrain_surface_patches<O: TerrainOracle>(
         };
         let hits = [0.0, patch.len / 2.0, patch.len, centroid].map(|x| {
             let travel = sample_halves(x, patch.len, patch.travel);
-            oracle.contact_along(
+            oracle.profile_contact_along(
                 patch.origin + axis * x + out * (params.face_offset + travel),
                 out,
                 params.probe_reach + travel,
@@ -191,7 +197,7 @@ fn terrain_surface_patches<O: TerrainOracle>(
             let origin = patch.origin + axis * start;
             let pen = [0.0, half / 2.0, half].map(|x| {
                 let t = sample_halves(x, half, travel);
-                oracle.depth_along(
+                oracle.profile_depth_along(
                     origin + axis * x + out * (params.face_offset + t),
                     out,
                     params.probe_reach + t,
@@ -211,7 +217,7 @@ fn terrain_surface_patches<O: TerrainOracle>(
                     pen,
                     travel,
                     integral,
-                    ..patch.clone()
+                    ..patch
                 },
                 axis,
                 out,
@@ -246,7 +252,7 @@ fn patch_contact<O: TerrainOracle>(
     let query = patch.origin + axis * centroid + out * (params.face_offset + travel);
     match &patch.face {
         Some(face) => Some((face.point, face.normal)),
-        None => match oracle.contact_along(query, out, params.probe_reach + travel) {
+        None => match oracle.profile_contact_along(query, out, params.probe_reach + travel) {
             TerrainContact::Hit { depth, normal } if depth > 0.0 => {
                 Some((query - out * depth, *normal))
             }

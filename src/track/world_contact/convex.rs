@@ -3,7 +3,7 @@
 //! resting face. Only faces reached from the probe origin enter the support envelope.
 
 use super::{SupportPatch, sample_halves};
-use crate::track::rubble::{RubbleBodies, Slab, SlabOverlap};
+use crate::track::rubble::{RubbleBodies, Slab};
 use bevy::prelude::*;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,14 +86,15 @@ pub(crate) fn clip_faces(triangles: &[[Vec3; 3]], slab: &Slab) -> Vec<ClippedFac
             .take(polygon.len())
             .map(|(a, b)| a.cross(*b))
             .collect();
-        planes.extend([Vec3::Z * slab.reach - depth, depth + Vec3::Z * slab.travel]);
+        let envelope = [Vec3::Z * slab.reach - depth, depth + Vec3::Z * slab.travel];
+        planes.extend(envelope);
         for plane in [
             Vec3::X,
             Vec3::new(-1.0, 0.0, slab.len),
             Vec3::new(0.0, 1.0, -slab.lateral.0),
             Vec3::new(0.0, -1.0, slab.lateral.1),
-            Vec3::Z * slab.reach - depth,
-            depth + Vec3::Z * slab.travel,
+            envelope[0],
+            envelope[1],
         ] {
             polygon = clip(&polygon, plane);
         }
@@ -133,16 +134,14 @@ fn in_cell(polygon: &[Vec3], strip: (f32, f32), u: (f32, f32)) -> Vec<Vec3> {
 }
 
 /// Ignore solids wholly below the sampled field so they cannot repartition its quadrature.
-pub(super) fn raised_faces(
-    overlaps: &[SlabOverlap],
+pub(super) fn raised_faces<'a>(
+    faces: impl Iterator<Item = (Option<usize>, &'a ClippedFace)>,
     strip: (f32, f32),
     len: f32,
     pen: [f32; 3],
     travel: [f32; 3],
-) -> Vec<(usize, &ClippedFace)> {
-    overlaps
-        .iter()
-        .flat_map(|hit| hit.faces.iter().map(move |f| (hit.piece, f)))
+) -> Vec<(Option<usize>, &'a ClippedFace)> {
+    faces
         .filter(|(_, face)| {
             (0..2).any(|half| {
                 let polygon = in_cell(
@@ -161,9 +160,9 @@ pub(super) fn raised_faces(
         .collect()
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(super) struct ContactFace {
-    pub(super) collider: Entity,
+    pub(super) collider: Option<Entity>,
     pub(super) normal: Vec3,
     pub(super) point: Vec3,
 }
@@ -238,7 +237,7 @@ fn integrate(polygon: &[Vec3], depth: Vec3, width: f32) -> Option<Integral> {
 struct Cell<'a> {
     polygon: Vec<Vec3>,
     depth: Vec3,
-    face: Option<(usize, &'a ClippedFace)>,
+    face: Option<(Option<usize>, &'a ClippedFace)>,
 }
 
 /// Overlay convex entry faces onto each field half-profile. Each disjoint cell owns the deepest
@@ -249,7 +248,7 @@ pub(super) fn patches(
     field_offset: f32,
     pen: [f32; 3],
     travel: [f32; 3],
-    faces: &[(usize, &ClippedFace)],
+    faces: &[(Option<usize>, &ClippedFace)],
     pieces: &RubbleBodies,
 ) -> Vec<SupportPatch> {
     let mut result = Vec::new();
@@ -314,7 +313,7 @@ pub(super) fn patches(
                 .map(|p| p.x)
                 .fold(f32::NEG_INFINITY, f32::max);
             let face = cell.face.map(|(piece, face)| ContactFace {
-                collider: pieces.collider(piece),
+                collider: piece.map(|piece| pieces.collider(piece)),
                 normal: face.normal,
                 // Use the projected pressure integral directly. Reintegrating world triangles
                 // squares a tiny sliver's area in the vector norm and can underflow to zero.

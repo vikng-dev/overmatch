@@ -698,12 +698,12 @@ fn probe_depths<O: TerrainOracle>(
     let key = probe_key(points[0], out, reach[0]);
     let first = match *previous {
         Some((last_key, depth)) if last_key == key => depth,
-        _ => oracle.depth_along(points[0], out, reach[0]),
+        _ => oracle.profile_depth_along(points[0], out, reach[0]),
     };
     let depths = [
         first,
-        oracle.depth_along(points[1], out, reach[1]),
-        oracle.depth_along(points[2], out, reach[2]),
+        oracle.profile_depth_along(points[1], out, reach[1]),
+        oracle.profile_depth_along(points[2], out, reach[2]),
     ];
     *previous = Some((probe_key(points[2], out, reach[2]), depths[2]));
     depths
@@ -765,11 +765,8 @@ fn support_stiffness(
     weight * (elastic + damper)
 }
 
-/// PASS 1 — geometry, support, and slip per contact column. Forces are NOT emitted yet: the
-/// elastic grip resultant needs this tick's total budget and load-weighted slip BEFORE
-/// per-contact traction can include it. Pass 2 emits apps in the exact support-then-traction
-/// per-contact order the one-pass law used — application order is the bit-reproducibility
-/// contract, and it is unchanged.
+/// Grip needs the total support budget and load-weighted slip before force emission.
+/// Support precedes traction per contact for bit reproducibility.
 ///
 /// Returns the resolved contacts plus the membership evidence pass 1 cannot put in them:
 /// columns whose damped support load clipped to zero while elastic penetration remains — the

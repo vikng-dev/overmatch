@@ -299,7 +299,7 @@ pub(crate) struct Slab {
 
 impl Slab {
     /// The slab's world bounds.
-    fn aabb(&self) -> (Vec3, Vec3) {
+    pub(crate) fn aabb(&self) -> (Vec3, Vec3) {
         let mut lo = Vec3::INFINITY;
         let mut hi = Vec3::NEG_INFINITY;
         for u in [0.0, self.len] {
@@ -595,41 +595,49 @@ impl RubbleBodies<'_> {
 
     /// Every gathered piece that reaches into `slab`, with its extent there, in gather order.
     pub(crate) fn in_slab(&self, slab: &Slab) -> Vec<SlabOverlap> {
-        let mut overlaps = Vec::new();
         if self.active.is_empty() {
-            return overlaps;
+            return Vec::new(); // No gathered solid can intersect this source.
         }
+        self.in_slab_on_pool(slab, ComputeTaskPool::get())
+    }
+
+    fn in_slab_on_pool(&self, slab: &Slab, pool: &TaskPool) -> Vec<SlabOverlap> {
         let (lo, hi) = slab.aabb();
         let radial = (slab.face - slab.reach, slab.face + slab.travel);
-        for &piece in &self.active {
-            #[cfg(test)]
-            self.surface_checks.fetch_add(1, Ordering::Relaxed);
-            let s = &self.surfaces[piece];
-            if (s.aabb.min.cmpgt(hi) | s.aabb.max.cmplt(lo)).any() {
-                continue;
-            }
-            let extent = |dir: Vec3| {
-                (
-                    (s.support(-dir) - slab.origin).dot(dir),
-                    (s.support(dir) - slab.origin).dot(dir),
-                )
-            };
-            let (u0, u1) = extent(slab.axis);
-            let (l0, l1) = extent(slab.lat);
-            let (inner, outer) = extent(slab.out);
-            let u = (u0.max(0.0), u1.min(slab.len));
-            let l = (l0.max(slab.lateral.0), l1.min(slab.lateral.1));
-            // The piece must reach out past the probes' origin, `reach` behind the rest face at
-            // every travel.
-            if u.1 <= u.0 || l.1 <= l.0 || outer <= radial.0 || inner >= radial.1 {
-                continue;
-            }
-            let faces = super::world_contact::convex::clip_faces(&s.triangles, slab);
-            if !faces.is_empty() {
-                overlaps.push(SlabOverlap { piece, faces });
-            }
-        }
-        overlaps
+        // Candidate geometry is independent; the overlay consumes results in gather order.
+        self.active
+            .par_splat_map(pool, None, |_, candidates| {
+                candidates
+                    .iter()
+                    .filter_map(|&piece| {
+                        #[cfg(test)]
+                        self.surface_checks.fetch_add(1, Ordering::Relaxed);
+                        let s = &self.surfaces[piece];
+                        if (s.aabb.min.cmpgt(hi) | s.aabb.max.cmplt(lo)).any() {
+                            return None; // Candidate lies outside this contact envelope.
+                        }
+                        let extent = |dir: Vec3| {
+                            (
+                                (s.support(-dir) - slab.origin).dot(dir),
+                                (s.support(dir) - slab.origin).dot(dir),
+                            )
+                        };
+                        let (u0, u1) = extent(slab.axis);
+                        let (l0, l1) = extent(slab.lat);
+                        let (inner, outer) = extent(slab.out);
+                        let u = (u0.max(0.0), u1.min(slab.len));
+                        let l = (l0.max(slab.lateral.0), l1.min(slab.lateral.1));
+                        if u.1 <= u.0 || l.1 <= l.0 || outer <= radial.0 || inner >= radial.1 {
+                            return None; // No positive volume reaches the probe envelope.
+                        }
+                        let faces = super::world_contact::convex::clip_faces(&s.triangles, slab);
+                        (!faces.is_empty()).then_some(SlabOverlap { piece, faces })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
@@ -1119,6 +1127,23 @@ mod tests {
                 for workers in [1, 2, 4] {
                     let pool = TaskPoolBuilder::new().num_threads(workers).build();
                     let actual = RubbleBodies::gather_on_pool(&rubble, &near, &bodies, &pool);
+                    let slab = Slab {
+                        origin: Vec3::new(10.0, 0.3, -0.1),
+                        axis: Vec3::X,
+                        lat: Vec3::Z,
+                        out: Vec3::NEG_Y,
+                        len: 35.0,
+                        lateral: (-0.2, 0.2),
+                        face: 0.025,
+                        reach: 0.5,
+                        travel: 0.1,
+                    };
+                    let hits = reference.in_slab(&slab);
+                    assert!(
+                        hits.len() > 1,
+                        "fixture must cross candidate batch boundaries"
+                    );
+                    assert_eq!(actual.in_slab_on_pool(&slab, &pool), hits);
                     assert_eq!(actual.bodies, reference.bodies);
                     assert_eq!(actual.active, reference.active);
                     assert_eq!(actual.by_collider, reference.by_collider);
@@ -1151,6 +1176,94 @@ mod tests {
             Quat::IDENTITY,
             Vec3::new(200.0, 1.0, 200.0),
         )])
+    }
+
+    /// The mechanical law must depend on geometry and material, not their adapter.
+    /// Fixture: the same planar ramp as a grid and a fixed convex solid, with equal effective
+    /// grip and rolling facts. Tangent translation tests tessellation-independent pressure;
+    /// normal closing tests both adapters with the same facets.
+    #[test]
+    fn grid_and_convex_adapters_give_equivalent_contact_for_equal_surfaces() {
+        use crate::ground_field::{ContactGround, GroundField};
+        use crate::terrain_grid::{HeightGrid, TerrainExtent};
+        let mut app = physics();
+        let height = |x: f32, z: f32| 0.2 + 0.03 * x + 0.02 * z;
+        let mut vertices = Vec::new();
+        for x in [-2.0, 2.0] {
+            for z in [-2.0, 2.0] {
+                vertices.extend([Vec3::new(x, height(x, z), z), Vec3::new(x, -1.0, z)]);
+            }
+        }
+        let solid = app
+            .world_mut()
+            .spawn((
+                Transform::IDENTITY,
+                Collider::convex_hull(vertices).expect("fixture ramp is a finite convex prism"),
+                contact_friction(0.7),
+            ))
+            .id();
+        app.update();
+        app.world_mut().run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+            let pieces = RubbleBodies::gather(&rubble, &[solid], &bodies);
+            let grip = pad_grip(contact_friction(0.8));
+            let ground = ContactGround {
+                grip: grip.pair(pieces.friction(solid)),
+                rolling_resistance: super::super::forces::rigid_rolling_resistance(),
+            };
+            let pose = Affine3A::from_translation(Vec3::Y * 0.1);
+            let tangent = Vec3::new(0.4, 0.03 * 0.4 + 0.02 * 0.3, 0.3);
+            let run = |field: &BlockField, pieces: &RubbleBodies, velocity: Vec3| pad_pass_gripping(
+                grip, field, pieces, pose, SideState { speed: 0.6, ..default() },
+                velocity, &mut GripElements::for_links(30),
+            );
+            let empty = BlockField::default();
+            let totals = |report: &SideReport| {
+                let mut force = Vec3::ZERO;
+                let mut torque = Vec3::ZERO;
+                for app in &report.apps {
+                    force += app.force;
+                    torque += app.point.cross(app.force);
+                }
+                (force, torque, report.contacts.iter().map(|c| c.load).sum::<f32>())
+            };
+            for (size, velocity) in [(2, tangent), (3, tangent), (5, tangent), (9, tangent), (2, Vec3::new(0.4, -0.2, 0.3))] {
+                let reference = run(&empty, &pieces, velocity);
+                assert!(!reference.contacts.is_empty());
+                assert!(reference.contacts.iter().all(|c| c.collider == Some(solid)));
+                let (force, torque, load) = totals(&reference);
+                let mut samples = Vec::new();
+                for j in 0..size {
+                    for i in 0..size {
+                        samples.push(height(-2.0 + 4.0 * i as f32 / (size - 1) as f32,
+                                            -2.0 + 4.0 * j as f32 / (size - 1) as f32));
+                    }
+                }
+                let grid = HeightGrid::new(samples.into(), size, TerrainExtent {
+                    world_size_m: 4.0, height_offset_m: -1.0, height_span_m: 2.0,
+                });
+                let field = BlockField::default().with_height(Some(grid))
+                    .with_ground(Some(GroundField::uniform(ground)));
+                let report = run(&field, &RubbleBodies::default(), velocity);
+                assert!(!report.contacts.is_empty());
+                let expected_normal = Vec3::new(-0.03, 1.0, -0.02).normalize();
+                for contact in &report.contacts {
+                    assert_eq!(contact.collider, None);
+                    assert!((contact.normal - expected_normal).length() < 1e-5);
+                    assert!((contact.point.y - height(contact.point.x, contact.point.z)).abs() < 1e-5);
+                    assert_eq!(contact.mu, ground.grip);
+                }
+                let (f, t, l) = totals(&report);
+                // Resolution: accumulated f32 clipping/moments across differing tessellations.
+                assert!((f - force).length() < load * 1e-5, "{size}: {f} vs {force}");
+                assert!((t - torque).length() < load * 1e-5, "{size}: {t} vs {torque}");
+                assert!((l - load).abs() < load * 1e-5);
+                let both = totals(&run(&field, &pieces, velocity));
+                assert!((both.0-force).length() < load*1e-5, "coincident adapters doubled support");
+                assert!((both.1-torque).length() < load*1e-5, "coincident adapters changed the lever arm");
+                println!("MEASURED grid/convex equivalence {size}, velocity {velocity}: force error {} N, torque error {} N m, load error {} N",
+                    (f-force).length(), (t-torque).length(), (l-load).abs());
+            }
+        }).unwrap();
     }
 
     /// A DYNAMIC BODY SUPPORTS THE BELT BY ITS PHYSICS, NEVER BY WHAT IT IS. An unmarked loose
