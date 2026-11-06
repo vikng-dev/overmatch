@@ -31,7 +31,7 @@ use super::oracle::TerrainOracle;
 use super::rubble::{RubbleBodies, Slab};
 #[cfg(test)]
 use super::world_contact::surface_under;
-use super::world_contact::{PatchQuery, SupportPatch, patches, sample};
+use super::world_contact::{PatchQuery, patches, sample};
 
 use super::route::{polyline_len, resample};
 #[cfg(feature = "bitprobe")]
@@ -463,24 +463,14 @@ pub struct SideReport {
 }
 
 impl SideReport {
-    /// Driver geometry is distinct from the piece overlap law's physical orientation.
-    /// Empty space inside a coarse overlap cell has no actual surface to observe.
+    /// The Driver and contact law read the same force-bearing surface.
     fn observe_support(
         &mut self,
         (point, normal): (Vec3, Vec3),
         half_span: Vec3,
         length_weight: f32,
         (mu, rolling_coefficient): (f32, f32),
-        (collider, out): (Option<Entity>, Vec3),
-        pieces: &RubbleBodies,
     ) {
-        let (point, normal) = match collider {
-            Some(collider) => match pieces.support_face(collider, point, out) {
-                Some(face) => face,
-                None => return, // The coarse cell's centroid lies in empty space.
-            },
-            None => (point, normal),
-        };
         self.perceived_support.push(SupportFact {
             point,
             normal,
@@ -950,18 +940,16 @@ fn collect_column_contacts<O: TerrainOracle>(
                 oracle,
                 pieces,
             ) {
-                let SupportPatch {
-                    len, weight, pen, ..
-                } = patch;
-                let pen_max = pen[0].max(pen[1]).max(pen[2]);
+                let weight = patch.weight;
+                let pen_max = patch.max_depth();
                 if pen_max <= 0.0 {
                     continue;
                 }
 
-                let Some((area, contact_len, x_c)) = profile_resultant(len, pen) else {
+                let Some((area, contact_len, x_c)) = patch.resultant() else {
                     continue;
                 };
-                let Some(surface) = sample(patch, axis, out, x_c, params, oracle, pieces) else {
+                let Some(surface) = sample(&patch, axis, out, x_c, params, oracle, pieces) else {
                     // The loaded profile bridges a gap or a buried probe; neither is a surface.
                     continue;
                 };
@@ -985,8 +973,6 @@ fn collect_column_contacts<O: TerrainOracle>(
                     axis * (contact_len / 2.0),
                     weight * contact_len,
                     (surface.mu, surface.rolling),
-                    (collider, out),
-                    pieces,
                 );
                 if load <= 0.0 {
                     if elements_mode && load_elastic > 0.0 {

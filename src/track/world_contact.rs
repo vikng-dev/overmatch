@@ -1,7 +1,7 @@
 //! World-contact patches for the game's running gear (game state only).
 //! `patches` resolves coverage; `sample` supplies geometry, material and point motion to the
 //! mechanical law. Collider identity addresses the tick-start snapshot's owner and reaction.
-//! The field and collider adapters retain their current geometric approximations here.
+//! The convex adapter preserves clipped face geometry; the field uses sampled profiles.
 
 use super::forces::{ForceParams, GripParams, profile_resultant, rigid_rolling_resistance};
 use super::oracle::{TerrainContact, TerrainOracle};
@@ -9,6 +9,7 @@ use super::rubble::{RubbleBodies, Slab, SlabOverlap};
 use bevy::prelude::*;
 
 mod admission;
+pub(super) mod convex;
 pub(crate) use admission::{plugin, solid};
 
 /// One shoe column's world-contact envelope and sampled free-travel profile, in metres.
@@ -37,20 +38,21 @@ pub(crate) fn patches<O: TerrainOracle>(
         pen,
         travel,
     } = query;
-    let affected = raised_footprints(overlaps, strip, slab.len, pen, travel);
+    let affected = convex::raised_faces(overlaps, strip, slab.len, pen, travel);
     let field_patch = SupportPatch {
         origin: slab.origin + slab.lat * field_offset,
         len: slab.len,
         weight,
         pen,
         travel,
-        collider: None,
+        face: None,
+        integral: None,
     };
     let split;
     let patches = if affected.is_empty() {
         std::slice::from_ref(&field_patch)
     } else {
-        split = footprint_patches(slab, strip, field_offset, pen, travel, &affected, pieces);
+        split = convex::patches(slab, strip, field_offset, pen, travel, &affected, pieces);
         &split
     };
     terrain_surface_patches(patches, slab.axis, slab.out, params, oracle)
@@ -68,7 +70,7 @@ pub(crate) struct SurfaceSample {
 }
 
 pub(crate) fn sample<O: TerrainOracle>(
-    patch: SupportPatch,
+    patch: &SupportPatch,
     axis: Vec3,
     out: Vec3,
     centroid: f32,
@@ -77,14 +79,13 @@ pub(crate) fn sample<O: TerrainOracle>(
     pieces: &RubbleBodies,
 ) -> Option<SurfaceSample> {
     let (point, normal) = patch_contact(patch, axis, out, centroid, params, oracle)?;
-    let surface = surface_under(params.grip, patch.collider, point, oracle, pieces);
+    let collider = patch.face.as_ref().map(|face| face.collider);
+    let surface = surface_under(params.grip, collider, point, oracle, pieces);
     Some(SurfaceSample {
         point,
         normal,
-        velocity: patch
-            .collider
-            .map_or(Vec3::ZERO, |collider| pieces.velocity_at(collider, point)),
-        collider: patch.collider,
+        velocity: collider.map_or(Vec3::ZERO, |collider| pieces.velocity_at(collider, point)),
+        collider,
         mu: surface.mu,
         rolling: surface.rolling,
     })
@@ -102,16 +103,33 @@ fn sample_halves(x: f32, len: f32, v: [f32; 3]) -> f32 {
     }
 }
 
-/// A covered rectangle: `pen` is signed penetration (m) at pin/mid/pin, `len` is metres,
-/// and `weight` is the covered fraction of shoe width. Both adapters feed one support law.
-#[derive(Clone, Copy)]
+/// A sampled field profile or an exact clipped face. Resultants integrate positive penetration
+/// in m² and contacting length in m, normalized by shoe width; `weight` scales field columns.
+#[derive(Clone)]
 pub(crate) struct SupportPatch {
     origin: Vec3,
-    pub(crate) len: f32,
+    len: f32,
     pub(crate) weight: f32,
-    pub(crate) pen: [f32; 3],
+    pen: [f32; 3],
     travel: [f32; 3],
-    collider: Option<Entity>,
+    face: Option<convex::ContactFace>,
+    integral: Option<convex::Integral>,
+}
+
+impl SupportPatch {
+    pub(crate) fn max_depth(&self) -> f32 {
+        self.integral.as_ref().map_or_else(
+            || self.pen.into_iter().fold(f32::NEG_INFINITY, f32::max),
+            |i| i.max_depth,
+        )
+    }
+
+    pub(crate) fn resultant(&self) -> Option<(f32, f32, f32)> {
+        match &self.integral {
+            Some(i) => Some((i.area, i.length, i.centroid.x)),
+            None => profile_resultant(self.len, self.pen),
+        }
+    }
 }
 
 /// Resolution: surface quadrature stops below half the field's rounding radius. It confines
@@ -136,7 +154,7 @@ fn terrain_surface_patches<O: TerrainOracle>(
         oracle: &O,
         result: &mut Vec<SupportPatch>,
     ) {
-        let Some((_, _, centroid)) = profile_resultant(patch.len, patch.pen) else {
+        let Some((_, _, centroid)) = patch.resultant() else {
             return; // A zero-pressure strip carries no surface resultant.
         };
         let hits = [0.0, patch.len / 2.0, patch.len, centroid].map(|x| {
@@ -179,13 +197,21 @@ fn terrain_surface_patches<O: TerrainOracle>(
                     params.probe_reach + t,
                 )
             });
+            let integral = match &patch.integral {
+                Some(integral) => match integral.slice(start, half) {
+                    Some(child) => Some(child),
+                    None => continue, // This half contains no positive covered field area.
+                },
+                None => None,
+            };
             split(
                 SupportPatch {
                     origin,
                     len: half,
                     pen,
                     travel,
-                    ..patch
+                    integral,
+                    ..patch.clone()
                 },
                 axis,
                 out,
@@ -196,125 +222,20 @@ fn terrain_surface_patches<O: TerrainOracle>(
         }
     }
     let mut result = Vec::new();
-    for &patch in patches {
-        if patch.collider.is_some() || patch.pen.iter().all(|p| *p <= 0.0) {
-            result.push(patch);
+    for patch in patches {
+        if patch.face.is_some() || patch.max_depth() <= 0.0 {
+            result.push(patch.clone());
         } else {
-            split(patch, axis, out, params, oracle, &mut result);
+            split(patch.clone(), axis, out, params, oracle, &mut result);
         }
     }
     result
 }
 
-/// Partition a strip at footprint edges and at field/piece depth crossings. Within each cell
-/// only the deepest surface carries the belt, so stacked pieces cannot multiply its support.
-/// Column widths are DERIVED from their quadrature shares, retaining the existing field rule
-/// while a narrow piece takes exactly its covered fraction of the true shoe width.
-fn footprint_patches(
-    slab: &Slab,
-    strip: (f32, f32),
-    field_offset: f32,
-    pen: [f32; 3],
-    travel: [f32; 3],
-    overlaps: &[SlabOverlap],
-    pieces: &RubbleBodies,
-) -> Vec<SupportPatch> {
-    let mut us = vec![0.0, slab.len / 2.0, slab.len];
-    let mut ls = vec![strip.0, strip.1];
-    for hit in overlaps {
-        us.extend([hit.u.0, hit.u.1]);
-        ls.extend([
-            hit.l.0.clamp(strip.0, strip.1),
-            hit.l.1.clamp(strip.0, strip.1),
-        ]);
-    }
-    us.sort_unstable_by(f32::total_cmp);
-    us.dedup();
-    ls.sort_unstable_by(f32::total_cmp);
-    ls.dedup();
-    let mut patches = Vec::new();
-    for l in ls.windows(2) {
-        let lateral = (l[0] + l[1]) / 2.0;
-        for u in us.windows(2) {
-            let mid = (u[0] + u[1]) / 2.0;
-            let deepest = overlaps
-                .iter()
-                .filter(|hit| {
-                    mid > hit.u.0 && mid < hit.u.1 && lateral > hit.l.0 && lateral < hit.l.1
-                })
-                .fold(None::<&SlabOverlap>, |best, hit| match best {
-                    Some(best) if best.depth >= hit.depth => Some(best),
-                    _ => Some(hit),
-                });
-            let field = |x| sample_halves(x, slab.len, pen);
-            let local_travel = |x| sample_halves(x, slab.len, travel);
-            let mut cuts = vec![u[0], u[1]];
-            if let Some(hit) = deepest {
-                let a = hit.depth + local_travel(u[0]) - field(u[0]);
-                let b = hit.depth + local_travel(u[1]) - field(u[1]);
-                if (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0) {
-                    cuts.insert(1, u[0] + (u[1] - u[0]) * a / (a - b));
-                }
-            }
-            for range in cuts.windows(2) {
-                let xs = [range[0], (range[0] + range[1]) / 2.0, range[1]];
-                let winner = deepest.filter(|hit| hit.depth + local_travel(xs[1]) > field(xs[1]));
-                patches.push(SupportPatch {
-                    // A field cell retains its quadrature column's location. Only the covered
-                    // piece area moves to its true lateral centroid, so a vanishing footprint
-                    // cannot shift the remaining ground's roll lever arm.
-                    origin: slab.origin
-                        + slab.axis * range[0]
-                        + slab.lat
-                            * if winner.is_some() {
-                                lateral
-                            } else {
-                                field_offset
-                            },
-                    len: range[1] - range[0],
-                    weight: (l[1] - l[0]) / (slab.lateral.1 - slab.lateral.0),
-                    pen: xs.map(|x| match winner {
-                        Some(hit) => hit.depth + local_travel(x),
-                        None => field(x),
-                    }),
-                    travel: xs.map(local_travel),
-                    collider: winner.map(|hit| pieces.collider(hit.piece)),
-                });
-            }
-        }
-    }
-    patches
-}
-
-/// Pieces that actually replace positive field support in this column strip. A buried or
-/// laterally separate piece must not change the remaining field's quadrature or force bits.
-fn raised_footprints(
-    overlaps: &[SlabOverlap],
-    strip: (f32, f32),
-    len: f32,
-    pen: [f32; 3],
-    travel: [f32; 3],
-) -> Vec<SlabOverlap> {
-    overlaps
-        .iter()
-        .copied()
-        .filter(|hit| {
-            hit.l.1 > strip.0
-                && hit.l.0 < strip.1
-                && [hit.u.0, hit.u.1, (len / 2.0).clamp(hit.u.0, hit.u.1)]
-                    .into_iter()
-                    .any(|x| {
-                        let depth = hit.depth + sample_halves(x, len, travel);
-                        depth > 0.0 && depth > sample_halves(x, len, pen)
-                    })
-        })
-        .collect()
-}
-
 /// The pressure centroid's own struck surface. A clearance hit cannot carry the load
-/// sampled on neighbouring lips; piece overlap orientation remains the documented stand-in.
+/// sampled on neighbouring lips. Convex points are pressure centroids on their actual faces.
 fn patch_contact<O: TerrainOracle>(
-    patch: SupportPatch,
+    patch: &SupportPatch,
     axis: Vec3,
     out: Vec3,
     centroid: f32,
@@ -323,11 +244,8 @@ fn patch_contact<O: TerrainOracle>(
 ) -> Option<(Vec3, Vec3)> {
     let travel = sample_halves(centroid, patch.len, patch.travel);
     let query = patch.origin + axis * centroid + out * (params.face_offset + travel);
-    match patch.collider {
-        Some(_) => Some((
-            query - out * sample_halves(centroid, patch.len, patch.pen).max(0.0),
-            -out,
-        )),
+    match &patch.face {
+        Some(face) => Some((face.point, face.normal)),
         None => match oracle.contact_along(query, out, params.probe_reach + travel) {
             TerrainContact::Hit { depth, normal } if depth > 0.0 => {
                 Some((query - out * depth, *normal))
