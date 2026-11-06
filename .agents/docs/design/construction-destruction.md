@@ -381,16 +381,20 @@ interface forces inside each part. Each owner caches this field until its standi
 cracks or separated joints change. Preloads stay fixed during optimization, including on
 supports beyond the seed patch; contact demand does not manufacture one.
 The pristine field reuses the design's part equilibrium and factored chunk kernels. After a
-structure change, only changed chunk kernels refactor. One interface pass assembles all boundary
+structure change, kernels that differ from their design refactor. One interface pass assembles all boundary
 loads; kernels visit their chunks' own joint adjacency, with local hash indices. DERIVED: expected
 `O(chunks + joints)` indexing/traversal work per cold field, plus the gravity part solve and
 chunk triangular solves/factorisations; unchanged fields need only the linear topology signature.
 The grounded-singleton operation witness counts visits and forbids intact-kernel refactorisation.
 
-Dinic's level graphs and blocking flows find the minimum cut; residual reachability selects its
-source side `S*` (E. A. Dinic, 1970, [original paper](https://www.mathnet.ru/eng/dan35701)).
-The solve stops as soon as accumulated flow reaches the contact demand: this certifies that the
-patch holds without finding the entire cut. Held-contact capacity and threshold telemetry are
+Goldberg–Tarjan push-relabel finds the minimum cut, with FIFO discharge and periodic global
+reverse-residual distance updates ([1988 paper](https://doi.org/10.1145/48014.61051)).
+A synthetic inlet caps the supplied preflow at demand; infinite-demand diagnostics use an
+outward-rounded sum of finite directed capacities, an upper bound on any finite cut. Sink inflow reaching demand
+certifies that the patch holds: remaining surplus can return along reverse flow arcs.
+Otherwise all surplus returns to the inlet, leaving a feasible maximum flow; forward residual
+reachability selects the smallest source-side minimum cut `S*`. The construction graph is
+untruncated, so this gives up no cut exactness. Held-contact capacity and threshold telemetry are
 certified lower bounds; a releasing plug reports the exact exhausted flow and its source side.
 The plug can therefore include chunks beyond the occupied patch: compression transmits the push
 through a back layer or around a corner until perimeter joints or bulk crushing give way.
@@ -464,11 +468,14 @@ initial AABB by that travel and intersect it with the full rotation-radius envel
 therefore admits only a small local margin; exact nonlinear casts still decide occupied membership.
 
 DERIVED sweep work: bounds-tree traversal and exact casts choose the occupied source patch;
-live construction joints build the directed graph only on an occupied contact event. Dinic's
-worst-case work is `O(V² E)`; each level search and blocking-flow phase shares one residual state
-within its construction, while independent constructions retain their parallel geometry tasks.
-`SweepAccount::work.flow` reports graph nodes, residual edge pairs (including source and anchor
-constraints), blocking-flow phases, residual arcs tested in level/path searches, and augmentations.
+live construction joints build the directed graph only on an occupied contact event. Generic
+push-relabel has a capacity-independent `O(V² E)` work bound and `O(V + E)` storage; monotone
+labels and current-arc scans retain that bound. Global relabelling follows one graph-sized amount
+of discharge scans, amortising its traversal. On the grounded compression chain, routing and
+returning the surplus take linear visits, rather than one whole-graph search per support; the
+operation witness covers up to 32,768 chunks. Independent constructions retain parallel geometry.
+`SweepAccount::work.flow` reports nodes and residual edge pairs (including the synthetic inlet,
+source and anchors), global/local relabels, residual arc scans, and pushes.
 The plastic solve has fixed dimension and exchanges the whole plug's mass. Counts are separate
 from structural-check and decoration work and are not server-time measurements. The owner's
 hole-within-two-contact-ticks gate remains.
