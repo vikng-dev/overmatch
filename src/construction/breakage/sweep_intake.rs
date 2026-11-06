@@ -6,9 +6,26 @@ use avian3d::prelude::{
 use bevy::math::DMat3;
 use bevy::tasks::ParallelSliceMut;
 
+/// A source-side sweep impulse for the test-time contact account. A plastic mass exchange
+/// couples the whole body and has no surface normal; held contacts name their witness normal.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct SourceImpulse {
+    pub(crate) body: Entity,
+    pub(crate) point: Vec3,
+    pub(crate) normal: Option<Vec3>,
+    pub(crate) linear: Vec3,
+    /// Free angular impulse, about the source COM, rather than `point cross linear`.
+    pub(crate) angular: Vec3,
+}
+
 /// The sweep's per-tick account, available to headless witnesses and operator instruments.
 #[derive(Resource, Default, Debug)]
 pub(crate) struct SweepAccount {
+    #[cfg(test)]
+    pub(crate) source_impulses: Vec<SourceImpulse>,
+    #[cfg(test)]
+    pub(crate) cancelled_belts: Vec<crate::contact_transfer::AppliedContact>,
     prepared: BTreeSet<Entity>,
     prepared_at: Option<std::time::Duration>,
     pub(crate) freed: usize,
@@ -248,6 +265,8 @@ pub(super) fn run(mut p: Intake) {
         })
         .collect::<BTreeSet<_>>();
     for cancelled in p.transfers.cancel_implicit(&retired) {
+        #[cfg(test)]
+        p.account.cancelled_belts.push(cancelled);
         let (mut source, ..) = p
             .bodies
             .get_mut(cancelled.body)
@@ -495,6 +514,14 @@ fn commit_source(
     let result = super::super::sweep::exchange(&source, &parts);
     forces.apply_linear_impulse_at_point(-result.impulse.as_vec3(), centre);
     forces.apply_angular_impulse(-result.angular_impulse.as_vec3());
+    #[cfg(test)]
+    p.account.source_impulses.push(SourceImpulse {
+        body,
+        point: centre,
+        normal: None,
+        linear: -result.impulse.as_vec3(),
+        angular: -result.angular_impulse.as_vec3(),
+    });
     p.account.source_changes.push((
         body,
         source.velocity.as_vec3(),
@@ -817,6 +844,14 @@ fn hold(p: &mut Intake, body: Entity, root: Entity, swept: &super::super::sweep:
             "inward translation has an unlocked response"
         );
         forces.apply_linear_impulse(-normal * closing / response);
+        #[cfg(test)]
+        p.account.source_impulses.push(SourceImpulse {
+            body,
+            point,
+            normal: Some(-normal),
+            linear: -normal * closing / response,
+            angular: Vec3::ZERO,
+        });
     }
     let angular_mask = Mat3::from_diagonal(Vec3::new(
         f32::from(!axes.is_rotation_x_locked()),
@@ -836,6 +871,14 @@ fn hold(p: &mut Intake, body: Entity, root: Entity, swept: &super::super::sweep:
             "inward rotation has an unlocked response"
         );
         forces.apply_angular_impulse(-torque * angular_closing / angular_response);
+        #[cfg(test)]
+        p.account.source_impulses.push(SourceImpulse {
+            body,
+            point,
+            normal: Some(-normal),
+            linear: Vec3::ZERO,
+            angular: -torque * angular_closing / angular_response,
+        });
     }
     // Pre-integration pose accounts only for motion removed by the surface constraint. Avian
     // still integrates the surviving tangential twist over the complete step.

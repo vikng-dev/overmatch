@@ -51,21 +51,13 @@ pub(crate) struct MapInstance {
 #[derive(Component)]
 pub(crate) struct ScatterProxy;
 
-/// Resolution: least squared quaternion length [`resolve`] will normalize. Far below any rounding an f32
-/// text export produces (those land within ~1e-7 of unit) and far above the point where the
-/// squaring itself underflows, so the only thing it rejects is a quaternion with no direction in it.
-const MIN_ROTATION_LENGTH_SQ: f32 = 1.0e-12;
-
-/// One parsed instance: the prototype it resolves to and its authored pose MINUS the stale Y.
+/// One resolved instance; its pose was admitted by the map loader.
 struct Instance<'a> {
-    /// The prototype id, as the file references it — the view's mesh key.
     prototype: &'a str,
     shape: &'a Prototype,
-    /// Authored world XZ. The file's Y never leaves [`resolve`].
-    xz: Vec2,
-    rotation: Quat,
-    /// The file's own instance id — the sort key that fixes iteration order.
+    pose: crate::map::PlacementPose,
     id: &'a str,
+    ordinal: u16,
 }
 
 /// One placed instance: its prototype, its identity and its GROUND pose — the authored XZ and
@@ -88,79 +80,24 @@ fn graybox_friction(substance: &str) -> avian3d::prelude::Friction {
         })
 }
 
-impl Placement<'_> {
-    /// A graybox collider and spawn obstacle: a unit cube posed and scaled, its centre lifted by the
-    /// prototype's own bounds. `None` for a construction with its own geometry.
-    fn block(&self) -> Option<Transform> {
-        match self.shape {
-            Prototype::Block { min, max, .. } => {
-                let (min, max) = (Vec3::from_array(*min), Vec3::from_array(*max));
-                Some(Transform {
-                    translation: Vec3::from(self.pose.translation)
-                        + self.pose.rotation * ((min + max) * 0.5),
-                    rotation: self.pose.rotation,
-                    scale: max - min,
-                })
-            }
-            Prototype::Construction { .. } => None,
-        }
-    }
-}
-
-/// Resolve the manifest's instance records against its prototype library and put them in
-/// ITERATION ORDER. Everything past the manifest's own checks is ADR-0011 fail-fast: a pose
-/// component that is not finite (a NaN reaches the solver as a NaN collider) or a rotation with no
-/// length to normalize is a broken ship and panics naming the instance.
+/// Resolve admitted records against the library, retaining their admitted identity.
 fn resolve<'a>(
     records: &'a [InstanceRecord],
     library: &'a BTreeMap<String, Prototype>,
 ) -> Vec<Instance<'a>> {
-    let mut instances: Vec<Instance<'a>> = records
+    records
         .iter()
         .map(|raw| {
             // `map::parse` already refused any id outside the library.
-            let shape = &library[&raw.prototype];
-            let translation = Vec3::from_array(raw.translation);
-            let rotation = Quat::from_xyzw(
-                raw.rotation[0],
-                raw.rotation[1],
-                raw.rotation[2],
-                raw.rotation[3],
-            );
-            assert!(
-                translation.is_finite() && rotation.is_finite(),
-                "scatter: instance {} has a non-finite pose",
-                raw.id,
-            );
-            // A quaternion the exporter wrote as f32 TEXT is never exactly unit, so an off-unit one
-            // is normalized below and welcome. One with no length is not off-unit, it is not a
-            // rotation: `normalize` divides by zero and hands the solver a NaN collider, which is
-            // finite arithmetic's blind spot — the check above passes it. `[0,0,0,0]` is the
-            // shape this takes in a file.
-            assert!(
-                rotation.length_squared() > MIN_ROTATION_LENGTH_SQ,
-                "scatter: instance {} has rotation {:?}, which names no orientation",
-                raw.id,
-                raw.rotation,
-            );
             Instance {
                 prototype: &raw.prototype,
-                shape,
-                // The Y is DROPPED here, where the stale value cannot leak further.
-                xz: translation.xz(),
-                rotation: rotation.normalize(),
+                shape: &library[&raw.prototype],
+                pose: raw.pose,
                 id: &raw.id,
+                ordinal: raw.ordinal,
             }
         })
-        .collect();
-    // The file's own ids are the fixed order every peer spawns in.
-    instances.sort_by(|a, b| a.id.cmp(b.id));
-    assert!(
-        instances.len() <= usize::from(u16::MAX) + 1,
-        "scatter: {} instances, more than a MapInstance ordinal can name",
-        instances.len(),
-    );
-    instances
+        .collect()
 }
 
 /// Project every instance onto `grid`: the authored XZ and rotation kept, the Y taken from the
@@ -169,22 +106,16 @@ fn resolve<'a>(
 fn place<'a>(instances: &[Instance<'a>], grid: &HeightGrid) -> Vec<Placement<'a>> {
     instances
         .iter()
-        .enumerate()
-        .map(|(ordinal, instance)| Placement {
+        .map(|instance| Placement {
             prototype: instance.prototype,
             shape: instance.shape,
             identity: MapInstance {
                 id: instance.id.to_owned(),
-                ordinal: u16::try_from(ordinal).expect("resolve bounded the count"),
+                ordinal: instance.ordinal,
             },
-            pose: Isometry3d::new(
-                Vec3::new(
-                    instance.xz.x,
-                    grid.height_at(instance.xz.x, instance.xz.y),
-                    instance.xz.y,
-                ),
-                instance.rotation,
-            ),
+            pose: instance
+                .pose
+                .at_height(grid.height_at(instance.pose.xz().x, instance.pose.xz().y)),
         })
         .collect()
 }
@@ -346,7 +277,8 @@ impl ScatterScene {
                 }
                 Prototype::Block { substance, .. } => {
                     let block = placement
-                        .block()
+                        .shape
+                        .block(placement.pose)
                         .expect("a construction placement carries a block transform");
                     obstacles.push(block);
                     let mut entity = commands.spawn((
@@ -414,12 +346,12 @@ mod tests {
 
     /// One instance record of `prototype`, posed with a deliberately WRONG Y.
     fn record(id: &str, xz: Vec2, stale_y: f32) -> InstanceRecord {
-        InstanceRecord {
-            prototype: "house_proxy".to_owned(),
-            translation: [xz.x, stale_y, xz.y],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            id: id.to_owned(),
-        }
+        crate::map::tests::fixture_records(serde_json::json!([{
+            "prototype":"house_proxy", "id":id,
+            "translation":[xz.x,stale_y,xz.y], "rotation":[0,0,0,1]
+        }]))
+        .pop()
+        .unwrap()
     }
 
     /// THE stale-Y law: the placed Y is the grid's height under the instance's XZ, and the file's
@@ -443,11 +375,12 @@ mod tests {
     /// hand `b` ordinal 0 here.
     #[test]
     fn ordinals_follow_the_id_order_whatever_the_file_order() {
-        let records = [
-            record("b", Vec2::ZERO, 0.0),
-            record("c", Vec2::X, 0.0),
-            record("a", Vec2::Y, 0.0),
-        ];
+        let records = crate::map::tests::fixture_records(serde_json::json!(["b", "c", "a"].map(
+            |id| serde_json::json!({
+                "prototype":"house_proxy", "id":id,
+                "translation":[0,0,0], "rotation":[0,0,0,1]
+            })
+        )));
         let library = library();
         let placed = place(&resolve(&records, &library), &sloped_grid());
         let identities: Vec<(&str, u16)> = placed
@@ -455,18 +388,6 @@ mod tests {
             .map(|placement| (placement.identity.id.as_str(), placement.identity.ordinal))
             .collect();
         assert_eq!(identities, [("a", 0), ("b", 1), ("c", 2)]);
-    }
-
-    /// A zero quaternion is FINITE, so the pose check waves it through — and then `normalize`
-    /// divides by a zero length and puts a NaN rotation on a static collider, which reaches Avian
-    /// as geometry nothing can resolve against. It has to be refused where it is still a number in
-    /// a file (ADR-0011).
-    #[test]
-    #[should_panic(expected = "which names no orientation")]
-    fn a_rotation_with_no_length_panics() {
-        let mut raw = record("a", Vec2::ZERO, 0.0);
-        raw.rotation = [0.0, 0.0, 0.0, 0.0];
-        resolve(&[raw], &library());
     }
 
     /// Spawn on the sloped fixture grid. Physics registers collider requirements before spawning;
@@ -541,7 +462,7 @@ mod tests {
             .expect("the fixture places a house")
             .clone();
         second.id = "house_0002".to_owned();
-        second.translation[0] += 30.0;
+        second.pose = record("copy", second.pose.xz() + Vec2::X * 30.0, 0.0).pose;
         manifest.instances.push(second);
         let (mut app, _) = spawned(&manifest, true, false);
         let world = app.world_mut();
@@ -757,7 +678,7 @@ mod tests {
                 Prototype::Construction { .. }
             ) {
                 second.id.push_str("_copy");
-                second.translation[0] += 30.0; // Fixture separation.
+                second.pose = record("copy", second.pose.xz() + Vec2::X * 30.0, 0.0).pose; // Fixture separation.
                 manifest.instances.push(second);
             }
         }

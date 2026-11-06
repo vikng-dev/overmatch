@@ -1,0 +1,4 @@
+// From the bay, after scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch:
+// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_START=234.4,421.9,161 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/surroundings/p4-hill-sight.ron target/debug/overmatch --offline
+// Sky and horizon survey: the gunner optic on the highest hill, facing the east edge.
+(frames: (out: "target/capture/sky/p4-hill-sight.png", at: [12.0], size: (1280, 720), scale_factor: 1.0, ui: false, gizmos: false, sight: true, step_s: 0.015625))

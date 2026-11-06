@@ -393,8 +393,8 @@ Their decisions and measured bounds are recorded under “Bounded recoverable sh
 resampling depth at child stations. A normal variation below squared error `1e-4` needs no split
 (DERIVED about 0.6 degrees); planar terrain keeps its original profile. A centroid with clearance,
 a miss or a buried origin supplies no support. Thus a rounded lip cannot rotate an entire long
-column's load, and a far wall behind a gap cannot carry load from the near lip. Piece overlap
-orientation remains the existing documented stand-in outside this lane.
+column's load, and a far wall behind a gap cannot carry load from the near lip. Convex contacts
+carry the clipped face's own normal, as described below.
 
 **Rolling resistance read against construction pressure.**
 
@@ -523,10 +523,8 @@ record every sustained sample and the raw first delivery. The historical first-t
 in `drive-load-measurements-2026-11-02.json` for comparison.
 
 **Same-instant calibration, with the gear lane stopped at its boundary.** The contact pass now
-records an actual convex piece face for the Driver independently of the physical overlap law's
-belt-frame orientation. A coarse overlap cell whose centroid ray strikes no face supplies no
-geometric observation; the coarse physical reaction still runs. Turn resistance uses normal
-pressure, `mu_t W cos(theta) length/(4 R_g)`, consistently with grip and rolling.
+records the same clipped convex face for the Driver and the physical contact law. Turn resistance
+uses normal pressure, `mu_t W cos(theta) length/(4 R_g)`, consistently with grip and rolling.
 
 The same-instant instrument separates forecast-speed drift, actual crank rpm and crank
 acceleration from the numerical residual. MEASURED 524 settled samples leave -1.546875 to
@@ -575,11 +573,13 @@ A miss or a buried origin supplies no struck surface and carries no support; sca
 returns clearance or saturated depth for geometry consumers. In particular, neither absence
 falls back to the belt's normal.
 
-**Piece orientation is a StandIn.** `track::rubble::in_slab` retains one innermost depth per
-footprint, making every overlap face parallel to the belt. That coarse geometry therefore uses
-`-out` for support and `out · relative_velocity` for closing. A physically level piece under a
-tilted run can still inherit the earlier tilted-run loss. What settles the missing orientation
-is the overlap's actual face normal; this change leaves `rubble.rs` and its recipient law alone.
+**Convex faces keep their geometry.** `world_contact::convex` clips each solid's entry faces to
+its belt element's envelope and partitions projected coverage at face edges and depth crossings.
+Each covered area belongs to its deepest surface. Linear penetration integrates over the actual
+polygon, with its pressure centroid on the face and its outward normal shared by support,
+damping, grip and Driver observation. Tangential motion over a level solid has zero normal
+closing even beneath an inclined belt. The field still supplies sampled profiles; directional
+suspension compliance and the recipient solve remain separate migration work.
 
 **The 1c loss split, unchanged.** MEASURED headless before the flat-ground law, full throttle
 with no ground term, the fixture tank at F8, 10.68 m/s, averaged over a second:
@@ -708,7 +708,7 @@ change to keep it below clippy's function-length limit. No wire type changes.
 | Claude (law-ground-1c review) P2 | a first-hit jump at a step lip or construction corner rotates support and amplifies closing; the column mid probe supplies other patches' normals | verified: the full-hull trace and lateral corner fail the old law; each resultant now queries its own hit. The rounded face's genuine inclination is not a defect | driving: read contact normals from struck surfaces (#146) |
 | Claude (law-ground-1c review) P3 | a saturated/missing mid probe silently takes the old belt-normal law | verified: `Miss` and `Buried` are named, carry no support, and the no-surface force regression fails the old law | driving: read contact normals from struck surfaces (#146) |
 | Claude (law-ground-1c review) P3 | the rolling test does not kill the belt-normal damper mutant and reverses fixture run directions | verified: per-contact moving/parked load comparison kills the mutant; directions corrected | driving: read contact normals from struck surfaces (#146) |
-| Claude (law-ground-1c review) P3 | piece overlap faces are parallel to the belt, not the piece's physical face | verified: orientation is explicitly a StandIn above, settled by the overlap face normal; recipient code stays outside this lane | driving: record surface contact traces and entry-dependent speeds (#146) |
+| Claude (law-ground-1c review) P3 | piece overlap faces are parallel to the belt, not the piece's physical face | resolved by the convex adapter: clipped faces own their normals; the recipient solve remains separate | driving: record surface contact traces and entry-dependent speeds (#146) |
 | Claude (law-ground-1c review) P3 | the no-loss top-speed test lacks an integration margin and calls its band rolling loss | verified: margins now name settling, integration and vertical ride velocity | driving: read contact normals from struck surfaces (#146) |
 | Claude (law-ground-1c review), July lip question | rounding was claimed to keep the depth gradient continuous across every lip | verified false at silhouettes; actual normals and bounded normal closing remove that inference, while true wall/top changes remain for playtest | driving: record surface contact traces and entry-dependent speeds (#146) |
 | Claude (law-ground-1c review), slip-witness question | changing the scripted slip witness from 0.3 to 0.2 m/s weakened a physical bound | not a defect: it is a coverage witness, half the 0.4 m/s saturation scale; the corrected traction frame removes the tilted-run artifact. The replay remains green | transmission: keep the ground's rolling resistance whole through a shift window (#146) |

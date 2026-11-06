@@ -1128,7 +1128,7 @@ mod tests {
             let data = image.data.as_ref().unwrap();
             let texel = (image.texture_descriptor.size.width as usize - 1) * 4;
             let albedo = LinearRgba::from(Color::srgb_from_array(colour));
-            let sun = crate::world::sun_light().color.to_linear();
+            let sun = crate::sky::sun_light().color.to_linear();
             let expected = [
                 albedo.red * sun.red,
                 albedo.green * sun.green,
@@ -1136,7 +1136,7 @@ mod tests {
             ]
             .map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
             assert_eq!(&data[texel..texel + 3], &expected);
-            let light = crate::world::level_ground_irradiance_lux() / std::f32::consts::PI
+            let light = crate::sky::level_ground_irradiance_lux() / std::f32::consts::PI
                 * Exposure::default().exposure();
             assert!((billboard.lanes.glow.x + 1.0 - light).abs() < f32::EPSILON * light.max(1.0));
         }
@@ -1584,7 +1584,7 @@ mod tests {
                 .expect("a layered soil strike leaves one scar");
             let billboard = app.world().get::<Billboard>(scar).expect("a live scar");
             assert_eq!(billboard.lanes.fade.w, look().scar_fade.w * amount);
-            let light = crate::world::level_ground_irradiance_lux() / std::f32::consts::PI
+            let light = crate::sky::level_ground_irradiance_lux() / std::f32::consts::PI
                 * Exposure::default().exposure();
             assert_eq!(billboard.lanes.glow.x, light * look().scar_shade - 1.0);
             assert_eq!(

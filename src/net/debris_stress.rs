@@ -275,8 +275,8 @@ fn carry_construction_piece(
     commands.entity(added.entity).insert(Carrier(carrier));
 }
 
-/// Keep the parent's final pose and retirement tick on the wire until the shared view
-/// cursor reaches the split. Its children carry their own birth tick and occupied chunks.
+/// Keep a group's final pose and retirement tick on the wire until the shared view
+/// cursor reaches its retirement.
 fn retire_construction_piece(
     retired: On<RetirePiece>,
     bodies: Query<(&Carrier, &Position, &Rotation)>,
@@ -285,11 +285,11 @@ fn retire_construction_piece(
 ) {
     let (carrier, position, rotation) = bodies.get(retired.entity).expect(
         "only the server installs this observer, and `carry_construction_piece` gives every server chunk \
-         group its carrier in the flush that spawns it, before a deposit can stage its split",
+         group its carrier in the flush that spawns it, before the body can retire",
     );
     let (mut piece, mut pose) = carriers
         .get_mut(carrier.0)
-        .expect("a server chunk group retains its carrier through its split tick");
+        .expect("a server chunk group retains its carrier through its retirement tick");
     // A sweep departure can split after physics in its birth tick. Its empty presentation
     // interval has no sample to retain; only its final descendants reach publication.
     if piece.born == retired.tick {

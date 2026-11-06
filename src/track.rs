@@ -48,6 +48,7 @@ pub mod terrain;
 pub mod transmission;
 pub mod view;
 pub mod wheels;
+pub(crate) mod world_contact;
 pub mod wrap;
 
 pub use sim::sim_plugin;

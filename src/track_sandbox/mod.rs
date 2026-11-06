@@ -211,6 +211,7 @@ pub fn plugin(app: &mut App) {
     // Fingerprint the sim artifact before bake reads it and resolve the shoe's certified chain.
     app.add_plugins((
         crate::geometry_lod::sim_plugin,
+        crate::track::world_contact::plugin,
         // The live view the shoe's chain is selected through.
         crate::view::plugin,
         crate::geometry_lod::view_plugin,

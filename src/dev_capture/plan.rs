@@ -62,7 +62,7 @@ pub(crate) struct Repair {
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct Scene {
     /// The sun's elevation, degrees, strictly between 0 and 90, on every root that lights the
-    /// world (`world::sun_elevation_deg`): the key light, its sky and the baked terrain shadow move
+    /// world (`sky::sun_elevation_deg`): the key light, its sky and the baked terrain shadow move
     /// together. The illuminance is not rebalanced: a lower sun reads darker. Default the shipped
     /// sun.
     pub(crate) sun_elevation_deg: Option<f32>,
@@ -193,6 +193,11 @@ pub(crate) enum Camera {
     /// The root's own camera writers.
     #[default]
     Player,
+    /// The player's orbit held on a world bearing; its live terrain pull-in still places the body.
+    Orbit {
+        #[serde(deserialize_with = "orbit_direction")]
+        direction: Dir3,
+    },
     /// Held at `eye` looking at `look` (world metres, two distinct points) for the whole run, as a
     /// captor (`camera::CameraCaptive`): the player's own writers stand aside, and the lens stays
     /// the one the camera last had.
@@ -202,6 +207,18 @@ pub(crate) enum Camera {
     },
     /// Held at this world-space offset from the controlled tank, looking at its root.
     Follow { offset: (f32, f32, f32) },
+}
+
+fn orbit_direction<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Dir3, D::Error> {
+    use serde::de::Error;
+    let direction = Vec3::from(<(f32, f32, f32)>::deserialize(deserializer)?);
+    let repair = "frames.camera.direction: author a finite nonzero bearing with a horizontal component; rescale its components to unit magnitude";
+    let unit = Dir3::new(direction).map_err(|_| D::Error::custom(repair))?;
+    // Bevy's look_to selects another axis if this cross product cannot normalize.
+    if !unit.as_vec3().is_normalized() || Vec3::Y.cross(-unit.as_vec3()).try_normalize().is_none() {
+        return Err(D::Error::custom(repair));
+    }
+    Ok(unit)
 }
 
 /// One key read as pressed from app second `from` until app second `to` (`Time` as `Update`
@@ -499,6 +516,11 @@ pub(crate) enum PlanError {
     Read(std::io::Error),
     Parse(ron::error::SpannedError),
     Field(String),
+    OrbitCamera(bevy::ecs::query::QuerySingleError),
+    Output {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 impl std::fmt::Display for PlanError {
@@ -509,6 +531,15 @@ impl std::fmt::Display for PlanError {
             }
             Self::Parse(error) => error.fmt(f),
             Self::Field(error) => f.write_str(error),
+            Self::OrbitCamera(error) => write!(
+                f,
+                "frames.camera: {error}; choose Pose on a root without exactly one player orbit camera"
+            ),
+            Self::Output { path, source } => write!(
+                f,
+                "frames.out: cannot prepare {}: {source}; choose a writable directory and fix its path or permissions",
+                path.display()
+            ),
         }
     }
 }
@@ -604,7 +635,7 @@ impl CapturePlan {
                 );
             }
             match frames.camera {
-                Camera::Player => {}
+                Camera::Player | Camera::Orbit { .. } => {}
                 Camera::Pose { eye, look } => {
                     let (eye, look) = (Vec3::from(eye), Vec3::from(look));
                     if !(eye.is_finite() && look.is_finite() && eye != look) {
@@ -1068,6 +1099,32 @@ mod tests {
                     .unwrap_err()
                     .to_string()
                     .contains("scale_factor")
+            );
+        }
+    }
+
+    /// The wall plan selects an orbit bearing; undefined bases are refused before play.
+    #[test]
+    fn wall_capture_uses_an_admitted_orbit_bearing() {
+        let plan = CapturePlan::parse(include_str!(
+            "../../scripts/capture/surroundings/w1d-wall.ron"
+        ))
+        .unwrap();
+        assert!(matches!(plan.frames.unwrap().camera, Camera::Orbit { .. }));
+        for direction in [
+            "(0.0,0.0,0.0)",
+            "(0.0,1.0,0.0)",
+            "(1e-30,1.0,0.0)",
+            "(NaN,0.0,1.0)",
+            "(inf,0.0,1.0)",
+        ] {
+            let text =
+                format!(r#"(frames: (out: "f.png", camera: Orbit(direction: {direction})))"#);
+            assert!(
+                CapturePlan::parse(&text)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("frames.camera.direction")
             );
         }
     }

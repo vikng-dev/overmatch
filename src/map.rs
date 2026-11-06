@@ -1,4 +1,4 @@
-//! The map manifest: `assets/maps/<id>/level.json`, the ONE file that says what a map is.
+//! Map admission: root data in `assets/maps/<id>/`, published as one checked snapshot.
 //!
 //! ONE MAP IS ONE DIRECTORY. The exporter writes a single file per map carrying the terrain block
 //! (which heightmap, the square it hangs at, how its pixels decode to metres), the author's object
@@ -6,9 +6,17 @@
 //! resolves against its OWN directory, so a map moves as a directory and the systems that read it
 //! never learn an id.
 //!
-//! ONE PARSE. [`crate::terrain_grid::decode_height_grid`] reads the file at Startup and publishes
-//! [`MapManifest`]; the terrain decode takes its extent and heightmap from that resource and
-//! [`crate::scatter`] takes its instances from the same one. Nothing else opens the file.
+//! ONE PARSE. Simulation plugins initialize [`MapManifest`] from [`load`]; a terrain-only root
+//! admits it at Startup through [`crate::terrain_grid::decode_height_grid`]. The terrain decode
+//! takes its extent and heightmap from that resource; [`crate::scatter`] takes its instances too. [`content_digest`] delegates to
+//! [`load`], so compatibility checks cannot bypass admission.
+//!
+//! PROVISIONAL: the square play-area polygon stands in for the natural border (#200); its floor
+//! and ceiling stand in for authored vertical bounds informed by logged escapes. Height and mask
+//! decoders still reread files; the R6 remainder and replacements live in
+//! `.agents/docs/design/map-surroundings.md`.
+//! PROVISIONAL: admission encloses the current square spawn limit; a polygon inset replaces it
+//! when the spawn picker supports irregular boundaries (#200).
 //!
 //! THE LIBRARY IS THE GAME'S, THE PLACEMENT IS THE MAP'S. What a prototype id the placement
 //! references MEANS to the game — a construction's box, a fir's size — is `prototypes.ron` beside the
@@ -39,6 +47,10 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 
+mod play_area;
+
+pub(crate) use play_area::PlayArea;
+
 use crate::construction::ConstructionLibrary;
 use crate::terrain_grid::{RowOrder, TerrainExtent};
 
@@ -56,9 +68,12 @@ const LEVEL_FILE: &str = "level.json";
 /// The game's prototype library inside a map's directory (module doc). REQUIRED beside a manifest:
 /// a placement whose ids resolve to nothing is present-but-broken (ADR-0011).
 const PROTOTYPES_FILE: &str = "prototypes.ron";
+const BOUNDARY_FILE: &str = "boundary.ron";
 
-/// Subdirectory of a map holding what WE generate from the authored data (the UI map image), as
-/// opposed to what the author shipped.
+/// Map asset ownership (best practice): root files are authored inputs both binaries read,
+/// belonging in the content digest and server pack. `view/` holds authored client-only
+/// data; `derived/` holds generated client products (the UI map image). Neither client folder
+/// enters the digest or server pack. See `.agents/docs/design/map-surroundings.md`.
 const DERIVED_DIR: &str = "derived";
 
 /// `<root>/maps/<id>` — the map's directory.
@@ -88,10 +103,13 @@ pub(crate) fn derived_asset(name: &str) -> String {
     format!("{MAPS_DIR}/{MAP_ID}/{DERIVED_DIR}/{name}")
 }
 
-/// One map's `level.json`, parsed and checked. The extent is a claim the map's author makes about
-/// their export, never something derived from the pixels.
+/// One map's admitted root data. The terrain extent is the author's declaration, never something
+/// derived from pixels; the play area is checked against that extent before publication.
 #[derive(Resource, Debug, Clone, PartialEq)]
 pub(crate) struct MapManifest {
+    pub(crate) play_area: PlayArea,
+    /// Compatibility digest of the exact bytes admitted by `load`.
+    pub(crate) digest: u64,
     /// The manifest's own directory — what every asset name in it resolves against.
     dir: PathBuf,
     /// Heightmap file name, as declared.
@@ -109,13 +127,19 @@ pub(crate) struct MapManifest {
     pub(crate) masks_resolution: [u32; 2],
     /// Nonempty, finite horizontal spawn points inside the declared map square.
     pub(crate) spawn_points: SpawnPoints,
-    /// The author's object placement, in file order.
+    /// Admitted placements in id order, with their peer-stable ordinals.
     pub(crate) instances: Vec<InstanceRecord>,
     /// The game's library, keyed by the ids the placement uses. Every instance's prototype and
     /// every id the author's block declares resolves here; [`parse`] checked it.
     pub(crate) prototypes: BTreeMap<String, Prototype>,
     /// Every construction asset a [`Prototype::Construction`] names, loaded and validated ([`load`]).
     pub(crate) constructions: ConstructionLibrary,
+}
+
+impl FromWorld for MapManifest {
+    fn from_world(_world: &mut World) -> Self {
+        load(&crate::assets::asset_root())
+    }
 }
 
 /// Authored XZ spawn points certified once at the map load edge. The private slice cannot be
@@ -147,19 +171,8 @@ impl SpawnPoints {
 }
 
 impl MapManifest {
-    /// The construction asset ids the library names, each once.
-    fn construction_assets(&self) -> impl Iterator<Item = &str> {
-        self.prototypes
-            .values()
-            .filter_map(|prototype| match prototype {
-                Prototype::Construction { asset } => Some(asset.as_str()),
-                Prototype::Block { .. } => None,
-            })
-    }
-
-    /// Resolve each construction once at its authored size before play.
-    fn load_constructions(&mut self, root: &Path) {
-        self.constructions = ConstructionLibrary::load(root, self.construction_assets());
+    pub(crate) fn boundary_path(&self) -> PathBuf {
+        self.dir.join(BOUNDARY_FILE)
     }
 
     /// The declared heightmap's path.
@@ -207,15 +220,77 @@ pub(crate) enum Prototype {
     Construction { asset: String },
 }
 
-/// One authored placement at prototype size. `rotation` is XYZW, `translation` is XYZ.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[serde(try_from = "InstanceFields")]
+impl Prototype {
+    /// A graybox collider and spawn obstacle as a posed unit cube. Constructions own their geometry.
+    pub(crate) fn block(&self, pose: Isometry3d) -> Option<Transform> {
+        match self {
+            Self::Block { min, max, .. } => {
+                let (min, max) = (Vec3::from_array(*min), Vec3::from_array(*max));
+                Some(Transform {
+                    translation: Vec3::from(pose.translation) + pose.rotation * ((min + max) * 0.5),
+                    rotation: pose.rotation,
+                    scale: max - min,
+                })
+            }
+            Self::Construction { .. } => None,
+        }
+    }
+}
+
+/// An admitted placement orientation and XZ; stale authored Y is checked, then discarded.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PlacementPose {
+    xz: Vec2,
+    rotation: Quat,
+}
+
+impl PlacementPose {
+    fn checked(translation: [f32; 3], rotation: [f32; 4], id: &str) -> Result<Self, String> {
+        let rotation = Quat::from_array(rotation);
+        if !translation.iter().all(|value| value.is_finite()) {
+            return Err(format!(
+                "field instances[{id}].translation — author finite XYZ metres"
+            ));
+        }
+        // Resolution: reject near-zero norms before normalization amplifies rounding error.
+        const MIN_ROTATION_LENGTH_SQ: f32 = 1.0e-12;
+        let length_sq = rotation.length_squared();
+        if !(rotation.is_finite() && length_sq.is_finite() && length_sq > MIN_ROTATION_LENGTH_SQ) {
+            return Err(format!(
+                "field instances[{id}].rotation — author a finite quaternion with a normalizable length"
+            ));
+        }
+        Ok(Self {
+            xz: Vec2::new(translation[0], translation[2]),
+            rotation: rotation.normalize(),
+        })
+    }
+
+    pub(crate) fn at_height(self, height: f32) -> Isometry3d {
+        Isometry3d::new(Vec3::new(self.xz.x, height, self.xz.y), self.rotation)
+    }
+
+    pub(crate) fn xz(self) -> Vec2 {
+        self.xz
+    }
+}
+
+/// One authored placement at prototype size.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct InstanceRecord {
+    pub(crate) ordinal: u16,
     pub(crate) prototype: String,
-    pub(crate) translation: [f32; 3],
-    pub(crate) rotation: [f32; 4],
+    pub(crate) pose: PlacementPose,
     /// The file's own instance id — the sort key that fixes iteration order.
     pub(crate) id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(try_from = "InstanceFields")]
+struct ParsedInstance {
+    prototype: String,
+    pose: PlacementPose,
+    id: String,
 }
 
 /// Export metadata is permitted, but placement scaling is refused before it can enter the map.
@@ -229,7 +304,7 @@ struct InstanceFields {
     extra: BTreeMap<String, serde::de::IgnoredAny>,
 }
 
-impl TryFrom<InstanceFields> for InstanceRecord {
+impl TryFrom<InstanceFields> for ParsedInstance {
     type Error = String;
 
     fn try_from(raw: InstanceFields) -> Result<Self, Self::Error> {
@@ -241,11 +316,36 @@ impl TryFrom<InstanceFields> for InstanceRecord {
         }
         Ok(Self {
             prototype: raw.prototype,
-            translation: raw.translation,
-            rotation: raw.rotation,
+            pose: PlacementPose::checked(raw.translation, raw.rotation, &raw.id)?,
             id: raw.id,
         })
     }
+}
+
+/// Admit the identity space once; every peer numbers the same id-sorted placements.
+fn deserialize_instances<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<InstanceRecord>, D::Error> {
+    use serde::{Deserialize, de::Error};
+    let mut records = Vec::<ParsedInstance>::deserialize(deserializer)?;
+    let maximum = usize::from(u16::MAX) + 1;
+    if records.len() > maximum {
+        return Err(D::Error::custom(format!(
+            "field instances has {} placements — reduce to at most {maximum} so every instance has a u16 ordinal",
+            records.len()
+        )));
+    }
+    records.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(records
+        .into_iter()
+        .zip(0..=u16::MAX)
+        .map(|(raw, ordinal)| InstanceRecord {
+            prototype: raw.prototype,
+            pose: raw.pose,
+            id: raw.id,
+            ordinal,
+        })
+        .collect())
 }
 
 /// `level.json` as far as this crate reads it. Deliberately NOT `deny_unknown_fields`: the file
@@ -256,6 +356,7 @@ struct LevelFile {
     coordinate_system: CoordinateSystem,
     terrain: TerrainBlock,
     spawn_points: Vec<[f32; 2]>,
+    #[serde(deserialize_with = "deserialize_instances")]
     instances: Vec<InstanceRecord>,
     /// The author's prototype registry, read for its KEYS only (module doc). An export may omit
     /// the block.
@@ -428,8 +529,8 @@ impl ExtentXz {
         );
         let side = max_x - min_x;
         assert!(
-            side > 0.0,
-            "map: {} declares a {side} m world",
+            side.is_finite() && side > 0.0,
+            "map: {} field world_extent_xz declares a {side} m world — author a finite positive side",
             path.display(),
         );
         side
@@ -442,9 +543,42 @@ pub(crate) fn load(root: &Path) -> MapManifest {
     let path = level_path(root);
     let text = read_manifest(&path);
     let library = read_prototypes(root);
-    let mut manifest = parse(&text, &library, &path);
-    manifest.load_constructions(root);
-    manifest
+    let boundary_path = path.with_file_name(BOUNDARY_FILE);
+    let boundary = std::fs::read_to_string(&boundary_path).unwrap_or_else(|err| {
+        panic!(
+            "map: {} field boundary: {err} — restore the required boundary.ron",
+            boundary_path.display()
+        )
+    });
+    let parsed = parse(&text, &library, &path);
+    let read = |field: &str, name: &str| {
+        let file = parsed.dir.join(name);
+        std::fs::read(&file).unwrap_or_else(|err| {
+            panic!(
+                "map: {} field {field}: {}: {err} — restore the declared image",
+                path.display(),
+                file.display()
+            )
+        })
+    };
+    let heightmap = read(
+        "terrain.heightmap.asset",
+        &parsed.level.terrain.heightmap.asset,
+    );
+    let masks = read("terrain.masks.asset", &parsed.level.terrain.masks.asset);
+    let constructions = ConstructionLibrary::load(root, construction_assets(&parsed.prototypes));
+    let play_area = PlayArea::checked(&boundary, parsed.extent, &boundary_path);
+    parsed.check_play_area(&play_area, &constructions, &path);
+    let mut files = vec![
+        text.as_bytes(),
+        library.as_bytes(),
+        boundary.as_bytes(),
+        heightmap.as_slice(),
+        masks.as_slice(),
+    ];
+    files.extend(constructions.texts());
+    let digest = digest_of(&files);
+    parsed.publish(play_area, constructions, digest)
 }
 
 /// The selected map's prototype library text. Only read beside a manifest that exists, so there is
@@ -472,35 +606,17 @@ fn read_manifest(path: &Path) -> String {
     }
 }
 
-/// The CONTENT digest of the world this process will build: the manifest's own bytes, its prototype
-/// library's, the bytes of its heightmap, and every construction and dressing file it names —
-/// the files that decide the terrain
-/// and the scatter, none of which crosses the wire.
-///
-/// CONTENT, not the id: two peers can select the same map name over different files (a stale
-/// checkout, a half-pulled LFS object, a hand-edited `level.json`), and the id would happily agree
-/// while the ground disagreed. `crate::net::protocol::protocol_id` folds this into the handshake.
-///
-/// Same failure law as [`load`]: a manifest that is absent or does not hold panics.
+/// The map's compatibility term, after every load-gate check. Both peers derive their world
+/// from these root bytes; client-only `view/` and `derived/` products do not participate.
 pub(crate) fn content_digest(root: &Path) -> u64 {
-    let path = level_path(root);
-    let text = read_manifest(&path);
-    let library = read_prototypes(root);
-    let mut manifest = parse(&text, &library, &path);
-    manifest.load_constructions(root);
-    let constructions = &manifest.constructions;
-    let heightmap = manifest.heightmap_path();
-    let bytes = std::fs::read(&heightmap).unwrap_or_else(|err| {
-        panic!(
-            "map: {} names heightmap {} — {}: {err}",
-            path.display(),
-            manifest.heightmap(),
-            heightmap.display(),
-        )
-    });
-    let mut files = vec![text.as_bytes(), library.as_bytes(), bytes.as_slice()];
-    files.extend(constructions.texts());
-    digest_of(&files)
+    load(root).digest
+}
+
+fn construction_assets(prototypes: &BTreeMap<String, Prototype>) -> impl Iterator<Item = &str> {
+    prototypes.values().filter_map(|prototype| match prototype {
+        Prototype::Construction { asset } => Some(asset.as_str()),
+        Prototype::Block { .. } => None,
+    })
 }
 
 /// The fold itself, pure: [`crate::fingerprint`]'s FNV-1a, byte-driven and integer-only, so every
@@ -509,7 +625,7 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
 fn digest_of(files: &[&[u8]]) -> u64 {
     use crate::fingerprint::{FNV_OFFSET_BASIS, fnv1a_64};
     files.iter().fold(
-        fnv1a_64(FNV_OFFSET_BASIS, b"overmatch-map-content-v2"),
+        fnv1a_64(FNV_OFFSET_BASIS, b"overmatch-map-content-v3"),
         |hash, bytes| {
             let hash = fnv1a_64(hash, &(bytes.len() as u64).to_le_bytes());
             fnv1a_64(hash, bytes)
@@ -555,8 +671,8 @@ fn check_prototype(id: &str, prototype: &Prototype, library: &Path) {
 /// Parse and check one manifest's text against its prototype library's text. `path` is where the
 /// manifest came from — both the directory every asset name resolves against and the name every
 /// refusal carries.
-pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
-    let level: LevelFile = serde_json::from_str(text)
+fn parse(text: &str, library: &str, path: &Path) -> ParsedMap {
+    let mut level: LevelFile = serde_json::from_str(text)
         .unwrap_or_else(|err| panic!("map: {} failed to parse: {err}", path.display()));
     level.coordinate_system.check(path);
     let prototypes: BTreeMap<String, Prototype> = ron::from_str(library).unwrap_or_else(|err| {
@@ -583,7 +699,7 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
             path.display(),
         );
     }
-    let heightmap = level.terrain.heightmap;
+    let heightmap = &level.terrain.heightmap;
     let side_m = heightmap.world_extent_xz.side_m(path);
     let rows = heightmap.row_order(path);
     let (offset_m, scale_m) = (
@@ -593,32 +709,122 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
     // A zero span is legal — that is a deliberately level map; a negative or non-finite one NaNs
     // every sample the grid hands the sim.
     assert!(
-        offset_m.is_finite() && scale_m.is_finite() && scale_m >= 0.0,
-        "map: {} declares height_decode offset {offset_m} / scale {scale_m}",
+        offset_m.is_finite()
+            && scale_m.is_finite()
+            && scale_m >= 0.0
+            && (offset_m + scale_m).is_finite(),
+        "map: {} field height_decode offset {offset_m} / scale {scale_m} — author a finite range with nonnegative scale and finite offset + scale",
         path.display(),
     );
-    let masks = level.terrain.masks;
+    let masks = &level.terrain.masks;
     assert!(
         masks.resolution[0] > 0 && masks.resolution[1] > 0,
         "map: {} declares masks resolution {:?}, which is no image",
         path.display(),
         masks.resolution,
     );
-    MapManifest {
-        dir: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
-        heightmap: heightmap.asset,
+    let spawn_points =
+        SpawnPoints::checked(std::mem::take(&mut level.spawn_points), side_m * 0.5, path);
+    ParsedMap {
+        dir: path
+            .parent()
+            .expect("a manifest path has a containing directory")
+            .to_path_buf(),
         extent: TerrainExtent {
             world_size_m: side_m,
             height_offset_m: offset_m,
             height_span_m: scale_m,
         },
         rows,
-        masks: masks.asset,
-        masks_resolution: masks.resolution,
-        spawn_points: SpawnPoints::checked(level.spawn_points, side_m * 0.5, path),
-        instances: level.instances,
+        spawn_points,
         prototypes,
-        constructions: ConstructionLibrary::default(),
+        level,
+    }
+}
+
+/// Parsed inputs stay private until construction resolution and cross-file admission finish.
+struct ParsedMap {
+    dir: PathBuf,
+    extent: TerrainExtent,
+    rows: RowOrder,
+    spawn_points: SpawnPoints,
+    prototypes: BTreeMap<String, Prototype>,
+    level: LevelFile,
+}
+
+impl ParsedMap {
+    fn check_play_area(&self, area: &PlayArea, constructions: &ConstructionLibrary, path: &Path) {
+        for (index, point) in self.spawn_points.as_slice().iter().enumerate() {
+            assert!(
+                area.contains_points(&[point.to_array()]),
+                "map: {} field spawn_points[{index}] — move the point inside boundary.ron field polygon",
+                path.display(),
+            );
+        }
+        let limit = crate::spawn_limit(self.extent.half_extent());
+        assert!(
+            area.contains_points(&[
+                [-limit, -limit],
+                [limit, -limit],
+                [limit, limit],
+                [-limit, limit]
+            ]),
+            "map: {} field polygon — enclose the entire spawn-limit square declared by assets/ui/spawn_map.ron field limit_fraction, or reduce that fraction",
+            path.with_file_name(BOUNDARY_FILE).display(),
+        );
+        for instance in &self.level.instances {
+            // Scatter replaces stale authored Y with terrain height; projected bounds use zero.
+            let pose = instance.pose.at_height(0.0);
+            let bounds = match &self.prototypes[&instance.prototype] {
+                Prototype::Construction { asset } => crate::construction::footprint(
+                    constructions
+                        .get(asset)
+                        .expect("load resolved every construction before admission"),
+                    pose,
+                ),
+                prototype @ Prototype::Block { .. } => prototype
+                    .block(pose)
+                    .expect("a block prototype supplies its unit-cube transform"),
+            };
+            let mut points = Vec::with_capacity(8);
+            // A footprint is the convex projection of all eight corners of the posed unit cube.
+            for x in [-0.5, 0.5] {
+                for y in [-0.5, 0.5] {
+                    for z in [-0.5, 0.5] {
+                        let point = bounds.transform_point(Vec3::new(x, y, z));
+                        points.push([point.x, point.z]);
+                    }
+                }
+            }
+            assert!(
+                area.contains_points(&points),
+                "map: {} field instances[{}].translation/rotation produces footprint {points:?} — move or rotate the instance inside boundary.ron field polygon",
+                path.display(),
+                instance.id,
+            );
+        }
+    }
+
+    fn publish(
+        self,
+        play_area: PlayArea,
+        constructions: ConstructionLibrary,
+        digest: u64,
+    ) -> MapManifest {
+        MapManifest {
+            dir: self.dir,
+            heightmap: self.level.terrain.heightmap.asset,
+            extent: self.extent,
+            rows: self.rows,
+            masks: self.level.terrain.masks.asset,
+            masks_resolution: self.level.terrain.masks.resolution,
+            spawn_points: self.spawn_points,
+            instances: self.level.instances,
+            prototypes: self.prototypes,
+            constructions,
+            play_area,
+            digest,
+        }
     }
 }
 
@@ -626,6 +832,18 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
 // `pub(crate)` so every layer that asserts against the SHIPPED map reads it through the one loader.
 pub(crate) mod tests {
     use super::*;
+
+    fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
+        let parsed = super::parse(text, library, path);
+        let boundary = play_area::tests::boundary_text(parsed.extent);
+        let area = PlayArea::checked(
+            &boundary,
+            parsed.extent,
+            &path.with_file_name(BOUNDARY_FILE),
+        );
+        let digest = digest_of(&[text.as_bytes(), library.as_bytes(), boundary.as_bytes()]);
+        parsed.publish(area, ConstructionLibrary::default(), digest)
+    }
 
     /// The repo's `assets/` — what the shipped map is read out of, in tests, without an asset root.
     pub(crate) fn shipped_assets() -> PathBuf {
@@ -713,7 +931,8 @@ pub(crate) mod tests {
             &format!(r#""instances":[{INSTANCES}]"#),
         );
         let mut manifest = parse(&text, LIBRARY, Path::new("fixture/level.json"));
-        manifest.load_constructions(&shipped_assets());
+        manifest.constructions =
+            ConstructionLibrary::load(&shipped_assets(), construction_assets(&manifest.prototypes));
         manifest
     }
 
@@ -747,11 +966,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// THE MANIFEST IS THE MAP (`terrain_grid::decode_height_grid`): the shipped tree must carry
-    /// one at the default id, it must parse and pass every check through the real loader, and the
-    /// heightmap it names must exist as more than an LFS pointer. A map half-shipped — a PNG with
-    /// no manifest, or a manifest naming a file nobody added — fails here in CI rather than at
-    /// first boot.
+    /// CI checks the default map through the production loader and terrain decoder, refusing
+    /// missing manifests, missing heightmaps and undecodable images before boot.
     #[test]
     fn shipped_map_ships_a_valid_manifest() {
         let manifest = shipped_manifest();
@@ -768,12 +984,8 @@ pub(crate) mod tests {
                 heightmap.display(),
             )
         });
-        assert!(
-            bytes.len() > 1024,
-            "{} is {} bytes — a Git LFS POINTER, not the map (checkout without lfs pull)",
-            heightmap.display(),
-            bytes.len(),
-        );
+        crate::terrain_grid::grid_from_png(&bytes, manifest.extent, manifest.rows)
+            .expect("the declared heightmap must pass the production terrain decoder");
         assert!(
             manifest.extent.world_size_m > 0.0 && !manifest.instances.is_empty(),
             "the shipped map declares a world and objects on it",
@@ -811,24 +1023,14 @@ pub(crate) mod tests {
         }
     }
 
-    /// The surface-weight masks, pinned the way the heightmap is: DECODED from the shipped bytes,
-    /// so a Git LFS pointer file shipping in their place fails here in CI. `terrain.masks` in
-    /// `level.json` is the declaration, and this is what proves the bytes behind it are the image
-    /// that block describes — 8-bit RGB at the DECLARED resolution, R = recesses, G = slopes,
-    /// B = lowlands. The resolution is read out of the manifest rather than written here, so
-    /// re-cutting the masks at another sample spacing is one edit, in the file that declares it.
+    /// Decode the declared 8-bit RGB resolution, refusing LFS pointers. Channels are independent
+    /// linear weights: R = recesses, G = slopes, B = lowlands.
     #[test]
     fn shipped_terrain_masks_decode_as_declared() {
         let manifest = shipped_manifest();
         let path = shipped_assets().join(manifest.masks_asset());
         let bytes = std::fs::read(&path)
             .unwrap_or_else(|err| panic!("terrain masks missing at {}: {err}", path.display()));
-        assert!(
-            bytes.len() > 1024,
-            "{} is {} bytes — a Git LFS POINTER, not the masks (checkout without lfs pull)",
-            path.display(),
-            bytes.len(),
-        );
         let image = image::load_from_memory(&bytes).expect("the masks must decode as PNG");
         let color = image.color();
         let image::DynamicImage::ImageRgb8(masks) = image else {
@@ -1047,8 +1249,17 @@ pub(crate) mod tests {
         let library = read_prototypes(&root);
         let manifest = load(&root);
         let heightmap = std::fs::read(manifest.heightmap_path()).unwrap();
-        let mut files = vec![text.as_bytes(), library.as_bytes(), heightmap.as_slice()];
-        let assets: std::collections::BTreeSet<_> = manifest.construction_assets().collect();
+        let boundary = std::fs::read(path.with_file_name(BOUNDARY_FILE)).unwrap();
+        let masks = std::fs::read(manifest.dir.join(&manifest.masks)).unwrap();
+        let mut files = vec![
+            text.as_bytes(),
+            library.as_bytes(),
+            boundary.as_slice(),
+            heightmap.as_slice(),
+            masks.as_slice(),
+        ];
+        let assets: std::collections::BTreeSet<_> =
+            construction_assets(&manifest.prototypes).collect();
         let construction_texts: Vec<_> = assets
             .iter()
             .flat_map(|asset| {
@@ -1080,6 +1291,320 @@ pub(crate) mod tests {
         }
         files.extend(construction_files);
         assert_eq!(shipped, digest_of(&files));
+    }
+
+    struct MapFixture(PathBuf);
+
+    impl MapFixture {
+        fn new() -> Self {
+            Self::with_half_extent(10.0) // Fixture: a small terrain square.
+        }
+
+        fn with_half_extent(half_m: f32) -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "overmatch-wall-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let dir = map_dir(&root);
+            std::fs::create_dir_all(&dir).unwrap();
+            let text = manifest_text(half_m, -2.0, 5.0, "+Z");
+            let extent = super::parse(&text, EMPTY_LIBRARY, &dir.join(LEVEL_FILE)).extent;
+            std::fs::write(dir.join(LEVEL_FILE), text).unwrap();
+            std::fs::write(dir.join(PROTOTYPES_FILE), EMPTY_LIBRARY).unwrap();
+            std::fs::write(
+                dir.join(BOUNDARY_FILE),
+                play_area::tests::boundary_text(extent),
+            )
+            .unwrap();
+            image::GrayImage::new(4, 4).save(dir.join("h.png")).unwrap();
+            image::RgbImage::new(4, 4).save(dir.join("m.png")).unwrap();
+            Self(root)
+        }
+
+        fn edit_level(&self, edit: impl FnOnce(&mut serde_json::Value)) {
+            let path = level_path(&self.0);
+            let mut level = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            edit(&mut level);
+            std::fs::write(path, serde_json::to_string(&level).unwrap()).unwrap();
+        }
+
+        fn polygon(&self, polygon: &str) {
+            let path = level_path(&self.0);
+            let text = std::fs::read_to_string(&path).unwrap();
+            let library = read_prototypes(&self.0);
+            let extent = super::parse(&text, &library, &path).extent;
+            std::fs::write(
+                path.with_file_name(BOUNDARY_FILE),
+                play_area::tests::polygon_text(extent, polygon),
+            )
+            .unwrap();
+        }
+
+        fn refuses(&self, parts: &[&str]) {
+            for digest_only in [false, true] {
+                let refusal = std::panic::catch_unwind(|| {
+                    if digest_only {
+                        content_digest(&self.0);
+                    } else {
+                        load(&self.0);
+                    }
+                })
+                .expect_err("startup and compatibility must both refuse invalid map data");
+                let reason = refusal.downcast_ref::<String>().expect("formatted refusal");
+                for part in parts {
+                    assert!(reason.contains(part), "{reason}");
+                }
+            }
+        }
+    }
+
+    impl Drop for MapFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).expect("remove the isolated map fixture");
+        }
+    }
+
+    /// Both server startup and compatibility must refuse an unnameable instance before spawn.
+    #[test]
+    fn instance_ordinals_are_admitted_at_load_and_digest() {
+        let fixture = MapFixture::new();
+        std::fs::write(map_dir(&fixture.0).join(PROTOTYPES_FILE), HOUSE_LIBRARY).unwrap();
+        let maximum = usize::from(u16::MAX) + 1;
+        let records: Vec<_> = (0..maximum)
+            .rev()
+            .map(|i| {
+                serde_json::json!({
+                    "prototype":"house", "id":format!("house_{i:05}"),
+                    "translation":[0,0,0], "rotation":[0,0,0,1]
+                })
+            })
+            .collect();
+        fixture.edit_level(|level| level["instances"] = serde_json::json!(records));
+        let admitted = load(&fixture.0);
+        assert_eq!(content_digest(&fixture.0), admitted.digest);
+        for (instance, ordinal) in admitted.instances.iter().zip(0..=u16::MAX) {
+            assert_eq!(instance.ordinal, ordinal);
+            assert_eq!(instance.id, format!("house_{ordinal:05}"));
+        }
+        fixture.edit_level(|level| {
+            level["instances"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "prototype":"house", "id":"overflow", "translation":[0,0,0],
+                    "rotation":[0,0,0,1]
+                }));
+        });
+        fixture.refuses(&["level.json", "field instances", "reduce to at most 65536"]);
+    }
+
+    pub(crate) fn fixture_records(value: serde_json::Value) -> Vec<InstanceRecord> {
+        deserialize_instances(value).unwrap()
+    }
+
+    /// Authority spawn selection relies on admission to enclose every authored candidate.
+    /// The terrain check alone admits a point outside a narrower play area.
+    #[test]
+    fn spawn_point_outside_the_polygon_is_refused_with_its_repair() {
+        let fixture = MapFixture::new();
+        fixture.polygon("[(-10,-10), (9.8,-10), (9.8,10), (-10,10)]");
+        fixture.edit_level(|level| level["spawn_points"] = serde_json::json!([[9.9, 0]]));
+        fixture.refuses(&[
+            "level.json",
+            "field spawn_points[0]",
+            "move the point inside",
+            "boundary.ron",
+        ]);
+    }
+
+    /// Player picks fill a square, including its edges. Checking only authored spawns or only
+    /// the square's corners admits picks across a concave notch.
+    #[test]
+    fn the_entire_spawn_limit_square_must_be_inside_the_polygon() {
+        let narrow = MapFixture::new();
+        let x = crate::spawn_limit(10.0) * 0.5;
+        narrow.polygon(&format!("[(-10,-10), ({x},-10), ({x},10), (-10,10)]"));
+        narrow.refuses(&[
+            "boundary.ron",
+            "field polygon",
+            "enclose the entire spawn-limit square",
+            "limit_fraction",
+        ]);
+        // Fixture: the square's corners remain inside, but its top edge bridges this wide notch.
+        let half = play_area::WALL_THICKNESS_M * 10.0 / crate::spawn_limit(1.0);
+        let limit = crate::spawn_limit(half);
+        let (x, z) = (limit * 0.1, limit * 0.9);
+        let concave = MapFixture::with_half_extent(half);
+        concave.polygon(&format!("[(-{half},-{half}), ({half},-{half}), ({half},{half}), ({x},{half}), ({x},{z}), (-{x},{z}), (-{x},{half}), (-{half},{half})]"));
+        concave.refuses(&[
+            "boundary.ron",
+            "field polygon",
+            "enclose the entire spawn-limit square",
+        ]);
+    }
+
+    /// Scatter's colliders must fit before play. Origins, unrotated bounds, or a base-only
+    /// projection each admit one of these overflowing graybox fixtures.
+    #[test]
+    fn block_footprints_refuse_overflow_after_yaw_and_tilt() {
+        // Fixture: identity, yaw and tilt poses against the same generic square boundary.
+        for (x, rotation) in [
+            (9.5, [0.0, 0.0, 0.0, 1.0]),
+            (8.8, [0.0, 0.38268343, 0.0, 0.9238795]),
+            (8.0, [0.0, 0.0, -0.38268343, 0.9238795]),
+        ] {
+            let fixture = MapFixture::new();
+            std::fs::write(prototypes_path(&fixture.0), HOUSE_LIBRARY).unwrap();
+            let mut instance: serde_json::Value = serde_json::from_str(HOUSE_INSTANCE).unwrap();
+            instance["translation"] = serde_json::json!([x, 0, 0]);
+            instance["rotation"] = serde_json::json!(rotation);
+            fixture.edit_level(|level| level["instances"] = serde_json::json!([instance]));
+            fixture.refuses(&[
+                "level.json",
+                "field instances[house_0001].translation/rotation",
+                "move or rotate the instance inside",
+            ]);
+        }
+        // Fixture: touching the boundary is legal; no authored clearance is added by the gate.
+        let touching = MapFixture::new();
+        std::fs::write(prototypes_path(&touching.0), HOUSE_LIBRARY).unwrap();
+        let mut instance: serde_json::Value = serde_json::from_str(HOUSE_INSTANCE).unwrap();
+        instance["translation"] = serde_json::json!([9, 0, 0]);
+        touching.edit_level(|level| level["instances"] = serde_json::json!([instance]));
+        load(&touching.0);
+    }
+
+    /// Resolved construction bounds, rather than placement origins or view geometry, enclose
+    /// everything scatter can spawn. The fixture takes its size from the construction owner.
+    #[test]
+    fn construction_footprint_crossing_names_the_instance_and_repair() {
+        let fixture = MapFixture::new();
+        // Fixture: one shipped construction supplies real admitted bounds, with an arbitrary id.
+        let asset = "fir_1";
+        let library = format!("{{\"fixture\": Construction(asset: \"{asset}\")}}");
+        std::fs::write(prototypes_path(&fixture.0), library).unwrap();
+        let dir = fixture.0.join("constructions").join(asset);
+        std::fs::create_dir_all(&dir).unwrap();
+        for suffix in ["construction", "dressing"] {
+            let file = format!("{asset}.{suffix}.ron");
+            std::fs::copy(
+                shipped_assets()
+                    .join("constructions")
+                    .join(asset)
+                    .join(&file),
+                dir.join(file),
+            )
+            .unwrap();
+        }
+        let constructions = ConstructionLibrary::load(&fixture.0, [asset]);
+        let (min, max) = constructions.get(asset).unwrap().bounds();
+        let x = 10.0 - max.x + (max.x - min.x) * 0.25;
+        fixture.edit_level(|level| level["instances"] = serde_json::json!([{
+            "prototype":"fixture", "id":"construction_fixture", "translation":[x,0,0], "rotation":[0,0,0,1]
+        }]));
+        fixture.refuses(&[
+            "level.json",
+            "instances[construction_fixture].translation/rotation",
+            "move or rotate the instance inside",
+        ]);
+    }
+
+    /// A footprint requires a finite normalized orientation. The map edge must refuse these
+    /// poses before either scatter or compatibility can consume them.
+    #[test]
+    fn invalid_placement_rotations_name_the_field_and_repair() {
+        // Fixture: a directionless quaternion and one whose norm overflows simulation precision.
+        for rotation in [[0.0; 4], [1.0e30, 0.0, 0.0, 1.0]] {
+            let fixture = MapFixture::new();
+            std::fs::write(prototypes_path(&fixture.0), HOUSE_LIBRARY).unwrap();
+            let mut instance: serde_json::Value = serde_json::from_str(HOUSE_INSTANCE).unwrap();
+            instance["rotation"] = serde_json::json!(rotation);
+            fixture.edit_level(|level| level["instances"] = serde_json::json!([instance]));
+            fixture.refuses(&[
+                "level.json",
+                "field instances[house_0001].rotation",
+                "author a finite quaternion with a normalizable length",
+            ]);
+        }
+    }
+
+    /// A handshake must not mint a digest for a polygon whose outward wall enters the region.
+    #[test]
+    fn wall_overlap_is_refused_by_load_and_digest() {
+        let fixture = MapFixture::with_half_extent(1000.0);
+        // Fixture: a notch beyond the spawn square, narrower than the actual wall depth.
+        let x = play_area::WALL_THICKNESS_M * 0.25;
+        fixture.polygon(&format!("[(-1000,-1000), (1000,-1000), (1000,1000), ({x},1000), ({x},980), (-{x},980), (-{x},1000), (-1000,1000)]"));
+        fixture.refuses(&[
+            "boundary.ron",
+            "field polygon edge",
+            "widen or reshape the notch",
+        ]);
+    }
+
+    /// Compatibility must change with boundary or mask bytes, including edits that still pass
+    /// admission. Both consumers use the same snapshot and neither may skip its checks.
+    #[test]
+    fn boundary_and_mask_mutations_change_the_admitted_digest() {
+        let fixture = MapFixture::new();
+        let root = &fixture.0;
+        let base = load(root).digest;
+        assert_eq!(content_digest(root), base);
+        let path = map_dir(root).join(BOUNDARY_FILE);
+        let boundary = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, boundary.replace("ceiling_m: (4", "ceiling_m: (5")).unwrap();
+        assert_ne!(
+            content_digest(root),
+            base,
+            "boundary edit changes the compatibility term"
+        );
+        std::fs::write(&path, boundary).unwrap();
+        let masks = map_dir(root).join("m.png");
+        let mut image = image::RgbImage::new(4, 4);
+        image.put_pixel(0, 0, image::Rgb([1, 0, 0])); // Fixture: a different valid mask sample.
+        image.save(masks).unwrap();
+        assert_ne!(
+            content_digest(root),
+            base,
+            "mask edit changes the compatibility term"
+        );
+    }
+
+    /// A handshake must refuse the same broken boundary as map startup, rather than mint a tag
+    /// for data the simulation will reject. The file, field and fix survive through both edges.
+    #[test]
+    fn digest_cannot_bypass_boundary_admission() {
+        let fixture = MapFixture::new();
+        let path = map_dir(&fixture.0).join(BOUNDARY_FILE);
+        let boundary = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, boundary.replace("floor_m: (-3", "floor_m: (-2")).unwrap();
+        fixture.refuses(&["boundary.ron", "floor_m", "below height_decode.offset_m"]);
+    }
+
+    /// Finite source coordinates can still overflow a derived range. Terrain and boundary
+    /// consumers rely on finite metres, so the descriptor gate must refuse before publication.
+    #[test]
+    fn derived_terrain_ranges_must_remain_finite() {
+        // Fixture: representable inputs whose side or offset + scale overflows f32.
+        for (text, field) in [
+            (manifest_text(f32::MAX, 0.0, 1.0, "+Z"), "world_extent_xz"),
+            (
+                manifest_text(10.0, f32::MAX, f32::MAX, "+Z"),
+                "height_decode",
+            ),
+        ] {
+            let refusal = std::panic::catch_unwind(|| {
+                super::parse(&text, EMPTY_LIBRARY, Path::new("fixture/level.json"));
+            })
+            .expect_err("overflowing ranges must be refused");
+            let reason = refusal.downcast_ref::<String>().unwrap();
+            for part in ["fixture/level.json", field, "author a finite"] {
+                assert!(reason.contains(part), "{reason}");
+            }
+        }
     }
 
     /// The column index IS X — the decode walks a row-major image, so a `-X` export describes

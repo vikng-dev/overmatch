@@ -14,11 +14,9 @@
 //!   body carries Avian force state; static construction transmits the full opposite belt
 //!   reaction to [`crate::contact_transfer::ContactTransfers`] when it has structural laws.
 //! - **The footprint check**: a link's slab ([`Slab`]) is the volume its field probes sweep, made
-//!   solid across the true shoe width: along the link, between its measured faces, and from the
-//!   probes' origin out to the contact envelope. A piece's extent in it is six support points of
-//!   its own convex shape (along, across and through the link), so a piece narrower than the gap
-//!   between the probe columns is read. The convex boundary is clipped to the footprint before
-//!   its depth is read: a remote vertex and an empty convex corner cannot become support.
+//!   solid across the true shoe width. Six support points reject separated shapes; the convex
+//!   adapter then clips entry faces to that envelope. Narrow pieces and empty corners are
+//!   resolved by their actual projected coverage, independently of the probe columns.
 //! - **One support law**: `forces::contact_side` partitions overlapping footprints; the deepest
 //!   surface in each cell enters the field's own support law at its covered share of the shoe.
 //!   Stacked pieces cannot multiply the hull's support.
@@ -75,8 +73,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
 use avian3d::prelude::{
     Collider, ColliderAabb, ColliderOf, CollisionLayers, ComputedAngularInertia,
-    ComputedCenterOfMass, ComputedMass, DefaultFriction, Forces, Friction, LayerMask, LockedAxes,
-    Position, ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery, WriteRigidBodyForces,
+    ComputedCenterOfMass, ComputedMass, DefaultFriction, Forces, Friction, LockedAxes, Position,
+    ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery, WriteRigidBodyForces,
 };
 use bevy::ecs::query::{QueryData, QueryFilter};
 use bevy::ecs::system::SystemParam;
@@ -85,16 +83,9 @@ use bevy::prelude::*;
 use bevy::tasks::{ComputeTaskPool, ParallelSlice, TaskPool};
 
 use super::terrain::FieldSurface;
-use crate::Layer;
 use crate::contact_transfer::{AppliedContact, BodyInertia, ContactTransfers, StructureBody};
 
 use super::forces::BeltContact;
-
-/// The contact class the belt bears with: the hull's own collision proxies'. A collider whose
-/// filters exclude the hull (a tank's armour and crew volumes) is no surface for the belt either.
-pub(crate) fn belt_layers() -> CollisionLayers {
-    CollisionLayers::new([Layer::Vehicle], LayerMask::ALL)
-}
 
 /// The spatial query, what makes a collider a surface the belt bears on, its shape and friction.
 #[derive(SystemParam)]
@@ -128,9 +119,8 @@ impl RubbleQuery<'_, '_> {
             .layers
             .get(collider)
             .expect("avian requires CollisionLayers on every Collider");
-        !self.sensors.contains(collider)
+        super::world_contact::solid(layers, self.sensors.contains(collider))
             && !self.field_surfaces.contains(collider)
-            && layers.interacts_with(belt_layers())
     }
 
     /// The support colliders meeting the AABB of half-extent `radius` about `center`, ascending
@@ -232,7 +222,7 @@ struct Surface {
     position: Vec3,
     rotation: Quat,
     aabb: ColliderAabb,
-    /// The convex boundary at the same tick-start pose, for clipping support to a footprint.
+    /// Outward-wound convex boundary at the tick-start pose.
     triangles: Vec<[Vec3; 3]>,
     body: Option<usize>,
     friction: Friction,
@@ -285,92 +275,6 @@ impl Surface {
             });
         self.position + self.rotation * map.local_support_point(self.rotation.inverse() * dir)
     }
-
-    /// Extrema of the convex shape *inside* the footprint's four side planes. Projected support
-    /// intervals alone can overlap at an empty corner, or pick the remote end of a long piece
-    /// outside an angled link. Clipping the actual boundary supplies the missing constraints.
-    fn clipped_extent(&self, slab: &Slab) -> Option<(Vec3, Vec3)> {
-        footprint_extent(&self.triangles, slab)
-    }
-}
-
-/// The extrema, in `slab`'s coordinates, of the convex boundary `triangles` clipped to the
-/// footprint's four side planes; `None` when no clipped triangle keeps a projected support area.
-fn footprint_extent(triangles: &[[Vec3; 3]], slab: &Slab) -> Option<(Vec3, Vec3)> {
-    let mut lo = Vec3::INFINITY;
-    let mut hi = Vec3::NEG_INFINITY;
-    let mut area = false;
-    let mut buffers = [[Vec3::ZERO; CLIP_CAPACITY]; 2];
-    for triangle in triangles {
-        let [mut front, mut back] = buffers.each_mut();
-        for (slot, p) in front.iter_mut().zip(triangle) {
-            let r = *p - slab.origin;
-            *slot = Vec3::new(r.dot(slab.axis), r.dot(slab.lat), r.dot(slab.out));
-        }
-        let mut len = triangle.len();
-        for (axis, sign, bound) in [
-            (0, 1.0, 0.0),
-            (0, -1.0, -slab.len),
-            (1, 1.0, slab.lateral.0),
-            (1, -1.0, -slab.lateral.1),
-        ] {
-            len = clip_polygon(&front[..len], axis, sign, bound, back);
-            std::mem::swap(&mut front, &mut back);
-        }
-        let polygon = &front[..len];
-        if !polygon.is_empty() {
-            let mut projected_area = 0.0;
-            for i in 0..polygon.len() {
-                let a = polygon[i];
-                let b = polygon[(i + 1) % polygon.len()];
-                projected_area += a.x * b.y - a.y * b.x;
-                lo = lo.min(a);
-                hi = hi.max(a);
-            }
-            area |= projected_area.abs() > 0.0;
-        }
-    }
-    area.then_some((lo, hi))
-}
-
-/// How many points a triangle's clipped polygon can hold. A [`clip_polygon`] pass emits at most
-/// two points per input point, so the four footprint passes over a triangle stay within
-/// `3 * 2^4` (DERIVED). The convex case gains at most one point per pass; the bound also holds
-/// for a polygon f32 rounding has made non-convex.
-const CLIP_CAPACITY: usize = 48;
-
-/// Sutherland-Hodgman clipping to one footprint half-plane, in slab coordinates, into `out`;
-/// returns the clipped polygon's length. Boundary points stay in the polygon; a mere touching
-/// edge has no projected support area. The drive step clips every boundary triangle of every
-/// piece reaching each link's slab, so the polygons live in fixed buffers, never on the heap.
-fn clip_polygon(
-    points: &[Vec3],
-    axis: usize,
-    sign: f32,
-    bound: f32,
-    out: &mut [Vec3; CLIP_CAPACITY],
-) -> usize {
-    // An earlier pass may have clipped the whole triangle away.
-    if points.is_empty() {
-        return 0;
-    }
-    let mut len = 0;
-    let mut a = points[points.len() - 1];
-    let mut da = sign * a[axis] - bound;
-    for &b in points {
-        let db = sign * b[axis] - bound;
-        if (da < 0.0 && db >= 0.0) || (da >= 0.0 && db < 0.0) {
-            out[len] = a + (b - a) * (da / (da - db));
-            len += 1;
-        }
-        if db >= 0.0 {
-            out[len] = b;
-            len += 1;
-        }
-        a = b;
-        da = db;
-    }
-    len
 }
 
 /// One link's slab: the volume its field probes sweep, solid across the shoe (module doc). World
@@ -395,7 +299,7 @@ pub(crate) struct Slab {
 
 impl Slab {
     /// The slab's world bounds.
-    fn aabb(&self) -> (Vec3, Vec3) {
+    pub(crate) fn aabb(&self) -> (Vec3, Vec3) {
         let mut lo = Vec3::INFINITY;
         let mut hi = Vec3::NEG_INFINITY;
         for u in [0.0, self.len] {
@@ -411,16 +315,11 @@ impl Slab {
     }
 }
 
-/// One piece's extent in a [`Slab`]: along the link (`u`, m from the first pin, clipped to the
-/// link), across the shoe (`l`, offsets from the pin plane, clipped to the shoe), and `depth`,
-/// how far its innermost point lies past the rest face toward the pins (m, saturated at the
-/// probes' reach). The local free travel adds to `depth` exactly as it adds to a probe's.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A convex solid's actual entry faces clipped to one belt element's envelope.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SlabOverlap {
     pub(crate) piece: usize,
-    pub(crate) u: (f32, f32),
-    pub(crate) l: (f32, f32),
-    pub(crate) depth: f32,
+    pub(crate) faces: Vec<super::world_contact::convex::ClippedFace>,
 }
 
 /// The colliders near every driving tank this tick, read once at tick start: each collider's
@@ -440,31 +339,6 @@ pub struct RubbleBodies<'a> {
 }
 
 impl RubbleBodies<'_> {
-    /// The piece's actual struck face, independent of the belt frame. A coarse overlap
-    /// cell may contain empty space at its pressure centroid; then there is no geometric
-    /// support sample for the Driver, although the coarse physical overlap law still runs.
-    pub(crate) fn support_face(
-        &self,
-        collider: Entity,
-        point: Vec3,
-        out: Vec3,
-    ) -> Option<(Vec3, Vec3)> {
-        let surface = self.surface(collider);
-        let reach = (surface.aabb.max - surface.aabb.min).length();
-        let origin = point - out * reach;
-        surface
-            .shape
-            .cast_ray(
-                surface.position,
-                surface.rotation,
-                origin,
-                out,
-                2.0 * reach,
-                false,
-            )
-            .map(|(depth, normal)| (origin + out * depth, normal))
-    }
-
     /// Read the `near` colliders' shapes, frictions and bodies. Every dynamic body must carry the
     /// force state Avian constructs for it, readable through `bodies`.
     pub(crate) fn gather<D: QueryData<ReadOnly = PieceReadData>, F: QueryFilter>(
@@ -721,52 +595,49 @@ impl RubbleBodies<'_> {
 
     /// Every gathered piece that reaches into `slab`, with its extent there, in gather order.
     pub(crate) fn in_slab(&self, slab: &Slab) -> Vec<SlabOverlap> {
-        let mut overlaps = Vec::new();
         if self.active.is_empty() {
-            return overlaps;
+            return Vec::new(); // No gathered solid can intersect this source.
         }
+        self.in_slab_on_pool(slab, ComputeTaskPool::get())
+    }
+
+    fn in_slab_on_pool(&self, slab: &Slab, pool: &TaskPool) -> Vec<SlabOverlap> {
         let (lo, hi) = slab.aabb();
         let radial = (slab.face - slab.reach, slab.face + slab.travel);
-        for &piece in &self.active {
-            #[cfg(test)]
-            self.surface_checks.fetch_add(1, Ordering::Relaxed);
-            let s = &self.surfaces[piece];
-            if (s.aabb.min.cmpgt(hi) | s.aabb.max.cmplt(lo)).any() {
-                continue;
-            }
-            let extent = |dir: Vec3| {
-                (
-                    (s.support(-dir) - slab.origin).dot(dir),
-                    (s.support(dir) - slab.origin).dot(dir),
-                )
-            };
-            let (u0, u1) = extent(slab.axis);
-            let (l0, l1) = extent(slab.lat);
-            let (inner, outer) = extent(slab.out);
-            let u = (u0.max(0.0), u1.min(slab.len));
-            let l = (l0.max(slab.lateral.0), l1.min(slab.lateral.1));
-            // The piece must reach out past the probes' origin, `reach` behind the rest face at
-            // every travel.
-            if u.1 <= u.0 || l.1 <= l.0 || outer <= radial.0 || inner >= radial.1 {
-                continue;
-            }
-            // Six support calls reject separated intervals cheaply. The retained boundary is
-            // clipped before its depth is read, so a vertex outside the footprint cannot lift
-            // the hull and an empty convex corner cannot become a contact.
-            let Some((lo, hi)) = s.clipped_extent(slab) else {
-                continue;
-            };
-            if hi.z <= radial.0 || lo.z >= radial.1 {
-                continue;
-            }
-            overlaps.push(SlabOverlap {
-                piece,
-                u: (lo.x.max(0.0), hi.x.min(slab.len)),
-                l: (lo.y.max(slab.lateral.0), hi.y.min(slab.lateral.1)),
-                depth: (slab.face - lo.z).min(slab.reach),
-            });
-        }
-        overlaps
+        // Candidate geometry is independent; the overlay consumes results in gather order.
+        self.active
+            .par_splat_map(pool, None, |_, candidates| {
+                candidates
+                    .iter()
+                    .filter_map(|&piece| {
+                        #[cfg(test)]
+                        self.surface_checks.fetch_add(1, Ordering::Relaxed);
+                        let s = &self.surfaces[piece];
+                        if (s.aabb.min.cmpgt(hi) | s.aabb.max.cmplt(lo)).any() {
+                            return None; // Candidate lies outside this contact envelope.
+                        }
+                        let extent = |dir: Vec3| {
+                            (
+                                (s.support(-dir) - slab.origin).dot(dir),
+                                (s.support(dir) - slab.origin).dot(dir),
+                            )
+                        };
+                        let (u0, u1) = extent(slab.axis);
+                        let (l0, l1) = extent(slab.lat);
+                        let (inner, outer) = extent(slab.out);
+                        let u = (u0.max(0.0), u1.min(slab.len));
+                        let l = (l0.max(slab.lateral.0), l1.min(slab.lateral.1));
+                        if u.1 <= u.0 || l.1 <= l.0 || outer <= radial.0 || inner >= radial.1 {
+                            return None; // No positive volume reaches the probe envelope.
+                        }
+                        let faces = super::world_contact::convex::clip_faces(&s.triangles, slab);
+                        (!faces.is_empty()).then_some(SlabOverlap { piece, faces })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
@@ -1120,13 +991,15 @@ mod tests {
     use std::time::Duration;
 
     use avian3d::prelude::{
-        Collider, ColliderDensity, Gravity, LinearVelocity, PhysicsPlugins, Position, Rotation,
+        Collider, ColliderDensity, Gravity, LayerMask, LinearVelocity, PhysicsPlugins, Position,
+        Rotation,
     };
     use bevy::ecs::system::RunSystemOnce;
     use bevy::math::{Affine3A, Quat, Vec2};
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
+    use crate::Layer;
     use crate::construction::breakage::ChunkCollider;
     use crate::substances::contact_friction;
     use crate::track::forces::{
@@ -1147,6 +1020,7 @@ mod tests {
             AssetPlugin::default(),
             PhysicsPlugins::default(),
             crate::contact_transfer::sim_plugin,
+            super::super::world_contact::plugin,
         ))
         .init_asset::<Mesh>()
         .insert_resource(Gravity(gravity))
@@ -1253,6 +1127,23 @@ mod tests {
                 for workers in [1, 2, 4] {
                     let pool = TaskPoolBuilder::new().num_threads(workers).build();
                     let actual = RubbleBodies::gather_on_pool(&rubble, &near, &bodies, &pool);
+                    let slab = Slab {
+                        origin: Vec3::new(10.0, 0.3, -0.1),
+                        axis: Vec3::X,
+                        lat: Vec3::Z,
+                        out: Vec3::NEG_Y,
+                        len: 35.0,
+                        lateral: (-0.2, 0.2),
+                        face: 0.025,
+                        reach: 0.5,
+                        travel: 0.1,
+                    };
+                    let hits = reference.in_slab(&slab);
+                    assert!(
+                        hits.len() > 1,
+                        "fixture must cross candidate batch boundaries"
+                    );
+                    assert_eq!(actual.in_slab_on_pool(&slab, &pool), hits);
                     assert_eq!(actual.bodies, reference.bodies);
                     assert_eq!(actual.active, reference.active);
                     assert_eq!(actual.by_collider, reference.by_collider);
@@ -1285,6 +1176,94 @@ mod tests {
             Quat::IDENTITY,
             Vec3::new(200.0, 1.0, 200.0),
         )])
+    }
+
+    /// The mechanical law must depend on geometry and material, not their adapter.
+    /// Fixture: the same planar ramp as a grid and a fixed convex solid, with equal effective
+    /// grip and rolling facts. Tangent translation tests tessellation-independent pressure;
+    /// normal closing tests both adapters with the same facets.
+    #[test]
+    fn grid_and_convex_adapters_give_equivalent_contact_for_equal_surfaces() {
+        use crate::ground_field::{ContactGround, GroundField};
+        use crate::terrain_grid::{HeightGrid, TerrainExtent};
+        let mut app = physics();
+        let height = |x: f32, z: f32| 0.2 + 0.03 * x + 0.02 * z;
+        let mut vertices = Vec::new();
+        for x in [-2.0, 2.0] {
+            for z in [-2.0, 2.0] {
+                vertices.extend([Vec3::new(x, height(x, z), z), Vec3::new(x, -1.0, z)]);
+            }
+        }
+        let solid = app
+            .world_mut()
+            .spawn((
+                Transform::IDENTITY,
+                Collider::convex_hull(vertices).expect("fixture ramp is a finite convex prism"),
+                contact_friction(0.7),
+            ))
+            .id();
+        app.update();
+        app.world_mut().run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+            let pieces = RubbleBodies::gather(&rubble, &[solid], &bodies);
+            let grip = pad_grip(contact_friction(0.8));
+            let ground = ContactGround {
+                grip: grip.pair(pieces.friction(solid)),
+                rolling_resistance: super::super::forces::rigid_rolling_resistance(),
+            };
+            let pose = Affine3A::from_translation(Vec3::Y * 0.1);
+            let tangent = Vec3::new(0.4, 0.03 * 0.4 + 0.02 * 0.3, 0.3);
+            let run = |field: &BlockField, pieces: &RubbleBodies, velocity: Vec3| pad_pass_gripping(
+                grip, field, pieces, pose, SideState { speed: 0.6, ..default() },
+                velocity, &mut GripElements::for_links(30),
+            );
+            let empty = BlockField::default();
+            let totals = |report: &SideReport| {
+                let mut force = Vec3::ZERO;
+                let mut torque = Vec3::ZERO;
+                for app in &report.apps {
+                    force += app.force;
+                    torque += app.point.cross(app.force);
+                }
+                (force, torque, report.contacts.iter().map(|c| c.load).sum::<f32>())
+            };
+            for (size, velocity) in [(2, tangent), (3, tangent), (5, tangent), (9, tangent), (2, Vec3::new(0.4, -0.2, 0.3))] {
+                let reference = run(&empty, &pieces, velocity);
+                assert!(!reference.contacts.is_empty());
+                assert!(reference.contacts.iter().all(|c| c.collider == Some(solid)));
+                let (force, torque, load) = totals(&reference);
+                let mut samples = Vec::new();
+                for j in 0..size {
+                    for i in 0..size {
+                        samples.push(height(-2.0 + 4.0 * i as f32 / (size - 1) as f32,
+                                            -2.0 + 4.0 * j as f32 / (size - 1) as f32));
+                    }
+                }
+                let grid = HeightGrid::new(samples.into(), size, TerrainExtent {
+                    world_size_m: 4.0, height_offset_m: -1.0, height_span_m: 2.0,
+                });
+                let field = BlockField::default().with_height(Some(grid))
+                    .with_ground(Some(GroundField::uniform(ground)));
+                let report = run(&field, &RubbleBodies::default(), velocity);
+                assert!(!report.contacts.is_empty());
+                let expected_normal = Vec3::new(-0.03, 1.0, -0.02).normalize();
+                for contact in &report.contacts {
+                    assert_eq!(contact.collider, None);
+                    assert!((contact.normal - expected_normal).length() < 1e-5);
+                    assert!((contact.point.y - height(contact.point.x, contact.point.z)).abs() < 1e-5);
+                    assert_eq!(contact.mu, ground.grip);
+                }
+                let (f, t, l) = totals(&report);
+                // Resolution: accumulated f32 clipping/moments across differing tessellations.
+                assert!((f - force).length() < load * 1e-5, "{size}: {f} vs {force}");
+                assert!((t - torque).length() < load * 1e-5, "{size}: {t} vs {torque}");
+                assert!((l - load).abs() < load * 1e-5);
+                let both = totals(&run(&field, &pieces, velocity));
+                assert!((both.0-force).length() < load*1e-5, "coincident adapters doubled support");
+                assert!((both.1-torque).length() < load*1e-5, "coincident adapters changed the lever arm");
+                println!("MEASURED grid/convex equivalence {size}, velocity {velocity}: force error {} N, torque error {} N m, load error {} N",
+                    (f-force).length(), (t-torque).length(), (l-load).abs());
+            }
+        }).unwrap();
     }
 
     /// A DYNAMIC BODY SUPPORTS THE BELT BY ITS PHYSICS, NEVER BY WHAT IT IS. An unmarked loose
@@ -1329,6 +1308,70 @@ mod tests {
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 RubbleBodies::gather(&rubble, &[body], &bodies);
+            })
+            .unwrap();
+    }
+
+    /// The world interface must deliver load on unmarked static geometry, including a map-edge
+    /// wall. Self-owned children, sensors and query volumes cannot contribute a patch.
+    #[test]
+    fn unmarked_solids_carry_load_without_admitting_self_or_observations() {
+        let mut app = physics_with(Vec3::ZERO);
+        // Fixture: coincident static boxes under a calibration pad, no gameplay-kind markers.
+        let solid = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.2, 0.0),
+                Collider::cuboid(2.0, 0.4, 2.0),
+            ))
+            .id();
+        let owner = app
+            .world_mut()
+            .spawn((Transform::IDENTITY, RigidBody::Static))
+            .id();
+        let own = app
+            .world_mut()
+            .spawn((
+                ChildOf(owner),
+                Transform::from_xyz(0.0, 0.2, 0.0),
+                Collider::cuboid(2.0, 0.4, 2.0),
+            ))
+            .id();
+        let sensor = app
+            .world_mut()
+            .spawn((Transform::IDENTITY, Collider::cuboid(2.0, 0.4, 2.0), Sensor))
+            .id();
+        let query = app
+            .world_mut()
+            .spawn((
+                Transform::IDENTITY,
+                Collider::cuboid(2.0, 0.4, 2.0),
+                CollisionLayers::new([Layer::Armor], LayerMask::NONE),
+            ))
+            .id();
+        app.update();
+        app.update();
+        app.world_mut()
+            .run_system_once(move |world: RubbleQuery, bodies: Query<PieceData>| {
+                let near = world.near(Vec3::ZERO, 4.0);
+                assert!(near.contains(&solid) && near.contains(&own));
+                assert!(!near.contains(&sensor) && !near.contains(&query));
+                let snapshot = RubbleBodies::gather(&world, &near, &bodies);
+                let selected = snapshot.for_source(owner, &near);
+                let report = flat_pass(&selected);
+                assert!(
+                    report
+                        .contacts
+                        .iter()
+                        .any(|c| c.collider == Some(solid) && c.load > 0.0),
+                    "a compatible unmarked solid must carry belt load"
+                );
+                assert!(
+                    report.contacts.iter().all(|c| c.collider != Some(own)
+                        && c.collider != Some(sensor)
+                        && c.collider != Some(query)),
+                    "self and observations cannot enter the mechanical law"
+                );
             })
             .unwrap();
     }
@@ -1667,137 +1710,6 @@ mod tests {
             .unwrap();
     }
 
-    /// THE FIXED-BUFFER CLIP READS EVERY FOOTPRINT EXTENT BIT FOR BIT AS A HEAP CLIP DOES. The
-    /// drive step clips each boundary triangle of every piece reaching a link's slab, and the
-    /// support depth, the contact patches and the determinism trace read the extent it returns.
-    /// The reference is the allocating Sutherland-Hodgman pass the buffers replace: a buffer
-    /// pass that read the wrong buffer, kept a stale length or dropped a crossing point differs.
-    /// FIXTURE DATA: seeded triangles about yawed, tilted slabs, including vertices exactly on
-    /// the footprint planes, zero-area slivers, and a 12-gon frustum hull's whole boundary.
-    #[test]
-    fn the_fixed_buffer_clip_matches_a_heap_clip_bit_for_bit() {
-        fn heap_clip(points: &[Vec3], axis: usize, sign: f32, bound: f32) -> Vec<Vec3> {
-            let mut out = Vec::new();
-            if points.is_empty() {
-                return out;
-            }
-            let mut a = points[points.len() - 1];
-            let mut da = sign * a[axis] - bound;
-            for &b in points {
-                let db = sign * b[axis] - bound;
-                if (da < 0.0 && db >= 0.0) || (da >= 0.0 && db < 0.0) {
-                    out.push(a + (b - a) * (da / (da - db)));
-                }
-                if db >= 0.0 {
-                    out.push(b);
-                }
-                a = b;
-                da = db;
-            }
-            out
-        }
-        fn heap_extent(triangles: &[[Vec3; 3]], slab: &Slab) -> Option<(Vec3, Vec3)> {
-            let mut lo = Vec3::INFINITY;
-            let mut hi = Vec3::NEG_INFINITY;
-            let mut area = false;
-            for triangle in triangles {
-                let mut polygon: Vec<_> = triangle
-                    .iter()
-                    .map(|p| {
-                        let r = *p - slab.origin;
-                        Vec3::new(r.dot(slab.axis), r.dot(slab.lat), r.dot(slab.out))
-                    })
-                    .collect();
-                for (axis, sign, bound) in [
-                    (0, 1.0, 0.0),
-                    (0, -1.0, -slab.len),
-                    (1, 1.0, slab.lateral.0),
-                    (1, -1.0, -slab.lateral.1),
-                ] {
-                    polygon = heap_clip(&polygon, axis, sign, bound);
-                }
-                if !polygon.is_empty() {
-                    let mut projected_area = 0.0;
-                    for i in 0..polygon.len() {
-                        let a = polygon[i];
-                        let b = polygon[(i + 1) % polygon.len()];
-                        projected_area += a.x * b.y - a.y * b.x;
-                        lo = lo.min(a);
-                        hi = hi.max(a);
-                    }
-                    area |= projected_area.abs() > 0.0;
-                }
-            }
-            area.then_some((lo, hi))
-        }
-        let bits = |extent: Option<(Vec3, Vec3)>| {
-            extent.map(|(lo, hi)| [lo.to_array(), hi.to_array()].map(|v| v.map(f32::to_bits)))
-        };
-        let ring = (0..12).flat_map(|k| {
-            let (z, x) = (k as f32 * std::f32::consts::TAU / 12.0).sin_cos();
-            [
-                Vec3::new(0.3 * x, 0.0, 0.3 * z),
-                Vec3::new(0.25 * x, 1.5, 0.25 * z),
-            ]
-        });
-        let frustum = Surface::triangles(
-            &Collider::convex_hull(ring.collect()).expect("two rings at distinct heights"),
-            Vec3::new(0.05, -0.2, 0.0),
-            Quat::from_rotation_z(1.4),
-        );
-        let mut rng = Lcg(0xc11b);
-        let (mut some, mut none) = (0, 0);
-        for case in 0..3000 {
-            let frame = Quat::from_euler(
-                EulerRot::YXZ,
-                rng.range(-3.0, 3.0),
-                rng.range(-1.0, 1.0),
-                rng.range(-1.0, 1.0),
-            );
-            let slab = Slab {
-                origin: rng.vec(0.2),
-                axis: frame * Vec3::Z,
-                lat: frame * Vec3::X,
-                out: frame * Vec3::NEG_Y,
-                len: rng.range(0.05, 0.3),
-                lateral: (rng.range(-0.4, -0.1), rng.range(0.1, 0.4)),
-                face: 0.025,
-                reach: 0.5,
-                travel: 0.1,
-            };
-            let on_plane = slab.origin + slab.axis * slab.len + slab.lat * slab.lateral.1;
-            let mut triangles: Vec<[Vec3; 3]> = (0..8)
-                .map(|_| [rng.vec(0.5), rng.vec(0.5), rng.vec(0.5)])
-                .collect();
-            triangles.push([on_plane, slab.origin, rng.vec(0.5)]);
-            triangles.push([slab.origin, on_plane, (slab.origin + on_plane) / 2.0]);
-            if case % 10 == 0 {
-                triangles.extend_from_slice(&frustum);
-            }
-            if case % 2 == 1 {
-                // Beside the shoe: every triangle clips away.
-                for p in triangles.iter_mut().flatten() {
-                    *p += slab.lat * 3.0;
-                }
-            }
-            let fixed = footprint_extent(&triangles, &slab);
-            assert_eq!(
-                bits(fixed),
-                bits(heap_extent(&triangles, &slab)),
-                "case {case}"
-            );
-            if fixed.is_some() {
-                some += 1;
-            } else {
-                none += 1;
-            }
-        }
-        assert!(
-            some > 100 && none > 100,
-            "both outcomes exercised: {some} / {none}"
-        );
-    }
-
     /// A LONG PIECE'S REMOTE VERTEX CANNOT COMPRESS AN ANGLED LINK. The hull relies on depth
     /// being constrained to the actual footprint, not a shape-wide support point. A flat top
     /// below this inclined footprint has the same local intrusion at either fixture length.
@@ -1830,9 +1742,15 @@ mod tests {
                     reach: 0.5,
                     travel: 0.1,
                 };
-                let short_depth = pieces.in_slab(&slab)[0].depth;
+                let depth = |hits: Vec<SlabOverlap>| {
+                    hits.iter()
+                        .flat_map(|h| &h.faces)
+                        .flat_map(|f| f.polygon.iter().map(|p| f.depth.dot(*p)))
+                        .fold(f32::NEG_INFINITY, f32::max)
+                };
+                let short_depth = depth(pieces.in_slab(&slab));
                 slab.origin.x = 10.0;
-                let long_depth = pieces.in_slab(&slab)[0].depth;
+                let long_depth = depth(pieces.in_slab(&slab));
                 assert!(
                     (short_depth - 0.025).abs() < 1e-5,
                     "local depth {short_depth}"
@@ -2494,6 +2412,42 @@ mod tests {
             .unwrap();
     }
 
+    /// The normal damper must spend no work on motion tangent to the supporting solid. The
+    /// hull and drivetrain rely on this even when the belt element is inclined. Fixture: broad
+    /// level solid, inclined pad, and opposite tangential velocities, with no vertical motion.
+    #[test]
+    fn inclined_belt_over_level_solid_has_no_fictitious_normal_damping() {
+        let mut app = physics();
+        piece_box(&mut app, Vec3::Y * 0.1, Vec3::new(4.0, 0.2, 4.0));
+        app.update();
+        app.world_mut().run_system_once(|rubble: RubbleQuery, bodies: Query<PieceData>| {
+            let near = rubble.near(Vec3::ZERO, 4.0);
+            let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+            for pitch in [-15.0_f32, 15.0] {
+                let mut loads = Vec::new();
+                for speed in [-3.0, 0.0, 3.0] {
+                    let report = pad_pass(
+                        &ground(), &pieces,
+                        Affine3A::from_rotation_translation(Quat::from_rotation_x(pitch.to_radians()), Vec3::Y * 0.1),
+                        SideState::default(), Vec3::Z * speed, &mut GripElements::for_links(30),
+                    );
+                    let contacts: Vec<_> = report.contacts.iter().filter(|c| c.collider.is_some()).collect();
+                    assert!(!contacts.is_empty());
+                    for c in &contacts {
+                        assert!((c.normal - Vec3::Y).length() < 1e-6);
+                        assert!((c.load - c.load_elastic).abs() < c.load_elastic * 1e-6,
+                            "tangential motion entered normal damping: {} vs {}", c.load, c.load_elastic);
+                        assert!((c.point.y - 0.2).abs() < 1e-5, "centroid left supporting plane");
+                    }
+                    loads.push(contacts.iter().map(|c| c.load).sum::<f32>());
+                }
+                assert_eq!(loads[0], loads[1]);
+                assert_eq!(loads[1], loads[2]);
+                println!("MEASURED pitch {pitch} deg: normal load {} N, tangential-speed normal damping 0 N", loads[1]);
+            }
+        }).unwrap();
+    }
+
     /// Park a fixture hull, integrating heave under the actual support and clamped reactions.
     /// FIXTURE DATA: mass 6 t, duration supplied in fixed ticks, gravity 9.81 m/s².
     fn park(app: &mut App, mut h: f32, ticks: usize) -> f32 {
@@ -2629,13 +2583,16 @@ mod tests {
     /// strain must not depend on how many colliders partition an otherwise identical surface.
     #[test]
     fn stacked_and_partitioned_surfaces_preserve_support_and_grip() {
-        let pass = |partition: bool, buried: bool| {
+        let pass = |partition: bool, buried: bool, duplicate: bool| {
             let mut app = physics();
             if partition {
                 for x in [-0.05, 0.05] {
                     piece_box(&mut app, Vec3::new(x, 0.1, 0.0), Vec3::new(0.1, 0.2, 4.0));
                 }
             } else {
+                piece_box(&mut app, Vec3::new(0.0, 0.1, 0.0), Vec3::new(0.2, 0.2, 4.0));
+            }
+            if duplicate {
                 piece_box(&mut app, Vec3::new(0.0, 0.1, 0.0), Vec3::new(0.2, 0.2, 4.0));
             }
             if buried {
@@ -2673,9 +2630,14 @@ mod tests {
                 })
                 .unwrap()
         };
-        let (load, grip) = pass(false, false);
-        for (partition, buried) in [(true, false), (false, true), (true, true)] {
-            let (other, elements) = pass(partition, buried);
+        let (load, grip) = pass(false, false, false);
+        for (partition, buried, duplicate) in [
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, false, true),
+        ] {
+            let (other, elements) = pass(partition, buried, duplicate);
             assert!(
                 (other - load).abs() < load * 1e-5,
                 "support multiplied: {load} -> {other}"

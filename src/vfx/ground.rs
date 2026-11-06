@@ -30,7 +30,7 @@ impl PaintedGround<'_> {
 /// The key light's radiance per unit albedo on level ground: what lit soil of albedo one draws at
 /// under this camera.
 pub(super) fn soil_light(exposure: Exposure) -> f32 {
-    crate::world::level_ground_irradiance_lux() / std::f32::consts::PI * exposure.exposure()
+    crate::sky::level_ground_irradiance_lux() / std::f32::consts::PI * exposure.exposure()
 }
 
 /// The source whose share interval holds `draw`, a point in `[0, Σ share)`: the sources laid end

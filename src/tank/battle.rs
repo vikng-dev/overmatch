@@ -478,7 +478,7 @@ fn constructions_near(manifest: &MapManifest, eye: Vec2, look: Vec2) -> (usize, 
                 Some(Prototype::Construction { .. })
             )
         })
-        .map(|instance| Vec2::new(instance.translation[0], instance.translation[2]) - eye)
+        .map(|instance| instance.pose.xz() - eye)
         .filter(|offset| offset.length() < 150.0)
         .fold((0, 0), |(near, in_view), offset| {
             let seen = offset.normalize_or_zero().dot(look) > half_field;
@@ -1047,7 +1047,7 @@ mod tests {
         let manifest = crate::map::tests::shipped_manifest();
         let mut constructions = Vec::new();
         for instance in &manifest.instances {
-            let xz = Vec2::new(instance.translation[0], instance.translation[2]);
+            let xz = instance.pose.xz();
             match manifest.prototypes.get(&instance.prototype) {
                 Some(Prototype::Block { min, max, .. }) => {
                     let reach = Vec2::new(

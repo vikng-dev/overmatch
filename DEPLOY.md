@@ -36,7 +36,8 @@ client's whole tree:
 | `assets/<id>/<id>.lod.json` | `geometry_lod::load_certificate` (panics without it) |
 | `assets/<id>/<id>.tank.ron` | the spec sheet, through the `AssetServer` |
 
-The 64 MB view glb, `shell/shell.glb`, the terrain KTX2, the vfx
+The maps' `view/` (authored client sky and outland) and `derived/` (generated client products)
+stay out of the server payload. The 64 MB view glb, `shell/shell.glb`, the terrain KTX2, the vfx
 atlases, the shaders and the fonts stay out: every one is loaded by a plugin the server does not
 mount, or behind the `!windows.is_empty()` branch a window-less server never takes. The shell model
 in particular belongs to `ballistics::view_plugin` — the server mounts `ballistics::sim_plugin`,

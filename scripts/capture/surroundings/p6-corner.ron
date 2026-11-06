@@ -1,0 +1,4 @@
+// From the bay, after scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch:
+// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env -u OVERMATCH_START OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/surroundings/p6-corner.ron target/debug/overmatch --offline
+// Sky and horizon survey: a free pose high over the south-west corner, looking along the diagonal (2.1 km).
+(frames: (out: "target/capture/sky/p6-corner.png", at: [12.0], size: (1280, 720), scale_factor: 1.0, ui: false, gizmos: false, step_s: 0.015625, camera: Pose(eye: (-720.0, 80.0, -720.0), look: (750.0, 0.0, 750.0))))

@@ -448,9 +448,7 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
                     };
                     assert!(
                         gathered.in_slab(&slab).iter().any(|overlap| {
-                            gathered.collider(overlap.piece) == entity
-                                && overlap.u.1 > overlap.u.0
-                                && overlap.l.1 > overlap.l.0
+                            gathered.collider(overlap.piece) == entity && !overlap.faces.is_empty()
                         }),
                         "the freed occupied hull must reach the belt footprint reader"
                     );

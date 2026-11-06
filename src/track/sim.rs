@@ -459,6 +459,7 @@ impl TrackGear {
 }
 
 pub fn sim_plugin(app: &mut App) {
+    app.add_plugins(super::world_contact::plugin);
     app.init_resource::<DriveSupports>();
     app.insert_resource(super::load::DriverResolution::load());
     // Lazy one-shot: the blueprint lands at Startup (bake); the gear builds on the first

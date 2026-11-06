@@ -84,6 +84,16 @@ The recoiling barrel — child of the Gun, parent of the Muzzle. Slides under re
 **Muzzle**:
 The barrel's tip. Its forward is the bore axis; shells spawn here.
 
+## Map bounds
+
+**Play area**:
+The region game bodies may occupy: a closed polygon in world XZ between a floor and a ceiling.
+_Avoid_: map extent (the terrain square, which may enclose more than the play area)
+
+**Boundary**:
+The play area's side bound, described by its polygon and held by a static wall.
+_Avoid_: terrain edge (the boundary may follow an irregular border inside the terrain)
+
 ## Sim / view
 
 **Sim body** (sim skeleton):

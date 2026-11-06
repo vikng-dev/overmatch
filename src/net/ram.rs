@@ -196,8 +196,7 @@ impl Recipe {
         let rotation =
             Quat::from_rotation_y(self.heading_deg.rem_euclid(360.0).to_radians() as f32);
         let direction = rotation * Vec3::NEG_Z;
-        let target = Vec3::from_array(instance.translation);
-        let xz = (target - direction * runup_m).xz();
+        let xz = instance.pose.xz() - direction.xz() * runup_m;
         let limit = super::spawn_map::spawn_limit(manifest.extent.half_extent());
         if !runup_m.is_finite() || xz.abs().max_element() > limit {
             return Err(invalid(

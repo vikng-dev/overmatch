@@ -3039,6 +3039,8 @@ fn the_replayed_first_contact_stops_resolve() {
             std::time::Duration::from_micros(15_625),
         ))
         .insert_resource(RetainSpentShells(true))
+        // Fixture: bounds enclose the analytical flight space independently of the selected map.
+        .insert_resource(crate::map::tests::fixture_manifest(4096.0, -1024.0, 2048.0))
         .add_systems(Update, crate::ballistics::integrate_projectiles)
         .add_observer(crate::ballistics::on_fire_shell);
         let mut fire = crate::ballistics::FireShell::of_round(

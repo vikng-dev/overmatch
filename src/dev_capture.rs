@@ -133,6 +133,50 @@ fn hold_keys(time: Res<Time>, mut holds: ResMut<KeyHolds>, mut keys: ResMut<Butt
     holds.held = active;
 }
 
+#[derive(Resource)]
+struct BoundOrbit(Entity);
+
+fn bind_orbit(world: &mut World) -> Result<Entity, plan::PlanError> {
+    world
+        .query_filtered::<Entity, (
+            With<crate::view::PlayerView>,
+            With<crate::camera::OrbitCamera>,
+        )>()
+        .single(world)
+        .map_err(plan::PlanError::OrbitCamera)
+}
+
+fn prepare_output(path: &Path) -> Result<(), plan::PlanError> {
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|source| plan::PlanError::Output {
+            path: dir.to_owned(),
+            source,
+        })?;
+    }
+    let output_error = |source| plan::PlanError::Output {
+        path: path.to_owned(),
+        source,
+    };
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => {
+            drop(file);
+            std::fs::remove_file(path).map_err(output_error)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .map_err(output_error)?;
+        }
+        Err(error) => return Err(output_error(error)),
+    }
+    Ok(())
+}
+
 fn mount(app: &mut App, frames: &plan::Frames) {
     let size = frames.size();
     info!(
@@ -145,14 +189,9 @@ fn mount(app: &mut App, frames: &plan::Frames) {
         frames.ui,
         frames.gizmos
     );
-    if let Some(dir) = frames
-        .out
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(dir).unwrap_or_else(|error| {
-            panic!("{}: frames.out: {}: {error}", plan::VARIABLE, dir.display())
-        });
+    for at in &frames.at {
+        prepare_output(&frame_path(&frames.out, *at, frames.at.len()))
+            .unwrap_or_else(|error| plan::refuse(error));
     }
     crate::run_window::hide(app);
     // The effects plugin only `init_resource`s the RNG, so this seed holds in either mount order.
@@ -162,6 +201,25 @@ fn mount(app: &mut App, frames: &plan::Frames) {
     }
     match frames.camera {
         plan::Camera::Player => {}
+        plan::Camera::Orbit { direction } => {
+            let rotation = Transform::IDENTITY.looking_to(direction, Dir3::Y).rotation;
+            app.add_systems(PostStartup, |world: &mut World| {
+                let camera = bind_orbit(world).unwrap_or_else(|error| plan::refuse(error));
+                world.insert_resource(BoundOrbit(camera));
+            });
+            app.add_systems(
+                PostUpdate,
+                (move |camera: Res<BoundOrbit>, mut transforms: Query<&mut Transform>| {
+                    transforms
+                        .get_mut(camera.0)
+                        .expect("the orbit camera bound at startup retains its transform")
+                        .rotation = rotation;
+                })
+                .before(crate::camera::OrbitCameraSet)
+                .before(crate::camera::GunnerCameraPlaced)
+                .after(crate::state::PlayerInputSet),
+            );
+        }
         plan::Camera::Pose { eye, look } => {
             let pose = Pose {
                 eye: eye.into(),
@@ -563,6 +621,52 @@ pub(crate) fn retarget_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Capture operators get a field-level refusal on a free-fly root before frame systems run.
+    #[test]
+    fn orbit_binding_refuses_a_root_without_an_orbit_camera() {
+        let mut world = World::new();
+        world.spawn((crate::view::PlayerView, Transform::IDENTITY));
+        let error = bind_orbit(&mut world).unwrap_err().to_string();
+        assert!(
+            error.contains("frames.camera") && error.contains("Pose"),
+            "{error}"
+        );
+    }
+
+    /// A file blocking the parent directory must refuse startup through the plan error boundary.
+    #[test]
+    fn output_parent_failure_preserves_the_path_and_os_cause() {
+        let parent =
+            std::env::temp_dir().join(format!("overmatch-wall-output-{}", std::process::id()));
+        std::fs::write(&parent, b"fixture").unwrap();
+        let error = prepare_output(&parent.join("frame.png")).unwrap_err();
+        std::fs::remove_file(&parent).unwrap();
+        assert!(matches!(&error, plan::PlanError::Output { path, .. } if path == &parent));
+        let message = error.to_string();
+        assert!(
+            message.contains("frames.out") && message.contains("permissions"),
+            "{message}"
+        );
+    }
+
+    /// Output preflight refuses a directory as a frame and preserves existing frame bytes.
+    #[test]
+    fn output_preflight_checks_the_file_without_truncating_it() {
+        let dir = std::env::temp_dir().join(format!("overmatch-wall-frame-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(matches!(
+            prepare_output(&dir),
+            Err(plan::PlanError::Output { .. })
+        ));
+        let path = dir.join("frame.png");
+        prepare_output(&path).unwrap();
+        assert!(!path.exists(), "preflight removes its new probe file");
+        std::fs::write(&path, b"fixture").unwrap();
+        prepare_output(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"fixture");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// A raised strike reaches the seam as the plan resolved it: on the ground its probe found,
     /// carrying the cue's own round and surface. The impact stills judged against ADR-0023 rely on
