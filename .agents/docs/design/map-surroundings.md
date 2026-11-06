@@ -605,45 +605,50 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
 `Taste`, labelled as one.
 
 **Witnesses (W1c, W1d).**
-- Tolerances are read from Avian's configured contact tolerances, their owner, never restated.
-- W1c (invariant: no body crosses the side bound; relied on by the server sim):
+- W1c (server body containment and physical queries):
   - a debris piece thrown outward, flat and spinning, stays inside;
   - `ground_distance` toward the edge returns the wall's distance;
+  - these witnesses read Avian's configured contact tolerance, never restate it;
   - no grip (invariant: the owner's zero-grip choice holds on every friction path): the wall's
     friction, read from `boundary.ron`, combined with every shipped substance's contact friction,
     with the track's grip friction through `GripParams::pair`, and with `DefaultFriction`, is zero,
     static and dynamic.
-- W1d (same invariant, for hulls):
-  - a tank at full throttle head-on, at 30° grinding along the wall, into a convex corner, and
-    arriving airborne off a ramp, stays inside;
-  - driven obliquely into the wall, it gains no height from it: no rearing, no climb, no perch.
-    It slides along the wall.
+- W1d (server hull containment): overlap with the wall remains within the force-and-arrival bound
+  below throughout the drive, without accumulating outward drift.
+  - Entries: full throttle head-on, at 30° grinding along the wall, into a convex corner, and
+    airborne off a ramp through ordinary track support.
+  - The oblique drive gains no height: no rearing, climb or perch, and at least a hull width of
+    sliding. The height bound comes from the fixture's fully extended roadwheel shoe geometry.
 
-**W1d acceptance remains open (#299).** MEASURED with the production headless sim, a flat
-fixture and a terrain ramp, using the configured 5 mm contact tolerance:
+**Compliant-contact bound (DERIVED).** The production witness reads the live static-contact
+coefficients from `ContactSoftnessCoefficients::non_dynamic` and the substep duration `h`.
+For mass scale `s`, impulse scale `i` and bias `b`, the spring frequency satisfies
+`omega² = s*b/(i*h)` (`SoftnessParameters::compute_coefficients`). The speculative margin
+`NarrowPhaseConfig::contact_tolerance` only identifies proximity; it does not bound penetration.
 
-| Entry | Greatest hull overrun | Margin to tolerance | Result |
-|---|---:|---:|---|
-| Head-on, governed-speed entry, full throttle | 1.007 mm | +3.993 mm | pass |
-| Convex corner, governed-speed entry, full throttle | 0.961 mm | +4.039 mm | pass |
-| 30 degrees to the wall, full throttle from rest | 18.127 mm | -13.127 mm | containment fails |
-| Airborne from a ramp, full throttle | 9.323 mm | -4.323 mm | containment fails; airborne wall contact confirmed |
+`ContactNormalPart::generate` gives the contact's effective inverse mass as
+`1/m + (r × n)ᵀ I⁻¹ (r × n)`. The witness bounds every hull proxy's lever arm by its
+COM-relative AABB radius `R`, so `m_min = 1/(1/m + R² ||I⁻¹||_F)` is a conservative lower bound
+on effective mass under any rotation. Allowing the entire horizontal push at that softest contact
+bounds steady compression by `d_s = F_max/k_min`, where `k_min = m_min*omega²`.
+`F_max` is the drive's greatest contact-owned traction capacity plus rolling-force magnitude;
+no engine-power estimate or vehicle-specific constant replaces that limit.
 
-The oblique drive slides 11.882 m while touching the wall. Its highest fully extended roadwheel
-shoe point stays 83.681 mm below the ground plane: 88.681 mm of margin including contact tolerance
-(DERIVED from the fixture's own running gear). The active test checks that reach and a full hull
-width of sliding. The two containment failures remain ignored reproductions with their original
-bounds, run explicitly with `headless_test::boundary -- --ignored --nocapture`.
+For arrival, all pre-contact rigid-body kinetic energy may enter that contact:
+`E = (m |v|² + wᵀ I w)/2`, with angular velocity in the inertia tensor's local frame.
+Discarding damping and allowing the greatest push throughout compression gives
+`k_min*d²/2 <= E + F_max*d`, hence `d_a = d_s + sqrt(d_s² + 2E/k_min)`.
+Mass, inertia, geometry, arrival velocity and traction capacity all come from the mounted sim.
+The separate numeric allowance is a coordinate-scaled f32 pose/AABB operation budget. The witness
+also checks that the arrival bound lies below `SolverConfig::max_overlap_solve_speed / b`
+(with the configured length unit), where the bias is uncapped and the spring derivation applies.
 
-The failure is in generic hull/contact resolution, not wall data: MEASURED wall-face error and
-cached-versus-live collider pose discrepancy are each at most 0.016 mm. Changing only Avian's
-contact-frequency factor to half shifts the grind's peak overrun from 18.127 to 11.200 mm; this
-is a diagnostic observation, not a chosen tuning. The changed factor is discarded. No wall-specific
-rule or solver tuning is added. The exact contact-law term needs follow-up under #299.
-
-Avian's `NarrowPhaseConfig::contact_tolerance` is a minimum speculative margin, not a maximum
-penetration guarantee; `ContactNormalPart::solve_impulse` uses compliant constraints. Thus the
-5 mm acceptance is a stricter project requirement, not a guarantee of the configured solver.
+The witness checks every drive sample against `d_a` plus that numeric allowance. Its no-growth
+check compares the two halves of the contact trace: the later peak cannot exceed the earlier peak
+plus one force-limited compression and the numeric allowance. This is a relation within the run,
+never a pinned trajectory or a stored peak. Every sample in the later half must also fit the
+steady force bound plus the numeric allowance. The fixture drives long enough to continue pressing
+and sliding after arrival.
 
 **Capture.** W1d: third person at the east edge, the tank held at the wall and the camera pulled in.
 
@@ -663,7 +668,7 @@ penetration guarantee; `ContactNormalPart::solve_impulse` uses compliant constra
 | Boundary admission (W1b delivered) | cross-file gate checks 3–5: spawns, resolved placement footprints and outward edge boxes; startup and compatibility share every refusal | square spawn limit | a polygon-inset spawn picker (#200) |
 | Boundary wall (W1c delivered) | admitted finite wall dimensions; `PlayArea::wall_boxes` supplies outward edge solids at Startup on every map composition; `Terrain` layer, friction through `substances::contact_friction`; camera, debris and pair-path witnesses | invisible; routed landing response | map art; generic contact materials (#304) |
 | Placement Y | finite authored Y is admitted | scatter replaces Y with terrain height because the export is stale | #221: restore the off-repo Houdini source, export truthful world XYZ against the shipped height decode (including moved XZ), then retain authored Y; hand-resampling the product alone would be overwritten on export |
-| Boundary driving (W1d acceptance open) | production-composition hull witnesses; geometry-derived support reach and configured contact tolerance | none new | #299: resolve the grind and airborne containment failures above before claiming the hull side bound |
+| Boundary driving | production-composition hull witnesses; force/energy-derived containment, no-growth relation and geometry-derived support reach | none new | #299: the owner judges the wall capture |
 | Boundary floor consumers | planned: floor law | none new | W2, W3 |
 | Map load (W1a delivered) | one admitted sequence and digest, including boundary and masks (R6); height-decode range must remain finite | the decoders' second read (R6 remainder) | the snapshot carrying the bytes, with destruction-05 and destruction-09 |
 | Map sources | tracked, reproducible, admitted generators | off-repo Houdini scene and TIFF; `map_ui.png` recipe | #221's pipeline; a startup derivation |
@@ -722,7 +727,7 @@ south-east, square to the sun's bearing, so the faces in view take their fill fr
 | **W1a** Play area | Codex | none | `boundary.ron`, `PlayArea`, gate checks 1–2, the R6 sequence with `content_digest = load().digest`, masks in the digest, and the Play area and Boundary glossary entries. | Each refusal fires on its fixture. Editing `boundary.ron` or the masks changes the digest. | none | square polygon |
 | **W1b** Cross-file gate | Codex | W1a | Gate checks 3–5; the refused Kalinovo instances moved in `level.json`. | Each refusal fires on its fixture; the shipped map loads. | none | square spawn limit |
 | **W1c** Wall | Codex | W1b; trackworld session 3 on main | Spawns the edge boxes with the `friction` row through `contact_friction`, plus its refusal. | W1c witnesses (§3.6), the no-grip pair witness included. | none | invisible; routed landing response |
-| **W1d** Hulls at the wall | Codex | W1c | Driving witnesses only. | W1d witnesses (§3.6): the oblique drive gains no height. | east edge, third person | none |
+| **W1d** Hulls at the wall | Codex | W1c | Driving witnesses with bounds from live contact softness, fixture inertia, traction capacity and arrival energy. | All W1d containment, no-growth and no-lift witnesses (§3.6). | east edge, third person | none |
 | **W2** Round floor | Codex | W1a | Subject: the game's damage model; the brief carries the vocabulary section. The march retires below `PlayArea.floor_m`; `physical_laws.ron`'s `floor_m` is deleted. | A round fired outward over the edge is retired once below the floor (invariant: every march ends; relied on by the server's per-round cost). | none | none |
 | **W3** Piece floor | Codex | W1a | Debris pieces below the floor retire, logged with speed; a tank below the floor panics, naming it. `debris.rs:42` is restated. | A piece placed below the floor is retired within one tick (invariant: no body falls forever). | none | none |
 | **A1** Aim meets what rounds meet | Codex | none | Subject: the game's damage model. `aim_distance` uses the height grid's exact caster plus `Armor`; the doc claim at `aim.rs:41-42` is corrected. | Aim over a `Terrain`-only fixture block reaches the height grid behind it, as the march does (invariant: the aim predicts the round; relied on by the aim dots). | none | none |
@@ -734,7 +739,7 @@ The plan's L6 (an `Atmosphere` spike) is out: settled.
 ## 5. Owner decisions left
 
 1. **Wall driving verdict.** W1c supplies the edge solids after the convex and terrain adapters;
-   W1d records two containment failures above; contact resolution and the owner's visual verdict remain open.
+   W1d supplies the compliant containment and no-growth witnesses (§3.6); the owner's visual verdict remains open.
 2. **Haze default.** 12 km under the playtest fork (alternatives 8 km and 20 km). Settled in play;
    nothing is needed before L2a.
 3. **When the outland gets authored land.** Odd-reflection height now; an authored outland, or
