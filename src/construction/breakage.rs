@@ -649,8 +649,8 @@ pub(crate) struct Piece {
     pub(crate) chunks: Vec<u16>,
     /// This group replaces its parent at this authoritative tick (the shared view cursor).
     pub(crate) born: u32,
-    /// A split retires its old carrier at this tick; the historical pose remains available
-    /// until the replica's shared cursor has presented the replacement.
+    /// This group leaves simulation at this tick; its historical pose remains available
+    /// until the replica's shared cursor has presented the retirement.
     pub(crate) retired: Option<u32>,
 }
 
@@ -2563,9 +2563,8 @@ fn spawn_prepared(commands: &mut Commands, prepared: PreparedDeparture) {
     });
 }
 
-/// A split retiring its parent group's body at `tick`, triggered as `split_groups` despawns it:
-/// the server keeps the parent's carrier with its final pose and this tick
-/// (`net::debris_stress`), so replicas draw the parent until its replacements take over.
+/// A construction group retiring at `tick`: its carrier keeps the final pose and retirement
+/// tick, so replicas draw it until the shared cursor reaches its replacement or dust entries.
 #[derive(Event)]
 pub(crate) struct RetirePiece {
     pub(crate) entity: Entity,

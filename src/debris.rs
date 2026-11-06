@@ -39,7 +39,9 @@
 //!   bits change: a writer that rewrote it every step would wake every sleeper touching a
 //!   construction every step.
 //!
-//! A piece stays all match: nothing here despawns one.
+//! A piece remains simulated until it crosses the admitted play-area floor. The authority retires
+//! it there, logging its speed; construction chunks publish dust and a retirement tick for the
+//! shared presentation cursor. A tank crossing the floor is a broken containment invariant.
 //!
 //! HOW MANY CONSTRUCTION PIECES (DERIVED from `construction::breakage`): a chunk leaves its construction at most once
 //! and every split partitions its owned chunks, so live construction bodies never exceed the map's
@@ -177,9 +179,102 @@ fn wake_on_static_moved(
     }
 }
 
+struct FloorRetirement {
+    entity: Entity,
+    height: f32,
+    speed: f32,
+    /// Stress-fixture pieces have no construction ledger state.
+    entries: Option<Vec<crate::construction::breakage::Entry>>,
+}
+
+/// The game's destruction model: no escaped piece falls forever. Independent bodies prepare
+/// their departures in parallel; ledger entries, carrier retirement and body removal commit
+/// together in entity order before collider snapshots can expose them to the next march.
+fn retire_below_floor(
+    map: Res<crate::map::MapManifest>,
+    pieces: Query<
+        (
+            Entity,
+            &Position,
+            &LinearVelocity,
+            Option<&crate::construction::breakage::Piece>,
+        ),
+        With<DebrisPiece>,
+    >,
+    clock: Option<Res<crate::ShotClock>>,
+    mut commands: Commands,
+) {
+    use crate::construction::breakage::{Entry, Event, Record, RetirePiece};
+    let floor = map.play_area.floor_m();
+    // Clockless analytical fixtures publish at their explicit zero cursor.
+    let tick = clock.as_deref().map_or(0, |clock| clock.0.raw());
+    let mut departures = bevy::utils::Parallel::<Vec<FloorRetirement>>::default();
+    pieces
+        .par_iter()
+        .for_each(|(entity, position, velocity, piece)| {
+            if position.y < floor {
+                let entries = piece.map(|piece| {
+                    piece
+                        .chunks
+                        .iter()
+                        .map(|&chunk| Entry {
+                            construction: piece.construction,
+                            event: Event::Dust(chunk),
+                            tick,
+                        })
+                        .collect()
+                });
+                departures.scope(|departures| {
+                    departures.push(FloorRetirement {
+                        entity,
+                        height: position.y,
+                        speed: velocity.length(),
+                        entries,
+                    })
+                });
+            }
+        });
+    let mut departures: Vec<_> = departures.drain().collect();
+    departures.sort_unstable_by_key(|departure| departure.entity);
+    if departures.is_empty() {
+        return;
+    }
+    for departure in &departures {
+        warn!(piece = %departure.entity, speed_mps = departure.speed, height_m = departure.height,
+            floor_m = floor, "debris: retiring piece below the play-area floor");
+    }
+    commands.queue(move |world: &mut World| {
+        for departure in departures {
+            if let Some(entries) = departure.entries {
+                world.resource_mut::<Record>().entries.extend(entries);
+                world.trigger(RetirePiece {
+                    entity: departure.entity,
+                    tick,
+                });
+            }
+            assert!(
+                world.despawn(departure.entity),
+                "the floor gate owns each selected live piece until retirement"
+            );
+        }
+    });
+}
+
+fn assert_tanks_above_floor(
+    map: Res<crate::map::MapManifest>,
+    tanks: Query<(Entity, &Position), With<crate::tank::Tank>>,
+) {
+    let floor = map.play_area.floor_m();
+    tanks.par_iter().for_each(|(tank, position)| {
+        assert!(position.y >= floor,
+            "tank {tank} below play-area floor: y={} m, floor={floor} m; hull containment is broken", position.y);
+    });
+}
+
 /// Mount the rule.
 pub(crate) fn sim_plugin(app: &mut App) {
-    app.add_observer(wake_on_collider_gone)
+    app.init_resource::<crate::map::MapManifest>()
+        .add_observer(wake_on_collider_gone)
         .add_observer(wake_on_body_gone)
         .add_observer(wake_on_collider_disabled)
         .add_systems(
@@ -187,6 +282,13 @@ pub(crate) fn sim_plugin(app: &mut App) {
             wake_on_static_moved
                 .after(PhysicsStepSystems::First)
                 .before(PhysicsStepSystems::BroadPhase),
+        )
+        .add_systems(
+            FixedPostUpdate,
+            (retire_below_floor, assert_tanks_above_floor)
+                .after(PhysicsSystems::Writeback)
+                .before(crate::state::SimPhase::ColliderPoses)
+                .run_if(not(resource_exists::<crate::ClientReplica>)),
         );
 }
 
@@ -202,6 +304,8 @@ mod tests {
     /// The rule on avian, one fixed tick per update at 64 Hz, gravity `gravity`.
     fn settling(gravity: Vec3) -> App {
         let mut app = App::new();
+        // Fixture: bounds enclose the analytical bodies independently of the selected map.
+        app.insert_resource(crate::map::tests::fixture_manifest(4096.0, -1024.0, 2048.0));
         app.add_plugins((
             MinimalPlugins,
             bevy::transform::TransformPlugin,
@@ -220,6 +324,85 @@ mod tests {
         app.finish();
         app.cleanup();
         app
+    }
+
+    /// The game's destruction model: an escaped piece leaves within one tick, publishes the
+    /// chunks as dust, and retires its carrier at the authority tick. Replicas rely on both facts.
+    #[test]
+    fn a_piece_below_floor_retires_with_its_ledger_and_carrier_tick() {
+        use crate::construction::breakage::{Entry, Event, Piece, Record, RetirePiece};
+        #[derive(Resource, Default)]
+        struct Retired(Vec<(Entity, u32)>);
+        let mut app = settling(Vec3::ZERO);
+        // Fixture: a checked map with construction ordinals, and an explicit authority tick.
+        let map = crate::map::tests::construction_fixture_manifest();
+        let floor = map.play_area.floor_m();
+        app.insert_resource(map)
+            .insert_resource(crate::ShotClock(crate::sim_tick::SimTick::new(7)))
+            .init_resource::<Record>()
+            .init_resource::<Retired>()
+            .add_observer(|retired: On<RetirePiece>, mut log: ResMut<Retired>| {
+                log.0.push((retired.entity, retired.tick));
+            });
+        app.update();
+        let below = piece(&mut app, Vec3::new(0.0, floor - 1.0, 0.0));
+        // Fixture: ordinal zero is a breakable construction; chunk zero belongs to this group.
+        app.world_mut().entity_mut(below).insert((
+            Piece {
+                construction: 0,
+                chunks: vec![0],
+                born: 0,
+                retired: None,
+            },
+            LinearVelocity(Vec3::new(3.0, 4.0, 0.0)),
+        ));
+        let at_floor = piece(&mut app, Vec3::new(3.0, floor, 0.0));
+        let above = piece(&mut app, Vec3::new(6.0, floor + 1.0, 0.0));
+        app.update();
+        assert!(app.world().get_entity(below).is_err());
+        assert!(app.world().get_entity(at_floor).is_ok());
+        assert!(app.world().get_entity(above).is_ok());
+        assert_eq!(
+            app.world().resource::<Record>().entries,
+            [Entry {
+                construction: 0,
+                event: Event::Dust(0),
+                tick: 7
+            }]
+        );
+        assert_eq!(app.world().resource::<Retired>().0, [(below, 7)]);
+    }
+
+    /// The shared timeline, not a replica's local position, owns piece retirement.
+    #[test]
+    fn a_replica_waits_for_authority_below_the_floor() {
+        let mut app = settling(Vec3::ZERO);
+        app.init_resource::<crate::ClientReplica>();
+        app.update();
+        let floor = app
+            .world()
+            .resource::<crate::map::MapManifest>()
+            .play_area
+            .floor_m();
+        let below = piece(&mut app, Vec3::new(0.0, floor - 1.0, 0.0));
+        app.update();
+        assert!(app.world().get_entity(below).is_ok());
+    }
+
+    /// The server relies on hull containment; a named tank escaping is a bug in every build.
+    #[test]
+    #[should_panic(expected = "below play-area floor")]
+    fn a_tank_below_the_floor_is_a_containment_bug() {
+        let mut app = settling(Vec3::ZERO);
+        app.update();
+        let floor = app
+            .world()
+            .resource::<crate::map::MapManifest>()
+            .play_area
+            .floor_m();
+        app.world_mut()
+            .spawn((crate::tank::Tank, Position(Vec3::Y * (floor - 1.0))));
+        app.update();
     }
 
     /// A 0.4 m cube piece at `at`, dynamic (fixture data).

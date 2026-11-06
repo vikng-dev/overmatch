@@ -564,10 +564,11 @@ Rejected:
 - **Ceiling.** Admitted, not derived: launch speed is impulse over mass with no ceiling
   (`debris/launch.rs:73`).
 - **Below the floor, simulation ends.** One law for everything:
-  - rounds retire there (W2, retiring `physical_laws.ron`'s `floor_m` into its named replacement);
-  - debris pieces retire there (W3). This changes `src/debris.rs:42`, "A piece stays all match", and
-    keeps its bound: live bodies never exceed the breakable chunks. A retire is a game state, logged
-    with the piece's speed. A log of escapes is the evidence the ceiling needs raising.
+  - rounds retire below `PlayArea.floor_m` (W2);
+  - debris pieces retire there (W3), logged with their speed. Construction chunks publish dust
+    entries and a carrier retirement tick, so the shared cursor owns their disappearance. Live
+    bodies still never exceed the breakable chunks. Logged escapes inform authored vertical bounds
+    and containment diagnosis.
   - A tank below the floor is a broken invariant, since the wall holds hulls (W1d's witnesses). It
     panics, naming the tank.
 - No side retire: a round leaving a concave polygon can re-enter across a notch.
@@ -670,7 +671,7 @@ settling deadline for that system. A full-rig transient bound remains open.
 | Boundary wall (W1c delivered) | admitted finite wall dimensions; `PlayArea::wall_boxes` supplies outward edge solids at Startup on every map composition; `Terrain` layer, friction through `substances::contact_friction`; camera, debris and pair-path witnesses | invisible; routed landing response | map art; generic contact materials (#304) |
 | Placement Y | finite authored Y is admitted | scatter replaces Y with terrain height because the export is stale | #221: restore the off-repo Houdini source, export truthful world XYZ against the shipped height decode (including moved XZ), then retain authored Y; hand-resampling the product alone would be overwritten on export |
 | Boundary driving | production-composition hull witnesses; force/energy-derived containment, no-growth relation and geometry-derived support reach | none new | #299: the owner judges the wall capture |
-| Boundary floor consumers | planned: floor law | none new | W2, W3 |
+| Boundary floor consumers (W2, W3 delivered) | shared admitted floor; ordered authority retirement and shared-cursor records | none new | none |
 | Map load (W1a delivered) | one admitted sequence and digest, including boundary and masks (R6); height-decode range must remain finite | the decoders' second read (R6 remainder) | the snapshot carrying the bytes, with destruction-05 and destruction-09 |
 | Map sources | tracked, reproducible, admitted generators | off-repo Houdini scene and TIFF; `map_ui.png` recipe | #221's pipeline; a startup derivation |
 
