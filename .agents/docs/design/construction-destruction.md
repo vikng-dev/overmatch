@@ -920,7 +920,7 @@ invented supports.
 
 A failed seam partitions ownership at the same authoritative tick. `PendingSplit` creates children after the law stage and before publication.
 Children inherit `v + omega cross r` at their actual occupied centres of mass and the parent's
-angular velocity; their whole occupied hulls partition the parent’s occupied geometry. Contact hulls are inset independently and do not define mass, inertia or ballistic thickness. This adds no kinetic energy. The existing
+angular velocity; their whole occupied hulls partition the parent’s occupied geometry. Contact hulls are inset independently; the game's rounds read that same hull, while mass and inertia use the whole occupied geometry. This adds no kinetic energy. The existing
 fracture-work criterion is a threshold, not a resolved cohesive dissipation/strain model.
 The sweep exchanges body momentum before physics; field departures retain their field-impulse launch.
 

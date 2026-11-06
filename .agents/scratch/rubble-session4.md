@@ -104,3 +104,10 @@ physics events, not a collider representation change or a conservation obligatio
 No temporary benchmark, serial alternative, environment selector or timing probe remains.
 Validation uses formatting, CI clippy, construction/debris/headless targeted tests and the
 whole-tree citation, UI, network-boundary and bake guards, followed by one full library suite.
+
+
+MEASURED final validation: formatting and CI clippy pass; the implementation batch passes
+301 targeted/headless/whole-tree guard tests, with seven manual tests ignored. Final-scale
+preparation then passes 107 affected construction and guard tests, with three manual tests
+ignored. The one detached full library suite passes 2439 tests, with 40 ignored and zero failures.
+The owner-priced sweep regression remains unresolved despite those correctness gates.
