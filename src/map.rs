@@ -15,6 +15,8 @@
 //! and ceiling stand in for authored vertical bounds informed by logged escapes. Height and mask
 //! decoders still reread files; the R6 remainder and replacements live in
 //! `.agents/docs/design/map-surroundings.md`.
+//! PROVISIONAL: admission encloses the current square spawn limit; a polygon inset replaces it
+//! when the spawn picker supports irregular boundaries (#200).
 //!
 //! THE LIBRARY IS THE GAME'S, THE PLACEMENT IS THE MAP'S. What a prototype id the placement
 //! references MEANS to the game — a construction's box, a fir's size — is `prototypes.ron` beside the
@@ -468,6 +470,7 @@ pub(crate) fn load(root: &Path) -> MapManifest {
     let masks = read("terrain.masks.asset", &parsed.level.terrain.masks.asset);
     let constructions = ConstructionLibrary::load(root, construction_assets(&parsed.prototypes));
     let play_area = PlayArea::checked(&boundary, parsed.extent, &boundary_path);
+    parsed.check_play_area(&play_area, &constructions, &path);
     let mut files = vec![
         text.as_bytes(),
         library.as_bytes(),
@@ -652,6 +655,84 @@ struct ParsedMap {
 }
 
 impl ParsedMap {
+    fn check_play_area(&self, area: &PlayArea, constructions: &ConstructionLibrary, path: &Path) {
+        for (index, point) in self.spawn_points.as_slice().iter().enumerate() {
+            assert!(
+                area.contains_points(&[point.to_array()]),
+                "map: {} field spawn_points[{index}] — move the point inside boundary.ron field polygon",
+                path.display(),
+            );
+        }
+        let limit = crate::spawn_limit(self.extent.half_extent());
+        assert!(
+            area.contains_points(&[
+                [-limit, -limit],
+                [limit, -limit],
+                [limit, limit],
+                [-limit, limit]
+            ]),
+            "map: {} field polygon — enclose the entire spawn-limit square declared by assets/ui/spawn_map.ron field limit_fraction, or reduce that fraction",
+            path.with_file_name(BOUNDARY_FILE).display(),
+        );
+        for instance in &self.level.instances {
+            let rotation = Quat::from_array(instance.rotation);
+            let length_sq = rotation.length_squared();
+            assert!(
+                instance.translation.iter().all(|value| value.is_finite()),
+                "map: {} field instances[{}].translation — author finite XYZ metres",
+                path.display(),
+                instance.id,
+            );
+            assert!(
+                rotation.is_finite()
+                    && length_sq.is_finite()
+                    && length_sq > crate::scatter::MIN_ROTATION_LENGTH_SQ,
+                "map: {} field instances[{}].rotation — author a finite quaternion with a normalizable length",
+                path.display(),
+                instance.id,
+            );
+            // Scatter replaces authored Y with terrain height; vertical translation cannot
+            // change the projected footprint. Its normalized authored rotation is retained.
+            let pose = Isometry3d::new(
+                Vec3::new(instance.translation[0], 0.0, instance.translation[2]),
+                rotation.normalize(),
+            );
+            let bounds = match &self.prototypes[&instance.prototype] {
+                Prototype::Construction { asset } => crate::construction::footprint(
+                    constructions
+                        .get(asset)
+                        .expect("load resolved every construction before admission"),
+                    pose,
+                ),
+                Prototype::Block { min, max, .. } => {
+                    let (min, max) = (Vec3::from_array(*min), Vec3::from_array(*max));
+                    Transform {
+                        translation: Vec3::from(pose.translation)
+                            + pose.rotation * ((min + max) * 0.5),
+                        rotation: pose.rotation,
+                        scale: max - min,
+                    }
+                }
+            };
+            let mut points = Vec::with_capacity(8);
+            // A footprint is the convex projection of all eight corners of the posed unit cube.
+            for x in [-0.5, 0.5] {
+                for y in [-0.5, 0.5] {
+                    for z in [-0.5, 0.5] {
+                        let point = bounds.transform_point(Vec3::new(x, y, z));
+                        points.push([point.x, point.z]);
+                    }
+                }
+            }
+            assert!(
+                area.contains_points(&points),
+                "map: {} field instances[{}].translation/rotation produces footprint {points:?} — move or rotate the instance inside boundary.ron field polygon",
+                path.display(),
+                instance.id,
+            );
+        }
+    }
+
     fn publish(
         self,
         play_area: PlayArea,
@@ -1151,6 +1232,10 @@ pub(crate) mod tests {
 
     impl MapFixture {
         fn new() -> Self {
+            Self::with_half_extent(10.0) // Fixture: a small terrain square.
+        }
+
+        fn with_half_extent(half_m: f32) -> Self {
             use std::sync::atomic::{AtomicUsize, Ordering};
             static NEXT: AtomicUsize = AtomicUsize::new(0);
             let root = std::env::temp_dir().join(format!(
@@ -1160,7 +1245,7 @@ pub(crate) mod tests {
             ));
             let dir = map_dir(&root);
             std::fs::create_dir_all(&dir).unwrap();
-            let text = manifest_text(10.0, -2.0, 5.0, "+Z");
+            let text = manifest_text(half_m, -2.0, 5.0, "+Z");
             let extent = super::parse(&text, EMPTY_LIBRARY, &dir.join(LEVEL_FILE)).extent;
             std::fs::write(dir.join(LEVEL_FILE), text).unwrap();
             std::fs::write(dir.join(PROTOTYPES_FILE), EMPTY_LIBRARY).unwrap();
@@ -1173,12 +1258,188 @@ pub(crate) mod tests {
             image::RgbImage::new(4, 4).save(dir.join("m.png")).unwrap();
             Self(root)
         }
+
+        fn edit_level(&self, edit: impl FnOnce(&mut serde_json::Value)) {
+            let path = level_path(&self.0);
+            let mut level = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            edit(&mut level);
+            std::fs::write(path, serde_json::to_string(&level).unwrap()).unwrap();
+        }
+
+        fn polygon(&self, polygon: &str) {
+            let path = level_path(&self.0);
+            let text = std::fs::read_to_string(&path).unwrap();
+            let library = read_prototypes(&self.0);
+            let extent = super::parse(&text, &library, &path).extent;
+            std::fs::write(
+                path.with_file_name(BOUNDARY_FILE),
+                play_area::tests::polygon_text(extent, polygon),
+            )
+            .unwrap();
+        }
+
+        fn refuses(&self, parts: &[&str]) {
+            for digest_only in [false, true] {
+                let refusal = std::panic::catch_unwind(|| {
+                    if digest_only {
+                        content_digest(&self.0);
+                    } else {
+                        load(&self.0);
+                    }
+                })
+                .expect_err("startup and compatibility must both refuse invalid map data");
+                let reason = refusal.downcast_ref::<String>().expect("formatted refusal");
+                for part in parts {
+                    assert!(reason.contains(part), "{reason}");
+                }
+            }
+        }
     }
 
     impl Drop for MapFixture {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).expect("remove the isolated map fixture");
         }
+    }
+
+    /// Authority spawn selection relies on admission to enclose every authored candidate.
+    /// The terrain check alone admits a point outside a narrower play area.
+    #[test]
+    fn spawn_point_outside_the_polygon_is_refused_with_its_repair() {
+        let fixture = MapFixture::new();
+        fixture.polygon("[(-10,-10), (9.8,-10), (9.8,10), (-10,10)]");
+        fixture.edit_level(|level| level["spawn_points"] = serde_json::json!([[9.9, 0]]));
+        fixture.refuses(&[
+            "level.json",
+            "field spawn_points[0]",
+            "move the point inside",
+            "boundary.ron",
+        ]);
+    }
+
+    /// Player picks fill a square, including its edges. Checking only authored spawns or only
+    /// the square's corners admits picks across a concave notch.
+    #[test]
+    fn the_entire_spawn_limit_square_must_be_inside_the_polygon() {
+        let narrow = MapFixture::new();
+        let x = crate::spawn_limit(10.0) * 0.5;
+        narrow.polygon(&format!("[(-10,-10), ({x},-10), ({x},10), (-10,10)]"));
+        narrow.refuses(&[
+            "boundary.ron",
+            "field polygon",
+            "enclose the entire spawn-limit square",
+            "limit_fraction",
+        ]);
+        // Fixture: the square's corners remain inside, but its top edge bridges this wide notch.
+        let half = play_area::WALL_THICKNESS_M * 10.0 / crate::spawn_limit(1.0);
+        let limit = crate::spawn_limit(half);
+        let (x, z) = (limit * 0.1, limit * 0.9);
+        let concave = MapFixture::with_half_extent(half);
+        concave.polygon(&format!("[(-{half},-{half}), ({half},-{half}), ({half},{half}), ({x},{half}), ({x},{z}), (-{x},{z}), (-{x},{half}), (-{half},{half})]"));
+        concave.refuses(&[
+            "boundary.ron",
+            "field polygon",
+            "enclose the entire spawn-limit square",
+        ]);
+    }
+
+    /// Scatter's colliders must fit before play. Origins, unrotated bounds, or a base-only
+    /// projection each admit one of these overflowing graybox fixtures.
+    #[test]
+    fn block_footprints_refuse_overflow_after_yaw_and_tilt() {
+        // Fixture: identity, yaw and tilt poses against the same generic square boundary.
+        for (x, rotation) in [
+            (9.5, [0.0, 0.0, 0.0, 1.0]),
+            (8.8, [0.0, 0.38268343, 0.0, 0.9238795]),
+            (8.0, [0.0, 0.0, -0.38268343, 0.9238795]),
+        ] {
+            let fixture = MapFixture::new();
+            std::fs::write(prototypes_path(&fixture.0), HOUSE_LIBRARY).unwrap();
+            let mut instance: serde_json::Value = serde_json::from_str(HOUSE_INSTANCE).unwrap();
+            instance["translation"] = serde_json::json!([x, 0, 0]);
+            instance["rotation"] = serde_json::json!(rotation);
+            fixture.edit_level(|level| level["instances"] = serde_json::json!([instance]));
+            fixture.refuses(&[
+                "level.json",
+                "field instances[house_0001].translation/rotation",
+                "move or rotate the instance inside",
+            ]);
+        }
+        // Fixture: touching the boundary is legal; no authored clearance is added by the gate.
+        let touching = MapFixture::new();
+        std::fs::write(prototypes_path(&touching.0), HOUSE_LIBRARY).unwrap();
+        let mut instance: serde_json::Value = serde_json::from_str(HOUSE_INSTANCE).unwrap();
+        instance["translation"] = serde_json::json!([9, 0, 0]);
+        touching.edit_level(|level| level["instances"] = serde_json::json!([instance]));
+        load(&touching.0);
+    }
+
+    /// Resolved construction bounds, rather than placement origins or view geometry, enclose
+    /// everything scatter can spawn. The fixture takes its size from the construction owner.
+    #[test]
+    fn construction_footprint_crossing_names_the_instance_and_repair() {
+        let fixture = MapFixture::new();
+        // Fixture: one shipped construction supplies real admitted bounds, with an arbitrary id.
+        let asset = "fir_1";
+        let library = format!("{{\"fixture\": Construction(asset: \"{asset}\")}}");
+        std::fs::write(prototypes_path(&fixture.0), library).unwrap();
+        let dir = fixture.0.join("constructions").join(asset);
+        std::fs::create_dir_all(&dir).unwrap();
+        for suffix in ["construction", "dressing"] {
+            let file = format!("{asset}.{suffix}.ron");
+            std::fs::copy(
+                shipped_assets()
+                    .join("constructions")
+                    .join(asset)
+                    .join(&file),
+                dir.join(file),
+            )
+            .unwrap();
+        }
+        let constructions = ConstructionLibrary::load(&fixture.0, [asset]);
+        let (min, max) = constructions.get(asset).unwrap().bounds();
+        let x = 10.0 - max.x + (max.x - min.x) * 0.25;
+        fixture.edit_level(|level| level["instances"] = serde_json::json!([{
+            "prototype":"fixture", "id":"construction_fixture", "translation":[x,0,0], "rotation":[0,0,0,1]
+        }]));
+        fixture.refuses(&[
+            "level.json",
+            "instances[construction_fixture].translation/rotation",
+            "move or rotate the instance inside",
+        ]);
+    }
+
+    /// A footprint requires a finite normalized orientation. The map edge must refuse these
+    /// poses before either scatter or compatibility can consume them.
+    #[test]
+    fn invalid_placement_rotations_name_the_field_and_repair() {
+        // Fixture: a directionless quaternion and one whose norm overflows simulation precision.
+        for rotation in [[0.0; 4], [1.0e30, 0.0, 0.0, 1.0]] {
+            let fixture = MapFixture::new();
+            std::fs::write(prototypes_path(&fixture.0), HOUSE_LIBRARY).unwrap();
+            let mut instance: serde_json::Value = serde_json::from_str(HOUSE_INSTANCE).unwrap();
+            instance["rotation"] = serde_json::json!(rotation);
+            fixture.edit_level(|level| level["instances"] = serde_json::json!([instance]));
+            fixture.refuses(&[
+                "level.json",
+                "field instances[house_0001].rotation",
+                "author a finite quaternion with a normalizable length",
+            ]);
+        }
+    }
+
+    /// A handshake must not mint a digest for a polygon whose outward wall enters the region.
+    #[test]
+    fn wall_overlap_is_refused_by_load_and_digest() {
+        let fixture = MapFixture::with_half_extent(1000.0);
+        // Fixture: a notch beyond the spawn square, narrower than the actual wall depth.
+        let x = play_area::WALL_THICKNESS_M * 0.25;
+        fixture.polygon(&format!("[(-1000,-1000), (1000,-1000), (1000,1000), ({x},1000), ({x},980), (-{x},980), (-{x},1000), (-1000,1000)]"));
+        fixture.refuses(&[
+            "boundary.ron",
+            "field polygon edge",
+            "widen or reshape the notch",
+        ]);
     }
 
     /// Compatibility must change with boundary or mask bytes, including edits that still pass

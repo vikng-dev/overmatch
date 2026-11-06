@@ -51,10 +51,10 @@ pub(crate) struct MapInstance {
 #[derive(Component)]
 pub(crate) struct ScatterProxy;
 
-/// Resolution: least squared quaternion length [`resolve`] will normalize. Far below any rounding an f32
-/// text export produces (those land within ~1e-7 of unit) and far above the point where the
-/// squaring itself underflows, so the only thing it rejects is a quaternion with no direction in it.
-const MIN_ROTATION_LENGTH_SQ: f32 = 1.0e-12;
+/// Resolution: least squared quaternion length admitted by the map and normalized by [`resolve`].
+/// Far below a rounded unit norm, but above underflow; rejects near-zero norms before
+/// normalization amplifies their rounding error.
+pub(crate) const MIN_ROTATION_LENGTH_SQ: f32 = 1.0e-12;
 
 /// One parsed instance: the prototype it resolves to and its authored pose MINUS the stale Y.
 struct Instance<'a> {

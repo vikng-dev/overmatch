@@ -119,6 +119,8 @@ mod map;
 /// The networking implementation. Executables enter through [`run_client`] and [`run_server`];
 /// the adapter tree is private to the library.
 mod net;
+// Shared authored coordinate bound; admission and player picks must use the same square.
+pub(crate) use net::spawn_map::spawn_limit;
 pub(crate) use net::{env_flag, env_parse, env_text, env_value, refuse_start};
 pub use net::{run_client, run_server};
 /// Documentation frames to disk, from the capture plan `OVERMATCH_CAPTURE` names; inert without it.

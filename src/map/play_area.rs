@@ -5,6 +5,10 @@ use std::path::Path;
 
 use crate::{provenance::Sourced, terrain_grid::TerrainExtent};
 
+/// Resolution: a thick solid for discrete collision detection; the reference case of 100 m/s
+/// at 64 Hz travels 1.5625 m per tick (DERIVED).
+pub(crate) const WALL_THICKNESS_M: f32 = 20.0;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PlayArea {
     polygon: Box<[[f32; 2]]>,
@@ -110,7 +114,57 @@ impl PlayArea {
             area.friction().is_finite() && area.friction() >= 0.0,
             "map: {file} field friction — author a finite nonnegative contact friction"
         );
+        area.check_outward_boxes(path);
         area
+    }
+
+    /// Enclose a convex footprint, including its edges, in a simple polygon without holes.
+    /// Pairwise segments include its hull edges; midpoint intervals detect concave notches
+    /// even when every supplied vertex is inside. Boundary contact is permitted.
+    pub(super) fn contains_points(&self, points: &[[f32; 2]]) -> bool {
+        let polygon: Vec<_> = self.polygon.iter().copied().map(widen).collect();
+        let points: Vec<_> = points.iter().copied().map(widen).collect();
+        points
+            .iter()
+            .all(|point| point.iter().all(|value| value.is_finite()) && inside(&polygon, *point))
+            && points.iter().enumerate().all(|(index, a)| {
+                points[index + 1..]
+                    .iter()
+                    .all(|b| segment_inside(&polygon, *a, *b))
+            })
+    }
+
+    fn check_outward_boxes(&self, path: &Path) {
+        let polygon: Vec<_> = self.polygon.iter().copied().map(widen).collect();
+        for (index, (a, b)) in edges(&polygon).enumerate() {
+            let delta = sub(b, a);
+            let length_sq = dot(delta, delta);
+            let depth = f64::from(WALL_THICKNESS_M) * length_sq.sqrt();
+            // Unnormalized edge coordinates: along = dot(delta, p-a), outward = -cross.
+            // This keeps the inner face exactly on its authored edge, without offset rounding.
+            let local: Vec<_> = polygon
+                .iter()
+                .map(|point| {
+                    let relative = sub(*point, a);
+                    [dot(delta, relative), -cross(delta, relative)]
+                })
+                .collect();
+            let center = [
+                a[0] + delta[0] * 0.5
+                    + delta[1] * f64::from(WALL_THICKNESS_M) / (2.0 * length_sq.sqrt()),
+                a[1] + delta[1] * 0.5
+                    - delta[0] * f64::from(WALL_THICKNESS_M) / (2.0 * length_sq.sqrt()),
+            ];
+            // Positive-area overlap either contains an original boundary segment in the open
+            // box, or contains the whole box (whose center then lies inside the polygon).
+            let overlap = edges(&local).any(|(p, q)| segment_enters_box(p, q, [length_sq, depth]))
+                || inside(&polygon, center);
+            assert!(
+                !overlap,
+                "map: {} field polygon edge {index} — widen or reshape the notch so its outward {WALL_THICKNESS_M} m wall box does not enter the play-area interior",
+                path.display(),
+            );
+        }
     }
 
     pub(crate) fn polygon(&self) -> &[[f32; 2]] {
@@ -125,6 +179,107 @@ impl PlayArea {
     pub(crate) fn friction(&self) -> f32 {
         self.friction
     }
+}
+
+type Point = [f64; 2];
+
+fn widen(point: [f32; 2]) -> Point {
+    point.map(f64::from)
+}
+
+fn sub(a: Point, b: Point) -> Point {
+    [a[0] - b[0], a[1] - b[1]]
+}
+
+fn dot(a: Point, b: Point) -> f64 {
+    a[0] * b[0] + a[1] * b[1]
+}
+
+fn cross(a: Point, b: Point) -> f64 {
+    a[0] * b[1] - a[1] * b[0]
+}
+
+fn edges(polygon: &[Point]) -> impl Iterator<Item = (Point, Point)> + '_ {
+    polygon
+        .iter()
+        .copied()
+        .zip(polygon.iter().copied().cycle().skip(1))
+}
+
+fn inside(polygon: &[Point], point: Point) -> bool {
+    let mut enclosed = false;
+    for (a, b) in edges(polygon) {
+        if cross(sub(b, a), sub(point, a)) == 0.0
+            && (0..2).all(|axis| {
+                point[axis] >= a[axis].min(b[axis]) && point[axis] <= a[axis].max(b[axis])
+            })
+        {
+            return true;
+        }
+        if (a[1] > point[1]) != (b[1] > point[1])
+            && point[0] < a[0] + (point[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1])
+        {
+            enclosed = !enclosed;
+        }
+    }
+    enclosed
+}
+
+fn segment_inside(polygon: &[Point], a: Point, b: Point) -> bool {
+    let delta = sub(b, a);
+    let length_sq = dot(delta, delta);
+    if length_sq == 0.0 {
+        return true; // contains_points already checked this repeated projected corner.
+    }
+    let mut cuts = vec![0.0, 1.0];
+    let mut border = Vec::new();
+    for (c, d) in edges(polygon) {
+        let edge = sub(d, c);
+        let relative = sub(c, a);
+        let denominator = cross(delta, edge);
+        if denominator == 0.0 {
+            if cross(relative, delta) == 0.0 {
+                let endpoints = [c, d].map(|point| dot(sub(point, a), delta) / length_sq);
+                border.push([
+                    endpoints[0].min(endpoints[1]),
+                    endpoints[0].max(endpoints[1]),
+                ]);
+                cuts.extend(endpoints.into_iter().filter(|t| (0.0..=1.0).contains(t)));
+            }
+        } else {
+            let t = cross(relative, edge) / denominator;
+            let u = cross(relative, delta) / denominator;
+            if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
+                cuts.push(t);
+            }
+        }
+    }
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    cuts.windows(2).all(|pair| {
+        let t = (pair[0] + pair[1]) * 0.5;
+        // Collinear overlap is legal without interpolating back off its boundary by rounding.
+        border.iter().any(|range| t >= range[0] && t <= range[1])
+            || inside(polygon, [a[0] + t * delta[0], a[1] + t * delta[1]])
+    })
+}
+
+fn segment_enters_box(a: Point, b: Point, size: Point) -> bool {
+    let (mut low, mut high) = (0.0_f64, 1.0_f64);
+    for axis in 0..2 {
+        let delta = b[axis] - a[axis];
+        if delta == 0.0 {
+            if a[axis] <= 0.0 || a[axis] >= size[axis] {
+                return false;
+            }
+        } else {
+            let first = -a[axis] / delta;
+            let last = (size[axis] - a[axis]) / delta;
+            low = low.max(first.min(last));
+            high = high.min(first.max(last));
+        }
+    }
+    low < high
 }
 
 fn orient(a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> f64 {
@@ -174,6 +329,14 @@ pub(super) mod tests {
             extent.height_offset_m - 1.0,
             extent.height_offset_m + extent.height_span_m + 1.0
         )
+    }
+
+    pub(crate) fn polygon_text(extent: TerrainExtent, polygon: &str) -> String {
+        let mut text = boundary_text(extent);
+        let start = text.find('[').unwrap();
+        let end = text.find(']').unwrap() + 1;
+        text.replace_range(start..end, polygon);
+        text
     }
 
     fn checked(text: &str) -> PlayArea {
@@ -288,17 +451,74 @@ pub(super) mod tests {
     /// wall consumers must not accidentally restrict the type to its provisional square fixture.
     #[test]
     fn concave_and_collinear_polygons_are_admitted() {
-        let valid = boundary_text(EXTENT);
-        let start = valid.find('[').unwrap();
-        let end = valid.find(']').unwrap() + 1;
-        let text = format!(
-            "{}{}{}",
-            &valid[..start],
-            "[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (2.0, 2.0), (1.0, 1.0), (0.0, 2.0)]",
-            &valid[end..]
+        // Fixture: an L-shaped play area with enough room for its outward boxes.
+        let extent = TerrainExtent {
+            world_size_m: 200.0,
+            ..EXTENT
+        };
+        let text = polygon_text(
+            extent,
+            "[(-100,-100), (0,-100), (100,-100), (100,100), (0,100), (0,0), (-100,0)]",
         );
-        let area = checked(&text);
-        assert_eq!(area.polygon().len(), 6);
-        checked(&valid); // The terrain edge itself is included.
+        let area = PlayArea::checked(&text, extent, Path::new("fixture/boundary.ron"));
+        assert_eq!(area.polygon().len(), 7);
+        checked(&boundary_text(EXTENT)); // The terrain edge itself is included.
+    }
+
+    /// Wall consumers rely on edge boxes staying outside the admitted region. Mutant: testing
+    /// only the polygon's own simplicity admits a notch narrower than its outward extrusion.
+    #[test]
+    fn wall_box_refusal_names_the_notch_and_its_repair() {
+        // Fixture: notch widths below, equal to, and above the actual extrusion depth.
+        let extent = TerrainExtent {
+            world_size_m: WALL_THICKNESS_M * 10.0,
+            ..EXTENT
+        };
+        let half = extent.half_extent();
+        for (ratio, admitted) in [(0.5, false), (1.0, true), (2.0, true)] {
+            let x = WALL_THICKNESS_M * ratio * 0.5;
+            let polygon = format!(
+                "[(-{half},-{half}), ({half},-{half}), ({half},{half}), ({x},{half}), ({x},0), (-{x},0), (-{x},{half}), (-{half},{half})]"
+            );
+            let text = polygon_text(extent, &polygon);
+            let result = std::panic::catch_unwind(|| {
+                PlayArea::checked(&text, extent, Path::new("fixture/boundary.ron"))
+            });
+            if admitted {
+                result.expect("a wide notch and boundary-only contact must pass");
+            } else {
+                let refusal = result.expect_err("a narrow notch must fail before play");
+                let reason = refusal.downcast_ref::<String>().unwrap();
+                for part in [
+                    "fixture/boundary.ron",
+                    "field polygon edge",
+                    "widen or reshape the notch",
+                ] {
+                    assert!(reason.contains(part), "{reason}");
+                }
+            }
+        }
+    }
+
+    /// The spawn picker and placement gate must enclose whole convex footprints. Checking only
+    /// corners admits a footprint bridging a notch; refusing boundary contact also rejects legal data.
+    #[test]
+    fn convex_footprints_cannot_bridge_concavity() {
+        // Fixture: an L-shaped region, with a reflex vertex at the origin.
+        let extent = TerrainExtent {
+            world_size_m: 200.0,
+            ..EXTENT
+        };
+        let text = polygon_text(
+            extent,
+            "[(-100,-100), (100,-100), (100,100), (0,100), (0,0), (-100,0)]",
+        );
+        let area = PlayArea::checked(&text, extent, Path::new("fixture/boundary.ron"));
+        let corners = [[-50.0, -10.0], [10.0, -10.0], [10.0, 50.0]];
+        assert!(corners.iter().all(|point| area.contains_points(&[*point])));
+        assert!(!area.contains_points(&corners));
+        assert!(!area.contains_points(&[[-100.0, 0.0], [0.0, 0.0], [0.0, 100.0]]));
+        assert!(area.contains_points(&[[-100.0, 0.0], [100.0, 0.0]]));
+        assert!(area.contains_points(&[[0.0, 0.0], [0.0, 100.0]]));
     }
 }

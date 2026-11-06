@@ -67,7 +67,7 @@ Where code and prose disagree, the code wins, and the row says so.
 | `src/scatter.rs` | places instances on every composition; both peers derive them, nothing is replicated (`:1-24`) | **B**. Graybox `Block`s are placeholders (`"placeholder": true`). | Statics are `[Terrain]` (`:318`). |
 | `src/world.rs`, `src/world/look.rs` | sun, analytic sky, environment light, environment spawn | sky law **B**; sky data home **P** (moved by V0) | Sky data is `include_str!` of `assets/world/lighting.ron` : global, not per map. `sky_radiance` (V1 moved it to `sky::sky_radiance`) is baked to 128² `Rgba8Unorm` and filtered once (`sky::light_battlefield_views`). **A bug**: the bake evaluates radiance at cubemap coordinates, but Bevy samples every cubemap at (x, y, −z) of the world direction (`bevy_core_pipeline-0.19.1/src/skybox/skybox.wgsl:78-79`; vendored `light_probe/environment_map.wgsl`, `compute_cubemap_sample_dir`). Today's fill glow therefore sits mirrored across the XY plane: the sun is at azimuth +45° and the glow at −45° (DERIVED). L1a fixes it (`sky::world_direction`). **U**: the sun's `DirectionalLight` spawns on every composition, the server included, and `world::plugin` parses the lighting file on the server. That is view data on the server; V0 moves it. |
 | `assets/world/lighting.ron` | 12 `Taste` rows | **P**: moves per map (V0) | Its parse admits `sky_intensity_cd_m2 = 0` (refused since L1a) and zero colour channels, which the new derivations divide by (§3.2, §3.4). |
-| `src/net/spawn_map.rs`, `assets/ui/spawn_map.ron:2` | the spawn clamp, 0.95 of the half-extent as a `Unit` (`spawn_map.rs:41-44`) | **B** while the play area is the terrain square; **P** the day it is irregular (§3.6) | Backlog rows net-05, net-09, net-10. No lane here edits the file. |
+| `src/net/spawn_map.rs`, `assets/ui/spawn_map.ron:2` | the spawn clamp, 0.95 of the half-extent as a `Unit` (`spawn_limit`, fraction from `assets/ui/spawn_map.ron`) | **B** shared client/authority bound; **P** square region, replaced by a polygon inset (§3.6) | Backlog rows net-05, net-09, net-10. No lane here edits the file. |
 | `assets/ballistics/physical_laws.ron:12` | `floor_m: -100`, `StandIn("Finite play boundary until maps author vertical play bounds…")` | **P**, replacement named; W2 retires it into the play area | Read at `src/ballistics.rs:2495`. |
 | `src/aim.rs` | aim distance | **U**: the doc at `:41-42` claims the "same `Terrain \| Armor` mask the live shell marches against", but the march meets only `Armor`-member colliders plus the height grid (`ballistics.rs:747-757`, `:784-789`). Code wins: the aim ray stops on `Terrain`-only colliders that rounds pass through. A1 fixes it. | |
 | `tools/` | offline Rust stages ("the map compiler", `tools/src/construction.rs:1`) | **B**: never shipped; nothing in the game depends on it (`tools/Cargo.toml:1-4`) | |
@@ -592,9 +592,9 @@ W1a:
 
 W1b:
 
-3. Every spawn point lies inside the polygon, and so does the spawn-limit square (0.95·half,
-   `spawn_map.rs:41-44`). That square is P, replaced by an inset of the polygon the day the boundary
-   is irregular.
+3. Every spawn point lies inside the polygon, and so does the spawn-limit square (`spawn_limit`,
+   fraction from `assets/ui/spawn_map.ron` field `limit_fraction`). That square is P; a polygon-inset
+   picker replaces it when spawning follows an irregular boundary.
 4. No placement's footprint (`construction::footprint`, or the Block transform) crosses the polygon;
    the refusal names the instance id. W1b moves Kalinovo's refused instances (`fir_a_0201` first)
    inward in `level.json` by the least distance that clears them, and lists them in its commit.
@@ -643,7 +643,8 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
 | Clouds, sun disk | baked, static; one shared solar radius | none | none |
 | Distant life | instanced clumps bound to constructions in data | seeded placement | authored placement in the instance format (#221) |
 | Boundary data (W1a delivered) | `boundary.ron`, checked `PlayArea`, gate checks 1–2; no grip is an owner `Taste` | square polygon; floor and ceiling bounds | the natural border's polygon (#200); authored vertical bounds, informed by logged escapes |
-| Boundary consumers | planned: cross-file gate, edge boxes, floor law | square spawn limit; invisible; routed landing response | a polygon-inset spawn limit; generic contact materials |
+| Boundary admission (W1b delivered) | cross-file gate checks 3–5: spawns, resolved placement footprints and outward edge boxes; startup and compatibility share every refusal | square spawn limit | a polygon-inset spawn picker (#200) |
+| Boundary consumers | planned: edge boxes, floor law | invisible; routed landing response | map art; generic contact materials |
 | Map load (W1a delivered) | one admitted sequence and digest, including boundary and masks (R6); height-decode range must remain finite | the decoders' second read (R6 remainder) | the snapshot carrying the bytes, with destruction-05 and destruction-09 |
 | Map sources | tracked, reproducible, admitted generators | off-repo Houdini scene and TIFF; `map_ui.png` recipe | #221's pipeline; a startup derivation |
 
