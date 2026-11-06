@@ -18,7 +18,9 @@ pub(crate) struct SweepAccount {
     pub(crate) chunks: Vec<(u16, u16, Vec3)>,
     pub(crate) outgoing_kinetic_j: f64,
     pub(crate) outgoing_momentum: Vec3,
-    pub(crate) contacts: BTreeSet<(Entity, u16)>,
+    /// Per source body and construction its hull met this tick: the closing speed along the
+    /// sweep's contact normal at the first point met, m/s.
+    pub(crate) contacts: BTreeMap<(Entity, u16), f32>,
     pub(crate) samples: Vec<(Entity, u16, f32, (f32, f32, f32, f32))>,
     pub(super) held: Vec<(Entity, Load)>,
     pub(crate) source_changes: Vec<(Entity, Vec3, Vec3, Vec3)>,
@@ -174,16 +176,18 @@ pub(super) fn run(mut p: Intake) {
                 .constructions
                 .get(root)
                 .expect("swept owner survives geometry intake");
-            p.account.contacts.insert((body, owner.construction));
+            let witness = swept
+                .witness
+                .expect("a resolved patch has an inward witness");
+            p.account
+                .contacts
+                .entry((body, owner.construction))
+                .and_modify(|speed| *speed = speed.max(witness.speed))
+                .or_insert(witness.speed);
             #[cfg(test)]
-            p.account.patches.push((
-                body,
-                owner.construction,
-                swept.chunks.clone(),
-                swept
-                    .witness
-                    .expect("a resolved patch has an inward witness"),
-            ));
+            p.account
+                .patches
+                .push((body, owner.construction, swept.chunks.clone(), witness));
             p.account.samples.push((
                 body,
                 owner.construction,

@@ -12,7 +12,7 @@ use super::harness::{LeverError, env_text};
 use crate::{
     construction::{
         Body,
-        breakage::{Breakage, Piece},
+        breakage::{Breakage, Piece, SweepAccount},
     },
     contact_transfer::ContactTransfers,
     cost::stages::Stage,
@@ -289,8 +289,9 @@ pub(super) struct Census<'w, 's> {
     ram: Option<ResMut<'w, Ram>>,
     tanks: Query<'w, 's, Entity, With<Tank>>,
     pieces: Query<'w, 's, (), (With<Piece>, With<Breakage>, Without<Sleeping>)>,
-    constructions: Query<'w, 's, (Entity, &'static MapInstance), With<Body>>,
+    constructions: Query<'w, 's, (Entity, &'static MapInstance, &'static Breakage), With<Body>>,
     contacts: Res<'w, ContactTransfers>,
+    sweep: Res<'w, SweepAccount>,
 }
 
 impl Census<'_, '_> {
@@ -326,16 +327,25 @@ impl Census<'_, '_> {
             let target = self
                 .constructions
                 .iter()
-                .find(|(_, id)| id.id == ram.recipe.instance)
+                .find(|(_, id, _)| id.id == ram.recipe.instance)
                 .expect("the admitted ram construction exists throughout its capture")
                 .0;
             ram.target = Some(target);
             target
         };
         if ram.impact_tick.is_none() {
+            // First contact is the tank's first touch by either path: the hull sweep, which runs
+            // before physics and can open the matter it meets so the solver never touches it, or
+            // a solver contact. Each reports its closing speed along its contact normal.
+            let ordinal = self
+                .constructions
+                .get(target)
+                .expect("the target was checked this tick")
+                .2
+                .construction;
             let groups: Vec<_> = self.contacts.groups().collect();
             let tanks = &self.tanks;
-            let normal_speed = groups
+            let solver = groups
                 .par_splat_map(ComputeTaskPool::get(), None, |_, groups| {
                     groups
                         .iter()
@@ -345,9 +355,16 @@ impl Census<'_, '_> {
                         .reduce(f32::max)
                 })
                 .into_iter()
-                .flatten()
-                .reduce(f32::max);
-            if let Some(normal_speed) = normal_speed {
+                .flatten();
+            let swept = self
+                .sweep
+                .contacts
+                .iter()
+                .filter(|((body, construction), _)| {
+                    *construction == ordinal && tanks.contains(*body)
+                })
+                .map(|(_, &speed)| speed);
+            if let Some(normal_speed) = solver.chain(swept).reduce(f32::max) {
                 ram.impact_tick = Some(ram.tick);
                 ram.impact = Some(
                     json!({"tick": ram.tick, "speed_m_s": ram.pre_speed, "normal_speed_m_s": normal_speed}),
@@ -511,7 +528,8 @@ mod tests {
                 }),
                 spec: std::sync::Arc::new(fixture_spec()),
             })
-            .init_resource::<ContactTransfers>();
+            .init_resource::<ContactTransfers>()
+            .init_resource::<SweepAccount>();
         install_recipe(&mut app, recipe);
         app.world_mut().run_schedule(PostStartup);
         let ram = app.world().resource::<Ram>();
@@ -539,16 +557,8 @@ mod tests {
         let target = world.spawn_empty().id();
         world.despawn(target);
         world.init_resource::<ContactTransfers>();
-        // Fixture: the route and timing values are irrelevant once its owner is gone.
-        let mut ram = Ram::new(Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap());
-        ram.plan = Some(Plan {
-            spawn: [0.0; 3],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            runup_m: 1.0,
-            governed_m_s: 1.0,
-            minimum_m_s: 1.0,
-        });
-        ram.started = true;
+        world.init_resource::<SweepAccount>();
+        let mut ram = armed();
         ram.target = Some(target);
         world.insert_resource(ram);
         let captured = world
@@ -558,6 +568,70 @@ mod tests {
             .unwrap();
         assert!(!captured);
         assert_eq!(world.resource::<Ram>().done, Some(End::WorldChanged));
+    }
+
+    /// A started capture on the shipped recipe. Fixture: the route and timing values are
+    /// irrelevant to the census's impact and end decisions.
+    fn armed() -> Ram {
+        let mut ram = Ram::new(Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap());
+        ram.plan = Some(Plan {
+            spawn: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            runup_m: 1.0,
+            governed_m_s: 1.0,
+            minimum_m_s: 1.0,
+        });
+        ram.started = true;
+        ram
+    }
+
+    /// The admission gate reads the speed at first contact. The hull sweep runs before physics
+    /// and can open all the matter it meets, so the solver touches the target later and slower,
+    /// or never: a tank's sweep touch on the target sets the impact tick alone, at the sweep's
+    /// closing speed along its normal. Another body's touch and the tank's touch on another
+    /// construction are not the ram's impact.
+    #[test]
+    fn a_sweep_touch_before_any_solver_contact_sets_the_impact_tick() {
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::tasks::TaskPool;
+        ComputeTaskPool::get_or_init(TaskPool::default);
+        let mut world = World::new();
+        world.init_resource::<ContactTransfers>();
+        world.init_resource::<SweepAccount>();
+        let mut ram = armed();
+        ram.pre_speed = 10.0; // Fixture: FixedFirst's sample of the tank.
+        let instance = ram.recipe.instance.clone();
+        world.insert_resource(ram);
+        let tank = world.spawn(Tank).id();
+        let other = world.spawn_empty().id();
+        // Fixture: the target is construction 3; construction 4 is another.
+        world.spawn((
+            Body,
+            MapInstance {
+                id: instance,
+                ordinal: 0,
+            },
+            Breakage::new(crate::construction::tests::column_construction(), 3),
+        ));
+        let record = |world: &mut World| {
+            world
+                .run_system_once(|mut census: Census| {
+                    census.record(0.0, 0.0, 0.0, [0.0; crate::cost::stages::COUNT], 1.0)
+                })
+                .unwrap()
+        };
+        assert!(record(&mut world));
+        assert_eq!(world.resource::<Ram>().impact_tick, None);
+        // Fixture closing speeds, m/s; only the tank's touch on the target is the impact.
+        world.resource_mut::<SweepAccount>().contacts =
+            [((tank, 3), 9.5), ((other, 3), 12.0), ((tank, 4), 11.0)].into();
+        assert!(record(&mut world));
+        let ram = world.resource::<Ram>();
+        assert_eq!(ram.impact_tick, Some(2));
+        assert_eq!(
+            ram.impact,
+            Some(json!({"tick": 2, "speed_m_s": 10.0, "normal_speed_m_s": 9.5}))
+        );
     }
 
     /// A second vehicle changes distance through its data, without a vehicle-specific route.
@@ -637,7 +711,7 @@ mod tests {
         for tick in 0..plan.drive_ticks {
             drive_tick(&mut app, tank, 1.0, 0.0);
             let account = app.world().resource::<SweepAccount>();
-            if account.contacts.contains(&(tank, ordinal)) && contact.is_none() {
+            if account.contacts.contains_key(&(tank, ordinal)) && contact.is_none() {
                 contact = Some(tick);
                 println!(
                     "MEASURED first occupied contact: {:?}",
