@@ -1681,9 +1681,9 @@ fn a_reused_pattern_reassembles_stiffness_and_tracks_anchors() {
         .unwrap();
     let after = factor.solve(&loads);
     close(
-        after[0].linear.y * 2.0,
-        before[0].linear.y,
-        "inverse stiffness response",
+        after[0].linear.y / before[0].linear.y,
+        0.5,
+        "inverse stiffness response ratio",
     );
     close(
         graph.edges[0].resultant(&graph.nodes, &after).linear.y,

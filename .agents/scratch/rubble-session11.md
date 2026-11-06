@@ -1,0 +1,9 @@
+Subject: the video game's environment destruction model; game state only. The landing gates remain unmet.
+
+- Work/predicate: gravity settles all standing parts and their inter-part/ground contacts, excluding external Avian contacts. MEASURED impact +1: two passes, three openings, 72 slips; members 1122 -> 1109 and live joints 3258 -> 3201 invalidate reuse; pending verdicts are zero. There is no empty-slip gate.
+- Fix: “construction: reuse gravity settling topology and sparse order (#235)” retains rigid geometry and valid sparse order/buffers while rebuilding every coefficient and pivot. It keeps the full coupled owner and the existing contact stopping rule; no new threshold.
+- MEASURED one-time identical-input comparison: five complete preload fields and eleven sweep verdicts agree exactly with fresh graph/factor reconstruction. Generic witnesses cover fresh stiffness, changed anchors and changed adjacency; all temporary probes are removed.
+- MEASURED session 9 A/B: sweep maxima 9.694 / 9.544 ms; worst ticks 26.783 / 25.872 ms; contact p99 15.850 / 16.343 ms; overruns contact/all 4/4 and 4/4.
+- MEASURED final A/B with sibling load logs: sweep maxima 9.365 / 7.903 ms; worst ticks 29.261 / 32.615 ms; contact p99 18.426 / 19.511 ms; overruns contact/all 4/4 and 11/11. These separate trajectories do not establish a paired speedup.
+- MEASURED gates: fmt, CI clippy and 107 targeted/whole-tree guards pass; full library suite 2499 passed, zero failed, 41 ignored. The final test-only ratio assertion is checked by a repeated targeted gate.
+- Decision: retain invariant-work reuse; DERIVED both sweep maxima still exceed the owner's 6.1 ms gate. MEASURED eight late B overruns have zero casts and at most 0.762 ms sweep; their dominant brackets are FixedUpdate/physics, with the cause unclassified. [Evidence, scope and load paths](rubble-session11.json). Nothing pushed.
