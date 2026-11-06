@@ -1,4 +1,3 @@
-// Frame 3: p3-hill. OVERMATCH_START: 234.4,421.9,71.
 // From the bay, after scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch:
 // /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_START=234.4,421.9,71 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/surroundings/p3-hill.ron target/debug/overmatch --offline
 // Sky and horizon survey: a third-person height on the map's highest hill (49.8 m), looking at the

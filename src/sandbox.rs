@@ -582,10 +582,7 @@ fn setup_overlay_materials(
 /// A directional light on the overlay layer, matching the world light's direction — without it the
 /// overlay's plates (rendered by the overlay camera) get no scene light and read flat/dark.
 ///
-/// Both the direction and the intensity come from `sky`'s single sun definition rather than a
-/// second copy of the numbers: the overlay is drawn OVER the same scene, so any drift between the
-/// two lights shows up as plates lit from a different sun than the tank under them. No shadows —
-/// this light exists only to shade the overlay layer.
+/// No shadows: this light only shades the overlay layer.
 fn spawn_overlay_light(mut commands: Commands) {
     commands.spawn((
         crate::sky::sun_light(),

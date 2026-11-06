@@ -1,4 +1,3 @@
-// Frame 5: p5-outside. OVERMATCH_START: unset (default offline spawn; no OVERMATCH_START line in the survey log).
 // From the bay, after scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch:
 // /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env -u OVERMATCH_START OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/surroundings/p5-outside.ron target/debug/overmatch --offline
 // Sky and horizon survey: a free pose 150 m outside the east edge, looking back at the map's cut.

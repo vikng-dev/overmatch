@@ -1363,15 +1363,14 @@ mod tests {
             .expect("the family material is stored")
             .lut
             .clone();
-        let data = world
+        let palette = world
             .resource::<Assets<Image>>()
             .get(&lut)
-            .expect("the palette is stored")
-            .data
-            .as_ref()
+            .expect("the palette is stored");
+        // The last column is full signal, row 0 the newborn cloud.
+        let texel = palette
+            .pixel_bytes(UVec3::new(palette.width() - 1, 0, 0))
             .expect("the palette carries its texels");
-        // The palette is 64 × 16 RGBA8: x = 63 is full signal, row 0 the newborn cloud.
-        let texel = 63 * 4;
         let light = world
             .get::<Billboard>(puff)
             .expect("a billboard")
@@ -1379,7 +1378,7 @@ mod tests {
             .glow
             .x
             + 1.0;
-        ([data[texel], data[texel + 1], data[texel + 2]], light)
+        ([texel[0], texel[1], texel[2]], light)
     }
 
     /// The lit soil texel: linear albedo times the world key light's linear colour, in 8-bit RGB.

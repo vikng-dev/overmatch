@@ -12,9 +12,10 @@ use bevy::pbr::generate::{
     GeneratorBindGroups, GeneratorPipelines, RenderEnvironmentMap, filtering_system,
 };
 use bevy::prelude::*;
-use bevy::render::render_resource::PipelineCache;
+use bevy::render::render_resource::{CachedPipelineState, PipelineCache};
 use bevy::render::sync_world::MainEntity;
 use bevy::render::{Render, RenderApp, RenderSystems};
+use bevy::shader::ShaderCacheError;
 use serde::Deserialize;
 
 use crate::provenance::{Sourced, from_shipped_str};
@@ -23,19 +24,12 @@ use crate::render_policy::CameraProfile;
 static LIGHTING: LazyLock<Lighting> = LazyLock::new(|| {
     Lighting::load(&crate::map::map_dir(&crate::assets::asset_root()).join("view/sky.ron"))
 });
-fn get() -> &'static Lighting {
-    &LIGHTING
-}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Lighting {
-    /// Sun elevation above the horizon, degrees — LOW, and deliberately so. Relief on a normal-mapped
-    /// surface is carried by the cosine between the light and the perturbed normal, so a high sun
-    /// (the old `(4, 8, 4)` placement was ~55°) flattens ground detail into near-uniform brightness
-    /// no matter how good the map is: every ripple faces the light about equally. At a grazing angle
-    /// the same bump swings from lit to self-shadowed across a few centimetres, which is what makes
-    /// the terrain read as SURFACE instead of a photograph. Also the honest tactical light for a tank
-    /// sim — long shadows are cover and a range cue.
+    /// Sun elevation above the horizon, degrees; low on purpose. At a grazing angle a normal-mapped
+    /// bump swings from lit to self-shadowed across centimetres, so relief reads, where a high sun
+    /// lights every ripple alike. Long shadows are also cover and a range cue.
     sun_elevation_deg: Sourced<f32>,
     /// Sun azimuth, degrees from +X toward +Z.
     sun_azimuth_deg: Sourced<f32>,
@@ -144,11 +138,8 @@ const SUN_SHADOW_NORMAL_BIAS: f32 = 2.6;
 /// casting is the caller's call — the overlay light must not cast.
 pub(crate) fn sun_light() -> DirectionalLight {
     DirectionalLight {
-        color: {
-            let [r, g, b] = get().sun_srgb.0;
-            Color::srgb(r, g, b)
-        },
-        illuminance: get().sun_illuminance_lux.0,
+        color: Color::srgb_from_array(LIGHTING.sun_srgb.0),
+        illuminance: LIGHTING.sun_illuminance_lux.0,
         shadow_normal_bias: SUN_SHADOW_NORMAL_BIAS,
         ..default()
     }
@@ -158,7 +149,7 @@ pub(crate) fn sun_light() -> DirectionalLight {
 /// elevation ([`sun_elevation_deg`]). The key light a lit view-only mass shares with the ground it
 /// rose from; the sky's share is not in it.
 pub(crate) fn level_ground_irradiance_lux() -> f32 {
-    get().sun_illuminance_lux.0 * sun_elevation_deg().to_radians().sin()
+    LIGHTING.sun_illuminance_lux.0 * sun_elevation_deg().to_radians().sin()
 }
 
 /// The sun's elevation, degrees: `Lighting::sun_elevation_deg`, or a capture plan's
@@ -168,7 +159,7 @@ pub(crate) fn level_ground_irradiance_lux() -> f32 {
 fn sun_elevation_deg() -> f32 {
     crate::dev_capture::plan()
         .and_then(|plan| plan.scene.sun_elevation_deg)
-        .unwrap_or(get().sun_elevation_deg.0)
+        .unwrap_or(LIGHTING.sun_elevation_deg.0)
 }
 
 /// Unit vector pointing FROM the scene TOWARD the sun, from [`sun_elevation_deg`] /
@@ -176,7 +167,7 @@ fn sun_elevation_deg() -> f32 {
 /// and the sky it is embedded in can never disagree about where the sun is.
 pub(crate) fn toward_sun() -> Vec3 {
     let (sin_elevation, cos_elevation) = sun_elevation_deg().to_radians().sin_cos();
-    let (sin_azimuth, cos_azimuth) = get().sun_azimuth_deg.0.to_radians().sin_cos();
+    let (sin_azimuth, cos_azimuth) = LIGHTING.sun_azimuth_deg.0.to_radians().sin_cos();
     Vec3::new(
         cos_elevation * cos_azimuth,
         sin_elevation,
@@ -188,7 +179,7 @@ pub(crate) fn toward_sun() -> Vec3 {
 /// shadow cascades around the camera, not around the light's position — so the authored stand-off is
 /// purely so the entity reads sensibly in debug views.
 pub(crate) fn sun_transform() -> Transform {
-    Transform::from_translation(toward_sun() * get().sun_debug_distance_m.0)
+    Transform::from_translation(toward_sun() * LIGHTING.sun_debug_distance_m.0)
         .looking_at(Vec3::ZERO, Vec3::Y)
 }
 
@@ -205,7 +196,7 @@ const SKY_CUBEMAP_FACE_PX: u32 = 128;
 /// the sky half, because it is what keeps the underside of a hull and the lower run of track darker
 /// than their tops (a uniform environment would flatten them exactly the way ambient light does).
 fn sky_radiance(dir: Vec3) -> Vec3 {
-    let look = get();
+    let look = &*LIGHTING;
     let vector = |[x, y, z]: [f32; 3]| Vec3::new(x, y, z);
     let zenith = vector(look.zenith_linear.0);
     let haze = vector(look.haze_linear.0);
@@ -369,7 +360,7 @@ fn light_battlefield_views(
                     Name::new("Sky light filter"),
                     GeneratedEnvironmentMapLight {
                         environment_map: images.add(sky_cubemap()),
-                        intensity: get().sky_intensity_cd_m2.0,
+                        intensity: LIGHTING.sky_intensity_cd_m2.0,
                         ..default()
                     },
                 ))
@@ -420,26 +411,41 @@ fn retire_sky_filter(
 /// compiled. This runs after both and before `RenderSystems::Render`, whose
 /// `process_pipeline_queue_system` is the next system to change pipeline states, so it sees the
 /// readiness they saw.
+///
+/// A generator Bevy disabled (a GPU without compute shaders, a platform outside the targets) or a
+/// generator shader that failed to compile would leave the views without the sky's light forever,
+/// so both panic, naming the cause.
 fn report_recorded_sky_filters(
     filters: Query<&MainEntity, (With<GeneratorBindGroups>, With<RenderEnvironmentMap>)>,
     pipelines: Option<Res<GeneratorPipelines>>,
     cache: Res<PipelineCache>,
     recorded: Res<RecordedSkyFilters>,
 ) {
-    let Some(pipelines) = pipelines else {
-        return;
-    };
-    let compiled = [
-        pipelines.copy,
-        pipelines.downsample_first,
-        pipelines.downsample_second,
-        pipelines.radiance,
-        pipelines.irradiance,
-    ]
-    .into_iter()
-    .all(|id| cache.get_compute_pipeline(id).is_some());
-    if !compiled {
-        return;
+    let pipelines = pipelines.expect(
+        "sky light: Bevy disabled its environment-map generator, so this GPU lacks the compute \
+         shaders the battlefield's sky light is filtered with",
+    );
+    for (name, id) in [
+        ("copy", pipelines.copy),
+        ("downsample_first", pipelines.downsample_first),
+        ("downsample_second", pipelines.downsample_second),
+        ("radiance", pipelines.radiance),
+        ("irradiance", pipelines.irradiance),
+    ] {
+        match cache.get_compute_pipeline_state(id) {
+            CachedPipelineState::Ok(_) => {}
+            // Still compiling, or waiting on a shader or an import Bevy retries.
+            CachedPipelineState::Queued
+            | CachedPipelineState::Creating(_)
+            | CachedPipelineState::Err(
+                ShaderCacheError::ShaderNotLoaded(_)
+                | ShaderCacheError::ShaderImportNotYetAvailable,
+            ) => return,
+            CachedPipelineState::Err(error) => panic!(
+                "sky light: the environment-map generator's {name} pipeline failed ({error}); \
+                 the battlefield views would never receive the sky's light"
+            ),
+        }
     }
     let mut recorded = recorded.0.lock().expect("sky filter report poisoned");
     for filter in &filters {
@@ -450,8 +456,6 @@ fn report_recorded_sky_filters(
 
 pub(crate) fn spawn_sun(commands: &mut Commands) {
     // Settings owns the cascade ladder; this spawn supplies only the key light and its pose.
-    // Cascades fit around the camera. A low sun stretches the texel footprint along the light,
-    // which is what `SUN_SHADOW_NORMAL_BIAS` addresses.
     commands.spawn((
         DirectionalLight {
             shadow_maps_enabled: true,
@@ -581,7 +585,7 @@ mod tests {
             EnvironmentMapLight {
                 diffuse_map: images.add(Image::default()),
                 specular_map: images.add(Image::default()),
-                intensity: get().sky_intensity_cd_m2.0,
+                intensity: LIGHTING.sky_intensity_cd_m2.0,
                 ..default()
             }
         };
@@ -621,7 +625,7 @@ mod tests {
                 (&light.diffuse_map, &light.specular_map),
                 (&maps.diffuse_map, &maps.specular_map),
             );
-            assert_eq!(light.intensity, get().sky_intensity_cd_m2.0);
+            assert_eq!(light.intensity, LIGHTING.sky_intensity_cd_m2.0);
         }
     }
 }
