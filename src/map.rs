@@ -1160,12 +1160,9 @@ pub(crate) mod tests {
             ));
             let dir = map_dir(&root);
             std::fs::create_dir_all(&dir).unwrap();
-            let extent = TerrainExtent {
-                world_size_m: 20.0,
-                height_offset_m: -2.0,
-                height_span_m: 5.0,
-            };
-            std::fs::write(dir.join(LEVEL_FILE), manifest_text(10.0, -2.0, 5.0, "+Z")).unwrap();
+            let text = manifest_text(10.0, -2.0, 5.0, "+Z");
+            let extent = super::parse(&text, EMPTY_LIBRARY, &dir.join(LEVEL_FILE)).extent;
+            std::fs::write(dir.join(LEVEL_FILE), text).unwrap();
             std::fs::write(dir.join(PROTOTYPES_FILE), EMPTY_LIBRARY).unwrap();
             std::fs::write(
                 dir.join(BOUNDARY_FILE),
@@ -1248,12 +1245,10 @@ pub(crate) mod tests {
                 "height_decode",
             ),
         ] {
-            let refusal = match std::panic::catch_unwind(|| {
-                super::parse(&text, EMPTY_LIBRARY, Path::new("fixture/level.json"))
-            }) {
-                Ok(_) => panic!("overflowing ranges must be refused"),
-                Err(refusal) => refusal,
-            };
+            let refusal = std::panic::catch_unwind(|| {
+                super::parse(&text, EMPTY_LIBRARY, Path::new("fixture/level.json"));
+            })
+            .expect_err("overflowing ranges must be refused");
             let reason = refusal.downcast_ref::<String>().unwrap();
             for part in ["fixture/level.json", field, "author a finite"] {
                 assert!(reason.contains(part), "{reason}");
