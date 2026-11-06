@@ -194,8 +194,11 @@ sampled for: `(c.x, c.y, −c.z)` of the cube direction `c`, the inverse of Bevy
 - `Skybox { image, brightness: sky_intensity_cd_m2, rotation: Quat::IDENTITY }`
   (`bevy_light-0.19.1/src/probe.rs:228-256`, exported as `bevy::light::Skybox`).
 - It goes on every view whose `CameraProfile::draws_battlefield()` holds
-  (`render_policy.rs:338-343`): commander, optic, kill cam lesson. It is attached by the system that
-  attaches the environment light (`sky::light_battlefield_views`).
+  (`render_policy.rs:338-343`): commander, optic, kill cam lesson; and, as the environment light
+  does, on a view with no profile (the armour sandbox's) when the view clears its own target. A
+  view that does not clear composites over a lower one, which a skybox would paint over.
+  `sky::draw_sky` attaches it beside `sky::light_battlefield_views`, through their one predicate,
+  so `SPIKE_ABLATE=sky` and `env_light` remove each alone.
 - The pen cam inset keeps its own clear colour (`src/damage_cam/pen_cam/stage.rs:286`).
 
 **Brightness.** One number, `sky_intensity_cd_m2`: the `Skybox` brightness and the environment
@@ -634,7 +637,7 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
 | Sky data (V0 delivered) | per-map `view/sky.ron`, admitted at client first use; sun behind the window gate; server pack excludes `view/` | none | none |
 | Sky module (V1 delivered) | `src/sky.rs` owns admission, the sun, analytic bake and filter-once light; existing sky witnesses retain their assertions | none | none |
 | Sky light bake (L1a delivered) | `Bake`; the light bake evaluated in world orientation (`world_direction`), `Rgba16Float`; `sky_intensity_cd_m2 = 0` refused | none | none |
-| Drawn sky (L1b onward) | analytic sky; the drawn bake in world orientation; one brightness | none | none |
+| Drawn sky (L1b delivered) | `Bake::Drawn`, 512² cube view in world orientation, the horizon value below the horizon; `Skybox` on battlefield views that clear, at `sky_intensity_cd_m2`; ablate key `sky` | none | none |
 | Haze | Koschmieder fog; one unshadowed lobe for sky and fog | the 12 km default (playtest fork) | the fork's verdict |
 | Outland | stitched, attribute-continuous view mesh to 1.25·V | odd-reflection height; mirrored mask | authored outland, or terrain past the boundary (#221) |
 | Clouds, sun disk | baked, static; one shared solar radius | none | none |

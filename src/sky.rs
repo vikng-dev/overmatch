@@ -1,7 +1,8 @@
 //! Client-only, per-map sky admission, sun and analytic environment light.
 //! `sun_light`, `sun_transform` and `level_ground_irradiance_lux` share one admitted sky;
 //! `spawn_sun` is called only behind the world's window guard. The environment is filtered once
-//! and shared by battlefield views. Each [`Bake`] holds the sky in world orientation
+//! and shared by battlefield views, and those that paint their own background draw the sky
+//! ([`draw_sky`]) at the fill's one luminance. Each [`Bake`] holds the sky in world orientation
 //! ([`world_direction`]), so its glow lies on the side the key light comes from. See
 //! `.agents/docs/design/map-surroundings.md` for the design.
 
@@ -10,6 +11,8 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
 };
 
+use bevy::camera::ClearColorConfig;
+use bevy::light::Skybox;
 use bevy::pbr::generate::{
     GeneratorBindGroups, GeneratorPipelines, RenderEnvironmentMap, filtering_system,
 };
@@ -185,24 +188,31 @@ pub(crate) fn sun_transform() -> Transform {
         .looking_at(Vec3::ZERO, Vec3::Y)
 }
 
-/// What a cubemap of [`sky_radiance`] is baked for. Every bake stores, at each texel, the radiance
-/// of the world direction Bevy samples that texel for ([`world_direction`]), as `Rgba16Float`
-/// LINEAR radiance ratios: the generator filters in `Rgba16Float` (its copy pass converts any
-/// source), so an 8-bit source would only add banding.
+/// What a cubemap of [`sky_radiance`] is baked for. Every bake is a cube view of six square
+/// layers that stores, at each texel, the radiance of the world direction Bevy samples that texel
+/// for ([`world_direction`]), as `Rgba16Float` LINEAR radiance ratios: the generator filters in
+/// `Rgba16Float` (its copy pass converts any source), so an 8-bit source would only add banding.
 #[derive(Clone, Copy)]
 enum Bake {
     /// The source the environment light is filtered from. No sun disk: the `DirectionalLight`
     /// carries the sun's light, and a disk here would add it twice.
     Light,
+    /// The sky the battlefield views draw (`Skybox`). Below the horizon it holds the horizon's
+    /// value at the same azimuth: infinitely distant ground under haze, the limit the fog
+    /// converges to.
+    Drawn,
 }
 
 impl Bake {
     /// Resolution: face size, pixels; a power of two, or `GeneratedEnvironmentMapLight` panics.
     /// Bevy convolves the light's source (Lambertian for diffuse, GGX per mip for specular) before
     /// anything samples it, so 128² resolves this smooth sky and keeps the startup filter cheap.
+    /// The drawn sky's 512² is 0.18° a texel: the optic's 25° field over about 1080 px magnifies
+    /// a texel about 7.6× (DERIVED), and the smooth gradient holds at that.
     fn face_px(self) -> u32 {
         match self {
             Bake::Light => 128,
+            Bake::Drawn => 512,
         }
     }
 }
@@ -219,8 +229,7 @@ fn sky_radiance(look: &Lighting, toward_sun: Vec3, dir: Vec3, bake: Bake) -> Vec
     let glow = Vec3::from_array(look.glow_linear.0);
     let ground = Vec3::from_array(look.ground_linear.0);
 
-    let up = dir.y.clamp(-1.0, 1.0);
-    if up >= 0.0 {
+    let sky = |up: f32| {
         // `sqrt` hugs the gradient to the horizon, where a real low-sun sky keeps its warmth.
         let t = up.sqrt();
         let base = haze.lerp(zenith, t);
@@ -232,10 +241,12 @@ fn sky_radiance(look: &Lighting, toward_sun: Vec3, dir: Vec3, bake: Bake) -> Vec
             glow,
             toward.powi(look.glow_exponent.0) * (1.0 - t) * look.glow_strength.0,
         )
-    } else {
-        match bake {
-            Bake::Light => haze.lerp(ground, (-up).sqrt()),
-        }
+    };
+    let up = dir.y.clamp(-1.0, 1.0);
+    match bake {
+        _ if up >= 0.0 => sky(up),
+        Bake::Light => haze.lerp(ground, (-up).sqrt()),
+        Bake::Drawn => sky(0.0),
     }
 }
 
@@ -261,10 +272,12 @@ fn cube_face_direction(face: u32, u: f32, v: f32) -> Vec3 {
     .normalize()
 }
 
-/// Bake [`sky_radiance`] into six square layers, per [`Bake`].
+/// Bake [`sky_radiance`] into a cubemap, per [`Bake`].
 fn bake_cubemap(look: &Lighting, toward_sun: Vec3, bake: Bake) -> Image {
     use bevy::asset::RenderAssetUsages;
-    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    use bevy::render::render_resource::{
+        Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
+    };
 
     let size = bake.face_px();
     let mut image = Image::new_fill(
@@ -276,10 +289,19 @@ fn bake_cubemap(look: &Lighting, toward_sun: Vec3, bake: Bake) -> Image {
         TextureDimension::D2,
         &[0; 8],
         TextureFormat::Rgba16Float,
-        // Both worlds: the generator reads the asset back from `Assets<Image>` to size its
-        // convolution, so the main-world copy has to survive extraction.
-        RenderAssetUsages::all(),
+        match bake {
+            // Both worlds: the generator reads the asset back from `Assets<Image>` to size its
+            // convolution, so the main-world copy has to survive extraction.
+            Bake::Light => RenderAssetUsages::all(),
+            // Only the skybox reads it, on the GPU: no 12.6 MB main-world copy (DERIVED, 512²·6·8 B).
+            Bake::Drawn => RenderAssetUsages::RENDER_WORLD,
+        },
     );
+    // Bevy skips a skybox whose image is not a cube view, with only a `warn_once`.
+    image.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::Cube),
+        ..default()
+    });
     let texel = |k: u32| 2.0 * (k as f32 + 0.5) / size as f32 - 1.0;
     for face in 0..6 {
         for y in 0..size {
@@ -330,10 +352,13 @@ pub(crate) fn plugin(app: &mut App) {
     app.insert_resource(recorded.clone()).add_systems(
         Update,
         (
-            retire_sky_filter.run_if(resource_exists::<SkyLight>),
-            light_battlefield_views,
-        )
-            .chain(),
+            (
+                retire_sky_filter.run_if(resource_exists::<SkyLight>),
+                light_battlefield_views,
+            )
+                .chain(),
+            draw_sky,
+        ),
     );
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
@@ -368,7 +393,7 @@ fn light_battlefield_views(
     }
     let mut views = views
         .iter()
-        .filter(|(_, profile)| profile.is_none_or(|profile| profile.draws_battlefield()))
+        .filter(|(_, profile)| draws_battlefield(*profile))
         .map(|(view, _)| view)
         .peekable();
     if views.peek().is_none() {
@@ -398,6 +423,42 @@ fn light_battlefield_views(
                 commands.entity(view).insert(light.clone());
             }
         }
+    }
+}
+
+/// Whether a 3-D view draws the battlefield: a battlefield profile, or none (the armour
+/// sandbox's views). A pen cam view lights and draws its own stage.
+fn draws_battlefield(profile: Option<&CameraProfile>) -> bool {
+    profile.is_none_or(|profile| profile.draws_battlefield())
+}
+
+/// Draw the sky behind every battlefield view that paints its own background: the
+/// [`Bake::Drawn`] cubemap, baked when the first such view appears, as a `Skybox` at the fill's
+/// luminance, `Lighting::sky_intensity_cd_m2` (one number for the sky's light and its look). A view
+/// that does not clear its target (the sandbox's overlay and UI cameras) composites over a lower
+/// view's picture, which a skybox would paint over.
+///
+/// A frame-cost ablation (`SPIKE_ABLATE=sky`, `render_cost`) leaves every view without it.
+fn draw_sky(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut drawn: Local<Option<Skybox>>,
+    ablate: Option<Res<crate::render_cost::Ablate>>,
+    views: Query<(Entity, &Camera, Option<&CameraProfile>), (With<Camera3d>, Without<Skybox>)>,
+) {
+    if ablate.is_some_and(|ablate| ablate.sky) {
+        return;
+    }
+    for (view, camera, profile) in &views {
+        if !draws_battlefield(profile) || matches!(camera.clear_color, ClearColorConfig::None) {
+            continue;
+        }
+        let skybox = drawn.get_or_insert_with(|| Skybox {
+            image: Some(images.add(bake_cubemap(&LIGHTING, toward_sun(), Bake::Drawn))),
+            brightness: LIGHTING.sky_intensity_cd_m2.0,
+            rotation: Quat::IDENTITY,
+        });
+        commands.entity(view).insert(skybox.clone());
     }
 }
 
@@ -571,19 +632,102 @@ mod tests {
         );
     }
     /// The constraints `GeneratedEnvironmentMapLight` PANICS on — square, power-of-two, and six
-    /// faces — so a bad edit fails here rather than at first render.
+    /// faces — held by every bake, so a bad edit fails here rather than at first render.
     #[test]
     fn the_source_cubemap_matches_what_the_filter_requires() {
-        let face = Bake::Light.face_px();
-        assert!(face.is_power_of_two());
-        let size = bake_cubemap(&LIGHTING, toward_sun(), Bake::Light)
-            .texture_descriptor
-            .size;
+        for bake in [Bake::Light, Bake::Drawn] {
+            let face = bake.face_px();
+            assert!(face.is_power_of_two());
+            let size = bake_cubemap(&LIGHTING, toward_sun(), bake)
+                .texture_descriptor
+                .size;
+            assert_eq!(
+                (size.width, size.height, size.depth_or_array_layers),
+                (face, face, 6),
+                "six square faces",
+            );
+        }
+    }
+
+    /// Bevy draws a skybox only from a cube view, and skips any other with one `warn_once`
+    /// (`sanity_check_skybox_image_and_warn`): the battlefield would show the clear colour.
+    #[test]
+    fn the_drawn_bake_is_a_cube_view() {
+        let view = bake_cubemap(&LIGHTING, toward_sun(), Bake::Drawn).texture_view_descriptor;
         assert_eq!(
-            (size.width, size.height, size.depth_or_array_layers),
-            (face, face, 6),
-            "six square faces",
+            view.and_then(|view| view.dimension),
+            Some(bevy::render::render_resource::TextureViewDimension::Cube),
         );
+    }
+
+    /// Below the horizon the drawn sky is the horizon itself at the same azimuth, so a sightline
+    /// past the terrain's edge meets the haze it fades into, never a darker ground band; the light
+    /// bake keeps the ground's bounce there. FIXTURE DATA: the sampled azimuths and depressions.
+    #[test]
+    fn the_drawn_sky_below_the_horizon_is_the_horizon() {
+        let look = Lighting::parse(FILE, DATA).unwrap();
+        let toward = toward_sun();
+        for azimuth_deg in [0.0_f32, 45.0, 200.0] {
+            let (sin, cos) = azimuth_deg.to_radians().sin_cos();
+            let horizon = sky_radiance(&look, toward, Vec3::new(cos, 0.0, sin), Bake::Drawn);
+            for depression in [0.05_f32, 0.5, 2.0] {
+                let below = Vec3::new(cos, -depression, sin).normalize();
+                let drawn = sky_radiance(&look, toward, below, Bake::Drawn);
+                // Resolution: the azimuth is renormalized from a shortened vector, a few ulps.
+                assert!(drawn.abs_diff_eq(horizon, 1e-6), "{drawn} under {horizon}");
+                assert!(
+                    !sky_radiance(&look, toward, below, Bake::Light).abs_diff_eq(horizon, 1e-3)
+                );
+            }
+        }
+    }
+
+    /// The drawn sky's views, which every battlefield picture relies on: each battlefield view that
+    /// paints its own background carries one shared `Skybox` at the fill's luminance; a pen cam
+    /// view keeps its own clear colour, and a view that composites over another (no clear) draws
+    /// none, or it would paint over the picture beneath it.
+    #[test]
+    fn the_sky_is_drawn_behind_every_battlefield_view_that_clears() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>().add_plugins(plugin);
+        let world = app.world_mut();
+        let commander = world
+            .spawn((Camera3d::default(), CameraProfile::BattlefieldThirdPerson))
+            .id();
+        let sandbox = world.spawn(Camera3d::default()).id();
+        let inset = world
+            .spawn((Camera3d::default(), CameraProfile::PenCamInset))
+            .id();
+        let overlay = world
+            .spawn((
+                Camera3d::default(),
+                Camera {
+                    clear_color: ClearColorConfig::None,
+                    ..default()
+                },
+            ))
+            .id();
+        app.update();
+        let lesson = app
+            .world_mut()
+            .spawn((Camera3d::default(), CameraProfile::KillCamLesson))
+            .id();
+        app.update();
+
+        let world = app.world();
+        let drawn = world
+            .get::<Skybox>(commander)
+            .expect("the commander view draws the sky");
+        assert_eq!(drawn.brightness, LIGHTING.sky_intensity_cd_m2.0);
+        for view in [sandbox, lesson] {
+            let skybox = world
+                .get::<Skybox>(view)
+                .expect("a battlefield view draws the sky");
+            assert_eq!(skybox.image, drawn.image, "one drawn bake, shared");
+        }
+        for view in [inset, overlay] {
+            assert!(world.get::<Skybox>(view).is_none());
+        }
     }
 
     /// Where the light bake's glow lies, which every lit surface relies on: on the side the

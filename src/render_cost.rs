@@ -51,6 +51,7 @@
 //! * **`SPIKE_ABLATE=<feature>[,<feature>…]`**: render features removed, to measure what each costs
 //!   by difference. `bloom` and `depth_prepass` remove those components from every `Camera3d`;
 //!   `env_light` stops `sky` from filtering the sky's environment light and giving it to views;
+//!   `sky` stops `sky` from drawing the sky behind them;
 //!   `ui` hides every UI root, which removes the UI's extraction and drawing but not its layout. An
 //!   unknown name refuses startup, so a typo cannot read as a free feature. Never part of a shipped
 //!   measurement: the picture changes.
@@ -99,11 +100,13 @@ use crate::trace::{JsonlSink, role_path};
 const PHASE_COUNT_PERIOD_S: f64 = 5.0;
 
 /// Render features removed by `SPIKE_ABLATE` (module doc). Read by `sky::light_battlefield_views`
-/// for `env_light`; the other fields act here or on the terrain material.
+/// for `env_light` and by `sky::draw_sky` for `sky`; the other fields act here or on the terrain
+/// material.
 #[derive(Resource, Clone, Copy, Default, Debug)]
 pub(crate) struct Ablate {
     bloom: bool,
     pub(crate) env_light: bool,
+    pub(crate) sky: bool,
     depth_prepass: bool,
     ui: bool,
     terrain_casters: bool,
@@ -140,6 +143,7 @@ impl Ablate {
             match name {
                 "bloom" => ablate.bloom = true,
                 "env_light" => ablate.env_light = true,
+                "sky" => ablate.sky = true,
                 "depth_prepass" => ablate.depth_prepass = true,
                 "ui" => ablate.ui = true,
                 "terrain-casters" => ablate.terrain_casters = true,
@@ -206,7 +210,7 @@ impl std::fmt::Display for RenderControlError {
             Self::Ablation(value) => (
                 "SPIKE_ABLATE",
                 value,
-                "bloom, env_light, depth_prepass, ui, terrain-casters, construction-casters, tank-casters, inset_half, inset_masks, inset_bloom, terrain_macro or terrain_layers",
+                "bloom, env_light, sky, depth_prepass, ui, terrain-casters, construction-casters, tank-casters, inset_half, inset_masks, inset_bloom, terrain_macro or terrain_layers",
             ),
         };
         write!(f, "{name}={value:?}: expected {expected}")
@@ -857,8 +861,10 @@ mod tests {
     /// battery reads every `SPIKE_ABLATE` condition as the cost of the named feature.
     #[test]
     fn ablation_list_parses_known_features_and_rejects_unknown_ones() {
-        let ablate = Ablate::parse("bloom, env_light,,ui").expect("known features");
-        assert!(ablate.bloom && ablate.env_light && ablate.ui && !ablate.depth_prepass);
+        let ablate = Ablate::parse("bloom, env_light,,ui,sky").expect("known features");
+        assert!(
+            ablate.bloom && ablate.env_light && ablate.ui && ablate.sky && !ablate.depth_prepass
+        );
         let ablate = Ablate::parse("inset_half,inset_masks,inset_bloom").expect("inset levers");
         assert!(ablate.inset_half && ablate.inset_masks && ablate.inset_bloom && !ablate.bloom);
         let terrain = Ablate::parse("terrain_macro")

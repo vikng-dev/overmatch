@@ -19,7 +19,7 @@
 #
 # Useful levers: `msaa:`, `render_scale:`, `shadow_distance:`, `shadow_cascades:`,
 # `shadow_resolution:`, `track_prints:` (video.ron, src/settings.rs); OVERMATCH_PROBE_TANKS;
-# SPIKE_ABLATE=bloom,env_light,depth_prepass,ui and SPIKE_PHASE_COUNTS=1
+# SPIKE_ABLATE=bloom,env_light,sky,depth_prepass,ui and SPIKE_PHASE_COUNTS=1
 #   (inset_half, inset_masks, inset_bloom price the pen cam corner: run-pencam-attribution.sh)
 #   (src/render_cost.rs).
 # OVERMATCH_BATTLE=1 is the battle scene (src/tank/battle.rs): 30 tanks moving and firing on a
