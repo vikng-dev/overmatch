@@ -162,6 +162,18 @@ fn mount(app: &mut App, frames: &plan::Frames) {
     }
     match frames.camera {
         plan::Camera::Player => {}
+        plan::Camera::Orbit { direction } => {
+            let rotation = Transform::IDENTITY.looking_to(direction, Dir3::Y).rotation;
+            app.add_systems(
+                PostUpdate,
+                (move |mut cameras: Query<&mut Transform, (With<crate::view::PlayerView>, With<crate::camera::OrbitCamera>)>| {
+                    cameras.single_mut().expect("capture frames.camera Orbit requires one player orbit camera at Startup; choose Pose on a root without one").rotation = rotation;
+                })
+                .before(crate::camera::OrbitCameraSet)
+                .before(crate::camera::GunnerCameraPlaced)
+                .after(crate::state::PlayerInputSet),
+            );
+        }
         plan::Camera::Pose { eye, look } => {
             let pose = Pose {
                 eye: eye.into(),
