@@ -396,7 +396,7 @@ pub(crate) struct Motion<'a> {
 }
 
 impl Motion<'_> {
-    /// Conservative occupied-motion bounds; rotation uses the furthest AABB corner about the COM.
+    /// Conservative occupied-motion bounds, including the curved path between endpoint hulls.
     pub(crate) fn bounds(&self) -> ColliderAabb {
         let Self {
             hull,
@@ -419,13 +419,20 @@ impl Motion<'_> {
                 .abs()
                 .max((aabb.max - centre).abs())
                 .length();
-            // DERIVED: every point's rotational travel is at most R*min(|omega|*dt, 2),
-            // bounded by arc length and diameter. Intersect with the whole rotation envelope.
-            let margin = Vec3::splat(radius * (spin.length() * dt).min(2.0));
+            let angle = spin.length() * dt;
+            let turn = Quat::from_scaled_axis(spin * dt);
+            let end = hull.aabb(
+                centre + travel + turn * (position - centre),
+                turn * rotation,
+            );
+            // DERIVED: each point has |x''| <= R*|omega|², so its deviation from the
+            // endpoint chord is at most R*(|omega|*dt)²/8. Linear travel adds no curvature.
+            // The full rotation envelope caps this bound over long angular paths.
+            let margin = Vec3::splat(radius * angle * angle / 8.0);
             (
-                (aabb.min.min(aabb.min + travel) - margin)
+                (aabb.min.min(end.min) - margin)
                     .max(centre.min(centre + travel) - Vec3::splat(radius)),
-                (aabb.max.max(aabb.max + travel) + margin)
+                (aabb.max.max(end.max) + margin)
                     .min(centre.max(centre + travel) + Vec3::splat(radius)),
             )
         };
@@ -892,6 +899,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The game's environment destruction query must not cast into the space behind a
+    /// short circular path. A small chunk rotating about its body's distant COM exposed
+    /// this waste: full arc-length expansion admitted targets behind both endpoint hulls.
+    #[test]
+    fn an_orbiting_chunk_does_not_query_behind_its_quarter_circle() {
+        // Fixture: a small cube travels from +X to +Y about the origin, without translation.
+        let radius = 2.0;
+        let hull = Collider::cuboid(0.2, 0.2, 0.2);
+        let bounds = Motion {
+            hull: &hull,
+            position: Vec3::X * radius,
+            rotation: Quat::IDENTITY,
+            centre: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            spin: Vec3::Z * std::f32::consts::FRAC_PI_2,
+            dt: 1.0,
+        }
+        .bounds();
+        // DERIVED: the occupied path stays in x,y >= -sqrt(3)*0.1; even a chord
+        // envelope bounded by its maximum second derivative excludes -radius/2.
+        assert!(bounds.min.x > -radius / 2.0 && bounds.min.y > -radius / 2.0);
     }
 
     fn driven_patch(
