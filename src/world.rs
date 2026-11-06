@@ -1,5 +1,6 @@
 //! Battlefield construction, environment lighting, and the ground queries shared by aiming and
-//! the camera. Required lighting data lives in `assets/world/lighting.ron`.
+//! the camera. Best practice: sky data is client-only, under the selected map's `view/` folder.
+//! See `.agents/docs/design/map-surroundings.md` for map asset ownership.
 
 use std::sync::{Arc, Mutex};
 
@@ -375,9 +376,9 @@ fn retire_sky_filter(
     if !ran {
         return;
     }
-    let Ok(light) = maps.get(filter) else {
-        return;
-    };
+    let light = maps
+        .get(filter)
+        .expect("a recorded sky filter carries the maps Bevy generated before extraction");
     *sky = SkyLight::Filtered(light.clone());
     commands.entity(filter).despawn();
     info!("sky light: filtered once; the filter is retired and the views share its maps");
@@ -418,7 +419,6 @@ fn report_recorded_sky_filters(
 }
 
 pub fn plugin(app: &mut App) {
-    look::get();
     // Decode the heightmap FIRST (synchronous, ADR-0014), then spawn whichever world it selects:
     // the heightfield when the grid decoded, the flat slab + authored course otherwise.
     app.add_systems(
@@ -594,22 +594,24 @@ fn spawn_environment(
     ablate: Option<Res<crate::render_cost::Ablate>>,
 ) {
     let mut blocks: Vec<Transform> = Vec::new();
-    // Settings owns the cascade ladder; this spawn supplies only the key light and its pose.
-    // Cascades fit around the camera. A low sun stretches the texel footprint along the light,
-    // which is what `SUN_SHADOW_NORMAL_BIAS` addresses.
-    commands.spawn((
-        DirectionalLight {
-            shadow_maps_enabled: true,
-            ..sun_light()
-        },
-        sun_transform(),
-        // WHAT THE SUN LIGHTS AND CASTS FROM. Not optional and not cosmetic: the vendored bevy_pbr
-        // patch gives every shadow view its LIGHT's mask, so a sun with no profile is layer-0-only
-        // and silently stops shadowing everything `render_policy` has moved off the world channel —
-        // the local tank's whole body, and the track shadow ribbon. Pinned by
-        // `render_policy::tests::the_sun_reaches_every_channel`.
-        crate::render_policy::LightProfile::BattlefieldSun,
-    ));
+    if !windows.is_empty() {
+        // Settings owns the cascade ladder; this spawn supplies only the key light and its pose.
+        // Cascades fit around the camera. A low sun stretches the texel footprint along the light,
+        // which is what `SUN_SHADOW_NORMAL_BIAS` addresses.
+        commands.spawn((
+            DirectionalLight {
+                shadow_maps_enabled: true,
+                ..sun_light()
+            },
+            sun_transform(),
+            // WHAT THE SUN LIGHTS AND CASTS FROM. Not optional and not cosmetic: the vendored bevy_pbr
+            // patch gives every shadow view its LIGHT's mask, so a sun with no profile is layer-0-only
+            // and silently stops shadowing everything `render_policy` has moved off the world channel —
+            // the local tank's whole body, and the track shadow ribbon. Pinned by
+            // `render_policy::tests::the_sun_reaches_every_channel`.
+            crate::render_policy::LightProfile::BattlefieldSun,
+        ));
+    }
 
     // The heightmap world: when the grid decoded, the heightfield IS the world — no flat slab,
     // no authored test course. The oracle's ground term comes from the grid; `TerrainMap` carries
@@ -1039,6 +1041,30 @@ mod tests {
             assert_eq!(light.intensity, look::get().sky_intensity_cd_m2.0);
         }
     }
+    /// The dedicated server shares the world installer but must construct no client sky.
+    /// Clients with a window still require the sun.
+    #[test]
+    fn the_sun_is_constructed_only_for_windowed_worlds() {
+        for windowed in [false, true] {
+            let mut app = crate::headless_test::headless_shell();
+            app.insert_resource(crate::terrain_grid::ForceFlatWorld)
+                .add_plugins(plugin);
+            if windowed {
+                app.world_mut().spawn(Window {
+                    visible: false,
+                    ..default()
+                });
+            }
+            crate::headless_test::finish_plugins(&mut app);
+            app.world_mut().run_schedule(Startup);
+            let world = app.world_mut();
+            assert_eq!(
+                world.query::<&DirectionalLight>().iter(world).count(),
+                usize::from(windowed),
+            );
+        }
+    }
+
     /// Mount the production world installer with a component-only Window and no winit or
     /// GPU. The rendered material and PrintDepths must receive the exact simulation mask.
     /// FIXTURE: a 2x2 asymmetric mask over a small flat grid, without map instances.

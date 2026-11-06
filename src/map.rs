@@ -57,8 +57,11 @@ const LEVEL_FILE: &str = "level.json";
 /// a placement whose ids resolve to nothing is present-but-broken (ADR-0011).
 const PROTOTYPES_FILE: &str = "prototypes.ron";
 
-/// Subdirectory of a map holding what WE generate from the authored data (the UI map image), as
-/// opposed to what the author shipped.
+/// Map asset ownership (best practice): root files are authored inputs both binaries read,
+/// belonging in the content digest and server pack. `view/` holds authored client-only
+/// data; `derived/` holds generated client products (the UI map image). Neither client folder
+/// enters the digest or server pack. The existing mask omission from the digest is the
+/// design's W1a lane. See `.agents/docs/design/map-surroundings.md`.
 const DERIVED_DIR: &str = "derived";
 
 /// `<root>/maps/<id>` — the map's directory.

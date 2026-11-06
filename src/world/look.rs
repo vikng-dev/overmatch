@@ -1,11 +1,11 @@
-//! Required world lighting tastes. Renderer sampling resolution stays with its algorithm.
+//! Best practice: required per-map sky tastes, read only by client views at first use.
+//! Renderer sampling resolution stays with its algorithm. See `.agents/docs/design/map-surroundings.md`.
 use crate::provenance::{Sourced, from_shipped_str};
 use serde::Deserialize;
-use std::sync::LazyLock;
-const FILE: &str = "assets/world/lighting.ron";
-const DATA: &str = include_str!("../../assets/world/lighting.ron");
-static LIGHTING: LazyLock<Lighting> =
-    LazyLock::new(|| Lighting::parse(DATA).unwrap_or_else(|error| panic!("{error}")));
+use std::{path::Path, sync::LazyLock};
+static LIGHTING: LazyLock<Lighting> = LazyLock::new(|| {
+    Lighting::load(&crate::map::map_dir(&crate::assets::asset_root()).join("view/sky.ron"))
+});
 pub(super) fn get() -> &'static Lighting {
     &LIGHTING
 }
@@ -43,9 +43,21 @@ pub(super) struct Lighting {
     pub(super) glow_strength: Sourced<f32>,
 }
 impl Lighting {
-    fn parse(text: &str) -> Result<Self, String> {
-        let data: Self = from_shipped_str(FILE, text)?;
-        let refuse = |field: &str, fix: &str| format!("{FILE}: {field}: {fix}");
+    fn load(path: &Path) -> Self {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|error| {
+            panic!(
+                "{}: sky: {error}; restore the map's required view/sky.ron",
+                path.display()
+            )
+        });
+        Self::parse(&path.display().to_string(), &text).unwrap_or_else(|error| {
+            panic!("{error}; sky: author every required field with valid values and provenance")
+        })
+    }
+
+    fn parse(file: &str, text: &str) -> Result<Self, String> {
+        let data: Self = from_shipped_str(file, text)?;
+        let refuse = |field: &str, fix: &str| format!("{file}: {field}: {fix}");
         if !data.sun_elevation_deg.0.is_finite()
             || !(0.0..90.0).contains(&data.sun_elevation_deg.0)
             || data.sun_elevation_deg.0 == 0.0
@@ -104,11 +116,43 @@ impl Lighting {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const FILE: &str = "fixture/view/sky.ron";
+    const DATA: &str = include_str!("../../assets/maps/kalinovo/view/sky.ron");
+
+    /// Client startup requires readable, admitted sky data; every refusal names its file,
+    /// field and repair so a map author can correct it before play.
+    #[test]
+    fn sky_file_failures_name_the_file_field_and_fix() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("target/sky-file-admission-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sky.ron");
+        for (text, field, fix) in [
+            (None, "sky:", "restore"),
+            (Some("()"), "sun_elevation_deg", "author"),
+            (Some("("), "sky:", "author"),
+        ] {
+            if let Some(text) = text {
+                std::fs::write(&path, text).unwrap();
+            }
+            let error = std::panic::catch_unwind(|| Lighting::load(&path)).unwrap_err();
+            let message = error
+                .downcast_ref::<String>()
+                .expect("the load gate formats its refusal");
+            assert!(message.contains(&path.display().to_string()), "{message}");
+            assert!(
+                message.contains(field) && message.contains(fix),
+                "{message}"
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// The world refuses malformed authored light before startup, including test-only provenance.
     #[test]
     fn lighting_is_required_and_checked_before_play() {
-        Lighting::parse(DATA).unwrap();
-        let error = Lighting::parse("()").unwrap_err();
+        Lighting::parse(FILE, DATA).unwrap();
+        let error = Lighting::parse(FILE, "()").unwrap_err();
         assert!(
             error.contains(FILE) && error.contains("sun_elevation_deg"),
             "{error}"
@@ -134,10 +178,10 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            let error = Lighting::parse(&text).unwrap_err();
+            let error = Lighting::parse(FILE, &text).unwrap_err();
             assert!(error.contains(FILE) && error.contains(field), "{error}");
         }
-        let error = Lighting::parse(&DATA.replace("Taste(", "Fixture(")).unwrap_err();
+        let error = Lighting::parse(FILE, &DATA.replace("Taste(", "Fixture(")).unwrap_err();
         assert!(
             error.contains(FILE) && error.contains("Fixture provenance is test-only"),
             "{error}"

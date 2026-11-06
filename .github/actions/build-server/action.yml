@@ -53,6 +53,7 @@ runs:
     #                                    OUT of level.json, so it cannot be resolved at packaging
     #                                    time. `derived/` is excluded — `map_ui.png` is
     #                                    loaded only by `net::spawn_map`, a client plugin.
+    #                                    `view/` is excluded: authored client-only sky and outland.
     #   maps/*/prototypes.ron            crate::map::read_prototypes, what each id a map places
     #                                    means (a block's bounds or a construction asset), and the
     #                                    content digest; `map::load` panics without it
@@ -112,7 +113,8 @@ runs:
         while IFS= read -r path; do paths+=("$path"); done < <(
           {
             find assets/maps -type f \( -name '*.json' -o -name '*.png' -o -name '*.ron' \) \
-              -not -path 'assets/maps/*/derived/*'
+              -not -path 'assets/maps/*/derived/*' \
+              -not -path 'assets/maps/*/view/*'
             find assets/constructions -type f \( -name '*.construction.ron' -o -name '*.dressing.ron' \)
             echo assets/terrain/ground_types.ron
           } | LC_ALL=C sort

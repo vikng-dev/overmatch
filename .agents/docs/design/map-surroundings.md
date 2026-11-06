@@ -630,7 +630,8 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
 
 | Piece | Best practice now | Provisional now | Replaced by |
 |---|---|---|---|
-| Sky | analytic sky; two bakes in world orientation; one brightness | none | none |
+| Sky data (V0 delivered) | per-map `view/sky.ron`, admitted at client first use; sun behind the window gate; server pack excludes `view/` | none | none |
+| Sky rendering (L1 onward) | analytic sky; two bakes in world orientation; one brightness | none | none |
 | Haze | Koschmieder fog; one unshadowed lobe for sky and fog | the 12 km default (playtest fork) | the fork's verdict |
 | Outland | stitched, attribute-continuous view mesh to 1.25·V | odd-reflection height; mirrored mask | authored outland, or terrain past the boundary (#221) |
 | Clouds, sun disk | baked, static; one shared solar radius | none | none |
