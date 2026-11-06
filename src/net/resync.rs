@@ -71,6 +71,8 @@ fn note_presented<C: Component>(
     timeline: Res<InterpolationTimeline>,
     mut commands: Commands,
 ) {
+    // Stream refusal or ordinary retirement can despawn a replica before these commands flush.
+    // Its presentation bookkeeping then expires with it, as in hold_unknown_history.
     for (entity, value, history, presented) in &replicas {
         match history.get_state_at_or_before(timeline.tick()) {
             Some(HistoryState::Updated(_)) => {
@@ -81,11 +83,11 @@ fn note_presented<C: Component>(
                 if !matches!(presented, Some(Presented::Sampled(_))) {
                     commands
                         .entity(entity)
-                        .insert(Presented::<C>::Sampled(PhantomData));
+                        .try_insert(Presented::<C>::Sampled(PhantomData));
                 }
             }
             Some(HistoryState::Removed) if presented.is_some() => {
-                commands.entity(entity).remove::<Presented<C>>();
+                commands.entity(entity).try_remove::<Presented<C>>();
             }
             // No history is either a not-yet-visible component or a held resync sample.
             // An explicit removal with no presentation marker is already retired.
@@ -250,6 +252,47 @@ mod tests {
             app.world().get_entity(sampled).is_err(),
             "retiring a sampled replica must not queue a command error after despawn"
         );
+    }
+
+    /// Refusing a peer's stream can despawn its carrier while presentation commands wait in
+    /// another system's buffer. Neither sampling nor removal may resurrect it or panic.
+    #[test]
+    fn a_refused_replica_can_depart_before_presentation_commands_flush() {
+        use super::super::debris_stress::DebrisPose;
+        use bevy::ecs::system::{IntoSystem, System};
+
+        for removing in [false, true] {
+            let mut app = interpolation_app();
+            cursor(&mut app, 100);
+            let pose = DebrisPose {
+                position: Vec3::Y,
+                rotation: Quat::IDENTITY,
+            };
+            let mut samples = history(pose);
+            if removing {
+                samples.insert_removed(Tick(100));
+            }
+            let entity = app
+                .world_mut()
+                .spawn((Remote, Interpolated, pose, samples))
+                .id();
+            if removing {
+                app.world_mut()
+                    .entity_mut(entity)
+                    .insert(super::Presented::<DebrisPose>::Held);
+            }
+            let mut note = IntoSystem::into_system(super::note_presented::<DebrisPose>);
+            note.initialize(app.world_mut());
+            note.run_without_applying_deferred((), app.world_mut())
+                .unwrap();
+            // The refusal path flushes its despawn before this independent command buffer.
+            app.world_mut().entity_mut(entity).despawn();
+            note.apply_deferred(app.world_mut());
+            assert!(
+                app.world().get_entity(entity).is_err(),
+                "refused carriers stay gone"
+            );
+        }
     }
 
     /// Before a component's first visible sample it has no previous presentation to hold. Keeping
