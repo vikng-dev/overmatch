@@ -1,0 +1,11 @@
+Subject: the video game’s environment destruction model; game state only.
+
+Status: the zero-overrun landing gate is NOT met; the committed bound correction is partial progress.
+Bisect: “construction: keep one permanent collider per chunk” reproduces the regression before immediate disconnection: MEASURED 46.344 ms worst / 30.531 ms sweep at impact +2, versus the historical 6.081 ms sweep.
+Cause: MEASURED original-tip probe, impact +2: 203 sources, 11,720 leaf casts; casts 20.731 ms, preload 4.247 ms, cut resolution 0.484 ms. Small chunks orbit a shared COM; full arc-length expansion admits multi-metre boxes of empty space. This is the work the small fixture missed.
+Fix: “construction: bound rotating rubble by its curved path” replaces arc-length inflation with endpoint hulls plus DERIVED curvature allowance R*theta²/8, capped by the full rotation envelope. Physical velocity and spin remain unchanged. All temporary probes are removed.
+MEASURED final run A: worst 31.332 ms at tick 1311; sweep 13.033 ms; contact-window p99 25.787 ms; 4 overruns; impact tick 1309. Artifacts: target/integ-ram-rubble5-fix-a/.
+MEASURED final run B: worst 27.955 ms at tick 1312; sweep 13.331 ms; contact-window p99 16.167 ms; 4 overruns; impact tick 1310. Artifacts: target/integ-ram-rubble5-fix-b/. Both summaries use result.json’s impact-to-deadline window.
+Impact-clock explanation: Ram::pose starts the counter at spawn; the client waits for combat/synchronization release, then 128 idle script ticks. The historical paused census contacts at tick 1263 both before and after the collider change; no destruction precedes contact in the real runs. DERIVED attribution: startup/input phase, not an eleven-tick delay in the destruction law. The exact old eleven-tick spawn-to-throttle breakdown was not instrumented; the same fixed code now reports 1309/1310.
+MEASURED gates: formatting, CI clippy, all 31 sweep tests, citation/UI/network/bake guards and one detached full library suite pass: 2440 passed, 40 ignored, zero failures. The quarter-circle exclusion and complete-path containment witnesses pass.
+At the session cap, the residual-probe build had finished but its run still waited for the machine lock; only that queued run was cancelled. Remaining work: localize the residual 13 ms sweep and remove all four overruns in each final run. Nothing pushed.
