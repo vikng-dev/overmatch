@@ -347,9 +347,6 @@ pub(super) mod tests {
     /// a different invalid class. Fixture coordinates carry no shipped map constraint.
     #[test]
     fn polygon_refusals_name_the_file_field_and_fix() {
-        let valid = boundary_text(EXTENT);
-        let start = valid.find('[').unwrap();
-        let end = valid.find(']').unwrap() + 1;
         for (polygon, fix) in [
             ("[]", "at least three"),
             ("[(0.0, 0.0), (1.0, 0.0)]", "at least three"),
@@ -378,7 +375,7 @@ pub(super) mod tests {
                 "nonadjacent touches",
             ),
         ] {
-            let text = format!("{}{}{}", &valid[..start], polygon, &valid[end..]);
+            let text = polygon_text(EXTENT, polygon);
             refusal(&text, "polygon", fix);
         }
     }

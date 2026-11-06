@@ -210,13 +210,67 @@ pub(crate) enum Prototype {
     Construction { asset: String },
 }
 
-/// One authored placement at prototype size. `rotation` is XYZW, `translation` is XYZ.
+impl Prototype {
+    /// A graybox collider and spawn obstacle as a posed unit cube. Constructions own their geometry.
+    pub(crate) fn block(&self, pose: Isometry3d) -> Option<Transform> {
+        match self {
+            Self::Block { min, max, .. } => {
+                let (min, max) = (Vec3::from_array(*min), Vec3::from_array(*max));
+                Some(Transform {
+                    translation: Vec3::from(pose.translation) + pose.rotation * ((min + max) * 0.5),
+                    rotation: pose.rotation,
+                    scale: max - min,
+                })
+            }
+            Self::Construction { .. } => None,
+        }
+    }
+}
+
+/// An admitted placement orientation and XZ; stale authored Y is checked, then discarded.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PlacementPose {
+    xz: Vec2,
+    rotation: Quat,
+}
+
+impl PlacementPose {
+    fn checked(translation: [f32; 3], rotation: [f32; 4], id: &str) -> Result<Self, String> {
+        let rotation = Quat::from_array(rotation);
+        if !translation.iter().all(|value| value.is_finite()) {
+            return Err(format!(
+                "field instances[{id}].translation — author finite XYZ metres"
+            ));
+        }
+        // Resolution: reject near-zero norms before normalization amplifies rounding error.
+        const MIN_ROTATION_LENGTH_SQ: f32 = 1.0e-12;
+        let length_sq = rotation.length_squared();
+        if !(rotation.is_finite() && length_sq.is_finite() && length_sq > MIN_ROTATION_LENGTH_SQ) {
+            return Err(format!(
+                "field instances[{id}].rotation — author a finite quaternion with a normalizable length"
+            ));
+        }
+        Ok(Self {
+            xz: Vec2::new(translation[0], translation[2]),
+            rotation: rotation.normalize(),
+        })
+    }
+
+    pub(crate) fn at_height(self, height: f32) -> Isometry3d {
+        Isometry3d::new(Vec3::new(self.xz.x, height, self.xz.y), self.rotation)
+    }
+
+    pub(crate) fn xz(self) -> Vec2 {
+        self.xz
+    }
+}
+
+/// One authored placement at prototype size.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(try_from = "InstanceFields")]
 pub(crate) struct InstanceRecord {
     pub(crate) prototype: String,
-    pub(crate) translation: [f32; 3],
-    pub(crate) rotation: [f32; 4],
+    pub(crate) pose: PlacementPose,
     /// The file's own instance id — the sort key that fixes iteration order.
     pub(crate) id: String,
 }
@@ -244,8 +298,7 @@ impl TryFrom<InstanceFields> for InstanceRecord {
         }
         Ok(Self {
             prototype: raw.prototype,
-            translation: raw.translation,
-            rotation: raw.rotation,
+            pose: PlacementPose::checked(raw.translation, raw.rotation, &raw.id)?,
             id: raw.id,
         })
     }
@@ -675,28 +728,8 @@ impl ParsedMap {
             path.with_file_name(BOUNDARY_FILE).display(),
         );
         for instance in &self.level.instances {
-            let rotation = Quat::from_array(instance.rotation);
-            let length_sq = rotation.length_squared();
-            assert!(
-                instance.translation.iter().all(|value| value.is_finite()),
-                "map: {} field instances[{}].translation — author finite XYZ metres",
-                path.display(),
-                instance.id,
-            );
-            assert!(
-                rotation.is_finite()
-                    && length_sq.is_finite()
-                    && length_sq > crate::scatter::MIN_ROTATION_LENGTH_SQ,
-                "map: {} field instances[{}].rotation — author a finite quaternion with a normalizable length",
-                path.display(),
-                instance.id,
-            );
-            // Scatter replaces authored Y with terrain height; vertical translation cannot
-            // change the projected footprint. Its normalized authored rotation is retained.
-            let pose = Isometry3d::new(
-                Vec3::new(instance.translation[0], 0.0, instance.translation[2]),
-                rotation.normalize(),
-            );
+            // Scatter replaces stale authored Y with terrain height; projected bounds use zero.
+            let pose = instance.pose.at_height(0.0);
             let bounds = match &self.prototypes[&instance.prototype] {
                 Prototype::Construction { asset } => crate::construction::footprint(
                     constructions
@@ -704,15 +737,9 @@ impl ParsedMap {
                         .expect("load resolved every construction before admission"),
                     pose,
                 ),
-                Prototype::Block { min, max, .. } => {
-                    let (min, max) = (Vec3::from_array(*min), Vec3::from_array(*max));
-                    Transform {
-                        translation: Vec3::from(pose.translation)
-                            + pose.rotation * ((min + max) * 0.5),
-                        rotation: pose.rotation,
-                        scale: max - min,
-                    }
-                }
+                prototype @ Prototype::Block { .. } => prototype
+                    .block(pose)
+                    .expect("a block prototype supplies its unit-cube transform"),
             };
             let mut points = Vec::with_capacity(8);
             // A footprint is the convex projection of all eight corners of the posed unit cube.
@@ -894,11 +921,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// THE MANIFEST IS THE MAP (`terrain_grid::decode_height_grid`): the shipped tree must carry
-    /// one at the default id, it must parse and pass every check through the real loader, and the
-    /// heightmap it names must pass the production terrain decoder. A map half-shipped — a PNG with
-    /// no manifest, or a manifest naming a file nobody added — fails here in CI rather than at
-    /// first boot.
+    /// CI checks the default map through the production loader and terrain decoder, refusing
+    /// missing manifests, missing heightmaps and undecodable images before boot.
     #[test]
     fn shipped_map_ships_a_valid_manifest() {
         let manifest = shipped_manifest();
@@ -954,12 +978,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// The surface-weight masks, pinned the way the heightmap is: DECODED from the shipped bytes,
-    /// so a Git LFS pointer file shipping in their place fails here in CI. `terrain.masks` in
-    /// `level.json` is the declaration, and this is what proves the bytes behind it are the image
-    /// that block describes — 8-bit RGB at the DECLARED resolution, R = recesses, G = slopes,
-    /// B = lowlands. The resolution is read out of the manifest rather than written here, so
-    /// re-cutting the masks at another sample spacing is one edit, in the file that declares it.
+    /// Decode the declared 8-bit RGB resolution, refusing LFS pointers. Channels are independent
+    /// linear weights: R = recesses, G = slopes, B = lowlands.
     #[test]
     fn shipped_terrain_masks_decode_as_declared() {
         let manifest = shipped_manifest();
@@ -1478,20 +1498,7 @@ pub(crate) mod tests {
         let path = map_dir(&fixture.0).join(BOUNDARY_FILE);
         let boundary = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, boundary.replace("floor_m: (-3", "floor_m: (-2")).unwrap();
-        for digest_only in [false, true] {
-            let refusal = std::panic::catch_unwind(|| {
-                if digest_only {
-                    content_digest(&fixture.0);
-                } else {
-                    load(&fixture.0);
-                }
-            })
-            .expect_err("both entry points refuse a floor at the lowest decodable height");
-            let reason = refusal.downcast_ref::<String>().unwrap();
-            for part in ["boundary.ron", "floor_m", "below height_decode.offset_m"] {
-                assert!(reason.contains(part), "{reason}");
-            }
-        }
+        fixture.refuses(&["boundary.ron", "floor_m", "below height_decode.offset_m"]);
     }
 
     /// Finite source coordinates can still overflow a derived range. Terrain and boundary

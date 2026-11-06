@@ -2576,26 +2576,17 @@ mod tests {
             .unwrap();
         let manifest = crate::map::tests::shipped_manifest();
         for instance in &manifest.instances {
-            let pose = Transform {
-                translation: Vec3::new(instance.translation[0], 0.0, instance.translation[2]),
-                rotation: Quat::from_array(instance.rotation).normalize(),
-                ..Transform::IDENTITY
-            };
+            let pose = instance.pose.at_height(0.0);
             let block = match &manifest.prototypes[&instance.prototype] {
-                crate::map::Prototype::Block { min, max, .. } => {
-                    let (min, max) = (Vec3::from_array(*min), Vec3::from_array(*max));
-                    Transform {
-                        translation: pose.translation + pose.rotation * ((min + max) * 0.5),
-                        rotation: pose.rotation,
-                        scale: max - min,
-                    }
-                }
+                prototype @ crate::map::Prototype::Block { .. } => prototype
+                    .block(pose)
+                    .expect("a block prototype supplies its unit-cube transform"),
                 crate::map::Prototype::Construction { asset } => crate::construction::footprint(
                     manifest
                         .constructions
                         .get(asset)
                         .expect("map load resolved every structure"),
-                    pose.to_isometry(),
+                    pose,
                 ),
             };
             if let Some(footprint) = block_footprint(&block, None, radius) {
