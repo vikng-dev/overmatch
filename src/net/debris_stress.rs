@@ -1112,3 +1112,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "debris_stress/tests/ram_census.rs"]
+mod ram_census;
