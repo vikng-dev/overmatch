@@ -310,7 +310,9 @@ class RamTests(unittest.TestCase):
         # Fixture: unequal ticks and sends expose percentile-of-percentile and nested-cost bugs.
         recipe = collapse.ram_recipe(collapse.ROOT / "scripts/perf/ram.json")
         ticks = [dict(tick=i, tick_us=100*i, physics_us=30, sleep_us=10,
-                      intake_us=5, structure_us=15, refit_us=10, publish_us=5, contacts_us=2, collector_us=1, dt_s=0.1, awake=4-i, tanks=1)
+                      intake_us=5, structure_us=15, refit_us=10, publish_us=5, contacts_us=2,
+                      sweep_us=3, crumble_us=7, collector_us=1, dt_s=0.1, awake=4-i, tanks=1,
+                      phases_us=dict(fixed_update_us=10, physics_step_us=28, construction_ecs_us=10, fixed_last_us=2))
                  for i in range(1, 5)]
         ram = dict(recipe=recipe, plan=dict(minimum_m_s=9, governed_m_s=10, runup_m=20,
                                            spawn=[0, 0, 0], rotation=[0, 0, 0, 1]),
@@ -331,8 +333,48 @@ class RamTests(unittest.TestCase):
         self.assertEqual(result["peak_awake"], 2)
         self.assertEqual(result["send_us"], 40)
         self.assertAlmostEqual(sum(result["share_pct"].values()), 100)
-        self.assertAlmostEqual(result["share_pct"]["physics"], 100*54/900)
+        self.assertAlmostEqual(result["share_pct"]["physics_step"], 100*54/900)
         self.assertAlmostEqual(result["share_pct"]["sleep"], 100*30/900)
+        self.assertAlmostEqual(result["share_pct"]["sweep"], 100*9/900)
+        self.assertAlmostEqual(result["share_pct"]["crumble"], 100*21/900)
+        self.assertEqual(result["stage_us"]["unattributed"], 609)
+
+    def test_each_over_budget_tick_reports_its_own_gap_including_the_approach(self):
+        # Fixture: all ticks exceed the budget, including the tick before measured contact.
+        recipe, ram = self.fixture()
+        for tick in ram["ticks"]:
+            tick["dt_s"] = 0.00005
+        result = collapse.ram_summary(self.text(ram), recipe)
+        self.assertEqual([t["tick"] for t in result["over_budget_ticks"]], [1, 2, 3, 4])
+        for tick, measured in zip(ram["ticks"], result["over_budget_ticks"]):
+            self.assertEqual(measured["parts_us"]["unattributed"], tick["tick_us"] - 97)
+            self.assertAlmostEqual(measured["attributed_pct"], 100*97/tick["tick_us"])
+        self.assertEqual(result["worst_tick_attribution"], result["over_budget_ticks"][-1])
+
+    def test_new_stage_and_phase_fields_are_additive_without_another_reader_allowlist(self):
+        recipe, ram = self.fixture()
+        for tick in ram["ticks"]:
+            tick["new_law_us"] = 2  # Fixture: a newly instrumented leaf.
+            tick["phases_us"]["new_phase_us"] = 1
+        result = collapse.ram_summary(self.text(ram), recipe)
+        self.assertEqual(result["stage_us"]["new_law"], 6)
+        self.assertEqual(result["stage_us"]["new_phase"], 3)
+        self.assertEqual(result["stage_us"]["unattributed"], 600)
+
+    def test_ram_refuses_missing_nonfinite_overlapping_or_changed_timing_schema(self):
+        recipe, ram = self.fixture()
+        for change in (lambda t: t.pop("sweep_us"), lambda t: t.pop("crumble_us"),
+                       lambda t: t.pop("phases_us"), lambda t: t.update(phases_us={}),
+                       lambda t: t["phases_us"].update(physics_step_us=9),
+                       lambda t: t["phases_us"].update(fixed_update_us=1000),
+                       lambda t: t["phases_us"].update(fixed_update_us=float("nan")),
+                       lambda t: t["phases_us"].update(intake_us=1),
+                       lambda t: t["phases_us"].update(new_phase_us=1)):
+            changed = copy.deepcopy(ram)
+            changed["done"] = None
+            change(changed["ticks"][1])
+            with self.subTest(change=change), self.assertRaisesRegex(RuntimeError, "malformed ram stats"):
+                collapse.ram_summary(self.text(changed), recipe)
 
     def test_ram_refuses_slow_impact_missing_ticks_and_incompatible_logs(self):
         recipe, ram = self.fixture()
@@ -376,7 +418,7 @@ class RamTests(unittest.TestCase):
         recipe, ram = self.fixture()
         for section, fields in (("plan", ("minimum_m_s", "governed_m_s", "runup_m", "spawn", "rotation")),
                                 ("impact", ("speed_m_s", "normal_speed_m_s")),
-                                ("ticks", ("tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "collector_us", "dt_s")),
+                                ("ticks", ("tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "sweep_us", "crumble_us", "collector_us", "dt_s")),
                                 ("sends", ("us",))):
             for field in fields:
                 for bad in (float("nan"), float("inf"), float("-inf"), True, 10**400, -(10**400)):

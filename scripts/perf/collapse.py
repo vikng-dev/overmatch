@@ -330,6 +330,33 @@ def tick_seconds():
     return int(match[1].replace("_", "")) / 1e9
 
 
+# Inclusive or outside-tick measurements, not independent leaf stages.
+RAM_NON_ADDITIVE = {"tick_us", "physics_us", "sleep_us", "collector_us", "phases_us"}
+# Resolution: one nanosecond permits floating conversion/summation noise, not a missing stage.
+RAM_ROUNDING_US = 0.001
+
+
+def ram_parts(tick):
+    """Add every reported phase and leaf once; physics/sleep detail is nested, send is outside."""
+    parts = {name.removesuffix("_us"): us for name, us in tick["phases_us"].items()}
+    for name, us in tick.items():
+        if name.endswith("_us") and name not in RAM_NON_ADDITIVE:
+            name = name.removesuffix("_us")
+            if name in parts:
+                raise ValueError(f"duplicate phase/leaf timing {name}")
+            parts[name] = us
+    parts["physics_step"] -= tick["sleep_us"]
+    if parts["physics_step"] < -RAM_ROUNDING_US:
+        raise ValueError("sleep exceeds its containing physics_step phase")
+    parts["sleep"] = tick["sleep_us"]
+    remainder = tick["tick_us"] - sum(parts.values())
+    if not math.isfinite(remainder) or remainder < -RAM_ROUNDING_US:
+        raise ValueError("stage measurements exceed their containing tick")
+    # Only sub-nanosecond conversion noise may be clamped; genuine gaps remain visible.
+    parts["unattributed"] = max(0.0, remainder)
+    return parts
+
+
 def ram_rows(text, recipe):
     def finite(value, field):
         try:
@@ -354,12 +381,25 @@ def ram_rows(text, recipe):
                     raise RuntimeError("missing, duplicated or reordered ram tick")
                 if tick["tanks"] != 1:
                     raise RuntimeError("ram requires exactly one tank")
-                for field in ("tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "collector_us", "dt_s"):
+                required = {"tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "sweep_us", "crumble_us", "collector_us", "dt_s"}
+                if missing := required - tick.keys():
+                    raise ValueError(f"missing tick timing fields: {sorted(missing)}")
+                for field in {name for name in tick if name.endswith("_us") and name != "phases_us"} | {"dt_s"}:
                     finite(tick[field], f"ticks.{field}")
                     if tick[field] < 0:
                         raise ValueError(f"invalid {field}")
                 if tick["dt_s"] <= 0 or tick["sleep_us"] + tick["contacts_us"] > tick["physics_us"]:
                     raise ValueError("invalid timestep or nested sleep bracket")
+                phases = tick["phases_us"]
+                if not isinstance(phases, dict) or not phases or any(not name.endswith("_us") for name in phases):
+                    raise ValueError("invalid phases_us: expected named phase timings")
+                for name, us in phases.items():
+                    finite(us, f"phases_us.{name}")
+                    if us < 0:
+                        raise ValueError(f"invalid phases_us.{name}")
+                parts = ram_parts(tick)
+                if ticks and parts.keys() != ram_parts(ticks[0]).keys():
+                    raise ValueError("ram timing fields changed during capture")
                 ticks.append(tick)
             for send in ram["sends"]:
                 if not isinstance(send["tick"], int) or send["tick"] <= 0 or send["tick"] > len(ticks) or sends and send["tick"] <= sends[-1]["tick"]:
@@ -413,23 +453,28 @@ def ram_summary(text, recipe):
     if any(t["dt_s"] != dt for t in ticks):
         raise RuntimeError("ram fixed timestep changed during capture")
     total = sum(t["tick_us"] for t in window)
-    summed = {k: sum(t[k] for t in window) for k in ("intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "physics_us", "sleep_us")}
-    # Contact readout and sleep are nested in shared physics; debit both for additive shares.
-    parts = dict(contacts=summed["contacts_us"], updates=summed["publish_us"], intake=summed["intake_us"], structure=summed["structure_us"], refit=summed["refit_us"],
-                 physics=summed["physics_us"] - summed["sleep_us"] - summed["contacts_us"], sleep=summed["sleep_us"])
-    parts["other"] = total - sum(parts.values())
-    if total <= 0 or parts["other"] < -len(window):
-        raise RuntimeError("stage measurements exceed their containing ticks")
+    breakdowns = [ram_parts(t) for t in window]
+    parts = {k: sum(p[k] for p in breakdowns) for k in breakdowns[0]}
+    if total <= 0:
+        raise RuntimeError("ram has no positive measured tick time")
     ordered = sorted(t["tick_us"] for t in window)
     send_us = sum(s["us"] for s in sends if window[0]["tick"] <= s["tick"] <= window[-1]["tick"])
     worst = max(window, key=lambda t: t["tick_us"])
+    def attribution(tick):
+        stages = ram_parts(tick)
+        return dict(tick=tick["tick"], tick_us=tick["tick_us"], parts_us=stages,
+                    attributed_pct=100 * (1 - stages["unattributed"] / tick["tick_us"]))
     return dict(recipe=recipe, plan=plan, impact=impact, end=last["done"],
                 first_tick=window[0]["tick"], last_tick=window[-1]["tick"], window_s=len(window)*dt,
                 worst_tick=worst, p99_us=ordered[math.ceil(0.99*len(ordered))-1],
+                worst_tick_attribution=attribution(worst),
+                # Include approach ticks too: the attribution gate applies to the whole capture.
+                over_budget_ticks=[attribution(t) for t in ticks if t["tick_us"] > dt*1e6],
                 peak_awake=max(t["awake"] for t in window), final_awake=window[-1]["awake"],
                 overruns=sum(t["tick_us"] > dt*1e6 for t in window),
                 collector_mean_us=sum(t["collector_us"] for t in window)/len(window),
                 collector_max_us=max(t["collector_us"] for t in window),
+                tick_mean_us=total/len(window), stage_us=parts,
                 share_pct={k: 100*v/total for k,v in parts.items()},
                 send_us=send_us, send_pct_of_tick_time=100*send_us/total, ticks=ticks, rows=rows)
 
