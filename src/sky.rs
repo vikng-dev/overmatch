@@ -1,7 +1,9 @@
 //! Best practice: client-only, per-map sky admission, sun and analytic environment light.
 //! `sun_light`, `sun_transform` and `level_ground_irradiance_lux` share one admitted sky;
 //! `spawn_sun` is called only behind the world's window guard. The environment is filtered once
-//! and shared by battlefield views. See `.agents/docs/design/map-surroundings.md` for the design.
+//! and shared by battlefield views. Each [`Bake`] holds the sky in world orientation
+//! ([`world_direction`]), so its glow lies on the side the key light comes from. See
+//! `.agents/docs/design/map-surroundings.md` for the design.
 
 use std::{
     path::Path,
@@ -86,17 +88,12 @@ impl Lighting {
         }
         for (field, value) in [
             ("sun_illuminance_lux", data.sun_illuminance_lux.0),
+            ("sky_intensity_cd_m2", data.sky_intensity_cd_m2.0),
             ("sun_debug_distance_m", data.sun_debug_distance_m.0),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(refuse(field, "author a finite positive magnitude"));
             }
-        }
-        if !data.sky_intensity_cd_m2.0.is_finite() || data.sky_intensity_cd_m2.0 < 0.0 {
-            return Err(refuse(
-                "sky_intensity_cd_m2",
-                "author a finite nonnegative fill intensity",
-            ));
         }
         if data.glow_exponent.0 <= 0 {
             return Err(refuse("glow_exponent", "author a positive lobe exponent"));
@@ -162,12 +159,17 @@ fn sun_elevation_deg() -> f32 {
         .unwrap_or(LIGHTING.sun_elevation_deg.0)
 }
 
-/// Unit vector pointing FROM the scene TOWARD the sun, from [`sun_elevation_deg`] /
-/// `Lighting::sun_azimuth_deg`. The one place that turns the two angles into a direction, so the key light
-/// and the sky it is embedded in can never disagree about where the sun is.
+/// Unit vector pointing FROM the scene TOWARD the sun, from [`sun_elevation_deg`] and
+/// `Lighting::sun_azimuth_deg`: the one direction the key light and the sky it is baked into share.
 pub(crate) fn toward_sun() -> Vec3 {
-    let (sin_elevation, cos_elevation) = sun_elevation_deg().to_radians().sin_cos();
-    let (sin_azimuth, cos_azimuth) = LIGHTING.sun_azimuth_deg.0.to_radians().sin_cos();
+    sun_direction(sun_elevation_deg(), LIGHTING.sun_azimuth_deg.0)
+}
+
+/// The one place that turns a sun's two angles, degrees, into a unit vector toward it: elevation
+/// above the horizon, azimuth from +X toward +Z.
+fn sun_direction(elevation_deg: f32, azimuth_deg: f32) -> Vec3 {
+    let (sin_elevation, cos_elevation) = elevation_deg.to_radians().sin_cos();
+    let (sin_azimuth, cos_azimuth) = azimuth_deg.to_radians().sin_cos();
     Vec3::new(
         cos_elevation * cos_azimuth,
         sin_elevation,
@@ -183,25 +185,39 @@ pub(crate) fn sun_transform() -> Transform {
         .looking_at(Vec3::ZERO, Vec3::Y)
 }
 
-/// Resolution: face size of the environment source cubemap, pixels; limits startup filtering cost. Small on purpose: the source
-/// is a smooth analytic sky with no small features, and bevy convolves it (Lambertian for diffuse,
-/// GGX per mip for specular) before anything samples it, so 128² per face resolves everything this
-/// sky contains — 393 kB, built in memory, never an asset on disk. MUST be a power of two;
-/// `GeneratedEnvironmentMapLight` panics otherwise.
-const SKY_CUBEMAP_FACE_PX: u32 = 128;
+/// What a cubemap of [`sky_radiance`] is baked for. Every bake stores, at each texel, the radiance
+/// of the world direction Bevy samples that texel for ([`world_direction`]), as `Rgba16Float`
+/// LINEAR radiance ratios: the generator filters in `Rgba16Float` (its copy pass converts any
+/// source), so an 8-bit source would only add banding.
+#[derive(Clone, Copy)]
+enum Bake {
+    /// The source the environment light is filtered from. No sun disk: the `DirectionalLight`
+    /// carries the sun's light, and a disk here would add it twice.
+    Light,
+}
 
-/// The analytic golden-hour sky as LINEAR radiance ratios in `0..1` for one direction; the absolute
-/// level is `Lighting::sky_intensity_cd_m2`. Deep blue overhead, warm haze at the horizon, a broad
-/// warm glow on the sun's side, and a dim warm bounce below — the ground half matters as much as
-/// the sky half, because it is what keeps the underside of a hull and the lower run of track darker
-/// than their tops (a uniform environment would flatten them exactly the way ambient light does).
-fn sky_radiance(dir: Vec3) -> Vec3 {
-    let look = &*LIGHTING;
-    let vector = |[x, y, z]: [f32; 3]| Vec3::new(x, y, z);
-    let zenith = vector(look.zenith_linear.0);
-    let haze = vector(look.haze_linear.0);
-    let glow = vector(look.glow_linear.0);
-    let ground = vector(look.ground_linear.0);
+impl Bake {
+    /// Resolution: face size, pixels; a power of two, or `GeneratedEnvironmentMapLight` panics.
+    /// Bevy convolves the light's source (Lambertian for diffuse, GGX per mip for specular) before
+    /// anything samples it, so 128² resolves this smooth sky and keeps the startup filter cheap.
+    fn face_px(self) -> u32 {
+        match self {
+            Bake::Light => 128,
+        }
+    }
+}
+
+/// The analytic golden-hour sky as LINEAR radiance ratios in `0..1` toward world direction `dir`,
+/// under a sun toward `toward_sun`; the absolute level is `Lighting::sky_intensity_cd_m2`. Deep
+/// blue overhead, warm haze at the horizon, a broad warm glow on the sun's side, and a dim warm
+/// bounce below — the ground half matters as much as the sky half, because it is what keeps the
+/// underside of a hull and the lower run of track darker than their tops (a uniform environment
+/// would flatten them exactly the way ambient light does).
+fn sky_radiance(look: &Lighting, toward_sun: Vec3, dir: Vec3, bake: Bake) -> Vec3 {
+    let zenith = Vec3::from_array(look.zenith_linear.0);
+    let haze = Vec3::from_array(look.haze_linear.0);
+    let glow = Vec3::from_array(look.glow_linear.0);
+    let ground = Vec3::from_array(look.ground_linear.0);
 
     let up = dir.y.clamp(-1.0, 1.0);
     if up >= 0.0 {
@@ -210,19 +226,29 @@ fn sky_radiance(dir: Vec3) -> Vec3 {
         let base = haze.lerp(zenith, t);
         // The glow follows the KEY LIGHT's azimuth, so the reflection sliding along a track link
         // agrees with the shadow that link is casting.
-        let sun_xz = toward_sun().xz().normalize_or_zero();
+        let sun_xz = toward_sun.xz().normalize_or_zero();
         let toward = dir.xz().normalize_or_zero().dot(sun_xz).max(0.0);
         base.lerp(
             glow,
             toward.powi(look.glow_exponent.0) * (1.0 - t) * look.glow_strength.0,
         )
     } else {
-        haze.lerp(ground, (-up).sqrt())
+        match bake {
+            Bake::Light => haze.lerp(ground, (-up).sqrt()),
+        }
     }
 }
 
-/// Direction through the centre of texel `(u, v)` of cubemap `face`, in the layer order wgpu (and
-/// glTF, and every cubemap format) uses: +X, −X, +Y, −Y, +Z, −Z.
+/// The world direction Bevy samples cube direction `cube` for. Bevy treats cubemaps as
+/// left-handed: the skybox (`skybox_fragment`) and the environment light
+/// (`compute_cubemap_sample_dir`) both read a cubemap at (x, y, −z) of the world direction. The
+/// flip is its own inverse.
+fn world_direction(cube: Vec3) -> Vec3 {
+    Vec3::new(cube.x, cube.y, -cube.z)
+}
+
+/// Direction through the centre of texel `(u, v)` of cubemap `face`, in cube coordinates and the
+/// layer order wgpu (and glTF, and every cubemap format) uses: +X, −X, +Y, −Y, +Z, −Z.
 fn cube_face_direction(face: u32, u: f32, v: f32) -> Vec3 {
     match face {
         0 => Vec3::new(1.0, -v, -u),
@@ -235,46 +261,41 @@ fn cube_face_direction(face: u32, u: f32, v: f32) -> Vec3 {
     .normalize()
 }
 
-/// Build the environment light's source cubemap from [`sky_radiance`]. Six square layers of
-/// `Rgba8Unorm` — LINEAR, not sRGB, because what we author here are radiance ratios, not colours a
-/// display should decode.
-fn sky_cubemap() -> Image {
+/// Bake [`sky_radiance`] into six square layers, per [`Bake`].
+fn bake_cubemap(look: &Lighting, toward_sun: Vec3, bake: Bake) -> Image {
     use bevy::asset::RenderAssetUsages;
-    use bevy::image::Image;
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-    let size = SKY_CUBEMAP_FACE_PX;
-    let mut data = Vec::with_capacity((size * size * 6 * 4) as usize);
-    for face in 0..6 {
-        for y in 0..size {
-            for x in 0..size {
-                let texel = |k: u32| 2.0 * (k as f32 + 0.5) / size as f32 - 1.0;
-                let radiance = sky_radiance(cube_face_direction(face, texel(x), texel(y)));
-                data.extend_from_slice(&[
-                    (radiance.x * 255.0).round() as u8,
-                    (radiance.y * 255.0).round() as u8,
-                    (radiance.z * 255.0).round() as u8,
-                    u8::MAX,
-                ]);
-            }
-        }
-    }
-    Image::new(
+    let size = bake.face_px();
+    let mut image = Image::new_fill(
         Extent3d {
             width: size,
             height: size,
             depth_or_array_layers: 6,
         },
         TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8Unorm,
+        &[0; 8],
+        TextureFormat::Rgba16Float,
         // Both worlds: the generator reads the asset back from `Assets<Image>` to size its
         // convolution, so the main-world copy has to survive extraction.
         RenderAssetUsages::all(),
-    )
+    );
+    let texel = |k: u32| 2.0 * (k as f32 + 0.5) / size as f32 - 1.0;
+    for face in 0..6 {
+        for y in 0..size {
+            for x in 0..size {
+                let dir = world_direction(cube_face_direction(face, texel(x), texel(y)));
+                let [r, g, b] = sky_radiance(look, toward_sun, dir, bake).to_array();
+                image
+                    .set_color_at_3d(x, y, face, Color::linear_rgb(r, g, b))
+                    .expect("a six-layer Rgba16Float image takes a colour at every texel");
+            }
+        }
+    }
+    image
 }
 
-/// The sky's environment light: [`sky_cubemap`] filtered into diffuse and specular maps ONCE per
+/// The sky's environment light: the [`Bake::Light`] cubemap filtered into diffuse and specular maps ONCE per
 /// app, then carried by every battlefield view as a plain `EnvironmentMapLight`. Inserted when the
 /// first battlefield view appears, so an app with no camera (the dedicated server) never builds
 /// the cubemap.
@@ -359,7 +380,11 @@ fn light_battlefield_views(
                 .spawn((
                     Name::new("Sky light filter"),
                     GeneratedEnvironmentMapLight {
-                        environment_map: images.add(sky_cubemap()),
+                        environment_map: images.add(bake_cubemap(
+                            &LIGHTING,
+                            toward_sun(),
+                            Bake::Light,
+                        )),
                         intensity: LIGHTING.sky_intensity_cd_m2.0,
                         ..default()
                     },
@@ -520,7 +545,7 @@ mod tests {
             ("sun_azimuth_deg", "NaN"),
             ("sun_illuminance_lux", "0.0"),
             ("sun_debug_distance_m", "0.0"),
-            ("sky_intensity_cd_m2", "-1.0"),
+            ("sky_intensity_cd_m2", "0.0"),
             ("glow_exponent", "0"),
             ("glow_strength", "2.0"),
             ("sun_srgb", "(2.0, 0.0, 0.0)"),
@@ -546,22 +571,66 @@ mod tests {
         );
     }
     /// The constraints `GeneratedEnvironmentMapLight` PANICS on — square, power-of-two, and six
-    /// faces — plus the byte count, so a bad edit fails here rather than at first render.
+    /// faces — so a bad edit fails here rather than at first render.
     #[test]
     fn the_source_cubemap_matches_what_the_filter_requires() {
-        let sky = sky_cubemap();
-        let size = sky.texture_descriptor.size;
-        assert!(SKY_CUBEMAP_FACE_PX.is_power_of_two());
+        let face = Bake::Light.face_px();
+        assert!(face.is_power_of_two());
+        let size = bake_cubemap(&LIGHTING, toward_sun(), Bake::Light)
+            .texture_descriptor
+            .size;
         assert_eq!(
-            (size.width, size.height),
-            (SKY_CUBEMAP_FACE_PX, SKY_CUBEMAP_FACE_PX)
+            (size.width, size.height, size.depth_or_array_layers),
+            (face, face, 6),
+            "six square faces",
         );
-        assert_eq!(size.depth_or_array_layers, 6, "a cubemap is six faces");
-        assert_eq!(
-            sky.data.as_ref().map(Vec::len),
-            Some((SKY_CUBEMAP_FACE_PX * SKY_CUBEMAP_FACE_PX * 6 * 4) as usize),
-            "four bytes per texel across six faces",
-        );
+    }
+
+    /// Where the light bake's glow lies, which every lit surface relies on: on the side the
+    /// directional light comes from. For two sun bearings asymmetric about both world axes, the
+    /// bake, read the way Bevy samples a cubemap, is brightest along the horizon at the sun's own
+    /// azimuth. A bake evaluated in cube coordinates mirrors the glow across the XY plane; a
+    /// face-size test cannot see that. FIXTURE DATA: the bearings.
+    #[test]
+    fn the_light_bake_glows_on_the_suns_side() {
+        let look = Lighting::parse(FILE, DATA).unwrap();
+        for bearing_deg in [30.0_f32, 235.0] {
+            let toward = sun_direction(look.sun_elevation_deg.0, bearing_deg);
+            let bake = bake_cubemap(&look, toward, Bake::Light);
+            let brightest = (0..360)
+                .map(|degree| degree as f32)
+                .max_by(|a, b| horizon(&bake, *a).total_cmp(&horizon(&bake, *b)))
+                .unwrap();
+            let sun = toward.z.atan2(toward.x).to_degrees();
+            let off = (brightest - sun).rem_euclid(360.0);
+            assert!(
+                off.min(360.0 - off) <= 5.0,
+                "sun at {sun}°, the glow brightest at {brightest}°"
+            );
+        }
+    }
+
+    /// The bake's summed linear RGB just above the horizon at world azimuth `azimuth_deg` (from +X
+    /// toward +Z), read as Bevy reads a cubemap: at (x, y, −z) of the world direction
+    /// (`compute_cubemap_sample_dir`), on the face and texel `dir_to_cube_uv` picks. Near the
+    /// horizon, only the four side faces can dominate.
+    fn horizon(bake: &Image, azimuth_deg: f32) -> f32 {
+        let (sin, cos) = azimuth_deg.to_radians().sin_cos();
+        let cube = Vec3::new(cos, 0.03, -sin);
+        let (x, z) = (cube.x.abs(), cube.z.abs());
+        let (face, u, v) = match (x >= z, cube.x > 0.0, cube.z > 0.0) {
+            (true, true, _) => (0, -cube.z / x, -cube.y / x),
+            (true, false, _) => (1, cube.z / x, -cube.y / x),
+            (false, _, true) => (4, cube.x / z, -cube.y / z),
+            (false, _, false) => (5, -cube.x / z, -cube.y / z),
+        };
+        let size = bake.width() as f32;
+        let texel = |c: f32| (((c * 0.5 + 0.5) * size) as u32).min(bake.width() - 1);
+        let colour = bake
+            .get_color_at_3d(texel(u), texel(v), face)
+            .expect("the bake has six layers")
+            .to_linear();
+        colour.red + colour.green + colour.blue
     }
 
     /// The sky light's steady state, which the frame cost depends on: once the render world

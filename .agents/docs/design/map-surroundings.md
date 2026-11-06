@@ -633,7 +633,8 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
 |---|---|---|---|
 | Sky data (V0 delivered) | per-map `view/sky.ron`, admitted at client first use; sun behind the window gate; server pack excludes `view/` | none | none |
 | Sky module (V1 delivered) | `src/sky.rs` owns admission, the sun, analytic bake and filter-once light; existing sky witnesses retain their assertions | none | none |
-| Sky rendering (L1 onward) | analytic sky; two bakes in world orientation; one brightness | none | none |
+| Sky light bake (L1a delivered) | `Bake`; the light bake evaluated in world orientation (`world_direction`), `Rgba16Float`; `sky_intensity_cd_m2 = 0` refused | none | none |
+| Drawn sky (L1b onward) | analytic sky; the drawn bake in world orientation; one brightness | none | none |
 | Haze | Koschmieder fog; one unshadowed lobe for sky and fog | the 12 km default (playtest fork) | the fork's verdict |
 | Outland | stitched, attribute-continuous view mesh to 1.25·V | odd-reflection height; mirrored mask | authored outland, or terrain past the boundary (#221) |
 | Clouds, sun disk | baked, static; one shared solar radius | none | none |
@@ -660,11 +661,13 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
 - Capture lanes re-shoot their assigned frames hidden and muted. The owner judges look by eye.
 
 **Capture plans.** `scripts/capture/surroundings/p1-normal.ron` through
-`p7-farplane.ron` are the one home of frames 1–7. Each header records its start pose and
-a hidden, muted command under the machine lock. Outputs go to `target/capture/sky/`.
+`p7-farplane.ron` are the one home of frames 1–7, and `hull-closeup.ron` of the hull close-up.
+Each header records its start pose and a hidden, muted command under the machine lock. Outputs go
+to `target/capture/sky/`.
 Frames: 1 third person toward the south edge; 2 the same spot in the optic; 3 the highest hill;
 4 that hill in the optic; 5 outside the east edge looking back; 6 the diagonal toward the sun;
-7 the diagonal away from the sun, beyond the camera far plane.
+7 the diagonal away from the sun, beyond the camera far plane; the hull close-up from the
+south-east, square to the sun's bearing, so the faces in view take their fill from the sky.
 
 **Ratchet.** The backlog rows naming files these lanes edit:
 - view-13 (`terrain_shadow.rs`) goes to L4a.

@@ -1,0 +1,5 @@
+// From the bay, after scripts/serial-cargo build --features dev_ui,bitprobe --bin overmatch:
+// /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OVERMATCH_START=599.9,-599.9,195 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=hidden OVERMATCH_MUTE=1 OVERMATCH_CAPTURE=scripts/capture/surroundings/hull-closeup.ron target/debug/overmatch --offline
+// Sky light on a hull: the tank seen from the south-east (+X, -Z), at right angles to the sun's
+// bearing, so the faces in view take their fill from the sky rather than the key light.
+(frames: (out: "target/capture/sky/hull-closeup.png", at: [12.0], size: (1280, 720), scale_factor: 1.0, ui: false, gizmos: false, step_s: 0.015625, camera: Follow(offset: (6.0, 2.5, -6.0))))
