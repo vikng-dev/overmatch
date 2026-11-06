@@ -12,6 +12,7 @@ enum AssetLayout {
         root: PathBuf,
         adjacent_assets: PathBuf,
     },
+    Override(PathBuf),
     Assets(PathBuf),
 }
 
@@ -21,7 +22,7 @@ enum AssetLayout {
 /// profile names are otherwise unrestricted. macOS bundles take precedence over an enclosing `target/`.
 fn asset_root_from(exe_dir: &Path, env_root: Option<&Path>) -> AssetLayout {
     if let Some(root) = env_root {
-        return AssetLayout::Assets(root.join("assets"));
+        return AssetLayout::Override(root.join("assets"));
     }
     if exe_dir.ends_with("Contents/MacOS") {
         let contents = exe_dir
@@ -41,13 +42,7 @@ fn asset_root_from(exe_dir: &Path, env_root: Option<&Path>) -> AssetLayout {
         };
         let cargo_output = match below {
             [_profile] => true,
-            [triple, _profile] => {
-                triple
-                    .as_encoded_bytes()
-                    .split(|byte| *byte == b'-')
-                    .count()
-                    >= 2
-            }
+            [triple, _profile] => triple.as_encoded_bytes().contains(&b'-'),
             _ => false,
         };
         if cargo_output {
@@ -65,6 +60,10 @@ fn asset_root_from(exe_dir: &Path, env_root: Option<&Path>) -> AssetLayout {
 
 #[derive(Debug)]
 enum AssetRootError {
+    InvalidOverride {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     LayoutIo {
         path: PathBuf,
         source: std::io::Error,
@@ -75,6 +74,14 @@ enum AssetRootError {
 impl std::fmt::Display for AssetRootError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidOverride { path, source } => {
+                return write!(
+                    f,
+                    "BEVY_ASSET_ROOT: {} is not an accessible assets directory: {source}; \
+                     set BEVY_ASSET_ROOT to the directory holding assets/ or unset it",
+                    path.display()
+                );
+            }
             Self::LayoutIo { path, source } => write!(
                 f,
                 "cannot verify checkout layout at {}: {source}",
@@ -85,16 +92,38 @@ impl std::fmt::Display for AssetRootError {
                 "packaged assets at {} conflict with the enclosing Cargo target layout",
                 path.display()
             ),
-        }
+        }?;
+        write!(
+            f,
+            "; move the packaged game outside target/<profile> or \
+             target/<triple>/<profile>, or set BEVY_ASSET_ROOT to the directory holding its assets/"
+        )
     }
 }
 
 impl AssetLayout {
     /// Validation never changes the selected root. Both `.git/` and a worktree's `.git` file
-    /// witness a checkout. Assets beside a Cargo binary indicate a conflicting packaged layout,
-    /// refused even inside a real checkout; metadata checks never select a fallback tree.
+    /// witness a checkout; assets beside a Cargo binary conflict even inside a real checkout.
     fn resolve(self) -> Result<PathBuf, AssetRootError> {
         match self {
+            Self::Override(assets) => {
+                std::fs::metadata(&assets)
+                    .and_then(|metadata| {
+                        if metadata.is_dir() {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::NotADirectory,
+                                "assets path must be a directory",
+                            ))
+                        }
+                    })
+                    .map_err(|source| AssetRootError::InvalidOverride {
+                        path: assets.clone(),
+                        source,
+                    })?;
+                Ok(assets)
+            }
             Self::Assets(assets) => Ok(assets),
             Self::Checkout {
                 root,
@@ -167,12 +196,9 @@ pub(crate) fn asset_root() -> PathBuf {
             asset_root_from(exe_dir, None)
         }
     };
-    layout.resolve().unwrap_or_else(|error| {
-        crate::refuse_start(format!(
-            "{error}; move the packaged game outside target/<profile> or \
-             target/<triple>/<profile>, or set BEVY_ASSET_ROOT to the directory holding its assets/"
-        ))
-    })
+    layout
+        .resolve()
+        .unwrap_or_else(|error| crate::refuse_start(error.to_string()))
 }
 
 /// Client-only dependencies collected in `PreStartup`, before tank admission starts in `Startup`.
@@ -336,9 +362,53 @@ mod tests {
         ] {
             assert_eq!(
                 asset_root_from(Path::new(dir), Some(Path::new("/chosen"))),
-                AssetLayout::Assets(PathBuf::from("/chosen/assets"))
+                AssetLayout::Override(PathBuf::from("/chosen/assets"))
             );
         }
+    }
+
+    /// Operators must see an invalid override refused before either asset reader runs;
+    /// only an existing assets directory can pass, without selecting another layout.
+    #[test]
+    fn env_root_refuses_missing_or_non_directory_assets() {
+        let root = std::env::temp_dir().join(format!("overmatch-override-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("file")).unwrap();
+        std::fs::write(
+            root.join("file/assets"),
+            b"fixture: a file is not an assets directory",
+        )
+        .unwrap();
+        for (name, kind) in [
+            ("missing", std::io::ErrorKind::NotFound),
+            ("file", std::io::ErrorKind::NotADirectory),
+        ] {
+            let chosen = root.join(name);
+            let error = asset_root_from(Path::new("/repo/target/release"), Some(&chosen))
+                .resolve()
+                .unwrap_err();
+            match &error {
+                AssetRootError::InvalidOverride { path, source } => {
+                    assert_eq!(path, &chosen.join("assets"));
+                    assert_eq!(source.kind(), kind);
+                }
+                other => panic!("invalid operator override must refuse: {other}"),
+            }
+            let message = error.to_string();
+            assert!(message.contains("BEVY_ASSET_ROOT"));
+            assert!(message.contains(&chosen.join("assets").display().to_string()));
+            assert!(
+                message
+                    .contains("set BEVY_ASSET_ROOT to the directory holding assets/ or unset it")
+            );
+        }
+        std::fs::create_dir(root.join("assets")).unwrap();
+        assert_eq!(
+            asset_root_from(Path::new("/repo/target/release"), Some(&root))
+                .resolve()
+                .unwrap(),
+            root.join("assets")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// A player extracting into target/release must not silently read an ancestor's assets.
