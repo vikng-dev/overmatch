@@ -563,3 +563,63 @@ fn a_shed_fragment_leaves_with_its_groups_rigid_motion() {
     assert_eq!((shed.construction, shed.tick), (5, 9));
     assert_eq!(shed.chunks, vec![fragment[0] as u16]);
 }
+
+/// The game's environment destruction keeps absorbed matter at rubble resolution. Only a joint
+/// parted in this event may absorb new matter; later evaluations must not undo that absorption.
+#[test]
+fn a_small_parted_neighbour_joins_one_server_body_and_stays_with_it() {
+    use crate::construction::fracture::{Bond, Joint};
+    let mut structure = released_part().structure;
+    structure.chunks.truncate(3);
+    structure.part_of.truncate(3);
+    let floor = PhysicalLaws::shipped().server_rubble_min_size_m;
+    // Fixture: one below-floor fragment between two resolved fragments, with ordered joints.
+    for (chunk, scale) in structure.chunks.iter_mut().zip([0.5_f32, 2.0, 2.0]) {
+        chunk.volume = (floor * scale).powi(3);
+        chunk.mass = chunk.volume * chunk.material.density;
+    }
+    let seam = structure.chunks[0].material.seam;
+    structure.joints = [1, 2]
+        .map(|b| Joint {
+            a: 0,
+            b: Side::Chunk(b),
+            area: 1.0,
+            centroid: Vec3::ZERO,
+            normal: Vec3::X,
+            bond: Bond::Bonded(seam),
+        })
+        .to_vec();
+    let fragments = vec![vec![0], vec![1], vec![2]];
+    let mut retained = Vec::new();
+    assert_eq!(
+        merge_fragments(&structure, fragments.clone(), &[], &mut retained),
+        fragments
+    );
+    let merged = merge_fragments(&structure, fragments.clone(), &[1, 0], &mut retained);
+    assert_eq!(
+        merged,
+        [vec![0, 1], vec![2]],
+        "joint order selects the neighbour"
+    );
+    assert_eq!(retained, [0]);
+    assert_eq!(
+        merge_fragments(&structure, fragments, &[], &mut retained),
+        merged
+    );
+    let mut record = Record::default();
+    let (bodies, decor) = route(
+        &structure,
+        (1, Transform::IDENTITY),
+        merged,
+        (Vec3::ZERO, Vec3::ZERO, Vec3::ZERO),
+        1,
+        &mut record,
+    );
+    assert_eq!(bodies, [vec![0, 1], vec![2]]);
+    assert!(decor.is_empty() && record.entries.is_empty());
+    // A neighbour which remains standing cannot absorb the leaving fragment.
+    assert_eq!(
+        merge_fragments(&structure, vec![vec![0]], &[0], &mut Vec::new()),
+        [vec![0]]
+    );
+}

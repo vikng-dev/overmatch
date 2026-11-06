@@ -561,8 +561,10 @@ pub(super) fn sweep_departure(
         centre,
     } = motion;
     let kind = breakage.kind.clone();
+    let mut parted = Vec::new();
     for j in kind.sweep.cut(&group) {
         if !breakage.live.state.separated[j] {
+            parted.push(j);
             breakage.live.state.cracked[j] = true;
             breakage.live.state.separated[j] = true;
             let joint = &breakage.live.structure.joints[j];
@@ -579,6 +581,12 @@ pub(super) fn sweep_departure(
     }
     let fragments =
         crate::debris::crumble::fragments(&breakage.live.structure, &breakage.live.state, &group);
+    let fragments = crate::debris::crumble::merge_fragments(
+        &breakage.live.structure,
+        fragments,
+        &parted,
+        &mut breakage.live.rubble_joints,
+    );
     for &c in &group {
         record.entries.push(Entry {
             construction: breakage.construction,

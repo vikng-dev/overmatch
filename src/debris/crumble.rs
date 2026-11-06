@@ -227,6 +227,79 @@ pub(crate) fn server_body(structure: &Structure, fragment: &[usize]) -> bool {
     volume.cbrt() >= PhysicalLaws::shipped().server_rubble_min_size_m
 }
 
+/// Coarsen only across joints parted in this event, in ascending joint order. Either side must
+/// be below the floor and both must be leaving. Retained edges preserve earlier absorption at
+/// rubble resolution without restoring material strength. Runs within each owner's worker;
+/// chunks and returned groups stay ascending, independent of worker assignment.
+pub(crate) fn merge_fragments(
+    structure: &Structure,
+    mut fragments: Vec<Vec<usize>>,
+    parted: &[usize],
+    retained: &mut Vec<usize>,
+) -> Vec<Vec<usize>> {
+    for fragment in &mut fragments {
+        fragment.sort_unstable();
+        assert!(!fragment.is_empty(), "a departing fragment contains matter");
+    }
+    fragments.sort_by_key(|fragment| fragment[0]);
+    let mut owner = vec![None; structure.chunks.len()];
+    for (g, fragment) in fragments.iter().enumerate() {
+        for &c in fragment {
+            assert!(
+                owner[c].replace(g).is_none(),
+                "departing fragments partition matter"
+            );
+        }
+    }
+    let mut parent: Vec<_> = (0..fragments.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    retained.retain(|&j| {
+        let joint = &structure.joints[j];
+        matches!(joint.b, Side::Chunk(b) if owner[joint.a].is_some() && owner[b].is_some())
+    });
+    let mut edges: Vec<_> = retained
+        .iter()
+        .map(|&j| (false, j))
+        .chain(parted.iter().map(|&j| (true, j)))
+        .collect();
+    edges.sort_unstable();
+    for (new, j) in edges {
+        let joint = &structure.joints[j];
+        let Side::Chunk(b) = joint.b else { continue }; // Ground is no departing neighbour.
+        let (Some(a), Some(b)) = (owner[joint.a], owner[b]) else {
+            continue; // Only fragments leaving together may join.
+        };
+        let (a, b) = (root(&mut parent, a), root(&mut parent, b));
+        if a == b
+            || (new
+                && server_body(structure, &fragments[a])
+                && server_body(structure, &fragments[b]))
+        {
+            continue;
+        }
+        let (a, b) = (a.min(b), a.max(b));
+        parent[b] = a;
+        let absorbed = std::mem::take(&mut fragments[b]);
+        fragments[a].extend(absorbed);
+        fragments[a].sort_unstable();
+        if new {
+            retained.push(j);
+        }
+    }
+    retained.sort_unstable();
+    retained.dedup();
+    fragments
+        .into_iter()
+        .filter(|fragment| !fragment.is_empty())
+        .collect()
+}
+
 /// A fragment leaving the simulation for the players' decoration, sent once at `tick`: its
 /// construction and chunks (ascending), the construction frame's world pose then, the fragment's
 /// centre-of-mass velocity (m/s) and spin (rad/s) in world terms, and a seed that fixes every
@@ -583,15 +656,24 @@ fn crumble_landings(
             .collect();
         inputs.par_chunk_map(ComputeTaskPool::get(), 1, |_, landing| {
             let (live, owned, touches, energy) = &landing[0];
-            crumble(&live.structure, &live.state, owned, touches, *energy)
+            let mut result = crumble(&live.structure, &live.state, owned, touches, *energy);
+            let mut retained = live.rubble_joints.clone();
+            result.fragments = merge_fragments(
+                &live.structure,
+                result.fragments,
+                &result.separated,
+                &mut retained,
+            );
+            (result, retained)
         })
     };
-    for ((entity, ..), result) in landings.into_iter().zip(results) {
+    for ((entity, ..), (result, retained)) in landings.into_iter().zip(results) {
         let (_, piece, mut breakage, pose, (velocity, spin, centre), _) = groups
             .get_mut(entity)
             .expect("the landings were filtered to these groups");
         let frame = breakage.physics_frame(pose);
         let live = breakage.live.as_mut();
+        live.rubble_joints = retained;
         for &j in &result.cracked {
             live.state.cracked[j] = true;
         }

@@ -541,6 +541,8 @@ pub(crate) struct Live {
     pub(crate) gravity: fracture::parts::Gravity,
     /// Per law chunk: its holes, in record order (module doc).
     pub(crate) holes: Vec<Vec<Hole>>,
+    /// Parted joints retained only as carrier grouping at rubble resolution, never as strength.
+    pub(crate) rubble_joints: Vec<usize>,
 }
 
 impl Live {
@@ -563,6 +565,7 @@ impl Live {
             assessment: Arc::new(fracture::parts::Assessment::default()),
             gravity: fracture::parts::Gravity::default(),
             holes: vec![Vec::new(); structure.chunks.len()],
+            rubble_joints: Vec::new(),
             structure,
         }
     }
@@ -581,6 +584,16 @@ impl Live {
             assessment: Arc::new(fracture::parts::Assessment::default()),
             gravity: fracture::parts::Gravity::default(),
             holes: self.holes.clone(),
+            rubble_joints: self
+                .rubble_joints
+                .iter()
+                .copied()
+                .filter(|&j| {
+                    let joint = &self.structure.joints[j];
+                    group.binary_search(&joint.a).is_ok()
+                        && matches!(joint.b, Side::Chunk(b) if group.binary_search(&b).is_ok())
+                })
+                .collect(),
         };
         child.state.retain_group(group);
         child
@@ -1285,6 +1298,7 @@ struct DepositParam<'w, 's> {
     clock: Option<Res<'w, ShotClock>>,
     fixed: Res<'w, Time<Fixed>>,
     record: ResMut<'w, Record>,
+    shed: MessageWriter<'w, crate::debris::crumble::Shed>,
     commands: Commands<'w, 's>,
     /// The moving bodies a blast's rays meet ([`moving_near`]) and push.
     spatial: SpatialQuery<'w, 's>,
@@ -1293,6 +1307,7 @@ struct DepositParam<'w, 's> {
     chunk_entities: ChunkChildren<'w, 's>,
     aabbs: Query<'w, 's, &'static ColliderAabb>,
     bodies: Query<'w, 's, (Forces, &'static RigidBody)>,
+    centres: Query<'w, 's, &'static avian3d::prelude::ComputedCenterOfMass>,
 }
 
 /// The layers of the surfaces a blast's rays meet through avian: static surfaces
@@ -1549,6 +1564,7 @@ struct OwnerEffects {
     events: Vec<Event>,
     split: Option<PendingSplit>,
     departures: Vec<PreparedDeparture>,
+    sheds: Vec<crate::debris::crumble::Shed>,
 }
 
 /// Immutable inputs for one owner's law run; shared-body effects are staged in `OwnerEffects`.
@@ -1558,6 +1574,8 @@ struct OwnerInputs<'a> {
     pressing: &'a [Load],
     resting: &'a [Load],
     spin: Vec3,
+    /// Parent rigid velocity, spin and world COM; placed matter is at rest.
+    motion: (Vec3, Vec3, Vec3),
     tick: u32,
     step: f32,
 }
@@ -1575,6 +1593,7 @@ fn evaluate_owner(
         pressing,
         resting,
         spin,
+        motion,
         tick,
         step,
     } = inputs;
@@ -1598,7 +1617,74 @@ fn evaluate_owner(
         .chain(pressing.iter().copied())
         .chain(resting.iter().copied())
         .collect();
-    let changes = run_laws(&kind.layout.element_of, live, &loads, holes, spin, step);
+    let before = live.state.separated.clone();
+    let mut changes = run_laws(&kind.layout.element_of, live, &loads, holes, spin, step);
+    let parted: Vec<_> = live
+        .state
+        .separated
+        .iter()
+        .enumerate()
+        .filter_map(|(j, &now)| (now && !before[j]).then_some(j))
+        .collect();
+    let (groups, sources): (Vec<_>, Vec<_>) =
+        std::mem::take(&mut changes.groups).into_iter().unzip();
+    let groups = crate::debris::crumble::merge_fragments(
+        &live.structure,
+        groups,
+        &parted,
+        &mut live.rubble_joints,
+    );
+    let owners: HashMap<_, _> = groups
+        .iter()
+        .enumerate()
+        .flat_map(|(g, chunks)| chunks.iter().map(move |&c| (c, g)))
+        .collect();
+    let mut regrouped = vec![Vec::new(); groups.len()];
+    for load in sources.into_iter().flatten() {
+        regrouped[owners[&load.chunk]].push(load);
+    }
+    // A carrier which did not split releases no new fragment. Its existing matter stays with it.
+    let unchanged = moving.is_some_and(|owned| {
+        groups.len() == 1
+            && groups[0]
+                .iter()
+                .copied()
+                .eq(owned.iter().map(|&c| usize::from(c)))
+    });
+    let (kept, small): (Vec<_>, Vec<_>) =
+        groups.into_iter().zip(regrouped).partition(|(group, _)| {
+            unchanged || crate::debris::crumble::server_body(&live.structure, group)
+        });
+    changes.groups = kept;
+    for (group, _) in &small {
+        for &c in group {
+            live.state.fate[c] = Fate::Dust;
+            changes.events.push(Event::Dust(c as u16));
+        }
+    }
+    let sheds = pool.scope(|scope| {
+        let live = &*live;
+        for (group, loads) in &small {
+            let kind = &kind;
+            scope.spawn(async move {
+                let launch = launch(kind, &live.structure, group, loads);
+                let at = construction_pose.transform_point(launch.centre);
+                crate::debris::crumble::Shed::of(
+                    &live.structure,
+                    (construction, construction_pose),
+                    group,
+                    (
+                        motion.0
+                            + motion.1.cross(at - motion.2)
+                            + construction_pose.rotation * launch.velocity,
+                        motion.1 + construction_pose.rotation * launch.spin,
+                        at,
+                    ),
+                    tick,
+                )
+            });
+        }
+    });
     // Moving matter already has a carrier; only surviving field loads push it.
     let fields = if moving.is_some() {
         field_blows(&loads, &live.state).copied().collect()
@@ -1662,6 +1748,7 @@ fn evaluate_owner(
         events: changes.events,
         split,
         departures,
+        sheds,
     }
 }
 
@@ -1765,6 +1852,22 @@ fn apply_deposits(mut p: DepositParam) {
                     let taken = &batch[&root];
                     let frame = frames[&root];
                     let construction = breakage.physics_frame(transform);
+                    let motion = if piece.is_some() {
+                        let (body, _) = bodies
+                            .get(root)
+                            .expect("a moving group has its physics body");
+                        let centre = p
+                            .centres
+                            .get(root)
+                            .expect("a physics body has its computed COM");
+                        (
+                            body.linear_velocity(),
+                            body.angular_velocity(),
+                            body.position().0 + body.rotation().0 * centre.0,
+                        )
+                    } else {
+                        (Vec3::ZERO, Vec3::ZERO, construction.translation) // Placed matter is at rest.
+                    };
                     let effect = evaluate_owner(
                         root,
                         breakage.bypass_change_detection(),
@@ -1776,6 +1879,7 @@ fn apply_deposits(mut p: DepositParam) {
                             pressing: presses.get(&root).map_or(&[][..], Vec::as_slice),
                             resting: resting.get(&root).map_or(&[][..], Vec::as_slice),
                             spin: construction_spin(bodies, root, frame.rotation, piece.is_some()),
+                            motion,
                             tick,
                             step,
                         },
@@ -1801,6 +1905,7 @@ fn apply_deposits(mut p: DepositParam) {
             // Records, source impulses and carrier creation keep source-entity order,
             // independent of worker completion. Every owner commits once after tick intake.
             for (effect, reusable) in effects {
+                p.shed.write_batch(effect.sheds);
                 let frame = frames[&effect.root];
                 if !effect.fields.is_empty() {
                     let (mut body, _) = p

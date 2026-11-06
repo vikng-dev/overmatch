@@ -300,10 +300,10 @@ fn isolate_chunk(app: &mut App, root: Entity, chunk: usize) {
     });
 }
 
-/// The game's environment destruction model: admitted map kinds with above-ground breakable
-/// matter release through the common plugin when a chunk loses support. The Driver relies on that owner reaching the
-/// production belt gather and footprint reader with centroid-local convex geometry.
-/// Fixture: isolate one above-ground chunk, then request a law evaluation with zero work.
+/// The game's environment destruction routes unsupported matter from every admitted map kind.
+/// Resolved fragments reach the Driver through centroid-local colliders; smaller isolated
+/// fragments reach decor and the ledger. Fixture: remove one above-ground chunk's supports.
+
 #[test]
 fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
     let manifest = crate::map::tests::shipped_manifest();
@@ -318,6 +318,8 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
     for asset in assets {
         let kind = manifest.constructions.get(asset).unwrap();
         let (mut app, root) = composed_kind(false, kind);
+        app.init_resource::<Sheds>()
+            .add_systems(FixedPostUpdate, keep_sheds.after(LawSet));
         app.update();
         app.update();
         let body = app.world().get::<Breakage>(root).unwrap();
@@ -331,8 +333,30 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
             continue; // Valid constructions can have no above-ground breakable matter to release.
         };
         let at = body.live.structure.chunks[chunk].centroid;
+        let resolved = body.live.structure.chunks[chunk].volume.cbrt()
+            >= crate::physical_laws::PhysicalLaws::shipped().server_rubble_min_size_m;
         isolate_chunk(&mut app, root, chunk);
         app.update();
+        if !resolved {
+            assert_eq!(
+                app.world().get::<Breakage>(root).unwrap().live.state.fate[chunk],
+                Fate::Dust
+            );
+            assert!(
+                app.world()
+                    .resource::<Sheds>()
+                    .0
+                    .iter()
+                    .any(|shed| shed.chunks.contains(&(chunk as u16)))
+            );
+            assert!(
+                !app.world_mut()
+                    .query::<&Piece>()
+                    .iter(app.world())
+                    .any(|piece| piece.chunks.contains(&(chunk as u16)))
+            );
+            continue;
+        }
         let (owner, piece) = app
             .world_mut()
             .query::<(Entity, &Piece)>()
@@ -3743,6 +3767,7 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
                                 pressing: &[],
                                 resting: &[],
                                 spin: Vec3::Z * 4.0,
+                                motion: (Vec3::ZERO, Vec3::Z * 4.0, Vec3::ZERO),
                                 tick: 1,
                             },
                         );
