@@ -516,6 +516,11 @@ pub(crate) enum PlanError {
     Read(std::io::Error),
     Parse(ron::error::SpannedError),
     Field(String),
+    OrbitCamera(bevy::ecs::query::QuerySingleError),
+    Output {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 impl std::fmt::Display for PlanError {
@@ -526,6 +531,15 @@ impl std::fmt::Display for PlanError {
             }
             Self::Parse(error) => error.fmt(f),
             Self::Field(error) => f.write_str(error),
+            Self::OrbitCamera(error) => write!(
+                f,
+                "frames.camera: {error}; choose Pose on a root without exactly one player orbit camera"
+            ),
+            Self::Output { path, source } => write!(
+                f,
+                "frames.out: cannot prepare {}: {source}; choose a writable directory and fix its path or permissions",
+                path.display()
+            ),
         }
     }
 }
