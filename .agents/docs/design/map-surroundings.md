@@ -529,7 +529,7 @@ project's one pair rule. It replaces borrowing the terrain's solver stand-in
 (`debris/crumble.rs:491` → `contact_law.rs:47-51`, `Contactor::ground`). That is routing, not a
 stated fact. The replacement is material selection through a generic contact interface, where every
 collider names its material in data. That would also fix graybox Blocks of brick being read as soil.
-It is a follow-up task under #200, not a lane here.
+It is tracked by #304, outside the wall lanes.
 
 **Why a polygon of edge boxes.** "May become irregular later" and "Commit to one path" have one
 answer: one representation and one constructor. The square is a four-vertex polygon, not a mode.
@@ -619,6 +619,32 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
   - driven obliquely into the wall, it gains no height from it: no rearing, no climb, no perch.
     It slides along the wall.
 
+**W1d acceptance remains open (#299).** MEASURED with the production headless sim, a flat
+fixture and a terrain ramp, using the configured 5 mm contact tolerance:
+
+| Entry | Greatest hull overrun | Margin to tolerance | Result |
+|---|---:|---:|---|
+| Head-on, governed-speed entry, full throttle | 1.007 mm | +3.993 mm | pass |
+| Convex corner, governed-speed entry, full throttle | 0.961 mm | +4.039 mm | pass |
+| 30 degrees to the wall, full throttle from rest | 18.127 mm | -13.127 mm | containment fails |
+| Airborne from a ramp, full throttle | 9.323 mm | -4.323 mm | containment fails; airborne wall contact confirmed |
+
+The oblique drive slides 11.882 m while touching the wall. Its highest fully extended roadwheel
+shoe point stays 83.681 mm below the ground plane: 88.681 mm of margin including contact tolerance
+(DERIVED from the fixture's own running gear). The active test checks that reach and a full hull
+width of sliding. The two containment failures remain ignored reproductions with their original
+bounds, run explicitly with `headless_test::boundary -- --ignored --nocapture`.
+
+The failure is in generic hull/contact resolution, not wall data: MEASURED wall-face error and
+cached-versus-live collider pose discrepancy are each at most 0.016 mm. Changing only Avian's
+contact-frequency factor to half shifts the grind's peak overrun from 18.127 to 11.200 mm; this
+is a diagnostic observation, not a chosen tuning. The changed factor is discarded. No wall-specific
+rule or solver tuning is added. The exact contact-law term needs follow-up under #299.
+
+Avian's `NarrowPhaseConfig::contact_tolerance` is a minimum speculative margin, not a maximum
+penetration guarantee; `ContactNormalPart::solve_impulse` uses compliant constraints. Thus the
+5 mm acceptance is a stricter project requirement, not a guarantee of the configured solver.
+
 **Capture.** W1d: third person at the east edge, the tank held at the wall and the camera pulled in.
 
 ### 3.7 Ledger: best practice and provisional
@@ -635,8 +661,9 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
 | Distant life | instanced clumps bound to constructions in data | seeded placement | authored placement in the instance format (#221) |
 | Boundary data (W1a delivered) | `boundary.ron`, checked `PlayArea`, gate checks 1–2; no grip is an owner `Taste` | square polygon; floor and ceiling bounds | the natural border's polygon (#200); authored vertical bounds, informed by logged escapes |
 | Boundary admission (W1b delivered) | cross-file gate checks 3–5: spawns, resolved placement footprints and outward edge boxes; startup and compatibility share every refusal | square spawn limit | a polygon-inset spawn picker (#200) |
-| Boundary wall (W1c delivered) | admitted finite wall dimensions; `PlayArea::wall_boxes` supplies outward edge solids at Startup on every map composition; `Terrain` layer, friction through `substances::contact_friction`; camera, debris and pair-path witnesses | invisible; routed landing response | map art; generic contact materials (#200) |
+| Boundary wall (W1c delivered) | admitted finite wall dimensions; `PlayArea::wall_boxes` supplies outward edge solids at Startup on every map composition; `Terrain` layer, friction through `substances::contact_friction`; camera, debris and pair-path witnesses | invisible; routed landing response | map art; generic contact materials (#304) |
 | Placement Y | finite authored Y is admitted | scatter replaces Y with terrain height because the export is stale | #221: restore the off-repo Houdini source, export truthful world XYZ against the shipped height decode (including moved XZ), then retain authored Y; hand-resampling the product alone would be overwritten on export |
+| Boundary driving (W1d acceptance open) | production-composition hull witnesses; geometry-derived support reach and configured contact tolerance | none new | #299: resolve the grind and airborne containment failures above before claiming the hull side bound |
 | Boundary floor consumers | planned: floor law | none new | W2, W3 |
 | Map load (W1a delivered) | one admitted sequence and digest, including boundary and masks (R6); height-decode range must remain finite | the decoders' second read (R6 remainder) | the snapshot carrying the bytes, with destruction-05 and destruction-09 |
 | Map sources | tracked, reproducible, admitted generators | off-repo Houdini scene and TIFF; `map_ui.png` recipe | #221's pipeline; a startup derivation |
@@ -707,7 +734,7 @@ The plan's L6 (an `Atmosphere` spike) is out: settled.
 ## 5. Owner decisions left
 
 1. **Wall driving verdict.** W1c supplies the edge solids after the convex and terrain adapters;
-   W1d still owes the hull-driving witnesses and the owner's visual verdict.
+   W1d records two containment failures above; contact resolution and the owner's visual verdict remain open.
 2. **Haze default.** 12 km under the playtest fork (alternatives 8 km and 20 km). Settled in play;
    nothing is needed before L2a.
 3. **When the outland gets authored land.** Odd-reflection height now; an authored outland, or
