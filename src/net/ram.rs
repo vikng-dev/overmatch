@@ -16,7 +16,7 @@ use crate::{
     },
     contact_transfer::ContactTransfers,
     cost::{
-        phases,
+        SendSample, TickSample, phases,
         stages::{self, NamedTimes},
     },
     map::{MapManifest, Prototype},
@@ -77,27 +77,6 @@ struct Plan {
     minimum_m_s: f64,
 }
 
-#[derive(Serialize)]
-struct Tick {
-    tick: u64,
-    tick_us: f64,
-    physics_us: f64,
-    sleep_us: f64,
-    #[serde(flatten)]
-    stages: NamedTimes<{ stages::COUNT }>,
-    phases_us: NamedTimes<{ phases::COUNT }>,
-    collector_us: f64,
-    awake: usize,
-    tanks: usize,
-    dt_s: f64,
-}
-
-#[derive(Serialize)]
-struct Send {
-    tick: u64,
-    us: f64,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum End {
@@ -118,8 +97,8 @@ pub(super) struct Ram {
     resting_s: f64,
     done: Option<End>,
     target: Option<Entity>,
-    rows: Vec<Tick>,
-    sends: Vec<Send>,
+    rows: Vec<TickSample>,
+    sends: Vec<SendSample>,
     last_send_tick: Option<u64>,
 }
 
@@ -262,7 +241,7 @@ impl Ram {
     pub(super) fn send(&mut self, us: f64) {
         if self.plan.is_some() && self.tick > 0 && self.last_send_tick != Some(self.tick) {
             self.last_send_tick = Some(self.tick);
-            self.sends.push(Send {
+            self.sends.push(SendSample {
                 tick: self.tick,
                 us,
             });
@@ -292,6 +271,17 @@ pub(super) struct Census<'w, 's> {
 }
 
 impl Census<'_, '_> {
+    pub(super) fn contact_points(&self) -> usize {
+        self.contacts
+            .groups()
+            .map(<[crate::contact_transfer::ContactTransfer]>::len)
+            .sum()
+    }
+
+    pub(super) fn counts(&self) -> (usize, usize) {
+        (self.pieces.iter().len(), self.tanks.iter().len())
+    }
+
     pub(super) fn collector(&mut self, us: f64) {
         if let Some(row) = self.ram.as_deref_mut().and_then(|ram| ram.rows.last_mut()) {
             row.collector_us = us;
@@ -362,7 +352,7 @@ impl Census<'_, '_> {
                 ram.done = Some(End::Deadline);
             }
         }
-        ram.rows.push(Tick {
+        ram.rows.push(TickSample {
             tick: ram.tick,
             tick_us,
             physics_us,

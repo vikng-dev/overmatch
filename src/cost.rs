@@ -15,7 +15,31 @@ pub(crate) mod stages;
 use std::time::Instant;
 
 use bevy::{app::FixedMain, prelude::*};
+use serde::Serialize;
 use serde_json::json;
+use stages::NamedTimes;
+
+/// Shared per-tick wire schema for the ram and scheduled-collapse instruments.
+#[derive(Serialize)]
+pub(crate) struct TickSample {
+    pub(crate) tick: u64,
+    pub(crate) tick_us: f64,
+    pub(crate) physics_us: f64,
+    pub(crate) sleep_us: f64,
+    #[serde(flatten)]
+    pub(crate) stages: NamedTimes<{ stages::COUNT }>,
+    pub(crate) phases_us: NamedTimes<{ phases::COUNT }>,
+    pub(crate) collector_us: f64,
+    pub(crate) awake: usize,
+    pub(crate) tanks: usize,
+    pub(crate) dt_s: f64,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SendSample {
+    pub(crate) tick: u64,
+    pub(crate) us: f64,
+}
 
 use crate::ballistics::Projectile;
 use crate::state::MatchCommands;

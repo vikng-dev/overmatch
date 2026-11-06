@@ -34,9 +34,47 @@ pub(crate) const NAMES: [&str; 7] = [
 pub(crate) const COUNT: usize = NAMES.len();
 
 #[derive(Resource, Default)]
-pub(crate) struct Stages(Arc<[AtomicU64; COUNT]>);
+pub(crate) struct Stages(Arc<[AtomicU64; COUNT]>, Arc<[AtomicU64; WORK_COUNT]>);
+
+/// Counts accompany wall brackets; they do not add time or change law decisions.
+#[derive(Clone, Copy)]
+pub(crate) enum Work {
+    AssessedOwners,
+    StructureSolveColumns,
+    PreparedBodies,
+    PreparedColliders,
+    Landings,
+    LandingPasses,
+    LandingOps,
+    ContactPoints,
+}
+
+pub(crate) const WORK_NAMES: [&str; 8] = [
+    "assessed_owners",
+    "structure_solve_columns",
+    "prepared_bodies",
+    "prepared_colliders",
+    "landings",
+    "landing_passes",
+    "landing_ops",
+    "contact_points",
+];
+pub(crate) const WORK_COUNT: usize = WORK_NAMES.len();
+pub(crate) type NamedCounts = NamedValues<WORK_COUNT, u64>;
+pub(crate) type NamedTimes<const N: usize> = NamedValues<N, f64>;
 
 impl Stages {
+    pub(crate) fn add(&self, work: Work, count: u64) {
+        self.1[work as usize].fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub(crate) fn take_counts(&self) -> NamedCounts {
+        NamedCounts::new(
+            &WORK_NAMES,
+            std::array::from_fn(|i| self.1[i].swap(0, Ordering::Relaxed)),
+        )
+    }
+
     pub(super) fn total_ns(&self) -> u64 {
         self.0.iter().map(|ns| ns.load(Ordering::Relaxed)).sum()
     }
@@ -56,22 +94,22 @@ impl Stages {
 
 /// Serialize stage names from their owner, so consumers can include newly added stages.
 #[derive(Clone, Copy)]
-pub(crate) struct NamedTimes<const N: usize> {
+pub(crate) struct NamedValues<const N: usize, T> {
     names: &'static [&'static str; N],
-    pub(crate) values: [f64; N],
+    pub(crate) values: [T; N],
 }
 
-impl<const N: usize> NamedTimes<N> {
-    pub(crate) fn new(names: &'static [&'static str; N], values: [f64; N]) -> Self {
+impl<const N: usize, T> NamedValues<N, T> {
+    pub(crate) fn new(names: &'static [&'static str; N], values: [T; N]) -> Self {
         Self { names, values }
     }
 }
 
-impl<const N: usize> Serialize for NamedTimes<N> {
+impl<const N: usize, T: Serialize> Serialize for NamedValues<N, T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(N))?;
-        for (name, us) in self.names.iter().zip(self.values) {
-            map.serialize_entry(name, &us)?;
+        for (name, us) in self.names.iter().zip(&self.values) {
+            map.serialize_entry(name, us)?;
         }
         map.end()
     }
@@ -94,6 +132,24 @@ impl Drop for Bracket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Match traces must drain every worker's work once without debiting counts from wall time.
+    #[test]
+    fn work_counts_are_named_and_drain_independently_of_time() {
+        let stages = Stages::default();
+        // Fixture: unequal worker contributions expose lost accumulation and wrong field names.
+        std::thread::scope(|scope| {
+            for count in [2, 3] {
+                let stages = &stages;
+                scope.spawn(move || stages.add(Work::Landings, count));
+            }
+        });
+        assert_eq!(stages.total_ns(), 0);
+        let value = serde_json::to_value(stages.take_counts()).unwrap();
+        assert_eq!(value["landings"], 5);
+        assert_eq!(value["landing_passes"], 0);
+        assert_eq!(stages.take_counts().values, [0; WORK_COUNT]);
+    }
 
     /// The stats consumer must empty each stage independently at every fixed tick; a stale
     /// accumulator would count previous ticks again. Timings are observations, never thresholds.
