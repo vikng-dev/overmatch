@@ -15,7 +15,10 @@ use crate::{
         breakage::{Breakage, Piece},
     },
     contact_transfer::ContactTransfers,
-    cost::stages::Stage,
+    cost::{
+        phases,
+        stages::{self, NamedTimes},
+    },
     map::{MapManifest, Prototype},
     scatter::MapInstance,
     spec::TankSpec,
@@ -80,13 +83,9 @@ struct Tick {
     tick_us: f64,
     physics_us: f64,
     sleep_us: f64,
-    intake_us: f64,
-    structure_us: f64,
-    refit_us: f64,
-    publish_us: f64,
-    contacts_us: f64,
-    sweep_us: f64,
-    crumble_us: f64,
+    #[serde(flatten)]
+    stages: NamedTimes<{ stages::COUNT }>,
+    phases_us: NamedTimes<{ phases::COUNT }>,
     collector_us: f64,
     awake: usize,
     tanks: usize,
@@ -305,6 +304,7 @@ impl Census<'_, '_> {
         physics_us: f64,
         sleep_us: f64,
         stages: [f64; crate::cost::stages::COUNT],
+        phases_us: NamedTimes<{ phases::COUNT }>,
         dt: f64,
     ) -> bool {
         let Some(ram) = self
@@ -367,13 +367,8 @@ impl Census<'_, '_> {
             tick_us,
             physics_us,
             sleep_us,
-            intake_us: stages[Stage::Intake as usize],
-            structure_us: stages[Stage::Structure as usize],
-            refit_us: stages[Stage::Refit as usize],
-            publish_us: stages[Stage::Publish as usize],
-            contacts_us: stages[Stage::Contacts as usize],
-            sweep_us: stages[Stage::Sweep as usize],
-            crumble_us: stages[Stage::Crumble as usize],
+            stages: NamedTimes::new(&stages::NAMES, stages),
+            phases_us,
             collector_us: 0.0,
             awake,
             tanks: self.tanks.iter().len(),
@@ -519,7 +514,14 @@ mod tests {
         assert!(
             !app.world_mut()
                 .run_system_once(|mut census: Census| {
-                    census.record(0.0, 0.0, 0.0, [0.0; crate::cost::stages::COUNT], 1.0)
+                    census.record(
+                        0.0,
+                        0.0,
+                        0.0,
+                        [0.0; crate::cost::stages::COUNT],
+                        NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]),
+                        1.0,
+                    )
                 })
                 .unwrap()
         );
@@ -552,7 +554,14 @@ mod tests {
         world.insert_resource(ram);
         let captured = world
             .run_system_once(|mut census: Census| {
-                census.record(0.0, 0.0, 0.0, [0.0; crate::cost::stages::COUNT], 1.0)
+                census.record(
+                    0.0,
+                    0.0,
+                    0.0,
+                    [0.0; crate::cost::stages::COUNT],
+                    NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]),
+                    1.0,
+                )
             })
             .unwrap();
         assert!(!captured);

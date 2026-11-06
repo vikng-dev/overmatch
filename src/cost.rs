@@ -9,11 +9,12 @@
 //! Invariant: use a distinct base path from `SPIKE_TRACE`; both recorders otherwise open the same
 //! role-qualified file independently.
 
+pub(crate) mod phases;
 pub(crate) mod stages;
 
 use std::time::Instant;
 
-use bevy::prelude::*;
+use bevy::{app::FixedMain, prelude::*};
 use serde_json::json;
 
 use crate::ballistics::Projectile;
@@ -62,20 +63,20 @@ impl WorkloadStart {
 /// The fixed-tick timer, present only while some consumer has armed it.
 #[derive(Resource, Default)]
 pub(crate) struct TickClock {
-    /// `Instant` captured at `FixedFirst` this tick; the whole-schedule timer's start.
+    /// Start before `FixedMain::run_fixed_main`, including every fixed schedule's final flush.
     start: Option<Instant>,
     /// Accumulated `integrate_projectiles` wall micros this tick.
     march_us: f64,
     /// Number of projectile-march calls this tick.
     march_calls: u32,
-    /// The tick [`close_tick`] closed this `FixedLast`; `None` when no tick was opened.
+    /// The tick [`close_tick`] closed in `FixedMain`; `None` when no tick was opened.
     closed: Option<TickCost>,
 }
 
 /// One closed fixed tick.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TickCost {
-    /// Wall micros from `FixedFirst` to `FixedLast`.
+    /// Wall micros around `FixedMain::run_fixed_main`, excluding the stats/trace consumers.
     pub(crate) us: f64,
     /// The projectile-march share of `us`.
     march_us: f64,
@@ -89,13 +90,13 @@ impl TickClock {
         self.march_calls += 1;
     }
 
-    /// The tick closed this `FixedLast`, for a reader ordered after [`TickClosed`].
+    /// The tick closed this `FixedMain`, for a reader ordered after [`TickClosed`].
     pub(crate) fn closed(&self) -> Option<TickCost> {
         self.closed
     }
 }
 
-/// The `FixedLast` set holding the clock's close; every reader of [`TickClock::closed`] runs after
+/// The `FixedMain` set holding the clock's close; every reader of [`TickClock::closed`] runs after
 /// it.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TickClosed;
@@ -106,22 +107,51 @@ pub(crate) fn arm_tick_clock(app: &mut App) {
         return;
     }
     app.init_resource::<TickClock>();
-    // Invariant: `FixedFirst` and `FixedLast` bracket only the complete fixed schedule.
-    app.add_systems(FixedFirst, open_tick);
-    app.add_systems(FixedLast, close_tick.in_set(TickClosed));
+    // Bevy 0.19.1's runner returns only after each child schedule applies its final buffers.
+    app.add_systems(FixedMain, open_tick.before(FixedMain::run_fixed_main));
+    app.add_systems(
+        FixedMain,
+        close_tick
+            .after(FixedMain::run_fixed_main)
+            .in_set(TickClosed),
+    );
 }
 
-/// `FixedFirst`: open the per-tick timer and clear the march accumulator.
-fn open_tick(mut clock: ResMut<TickClock>) {
-    clock.start = Some(Instant::now());
+fn open_tick(
+    mut clock: ResMut<TickClock>,
+    phases: Option<ResMut<phases::Phases>>,
+    stages: Option<Res<stages::Stages>>,
+) {
+    let now = Instant::now();
+    clock.start = Some(now);
     clock.march_us = 0.0;
     clock.march_calls = 0;
+    if let Some(mut phases) = phases {
+        phases.open(
+            now,
+            stages
+                .as_deref()
+                .expect("phase timing installs leaf timing"),
+        );
+    }
 }
 
-/// `FixedLast`: capture the elapsed time before any reader samples counts.
-fn close_tick(mut clock: ResMut<TickClock>) {
+fn close_tick(
+    mut clock: ResMut<TickClock>,
+    phases: Option<ResMut<phases::Phases>>,
+    stages: Option<Res<stages::Stages>>,
+) {
+    let now = Instant::now();
+    if let Some(mut phases) = phases {
+        phases.close(
+            now,
+            stages
+                .as_deref()
+                .expect("phase timing installs leaf timing"),
+        );
+    }
     let closed = clock.start.take().map(|start| TickCost {
-        us: start.elapsed().as_secs_f64() * 1.0e6,
+        us: now.duration_since(start).as_secs_f64() * 1.0e6,
         march_us: clock.march_us,
         march_calls: clock.march_calls,
     });
@@ -163,7 +193,7 @@ fn install(app: &mut App, role: &'static str) -> bool {
     });
     arm_tick_clock(app);
     app.add_systems(Startup, write_meta);
-    app.add_systems(FixedLast, write_tick.after(TickClosed));
+    app.add_systems(FixedMain, write_tick.after(TickClosed));
     true
 }
 
@@ -183,7 +213,7 @@ fn write_meta(mut cost: ResMut<CostTrace>, fixed: Res<Time<Fixed>>, role: Res<Co
 #[derive(Resource)]
 struct CostRole(&'static str);
 
-/// `FixedLast`, after the clock closes: sample counts and write the row past warmup. A held tick
+/// `FixedMain`, after the clock closes: sample counts and write the row past warmup. A held tick
 /// (the empty server or results, [`MatchCommands::Held`]) is neither counted nor written: the
 /// workload under measurement starts at combat release and any runner signal, so tables hold no held
 /// ticks. Both recorder compositions install the match-command publication.

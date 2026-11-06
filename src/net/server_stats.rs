@@ -21,7 +21,7 @@
 //! - `intake_us`, `structure_us`, `refit_us`: one sample per tick, including zero for no
 //!   work. Intake converts shell/charge/contact inputs and casts deposit geometry; structure
 //!   evaluates owner laws, prepares launches and commits effects; refit prepares collider changes
-//!   and partitions carriers. Deferred ECS application and AABB updates remain in other tick work.
+//!   and partitions carriers. Deferred ECS application and AABB updates land in `phases_us`.
 //! - `contacts_us`: solver-contact readout and resting-contact cache maintenance, included in
 //!   `physics_us`. Intake consumes that readout later in the tick.
 //! - `publish_us`: construction-ledger diff commands prepared inside the tick.
@@ -29,6 +29,9 @@
 //!   exchanges, and the departures it routes. The refit it triggers is `refit_us`.
 //! - `crumble_us`: the landing crumble after the deposits: each moving group's landing read,
 //!   judged by its kernel and routed.
+//! - `phases_us`: complete schedule/phase intervals after debiting the leaf brackets above.
+//!   ECS application, synchronous hooks and dispatch stay in their phase; `physics_step_us`
+//!   includes sleep. Add phases and leaves once; `physics_us` and `sleep_us` are nested detail.
 //! - `collector_us`: stats tick sampling after `TickClosed`, outside `tick_us`; includes the
 //!   armed ram census. Clock-read/bracket cost remains inside the measured stages.
 //! - `sleep_us`: Avian's island-sleep bracket, included in `physics_us`. Physics covers all
@@ -58,6 +61,7 @@
 use std::time::{Duration, Instant};
 
 use avian3d::prelude::{PhysicsSchedule, PhysicsStepSystems, RigidBody, Sleeping};
+use bevy::app::FixedMain;
 use bevy::prelude::*;
 use bevy::utils::Parallel;
 use bevy_replicon::prelude::ServerSystems;
@@ -78,6 +82,7 @@ use crate::construction::{
 };
 use crate::cost::{
     TickClock, TickClosed, arm_tick_clock,
+    phases::{self, Phases},
     stages::{COUNT, NAMES, Stages},
 };
 use crate::damage_cam::recorder::ShotRecorder;
@@ -109,6 +114,7 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         sleep: TickWindow::default(),
         collector: TickWindow::default(),
         stages: std::array::from_fn(|_| TickWindow::default()),
+        phases: std::array::from_fn(|_| TickWindow::default()),
         send: TickWindow::default(),
         cpu_at_start: process_cpu(),
         throttle_at_start: read_throttle(),
@@ -117,8 +123,8 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         send_bytes: 0,
     });
     app.init_resource::<PhaseStarts>();
-    app.init_resource::<Stages>();
-    app.add_systems(FixedLast, record_tick.after(TickClosed));
+    phases::install(app);
+    app.add_systems(FixedMain, record_tick.after(TickClosed));
     app.add_systems(
         PhysicsSchedule,
         (
@@ -181,6 +187,7 @@ struct ServerStats {
     sleep: TickWindow,
     collector: TickWindow,
     stages: [TickWindow; COUNT],
+    phases: [TickWindow; phases::COUNT],
     /// The period's outbound brackets, wall micros.
     send: TickWindow,
     /// The process's CPU time when the current period opened.
@@ -287,6 +294,7 @@ struct Snapshot {
     sleep: Option<TickSummary>,
     collector: Option<TickSummary>,
     stages: [Option<TickSummary>; COUNT],
+    phases: [Option<TickSummary>; phases::COUNT],
     send: Option<TickSummary>,
     debris: Value,
     clients: usize,
@@ -351,6 +359,13 @@ fn stats_line(snapshot: &Snapshot) -> String {
     for (name, summary) in NAMES.into_iter().zip(&snapshot.stages) {
         body[name] = percentiles(summary.as_ref());
     }
+    body["phases_us"] = Value::Object(
+        phases::NAMES
+            .into_iter()
+            .zip(&snapshot.phases)
+            .map(|(name, summary)| (name.to_owned(), percentiles(summary.as_ref())))
+            .collect(),
+    );
     body["debris"] = snapshot.debris.clone();
     body["construction"] = snapshot.construction.clone();
     if let Some(workload) = &snapshot.workload {
@@ -362,10 +377,11 @@ fn stats_line(snapshot: &Snapshot) -> String {
     format!("{PREFIX} {body}")
 }
 
-/// `FixedLast`, after the clock closes: add the tick to the period.
+/// `FixedMain`, after all fixed schedules and their final flushes close.
 fn record_tick(
     clock: Res<TickClock>,
     stages: Res<Stages>,
+    phases: Res<Phases>,
     mut stats: ResMut<ServerStats>,
     starts: Res<PhaseStarts>,
     mut ram: super::ram::Census,
@@ -380,9 +396,13 @@ fn record_tick(
             starts.physics_us,
             starts.sleep_us,
             measured,
+            phases.times(),
             fixed.timestep().as_secs_f64(),
         );
         for (window, us) in stats.stages.iter_mut().zip(measured) {
+            window.push(us);
+        }
+        for (window, us) in stats.phases.iter_mut().zip(phases.times().values) {
             window.push(us);
         }
         let collector_us = collect_start.elapsed().as_secs_f64() * 1.0e6;
@@ -574,6 +594,7 @@ fn emit_line(
         sleep: stats.sleep.drain(budget_us),
         collector: stats.collector.drain(budget_us),
         stages: std::array::from_fn(|i| stats.stages[i].drain(budget_us)),
+        phases: std::array::from_fn(|i| stats.phases[i].drain(budget_us)),
         send: stats.send.drain(budget_us),
         debris: debris.json(),
         clients: census.clients.iter().count(),
@@ -669,6 +690,7 @@ mod tests {
             sleep: TickWindow::default(),
             collector: TickWindow::default(),
             stages: std::array::from_fn(|_| TickWindow::default()),
+            phases: std::array::from_fn(|_| TickWindow::default()),
             send: TickWindow::default(),
             cpu_at_start: None,
             throttle_at_start: None,
@@ -907,6 +929,7 @@ mod tests {
             sleep: None,
             collector: None,
             stages: std::array::from_fn(|_| None),
+            phases: std::array::from_fn(|_| None),
             debris: json!({"live": 35, "sleeping": 140}),
             clients: 2,
             tanks: 6,
@@ -953,6 +976,7 @@ mod tests {
                 "refit_us": null,
                 "sweep_us": null,
                 "crumble_us": null,
+                "phases_us": phases::NAMES.into_iter().map(|name| (name.to_owned(), Value::Null)).collect::<serde_json::Map<_, _>>(),
                 "physics_us": {"p50": 301.0, "p95": 455.0, "p99": 600.0, "total": 200000.0, "max": 900.0},
                 "send_us": {"p50": 120.0, "p95": 180.1, "p99": 200.0, "total": 80000.0, "max": 250.0},
                 "throttled_usec": 45000,
