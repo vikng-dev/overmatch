@@ -815,7 +815,7 @@ pub(crate) mod tests {
 
     /// THE MANIFEST IS THE MAP (`terrain_grid::decode_height_grid`): the shipped tree must carry
     /// one at the default id, it must parse and pass every check through the real loader, and the
-    /// heightmap it names must exist as more than an LFS pointer. A map half-shipped — a PNG with
+    /// heightmap it names must pass the production terrain decoder. A map half-shipped — a PNG with
     /// no manifest, or a manifest naming a file nobody added — fails here in CI rather than at
     /// first boot.
     #[test]
@@ -834,12 +834,8 @@ pub(crate) mod tests {
                 heightmap.display(),
             )
         });
-        assert!(
-            bytes.len() > 1024,
-            "{} is {} bytes — a Git LFS POINTER, not the map (checkout without lfs pull)",
-            heightmap.display(),
-            bytes.len(),
-        );
+        crate::terrain_grid::grid_from_png(&bytes, manifest.extent, manifest.rows)
+            .expect("the declared heightmap must pass the production terrain decoder");
         assert!(
             manifest.extent.world_size_m > 0.0 && !manifest.instances.is_empty(),
             "the shipped map declares a world and objects on it",
@@ -889,12 +885,6 @@ pub(crate) mod tests {
         let path = shipped_assets().join(manifest.masks_asset());
         let bytes = std::fs::read(&path)
             .unwrap_or_else(|err| panic!("terrain masks missing at {}: {err}", path.display()));
-        assert!(
-            bytes.len() > 1024,
-            "{} is {} bytes — a Git LFS POINTER, not the masks (checkout without lfs pull)",
-            path.display(),
-            bytes.len(),
-        );
         let image = image::load_from_memory(&bytes).expect("the masks must decode as PNG");
         let color = image.color();
         let image::DynamicImage::ImageRgb8(masks) = image else {
