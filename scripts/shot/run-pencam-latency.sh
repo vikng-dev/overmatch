@@ -61,7 +61,7 @@ trap 'exit 143' TERM
 # The flat patch (scripts/harness/flat-patch.ron); lane 1 spawns 8 m along +x from lane 0, both
 # facing −z.
 env OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" \
-  SPIKE_SHOT_TRACE="$OUT/server" BEVY_ASSET_ROOT="$REPO" \
+  SPIKE_SHOT_TRACE="$OUT/server" \
   "$SERVER" >"$OUT/server.log" 2>&1 &
 SERVER_PID=$!
 
@@ -81,7 +81,7 @@ client() {
   exec env SPIKE_WORKLOAD_READY="$READY" OVERMATCH_WINDOW=hidden \
     OVERMATCH_HARNESS="$OUT/$1.harness.ron" OVERMATCH_SERVER=127.0.0.1:5888 \
     SPIKE_LATENCY_MS="$LAT" SPIKE_JITTER_MS="$JIT" SPIKE_JITTER_SEED="$SEED" \
-    SPIKE_SHOT_TRACE="$OUT/$1" BEVY_ASSET_ROOT="$REPO" \
+    SPIKE_SHOT_TRACE="$OUT/$1" \
     "$CLIENT" >"$OUT/$1.log" 2>&1
 }
 

@@ -51,7 +51,7 @@ trap 'exit 143' TERM
 # never touches armor (verified: zero damage rows in a full run). Lane 1 puts the shooter at +8 x,
 # so aim -8,0,0 points back at the target.
 env OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" \
-  SPIKE_SHOT_TRACE="$OUT/server" BEVY_ASSET_ROOT="$REPO" \
+  SPIKE_SHOT_TRACE="$OUT/server" \
   "$SERVER" >"$OUT/server.log" 2>&1 &
 SERVER_PID=$!
 
@@ -72,7 +72,7 @@ grep -q "listening" "$OUT/server.log"
 printf '(drive: Idle, ticks: %s)\n' "$((TICKS + 128))" >"$OUT/target.harness.ron"
 env SPIKE_WORKLOAD_READY="$READY" OVERMATCH_HARNESS="$OUT/target.harness.ron" OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
   SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 SPIKE_SHOT_TRACE="$OUT/target" \
-  BEVY_ASSET_ROOT="$REPO" "$CLIENT" >"$OUT/target.log" 2>&1 &
+  "$CLIENT" >"$OUT/target.log" 2>&1 &
 TARGET_PID=$!
 
 # Lane assignment is connect-order: the first client to CONNECT gets lane 0, and the shooter's
@@ -94,7 +94,7 @@ printf '(drive: Fire(secondary: true), aim: Point((-8, 0, 0)), range_m: 12, tick
   >"$OUT/shooter.harness.ron"
 env SPIKE_WORKLOAD_READY="$READY" OVERMATCH_HARNESS="$OUT/shooter.harness.ron" OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
   SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 \
-  SPIKE_SHOT_TRACE="$OUT/shooter" BEVY_ASSET_ROOT="$REPO" \
+  SPIKE_SHOT_TRACE="$OUT/shooter" \
   "$CLIENT" >"$OUT/shooter.log" 2>&1 &
 SHOOTER_PID=$!
 

@@ -174,7 +174,7 @@ for cond in "${CONDITIONS[@]}"; do
     [[ -n "$glass" ]] && glass_env=(OVERMATCH_XRAY="$glass")
     env OVERMATCH_WINDOW=visible \
       OVERMATCH_UNATTENDED=1 OVERMATCH_CONFIG_DIR="$cfg" "${scen[@]}" "${glass_env[@]}" \
-      SPIKE_FRAME_COST="$OUT/$cond.jsonl" RUST_LOG="$LOG_FILTER" BEVY_ASSET_ROOT="$REPO" \
+      SPIKE_FRAME_COST="$OUT/$cond.jsonl" RUST_LOG="$LOG_FILTER" \
       "$CLIENT" --offline >"$log" 2>&1 &
     CLIENT_PID=$!
     outcome="$(wait_span "$stream" "$run_s" "$CLIENT_PID")"
@@ -198,7 +198,7 @@ for cond in "${CONDITIONS[@]}"; do
     ready="$OUT/$cond.ready"
     rm -f "$ready"
     # The flat patch (scripts/harness/flat-patch.ron); lane 1 spawns 8 m along +x from lane 0.
-    env OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" BEVY_ASSET_ROOT="$REPO" \
+    env OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" \
       "$SERVER" >"$OUT/$cond.server.log" 2>&1 &
     SERVER_PID=$!
     for _ in {1..150}; do
@@ -211,7 +211,7 @@ for cond in "${CONDITIONS[@]}"; do
       "$((ticks + 128))" >"$OUT/$cond.harness.ron"
     env SPIKE_WORKLOAD_READY="$ready" OVERMATCH_UNATTENDED=1 OVERMATCH_CONFIG_DIR="$cfg" \
       OVERMATCH_HARNESS="$OUT/$cond.harness.ron" OVERMATCH_WINDOW=visible OVERMATCH_SERVER=127.0.0.1:5888 \
-      SPIKE_FRAME_COST="$OUT/$cond.jsonl" RUST_LOG="$LOG_FILTER" BEVY_ASSET_ROOT="$REPO" \
+      SPIKE_FRAME_COST="$OUT/$cond.jsonl" RUST_LOG="$LOG_FILTER" \
       "$CLIENT" >"$log" 2>&1 &
     CLIENT_PID=$!
     for _ in {1..300}; do
@@ -224,7 +224,6 @@ for cond in "${CONDITIONS[@]}"; do
       "$ticks" >"$OUT/$cond.opponent.harness.ron"
     env SPIKE_WORKLOAD_READY="$ready" OVERMATCH_WINDOW=hidden \
       OVERMATCH_HARNESS="$OUT/$cond.opponent.harness.ron" OVERMATCH_SERVER=127.0.0.1:5888 \
-      BEVY_ASSET_ROOT="$REPO" \
       "$CLIENT" >"$OUT/$cond.opponent.log" 2>&1 &
     OTHER_PID=$!
     # Both clients hold their scripts until every input slot is present; combat is already live.

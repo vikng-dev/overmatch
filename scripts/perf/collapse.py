@@ -18,6 +18,8 @@ and engine scheduling outside PhysicsSchedule. Send bytes are attempted encrypte
 bytes before transport; raw rows also retain send time, RSS and quota throttling.
 Hosted runs require kernel evidence of two vCPU. --rehearsal is explicitly unpriced local
 plumbing on the recorded host; concurrent lanes make its timings unsuitable for pricing.
+--tick-attribution saves exact tick stages/work counts and replication envelope size histograms;
+its server uses lightyear_replication::server=trace (printed by --print-server-env).
 Full-speed ram: --ram scripts/perf/ram.json (local or hosted).
 Without --schedule or --ram, the tankless HE diagnostic remains available.
 """
@@ -247,8 +249,10 @@ def run_match(args, out, recipe):
     address = "127.0.0.1:5888" if local else args.target
     # Inherited stress/trace levers would silently add a second workload.
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OVERMATCH_", "SPIKE_"))}
-    env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1", BEVY_ASSET_ROOT=str(ROOT), NO_COLOR="1")
+    env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1", NO_COLOR="1")
     env["OVERMATCH_LOADTEST"] = json.dumps(recipe, separators=(",", ":"))
+    if args.tick_attribution:
+        env["RUST_LOG"] = env.get("RUST_LOG", "info") + ",lightyear_replication::server=trace"
     serverlog = out / "server.log"
     (out / "rows.json").unlink(missing_ok=True)
     client_count = args.clients or args.tanks
@@ -289,6 +293,11 @@ def run_match(args, out, recipe):
                         if log.count("client: connected (entity") != 1 or "harness: released" not in log:
                             raise RuntimeError(f"client{i}: requires one connection and synchronized combat release")
                     (out / "rows.json").write_text(json.dumps(rows, indent=2) + "\n")
+                    if args.tick_attribution:
+                        trace = match_tick_summary(rows, recipe)
+                        trace["replication_windows"] = replication_windows(text)
+                        (out / "tick-attribution.json").write_text(json.dumps(trace, indent=2) + "\n")
+                        print(f"MEASURED match-tick-attribution: {len(trace['ticks'])} ticks, {len(trace['over_budget_ticks'])} over budget; {out / 'tick-attribution.json'}")
                     report_match(windows)
                     last = windows[-1]["loadtest"]
                     print(f"COMPLETE: {args.tanks} tanks, {client_count} real links, {last['constructions']} constructions, {len(windows)} complete windows, {last['events_fired']} events; game construction outcomes {json.dumps(last['targets'])}; artifacts: {out}")
@@ -357,15 +366,55 @@ def ram_parts(tick):
     return parts
 
 
-def ram_rows(text, recipe):
-    def finite(value, field):
-        try:
-            if not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value):
-                return
-        except OverflowError:
-            pass
-        raise ValueError(f"invalid {field}: expected a finite number")
+def finite(value, field):
+    try:
+        if not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value):
+            return
+    except OverflowError:
+        pass
+    raise ValueError(f"invalid {field}: expected a finite number")
 
+
+def read_tick_samples(batches, tanks, ticks=None, sends=None):
+    ticks = [] if ticks is None else ticks
+    sends = [] if sends is None else sends
+    for batch in batches:
+        for tick in batch["ticks"]:
+            if tick["tick"] != len(ticks) + 1:
+                raise RuntimeError("missing, duplicated or reordered instrument tick")
+            if tick["tanks"] != tanks:
+                raise RuntimeError("tick population differs from requested tanks")
+            required = {"tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "sweep_us", "crumble_us", "collector_us", "dt_s"}
+            if missing := required - tick.keys():
+                raise ValueError(f"missing tick timing fields: {sorted(missing)}")
+            for field in {name for name in tick if name.endswith("_us") and name != "phases_us"} | {"dt_s"}:
+                finite(tick[field], f"ticks.{field}")
+                if tick[field] < 0:
+                    raise ValueError(f"invalid {field}")
+            if tick["dt_s"] <= 0 or tick["sleep_us"] + tick["contacts_us"] > tick["physics_us"]:
+                raise ValueError("invalid timestep or nested sleep bracket")
+            phases = tick["phases_us"]
+            if not isinstance(phases, dict) or not phases or any(not name.endswith("_us") or name in RAM_NON_ADDITIVE | {"unattributed_us"} for name in phases):
+                raise ValueError("invalid phases_us: expected named phase timings")
+            for name, us in phases.items():
+                finite(us, f"phases_us.{name}")
+                if us < 0:
+                    raise ValueError(f"invalid phases_us.{name}")
+            parts = ram_parts(tick)
+            if ticks and parts.keys() != ram_parts(ticks[0]).keys():
+                raise ValueError("instrument timing fields changed during capture")
+            ticks.append(tick)
+        for send in batch["sends"]:
+            if not isinstance(send["tick"], int) or send["tick"] <= 0 or send["tick"] > len(ticks) or sends and send["tick"] <= sends[-1]["tick"]:
+                raise ValueError("invalid or reordered send tick")
+            finite(send["us"], "sends.us")
+            if send["us"] < 0:
+                raise ValueError("invalid send duration")
+            sends.append(send)
+    return ticks, sends
+
+
+def ram_rows(text, recipe):
     rows, ticks, sends = [], [], []
     last = None
     for number, line in enumerate(text.splitlines(), 1):
@@ -376,38 +425,7 @@ def ram_rows(text, recipe):
             ram = row["ram"]
             if ram["recipe"] != recipe:
                 raise RuntimeError("server ram recipe differs from requested recipe")
-            for tick in ram["ticks"]:
-                if tick["tick"] != len(ticks) + 1:
-                    raise RuntimeError("missing, duplicated or reordered ram tick")
-                if tick["tanks"] != 1:
-                    raise RuntimeError("ram requires exactly one tank")
-                required = {"tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "sweep_us", "crumble_us", "collector_us", "dt_s"}
-                if missing := required - tick.keys():
-                    raise ValueError(f"missing tick timing fields: {sorted(missing)}")
-                for field in {name for name in tick if name.endswith("_us") and name != "phases_us"} | {"dt_s"}:
-                    finite(tick[field], f"ticks.{field}")
-                    if tick[field] < 0:
-                        raise ValueError(f"invalid {field}")
-                if tick["dt_s"] <= 0 or tick["sleep_us"] + tick["contacts_us"] > tick["physics_us"]:
-                    raise ValueError("invalid timestep or nested sleep bracket")
-                phases = tick["phases_us"]
-                if not isinstance(phases, dict) or not phases or any(not name.endswith("_us") or name in RAM_NON_ADDITIVE | {"unattributed_us"} for name in phases):
-                    raise ValueError("invalid phases_us: expected named phase timings")
-                for name, us in phases.items():
-                    finite(us, f"phases_us.{name}")
-                    if us < 0:
-                        raise ValueError(f"invalid phases_us.{name}")
-                parts = ram_parts(tick)
-                if ticks and parts.keys() != ram_parts(ticks[0]).keys():
-                    raise ValueError("ram timing fields changed during capture")
-                ticks.append(tick)
-            for send in ram["sends"]:
-                if not isinstance(send["tick"], int) or send["tick"] <= 0 or send["tick"] > len(ticks) or sends and send["tick"] <= sends[-1]["tick"]:
-                    raise ValueError("invalid or reordered send tick")
-                finite(send["us"], "sends.us")
-                if send["us"] < 0:
-                    raise ValueError("invalid send duration")
-                sends.append(send)
+            ticks, sends = read_tick_samples([ram], 1, ticks, sends)
             plan, impact = ram["plan"], ram["impact"]
             if plan is not None:
                 for field in ("runup_m", "governed_m_s", "minimum_m_s"):
@@ -431,6 +449,60 @@ def ram_rows(text, recipe):
         except (ValueError, KeyError, TypeError) as error:
             raise RuntimeError(f"server log line {number}: malformed ram stats: {error}") from error
     return rows, ticks, sends, last
+
+
+def tick_attribution(tick):
+    stages = ram_parts(tick)
+    return dict(tick=tick["tick"], tick_us=tick["tick_us"], parts_us=stages,
+                attributed_pct=100 * (1 - stages["unattributed"] / tick["tick_us"]),
+                **{key: tick[key] for key in ("elapsed_s", "events_fired", "work") if key in tick})
+
+
+def replication_windows(text):
+    """Pinned Lightyear send_server_packets trace: plaintext envelopes, before transport retries.
+
+    The histogram preserves oversized single-entity mutations for source-based byte attribution;
+    it does not mislabel replication bytes as encrypted sends or assume poses fill every mutation.
+    """
+    windows, channels = [], {}
+    seen = False
+    for number, line in enumerate(text.splitlines(), 1):
+        line = ANSI.sub("", line)
+        if "send_server_packets: sending " in line:
+            match = re.search(r"send_server_packets: sending (\d+) bytes on channel_idx=(\d+) to ", line)
+            if match is None:
+                raise RuntimeError(f"server log line {number}: malformed replication size trace")
+            size, channel = map(int, match.groups())
+            histogram = channels.setdefault(str(channel), collections.Counter())
+            histogram[size] += 1
+            seen = True
+        if "server_stats " in line:
+            row = json.loads(line.split("server_stats ", 1)[1])
+            sequence = row["loadtest"]["sequence"]
+            if sequence != len(windows) + 1:
+                raise RuntimeError("missing, duplicated or reordered replication window")
+            windows.append(dict(sequence=sequence, channels={
+                channel: dict(messages=sum(histogram.values()),
+                              bytes=sum(size*count for size, count in histogram.items()),
+                              sizes=dict(sorted(histogram.items())))
+                for channel, histogram in sorted(channels.items())}))
+            channels = {}
+    if not seen:
+        raise RuntimeError("replication byte trace missing: start the server with --print-server-env --tick-attribution")
+    # An unfinished trailing stats period is outside the complete-window report.
+    return windows
+
+
+def match_tick_summary(rows, recipe):
+    """Per-tick wave attribution; the ram and match share schema checks and additive accounting."""
+    ticks, sends = read_tick_samples([r["loadtest"] for r in rows], recipe["tanks"])
+    if not ticks:
+        raise RuntimeError("match tick attribution missing: rebuild the instrumented server")
+    if any(t["dt_s"] != ticks[0]["dt_s"] for t in ticks):
+        raise RuntimeError("match fixed timestep changed during capture")
+    return dict(ticks=ticks, sends=sends,
+                worst_tick_attribution=tick_attribution(max(ticks, key=lambda t: t["tick_us"])),
+                over_budget_ticks=[tick_attribution(t) for t in ticks if t["tick_us"] > t["dt_s"]*1e6])
 
 
 def ram_summary(text, recipe):
@@ -460,17 +532,13 @@ def ram_summary(text, recipe):
     ordered = sorted(t["tick_us"] for t in window)
     send_us = sum(s["us"] for s in sends if window[0]["tick"] <= s["tick"] <= window[-1]["tick"])
     worst = max(window, key=lambda t: t["tick_us"])
-    def attribution(tick):
-        stages = ram_parts(tick)
-        return dict(tick=tick["tick"], tick_us=tick["tick_us"], parts_us=stages,
-                    attributed_pct=100 * (1 - stages["unattributed"] / tick["tick_us"]))
     return dict(recipe=recipe, plan=plan, impact=impact, end=last["done"],
                 first_tick=window[0]["tick"], last_tick=window[-1]["tick"], window_s=len(window)*dt,
                 worst_tick=worst, p99_us=ordered[math.ceil(0.99*len(ordered))-1],
-                worst_tick_attribution=attribution(worst),
-                worst_capture_tick_attribution=attribution(max(ticks, key=lambda t: t["tick_us"])),
+                worst_tick_attribution=tick_attribution(worst),
+                worst_capture_tick_attribution=tick_attribution(max(ticks, key=lambda t: t["tick_us"])),
                 # Include approach ticks too: the attribution gate applies to the whole capture.
-                over_budget_ticks=[attribution(t) for t in ticks if t["tick_us"] > dt*1e6],
+                over_budget_ticks=[tick_attribution(t) for t in ticks if t["tick_us"] > dt*1e6],
                 peak_awake=max(t["awake"] for t in window), final_awake=window[-1]["awake"],
                 overruns=sum(t["tick_us"] > dt*1e6 for t in window),
                 collector_mean_us=sum(t["collector_us"] for t in window)/len(window),
@@ -492,7 +560,7 @@ def run_ram(args, out, recipe):
     address = "127.0.0.1:5888" if local else args.target
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OVERMATCH_", "SPIKE_"))}
     env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1",
-               BEVY_ASSET_ROOT=str(ROOT), NO_COLOR="1", OVERMATCH_RAM=json.dumps(recipe, separators=(",", ":")),
+               NO_COLOR="1", OVERMATCH_RAM=json.dumps(recipe, separators=(",", ":")),
                OVERMATCH_BOT="0", OVERMATCH_SERVER_STATS_S="1")
     dt = tick_seconds()
     # DERIVED: the client outlives approach, observation and both admission watchdog spans.
@@ -639,7 +707,7 @@ def run(args, out):
     env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1",
                OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_BOT="0", OVERMATCH_DEBRIS_STRESS="off",
                OVERMATCH_SERVER_STATS_S=str(STATS_PERIOD_S), OVERMATCH_HE_STRESS=f"{args.bursts}:{args.period}",
-               BEVY_ASSET_ROOT=str(ROOT), RUST_BACKTRACE="1")
+               RUST_BACKTRACE="1")
     # Refuse a busy port before the child can fail, without contacting another server.
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -732,10 +800,13 @@ def main():
     parser.add_argument("--bin", type=Path, default=ROOT / "target/debug", help="binary directory (default target/debug; other directories must already be built)")
     parser.add_argument("--rehearsal", action="store_true", help="local plumbing only: print unpriced observations without claiming a two-vCPU allocation")
     parser.add_argument("--print-server-env", action="store_true", help="print the recipe/environment for the operator's deployment, then exit without a build or run")
+    parser.add_argument("--tick-attribution", action="store_true", help="require and save per-tick scheduled-collapse stages (same reader as ram)")
     parser.add_argument("--holding-lock", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.bin = args.bin.resolve()
     args.tanks = args.tanks if args.tanks is not None else (1 if args.ram else 30)
+    if args.tick_attribution and not args.schedule:
+        parser.error("--tick-attribution requires --schedule")
     if args.ram and args.tanks != 1:
         parser.error("--ram requires exactly one tank")
     if args.clients is not None and args.clients > args.tanks:
@@ -768,6 +839,8 @@ def main():
         print("OVERMATCH_LOADTEST=" + json.dumps(recipe, separators=(",", ":")))
         print(f"OVERMATCH_BOT={args.tanks - (args.clients or args.tanks)}")
         print("OVERMATCH_SERVER_STATS_S=1")
+        if args.tick_attribution:
+            print("RUST_LOG=info,lightyear_replication::server=trace")
         return 0
     if recipe and args.duration <= recipe["events"][-1]["at_s"] + STATS_PERIOD_S:
         parser.error("--duration must leave a complete stats period after the last scheduled break")

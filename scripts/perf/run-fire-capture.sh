@@ -88,7 +88,6 @@ for cond in "${CONDITIONS[@]}"; do
     SPIKE_AUTO_FIRE=1 \
     SPIKE_FRAME_COST="$OUT/$cond.jsonl" \
     SPIKE_RENDER_COST="$OUT/$cond.render.jsonl" \
-    BEVY_ASSET_ROOT="$REPO" \
     "$CLIENT" --offline >"$OUT/$cond.log" 2>&1 &
   CLIENT_PID=$!
 

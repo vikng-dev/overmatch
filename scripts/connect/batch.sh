@@ -45,7 +45,7 @@ for i in $(seq $START $((START + N - 1))); do
   base="$OUT/run$i"
   rm -f "$base".*.jsonl "$base".*.log
 
-  SPIKE_TRACE="$base.jsonl" BEVY_ASSET_ROOT="$REPO" \
+  SPIKE_TRACE="$base.jsonl" \
     ./target/debug/overmatch-server > "$base.server.log" 2>&1 &
   SERVER_PID=$!
   for t in $(seq 1 100); do
@@ -55,7 +55,7 @@ for i in $(seq $START $((START + N - 1))); do
 
   t0=$(date +%s)
   OVERMATCH_HARNESS="$OUT/harness.ron" SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 OVERMATCH_SERVER=127.0.0.1:5888 \
-    SPIKE_TRACE="$base.jsonl" BEVY_ASSET_ROOT="$REPO" \
+    SPIKE_TRACE="$base.jsonl" \
     ./target/debug/overmatch > "$base.client.log" 2>&1 &
   CLIENT_PID=$!
 

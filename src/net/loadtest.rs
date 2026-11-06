@@ -80,6 +80,19 @@ impl Recipe {
 pub(super) struct Loadtest {
     recipe: Recipe,
     state: RunState,
+    tick: u64,
+    ticks: Vec<MatchTick>,
+    sends: Vec<crate::cost::SendSample>,
+    last_send_tick: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct MatchTick {
+    #[serde(flatten)]
+    sample: crate::cost::TickSample,
+    elapsed_s: f64,
+    events_fired: usize,
+    work: crate::cost::stages::NamedCounts,
 }
 
 enum RunState {
@@ -102,8 +115,46 @@ struct Target {
 }
 
 impl Loadtest {
+    pub(super) fn running(&self) -> bool {
+        matches!(self.state, RunState::Running { .. })
+    }
+
+    pub(super) fn record(
+        &mut self,
+        mut sample: crate::cost::TickSample,
+        work: crate::cost::stages::NamedCounts,
+    ) {
+        let RunState::Running { started, next, .. } = &self.state else {
+            return; // Admission has not opened the workload clock.
+        };
+        self.tick += 1;
+        sample.tick = self.tick;
+        self.ticks.push(MatchTick {
+            sample,
+            elapsed_s: started.elapsed().as_secs_f64(),
+            events_fired: *next,
+            work,
+        });
+    }
+
+    pub(super) fn collector(&mut self, us: f64) {
+        if let Some(tick) = self.ticks.last_mut() {
+            tick.sample.collector_us = us;
+        }
+    }
+
+    pub(super) fn send(&mut self, us: f64) {
+        if self.tick > 0 && self.last_send_tick != Some(self.tick) {
+            self.last_send_tick = Some(self.tick);
+            self.sends.push(crate::cost::SendSample {
+                tick: self.tick,
+                us,
+            });
+        }
+    }
+
     pub(super) fn json(
-        &self,
+        &mut self,
         record: &Record,
         constructions: &Query<(&MapInstance, &Breakage), With<Body>>,
         now: Instant,
@@ -131,7 +182,8 @@ impl Loadtest {
                 (Some(now.duration_since(*started).as_secs_f64()), *next)
             }
         };
-        json!({"recipe": self.recipe, "elapsed_s": elapsed, "window_start_s": elapsed.map(|t| t - period.as_secs_f64()), "events_fired": next, "targets": targets})
+        json!({"recipe": self.recipe, "elapsed_s": elapsed, "window_start_s": elapsed.map(|t| t - period.as_secs_f64()), "events_fired": next, "targets": targets,
+            "ticks": std::mem::take(&mut self.ticks), "sends": std::mem::take(&mut self.sends)})
     }
 }
 
@@ -147,6 +199,10 @@ fn install_value(app: &mut App, text: &str) -> Result<(), LeverError> {
     app.insert_resource(Loadtest {
         recipe,
         state: RunState::AwaitingAdmission,
+        tick: 0,
+        ticks: Vec::new(),
+        sends: Vec::new(),
+        last_send_tick: None,
     })
     .add_systems(FixedUpdate, drive.in_set(GameplaySet));
     Ok(())
@@ -173,7 +229,7 @@ fn drive(
     record: Res<Record>,
     mut commands: Commands,
 ) {
-    let Loadtest { recipe, state } = &mut *load;
+    let Loadtest { recipe, state, .. } = &mut *load;
     if matches!(state, RunState::AwaitingAdmission) {
         // GameplaySet opens only after map admission: resolve operator IDs at its first tick.
         let mut targets = Vec::with_capacity(recipe.events.len());
@@ -325,6 +381,60 @@ fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The trace reader relies on admission-relative numbering across stats periods and sends
+    /// tied to the last completed tick. Draining telemetry must not restart either sequence.
+    #[test]
+    fn tick_trace_starts_at_admission_and_drains_without_resetting_sequence() {
+        use crate::cost::{
+            TickSample, phases,
+            stages::{self, NamedCounts, NamedTimes, WORK_COUNT, WORK_NAMES},
+        };
+        let mut app = App::new();
+        install_value(
+            &mut app,
+            r#"{"tanks":1,"events":[{"at_s":0,"instances":["a"]}]}"#,
+        )
+        .unwrap();
+        let mut load = app.world_mut().resource_mut::<Loadtest>();
+        // Fixture: timing fields are arbitrary observations, never a performance threshold.
+        let sample = || TickSample {
+            tick: 0,
+            tick_us: 100.0,
+            physics_us: 30.0,
+            sleep_us: 2.0,
+            stages: NamedTimes::new(&stages::NAMES, [0.0; stages::COUNT]),
+            phases_us: NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]),
+            sweep_sources: 0,
+            sweep_casts: 0,
+            collector_us: 0.0,
+            awake: 0,
+            tanks: 1,
+            dt_s: 0.1,
+        };
+        load.record(sample(), NamedCounts::new(&WORK_NAMES, [0; WORK_COUNT]));
+        load.send(1.0);
+        assert!(load.ticks.is_empty() && load.sends.is_empty());
+        load.state = RunState::Running {
+            started: Instant::now(),
+            targets: Vec::new(),
+            next: 1,
+        };
+        load.record(sample(), NamedCounts::new(&WORK_NAMES, [0; WORK_COUNT]));
+        load.collector(7.0);
+        load.send(4.0);
+        load.send(5.0);
+        let first = std::mem::take(&mut load.ticks);
+        assert_eq!(first[0].sample.tick, 1);
+        assert_eq!(first[0].sample.collector_us, 7.0);
+        assert_eq!(first[0].events_fired, 1);
+        assert_eq!(load.sends.len(), 1);
+        assert_eq!(load.sends[0].tick, 1);
+        load.record(sample(), NamedCounts::new(&WORK_NAMES, [0; WORK_COUNT]));
+        load.send(6.0);
+        assert_eq!(load.ticks[0].sample.tick, 2);
+        assert_eq!(load.sends[1].tick, 2);
+    }
 
     /// Operators rely on an exact recipe: malformed timing, reused targets and unknown fields
     /// must refuse instead of silently changing the requested concurrency.

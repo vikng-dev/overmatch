@@ -43,7 +43,7 @@ use crate::construction::fracture::parts::Kernel;
 use crate::construction::fracture::{Cause, Failure, Side, State, Structure};
 use crate::contact_law::{Contactor, peak_force};
 use crate::contact_transfer::ContactTransfers;
-use crate::cost::stages::{Stage, Stages};
+use crate::cost::stages::{Stage, Stages, Work};
 use crate::physical_laws::PhysicalLaws;
 use crate::{Layer, ShotClock};
 
@@ -70,6 +70,8 @@ pub(crate) struct Crumble {
     pub(crate) fragments: Vec<Vec<usize>>,
     /// Scalar operations of its passes, each kernel's factorization and solve, a DERIVED count.
     pub(crate) work: u64,
+    /// Field evaluations attempted by this landing, including its final holding pass.
+    pub(crate) passes: usize,
 }
 
 /// The fracture work to fail joint `j` by `cause`, J: its seam's fracture energy in that mode
@@ -165,7 +167,9 @@ pub(crate) fn crumble(
     let mut after = state.clone();
     let (mut cracked, mut separated) = (Vec::new(), Vec::new());
     let (mut spent, mut work) = (0.0_f32, 0);
+    let mut passes = 0;
     'passes: for _ in 0..PASSES {
+        passes += 1;
         let pieces = fragments(structure, &after, group);
         let share = |chunk: usize| {
             let piece = pieces
@@ -217,6 +221,7 @@ pub(crate) fn crumble(
         spent,
         fragments: fragments(structure, &after, group),
         work,
+        passes,
     }
 }
 
@@ -653,6 +658,11 @@ fn crumble_landings(
             let frame = breakage.physics_frame(pose);
             let live = breakage.live.as_mut();
             let mut result = crumble(&live.structure, &live.state, &owned, touches, *energy);
+            if let Some(stages) = stages.as_deref() {
+                stages.add(Work::Landings, 1);
+                stages.add(Work::LandingPasses, result.passes as u64);
+                stages.add(Work::LandingOps, result.work);
+            }
             result.fragments = merge_fragments(
                 &live.structure,
                 result.fragments,
@@ -686,6 +696,7 @@ fn crumble_landings(
     prepared.sort_unstable_by_key(|(entity, ..)| *entity);
     for (entity, pending, sheds, entries) in prepared {
         record.entries.extend(entries);
+
         shed.write_batch(sheds);
         commands.entity(entity).insert(pending);
     }

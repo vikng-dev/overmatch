@@ -51,7 +51,7 @@ class CollapseTests(unittest.TestCase):
         clock, polls, children, timeouts = [0.0], [], [], []
         args = SimpleNamespace(target="192.0.2.1:5888", deployment="fixture", tanks=2,
                                clients=1, duration=3, startup_grace=7 * collapse.HOSTED_LOG_POLL_S, rehearsal=False,
-                               bin=Path("/fixture/bin"))
+                               bin=Path("/fixture/bin"), tick_attribution=False)
         class Client:
             killed = False
             def poll(self):
@@ -322,6 +322,54 @@ class RamTests(unittest.TestCase):
 
     def text(self, ram):
         return "server_stats " + json.dumps(dict(ram=ram))
+
+    def test_replication_histograms_keep_oversized_mutations_separate_from_transport(self):
+        # Fixture: identical envelopes to different clients are both traffic; bins drain once.
+        text = "\n".join([
+            "TRACE send_server_packets: sending 28 bytes on channel_idx=1 to a",
+            "TRACE send_server_packets: sending 28 bytes on channel_idx=1 to b",
+            "TRACE send_server_packets: sending 200000 bytes on channel_idx=1 to a",
+            "TRACE send_server_packets: sending 52 bytes on channel_idx=0 to a",
+            'server_stats {"loadtest":{"sequence":1}}',
+            'server_stats {"loadtest":{"sequence":2}}',
+        ])
+        rows = collapse.replication_windows(text)
+        self.assertEqual(rows[0]["channels"]["1"],
+                         dict(messages=3, bytes=200056, sizes={28: 2, 200000: 1}))
+        self.assertEqual(rows[0]["channels"]["0"]["bytes"], 52)
+        self.assertEqual(rows[1]["channels"], {})
+        with self.assertRaisesRegex(RuntimeError, "byte trace missing"):
+            collapse.replication_windows('server_stats {"loadtest":{"sequence":1}}')
+        with self.assertRaisesRegex(RuntimeError, "line 1.*malformed replication"):
+            collapse.replication_windows(text.replace("sending 28 bytes", "sending malformed bytes", 1))
+        with self.assertRaisesRegex(RuntimeError, "replication window"):
+            collapse.replication_windows(text.replace('"sequence":2', '"sequence":3'))
+
+    def test_match_trace_uses_shared_validation_and_attributes_each_overrun(self):
+        # Fixture: one wave straddles stats lines; the reader must retain exact tick identity.
+        _, ram = self.fixture()
+        ticks = ram["ticks"]
+        for tick in ticks:
+            tick.update(dt_s=0.00025, elapsed_s=tick["tick"] / 10, events_fired=1, tanks=2)
+        recipe = dict(tanks=2, events=[dict(at_s=0.1, instances=["a", "b"])])
+        rows = [dict(loadtest=dict(ticks=ticks[:2], sends=ram["sends"][:1])),
+                dict(loadtest=dict(ticks=ticks[2:], sends=ram["sends"][1:]))]
+        result = collapse.match_tick_summary(rows, recipe)
+        self.assertEqual([t["tick"] for t in result["over_budget_ticks"]], [3, 4])
+        self.assertEqual(result["ticks"], ticks)
+        self.assertEqual(result["sends"], ram["sends"])
+        for row in result["over_budget_ticks"]:
+            self.assertAlmostEqual(sum(row["parts_us"].values()), row["tick_us"])
+        broken = copy.deepcopy(rows)
+        del broken[1]["loadtest"]["ticks"][0]["phases_us"]
+        with self.assertRaises((ValueError, KeyError)):
+            collapse.match_tick_summary(broken, recipe)
+        broken = copy.deepcopy(rows)
+        broken[1]["loadtest"]["ticks"][0]["tick"] += 1
+        with self.assertRaisesRegex(RuntimeError, "instrument tick"):
+            collapse.match_tick_summary(broken, recipe)
+        with self.assertRaisesRegex(RuntimeError, "attribution missing"):
+            collapse.match_tick_summary([dict(loadtest=dict(ticks=[], sends=[]))], recipe)
 
     def test_ram_percentile_and_additive_split_use_only_contact_ticks(self):
         recipe, ram = self.fixture()

@@ -70,7 +70,7 @@
 //! THE BODY IN THE PHYSICS WORLD. A state change reaches avian's world in the frame it is made
 //! ([`reconcile`], then avian's refit of moved colliders), so the next tick's march reads it.
 
-use crate::cost::stages::{Stage, Stages};
+use crate::cost::stages::{Stage, Stages, Work};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -1565,6 +1565,7 @@ struct OwnerEffects {
     split: Option<PendingSplit>,
     departures: Vec<PreparedDeparture>,
     sheds: Vec<crate::debris::crumble::Shed>,
+    solves: usize,
 }
 
 /// Immutable inputs for one owner's law run; shared-body effects are staged in `OwnerEffects`.
@@ -1749,6 +1750,7 @@ fn evaluate_owner(
         construction,
         fields,
         events: changes.events,
+        solves: changes.solves,
         split,
         departures,
         sheds,
@@ -1849,6 +1851,7 @@ fn apply_deposits(mut p: DepositParam) {
             let chunk_entities = &p.chunk_entities;
             let bodies = &p.bodies;
             let resting = &p.resting.0;
+            let stages = p.stages.as_deref();
             p.constructions
                 .par_iter_many_unique_mut(batch.keys())
                 .for_each(|(root, transform, mut breakage, piece)| {
@@ -1893,6 +1896,24 @@ fn apply_deposits(mut p: DepositParam) {
                             step,
                         },
                     );
+                    if let Some(stages) = stages {
+                        stages.add(Work::AssessedOwners, 1);
+                        stages.add(Work::StructureSolveColumns, effect.solves as u64);
+                        stages.add(Work::PreparedBodies, effect.departures.len() as u64);
+                        stages.add(
+                            Work::PreparedColliders,
+                            effect
+                                .departures
+                                .iter()
+                                .map(|d| {
+                                    d.chunks
+                                        .iter()
+                                        .filter(|(_, _, fresh)| fresh.is_some())
+                                        .count() as u64
+                                })
+                                .sum(),
+                        );
+                    }
                     // Only recorded changes require a collider refit.
                     if !effect.events.is_empty() {
                         breakage.set_changed();
@@ -2875,6 +2896,21 @@ fn split_groups(
                 },
                 &reusable,
             );
+            if let Some(stages) = stages.as_deref() {
+                stages.add(Work::PreparedBodies, children.len() as u64);
+                stages.add(
+                    Work::PreparedColliders,
+                    children
+                        .iter()
+                        .map(|d| {
+                            d.chunks
+                                .iter()
+                                .filter(|(_, _, fresh)| fresh.is_some())
+                                .count() as u64
+                        })
+                        .sum(),
+                );
+            }
             effects.scope(|effects| effects.push((entity, split.tick, children, reusable)));
         },
     );

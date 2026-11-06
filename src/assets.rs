@@ -4,67 +4,150 @@
 
 use std::path::{Path, PathBuf};
 
-/// Resolve the `assets/` directory from explicit inputs — **pure**, so the resolution rule is unit-
-/// testable. The macOS bug survived precisely because the rule lived only inside `std::env` reads
-/// and a `current_exe()` call, a shape nothing but a real `.app` ever exercised.
-///
-/// Precedence extends Bevy's own [`FileAssetReader::get_base_path`] (`BEVY_ASSET_ROOT` →
-/// `CARGO_MANIFEST_DIR` → the executable's directory) by one rung, and the asset server is handed
-/// the result as an absolute path (`crate::default_plugins`), so Bevy's own chain never picks the
-/// tree: env root → runtime manifest dir → `baked_manifest_dir` (the
-/// manifest dir a dev-profile build captured at compile time, [`BAKED_MANIFEST_DIR`]) → the platform
-/// bundle layout for the env-less packaged case:
-/// - macOS `.app`: `exe_dir` = `<App>.app/Contents/MacOS` → the sibling `Contents/Resources/assets`
-///   (where `scripts/package-macos.sh` copies them — see its `Contents/Resources/assets` line).
-/// - flat archive (Windows/Linux): binary and `assets/` extract into one folder → `exe_dir/assets`.
-///
-/// Deliberately does no `is_dir()` probing and has no silent `"assets"`-in-cwd fallback: the path is
-/// resolved deterministically from the build and the layout, and if it is wrong the bake panics
-/// naming it (ADR-0011 fail-fast) instead of quietly loading a different tree.
-///
-/// [`FileAssetReader::get_base_path`]: bevy::asset::io::file::FileAssetReader::get_base_path
-fn asset_root_from(
-    exe_dir: &Path,
-    manifest_dir: Option<&Path>,
-    env_root: Option<&Path>,
-    baked_manifest_dir: Option<&str>,
-) -> PathBuf {
-    // `BEVY_ASSET_ROOT` wins over everything: it is the only rung that places assets away from a
-    // release-derived binary (perf scripts on `target/release`, bitprobe CI, the Windows smoke's
-    // server fixture).
-    if let Some(root) = env_root {
-        return root.join("assets");
-    }
-    // `CARGO_MANIFEST_DIR`: cargo sets it for `cargo run` / `cargo test`, so the dev loop and CI
-    // resolve to `<repo>/assets` regardless of the exe's location under `target/`.
-    if let Some(dir) = manifest_dir {
-        return dir.join("assets");
-    }
-    // A dev-profile binary launched by hand (`target/debug/overmatch --offline`) has neither env
-    // var; its assets are the checkout that compiled it, not a directory beside the exe.
-    if let Some(dir) = baked_manifest_dir {
-        return Path::new(dir).join("assets");
-    }
-    // No env and nothing baked — a shipped build. macOS `.app`: the exe sits in `Contents/MacOS`,
-    // but assets ship one level over in `Contents/Resources/assets`.
-    if exe_dir.ends_with("Contents/MacOS")
-        && let Some(contents) = exe_dir.parent()
-    {
-        return contents.join("Resources").join("assets");
-    }
-    // Flat archive: `assets/` is beside the binary.
-    exe_dir.join("assets")
+/// The checkout arm requires a Git marker before its assets can be used. A player's folder
+/// can imitate Cargo's path shape; that ambiguity must refuse startup, never select another tree.
+#[derive(Debug, PartialEq, Eq)]
+enum AssetLayout {
+    Checkout {
+        root: PathBuf,
+        adjacent_assets: PathBuf,
+    },
+    Override(PathBuf),
+    Assets(PathBuf),
 }
 
-/// The checkout that compiled this binary, kept only by dev profiles. Every shipped binary is a
-/// release-derived profile (`scripts/package-macos.sh`, `scripts/build-linux.sh`,
-/// `.github/workflows/release.yml` all build `--release`), where `debug_assertions` is off, so a
-/// player's binary carries no build-machine path and resolves by layout alone.
-const BAKED_MANIFEST_DIR: Option<&str> = if cfg!(debug_assertions) {
-    Some(env!("CARGO_MANIFEST_DIR"))
-} else {
-    None
-};
+/// Resolve by layout alone, without filesystem probing or build-machine paths.
+/// Cargo outputs live in `target/<profile>[/deps|examples]`, optionally below a target triple.
+/// Target names have hyphen-separated fields (including abbreviated names such as wasm32-wasip1);
+/// profile names are otherwise unrestricted. macOS bundles take precedence over an enclosing `target/`.
+fn asset_root_from(exe_dir: &Path, env_root: Option<&Path>) -> AssetLayout {
+    if let Some(root) = env_root {
+        return AssetLayout::Override(root.join("assets"));
+    }
+    if exe_dir.ends_with("Contents/MacOS") {
+        let contents = exe_dir
+            .parent()
+            .expect("Contents/MacOS has a Contents parent");
+        return AssetLayout::Assets(contents.join("Resources/assets"));
+    }
+    for target in exe_dir.ancestors().filter(|dir| dir.ends_with("target")) {
+        let below: Vec<_> = exe_dir
+            .strip_prefix(target)
+            .expect("an ancestor is a path prefix")
+            .iter()
+            .collect();
+        let below = match below.as_slice() {
+            [rest @ .., leaf] if *leaf == "deps" || *leaf == "examples" => rest,
+            rest => rest,
+        };
+        let cargo_output = match below {
+            [_profile] => true,
+            [triple, _profile] => triple.as_encoded_bytes().contains(&b'-'),
+            _ => false,
+        };
+        if cargo_output {
+            return AssetLayout::Checkout {
+                root: target
+                    .parent()
+                    .expect("a target directory with profile children has a checkout parent")
+                    .to_owned(),
+                adjacent_assets: exe_dir.join("assets"),
+            };
+        }
+    }
+    AssetLayout::Assets(exe_dir.join("assets"))
+}
+
+#[derive(Debug)]
+enum AssetRootError {
+    InvalidOverride {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    LayoutIo {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    PackagedAssetsInTarget(PathBuf),
+}
+
+impl std::fmt::Display for AssetRootError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidOverride { path, source } => {
+                return write!(
+                    f,
+                    "BEVY_ASSET_ROOT: {} is not an accessible assets directory: {source}; \
+                     set BEVY_ASSET_ROOT to the directory holding assets/ or unset it",
+                    path.display()
+                );
+            }
+            Self::LayoutIo { path, source } => write!(
+                f,
+                "cannot verify checkout layout at {}: {source}",
+                path.display()
+            ),
+            Self::PackagedAssetsInTarget(path) => write!(
+                f,
+                "packaged assets at {} conflict with the enclosing Cargo target layout",
+                path.display()
+            ),
+        }?;
+        write!(
+            f,
+            "; move the packaged game outside target/<profile> or \
+             target/<triple>/<profile>, or set BEVY_ASSET_ROOT to the directory holding its assets/"
+        )
+    }
+}
+
+impl AssetLayout {
+    /// Validation never changes the selected root. Both `.git/` and a worktree's `.git` file
+    /// witness a checkout; assets beside a Cargo binary conflict even inside a real checkout.
+    fn resolve(self) -> Result<PathBuf, AssetRootError> {
+        match self {
+            Self::Override(assets) => {
+                std::fs::metadata(&assets)
+                    .and_then(|metadata| {
+                        if metadata.is_dir() {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::NotADirectory,
+                                "assets path must be a directory",
+                            ))
+                        }
+                    })
+                    .map_err(|source| AssetRootError::InvalidOverride {
+                        path: assets.clone(),
+                        source,
+                    })?;
+                Ok(assets)
+            }
+            Self::Assets(assets) => Ok(assets),
+            Self::Checkout {
+                root,
+                adjacent_assets,
+            } => {
+                let marker = root.join(".git");
+                std::fs::metadata(&marker).map_err(|source| AssetRootError::LayoutIo {
+                    path: marker,
+                    source,
+                })?;
+                match std::fs::symlink_metadata(&adjacent_assets) {
+                    Ok(_) => Err(AssetRootError::PackagedAssetsInTarget(adjacent_assets)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(root.join("assets"))
+                    }
+                    Err(source) => Err(AssetRootError::LayoutIo {
+                        path: adjacent_assets,
+                        source,
+                    }),
+                }
+            }
+        }
+    }
+}
 
 /// THE SELECTION: the id of the one tank this build spawns. The tank's trio lives at
 /// `assets/<id>/<id>.{glb,sim.glb,tank.ron,lod.json}`; every path in the program is derived from
@@ -93,30 +176,29 @@ pub(crate) use {tank_file, tank_id};
 /// The selected tank's asset id.
 pub(crate) const TANK_ID: &str = tank_id!();
 
-/// The `assets/` directory this process reads from — the thin env-reading wrapper over the pure
-/// [`asset_root_from`]. Used both as `AssetPlugin`'s `file_path` on every composition root
-/// (`crate::default_plugins`) and as the bake extractor's glb base (`bake::extract_at_startup`), so
-/// the two never disagree on which file they open. Both env vars are read as OS paths, so a root
-/// that is not UTF-8 is still that root, never "unset". A process whose own executable the OS
-/// cannot locate refuses to start, naming the OS error and the lever that bypasses the lookup.
+/// Shared root for Bevy and direct readers. `BEVY_ASSET_ROOT` deliberately places assets away
+/// from the binary (the packaged Windows smoke server uses it); otherwise the layout owns it.
+/// OS paths preserve non-UTF-8 overrides. A matching Cargo layout must prove its checkout.
 pub(crate) fn asset_root() -> PathBuf {
-    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
     let env_root = std::env::var_os("BEVY_ASSET_ROOT").map(PathBuf::from);
-    let exe = std::env::current_exe().unwrap_or_else(|err| {
-        panic!(
-            "cannot locate this executable to find its assets/ beside it: {err} — set \
-             BEVY_ASSET_ROOT to the directory that holds assets/"
-        )
-    });
-    let exe_dir = exe
-        .parent()
-        .expect("the OS names an executable by a file path, which has a parent directory");
-    asset_root_from(
-        exe_dir,
-        manifest_dir.as_deref(),
-        env_root.as_deref(),
-        BAKED_MANIFEST_DIR,
-    )
+    let layout = match env_root.as_deref() {
+        // An explicit root needs no executable lookup; only the layout resolver appends assets/.
+        Some(root) => asset_root_from(Path::new(""), Some(root)),
+        None => {
+            let exe = std::env::current_exe().unwrap_or_else(|error| {
+                crate::refuse_start(format!(
+                    "cannot locate this executable to find assets: {error}; set BEVY_ASSET_ROOT to the directory holding assets/"
+                ))
+            });
+            let exe_dir = exe
+                .parent()
+                .expect("the OS names an executable by a file path, which has a parent directory");
+            asset_root_from(exe_dir, None)
+        }
+    };
+    layout
+        .resolve()
+        .unwrap_or_else(|error| crate::refuse_start(error.to_string()))
 }
 
 /// Client-only dependencies collected in `PreStartup`, before tank admission starts in `Startup`.
@@ -195,97 +277,183 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// FIXTURE DATA (the shipped tank): the id and the trio paths the program derives. Every
-    /// consumer reaches the files only through these, so a wrong suffix or a dropped `<id>/`
-    /// directory fails here and not at a missing-file panic.
+    /// Asset readers rely on paths derived from the selected ID, so selecting another valid
+    /// tank must preserve this test while a missing ID directory or wrong suffix fails it.
     #[test]
     fn the_selected_tank_derives_its_trio_paths() {
-        assert_eq!(TANK_ID, "tiger_1");
-        assert_eq!(tank_file!(".glb"), "tiger_1/tiger_1.glb");
-        assert_eq!(tank_file!(".sim.glb"), "tiger_1/tiger_1.sim.glb");
-        assert_eq!(tank_file!(".tank.ron"), "tiger_1/tiger_1.tank.ron");
-        assert_eq!(tank_file!(".lod.json"), "tiger_1/tiger_1.lod.json");
+        for (path, suffix) in [
+            (tank_file!(".glb"), ".glb"),
+            (tank_file!(".sim.glb"), ".sim.glb"),
+            (tank_file!(".tank.ron"), ".tank.ron"),
+            (tank_file!(".lod.json"), ".lod.json"),
+        ] {
+            assert_eq!(path, format!("{TANK_ID}/{TANK_ID}{suffix}"));
+        }
     }
 
-    /// `BEVY_ASSET_ROOT` wins over a set `CARGO_MANIFEST_DIR`, over a baked manifest dir and over
-    /// any exe layout — a release-derived binary run away from its assets (perf scripts, bitprobe
-    /// CI, the Windows smoke's server fixture) relies on this.
+    /// Bare builds, cargo run and cargo test share one checkout rule in every profile.
     #[test]
-    fn env_root_wins_over_everything() {
-        let got = asset_root_from(
-            Path::new("/App.app/Contents/MacOS"),
-            Some(Path::new("/repo")),
-            Some(Path::new("/opt/overmatch-server")),
-            Some("/build-machine/repo"),
+    fn cargo_layouts_identify_the_owning_checkout() {
+        for profile in ["debug", "release", "edit", "custom-profile"] {
+            for triple in [
+                "",
+                "aarch64-apple-darwin/",
+                "x86_64-unknown-linux-gnu/",
+                "wasm32-wasip1/",
+            ] {
+                for leaf in ["", "/deps", "/examples"] {
+                    let dir = format!("/repo/target/{triple}{profile}{leaf}");
+                    assert_eq!(
+                        asset_root_from(Path::new(&dir), None),
+                        AssetLayout::Checkout {
+                            root: PathBuf::from("/repo"),
+                            adjacent_assets: Path::new(&dir).join("assets")
+                        },
+                        "{dir}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A directory named target alone, or a deeper unrelated tree, is a flat package layout.
+    #[test]
+    fn unrelated_target_paths_keep_assets_beside_the_binary() {
+        for dir in [
+            "/games/target",
+            "/games/target/game/bin",
+            "/games/target/release/nested/bin",
+        ] {
+            assert_eq!(
+                asset_root_from(Path::new(dir), None),
+                AssetLayout::Assets(Path::new(dir).join("assets"))
+            );
+        }
+    }
+
+    /// Packaged clients must retain their assets when relocated, even into a checkout's target.
+    #[test]
+    fn packages_resolve_by_layout() {
+        for (dir, assets) in [
+            ("/opt/overmatch", "/opt/overmatch/assets"),
+            (
+                "/App.app/Contents/MacOS",
+                "/App.app/Contents/Resources/assets",
+            ),
+            (
+                "/repo/target/release/App.app/Contents/MacOS",
+                "/repo/target/release/App.app/Contents/Resources/assets",
+            ),
+        ] {
+            assert_eq!(
+                asset_root_from(Path::new(dir), None),
+                AssetLayout::Assets(PathBuf::from(assets))
+            );
+        }
+    }
+
+    /// Operators can deliberately override every layout, including an ambiguous player folder.
+    #[test]
+    fn env_root_wins_over_every_layout() {
+        for dir in [
+            "/repo/target/release",
+            "/App.app/Contents/MacOS",
+            "/opt/overmatch",
+        ] {
+            assert_eq!(
+                asset_root_from(Path::new(dir), Some(Path::new("/chosen"))),
+                AssetLayout::Override(PathBuf::from("/chosen/assets"))
+            );
+        }
+    }
+
+    /// Operators must see an invalid override refused before either asset reader runs;
+    /// only an existing assets directory can pass, without selecting another layout.
+    #[test]
+    fn env_root_refuses_missing_or_non_directory_assets() {
+        let root = std::env::temp_dir().join(format!("overmatch-override-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("file")).unwrap();
+        std::fs::write(
+            root.join("file/assets"),
+            b"fixture: a file is not an assets directory",
+        )
+        .unwrap();
+        for (name, kind) in [
+            ("missing", std::io::ErrorKind::NotFound),
+            ("file", std::io::ErrorKind::NotADirectory),
+        ] {
+            let chosen = root.join(name);
+            let error = asset_root_from(Path::new("/repo/target/release"), Some(&chosen))
+                .resolve()
+                .unwrap_err();
+            match &error {
+                AssetRootError::InvalidOverride { path, source } => {
+                    assert_eq!(path, &chosen.join("assets"));
+                    assert_eq!(source.kind(), kind);
+                }
+                other => panic!("invalid operator override must refuse: {other}"),
+            }
+            let message = error.to_string();
+            assert!(message.contains("BEVY_ASSET_ROOT"));
+            assert!(message.contains(&chosen.join("assets").display().to_string()));
+            assert!(
+                message
+                    .contains("set BEVY_ASSET_ROOT to the directory holding assets/ or unset it")
+            );
+        }
+        std::fs::create_dir(root.join("assets")).unwrap();
+        assert_eq!(
+            asset_root_from(Path::new("/repo/target/release"), Some(&root))
+                .resolve()
+                .unwrap(),
+            root.join("assets")
         );
-        assert_eq!(got, Path::new("/opt/overmatch-server/assets"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// No `BEVY_ASSET_ROOT`, `CARGO_MANIFEST_DIR` set → `<manifest>/assets`. This is the dev loop
-    /// and every `cargo test`/`cargo run`, which is why CI never hit the packaged-app bug.
+    /// A player extracting into target/release must not silently read an ancestor's assets.
+    /// The pure resolver marks that residual ambiguity; the startup gate requires a Git marker.
     #[test]
-    fn manifest_dir_when_no_env_root() {
-        let got = asset_root_from(
-            Path::new("/repo/target/debug"),
-            Some(Path::new("/repo")),
-            None,
-            None,
+    fn cargo_shaped_package_requires_a_checkout_marker() {
+        let root = std::env::temp_dir().join(format!("overmatch-layout-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        let dir = root.join("target/release");
+        assert_eq!(
+            asset_root_from(&dir, None),
+            AssetLayout::Checkout {
+                root: root.clone(),
+                adjacent_assets: dir.join("assets")
+            }
         );
-        assert_eq!(got, Path::new("/repo/assets"));
-    }
-
-    /// A dev-profile binary launched by hand has no env at all; the baked manifest dir resolves it to
-    /// the checkout that compiled it, never to `target/debug/assets`. The runtime env still wins
-    /// when set, so `cargo run` from a worktree reads that worktree, not the baked one.
-    #[test]
-    fn baked_manifest_dir_when_launched_by_hand() {
-        let got = asset_root_from(Path::new("/repo/target/debug"), None, None, Some("/repo"));
-        assert_eq!(got, Path::new("/repo/assets"));
-        assert_ne!(got, Path::new("/repo/target/debug/assets"));
-
-        let got = asset_root_from(
-            Path::new("/wt/target/debug"),
-            Some(Path::new("/wt")),
-            None,
-            Some("/repo"),
+        match asset_root_from(&dir, None).resolve().unwrap_err() {
+            AssetRootError::LayoutIo { path, source } => {
+                assert_eq!(path, root.join(".git"));
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("missing checkout marker must refuse: {other}"),
+        }
+        // A linked worktree's marker is a file; a regular checkout's marker is a directory.
+        std::fs::write(root.join(".git"), "gitdir: /fixture/worktree").unwrap();
+        assert_eq!(
+            asset_root_from(&dir, None).resolve().unwrap(),
+            root.join("assets")
         );
-        assert_eq!(got, Path::new("/wt/assets"));
-    }
-
-    /// THE REGRESSION GUARD for the v0.3.0-alpha.2 startup panic. A double-clicked macOS `.app` has
-    /// neither env var; the exe lives in `Contents/MacOS`, and assets ship in the sibling
-    /// `Contents/Resources/assets` — NOT `Contents/MacOS/assets`, which is what the buggy bake
-    /// resolved and then panicked on. Built as a real on-disk `.app`-shaped tree so the guard runs
-    /// on any OS, not just macOS.
-    #[test]
-    fn macos_app_resolves_to_resources_not_macos_dir() {
-        let base = std::env::temp_dir().join(format!(
-            "overmatch-assets-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let macos = base.join("Overmatch.app/Contents/MacOS");
-        let resources_assets = base.join("Overmatch.app/Contents/Resources/assets");
-        std::fs::create_dir_all(&macos).unwrap();
-        std::fs::create_dir_all(&resources_assets).unwrap();
-
-        let got = asset_root_from(&macos, None, None, None);
-        assert_eq!(got, resources_assets);
-        // And explicitly NOT the exe-dir/assets path the buggy resolver produced.
-        assert_ne!(got, macos.join("assets"));
-
-        std::fs::remove_dir_all(&base).ok();
-    }
-
-    /// Flat layout (Windows/Linux ship the binary and `assets/` in one extracted folder), no env →
-    /// `<exe_dir>/assets`. This is why the bug never showed on those platforms: exe-dir/assets is
-    /// where the assets actually are.
-    #[test]
-    fn flat_layout_resolves_beside_exe() {
-        let got = asset_root_from(Path::new("/opt/overmatch"), None, None, None);
-        assert_eq!(got, Path::new("/opt/overmatch/assets"));
+        std::fs::remove_file(root.join(".git")).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        assert_eq!(
+            asset_root_from(&dir, None).resolve().unwrap(),
+            root.join("assets")
+        );
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        match asset_root_from(&dir, None).resolve().unwrap_err() {
+            AssetRootError::PackagedAssetsInTarget(path) => assert_eq!(path, dir.join("assets")),
+            other => panic!("a package inside a checkout must refuse: {other}"),
+        }
+        assert_eq!(
+            asset_root_from(&dir, Some(&dir)).resolve().unwrap(),
+            dir.join("assets"),
+            "an operator can deliberately select the packaged assets"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

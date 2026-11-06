@@ -24,7 +24,7 @@ def run_one(root, out, seconds, index):
     env = dict(os.environ, OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1",
                OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_BOT="30",
                SPIKE_SHOT_TRACE=str(prefix), OVERMATCH_CAPTURE=str(plan),
-               BEVY_ASSET_ROOT=str(root), RUST_BACKTRACE="1")
+               RUST_BACKTRACE="1")
     for key in ("SPIKE_COST_TRACE", "SPIKE_FRAME_COST", "SPIKE_RENDER_COST",
                 "OVERMATCH_SERVER_STATS_S", "OVERMATCH_HARNESS", "SPIKE_TRACE"):
         env.pop(key, None)

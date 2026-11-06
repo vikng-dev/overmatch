@@ -51,7 +51,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "== booting $CLIENT hidden for ${SECONDS_TO_RUN}s (log: $LOG)"
-OVERMATCH_WINDOW=hidden BEVY_ASSET_ROOT="$REPO" OVERMATCH_CONFIG_DIR="$CONFIG" \
+OVERMATCH_WINDOW=hidden OVERMATCH_CONFIG_DIR="$CONFIG" \
   "$CLIENT" --offline >"$LOG" 2>&1 &
 CLIENT_PID=$!
 
