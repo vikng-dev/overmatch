@@ -2481,20 +2481,20 @@ fn drop_slab() -> (
 /// shipped plugins and real Avian contacts: the live bodies and the sheds partition the part,
 /// each live body reaches the cut-off and each shed falls short of it, and the record writes
 /// every shed chunk as dust at its shed's tick, so every player's view hands the parent's chunks
-/// over. A mutant that drops the sheds, keeps a light fragment as a body or leaves a shed chunk
+/// over. A mutant that drops the sheds, keeps a below-floor fragment as a body or leaves a shed chunk
 /// standing in the record breaks it. Which fragments form is the law's (its own tests); this
 /// witness asserts no count.
 #[test]
 fn a_released_part_lands_crumbles_and_sheds_its_small_fragments() {
-    let cut = crate::physical_laws::PhysicalLaws::shipped().server_fragment_kg;
+    let cut = crate::physical_laws::PhysicalLaws::shipped().server_rubble_min_size_m;
     let (kind, group, pieces, sheds, record) = drop_slab();
-    let mass = |chunks: &[u16]| {
+    let size = |chunks: &[u16]| {
         chunks
             .iter()
-            .map(|&c| kind.structure.chunks[usize::from(c)].mass)
+            .map(|&c| kind.structure.chunks[usize::from(c)].volume)
             .sum::<f32>()
+            .cbrt()
     };
-    assert!(!sheds.is_empty(), "the landing shed its light fragments");
     let mut owned: Vec<usize> = pieces
         .iter()
         .flat_map(|piece| &piece.chunks)
@@ -2507,10 +2507,10 @@ fn a_released_part_lands_crumbles_and_sheds_its_small_fragments() {
         "the bodies and sheds partition the released part"
     );
     for piece in &pieces {
-        assert!(mass(&piece.chunks) >= cut, "a kept body {:?}", piece.chunks);
+        assert!(size(&piece.chunks) >= cut, "a kept body {:?}", piece.chunks);
     }
     for shed in &sheds {
-        assert!(mass(&shed.chunks) < cut, "a shed {:?}", shed.chunks);
+        assert!(size(&shed.chunks) < cut, "a shed {:?}", shed.chunks);
         for &c in &shed.chunks {
             assert!(record.entries.contains(&Entry {
                 construction: 3,

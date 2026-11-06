@@ -21,7 +21,7 @@ struct File {
     plate_capacity: Sourced<crate::ballistics::plate_capacity::PlateCapacity>,
     contact_friction: Sourced<f32>,
     floor_m: Sourced<f32>,
-    server_fragment_kg: Sourced<f32>,
+    server_rubble_min_size_m: Sourced<f32>,
     ground_youngs_modulus_pa: Sourced<f64>,
     ground_poisson_ratio: Sourced<f64>,
 }
@@ -40,9 +40,9 @@ pub(crate) struct PhysicalLaws {
     pub plate_capacity: crate::ballistics::plate_capacity::PlateCapacity,
     pub contact_friction: f32,
     pub floor_m: f32,
-    /// The lightest construction fragment the server keeps as a body, kg; a lighter one becomes
-    /// the players' decoration (`crate::debris::crumble`).
-    pub server_fragment_kg: f32,
+    /// Minimum cube root of occupied fragment volume, m, retained as server rubble;
+    /// the same resolution for every material (`crate::debris::crumble`).
+    pub server_rubble_min_size_m: f32,
     /// The ground's Young's modulus (Pa) and Poisson's ratio: its side of a landing's contact
     /// stiffness (`crate::debris::crumble`).
     pub ground_youngs_modulus_pa: f64,
@@ -62,7 +62,10 @@ impl PhysicalLaws {
             ("air_density", file.air_density.0),
             ("cavity_inertia", file.cavity_inertia.0),
             ("contact_friction", f64::from(file.contact_friction.0)),
-            ("server_fragment_kg", f64::from(file.server_fragment_kg.0)),
+            (
+                "server_rubble_min_size_m",
+                f64::from(file.server_rubble_min_size_m.0),
+            ),
             ("ground_youngs_modulus_pa", file.ground_youngs_modulus_pa.0),
         ] {
             if !value.is_finite() || value <= 0.0 {
@@ -103,7 +106,7 @@ impl PhysicalLaws {
             plate_capacity: file.plate_capacity.0,
             contact_friction: file.contact_friction.0,
             floor_m: file.floor_m.0,
-            server_fragment_kg: file.server_fragment_kg.0,
+            server_rubble_min_size_m: file.server_rubble_min_size_m.0,
             ground_youngs_modulus_pa: file.ground_youngs_modulus_pa.0,
             ground_poisson_ratio: file.ground_poisson_ratio.0,
         })
@@ -221,7 +224,7 @@ mod tests {
         plate_capacity: ((shear_slope: 1.5, opening_share: 0.6, return_power: 1.5), Fixture("fixture")),
         contact_friction: (0.25, Fixture("fixture")),
         floor_m: (-50.0, Fixture("fixture")),
-        server_fragment_kg: (20.0, Fixture("fixture")),
+        server_rubble_min_size_m: (20.0, Fixture("fixture")),
         ground_youngs_modulus_pa: (3.0e7, Fixture("fixture")),
         ground_poisson_ratio: (0.25, Fixture("fixture")),
         reflected_impulse: ((from: 1.0, branches: [(2.0, [0.0])]), Fixture("fixture")),
@@ -243,7 +246,7 @@ mod tests {
             ("air_density", "1.5"),
             ("cavity_inertia", "2.0"),
             ("contact_friction", "0.25"),
-            ("server_fragment_kg", "20.0"),
+            ("server_rubble_min_size_m", "20.0"),
             ("ground_youngs_modulus_pa", "3.0e7"),
         ] {
             for bad in ["0.0", "-1.0", "NaN", "inf"] {

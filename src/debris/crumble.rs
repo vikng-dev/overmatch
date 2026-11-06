@@ -19,9 +19,9 @@
 //! crack first, it stops at the first the energy left cannot pay. What stays connected over the
 //! joints that did not part is a fragment.
 //!
-//! THE SIZE SPLIT ([`route`]). A fragment at least [`PhysicalLaws::server_fragment_kg`] stays
-//! a server body, split off through the construction's split path
-//! ([`crate::construction::breakage::PendingSplit`]). A lighter one leaves the simulation: the
+//! THE SIZE SPLIT ([`route`]). A fragment whose occupied volume's cube root reaches
+//! [`PhysicalLaws::server_rubble_min_size_m`] stays a server body through the construction's split
+//! path ([`crate::construction::breakage::PendingSplit`]). A smaller one leaves the simulation: the
 //! record writes its chunks as dust, and one [`Shed`] carries it to the players' decoration
 //! ([`super::decor`]), which only draws it.
 
@@ -221,10 +221,10 @@ pub(crate) fn crumble(
     }
 }
 
-/// Whether `fragment` stays a server body: its mass reaches the cut-off (module doc).
+/// Whether `fragment` reaches the material-independent rubble size floor (module doc).
 pub(crate) fn server_body(structure: &Structure, fragment: &[usize]) -> bool {
-    let mass: f32 = fragment.iter().map(|&c| structure.chunks[c].mass).sum();
-    mass >= PhysicalLaws::shipped().server_fragment_kg
+    let volume: f32 = fragment.iter().map(|&c| structure.chunks[c].volume).sum();
+    volume.cbrt() >= PhysicalLaws::shipped().server_rubble_min_size_m
 }
 
 /// A fragment leaving the simulation for the players' decoration, sent once at `tick`: its
@@ -619,7 +619,7 @@ fn crumble_landings(
 }
 
 /// The size split of `fragments` of `construction` at `tick` (module doc), each moving with the
-/// rigid field `motion` (as [`Shed::of`]): a light one goes to the record as dust and to the
+/// rigid field `motion` (as [`Shed::of`]): a small one goes to the record as dust and to the
 /// players as one [`Shed`], returned for the caller to send; the rest, returned, stay server bodies.
 pub(crate) fn route(
     structure: &Structure,

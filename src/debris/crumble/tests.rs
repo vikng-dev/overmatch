@@ -499,33 +499,41 @@ fn the_cracks_absorb_at_most_the_energy_the_landing_dissipated() {
     }
 }
 
-/// ROUTING: a fragment stays a server body exactly when its mass reaches the cut-off, read from its
-/// owner ([`PhysicalLaws::server_fragment_kg`]); single chunks and growing runs of them, by mass,
-/// straddle it. A mutant that compares volume, counts chunks or flips the comparison breaks it.
+/// The game's environment destruction routes by occupied volume, independent of aspect ratio
+/// and material density. Comparing mass or longest extent sends these fixtures down wrong paths.
 #[test]
-fn fragments_at_the_cut_off_stay_server_bodies_and_lighter_ones_shed() {
-    let structure = released_part().structure;
-    let cut = PhysicalLaws::shipped().server_fragment_kg;
-    let mut chunks: Vec<usize> = (0..structure.chunks.len()).collect();
-    chunks.sort_by(|&a, &b| {
-        structure.chunks[a]
-            .mass
-            .total_cmp(&structure.chunks[b].mass)
-    });
-    let (mut light, mut heavy) = (0, 0);
-    for size in 1..=8 {
-        for start in (0..chunks.len()).step_by(97) {
-            let fragment: Vec<usize> = chunks.iter().skip(start).take(size).copied().collect();
-            let mass: f32 = fragment.iter().map(|&c| structure.chunks[c].mass).sum();
-            assert_eq!(server_body(&structure, &fragment), mass >= cut, "{mass} kg");
-            if mass >= cut {
-                heavy += 1;
-            } else {
-                light += 1;
-            }
+fn rubble_size_uses_occupied_volume_for_splinters_compact_brick_and_wood() {
+    use crate::construction::fracture::{Chunk, Material};
+    let floor = PhysicalLaws::shipped().server_rubble_min_size_m;
+    let registry = crate::substances::SubstanceRegistry::shipped_static();
+    for name in ["Brick", "Wood"] {
+        // Fixture material pair with different densities.
+        let material = Material::of(registry, name).unwrap().unwrap();
+        for (dimensions, server) in [
+            (Vec3::splat(floor), true),
+            (Vec3::new(floor * 10.0, floor / 10.0, floor / 10.0), false),
+        ] {
+            // Fixture: an equal-sided piece at the floor and a long, thin splinter.
+            let volume = dimensions.x * dimensions.y * dimensions.z;
+            let structure = Structure {
+                geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
+                part_of: vec![0],
+                chunks: vec![Chunk {
+                    volume,
+                    mass: material.density * volume,
+                    material,
+                    centroid: Vec3::ZERO,
+                    buried: false,
+                }],
+                joints: Vec::new(),
+            };
+            assert_eq!(
+                server_body(&structure, &[0]),
+                server,
+                "{name}: {dimensions}"
+            );
         }
     }
-    assert!(light > 0 && heavy > 0, "the fixture straddles the cut-off");
 }
 
 /// A shed fragment leaves with the rigid velocity field of the group it left, at its own centre:
