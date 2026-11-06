@@ -197,7 +197,9 @@ fn install_server_from(
         .add_observer(retire_construction_piece)
         .add_systems(
             FixedPostUpdate,
-            publish_poses.in_set(crate::state::SimPhase::Publish),
+            (admit_new_carriers, publish_poses)
+                .chain()
+                .in_set(crate::state::SimPhase::Publish),
         );
     let Some(lever) = lever else {
         return Ok(());
@@ -279,6 +281,7 @@ fn retire_construction_piece(
     retired: On<RetirePiece>,
     bodies: Query<(&Carrier, &Position, &Rotation)>,
     mut carriers: Query<(&mut Piece, &mut DebrisPose)>,
+    mut commands: Commands,
 ) {
     let (carrier, position, rotation) = bodies.get(retired.entity).expect(
         "only the server installs this observer, and `carry_construction_piece` gives every server chunk \
@@ -287,6 +290,12 @@ fn retire_construction_piece(
     let (mut piece, mut pose) = carriers
         .get_mut(carrier.0)
         .expect("a server chunk group retains its carrier through its split tick");
+    // A sweep departure can split after physics in its birth tick. Its empty presentation
+    // interval has no sample to retain; only its final descendants reach publication.
+    if piece.born == retired.tick {
+        commands.entity(carrier.0).despawn();
+        return;
+    }
     piece.retired = Some(retired.tick);
     pose.set_if_neq(DebrisPose {
         position: position.0,
@@ -461,6 +470,37 @@ fn release_breaches(
             LinearVelocity(release.velocity),
             AngularVelocity(release.spin),
         ));
+    }
+}
+
+/// Birth identities already published in this world. Historical carriers retain their claims
+/// until world replacement, since a late joiner receives them alongside live descendants.
+#[derive(Default)]
+struct PublishedChunks {
+    world: Option<crate::world::WorldGeneration>,
+    owners: std::collections::HashSet<(u16, u32, u16)>,
+}
+
+/// The first stable ownership boundary is after every law-stage split: intermediate groups
+/// can share a birth tick, but retirement removes their zero-duration carriers before this gate.
+fn admit_new_carriers(
+    added: Query<&Piece, (With<DebrisPose>, Added<Piece>)>,
+    world: Res<AuthorityWorld>,
+    mut published: Local<PublishedChunks>,
+) {
+    if published.world != Some(world.0) {
+        published.world = Some(world.0);
+        published.owners.clear();
+    }
+    for piece in &added {
+        for &chunk in &piece.chunks {
+            published.owners.insert((piece.construction, piece.born, chunk))
+                .then_some(())
+                .ok_or(crate::construction::breakage::PieceError::DuplicateOwnership {
+                    construction: piece.construction, chunk, born: piece.born,
+                })
+                .expect("law-stage retirement removes intermediate carriers before publication; each chunk has one carrier per birth tick");
+        }
     }
 }
 
@@ -663,6 +703,96 @@ mod tests {
         );
         let bytes = postcard::to_allocvec(piece).unwrap();
         assert_eq!(&postcard::from_bytes::<Piece>(&bytes).unwrap(), piece);
+    }
+
+    /// The sweep can free a group before physics and the law pass split it on the same tick.
+    /// Clients require one same-birth owner per chunk; a zero-duration parent never presents.
+    #[test]
+    fn a_group_split_in_its_birth_tick_publishes_only_its_children() {
+        let mut app = App::new();
+        // Lightyear's carrier removal hook reads its filter registry even without transport.
+        app.init_resource::<bevy_replicon::server::visibility::registry::FilterRegistry>()
+            .insert_resource(fixture_world());
+        install_server_from(&mut app, None, scenario::RON).unwrap();
+        // Fixture: a sweep departure followed by its law-stage split, both at tick 7.
+        let parent = app
+            .world_mut()
+            .spawn((
+                Piece {
+                    construction: 3,
+                    chunks: vec![1, 2],
+                    born: 7,
+                    retired: None,
+                },
+                Position(Vec3::ZERO),
+                Rotation(Quat::IDENTITY),
+            ))
+            .id();
+        app.world_mut().flush();
+        for chunk in [1, 2] {
+            app.world_mut().spawn((
+                Piece {
+                    construction: 3,
+                    chunks: vec![chunk],
+                    born: 7,
+                    retired: None,
+                },
+                Position(Vec3::Y),
+                Rotation(Quat::IDENTITY),
+            ));
+        }
+        app.world_mut().trigger(RetirePiece {
+            entity: parent,
+            tick: 7,
+        });
+        app.world_mut().entity_mut(parent).despawn();
+        app.world_mut().flush();
+        app.world_mut().run_schedule(FixedPostUpdate);
+        let carriers: Vec<_> = app
+            .world_mut()
+            .query_filtered::<&Piece, With<DebrisPose>>()
+            .iter(app.world())
+            .cloned()
+            .collect();
+        let mut owned = std::collections::BTreeSet::new();
+        for piece in &carriers {
+            for &chunk in &piece.chunks {
+                assert!(
+                    owned.insert((piece.construction, piece.born, chunk)),
+                    "a client must never receive two same-birth carriers for one chunk"
+                );
+            }
+        }
+        assert_eq!(
+            carriers.len(),
+            2,
+            "only the final groups have presentation intervals"
+        );
+    }
+
+    /// Authority must fail before sending duplicate birth identities, even when they are
+    /// introduced in different publication ticks; clients refuse that stream.
+    #[test]
+    #[should_panic(expected = "each chunk has one carrier per birth tick")]
+    fn duplicate_chunk_birth_is_a_server_bug_before_publication() {
+        let mut app = App::new();
+        app.insert_resource(fixture_world());
+        install_server_from(&mut app, None, scenario::RON).unwrap();
+        for _ in 0..2 {
+            // Fixture: an invalid repeated identity, arriving in separate publication passes.
+            app.world_mut().spawn((
+                Piece {
+                    construction: 3,
+                    chunks: vec![1],
+                    born: 7,
+                    retired: None,
+                },
+                Position(Vec3::ZERO),
+                Rotation(Quat::IDENTITY),
+            ));
+            app.world_mut().flush();
+            app.world_mut().run_schedule(FixedPostUpdate);
+        }
     }
 
     /// A piece spawned without its body pose is a construction bug, never a group that silently
