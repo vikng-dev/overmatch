@@ -351,6 +351,13 @@ class RamTests(unittest.TestCase):
             self.assertAlmostEqual(measured["attributed_pct"], 100*97/tick["tick_us"])
         self.assertEqual(result["worst_tick_attribution"], result["over_budget_ticks"][-1])
 
+    def test_capture_peak_is_visible_when_it_precedes_the_contact_window(self):
+        recipe, ram = self.fixture()
+        ram["ticks"][0]["tick_us"] = 1000  # Fixture: an approach scheduling stall.
+        result = collapse.ram_summary(self.text(ram), recipe)
+        self.assertEqual(result["worst_tick_attribution"]["tick"], 4)
+        self.assertEqual(result["worst_capture_tick_attribution"]["tick"], 1)
+
     def test_new_stage_and_phase_fields_are_additive_without_another_reader_allowlist(self):
         recipe, ram = self.fixture()
         for tick in ram["ticks"]:
@@ -368,6 +375,9 @@ class RamTests(unittest.TestCase):
                        lambda t: t["phases_us"].update(physics_step_us=9),
                        lambda t: t["phases_us"].update(fixed_update_us=1000),
                        lambda t: t["phases_us"].update(fixed_update_us=float("nan")),
+                       lambda t: t["phases_us"].update(sleep_us=1),
+                       lambda t: t["phases_us"].update(unattributed_us=1),
+                       lambda t: t.update(unattributed_us=1),
                        lambda t: t["phases_us"].update(intake_us=1),
                        lambda t: t["phases_us"].update(new_phase_us=1)):
             changed = copy.deepcopy(ram)

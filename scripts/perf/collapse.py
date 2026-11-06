@@ -342,7 +342,7 @@ def ram_parts(tick):
     for name, us in tick.items():
         if name.endswith("_us") and name not in RAM_NON_ADDITIVE:
             name = name.removesuffix("_us")
-            if name in parts:
+            if name in parts or name == "unattributed":
                 raise ValueError(f"duplicate phase/leaf timing {name}")
             parts[name] = us
     parts["physics_step"] -= tick["sleep_us"]
@@ -391,7 +391,7 @@ def ram_rows(text, recipe):
                 if tick["dt_s"] <= 0 or tick["sleep_us"] + tick["contacts_us"] > tick["physics_us"]:
                     raise ValueError("invalid timestep or nested sleep bracket")
                 phases = tick["phases_us"]
-                if not isinstance(phases, dict) or not phases or any(not name.endswith("_us") for name in phases):
+                if not isinstance(phases, dict) or not phases or any(not name.endswith("_us") or name in RAM_NON_ADDITIVE | {"unattributed_us"} for name in phases):
                     raise ValueError("invalid phases_us: expected named phase timings")
                 for name, us in phases.items():
                     finite(us, f"phases_us.{name}")
@@ -468,6 +468,7 @@ def ram_summary(text, recipe):
                 first_tick=window[0]["tick"], last_tick=window[-1]["tick"], window_s=len(window)*dt,
                 worst_tick=worst, p99_us=ordered[math.ceil(0.99*len(ordered))-1],
                 worst_tick_attribution=attribution(worst),
+                worst_capture_tick_attribution=attribution(max(ticks, key=lambda t: t["tick_us"])),
                 # Include approach ticks too: the attribution gate applies to the whole capture.
                 over_budget_ticks=[attribution(t) for t in ticks if t["tick_us"] > dt*1e6],
                 peak_awake=max(t["awake"] for t in window), final_awake=window[-1]["awake"],
