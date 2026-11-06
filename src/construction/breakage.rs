@@ -1695,13 +1695,8 @@ fn evaluate_owner(
         Vec::new()
     };
     let mut departures = Vec::new();
-    let split = if let Some(owned) = moving {
+    let split = if moving.is_some() {
         let groups: Vec<_> = changes.groups.into_iter().map(|(group, _)| group).collect();
-        let unchanged = groups.len() == 1
-            && groups[0]
-                .iter()
-                .copied()
-                .eq(owned.iter().map(|&c| usize::from(c)));
         if unchanged {
             for &c in &groups[0] {
                 live.state.fate[c] = Fate::Standing;
