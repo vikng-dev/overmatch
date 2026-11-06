@@ -276,11 +276,18 @@ pub(crate) fn booted_sim_on(world: Option<crate::terrain_grid::HeightGrid>) -> B
 /// The populated-map composition gates select their own placement through `booted_sim_on`.
 fn booted_driving_grid(grid: crate::terrain_grid::HeightGrid) -> BootedSim {
     let extent = grid.extent();
-    let manifest = crate::map::tests::fixture_manifest(
-        extent.half_extent(),
-        extent.height_offset_m,
-        extent.height_span_m,
-    );
+    // Synthetic samples are already world metres and can extend beyond the decode interval.
+    // The fixture's containment boundary must enclose the entire supplied surface.
+    let mut low = extent.height_offset_m;
+    let mut high = low + extent.height_span_m;
+    for j in 0..grid.size() as usize {
+        for i in 0..grid.size() as usize {
+            let height = grid.sample(i, j);
+            low = low.min(height);
+            high = high.max(height);
+        }
+    }
+    let manifest = crate::map::tests::fixture_manifest(extent.half_extent(), low, high - low);
     booted_sim_on_map(Some(grid), Some(manifest))
 }
 
