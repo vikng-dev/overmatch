@@ -77,8 +77,8 @@ use std::sync::Arc;
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
     ActiveCollisionHooks, AngularVelocity, Collider, ColliderAabb, ColliderOf, CollisionHooks,
-    CollisionLayers, ContactPair, Forces, LayerMask, LinearVelocity, Position, ReadRigidBodyForces,
-    RigidBody, Rotation, Sensor, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces,
+    CollisionLayers, ContactPair, Forces, LinearVelocity, Position, ReadRigidBodyForces, RigidBody,
+    Rotation, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces,
 };
 
 use bevy::math::DVec3;
@@ -1570,6 +1570,7 @@ struct OwnerEffects {
 /// Immutable inputs for one owner's law run; shared-body effects are staged in `OwnerEffects`.
 struct OwnerInputs<'a> {
     pool: &'a TaskPool,
+    reusable: &'a ReusableColliders,
     taken: &'a Taken,
     pressing: &'a [Load],
     resting: &'a [Load],
@@ -1589,6 +1590,7 @@ fn evaluate_owner(
 ) -> OwnerEffects {
     let OwnerInputs {
         pool,
+        reusable,
         taken,
         pressing,
         resting,
@@ -1725,15 +1727,18 @@ fn evaluate_owner(
             for (group, loads) in changes.groups {
                 scope.spawn(async move {
                     let launch = launch(kind, &live.structure, &group, &loads);
-                    prepare_group(Departure {
-                        kind: kind.clone(),
-                        construction,
-                        root: construction_pose,
-                        live: live.group(&group),
-                        group,
-                        launch,
-                        tick,
-                    })
+                    prepare_group(
+                        Departure {
+                            kind: kind.clone(),
+                            construction,
+                            root: construction_pose,
+                            live: live.group(&group),
+                            group,
+                            launch,
+                            tick,
+                        },
+                        reusable,
+                    )
                 });
             }
         });
@@ -1866,6 +1871,11 @@ fn apply_deposits(mut p: DepositParam) {
                     } else {
                         (Vec3::ZERO, Vec3::ZERO, construction.translation) // Placed matter is at rest.
                     };
+                    let reusable = if piece.is_none() {
+                        reusable_colliders(children.get(root).ok(), chunk_entities)
+                    } else {
+                        BTreeMap::new() // Moving owners transfer their colliders in split_groups.
+                    };
                     let effect = evaluate_owner(
                         root,
                         breakage.bypass_change_detection(),
@@ -1873,6 +1883,7 @@ fn apply_deposits(mut p: DepositParam) {
                         construction,
                         OwnerInputs {
                             pool: ComputeTaskPool::get(),
+                            reusable: &reusable,
                             taken,
                             pressing: presses.get(&root).map_or(&[][..], Vec::as_slice),
                             resting: resting.get(&root).map_or(&[][..], Vec::as_slice),
@@ -1886,11 +1897,6 @@ fn apply_deposits(mut p: DepositParam) {
                     if !effect.events.is_empty() {
                         breakage.set_changed();
                     }
-                    let reusable = if effect.departures.is_empty() {
-                        BTreeMap::new()
-                    } else {
-                        reusable_colliders(children.get(root).ok(), chunk_entities)
-                    };
                     effects.scope(|effects| effects.push((effect, reusable)));
                 });
             let mut effects: Vec<_> = effects.drain().collect();
@@ -2460,10 +2466,10 @@ pub(crate) fn chunk_collider(kind: &ConstructionKind, c: usize, origin: Vec3) ->
     .expect("a load-certified authored hull stays a solid convex hull")
 }
 
-/// How far a freed chunk's contact hull stands inside its whole hull, m (Resolution). A chunk freed
-/// in place touches its neighbours, and at zero separation the solver's contact normal is rounding
-/// noise. MEASURED on the shipped house, 11 sampled releases: with no gap 3 took kicks of up to
-/// 5.5 cm and 0.22 J/kg from nothing; at 1 mm none gained energy, 1 km from the origin as well.
+/// Resolution: the contact hull stands 1 mm inside occupied matter to separate coplanar faces
+/// beyond Parry's zero-distance GJK/EPA ambiguity. The game's damage-model rounds meet this
+/// same hull: its nearest face moves 1 mm, farther faces proportionally (inset_point caps small
+/// hulls). Mass, inertia and centre use the whole hull.
 const LOOSE_GAP_M: f32 = 1e-3;
 
 /// Resolution: preserve a solid, numerically resolved hull when the requested inset would
@@ -2492,9 +2498,8 @@ pub(crate) fn inset_point(block: &Block, gap: f32) -> impl Fn(Vec3) -> Vec3 {
     move |point| middle + (point - middle) * shrink
 }
 
-/// The hull a freed chunk meets contacts with, inside its whole occupied hull. The nominal
-/// nearest-face gap is LOOSE_GAP_M, reduced by the small-hull cap in inset_point. Mass, inertia
-/// and ballistics read the whole hull instead.
+/// A chunk's permanent contact and ballistic hull. The nearest-face gap is LOOSE_GAP_M,
+/// reduced by the small-hull cap in inset_point; occupied mass uses the whole hull.
 pub(crate) fn loose_collider(block: &Block, origin: Vec3) -> Collider {
     let inset = inset_point(block, LOOSE_GAP_M);
     Collider::convex_hull(block.points.iter().map(|p| inset(*p) - origin).collect())
@@ -2523,38 +2528,44 @@ struct Departure {
     launch: Launch,
 }
 
-type ContactChunk = (
-    Transform,
+type ChunkPhysics = (
     Collider,
     (
         avian3d::prelude::Mass,
         avian3d::prelude::AngularInertia,
         avian3d::prelude::CenterOfMass,
     ),
-    CollisionLayers,
     avian3d::prelude::Friction,
-    ChunkCollider,
-);
-type OccupiedChunk = (
-    Transform,
-    Collider,
-    Sensor,
-    CollisionLayers,
     BallisticVolume,
     ChunkCollider,
 );
 
-type ChunkChildren<'w, 's> = Query<'w, 's, (&'static ChunkCollider, Has<Sensor>)>;
-type ReusableColliders = BTreeMap<(u16, bool), Entity>;
+type ChunkChildren<'w, 's> = Query<'w, 's, &'static ChunkCollider>;
+type ReusableColliders = BTreeMap<u16, Entity>;
 
-/// Existing contact and occupied colliders, indexed once per departing owner.
+/// Every chunk keeps its own centroid frame through standing, departure and subsequent splits.
+fn chunk_physics(kind: &ConstructionKind, c: usize) -> ChunkPhysics {
+    let origin = kind.structure.chunks[c].centroid;
+    (
+        loose_collider(&kind.layout.blocks[c], origin),
+        occupied_mass(
+            &chunk_collider(kind, c, origin),
+            kind.layout.materials[c].density,
+        ),
+        kind.chunk_friction(c),
+        chunk_volume(kind, c),
+        ChunkCollider(c as u16),
+    )
+}
+
+/// Existing colliders, indexed once per departing owner.
 fn reusable_colliders(children: Option<&Children>, chunks: &ChunkChildren) -> ReusableColliders {
     let mut reusable = BTreeMap::new();
     for &entity in children.into_iter().flatten() {
-        if let Ok((chunk, sensor)) = chunks.get(entity) {
+        if let Ok(chunk) = chunks.get(entity) {
             assert!(
-                reusable.insert((chunk.0, sensor), entity).is_none(),
-                "an owner has one collider per chunk and role"
+                reusable.insert(chunk.0, entity).is_none(),
+                "an owner has one collider per chunk"
             );
         } // Element and view children have no chunk address.
     }
@@ -2563,35 +2574,23 @@ fn reusable_colliders(children: Option<&Children>, chunks: &ChunkChildren) -> Re
 
 struct PreparedDeparture {
     departure: Departure,
-    chunks: Vec<(ContactChunk, OccupiedChunk)>,
+    chunks: Vec<(u16, Transform, Option<ChunkPhysics>)>,
 }
 
-/// Prepare occupied mass and inset contact geometry while the group is independently owned.
-/// Ordered emission only enqueues these complete bundles.
-fn prepare_group(mut departure: Departure) -> PreparedDeparture {
+/// Only fresh chunks build geometry; rehoming retains the standing collider and mass properties.
+fn prepare_group(departure: Departure, reusable: &ReusableColliders) -> PreparedDeparture {
     let kind = &departure.kind;
-    let origin = departure.launch.centroid;
-    let chunks = std::mem::take(&mut departure.launch.colliders)
-        .into_iter()
-        .map(|(c, hull)| {
-            let contact = (
-                Transform::IDENTITY,
-                loose_collider(&kind.layout.blocks[c], origin),
-                occupied_mass(&hull, kind.layout.materials[c].density),
-                piece_layers(),
-                kind.chunk_friction(c),
-                ChunkCollider(c as u16),
-            );
-            // The game's damage model reads occupied geometry; the sensor adds no solver mass.
-            let occupied = (
-                Transform::IDENTITY,
-                hull,
-                Sensor,
-                CollisionLayers::new([Layer::Armor], LayerMask::NONE),
-                chunk_volume(kind, c),
-                ChunkCollider(c as u16),
-            );
-            (contact, occupied)
+    let chunks = departure
+        .group
+        .iter()
+        .map(|&c| {
+            (
+                c as u16,
+                Transform::from_translation(
+                    kind.structure.chunks[c].centroid - departure.launch.centroid,
+                ),
+                (!reusable.contains_key(&(c as u16))).then(|| chunk_physics(kind, c)),
+            )
         })
         .collect();
     PreparedDeparture { departure, chunks }
@@ -2645,7 +2644,11 @@ fn spawn_piece(
 
 #[cfg(test)]
 fn spawn_group(commands: &mut Commands, departure: Departure) {
-    spawn_prepared(commands, prepare_group(departure), &mut BTreeMap::new());
+    spawn_prepared(
+        commands,
+        prepare_group(departure, &BTreeMap::new()),
+        &mut BTreeMap::new(),
+    );
 }
 
 /// Commit a group from its synchronous, independently prepared construction state.
@@ -2698,34 +2701,30 @@ fn spawn_prepared(
             AngularVelocity(root.rotation * *spin),
         ))
         .id();
-    let pose = (
-        Position(at),
-        Rotation(root.rotation),
-        GlobalTransform::from(Transform::from_translation(at).with_rotation(root.rotation)),
-    );
-    // Fresh colliders derive identity-local transforms through Avian's add hook; reused
-    // colliders have already run it and need the new world's pose explicitly.
-    let fresh_pose = (Position::PLACEHOLDER, Rotation::PLACEHOLDER, pose.2);
-    for (contact, occupied) in chunks {
-        let chunk = contact.5.0;
-        if let Some(entity) = reusable.remove(&(chunk, false)) {
-            // ChildOf updates ColliderOf in Avian 0.7's ColliderHierarchyPlugin. The
-            // rehome rule drops pairs still naming the old body before its next physics step.
+    for (chunk, local, fresh) in chunks {
+        let world = Transform::from_translation(at + root.rotation * local.translation)
+            .with_rotation(root.rotation);
+        let pose = (
+            Position(world.translation),
+            Rotation(world.rotation),
+            GlobalTransform::from(world),
+        );
+        if let Some(entity) = reusable.remove(&chunk) {
+            // ColliderOf's relationship hook reads the supplied world pose. No collider insertion
+            // runs: its shape and occupied mass properties stay in the chunk's own frame.
             commands
                 .entity(entity)
-                .remove::<(BallisticVolume, ActiveCollisionHooks)>()
-                .insert((ChildOf(piece), contact, pose));
+                .remove::<ActiveCollisionHooks>()
+                .insert((ChildOf(piece), local, piece_layers(), pose));
         } else {
-            // An element can release before its per-chunk colliders have ever existed.
-            commands.spawn((ChildOf(piece), contact, fresh_pose));
-        }
-        if let Some(entity) = reusable.remove(&(chunk, true)) {
-            commands
-                .entity(entity)
-                .insert((ChildOf(piece), occupied, pose));
-        } else {
-            // A standing chunk has no separate occupied sensor yet.
-            commands.spawn((ChildOf(piece), occupied, fresh_pose));
+            // Fresh colliders run Avian's local-pose initialization hook once.
+            commands.spawn((
+                ChildOf(piece),
+                local,
+                fresh.expect("a chunk without a reusable collider prepared its physics"),
+                piece_layers(),
+                (Position::PLACEHOLDER, Rotation::PLACEHOLDER, pose.2),
+            ));
         }
     }
 }
@@ -2777,6 +2776,7 @@ impl PendingSplit {
         construction: u16,
         root: Transform,
         motion: SplitMotion,
+        reusable: &ReusableColliders,
     ) -> Vec<PreparedDeparture> {
         pool.scope(|scope| {
             for (group, live) in &self.children {
@@ -2790,15 +2790,18 @@ impl PendingSplit {
                             .spin
                             .cross(launch.centre - breakage.origin - motion.centre);
                     launch.spin = motion.spin;
-                    prepare_group(Departure {
-                        kind: breakage.kind.clone(),
-                        construction,
-                        root,
-                        group: group.clone(),
-                        launch,
-                        live: live.clone(),
-                        tick: self.tick,
-                    })
+                    prepare_group(
+                        Departure {
+                            kind: breakage.kind.clone(),
+                            construction,
+                            root,
+                            group: group.clone(),
+                            launch,
+                            live: live.clone(),
+                            tick: self.tick,
+                        },
+                        reusable,
+                    )
                 });
             }
         })
@@ -2829,6 +2832,7 @@ fn split_groups(
         |(entity, piece, body, breakage, velocity, spin, centre, split, colliders)| {
             let root = breakage.physics_frame(body);
             let inverse = root.rotation.inverse();
+            let reusable = reusable_colliders(Some(colliders), &chunks);
             let children = split.prepare(
                 ComputeTaskPool::get(),
                 breakage,
@@ -2839,8 +2843,8 @@ fn split_groups(
                     spin: inverse * spin.0,
                     centre: centre.0,
                 },
+                &reusable,
             );
-            let reusable = reusable_colliders(Some(colliders), &chunks);
             effects.scope(|effects| effects.push((entity, split.tick, children, reusable)));
         },
     );
@@ -2856,10 +2860,10 @@ fn split_groups(
 }
 
 /// A loose chunk's contact filter: debris meets ground, constructions, hulls and other pieces,
-/// never a tank's armour volumes. Its separate whole-hull sensor supplies ballistic geometry.
+/// never a tank's armour volumes. The same hull supplies the game's ballistic geometry.
 pub(crate) fn piece_layers() -> CollisionLayers {
     CollisionLayers::new(
-        [Layer::Debris],
+        [Layer::Debris, Layer::Armor],
         [
             Layer::Terrain,
             Layer::Vehicle,
@@ -2989,14 +2993,20 @@ fn prepare_reconcile(
             (true, None) => {
                 effects.push(ColliderChange::Chunk((
                     ChildOf(root),
-                    Transform::IDENTITY,
-                    chunk_collider(kind, c, Vec3::ZERO),
+                    Transform::from_translation(kind.structure.chunks[c].centroid),
+                    chunk_physics(kind, c),
                     super::element_layers(),
-                    kind.chunk_friction(c),
-                    chunk_volume(kind, c),
-                    ChunkCollider(c as u16),
                     ActiveCollisionHooks::MODIFY_CONTACTS, // [`SweepContacts`].
-                    pose,
+                    (
+                        Position::PLACEHOLDER,
+                        Rotation::PLACEHOLDER,
+                        GlobalTransform::from(
+                            Transform::from_translation(
+                                transform.transform_point(kind.structure.chunks[c].centroid),
+                            )
+                            .with_rotation(transform.rotation),
+                        ),
+                    ),
                 )));
             }
             _ => {}

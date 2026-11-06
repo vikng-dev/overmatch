@@ -9,17 +9,15 @@ use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::{
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-/// One freed group's collider frame and departure in construction terms. The mass and inertia are those of these exact colliders at their data's density.
+/// A freed group's occupied-mass frame and departure in construction terms.
 #[derive(Debug)]
 pub(crate) struct Launch {
     pub(crate) centroid: Vec3,
     /// Actual occupied centre of mass in the construction frame, including collider rounding.
     pub(crate) centre: Vec3,
-    pub(crate) colliders: Vec<(usize, Collider)>,
     pub(crate) velocity: Vec3,
     pub(crate) spin: Vec3,
-    /// The occupied mass and inertia about `centre`, which tests hold spawned bodies to; Avian
-    /// sums the same colliders for the body itself.
+    /// Occupied mass and inertia about `centre`; contact insets carry these whole-hull properties.
     #[cfg(test)]
     pub(crate) mass: f32,
     #[cfg(test)]
@@ -69,7 +67,6 @@ pub(crate) fn launch_colliders(
     Launch {
         centroid,
         centre: com,
-        colliders,
         velocity: impulse / total.mass,
         spin: inverse_inertia * angular,
         #[cfg(test)]

@@ -1,6 +1,7 @@
 use super::*;
 use avian3d::prelude::{
     ConstantForce, ConstantLinearAcceleration, ConstantLocalForce, ConstantLocalLinearAcceleration,
+    Sensor,
 };
 
 /// The sweep's per-tick account, available to headless witnesses and operator instruments.
@@ -501,6 +502,7 @@ fn commit_source(
                 return; // An earlier source already freed this owner's candidate matter.
             }
             let mut record = Record::default();
+            let reusable = reusable_colliders(children.get(root).ok(), chunk_entities);
             let departure = sweep_departure(
                 &mut breakage,
                 pose,
@@ -512,8 +514,8 @@ fn commit_source(
                 },
                 tick,
                 &mut record,
+                &reusable,
             );
-            let reusable = reusable_colliders(children.get(root).ok(), chunk_entities);
             released.scope(|local| local.push((root, chunks, departure, record.entries, reusable)));
         });
     let mut released: Vec<_> = released.drain().collect();
@@ -573,6 +575,7 @@ pub(super) fn sweep_departure(
     motion: ReleasedMotion,
     tick: u32,
     record: &mut Record,
+    reusable: &ReusableColliders,
 ) -> (Vec<PreparedDeparture>, Vec<crate::debris::crumble::Shed>) {
     let ReleasedMotion {
         velocity,
@@ -632,15 +635,18 @@ pub(super) fn sweep_departure(
                 let at = pose.transform_point(launch.centre);
                 launch.velocity = pose.rotation.inverse() * (velocity + spin.cross(at - centre));
                 launch.spin = pose.rotation.inverse() * spin;
-                prepare_group(Departure {
-                    kind: kind.clone(),
-                    construction: breakage.construction,
-                    root: pose,
-                    live: breakage.live.group(&group),
-                    group,
-                    launch,
-                    tick,
-                })
+                prepare_group(
+                    Departure {
+                        kind: kind.clone(),
+                        construction: breakage.construction,
+                        root: pose,
+                        live: breakage.live.group(&group),
+                        group,
+                        launch,
+                        tick,
+                    },
+                    reusable,
+                )
             });
         }
     });

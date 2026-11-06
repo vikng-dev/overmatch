@@ -408,8 +408,9 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
             assert_eq!(world.get::<ColliderOf>(entity).unwrap().body, owner);
             assert_eq!(
                 world.get::<Transform>(entity).unwrap().translation,
-                Vec3::ZERO,
-                "direct convex points already use the dynamic owner's centroid frame"
+                kind.structure.chunks[chunk].centroid
+                    - app.world().get::<Breakage>(owner).unwrap().origin,
+                "a permanent chunk frame moves relative to the dynamic owner"
             );
             let bound = world.get::<ColliderAabb>(entity).unwrap();
             let at = world.get::<Position>(entity).unwrap().0;
@@ -3457,52 +3458,6 @@ fn a_chunk_freed_in_place_takes_no_energy_from_its_neighbours() {
     }
 }
 
-/// The game's damage model marches a freed chunk's occupied hull. Contact separation must not
-/// shorten either face of its ballistic chord. This reads the collider spawn_group actually
-/// attached to a live piece, so retaining BallisticVolume on the contact inset fails.
-#[test]
-fn a_freed_chunks_ballistic_chord_is_its_occupied_chord() {
-    let kind = shipped_house();
-    let (_, [c, ..]) = fixture_chunks(&kind);
-    let (mut app, _) = freed_in_place(&[c], Vec3::ZERO);
-    app.insert_resource(Gravity::ZERO);
-    app.update();
-    let origin = app
-        .world_mut()
-        .query_filtered::<&Breakage, With<Piece>>()
-        .single(app.world())
-        .unwrap()
-        .origin;
-    let occupied = chunk_collider(&kind, c, origin);
-    let centroid = kind.layout.structure(&kind.asset).chunks[c].centroid - origin;
-    let mut volumes = app
-        .world_mut()
-        .query::<(&Collider, &BallisticVolume, &ChildOf)>();
-    let colliders: Vec<_> = volumes
-        .iter(app.world())
-        .filter(|(_, _, parent)| app.world().get::<Piece>(parent.parent()).is_some())
-        .map(|(hull, _, _)| hull)
-        .collect();
-    assert_eq!(colliders.len(), 1);
-    // Fixture rays in three independent directions, long enough to cross this chunk.
-    for dir in [Vec3::X, Vec3::Y, Vec3::Z] {
-        let reach = (kind.layout.blocks[c].max - kind.layout.blocks[c].min).length();
-        for sign in [-1.0, 1.0] {
-            let ray = dir * sign;
-            let from = centroid - ray * reach;
-            let cast = |hull: &Collider| {
-                hull.cast_ray(Vec3::ZERO, Quat::IDENTITY, from, ray, reach * 2.0, true)
-                    .unwrap()
-                    .0
-            };
-            assert!(
-                (cast(colliders[0]) - cast(&occupied)).abs() < 1e-5,
-                "contact separation changed the game's ballistic face on {ray}"
-            );
-        }
-    }
-}
-
 /// The game's damage model cannot silently discard a malformed empty exit field.
 #[test]
 #[should_panic(expected = "a recorded cone has its admitted nonempty direction set")]
@@ -3532,40 +3487,6 @@ fn construction_refuses_a_recorded_cone_without_its_direction_set() {
         burst: None,
         lines: Vec::new(),
     });
-}
-
-/// The game's environment destruction assigns occupied mass once. This control removes the
-/// sensor marker from the actual spawned solid; a missing marker at spawn fails the mass guard.
-#[test]
-fn a_ballistic_sensor_does_not_add_a_second_occupied_mass() {
-    let kind = shipped_house();
-    let (_, [c, ..]) = fixture_chunks(&kind);
-    let (mut app, (mass, _, _)) = freed_in_place(&[c], Vec3::ZERO);
-    app.update();
-    let (solid, parent) = app
-        .world_mut()
-        .query_filtered::<(Entity, &ChildOf), (With<Sensor>, With<BallisticVolume>)>()
-        .iter(app.world())
-        .map(|(e, parent)| (e, parent.parent()))
-        .find(|(_, parent)| app.world().get::<Piece>(*parent).is_some())
-        .unwrap();
-    assert!((app.world().get::<ComputedMass>(parent).unwrap().value() / mass - 1.0).abs() < 1e-5);
-    let extra = app
-        .world()
-        .get::<Collider>(solid)
-        .unwrap()
-        .mass_properties(1.0)
-        .mass;
-    app.world_mut().entity_mut(solid).remove::<Sensor>();
-    app.world_mut().entity_mut(parent).insert(
-        avian3d::dynamics::rigid_body::mass_properties::components::RecomputeMassProperties,
-    );
-    app.update();
-    let added = app.world().get::<ComputedMass>(parent).unwrap().value() - mass;
-    assert!(
-        added > extra * 0.9,
-        "the no-sensor control must expose the duplicate mass: {added} of {extra}"
-    );
 }
 
 /// The game's construction field geometry reduces by ray and source entity, independent of
@@ -3763,6 +3684,7 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
                             OwnerInputs {
                                 step: STEP,
                                 pool: &pool,
+                                reusable: &BTreeMap::new(),
                                 taken,
                                 pressing: &[],
                                 resting: &[],
@@ -3842,15 +3764,11 @@ fn prepared_group_state(prepared: PreparedDeparture) -> impl std::fmt::Debug + P
         prepared
             .chunks
             .into_iter()
-            .map(|(contact, occupied)| {
+            .map(|(chunk, transform, fresh)| {
                 (
-                    contact.0,
-                    contact.1.mass_properties(1.0),
-                    contact.2,
-                    contact.5,
-                    occupied.0,
-                    occupied.1.mass_properties(1.0),
-                    occupied.5,
+                    chunk,
+                    transform,
+                    fresh.map(|physics| (physics.0.mass_properties(1.0), physics.1, physics.4)),
                 )
             })
             .collect::<Vec<_>>(),
@@ -3882,7 +3800,14 @@ fn split_preparation_keeps_child_order_and_state_across_workers() {
     };
     let run = |threads| {
         let pool = TaskPoolBuilder::new().num_threads(threads).build();
-        let prepared = split.prepare(&pool, &breakage, breakage.construction, root, motion);
+        let prepared = split.prepare(
+            &pool,
+            &breakage,
+            breakage.construction,
+            root,
+            motion,
+            &BTreeMap::new(),
+        );
         assert_eq!(
             prepared
                 .iter()
@@ -4587,6 +4512,7 @@ fn a_swept_patch_keeps_its_server_body_mass_and_rigid_motion() {
         },
         7,
         &mut record,
+        &BTreeMap::new(),
     );
     assert!(sheds.is_empty());
     assert_eq!(departures.len(), 1);
@@ -4634,91 +4560,102 @@ fn a_swept_patch_keeps_its_server_body_mass_and_rigid_motion() {
     );
 }
 
+#[derive(Debug, PartialEq)]
+struct ChunkFact {
+    owner: Vec<u16>,
+    chunk: u16,
+    sensor: bool,
+    points: Vec<Vec3>,
+    layers: CollisionLayers,
+    mass: Option<f32>,
+    inertia: Option<Mat3>,
+    centre: Option<Vec3>,
+    friction: Option<Friction>,
+    volume: Option<(String, crate::ballistics::VolumeMaterial)>,
+    cached_mass: ColliderMassProperties,
+}
+fn chunk_facts(world: &mut World) -> Vec<ChunkFact> {
+    let mut facts: Vec<_> = world
+        .query::<(
+            Entity,
+            &ChildOf,
+            &ChunkCollider,
+            &Collider,
+            &CollisionLayers,
+            Has<Sensor>,
+            Option<&Mass>,
+            Option<&AngularInertia>,
+            Option<&CenterOfMass>,
+            Option<&Friction>,
+            Option<&BallisticVolume>,
+            &ColliderOf,
+            &ColliderMassProperties,
+        )>()
+        .iter(world)
+        .filter_map(
+            |(
+                entity,
+                parent,
+                chunk,
+                collider,
+                layers,
+                sensor,
+                mass,
+                inertia,
+                centre,
+                friction,
+                volume,
+                of,
+                cached_mass,
+            )| {
+                let piece = world.get::<Piece>(parent.parent())?;
+                assert_eq!(
+                    of.body,
+                    parent.parent(),
+                    "physics and hierarchy name the same owner"
+                );
+                assert!(
+                    !sensor,
+                    "the game reads the contact collider for ballistics"
+                );
+                let breakage = world.get::<Breakage>(parent.parent()).unwrap();
+                assert_eq!(
+                    world.get::<Transform>(entity).unwrap().translation,
+                    breakage.kind.structure.chunks[usize::from(chunk.0)].centroid - breakage.origin
+                );
+                Some(ChunkFact {
+                    owner: piece.chunks.clone(),
+                    chunk: chunk.0,
+                    sensor,
+                    points: collider
+                        .shape_scaled()
+                        .as_convex_polyhedron()
+                        .unwrap()
+                        .points()
+                        .to_vec(),
+                    layers: *layers,
+                    mass: mass.map(|m| m.0),
+                    inertia: inertia.map(|i| i.tensor().to_mat3()),
+                    centre: centre.map(|c| c.0),
+                    friction: friction.copied(),
+                    volume: volume.map(|v| (v.substance.clone(), v.material)),
+                    cached_mass: *cached_mass,
+                })
+            },
+        )
+        .collect();
+    facts.sort_by_key(|f| (f.chunk, f.sensor));
+    facts
+}
+
 /// The game's environment destruction model: bookkeeping may reuse entity IDs, but every
 /// physics tick retains the same chunk shapes, ownership, material and solver properties.
 /// Fresh departure is also exercised: an intact element has no per-chunk entities to reuse.
 #[test]
 fn departure_and_split_preserve_each_chunks_collider_contract() {
     use bevy::ecs::system::{RunSystemOnce, SystemState};
-    #[derive(Debug, PartialEq)]
-    struct Fact {
-        owner: Vec<u16>,
-        chunk: u16,
-        sensor: bool,
-        points: Vec<Vec3>,
-        layers: CollisionLayers,
-        mass: Option<f32>,
-        inertia: Option<Mat3>,
-        centre: Option<Vec3>,
-        friction: Option<Friction>,
-        volume: Option<(String, crate::ballistics::VolumeMaterial)>,
-        cached_mass: ColliderMassProperties,
-    }
-    fn facts(world: &mut World) -> Vec<Fact> {
-        let mut facts: Vec<_> = world
-            .query::<(
-                Entity,
-                &ChildOf,
-                &ChunkCollider,
-                &Collider,
-                &CollisionLayers,
-                Has<Sensor>,
-                Option<&Mass>,
-                Option<&AngularInertia>,
-                Option<&CenterOfMass>,
-                Option<&Friction>,
-                Option<&BallisticVolume>,
-                &ColliderOf,
-                &ColliderMassProperties,
-            )>()
-            .iter(world)
-            .filter_map(
-                |(
-                    entity,
-                    parent,
-                    chunk,
-                    collider,
-                    layers,
-                    sensor,
-                    mass,
-                    inertia,
-                    centre,
-                    friction,
-                    volume,
-                    of,
-                    cached_mass,
-                )| {
-                    let piece = world.get::<Piece>(parent.parent())?;
-                    assert_eq!(
-                        of.body,
-                        parent.parent(),
-                        "physics and hierarchy name the same owner"
-                    );
-                    assert_eq!(world.get::<Transform>(entity), Some(&Transform::IDENTITY));
-                    Some(Fact {
-                        owner: piece.chunks.clone(),
-                        chunk: chunk.0,
-                        sensor,
-                        points: collider
-                            .shape_scaled()
-                            .as_convex_polyhedron()
-                            .unwrap()
-                            .points()
-                            .to_vec(),
-                        layers: *layers,
-                        mass: mass.map(|m| m.0),
-                        inertia: inertia.map(|i| i.tensor().to_mat3()),
-                        centre: centre.map(|c| c.0),
-                        friction: friction.copied(),
-                        volume: volume.map(|v| (v.substance.clone(), v.material)),
-                        cached_mass: *cached_mass,
-                    })
-                },
-            )
-            .collect();
-        facts.sort_by_key(|f| (f.chunk, f.sensor));
-        facts
-    }
+    #[derive(Resource, Default)]
+    struct ShapeInsertions(usize);
     let run = |reuse: bool| {
         let kind = column_construction();
         let (mut app, root) = composed_kind(false, &kind);
@@ -4739,6 +4676,9 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
             .swapped
             .fill(true);
         app.world_mut().run_system_once(reconcile).unwrap();
+        app.init_resource::<ShapeInsertions>().add_observer(
+            |_: On<Insert, Collider>, mut insertions: ResMut<ShapeInsertions>| insertions.0 += 1,
+        );
         // Fixture: the upper two members leave together, then split into individual bodies.
         let group = vec![1, 2];
         let mut query = SystemState::<ChunkChildren>::new(app.world_mut());
@@ -4748,7 +4688,7 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
         );
         let old: Vec<_> = reusable
             .iter()
-            .filter(|((chunk, _), _)| group.contains(&usize::from(*chunk)))
+            .filter(|(chunk, _)| group.contains(&usize::from(**chunk)))
             .map(|(_, &entity)| entity)
             .collect();
         let departure = {
@@ -4771,7 +4711,11 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
         if !reuse {
             reusable.clear();
         }
-        spawn_prepared(&mut commands, prepare_group(departure), &mut reusable);
+        spawn_prepared(
+            &mut commands,
+            prepare_group(departure, &reusable),
+            &mut reusable,
+        );
         queue.apply(app.world_mut());
         app.world_mut().run_system_once(reconcile).unwrap();
         if reuse {
@@ -4781,15 +4725,21 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
                 "departing chunk entities survive the handoff"
             );
         }
-        let mut snapshots = vec![facts(app.world_mut())];
+        assert_eq!(
+            app.world().resource::<ShapeInsertions>().0,
+            if reuse { 0 } else { 2 },
+            "reuse transfers collider ownership without replacing a shape"
+        );
+        app.world_mut().resource_mut::<ShapeInsertions>().0 = 0;
+        let mut snapshots = vec![chunk_facts(app.world_mut())];
         assert_eq!(
             snapshots[0].len(),
-            4,
-            "each chunk retains contact and occupied geometry"
+            2,
+            "each chunk has one contact and ballistic collider"
         );
         for _ in 0..2 {
             app.update();
-            snapshots.push(facts(app.world_mut()));
+            snapshots.push(chunk_facts(app.world_mut()));
         }
         let parent = app
             .world_mut()
@@ -4821,12 +4771,17 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
                 .all(|&e| app.world().get::<Collider>(e).is_some()),
             "split children survive their previous body's retirement"
         );
-        snapshots.push(facts(app.world_mut()));
+        assert_eq!(
+            app.world().resource::<ShapeInsertions>().0,
+            0,
+            "splitting keeps every chunk's permanent shape"
+        );
+        snapshots.push(chunk_facts(app.world_mut()));
         for _ in 0..2 {
             app.update();
-            snapshots.push(facts(app.world_mut()));
+            snapshots.push(chunk_facts(app.world_mut()));
         }
-        assert!(snapshots.iter().all(|snapshot| snapshot.len() == 4));
+        assert!(snapshots.iter().all(|snapshot| snapshot.len() == 2));
         snapshots
     };
     assert_eq!(run(false), run(true));
