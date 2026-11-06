@@ -75,8 +75,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
 use avian3d::prelude::{
     Collider, ColliderAabb, ColliderOf, CollisionLayers, ComputedAngularInertia,
-    ComputedCenterOfMass, ComputedMass, DefaultFriction, Forces, Friction, LayerMask, LockedAxes,
-    Position, ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery, WriteRigidBodyForces,
+    ComputedCenterOfMass, ComputedMass, DefaultFriction, Forces, Friction, LockedAxes, Position,
+    ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery, WriteRigidBodyForces,
 };
 use bevy::ecs::query::{QueryData, QueryFilter};
 use bevy::ecs::system::SystemParam;
@@ -85,16 +85,9 @@ use bevy::prelude::*;
 use bevy::tasks::{ComputeTaskPool, ParallelSlice, TaskPool};
 
 use super::terrain::FieldSurface;
-use crate::Layer;
 use crate::contact_transfer::{AppliedContact, BodyInertia, ContactTransfers, StructureBody};
 
 use super::forces::BeltContact;
-
-/// The contact class the belt bears with: the hull's own collision proxies'. A collider whose
-/// filters exclude the hull (a tank's armour and crew volumes) is no surface for the belt either.
-pub(crate) fn belt_layers() -> CollisionLayers {
-    CollisionLayers::new([Layer::Vehicle], LayerMask::ALL)
-}
 
 /// The spatial query, what makes a collider a surface the belt bears on, its shape and friction.
 #[derive(SystemParam)]
@@ -128,9 +121,8 @@ impl RubbleQuery<'_, '_> {
             .layers
             .get(collider)
             .expect("avian requires CollisionLayers on every Collider");
-        !self.sensors.contains(collider)
+        super::world_contact::solid(layers, self.sensors.contains(collider))
             && !self.field_surfaces.contains(collider)
-            && layers.interacts_with(belt_layers())
     }
 
     /// The support colliders meeting the AABB of half-extent `radius` about `center`, ascending
@@ -1120,13 +1112,15 @@ mod tests {
     use std::time::Duration;
 
     use avian3d::prelude::{
-        Collider, ColliderDensity, Gravity, LinearVelocity, PhysicsPlugins, Position, Rotation,
+        Collider, ColliderDensity, Gravity, LayerMask, LinearVelocity, PhysicsPlugins, Position,
+        Rotation,
     };
     use bevy::ecs::system::RunSystemOnce;
     use bevy::math::{Affine3A, Quat, Vec2};
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
+    use crate::Layer;
     use crate::construction::breakage::ChunkCollider;
     use crate::substances::contact_friction;
     use crate::track::forces::{
@@ -1147,6 +1141,7 @@ mod tests {
             AssetPlugin::default(),
             PhysicsPlugins::default(),
             crate::contact_transfer::sim_plugin,
+            super::super::world_contact::plugin,
         ))
         .init_asset::<Mesh>()
         .insert_resource(Gravity(gravity))
@@ -1329,6 +1324,70 @@ mod tests {
         app.world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 RubbleBodies::gather(&rubble, &[body], &bodies);
+            })
+            .unwrap();
+    }
+
+    /// The world interface must deliver load on unmarked static geometry, including a map-edge
+    /// wall. Self-owned children, sensors and query volumes cannot contribute a patch.
+    #[test]
+    fn unmarked_solids_carry_load_without_admitting_self_or_observations() {
+        let mut app = physics_with(Vec3::ZERO);
+        // Fixture: coincident static boxes under a calibration pad, no gameplay-kind markers.
+        let solid = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 0.2, 0.0),
+                Collider::cuboid(2.0, 0.4, 2.0),
+            ))
+            .id();
+        let owner = app
+            .world_mut()
+            .spawn((Transform::IDENTITY, RigidBody::Static))
+            .id();
+        let own = app
+            .world_mut()
+            .spawn((
+                ChildOf(owner),
+                Transform::from_xyz(0.0, 0.2, 0.0),
+                Collider::cuboid(2.0, 0.4, 2.0),
+            ))
+            .id();
+        let sensor = app
+            .world_mut()
+            .spawn((Transform::IDENTITY, Collider::cuboid(2.0, 0.4, 2.0), Sensor))
+            .id();
+        let query = app
+            .world_mut()
+            .spawn((
+                Transform::IDENTITY,
+                Collider::cuboid(2.0, 0.4, 2.0),
+                CollisionLayers::new([Layer::Armor], LayerMask::NONE),
+            ))
+            .id();
+        app.update();
+        app.update();
+        app.world_mut()
+            .run_system_once(move |world: RubbleQuery, bodies: Query<PieceData>| {
+                let near = world.near(Vec3::ZERO, 4.0);
+                assert!(near.contains(&solid) && near.contains(&own));
+                assert!(!near.contains(&sensor) && !near.contains(&query));
+                let snapshot = RubbleBodies::gather(&world, &near, &bodies);
+                let selected = snapshot.for_source(owner, &near);
+                let report = flat_pass(&selected);
+                assert!(
+                    report
+                        .contacts
+                        .iter()
+                        .any(|c| c.collider == Some(solid) && c.load > 0.0),
+                    "a compatible unmarked solid must carry belt load"
+                );
+                assert!(
+                    report.contacts.iter().all(|c| c.collider != Some(own)
+                        && c.collider != Some(sensor)
+                        && c.collider != Some(query)),
+                    "self and observations cannot enter the mechanical law"
+                );
             })
             .unwrap();
     }
