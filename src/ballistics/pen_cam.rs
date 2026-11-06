@@ -92,6 +92,8 @@ fn scenario_world_under(scenario: &Scenario, law: Option<&spall_cone::ConeShape>
     let mut app = probe_world_posed(pose).expect("the bound tank builds");
     app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP))
         .insert_resource(RetainSpentShells(true))
+        // Fixture: bounds enclose the analytical flight space independently of the selected map.
+        .insert_resource(crate::map::tests::fixture_manifest(4096.0, -1024.0, 2048.0))
         .add_systems(Update, integrate_projectiles);
     if let Some(law) = law {
         app.insert_resource(spall_cone::SpallLaw(law.clone()));
@@ -630,6 +632,8 @@ pub(super) fn fixture_tanks(volumes: &[(FixtureVolume, usize, Quat)]) -> (App, V
     .init_asset::<Mesh>()
     .insert_resource(TimeUpdateStrategy::ManualDuration(STEP))
     .insert_resource(RetainSpentShells(true))
+    // Fixture: bounds enclose the analytical flight space independently of the selected map.
+    .insert_resource(crate::map::tests::fixture_manifest(4096.0, -1024.0, 2048.0))
     .add_systems(Update, integrate_projectiles);
     while app.plugins_state() == bevy::app::PluginsState::Adding {
         std::thread::sleep(Duration::from_millis(1));

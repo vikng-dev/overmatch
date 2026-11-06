@@ -20,7 +20,6 @@ struct File {
     cavity_inertia: Sourced<f64>,
     plate_capacity: Sourced<crate::ballistics::plate_capacity::PlateCapacity>,
     contact_friction: Sourced<f32>,
-    floor_m: Sourced<f32>,
     server_fragment_kg: Sourced<f32>,
     ground_youngs_modulus_pa: Sourced<f64>,
     ground_poisson_ratio: Sourced<f64>,
@@ -39,7 +38,6 @@ pub(crate) struct PhysicalLaws {
     pub cavity_inertia: f64,
     pub plate_capacity: crate::ballistics::plate_capacity::PlateCapacity,
     pub contact_friction: f32,
-    pub floor_m: f32,
     /// The lightest construction fragment the server keeps as a body, kg; a lighter one becomes
     /// the players' decoration (`crate::debris::crumble`).
     pub server_fragment_kg: f32,
@@ -77,11 +75,6 @@ impl PhysicalLaws {
             ));
         }
         file.plate_capacity.0.validate(PATH)?;
-        if !file.floor_m.0.is_finite() {
-            return Err(format!(
-                "{PATH}: floor_m: author a finite world boundary in metres"
-            ));
-        }
         for (field, fit) in [
             ("reflected_impulse", &file.reflected_impulse.0),
             ("incident_impulse", &file.incident_impulse.0),
@@ -102,7 +95,6 @@ impl PhysicalLaws {
             cavity_inertia: file.cavity_inertia.0,
             plate_capacity: file.plate_capacity.0,
             contact_friction: file.contact_friction.0,
-            floor_m: file.floor_m.0,
             server_fragment_kg: file.server_fragment_kg.0,
             ground_youngs_modulus_pa: file.ground_youngs_modulus_pa.0,
             ground_poisson_ratio: file.ground_poisson_ratio.0,
@@ -220,7 +212,6 @@ mod tests {
         cavity_inertia: (2.0, Fixture("fixture")),
         plate_capacity: ((shear_slope: 1.5, opening_share: 0.6, return_power: 1.5), Fixture("fixture")),
         contact_friction: (0.25, Fixture("fixture")),
-        floor_m: (-50.0, Fixture("fixture")),
         server_fragment_kg: (20.0, Fixture("fixture")),
         ground_youngs_modulus_pa: (3.0e7, Fixture("fixture")),
         ground_poisson_ratio: (0.25, Fixture("fixture")),
@@ -235,7 +226,7 @@ mod tests {
     #[test]
     fn shared_physical_data_is_required_and_validated() {
         PhysicalLaws::shipped();
-        assert_eq!(PhysicalLaws::from_ron(VALID).unwrap().floor_m, -50.0);
+        PhysicalLaws::from_ron(VALID).unwrap();
         for (field, good) in [
             ("gravity_mps2", "9.0"),
             ("tnt_energy_j_per_kg", "4.0e6"),
@@ -256,24 +247,6 @@ mod tests {
                 );
             }
         }
-        for bad in ["NaN", "inf", "-inf"] {
-            let text = VALID.replace("floor_m: (-50.0,", &format!("floor_m: ({bad},"));
-            let error = PhysicalLaws::from_ron(&text).unwrap_err();
-            assert!(
-                error.contains(PATH) && error.contains("floor_m") && error.contains("author"),
-                "{error}"
-            );
-        }
-        let missing = VALID
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("floor_m:"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            PhysicalLaws::from_ron(&missing)
-                .unwrap_err()
-                .contains("floor_m")
-        );
     }
     /// The game's damage model: the file gate, not first contact, admits the capacity law.
     /// Mutants: omit the required field or bypass its validator. Values belong to VALID.

@@ -6,9 +6,9 @@
 //! resolves against its OWN directory, so a map moves as a directory and the systems that read it
 //! never learn an id.
 //!
-//! ONE PARSE. [`crate::terrain_grid::decode_height_grid`] reads the file at Startup and publishes
-//! [`MapManifest`]; the terrain decode takes its extent and heightmap from that resource and
-//! [`crate::scatter`] takes its instances from the same one. [`content_digest`] delegates to
+//! ONE PARSE. Simulation plugins initialize [`MapManifest`] from [`load`]; a terrain-only root
+//! admits it at Startup through [`crate::terrain_grid::decode_height_grid`]. The terrain decode
+//! takes its extent and heightmap from that resource; [`crate::scatter`] takes its instances too. [`content_digest`] delegates to
 //! [`load`], so compatibility checks cannot bypass admission.
 //!
 //! PROVISIONAL: the square play-area polygon stands in for the natural border (#200); its floor
@@ -134,6 +134,12 @@ pub(crate) struct MapManifest {
     pub(crate) prototypes: BTreeMap<String, Prototype>,
     /// Every construction asset a [`Prototype::Construction`] names, loaded and validated ([`load`]).
     pub(crate) constructions: ConstructionLibrary,
+}
+
+impl FromWorld for MapManifest {
+    fn from_world(_world: &mut World) -> Self {
+        load(&crate::assets::asset_root())
+    }
 }
 
 /// Authored XZ spawn points certified once at the map load edge. The private slice cannot be

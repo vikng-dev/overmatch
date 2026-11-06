@@ -1851,6 +1851,7 @@ pub fn sim_plugin(app: &mut App) {
     box_classes::BoxClasses::shipped();
     energy_dose::joules_per_hp();
     physical_laws::PhysicalLaws::shipped();
+    app.init_resource::<crate::map::MapManifest>();
     app.configure_sets(
         FixedPostUpdate,
         (
@@ -2346,6 +2347,7 @@ fn integrate_projectiles(
         Option<&mut ShotRecording>,
     )>,
     world: ProjectileMarchWorld,
+    map: Res<crate::map::MapManifest>,
     mut recorder: MarchRecorder,
     // Collider poses + shapes, for the §13 corridor collector: it walks each candidate's geometry
     // itself rather than asking Avian for a nearest hit (see `ballistics::collect`).
@@ -2492,7 +2494,7 @@ fn integrate_projectiles(
             } else {
                 commands.entity(entity).despawn();
             }
-        } else if step.position.y < physical_laws::PhysicalLaws::shipped().floor_m {
+        } else if step.position.y < map.play_area.floor_m() {
             // Below the world floor: bound a shell that never hits terrain. No impact to inspect,
             // so even the sandbox despawns it.
             if let Some(shot) = shot {
@@ -4727,6 +4729,8 @@ pub(crate) mod march_tests {
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
             16,
         )))
+        // Fixture: map bounds enclose this geometry-only instrument's flight space.
+        .insert_resource(crate::map::tests::fixture_manifest(4096.0, -1024.0, 2048.0))
         .init_resource::<RetainSpentShells>()
         .init_resource::<ImpactLog>()
         .add_observer(capture_impact)

@@ -854,7 +854,11 @@ mod tests {
             .unwrap()
             .replica = Some(Replica::born(
             100,
-            Vec3::Y * (super::super::physical_laws::PhysicalLaws::shipped().floor_m - 1.0),
+            Vec3::Y
+                * (crate::map::tests::fixture_manifest(8.0, 0.0, 10.0)
+                    .play_area
+                    .floor_m()
+                    - 1.0),
             Vec3::NEG_Y,
         ));
         app.update();
