@@ -683,6 +683,16 @@ struct PreloadWork {
     reused: usize,
 }
 
+/// One part's gravity preloads on its internal joints, N, solved apart from the others.
+#[derive(Default)]
+struct PartPreload {
+    normal: Vec<(usize, f64)>,
+    #[cfg(test)]
+    visits: usize,
+    #[cfg(test)]
+    built: bool,
+}
+
 impl Gravity {
     pub(crate) fn get(
         &mut self,
@@ -746,12 +756,16 @@ impl Gravity {
                     }
                 }
             }
-            for (p, part) in graph
-                .parts
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| !p.node.fixed)
-            {
+            // A part's kernel reads its own joints and writes only its internal ones: the parts
+            // solve in parallel, and their preloads commit in part order.
+            let free: Vec<usize> = (0..graph.parts.len())
+                .filter(|&p| !graph.parts[p].node.fixed)
+                .collect();
+            let pool = ComputeTaskPool::get_or_init(TaskPool::default);
+            let solved = free.par_chunk_map(pool, 1, |_, p| {
+                let p = p[0];
+                let part = &graph.parts[p];
+                let mut solved = PartPreload::default();
                 let loads: Vec<_> = part.chunks.iter().map(|&c| boundary[c]).collect();
                 let intact = design.kernels.get(part.element).filter(|kernel| {
                     kernel.chunks == part.chunks
@@ -759,7 +773,7 @@ impl Gravity {
                             standing.topology.incident[c].iter().all(|&j| {
                                 #[cfg(test)]
                                 {
-                                    self.work.kernel_visits += 1;
+                                    solved.visits += 1;
                                 }
                                 let joint = &structure.joints[j];
                                 let belongs = match joint.b {
@@ -780,17 +794,13 @@ impl Gravity {
                 });
                 let changed;
                 let kernel = if let Some(kernel) = intact {
-                    #[cfg(test)]
-                    {
-                        self.work.reused += 1;
-                    }
                     kernel
                 } else {
                     changed = Kernel::of(structure, &standing, &part.chunks);
                     #[cfg(test)]
                     {
-                        self.work.builds += 1;
-                        self.work.kernel_visits += changed.joint_visits;
+                        solved.built = true;
+                        solved.visits += changed.joint_visits;
                     }
                     &changed
                 };
@@ -801,10 +811,28 @@ impl Gravity {
                     if let Side::Chunk(b) = joint.b
                         && graph.part[joint.a] == graph.part[b]
                     {
-                        normal[j] = carried
-                            .linear
-                            .dot(super::bondsolve::joint_normal(structure, joint));
+                        solved.normal.push((
+                            j,
+                            carried
+                                .linear
+                                .dot(super::bondsolve::joint_normal(structure, joint)),
+                        ));
                     }
+                }
+                solved
+            });
+            for part in solved {
+                #[cfg(test)]
+                {
+                    self.work.kernel_visits += part.visits;
+                    if part.built {
+                        self.work.builds += 1;
+                    } else {
+                        self.work.reused += 1;
+                    }
+                }
+                for (j, preload) in part.normal {
+                    normal[j] = preload;
                 }
             }
             self.cached = Some((signature, normal));
