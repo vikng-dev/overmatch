@@ -1,6 +1,6 @@
-//! The crumble's invariants, in the game's environment destruction model (game state only), on
-//! the shipped house's data. Which chunks a test reads is chosen by a class rule (a breakable
-//! element's chunks, its lowest course, every chunk ordered by mass), never by number.
+//! Crumble and rubble-routing invariants in the game's environment destruction model (game
+//! state only). Asset-backed fixtures select members by construction properties; inline
+//! fixtures state their geometry and material inputs.
 
 use super::*;
 use crate::construction::tests::shipped_house;

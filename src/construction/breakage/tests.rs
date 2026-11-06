@@ -4342,7 +4342,12 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
         .sum();
     assert!((transferred - impulse).length() < 1e-4 * impulse.length());
     let after = app.world().get::<LinearVelocity>(source).unwrap().0;
-    assert!(((Vec3::X * speed - after) * mass - impulse).length() < 1e-3 * impulse.length());
+    let (_, before, after_exchange, _) = account
+        .source_changes
+        .iter()
+        .find(|(body, ..)| *body == source)
+        .unwrap();
+    assert!(((*before - *after_exchange) * mass - impulse).length() < 1e-3 * impulse.length());
     assert!(
         !app.world()
             .get::<Breakage>(root)
@@ -4360,8 +4365,8 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     for &&(_, c, _) in &selected {
         assert_eq!(
             shape.fate[usize::from(c)],
-            Fate::Dust,
-            "the streamed ledger opens the whole exchanged plug"
+            app.world().get::<Breakage>(root).unwrap().live.state.fate[usize::from(c)],
+            "the streamed ledger agrees with the authority for all freed matter"
         );
     }
     println!(
@@ -4550,23 +4555,28 @@ fn sweep_installers_keep_every_contact_outside_prepared_coverage() {
     }
 }
 
-/// The game's environment destruction: the hull makes the hole. A swept patch leaves the
-/// server as dust whatever its mass, and reaches the players as one cluster moving on its rigid
-/// field. Opening internal seams would turn it into unrelated chunks; routing it by size would keep
-/// a server body pinned between the hull and the standing construction.
+/// The game's environment destruction keeps a resolved hull plug's matter and rigid motion.
+/// The server body must retain occupied mass; internal seams and contact hooks stay untouched.
 #[test]
-fn a_swept_patch_leaves_as_one_dust_cluster_whatever_its_mass() {
+fn a_swept_patch_keeps_its_server_body_mass_and_rigid_motion() {
     let kind = column_construction();
     let (mut app, root) = composed_kind(false, &kind);
+    crate::headless_test::start_fixed_clock(&mut app);
+    app.update(); // Bevy's first real-time update initializes its clock with zero delta.
+    app.update();
     let mut owner = app.world_mut().get_mut::<Breakage>(root).unwrap();
     let mut record = Record::default();
-    // Fixture: the upper pair, past the server cut-off, leaves at a rigid twist about the origin.
+    // Fixture: the upper pair leaves with translation and spin about the construction origin.
     let group = vec![1, 2];
     assert!(crate::debris::crumble::server_body(
         &owner.live.structure,
         &group
     ));
-    let sheds = sweep_intake::sweep_departure(
+    let expected_mass: f32 = group
+        .iter()
+        .map(|&c| kind.sweep.part(c, &Transform::IDENTITY).mass as f32)
+        .sum();
+    let (departures, sheds) = sweep_intake::sweep_departure(
         &mut owner,
         Transform::IDENTITY,
         group.clone(),
@@ -4578,8 +4588,15 @@ fn a_swept_patch_leaves_as_one_dust_cluster_whatever_its_mass() {
         7,
         &mut record,
     );
-    assert_eq!(sheds.len(), 1, "one connected patch is one cluster");
-    assert_eq!(sheds[0].chunks, [1, 2]);
+    assert!(sheds.is_empty());
+    assert_eq!(departures.len(), 1);
+    let launched = &departures[0].departure;
+    assert_eq!(launched.group, group);
+    assert_eq!(
+        launched.launch.velocity,
+        Vec3::X * 2.0 + Vec3::Z.cross(launched.launch.centre)
+    );
+    assert_eq!(launched.launch.spin, Vec3::Z);
     let internal = kind
         .layout
         .joints
@@ -4588,12 +4605,33 @@ fn a_swept_patch_leaves_as_one_dust_cluster_whatever_its_mass() {
         .unwrap();
     assert!(!owner.live.state.separated[internal]);
     for &c in &group {
-        assert_eq!(owner.live.state.fate[c], Fate::Dust);
+        assert_eq!(owner.live.state.fate[c], Fate::Fallen);
     }
-    assert!(record.entries.iter().all(|e| e.tick == 7));
-    let count = |f: fn(&Event) -> bool| record.entries.iter().filter(|e| f(&e.event)).count();
-    assert_eq!(count(|e| matches!(e, Event::Separate(_))), 1);
-    assert_eq!(count(|e| matches!(e, Event::Dust(_))), group.len());
+    assert!(record.entries.iter().all(|entry| entry.tick == 7));
+    assert!(
+        record
+            .entries
+            .iter()
+            .all(|entry| !matches!(entry.event, Event::Dust(_)))
+    );
+    let mut queue = bevy::ecs::world::CommandQueue::default();
+    let mut commands = Commands::new(&mut queue, app.world());
+    for departure in departures {
+        spawn_prepared(&mut commands, departure, &mut BTreeMap::new());
+    }
+    queue.apply(app.world_mut());
+    app.update();
+    let (piece, mass) = app
+        .world_mut()
+        .query::<(&Piece, &ComputedMass)>()
+        .single(app.world())
+        .unwrap();
+    assert_eq!(piece.chunks, [1, 2]);
+    assert!(
+        (mass.value() / expected_mass - 1.0).abs() < 1e-5,
+        "occupied mass: {} kg on the server, {expected_mass} kg in the freed source geometry",
+        mass.value()
+    );
 }
 
 /// The game's environment destruction model: bookkeeping may reuse entity IDs, but every
@@ -4833,3 +4871,5 @@ fn the_law_installer_reuses_departing_standing_colliders() {
     assert!(app.world().get::<Piece>(parent).is_some());
     assert_eq!(app.world().get::<ColliderOf>(old).unwrap().body, parent);
 }
+
+mod rubble_observation;

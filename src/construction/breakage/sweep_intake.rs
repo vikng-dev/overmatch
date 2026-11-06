@@ -158,6 +158,8 @@ pub(super) struct Intake<'w, 's> {
     account: ResMut<'w, SweepAccount>,
     shed: MessageWriter<'w, crate::debris::crumble::Shed>,
     commands: Commands<'w, 's>,
+    children: Query<'w, 's, &'static Children>,
+    chunk_entities: ChunkChildren<'w, 's>,
 }
 
 pub(super) fn run(mut p: Intake) {
@@ -481,19 +483,48 @@ fn commit_source(
     p.account
         .exchanges
         .push((body, result.impulse.as_vec3(), result.dissipated));
-    for (root, chunks) in owners {
-        let (_, position, rotation, mut breakage) = p
+    // The source's common exchange is known. Owners prepare their own topology and geometry
+    // independently; ledger and structural effects commit in owner order before physics.
+    let mut released = bevy::utils::Parallel::<Vec<_>>::default();
+    let children = &p.children;
+    let chunk_entities = &p.chunk_entities;
+    p.constructions
+        .par_iter_many_unique_mut(owners.keys())
+        .for_each(|(root, position, rotation, mut breakage)| {
+            let pose = breakage.physics_frame((position, rotation));
+            let chunks: Vec<_> = owners[&root]
+                .iter()
+                .copied()
+                .filter(|&c| breakage.live.state.standing(c))
+                .collect();
+            if chunks.is_empty() {
+                return; // An earlier source already freed this owner's candidate matter.
+            }
+            let mut record = Record::default();
+            let departure = sweep_departure(
+                &mut breakage,
+                pose,
+                chunks.clone(),
+                ReleasedMotion {
+                    velocity: result.velocity.as_vec3(),
+                    spin: result.spin.as_vec3(),
+                    centre: source.centre.as_vec3(),
+                },
+                tick,
+                &mut record,
+            );
+            let reusable = reusable_colliders(children.get(root).ok(), chunk_entities);
+            released.scope(|local| local.push((root, chunks, departure, record.entries, reusable)));
+        });
+    let mut released: Vec<_> = released.drain().collect();
+    released.sort_unstable_by_key(|(root, ..)| *root);
+    for (root, chunks, (departures, sheds), entries, mut reusable) in released {
+        let (_, position, rotation, breakage) = p
             .constructions
-            .get_mut(root)
-            .expect("sweep owner survives intake");
+            .get(root)
+            .expect("a prepared sweep owner survives its ordered commit");
         let pose = breakage.physics_frame((position, rotation));
-        let chunks: Vec<_> = chunks
-            .into_iter()
-            .filter(|&c| breakage.live.state.standing(c))
-            .collect();
-        if chunks.is_empty() {
-            continue;
-        }
+        p.record.entries.extend(entries);
         p.queue.0.push(RawDeposit {
             changed: vec![root],
             ..default()
@@ -509,20 +540,8 @@ fn commit_source(
                 .chunks
                 .push((breakage.construction, c as u16, velocity));
         }
-        let sheds = sweep_departure(
-            &mut breakage,
-            pose,
-            chunks.clone(),
-            ReleasedMotion {
-                velocity: result.velocity.as_vec3(),
-                spin: result.spin.as_vec3(),
-                centre: source.centre.as_vec3(),
-            },
-            tick,
-            &mut p.record,
-        );
-        // The patch's momentum and energy leave with the players' decoration, on the rigid field
-        // the exchange gave every freed chunk.
+        // Ordered reduction of the momentum and energy transferred to all freed matter,
+        // whether retained on server bodies or handed to decor.
         for c in chunks {
             let part = breakage.kind.sweep.part(c, &pose);
             let velocity = result.velocity + result.spin.cross(part.centre - source.centre);
@@ -533,6 +552,9 @@ fn commit_source(
         }
         p.account.shed += sheds.len();
         p.shed.write_batch(sheds);
+        for departure in departures {
+            spawn_prepared(&mut p.commands, departure, &mut reusable);
+        }
     }
 }
 
@@ -542,11 +564,8 @@ pub(super) struct ReleasedMotion {
     pub(super) centre: Vec3,
 }
 
-/// One freed patch, its rigid velocity field and authoritative tick: the hull makes the hole.
-/// Whatever its mass, the patch leaves the server as dust in the record and reaches the players
-/// as decoration, one [`crate::debris::crumble::Shed`] per fragment that stays connected; the
-/// hull has paid its exchange. The size route is for what the structure law releases and for
-/// landings, never for a swept hole.
+/// Free a patch on the exchange's rigid field. Resolved fragments stay as server bodies;
+/// only isolated below-floor matter leaves as decor. Avian owns subsequent body contacts.
 pub(super) fn sweep_departure(
     breakage: &mut Breakage,
     pose: Transform,
@@ -554,7 +573,7 @@ pub(super) fn sweep_departure(
     motion: ReleasedMotion,
     tick: u32,
     record: &mut Record,
-) -> Vec<crate::debris::crumble::Shed> {
+) -> (Vec<PreparedDeparture>, Vec<crate::debris::crumble::Shed>) {
     let ReleasedMotion {
         velocity,
         spin,
@@ -587,27 +606,45 @@ pub(super) fn sweep_departure(
         &parted,
         &mut breakage.live.rubble_joints,
     );
+    let (kept, sheds) = crate::debris::crumble::route(
+        &breakage.live.structure,
+        (breakage.construction, pose),
+        fragments,
+        (velocity, spin, centre),
+        tick,
+        record,
+    );
     for &c in &group {
-        record.entries.push(Entry {
-            construction: breakage.construction,
-            event: Event::Dust(c as u16),
-            tick,
-        });
-        breakage.live.state.fate[c] = Fate::Dust;
+        breakage.live.state.fate[c] = Fate::Fallen;
         breakage.live.swapped[usize::from(kind.layout.element_of[c])] = true;
     }
-    fragments
-        .iter()
-        .map(|fragment| {
-            crate::debris::crumble::Shed::of(
-                &breakage.live.structure,
-                (breakage.construction, pose),
-                fragment,
-                (velocity, spin, centre),
-                tick,
-            )
-        })
-        .collect()
+    for shed in &sheds {
+        for &c in &shed.chunks {
+            breakage.live.state.fate[usize::from(c)] = Fate::Dust;
+        }
+    }
+    let departures = ComputeTaskPool::get().scope(|scope| {
+        let breakage = &*breakage;
+        for group in kept {
+            let kind = &kind;
+            scope.spawn(async move {
+                let mut launch = launch(kind, &breakage.live.structure, &group, &[]);
+                let at = pose.transform_point(launch.centre);
+                launch.velocity = pose.rotation.inverse() * (velocity + spin.cross(at - centre));
+                launch.spin = pose.rotation.inverse() * spin;
+                prepare_group(Departure {
+                    kind: kind.clone(),
+                    construction: breakage.construction,
+                    root: pose,
+                    live: breakage.live.group(&group),
+                    group,
+                    launch,
+                    tick,
+                })
+            });
+        }
+    });
+    (departures, sheds)
 }
 
 /// A held cut transmits its stopping press through the same intake as solver contacts. Moving
@@ -713,6 +750,7 @@ pub(super) fn changed(account: Res<SweepAccount>) -> bool {
 /// colliders the sweep prepared this tick. Touching points within Avian's tolerance and all
 /// uncovered points retain the solver's protection. Standing colliders enable the hook with
 /// [`ActiveCollisionHooks::MODIFY_CONTACTS`].
+/// Freed pieces need no hook: they have left the standing query, and Avian owns their contacts.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct SweepContacts<'w, 's> {
     owners: Query<

@@ -242,6 +242,9 @@ pub(crate) fn merge_fragments(
         assert!(!fragment.is_empty(), "a departing fragment contains matter");
     }
     fragments.sort_by_key(|fragment| fragment[0]);
+    if parted.is_empty() && retained.is_empty() {
+        return fragments; // No eligible edge can change this partition.
+    }
     let mut owner = vec![None; structure.chunks.len()];
     for (g, fragment) in fragments.iter().enumerate() {
         for &c in fragment {
@@ -700,7 +703,7 @@ fn crumble_landings(
     }
 }
 
-/// The size split of `fragments` of `construction` at `tick` (module doc), each moving with the
+/// The size split after [`merge_fragments`], at `tick`, each fragment moving with the
 /// rigid field `motion` (as [`Shed::of`]): a small one goes to the record as dust and to the
 /// players as one [`Shed`], returned for the caller to send; the rest, returned, stay server bodies.
 pub(crate) fn route(

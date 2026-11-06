@@ -1641,7 +1641,10 @@ fn evaluate_owner(
         .collect();
     let mut regrouped = vec![Vec::new(); groups.len()];
     for load in sources.into_iter().flatten() {
-        regrouped[owners[&load.chunk]].push(load);
+        regrouped[*owners
+            .get(&load.chunk)
+            .expect("each departing load belongs to one departing group")]
+        .push(load);
     }
     // A carrier which did not split releases no new fragment. Its existing matter stays with it.
     let unchanged = moving.is_some_and(|owned| {
