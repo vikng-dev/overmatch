@@ -1536,3 +1536,115 @@ fn the_shipped_map_census_at_spawn() {
     }
     println!("CENSUS placements={placed:?} joint_failures_at_spawn={failing}");
 }
+
+/// The game's environment destruction: cut preloads include internal bonded joints and loads
+/// handed in from another part. Removal, cracks and separation invalidate the owner's cache.
+#[test]
+fn gravity_preloads_cover_internal_joints_and_refresh_after_structure_changes() {
+    // Fixture: three unit-mass cubes, the bottom two one bonded part, the top another.
+    let mut chunks: Vec<_> = (0..3)
+        .map(|y| cube(Vec3::Y * y as f32, 1.0, false))
+        .collect();
+    for chunk in &mut chunks {
+        chunk.mass = 1.0;
+    }
+    let bond = Bond::Bonded(seam(1e6, 1e6));
+    let structure = structure(
+        chunks,
+        vec![0, 0, 1],
+        vec![
+            joint(1, Side::Chunk(0), Vec3::Y * 0.5, Vec3::Y, 1.0, bond),
+            joint(2, Side::Chunk(1), Vec3::Y * 1.5, Vec3::Y, 1.0, bond),
+            joint(0, Side::Ground, Vec3::NEG_Y * 0.5, Vec3::Y, 1.0, bond),
+        ],
+    );
+    let mut state = State::new(&structure);
+    let design = Assessment::at_rest(&structure);
+    let mut gravity = Gravity::default();
+    let check = |actual: &[f64], masses: [f64; 3]| {
+        for (&actual, mass) in actual.iter().zip(masses) {
+            close(actual, -mass * g(), "weight carried by joint");
+        }
+    };
+    check(gravity.get(&structure, &state, &design), [2.0, 1.0, 3.0]);
+    check(gravity.get(&structure, &state, &design), [2.0, 1.0, 3.0]);
+    state.fate[2] = super::super::Fate::Dust;
+    check(gravity.get(&structure, &state, &design), [1.0, 0.0, 2.0]);
+    state.cracked[0] = true;
+    check(gravity.get(&structure, &state, &design), [1.0, 0.0, 2.0]);
+    state.separated[0] = true;
+    check(gravity.get(&structure, &state, &design), [0.0, 0.0, 1.0]);
+}
+
+/// The game's environment destruction: a first touch must not scan the owner's whole graph
+/// or refactor a design kernel for every grounded singleton. Counts expose the quadratic form.
+#[test]
+fn grounded_singletons_prepare_preload_with_linear_joint_visits() {
+    // Fixture: 2048 unit-mass grounded cubes, each its own part, joined in a horizontal chain.
+    let count = 2048;
+    let chunks = (0..count)
+        .map(|x| {
+            let mut chunk = cube(Vec3::X * x as f32, 1.0, false);
+            chunk.mass = 1.0;
+            chunk
+        })
+        .collect();
+    let bond = Bond::Bonded(seam(1e9, 1e9));
+    let mut joints = Vec::new();
+    for c in 0..count {
+        joints.push(joint(
+            c,
+            Side::Ground,
+            Vec3::X * c as f32 - Vec3::Y * 0.5,
+            Vec3::Y,
+            1.0,
+            bond,
+        ));
+        if c + 1 < count {
+            joints.push(joint(
+                c,
+                Side::Chunk(c + 1),
+                Vec3::X * (c as f32 + 0.5),
+                Vec3::NEG_X,
+                1.0,
+                bond,
+            ));
+        }
+    }
+    let structure = structure(chunks, (0..count).collect(), joints);
+    let state = State::new(&structure);
+    let design = Assessment::at_rest(&structure);
+    assert_eq!(design.kernels.len(), count);
+    let mut gravity = Gravity::default();
+    let field = gravity.get(&structure, &state, &design);
+    for c in 0..count {
+        close(
+            field[2 * c],
+            -g(),
+            "each ground carries its singleton's weight",
+        );
+    }
+    println!("MEASURED grounded singleton preload: {:?}", gravity.work);
+    // DERIVED traversal bound: one interface pass, two incidence visits per joint,
+    // and at most two endpoint-local kernel visits. No intact design kernel is refactored.
+    assert!(
+        gravity.work.boundary_visits + gravity.work.kernel_visits
+            <= 5 * (count + structure.joints.len()),
+        "{:?}",
+        gravity.work
+    );
+    assert_eq!(gravity.work.builds, 0);
+    assert_eq!(gravity.work.reused, count);
+    // An interface crack changes the part field but no singleton's kernel stiffness.
+    let mut changed = state.clone();
+    changed.cracked[1] = true;
+    gravity.get(&structure, &changed, &design);
+    assert_eq!(gravity.work.builds, 0);
+    assert_eq!(gravity.work.reused, count);
+    // A cracked ground anchor does change its own kernel, without refactoring its neighbours.
+    changed.cracked[0] = true;
+    gravity.get(&structure, &changed, &design);
+    assert_eq!(gravity.work.builds, 1);
+    assert_eq!(gravity.work.reused, count - 1);
+    println!("MEASURED changed singleton preload: {:?}", gravity.work);
+}

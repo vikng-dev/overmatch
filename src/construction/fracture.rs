@@ -39,6 +39,8 @@ pub(crate) struct Material {
     /// converts their crushing work into the volume their loads take from a pool
     /// ([`Load::crushed`]). A blast's pulse crushes by [`Self::compaction`] instead.
     pub crush: f32,
+    /// Quasi-static bulk compression, Pa, from `bulk.blast.compressive_strength`.
+    pub compressive_strength: f64,
     /// How a blast's pulse crushes it (Law 1, [`Compaction`]).
     pub compaction: Compaction,
     /// How a blast's pulse throws a rear scab off it (Law 2, [`Spall`]).
@@ -201,6 +203,7 @@ impl Material {
             contact: crate::substances::Compliance::of(blast.youngs_modulus, shear_modulus)
                 .map_err(|reason| format!("substance {name:?}: {reason}"))?,
             crush: (share * registry.reference_facts().cavity_strength()) as f32,
+            compressive_strength: blast.compressive_strength,
             compaction: Compaction::of(&blast, bulk.density),
             spall: Spall::of(&blast, bulk.density, static_tensile),
             seam,

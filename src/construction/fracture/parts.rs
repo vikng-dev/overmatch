@@ -24,7 +24,7 @@ use bevy::math::{DMat3, DVec3, Vec3};
 use bevy::tasks::{ComputeTaskPool, ParallelSlice, TaskPool};
 use std::collections::BTreeMap;
 
-use super::bondsolve::{Edge, Node, Wrench, accelerating_frame, joint_edge, pair_friction};
+use super::bondsolve::{Edge, Node, Wrench, accelerating_frame, joint_edge};
 use super::{Cause, Failure, Load, Side, State, Structure};
 
 mod kernel;
@@ -664,6 +664,159 @@ impl Signature {
     }
 }
 
+/// The game's environment destruction: gravity-only joint preloads, in N (positive tension).
+/// An owner's topology fixes this field; contact demand never creates preload for its cut.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Gravity {
+    cached: Option<(Signature, Vec<f64>)>,
+    #[cfg(test)]
+    work: PreloadWork,
+}
+
+/// Operation counts for the gravity-field traversal, excluding the part field and triangular solves.
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+struct PreloadWork {
+    boundary_visits: usize,
+    kernel_visits: usize,
+    builds: usize,
+    reused: usize,
+}
+
+impl Gravity {
+    pub(crate) fn get(
+        &mut self,
+        structure: &Structure,
+        state: &State,
+        design: &Assessment,
+    ) -> &[f64] {
+        let signature = Signature::of(structure, state);
+        if self
+            .cached
+            .as_ref()
+            .is_none_or(|(old, _)| *old != signature)
+        {
+            #[cfg(test)]
+            {
+                self.work = PreloadWork::default();
+            }
+            let mut standing = state.clone();
+            let mut rebuilt = Assessment::default();
+            let equilibrium = if design.signature == signature && design.initial_verdict.is_empty()
+            {
+                design
+            } else {
+                rebuilt.rebuild(structure, &mut standing);
+                rebuilt.loads = rebuilt.loads_of(&[], Vec3::ZERO, 1.0);
+                rebuilt.settle(structure, &mut standing, &[], Vec3::ZERO, 1.0);
+                &rebuilt
+            };
+            let mut normal = vec![0.0; structure.joints.len()];
+            let graph = &equilibrium.graph;
+            let field = &equilibrium.answer[..graph.parts.len()];
+            // Assemble every part's boundary in one adjacency pass. Ground and buried ends
+            // remain kernel anchors; only interfaces between free parts supply loads.
+            let mut boundary = vec![Wrench::default(); structure.chunks.len()];
+            for (edge, &j) in graph.edges.iter().zip(&graph.joints) {
+                #[cfg(test)]
+                {
+                    self.work.boundary_visits += 1;
+                }
+                let carried = edge.resultant(&graph.nodes, field);
+                normal[j] = carried.linear.dot(edge.normal);
+                if let Some(b) = edge.b {
+                    if graph.parts[edge.a].node.fixed || graph.parts[b].node.fixed {
+                        continue; // Buried matter anchors the internal solve.
+                    }
+                    let joint = &structure.joints[j];
+                    let Side::Chunk(far) = joint.b else {
+                        panic!("a part interface has two chunk endpoints");
+                    };
+                    for (chunk, sign) in [(joint.a, -1.0), (far, 1.0)] {
+                        let force = carried.linear * sign;
+                        boundary[chunk].add(
+                            Wrench {
+                                linear: force,
+                                angular: carried.angular * sign
+                                    + (edge.centre - structure.chunks[chunk].centroid.as_dvec3())
+                                        .cross(force),
+                            },
+                            1.0,
+                        );
+                    }
+                }
+            }
+            for (p, part) in graph
+                .parts
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| !p.node.fixed)
+            {
+                let loads: Vec<_> = part.chunks.iter().map(|&c| boundary[c]).collect();
+                let intact = design.kernels.get(part.element).filter(|kernel| {
+                    kernel.chunks == part.chunks
+                        && part.chunks.iter().all(|&c| {
+                            standing.topology.incident[c].iter().all(|&j| {
+                                #[cfg(test)]
+                                {
+                                    self.work.kernel_visits += 1;
+                                }
+                                let joint = &structure.joints[j];
+                                let belongs = match joint.b {
+                                    Side::Ground => true,
+                                    Side::Chunk(b) => {
+                                        let other = if joint.a == c { b } else { joint.a };
+                                        structure.chunks[other].buried
+                                            || graph.part[other] == Some(p)
+                                    }
+                                };
+                                // External interfaces supply loads, not kernel stiffness.
+                                !belongs
+                                    || (!standing.cracked[j]
+                                        && !standing.separated[j]
+                                        && standing.live(joint))
+                            })
+                        })
+                });
+                let changed;
+                let kernel = if let Some(kernel) = intact {
+                    #[cfg(test)]
+                    {
+                        self.work.reused += 1;
+                    }
+                    kernel
+                } else {
+                    changed = Kernel::of(structure, &standing, &part.chunks);
+                    #[cfg(test)]
+                    {
+                        self.work.builds += 1;
+                        self.work.kernel_visits += changed.joint_visits;
+                    }
+                    &changed
+                };
+                let hold = kernel.hold(structure, &loads);
+                for (j, carried) in hold.carried {
+                    let joint = &structure.joints[j];
+                    // Interfaces belong to the part field; only internal edges use the kernel.
+                    if let Side::Chunk(b) = joint.b
+                        && graph.part[joint.a] == graph.part[b]
+                    {
+                        normal[j] = carried
+                            .linear
+                            .dot(super::bondsolve::joint_normal(structure, joint));
+                    }
+                }
+            }
+            self.cached = Some((signature, normal));
+        }
+        &self
+            .cached
+            .as_ref()
+            .expect("gravity was prepared for this topology")
+            .1
+    }
+}
+
 /// One owner's part graph, factor and last solved field. Source addresses stay in the ledger.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Assessment {
@@ -1160,18 +1313,13 @@ impl Assessment {
             let edge = &self.graph.edges[e];
             let joint = &structure.joints[self.graph.joints[e]];
             let seam = joint.seam().expect("a bonded edge holds by a seam");
-            let friction = pair_friction(structure, joint);
+            let strength = super::bondsolve::JointStrength::of(structure, joint, false);
             let read = |field: &[Wrench]| {
                 let carried = edge.resultant(nodes, field);
                 let (tension, shear) = edge.stress(carried, edge.normal);
                 let compression = (-carried.linear.dot(edge.normal) / edge.area).max(0.0);
-                [
-                    (tension, f64::from(seam.tensile)),
-                    (
-                        shear,
-                        f64::from(seam.shear.cohesion) + friction * compression,
-                    ),
-                ]
+                let [tensile, sliding] = strength.limits(compression);
+                [(tension, tensile), (shear, sliding)]
             };
             let (opening, sliding) = edge.energy(nodes, total);
             let (held_opening, held_sliding) = edge.energy(nodes, steady);

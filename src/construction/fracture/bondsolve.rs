@@ -403,16 +403,6 @@ pub(crate) fn joint_edge(
     }
     let patch = structure.geometry.patch(joint, j);
     let area = f64::from(joint.area);
-    // The f32 source direction is normalized again in the arithmetic precision of
-    // the joint law; projection requires an orthonormal normal/shear split. A convex chunk's
-    // centroid lies on its own side of each of its faces, a part's centre need not.
-    let direction = joint.normal.as_dvec3().normalize();
-    let toward_a =
-        if (structure.chunks[joint.a].centroid.as_dvec3() - patch.centre).dot(direction) >= 0.0 {
-            direction
-        } else {
-            -direction
-        };
     let fixing = if push {
         None
     } else {
@@ -422,13 +412,74 @@ pub(crate) fn joint_edge(
         a,
         b,
         centre: patch.centre,
-        normal: toward_a,
+        normal: joint_normal(structure, joint),
         area,
         patch,
         push: push.then(|| pair_friction(structure, joint)),
         friction: None,
         normal_stiffness: fixing.map_or(area / normal, |f| area * f64::from(f.normal)),
         shear_stiffness: fixing.map_or(area / shear, |f| area * f64::from(f.shear)),
+    }
+}
+
+/// The face normal toward chunk `a`, independent of the authored normal's sign. A convex
+/// chunk's centroid lies on its own side of each face; a part's centre need not.
+pub(crate) fn joint_normal(structure: &super::Structure, joint: &super::Joint) -> DVec3 {
+    let direction = joint.normal.as_dvec3().normalize();
+    if (structure.chunks[joint.a].centroid - joint.patch().0)
+        .as_dvec3()
+        .dot(direction)
+        >= 0.0
+    {
+        direction
+    } else {
+        -direction
+    }
+}
+
+/// The joint's traction limits: unlimited compression in bearing, tension for intact seams,
+/// and cohesion plus Coulomb friction. Bulk crushing is a separate material verdict.
+pub(crate) struct JointStrength {
+    tensile: f64,
+    cohesion: f64,
+    friction: f64,
+}
+
+impl JointStrength {
+    pub(crate) fn of(structure: &super::Structure, joint: &super::Joint, push: bool) -> Self {
+        let seam = joint.seam().filter(|_| !push);
+        Self {
+            tensile: seam.map_or(0.0, |s| f64::from(s.tensile)),
+            cohesion: seam.map_or(0.0, |s| f64::from(s.shear.cohesion)),
+            friction: pair_friction(structure, joint),
+        }
+    }
+
+    /// Tension and shear limits, Pa, at the face's compressive stress (Pa).
+    pub(crate) fn limits(&self, compression: f64) -> [f64; 2] {
+        [self.tensile, self.cohesion + self.friction * compression]
+    }
+
+    /// Resistance to a unit rigid translation, N: normal and sliding traction work add
+    /// (Yastrebov 2013, Eq. 4.53 and Eq. 4.56; design "Bodies in contact"). `bearing`
+    /// is unloaded bulk capacity; `preload` is positive in tension and stays fixed.
+    pub(crate) fn translation_resistance(
+        &self,
+        area: f64,
+        normal: DVec3,
+        direction: DVec3,
+        preload: f64,
+        bearing: f64,
+    ) -> f64 {
+        let opening = direction.dot(normal);
+        let sliding = direction.cross(normal).length();
+        let [tensile, shear] = self.limits((-preload / area).max(0.0));
+        let normal_force = if opening > 0.0 {
+            (tensile * area - preload).max(0.0)
+        } else {
+            (bearing + preload).max(0.0)
+        };
+        normal_force * opening.abs() + shear * area * sliding
     }
 }
 

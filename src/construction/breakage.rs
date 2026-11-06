@@ -538,6 +538,7 @@ pub(crate) struct Live {
     pub(crate) state: State,
     pub(crate) swapped: Vec<bool>,
     pub(crate) assessment: Arc<fracture::parts::Assessment>,
+    pub(crate) gravity: fracture::parts::Gravity,
     /// Per law chunk: its holes, in record order (module doc).
     pub(crate) holes: Vec<Vec<Hole>>,
 }
@@ -560,6 +561,7 @@ impl Live {
             state: State::new(&structure),
             swapped: vec![false; elements],
             assessment: Arc::new(fracture::parts::Assessment::default()),
+            gravity: fracture::parts::Gravity::default(),
             holes: vec![Vec::new(); structure.chunks.len()],
             structure,
         }
@@ -577,6 +579,7 @@ impl Live {
             state: self.state.clone(),
             swapped: vec![true; self.swapped.len()],
             assessment: Arc::new(fracture::parts::Assessment::default()),
+            gravity: fracture::parts::Gravity::default(),
             holes: self.holes.clone(),
         };
         child.state.retain_group(group);

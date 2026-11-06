@@ -12,6 +12,8 @@ use std::collections::HashSet;
 use super::fracture::{Block, Side, State, Structure};
 use crate::contact_law::{Contactor, peak_force, peak_speed};
 
+mod mincut;
+
 /// The farthest a chunk hull's vertex may lie from its bounds' centre on any axis, m: ADR-0015's
 /// 10 m figure on the support coordinates of the only colliders a sweep casts against, each cast
 /// run in its target's frame about that centre. Resolution: parry 0.27's GJK shape cast returns
@@ -68,9 +70,15 @@ struct Node {
 pub(crate) struct Work {
     pub(crate) bounds: usize,
     pub(crate) casts: usize,
-    /// Incident references examined for patch membership, including internal edges twice.
+    /// Construction joint candidates for the flow graph.
     pub(crate) joints: usize,
     pub(crate) queries: usize,
+    pub(crate) flow: mincut::Work,
+}
+
+struct Demand {
+    direction: Vec3,
+    force: f64,
 }
 
 impl Geometry {
@@ -259,14 +267,14 @@ impl Geometry {
             .collect()
     }
 
-    /// Break `sweep`'s cut when the hull's stop on its witness chunk, plus its inward `drive`,
-    /// exceeds the cut's capacity. The stop is the elastic impact's peak force
-    /// ([`peak_force`]) of the hull's effective contact `mass` on that chunk, its side [`Contactor::RIGID`],
-    /// so no physics step enters it.
+    /// Break the minimum directional plug when the witness's Hertz peak plus inward drive
+    /// exceeds its capacity. [`peak_force`] reads the source's effective contact `mass`, the
+    /// witness chunk and [`Contactor::RIGID`]; no physics step enters the threshold.
     pub(crate) fn resolve(
         &self,
         structure: &Structure,
         state: &State,
+        preload: &[f64],
         sweep: &mut Sweep,
         mass: f32,
         drive: Vec3,
@@ -274,31 +282,32 @@ impl Geometry {
         let Some(witness) = sweep.witness else {
             return;
         }; // No occupied inward motion.
-        sweep.work.joints += sweep
-            .chunks
-            .iter()
-            .map(|&c| self.incident[c].len())
-            .sum::<usize>();
-        let capacity = self
-            .cut(&sweep.chunks)
-            .into_iter()
-            .map(|j| {
-                let joint = &structure.joints[j];
-                if state.cracked[j] || state.separated[j] || !state.live(joint) {
-                    return 0.0;
-                }
-                joint.seam().map_or(0.0, |seam| {
-                    let opening = witness.normal.dot(joint.normal).abs();
-                    let sliding = witness.normal.cross(joint.normal).length();
-                    joint.area * (seam.tensile * opening + seam.shear.cohesion * sliding)
-                })
-            })
-            .sum::<f32>();
         let drive = drive.dot(witness.normal).max(0.0);
         let (mass, patch) = (f64::from(mass), Contactor::chunk(structure, witness.chunk));
         let stop = peak_force(mass, f64::from(witness.speed), patch, Contactor::RIGID) as f32;
         let demand = stop + drive;
-        sweep.broken = demand > capacity;
+        let cut = self.plug(
+            structure,
+            state,
+            preload,
+            &sweep.chunks,
+            Demand {
+                direction: witness.normal,
+                force: f64::from(demand),
+            },
+            &mut sweep.work,
+        );
+        let capacity = match cut {
+            mincut::Cut::Held => {
+                sweep.broken = false;
+                demand
+            }
+            mincut::Cut::Released { inside, capacity } => {
+                sweep.broken = true;
+                sweep.chunks = (0..structure.chunks.len()).filter(|&c| inside[c]).collect();
+                capacity as f32
+            }
+        };
         let left = f64::from((capacity - drive).max(0.0));
         sweep.load = Some(PatchLoad {
             drive,
@@ -306,6 +315,72 @@ impl Geometry {
             capacity,
             threshold: peak_speed(mass, left, patch, Contactor::RIGID) as f32,
         });
+    }
+
+    /// The source side of the minimum directional cut. Compression propagates motion through
+    /// matter until a cheaper perimeter or a bulk crushing face reaches the fixed surroundings.
+    fn plug(
+        &self,
+        structure: &Structure,
+        state: &State,
+        preload: &[f64],
+        patch: &[usize],
+        demand: Demand,
+        work: &mut Work,
+    ) -> mincut::Cut {
+        use super::fracture::bondsolve::{JointStrength, joint_normal};
+        let live = |j: usize| !state.separated[j] && state.live(&structure.joints[j]);
+        assert_eq!(
+            preload.len(),
+            structure.joints.len(),
+            "one standing preload per joint"
+        );
+        let sink = structure.chunks.len();
+        let source = sink + 1;
+        let mut graph = mincut::Network::new(source + 1);
+        for (c, _) in structure.chunks.iter().enumerate() {
+            if state.standing(c) && !covered(structure, state, c) {
+                graph.edge(c, sink, f64::INFINITY, 0.0);
+            }
+        }
+        for &c in patch {
+            assert!(
+                covered(structure, state, c),
+                "only covered chunks can seed a plug"
+            );
+            graph.edge(source, c, f64::INFINITY, 0.0);
+        }
+        for (j, joint) in structure.joints.iter().enumerate() {
+            work.joints += 1;
+            if !live(j) {
+                continue;
+            } // Open faces and departed matter carry no load.
+            let b = match joint.b {
+                Side::Chunk(b) => b,
+                Side::Ground => sink,
+            };
+            let own = structure.chunks[joint.a].material.compressive_strength;
+            let strength = match joint.b {
+                Side::Chunk(b) => own.min(structure.chunks[b].material.compressive_strength),
+                Side::Ground => own,
+            };
+            let normal = joint_normal(structure, joint);
+            let directional = |normal: DVec3| {
+                JointStrength::of(structure, joint, state.cracked[j]).translation_resistance(
+                    f64::from(joint.area),
+                    normal,
+                    demand.direction.as_dvec3(),
+                    preload[j],
+                    strength * f64::from(joint.area),
+                )
+            };
+            let forward = directional(normal);
+            let backward = directional(-normal);
+            graph.edge(joint.a, b, forward, backward);
+        }
+        let (cut, flow) = graph.cut(source, sink, demand.force);
+        work.flow += flow;
+        cut
     }
 }
 
@@ -447,12 +522,15 @@ pub(crate) struct Witness {
 pub(crate) struct PatchLoad {
     pub(crate) drive: f32,
     pub(crate) demand: f32,
+    /// Exact for a released plug; a certified lower bound when held.
     pub(crate) capacity: f32,
+    /// Speed at the reported capacity, likewise a lower bound when held.
     pub(crate) threshold: f32,
 }
 
 #[derive(Default, Debug)]
 pub(crate) struct Sweep {
+    /// Occupied source patch until resolved; the minimum-cut plug when broken.
     pub(crate) chunks: Vec<usize>,
     pub(crate) incoming: f32,
     pub(crate) witness: Option<Witness>,
@@ -477,6 +555,7 @@ impl Sweep {
         self.work.casts += other.work.casts;
         self.work.joints += other.work.joints;
         self.work.queries += other.work.queries;
+        self.work.flow += other.work.flow;
     }
 }
 
@@ -603,6 +682,23 @@ mod tests {
     use super::*;
     use crate::construction::fracture::{Bond, Chunk, Joint, Material};
 
+    fn cut_capacity(cut: mincut::Cut) -> f32 {
+        let mincut::Cut::Released { capacity, .. } = cut else {
+            panic!("an unlimited demand exhausts the fixture's finite cut");
+        };
+        capacity as f32
+    }
+
+    fn preload(structure: &Structure, state: &State) -> Vec<f64> {
+        super::super::fracture::parts::Gravity::default()
+            .get(
+                structure,
+                state,
+                &super::super::fracture::parts::Assessment::at_rest(structure),
+            )
+            .to_vec()
+    }
+
     /// Fixture: nine anchored chunks on a plane. The middle row has strong internal seams;
     /// their capacity must disappear from the cut when that row moves together.
     fn wall(strength: f32) -> (Structure, Geometry) {
@@ -661,6 +757,8 @@ mod tests {
                 bond: Bond::Bonded(seam),
             });
         }
+        structure.part_of = (0..structure.chunks.len()).collect();
+        structure.geometry = super::super::fracture::bondsolve::Geometry::CircularFixture;
         let geometry = Geometry::new(&blocks, &structure).expect("the fixture's chunks are small");
         (structure, geometry)
     }
@@ -830,6 +928,7 @@ mod tests {
         geometry.resolve(
             structure,
             &State::new(structure),
+            &preload(structure, &State::new(structure)),
             &mut swept,
             mass,
             Vec3::X * drive,
@@ -837,8 +936,9 @@ mod tests {
         swept
     }
 
-    /// The game's environment destruction: occupancy chooses the hole and only boundary joints
-    /// resist it. Server carriers rely on their combined plastic exchange preserving momentum.
+    /// The game's environment destruction: the plug contains every occupied source chunk;
+    /// internal joints carry no relative motion. Server carriers rely on their combined plastic
+    /// exchange preserving momentum.
     #[test]
     fn a_fast_block_frees_its_whole_patch_and_balances_momentum() {
         let (structure, geometry) = wall(16.0);
@@ -904,8 +1004,11 @@ mod tests {
         // DERIVED: the speed whose peak force is the cut's 48 N.
         let base = speed_at(&structure, 48.0);
         let reported = bracket(&structure, &geometry, base, 0.0);
-        // Resolution: one f64-to-f32 rounding of the same inverse.
-        assert!(reported.iter().all(|&t| (t / base - 1.0).abs() < 1e-6));
+        // DERIVED: a holding certificate lies between the tested demand and the full cut;
+        // a releasing cut reports the full threshold. Resolution: f64-to-f32 inverse rounding.
+        assert!(reported[0] >= base * 0.9999 * (1.0 - 1e-6));
+        assert!(reported[0] <= base * (1.0 + 1e-6));
+        assert!((reported[1] / base - 1.0).abs() < 1e-6);
         // DERIVED: the peak force grows as v^(6/5), so doubling both seam modes raises the
         // threshold by 2^(5/6) at unchanged mass.
         let (stronger, stronger_geometry) = wall(32.0);
@@ -918,6 +1021,548 @@ mod tests {
         println!(
             "DERIVED and MEASURED block thresholds: base={base}, double-strength={strong}, driven={driven} m/s"
         );
+    }
+
+    /// The game's environment destruction: a released part cannot sweep away boards pressed
+    /// into their supports. The floor yields only past its friction or lifting load; treating
+    /// cracked seams or rests as absent loses this bearing for every construction using them.
+    #[test]
+    fn resting_boards_keep_bearing_until_the_load_slides_or_lifts_them() {
+        use super::super::fracture::Bond;
+        for cracked in [false, true] {
+            let (mut structure, geometry) = wall(16.0);
+            for joint in &mut structure.joints[..9] {
+                joint.normal = Vec3::Y;
+                joint.centroid = structure.chunks[joint.a].centroid - Vec3::Y * 0.5;
+                if !cracked {
+                    joint.bond = Bond::Resting;
+                }
+            }
+            let mut state = State::new(&structure);
+            state.cracked[..9].fill(cracked);
+            // Fixture: three boards on horizontal supports, a 128 kg released source.
+            let chunks = vec![3, 4, 5];
+            let weight = chunks
+                .iter()
+                .map(|&c| structure.chunks[c].mass)
+                .sum::<f32>()
+                * crate::physical_laws::gravity_mps2();
+            let mu = structure.chunks[4].material.friction;
+            for (normal, force, broken) in [
+                (Vec3::NEG_Y, weight * 100.0, false),
+                (Vec3::X, mu * weight * 0.5, false),
+                (Vec3::X, mu * weight * 2.0, true),
+                (Vec3::Y, weight * 0.5, false),
+                (Vec3::Y, weight * 2.0, true),
+            ] {
+                let speed = peak_speed(
+                    128.0,
+                    f64::from(force),
+                    Contactor::chunk(&structure, 4),
+                    Contactor::RIGID,
+                ) as f32;
+                let mut swept = Sweep {
+                    chunks: chunks.clone(),
+                    witness: Some(Witness {
+                        normal,
+                        speed,
+                        chunk: 4,
+                        time: 0.0,
+                        at: structure.chunks[4].centroid,
+                    }),
+                    ..default()
+                };
+                geometry.resolve(
+                    &structure,
+                    &state,
+                    &preload(&structure, &state),
+                    &mut swept,
+                    128.0,
+                    Vec3::ZERO,
+                );
+                assert_eq!(
+                    swept.broken, broken,
+                    "cracked={cracked}, direction={normal}"
+                );
+            }
+        }
+    }
+
+    /// Fixture: unit cubes, 16 Pa perimeter seams and strong bulk bearing. Buried cubes
+    /// represent the standing remainder; the supplied edges name the physical construction.
+    fn plug_fixture(
+        centres: &[Vec3],
+        buried: &[usize],
+        edges: &[(usize, usize)],
+    ) -> (Structure, Geometry) {
+        let mut material = Material::of(
+            crate::substances::SubstanceRegistry::shipped_static(),
+            "Brick",
+        )
+        .unwrap()
+        .unwrap();
+        material.density = 1.0; // Fixture: unit-mass cubes with gravity below tensile strength.
+        material.friction = 0.0; // Fixture: the perimeter's capacity is cohesive shear alone.
+        let mut structure = Structure::default();
+        let blocks: Vec<_> = centres
+            .iter()
+            .map(|&centre| {
+                structure.chunks.push(Chunk {
+                    volume: 1.0,
+                    mass: material.density,
+                    centroid: centre,
+                    material,
+                    buried: buried.contains(&structure.chunks.len()),
+                });
+                Block::hull(
+                    [-0.5, 0.5]
+                        .into_iter()
+                        .flat_map(|x| {
+                            [-0.5, 0.5].into_iter().flat_map(move |y| {
+                                [-0.5, 0.5].map(move |z| centre + Vec3::new(x, y, z))
+                            })
+                        })
+                        .collect(),
+                )
+                .unwrap()
+            })
+            .collect();
+        for &(a, b) in edges {
+            let mut seam = material.seam;
+            seam.tensile = 16.0;
+            seam.shear.cohesion = 16.0;
+            structure.joints.push(Joint {
+                a,
+                b: Side::Chunk(b),
+                area: 1.0,
+                centroid: (centres[a] + centres[b]) / 2.0,
+                normal: (centres[b] - centres[a]).normalize(),
+                bond: Bond::Bonded(seam),
+            });
+        }
+        structure.part_of = (0..structure.chunks.len()).collect();
+        structure.geometry = super::super::fracture::bondsolve::Geometry::CircularFixture;
+        let geometry = Geometry::new(&blocks, &structure).unwrap();
+        (structure, geometry)
+    }
+
+    fn contact_patch(structure: &Structure, direction: Vec3, force: f32) -> Sweep {
+        // Fixture: 128 kg source at chunk zero; Hertz's inverse supplies the desired demand.
+        Sweep {
+            chunks: vec![0],
+            witness: Some(Witness {
+                normal: direction,
+                speed: peak_speed(
+                    128.0,
+                    f64::from(force),
+                    Contactor::chunk(structure, 0),
+                    Contactor::RIGID,
+                ) as f32,
+                chunk: 0,
+                time: 0.0,
+                at: structure.chunks[0].centroid,
+            }),
+            ..default()
+        }
+    }
+
+    /// The game's environment destruction: expanding a plug must retain the weight of every
+    /// standing support. This catches a zero-preload ground edge outside the touched seed.
+    #[test]
+    fn an_expanded_stack_must_overcome_both_blocks_ground_friction() {
+        let (mut structure, geometry) = plug_fixture(&[Vec3::Y, Vec3::ZERO], &[], &[(0, 1)]);
+        // Fixture: two unit-mass resting cubes; the upper contact's pair friction is 3,
+        // the lower cube's ground friction is 1, so the cheaper cut moves both cubes.
+        structure.chunks[0].material.friction = 9.0;
+        structure.chunks[1].material.friction = 1.0;
+        structure.joints[0].bond = Bond::Resting;
+        structure.joints.push(Joint {
+            a: 1,
+            b: Side::Ground,
+            area: 1.0,
+            centroid: Vec3::NEG_Y * 0.5,
+            normal: Vec3::Y,
+            bond: Bond::Resting,
+        });
+        let state = State::new(&structure);
+        // DERIVED: the ground carries two unit masses, so the cut is 2*g N;
+        // the upper interface costs sqrt(9*1)*g = 3*g N.
+        let capacity = 2.0 * crate::physical_laws::gravity_mps2();
+        for (ratio, broken) in [(0.99, false), (1.01, true)] {
+            let mut patch = contact_patch(&structure, Vec3::X, capacity * ratio);
+            geometry.resolve(
+                &structure,
+                &state,
+                &preload(&structure, &state),
+                &mut patch,
+                128.0,
+                Vec3::ZERO,
+            );
+            assert_eq!(patch.broken, broken, "ratio={ratio}, load={:?}", patch.load);
+            if broken {
+                assert_eq!(patch.chunks, [0, 1]);
+            }
+        }
+    }
+
+    /// The game's environment destruction: a cut weighs traction work along its prescribed
+    /// translation. A weak shear limit cannot erase the work of opening a strong bond.
+    #[test]
+    fn diagonal_translation_adds_normal_and_shear_resistance_on_both_branches() {
+        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, Vec3::X], &[1], &[(0, 1)]);
+        // Fixture: unit-area face, 1000 N normal limits and 1 N shear; 0.001 kg moving mass
+        // keeps the gravity shear below the fixture's cohesion, with zero normal preload.
+        structure.chunks[0].mass = 0.001;
+        structure.chunks[0].material.density = 0.001;
+        for chunk in &mut structure.chunks {
+            chunk.material.compressive_strength = 1000.0;
+        }
+        let Bond::Bonded(seam) = &mut structure.joints[0].bond else {
+            unreachable!()
+        };
+        seam.tensile = 1000.0;
+        seam.shear.cohesion = 1.0;
+        let state = State::new(&structure);
+        // DERIVED: traction dot unit translation = (1000 + 1) / sqrt(2) N.
+        let expected = 1001.0 / 2.0_f32.sqrt();
+        for normal in [-1.0, 1.0] {
+            let direction = (Vec3::X * normal + Vec3::Z).normalize();
+            let capacity = cut_capacity(geometry.plug(
+                &structure,
+                &state,
+                &preload(&structure, &state),
+                &[0],
+                Demand {
+                    direction,
+                    force: f64::INFINITY,
+                },
+                &mut Work::default(),
+            ));
+            assert!(
+                (capacity - expected).abs() < 0.001,
+                "direction={direction}, capacity={capacity}, expected={expected}"
+            );
+        }
+    }
+
+    /// The game's environment destruction: grazing compression retains shear, so a small
+    /// change of contact direction cannot turn a held boundary into a free cut.
+    #[test]
+    fn grazing_compression_is_continuous_with_tangential_shear() {
+        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, Vec3::X], &[1], &[(0, 1)]);
+        // Fixture: 10 kPa bearing and 16 Pa shear on a unit-area joint, no friction.
+        for chunk in &mut structure.chunks {
+            chunk.material.compressive_strength = 1e4;
+        }
+        let state = State::new(&structure);
+        for approach in [-1e-8, 0.0, 1e-8] {
+            let direction = (Vec3::Y + Vec3::X * approach).normalize();
+            let capacity = cut_capacity(geometry.plug(
+                &structure,
+                &state,
+                &preload(&structure, &state),
+                &[0],
+                Demand {
+                    direction,
+                    force: f64::INFINITY,
+                },
+                &mut Work::default(),
+            ));
+            // DERIVED: bearing changes by at most 10 kPa * 1 m² * 1e-8 = 1e-4 N;
+            // the shear projection changes only at second order. Allow f32 rounding too.
+            assert!(
+                (capacity - 16.0).abs() < 2e-4,
+                "approach={approach}, capacity={capacity}"
+            );
+        }
+    }
+
+    /// The game's environment destruction: a low side press cannot cut a cohesive boundary
+    /// merely because its inward normal component is small. The sweep owns this class rule;
+    /// the shipped construction's cut remains an observation.
+    #[test]
+    fn a_side_press_below_the_derived_shear_bracket_removes_nothing() {
+        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, Vec3::X], &[1], &[(0, 1)]);
+        // Fixture: unit area, 512 Pa cohesion, 10 kPa compression, zero friction.
+        for chunk in &mut structure.chunks {
+            chunk.material.compressive_strength = 1e4;
+        }
+        let Bond::Bonded(seam) = &mut structure.joints[0].bond else {
+            unreachable!()
+        };
+        seam.shear.cohesion = 512.0;
+        let state = State::new(&structure);
+        let direction = (Vec3::Y + 0.001 * Vec3::X).normalize();
+        // DERIVED: 10,000 * 0.001 / sqrt(1.000001) + 512 / sqrt(1.000001)
+        // lies between 521 and 523 N. The 400 N press holds; 524 N releases it.
+        for (force, broken) in [(400.0, false), (524.0, true)] {
+            let mut patch = contact_patch(&structure, direction, force);
+            geometry.resolve(
+                &structure,
+                &state,
+                &preload(&structure, &state),
+                &mut patch,
+                128.0,
+                Vec3::ZERO,
+            );
+            assert_eq!(patch.broken, broken, "force={force}");
+            if broken {
+                assert!((521.0..523.0).contains(&patch.load.unwrap().capacity));
+            }
+        }
+    }
+
+    /// The game's environment destruction: compressed sliding must retain friction from
+    /// gravity, but cannot turn the imposed press into additional friction preload.
+    #[test]
+    fn compressed_sliding_reads_only_existing_gravity_preload() {
+        for cracked in [false, true] {
+            let (mut structure, geometry) =
+                plug_fixture(&[Vec3::ZERO, Vec3::NEG_Y], &[1], &[(0, 1)]);
+            // Fixture: 10 kPa compression, friction 0.5, a unit-mass moving board.
+            for chunk in &mut structure.chunks {
+                chunk.material.compressive_strength = 1e4;
+                chunk.material.friction = 0.5;
+            }
+            if !cracked {
+                structure.joints[0].bond = Bond::Resting;
+            }
+            let mut state = State::new(&structure);
+            state.cracked[0] = cracked;
+            let direction = (Vec3::X - 0.001 * Vec3::Y).normalize();
+            // DERIVED: unit area and mass leave R_n=10,000-g N and R_s=0.5*g N;
+            // both project onto the imposed translation. The bracket tolerates f32 Hertz inversion.
+            let gravity = crate::physical_laws::gravity_mps2();
+            let capacity = (1e4 - gravity) * -direction.y + 0.5 * gravity * direction.x;
+            for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
+                let mut patch = contact_patch(&structure, direction, capacity * ratio);
+                geometry.resolve(
+                    &structure,
+                    &state,
+                    &preload(&structure, &state),
+                    &mut patch,
+                    128.0,
+                    Vec3::ZERO,
+                );
+                assert_eq!(patch.broken, broken, "cracked={cracked}, ratio={ratio}");
+            }
+        }
+    }
+
+    /// The game's environment destruction: an impact spends the crushing reserve, not the
+    /// capacity already carrying gravity. Otherwise nearly loaded supports stop extra impacts.
+    #[test]
+    fn existing_compression_leaves_only_the_remaining_crushing_reserve() {
+        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, Vec3::NEG_Y], &[1], &[(0, 1)]);
+        // Fixture: a unit-area 10 kN support carrying 9 kN under gravity.
+        for chunk in &mut structure.chunks {
+            chunk.material.compressive_strength = 1e4;
+        }
+        structure.chunks[0].mass = 9000.0 / crate::physical_laws::gravity_mps2();
+        structure.chunks[0].material.density = structure.chunks[0].mass;
+        structure.joints[0].bond = Bond::Resting;
+        let state = State::new(&structure);
+        // DERIVED: 10 kN - 9 kN = 1 kN reserve. The upper impact exceeds it.
+        for (force, broken) in [(2000.0, true), (900.0, false)] {
+            let mut patch = contact_patch(&structure, Vec3::NEG_Y, force);
+            geometry.resolve(
+                &structure,
+                &state,
+                &preload(&structure, &state),
+                &mut patch,
+                128.0,
+                Vec3::ZERO,
+            );
+            assert_eq!(patch.broken, broken, "force={force}, load={:?}", patch.load);
+            if broken {
+                assert!((patch.load.unwrap().capacity - 1000.0).abs() < 0.01);
+            }
+        }
+    }
+
+    /// The game's environment destruction: closing first unloads tension before spending
+    /// bulk capacity. Suspended members rely on the signed preload in the cut reserve.
+    #[test]
+    fn closing_a_tensioned_member_spends_the_signed_reserve() {
+        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, Vec3::Y], &[1], &[(0, 1)]);
+        // Fixture: unit area, 20 kN tensile and 10 kN bulk capacity, 9 kN gravity tension.
+        let mut seam = structure.joints[0].seam().unwrap();
+        seam.tensile = 2e4;
+        structure.joints[0].bond = Bond::Bonded(seam);
+        for chunk in &mut structure.chunks {
+            chunk.material.compressive_strength = 1e4;
+        }
+        structure.chunks[0].mass = 9000.0 / crate::physical_laws::gravity_mps2();
+        structure.chunks[0].material.density = structure.chunks[0].mass;
+        let state = State::new(&structure);
+        let preload = preload(&structure, &state);
+        assert!((preload[0] - 9000.0).abs() < 0.01);
+        // DERIVED: 10 + 9 = 19 kN closing reserve; 15 kN leaves 6 kN compression.
+        for (force, broken) in [(15000.0, false), (19001.0, true)] {
+            let mut patch = contact_patch(&structure, Vec3::Y, force);
+            geometry.resolve(&structure, &state, &preload, &mut patch, 128.0, Vec3::ZERO);
+            assert_eq!(patch.broken, broken, "force={force}");
+        }
+    }
+
+    /// The game's environment destruction: an oblique joint under normal motion has a finite
+    /// bulk limit. Normalization roundoff must not create a tangential bearing direction and
+    /// an infinite cut; arbitrary construction orientations rely on this.
+    #[test]
+    fn normal_crushing_stays_finite_on_an_oblique_joint() {
+        let direction = Vec3::ONE.normalize();
+        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, direction], &[1], &[(0, 1)]);
+        // Fixture: a frictional rest with a 10 kPa bulk limit and unit area.
+        for chunk in &mut structure.chunks {
+            chunk.material.compressive_strength = 1e4;
+            chunk.material.friction = 0.5;
+        }
+        structure.joints[0].bond = Bond::Resting;
+        let capacity = cut_capacity(geometry.plug(
+            &structure,
+            &State::new(&structure),
+            &preload(&structure, &State::new(&structure)),
+            &[0],
+            Demand {
+                direction,
+                force: f64::INFINITY,
+            },
+            &mut Work::default(),
+        ));
+        // DERIVED: normal translation costs 10 kPa * 1 m²; allow f32 normalization error.
+        assert!((capacity - 1e4).abs() < 0.01, "capacity={capacity}");
+    }
+
+    /// The game's environment destruction: bearing transmits a face-on push into the back
+    /// layer. The server must remove both layers at their DERIVED 8 * 16 N perimeter shear,
+    /// rather than interpreting the internal compression edge as an immovable support.
+    #[test]
+    fn a_two_layer_wall_releases_one_plug_at_its_perimeter_shear() {
+        let (structure, geometry) = plug_fixture(
+            &[
+                Vec3::ZERO,
+                Vec3::X,
+                Vec3::Y,
+                Vec3::NEG_Y,
+                Vec3::Z,
+                Vec3::NEG_Z,
+                Vec3::X + Vec3::Y,
+                Vec3::X - Vec3::Y,
+                Vec3::X + Vec3::Z,
+                Vec3::X - Vec3::Z,
+            ],
+            &(2..10).collect::<Vec<_>>(),
+            &[
+                (0, 1),
+                (0, 2),
+                (0, 3),
+                (0, 4),
+                (0, 5),
+                (1, 6),
+                (1, 7),
+                (1, 8),
+                (1, 9),
+            ],
+        );
+        for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
+            let mut patch = contact_patch(&structure, Vec3::X, 128.0 * ratio);
+            geometry.resolve(
+                &structure,
+                &State::new(&structure),
+                &preload(&structure, &State::new(&structure)),
+                &mut patch,
+                128.0,
+                Vec3::ZERO,
+            );
+            assert_eq!(patch.broken, broken);
+            if broken {
+                assert_eq!(patch.chunks, [0, 1]);
+            }
+        }
+    }
+
+    /// The game's environment destruction: an end push along a perpendicular wall moves its
+    /// connected length. DERIVED: one front-wall perimeter joint plus two perpendicular-wall
+    /// base joints cost 3 * 16 N. Ignoring the far base or stopping at bearing breaks this.
+    #[test]
+    fn a_corner_transmits_the_push_to_the_perpendicular_walls_base() {
+        let (structure, geometry) = plug_fixture(
+            &[
+                Vec3::ZERO,
+                Vec3::Z,
+                Vec3::X,
+                Vec3::X * 2.0,
+                Vec3::X - Vec3::Y,
+                Vec3::X * 2.0 - Vec3::Y,
+            ],
+            &[1, 4, 5],
+            &[(0, 1), (0, 2), (2, 3), (2, 4), (3, 5)],
+        );
+        for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
+            let mut patch = contact_patch(&structure, Vec3::X, 48.0 * ratio);
+            geometry.resolve(
+                &structure,
+                &State::new(&structure),
+                &preload(&structure, &State::new(&structure)),
+                &mut patch,
+                128.0,
+                Vec3::ZERO,
+            );
+            assert_eq!(patch.broken, broken);
+            if broken {
+                assert_eq!(patch.chunks, [0, 2, 3]);
+            }
+        }
+    }
+
+    /// The game's environment destruction: a released source pressing boards onto an anchored
+    /// joist must pass the weaker bulk's crushing capacity, not the rest's zero cohesion or an
+    /// infinite bearing limit. The joist stays anchored regardless of joint endpoint ordering.
+    #[test]
+    fn resting_boards_on_an_anchored_joist_hold_below_bulk_crushing() {
+        for reversed in [false, true] {
+            for cracked in [false, true] {
+                let (mut structure, geometry) =
+                    plug_fixture(&[Vec3::ZERO, Vec3::NEG_Y], &[1], &[(0, 1)]);
+                // Fixture: the board is twice as strong in compression as its supporting joist.
+                structure.chunks[0].material.compressive_strength = 2e4;
+                structure.chunks[1].material.compressive_strength = 1e4;
+                if !cracked {
+                    structure.joints[0].bond = Bond::Resting;
+                }
+                if reversed {
+                    structure.joints[0].a = 1;
+                    structure.joints[0].b = Side::Chunk(0);
+                }
+                let mut state = State::new(&structure);
+                state.cracked[0] = cracked;
+                // DERIVED: min(20 kPa, 10 kPa) * 1 m² minus the unit board's weight.
+                let reserve = 1e4 - crate::physical_laws::gravity_mps2();
+                for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
+                    let mut patch = contact_patch(&structure, Vec3::NEG_Y, reserve * ratio);
+                    geometry.resolve(
+                        &structure,
+                        &state,
+                        &preload(&structure, &state),
+                        &mut patch,
+                        128.0,
+                        Vec3::ZERO,
+                    );
+                    assert_eq!(
+                        patch.broken, broken,
+                        "reversed={reversed}, cracked={cracked}"
+                    );
+                    assert_eq!(
+                        patch.chunks,
+                        [0],
+                        "a buried joist never joins the moving plug"
+                    );
+                    if broken {
+                        assert!((patch.load.unwrap().capacity - reserve).abs() < 0.01);
+                    }
+                }
+            }
+        }
     }
 
     /// The game's environment destruction: the load gate refuses a chunk reaching past the cast
