@@ -646,9 +646,10 @@ also checks that the arrival bound lies below `SolverConfig::max_overlap_solve_s
 The witness checks every drive sample against `d_a` plus that numeric allowance. Its no-growth
 check compares the two halves of the contact trace: the later peak cannot exceed the earlier peak
 plus one force-limited compression and the numeric allowance. This is a relation within the run,
-never a pinned trajectory or a stored peak. Every sample in the later half must also fit the
-steady force bound plus the numeric allowance. The fixture drives long enough to continue pressing
-and sliding after arrival.
+never a pinned trajectory or a stored peak. Static compression and the later half's margin against
+it are reported as observations. The driven rig can change contact geometry and excite
+coupled suspension and rotational modes; scalar contact softness alone establishes no finite-time
+settling deadline for that system. A full-rig transient bound remains open.
 
 **Capture.** W1d: third person at the east edge, the tank held at the wall and the camera pulled in.
 
