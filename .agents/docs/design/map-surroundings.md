@@ -166,8 +166,9 @@ numbers, each with its reason.
   spawns nothing of the sky.
 - V1 moves the parse, `sky_radiance`, the bakes and the filter-once light out of `world.rs:164-415`
   and `world/look.rs` into a client-only `src/sky.rs`, with no behaviour change. `world.rs` keeps the
-  ground, the scatter and the colliders. `terrain_shadow::install` and the sandbox
-  (`src/sandbox.rs:591-592`) call `sky::` for the sun.
+  ground, the scatter and the colliders. The world passes `sky::toward_sun()` to `terrain_shadow::install`; the shadow module already
+  takes a direction rather than calling the sky itself. The sandbox calls `sky::sun_light` and
+  `sky::sun_transform`.
 
 **Orientation (L1a).** Each bake evaluates `sky_radiance` at the world direction its texel is
 sampled for: `(c.x, c.y, −c.z)` of the cube direction `c`, the inverse of Bevy's sampling flip
@@ -631,6 +632,7 @@ spawn limit, the invisibility and the routed landing response are P. The zero gr
 | Piece | Best practice now | Provisional now | Replaced by |
 |---|---|---|---|
 | Sky data (V0 delivered) | per-map `view/sky.ron`, admitted at client first use; sun behind the window gate; server pack excludes `view/` | none | none |
+| Sky module (V1 delivered) | `src/sky.rs` owns admission, the sun, analytic bake and filter-once light; existing sky witnesses retain their assertions | none | none |
 | Sky rendering (L1 onward) | analytic sky; two bakes in world orientation; one brightness | none | none |
 | Haze | Koschmieder fog; one unshadowed lobe for sky and fog | the 12 km default (playtest fork) | the fork's verdict |
 | Outland | stitched, attribute-continuous view mesh to 1.25·V | odd-reflection height; mirrored mask | authored outland, or terrain past the boundary (#221) |

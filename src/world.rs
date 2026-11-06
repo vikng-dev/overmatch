@@ -1,25 +1,13 @@
-//! Battlefield construction, environment lighting, and the ground queries shared by aiming and
-//! the camera. Best practice: sky data is client-only, under the selected map's `view/` folder.
+//! Battlefield construction and ground queries shared by aiming and the camera.
+//! Best practice: simulation comes from map root data; client sky construction belongs to `sky`.
 //! See `.agents/docs/design/map-surroundings.md` for map asset ownership.
-
-use std::sync::{Arc, Mutex};
 
 use avian3d::prelude::{
     Collider, CollisionLayers, LayerMask, RigidBody, SpatialQuery, SpatialQueryFilter,
 };
-use bevy::pbr::generate::{
-    GeneratorBindGroups, GeneratorPipelines, RenderEnvironmentMap, filtering_system,
-};
 use bevy::prelude::*;
 
-use bevy::render::render_resource::PipelineCache;
-use bevy::render::sync_world::MainEntity;
-use bevy::render::{Render, RenderApp, RenderSystems};
-
 use crate::Layer;
-use crate::render_policy::CameraProfile;
-
-mod look;
 
 /// The world's construction generation. Streamed environment pieces belong to exactly this
 /// generation; consumers must not resolve an older piece against a newly constructed map.
@@ -100,324 +88,6 @@ const GROUND_SIZE: f32 = crate::terrain_grid::FIXTURE_EXTENT.world_size_m;
 /// Resolution: a nonzero buried thickness keeps the test-course ground a closed collision solid.
 const GROUND_THICKNESS: f32 = 1.0;
 
-/// Resolution: shadow lookup offset suppresses numerical self-shadowing at grazing incidence.
-/// Shadow normal bias for the sun. Bevy's default (1.8) is tuned for a mid-height light; at 17°
-/// the depth slope across one shadow-map texel grows by `cot(17°)/cot(55°)` ≈ 4.7×, which is
-/// exactly the geometry that produces acne (a surface shadowing itself in stripes). This is a
-/// deliberate but conservative nudge — the bias offsets the lookup ALONG the surface normal, so
-/// overshooting detaches contact shadows ("peter-panning", a tank hovering over its own shadow).
-/// If shadows look detached at the tracks, lower this before touching `shadow_depth_bias`.
-const SUN_SHADOW_NORMAL_BIAS: f32 = 2.6;
-
-/// The scene's sun as ONE definition, so the armor sandbox's overlay-layer copy
-/// (`sandbox::spawn_overlay_light`) cannot drift from the light the world actually uses. Shadow
-/// casting is the caller's call — the overlay light must not cast.
-pub(crate) fn sun_light() -> DirectionalLight {
-    DirectionalLight {
-        color: {
-            let [r, g, b] = look::get().sun_srgb.0;
-            Color::srgb(r, g, b)
-        },
-        illuminance: look::get().sun_illuminance_lux.0,
-        shadow_normal_bias: SUN_SHADOW_NORMAL_BIAS,
-        ..default()
-    }
-}
-
-/// The sun's irradiance on level ground, lux: `look::Lighting::sun_illuminance_lux` times the sine of the sun's
-/// elevation ([`sun_elevation_deg`]). The key light a lit view-only mass shares with the ground it
-/// rose from; the sky's share is not in it.
-pub(crate) fn level_ground_irradiance_lux() -> f32 {
-    look::get().sun_illuminance_lux.0 * sun_elevation_deg().to_radians().sin()
-}
-
-/// The sun's elevation, degrees: `look::Lighting::sun_elevation_deg`, or a capture plan's
-/// `scene.sun_elevation_deg` (`dev_capture::plan`, validated there). It moves the key light, its
-/// sky and the baked terrain shadow (`terrain_shadow`) together, so a capture can judge terrain
-/// shadows on a map whose slopes stay under the shipped sun.
-fn sun_elevation_deg() -> f32 {
-    crate::dev_capture::plan()
-        .and_then(|plan| plan.scene.sun_elevation_deg)
-        .unwrap_or(look::get().sun_elevation_deg.0)
-}
-
-/// Unit vector pointing FROM the scene TOWARD the sun, from [`sun_elevation_deg`] /
-/// `look::Lighting::sun_azimuth_deg`. The one place that turns the two angles into a direction, so the key light
-/// and the sky it is embedded in can never disagree about where the sun is.
-fn toward_sun() -> Vec3 {
-    let (sin_elevation, cos_elevation) = sun_elevation_deg().to_radians().sin_cos();
-    let (sin_azimuth, cos_azimuth) = look::get().sun_azimuth_deg.0.to_radians().sin_cos();
-    Vec3::new(
-        cos_elevation * cos_azimuth,
-        sin_elevation,
-        cos_elevation * sin_azimuth,
-    )
-}
-
-/// Where the sun sits, from [`toward_sun`]. Only the ROTATION reaches the shader — bevy fits the
-/// shadow cascades around the camera, not around the light's position — so the authored stand-off is
-/// purely so the entity reads sensibly in debug views.
-pub(crate) fn sun_transform() -> Transform {
-    Transform::from_translation(toward_sun() * look::get().sun_debug_distance_m.0)
-        .looking_at(Vec3::ZERO, Vec3::Y)
-}
-
-/// Resolution: face size of the environment source cubemap, pixels; limits startup filtering cost. Small on purpose: the source
-/// is a smooth analytic sky with no small features, and bevy convolves it (Lambertian for diffuse,
-/// GGX per mip for specular) before anything samples it, so 128² per face resolves everything this
-/// sky contains — 393 kB, built in memory, never an asset on disk. MUST be a power of two;
-/// `GeneratedEnvironmentMapLight` panics otherwise.
-const SKY_CUBEMAP_FACE_PX: u32 = 128;
-
-/// The analytic golden-hour sky as LINEAR radiance ratios in `0..1` for one direction; the absolute
-/// level is `look::Lighting::sky_intensity_cd_m2`. Deep blue overhead, warm haze at the horizon, a broad
-/// warm glow on the sun's side, and a dim warm bounce below — the ground half matters as much as
-/// the sky half, because it is what keeps the underside of a hull and the lower run of track darker
-/// than their tops (a uniform environment would flatten them exactly the way ambient light does).
-fn sky_radiance(dir: Vec3) -> Vec3 {
-    let look = look::get();
-    let vector = |[x, y, z]: [f32; 3]| Vec3::new(x, y, z);
-    let zenith = vector(look.zenith_linear.0);
-    let haze = vector(look.haze_linear.0);
-    let glow = vector(look.glow_linear.0);
-    let ground = vector(look.ground_linear.0);
-
-    let up = dir.y.clamp(-1.0, 1.0);
-    if up >= 0.0 {
-        // `sqrt` hugs the gradient to the horizon, where a real low-sun sky keeps its warmth.
-        let t = up.sqrt();
-        let base = haze.lerp(zenith, t);
-        // The glow follows the KEY LIGHT's azimuth, so the reflection sliding along a track link
-        // agrees with the shadow that link is casting.
-        let sun_xz = toward_sun().xz().normalize_or_zero();
-        let toward = dir.xz().normalize_or_zero().dot(sun_xz).max(0.0);
-        base.lerp(
-            glow,
-            toward.powi(look.glow_exponent.0) * (1.0 - t) * look.glow_strength.0,
-        )
-    } else {
-        haze.lerp(ground, (-up).sqrt())
-    }
-}
-
-/// Direction through the centre of texel `(u, v)` of cubemap `face`, in the layer order wgpu (and
-/// glTF, and every cubemap format) uses: +X, −X, +Y, −Y, +Z, −Z.
-fn cube_face_direction(face: u32, u: f32, v: f32) -> Vec3 {
-    match face {
-        0 => Vec3::new(1.0, -v, -u),
-        1 => Vec3::new(-1.0, -v, u),
-        2 => Vec3::new(u, 1.0, v),
-        3 => Vec3::new(u, -1.0, -v),
-        4 => Vec3::new(u, -v, 1.0),
-        _ => Vec3::new(-u, -v, -1.0),
-    }
-    .normalize()
-}
-
-/// Build the environment light's source cubemap from [`sky_radiance`]. Six square layers of
-/// `Rgba8Unorm` — LINEAR, not sRGB, because what we author here are radiance ratios, not colours a
-/// display should decode.
-fn sky_cubemap() -> Image {
-    use bevy::asset::RenderAssetUsages;
-    use bevy::image::Image;
-    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-
-    let size = SKY_CUBEMAP_FACE_PX;
-    let mut data = Vec::with_capacity((size * size * 6 * 4) as usize);
-    for face in 0..6 {
-        for y in 0..size {
-            for x in 0..size {
-                let texel = |k: u32| 2.0 * (k as f32 + 0.5) / size as f32 - 1.0;
-                let radiance = sky_radiance(cube_face_direction(face, texel(x), texel(y)));
-                data.extend_from_slice(&[
-                    (radiance.x * 255.0).round() as u8,
-                    (radiance.y * 255.0).round() as u8,
-                    (radiance.z * 255.0).round() as u8,
-                    u8::MAX,
-                ]);
-            }
-        }
-    }
-    Image::new(
-        Extent3d {
-            width: size,
-            height: size,
-            depth_or_array_layers: 6,
-        },
-        TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8Unorm,
-        // Both worlds: the generator reads the asset back from `Assets<Image>` to size its
-        // convolution, so the main-world copy has to survive extraction.
-        RenderAssetUsages::all(),
-    )
-}
-
-/// The sky's environment light: [`sky_cubemap`] filtered into diffuse and specular maps ONCE per
-/// app, then carried by every battlefield view as a plain `EnvironmentMapLight`. Inserted when the
-/// first battlefield view appears, so an app with no camera (the dedicated server) never builds
-/// the cubemap.
-///
-/// Once is enough because the sky never changes for the life of the app; a sky that changes must
-/// start a new filtering. Bevy's `GeneratedEnvironmentMapLight` re-runs its compute passes on
-/// every frame the component exists (vendored `bevy_pbr` `light_probe/generate.rs`,
-/// `downsampling_system` and `filtering_system`), so the filter is despawned as soon as they have
-/// been recorded.
-///
-/// The filtered maps exist only on the GPU: bevy creates both images with placeholder contents and
-/// its passes write the textures. Nothing may mutate either `Image` asset: a mutation re-uploads
-/// the placeholder, and the views lose the sky's light.
-#[derive(Resource)]
-enum SkyLight {
-    /// The entity carrying `GeneratedEnvironmentMapLight`, until its passes are recorded.
-    Filtering(Entity),
-    /// The filtered maps, as every battlefield view carries them.
-    Filtered(EnvironmentMapLight),
-}
-
-/// Main-world ids of the sky filters whose passes the render world has recorded. One `Arc` in both
-/// worlds: the render world appends, the main world reads and clears.
-#[derive(Resource, Clone, Default)]
-struct RecordedSkyFilters(Arc<Mutex<Vec<Entity>>>);
-
-/// The sky light's two halves: the main world's [`SkyLight`] systems, and the render world's
-/// report of when the filter has run. An app without a render world (the dedicated server, the
-/// headless fixtures) never sees its filter retire, and never needs to.
-fn sky_light_plugin(app: &mut App) {
-    let recorded = RecordedSkyFilters::default();
-    app.insert_resource(recorded.clone()).add_systems(
-        Update,
-        (
-            retire_sky_filter.run_if(resource_exists::<SkyLight>),
-            light_battlefield_views,
-        )
-            .chain(),
-    );
-    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-        return;
-    };
-    render_app.insert_resource(recorded).add_systems(
-        Render,
-        report_recorded_sky_filters
-            .after(filtering_system)
-            .before(RenderSystems::Render),
-    );
-}
-
-/// Give every 3-D view of the battlefield image-based lighting from the shared sky, starting the
-/// filter for the first one and attaching the filtered maps once [`SkyLight`] holds them. A view
-/// whose profile draws no battlefield (the pen cam's inset and masks) lights its own stage.
-///
-/// Attached to VIEWS rather than spawned as a light: an environment map on a camera lights that
-/// whole view, which is what "the sky" means here — as opposed to a `LightProbe`, which bounds it
-/// to a region. Doing it in `world` (rather than at each camera's spawn) is what keeps the game and
-/// the armor sandbox honestly identical.
-///
-/// A frame-cost ablation (`SPIKE_ABLATE=env_light`, `render_cost`) leaves every view unlit by it.
-fn light_battlefield_views(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    sky: Option<Res<SkyLight>>,
-    ablate: Option<Res<crate::render_cost::Ablate>>,
-    views: Query<(Entity, Option<&CameraProfile>), (With<Camera3d>, Without<EnvironmentMapLight>)>,
-) {
-    if ablate.is_some_and(|ablate| ablate.env_light) {
-        return;
-    }
-    let mut views = views
-        .iter()
-        .filter(|(_, profile)| profile.is_none_or(|profile| profile.draws_battlefield()))
-        .map(|(view, _)| view)
-        .peekable();
-    if views.peek().is_none() {
-        return;
-    }
-    match sky.as_deref() {
-        None => {
-            let filter = commands
-                .spawn((
-                    Name::new("Sky light filter"),
-                    GeneratedEnvironmentMapLight {
-                        environment_map: images.add(sky_cubemap()),
-                        intensity: look::get().sky_intensity_cd_m2.0,
-                        ..default()
-                    },
-                ))
-                .id();
-            commands.insert_resource(SkyLight::Filtering(filter));
-        }
-        Some(SkyLight::Filtering(_)) => {}
-        Some(SkyLight::Filtered(light)) => {
-            for view in views {
-                commands.entity(view).insert(light.clone());
-            }
-        }
-    }
-}
-
-/// Keep the maps the filter wrote and despawn it, once the render world reports its passes
-/// recorded. Bevy's `generate_environment_map_light` gives the filter its `EnvironmentMapLight`
-/// before extraction can hand it to the render world, so a recorded filter always carries one.
-fn retire_sky_filter(
-    mut commands: Commands,
-    mut sky: ResMut<SkyLight>,
-    recorded: Res<RecordedSkyFilters>,
-    maps: Query<&EnvironmentMapLight>,
-) {
-    let SkyLight::Filtering(filter) = *sky else {
-        return;
-    };
-    let ran = {
-        let mut recorded = recorded.0.lock().expect("sky filter report poisoned");
-        let ran = recorded.contains(&filter);
-        recorded.clear();
-        ran
-    };
-    if !ran {
-        return;
-    }
-    let light = maps
-        .get(filter)
-        .expect("a recorded sky filter carries the maps Bevy generated before extraction");
-    *sky = SkyLight::Filtered(light.clone());
-    commands.entity(filter).despawn();
-    info!("sky light: filtered once; the filter is retired and the views share its maps");
-}
-
-/// Render-world half: report each sky filter whose passes bevy recorded this frame. Bevy's
-/// `downsampling_system` and `filtering_system` record them for every entity carrying both
-/// `GeneratorBindGroups` and `RenderEnvironmentMap`, once all five generator pipelines have
-/// compiled. This runs after both and before `RenderSystems::Render`, whose
-/// `process_pipeline_queue_system` is the next system to change pipeline states, so it sees the
-/// readiness they saw.
-fn report_recorded_sky_filters(
-    filters: Query<&MainEntity, (With<GeneratorBindGroups>, With<RenderEnvironmentMap>)>,
-    pipelines: Option<Res<GeneratorPipelines>>,
-    cache: Res<PipelineCache>,
-    recorded: Res<RecordedSkyFilters>,
-) {
-    let Some(pipelines) = pipelines else {
-        return;
-    };
-    let compiled = [
-        pipelines.copy,
-        pipelines.downsample_first,
-        pipelines.downsample_second,
-        pipelines.radiance,
-        pipelines.irradiance,
-    ]
-    .into_iter()
-    .all(|id| cache.get_compute_pipeline(id).is_some());
-    if !compiled {
-        return;
-    }
-    let mut recorded = recorded.0.lock().expect("sky filter report poisoned");
-    for filter in &filters {
-        debug!("sky light: filter passes recorded for {}", filter.id());
-        recorded.push(filter.id());
-    }
-}
-
 pub fn plugin(app: &mut App) {
     // Decode the heightmap FIRST (synchronous, ADR-0014), then spawn whichever world it selects:
     // the heightfield when the grid decoded, the flat slab + authored course otherwise.
@@ -426,7 +96,7 @@ pub fn plugin(app: &mut App) {
         (crate::terrain_grid::decode_height_grid, spawn_environment).chain(),
     );
     app.add_systems(Update, report_failed_terrain_map);
-    app.add_plugins(sky_light_plugin);
+    app.add_plugins(crate::sky::plugin);
     // The ground material `spawn_environment` builds above. Mounted here rather than in a client
     // composition because `spawn_environment` writes its asset collection on every composition:
     // the plugin's render half is behind the render app, which the dedicated server does not have.
@@ -595,22 +265,7 @@ fn spawn_environment(
 ) {
     let mut blocks: Vec<Transform> = Vec::new();
     if !windows.is_empty() {
-        // Settings owns the cascade ladder; this spawn supplies only the key light and its pose.
-        // Cascades fit around the camera. A low sun stretches the texel footprint along the light,
-        // which is what `SUN_SHADOW_NORMAL_BIAS` addresses.
-        commands.spawn((
-            DirectionalLight {
-                shadow_maps_enabled: true,
-                ..sun_light()
-            },
-            sun_transform(),
-            // WHAT THE SUN LIGHTS AND CASTS FROM. Not optional and not cosmetic: the vendored bevy_pbr
-            // patch gives every shadow view its LIGHT's mask, so a sun with no profile is layer-0-only
-            // and silently stops shadowing everything `render_policy` has moved off the world channel —
-            // the local tank's whole body, and the track shadow ribbon. Pinned by
-            // `render_policy::tests::the_sun_reaches_every_channel`.
-            crate::render_policy::LightProfile::BattlefieldSun,
-        ));
+        crate::sky::spawn_sun(&mut commands);
     }
 
     // The heightmap world: when the grid decoded, the heightfield IS the world — no flat slab,
@@ -765,7 +420,12 @@ fn spawn_environment(
             //
             // The same heightfield supplies the baked sun shadow to every receiver. Terrain
             // geometry does not also cast into the cascades.
-            crate::terrain_shadow::install(&mut commands, &mut images, &grid, toward_sun());
+            crate::terrain_shadow::install(
+                &mut commands,
+                &mut images,
+                &grid,
+                crate::sky::toward_sun(),
+            );
             crate::terrain_lod::spawn(
                 &mut commands,
                 &mut meshes,
@@ -957,90 +617,6 @@ pub fn ground_distance(spatial: &SpatialQuery, ray: Ray3d, max: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// The constraints `GeneratedEnvironmentMapLight` PANICS on — square, power-of-two, and six
-    /// faces — plus the byte count, so a bad edit fails here rather than at first render.
-    #[test]
-    fn the_source_cubemap_matches_what_the_filter_requires() {
-        let sky = sky_cubemap();
-        let size = sky.texture_descriptor.size;
-        assert!(SKY_CUBEMAP_FACE_PX.is_power_of_two());
-        assert_eq!(
-            (size.width, size.height),
-            (SKY_CUBEMAP_FACE_PX, SKY_CUBEMAP_FACE_PX)
-        );
-        assert_eq!(size.depth_or_array_layers, 6, "a cubemap is six faces");
-        assert_eq!(
-            sky.data.as_ref().map(Vec::len),
-            Some((SKY_CUBEMAP_FACE_PX * SKY_CUBEMAP_FACE_PX * 6 * 4) as usize),
-            "four bytes per texel across six faces",
-        );
-    }
-
-    /// The sky light's steady state, which the frame cost depends on: once the render world
-    /// reports the filter's passes recorded, no `GeneratedEnvironmentMapLight` is left for bevy to
-    /// re-filter every frame, and every battlefield view (present then, or spawned later) carries
-    /// the one filtered pair. Until that report the filter must survive: retiring it early leaves
-    /// the views with maps nothing ever wrote.
-    #[test]
-    fn the_sky_is_filtered_once_and_then_shared_by_every_battlefield_view() {
-        let mut app = App::new();
-        app.init_resource::<Assets<Image>>()
-            .add_plugins(sky_light_plugin);
-        let view = app.world_mut().spawn(Camera3d::default()).id();
-        app.update();
-        let SkyLight::Filtering(filter) = *app.world().resource::<SkyLight>() else {
-            panic!("the first battlefield view starts the filter");
-        };
-
-        // What bevy's generator gives the filter before the render world first sees it.
-        let maps = {
-            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
-            EnvironmentMapLight {
-                diffuse_map: images.add(Image::default()),
-                specular_map: images.add(Image::default()),
-                intensity: look::get().sky_intensity_cd_m2.0,
-                ..default()
-            }
-        };
-        app.world_mut().entity_mut(filter).insert(maps.clone());
-        app.update();
-        assert!(
-            app.world()
-                .get::<GeneratedEnvironmentMapLight>(filter)
-                .is_some(),
-            "the filter is retired only once its passes have been recorded",
-        );
-
-        app.world()
-            .resource::<RecordedSkyFilters>()
-            .0
-            .lock()
-            .unwrap()
-            .push(filter);
-        app.update();
-        let later_view = app.world_mut().spawn(Camera3d::default()).id();
-        app.update();
-
-        let world = app.world_mut();
-        assert_eq!(
-            world
-                .query::<&GeneratedEnvironmentMapLight>()
-                .iter(world)
-                .count(),
-            0,
-            "nothing is left for bevy to filter again",
-        );
-        for lit in [view, later_view] {
-            let light = world
-                .get::<EnvironmentMapLight>(lit)
-                .expect("every battlefield view carries the filtered maps");
-            assert_eq!(
-                (&light.diffuse_map, &light.specular_map),
-                (&maps.diffuse_map, &maps.specular_map),
-            );
-            assert_eq!(light.intensity, look::get().sky_intensity_cd_m2.0);
-        }
-    }
     /// The dedicated server shares the world installer but must construct no client sky.
     /// Clients with a window still require the sun.
     #[test]

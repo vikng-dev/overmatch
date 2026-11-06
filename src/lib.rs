@@ -193,6 +193,7 @@ mod shooting;
 mod shot_trace;
 mod sight;
 pub mod sim_tick;
+mod sky;
 mod spec;
 mod state;
 /// The global substance registry (`assets/materials/materials.ron`): the material library's numeric

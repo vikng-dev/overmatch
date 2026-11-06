@@ -62,7 +62,7 @@ pub(crate) struct Repair {
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct Scene {
     /// The sun's elevation, degrees, strictly between 0 and 90, on every root that lights the
-    /// world (`world::sun_elevation_deg`): the key light, its sky and the baked terrain shadow move
+    /// world (`sky::sun_elevation_deg`): the key light, its sky and the baked terrain shadow move
     /// together. The illuminance is not rebalanced: a lower sun reads darker. Default the shipped
     /// sun.
     pub(crate) sun_elevation_deg: Option<f32>,

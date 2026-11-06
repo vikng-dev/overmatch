@@ -251,7 +251,7 @@ impl DustPalettes {
             .or_insert_with(|| {
                 let albedo = LinearRgba::from(Color::srgb_from_array(colour_srgb));
                 // The world key's colour is constant for the session; only its elevation varies.
-                let sun = crate::world::sun_light().color.to_linear();
+                let sun = crate::sky::sun_light().color.to_linear();
                 gradient_lut(images, |x, y| {
                     let shade = (look().soil_shade.x + look().soil_shade.y * x)
                         * (look().soil_shade.z + look().soil_shade.w * (1.0 - y));
@@ -1385,7 +1385,7 @@ mod tests {
     /// The lit soil texel: linear albedo times the world key light's linear colour, in 8-bit RGB.
     fn stored_linear(colour_srgb: [f32; 3]) -> [u8; 3] {
         let albedo = LinearRgba::from(Color::srgb_from_array(colour_srgb));
-        let sun = crate::world::sun_light().color.to_linear();
+        let sun = crate::sky::sun_light().color.to_linear();
         [
             albedo.red * sun.red,
             albedo.green * sun.green,
@@ -1403,7 +1403,7 @@ mod tests {
     /// ground's colour replaced.
     #[test]
     fn each_puff_is_its_grounds_soil_lit_by_the_key_light() {
-        let light = crate::world::level_ground_irradiance_lux() / std::f32::consts::PI
+        let light = crate::sky::level_ground_irradiance_lux() / std::f32::consts::PI
             * Exposure::default().exposure();
         for colour in [[0.6, 0.5, 0.3], [0.2, 0.25, 0.3]] {
             let mut app = harness_ground(0.0);
