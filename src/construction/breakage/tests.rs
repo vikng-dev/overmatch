@@ -4662,6 +4662,29 @@ fn chunk_facts(world: &mut World) -> Vec<ChunkFact> {
                     "the game reads the contact collider for ballistics"
                 );
                 let breakage = world.get::<Breakage>(parent.parent()).unwrap();
+                let source = world
+                    .get::<super::super::sweep::SourceShape>(parent.parent())
+                    .expect("a free group's query geometry exists at spawn and split");
+                let leaf =
+                    &source.0.hulls()[piece.chunks.iter().position(|&c| c == chunk.0).unwrap()];
+                assert_eq!(
+                    leaf.position,
+                    world.get::<Transform>(entity).unwrap().translation
+                );
+                assert_eq!(leaf.rotation, Quat::IDENTITY);
+                assert_eq!(
+                    leaf.hull
+                        .shape_scaled()
+                        .as_convex_polyhedron()
+                        .unwrap()
+                        .points(),
+                    collider
+                        .shape_scaled()
+                        .as_convex_polyhedron()
+                        .unwrap()
+                        .points()
+                );
+
                 assert_eq!(
                     world.get::<Transform>(entity).unwrap().translation,
                     breakage.kind.structure.chunks[usize::from(chunk.0)].centroid - breakage.origin

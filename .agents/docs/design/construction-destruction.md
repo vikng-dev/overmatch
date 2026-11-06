@@ -352,10 +352,21 @@ Subject: the game's environment destruction, game state only. A moving body's oc
 makes the hole before the physics contact solver runs (`construction::sweep`). Structural
 collapse remains the part graph's decision. Neither law names a vehicle or construction.
 
-For each tick, query the body's translated or rotating convex hull against admitted chunk hulls.
-A per-design bounds tree narrows exact convex casts to nearby chunks. All intersected standing
-chunks form one patch per source body and construction; several colliders on one body contribute
-to that same patch. Buried matter remains soil-held.
+One sweep source per rigid body owns motion, inertia and drive. A query-only binary bounds tree
+holds its convex contact hulls in exact body-local frames. Free groups prepare this tree from
+admitted data synchronously with spawn and split; articulated bodies snapshot their current
+collider frames. Each body makes one spatial query, then traverses each candidate construction's
+bounds tree. Buried matter remains soil-held. The permanent colliders and ordinary Avian contacts
+keep their existing jobs; no enclosing convex hull invents matter between the leaves.
+
+At each target leaf, visit source siblings by lower entry time. Rotation-only envelopes
+translate with the COM, so a slab query gives a conservative entry time. Only an inward exact
+convex hit may prune later source leaves. Every occupied target joins the body's patch once;
+the earliest inward witness supplies its contact response. Parry 0.27's
+`CompositeShapeRef::cast_shape_nonlinear` returns the first geometric hit, which can be tangent
+and hide another leaf's later inward hit; its first-hit composite query therefore cannot own this
+patch. Independent body queries and cuts run in worker-sized batches; effects commit in body
+entity order because sources can compete for the same standing matter.
 
 The patch is the forced source of a directed graph over standing law chunks. Ground endpoints
 and chunks the sweep does not cover (including buried matter) are fixed sinks. Live, unseparated
@@ -482,10 +493,10 @@ released bodies, as well as the sweep's plastic exchange.
 
 Round and field impulse laws retain their own fracture-work and launch accounts.
 
-DERIVED angular bounds: with `R` enclosing every hull point about its centre of mass, rotational
-travel is at most `R * min(abs(omega)*dt, 2)`, by arc length and diameter. Expand the translated
-initial AABB by that travel and intersect it with the full rotation-radius envelope. Small spin
-therefore admits only a small local margin; exact nonlinear casts still decide occupied membership.
+DERIVED angular bounds: a hull point at radius `R` about its COM has acceleration at most
+`R * |omega|²`. Its deviation from the endpoint chord over `dt` is therefore at most
+`R * (|omega| * dt)² / 8`. Expand the endpoint AABBs by that curvature bound and intersect with
+the full rotation-radius envelope. Exact nonlinear casts decide occupied membership.
 
 DERIVED sweep work: bounds-tree traversal and exact casts choose the occupied source patch;
 live construction joints build the directed graph only on an occupied contact event. Generic

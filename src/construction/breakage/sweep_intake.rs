@@ -4,7 +4,7 @@ use avian3d::prelude::{
     Sensor,
 };
 use bevy::math::DMat3;
-use bevy::tasks::ParallelSliceMut;
+use bevy::tasks::{ParallelSlice, ParallelSliceMut};
 
 /// A source-side sweep impulse for the test-time contact account. A plastic mass exchange
 /// couples the whole body and has no surface normal; held contacts name their witness normal.
@@ -28,6 +28,7 @@ pub(crate) struct SweepAccount {
     pub(crate) cancelled_belts: Vec<crate::contact_transfer::AppliedContact>,
     prepared: BTreeSet<Entity>,
     prepared_at: Option<std::time::Duration>,
+    pub(crate) sources: usize,
     pub(crate) freed: usize,
     /// Freed fragments shed to the players as decoration.
     pub(crate) shed: usize,
@@ -48,18 +49,16 @@ pub(crate) struct SweepAccount {
 
 struct SweepSource {
     body: Entity,
-    collider: Entity,
-    hull: Collider,
+    colliders: Vec<Entity>,
+    shape: Arc<super::super::sweep::SourceTree>,
     position: Vec3,
     rotation: Quat,
     velocity: Vec3,
     centre: Vec3,
     spin: Vec3,
-    layers: CollisionLayers,
     roots: BTreeSet<Entity>,
     mass: f32,
     inertia: avian3d::prelude::ComputedAngularInertia,
-    body_rotation: Quat,
     axes: avian3d::prelude::LockedAxes,
     drive: Vec3,
 }
@@ -75,7 +74,7 @@ impl SweepSource {
         let normal = pose.rotation * witness.normal;
         let point = pose.translation + pose.rotation * witness.at;
         let lever = point - self.centre - self.velocity * witness.time;
-        let rotation = Quat::from_scaled_axis(self.spin * witness.time) * self.body_rotation;
+        let rotation = Quat::from_scaled_axis(self.spin * witness.time) * self.rotation;
         let response = SolverBodyInertia::new(
             self.mass.recip(),
             self.inertia.rotated(rotation).inverse(),
@@ -167,6 +166,7 @@ pub(super) struct Intake<'w, 's> {
             Entity,
             &'static avian3d::prelude::RigidBodyColliders,
             Has<avian3d::prelude::Sleeping>,
+            Option<&'static super::super::sweep::SourceShape>,
         ),
     >,
     spatial: SpatialQuery<'w, 's>,
@@ -187,7 +187,11 @@ pub(super) fn run(mut p: Intake) {
     let dt = p.fixed.timestep().as_secs_f32();
     let tick = p.clock.as_deref().map_or(0, |clock| clock.0.raw());
     let sources = sources(&p, dt);
-    p.account.prepared = sources.iter().map(|source| source.collider).collect();
+    p.account.prepared = sources
+        .iter()
+        .flat_map(|source| source.colliders.iter().copied())
+        .collect();
+    p.account.sources = sources.len();
     p.account.prepared_at = Some(p.fixed.elapsed());
     let mut candidates = geometry(&mut p, dt, &sources);
     candidates.sort_by_key(|(body, root, _)| (*body, *root));
@@ -244,7 +248,7 @@ pub(super) fn run(mut p: Intake) {
     let retired = changed
         .into_iter()
         .flat_map(|root| {
-            let (_, handles, _) = p
+            let (_, handles, _, _) = p
                 .body_colliders
                 .get(root)
                 .expect("a swept owner retains its collider relationship until refit");
@@ -288,8 +292,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
     let mut gathered = bevy::utils::Parallel::<Vec<SweepSource>>::default();
     body_colliders
         .par_iter()
-        .for_each(|(body_entity, handles, sleeping)| {
-            let mut sources = Vec::new();
+        .for_each(|(body_entity, handles, sleeping, cached)| {
             let Ok((forces, body, mass, inertia, com, axes)) = bodies.get(body_entity) else {
                 return; // Unmarked fixed collider roots have no dynamic force state.
             };
@@ -303,62 +306,77 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
             {
                 return;
             }
-            for handle in handles {
-                let Ok((_, hull, owner, local, layers, _, _)) = colliders.get(handle) else {
-                    continue;
-                }; // Sensors are presentation/ballistic occupancy, not contact hulls.
-                if !layers.interacts_with(super::super::element_layers()) {
-                    continue;
-                }
-                let position = forces.position().0 + forces.rotation().0 * local.translation;
-                let rotation = forces.rotation().0 * local.rotation.0;
-                let centre = forces.position().0 + forces.rotation().0 * com.0;
-                let motion = super::super::sweep::Motion {
-                    hull,
-                    position,
-                    rotation,
-                    centre,
-                    velocity: forces.linear_velocity(),
-                    spin: forces.angular_velocity(),
-                    dt,
-                };
-                let roots = spatial
-                    .aabb_intersections_with_aabb(motion.bounds())
-                    .into_iter()
-                    .filter_map(|entity| {
-                        let Ok((_, _, other, _, _, _, _)) = colliders.get(entity) else {
-                            return None;
-                        };
-                        (other.body != body_entity && constructions.contains(other.body))
-                            .then_some(other.body)
-                    })
-                    .collect::<BTreeSet<_>>();
-                sources.push(SweepSource {
-                    body: owner.body,
-                    collider: handle,
-                    hull: hull.clone(),
-                    position,
-                    rotation,
-                    centre,
-                    velocity: forces.linear_velocity(),
-                    spin: forces.angular_velocity(),
-                    layers: *layers,
-                    roots,
-                    mass: mass.value(),
-                    inertia: *inertia,
-                    body_rotation: forces.rotation().0,
-                    axes: axes.copied().unwrap_or_default(), // Absence is Avian's unrestricted state.
-                    drive: (forces.accumulated_linear_acceleration()
-                        + constant_acceleration(
-                            drives,
-                            body_entity,
-                            forces.rotation().0,
-                            mass.inverse(),
-                        ))
-                        * mass.value(),
-                });
-            }
-            gathered.scope(|local| local.extend(sources));
+            let admitted: Vec<_> = handles
+                .iter()
+                .filter_map(|handle| {
+                    let Ok((_, hull, _, local, layers, _, _)) = colliders.get(handle) else {
+                        return None; // Sensors are not contact hulls.
+                    };
+                    layers
+                        .interacts_with(super::super::element_layers())
+                        .then_some((handle, hull, local))
+                })
+                .collect();
+            if admitted.is_empty() {
+                return;
+            } // No construction-contact geometry on this body.
+            // Fixed-frame groups prepare their tree at spawn/split. Articulated bodies need a
+            // current-frame snapshot: their collider-local poses can change without a body split.
+            let shape = cached.map_or_else(
+                || {
+                    Arc::new(super::super::sweep::SourceTree::new(
+                        admitted
+                            .iter()
+                            .map(|(_, hull, local)| super::super::sweep::Hull {
+                                hull: (*hull).clone(),
+                                position: local.translation,
+                                rotation: local.rotation.0,
+                            })
+                            .collect(),
+                    ))
+                },
+                |shape| shape.0.clone(),
+            );
+            let position = forces.position().0;
+            let rotation = forces.rotation().0;
+            let centre = position + rotation * com.0;
+            let motion = super::super::sweep::RigidMotion {
+                position,
+                rotation,
+                centre,
+                velocity: forces.linear_velocity(),
+                spin: forces.angular_velocity(),
+                dt,
+            };
+            let roots = spatial
+                .aabb_intersections_with_aabb(shape.bounds(motion))
+                .into_iter()
+                .filter_map(|entity| {
+                    let Ok((_, _, other, _, _, _, _)) = colliders.get(entity) else {
+                        return None;
+                    };
+                    (other.body != body_entity && constructions.contains(other.body))
+                        .then_some(other.body)
+                })
+                .collect();
+            let source = SweepSource {
+                body: body_entity,
+                colliders: admitted.iter().map(|(handle, ..)| *handle).collect(),
+                shape,
+                position,
+                rotation,
+                centre,
+                velocity: forces.linear_velocity(),
+                spin: forces.angular_velocity(),
+                roots,
+                mass: mass.value(),
+                inertia: *inertia,
+                axes: axes.copied().unwrap_or_default(), // Absence is Avian's unrestricted state.
+                drive: (forces.accumulated_linear_acceleration()
+                    + constant_acceleration(drives, body_entity, rotation, mass.inverse()))
+                    * mass.value(),
+            };
+            gathered.scope(|local| local.push(source));
         });
     let mut sources: Vec<_> = gathered.drain().collect();
     sources.sort_by_key(|source| source.body);
@@ -398,28 +416,33 @@ fn owner_geometry(
     dt: f32,
 ) -> Vec<(Entity, Entity, super::super::sweep::Sweep)> {
     let inverse = pose.rotation.inverse();
-    let mut patches: BTreeMap<Entity, super::super::sweep::Sweep> = BTreeMap::new();
-    for source in sources.iter().filter(|source| {
-        source.roots.contains(&root)
-            && source.body != root
-            && source.layers.interacts_with(super::super::element_layers())
-    }) {
-        let swept = breakage.kind.sweep.swept(
-            &breakage.live.structure,
-            &breakage.live.state,
-            super::super::sweep::Motion {
-                hull: &source.hull,
-                position: inverse * (source.position - pose.translation),
-                rotation: inverse * source.rotation,
-                velocity: inverse * source.velocity,
-                centre: inverse * (source.centre - pose.translation),
-                spin: inverse * source.spin,
-                dt,
-            },
-        );
-        patches.entry(source.body).or_default().merge(swept);
-    }
     let pool = ComputeTaskPool::get();
+    let mut patches: Vec<_> = sources
+        .par_splat_map(pool, None, |_, sources| {
+            sources
+                .iter()
+                .filter(|source| source.roots.contains(&root) && source.body != root)
+                .map(|source| {
+                    let swept = breakage.kind.sweep.swept(
+                        &breakage.live.structure,
+                        &breakage.live.state,
+                        &source.shape,
+                        super::super::sweep::RigidMotion {
+                            position: inverse * (source.position - pose.translation),
+                            rotation: inverse * source.rotation,
+                            velocity: inverse * source.velocity,
+                            centre: inverse * (source.centre - pose.translation),
+                            spin: inverse * source.spin,
+                            dt,
+                        },
+                    );
+                    (source.body, swept)
+                })
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect();
     let kind = &breakage.kind;
     let Live {
         structure,
@@ -428,10 +451,9 @@ fn owner_geometry(
         ..
     } = &mut *breakage.live;
     let preload = patches
-        .values()
-        .any(|s| s.witness.is_some())
+        .iter()
+        .any(|(_, s)| s.witness.is_some())
         .then(|| gravity.get(structure, state, &kind.equilibrium));
-    let mut patches: Vec<_> = patches.into_iter().collect();
     // Body patches read the same topology and preload; only their ordered effects interact.
     patches
         .par_splat_map_mut(pool, None, |_, patches| {
@@ -440,8 +462,8 @@ fn owner_geometry(
                 .map(|(body, swept)| {
                     let source = sources
                         .iter()
-                        .find(|s| s.body == *body)
-                        .expect("a patch has its source body");
+                        .find(|source| source.body == *body)
+                        .expect("a body patch retains its source");
                     if let Some(witness) = swept.witness {
                         kind.sweep.resolve(
                             structure,

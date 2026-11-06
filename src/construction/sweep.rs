@@ -13,6 +13,8 @@ use super::fracture::{Block, Side, State, Structure};
 use crate::contact_law::{Contactor, peak_force, peak_speed};
 
 mod mincut;
+mod source;
+pub(crate) use source::{Hull, RigidMotion, SourceShape, SourceTree};
 
 /// The farthest a chunk hull's vertex may lie from its bounds' centre on any axis, m: ADR-0015's
 /// 10 m figure on the support coordinates of the only colliders a sweep casts against, each cast
@@ -31,6 +33,7 @@ pub(crate) fn covered(structure: &Structure, state: &State, chunk: usize) -> boo
 pub(crate) struct Geometry {
     /// Each chunk's hull about its bounds' centre, `centres[c]`: the frame its casts run in.
     hulls: Vec<Collider>,
+    contact_hulls: Vec<Hull>,
     centres: Vec<Vec3>,
     parts: Vec<Part>,
     incident: Vec<Vec<usize>>,
@@ -117,6 +120,15 @@ impl Geometry {
         }
         let mut geometry = Self {
             hulls,
+            contact_hulls: blocks
+                .iter()
+                .zip(&structure.chunks)
+                .map(|(block, chunk)| Hull {
+                    hull: super::breakage::loose_collider(block, chunk.centroid),
+                    position: chunk.centroid,
+                    rotation: Quat::IDENTITY,
+                })
+                .collect(),
             centres,
             parts,
             incident: vec![Vec::new(); blocks.len()],
@@ -175,33 +187,50 @@ impl Geometry {
         index
     }
 
-    /// Occupied rigid motion over `dt`, in construction coordinates; collider scale is applied.
-    /// Avian's pinned convex cast supplies the contact normal; tangent motion transfers no mass.
-    pub(crate) fn swept(&self, structure: &Structure, state: &State, motion: Motion<'_>) -> Sweep {
-        let Motion {
-            velocity,
-            centre,
-            spin,
-            dt,
-            ..
-        } = motion;
+    pub(crate) fn contact_hull(&self, chunk: usize) -> &Collider {
+        &self.contact_hulls[chunk].hull
+    }
+
+    pub(crate) fn source(&self, chunks: &[usize], origin: Vec3, scale: Vec3) -> SourceShape {
+        let hulls = chunks
+            .iter()
+            .map(|&c| {
+                let mut hull = self.contact_hulls[c].clone();
+                hull.position -= origin;
+                // Resolution: Avian's insertion-hook scaling subdivision detail.
+                hull.hull.set_scale(scale, 10);
+                hull
+            })
+            .collect();
+        SourceShape(std::sync::Arc::new(SourceTree::new(hulls)))
+    }
+
+    /// One rigid body's occupied patch. Construction nodes reject empty body motion first;
+    /// each admitted target leaf searches the source tree for its earliest inward witness.
+    pub(crate) fn swept(
+        &self,
+        structure: &Structure,
+        state: &State,
+        source: &SourceTree,
+        motion: RigidMotion,
+    ) -> Sweep {
         assert!(
-            dt.is_finite() && dt > 0.0,
+            motion.dt.is_finite() && motion.dt > 0.0,
             "sweep has a positive physics step"
         );
         let mut result = Sweep {
-            incoming: velocity.length(),
+            incoming: motion.velocity.length(),
             ..default()
         };
-        if (velocity == Vec3::ZERO && spin == Vec3::ZERO) || self.tree.is_empty() {
+        if (motion.velocity == Vec3::ZERO && motion.spin == Vec3::ZERO) || self.tree.is_empty() {
             return result;
         }
-        let ColliderAabb { min, max } = motion.bounds();
+        let query = source.query(motion);
         let mut stack = vec![0];
         while let Some(index) = stack.pop() {
             let node = &self.tree[index];
             result.work.bounds += 1;
-            if !node.min.cmple(max).all() || !min.cmple(node.max).all() {
+            if query.entry(0, node, motion.dt).is_none() {
                 continue;
             }
             if let Some((a, b)) = node.children {
@@ -212,25 +241,13 @@ impl Geometry {
             if !covered(structure, state, c) {
                 continue;
             }
-            result.work.casts += 1;
-            let hit = motion.hit(&self.hulls[c], self.centres[c], &mut result.work);
-            let Some((time, normal, at)) = hit else {
-                continue;
-            };
-            let speed = (velocity + spin.cross(at - centre - velocity * time)).dot(normal);
-            if speed <= 0.0 {
-                continue;
-            }
-            result.chunks.push(c);
-            let witness = Witness {
-                time,
-                normal,
-                at,
-                speed,
-                chunk: c,
-            };
-            if result.witness.is_none_or(|first| time < first.time) {
-                result.witness = Some(witness);
+            if let Some(witness) =
+                query.inward(node, &self.hulls[c], self.centres[c], &mut result.work)
+            {
+                result.chunks.push(c);
+                if result.witness.is_none_or(|first| witness.time < first.time) {
+                    result.witness = Some(witness);
+                }
             }
         }
         result.chunks.sort_unstable();
@@ -408,35 +425,19 @@ impl Motion<'_> {
             dt,
         } = *self;
         let aabb = hull.aabb(position, rotation);
-        let travel = velocity * dt;
-        let (min, max) = if spin == Vec3::ZERO {
-            (
-                aabb.min.min(aabb.min + travel),
-                aabb.max.max(aabb.max + travel),
-            )
-        } else {
-            let radius = (aabb.min - centre)
-                .abs()
-                .max((aabb.max - centre).abs())
-                .length();
-            let angle = spin.length() * dt;
-            let turn = Quat::from_scaled_axis(spin * dt);
-            let end = hull.aabb(
-                centre + travel + turn * (position - centre),
-                turn * rotation,
-            );
-            // DERIVED: each point has |x''| <= R*|omega|², so its deviation from the
-            // endpoint chord is at most R*(|omega|*dt)²/8. Linear travel adds no curvature.
-            // The full rotation envelope caps this bound over long angular paths.
-            let margin = Vec3::splat(radius * angle * angle / 8.0);
-            (
-                (aabb.min.min(end.min) - margin)
-                    .max(centre.min(centre + travel) - Vec3::splat(radius)),
-                (aabb.max.max(end.max) + margin)
-                    .min(centre.max(centre + travel) + Vec3::splat(radius)),
-            )
-        };
-        ColliderAabb { min, max }
+        if spin == Vec3::ZERO {
+            return aabb.merged(ColliderAabb {
+                min: aabb.min + velocity * dt,
+                max: aabb.max + velocity * dt,
+            });
+        }
+
+        let turn = Quat::from_scaled_axis(spin * dt);
+        let end = hull.aabb(
+            centre + velocity * dt + turn * (position - centre),
+            turn * rotation,
+        );
+        curved_bounds(aabb, end, centre, velocity, spin, dt)
     }
 
     /// The first hit of this motion on chunk `target`, a hull about `origin`, in construction
@@ -515,6 +516,34 @@ impl Motion<'_> {
     }
 }
 
+/// DERIVED: |x''| <= R*|omega|² bounds deviation from the endpoint chord by
+/// R*(|omega|*dt)²/8; linear COM travel adds no curvature. The full orbit caps long paths.
+fn curved_bounds(
+    start: ColliderAabb,
+    end: ColliderAabb,
+    centre: Vec3,
+    velocity: Vec3,
+    spin: Vec3,
+    dt: f32,
+) -> ColliderAabb {
+    let travel = velocity * dt;
+    if spin == Vec3::ZERO {
+        return start.merged(end);
+    }
+    let radius = (start.min - centre)
+        .abs()
+        .max((start.max - centre).abs())
+        .length();
+    let angle = spin.length() * dt;
+    let margin = Vec3::splat(radius * angle * angle / 8.0);
+    ColliderAabb {
+        min: (start.min.min(end.min) - margin)
+            .max(centre.min(centre + travel) - Vec3::splat(radius)),
+        max: (start.max.max(end.max) + margin)
+            .min(centre.max(centre + travel) + Vec3::splat(radius)),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Witness {
     pub(crate) time: f32,
@@ -544,26 +573,6 @@ pub(crate) struct Sweep {
     pub(crate) broken: bool,
     pub(crate) load: Option<PatchLoad>,
     pub(crate) work: Work,
-}
-
-impl Sweep {
-    /// A rigid body's several contact hulls define one occupied patch, with no duplicate mass.
-    pub(crate) fn merge(&mut self, other: Self) {
-        self.chunks.extend(other.chunks);
-        self.chunks.sort_unstable();
-        self.chunks.dedup();
-        self.incoming = self.incoming.max(other.incoming);
-        if let Some(witness) = other.witness
-            && self.witness.is_none_or(|first| witness.time < first.time)
-        {
-            self.witness = Some(witness);
-        }
-        self.work.bounds += other.work.bounds;
-        self.work.casts += other.work.casts;
-        self.work.joints += other.work.joints;
-        self.work.queries += other.work.queries;
-        self.work.flow += other.work.flow;
-    }
 }
 
 /// Occupied mass properties in the frame of an exchange (SI).
@@ -689,6 +698,32 @@ mod tests {
     use super::*;
     use crate::construction::fracture::{Bond, Chunk, Joint, Material};
 
+    fn single_sweep(
+        geometry: &Geometry,
+        structure: &Structure,
+        state: &State,
+        motion: Motion<'_>,
+    ) -> Sweep {
+        let source = SourceTree::new(vec![Hull {
+            hull: motion.hull.clone(),
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+        }]);
+        geometry.swept(
+            structure,
+            state,
+            &source,
+            RigidMotion {
+                position: motion.position,
+                rotation: motion.rotation,
+                velocity: motion.velocity,
+                centre: motion.centre,
+                spin: motion.spin,
+                dt: motion.dt,
+            },
+        )
+    }
+
     fn cut_capacity(cut: mincut::Cut) -> f32 {
         let mincut::Cut::Released { capacity, .. } = cut else {
             panic!("an unlimited demand exhausts the fixture's finite cut");
@@ -781,7 +816,8 @@ mod tests {
             (Quat::IDENTITY, vec![4]),
             (Quat::from_rotation_x(std::f32::consts::FRAC_PI_4), vec![4]),
         ] {
-            let swept = geometry.swept(
+            let swept = single_sweep(
+                &geometry,
                 &structure,
                 &state,
                 Motion {
@@ -797,7 +833,8 @@ mod tests {
             assert_eq!(swept.chunks, expected);
         }
         let diagonal = Collider::cuboid(0.4, 0.2, 2.4);
-        let swept = geometry.swept(
+        let swept = single_sweep(
+            &geometry,
             &structure,
             &state,
             Motion {
@@ -812,7 +849,8 @@ mod tests {
         );
         assert_eq!(swept.chunks, vec![1, 2, 3, 4, 5, 6, 7]);
         let broad = Collider::cuboid(0.4, 1.4, 1.4);
-        let swept = geometry.swept(
+        let swept = single_sweep(
+            &geometry,
             &structure,
             &state,
             Motion {
@@ -834,7 +872,8 @@ mod tests {
     fn rotation_sweeps_the_hull_without_translation() {
         let (structure, geometry) = wall(1.0);
         let hull = Collider::cuboid(0.2, 4.0, 0.4);
-        let swept = geometry.swept(
+        let swept = single_sweep(
+            &geometry,
             &structure,
             &State::new(&structure),
             Motion {
@@ -924,6 +963,131 @@ mod tests {
         assert!(bounds.min.x > -radius / 2.0 && bounds.min.y > -radius / 2.0);
     }
 
+    /// The game's environment destruction: disconnected source matter leaves a hole between
+    /// lobes. Body traversal must match exhaustive convex leaves, including the stopping load.
+    #[test]
+    fn a_many_chunk_body_keeps_its_occupied_patch_and_stop() {
+        let (structure, geometry) = wall(1.0);
+        let state = State::new(&structure);
+        // Fixture: sixteen pairs of cubes behind each other, with an empty central channel.
+        let leaves: Vec<_> = (0..16)
+            .flat_map(|i| {
+                [-1.0, 1.0].map(move |z| Hull {
+                    hull: Collider::cuboid(0.4, 0.4, 0.4),
+                    position: Vec3::new(-0.4 * i as f32, 0.0, z),
+                    rotation: Quat::IDENTITY,
+                })
+            })
+            .collect();
+        let tree = SourceTree::new(leaves.clone());
+        let motion = RigidMotion {
+            position: Vec3::NEG_X,
+            rotation: Quat::IDENTITY,
+            velocity: Vec3::X * 4.0,
+            centre: Vec3::NEG_X,
+            spin: Vec3::ZERO,
+            dt: 2.0,
+        };
+        let mut body = geometry.swept(&structure, &state, &tree, motion);
+        let mut exhaustive = Sweep::default();
+        for c in 0..structure.chunks.len() {
+            for leaf in &leaves {
+                let leaf_motion = Motion {
+                    hull: &leaf.hull,
+                    position: motion.position + leaf.position,
+                    rotation: leaf.rotation,
+                    velocity: motion.velocity,
+                    centre: motion.centre,
+                    spin: motion.spin,
+                    dt: motion.dt,
+                };
+                if let Some((time, normal, at)) = leaf_motion.hit(
+                    &geometry.hulls[c],
+                    geometry.centres[c],
+                    &mut Work::default(),
+                ) {
+                    let speed = motion.velocity.dot(normal);
+                    if speed > 0.0 {
+                        exhaustive.chunks.push(c);
+                        if exhaustive.witness.is_none_or(|first| time < first.time) {
+                            exhaustive.witness = Some(Witness {
+                                time,
+                                normal,
+                                at,
+                                speed,
+                                chunk: c,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        exhaustive.chunks.sort_unstable();
+        exhaustive.chunks.dedup();
+        assert_eq!(
+            body.chunks,
+            [3, 5],
+            "the empty central channel is never a wrapping hull"
+        );
+        assert_eq!(body.chunks, exhaustive.chunks);
+        // DERIVED: leading face starts at -0.8 m, wall at -0.1 m, velocity 4 m/s.
+        // Resolution: convex shape cast's f32 support/termination error at fixture scale.
+        assert!((body.witness.unwrap().time - 0.7 / 4.0).abs() < 1e-4);
+        assert!((body.witness.unwrap().time - exhaustive.witness.unwrap().time).abs() < 1e-5);
+        let preload = preload(&structure, &state);
+        // Fixture: a common finite point response and drive for both geometry queries.
+        for patch in [&mut body, &mut exhaustive] {
+            geometry.resolve(&structure, &state, &preload, patch, 80.0, Vec3::X * 3.0);
+        }
+        assert_eq!(body.broken, exhaustive.broken);
+        assert_eq!(body.chunks, exhaustive.chunks);
+        assert!((body.load.unwrap().threshold - exhaustive.load.unwrap().threshold).abs() < 1e-5);
+    }
+
+    /// The game's environment destruction: a tangent leaf touching now cannot hide another
+    /// leaf's later inward contact. A composite first-geometric-hit query loses this patch.
+    #[test]
+    fn a_tangent_first_leaf_does_not_hide_the_inward_leaf() {
+        let (structure, geometry) = wall(1.0);
+        let mut state = State::new(&structure);
+        for c in 0..structure.chunks.len() {
+            if c != 4 {
+                state.fate[c] = super::super::fracture::Fate::Dust;
+            }
+        }
+        // Fixture: one leaf glides along the top face; the other approaches its front face.
+        let tree = SourceTree::new(vec![
+            Hull {
+                hull: Collider::cuboid(0.25, 0.25, 0.25),
+                position: Vec3::new(0.875, 0.625, 0.0),
+                rotation: Quat::IDENTITY,
+            },
+            Hull {
+                hull: Collider::cuboid(0.2, 0.2, 0.2),
+                position: Vec3::ZERO,
+                rotation: Quat::IDENTITY,
+            },
+        ]);
+        let result = geometry.swept(
+            &structure,
+            &state,
+            &tree,
+            RigidMotion {
+                position: Vec3::NEG_X,
+                rotation: Quat::IDENTITY,
+                velocity: Vec3::X * 2.0,
+                centre: Vec3::NEG_X,
+                spin: Vec3::ZERO,
+                dt: 1.0,
+            },
+        );
+        assert_eq!(result.chunks, [4]);
+        // DERIVED: front face travels 0.8 m at 2 m/s. Resolution: fixture-scale GJK error.
+        let hit = result.witness.unwrap();
+        assert!((hit.time - 0.4).abs() < 1e-4, "{hit:?}");
+        assert!((hit.speed - 2.0).abs() < 1e-4);
+    }
+
     fn driven_patch(
         structure: &Structure,
         geometry: &Geometry,
@@ -934,7 +1098,8 @@ mod tests {
         // Fixture: middle row, just outside the wall; normal motion crosses the same three chunks.
         // A one-metre travel window reaches the wall at any speed; the stop reads no step.
         let hull = Collider::cuboid(0.4, 0.4, 2.4);
-        let mut swept = geometry.swept(
+        let mut swept = single_sweep(
+            geometry,
             structure,
             &State::new(structure),
             Motion {

@@ -2543,7 +2543,7 @@ type ReusableColliders = BTreeMap<u16, Entity>;
 /// Every chunk keeps its own centroid frame through standing, departure and subsequent splits.
 fn chunk_physics(kind: &ConstructionKind, c: usize, scale: Vec3) -> ChunkPhysics {
     let origin = kind.structure.chunks[c].centroid;
-    let mut collider = loose_collider(&kind.layout.blocks[c], origin);
+    let mut collider = kind.sweep.contact_hull(c).clone();
     // Resolution: match Avian's insertion-hook scaling subdivision detail.
     collider.set_scale(scale, 10);
     (
@@ -2575,9 +2575,10 @@ fn reusable_colliders(children: Option<&Children>, chunks: &ChunkChildren) -> Re
 struct PreparedDeparture {
     departure: Departure,
     chunks: Vec<(u16, Transform, Option<ChunkPhysics>)>,
+    source: super::sweep::SourceShape,
 }
 
-/// Only fresh chunks build geometry; rehoming retains the standing collider and mass properties.
+/// Rehoming retains each collider and its mass properties; query geometry is prepared before spawn.
 fn prepare_group(departure: Departure, reusable: &ReusableColliders) -> PreparedDeparture {
     let kind = &departure.kind;
     // Match the supplied world pose's scale, including quaternion-to-matrix rounding.
@@ -2595,7 +2596,14 @@ fn prepare_group(departure: Departure, reusable: &ReusableColliders) -> Prepared
             )
         })
         .collect();
-    PreparedDeparture { departure, chunks }
+    let source = kind
+        .sweep
+        .source(&departure.group, departure.launch.centroid, scale);
+    PreparedDeparture {
+        departure,
+        chunks,
+        source,
+    }
 }
 
 /// Occupied free-group geometry and motion from its field impulses, in construction coordinates.
@@ -2659,7 +2667,11 @@ fn spawn_prepared(
     prepared: PreparedDeparture,
     reusable: &mut ReusableColliders,
 ) {
-    let PreparedDeparture { departure, chunks } = prepared;
+    let PreparedDeparture {
+        departure,
+        chunks,
+        source,
+    } = prepared;
     let Departure {
         kind,
         construction,
@@ -2681,6 +2693,7 @@ fn spawn_prepared(
     let piece = commands
         .spawn((
             Name::new("Piece"),
+            source,
             Piece {
                 construction,
                 chunks: group.iter().map(|&c| c as u16).collect(),
