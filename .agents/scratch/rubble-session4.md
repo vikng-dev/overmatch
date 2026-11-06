@@ -64,7 +64,9 @@ in worker-sized batches after shared preload, with ordered effects unchanged.
   split children; ordered application owns only ledger entries, messages and structural changes.
 - Parallel-work, fresh colliders: worker preparation caches contact-shape mass inside the pinned
   Collider. Existing backend insertion/update hooks consume that cache; changed shape, scale or
-  density cannot use an obsolete value. The explicit occupied mass overrides remain unchanged.
+  density cannot use an obsolete value. Worker preparation uses the same GlobalTransform scale
+  as insertion, including quaternion-to-matrix rounding in rotated frames. The explicit occupied
+  mass overrides remain unchanged.
   MEASURED 600 identical convex collider insertions, seventeen fresh app fixtures: 0.787 ms without
   preparation, 0.498 ms cached. The insertion and mutation witness checks the backend result and
   subsequent density, scale and shape replacement. The local patch inventory and upstream draft

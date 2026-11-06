@@ -2541,11 +2541,13 @@ type ChunkChildren<'w, 's> = Query<'w, 's, &'static ChunkCollider>;
 type ReusableColliders = BTreeMap<u16, Entity>;
 
 /// Every chunk keeps its own centroid frame through standing, departure and subsequent splits.
-fn chunk_physics(kind: &ConstructionKind, c: usize) -> ChunkPhysics {
+fn chunk_physics(kind: &ConstructionKind, c: usize, scale: Vec3) -> ChunkPhysics {
     let origin = kind.structure.chunks[c].centroid;
+    let mut collider = loose_collider(&kind.layout.blocks[c], origin);
+    // Resolution: match Avian's insertion-hook scaling subdivision detail.
+    collider.set_scale(scale, 10);
     (
-        loose_collider(&kind.layout.blocks[c], origin)
-            .with_mass_properties_cache(avian3d::prelude::ColliderDensity::default().0),
+        collider.with_mass_properties_cache(avian3d::prelude::ColliderDensity::default().0),
         occupied_mass(
             &chunk_collider(kind, c, origin),
             kind.layout.materials[c].density,
@@ -2578,6 +2580,8 @@ struct PreparedDeparture {
 /// Only fresh chunks build geometry; rehoming retains the standing collider and mass properties.
 fn prepare_group(departure: Departure, reusable: &ReusableColliders) -> PreparedDeparture {
     let kind = &departure.kind;
+    // Match the supplied world pose's scale, including quaternion-to-matrix rounding.
+    let scale = GlobalTransform::from(Transform::from_rotation(departure.root.rotation)).scale();
     let chunks = departure
         .group
         .iter()
@@ -2587,7 +2591,7 @@ fn prepare_group(departure: Departure, reusable: &ReusableColliders) -> Prepared
                 Transform::from_translation(
                     kind.structure.chunks[c].centroid - departure.launch.centroid,
                 ),
-                (!reusable.contains_key(&(c as u16))).then(|| chunk_physics(kind, c)),
+                (!reusable.contains_key(&(c as u16))).then(|| chunk_physics(kind, c, scale)),
             )
         })
         .collect();
@@ -2963,6 +2967,7 @@ fn prepare_reconcile(
     let mut effects = Vec::new();
     let kind = &breakage.kind;
     let shape = breakage.shape();
+    let scale = GlobalTransform::from(Transform::from_rotation(transform.rotation)).scale();
     let (mut have_elements, mut have_chunks) = (BTreeMap::new(), BTreeMap::new());
     for child in children.into_iter().flatten() {
         if let Ok(&Element(e)) = elements.get(*child) {
@@ -2995,7 +3000,7 @@ fn prepare_reconcile(
                 effects.push(ColliderChange::Chunk((
                     ChildOf(root),
                     Transform::from_translation(kind.structure.chunks[c].centroid),
-                    chunk_physics(kind, c),
+                    chunk_physics(kind, c, scale),
                     super::element_layers(),
                     ActiveCollisionHooks::MODIFY_CONTACTS, // [`SweepContacts`].
                     (
