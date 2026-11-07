@@ -4446,9 +4446,9 @@ fn a_partial_cut_keeps_belt_support_on_the_matter_that_stands() {
     }
     let chunks = &kind.structure.chunks;
     let side = chunks[1].centroid.y - chunks[0].centroid.y;
-    // Fixture: the momentum test's 1e6 kg cube, which frees the middle chunk (and the top one it
-    // carries) and leaves the anchored bottom chunk standing.
-    let (mass, speed) = (1e6, 128.0);
+    // Fixture: a 1e6 kg cube one chunk side from the middle, travelling that distance per tick;
+    // it frees the middle and top chunks while the anchored bottom chunk stands.
+    let (mass, speed) = (1e6, side / STEP);
     let start = chunks[1].centroid - Vec3::X * side;
     let source = app
         .world_mut()
