@@ -404,13 +404,13 @@
                     there). A seam between two chunks of one timber is the timber parting across
                     its grain, the weaker way, and a bond between timbers is no stronger than the
                     wood"))),
-                fracture_energy: Some((370.0, Derived("G = K_IC² / E_T: MEASURED red spruce
-                    mode I toughness, TL system, 0.42 MPa·√m (USDA FPL Wood Handbook,
-                    FPL-GTR-190, 2010, Table 5-10, read in a third-party copy of the chapter;
-                    mode I range 220–550 kPa·√m), over red spruce's tangential modulus,
-                    E_T ≈ 0.043 × E_L with E_L ≈
-                    11.1 GPa at 12 % moisture (CLAIMED, not read: Wood Handbook Tables 5-1 and
-                    5-3a, recalled), 0.48 GPa: 370 J/m²"))),
+                fracture_energy: Some((327.0, Derived("G = K_IC² / E_T: MEASURED red spruce
+                    mode I toughness, TL system, 420 kPa·√m (USDA FPL Wood Handbook,
+                    FPL-GTR-282, 2021, Chapter 5 Table 5-10, read primary), over the tangential
+                    modulus E_T ≈ 0.043 × E_L (Sitka spruce's ratio, Table 5-1, which lists no red
+                    spruce: ASSUMED). E_L ≈ 12.5 GPa: MEASURED red spruce bending modulus at 12 %
+                    moisture, 11,400 MPa (Table 5-3a, read primary), raised 10 % for shear
+                    deflection as Table 5-1's note directs. E_T ≈ 0.54 GPa: 327 J/m²"))),
                 // Blast inputs: the crush law reads this block. ASSUMED European-spruce
                 // analogue for the scalar forest timber; the existing density and seam data
                 // retain their own sources. Grain and moisture are not resolved by this row.
@@ -460,6 +460,11 @@
                     https://www.icfweb.org/Proceedings/ICF10A/72/ and /74/, read primary.
                     ASSUMED spruce analogue for this scalar wood row; the source reports a
                     specimen-size effect. Grain-resolved timber remains collision lane 8"))),
+                along_grain_compressive_strength: Some((38.2e6, Measured("red spruce, clear
+                    straight-grained wood, 12 % moisture: compression parallel to grain (maximum
+                    crushing strength) 38,200 kPa; USDA Forest Products Laboratory, Wood Handbook
+                    FPL-GTR-282 (2021), Chapter 5 Table 5-3a,
+                    https://research.fs.usda.gov/download/treesearch/62244.pdf, read primary"))),
             )),
         ),
         // A living trunk's green wood, one row per species (`assets/trees/species.ron` names each):
@@ -510,6 +515,7 @@
                 shear_modulus: Some((47292000.0, Unknown("StandIn isotropic G = E / (2 (1 + nu)), with ASSUMED nu = 0.25 and E from this row's bulk.blast.youngs_modulus. No matched shear-modulus measurement was read; settled by a shear-compliance measurement for this material and construction direction"))),
                 shear_cohesion: Some((8.9e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce shear parallel to grain at 12 % moisture, Wood Handbook FPL-GTR-282 Table 5-3a). Settled by a green Norway spruce measurement of this quantity"))),
                 shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green Norway spruce measurement of this quantity"))),
+                along_grain_compressive_strength: Some((18.8e6, Unknown("ASSUMED related-species value: red spruce's (Picea rubens) green compression parallel to grain, 18,800 kPa (USDA FPL Wood Handbook FPL-GTR-282, 2021, Chapter 5 Table 5-3a, read primary); no Norway spruce value read. Settled by a green Norway spruce measurement of this quantity"))),
             )),
         ),
         "GreenScotsPine": Hard(
@@ -549,6 +555,7 @@
                 shear_modulus: Some((47292000.0, Unknown("StandIn isotropic G = E / (2 (1 + nu)), with ASSUMED nu = 0.25 and E from this row's bulk.blast.youngs_modulus. No matched shear-modulus measurement was read; settled by a shear-compliance measurement for this material and construction direction"))),
                 shear_cohesion: Some((8.9e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce shear parallel to grain at 12 % moisture, Wood Handbook FPL-GTR-282 Table 5-3a). Settled by a green Scots pine measurement of this quantity"))),
                 shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green Scots pine measurement of this quantity"))),
+                along_grain_compressive_strength: Some((18.8e6, Unknown("ASSUMED related-species value: red pine's (Pinus resinosa) green compression parallel to grain, 18,800 kPa (USDA FPL Wood Handbook FPL-GTR-282, 2021, Chapter 5 Table 5-3a, read primary); no Scots pine value read. Settled by a green Scots pine measurement of this quantity"))),
             )),
         ),
         "GreenSilverBirch": Hard(
@@ -591,6 +598,7 @@
                 shear_modulus: Some((47292000.0, Unknown("StandIn isotropic G = E / (2 (1 + nu)), with ASSUMED nu = 0.25 and E from this row's bulk.blast.youngs_modulus. No matched shear-modulus measurement was read; settled by a shear-compliance measurement for this material and construction direction"))),
                 shear_cohesion: Some((8.9e6, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (red spruce shear parallel to grain at 12 % moisture, Wood Handbook FPL-GTR-282 Table 5-3a). Settled by a green silver birch measurement of this quantity"))),
                 shear_fracture_energy: Some((740.0, Unknown("ASSUMED dry-spruce analogue: the Wood row's value and source carried, no green-wood value read (clear Norway spruce RL mode II, Fruehmann et al. ICF10 2001). Settled by a green silver birch measurement of this quantity"))),
+                along_grain_compressive_strength: Some((16.3e6, Unknown("ASSUMED related-species value: paper birch's (Betula papyrifera) green compression parallel to grain, 16,300 kPa (USDA FPL Wood Handbook FPL-GTR-282, 2021, Chapter 5 Table 5-3a, read primary); no silver birch value read. Settled by a green silver birch measurement of this quantity"))),
             )),
         ),
         // Fired clay brick: every construction's masonry (`assets/constructions/<id>/<id>.construction.ron`

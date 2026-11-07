@@ -433,14 +433,12 @@ impl Geometry {
             if state.separated[j] || !state.live(joint) {
                 continue;
             } // Open faces and departed matter carry no load.
-            let own = structure.chunks[joint.a].material.compressive_strength;
+            let normal = joint_normal(structure, joint);
+            let own = structure.chunks[joint.a].material.bearing(normal);
             // The ground is one rigid surface and its settlement is not simulated (the one-surface
             // doctrine): a ground anchor bears at its chunk's own strength.
             let (b, strength) = match joint.b {
-                Side::Chunk(b) => (
-                    b,
-                    own.min(structure.chunks[b].material.compressive_strength),
-                ),
+                Side::Chunk(b) => (b, own.min(structure.chunks[b].material.bearing(normal))),
                 Side::Ground => (sink, own),
             };
             let resistance = JointStrength::of(structure, joint, state.cracked[j]);
@@ -453,7 +451,6 @@ impl Geometry {
                     strength * f64::from(joint.area),
                 )
             };
-            let normal = joint_normal(structure, joint);
             graph.edge(joint.a, b, directional(normal), directional(-normal));
         }
         let (cut, flow) = graph.cut(source, sink, demand.force);
