@@ -52,7 +52,7 @@ advance(layout, state, timestamped_loads, interval)
 ```
 
 Occupied hull sweeps commit geometry and body transfers before contact solving (see Bodies in contact).
-Other sources enter as loads; held patches transmit their stopping press through contact intake.
+Other sources enter as loads; a hull a cut holds presses through Avian's contacts like any body.
 The interface requires SI units, stable identities, event ordering and an explicit source budget.
 Its implementation owns local response, structural response, support assessment and representation changes.
 Callers do not decide which chunks fail.
@@ -428,7 +428,7 @@ For comparison against exact decimal fixtures, including their
 input conversion and the reported sum, use `T = (K + 1) q + gamma_(K+1) Sigma`, where `Sigma`
 is the sum of all positive finite directed capacities, `gamma_j = j eps / (1 - j eps)`, and
 `eps = f64::EPSILON`. This bounds numerical resolution relative to the graph's capacities,
-not to an asset-specific force. Held-contact capacity and threshold telemetry remain certified
+not to an asset-specific force. A held cut's capacity and threshold telemetry remain certified
 lower bounds. The fractional-graph reference and single-ULP deficit witnesses guard both contracts.
 The plug can therefore include chunks beyond the occupied patch: compression transmits the push
 through a back layer or around a corner until perimeter joints or bulk crushing give way.
@@ -444,20 +444,17 @@ stiffness). DERIVED: the first inward surface witness supplies the speed and con
 `m_eff = 1 / (1/m + (r cross n) dot I_world^-1 (r cross n))`, as in Avian 0.7's
 `ContactNormalPart::generate` against a fixed target. The lever `r` starts at the moving centre
 of mass; inertia is in world coordinates at contact time, with Avian's locked-axis response.
-No physics step enters the stop. Inward accumulated and constant
+No physics step enters the demand. Inward accumulated and constant
 drive forces add to the demand. If `F > C`, break the minimum cut and remove its whole plug
-`S*` from the standing construction. Otherwise move the hull to the first surface, stop its inward contact
-motion, and send that stopping impulse divided by the tick through contact intake to the
-structure check, which reads every contact as its mean force; the peak force decides only the cut. Continuing drive remains in Avian's contacts and
-its mean-force reading, including sleeping contacts; adding it to the explicit stopping load
-would count it twice. Remaining tangential motion and physics contacts still belong to Avian.
-
-`breakage::SweepContacts` suppresses Avian's look-ahead only against colliders the sweep prepared
-in the current fixed tick, at points on standing, exposed law chunks. The sweep and hook share
-`sweep::covered`; an element without law chunks, buried matter and an unprepared source retain
-speculation. Points within Avian's contact tolerance and penetrating points always remain.
-Standing colliders enable `ActiveCollisionHooks::MODIFY_CONTACTS`; the offline and bitprobe
-compositions register the hook through `offline_physics`. Network physics also registers the hook.
+`S*` from the standing construction. Otherwise the sweep does nothing to the hull: **Avian owns
+the stop** (owner decision, 2026-11-07). Its contact solver, speculative points included, stops
+the hull at matter whose cut holds as it stops a hull at any obstacle, and the structure check
+reads that contact as its mean force like every other; the peak force decides only the cut.
+The rejected alternatives: the sweep stopping the hull itself (a time-of-impact pose, a stop
+impulse and a press of its own), with a collision hook that dropped Avian's look-ahead points
+on covered chunks so the two stops did not meet. That answered one contact with three readings
+of it (the cut's `m_eff`, the press's whole mass and the body's centre-of-mass stop plus a free
+couple).
 
 DERIVED: for a fixed patch, `v_threshold` is the speed whose peak force is `max(0, C - F_drive,n)`:
 `δ = (3P / (4 E* √R))^(2/3)`, `v = √(16 E* √R δ^(5/2) / (15 m_eff))`; it grows as
@@ -485,6 +482,10 @@ at the same presentation tick. Dust-only hull departures are rejected: they remo
 the tank's path.
 A retired element's staged belt reactions are cancelled before integration; surviving surfaces
 receive fresh solver contacts. A sweep never enters the structural pulse/work calculation.
+The cancellation is kept: the track law stages a belt's reaction against the surface it read
+before the sweep runs, and a reaction from a surface the sweep removed has no surface to come
+from. Staging belts after the sweep instead would move the drive the cut reads into the next tick
+and reorder the track law's schedule for one consumer.
 
 Every remaining solver transfer enters the structure check as its whole mean force `J_solver/dt`.
 Physics already changed those bodies' momenta; contact intake supplies no second blow, source

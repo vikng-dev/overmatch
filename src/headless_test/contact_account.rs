@@ -18,7 +18,7 @@ use crate::construction::breakage::SweepAccount;
 use crate::track::bump_stop::{BumpStop, SidePlate};
 use crate::track::sim::TrackContacts;
 
-const PATHS: [&str; 6] = ["terrain", "collider", "slice", "stop", "hull", "sweep"];
+const PATHS: [&str; 5] = ["terrain", "collider", "slice", "stop", "hull"];
 
 #[derive(Clone, Copy, Default, Serialize)]
 struct Load {
@@ -62,7 +62,7 @@ struct ContactAccount {
     body: Entity,
     dt: f32,
     forward: Vec3,
-    sides: [[Load; 6]; 2],
+    sides: [[Load; 5]; 2],
     exchange: Vec3,
     exchange_moment: Vec3,
     points: Vec<SolverPoint>,
@@ -79,7 +79,7 @@ fn mount(app: &mut App, body: Entity) {
         body,
         dt: 0.0,
         forward: Vec3::ZERO,
-        sides: [[Load::default(); 6]; 2],
+        sides: [[Load::default(); 5]; 2],
         exchange: Vec3::ZERO,
         exchange_moment: Vec3::ZERO,
         points: Vec::new(),
@@ -123,7 +123,7 @@ fn prepare(
     sweep: Res<SweepAccount>,
 ) {
     account.dt = time.delta_secs();
-    account.sides = [[Load::default(); 6]; 2];
+    account.sides = [[Load::default(); 5]; 2];
     account.exchange = Vec3::ZERO;
     account.exchange_moment = Vec3::ZERO;
     account.points.clear();
@@ -168,18 +168,9 @@ fn prepare(
         if impulse.body != account.body {
             continue; // Other bodies have independent accounts.
         }
-        let force = impulse.linear / account.dt;
-        let moment = impulse.angular / account.dt;
-        if let Some(normal) = impulse.normal {
-            let si = side(rotation.0, impulse.point - position.0);
-            // Held sweeps remove translation at the COM and spin separately.
-            account.sides[si][5].add(force.dot(normal), force, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
-            account.sides[si][5].moment =
-                (Vec3::from_array(account.sides[si][5].moment) + moment).to_array();
-        } else {
-            account.exchange += force;
-            account.exchange_moment += moment;
-        }
+        let dt = account.dt;
+        account.exchange += impulse.linear / dt;
+        account.exchange_moment += impulse.angular / dt;
     }
     for (color, constraints) in graph.colors.iter().enumerate() {
         for (ci, constraint) in constraints.contact_constraints.iter().enumerate() {

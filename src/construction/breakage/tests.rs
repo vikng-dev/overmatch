@@ -4183,23 +4183,30 @@ fn owners_share_initial_equilibrium_until_their_first_changed_load() {
 }
 
 /// The game's environment destruction: the production pre-physics sweep removes the minimum-cut
-/// plug containing its occupied source patch on first contact and transfers its momentum once.
-/// Static-stop/refund intake, a delayed structure verdict, or a double physics exchange breaks it.
+/// plug containing its occupied source patch on first contact, before the solver. At zero
+/// gravity the hull's momentum plus its freed rubble's is conserved over the tick: a stop or
+/// exchange against the standing construction, or a stale belt reaction left uncancelled, is
+/// external to that pair and breaks it. Matter the sweep frees this tick neither brakes nor lifts
+/// the hull in the solver: the hull ends the tick at its post-exchange velocity and travels on it.
 #[test]
 fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
-    let kind = column_construction();
+    let kind = resolved_column();
     let (mut app, root) = composed_kind(false, &kind);
     for _ in 0..3 {
         app.update();
     }
-    // Fixture: a centred 0.4 m cube crossing only the middle of the three unit chunks.
+    // Fixture: a centred 0.4 m cube one chunk side short of the middle chunk's centre, crossing
+    // only that chunk within the tick.
+    let middle = kind.structure.chunks[1].centroid;
+    let side = middle.y - kind.structure.chunks[0].centroid.y;
+    let start = middle - Vec3::X * side;
     let speed = 128.0;
     let mass = 1e6;
     let source = app
         .world_mut()
         .spawn((
             RigidBody::Dynamic,
-            Position(Vec3::new(-1.0, 1.5, 0.0)),
+            Position(start),
             Rotation::default(),
             Collider::cuboid(0.4, 0.4, 0.4),
             Mass(mass),
@@ -4221,13 +4228,15 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
         .find(|(_, _, parent)| parent.parent() == root)
         .unwrap()
         .0;
-    let force = Vec3::NEG_X * 1e7; // Fixture: a stale belt reaction exposes a missed cancellation.
+    // Fixture: a stale belt reaction whose tick impulse (1.6e5 N s) exceeds the 1.3e4 N s
+    // conservation tolerance below.
+    let force = Vec3::NEG_X * 1e7;
     app.world_mut()
         .run_system_once(move |mut bodies: Query<Forces>| {
             bodies
                 .get_mut(source)
                 .unwrap()
-                .apply_force_at_point(force, Vec3::new(-1.0, 1.5, 0.0));
+                .apply_force_at_point(force, start);
         })
         .unwrap();
     app.world_mut().resource_mut::<ContactTransfers>().stage(
@@ -4235,7 +4244,7 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
             structure: root,
             structure_collider: old,
             body: source,
-            point: Vec3::new(0.0, 1.5, 0.0),
+            point: middle - Vec3::X * side / 2.0,
             normal: Vec3::NEG_X,
             force,
             closing_speed: speed,
@@ -4248,31 +4257,44 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
         .chunks
         .iter()
         .filter(|(ordinal, _, _)| *ordinal == 3)
+        .copied()
         .collect();
     assert!(
         selected.iter().any(|chunk| chunk.1 == 1),
         "the occupied middle chunk belongs to the plug"
     );
-    let impulse = account
-        .exchanges
-        .iter()
-        .find(|(body, _, _)| *body == source)
-        .unwrap()
-        .1;
-    let transferred: Vec3 = selected
-        .iter()
-        .map(|&&(_, c, velocity)| {
-            kind.sweep.part(usize::from(c), &Transform::IDENTITY).mass as f32 * velocity
-        })
-        .sum();
-    assert!((transferred - impulse).length() < 1e-4 * impulse.length());
-    let after = app.world().get::<LinearVelocity>(source).unwrap().0;
-    let (_, before, after_exchange, _) = account
+    let (_, _, exchanged, _) = *account
         .source_changes
         .iter()
         .find(|(body, ..)| *body == source)
         .unwrap();
-    assert!(((*before - *after_exchange) * mass - impulse).length() < 1e-3 * impulse.length());
+    let after = app.world().get::<LinearVelocity>(source).unwrap().0;
+    let rubble: DVec3 = app
+        .world_mut()
+        .query::<(&Piece, &ComputedMass, &LinearVelocity)>()
+        .iter(app.world())
+        .filter(|(piece, ..)| piece.construction == 3)
+        .map(|(_, m, v)| f64::from(m.value()) * v.0.as_dvec3())
+        .sum();
+    assert!(rubble != DVec3::ZERO, "the plug leaves as server rubble");
+    let before = f64::from(mass * speed) * DVec3::X;
+    let total = f64::from(mass) * after.as_dvec3() + rubble;
+    assert!(
+        (total - before).length() < 1e-4 * before.length(),
+        "hull and freed rubble keep the hull's momentum: {total:?} against {before:?}"
+    );
+    // Resolution: f32 velocity roundoff at 128 m/s.
+    assert!(
+        (after - exchanged).length() < 1e-5 * speed,
+        "the solver changes no exchanged hull velocity: {after:?} against {exchanged:?}"
+    );
+    // The plug's centre of mass lies off the hull's line, so the exchange alone moves it vertically.
+    let rise = app.world().get::<Position>(source).unwrap().0.y - start.y;
+    assert!(
+        (rise - exchanged.y * STEP).abs() < 1e-5 * speed * STEP,
+        "freed matter lifts no hull: rose {rise} m at {} m/s exchanged",
+        exchanged.y
+    );
     assert!(
         !app.world()
             .get::<Breakage>(root)
@@ -4287,22 +4309,13 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     }
     let live = Live::new(&kind);
     shape.derive_departures(&kind.layout, &live);
-    for &&(_, c, _) in &selected {
+    for &(_, c, _) in &selected {
         assert_eq!(
             shape.fate[usize::from(c)],
             app.world().get::<Breakage>(root).unwrap().live.state.fate[usize::from(c)],
             "the streamed ledger agrees with the authority for all freed matter"
         );
     }
-    println!(
-        "MEASURED sweep composition: selected={}, casts={}, joints={}, speed {} -> {}, impulse={:?}",
-        selected.len(),
-        account.work.casts,
-        account.work.joints,
-        speed,
-        after.x,
-        impulse
-    );
 }
 
 /// The game's environment destruction: an end contact on a slender source rotates it away,
@@ -4373,111 +4386,6 @@ fn a_sweep_reads_the_slender_sources_contact_mass() {
         peaks.push(demand);
     }
     assert!(peaks[1] < peaks[0], "rotation reduces the contact peak");
-}
-
-/// The game's environment destruction: the production installers must suppress speculation only
-/// where a prepared sweep owns the point. Unbreakable and buried matter, new sources, touching
-/// points and penetration still rely on Avian. Calling the hook directly cannot prove registration.
-#[test]
-fn sweep_installers_keep_every_contact_outside_prepared_coverage() {
-    #[derive(Clone, Copy, Debug)]
-    enum Case {
-        Covered,
-        Unbreakable,
-        Buried,
-        Unprepared,
-        Resting,
-        Penetrating,
-    }
-    let installers: &[(&str, fn() -> bevy::app::PluginGroupBuilder)] = &[
-        ("offline", crate::offline_physics),
-        #[cfg(feature = "bitprobe")]
-        ("bitprobe", crate::bitprobe::physics_plugins),
-    ];
-    for &(name, install) in installers {
-        for case in [
-            Case::Covered,
-            Case::Unbreakable,
-            Case::Buried,
-            Case::Unprepared,
-            Case::Resting,
-            Case::Penetrating,
-        ] {
-            let mut kind = column_construction();
-            if matches!(case, Case::Unbreakable) {
-                // Fixture: the standing collider's layout declares no breakable matter.
-                Arc::make_mut(&mut kind).layout.elements[0] = None;
-            }
-            let (mut app, root) =
-                composed_kind_with_physics(matches!(case, Case::Unprepared), &kind, install());
-            for _ in 0..3 {
-                app.update();
-            }
-            if matches!(case, Case::Buried) {
-                let mut owner = app.world_mut().get_mut::<Breakage>(root).unwrap();
-                for chunk in &mut Arc::make_mut(&mut owner.live.structure).chunks {
-                    chunk.buried = true;
-                }
-            }
-            let tolerance = app
-                .world()
-                .resource::<NarrowPhaseConfig>()
-                .contact_tolerance
-                * app.world().resource::<PhysicsLengthUnit>().0;
-            // Fixture: separated by 5 cm, within contact tolerance, or penetrating by 1 mm.
-            let separation = match case {
-                Case::Resting => tolerance / 2.0,
-                Case::Penetrating => -0.001,
-                _ => 0.05,
-            };
-            let body = app
-                .world_mut()
-                .spawn((
-                    RigidBody::Dynamic,
-                    Position(Vec3::new(-0.6 - separation, 1.5, 0.0)),
-                    Rotation::default(),
-                    Collider::cuboid(0.2, 0.2, 0.2),
-                    Mass(128.0),
-                    NoAutoMass,
-                    LinearVelocity::ZERO,
-                    piece_layers(),
-                ))
-                .id();
-            app.update();
-            // Fixture: tangential travel admits speculative points while inward travel is zero.
-            app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = Vec3::Z * 10.0;
-            app.update();
-            let points: Vec<_> = app
-                .world()
-                .resource::<ContactGraph>()
-                .iter_active()
-                .filter(|pair| {
-                    (pair.body1 == Some(body) && pair.body2 == Some(root))
-                        || (pair.body2 == Some(body) && pair.body1 == Some(root))
-                })
-                .flat_map(|pair| &pair.manifolds)
-                .flat_map(|manifold| &manifold.points)
-                .map(|point| point.penetration)
-                .collect();
-            if matches!(case, Case::Covered) {
-                assert!(
-                    points.is_empty(),
-                    "{name} {case:?}: look-ahead escaped the installer: {points:?}"
-                );
-            } else {
-                assert!(
-                    !points.is_empty(),
-                    "{name} {case:?}: Avian must keep its contacts"
-                );
-                if !matches!(case, Case::Resting | Case::Penetrating) {
-                    assert!(
-                        points.iter().any(|&depth| depth < -tolerance),
-                        "{name} {case:?}: the witness must contain speculation: {points:?}"
-                    );
-                }
-            }
-        }
-    }
 }
 
 /// Fixture: keep unit-column proportions while each chunk exceeds the authored rubble floor.

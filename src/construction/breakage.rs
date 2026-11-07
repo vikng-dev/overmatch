@@ -76,9 +76,9 @@ use std::sync::Arc;
 
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
-    ActiveCollisionHooks, AngularVelocity, Collider, ColliderAabb, ColliderOf, CollisionHooks,
-    CollisionLayers, ContactPair, Forces, LinearVelocity, Position, ReadRigidBodyForces, RigidBody,
-    Rotation, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces,
+    AngularVelocity, Collider, ColliderAabb, ColliderOf, CollisionLayers, Forces, LinearVelocity,
+    Position, ReadRigidBodyForces, RigidBody, Rotation, SpatialQuery, SpatialQueryFilter,
+    WriteRigidBodyForces,
 };
 
 use bevy::math::DVec3;
@@ -859,7 +859,7 @@ type Colliders<'w, 's> = Query<
 >;
 
 mod sweep_intake;
-pub(crate) use sweep_intake::{SweepAccount, SweepContacts};
+pub(crate) use sweep_intake::SweepAccount;
 
 /// AUTHORITY: each physics step's body contacts on the constructions as loads, read once a step
 /// (module doc): every point on a breakable element or chunk queued, the step's as one deposit,
@@ -870,10 +870,10 @@ fn read_contacts(
     mut read: Local<u64>,
     colliders: Colliders,
     constructions: Query<((&Position, &Rotation), &Breakage, Option<&Piece>)>,
-    loads: (ResMut<Queue>, ResMut<RestingLoads>, ResMut<SweepAccount>),
+    loads: (ResMut<Queue>, ResMut<RestingLoads>),
     stages: Option<Res<Stages>>,
 ) {
-    let (mut queue, mut resting, mut sweep) = loads;
+    let (mut queue, mut resting) = loads;
     let _intake = Stages::start(stages.as_deref(), Stage::Intake);
     if transfers.steps() == *read {
         return;
@@ -897,7 +897,7 @@ fn read_contacts(
         &constructions,
     );
     resting.0.clear();
-    let mut contacts = std::mem::take(&mut sweep.held);
+    let mut contacts = Vec::new();
     for (index, load) in converted.into_iter().enumerate() {
         if let Some((root, load)) = load {
             if index < awake {
@@ -2766,7 +2766,6 @@ fn spawn_prepared(
             // runs: its shape and occupied mass properties stay in the chunk's own frame.
             commands
                 .entity(entity)
-                .remove::<ActiveCollisionHooks>()
                 .insert((ChildOf(piece), local, layers, pose));
         } else {
             // Fresh colliders run Avian's local-pose initialization hook once.
@@ -3063,7 +3062,6 @@ fn prepare_reconcile(
                     Transform::from_translation(kind.structure.chunks[c].centroid),
                     chunk_physics(kind, c, scale),
                     super::element_layers(),
-                    ActiveCollisionHooks::MODIFY_CONTACTS, // [`SweepContacts`].
                     (
                         Position::PLACEHOLDER,
                         Rotation::PLACEHOLDER,

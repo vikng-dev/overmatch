@@ -301,8 +301,8 @@ impl Geometry {
         }; // No occupied inward motion.
         let drive = drive.dot(witness.normal).max(0.0);
         let (mass, patch) = (f64::from(mass), Contactor::chunk(structure, witness.chunk));
-        let stop = peak_force(mass, f64::from(witness.speed), patch, Contactor::RIGID) as f32;
-        let demand = stop + drive;
+        let peak = peak_force(mass, f64::from(witness.speed), patch, Contactor::RIGID) as f32;
+        let demand = peak + drive;
         let cut = self.plug(
             structure,
             state,
@@ -573,7 +573,7 @@ pub(crate) struct Witness {
     pub(crate) normal: Vec3,
     pub(crate) at: Vec3,
     pub(crate) speed: f32,
-    /// The chunk the hull meets first, whose material and size stop it.
+    /// The chunk the hull meets first, whose material and size set the impact's peak force.
     pub(crate) chunk: usize,
 }
 

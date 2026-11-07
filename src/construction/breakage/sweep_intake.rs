@@ -6,14 +6,12 @@ use avian3d::prelude::{
 use bevy::math::DMat3;
 use bevy::tasks::{ParallelSlice, ParallelSliceMut};
 
-/// A source-side sweep impulse for the test-time contact account. A plastic mass exchange
-/// couples the whole body and has no surface normal; held contacts name their witness normal.
+/// A source-side sweep exchange for the test-time contact account. A plastic mass exchange
+/// couples the whole body and has no surface normal.
 #[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct SourceImpulse {
     pub(crate) body: Entity,
-    pub(crate) point: Vec3,
-    pub(crate) normal: Option<Vec3>,
     pub(crate) linear: Vec3,
     /// Free angular impulse, about the source COM, rather than `point cross linear`.
     pub(crate) angular: Vec3,
@@ -26,8 +24,6 @@ pub(crate) struct SweepAccount {
     pub(crate) source_impulses: Vec<SourceImpulse>,
     #[cfg(test)]
     pub(crate) cancelled_belts: Vec<crate::contact_transfer::AppliedContact>,
-    prepared: BTreeSet<Entity>,
-    prepared_at: Option<std::time::Duration>,
     pub(crate) sources: usize,
     pub(crate) freed: usize,
     /// Freed fragments shed to the players as decoration.
@@ -43,13 +39,11 @@ pub(crate) struct SweepAccount {
     /// sweep's contact normal at the first point met, m/s.
     pub(crate) contacts: BTreeMap<(Entity, u16), f32>,
     pub(crate) samples: Vec<(Entity, u16, f32, (f32, f32, f32, f32))>,
-    pub(super) held: Vec<(Entity, Load)>,
     pub(crate) source_changes: Vec<(Entity, Vec3, Vec3, Vec3)>,
 }
 
 struct SweepSource {
     body: Entity,
-    colliders: Vec<Entity>,
     shape: Arc<super::super::sweep::SourceTree>,
     position: Vec3,
     rotation: Quat,
@@ -187,12 +181,7 @@ pub(super) fn run(mut p: Intake) {
     let dt = p.fixed.timestep().as_secs_f32();
     let tick = p.clock.as_deref().map_or(0, |clock| clock.0.raw());
     let sources = sources(&p, dt);
-    p.account.prepared = sources
-        .iter()
-        .flat_map(|source| source.colliders.iter().copied())
-        .collect();
     p.account.sources = sources.len();
-    p.account.prepared_at = Some(p.fixed.elapsed());
     let mut candidates = geometry(&mut p, dt, &sources);
     candidates.sort_by_key(|(body, root, _)| (*body, *root));
     let mut by_source: BTreeMap<Entity, BTreeMap<Entity, BTreeSet<usize>>> = BTreeMap::new();
@@ -220,9 +209,6 @@ pub(super) fn run(mut p: Intake) {
                 swept.incoming,
                 (load.demand, load.capacity, load.threshold, load.drive),
             ));
-        }
-        if !swept.broken && !swept.chunks.is_empty() {
-            hold(&mut p, body, root, &swept, dt);
         }
         p.account.work.bounds += swept.work.bounds;
         p.account.work.casts += swept.work.casts;
@@ -314,7 +300,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                     };
                     layers
                         .interacts_with(super::super::element_layers())
-                        .then_some((handle, hull, local))
+                        .then_some((hull, local))
                 })
                 .collect();
             if admitted.is_empty() {
@@ -327,7 +313,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                     Arc::new(super::super::sweep::SourceTree::new(
                         admitted
                             .iter()
-                            .map(|(_, hull, local)| super::super::sweep::Hull {
+                            .map(|(hull, local)| super::super::sweep::Hull {
                                 hull: (*hull).clone(),
                                 position: local.translation,
                                 rotation: local.rotation.0,
@@ -361,7 +347,6 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                 .collect();
             let source = SweepSource {
                 body: body_entity,
-                colliders: admitted.iter().map(|(handle, ..)| *handle).collect(),
                 shape,
                 position,
                 rotation,
@@ -540,8 +525,6 @@ fn commit_source(
     #[cfg(test)]
     p.account.source_impulses.push(SourceImpulse {
         body,
-        point: centre,
-        normal: None,
         linear: -result.impulse.as_vec3(),
         angular: -result.angular_impulse.as_vec3(),
     });
@@ -805,193 +788,6 @@ pub(super) fn sweep_departure(
     (departures, sheds)
 }
 
-/// A held cut transmits its stopping press through the same intake as solver contacts. Moving
-/// to the first surface before braking prevents a strong wall being crossed between solver ticks.
-fn hold(p: &mut Intake, body: Entity, root: Entity, swept: &super::super::sweep::Sweep, dt: f32) {
-    let witness = swept.witness.expect("a held patch has an occupied contact");
-    let (_, _, mass, ..) = p.bodies.get(body).expect("a held source survives intake");
-    // The structure check reads every contact as its mean force over the tick, as it reads the
-    // solver's; the stop's peak force decided only that the cut holds (`sweep::Geometry::resolve`).
-    let stop = mass.value() * witness.speed / dt;
-    let (_, position, rotation, owner) = p
-        .constructions
-        .get(root)
-        .expect("a held construction survives intake");
-    let pose = owner.physics_frame((position, rotation));
-    let normal = pose.rotation * witness.normal;
-    let point = pose.translation + pose.rotation * witness.at;
-    // Ongoing drive reaches the wall through Avian's contacts. Only the impulse removed
-    // before physics needs an extra intake load; counting drive here would duplicate its press.
-    let share = stop / swept.chunks.len() as f32;
-    for &c in &swept.chunks {
-        p.account.held.push((
-            root,
-            Load {
-                chunk: c,
-                at: owner.live.structure.chunks[c].centroid,
-                energy: 0.0,
-                crushed: 0.0,
-                blow: Vec3::ZERO,
-                press: witness.normal * share,
-                peak: None,
-                origin: Origin::Contact {
-                    other: body,
-                    step: dt,
-                },
-            },
-        ));
-    }
-    let (mut forces, _, mass, inertia, com, axes) = p
-        .bodies
-        .get_mut(body)
-        .expect("a held source survives intake");
-    let mut forces = forces.non_waking();
-    let position = forces.position().0;
-    let rotation = forces.rotation().0;
-    let centre = position + rotation * com.0;
-    let velocity = forces.linear_velocity();
-    let spin = forces.angular_velocity();
-    let turn = Quat::from_scaled_axis(spin * witness.time);
-    let lever = turn.inverse() * (point - centre - velocity * witness.time);
-    let axes = axes.copied().unwrap_or_default(); // Absence is Avian's unrestricted state.
-    let inverse_mass = Vec3::new(
-        f32::from(!axes.is_translation_x_locked()),
-        f32::from(!axes.is_translation_y_locked()),
-        f32::from(!axes.is_translation_z_locked()),
-    ) * mass.inverse();
-    let response = normal.dot(inverse_mass * normal);
-    let closing = velocity.dot(normal).max(0.0);
-    if closing > 0.0 {
-        assert!(
-            response > 0.0,
-            "inward translation has an unlocked response"
-        );
-        forces.apply_linear_impulse(-normal * closing / response);
-        #[cfg(test)]
-        p.account.source_impulses.push(SourceImpulse {
-            body,
-            point,
-            normal: Some(-normal),
-            linear: -normal * closing / response,
-            angular: Vec3::ZERO,
-        });
-    }
-    let angular_mask = Mat3::from_diagonal(Vec3::new(
-        f32::from(!axes.is_rotation_x_locked()),
-        f32::from(!axes.is_rotation_y_locked()),
-        f32::from(!axes.is_rotation_z_locked()),
-    ));
-    let inverse_inertia =
-        angular_mask * inertia.rotated(rotation).inverse().to_mat3() * angular_mask;
-    let torque = lever.cross(normal);
-    let angular_response = torque.dot(inverse_inertia * torque);
-    let angular_closing = (forces.linear_velocity() + spin.cross(lever))
-        .dot(normal)
-        .max(0.0);
-    if angular_closing > 0.0 {
-        assert!(
-            angular_response > 0.0,
-            "inward rotation has an unlocked response"
-        );
-        forces.apply_angular_impulse(-torque * angular_closing / angular_response);
-        #[cfg(test)]
-        p.account.source_impulses.push(SourceImpulse {
-            body,
-            point,
-            normal: Some(-normal),
-            linear: Vec3::ZERO,
-            angular: -torque * angular_closing / angular_response,
-        });
-    }
-    // Pre-integration pose accounts only for motion removed by the surface constraint. Avian
-    // still integrates the surviving tangential twist over the complete step.
-    let next_rotation =
-        Quat::from_scaled_axis(-forces.angular_velocity() * witness.time) * turn * rotation;
-    let next_centre = centre + (velocity - forces.linear_velocity()) * witness.time;
-    let next_position = next_centre + next_rotation * (rotation.inverse() * (position - centre));
-    if next_position != position || next_rotation != rotation {
-        p.commands
-            .entity(body)
-            .insert((Position(next_position), Rotation(next_rotation)));
-    }
-}
-
 pub(super) fn changed(account: Res<SweepAccount>) -> bool {
     account.freed > 0
-}
-
-/// The game's environment destruction: suppress look-ahead only on exposed law chunks against
-/// colliders the sweep prepared this tick. Touching points within Avian's tolerance and all
-/// uncovered points retain the solver's protection. Standing colliders enable the hook with
-/// [`ActiveCollisionHooks::MODIFY_CONTACTS`].
-/// Freed pieces need no hook: they have left the standing query, and Avian owns their contacts.
-#[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct SweepContacts<'w, 's> {
-    owners: Query<
-        'w,
-        's,
-        (
-            &'static ColliderOf,
-            Option<&'static Element>,
-            Option<&'static ChunkCollider>,
-        ),
-    >,
-    standing: Query<
-        'w,
-        's,
-        (
-            &'static Breakage,
-            &'static Position,
-            &'static Rotation,
-            &'static avian3d::prelude::ComputedCenterOfMass,
-        ),
-        Without<Piece>,
-    >,
-    account: Option<Res<'w, SweepAccount>>,
-    fixed: Res<'w, Time<Fixed>>,
-    config: Res<'w, avian3d::prelude::NarrowPhaseConfig>,
-    length_unit: Res<'w, avian3d::prelude::PhysicsLengthUnit>,
-}
-
-impl CollisionHooks for SweepContacts<'_, '_> {
-    fn modify_contacts(&self, contacts: &mut ContactPair, _: &mut Commands) -> bool {
-        // Physics-only apps and replica ticks prepare no sweeps and own no speculative point.
-        let Some(account) = self
-            .account
-            .as_deref()
-            .filter(|a| a.prepared_at == Some(self.fixed.elapsed()))
-        else {
-            return true;
-        };
-        let covered = |collider, source, anchor: Vec3| {
-            if !account.prepared.contains(&source) {
-                return false;
-            }
-            let Ok((of, element, chunk)) = self.owners.get(collider) else {
-                return false;
-            };
-            let Ok((owner, position, rotation, com)) = self.standing.get(of.body) else {
-                return false;
-            };
-            let pose = owner.physics_frame((position, rotation));
-            // Avian 0.7 ContactPoint anchors are world-space offsets from the body COM.
-            let point = position.0 + rotation.0 * com.0 + anchor;
-            let at = pose.rotation.inverse() * (point - pose.translation);
-            let chunk = chunk.map(|c| usize::from(c.0)).or_else(|| {
-                element.and_then(|e| nearest_chunk(&owner.kind.layout, usize::from(e.0), at))
-            });
-            chunk.is_some_and(|c| {
-                super::super::sweep::covered(&owner.live.structure, &owner.live.state, c)
-            })
-        };
-        let tolerance = self.config.contact_tolerance * self.length_unit.0;
-        for manifold in &mut contacts.manifolds {
-            manifold.points.retain(|point| {
-                point.penetration >= -tolerance
-                    || !(covered(contacts.collider1, contacts.collider2, point.anchor1)
-                        || covered(contacts.collider2, contacts.collider1, point.anchor2))
-            });
-        }
-        contacts.manifolds.iter().any(|m| !m.points.is_empty())
-    }
 }
