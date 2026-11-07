@@ -447,13 +447,14 @@ fn owner_geometry(
     let Live {
         structure,
         state,
+        assessment,
         gravity,
         ..
     } = &mut *breakage.live;
     let preload = patches
         .iter()
         .any(|(_, s)| s.witness.is_some())
-        .then(|| gravity.get(structure, state, &kind.equilibrium));
+        .then(|| gravity.get(structure, state, assessment));
     // Body patches read the same topology and preload; only their ordered effects interact.
     patches
         .par_splat_map_mut(pool, None, |_, patches| {

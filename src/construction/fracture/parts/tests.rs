@@ -1538,9 +1538,11 @@ fn the_shipped_map_census_at_spawn() {
 }
 
 /// The game's environment destruction: cut preloads include internal bonded joints and loads
-/// handed in from another part. Removal, cracks and separation invalidate the owner's cache.
+/// handed in from another part, read from the owner's own gravity column. Each re-solve the
+/// structure law makes after removal, a crack or a separation refreshes the owner's cache.
 #[test]
 fn gravity_preloads_cover_internal_joints_and_refresh_after_structure_changes() {
+    bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
     // Fixture: three unit-mass cubes, the bottom two one bonded part, the top another.
     let mut chunks: Vec<_> = (0..3)
         .map(|y| cube(Vec3::Y * y as f32, 1.0, false))
@@ -1559,21 +1561,23 @@ fn gravity_preloads_cover_internal_joints_and_refresh_after_structure_changes() 
         ],
     );
     let mut state = State::new(&structure);
-    let design = Assessment::at_rest(&structure);
+    let mut live = Assessment::at_rest(&structure);
     let mut gravity = Gravity::default();
-    let check = |actual: &[f64], masses: [f64; 3]| {
+    let mut check = |state: &mut State, masses: [f64; 3]| {
+        live.advance(&structure, state, &[], Vec3::ZERO, 1.0, true);
+        let actual = gravity.get(&structure, state, &live);
         for (&actual, mass) in actual.iter().zip(masses) {
             close(actual, -mass * g(), "weight carried by joint");
         }
     };
-    check(gravity.get(&structure, &state, &design), [2.0, 1.0, 3.0]);
-    check(gravity.get(&structure, &state, &design), [2.0, 1.0, 3.0]);
+    check(&mut state, [2.0, 1.0, 3.0]);
+    check(&mut state, [2.0, 1.0, 3.0]);
     state.fate[2] = super::super::Fate::Dust;
-    check(gravity.get(&structure, &state, &design), [1.0, 0.0, 2.0]);
+    check(&mut state, [1.0, 0.0, 2.0]);
     state.cracked[0] = true;
-    check(gravity.get(&structure, &state, &design), [1.0, 0.0, 2.0]);
+    check(&mut state, [1.0, 0.0, 2.0]);
     state.separated[0] = true;
-    check(gravity.get(&structure, &state, &design), [0.0, 0.0, 1.0]);
+    check(&mut state, [0.0, 0.0, 1.0]);
 }
 
 /// The game's environment destruction: a first touch must not scan the owner's whole graph
@@ -1613,6 +1617,7 @@ fn grounded_singletons_prepare_preload_with_linear_joint_visits() {
     }
     let structure = structure(chunks, (0..count).collect(), joints);
     let state = State::new(&structure);
+    bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
     let design = Assessment::at_rest(&structure);
     assert_eq!(design.kernels.len(), count);
     let mut gravity = Gravity::default();
@@ -1635,7 +1640,7 @@ fn grounded_singletons_prepare_preload_with_linear_joint_visits() {
     );
     assert_eq!(gravity.work.builds, 0);
     assert_eq!(gravity.work.reused, count);
-    // An interface crack changes the part field but no singleton's kernel stiffness.
+    // An interface crack changes no singleton's kernel stiffness.
     let mut changed = state.clone();
     changed.cracked[1] = true;
     gravity.get(&structure, &changed, &design);

@@ -388,14 +388,19 @@ term. `sigma_c` is the data's quasi-static `bulk.blast.compressive_strength`, ca
 `fracture::Material::compressive_strength`, not cavity work or the dynamic compaction plateau.
 The standing construction's gravity field supplies every joint's preload before optimization:
 part-law interface forces between parts, and `parts::Kernel::hold` under gravity plus those
-interface forces inside each part. Each owner caches this field until its standing chunks,
-cracks or separated joints change. Preloads stay fixed during optimization, including on
-supports beyond the seed patch; contact demand does not manufacture one.
-The pristine field reuses the design's part equilibrium and factored chunk kernels. After a
-structure change, kernels that differ from their design refactor. One interface pass assembles all boundary
+interface forces inside each part. The part forces are one more column of the owner's one
+equilibrium: `parts::Assessment` solves gravity alone on its own factor and contact active set
+whenever that factor changes, so contact loads (this body's press included) never enter the
+preload. The column is the structure law's last; the state can run one stage ahead of it (one
+stage per tick), and a joint that cracked or opened since reads it at its current strength.
+Each owner caches the preloads until that column or its standing chunks, cracks or separated
+joints change. Preloads stay fixed during optimization, including on supports beyond the seed
+patch; contact demand does not manufacture one.
+Intact kernels are the design's factored chunk kernels; kernels that differ from their design
+refactor. One interface pass assembles all boundary
 loads; kernels visit their chunks' own joint adjacency, with local hash indices. DERIVED: expected
-`O(chunks + joints)` indexing/traversal work per cold field, plus the gravity part solve and
-chunk triangular solves/factorisations; unchanged fields need only the linear topology signature.
+`O(chunks + joints)` indexing/traversal work per cold field, plus chunk triangular
+solves/factorisations; unchanged fields need only the linear topology signature.
 The grounded-singleton operation witness counts visits and forbids intact-kernel refactorisation.
 
 Goldberg–Tarjan push-relabel finds the minimum cut, with FIFO discharge and periodic global

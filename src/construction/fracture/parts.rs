@@ -738,11 +738,15 @@ impl Signature {
     }
 }
 
-/// The game's environment destruction: gravity-only joint preloads, in N (positive tension).
-/// An owner's topology fixes this field; contact demand never creates preload for its cut.
+/// The game's environment destruction: gravity-only joint preloads, in N (positive tension), from
+/// the owner's one equilibrium: the gravity column [`Assessment`] solves on its own factor and
+/// contact active set. That field is the structure law's last; between its solves the state can
+/// run one stage ahead (the law commits one stage per tick), so a joint that cracked or opened
+/// since reads the field at its current strength, and fallen matter carries none. Contact demand
+/// never creates preload for its cut. Cached until the field or the state's topology changes.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Gravity {
-    cached: Option<(Signature, Vec<f64>)>,
+    cached: Option<((u64, Signature), Vec<f64>)>,
     #[cfg(test)]
     work: PreloadWork,
 }
@@ -772,32 +776,17 @@ impl Gravity {
         &mut self,
         structure: &Structure,
         state: &State,
-        design: &Assessment,
+        equilibrium: &Assessment,
     ) -> &[f64] {
-        let signature = Signature::of(structure, state);
-        if self
-            .cached
-            .as_ref()
-            .is_none_or(|(old, _)| *old != signature)
-        {
+        let key = (equilibrium.revision, Signature::of(structure, state));
+        if self.cached.as_ref().is_none_or(|(old, _)| *old != key) {
             #[cfg(test)]
             {
                 self.work = PreloadWork::default();
             }
-            let mut standing = state.clone();
-            let mut rebuilt = Assessment::default();
-            let equilibrium = if design.signature == signature && design.initial_verdict.is_empty()
-            {
-                design
-            } else {
-                rebuilt.rebuild(structure, &mut standing);
-                rebuilt.loads = rebuilt.loads_of(&[], Vec3::ZERO, 1.0);
-                rebuilt.settle(structure, &mut standing, &[], Vec3::ZERO, 1.0);
-                &rebuilt
-            };
             let mut normal = vec![0.0; structure.joints.len()];
             let graph = &equilibrium.graph;
-            let field = &equilibrium.answer[..graph.parts.len()];
+            let field = &equilibrium.gravity;
             // Assemble every part's boundary in one adjacency pass. Ground and buried ends
             // remain kernel anchors; only interfaces between free parts supply loads.
             let mut boundary = vec![Wrench::default(); structure.chunks.len()];
@@ -831,49 +820,55 @@ impl Gravity {
                 }
             }
             // A part's kernel reads its own joints and writes only its internal ones: the parts
-            // solve in parallel, and their preloads commit in part order.
-            let free: Vec<usize> = (0..graph.parts.len())
+            // solve in parallel, and their preloads commit in part order. A part's fallen chunks
+            // left with their joints, so its kernel holds only what stands.
+            let free: Vec<(usize, Vec<usize>)> = (0..graph.parts.len())
                 .filter(|&p| !graph.parts[p].node.fixed)
+                .map(|p| {
+                    let chunks = graph.parts[p].chunks.iter().copied();
+                    (p, chunks.filter(|&c| state.standing(c)).collect::<Vec<_>>())
+                })
+                .filter(|(_, chunks)| !chunks.is_empty())
                 .collect();
-            let pool = ComputeTaskPool::get_or_init(TaskPool::default);
             // Worker-sized batches bound dispatch for tiny parts; results retain part order.
-            let solved = free.par_splat_map(pool, None, |_, parts| {
+            let solved = free.par_splat_map(ComputeTaskPool::get(), None, |_, parts| {
                 parts
                     .iter()
-                    .map(|&p| {
+                    .map(|(p, chunks)| {
+                        let p = *p;
                         let part = &graph.parts[p];
                         let mut solved = PartPreload::default();
-                        let loads: Vec<_> = part.chunks.iter().map(|&c| boundary[c]).collect();
-                        let intact = design.kernels.get(part.element).filter(|kernel| {
-                            kernel.chunks == part.chunks
-                                && part.chunks.iter().all(|&c| {
-                                    standing.topology.incident[c].iter().all(|&j| {
-                                        #[cfg(test)]
-                                        {
-                                            solved.visits += 1;
+                        let loads: Vec<_> = chunks.iter().map(|&c| boundary[c]).collect();
+                        let design = &equilibrium.kernels[part.element];
+                        let intact = (design.chunks == *chunks
+                            && chunks.iter().all(|&c| {
+                                state.topology.incident[c].iter().all(|&j| {
+                                    #[cfg(test)]
+                                    {
+                                        solved.visits += 1;
+                                    }
+                                    let joint = &structure.joints[j];
+                                    let belongs = match joint.b {
+                                        Side::Ground => true,
+                                        Side::Chunk(b) => {
+                                            let other = if joint.a == c { b } else { joint.a };
+                                            structure.chunks[other].buried
+                                                || graph.part[other] == Some(p)
                                         }
-                                        let joint = &structure.joints[j];
-                                        let belongs = match joint.b {
-                                            Side::Ground => true,
-                                            Side::Chunk(b) => {
-                                                let other = if joint.a == c { b } else { joint.a };
-                                                structure.chunks[other].buried
-                                                    || graph.part[other] == Some(p)
-                                            }
-                                        };
-                                        // External interfaces supply loads, not kernel stiffness.
-                                        !belongs
-                                            || (!standing.cracked[j]
-                                                && !standing.separated[j]
-                                                && standing.live(joint))
-                                    })
+                                    };
+                                    // External interfaces supply loads, not kernel stiffness.
+                                    !belongs
+                                        || (!state.cracked[j]
+                                            && !state.separated[j]
+                                            && state.live(joint))
                                 })
-                        });
+                            }))
+                        .then_some(design);
                         let changed;
                         let kernel = if let Some(kernel) = intact {
                             kernel
                         } else {
-                            changed = Kernel::of(structure, &standing, &part.chunks);
+                            changed = Kernel::of(structure, state, chunks);
                             #[cfg(test)]
                             {
                                 solved.built = true;
@@ -914,7 +909,11 @@ impl Gravity {
                     normal[j] = preload;
                 }
             }
-            self.cached = Some((signature, normal));
+            assert!(
+                normal.iter().all(|p| p.is_finite()),
+                "a factor that passed the mechanism pivot test solves a finite gravity field"
+            );
+            self.cached = Some((key, normal));
         }
         &self
             .cached
@@ -934,6 +933,12 @@ pub(crate) struct Assessment {
     /// The solved loads per part: sustained, then sustained plus this tick's pulse.
     loads: Vec<Wrench>,
     answer: Vec<Wrench>,
+    /// Per part: gravity alone, solved on the current factor and active set whenever it changes;
+    /// the hull sweep's preload field ([`Gravity`]). Contact loads stay out of it, so a press is
+    /// never counted again as the preload its own cut reads.
+    gravity: Vec<Wrench>,
+    /// Counts the factors `gravity` was solved on: a changed count is a changed field.
+    revision: u64,
     /// The owner's weight, N, and that weight times its radius of gyration, N·m.
     scale: (f64, f64),
     topology_changed: bool,
@@ -1057,6 +1062,14 @@ impl Assessment {
             }
         }
         self.work += self.factor.ops;
+        let n = self.graph.parts.len();
+        self.gravity = if self.factor.unknowns() == 0 {
+            vec![Wrench::default(); n]
+        } else {
+            self.work += self.factor.solve_ops();
+            self.factor.solve(&self.loads_of(&[], Vec3::ZERO, 1.0)[..n])
+        };
+        self.revision += 1;
         self.signature = Signature::of(structure, state);
         let parts = &self.graph.parts;
         let mass: f64 = parts.iter().map(|p| p.mass).sum();

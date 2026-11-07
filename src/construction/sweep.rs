@@ -754,13 +754,15 @@ mod tests {
         capacity as f32
     }
 
+    /// The gravity column the structure law solves for `state`: one advance from the design, on
+    /// a copy, so the fixture's state keeps its own cracks and openings.
     fn preload(structure: &Structure, state: &State) -> Vec<f64> {
-        super::super::fracture::parts::Gravity::default()
-            .get(
-                structure,
-                state,
-                &super::super::fracture::parts::Assessment::at_rest(structure),
-            )
+        use super::super::fracture::parts::{Assessment, Gravity};
+        bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+        let mut equilibrium = Assessment::at_rest(structure);
+        equilibrium.advance(structure, &mut state.clone(), &[], Vec3::ZERO, 1.0, true);
+        Gravity::default()
+            .get(structure, state, &equilibrium)
             .to_vec()
     }
 
