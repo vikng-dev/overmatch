@@ -17,7 +17,7 @@ use crate::{
     contact_transfer::ContactTransfers,
     cost::{
         TickSample, Trace, phases,
-        stages::{self, NamedTimes},
+        stages::{self, NamedCounts, NamedTimes},
     },
     map::{MapManifest, Prototype},
     scatter::MapInstance,
@@ -97,7 +97,12 @@ pub(super) struct Ram {
     resting_s: f64,
     done: Option<End>,
     target: Option<Entity>,
-    pub(super) trace: Trace<()>,
+    pub(super) trace: Trace<RamWork>,
+}
+
+#[derive(Serialize)]
+pub(super) struct RamWork {
+    work: NamedCounts,
 }
 
 pub(super) fn install(app: &mut App, stats_on: bool) -> Result<(), LeverError> {
@@ -290,7 +295,7 @@ impl Census<'_, '_> {
     }
 
     /// Records a tick of an armed, unfinished capture, returning its row's `collector_us`.
-    pub(super) fn record(&mut self, sample: TickSample) -> Option<&mut f64> {
+    pub(super) fn record(&mut self, sample: TickSample, work: NamedCounts) -> Option<&mut f64> {
         let ram = self
             .ram
             .as_deref_mut()
@@ -311,7 +316,7 @@ impl Census<'_, '_> {
             ram.target = Some(target);
             target
         };
-        let row = ram.trace.push(sample, ());
+        let row = ram.trace.push(sample, RamWork { work });
         let tick = row.tick;
         if ram.impact_tick.is_none() {
             // First contact is the tank's first touch by either path: the hull sweep, which runs
@@ -533,7 +538,9 @@ mod tests {
             .run_system_once(|mut census: Census| {
                 let times = NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]);
                 let sample = census.sample(0.0, 0.0, 0.0, [0.0; stages::COUNT], times, 1.0);
-                census.record(sample).is_some()
+                census
+                    .record(sample, crate::cost::stages::Stages::default().take_counts())
+                    .is_some()
             })
             .unwrap()
     }

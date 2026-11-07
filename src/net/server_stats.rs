@@ -409,7 +409,7 @@ fn record_tick(
             fixed.timestep().as_secs_f64(),
         );
         let rows = [
-            census.record(sample),
+            census.record(sample, work),
             load.as_deref_mut()
                 .and_then(|load| load.record(sample, work)),
         ];

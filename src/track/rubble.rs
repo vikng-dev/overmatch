@@ -84,6 +84,7 @@ use bevy::tasks::{ComputeTaskPool, ParallelSlice, TaskPool};
 
 use super::terrain::FieldSurface;
 use crate::contact_transfer::{AppliedContact, BodyInertia, ContactTransfers, StructureBody};
+use crate::cost::stages::{Stage, Stages, Work};
 
 use super::forces::BeltContact;
 
@@ -331,6 +332,7 @@ pub struct RubbleBodies<'a> {
     by_collider: Cow<'a, HashMap<Entity, usize>>,
     /// Indices in gather order, restricted once per source using its tick-start AABB query.
     active: Vec<usize>,
+    pub(crate) stages: Option<Stages>,
     #[cfg(test)]
     surface_checks: AtomicUsize,
     #[cfg(test)]
@@ -457,6 +459,7 @@ impl RubbleBodies<'_> {
             surfaces: Cow::Borrowed(&self.surfaces),
             by_collider: Cow::Borrowed(&self.by_collider),
             bodies: Cow::Borrowed(&self.bodies),
+            stages: self.stages.clone(),
             ..Default::default()
         };
         selected.select_source(source, near);
@@ -479,6 +482,13 @@ impl RubbleBodies<'_> {
         }
         self.active.sort_unstable();
         self.active.dedup();
+        self.count(Work::BeltCandidates, self.active.len());
+    }
+
+    fn count(&self, work: Work, count: usize) {
+        if let Some(stages) = &self.stages {
+            stages.add(work, count as u64);
+        }
     }
 
     fn surface(&self, collider: Entity) -> &Surface {
@@ -602,6 +612,9 @@ impl RubbleBodies<'_> {
     }
 
     fn in_slab_on_pool(&self, slab: &Slab, pool: &TaskPool) -> Vec<SlabOverlap> {
+        let _stage = Stages::start(self.stages.as_ref(), Stage::BeltRubble);
+        self.count(Work::BeltDispatches, 1);
+        self.count(Work::BeltSlabChecks, self.active.len());
         let (lo, hi) = slab.aabb();
         let radial = (slab.face - slab.reach, slab.face + slab.travel);
         // Candidate geometry is independent; the overlay consumes results in gather order.
@@ -616,6 +629,7 @@ impl RubbleBodies<'_> {
                         if (s.aabb.min.cmpgt(hi) | s.aabb.max.cmplt(lo)).any() {
                             return None; // Candidate lies outside this contact envelope.
                         }
+                        self.count(Work::BeltSlabAabbPasses, 1);
                         let extent = |dir: Vec3| {
                             (
                                 (s.support(-dir) - slab.origin).dot(dir),
@@ -631,6 +645,7 @@ impl RubbleBodies<'_> {
                             return None; // No positive volume reaches the probe envelope.
                         }
                         let faces = super::world_contact::convex::clip_faces(&s.triangles, slab);
+                        self.count(Work::BeltOverlaps, usize::from(!faces.is_empty()));
                         (!faces.is_empty()).then_some(SlabOverlap { piece, faces })
                     })
                     .collect::<Vec<_>>()
@@ -885,6 +900,7 @@ pub(crate) fn piece_impulses<'c>(
     contacts: impl IntoIterator<Item = (BeltSource, &'c BeltContact)>,
     dt: f32,
 ) -> Vec<Push> {
+    let _stage = Stages::start(bodies.stages.as_ref(), Stage::BeltRubble);
     let mut dynamic = Vec::new();
     for (source, contact) in contacts {
         // Field support has no recipient, and static or kinematic recipients take no impulses.
@@ -897,6 +913,13 @@ pub(crate) fn piece_impulses<'c>(
             - contact.belt_velocity)
             .dot(contact.normal);
         dynamic.push((contact, slot, collider, source, closing_speed));
+    }
+    bodies.count(Work::BeltDynamicContacts, dynamic.len());
+    if bodies.stages.is_some() {
+        let mut recipients: Vec<_> = dynamic.iter().map(|c| c.1).collect();
+        recipients.sort_unstable();
+        recipients.dedup();
+        bodies.count(Work::BeltRecipients, recipients.len());
     }
     let explicit = explicit_recipients(bodies, &dynamic, dt);
     dynamic.sort_by_cached_key(|(contact, ..)| {
