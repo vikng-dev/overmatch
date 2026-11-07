@@ -323,23 +323,22 @@ pub(super) fn run(mut p: Intake) {
     for round in 0..=DEPARTURE_ROUNDS {
         p.account.sources += sources.len();
         p.account.rounds = round + 1;
-        let mut departing: BTreeMap<Entity, Vec<(Entity, Cut)>> = BTreeMap::new();
+        let cuts = resolve_round(&mut p, dt, tick, &sources, &recut);
         let mut exchanges = BTreeMap::new();
-        for (body, plugs) in resolve_round(&mut p, dt, tick, &sources, &recut) {
-            let exchange = match departures
-                .iter_mut()
-                .find(|(departure, _)| *departure == body)
-            {
-                Some((_, departure)) => {
-                    let exchange = exchange_departure(&p, departure, &plugs);
+        for (body, departure, source, result) in exchange_all(&p, &departures, &cuts) {
+            match departure {
+                Some(i) => {
+                    launch_after(&mut departures[i].1, &source, &result);
                     // Its momentum entered the account when it was freed; [`commit`] adds the
                     // share it hands on as the plugs'.
-                    p.account.outgoing_momentum -= exchange.0.impulse.as_vec3();
-                    exchange
+                    p.account.outgoing_momentum -= result.impulse.as_vec3();
                 }
-                None => exchange_source(&mut p, body, &plugs),
-            };
-            exchanges.insert(body, exchange);
+                None => apply_exchange(&mut p, body, &source, &result),
+            }
+            exchanges.insert(body, (result, source.centre));
+        }
+        let mut departing: BTreeMap<Entity, Vec<(Entity, Cut)>> = BTreeMap::new();
+        for (body, plugs) in cuts {
             for (root, cut) in plugs {
                 departing.entry(root).or_default().push((body, cut));
             }
@@ -613,42 +612,44 @@ fn departure_sources(
     departures: &[(Entity, PreparedDeparture)],
 ) -> Vec<SweepSource> {
     let travel = travel(&p.substeps, dt);
+    let (spatial, colliders, constructions) = (&p.spatial, &p.colliders, &p.constructions);
+    let gravity = p.gravity.0;
+    // Each reads only its own launch and the standing colliders; results keep commit order.
+    let prepare = |(body, prepared): &(Entity, PreparedDeparture)| {
+        let Departure { root, launch, .. } = &prepared.departure;
+        let props = &launch.mass_properties;
+        let position = root.transform_point(launch.centroid);
+        let motion = super::super::sweep::RigidMotion {
+            position,
+            rotation: root.rotation,
+            centre: position + root.rotation * props.center_of_mass,
+            velocity: root.rotation * launch.velocity + gravity * travel,
+            acceleration: gravity,
+            lead: travel,
+            spin: root.rotation * launch.spin,
+            dt,
+        };
+        let shape = prepared.source.0.clone();
+        SweepSource {
+            body: *body,
+            roots: owners_met((spatial, colliders, constructions), *body, &shape, motion),
+            shape,
+            motion,
+            mass: props.mass,
+            inertia: avian3d::prelude::ComputedAngularInertia::new_with_local_frame(
+                props.principal_angular_inertia,
+                props.local_inertial_frame,
+            ),
+            axes: default(),
+            drive: gravity * props.mass,
+        }
+    };
     departures
-        .iter()
-        .map(|(body, prepared)| {
-            let Departure { root, launch, .. } = &prepared.departure;
-            let props = &launch.mass_properties;
-            let position = root.transform_point(launch.centroid);
-            let motion = super::super::sweep::RigidMotion {
-                position,
-                rotation: root.rotation,
-                centre: position + root.rotation * props.center_of_mass,
-                velocity: root.rotation * launch.velocity + p.gravity.0 * travel,
-                acceleration: p.gravity.0,
-                lead: travel,
-                spin: root.rotation * launch.spin,
-                dt,
-            };
-            let shape = prepared.source.0.clone();
-            SweepSource {
-                body: *body,
-                roots: owners_met(
-                    (&p.spatial, &p.colliders, &p.constructions),
-                    *body,
-                    &shape,
-                    motion,
-                ),
-                shape,
-                motion,
-                mass: props.mass,
-                inertia: avian3d::prelude::ComputedAngularInertia::new_with_local_frame(
-                    props.principal_angular_inertia,
-                    props.local_inertial_frame,
-                ),
-                axes: default(),
-                drive: p.gravity.0 * props.mass,
-            }
+        .par_splat_map(ComputeTaskPool::get(), None, |_, batch| {
+            batch.iter().map(prepare).collect::<Vec<_>>()
         })
+        .into_iter()
+        .flatten()
         .collect()
 }
 
@@ -849,38 +850,97 @@ fn owner_geometry<'s>(
     patches
 }
 
-/// `body`'s one plastic exchange against every plug it released this tick, applied to it: the
-/// exchange and the source centre it is about.
-fn exchange_source(
-    p: &mut Intake,
-    body: Entity,
-    plugs: &[(Entity, Cut)],
-) -> (super::super::sweep::Exchange, DVec3) {
-    let parts = plug_parts(p, plugs);
-    let (mut forces, _, mass, inertia, com, axes, _) = p
-        .bodies
-        .get_mut(body)
-        .expect("sweep source survives intake");
-    let centre = forces.position().0 + forces.rotation().0 * com.0;
+/// Each exchanging body's one plastic exchange against every plug it released this round, with its
+/// departure index when it is one of this tick's departures and the state it exchanged from. Each
+/// reads only its own motion and its plugs' parts, so they solve in batches from the state the
+/// round left; the caller applies them in the body order returned.
+fn exchange_all(
+    p: &Intake,
+    departures: &[(Entity, PreparedDeparture)],
+    cuts: &BTreeMap<Entity, Vec<(Entity, Cut)>>,
+) -> Vec<(
+    Entity,
+    Option<usize>,
+    super::super::sweep::Body,
+    super::super::sweep::Exchange,
+)> {
+    let (bodies, constructions) = (&p.bodies, &p.constructions);
+    let cuts: Vec<_> = cuts.iter().collect();
+    cuts.par_splat_map(ComputeTaskPool::get(), None, |_, batch| {
+        batch
+            .iter()
+            .map(|&(&body, plugs)| {
+                let departure = departures.iter().position(|(entity, _)| *entity == body);
+                let source = match departure {
+                    Some(i) => departure_body(&departures[i].1),
+                    None => source_body(bodies, body),
+                };
+                let parts: Vec<_> = plug_parts(constructions, plugs).collect();
+                let result = super::super::sweep::exchange(&source, &parts);
+                (body, departure, source, result)
+            })
+            .collect::<Vec<_>>()
+    })
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// A swept body's exchange state on its free axes, about its centre of mass.
+fn source_body(bodies: &Bodies, body: Entity) -> super::super::sweep::Body {
+    let (forces, _, mass, inertia, com, axes, _) =
+        bodies.get(body).expect("sweep source survives intake");
+    let rotation = forces.rotation().0;
     let axes = axes.copied().unwrap_or_default(); // Absence is Avian's unrestricted body state.
-    let linear = free_translation(axes);
     let angular = Mat3::from_diagonal(Vec3::new(
         f32::from(!axes.is_rotation_x_locked()),
         f32::from(!axes.is_rotation_y_locked()),
         f32::from(!axes.is_rotation_z_locked()),
     ));
-    let source = super::super::sweep::Body {
-        centre: centre.as_dvec3(),
-        inverse_mass: (linear * mass.inverse()).as_dvec3(),
-        inverse_inertia: (angular
-            * inertia.rotated(forces.rotation().0).inverse().to_mat3()
-            * angular)
+    super::super::sweep::Body {
+        centre: (forces.position().0 + rotation * com.0).as_dvec3(),
+        inverse_mass: (free_translation(axes) * mass.inverse()).as_dvec3(),
+        inverse_inertia: (angular * inertia.rotated(rotation).inverse().to_mat3() * angular)
             .as_dmat3(),
         velocity: forces.linear_velocity().as_dvec3(),
         spin: forces.angular_velocity().as_dvec3(),
-    };
-    let result = super::super::sweep::exchange(&source, &parts);
-    forces.apply_linear_impulse_at_point(-result.impulse.as_vec3(), centre);
+    }
+}
+
+/// A departure's exchange state, from its prepared launch.
+fn departure_body(prepared: &PreparedDeparture) -> super::super::sweep::Body {
+    let Departure { root, launch, .. } = &prepared.departure;
+    let props = &launch.mass_properties;
+    let inertia = avian3d::prelude::ComputedAngularInertia::new_with_local_frame(
+        props.principal_angular_inertia,
+        props.local_inertial_frame,
+    );
+    super::super::sweep::Body {
+        centre: (root.transform_point(launch.centroid) + root.rotation * props.center_of_mass)
+            .as_dvec3(),
+        inverse_mass: DVec3::splat(1.0 / f64::from(props.mass)),
+        inverse_inertia: inertia
+            .rotated(root.rotation)
+            .inverse()
+            .to_mat3()
+            .as_dmat3(),
+        velocity: (root.rotation * launch.velocity).as_dvec3(),
+        spin: (root.rotation * launch.spin).as_dvec3(),
+    }
+}
+
+/// Apply a swept body's exchange to it, and enter it in the account.
+fn apply_exchange(
+    p: &mut Intake,
+    body: Entity,
+    source: &super::super::sweep::Body,
+    result: &super::super::sweep::Exchange,
+) {
+    let (mut forces, _, mass, ..) = p
+        .bodies
+        .get_mut(body)
+        .expect("sweep source survives intake");
+    forces.apply_linear_impulse_at_point(-result.impulse.as_vec3(), source.centre.as_vec3());
     forces.apply_angular_impulse(-result.angular_impulse.as_vec3());
     #[cfg(test)]
     p.account.source_impulses.push(SourceImpulse {
@@ -888,65 +948,45 @@ fn exchange_source(
         linear: -result.impulse.as_vec3(),
         angular: -result.angular_impulse.as_vec3(),
     });
+    let before = source.velocity.as_vec3();
     p.account.source_changes.push((
         body,
-        source.velocity.as_vec3(),
+        before,
         forces.linear_velocity(),
-        (source.velocity.as_vec3() - forces.linear_velocity()) * mass.value(),
+        (before - forces.linear_velocity()) * mass.value(),
     ));
     p.account
         .exchanges
         .push((body, result.impulse.as_vec3(), result.dissipated));
-    (result, source.centre)
 }
 
 /// Every plug's occupied parts, in world frame.
-fn plug_parts(p: &Intake, plugs: &[(Entity, Cut)]) -> Vec<super::super::sweep::Part> {
-    plugs
-        .iter()
-        .flat_map(|(root, cut)| {
-            let (_, position, rotation, breakage) = p
-                .constructions
-                .get(*root)
-                .expect("sweep owner survives intake");
-            let pose = breakage.physics_frame((position, rotation));
-            cut.plug
-                .iter()
-                .map(|&c| breakage.kind.sweep.part(c, &pose))
-                .collect::<Vec<_>>()
-        })
-        .collect()
+fn plug_parts<'a>(
+    constructions: &'a Owners,
+    plugs: &'a [(Entity, Cut)],
+) -> impl Iterator<Item = super::super::sweep::Part> + 'a {
+    plugs.iter().flat_map(move |(root, cut)| {
+        let (_, position, rotation, breakage) = constructions
+            .get(*root)
+            .expect("sweep owner survives intake");
+        let pose = breakage.physics_frame((position, rotation));
+        cut.plug
+            .iter()
+            .map(move |&c| breakage.kind.sweep.part(c, &pose))
+    })
 }
 
-/// A departure's one plastic exchange against the plugs it released this tick, applied to its
-/// launch before it spawns.
-fn exchange_departure(
-    p: &Intake,
+/// A departure's launch after its exchange, before it spawns.
+fn launch_after(
     prepared: &mut PreparedDeparture,
-    plugs: &[(Entity, Cut)],
-) -> (super::super::sweep::Exchange, DVec3) {
-    let parts = plug_parts(p, plugs);
+    source: &super::super::sweep::Body,
+    result: &super::super::sweep::Exchange,
+) {
     let Departure { root, launch, .. } = &mut prepared.departure;
-    let props = &launch.mass_properties;
-    let rotation = root.rotation;
-    let position = root.transform_point(launch.centroid);
-    let inertia = avian3d::prelude::ComputedAngularInertia::new_with_local_frame(
-        props.principal_angular_inertia,
-        props.local_inertial_frame,
-    );
-    let source = super::super::sweep::Body {
-        centre: (position + rotation * props.center_of_mass).as_dvec3(),
-        inverse_mass: DVec3::splat(1.0 / f64::from(props.mass)),
-        inverse_inertia: inertia.rotated(rotation).inverse().to_mat3().as_dmat3(),
-        velocity: (rotation * launch.velocity).as_dvec3(),
-        spin: (rotation * launch.spin).as_dvec3(),
-    };
-    let result = super::super::sweep::exchange(&source, &parts);
     let velocity = source.velocity - source.inverse_mass * result.impulse;
     let spin = source.spin - source.inverse_inertia * result.angular_impulse;
-    launch.velocity = rotation.inverse() * velocity.as_vec3();
-    launch.spin = rotation.inverse() * spin.as_vec3();
-    (result, source.centre)
+    launch.velocity = root.rotation.inverse() * velocity.as_vec3();
+    launch.spin = root.rotation.inverse() * spin.as_vec3();
 }
 
 /// Departures prepare per owner, from its cuts and each cut's exchanged motion; ledger, queue
