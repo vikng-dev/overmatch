@@ -268,8 +268,9 @@ fn constant_acceleration(drives: &Drives, body: Entity, rotation: Quat, inverse_
 }
 
 /// StandIn: no sweep couples bodies in contact. Per body, the force its solver contacts moved
-/// into it over the last physics step from every body but `standing` construction (N, world): a
-/// sustained push the sweep adds to the drive and cast of the body it presses, so the cut ahead of
+/// into it over the last physics step from every body but `standing` construction, less the
+/// normal momentum that stopped the approach (N, world). Velocity already holds that momentum;
+/// the remaining press enters the drive and cast, so the cut ahead of
 /// pushed matter reads the pusher's force. [`ContactTransfers`] reads a contact once from each
 /// `structure` side, so each counts once: on the side that is its `body`, and on a structure
 /// side against a body that is no structure. Belt contacts act before the sweep as forces.
@@ -282,7 +283,8 @@ fn pushes(
     let solved = transfers.groups().flatten();
     for point in solved.filter(|point| point.body_collider.is_some() && !standing(point.structure))
     {
-        let force = point.impulse / transfers.dt();
+        let approach = point.normal * point.effective_mass * point.closing_speed.max(0.0);
+        let force = (point.impulse - approach) / transfers.dt();
         if !standing(point.body) {
             *pushes.entry(point.body).or_default() += force;
         }
@@ -1401,6 +1403,44 @@ mod tests {
         assert_eq!(pushes[&hull], Vec3::NEG_X * 12.0);
         assert_eq!(pushes[&under], Vec3::NEG_Y * 8.0);
         assert!(!pushes.contains_key(&wall), "standing matter is no source");
+    }
+
+    /// The game's environment destruction: a cut ahead of a struck body must not count the
+    /// approach momentum already in its velocity as fresh drive. A body held against standing
+    /// matter still transmits its pusher's press, with or without an approach in that step.
+    #[test]
+    fn a_blow_is_not_replayed_as_a_push_but_a_press_is() {
+        let [pusher, body, wall] = [1, 2, 3].map(|i| Entity::from_raw_u32(i).unwrap());
+        // Fixture: a 23 kg effective contact mass, a 0.5 s step, normal impulses in N s.
+        for (closing_speed, impulse, force) in
+            [(10.0, 230.0, 0.0), (0.0, 3.0, 6.0), (10.0, 233.0, 6.0)]
+        {
+            let contact = |structure, body, impulse| ContactTransfer {
+                structure,
+                structure_collider: structure,
+                body,
+                body_collider: Some(body),
+                point: Vec3::ZERO,
+                normal: Vec3::X,
+                impulse: Vec3::X * impulse,
+                effective_mass: 23.0,
+                closing_speed,
+            };
+            let transfers = ContactTransfers::fixture(
+                vec![
+                    vec![contact(pusher, body, impulse)],
+                    vec![contact(wall, body, -3.0)],
+                ],
+                0.5,
+            );
+            let push = pushes(&transfers, |e| e == wall, |e| e == pusher);
+            assert_eq!(
+                push[&body],
+                Vec3::X * force,
+                "approach {closing_speed}, impulse {impulse}"
+            );
+            assert_eq!(push[&pusher], Vec3::NEG_X * force);
+        }
     }
 
     /// The game's environment destruction: a cut reads the force its source drives into it, all
