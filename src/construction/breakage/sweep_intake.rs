@@ -592,7 +592,7 @@ fn commit_source(
                 &mut record,
                 &reusable,
             );
-            released.scope(|local| local.push((root, chunks, departure, record.entries, reusable)));
+            released.scope(|local| local.push((root, chunks, departure, record.entries)));
         });
     let mut released: Vec<_> = released.drain().collect();
     assert_eq!(
@@ -601,7 +601,7 @@ fn commit_source(
         "every owner of a committed plug stands for its departure"
     );
     released.sort_unstable_by_key(|(root, ..)| *root);
-    for (root, chunks, (departures, sheds), entries, mut reusable) in released {
+    for (root, chunks, (departures, sheds), entries) in released {
         let (_, position, rotation, breakage) = p
             .constructions
             .get(root)
@@ -628,16 +628,17 @@ fn commit_source(
         p.account.shed += sheds.len();
         p.shed.write_batch(sheds);
         for departure in departures {
-            spawn_prepared(&mut p.commands, departure, &mut reusable);
+            spawn_prepared(&mut p.commands, departure);
         }
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct ReleasedMotion {
-    pub(super) velocity: Vec3,
-    pub(super) spin: Vec3,
-    pub(super) centre: Vec3,
+/// A rigid velocity field: `velocity + spin × (x − centre)`, in the frame its user names.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ReleasedMotion {
+    pub(crate) velocity: Vec3,
+    pub(crate) spin: Vec3,
+    pub(crate) centre: Vec3,
 }
 
 /// A cut's swept matter inherits its exchange; matter losing its last support starts at rest.
@@ -768,7 +769,7 @@ pub(super) fn sweep_departure(
                     &breakage.live.structure,
                     (breakage.construction, pose),
                     vec![group],
-                    (motion.velocity, motion.spin, motion.centre),
+                    |light| vec![motion; light.len()],
                     tick,
                     &mut record,
                 );

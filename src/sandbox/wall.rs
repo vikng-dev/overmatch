@@ -1438,7 +1438,13 @@ fn apply_deposits(mut p: ApplyParam) {
                             Mesh3d(wall.meshes[chunk].clone()),
                             MeshMaterial3d(tint.clone()),
                             Transform::from_translation(block.center() - *centroid),
-                            crate::construction::breakage::loose_collider(block, block.center()),
+                            // The sandbox cut has no joints: every face may meet a neighbour.
+                            crate::construction::breakage::contact_collider(
+                                block,
+                                &vec![true; block.planes.len()],
+                                block.center(),
+                            )
+                            .expect("a sandbox wall chunk is thicker than its contact setback"),
                             crate::debris::launch::occupied_mass(
                                 &chunk_collider(block),
                                 wall.material.density,

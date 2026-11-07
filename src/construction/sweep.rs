@@ -33,6 +33,8 @@ pub(crate) fn covered(structure: &Structure, state: &State, chunk: usize) -> boo
 pub(crate) struct Geometry {
     /// Each chunk's hull about its bounds' centre, `centres[c]`: the frame its casts run in.
     hulls: Vec<Collider>,
+    /// Each chunk's contact hull about its centroid ([`super::breakage::contact_collider`]): what a
+    /// freed chunk meets other bodies with, its collider's and its sweep source's shape.
     contact_hulls: Vec<Hull>,
     centres: Vec<Vec3>,
     parts: Vec<Part>,
@@ -59,6 +61,23 @@ impl PartialEq for Geometry {
                 points(a) == points(b)
             })
     }
+}
+
+/// Resolution: the subdivision detail Avian's insertion hook scales a collider with.
+const SCALE_DETAIL: u32 = 10;
+
+/// `collider` at the scale Avian's insertion hook gives it on a body turned by `rotation`: the
+/// world pose's rotation-only scale, quaternion-to-matrix rounding included.
+pub(crate) fn posed(mut collider: Collider, rotation: Quat) -> Collider {
+    let scale = GlobalTransform::from(Transform::from_rotation(rotation)).scale();
+    collider.set_scale(scale, SCALE_DETAIL);
+    // `set_scale` logs and keeps the old scale when it fails.
+    assert_eq!(
+        collider.scale(),
+        scale,
+        "a convex hull rescales by its rotation's rounding"
+    );
+    collider
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,13 +144,21 @@ struct Demand {
 
 impl Geometry {
     /// Bake the sweep's chunk hulls, each about its bounds' centre, refusing a chunk whose hull
-    /// reaches past [`CAST_HALF_EXTENT_M`] from it: the load gate's refusal, its caller naming the
-    /// file.
+    /// reaches past [`CAST_HALF_EXTENT_M`] from it, or whose contact hull cannot be built: the
+    /// load gate's refusal, its caller naming the file.
     pub(crate) fn new(blocks: &[Block], structure: &Structure) -> Result<Self, String> {
         use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
         let mut hulls = Vec::with_capacity(blocks.len());
+        let mut contact_hulls = Vec::with_capacity(blocks.len());
         let mut centres = Vec::with_capacity(blocks.len());
         let mut parts = Vec::with_capacity(blocks.len());
+        let mut incident = vec![Vec::new(); blocks.len()];
+        for (j, joint) in structure.joints.iter().enumerate() {
+            incident[joint.a].push(j);
+            if let Side::Chunk(b) = joint.b {
+                incident[b].push(j);
+            }
+        }
         for (c, (block, chunk)) in blocks.iter().zip(&structure.chunks).enumerate() {
             let centre = (block.min + block.max) / 2.0;
             let reach = ((block.max - block.min) / 2.0).max_element();
@@ -156,21 +183,28 @@ impl Geometry {
             });
             hulls.push(about(centre));
             centres.push(centre);
+            let joints = incident[c].iter().map(|&j| &structure.joints[j]);
+            let faces = super::breakage::joint_faces(block, joints);
+            let hull = super::breakage::contact_collider(block, &faces, chunk.centroid)
+                .ok_or_else(|| {
+                    format!(
+                        "chunk {c} leaves no solid once its joint faces stand {} m back for \
+                         contact: author it thicker across its joints",
+                        super::breakage::LOOSE_GAP_M
+                    )
+                })?;
+            contact_hulls.push(Hull {
+                hull,
+                position: chunk.centroid,
+                rotation: Quat::IDENTITY,
+            });
         }
-        let mut geometry = Self {
+        Ok(Self {
             hulls,
-            contact_hulls: blocks
-                .iter()
-                .zip(&structure.chunks)
-                .map(|(block, chunk)| Hull {
-                    hull: super::breakage::loose_collider(block, chunk.centroid),
-                    position: chunk.centroid,
-                    rotation: Quat::IDENTITY,
-                })
-                .collect(),
+            contact_hulls,
             centres,
             parts,
-            incident: vec![Vec::new(); blocks.len()],
+            incident,
             tree: tree(
                 &blocks
                     .iter()
@@ -190,29 +224,25 @@ impl Geometry {
                     )
                 })
                 .collect(),
-        };
-        for (j, joint) in structure.joints.iter().enumerate() {
-            geometry.incident[joint.a].push(j);
-            if let Side::Chunk(b) = joint.b {
-                geometry.incident[b].push(j);
-            }
-        }
-        Ok(geometry)
+        })
     }
 
     pub(crate) fn contact_hull(&self, chunk: usize) -> &Collider {
         &self.contact_hulls[chunk].hull
     }
 
-    pub(crate) fn source(&self, chunks: &[usize], origin: Vec3, scale: Vec3) -> SourceShape {
+    /// A free group's sweep source about `origin`: its chunks' contact hulls as their colliders
+    /// stand on a body turned by `rotation`.
+    pub(crate) fn source(&self, chunks: &[usize], origin: Vec3, rotation: Quat) -> SourceShape {
         let hulls = chunks
             .iter()
             .map(|&c| {
-                let mut hull = self.contact_hulls[c].clone();
-                hull.position -= origin;
-                // Resolution: Avian's insertion-hook scaling subdivision detail.
-                hull.hull.set_scale(scale, 10);
-                hull
+                let hull = &self.contact_hulls[c];
+                Hull {
+                    hull: posed(hull.hull.clone(), rotation),
+                    position: hull.position - origin,
+                    rotation: hull.rotation,
+                }
             })
             .collect();
         SourceShape(std::sync::Arc::new(SourceTree::new(hulls)))

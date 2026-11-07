@@ -480,7 +480,7 @@ cut also frees matter already disconnected from every ground path, before standi
 Swept matter inherits the hull's plastic exchange; an unsupported remainder starts at rest.
 Below-floor merging (`crumble::merge_fragments`) projects their combined linear and angular
 momentum onto the merged rigid body.
-All freed fragments use the shared volume-based size route described under **Size split**;
+All freed fragments use the shared size route described under **Size split**;
 resolved rubble stays on the server and meets the hull through ordinary Avian contacts. The
 standing owner removes the chunks immediately; clients derive the hole from the joint ledger
 at the same presentation tick. Dust-only hull departures are rejected: they remove matter from
@@ -943,7 +943,7 @@ invented supports.
 
 A failed seam partitions ownership at the same authoritative tick. `PendingSplit` creates children after the law stage and before publication.
 Children inherit `v + omega cross r` at their actual occupied centres of mass and the parent's
-angular velocity; their whole occupied hulls partition the parent’s occupied geometry. Contact hulls are inset independently; the game's rounds read that same hull, while mass and inertia use the whole occupied geometry. This adds no kinetic energy. The existing
+angular velocity; their whole occupied hulls partition the parent’s occupied geometry. A chunk occupies its whole hull standing and freed: the game's rounds and the sweep's targets read it, and the parent body owns its occupied mass, inertia and centre. Only contact is separated: a freed chunk's contact hull, also its sweep source, sets each face carrying one of its joints back `LOOSE_GAP_M` (a `Resolution` against Parry's zero-distance normal noise, its basis beside the constant), and keeps every other face. A freed chunk therefore carries two colliders: its occupied hull, a sensor met only by rounds, and its contact hull. This adds no kinetic energy. The existing
 fracture-work criterion is a threshold, not a resolved cohesive dissipation/strain model.
 The sweep exchanges body momentum before physics; field departures retain their field-impulse launch.
 
@@ -1013,16 +1013,19 @@ This replaces the moving group's contact load (the decided **Collision loads** r
 every source" now covers fields and placed constructions only); that reading is the owner's to
 confirm.
 
-**Size split.** `server_rubble_min_size_m` (`Unit`,
-`assets/ballistics/physical_laws.ron`) is the server's rubble resolution, shared by every material.
-A fragment's size is the cube root of its occupied volume. Below-floor fragments merge through
-joints parted in this event into another departing fragment, processing joint identities in
-order; retained absorption joints preserve grouping without restoring strength. A fragment with
-no such neighbour becomes decor. The shared `route` serves hull cuts, structure releases and
-landings: resolved fragments stay server bodies; decor writes its chunks as dust at the event's
-tick and sends one `Shed` (construction, chunks, frame pose, velocity, spin, seed, tick) to every
-player on `DebrisChannel`, reliable and unordered. The rejected mass floor tied resolution to
-material density.
+**Size split.** A fragment stays a server body when it reaches the server's rubble resolution or
+a hull would feel its mass (`crumble::server_body`, `assets/ballistics/physical_laws.ron`):
+`server_rubble_min_size_m` (`Resolution`, the server's body cost) compares the cube root of its
+occupied volume, shared by every material; `server_rubble_hull_kg` (`Taste`, driving through
+rubble) compares its mass, since a plastic exchange moves a hull's speed by m/(m+M). A
+fragment failing both merges through a joint parted in this event into another departing
+fragment, the largest joint area first (ties by joint identity); retained absorption joints
+preserve grouping without restoring strength. A fragment with no such neighbour becomes decor.
+The shared `route` serves hull cuts, structure releases and landings, each fragment with its own
+release motion: resolved fragments stay server bodies; decor writes its chunks as dust at the
+event's tick and sends one `Shed` (construction, chunks, frame pose, velocity, spin, seed, tick)
+to every player on `DebrisChannel`, reliable and unordered. On the shipped house, whole lintels
+and one sill pass by mass alone; roof boards pass neither (DERIVED from its construction file).
 A replica refuses a shed whose chunks its map cannot hold or whose
 motion is not finite.
 
