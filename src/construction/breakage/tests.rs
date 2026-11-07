@@ -4266,7 +4266,7 @@ fn reconciliation_prepares_the_same_ordered_geometry_across_workers() {
                     let pool = TaskPoolBuilder::new().num_threads(threads).build();
                     for change in prepare_reconciliations(&pool, &owners, &elements, &chunks)
                         .into_iter()
-                        .flatten()
+                        .flat_map(|(_, changes)| changes)
                     {
                         change.apply(&mut commands);
                     }
@@ -4422,6 +4422,123 @@ fn owners_share_initial_equilibrium_until_their_first_changed_load() {
     assert!(!Arc::ptr_eq(&first.assessment, &second.assessment));
     assert!(Arc::ptr_eq(&second.assessment, &kind.equilibrium));
     assert!(!second.assessment.needs_tick());
+}
+
+/// The game's environment destruction: a cut that swaps an element to chunks keeps the belt
+/// support staged on its standing matter. The reaction on the chunk that leaves is cancelled on
+/// its source; the one on the chunk that stands reaches the physics step's reading on that
+/// chunk's own collider, and its force stays on the source. Cancelling every reaction on the
+/// retiring element collider takes a tick of real support away; keeping the one on departed
+/// matter leaves a reaction with no surface to come from.
+#[test]
+fn a_partial_cut_keeps_belt_support_on_the_matter_that_stands() {
+    use bevy::ecs::system::RunSystemOnce;
+    let kind = resolved_column();
+    let (mut app, root) = composed_kind(false, &kind);
+    for _ in 0..3 {
+        app.update();
+    }
+    let chunks = &kind.structure.chunks;
+    let side = chunks[1].centroid.y - chunks[0].centroid.y;
+    // Fixture: the momentum test's 1e6 kg cube, which frees the middle chunk (and the top one it
+    // carries) and leaves the anchored bottom chunk standing.
+    let (mass, speed) = (1e6, 128.0);
+    let start = chunks[1].centroid - Vec3::X * side;
+    let source = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Position(start),
+            Rotation::default(),
+            Collider::cuboid(0.4, 0.4, 0.4),
+            Mass(mass),
+            NoAutoMass,
+            AngularInertia::new(Vec3::splat(mass)),
+            CenterOfMass::default(),
+            LinearVelocity::ZERO,
+            piece_layers(),
+        ))
+        .id();
+    app.update();
+    let element = app
+        .world_mut()
+        .query::<(Entity, &Element, &ChildOf)>()
+        .iter(app.world())
+        .find(|(_, _, parent)| parent.parent() == root)
+        .unwrap()
+        .0;
+    // Fixture: belt reactions on the element's face at the chunk that leaves and at the one that
+    // stands, each force's tick impulse (1.6e5 N s) past the 1.3e4 N s tolerance below.
+    let belts = [1, 0].map(|c| crate::contact_transfer::AppliedContact {
+        structure: root,
+        structure_collider: element,
+        body: source,
+        point: chunks[c].centroid - Vec3::X * side / 2.0,
+        normal: Vec3::NEG_X,
+        force: Vec3::Y * 1e7,
+        closing_speed: 0.0,
+    });
+    app.world_mut()
+        .run_system_once(move |mut bodies: Query<Forces>| {
+            for belt in belts {
+                bodies
+                    .get_mut(source)
+                    .unwrap()
+                    .apply_force_at_point(belt.force, belt.point);
+            }
+        })
+        .unwrap();
+    for belt in belts {
+        app.world_mut()
+            .resource_mut::<ContactTransfers>()
+            .stage(belt);
+    }
+    app.world_mut().get_mut::<LinearVelocity>(source).unwrap().0 = Vec3::X * speed;
+    app.update();
+    let cancelled: Vec<_> = (app.world().resource::<SweepAccount>().cancelled_belts)
+        .iter()
+        .map(|belt| belt.point)
+        .collect();
+    assert_eq!(
+        cancelled,
+        [belts[0].point],
+        "only departed matter's reaction ceases"
+    );
+    let kept: Vec<_> = app
+        .world()
+        .resource::<ContactTransfers>()
+        .groups()
+        .flatten()
+        .filter(|point| point.body == source && point.body_collider.is_none())
+        .map(|point| {
+            let collider = app.world().entity(point.structure_collider);
+            (
+                collider.get::<ChunkCollider>().copied(),
+                collider.get::<ChildOf>().map(ChildOf::parent),
+                point.impulse,
+            )
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        [(Some(ChunkCollider(0)), Some(root), belts[1].force * STEP)],
+        "the standing chunk's own collider carries its reaction"
+    );
+    let rubble: DVec3 = app
+        .world_mut()
+        .query::<(&Piece, &ComputedMass, &LinearVelocity)>()
+        .iter(app.world())
+        .filter(|(piece, ..)| piece.construction == 3)
+        .map(|(_, m, v)| f64::from(m.value()) * v.0.as_dvec3())
+        .sum();
+    let after = app.world().get::<LinearVelocity>(source).unwrap().0;
+    let expected = f64::from(mass * speed) * DVec3::X + (belts[1].force * STEP).as_dvec3();
+    let total = f64::from(mass) * after.as_dvec3() + rubble;
+    // Resolution: f32 velocity and mass roundoff, about 1e-7 relative (DERIVED), with margin.
+    assert!(
+        (total - expected).length() < 1e-4 * expected.length(),
+        "the standing support stays on the source: {total:?} against {expected:?}"
+    );
 }
 
 /// The game's environment destruction: the production pre-physics sweep removes the minimum-cut

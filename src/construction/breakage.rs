@@ -3153,23 +3153,25 @@ fn derive_from_record(
 /// Prepared structural effects in the owner's original element-then-chunk order.
 enum ColliderChange<E, C> {
     Despawn(Entity),
+    /// An element collider retired for its chunks', and the element.
+    Swap(Entity, usize),
     Element(E),
-    Chunk(C),
+    Chunk(usize, C),
 }
 
 impl<E: Bundle, C: Bundle> ColliderChange<E, C> {
-    fn apply(self, commands: &mut Commands) {
+    /// Apply it; a built chunk collider returns its chunk and entity.
+    fn apply(self, commands: &mut Commands) -> Option<(usize, Entity)> {
         match self {
-            Self::Despawn(entity) => {
+            Self::Despawn(entity) | Self::Swap(entity, _) => {
                 commands.entity(entity).despawn();
             }
             Self::Element(bundle) => {
                 commands.spawn(bundle);
             }
-            Self::Chunk(bundle) => {
-                commands.spawn(bundle);
-            }
+            Self::Chunk(c, bundle) => return Some((c, commands.spawn(bundle).id())),
         }
+        None
     }
 }
 
@@ -3198,7 +3200,7 @@ fn prepare_reconcile(
     );
     for (e, swapped) in shape.swapped.iter().enumerate() {
         match (swapped, have_elements.get(&e)) {
-            (true, Some(entity)) => effects.push(ColliderChange::Despawn(*entity)),
+            (true, Some(entity)) => effects.push(ColliderChange::Swap(*entity, e)),
             (false, None) => {
                 effects.push(ColliderChange::Element((
                     ChildOf(root),
@@ -3215,25 +3217,28 @@ fn prepare_reconcile(
             (true, None) => {
                 let (hull, friction, volume, chunk) =
                     occupied_collider(kind, c, transform.rotation);
-                effects.push(ColliderChange::Chunk((
-                    ChildOf(root),
-                    Transform::from_translation(kind.structure.chunks[c].centroid),
-                    (with_insertion_mass(hull), friction, volume, chunk),
+                effects.push(ColliderChange::Chunk(
+                    c,
                     (
-                        super::element_layers(),
-                        ActiveCollisionHooks::MODIFY_CONTACTS,
-                    ),
-                    (
-                        Position::PLACEHOLDER,
-                        Rotation::PLACEHOLDER,
-                        GlobalTransform::from(
-                            Transform::from_translation(
-                                transform.transform_point(kind.structure.chunks[c].centroid),
-                            )
-                            .with_rotation(transform.rotation),
+                        ChildOf(root),
+                        Transform::from_translation(kind.structure.chunks[c].centroid),
+                        (with_insertion_mass(hull), friction, volume, chunk),
+                        (
+                            super::element_layers(),
+                            ActiveCollisionHooks::MODIFY_CONTACTS,
+                        ),
+                        (
+                            Position::PLACEHOLDER,
+                            Rotation::PLACEHOLDER,
+                            GlobalTransform::from(
+                                Transform::from_translation(
+                                    transform.transform_point(kind.structure.chunks[c].centroid),
+                                )
+                                .with_rotation(transform.rotation),
+                            ),
                         ),
                     ),
-                )));
+                ));
             }
             _ => {}
         }
@@ -3250,17 +3255,22 @@ fn prepare_reconciliations(
     >,
     elements: &Query<&Element>,
     chunks: &Query<&ChunkCollider>,
-) -> Vec<Vec<ColliderChange<impl Bundle, impl Bundle>>> {
+) -> Vec<(Entity, Vec<ColliderChange<impl Bundle, impl Bundle>>)> {
     pool.scope(|scope| {
         for (root, transform, breakage, children) in constructions {
             scope.spawn(async move {
-                prepare_reconcile(root, transform, breakage, children, elements, chunks)
+                let effects =
+                    prepare_reconcile(root, transform, breakage, children, elements, chunks);
+                (root, effects)
             });
         }
     })
 }
 
 /// Every peer: prepare changed owners together, then commit colliders before the same-update refit.
+/// A belt reaction staged on an element collider that retires for its chunks' moves to the chunk
+/// collider at its point: the sweep cancelled those on matter that left
+/// ([`sweep_intake::cancel_retired_belts`]).
 fn reconcile(
     constructions: Query<
         (Entity, &Transform, &Breakage, Option<&Children>),
@@ -3269,16 +3279,47 @@ fn reconcile(
     elements: Query<&Element>,
     chunks: Query<&ChunkCollider>,
     mut commands: Commands,
+    mut transfers: ResMut<ContactTransfers>,
     stages: Option<Res<Stages>>,
 ) {
     let _refit = Stages::start(stages.as_deref(), Stage::Refit);
     let effects =
         prepare_reconciliations(ComputeTaskPool::get(), &constructions, &elements, &chunks);
+    let (mut swapped, mut built) = (BTreeMap::new(), BTreeMap::new());
     // Direct scoped submissions collect in query order. All hulls are ready before this flush,
     // and refit_systems exposes every new collider to spatial queries in the same update.
-    for effect in effects.into_iter().flatten() {
-        effect.apply(&mut commands);
+    for (root, effects) in effects {
+        for effect in effects {
+            if let &ColliderChange::Swap(entity, element) = &effect {
+                swapped.insert(entity, (root, element));
+            }
+            if let Some((c, entity)) = effect.apply(&mut commands) {
+                built.insert((root, c), entity);
+            }
+        }
     }
+    if swapped.is_empty() {
+        return;
+    }
+    transfers.readdress(|contact| {
+        // A contact on any other collider keeps its address.
+        let &(root, element) = swapped.get(&contact.structure_collider)?;
+        let (_, transform, breakage, _) = constructions
+            .get(root)
+            .expect("a reconciled owner is still in its query");
+        let pose = breakage.frame(transform);
+        let chunk = nearest_chunk(
+            &breakage.kind.layout,
+            element,
+            pose.rotation.inverse() * (contact.point - pose.translation),
+        )
+        .expect("an element that swapped has chunks");
+        Some(
+            *built.get(&(root, chunk)).expect(
+                "a staged reaction outlives its swapped element only on a chunk that stands",
+            ),
+        )
+    });
 }
 
 /// Avian's refit of moved colliders in a frame a construction changed: the spawned chunks' bounds

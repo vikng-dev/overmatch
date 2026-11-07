@@ -285,7 +285,6 @@ pub(super) struct Intake<'w, 's> {
             Or<(With<Piece>, Without<Breakage>)>,
         ),
     >,
-    body_colliders: Query<'w, 's, &'static avian3d::prelude::RigidBodyColliders>,
     spatial: SpatialQuery<'w, 's>,
     transfers: ResMut<'w, ContactTransfers>,
     fixed: Res<'w, Time<Fixed>>,
@@ -431,32 +430,39 @@ fn resolve_round(
     cuts
 }
 
-/// Cancel each belt reaction staged against a collider this tick's cuts retired.
+/// Cancel each belt reaction staged against matter this tick's cuts took away: a chunk collider's
+/// chunk, or the chunk at its point of an element that swapped to chunks. A reaction on matter
+/// that stands keeps its support; reconciliation hands a swapped element's to the chunk collider
+/// at its point ([`super::reconcile`]).
 fn cancel_retired_belts(p: &mut Intake, changed: BTreeSet<Entity>) {
-    let retired = changed
-        .into_iter()
-        .flat_map(|root| {
-            let handles = p
-                .body_colliders
-                .get(root)
-                .expect("a swept owner retains its collider relationship until refit");
-            handles
-                .iter()
-                .filter(|&entity| {
-                    let Ok((_, _, owner, _, _, element, chunk)) = p.colliders.get(entity) else {
-                        return false;
-                    };
-                    let (_, _, _, breakage) = p
-                        .constructions
-                        .get(owner.body)
-                        .expect("swept collider belongs to its construction");
-                    element.is_some_and(|e| breakage.live.swapped[usize::from(e.0)])
-                        || chunk.is_some_and(|c| !breakage.live.state.standing(usize::from(c.0)))
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<BTreeSet<_>>();
-    for cancelled in p.transfers.cancel_implicit(&retired) {
+    let (colliders, constructions) = (&p.colliders, &p.constructions);
+    let departed = |contact: &crate::contact_transfer::AppliedContact| {
+        if !changed.contains(&contact.structure) {
+            return false; // No cut this tick changed its owner.
+        }
+        let (_, _, owner, _, _, element, chunk) = colliders
+            .get(contact.structure_collider)
+            .expect("a staged belt reaction names a contact collider of its owner");
+        let (_, position, rotation, breakage) = constructions
+            .get(owner.body)
+            .expect("a swept owner's collider belongs to it");
+        let chunk = match (chunk, element) {
+            (Some(chunk), _) => usize::from(chunk.0),
+            (None, Some(element)) if breakage.live.swapped[usize::from(element.0)] => {
+                let pose = breakage.physics_frame((position, rotation));
+                super::nearest_chunk(
+                    &breakage.kind.layout,
+                    usize::from(element.0),
+                    pose.rotation.inverse() * (contact.point - pose.translation),
+                )
+                .expect("an element a cut swapped has chunks")
+            }
+            (None, Some(_)) => return false, // An element no cut swapped keeps its collider.
+            (None, None) => panic!("a standing owner's colliders are elements and chunks"),
+        };
+        !breakage.live.state.standing(chunk)
+    };
+    for cancelled in p.transfers.cancel_implicit(departed) {
         #[cfg(test)]
         p.account.cancelled_belts.push(cancelled);
         let (mut source, ..) = p

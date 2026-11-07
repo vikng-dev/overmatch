@@ -521,16 +521,16 @@ resolved rubble stays on the server and meets the hull through ordinary Avian co
 standing owner removes the chunks immediately; clients derive the hole from the joint ledger
 at the same presentation tick. Dust-only hull departures are rejected: they remove matter from
 the tank's path.
-A retired element's staged belt reactions are cancelled before integration; surviving surfaces
-receive fresh solver contacts. A sweep never enters the structural pulse/work calculation.
-Why the cancellation: the track law stages a belt's reaction against the surface it read
-before the sweep runs, and a reaction from a surface the sweep removed has no surface to come
-from. Staging belts after the sweep instead would move the drive the cut reads into the next tick
-and reorder the track law's schedule for one consumer. A swapped element whose matter still
-stands beside the cut loses its belt reaction for that tick too: its element collider retires
-for the chunk colliders reconciliation builds after the sweep, which the staged reaction cannot
-name. That costs at most one tick of that belt's support, `F dt`; restaging it onto the new chunk
-colliders would carry each point through reconciliation for that one tick. The drive a cut reads
+A belt reaction staged on matter a cut took away (a chunk that left, or the chunk at its point of
+an element that swapped to chunks) is cancelled on its source before integration. One staged on
+matter that stands keeps its support: an element collider that retires for its chunks hands it to
+the chunk collider at its point as reconciliation builds that collider (`breakage::reconcile`). A
+sweep never enters the structural pulse/work calculation. Why the cancellation: the track law
+stages a belt's reaction against the surface it read before the sweep runs, and a reaction from
+matter the sweep removed has no surface to come from. Staging belts after the sweep instead would
+move the drive the cut reads into the next tick and reorder the track law's schedule for one
+consumer. Cancelling every reaction on a retiring element collider would take one tick of real
+support, `F dt`, from the matter that stands beside the cut. The drive a cut reads
 keeps the belt reactions staged against its own owner: the floor's traction drives a hull into a
 wall of the same house, so taking out the owner's whole staged set would drop a real press, and
 the plug that would bound the subtraction to the matter cut is what the cut itself decides.
