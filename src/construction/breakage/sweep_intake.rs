@@ -24,6 +24,9 @@ pub(crate) struct SweepAccount {
     pub(crate) source_impulses: Vec<SourceImpulse>,
     #[cfg(test)]
     pub(crate) cancelled_belts: Vec<crate::contact_transfer::AppliedContact>,
+    /// Per source body, the force it drives into a cut with (N, world).
+    #[cfg(test)]
+    pub(crate) drives: Vec<(Entity, Vec3)>,
     pub(crate) sources: usize,
     pub(crate) freed: usize,
     /// Freed fragments shed to the players as decoration.
@@ -109,6 +112,7 @@ type Bodies<'w, 's> = Query<
         &'static avian3d::prelude::ComputedAngularInertia,
         &'static avian3d::prelude::ComputedCenterOfMass,
         Option<&'static avian3d::prelude::LockedAxes>,
+        Option<&'static avian3d::prelude::GravityScale>,
     ),
 >;
 type Hulls<'w, 's> = Query<
@@ -135,6 +139,15 @@ type Drives<'w, 's> = Query<
         Option<&'static ConstantLocalLinearAcceleration>,
     ),
 >;
+
+/// Each world translation axis `axes` leaves free, as 1, and each it locks, as 0.
+fn free_translation(axes: avian3d::prelude::LockedAxes) -> Vec3 {
+    Vec3::new(
+        f32::from(!axes.is_translation_x_locked()),
+        f32::from(!axes.is_translation_y_locked()),
+        f32::from(!axes.is_translation_z_locked()),
+    )
+}
 
 fn constant_acceleration(drives: &Drives, body: Entity, rotation: Quat, inverse_mass: f32) -> Vec3 {
     let (force, local_force, acceleration, local_acceleration) = drives
@@ -166,6 +179,8 @@ pub(super) struct Intake<'w, 's> {
     spatial: SpatialQuery<'w, 's>,
     transfers: ResMut<'w, ContactTransfers>,
     fixed: Res<'w, Time<Fixed>>,
+    gravity: Res<'w, avian3d::prelude::Gravity>,
+    substeps: Res<'w, avian3d::prelude::SubstepCount>,
     clock: Option<Res<'w, ShotClock>>,
     record: ResMut<'w, Record>,
     queue: ResMut<'w, Queue>,
@@ -182,6 +197,10 @@ pub(super) fn run(mut p: Intake) {
     let tick = p.clock.as_deref().map_or(0, |clock| clock.0.raw());
     let sources = sources(&p, dt);
     p.account.sources = sources.len();
+    #[cfg(test)]
+    p.account
+        .drives
+        .extend(sources.iter().map(|source| (source.body, source.drive)));
     let mut candidates = geometry(&mut p, dt, &sources);
     candidates.sort_by_key(|(body, root, _)| (*body, *root));
     let mut by_source: BTreeMap<Entity, BTreeMap<Entity, BTreeSet<usize>>> = BTreeMap::new();
@@ -283,23 +302,37 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
         ref body_colliders,
         ref drives,
         ref spatial,
+        ref gravity,
+        ref substeps,
         ..
     } = *p;
+    // DERIVED: Avian 0.7 adds `a dt / N` to the velocity before each of its `N` substep position
+    // steps (`pre_process_velocity_increments`, then `integrate_velocities`), so a body no contact
+    // touches travels `v dt + a dt² (N + 1) / (2N)`: the cast's one velocity reaches that pose.
+    let travel = (substeps.0 + 1) as f32 / (2 * substeps.0) as f32 * dt;
     let mut gathered = bevy::utils::Parallel::<Vec<SweepSource>>::default();
     body_colliders
         .par_iter()
         .for_each(|(body_entity, handles, sleeping, piece, cached)| {
-            let Ok((forces, body, mass, inertia, com, axes)) = bodies.get(body_entity) else {
+            let Ok((forces, body, mass, inertia, com, axes, scale)) = bodies.get(body_entity)
+            else {
                 return; // Unmarked fixed collider roots have no dynamic force state.
             };
             // The sweep requires finite computed mass. Sleeping contacts retain their force
             // in ContactTransfers; Avian owns any source this intake does not prepare.
-            if !body.is_dynamic()
-                || mass.inverse() == 0.0
-                || sleeping
-                || (forces.linear_velocity() == Vec3::ZERO
-                    && forces.angular_velocity() == Vec3::ZERO)
-            {
+            if !body.is_dynamic() || mass.inverse() == 0.0 || sleeping {
+                return;
+            }
+            let axes = axes.copied().unwrap_or_default(); // Absence is Avian's unrestricted state.
+            let rotation = forces.rotation().0;
+            // What Avian integrates before its contact solve: accumulated and constant forces and
+            // gravity, on the free axes (`pre_process_velocity_increments`).
+            let acceleration = free_translation(axes)
+                * (forces.accumulated_linear_acceleration()
+                    + constant_acceleration(drives, body_entity, rotation, mass.inverse())
+                    + gravity.0 * scale.map_or(1.0, |scale| scale.0));
+            let velocity = forces.linear_velocity() + acceleration * travel;
+            if velocity == Vec3::ZERO && forces.angular_velocity() == Vec3::ZERO {
                 return;
             }
             let admitted: Vec<_> = handles
@@ -334,13 +367,12 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                 )),
             };
             let position = forces.position().0;
-            let rotation = forces.rotation().0;
             let centre = position + rotation * com.0;
             let motion = super::super::sweep::RigidMotion {
                 position,
                 rotation,
                 centre,
-                velocity: forces.linear_velocity(),
+                velocity,
                 spin: forces.angular_velocity(),
                 dt,
             };
@@ -362,10 +394,8 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                 roots,
                 mass: mass.value(),
                 inertia: *inertia,
-                axes: axes.copied().unwrap_or_default(), // Absence is Avian's unrestricted state.
-                drive: (forces.accumulated_linear_acceleration()
-                    + constant_acceleration(drives, body_entity, rotation, mass.inverse()))
-                    * mass.value(),
+                axes,
+                drive: acceleration * mass.value(),
             };
             gathered.scope(|local| local.push(source));
         });
@@ -523,17 +553,13 @@ fn commit_source(
     if parts.is_empty() {
         return; // Every cut this body met held.
     }
-    let (mut forces, _, mass, inertia, com, axes) = p
+    let (mut forces, _, mass, inertia, com, axes, _) = p
         .bodies
         .get_mut(body)
         .expect("sweep source survives intake");
     let centre = forces.position().0 + forces.rotation().0 * com.0;
     let axes = axes.copied().unwrap_or_default(); // Absence is Avian's unrestricted body state.
-    let linear = Vec3::new(
-        f32::from(!axes.is_translation_x_locked()),
-        f32::from(!axes.is_translation_y_locked()),
-        f32::from(!axes.is_translation_z_locked()),
-    );
+    let linear = free_translation(axes);
     let angular = Mat3::from_diagonal(Vec3::new(
         f32::from(!axes.is_rotation_x_locked()),
         f32::from(!axes.is_rotation_y_locked()),
@@ -816,4 +842,70 @@ pub(super) fn sweep_departure(
 
 pub(super) fn changed(account: Res<SweepAccount>) -> bool {
     account.freed > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::headless_test::{
+        FIXED_TICKS_PER_SECOND, booted_driving_grid, drive_tick, driving_plane, start_fixed_clock,
+    };
+
+    /// The game's environment destruction: a cut reads the force its source drives into it, all
+    /// Avian integrates besides contacts. A hull its belts hold at rest on level ground drives
+    /// nothing up or down, its support cancelling its weight; the belts read without gravity
+    /// would press the hull's whole weight up into any matter above it.
+    #[test]
+    fn a_hull_resting_on_level_ground_drives_no_vertical_force() {
+        let mut app = booted_driving_grid(driving_plane(0.0));
+        start_fixed_clock(&mut app);
+        let tank = app
+            .world_mut()
+            .query_filtered::<Entity, (With<crate::tank::Tank>, With<crate::tank::Controlled>)>()
+            .single(app.world())
+            .expect("one controlled tank");
+        // Fixture settling after the spawn drop.
+        for _ in 0..FIXED_TICKS_PER_SECOND * 2 {
+            drive_tick(&mut app, tank, 0.0, 0.0);
+        }
+        let weight = app
+            .world()
+            .get::<avian3d::prelude::ComputedMass>(tank)
+            .expect("the tank is a dynamic body")
+            .value()
+            * app
+                .world()
+                .resource::<avian3d::prelude::Gravity>()
+                .0
+                .length();
+        let mut vertical = Vec::new();
+        for _ in 0..FIXED_TICKS_PER_SECOND {
+            drive_tick(&mut app, tank, 0.0, 0.0);
+            let account = app.world().resource::<SweepAccount>();
+            vertical.extend(
+                account
+                    .drives
+                    .iter()
+                    .filter(|(body, _)| *body == tank)
+                    .map(|(_, drive)| drive.y),
+            );
+        }
+        let mean = vertical.iter().sum::<f32>() / vertical.len() as f32;
+        let peak = vertical.iter().fold(0.0_f32, |a, b| a.max(b.abs()));
+        println!(
+            "MEASURED resting vertical drive over {} ticks: mean {mean} N, peak {peak} N, weight {weight} N",
+            vertical.len()
+        );
+        assert_eq!(
+            vertical.len(),
+            FIXED_TICKS_PER_SECOND,
+            "a resting hull stays a sweep source every tick"
+        );
+        // Resolution: the belts' support at rest oscillates about the weight (MEASURED over this
+        // second: mean 0.8 %, peak 4.4 % of it); a drive read without gravity is 100 % of it.
+        assert!(
+            mean.abs() < 0.05 * weight,
+            "a resting hull's support cancels its weight: {mean} N against {weight} N"
+        );
+    }
 }

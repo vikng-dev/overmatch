@@ -448,8 +448,11 @@ stiffness). DERIVED: the first inward surface witness supplies the speed and con
 `m_eff = 1 / (1/m + (r cross n) dot I_world^-1 (r cross n))`, as in Avian 0.7's
 `ContactNormalPart::generate` against a fixed target. The lever `r` starts at the moving centre
 of mass; inertia is in world coordinates at contact time, with Avian's locked-axis response.
-No physics step enters the demand. Inward accumulated and constant
-drive forces add to the demand. If `F > C`, break the minimum cut and remove its whole plug
+No physics step enters the demand. The inward drive adds to it: all Avian integrates before
+its contact solve, accumulated and constant forces and gravity, on the body's free axes (a hull
+its belts hold at rest on level ground drives nothing vertically). The cast reads the same
+motion: DERIVED, Avian's `N` substeps carry a body no contact touches `v dt + a dt² (N + 1)/(2N)`,
+which the cast's one velocity reaches at the tick's end. If `F > C`, break the minimum cut and remove its whole plug
 `S*` from the standing construction. Otherwise the sweep does nothing to the hull: **Avian owns
 the stop** (owner decision, 2026-11-07). Its contact solver, speculative points included, stops
 the hull at matter whose cut holds as it stops a hull at any obstacle, and the structure check
@@ -497,7 +500,7 @@ Physics already changed those bodies' momenta; contact intake supplies no second
 mass share, delayed cap or give-back. Sleeping contact forces persist until their contact ends.
 
 Exact sweep membership and Avian's speculative contact envelope differ. The sweep casts admitted
-hulls with the tick-start rigid motion; Avian can constrain separated hulls against projected
+hulls with the motion Avian integrates before its solve; Avian can constrain separated hulls against projected
 contact planes. Such a non-member can transmit solver momentum without receiving a cut-capacity
 verdict. Post-contact speed therefore includes this retained contact response and contacts with
 released bodies, as well as the sweep's plastic exchange.
