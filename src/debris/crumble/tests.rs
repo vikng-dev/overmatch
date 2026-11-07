@@ -94,10 +94,10 @@ impl Part {
         let c = self.group[i];
         let centroid = self.structure.chunks[c].centroid;
         ContactTransfer {
-            structure: entity(GROUP),
-            structure_collider: collider(c),
-            body: entity(GROUND),
-            body_collider: Some(entity(GROUND)),
+            reference: entity(GROUP),
+            reference_collider: collider(c),
+            other: entity(GROUND),
+            other_collider: Some(entity(GROUND)),
             point: Vec3::new(centroid.x, self.low[i], centroid.z),
             normal: Vec3::NEG_Y,
             impulse: Vec3::NEG_Y * moved,
@@ -339,10 +339,10 @@ fn two_groups_colliding_spend_one_collisions_energy() {
         entity(GROUND + 1),
     );
     let side = |structure, own, body, theirs, normal: Vec3| ContactTransfer {
-        structure,
-        structure_collider: own,
-        body,
-        body_collider: Some(theirs),
+        reference: structure,
+        reference_collider: own,
+        other: body,
+        other_collider: Some(theirs),
         point: part.structure.chunks[c].centroid,
         normal,
         impulse: normal * mass * speed,

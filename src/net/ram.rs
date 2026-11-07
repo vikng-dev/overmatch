@@ -264,10 +264,7 @@ pub(super) struct Census<'w, 's> {
 
 impl Census<'_, '_> {
     pub(super) fn contact_points(&self) -> usize {
-        self.contacts
-            .groups()
-            .map(<[crate::contact_transfer::ContactTransfer]>::len)
-            .sum()
+        self.contacts.groups().map(|points| points.len()).sum()
     }
 
     /// This tick's sample, recorded by the ram and the scheduled collapse alike.
@@ -335,7 +332,7 @@ impl Census<'_, '_> {
                     groups
                         .iter()
                         .flat_map(|points| points.iter())
-                        .filter(|point| point.structure == target && tanks.contains(point.body))
+                        .filter(|point| point.reference == target && tanks.contains(point.other))
                         .map(|point| point.closing_speed)
                         .reduce(f32::max)
                 })
@@ -722,7 +719,7 @@ mod tests {
                     .world()
                     .resource::<crate::contact_transfer::ContactTransfers>()
                     .presses()
-                    .filter(|(point, _)| point.body == tank && point.structure == target)
+                    .filter(|(point, _)| point.other == tank && point.reference == target)
                     .map(|(point, _)| point.impulse)
                     .sum();
                 solver_contacts.push((
@@ -925,20 +922,20 @@ mod tests {
     ) {
         let cast: std::collections::BTreeSet<_> =
             account.drives.iter().map(|(body, _)| *body).collect();
-        let (points, exempt): (Vec<&crate::contact_transfer::ContactTransfer>, Vec<_>) = transfers
+        let (points, exempt): (Vec<crate::contact_transfer::ContactTransfer>, Vec<_>) = transfers
             .groups()
             .flatten()
             .filter(|point| {
-                let Ok((breakage, position, rotation)) = standing.get(point.structure) else {
+                let Ok((breakage, position, rotation)) = standing.get(point.reference) else {
                     return false; // A moving group's contacts are rubble's, not standing matter's.
                 };
-                if point.body_collider.is_none() || point.impulse == Vec3::ZERO {
+                if point.other_collider.is_none() || point.impulse == Vec3::ZERO {
                     return false;
                 }
                 let pose = breakage.physics_frame((position, rotation));
                 let at = pose.rotation.inverse() * (point.point - pose.translation);
                 let chunk = match colliders
-                    .get(point.structure_collider)
+                    .get(point.reference_collider)
                     .expect("a solver point lies on a live collider")
                 {
                     (_, Some(chunk)) => usize::from(chunk.0),
@@ -959,15 +956,15 @@ mod tests {
                         .patches
                         .iter()
                         .any(|(body, construction, chunks, _)| {
-                            *body == point.body
+                            *body == point.other
                                 && *construction == breakage.construction
                                 && chunks.contains(&chunk)
                         })
             })
-            .partition(|point| cast.contains(&point.body));
+            .partition(|point| cast.contains(&point.other));
         *unjudged = Unjudged {
             points: (points.into_iter())
-                .map(|p| (p.body, p.structure_collider, p.point, p.impulse))
+                .map(|p| (p.other, p.reference_collider, p.point, p.impulse))
                 .collect(),
             exempt: exempt.into_iter().map(|p| p.impulse).sum(),
         };
@@ -1023,11 +1020,11 @@ mod tests {
             transfers
                 .groups()
                 .flatten()
-                .filter(|point| point.body_collider.is_some())
+                .filter(|point| point.other_collider.is_some())
         };
         let on_tank = |structure: bool| -> Vec3 {
             solver()
-                .filter(|point| point.body == tank && (point.structure == target) == structure)
+                .filter(|point| point.other == tank && (point.reference == target) == structure)
                 .map(|point| point.impulse)
                 .sum()
         };
@@ -1040,11 +1037,11 @@ mod tests {
         let through = |judged: Option<bool>| -> Vec3 {
             solver()
                 .filter(|point| {
-                    point.body == tank
-                        && point.structure == target
+                    point.other == tank
+                        && point.reference == target
                         && world
                             .get::<crate::construction::breakage::ChunkCollider>(
-                                point.structure_collider,
+                                point.reference_collider,
                             )
                             .is_some_and(|chunk| {
                                 judged.is_none_or(|j| cast.contains(&usize::from(chunk.0)) == j)
@@ -1055,7 +1052,7 @@ mod tests {
         };
         let (through_chunks, judged) = (through(None), through(Some(true)));
         let held = solver()
-            .filter(|point| point.structure == target && point.body != tank)
+            .filter(|point| point.reference == target && point.other != tank)
             .map(|point| point.impulse)
             .sum();
         let change = (world.get::<LinearVelocity>(tank).unwrap().0 - before) * mass;

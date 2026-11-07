@@ -402,7 +402,10 @@ fn landings(
     let dt = transfers.dt();
     let mut landings: BTreeMap<Entity, Landing> = BTreeMap::new();
     for points in transfers.groups() {
-        let structure = points[0].structure;
+        let structure = points
+            .first()
+            .expect("a landing manifold is nonempty")
+            .reference;
         let Some(rest) = rest_speed(structure) else {
             continue; // Not a moving group free to crumble this step.
         };
@@ -418,7 +421,7 @@ fn landings(
                 0.0
             };
             landing.presses.push(Press {
-                collider: point.structure_collider,
+                collider: point.reference_collider,
                 at: point.point,
                 force: -(point.impulse - point.normal * struck) / dt,
             });
@@ -426,19 +429,19 @@ fn landings(
                 continue;
             }
             let at = landing.patches.iter().position(|patch| {
-                patch.collider == point.structure_collider && patch.other == point.body_collider
+                patch.collider == point.reference_collider && patch.other == point.other_collider
             });
             let patch = match at {
                 Some(at) => &mut landing.patches[at],
                 None => {
                     landing.patches.push(Patch {
-                        collider: point.structure_collider,
-                        other: point.body_collider,
+                        collider: point.reference_collider,
+                        other: point.other_collider,
                         at: Vec3::ZERO,
                         blow: Vec3::ZERO,
                         struck: 0.0,
                         closing: 0.0,
-                        shared: rest_speed(point.body).is_some(),
+                        shared: rest_speed(point.other).is_some(),
                     });
                     landing.patches.last_mut().expect("the patch just pushed")
                 }

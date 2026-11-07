@@ -97,7 +97,7 @@ use crate::ballistics::{
     ArmourMark, BallisticVolume, BurstField, DeliveredLine, PenetrationMarks, ShellMarched,
     SpallMarks,
 };
-use crate::contact_transfer::{ContactTransfer, ContactTransfers};
+use crate::contact_transfer::{ContactGroup, ContactTransfer, ContactTransfers};
 use crate::debris::launch::{Launch, launch_colliders};
 use crate::{ClientReplica, Layer, ShotClock};
 
@@ -869,7 +869,7 @@ mod sweep_intake;
 pub(crate) use sweep_intake::{ReleasedMotion, SweepAccount, SweepCast, SweepContacts};
 
 /// AUTHORITY: each physics step's body contacts on the constructions as loads, read once a step
-/// (module doc): every point on a breakable element or chunk queued, the step's as one deposit,
+/// (module doc): every point on a standing breakable element or chunk queued, the step's as one deposit,
 /// with the whole solver transfer divided by the step; and every resting point's press as its
 /// construction's ([`RestingLoads`]).
 fn read_contacts(
@@ -886,9 +886,7 @@ fn read_contacts(
         return;
     }
     *read = transfers.steps();
-    let groups: Vec<_> = transfers.groups().collect();
-    let awake = groups.iter().map(|points| points.len()).sum::<usize>();
-    let mut inputs: Vec<_> = groups.into_iter().map(ContactSource::Group).collect();
+    let mut inputs: Vec<_> = transfers.groups().map(ContactSource::Group).collect();
     inputs.extend(transfers.resting().iter().map(|rest| {
         ContactSource::Point(ContactInput {
             point: rest.transfer,
@@ -896,12 +894,27 @@ fn read_contacts(
             step: rest.dt,
         })
     }));
+    // Only standing construction receives structural loads; moving groups' landings crumble
+    // through debris. Reject those roots before grouping or converting their points.
+    inputs.retain(|input| {
+        constructions
+            .get(input.root())
+            .is_ok_and(|(_, _, moving)| moving.is_none())
+    });
+    let awake = inputs
+        .iter()
+        .map(|input| match input {
+            ContactSource::Group(points) => points.len(),
+            ContactSource::Point(_) => 0,
+        })
+        .sum::<usize>();
     let converted = prepare_contacts(
         ComputeTaskPool::get(),
         &inputs,
         &transfers,
         &colliders,
         &constructions,
+        stages.as_deref(),
     );
     resting.0.clear();
     let mut contacts = Vec::new();
@@ -980,8 +993,22 @@ pub(crate) fn watch_contact_intake(
 /// An awake constraint retains its complete distribution until its owner's worker splits and
 /// converts it. A sleeping point already has a known press and needs only frame conversion.
 enum ContactSource<'a> {
-    Group(&'a [ContactTransfer]),
+    Group(ContactGroup<'a>),
     Point(ContactInput),
+}
+
+impl ContactSource<'_> {
+    fn root(&self) -> Entity {
+        match self {
+            Self::Group(points) => {
+                points
+                    .first()
+                    .expect("retained contact groups are nonempty")
+                    .reference
+            }
+            Self::Point(input) => input.point.reference,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -999,19 +1026,15 @@ fn prepare_contacts(
     transfers: &ContactTransfers,
     colliders: &Colliders,
     constructions: &Query<((&Position, &Rotation), &Breakage, Option<&Piece>)>,
+    stages: Option<&Stages>,
 ) -> Vec<Option<(Entity, Load)>> {
     let mut owners: BTreeMap<Entity, Vec<(usize, &ContactSource<'_>)>> = BTreeMap::new();
     for (index, input) in inputs.iter().enumerate() {
-        let root = match input {
-            ContactSource::Group(points) => {
-                points
-                    .first()
-                    .expect("retained contact groups are nonempty")
-                    .structure
-            }
-            ContactSource::Point(input) => input.point.structure,
-        };
+        let root = input.root();
         owners.entry(root).or_default().push((index, input));
+    }
+    if let Some(stages) = stages {
+        stages.add(Work::ContactReadRoots, owners.len() as u64);
     }
     let mut converted: Vec<_> = pool
         .scope(|scope| {
@@ -1034,7 +1057,7 @@ fn prepare_contacts(
                                     .iter()
                                     .map(|point| {
                                         convert(ContactInput {
-                                            point: *point,
+                                            point,
                                             press: -point.impulse / transfers.dt(),
                                             step: transfers.dt(),
                                         })
@@ -1065,16 +1088,16 @@ fn contact_load(
     press: Vec3,
     step: f32,
 ) -> Option<(Entity, Load)> {
-    let (transform, breakage, moving) = constructions.get(transfer.structure).ok()?;
+    let (transform, breakage, moving) = constructions.get(transfer.reference).ok()?;
     if moving.is_some() {
         return None; // A moving group's landings crumble it (`crate::debris::crumble`).
     }
-    let (element, chunk, parent) = colliders.get(transfer.structure_collider).expect(
+    let (element, chunk, parent) = colliders.get(transfer.reference_collider).expect(
         "a construction collider the last physics step touched stands until the laws' next refit",
     );
     assert_eq!(
         parent.parent(),
-        transfer.structure,
+        transfer.reference,
         "a construction's collider is its root's child"
     );
     let layout = &breakage.kind.layout;
@@ -1086,7 +1109,7 @@ fn contact_load(
         (None, None) => unreachable!("Colliders admits elements and chunks only"),
     };
     Some((
-        transfer.structure,
+        transfer.reference,
         Load {
             chunk,
             at: local,
@@ -1096,7 +1119,7 @@ fn contact_load(
             press: frame.turn(press),
             peak: None,
             origin: Origin::Contact {
-                other: transfer.body,
+                other: transfer.other,
                 step,
             },
         },

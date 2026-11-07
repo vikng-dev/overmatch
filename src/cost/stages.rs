@@ -47,6 +47,10 @@ labelled!(
         LandingPasses = "landing_passes",
         LandingOps = "landing_ops",
         ContactPoints = "contact_points",
+        RestingStaticPoints = "resting_static_points",
+        RestingMovingPoints = "resting_moving_points",
+        ContactRecords = "contact_records",
+        ContactReadRoots = "contact_read_roots",
         CollidersAdded = "colliders_added",
         CollidersRemoved = "colliders_removed",
         // Belt footprint work, independent of the construction contact reader.

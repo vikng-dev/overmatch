@@ -1596,9 +1596,9 @@ fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
             .resource::<ContactTransfers>()
             .presses()
             .filter(|(point, _)| {
-                point.body == tank
+                point.other == tank
                     && point
-                        .body_collider
+                        .other_collider
                         .is_some_and(|collider| world.get::<BumpStop>(collider).is_some())
             })
             .map(|(_, press)| -press.y)
@@ -1697,8 +1697,8 @@ fn a_parked_tank_loads_fixed_structure_through_its_belt() {
         let dt = transfers.dt();
         let mut tick_lift = 0.0;
         for (point, press) in transfers.presses() {
-            if point.body == tank && point.body_collider.is_none() {
-                assert_eq!(point.structure, slab, "the belt bears on the slab alone");
+            if point.other == tank && point.other_collider.is_none() {
+                assert_eq!(point.reference, slab, "the belt bears on the slab alone");
                 tick_lift -= press.y;
             }
         }

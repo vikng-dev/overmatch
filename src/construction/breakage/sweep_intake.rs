@@ -280,13 +280,13 @@ fn pushes(
     let batches = groups.par_splat_map(ComputeTaskPool::get(), None, |_, groups| {
         let mut pushes = BTreeMap::<Entity, Vec3>::new();
         for point in groups.iter().flat_map(|points| points.iter()) {
-            if standing(point.structure) || standing(point.body) {
+            if standing(point.reference) || standing(point.other) {
                 continue; // Standing matter's cut judges its own contact.
             }
             let approach = point.normal * point.effective_mass * point.closing_speed.max(0.0);
             let force = (point.impulse - approach) / transfers.dt();
-            *pushes.entry(point.body).or_default() += force;
-            *pushes.entry(point.structure).or_default() -= force;
+            *pushes.entry(point.other).or_default() += force;
+            *pushes.entry(point.reference).or_default() -= force;
         }
         pushes
     });
@@ -807,9 +807,10 @@ fn geometry(
 /// released plug's cut commits at once, and every later source resolves again on its topology
 /// with the gravity field re-solved there ([`fracture::parts::Assessment::resolved_on`]), which
 /// the owner keeps as its next law stage's factor. A later source meeting only matter an earlier
-/// cut freed has no witness and so no cut. Both passes count as work; owners never meet here. An
-/// owner an earlier round of this tick cut (`recut`) has no first pass: every source resolves on
-/// its current topology.
+/// cut freed has no witness and so no cut. Geometry stays within this batch; later sources filter
+/// its per-target witnesses by current coverage rather than cast again. Both resolutions count
+/// as work; owners never meet here. An owner an earlier round of this tick cut (`recut`) has no
+/// first pass: every source resolves on its current topology.
 fn owner_sequence(
     breakage: &mut Breakage,
     (root, pose): (Entity, Transform),
@@ -840,13 +841,21 @@ fn owner_sequence(
                         fracture::parts::Gravity::default(),
                     )
                 });
-                let (_, mut swept) =
+                let (_, swept) = if let Some(mut first) = first {
+                    first.retain_covered(&breakage.live.structure, &breakage.live.state);
+                    let mut patch = (&sources[index], first);
+                    resolve_patches(
+                        breakage,
+                        pose,
+                        std::slice::from_mut(&mut patch),
+                        Some(field),
+                    );
+                    patch
+                } else {
                     owner_geometry(breakage, pose, &[&sources[index]], dt, Some(field))
                         .pop()
-                        .expect("one source resolves one patch");
-                if let Some(first) = first {
-                    swept.work += first.work;
-                }
+                        .expect("one source resolves one patch")
+                };
                 swept
             }
         };
@@ -907,6 +916,18 @@ fn owner_geometry<'s>(
         .flatten()
         .collect();
     let mut patches: Vec<_> = sources.iter().copied().zip(sweeps).collect();
+    resolve_patches(breakage, pose, &mut patches, field);
+    patches
+}
+
+/// Body patches read one topology and preload; only their ordered effects interact.
+fn resolve_patches(
+    breakage: &mut Breakage,
+    pose: Transform,
+    mut patches: &mut [(&SweepSource, super::super::sweep::Sweep)],
+    field: Option<&mut (fracture::parts::Assessment, fracture::parts::Gravity)>,
+) {
+    let inverse = pose.rotation.inverse();
     let kind = &breakage.kind;
     let Live {
         structure,
@@ -920,8 +941,7 @@ fn owner_geometry<'s>(
             Some((current, preloads)) => preloads.get(structure, state, current),
             None => gravity.get(structure, state, assessment),
         };
-        // Body patches read the same topology and preload; only their ordered effects interact.
-        patches.par_splat_map_mut(pool, None, |_, patches| {
+        patches.par_splat_map_mut(ComputeTaskPool::get(), None, |_, patches| {
             for (source, swept) in patches {
                 if let Some(witness) = swept.witness {
                     kind.sweep.resolve(
@@ -936,7 +956,6 @@ fn owner_geometry<'s>(
             }
         });
     }
-    patches
 }
 
 /// Each exchanging body's one plastic exchange against every plug it released this round, with its
@@ -1358,6 +1377,125 @@ mod tests {
     use crate::contact_transfer::ContactTransfer;
     use crate::headless_test::{booted_driving_grid, driving_plane, start_fixed_clock};
 
+    /// The game's environment destruction: ordered cuts must keep a later target's witness,
+    /// resolve its reduced preload, and never repeat geometry for the same source snapshot.
+    #[test]
+    fn an_owner_batch_retains_later_witnesses_but_resolves_current_preload() {
+        use super::super::super::sweep::{Hull, RigidMotion, SourceTree};
+        ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+        let kind = crate::construction::tests::column_construction();
+        let fixture = || {
+            let mut owner = Breakage::new(kind.clone(), 0);
+            // Fixture: three cubes on frictional rests, each carrying the cubes above it.
+            for joint in &mut Arc::make_mut(&mut owner.live.structure).joints {
+                joint.bond = fracture::Bond::Resting;
+            }
+            owner.live.assessment = Arc::new(
+                fracture::parts::Assessment::at_rest(&owner.live.structure)
+                    .resolved_on(&owner.live.structure, &owner.live.state),
+            );
+            owner
+        };
+        let mut owner = fixture();
+        let chunks = owner.live.structure.chunks.clone();
+        let friction_load =
+            chunks[1].material.friction * chunks[1].mass * crate::physical_laws::gravity_mps2();
+        // Fixture: low contact mass leaves the drive dominant; the upper leaf leads by 0.5 m.
+        let source = |body, leaves: &[(f32, usize)], drive| SweepSource {
+            body: Entity::from_raw_u32(body).unwrap(),
+            shape: Arc::new(SourceTree::new(
+                leaves
+                    .iter()
+                    .map(|&(x, c)| Hull {
+                        hull: Collider::cuboid(0.2, 0.2, 0.2),
+                        position: chunks[c].centroid + Vec3::X * x,
+                        rotation: Quat::IDENTITY,
+                    })
+                    .collect(),
+            )),
+            motion: RigidMotion {
+                position: Vec3::NEG_X * 2.0,
+                rotation: Quat::IDENTITY,
+                centre: Vec3::NEG_X * 2.0,
+                velocity: Vec3::X * 4.0,
+                acceleration: Vec3::ZERO,
+                lead: 0.0,
+                spin: Vec3::ZERO,
+                dt: 1.0,
+            },
+            roots: BTreeSet::new(),
+            mass: 1e-6,
+            inertia: avian3d::prelude::ComputedAngularInertia::INFINITY,
+            axes: default(),
+            drive: Vec3::X * drive,
+            push: Vec3::ZERO,
+        };
+        let sources = [
+            source(1, &[(0.0, 2)], friction_load * 4.0),
+            source(2, &[(0.5, 2), (0.0, 1)], friction_load * 1.5),
+            source(3, &[(0.0, 2)], friction_load * 4.0),
+            source(4, &[(-4.0, 2)], friction_load * 4.0),
+        ];
+        let root = Entity::from_raw_u32(6).unwrap();
+        let pose = Transform::IDENTITY;
+        let initial = owner_geometry(
+            &mut owner,
+            pose,
+            &sources.iter().collect::<Vec<_>>(),
+            1.0,
+            None,
+        );
+        assert_eq!(initial[1].1.witness.unwrap().chunk, 2);
+        assert!(
+            !initial[1].1.released(),
+            "two cubes' preload holds the later source"
+        );
+        assert!(initial[3].1.witness.is_none());
+        let first_casts: usize = initial.iter().map(|(_, swept)| swept.work.casts).sum();
+        let got = owner_sequence(
+            &mut owner,
+            (root, pose),
+            (&sources, &[0, 1, 2, 3]),
+            (1.0, 1),
+            false,
+        );
+        assert_eq!(got[0].cut.as_ref().unwrap().plug, [2]);
+        assert_eq!(got[1].swept.witness.unwrap().chunk, 1);
+        assert_eq!(got[1].cut.as_ref().unwrap().plug, [1]);
+        assert!(
+            got[2].swept.witness.is_none(),
+            "the removed target leaves an empty patch"
+        );
+        assert!(got[3].swept.witness.is_none(), "an empty patch stays empty");
+        assert_eq!(
+            got.iter().map(|r| r.swept.work.casts).sum::<usize>(),
+            first_casts,
+            "an owner's immutable source snapshots query geometry once"
+        );
+        assert_eq!(got[3].swept.work.bounds, initial[3].1.work.bounds);
+
+        let mut fresh = fixture();
+        let mut expected = Vec::new();
+        for index in 0..sources.len() {
+            expected.extend(owner_sequence(
+                &mut fresh,
+                (root, pose),
+                (&sources, &[index]),
+                (1.0, 1),
+                index > 0,
+            ));
+        }
+        for (got, expected) in got.iter().zip(&expected) {
+            assert_eq!(got.swept.chunks, expected.swept.chunks);
+            assert_eq!(got.swept.load(), expected.swept.load());
+        }
+        // A new motion snapshot has its own query, even within the same tick.
+        let next = [source(5, &[(0.0, 0)], friction_load * 4.0)];
+        let next = owner_sequence(&mut owner, (root, pose), (&next, &[0]), (1.0, 1), true);
+        assert!(next[0].swept.work.casts > 0);
+        assert_eq!(next[0].cut.as_ref().unwrap().plug, [0]);
+    }
+
     /// The game's environment destruction: a body a heavier one presses into rubble or standing
     /// matter reads that push in its drive, each solver contact once, regardless of classification;
     /// standing construction pushes nothing, since its own cut judges that contact. Without the
@@ -1369,10 +1507,10 @@ mod tests {
         let [hull, rubble, under, wall] = [1, 2, 3, 4].map(|i| Entity::from_raw_u32(i).unwrap());
         // Fixture: one point per contact, impulses in N s over a 0.5 s step.
         let point = |structure, body, impulse| ContactTransfer {
-            structure,
-            structure_collider: structure,
-            body,
-            body_collider: Some(body),
+            reference: structure,
+            reference_collider: structure,
+            other: body,
+            other_collider: Some(body),
             point: Vec3::ZERO,
             normal: Vec3::Y,
             impulse,
@@ -1410,10 +1548,10 @@ mod tests {
             [(10.0, 230.0, 0.0), (0.0, 3.0, 6.0), (10.0, 233.0, 6.0)]
         {
             let contact = |structure, body, impulse| ContactTransfer {
-                structure,
-                structure_collider: structure,
-                body,
-                body_collider: Some(body),
+                reference: structure,
+                reference_collider: structure,
+                other: body,
+                other_collider: Some(body),
                 point: Vec3::ZERO,
                 normal: Vec3::X,
                 impulse: Vec3::X * impulse,

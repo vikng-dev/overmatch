@@ -1568,11 +1568,11 @@ mod tests {
         let mut seen = 0;
         for (point, press) in transfers
             .presses()
-            .filter(|(point, ..)| point.body == source)
+            .filter(|(point, ..)| point.other == source)
         {
-            assert_eq!(point.structure, root);
-            assert_eq!(point.structure_collider, collider);
-            assert_eq!(point.body_collider, None);
+            assert_eq!(point.reference, root);
+            assert_eq!(point.reference_collider, collider);
+            assert_eq!(point.other_collider, None);
             reaction += press * transfers.dt();
             seen += 1;
         }
@@ -1586,7 +1586,7 @@ mod tests {
             !app.world()
                 .resource::<ContactTransfers>()
                 .presses()
-                .any(|(point, ..)| point.body == source),
+                .any(|(point, ..)| point.other == source),
             "an implicit contact must be refreshed each tick, never retained as a sleeping pair"
         );
     }
@@ -1664,9 +1664,9 @@ mod tests {
         app.update();
         let transfers = app.world().resource::<ContactTransfers>();
         let mut load = Vec3::ZERO;
-        for (point, press) in transfers.presses().filter(|(p, ..)| p.structure == slab) {
-            assert_eq!(point.body, source, "the contact is named with its source");
-            assert_eq!(point.body_collider, None);
+        for (point, press) in transfers.presses().filter(|(p, ..)| p.reference == slab) {
+            assert_eq!(point.other, source, "the contact is named with its source");
+            assert_eq!(point.other_collider, None);
             load += press * transfers.dt();
         }
         let took: Vec3 = pushes.iter().map(|push| push.impulse).sum();
@@ -1970,7 +1970,7 @@ mod tests {
             let reading = app.world().resource::<ContactTransfers>();
             let transferred: Vec3 = reading
                 .presses()
-                .filter(|(p, _)| p.structure == slab && p.body == source)
+                .filter(|(p, _)| p.reference == slab && p.other == source)
                 .map(|(_, press)| press * reading.dt())
                 .sum();
             let took: Vec3 = pushes.iter().map(|p| p.impulse).sum();
