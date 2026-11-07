@@ -613,6 +613,7 @@ pub(crate) struct Witness {
     pub(crate) time: f32,
     pub(crate) normal: Vec3,
     pub(crate) at: Vec3,
+    /// The closing speed along `normal` at `time`, m/s, never negative.
     pub(crate) speed: f32,
     /// The chunk the hull meets first, whose material and size set the impact's peak force.
     pub(crate) chunk: usize,
@@ -807,6 +808,8 @@ mod tests {
             state,
             &source,
             RigidMotion {
+                acceleration: Vec3::ZERO,
+                lead: 0.0,
                 position: motion.position,
                 rotation: motion.rotation,
                 velocity: motion.velocity,
@@ -1001,6 +1004,8 @@ mod tests {
                 &state,
                 &tree,
                 RigidMotion {
+                    acceleration: Vec3::ZERO,
+                    lead: 0.0,
                     position: Vec3::NEG_X,
                     centre: Vec3::NEG_X,
                     rotation: Quat::IDENTITY,
@@ -1045,6 +1050,8 @@ mod tests {
                 &state,
                 &tree,
                 RigidMotion {
+                    acceleration: Vec3::ZERO,
+                    lead: 0.0,
                     position: Vec3::ZERO,
                     centre: Vec3::ZERO,
                     rotation: Quat::IDENTITY,
@@ -1097,6 +1104,8 @@ mod tests {
             rotation: Quat::IDENTITY,
         }]);
         let motion = RigidMotion {
+            acceleration: Vec3::ZERO,
+            lead: 0.0,
             position: Vec3::new(-1.0, 0.2, 0.3),
             rotation: Quat::from_rotation_y(0.3),
             centre: Vec3::new(0.1, 0.8, -0.2),
@@ -1153,6 +1162,8 @@ mod tests {
             rotation: Quat::IDENTITY,
         }]);
         let bounds = tree.bounds(RigidMotion {
+            acceleration: Vec3::ZERO,
+            lead: 0.0,
             position: Vec3::X * radius,
             rotation: Quat::IDENTITY,
             centre: Vec3::ZERO,
@@ -1182,6 +1193,8 @@ mod tests {
             .collect();
         let tree = SourceTree::new(leaves.clone());
         let motion = RigidMotion {
+            acceleration: Vec3::ZERO,
+            lead: 0.0,
             position: Vec3::NEG_X,
             rotation: Quat::IDENTITY,
             velocity: Vec3::X * 4.0,
@@ -1276,6 +1289,8 @@ mod tests {
             &state,
             &tree,
             RigidMotion {
+                acceleration: Vec3::ZERO,
+                lead: 0.0,
                 position: Vec3::NEG_X,
                 rotation: Quat::IDENTITY,
                 velocity: Vec3::X * 2.0,
@@ -1289,6 +1304,73 @@ mod tests {
         let hit = result.witness.unwrap();
         assert!((hit.time - 0.4).abs() < 1e-4, "{hit:?}");
         assert!((hit.speed - 2.0).abs() < 1e-4);
+    }
+
+    /// The game's environment destruction: a witness closes at its source's velocity at the
+    /// witness's time, `v + a t`, while the cast reaches with the velocity that carries the body
+    /// to its tick-end pose. A body pressed onto matter at rest makes no impact and loads the cut
+    /// with its drive alone; one a gap away meets it at `a t`. Reading the reach as the impact
+    /// speed charges a resting body every tick for a fall it never makes.
+    #[test]
+    fn a_witness_closes_at_its_sources_velocity_at_the_witness_time() {
+        let (structure, geometry) = wall(16.0);
+        let state = State::new(&structure);
+        let tree = SourceTree::new(vec![Hull {
+            hull: Collider::cuboid(0.4, 0.4, 0.4),
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+        }]);
+        // Fixture: from rest, 2 m/s² toward the wall over a 1 s tick; the reach velocity is the
+        // body's at 0.5 s. The cube's face starts 1 mm into the wall, or 0.4 m short of it.
+        let (acceleration, lead) = (Vec3::X * 2.0, 0.5);
+        let at_gap = |gap: f32| {
+            let position = Vec3::X * (-0.3 - gap);
+            geometry.swept(
+                &structure,
+                &state,
+                &tree,
+                RigidMotion {
+                    position,
+                    rotation: Quat::IDENTITY,
+                    velocity: acceleration * lead,
+                    acceleration,
+                    lead,
+                    centre: position,
+                    spin: Vec3::ZERO,
+                    dt: 1.0,
+                },
+            )
+        };
+        let mut resting = at_gap(-0.001);
+        let touching = resting
+            .witness
+            .expect("a pressed body is inward at its matter");
+        assert_eq!(touching.time, 0.0);
+        assert_eq!(touching.speed, 0.0, "a body at rest closes at its rest");
+        let falling = at_gap(0.4)
+            .witness
+            .expect("the reach carries the body across its gap");
+        // DERIVED: 0.4 m at the 1 m/s reach. Resolution: fixture-scale GJK error.
+        assert!((falling.time - 0.4).abs() < 1e-4, "{falling:?}");
+        assert!(
+            (falling.speed - 2.0 * falling.time).abs() < 1e-5,
+            "a body meets matter at its velocity then, not at its reach: {falling:?}"
+        );
+        // Fixture: a 100 kg contact mass pressed by its 1 kN drive.
+        let preload = preload(&structure, &state);
+        geometry.resolve(
+            &structure,
+            &state,
+            &preload,
+            &mut resting,
+            100.0,
+            Vec3::X * 1e3,
+        );
+        let load = resting.load().expect("a witnessed patch reads a load");
+        assert_eq!(
+            load.demand, load.drive,
+            "a resting cut reads its drive alone"
+        );
     }
 
     fn driven_patch(

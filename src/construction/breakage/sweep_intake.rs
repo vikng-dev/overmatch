@@ -540,6 +540,8 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                 rotation,
                 centre,
                 velocity,
+                acceleration,
+                lead: travel,
                 spin: forces.angular_velocity(),
                 dt,
             };
@@ -569,7 +571,8 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
 /// DERIVED: Avian 0.7 adds `a dt / N` to the velocity before each of its `N` substep position
 /// steps (`pre_process_velocity_increments`, then `integrate_velocities`), so a body no contact
 /// touches travels `v dt + a dt² (N + 1) / (2N)`: the cast's one velocity, `v + a` times this,
-/// reaches that pose.
+/// reaches that pose, and is the body's velocity this far into the tick
+/// ([`super::super::sweep::RigidMotion::lead`]).
 fn travel(substeps: &avian3d::prelude::SubstepCount, dt: f32) -> f32 {
     (substeps.0 + 1) as f32 / (2 * substeps.0) as f32 * dt
 }
@@ -612,6 +615,8 @@ fn departure_sources(
                 rotation: root.rotation,
                 centre: position + root.rotation * props.center_of_mass,
                 velocity: root.rotation * launch.velocity + p.gravity.0 * travel,
+                acceleration: p.gravity.0,
+                lead: travel,
                 spin: root.rotation * launch.spin,
                 dt,
             };
@@ -773,6 +778,8 @@ fn owner_geometry<'s>(
                             position: inverse * (source.motion.position - pose.translation),
                             rotation: inverse * source.motion.rotation,
                             velocity: inverse * source.motion.velocity,
+                            acceleration: inverse * source.motion.acceleration,
+                            lead: source.motion.lead,
                             centre: inverse * (source.motion.centre - pose.translation),
                             spin: inverse * source.motion.spin,
                             dt,

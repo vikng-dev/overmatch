@@ -452,7 +452,7 @@ The demand is the peak force of the hull's impact on the patch plus its drive:
 `F = P(m_eff, v_n) + F_drive,n`, with `P` the Hertz peak force (Johnson 1985, §11.4) that
 landings use too (`contact_law::peak_force`): the witness chunk's material and volume-sphere
 radius on one side, the hull rigid and flat on the other (StandIn: no body data carries a hull's
-stiffness). DERIVED: the first inward surface witness supplies the speed and contact mass
+stiffness). DERIVED: the first inward surface witness supplies the contact mass
 `m_eff = 1 / (1/m + (r cross n) dot I_world^-1 (r cross n))`, as in Avian 0.7's
 `ContactNormalPart::generate` against a fixed target. The lever `r` starts at the moving centre
 of mass; inertia is in world coordinates at contact time, with Avian's locked-axis response.
@@ -460,7 +460,12 @@ No physics step enters the demand. The inward drive adds to it: all Avian integr
 its contact solve, accumulated and constant forces and gravity, on the body's free axes (a hull
 its belts hold at rest on level ground drives nothing vertically). The cast reads the same
 motion: DERIVED, Avian's `N` substeps carry a body no contact touches `v dt + a dt² (N + 1)/(2N)`,
-which the cast's one velocity reaches at the tick's end. If `F > C`, break the minimum cut and
+which the cast's one velocity reaches at the tick's end; that velocity decides only the reach and
+which motion is inward. The witness's speed `v_n` is the body's closing speed at the witness's
+time `t`, `v + a t`, never negative: a body resting on matter closes at its rest and loads the cut
+with its drive alone (MEASURED: a 231 kg body on a standing 8 m³ brick chunk read 20.96 kN,
+9.2 times its weight, while the reach stood in for the impact speed, and reads its 2.27 kN weight
+now). If `F > C`, break the minimum cut and
 remove its whole plug `S*` from the standing construction. Otherwise the sweep does nothing to
 the hull: **Avian owns the stop** (owner decision, 2026-11-07). Its contact solver, speculative
 points included, stops the hull at matter whose cut holds as it stops a hull at any obstacle, and
