@@ -866,6 +866,8 @@ type Colliders<'w, 's> = Query<
 >;
 
 mod sweep_intake;
+#[cfg(test)]
+pub(crate) use sweep_intake::pushes;
 pub(crate) use sweep_intake::{ReleasedMotion, SweepAccount, SweepCast, SweepContacts};
 
 /// AUTHORITY: each physics step's body contacts on the constructions as loads, read once a step

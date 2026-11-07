@@ -556,12 +556,28 @@ Avian's warm-start matcher treats unknown feature IDs as absent identities: thos
 match only by nearby anchors. The engine patch and its class witness are recorded in
 `vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`, "Unknown contact features".
 
-A cut reads the touching body's own motion and drive, and a pusher reaches it only through that
-drive: the force the body's solver contacts moved into it over the last step from every body but
-standing construction, less the normal momentum that stopped the approach, is part of its drive
-and cast acceleration. Per point it reads `(J - normal × m_eff × max(closing_speed, 0)) / dt`:
-velocity already holds the approach's momentum, so replaying it as drive counts a blow twice
-(StandIn: no sweep couples bodies in contact; `sweep_intake::pushes`). Without it a pusher's force reached standing
+A cut reads the touching body's own motion and drive, and a pusher reaches it through an
+estimated press from the last step's solver contacts with every body but standing construction.
+At each point, let `Jn = normal · J` and `S = m_eff × max(closing_speed, 0)`. The reading is
+`(J - normal × Jn + normal × max(Jn - S, 0)) / dt`: friction stays whole, and the normal remainder
+cannot pull or exceed the compression the point transferred. An unused speculative point reads
+zero. This is a **StandIn for the missing coupled contact response**, not an exact separation of
+blows from presses (`sweep_intake::pushes`): `S` estimates the momentum that point would need to
+stop the approach alone, while manifolds and separate contacts share the actual stop. It can
+replay part of a blow or under-read a simultaneous press; velocity already holds the blow.
+
+DERIVED bound for a uniform box with equal stopping shares at its four face corners: with face
+sides `a, b` and thickness `c`, `Σ m_eff / m = 4 / (1 + 3a²/(a²+c²) + 3b²/(b²+c²)) ≥ 4/7`.
+Thus at most `3/7` (about 43%) of a pure normal stop remains as press, approached in the thin-box
+limit. Unequal allocations and shared stops have only the pointwise bound
+`0 ≤ Jn_press ≤ max(Jn, 0)`, not that fraction. Tangential stopping momentum is not subtracted;
+soft-contact pushout and restitution can also read as press. Discarding each point's first
+positive substep is not an exact alternative: Avian's speculative response can still allow
+closing. MEASURED on the force-free 2 × 1 × 0.25 m slab fixture, 943 N·s of its 998 N·s transfer
+arrived after those first positive substeps. The steady-force class witness checks that a press
+continues to transmit through one manifold or two supports, with full and halved warm starts.
+
+Without the contact reading a pusher's force reached standing
 matter only through the solver contact the structure check reads, a law stage late, while the cuts
 ahead of the pushed body read that body's own demand: MEASURED on the tracked ram, from +3 the hull
 meets the house only through rubble, which took 150.2 and 105.7 kN·s off the hull at +3 and +4
