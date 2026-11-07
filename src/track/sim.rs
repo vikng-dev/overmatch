@@ -903,9 +903,6 @@ fn gather_drive_supports(
     near.dedup();
     // Gathering reads body state once, before any source applies its own forces.
     supports.pieces = RubbleBodies::gather(&rubble, &near, &bodies);
-    if let Some(stages) = stages.as_deref() {
-        stages.add(Work::BeltTriangulations, near.len() as u64);
-    }
     supports.pieces.stages = stages.as_deref().cloned();
 }
 
