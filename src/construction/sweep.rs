@@ -144,8 +144,9 @@ struct Demand {
 
 impl Geometry {
     /// Bake the sweep's chunk hulls, each about its bounds' centre, refusing a chunk whose hull
-    /// reaches past [`CAST_HALF_EXTENT_M`] from it, or whose contact hull cannot be built: the
-    /// load gate's refusal, its caller naming the file.
+    /// reaches past [`CAST_HALF_EXTENT_M`] from it, a joint between chunks on no face of one of
+    /// them, or a chunk whose contact hull cannot be built: the load gate's refusal, its caller
+    /// naming the file.
     pub(crate) fn new(blocks: &[Block], structure: &Structure) -> Result<Self, String> {
         use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
         let mut hulls = Vec::with_capacity(blocks.len());
@@ -183,8 +184,14 @@ impl Geometry {
             });
             hulls.push(about(centre));
             centres.push(centre);
-            let joints = incident[c].iter().map(|&j| &structure.joints[j]);
-            let faces = super::breakage::joint_faces(block, joints);
+            let joints = incident[c].iter().map(|&j| (j, &structure.joints[j]));
+            let faces = super::breakage::joint_faces(block, joints).map_err(|j| {
+                format!(
+                    "joint {j} lies on no face of chunk {c}, so freed the chunk would meet its \
+                     neighbour there with no contact gap: bake the construction again so each \
+                     joint between chunks lies on a face of both"
+                )
+            })?;
             let hull = super::breakage::contact_collider(block, &faces, chunk.centroid)
                 .ok_or_else(|| {
                     format!(
@@ -1458,6 +1465,17 @@ mod tests {
         buried: &[usize],
         edges: &[(usize, usize)],
     ) -> (Structure, Geometry) {
+        plug_fixture_turned(Quat::IDENTITY, centres, buried, edges)
+    }
+
+    /// [`plug_fixture`] with every cube turned by `rotation` about its centre, so a joint along a
+    /// turned axis lies on the two cubes' shared face.
+    fn plug_fixture_turned(
+        rotation: Quat,
+        centres: &[Vec3],
+        buried: &[usize],
+        edges: &[(usize, usize)],
+    ) -> (Structure, Geometry) {
         let mut material = Material::of(
             crate::substances::SubstanceRegistry::shipped_static(),
             "Brick",
@@ -1482,7 +1500,7 @@ mod tests {
                         .into_iter()
                         .flat_map(|x| {
                             [-0.5, 0.5].into_iter().flat_map(move |y| {
-                                [-0.5, 0.5].map(move |z| centre + Vec3::new(x, y, z))
+                                [-0.5, 0.5].map(move |z| centre + rotation * Vec3::new(x, y, z))
                             })
                         })
                         .collect(),
@@ -1718,7 +1736,12 @@ mod tests {
     #[test]
     fn normal_crushing_stays_finite_on_an_oblique_joint() {
         let direction = Vec3::ONE.normalize();
-        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, direction], &[1], &[(0, 1)]);
+        let (mut structure, geometry) = plug_fixture_turned(
+            Quat::from_rotation_arc(Vec3::X, direction),
+            &[Vec3::ZERO, direction],
+            &[1],
+            &[(0, 1)],
+        );
         // Fixture: a frictional rest with a 10 kPa bulk limit and unit area.
         for chunk in &mut structure.chunks {
             chunk.material.compressive_strength = 1e4;
@@ -1893,6 +1916,79 @@ mod tests {
                 .fold(0.0, f32::max);
             println!("MEASURED {id}: largest chunk half-extent {farthest} m");
         }
+    }
+
+    /// Fixture: a row of unit-section brick slabs along x, `widths` m thick, each joined to the
+    /// next on their shared face; `off_face` moves the joint after slab `a` to `at`.
+    fn slab_row(widths: &[f32], off_face: Option<(usize, Vec3)>) -> (Vec<Block>, Structure) {
+        let material = Material::of(
+            crate::substances::SubstanceRegistry::shipped_static(),
+            "Brick",
+        )
+        .unwrap()
+        .unwrap();
+        let (mut blocks, mut structure, mut x) = (Vec::new(), Structure::default(), 0.0);
+        for (c, &width) in widths.iter().enumerate() {
+            let points = [x, x + width]
+                .into_iter()
+                .flat_map(|x| {
+                    [-0.5, 0.5]
+                        .into_iter()
+                        .flat_map(move |y| [-0.5, 0.5].map(move |z| Vec3::new(x, y, z)))
+                })
+                .collect::<Vec<_>>();
+            blocks.push(Block::hull(points).unwrap());
+            structure.chunks.push(Chunk {
+                volume: width,
+                mass: width * material.density,
+                centroid: Vec3::new(x + width / 2.0, 0.0, 0.0),
+                material,
+                buried: false,
+            });
+            x += width;
+            if c > 0 {
+                let centroid = match off_face {
+                    Some((a, at)) if a + 1 == c => at,
+                    _ => Vec3::new(x - width, 0.0, 0.0),
+                };
+                structure.joints.push(Joint {
+                    a: c - 1,
+                    b: Side::Chunk(c),
+                    area: 1.0,
+                    centroid,
+                    normal: Vec3::X,
+                    bond: Bond::Bonded(material.seam),
+                });
+            }
+        }
+        structure.part_of = (0..widths.len()).collect();
+        (blocks, structure)
+    }
+
+    /// The game's environment destruction: the load gate refuses a joint between chunks that lies
+    /// on no face of one of them, naming the joint and the chunk, since its contact hull could not
+    /// stand back there; and a chunk thinner than its two setbacks, naming the chunk and the fix.
+    /// Mutants: silently skip the unmatched joint, or build no contact hull for the sliver.
+    #[test]
+    fn the_load_gate_refuses_a_joint_off_its_faces_and_a_chunk_its_setbacks_consume() {
+        let (blocks, structure) = slab_row(&[0.5, 0.5], None);
+        Geometry::new(&blocks, &structure).expect("joints on shared faces are admitted");
+        // Fixture: the joint's centroid inside slab 0, on no face of either slab.
+        let (blocks, structure) = slab_row(&[0.5, 0.5], Some((0, Vec3::new(0.25, 0.0, 0.0))));
+        let refusal = Geometry::new(&blocks, &structure).unwrap_err();
+        assert!(
+            refusal.contains("joint 0") && refusal.contains("chunk 0") && refusal.contains("bake"),
+            "{refusal}"
+        );
+        // Fixture: a 1.5 mm sliver between two jointed slabs, under its two setbacks.
+        let sliver = 1.5e-3;
+        assert!(sliver < 2.0 * super::super::breakage::LOOSE_GAP_M);
+        let (blocks, structure) = slab_row(&[0.5, sliver, 0.5], None);
+        let refusal = Geometry::new(&blocks, &structure).unwrap_err();
+        assert!(
+            refusal.contains("chunk 1") && refusal.contains("thicker"),
+            "{refusal}"
+        );
     }
 
     /// The game's environment destruction: carriers and source share one plastic velocity.

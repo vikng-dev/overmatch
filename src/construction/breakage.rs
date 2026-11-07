@@ -1889,8 +1889,9 @@ fn apply_deposits(mut p: DepositParam) {
                                 spin: body.angular_velocity(),
                                 centre: body.position().0 + body.rotation().0 * centre.0,
                             };
-                            // Moving owners transfer their colliders in split_groups.
-                            (motion, BTreeMap::new())
+                            // Moving owners transfer their colliders in split_groups; their laws
+                            // prepare no departure that would read these.
+                            (motion, ReusableColliders::Standing(BTreeMap::new()))
                         }
                         None => {
                             let motion = ReleasedMotion {
@@ -2522,15 +2523,24 @@ pub(crate) fn joint_face(block: &Block, joint: &Joint) -> Option<usize> {
     })
 }
 
-/// Which faces of `block` carry one of its `joints`: where another body's coplanar face can meet
-/// it, a neighbour's once the two ride different bodies, or the ground's. A joint on none of its
-/// faces (soil holding a buried chunk's side) meets it on no coplanar face, so sets none back.
-pub(crate) fn joint_faces<'a>(block: &Block, joints: impl Iterator<Item = &'a Joint>) -> Vec<bool> {
+/// Which faces of `block` carry one of its `joints` (each with its index): where another body's
+/// coplanar face can meet it, a neighbour's once the two ride different bodies, or the anchor
+/// plane's. `Err` names a chunk-to-chunk joint on none of the faces: freed, its chunk would meet
+/// that neighbour with no contact gap. A ground anchor on no face (soil bearing a chunk's side)
+/// sets none back: the terrain a freed chunk meets is a collider of its own, not that plane.
+pub(crate) fn joint_faces<'a>(
+    block: &Block,
+    joints: impl Iterator<Item = (usize, &'a Joint)>,
+) -> Result<Vec<bool>, usize> {
     let mut faces = vec![false; block.planes.len()];
-    for face in joints.filter_map(|joint| joint_face(block, joint)) {
-        faces[face] = true;
+    for (j, joint) in joints {
+        match (joint_face(block, joint), joint.b) {
+            (Some(face), _) => faces[face] = true,
+            (None, Side::Ground) => {}
+            (None, Side::Chunk(_)) => return Err(j),
+        }
     }
-    faces
+    Ok(faces)
 }
 
 /// A freed chunk's contact hull about `origin`: `block`'s occupied planes with each of its joint
@@ -2667,44 +2677,53 @@ fn ballistic_layers() -> CollisionLayers {
     CollisionLayers::new([Layer::Armor], LayerMask::NONE)
 }
 
-/// A chunk's colliders under its owner: the occupied one always, the contact one once freed.
-#[derive(Clone, Copy)]
-struct ChunkEntities {
-    occupied: Entity,
-    contact: Option<Entity>,
+/// A departing owner's existing chunk colliders, by chunk, indexed once. A standing owner holds
+/// the occupied collider of each chunk whose element has cracked, and its departing chunks build
+/// their contact hulls fresh; a piece holds both colliders of every chunk, `[occupied, contact]`,
+/// since each has ridden both since it first left.
+enum ReusableColliders {
+    Standing(BTreeMap<u16, Entity>),
+    Piece(BTreeMap<u16, [Entity; 2]>),
 }
 
 type ChunkChildren<'w, 's> = Query<'w, 's, (&'static ChunkCollider, Has<BallisticVolume>)>;
-type ReusableColliders = BTreeMap<u16, ChunkEntities>;
 
-/// Existing colliders, indexed once per departing owner.
+/// A standing owner's chunk colliders among its `children`.
 fn reusable_colliders(children: Option<&Children>, chunks: &ChunkChildren) -> ReusableColliders {
-    let (mut occupied, mut contact) = (BTreeMap::new(), BTreeMap::new());
+    let mut occupied = BTreeMap::new();
     for &entity in children.into_iter().flatten() {
         if let Ok((chunk, ballistic)) = chunks.get(entity) {
-            let side = if ballistic {
-                &mut occupied
-            } else {
-                &mut contact
-            };
+            assert!(ballistic, "a standing chunk carries no contact hull");
             assert!(
-                side.insert(chunk.0, entity).is_none(),
-                "an owner has one occupied and at most one contact collider per chunk"
+                occupied.insert(chunk.0, entity).is_none(),
+                "a standing chunk has one collider"
             );
         } // Element and view children have no chunk address.
     }
-    let reusable = occupied
-        .into_iter()
-        .map(|(chunk, occupied)| {
-            let contact = contact.remove(&chunk);
-            (chunk, ChunkEntities { occupied, contact })
-        })
-        .collect();
-    assert!(
-        contact.is_empty(),
-        "a chunk's contact collider rides beside its occupied one"
-    );
-    reusable
+    ReusableColliders::Standing(occupied)
+}
+
+/// A piece's chunk colliders among its `children`: both of every chunk it carries.
+fn piece_colliders(children: &Children, chunks: &ChunkChildren) -> ReusableColliders {
+    let mut both = BTreeMap::<u16, [Option<Entity>; 2]>::new();
+    for &entity in children {
+        if let Ok((chunk, ballistic)) = chunks.get(entity) {
+            let side = &mut both.entry(chunk.0).or_default()[usize::from(!ballistic)];
+            assert!(
+                side.replace(entity).is_none(),
+                "a piece's chunk has one occupied and one contact collider"
+            );
+        } // View children have no chunk address.
+    }
+    ReusableColliders::Piece(
+        both.into_iter()
+            .map(|(chunk, [occupied, contact])| {
+                let occupied = occupied.expect("a piece's chunk keeps its occupied collider");
+                let contact = contact.expect("a piece's chunk rides its contact hull");
+                (chunk, [occupied, contact])
+            })
+            .collect(),
+    )
 }
 
 /// Where a departing chunk's collider comes from: its existing entity, rehomed, or prepared fresh.
@@ -2779,19 +2798,30 @@ fn prepare_group(departure: Departure, reusable: &ReusableColliders) -> Prepared
         .group
         .iter()
         .map(|&c| {
-            let existing = reusable.get(&(c as u16));
+            let (occupied, contact) = match reusable {
+                ReusableColliders::Standing(occupied) => (
+                    match occupied.get(&(c as u16)) {
+                        Some(&entity) => ColliderSource::Rehome(entity),
+                        None => ColliderSource::Fresh(occupied_collider(kind, c, rotation)),
+                    },
+                    ColliderSource::Fresh(freed_contact(kind, c, rotation)),
+                ),
+                ReusableColliders::Piece(both) => {
+                    let [occupied, contact] = *both
+                        .get(&(c as u16))
+                        .expect("a split child's chunks are its parent's");
+                    (
+                        ColliderSource::Rehome(occupied),
+                        ColliderSource::Rehome(contact),
+                    )
+                }
+            };
             PreparedChunk {
                 local: Transform::from_translation(
                     kind.structure.chunks[c].centroid - departure.launch.centroid,
                 ),
-                occupied: match existing {
-                    Some(entities) => ColliderSource::Rehome(entities.occupied),
-                    None => ColliderSource::Fresh(occupied_collider(kind, c, rotation)),
-                },
-                contact: match existing.and_then(|entities| entities.contact) {
-                    Some(entity) => ColliderSource::Rehome(entity),
-                    None => ColliderSource::Fresh(freed_contact(kind, c, rotation)),
-                },
+                occupied,
+                contact,
             }
         })
         .collect();
@@ -2853,7 +2883,10 @@ fn spawn_piece(
 
 #[cfg(test)]
 fn spawn_group(commands: &mut Commands, departure: Departure) {
-    spawn_prepared(commands, prepare_group(departure, &BTreeMap::new()));
+    spawn_prepared(
+        commands,
+        prepare_group(departure, &ReusableColliders::Standing(BTreeMap::new())),
+    );
 }
 
 /// Commit a group from its synchronous, independently prepared construction state.
@@ -3035,7 +3068,7 @@ fn split_groups(
             let root = breakage.physics_frame(body);
             let inverse = root.rotation.inverse();
             let colliders = colliders.expect("a piece owns its chunk colliders");
-            let reusable = reusable_colliders(Some(colliders), &chunks);
+            let reusable = piece_colliders(colliders, &chunks);
             let children = split.prepare(
                 ComputeTaskPool::get(),
                 breakage,
