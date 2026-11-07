@@ -607,10 +607,11 @@ mod tests {
     /// The game's environment destruction: the tracked ram recipe must open occupied hull space
     /// within the owner's two-tick contact bar, and the source must lose the momentum its chunks take.
     /// At impact +1 and +2 every source of the hull's momentum change is named, the reading that
-    /// attributes its speed loss. Every tick, every contact the solver resolves against standing
-    /// construction matter is against matter a cut judged that tick (class invariant: a contact no
-    /// cut judged stops a body without a verdict). Counts, speeds and the advance by +60 are observations; the gate
-    /// pins the owner's latency and conservation.
+    /// attributes its speed loss. Every tick, every solver contact that moves a body the sweep cast
+    /// against standing construction matter is against matter that body's cut judged that tick
+    /// (class invariant: a contact no cut judged stops a body without a verdict). Counts, speeds
+    /// and the advance by +60 are observations; the gate pins the owner's latency and
+    /// conservation.
     #[test]
     fn tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum() {
         use crate::construction::breakage::{Breakage, SweepAccount};
@@ -621,6 +622,7 @@ mod tests {
         use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
         let mut app = booted_sim_on(Some(crate::terrain_grid::tests::shipped_grid()));
         start_fixed_clock(&mut app);
+        read_unjudged_contacts(&mut app);
         let tank = app
             .world_mut()
             .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
@@ -676,7 +678,7 @@ mod tests {
             let before = app.world().get::<LinearVelocity>(tank).unwrap().0;
             let start = app.world().get::<Position>(tank).unwrap().0;
             drive_tick(&mut app, tank, 1.0, 0.0);
-            assert_judged_contacts(&mut app, tick);
+            assert_judged_contacts(&app, tick);
             let account = app.world().resource::<SweepAccount>();
             (rounds, unswept) = (rounds.max(account.rounds), unswept + account.unswept);
             if account.contacts.contains_key(&(tank, ordinal)) && contact.is_none() {
@@ -867,34 +869,94 @@ mod tests {
         }
     }
 
-    /// No solver point moved momentum against standing construction matter outside the cast of
-    /// the body it touches this tick; a failure lists each as (body, collider, point, impulse).
-    fn assert_judged_contacts(app: &mut App, tick: usize) {
-        use bevy::ecs::system::RunSystemOnce;
-        let unjudged = app
-            .world_mut()
-            .run_system_once(
-                |hooks: crate::construction::breakage::SweepContacts,
-                 transfers: Res<crate::contact_transfer::ContactTransfers>| {
-                    transfers
-                        .groups()
-                        .flatten()
-                        .filter(|point| {
-                            point.body_collider.is_some()
-                                && point.impulse != Vec3::ZERO
-                                && hooks
-                                    .unjudged(point.structure_collider, point.body, point.point)
-                                    .expect("the authority sweeps every tick")
-                        })
-                        .map(|p| (p.body, p.structure_collider, p.point, p.impulse))
-                        .collect::<Vec<_>>()
-                },
-            )
-            .expect("the hook's parameters are valid in the shipped app");
+    /// This tick's solver points that moved a body the sweep cast through exposed standing
+    /// construction matter outside that body's patches, as (body, collider, point, impulse). Read
+    /// after the solve and before the laws commit, so matter the structure check frees afterwards
+    /// still reads as it stood, and from the sweep's own patches and the owner's state, not from
+    /// the collision hook's predicate.
+    #[derive(Resource, Default)]
+    struct Unjudged(Vec<(Entity, Entity, Vec3, Vec3)>);
+
+    fn read_unjudged_contacts(app: &mut App) {
+        app.init_resource::<Unjudged>().add_systems(
+            FixedPostUpdate,
+            read_unjudged
+                .after(avian3d::prelude::PhysicsSystems::Writeback)
+                .before(crate::construction::breakage::LawSet),
+        );
+    }
+
+    fn assert_judged_contacts(app: &App, tick: usize) {
+        let unjudged = &app.world().resource::<Unjudged>().0;
         assert!(
             unjudged.is_empty(),
             "the solver resolved standing matter no cut judged at tick {tick}: {unjudged:?}"
         );
+    }
+
+    fn read_unjudged(
+        transfers: Res<crate::contact_transfer::ContactTransfers>,
+        account: Res<crate::construction::breakage::SweepAccount>,
+        colliders: Query<(
+            Option<&crate::construction::Element>,
+            Option<&crate::construction::breakage::ChunkCollider>,
+        )>,
+        standing: Query<
+            (
+                &crate::construction::breakage::Breakage,
+                &avian3d::prelude::Position,
+                &avian3d::prelude::Rotation,
+            ),
+            Without<crate::construction::breakage::Piece>,
+        >,
+        mut unjudged: ResMut<Unjudged>,
+    ) {
+        let cast: std::collections::BTreeSet<_> =
+            account.drives.iter().map(|(body, _)| *body).collect();
+        unjudged.0 = transfers
+            .groups()
+            .flatten()
+            .filter(|point| {
+                let Ok((breakage, position, rotation)) = standing.get(point.structure) else {
+                    return false; // A moving group's contacts are rubble's, not standing matter's.
+                };
+                if point.body_collider.is_none()
+                    || point.impulse == Vec3::ZERO
+                    || !cast.contains(&point.body)
+                {
+                    return false;
+                }
+                let pose = breakage.physics_frame((position, rotation));
+                let at = pose.rotation.inverse() * (point.point - pose.translation);
+                let chunk = match colliders
+                    .get(point.structure_collider)
+                    .expect("a solver point lies on a live collider")
+                {
+                    (_, Some(chunk)) => usize::from(chunk.0),
+                    (Some(element), None) => match crate::construction::breakage::nearest_chunk(
+                        &breakage.kind.layout,
+                        usize::from(element.0),
+                        at,
+                    ) {
+                        Some(chunk) => chunk,
+                        None => return false, // An element that never breaks has no law chunk.
+                    },
+                    (None, None) => panic!("a standing owner's colliders are elements and chunks"),
+                };
+                let live = &breakage.live;
+                live.state.fate[chunk] == crate::construction::fracture::Fate::Standing
+                    && !live.structure.chunks[chunk].buried
+                    && !account
+                        .patches
+                        .iter()
+                        .any(|(body, construction, chunks, _)| {
+                            *body == point.body
+                                && *construction == breakage.construction
+                                && chunks.contains(&chunk)
+                        })
+            })
+            .map(|p| (p.body, p.structure_collider, p.point, p.impulse))
+            .collect();
     }
 
     fn momentum_sources(

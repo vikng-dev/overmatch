@@ -34,8 +34,11 @@ pub(crate) struct SweepCast {
 /// solver's contact, and so does every point of a body the sweep did not cast (a departure past
 /// [`DEPARTURE_ROUNDS`], a body woken in the step): no cast is no verdict. A point within Avian's
 /// contact tolerance is look-ahead too: a freed chunk stands only [`LOOSE_GAP_M`] off the faces
-/// it shared, and the body that freed it can push it across that gap within the solve. Standing
-/// colliders enable the hook with [`ActiveCollisionHooks::MODIFY_CONTACTS`].
+/// it shared, and the body that freed it can push it across that gap within the solve. That band
+/// is the push default, not a judgement: matter a pushed body is driven into gives way, overlapped
+/// by at most `Δv dt` for one tick with no load on the structure check, until the next tick's
+/// sweep judges it from inside. Standing colliders enable the hook with
+/// [`ActiveCollisionHooks::MODIFY_CONTACTS`].
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct SweepContacts<'w, 's> {
     owners: Query<

@@ -543,8 +543,24 @@ Exact sweep membership and Avian's speculative contact envelope differ. The swee
 hulls with the motion Avian integrates before its solve; Avian constrains separated hulls
 against projected contact planes, and a body another body pushes within the solve can close a
 gap its own free motion opens (a freed chunk stands only `LOOSE_GAP_M` off the faces it shared).
-The hook drops those points on covered non-members, so no non-member moves solver momentum; the
-tracked ram asserts it every tick. Post-contact speed is the sweep's plastic exchange, contacts
+The hook drops those separated points on covered chunks outside the touching body's cast, Avian's
+contact tolerance band included; a body the sweep did not cast keeps every point. The band is the
+push default, a decision and not a judgement: matter a pushed body is driven into gives way, the
+body overlaps it by at most `Δv dt` for one tick (DERIVED: 3 cm for a 2 m/s shove at 64 Hz), the
+structure check reads no load from it, and the next tick's sweep judges it from inside (MEASURED:
+the narrow form left a departure the hull pushed taking about 97 kN·s at one tick from standing
+colliders its own cast never reached). Overlapping points keep the solver's contact on any chunk,
+so "every solver contact against standing matter was judged by a cut" holds by construction only
+for separated points: an overlap moves momentum unjudged while it lasts (a body sliding along a
+face, a piece leaning on a side face, a soft-contact pushout). The tracked ram asserts the stronger
+form every tick of one straight ram, reading "judged" from the sweep's own patches before the laws
+commit; nothing else covers it. The objection that the hook vetoes contact by cast membership
+(base-truths review) is answered by these statements and by no cast meaning no verdict. Two
+alternatives stay contingent: casting a swept body's overlapping and in-band covered chunks into its
+patch at closing speed `max(v_n, 0)`, so the hook could drop every non-member point (a cut per
+touching pair per tick, cost unmeasured), and a law for pushes that casts a source together with
+the bodies touching it as one rigid group, retiring the band (only if shoved bodies visibly sink
+in play). Post-contact speed is the sweep's plastic exchange, contacts
 with cast members and contacts with released bodies.
 
 Round and field impulse laws retain their own fracture-work and launch accounts.

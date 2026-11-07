@@ -1391,7 +1391,7 @@ fn field_blows<'a>(loads: &'a [Load], state: &'a State) -> impl Iterator<Item = 
 }
 
 /// The chunk of `element` whose hull lies nearest `at`; `None` for an element that never breaks.
-fn nearest_chunk(layout: &Layout, element: usize, at: Vec3) -> Option<usize> {
+pub(crate) fn nearest_chunk(layout: &Layout, element: usize, at: Vec3) -> Option<usize> {
     layout.chunks_of(element).min_by(|&a, &b| {
         layout.blocks[a]
             .outside(at)
