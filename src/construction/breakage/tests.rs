@@ -4561,6 +4561,65 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     }
 }
 
+/// The game's environment destruction: the collision hook keeps Avian's contact for a body the
+/// sweep did not cast this tick, and drops look-ahead only where a cast says its body does not
+/// reach. Read as a cast that missed, no cast would take every look-ahead point on standing
+/// matter from a departure past the round cap or a body woken in the step, matter no cut judged.
+#[test]
+fn a_body_the_sweep_did_not_cast_keeps_avians_contact() {
+    use bevy::ecs::system::RunSystemOnce;
+    let kind = resolved_column();
+    let (mut app, root) = composed_kind(false, &kind);
+    for _ in 0..3 {
+        app.update();
+    }
+    let middle = kind.structure.chunks[1].centroid;
+    let side = middle.y - kind.structure.chunks[0].centroid.y;
+    // Fixture: two cubes clear of the middle chunk's face; at zero gravity the one at rest has no
+    // motion to cast, and the other moves away from the column.
+    let [resting, leaving] = [1.0, 2.0].map(|offset| {
+        app.world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Position(middle - Vec3::X * side * offset),
+                Rotation::default(),
+                Collider::cuboid(0.4, 0.4, 0.4),
+                Mass(1e3),
+                NoAutoMass,
+                AngularInertia::new(Vec3::splat(1e3)),
+                CenterOfMass::default(),
+                LinearVelocity::ZERO,
+                piece_layers(),
+            ))
+            .id()
+    });
+    app.update(); // First preparation creates the collider hierarchy at rest.
+    app.world_mut()
+        .get_mut::<LinearVelocity>(leaving)
+        .unwrap()
+        .0 = Vec3::NEG_X;
+    app.update();
+    let element = app
+        .world_mut()
+        .query::<(Entity, &Element, &ChildOf)>()
+        .iter(app.world())
+        .find(|(_, _, parent)| parent.parent() == root)
+        .unwrap()
+        .0;
+    let face = middle - Vec3::X * side / 2.0;
+    let read = app
+        .world_mut()
+        .run_system_once(move |hooks: SweepContacts| {
+            [resting, leaving].map(|body| hooks.unjudged(element, body, face))
+        })
+        .unwrap();
+    assert_eq!(
+        read,
+        [Some(false), Some(true)],
+        "no cast keeps Avian's contact; a cast that misses covered matter drops its look-ahead"
+    );
+}
+
 /// Two 1e6 kg, 0.4 m cubes at rest one chunk side short of `resolved_column`'s middle chunk and
 /// of chunk `later`, the first by entity order at the middle; the first is launched at 128 m/s across its chunk,
 /// then the second, in the same tick or the next. Returns the app after the second's tick.

@@ -502,7 +502,8 @@ Freed server bodies join the same tick's sweep as sources, from their prepared l
 gravity, under the entity each spawns as; a departure that releases more matter exchanges with
 it before it spawns. Rounds repeat until one frees no server body, at most `DEPARTURE_ROUNDS`
 past the first (MEASURED: the tracked ram's busiest tick needs 2); past that cap the newest
-departures are swept from the next tick. Before this, the freed plug, pushed by the hull, met
+departures are swept from the next tick and, like a body woken during the step, keep Avian's
+contacts this tick: no cast is no verdict. Before this, the freed plug, pushed by the hull, met
 standing remainder in the solver that no cut judged: 84 % of the hull's momentum change at +2.
 Below-floor merging (`crumble::merge_fragments`) projects their combined linear and angular
 momentum onto the merged rigid body.

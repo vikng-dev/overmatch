@@ -17,22 +17,25 @@ pub(crate) struct SourceImpulse {
     pub(crate) angular: Vec3,
 }
 
-/// The game's environment destruction: this tick's exact cast, each (source body, owner root,
-/// chunk) a source's sweep met inward and a cut judged; [`SweepContacts`] reads it.
+/// The game's environment destruction: this tick's exact cast, the bodies it cast and each
+/// (source body, owner root, chunk) a source's sweep met inward and a cut judged;
+/// [`SweepContacts`] reads it.
 #[derive(Resource, Default, Debug)]
 pub(crate) struct SweepCast {
     /// The fixed-clock time the sweep built it at: a contact pass at any other time had no sweep.
     at: Option<std::time::Duration>,
+    bodies: BTreeSet<Entity>,
     members: BTreeSet<(Entity, Entity, u16)>,
 }
 
 /// The game's environment destruction: the solver resolves no look-ahead point, one whose shapes
 /// are still apart, against standing matter that this tick's exact cast says a body does not
 /// reach, matter no cut judged. Overlapping points, cast members and uncovered chunks keep the
-/// solver's contact. A point within Avian's contact tolerance is look-ahead too: a freed chunk
-/// stands only [`LOOSE_GAP_M`] off the faces it shared, and the body that freed it can push it
-/// across that gap within the solve. Standing colliders enable the hook with
-/// [`ActiveCollisionHooks::MODIFY_CONTACTS`].
+/// solver's contact, and so does every point of a body the sweep did not cast (a departure past
+/// [`DEPARTURE_ROUNDS`], a body woken in the step): no cast is no verdict. A point within Avian's
+/// contact tolerance is look-ahead too: a freed chunk stands only [`LOOSE_GAP_M`] off the faces
+/// it shared, and the body that freed it can push it across that gap within the solve. Standing
+/// colliders enable the hook with [`ActiveCollisionHooks::MODIFY_CONTACTS`].
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct SweepContacts<'w, 's> {
     owners: Query<
@@ -52,13 +55,17 @@ pub(crate) struct SweepContacts<'w, 's> {
 }
 
 impl SweepContacts<'_, '_> {
-    /// Whether world `point` on `collider` is covered standing matter outside `source`'s cast
-    /// this tick. `None` when no sweep ran this tick: replicas and physics-only apps judge nothing.
+    /// Whether world `point` on `collider` is covered standing matter outside the cast of
+    /// `source`, a body this tick's sweep cast. `None` when no sweep ran this tick: replicas and
+    /// physics-only apps judge nothing.
     pub(crate) fn unjudged(&self, collider: Entity, source: Entity, point: Vec3) -> Option<bool> {
         let cast = self
             .cast
             .as_deref()
             .filter(|cast| cast.at == Some(self.fixed.elapsed()))?;
+        if !cast.bodies.contains(&source) {
+            return Some(false);
+        }
         let Ok((of, element, chunk)) = self.owners.get(collider) else {
             return Some(false); // Not a collider of a body: no construction matter.
         };
@@ -121,7 +128,7 @@ pub(crate) struct SweepAccount {
     pub(crate) sources: usize,
     /// Sweep rounds this tick, the first included ([`DEPARTURE_ROUNDS`]).
     pub(crate) rounds: usize,
-    /// Departures past the round cap, swept from the next tick.
+    /// Departures past the round cap, swept from the next tick; Avian keeps their contacts.
     pub(crate) unswept: usize,
     pub(crate) freed: usize,
     /// Freed fragments shed to the players as decoration.
@@ -294,7 +301,7 @@ pub(super) struct Intake<'w, 's> {
 
 /// Resolution: how many rounds past the first one tick's departures may join its sweep as
 /// sources. Each round sweeps only the matter the round before it freed; past the cap the newest
-/// departures spawn unswept and are swept from the next tick, counted in
+/// departures spawn unswept, keep Avian's contacts and are swept from the next tick, counted in
 /// [`SweepAccount::unswept`]. A bound on one tick's cost, not a law: the tracked ram reaches its
 /// fixed point well inside it (MEASURED in its test's report).
 const DEPARTURE_ROUNDS: usize = 8;
@@ -305,7 +312,7 @@ pub(super) fn run(mut p: Intake) {
     let tick = p.clock.as_deref().map_or(0, |clock| clock.0.raw());
     *p.cast = SweepCast {
         at: Some(p.fixed.elapsed()),
-        members: BTreeSet::new(),
+        ..default()
     };
     // Freed departures join the same tick's sweep: each moves within the tick it leaves, and the
     // remainder it meets is matter only a cut may judge (`SweepContacts`).
@@ -371,6 +378,9 @@ fn resolve_round(
     p.account
         .drives
         .extend(sources.iter().map(|source| (source.body, source.drive)));
+    p.cast
+        .bodies
+        .extend(sources.iter().map(|source| source.body));
     let mut resolved = geometry(p, dt, tick, sources, recut);
     resolved.sort_by_key(|resolution| (sources[resolution.source].body, resolution.root));
     p.cast.members.extend(
