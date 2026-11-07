@@ -35,9 +35,10 @@ pub(crate) struct SweepCast {
 /// [`DEPARTURE_ROUNDS`], a body woken in the step): no cast is no verdict. A point within Avian's
 /// contact tolerance is look-ahead too: a freed chunk stands only [`LOOSE_GAP_M`] off the faces
 /// it shared, and the body that freed it can push it across that gap within the solve. That band
-/// is the push default, not a judgement: matter a pushed body is driven into gives way, overlapped
-/// by at most `Δv dt` for one tick with no load on the structure check, until the next tick's
-/// sweep judges it from inside. Standing colliders enable the hook with
+/// is the default for a push's first tick, not a judgement: matter a pushed body is driven into
+/// gives way, overlapped by at most `Δv dt` for one tick with no load on the structure check,
+/// until the next tick's sweep, with the push in its drive ([`pushes`]), judges it from inside.
+/// Standing colliders enable the hook with
 /// [`ActiveCollisionHooks::MODIFY_CONTACTS`].
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct SweepContacts<'w, 's> {
@@ -127,6 +128,9 @@ pub(crate) struct SweepAccount {
     /// Per source body, the force it drives into a cut with (N, world).
     #[cfg(test)]
     pub(crate) drives: Vec<(Entity, Vec3)>,
+    /// Per source body, the share of its drive other bodies push with (N, world).
+    #[cfg(test)]
+    pub(crate) pushes: Vec<(Entity, Vec3)>,
     /// Sources swept this tick, departures that joined it included.
     pub(crate) sources: usize,
     /// Sweep rounds this tick, the first included ([`DEPARTURE_ROUNDS`]).
@@ -159,6 +163,9 @@ struct SweepSource {
     inertia: avian3d::prelude::ComputedAngularInertia,
     axes: avian3d::prelude::LockedAxes,
     drive: Vec3,
+    /// The share of `drive` other bodies push with ([`pushes`]), N, world.
+    #[cfg(test)]
+    push: Vec3,
 }
 
 impl SweepSource {
@@ -260,6 +267,32 @@ fn constant_acceleration(drives: &Drives, body: Entity, rotation: Quat, inverse_
         + rotation * local_acceleration.map_or(Vec3::ZERO, |a| a.0)
 }
 
+/// StandIn: no sweep couples bodies in contact. Per body, the force its solver contacts moved
+/// into it over the last physics step from every body but `standing` construction (N, world): a
+/// sustained push the sweep adds to the drive and cast of the body it presses, so the cut ahead of
+/// pushed matter reads the pusher's force. [`ContactTransfers`] reads a contact once from each
+/// `structure` side, so each counts once: on the side that is its `body`, and on a structure
+/// side against a body that is no structure. Belt contacts act before the sweep as forces.
+fn pushes(
+    transfers: &ContactTransfers,
+    standing: impl Fn(Entity) -> bool,
+    structure: impl Fn(Entity) -> bool,
+) -> BTreeMap<Entity, Vec3> {
+    let mut pushes = BTreeMap::<Entity, Vec3>::new();
+    let solved = transfers.groups().flatten();
+    for point in solved.filter(|point| point.body_collider.is_some() && !standing(point.structure))
+    {
+        let force = point.impulse / transfers.dt();
+        if !standing(point.body) {
+            *pushes.entry(point.body).or_default() += force;
+        }
+        if !structure(point.body) {
+            *pushes.entry(point.structure).or_default() -= force;
+        }
+    }
+    pushes
+}
+
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct Intake<'w, 's> {
     constructions: Owners<'w, 's>,
@@ -283,6 +316,7 @@ pub(super) struct Intake<'w, 's> {
             Or<(With<Piece>, Without<Breakage>)>,
         ),
     >,
+    structures: Query<'w, 's, (), With<crate::contact_transfer::StructureBody>>,
     spatial: SpatialQuery<'w, 's>,
     transfers: ResMut<'w, ContactTransfers>,
     fixed: Res<'w, Time<Fixed>>,
@@ -374,9 +408,14 @@ fn resolve_round(
     recut: &BTreeSet<Entity>,
 ) -> BTreeMap<Entity, Vec<(Entity, Cut)>> {
     #[cfg(test)]
-    p.account
-        .drives
-        .extend(sources.iter().map(|source| (source.body, source.drive)));
+    {
+        p.account
+            .drives
+            .extend(sources.iter().map(|source| (source.body, source.drive)));
+        p.account
+            .pushes
+            .extend(sources.iter().map(|source| (source.body, source.push)));
+    }
     p.cast
         .bodies
         .extend(sources.iter().map(|source| source.body));
@@ -483,6 +522,11 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
         ..
     } = *p;
     let travel = travel(substeps, dt);
+    let pushes = pushes(
+        &p.transfers,
+        |body| constructions.contains(body),
+        |body| p.structures.contains(body),
+    );
     let mut gathered = bevy::utils::Parallel::<Vec<SweepSource>>::default();
     movers
         .par_iter()
@@ -498,12 +542,15 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
             }
             let axes = axes.copied().unwrap_or_default(); // Absence is Avian's unrestricted state.
             let rotation = forces.rotation().0;
+            // No solver contact moved this body last step: nothing pushes it.
+            let push = free_translation(axes) * pushes.get(&body_entity).map_or(Vec3::ZERO, |&f| f);
             // What Avian integrates before its contact solve: accumulated and constant forces and
-            // gravity, on the free axes (`pre_process_velocity_increments`).
+            // gravity, on the free axes (`pre_process_velocity_increments`), and the push.
             let acceleration = free_translation(axes)
                 * (forces.accumulated_linear_acceleration()
                     + constant_acceleration(drives, body_entity, rotation, mass.inverse())
-                    + gravity.0 * scale.map_or(1.0, |scale| scale.0));
+                    + gravity.0 * scale.map_or(1.0, |scale| scale.0))
+                + push * mass.inverse();
             let velocity = forces.linear_velocity() + acceleration * travel;
             if velocity == Vec3::ZERO && forces.angular_velocity() == Vec3::ZERO {
                 return;
@@ -566,6 +613,8 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                 inertia: *inertia,
                 axes,
                 drive: acceleration * mass.value(),
+                #[cfg(test)]
+                push,
             };
             gathered.scope(|local| local.push(source));
         });
@@ -640,6 +689,8 @@ fn departure_sources(
             ),
             axes: default(),
             drive: gravity * props.mass,
+            #[cfg(test)]
+            push: Vec3::ZERO,
         }
     };
     departures
@@ -1264,7 +1315,54 @@ pub(super) fn changed(account: Res<SweepAccount>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contact_transfer::ContactTransfer;
     use crate::headless_test::{booted_driving_grid, driving_plane, start_fixed_clock};
+
+    /// The game's environment destruction: a body a heavier one presses into rubble or standing
+    /// matter reads that push in its drive, each contact once, whichever sides the reading names
+    /// it from; standing construction pushes nothing, since its own cut judges that contact, and
+    /// a belt contact is a force already applied. Without the push, a cut ahead of pushed matter
+    /// reads only the pushed body's own drive and holds the pusher through it.
+    #[test]
+    fn a_pushed_body_reads_each_pushers_force_once() {
+        let [hull, rubble, under, wall] = [1, 2, 3, 4].map(|i| Entity::from_raw_u32(i).unwrap());
+        // Fixture: one point per contact, impulses in N s over a 0.5 s step.
+        let point = |structure, body, impulse, solver: bool| ContactTransfer {
+            structure,
+            structure_collider: structure,
+            body,
+            body_collider: solver.then_some(body),
+            point: Vec3::ZERO,
+            normal: Vec3::Y,
+            impulse,
+            effective_mass: 1.0,
+            closing_speed: 0.0,
+        };
+        let transfers = ContactTransfers::fixture(
+            vec![
+                // The hull, no structure, pushes the rubble: read from the rubble's side alone.
+                vec![point(rubble, hull, Vec3::NEG_X * 6.0, true)],
+                // Two pieces, read from each side: once per body.
+                vec![point(under, rubble, Vec3::Y * 4.0, true)],
+                vec![point(rubble, under, Vec3::NEG_Y * 4.0, true)],
+                // Standing matter, read from each side: neither side's push.
+                vec![point(wall, rubble, Vec3::NEG_X * 2.0, true)],
+                vec![point(rubble, wall, Vec3::X * 2.0, true)],
+                // A belt contact the track law applied as a force before the sweep.
+                vec![point(rubble, hull, Vec3::NEG_X * 10.0, false)],
+            ],
+            0.5,
+        );
+        let pushes = pushes(
+            &transfers,
+            |e| e == wall,
+            |e| [rubble, under, wall].contains(&e),
+        );
+        assert_eq!(pushes[&rubble], Vec3::new(12.0, 8.0, 0.0));
+        assert_eq!(pushes[&hull], Vec3::NEG_X * 12.0);
+        assert_eq!(pushes[&under], Vec3::NEG_Y * 8.0);
+        assert!(!pushes.contains_key(&wall), "standing matter is no source");
+    }
 
     /// The game's environment destruction: a cut reads the force its source drives into it, all
     /// Avian integrates besides contacts: accumulated and constant forces with gravity. A body

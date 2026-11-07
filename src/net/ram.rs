@@ -998,18 +998,21 @@ mod tests {
             .filter(|impulse| impulse.body == tank)
             .map(|impulse| impulse.linear)
             .sum();
-        let (_, drive) = *account
-            .drives
-            .iter()
-            .find(|(body, _)| *body == tank)
-            .expect("the moving hull is a sweep source");
+        let [drive, push] = [&account.drives, &account.pushes].map(|forces| {
+            forces
+                .iter()
+                .find(|(body, _)| *body == tank)
+                .expect("the moving hull is a sweep source")
+                .1
+        });
         let cancelled: Vec3 = account
             .cancelled_belts
             .iter()
             .filter(|belt| belt.body == tank)
             .map(|belt| belt.force)
             .sum();
-        let belts = (drive - cancelled) * dt - gravity;
+        // The push enters only the sweep's drive; this step's solver contacts move it.
+        let belts = (drive - push - cancelled) * dt - gravity;
         let solver = || {
             transfers
                 .groups()

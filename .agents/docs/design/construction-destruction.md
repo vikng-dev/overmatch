@@ -479,10 +479,8 @@ remove its whole plug `S*` from the standing construction. Otherwise the sweep d
 the hull: **Avian owns the stop** (owner decision, 2026-11-07). Its contact solver, speculative
 points included, stops the hull at matter whose cut holds as it stops a hull at any obstacle, and
 the structure check reads that contact as its mean force like every other; the peak force decides
-only the cut. Its reach stops at the cut's: a collision hook (`sweep_intake::SweepContacts`)
-drops every look-ahead point, one whose shapes are still apart, on covered standing chunks
-outside this tick's exact cast, and keeps them on cast members, so Avian still stops a hull at
-matter whose cut held; it adds no hold, press or pose. Without it Avian's linearised look-ahead
+only the cut. Its reach stops at the cut's, through the collision hook the boundary paragraph
+below states (`sweep_intake::SweepContacts`). Without it Avian's linearised look-ahead
 braked and lifted the hull at standing matter no cut judged: MEASURED on the tracked ram
 (`tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum`, the 57 t hull at
 10.8 m/s), both ticks' cuts released, yet standing chunks outside the cast took 0.77 m/s off the
@@ -549,8 +547,25 @@ hulls with the motion Avian integrates before its solve; Avian constrains separa
 against projected contact planes, and a body another body pushes within the solve can close a
 gap its own free motion opens (a freed chunk stands only `LOOSE_GAP_M` off the faces it shared).
 The hook drops those separated points on covered chunks outside the touching body's cast, Avian's
-contact tolerance band included; a body the sweep did not cast keeps every point. The band is the
-push default, a decision and not a judgement: matter a pushed body is driven into gives way, the
+contact tolerance band included; a body the sweep did not cast keeps every point.
+
+A cut reads the touching body's own motion and drive, and a pusher reaches it only through that
+drive: the force the body's solver contacts moved into it over the last step from every body but
+standing construction is part of its drive and of its cast's acceleration (StandIn: no sweep
+couples bodies in contact; `sweep_intake::pushes`). Without it a pusher's force reached standing
+matter only through the solver contact the structure check reads, a law stage late, while the cuts
+ahead of the pushed body read that body's own demand: MEASURED on the tracked ram, from +3 the hull
+meets the house only through rubble, which took 150.2 and 105.7 kN·s off the hull at +3 and +4
+while the standing house took 167.7 and 84.7 kN·s from it, all through contacts the rubble's own
+cuts judged. With it the rubble's cuts read the hull's push from +4: the house takes 35.7 kN·s
+from the rubble at +4, the hull frees 322 chunks there instead of 146 and runs 4.77 m past first
+contact by +60 instead of 4.33 (MEASURED); +3 still holds it through rubble, as the hull's push
+first enters at +2 at 4.4 kN·s. Its limits: the push is a step late (one that ended last step drives one
+step more, one that starts this step waits a step), it is read only through contacts with a
+structure side (two hulls pressing each other read none), and a blow over one step reads as a
+sustained push for the next.
+
+The band is the default for a push's first step, a decision and not a judgement: matter a pushed body is driven into gives way, the
 body overlaps it by at most `Δv dt` for one tick (DERIVED: 3 cm for a 2 m/s shove at 64 Hz), the
 structure check reads no load from it, and the next tick's sweep judges it from inside (MEASURED:
 the narrow form left a departure the hull pushed taking about 97 kN·s at one tick from standing
@@ -559,14 +574,19 @@ so "every solver contact against standing matter was judged by a cut" holds by c
 for separated points: an overlap moves momentum unjudged while it lasts (a body sliding along a
 face, a piece leaning on a side face, a soft-contact pushout). The tracked ram asserts the stronger
 form every tick of one straight ram, reading "judged" from the sweep's own patches before the laws
-commit; nothing else covers it. The objection that the hook vetoes contact by cast membership
-(base-truths review) is answered by these statements and by no cast meaning no verdict. Two
-alternatives stay contingent: casting a swept body's overlapping and in-band covered chunks into its
-patch at closing speed `max(v_n, 0)`, so the hook could drop every non-member point (a cut per
-touching pair per tick, cost unmeasured), and a law for pushes that casts a source together with
-the bodies touching it as one rigid group, retiring the band (only if shoved bodies visibly sink
-in play). Post-contact speed is the sweep's plastic exchange, contacts
-with cast members and contacts with released bodies.
+commit; nothing else covers it, and it prints what such contacts move into bodies it did not cast.
+The objection that the hook vetoes contact by cast membership (base-truths review) is answered by
+these statements, by no cast meaning no verdict and by the push in the drive. Rejected: casting a
+swept body's overlapping and in-band covered chunks into its patch at closing speed `max(v_n, 0)`,
+so the hook could drop every non-member point. In the band it re-holds the plug the band releases,
+against a demand that omits the pusher behind it (the 97 kN·s departure returns); in an overlap
+`max(v_n, 0) = 0` and the inward drive is nil (an inward drive would have made the chunk a
+member), so the cut holds by construction, `0 ≤ C`. It buys a label at a cut per touching pair per
+tick and changes no outcome. Contingent: casting a source together with the bodies touching it as
+one rigid group, the push's coupled replacement, if the ram's attribution still shows the hull held
+through rubble no cut judged against its push. Post-contact speed is the sweep's plastic exchange
+and Avian's contacts: with cast members whose cut held, released bodies, uncovered matter (buried
+or unbreakable), overlaps, and every contact of a body the sweep did not cast.
 
 Round and field impulse laws retain their own fracture-work and launch accounts.
 
