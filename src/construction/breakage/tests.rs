@@ -1797,6 +1797,8 @@ fn no_bodys_kind_enters_a_contacts_loads() {
         let (mut app, root) = composed_keeping_contacts(&kind);
         let cube = contact_cube(&mut app, start, w * speed);
         if construction_piece {
+            // A free group carries its source tree from spawn: here, its own collider.
+            let hull = app.world().get::<Collider>(cube).unwrap().clone();
             app.world_mut().entity_mut(cube).insert((
                 Piece {
                     construction: 3,
@@ -1805,6 +1807,13 @@ fn no_bodys_kind_enters_a_contacts_loads() {
                     retired: None,
                 },
                 crate::debris::DebrisPiece,
+                super::super::sweep::SourceShape(Arc::new(super::super::sweep::SourceTree::new(
+                    vec![super::super::sweep::Hull {
+                        hull,
+                        position: Vec3::ZERO,
+                        rotation: Quat::IDENTITY,
+                    }],
+                ))),
             ));
         }
         for _ in 0..30 {
@@ -4835,19 +4844,12 @@ fn a_cut_frees_unsupported_matter_without_building_standing_colliders() {
         BTreeSet::from([1, 2]),
         "the cut and the matter it disconnected both leave before reconciliation"
     );
-    let quiet = sweep_intake::fragment_motion(
-        &kind,
-        &Transform::IDENTITY,
-        &[2],
-        &BTreeSet::from([1]),
-        sweep_intake::ReleasedMotion {
-            velocity: Vec3::X * 2.0,
-            spin: Vec3::Z,
-            centre: Vec3::ZERO,
-        },
-    );
-    assert_eq!(quiet.velocity, Vec3::ZERO);
-    assert_eq!(quiet.spin, Vec3::ZERO);
+    let crown = departures
+        .iter()
+        .find(|p| p.departure.group.contains(&2))
+        .expect("the unsupported crown leaves as server rubble");
+    assert_eq!(crown.departure.launch.velocity, Vec3::ZERO);
+    assert_eq!(crown.departure.launch.spin, Vec3::ZERO);
     let mut queue = bevy::ecs::world::CommandQueue::default();
     let mut commands = Commands::new(&mut queue, app.world());
     for departure in departures {

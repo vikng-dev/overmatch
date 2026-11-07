@@ -365,8 +365,11 @@ convex hit may prune later source leaves. Every occupied target joins the body's
 the earliest inward witness supplies its contact response. Parry 0.27's
 `CompositeShapeRef::cast_shape_nonlinear` returns the first geometric hit, which can be tangent
 and hide another leaf's later inward hit; its first-hit composite query therefore cannot own this
-patch. Independent body queries and cuts run in worker-sized batches; effects commit in body
-entity order because sources can compete for the same standing matter.
+patch. Touched constructions resolve one per task; their body queries and cuts run in
+worker-sized batches. Effects commit in body entity order because sources can compete for the
+same standing matter: a later body's plug on a construction an earlier commit changed this tick
+is resolved again on the state that commit left, so every committed plug is a minimum cut for its
+own demand.
 
 The patch is the forced source of a directed graph over standing law chunks. Ground endpoints
 and chunks the sweep does not cover (including buried matter) are fixed sinks. Live, unseparated

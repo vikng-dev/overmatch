@@ -87,8 +87,10 @@ impl SweepSource {
     }
 }
 
-/// Independent geometry queries run per construction. Sources commit in entity order because
-/// they can compete for the same chunks; a source exchanges against all its freed mass once.
+/// Independent geometry queries run per construction. Sources commit in entity order; a later
+/// source's plug on an owner an earlier one changed this tick is resolved again on the state that
+/// commit left, so every committed plug is a minimum cut for its own demand. A source exchanges
+/// against all its freed mass once.
 type Owners<'w, 's> = Query<
     'w,
     's,
@@ -160,6 +162,7 @@ pub(super) struct Intake<'w, 's> {
             Entity,
             &'static avian3d::prelude::RigidBodyColliders,
             Has<avian3d::prelude::Sleeping>,
+            Has<Piece>,
             Option<&'static super::super::sweep::SourceShape>,
         ),
     >,
@@ -222,7 +225,19 @@ pub(super) fn run(mut p: Intake) {
             .or_default()
             .extend(swept.chunks.into_iter().filter(|_| swept.broken));
     }
-    for (body, owners) in by_source {
+    let mut committed = BTreeSet::new();
+    for (body, mut owners) in by_source {
+        let source = sources
+            .iter()
+            .find(|source| source.body == body)
+            .expect("a candidate body is a sweep source");
+        for (&root, plug) in &mut owners {
+            if committed.contains(&root) {
+                *plug = resolve_again(&mut p, root, source, dt);
+            }
+        }
+        owners.retain(|_, plug| !plug.is_empty());
+        committed.extend(owners.keys().copied());
         commit_source(&mut p, body, owners, tick);
     }
     let changed = p
@@ -234,7 +249,7 @@ pub(super) fn run(mut p: Intake) {
     let retired = changed
         .into_iter()
         .flat_map(|root| {
-            let (_, handles, _, _) = p
+            let (_, handles, ..) = p
                 .body_colliders
                 .get(root)
                 .expect("a swept owner retains its collider relationship until refit");
@@ -278,7 +293,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
     let mut gathered = bevy::utils::Parallel::<Vec<SweepSource>>::default();
     body_colliders
         .par_iter()
-        .for_each(|(body_entity, handles, sleeping, cached)| {
+        .for_each(|(body_entity, handles, sleeping, piece, cached)| {
             let Ok((forces, body, mass, inertia, com, axes)) = bodies.get(body_entity) else {
                 return; // Unmarked fixed collider roots have no dynamic force state.
             };
@@ -306,23 +321,23 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
             if admitted.is_empty() {
                 return;
             } // No construction-contact geometry on this body.
-            // Fixed-frame groups prepare their tree at spawn/split. Articulated bodies need a
+            // Free groups prepare their tree at spawn and split. Articulated bodies need a
             // current-frame snapshot: their collider-local poses can change without a body split.
-            let shape = cached.map_or_else(
-                || {
-                    Arc::new(super::super::sweep::SourceTree::new(
-                        admitted
-                            .iter()
-                            .map(|(hull, local)| super::super::sweep::Hull {
-                                hull: (*hull).clone(),
-                                position: local.translation,
-                                rotation: local.rotation.0,
-                            })
-                            .collect(),
-                    ))
-                },
-                |shape| shape.0.clone(),
-            );
+            let shape = match (piece, cached) {
+                (true, Some(shape)) => shape.0.clone(),
+                (true, None) => panic!("a free group prepares its source tree at spawn and split"),
+                (false, Some(_)) => panic!("only a free group carries a prepared source tree"),
+                (false, None) => Arc::new(super::super::sweep::SourceTree::new(
+                    admitted
+                        .iter()
+                        .map(|(hull, local)| super::super::sweep::Hull {
+                            hull: (*hull).clone(),
+                            position: local.translation,
+                            rotation: local.rotation.0,
+                        })
+                        .collect(),
+                )),
+            };
             let position = forces.position().0;
             let rotation = forces.rotation().0;
             let centre = position + rotation * com.0;
@@ -378,37 +393,43 @@ fn geometry(
         .flat_map(|source| source.roots.iter().copied())
         .collect::<BTreeSet<_>>();
     let mut gathered = bevy::utils::Parallel::<Vec<_>>::default();
+    // One touched owner per task: owners differ widely in size, and the population is not the
+    // work set.
     p.constructions
-        .par_iter_mut()
+        .par_iter_many_unique_mut(&roots)
+        .batching_strategy(bevy::ecs::batching::BatchingStrategy::fixed(1))
         .for_each(|(root, position, rotation, mut breakage)| {
-            if !roots.contains(&root) {
-                return; // No prepared source overlaps this owner.
-            }
             // This pass mutates only derived preload storage, never collider or ledger state.
             let breakage = breakage.bypass_change_detection();
             let pose = breakage.physics_frame((position, rotation));
-            let results = owner_geometry(root, breakage, pose, sources, dt);
+            let own: Vec<_> = sources
+                .iter()
+                .filter(|source| source.roots.contains(&root))
+                .collect();
+            let results = owner_geometry(breakage, pose, &own, dt)
+                .into_iter()
+                .map(|(body, swept)| (body, root, swept));
             gathered.scope(|local| local.extend(results));
         });
     gathered.drain().collect()
 }
 
+/// Each of `sources`' patches on one owner, resolved against the owner's current state.
 fn owner_geometry(
-    root: Entity,
     breakage: &mut Breakage,
     pose: Transform,
-    sources: &[SweepSource],
+    sources: &[&SweepSource],
     dt: f32,
-) -> Vec<(Entity, Entity, super::super::sweep::Sweep)> {
+) -> Vec<(Entity, super::super::sweep::Sweep)> {
     let inverse = pose.rotation.inverse();
     let pool = ComputeTaskPool::get();
-    let mut patches: Vec<_> = sources
+    // Results retain source order.
+    let sweeps: Vec<_> = sources
         .par_splat_map(pool, None, |_, sources| {
             sources
                 .iter()
-                .filter(|source| source.roots.contains(&root) && source.body != root)
                 .map(|source| {
-                    let swept = breakage.kind.sweep.swept(
+                    breakage.kind.sweep.swept(
                         &breakage.live.structure,
                         &breakage.live.state,
                         &source.shape,
@@ -420,14 +441,14 @@ fn owner_geometry(
                             spin: inverse * source.spin,
                             dt,
                         },
-                    );
-                    (source.body, swept)
+                    )
                 })
                 .collect::<Vec<_>>()
         })
         .into_iter()
         .flatten()
         .collect();
+    let mut patches: Vec<_> = sources.iter().copied().zip(sweeps).collect();
     let kind = &breakage.kind;
     let Live {
         structure,
@@ -436,37 +457,52 @@ fn owner_geometry(
         gravity,
         ..
     } = &mut *breakage.live;
-    let preload = patches
-        .iter()
-        .any(|(_, s)| s.witness.is_some())
-        .then(|| gravity.get(structure, state, assessment));
-    // Body patches read the same topology and preload; only their ordered effects interact.
+    if patches.iter().any(|(_, swept)| swept.witness.is_some()) {
+        let preload = gravity.get(structure, state, assessment);
+        // Body patches read the same topology and preload; only their ordered effects interact.
+        patches.par_splat_map_mut(pool, None, |_, patches| {
+            for (source, swept) in patches {
+                if let Some(witness) = swept.witness {
+                    kind.sweep.resolve(
+                        structure,
+                        state,
+                        preload,
+                        swept,
+                        source.effective_mass(witness, &pose),
+                        inverse * source.drive,
+                    );
+                } // An empty patch has no contact response to resolve.
+            }
+        });
+    }
     patches
-        .par_splat_map_mut(pool, None, |_, patches| {
-            patches
-                .iter_mut()
-                .map(|(body, swept)| {
-                    let source = sources
-                        .iter()
-                        .find(|source| source.body == *body)
-                        .expect("a body patch retains its source");
-                    if let Some(witness) = swept.witness {
-                        kind.sweep.resolve(
-                            structure,
-                            state,
-                            preload.expect("an inward witness prepared gravity"),
-                            swept,
-                            source.effective_mass(witness, &pose),
-                            inverse * source.drive,
-                        );
-                    } // An empty patch has no contact response to resolve.
-                    (*body, root, std::mem::take(swept))
-                })
-                .collect::<Vec<_>>()
-        })
         .into_iter()
-        .flatten()
+        .map(|(source, swept)| (source.body, swept))
         .collect()
+}
+
+/// `body`'s plug on an owner an earlier source changed this tick, resolved again on the state that
+/// commit left: empty when its cut now holds.
+fn resolve_again(p: &mut Intake, root: Entity, source: &SweepSource, dt: f32) -> BTreeSet<usize> {
+    let (_, position, rotation, mut breakage) = p
+        .constructions
+        .get_mut(root)
+        .expect("a committed owner stands until refit");
+    let breakage = breakage.bypass_change_detection();
+    let pose = breakage.physics_frame((position, rotation));
+    let (_, swept) = owner_geometry(breakage, pose, &[source], dt)
+        .pop()
+        .expect("one source resolves one patch");
+    p.account.work.bounds += swept.work.bounds;
+    p.account.work.casts += swept.work.casts;
+    p.account.work.joints += swept.work.joints;
+    p.account.work.queries += swept.work.queries;
+    p.account.work.flow += swept.work.flow;
+    if swept.broken {
+        swept.chunks.into_iter().collect()
+    } else {
+        BTreeSet::new()
+    }
 }
 
 fn commit_source(
@@ -483,15 +519,18 @@ fn commit_source(
                 .get(*root)
                 .expect("sweep owner survives intake");
             let pose = breakage.physics_frame((position, rotation));
+            assert!(
+                chunks.iter().all(|&c| breakage.live.state.standing(c)),
+                "a committed plug was resolved on its owner's current state"
+            );
             chunks
                 .iter()
-                .filter(|&&c| breakage.live.state.standing(c))
                 .map(|&c| breakage.kind.sweep.part(c, &pose))
                 .collect::<Vec<_>>()
         })
         .collect();
     if parts.is_empty() {
-        return;
+        return; // Every cut this body met held.
     }
     let (mut forces, _, mass, inertia, com, axes) = p
         .bodies
@@ -546,14 +585,7 @@ fn commit_source(
         .par_iter_many_unique_mut(owners.keys())
         .for_each(|(root, position, rotation, mut breakage)| {
             let pose = breakage.physics_frame((position, rotation));
-            let chunks: Vec<_> = owners[&root]
-                .iter()
-                .copied()
-                .filter(|&c| breakage.live.state.standing(c))
-                .collect();
-            if chunks.is_empty() {
-                return; // An earlier source already freed this owner's candidate matter.
-            }
+            let chunks: Vec<_> = owners[&root].iter().copied().collect();
             let mut record = Record::default();
             let reusable = reusable_colliders(children.get(root).ok(), chunk_entities);
             let departure = sweep_departure(
@@ -572,6 +604,11 @@ fn commit_source(
             released.scope(|local| local.push((root, chunks, departure, record.entries, reusable)));
         });
     let mut released: Vec<_> = released.drain().collect();
+    assert_eq!(
+        released.len(),
+        owners.len(),
+        "every owner of a committed plug stands for its departure"
+    );
     released.sort_unstable_by_key(|(root, ..)| *root);
     for (root, chunks, (departures, sheds), entries, mut reusable) in released {
         let (_, position, rotation, breakage) = p
