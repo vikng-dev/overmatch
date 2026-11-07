@@ -20,9 +20,21 @@
 //! - **One support law**: `forces::contact_side` partitions overlapping footprints; the deepest
 //!   surface in each cell enters the field's own support law at its covered share of the shoe.
 //!   Stacked pieces cannot multiply the hull's support.
-//! - **Cost gate**: one AABB query per tank per tick over the footprint's bounding sphere
-//!   ([`RubbleQuery::near`], [`footprint_radius`]). With no rubble collider in it no shape is
-//!   read, so open ground is bit-identical to the field alone.
+//! - **Work while held against rubble** (DERIVED from the loops): one AABB query per tank
+//!   ([`RubbleQuery::near`], [`footprint_radius`]) selects its N candidates. Each side rejects N
+//!   candidates against its slabs' union bounds. For L stations and P survivors this means
+//!   N + L × P bounds checks, with one station dispatch when P > 0. Every slab AABB pass makes
+//!   six support-map queries; only a positive-volume pass builds the boundary triangles, once
+//!   per surface in the shared tick-start snapshot. Support-map and clipping work also depend on the shape's complexity.
+//!   `forces::collect_column_contacts` partitions the covered faces without a contact cap, so
+//!   face arrangements and their emitted patches still cost work on every held tick.
+//! - **Recipient work**: for C dynamic contacts and D gathered dynamic bodies, grouping sorts
+//!   D + C endpoint entries and the reaction pass sorts C contact keys. Each grouping pass walks
+//!   C contacts and the deduplicated endpoint slots, using sorted endpoint lookups, path-halved
+//!   roots and indexed failed-component membership. Each repeat clamps at least one body; none is
+//!   re-enabled: at most D + 1 passes (DERIVED). The query bounds space, not population;
+//!   local pile density, shape complexity and contact partitions remain cost inputs. With no
+//!   nearby collider no shape is read, and field-only driving retains its force arithmetic.
 //! - **Tick truth**: avian refits dynamic bodies' AABBs at the end of its physics step
 //!   (`update_solver_body_aabbs`) and writes each collider's `Position`/`Rotation`, so a snapshot
 //!   in `FixedUpdate` reads the poses the last step wrote.
