@@ -84,6 +84,7 @@ enum End {
     Rest,
     Deadline,
     WorldChanged,
+    ApproachTimeout,
 }
 
 #[derive(Resource)]
@@ -360,6 +361,8 @@ impl Census<'_, '_> {
             } else if (tick - impact_tick) as f64 * dt >= ram.recipe.deadline_s {
                 ram.done = Some(End::Deadline);
             }
+        } else if tick as f64 * sample.dt_s >= ram.recipe.approach_s {
+            ram.done = Some(End::ApproachTimeout);
         }
         Some(&mut row.collector_us)
     }
@@ -371,7 +374,7 @@ pub(crate) struct FixturePlan {
     pub(crate) spawn: Vec3,
     pub(crate) rotation: Quat,
     pub(crate) minimum_m_s: f32,
-    pub(crate) drive_ticks: usize,
+    pub(crate) approach_ticks: usize,
 }
 
 /// Headless witnesses use the operator recipe's real parser and planner without enabling pricing.
@@ -390,8 +393,8 @@ pub(crate) fn fixture_plan(app: &App) -> FixturePlan {
         spawn: Vec3::from_array(plan.spawn),
         rotation: Quat::from_array(plan.rotation),
         minimum_m_s: plan.minimum_m_s as f32,
-        // DERIVED: full throttle covers the approach budget and the entire observation.
-        drive_ticks: ((recipe.approach_s + recipe.deadline_s)
+        // DERIVED: first contact must arrive within the recipe's approach watchdog.
+        approach_ticks: (recipe.approach_s
             / app
                 .world()
                 .resource::<Time<Fixed>>()
@@ -589,6 +592,55 @@ mod tests {
         );
     }
 
+    /// The runner must receive a named refusal at the approach limit. Contact on the limit
+    /// still opens the observation; a mutant that waits or times out after impact fails here.
+    #[test]
+    fn approach_watchdog_ends_only_an_uncontacted_capture() {
+        use bevy::tasks::TaskPool;
+        ComputeTaskPool::get_or_init(TaskPool::default);
+        for contact_at_limit in [false, true] {
+            let mut world = World::new();
+            world.init_resource::<ContactTransfers>();
+            world.init_resource::<SweepAccount>();
+            let mut ram = armed();
+            ram.recipe.approach_s = 2.0; // Fixture: two one-second census ticks.
+            let instance = ram.recipe.instance.clone();
+            world.insert_resource(ram);
+            let tank = world.spawn(Tank).id();
+            world.spawn((
+                Body,
+                MapInstance {
+                    id: instance,
+                    ordinal: 0,
+                },
+                Breakage::new(crate::construction::tests::column_construction(), 3),
+            ));
+            assert!(record(&mut world));
+            assert_eq!(world.resource::<Ram>().done, None);
+            if contact_at_limit {
+                // Fixture: first touch arrives exactly at the approach limit.
+                world
+                    .resource_mut::<SweepAccount>()
+                    .contacts
+                    .insert((tank, 3), 1.0);
+            }
+            assert!(record(&mut world));
+            if contact_at_limit {
+                assert_eq!(world.resource::<Ram>().impact_tick, Some(2));
+                assert_eq!(world.resource::<Ram>().done, None);
+            } else {
+                assert_eq!(
+                    world.resource_mut::<Ram>().json()["done"],
+                    "approach_timeout"
+                );
+                assert!(
+                    !record(&mut world),
+                    "a refused capture records no coasting ticks"
+                );
+            }
+        }
+    }
+
     /// A second vehicle changes distance through its data, without a vehicle-specific route.
     #[test]
     fn runup_scales_with_mass_and_operator_margin() {
@@ -675,7 +727,7 @@ mod tests {
         let mut contact = None;
         let mut losses = Vec::new();
         let mut exempted = Vec::new();
-        for tick in 0..plan.drive_ticks {
+        for tick in 0..plan.approach_ticks + WATCHED {
             let before = app.world().get::<LinearVelocity>(tank).unwrap().0;
             let start = app.world().get::<Position>(tank).unwrap().0;
             drive_tick(&mut app, tank, 1.0, 0.0);
@@ -791,6 +843,10 @@ mod tests {
                 let speed = app.world().get::<LinearVelocity>(tank).unwrap().0.length();
                 speeds.push((after, speed));
             }
+            assert!(
+                contact.is_some() || tick + 1 < plan.approach_ticks,
+                "the fixture must reach contact within the recipe approach watchdog"
+            );
             if contact.is_some_and(|first| tick >= first + WATCHED) {
                 break;
             }

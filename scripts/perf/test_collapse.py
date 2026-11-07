@@ -475,6 +475,13 @@ class RamTests(unittest.TestCase):
         for end in ("rest", "deadline"):
             self.assertEqual(collapse.ram_summary(self.text(dict(ram, done=end)), recipe)["end"], end)
 
+    def test_approach_timeout_refuses_before_any_impact(self):
+        # Fixture: the server's watchdog ends a no-contact run; it cannot certify a coast.
+        recipe, ram = self.fixture()
+        ram.update(done="approach_timeout", impact=None)
+        with self.assertRaisesRegex(RuntimeError, "invalidated: approach_timeout"):
+            collapse.ram_summary(self.text(ram), recipe)
+
     def test_ram_refuses_nonfinite_or_reordered_send_samples(self):
         recipe, ram = self.fixture()
         for sends in ([dict(tick=3, us=float("nan"))], [dict(tick=3, us=1), dict(tick=2, us=1)]):
