@@ -98,13 +98,24 @@ impl SourceTree {
 pub(crate) struct RigidMotion {
     pub(crate) position: Vec3,
     pub(crate) rotation: Quat,
+    /// The cast's one velocity: the COM's velocity at time `lead`, whose straight path reaches
+    /// the pose free motion gives the body at the tick's end.
     pub(crate) velocity: Vec3,
+    /// What Avian integrates before its contact solve, m/s².
+    pub(crate) acceleration: Vec3,
+    /// The time into the tick at which the COM moves at `velocity`, s.
+    pub(crate) lead: f32,
     pub(crate) centre: Vec3,
     pub(crate) spin: Vec3,
     pub(crate) dt: f32,
 }
 
 impl RigidMotion {
+    /// The COM's velocity at cast time `t`, before any contact changes it.
+    fn velocity_at(self, t: f32) -> Vec3 {
+        self.velocity + self.acceleration * (t - self.lead)
+    }
+
     fn leaf(self, hull: &Hull) -> Motion<'_> {
         Motion {
             hull: &hull.hull,
@@ -214,17 +225,20 @@ impl QueryTree<'_> {
             let Some((time, normal, at)) = motion.hit(hull, origin, work) else {
                 continue;
             };
-            let speed = (motion.velocity
-                + motion
-                    .spin
-                    .cross(at - motion.centre - motion.velocity * time))
-            .dot(normal);
-            if speed > 0.0 && first.is_none_or(|first| time < first.time) {
+            let turn = motion
+                .spin
+                .cross(at - motion.centre - motion.velocity * time);
+            // The cast's reach decides inward motion; the witness closes at the body's velocity
+            // at its time. A body at rest on matter closes at its rest, not at its reach's fall,
+            // and one whose reach closes but whose velocity there still parts makes no impact.
+            if (motion.velocity + turn).dot(normal) > 0.0
+                && first.is_none_or(|first| time < first.time)
+            {
                 first = Some(Witness {
                     time,
                     normal,
                     at,
-                    speed,
+                    speed: (self.motion.velocity_at(time) + turn).dot(normal).max(0.0),
                     chunk: target.chunk,
                 });
             }

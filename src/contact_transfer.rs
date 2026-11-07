@@ -225,18 +225,30 @@ impl ContactTransfers {
         self.pending.push(contact);
     }
 
-    /// A pre-physics sweep removes occupied surfaces. Their staged belt forces cease with
-    /// those colliders; the caller cancels each returned force on its source before integration.
+    /// A pre-physics sweep removes occupied matter. The staged belt forces on matter that
+    /// `departed` names cease with it; the caller cancels each returned force on its source before
+    /// integration.
     pub(crate) fn cancel_implicit(
         &mut self,
-        retired: &std::collections::BTreeSet<Entity>,
+        departed: impl Fn(&AppliedContact) -> bool,
     ) -> Vec<AppliedContact> {
         let (cancelled, retained) = self
             .pending
             .drain(..)
-            .partition(|contact| retired.contains(&contact.structure_collider));
+            .partition(|contact| departed(contact));
         self.pending = retained;
         cancelled
+    }
+
+    /// Hand each staged contact `standing` names a collider for to that collider: its collider
+    /// retired before integration while the matter under its point stands, now under a collider
+    /// of its own.
+    pub(crate) fn readdress(&mut self, standing: impl Fn(&AppliedContact) -> Option<Entity>) {
+        for contact in &mut self.pending {
+            if let Some(collider) = standing(contact) {
+                contact.structure_collider = collider;
+            }
+        }
     }
 
     /// The source inertia recorded with this step's contacts, shared across all its points.

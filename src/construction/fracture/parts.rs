@@ -746,8 +746,8 @@ impl Signature {
 /// strength, and matter that left since carries no load inside its part but still loads the
 /// interfaces below it. Until an instance's first law stage commits its design's at-rest verdict,
 /// the field is that verdict's, a stage ahead of the state. A sweep after an earlier cut this tick
-/// reads [`Assessment::resolved_on`] instead. Cached until the field or the state's topology
-/// changes.
+/// reads the field [`Assessment::resolved_on`] solves on that cut's topology, which the next law
+/// stage adopts. Cached until the field or the state's topology changes.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Gravity {
     cached: Option<((u64, Signature), Vec<f64>)>,
@@ -965,6 +965,10 @@ pub(crate) struct Assessment {
     pub(crate) support: Vec<Vec<usize>>,
     /// Scalar operations of the last tick's factorization and solves, a DERIVED count.
     pub(crate) work: u64,
+    /// The factor and gravity column a hull sweep solved on this owner's topology after a cut
+    /// this tick ([`Self::resolved_on`]): the next law stage adopts it while that topology
+    /// stands, and factors its own otherwise.
+    pub(crate) next: Option<Box<Assessment>>,
 }
 
 impl Assessment {
@@ -1022,9 +1026,11 @@ impl Assessment {
     }
 
     /// The game's environment destruction: this owner's gravity field solved on `state`'s own
-    /// topology between law stages, for a hull sweep after an earlier cut this tick. Its rebuild
-    /// parts a mechanism's joints only in its own copy of `state`: the sweep commits no law
-    /// verdict, the next law stage does, and this field already reads those joints parted.
+    /// topology between law stages, for a hull sweep after an earlier cut this tick, and the
+    /// owner's [`Self::next`] factor. Its rebuild parts a mechanism's joints only in its own copy
+    /// of `state`: the sweep commits no law verdict, and this field already reads those joints
+    /// parted; their parting leaves its topology unlike the state's, so the next law stage
+    /// factors its own and commits them.
     pub(crate) fn resolved_on(&self, structure: &Structure, state: &State) -> Self {
         let mut current = Self {
             slipping: self.slipping.clone(),
@@ -1041,6 +1047,19 @@ impl Assessment {
     fn rebuild(&mut self, structure: &Structure, state: &mut State) -> Vec<Failure> {
         self.graph = Graph::of(structure, state, &self.slipping);
         self.refactor(structure, state)
+    }
+
+    /// Take `next`'s factor and gravity column as this stage's rebuild: [`Self::rebuild`] on the
+    /// same topology and slips, solved earlier in the tick, whose operations stay that stage's.
+    fn adopt(&mut self, next: Self) {
+        *self = Self {
+            revision: self.revision + 1,
+            work: self.work,
+            last_spin: self.last_spin,
+            removed: std::mem::take(&mut self.removed),
+            support: std::mem::take(&mut self.support),
+            ..next
+        };
     }
 
     /// A mechanism removes interfaces; rigid membership changes only at the next topology rebuild.
@@ -1214,6 +1233,7 @@ impl Assessment {
             "the part solve has a positive numerical tick"
         );
         let pending = !std::mem::take(&mut self.initial_verdict).is_empty();
+        let next = self.next.take();
         self.last_spin = spin;
         self.work = 0;
         let topology = !self.initialized
@@ -1224,7 +1244,14 @@ impl Assessment {
             let before = std::mem::take(&mut self.signature.members);
             self.removed
                 .extend(before.into_iter().filter(|&c| !state.standing(c)));
-            self.rebuild(structure, state)
+            match next {
+                // One factored solve per changed owner: a sweep already solved this topology.
+                Some(next) if next.signature == Signature::of(structure, state) => {
+                    self.adopt(*next);
+                    Vec::new()
+                }
+                _ => self.rebuild(structure, state),
+            }
         } else {
             Vec::new()
         };

@@ -4272,7 +4272,7 @@ fn reconciliation_prepares_the_same_ordered_geometry_across_workers() {
                     let pool = TaskPoolBuilder::new().num_threads(threads).build();
                     for change in prepare_reconciliations(&pool, &owners, &elements, &chunks)
                         .into_iter()
-                        .flatten()
+                        .flat_map(|(_, changes)| changes)
                     {
                         change.apply(&mut commands);
                     }
@@ -4430,6 +4430,123 @@ fn owners_share_initial_equilibrium_until_their_first_changed_load() {
     assert!(!second.assessment.needs_tick());
 }
 
+/// The game's environment destruction: a cut that swaps an element to chunks keeps the belt
+/// support staged on its standing matter. The reaction on the chunk that leaves is cancelled on
+/// its source; the one on the chunk that stands reaches the physics step's reading on that
+/// chunk's own collider, and its force stays on the source. Cancelling every reaction on the
+/// retiring element collider takes a tick of real support away; keeping the one on departed
+/// matter leaves a reaction with no surface to come from.
+#[test]
+fn a_partial_cut_keeps_belt_support_on_the_matter_that_stands() {
+    use bevy::ecs::system::RunSystemOnce;
+    let kind = resolved_column();
+    let (mut app, root) = composed_kind(false, &kind);
+    for _ in 0..3 {
+        app.update();
+    }
+    let chunks = &kind.structure.chunks;
+    let side = chunks[1].centroid.y - chunks[0].centroid.y;
+    // Fixture: the momentum test's 1e6 kg cube, which frees the middle chunk (and the top one it
+    // carries) and leaves the anchored bottom chunk standing.
+    let (mass, speed) = (1e6, 128.0);
+    let start = chunks[1].centroid - Vec3::X * side;
+    let source = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Position(start),
+            Rotation::default(),
+            Collider::cuboid(0.4, 0.4, 0.4),
+            Mass(mass),
+            NoAutoMass,
+            AngularInertia::new(Vec3::splat(mass)),
+            CenterOfMass::default(),
+            LinearVelocity::ZERO,
+            piece_layers(),
+        ))
+        .id();
+    app.update();
+    let element = app
+        .world_mut()
+        .query::<(Entity, &Element, &ChildOf)>()
+        .iter(app.world())
+        .find(|(_, _, parent)| parent.parent() == root)
+        .unwrap()
+        .0;
+    // Fixture: belt reactions on the element's face at the chunk that leaves and at the one that
+    // stands, each force's tick impulse (1.6e5 N s) past the 1.3e4 N s tolerance below.
+    let belts = [1, 0].map(|c| crate::contact_transfer::AppliedContact {
+        structure: root,
+        structure_collider: element,
+        body: source,
+        point: chunks[c].centroid - Vec3::X * side / 2.0,
+        normal: Vec3::NEG_X,
+        force: Vec3::Y * 1e7,
+        closing_speed: 0.0,
+    });
+    app.world_mut()
+        .run_system_once(move |mut bodies: Query<Forces>| {
+            for belt in belts {
+                bodies
+                    .get_mut(source)
+                    .unwrap()
+                    .apply_force_at_point(belt.force, belt.point);
+            }
+        })
+        .unwrap();
+    for belt in belts {
+        app.world_mut()
+            .resource_mut::<ContactTransfers>()
+            .stage(belt);
+    }
+    app.world_mut().get_mut::<LinearVelocity>(source).unwrap().0 = Vec3::X * speed;
+    app.update();
+    let cancelled: Vec<_> = (app.world().resource::<SweepAccount>().cancelled_belts)
+        .iter()
+        .map(|belt| belt.point)
+        .collect();
+    assert_eq!(
+        cancelled,
+        [belts[0].point],
+        "only departed matter's reaction ceases"
+    );
+    let kept: Vec<_> = app
+        .world()
+        .resource::<ContactTransfers>()
+        .groups()
+        .flatten()
+        .filter(|point| point.body == source && point.body_collider.is_none())
+        .map(|point| {
+            let collider = app.world().entity(point.structure_collider);
+            (
+                collider.get::<ChunkCollider>().copied(),
+                collider.get::<ChildOf>().map(ChildOf::parent),
+                point.impulse,
+            )
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        [(Some(ChunkCollider(0)), Some(root), belts[1].force * STEP)],
+        "the standing chunk's own collider carries its reaction"
+    );
+    let rubble: DVec3 = app
+        .world_mut()
+        .query::<(&Piece, &ComputedMass, &LinearVelocity)>()
+        .iter(app.world())
+        .filter(|(piece, ..)| piece.construction == 3)
+        .map(|(_, m, v)| f64::from(m.value()) * v.0.as_dvec3())
+        .sum();
+    let after = app.world().get::<LinearVelocity>(source).unwrap().0;
+    let expected = f64::from(mass * speed) * DVec3::X + (belts[1].force * STEP).as_dvec3();
+    let total = f64::from(mass) * after.as_dvec3() + rubble;
+    // Resolution: f32 velocity and mass roundoff, about 1e-7 relative (DERIVED), with margin.
+    assert!(
+        (total - expected).length() < 1e-4 * expected.length(),
+        "the standing support stays on the source: {total:?} against {expected:?}"
+    );
+}
+
 /// The game's environment destruction: the production pre-physics sweep removes the minimum-cut
 /// plug containing its occupied source patch on first contact, before the solver. At zero
 /// gravity the hull's momentum plus its freed rubble's is conserved over the tick: a stop or
@@ -4565,6 +4682,65 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
             "the streamed ledger agrees with the authority for all freed matter"
         );
     }
+}
+
+/// The game's environment destruction: the collision hook keeps Avian's contact for a body the
+/// sweep did not cast this tick, and drops look-ahead only where a cast says its body does not
+/// reach. Read as a cast that missed, no cast would take every look-ahead point on standing
+/// matter from a departure past the round cap or a body woken in the step, matter no cut judged.
+#[test]
+fn a_body_the_sweep_did_not_cast_keeps_avians_contact() {
+    use bevy::ecs::system::RunSystemOnce;
+    let kind = resolved_column();
+    let (mut app, root) = composed_kind(false, &kind);
+    for _ in 0..3 {
+        app.update();
+    }
+    let middle = kind.structure.chunks[1].centroid;
+    let side = middle.y - kind.structure.chunks[0].centroid.y;
+    // Fixture: two cubes clear of the middle chunk's face; at zero gravity the one at rest has no
+    // motion to cast, and the other moves away from the column.
+    let [resting, leaving] = [1.0, 2.0].map(|offset| {
+        app.world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Position(middle - Vec3::X * side * offset),
+                Rotation::default(),
+                Collider::cuboid(0.4, 0.4, 0.4),
+                Mass(1e3),
+                NoAutoMass,
+                AngularInertia::new(Vec3::splat(1e3)),
+                CenterOfMass::default(),
+                LinearVelocity::ZERO,
+                piece_layers(),
+            ))
+            .id()
+    });
+    app.update(); // First preparation creates the collider hierarchy at rest.
+    app.world_mut()
+        .get_mut::<LinearVelocity>(leaving)
+        .unwrap()
+        .0 = Vec3::NEG_X;
+    app.update();
+    let element = app
+        .world_mut()
+        .query::<(Entity, &Element, &ChildOf)>()
+        .iter(app.world())
+        .find(|(_, _, parent)| parent.parent() == root)
+        .unwrap()
+        .0;
+    let face = middle - Vec3::X * side / 2.0;
+    let read = app
+        .world_mut()
+        .run_system_once(move |hooks: SweepContacts| {
+            [resting, leaving].map(|body| hooks.unjudged(element, body, face))
+        })
+        .unwrap();
+    assert_eq!(
+        read,
+        [Some(false), Some(true)],
+        "no cast keeps Avian's contact; a cast that misses covered matter drops its look-ahead"
+    );
 }
 
 /// Two 1e6 kg, 0.4 m cubes at rest one chunk side short of `resolved_column`'s middle chunk and

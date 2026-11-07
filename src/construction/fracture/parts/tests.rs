@@ -1586,6 +1586,55 @@ fn gravity_preloads_cover_internal_joints_and_refresh_after_structure_changes() 
     check(&mut state, true, [0.0, 0.0, 1.0]);
 }
 
+/// The game's environment destruction: one factored solve per changed owner. A law stage adopts
+/// the factor and gravity column a hull sweep solved on its topology this tick, the equilibrium
+/// its own rebuild reaches, without factoring it again; a factor solved on a topology that has
+/// changed since is not adopted.
+#[test]
+fn a_law_stage_adopts_the_factor_a_sweep_solved_on_its_topology() {
+    bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+    // Fixture: three stacked unit cubes, two parts, grounded at the bottom.
+    let chunks = (0..3)
+        .map(|y| cube(Vec3::Y * y as f32, 1.0, false))
+        .collect();
+    let bond = Bond::Bonded(seam(1e6, 1e6));
+    let structure = structure(
+        chunks,
+        vec![0, 0, 1],
+        vec![
+            joint(1, Side::Chunk(0), Vec3::Y * 0.5, Vec3::Y, 1.0, bond),
+            joint(2, Side::Chunk(1), Vec3::Y * 1.5, Vec3::Y, 1.0, bond),
+            joint(0, Side::Ground, Vec3::NEG_Y * 0.5, Vec3::Y, 1.0, bond),
+        ],
+    );
+    let design = Assessment::at_rest(&structure);
+    let stage = |next: Option<&Assessment>, state: &State| {
+        let mut law = design.clone();
+        law.next = next.cloned().map(Box::new);
+        law.advance(&structure, &mut state.clone(), &[], Vec3::ZERO, STEP, false);
+        law
+    };
+    let equilibrium =
+        |law: &Assessment| (law.graph.clone(), law.factor.clone(), law.gravity.clone());
+    let mut cut = State::new(&structure);
+    cut.fate[2] = super::super::Fate::Fallen;
+    let solved = design.resolved_on(&structure, &cut);
+    let (own, adopted) = (stage(None, &cut), stage(Some(&solved), &cut));
+    assert_eq!(equilibrium(&adopted), equilibrium(&own));
+    assert_eq!(
+        own.work - adopted.work,
+        solved.work,
+        "the adopting stage does none of the factorization and gravity solve the sweep did"
+    );
+    let mut later = cut.clone();
+    later.fate[1] = super::super::Fate::Fallen;
+    assert_eq!(
+        equilibrium(&stage(Some(&solved), &later)),
+        equilibrium(&stage(None, &later)),
+        "a factor solved on a topology since changed is the law's to redo"
+    );
+}
+
 /// The game's environment destruction: a first touch must not scan the owner's whole graph
 /// or refactor a design kernel for every grounded singleton. Counts expose the quadratic form.
 #[test]
