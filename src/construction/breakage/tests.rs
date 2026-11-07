@@ -4443,12 +4443,7 @@ fn a_swept_patch_keeps_its_server_body_mass_and_rigid_motion() {
             .iter()
             .all(|entry| !matches!(entry.event, Event::Dust(_)))
     );
-    let mut queue = bevy::ecs::world::CommandQueue::default();
-    let mut commands = Commands::new(&mut queue, app.world());
-    for departure in departures {
-        spawn_prepared(&mut commands, departure, &mut BTreeMap::new());
-    }
-    queue.apply(app.world_mut());
+    spawn_departures(&mut app, departures);
     app.update();
     let (piece, mass) = app
         .world_mut()
@@ -4461,6 +4456,16 @@ fn a_swept_patch_keeps_its_server_body_mass_and_rigid_motion() {
         "occupied mass: {} kg on the server, {expected_mass} kg in the freed source geometry",
         mass.value()
     );
+}
+
+/// Spawn prepared departures through the server's own spawn, with nothing to reuse.
+fn spawn_departures(app: &mut App, departures: Vec<PreparedDeparture>) {
+    let mut queue = bevy::ecs::world::CommandQueue::default();
+    let mut commands = Commands::new(&mut queue, app.world());
+    for departure in departures {
+        spawn_prepared(&mut commands, departure, &mut BTreeMap::new());
+    }
+    queue.apply(app.world_mut());
 }
 
 #[derive(Debug, PartialEq)]
@@ -4850,12 +4855,7 @@ fn a_cut_frees_unsupported_matter_without_building_standing_colliders() {
         .expect("the unsupported crown leaves as server rubble");
     assert_eq!(crown.departure.launch.velocity, Vec3::ZERO);
     assert_eq!(crown.departure.launch.spin, Vec3::ZERO);
-    let mut queue = bevy::ecs::world::CommandQueue::default();
-    let mut commands = Commands::new(&mut queue, app.world());
-    for departure in departures {
-        spawn_prepared(&mut commands, departure, &mut BTreeMap::new());
-    }
-    queue.apply(app.world_mut());
+    spawn_departures(&mut app, departures);
     app.world_mut().run_system_once(reconcile).unwrap();
     for (chunk, parent) in app
         .world_mut()

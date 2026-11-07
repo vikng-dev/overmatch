@@ -324,10 +324,12 @@ mod tests {
         }
     }
 
-    /// The game's environment destruction: contact verdicts and returned plugs must agree
-    /// with exact integer-tenths cuts, including fractional cyclic and asymmetric networks.
+    /// The game's environment destruction: contact verdicts and returned plugs must agree with
+    /// the exhaustive minimum cut on small cyclic, asymmetric networks with zero arcs: within the
+    /// stated rounding bound for fractional capacities, exactly for whole-newton ones. A greedy
+    /// expansion or a cut that never cancels residual flow misses the global minimum.
     #[test]
-    fn fractional_cuts_match_randomised_exact_reference() {
+    fn cuts_match_the_exhaustive_minimum() {
         // Fixture: deterministic LCG, small enough to enumerate every source-side subset.
         let mut random = 0x0005_eed6_u64;
         let mut next = || {
@@ -337,13 +339,22 @@ mod tests {
         for case in 0..2048 {
             let nodes = 3 + (next() % 6) as usize;
             let sink = nodes - 1;
+            // Every fourth case: whole newtons below 13, so zero arcs are common and the cut exact.
+            let exact = case % 4 == 3;
             let scale = 2.0_f64.powi([-80, 0, 80][case % 3]);
-            let force = |units: u64| units as f64 / 10.0 * scale;
+            let force = |units: u64| {
+                if exact {
+                    units as f64
+                } else {
+                    units as f64 / 10.0 * scale
+                }
+            };
+            let span = if exact { 13 } else { 2001 };
             let mut edges = Vec::new();
             for a in 0..nodes {
                 for b in a + 1..nodes {
                     if next() % 4 != 0 {
-                        edges.push((a, b, next() % 2001, next() % 2001));
+                        edges.push((a, b, next() % span, next() % span));
                     }
                 }
             }
@@ -391,8 +402,14 @@ mod tests {
                 match graph.cut(0, sink, demand).0 {
                     Cut::Held => assert!(
                         demand <= force(expected) + tolerance,
-                        "case={case}, demand={demand}, expected={expected} tenths"
+                        "case={case}, demand={demand}, expected={expected} units"
                     ),
+                    Cut::Released { inside, capacity } if exact => {
+                        assert!(inside[0] && inside[1] && !inside[sink]);
+                        assert!(demand > force(expected), "case={case}, demand={demand}");
+                        assert_eq!(capacity, force(expected), "case={case}");
+                        assert_eq!(cut_units(&inside), expected, "case={case}");
+                    }
                     Cut::Released { inside, capacity } => {
                         assert!(inside[0] && inside[1] && !inside[sink]);
                         assert!(demand + tolerance >= force(expected), "case={case}");
@@ -447,58 +464,6 @@ mod tests {
             .sum();
         assert_eq!(capacity, 1.5);
         assert_eq!(flow, capacity);
-    }
-
-    /// The game's environment destruction: asymmetric joint capacities and residual cancellation
-    /// must select the globally cheapest plug. Exhaustive subsets independently certify small
-    /// cyclic graphs, including zero-capacity arcs; a greedy expansion is insufficient.
-    #[test]
-    fn directed_cuts_match_exhaustive_subsets() {
-        // Fixture: four chunk nodes between a forced patch and fixed surroundings.
-        for seed in 0..64 {
-            let mut edges = Vec::new();
-            for a in 0..4 {
-                for b in a + 1..4 {
-                    let forward = ((seed + a * 7 + b * 3) % 11) as f64;
-                    let backward = ((seed * 3 + a * 5 + b) % 13) as f64;
-                    edges.push((a, b, forward, backward));
-                }
-            }
-            let capacity = |inside: &[bool]| {
-                edges
-                    .iter()
-                    .map(|&(a, b, f, r)| match (inside[a], inside[b]) {
-                        (true, false) => f,
-                        (false, true) => r,
-                        _ => 0.0,
-                    })
-                    .sum::<f64>()
-            };
-            let expected = (0..4)
-                .map(|bits| capacity(&[true, bits & 1 != 0, bits & 2 != 0, false]))
-                .fold(f64::INFINITY, f64::min);
-            // Fixture demand margin: quarter-unit excess, with equality and an exact-cut probe.
-            for demand in [0.0, expected, expected + 0.25, f64::INFINITY] {
-                let mut graph = Network::new(6);
-                graph.edge(4, 0, f64::INFINITY, 0.0);
-                graph.edge(3, 5, f64::INFINITY, 0.0);
-                for &(a, b, forward, backward) in &edges {
-                    graph.edge(a, b, forward, backward);
-                }
-                match graph.cut(4, 5, demand).0 {
-                    Cut::Held => assert!(demand <= expected, "seed={seed}, demand={demand}"),
-                    Cut::Released {
-                        inside,
-                        capacity: flow,
-                    } => {
-                        assert!(demand > expected, "seed={seed}, demand={demand}");
-                        assert!(inside[0] && !inside[3]);
-                        assert_eq!(capacity(&inside), expected, "seed={seed}");
-                        assert_eq!(flow, expected, "seed={seed}");
-                    }
-                }
-            }
-        }
     }
 
     /// The game's environment destruction: a minimum-capacity tie must not add an unrelated

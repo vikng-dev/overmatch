@@ -69,6 +69,45 @@ struct Node {
     chunk: usize,
 }
 
+/// A median-split BVH whose leaf `i` bounds `bounds[i]`: each node halves its leaves at the
+/// median centre along its box's longest axis, ties broken by index.
+fn tree(bounds: &[ColliderAabb]) -> Vec<Node> {
+    fn build(nodes: &mut Vec<Node>, bounds: &[ColliderAabb], leaves: &mut [usize]) -> usize {
+        let bound = leaves
+            .iter()
+            .fold(ColliderAabb::INVALID, |a, &i| a.merged(bounds[i]));
+        let index = nodes.len();
+        nodes.push(Node {
+            min: bound.min,
+            max: bound.max,
+            children: None,
+            chunk: leaves[0],
+        });
+        if leaves.len() > 1 {
+            let axis = bound.size().max_position();
+            leaves.sort_unstable_by(|&a, &b| {
+                bounds[a].center()[axis]
+                    .total_cmp(&bounds[b].center()[axis])
+                    .then(a.cmp(&b))
+            });
+            let (a, b) = leaves.split_at_mut(leaves.len() / 2);
+            let a = build(nodes, bounds, a);
+            let b = build(nodes, bounds, b);
+            nodes[index].children = Some((a, b));
+        }
+        index
+    }
+    let mut nodes = Vec::with_capacity(2 * bounds.len());
+    if !bounds.is_empty() {
+        build(
+            &mut nodes,
+            bounds,
+            &mut (0..bounds.len()).collect::<Vec<_>>(),
+        );
+    }
+    nodes
+}
+
 #[derive(Default, Debug, Clone, Copy)]
 pub(crate) struct Work {
     pub(crate) bounds: usize,
@@ -132,7 +171,12 @@ impl Geometry {
             centres,
             parts,
             incident: vec![Vec::new(); blocks.len()],
-            tree: Vec::new(),
+            tree: tree(
+                &blocks
+                    .iter()
+                    .map(|b| ColliderAabb::from_min_max(b.min, b.max))
+                    .collect::<Vec<_>>(),
+            ),
             edges: structure
                 .joints
                 .iter()
@@ -153,38 +197,7 @@ impl Geometry {
                 geometry.incident[b].push(j);
             }
         }
-        if !blocks.is_empty() {
-            geometry.build(blocks, &mut (0..blocks.len()).collect::<Vec<_>>());
-        }
         Ok(geometry)
-    }
-
-    fn build(&mut self, blocks: &[Block], chunks: &mut [usize]) -> usize {
-        let (min, max) = chunks
-            .iter()
-            .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(a, b), &c| {
-                (a.min(blocks[c].min), b.max(blocks[c].max))
-            });
-        let index = self.tree.len();
-        self.tree.push(Node {
-            min,
-            max,
-            children: None,
-            chunk: chunks[0],
-        });
-        if chunks.len() > 1 {
-            let axis = (max - min).max_position();
-            chunks.sort_unstable_by(|&a, &b| {
-                (blocks[a].min[axis] + blocks[a].max[axis])
-                    .total_cmp(&(blocks[b].min[axis] + blocks[b].max[axis]))
-                    .then(a.cmp(&b))
-            });
-            let (left, right) = chunks.split_at_mut(chunks.len() / 2);
-            let a = self.build(blocks, left);
-            let b = self.build(blocks, right);
-            self.tree[index].children = Some((a, b));
-        }
-        index
     }
 
     pub(crate) fn contact_hull(&self, chunk: usize) -> &Collider {
@@ -737,8 +750,24 @@ mod tests {
         )
     }
 
-    fn cut_capacity(cut: mincut::Cut) -> f32 {
-        let mincut::Cut::Released { capacity, .. } = cut else {
+    /// The cut capacity chunk 0 meets moving along `direction` under an unlimited demand.
+    fn unlimited_capacity(
+        geometry: &Geometry,
+        structure: &Structure,
+        state: &State,
+        direction: Vec3,
+    ) -> f32 {
+        let mincut::Cut::Released { capacity, .. } = geometry.plug(
+            structure,
+            state,
+            &preload(structure, state),
+            &[0],
+            Demand {
+                direction,
+                force: f64::INFINITY,
+            },
+            &mut Work::default(),
+        ) else {
             panic!("an unlimited demand exhausts the fixture's finite cut");
         };
         capacity as f32
@@ -1539,17 +1568,7 @@ mod tests {
         let expected = 1001.0 / 2.0_f32.sqrt();
         for normal in [-1.0, 1.0] {
             let direction = (Vec3::X * normal + Vec3::Z).normalize();
-            let capacity = cut_capacity(geometry.plug(
-                &structure,
-                &state,
-                &preload(&structure, &state),
-                &[0],
-                Demand {
-                    direction,
-                    force: f64::INFINITY,
-                },
-                &mut Work::default(),
-            ));
+            let capacity = unlimited_capacity(&geometry, &structure, &state, direction);
             assert!(
                 (capacity - expected).abs() < 0.001,
                 "direction={direction}, capacity={capacity}, expected={expected}"
@@ -1569,17 +1588,7 @@ mod tests {
         let state = State::new(&structure);
         for approach in [-1e-8, 0.0, 1e-8] {
             let direction = (Vec3::Y + Vec3::X * approach).normalize();
-            let capacity = cut_capacity(geometry.plug(
-                &structure,
-                &state,
-                &preload(&structure, &state),
-                &[0],
-                Demand {
-                    direction,
-                    force: f64::INFINITY,
-                },
-                &mut Work::default(),
-            ));
+            let capacity = unlimited_capacity(&geometry, &structure, &state, direction);
             // DERIVED: bearing changes by at most 10 kPa * 1 m² * 1e-8 = 1e-4 N;
             // the shear projection changes only at second order. Allow f32 rounding too.
             assert!(
@@ -1661,12 +1670,10 @@ mod tests {
         structure.chunks[0].mass = 9000.0 / crate::physical_laws::gravity_mps2();
         structure.chunks[0].material.density = structure.chunks[0].mass;
         let state = State::new(&structure);
-        let preload = preload(&structure, &state);
-        assert!((preload[0] - 9000.0).abs() < 0.01);
+        assert!((preload(&structure, &state)[0] - 9000.0).abs() < 0.01);
         // DERIVED: 10 + 9 = 19 kN closing reserve; 15 kN leaves 6 kN compression.
         for (force, broken) in [(15000.0, false), (19001.0, true)] {
-            let mut patch = contact_patch(&structure, Vec3::Y, force);
-            geometry.resolve(&structure, &state, &preload, &mut patch, 128.0, Vec3::ZERO);
+            let patch = resolved_contact(&geometry, &structure, &state, Vec3::Y, force);
             assert_eq!(patch.broken, broken, "force={force}");
         }
     }
@@ -1684,17 +1691,8 @@ mod tests {
             chunk.material.friction = 0.5;
         }
         structure.joints[0].bond = Bond::Resting;
-        let capacity = cut_capacity(geometry.plug(
-            &structure,
-            &State::new(&structure),
-            &preload(&structure, &State::new(&structure)),
-            &[0],
-            Demand {
-                direction,
-                force: f64::INFINITY,
-            },
-            &mut Work::default(),
-        ));
+        let capacity =
+            unlimited_capacity(&geometry, &structure, &State::new(&structure), direction);
         // DERIVED: normal translation costs 10 kPa * 1 m²; allow f32 normalization error.
         assert!((capacity - 1e4).abs() < 0.01, "capacity={capacity}");
     }
@@ -1730,16 +1728,9 @@ mod tests {
                 (1, 9),
             ],
         );
+        let state = State::new(&structure);
         for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
-            let mut patch = contact_patch(&structure, Vec3::X, 128.0 * ratio);
-            geometry.resolve(
-                &structure,
-                &State::new(&structure),
-                &preload(&structure, &State::new(&structure)),
-                &mut patch,
-                128.0,
-                Vec3::ZERO,
-            );
+            let patch = resolved_contact(&geometry, &structure, &state, Vec3::X, 128.0 * ratio);
             assert_eq!(patch.broken, broken);
             if broken {
                 assert_eq!(patch.chunks, [0, 1]);
@@ -1764,16 +1755,9 @@ mod tests {
             &[1, 4, 5],
             &[(0, 1), (0, 2), (2, 3), (2, 4), (3, 5)],
         );
+        let state = State::new(&structure);
         for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
-            let mut patch = contact_patch(&structure, Vec3::X, 48.0 * ratio);
-            geometry.resolve(
-                &structure,
-                &State::new(&structure),
-                &preload(&structure, &State::new(&structure)),
-                &mut patch,
-                128.0,
-                Vec3::ZERO,
-            );
+            let patch = resolved_contact(&geometry, &structure, &state, Vec3::X, 48.0 * ratio);
             assert_eq!(patch.broken, broken);
             if broken {
                 assert_eq!(patch.chunks, [0, 2, 3]);
@@ -1805,14 +1789,12 @@ mod tests {
                 // DERIVED: min(20 kPa, 10 kPa) * 1 m² minus the unit board's weight.
                 let reserve = 1e4 - crate::physical_laws::gravity_mps2();
                 for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
-                    let mut patch = contact_patch(&structure, Vec3::NEG_Y, reserve * ratio);
-                    geometry.resolve(
+                    let patch = resolved_contact(
+                        &geometry,
                         &structure,
                         &state,
-                        &preload(&structure, &state),
-                        &mut patch,
-                        128.0,
-                        Vec3::ZERO,
+                        Vec3::NEG_Y,
+                        reserve * ratio,
                     );
                     assert_eq!(
                         patch.broken, broken,

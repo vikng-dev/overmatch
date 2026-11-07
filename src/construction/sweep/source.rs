@@ -32,42 +32,13 @@ impl SourceTree {
             !hulls.is_empty(),
             "a sweep source has occupied contact hulls"
         );
-        let bounds: Vec<_> = hulls
-            .iter()
-            .map(|h| h.hull.aabb(h.position, h.rotation))
-            .collect();
-        let mut tree = Self {
-            hulls,
-            nodes: Vec::new(),
-        };
-        tree.build(&bounds, &mut (0..tree.hulls.len()).collect::<Vec<_>>());
-        tree
-    }
-
-    fn build(&mut self, bounds: &[ColliderAabb], leaves: &mut [usize]) -> usize {
-        let bound = leaves
-            .iter()
-            .fold(ColliderAabb::INVALID, |a, &i| a.merged(bounds[i]));
-        let index = self.nodes.len();
-        self.nodes.push(Node {
-            min: bound.min,
-            max: bound.max,
-            children: None,
-            chunk: leaves[0],
-        });
-        if leaves.len() > 1 {
-            let axis = bound.size().max_position();
-            leaves.sort_unstable_by(|&a, &b| {
-                bounds[a].center()[axis]
-                    .total_cmp(&bounds[b].center()[axis])
-                    .then(a.cmp(&b))
-            });
-            let (a, b) = leaves.split_at_mut(leaves.len() / 2);
-            let a = self.build(bounds, a);
-            let b = self.build(bounds, b);
-            self.nodes[index].children = Some((a, b));
-        }
-        index
+        let nodes = tree(
+            &hulls
+                .iter()
+                .map(|h| h.hull.aabb(h.position, h.rotation))
+                .collect::<Vec<_>>(),
+        );
+        Self { hulls, nodes }
     }
 
     /// The body's whole-tick query box: the merged rotation envelopes of its leaves, the same
