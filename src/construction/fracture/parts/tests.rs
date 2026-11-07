@@ -1650,8 +1650,10 @@ fn a_law_stage_adopts_the_partings_a_sweeps_factor_made() {
         let (mut law, mut state) = (Assessment::default(), state.clone());
         law.next = next.cloned().map(Box::new);
         let (failures, _) = law.advance(&structure, &mut state, &[], Vec3::ZERO, STEP, false);
-        let work = law.work;
-        ((failures, state, law.graph, law.factor, law.gravity), work)
+        (
+            (failures, state, law.graph, law.factor, law.gravity),
+            law.work,
+        )
     };
     let ((own, own_work), (adopted, adopted_work)) = (stage(None), stage(Some(&solved)));
     assert!(!own.0.is_empty(), "the law's own rebuild parts the sliver");

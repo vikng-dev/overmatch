@@ -539,7 +539,7 @@ keeps the belt reactions staged against its own owner: the floor's traction driv
 wall of the same house, so taking out the owner's whole staged set would drop a real press, and
 the plug that would bound the subtraction to the matter cut is what the cut itself decides.
 
-Every remaining solver transfer enters the structure check as its whole mean force `J_solver/dt`.
+Every remaining structural solver transfer enters the structure check as its whole mean force `J_solver/dt`.
 Physics already changed those bodies' momenta; contact intake supplies no second blow, source
 mass share, delayed cap or give-back. Sleeping contact forces persist until their contact ends.
 
@@ -548,23 +548,34 @@ hulls with the motion Avian integrates before its solve; Avian constrains separa
 against projected contact planes, and a body another body pushes within the solve can close a
 gap its own free motion opens (a freed chunk stands only `LOOSE_GAP_M` off the faces it shared).
 The hook drops those separated points on covered chunks outside the touching body's cast, Avian's
-contact tolerance band included; a body the sweep did not cast keeps every point.
+contact tolerance band included; a body the sweep did not cast keeps every point. The support-gap
+coincidence with gravity reach, and its dependence on tick rate and substeps, is stated at
+`LOOSE_GAP_M`; retaining the pair through Avian's minimum speculative margin does not remove it.
+
+Avian's warm-start matcher treats unknown feature IDs as absent identities: those contacts
+match only by nearby anchors. The engine patch and its class witness are recorded in
+`vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`, "Unknown contact features".
 
 A cut reads the touching body's own motion and drive, and a pusher reaches it only through that
 drive: the force the body's solver contacts moved into it over the last step from every body but
-standing construction is part of its drive and of its cast's acceleration (StandIn: no sweep
-couples bodies in contact; `sweep_intake::pushes`). Without it a pusher's force reached standing
+standing construction, less the normal momentum that stopped the approach, is part of its drive
+and cast acceleration. Per point it reads `(J - normal × m_eff × max(closing_speed, 0)) / dt`:
+velocity already holds the approach's momentum, so replaying it as drive counts a blow twice
+(StandIn: no sweep couples bodies in contact; `sweep_intake::pushes`). Without it a pusher's force reached standing
 matter only through the solver contact the structure check reads, a law stage late, while the cuts
 ahead of the pushed body read that body's own demand: MEASURED on the tracked ram, from +3 the hull
 meets the house only through rubble, which took 150.2 and 105.7 kN·s off the hull at +3 and +4
 while the standing house took 167.7 and 84.7 kN·s from it, all through contacts the rubble's own
-cuts judged. With it the rubble's cuts read the hull's push from +4: the house takes 35.7 kN·s
-from the rubble at +4, the hull frees 322 chunks there instead of 146 and runs 4.77 m past first
-contact by +60 instead of 4.33 (MEASURED); +3 still holds it through rubble, as the hull's push
-first enters at +2 at 4.4 kN·s. Its limits: the push is a step late (one that ended last step drives one
-step more, one that starts this step waits a step), it is read only through contacts with a
-structure side (two hulls pressing each other read none), and a blow over one step reads as a
-sustained push for the next.
+cuts judged. MEASURED before removing approach momentum: the house took 35.7 kN·s from rubble at +4,
+the pushed rubble freed 322 chunks there instead of 146, and the hull ran 4.77 m past first
+contact by +60 instead of 4.33; +3 still held it through rubble, as the hull's push first entered
+at +2 at 4.4 kN·s. The remaining lag is one step: a press that ended last step drives one step
+more, and a press that starts this step waits a step. The input reads every solver constraint
+once, independent of body classification; standing construction's contacts are excluded because
+its cut judges them. `StructureBody` selects structural reporting only, so hull-on-hull and
+rubble-on-hull contacts both transmit drive. Implicit belt contacts already enter as applied
+forces. Per-batch folds run on the compute pool; only their per-body sums merge in batch order
+(DERIVED: two per-body map updates per contact point, then one per batch body entry on merge).
 
 The band is the default for a push's first step, a decision and not a judgement: matter a pushed body is driven into gives way, the
 body overlaps it by at most `Δv dt` for one tick (DERIVED: 3 cm for a 2 m/s shove at 64 Hz), the
@@ -576,16 +587,20 @@ for separated points: an overlap moves momentum unjudged while it lasts (a body 
 face, a piece leaning on a side face, a soft-contact pushout). The tracked ram asserts the stronger
 form every tick of one straight ram, reading "judged" from the sweep's own patches before the laws
 commit; nothing else covers it, and it prints what such contacts move into bodies it did not cast.
-The objection that the hook vetoes contact by cast membership (base-truths review) is answered by
-these statements, by no cast meaning no verdict and by the push in the drive. Rejected: casting a
+Rejected: casting a
 swept body's overlapping and in-band covered chunks into its patch at closing speed `max(v_n, 0)`,
 so the hook could drop every non-member point. In the band it re-holds the plug the band releases,
 against a demand that omits the pusher behind it (the 97 kN·s departure returns); in an overlap
 `max(v_n, 0) = 0` and the inward drive is nil (an inward drive would have made the chunk a
 member), so the cut holds by construction, `0 ≤ C`. It buys a label at a cut per touching pair per
 tick and changes no outcome. Contingent: casting a source together with the bodies touching it as
-one rigid group, the push's coupled replacement, if the ram's attribution still shows the hull held
-through rubble no cut judged against its push. Post-contact speed is the sweep's plastic exchange
+one rigid group, the push's coupled replacement, if the owner's play verdict after removing
+approach momentum is that rubble holds a ram against a house. DERIVED cost: one contact-graph
+grouping pass per tick, O(source contact pairs), with at least the push law's casts at the push
+tick, at the pusher's reach (0.16 m at 10.4 m/s and 64 Hz). One cut per (group, owner) replaces
+one per (piece, owner): 1 against 14 at +3 in the audited ram; its cost relative to the push law
+is UNMEASURED. CLAIMED implementation estimate: 60–100 code lines. It deletes `pushes` and the
+band default, but treats loosely coupled piles as welded. Post-contact speed is the sweep's plastic exchange
 and Avian's contacts: with cast members whose cut held, released bodies, uncovered matter (buried
 or unbreakable), overlaps, and every contact of a body the sweep did not cast.
 

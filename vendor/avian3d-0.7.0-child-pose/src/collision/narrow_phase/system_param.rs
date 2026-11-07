@@ -856,10 +856,15 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     // TODO: Cache this?
                     let distance_threshold = 0.1 * self.length_unit.0;
 
+                    // OVERMATCH PATCH: choose across all old manifolds once; later manifolds
+                    // must not overwrite a closer predecessor from an earlier one.
                     for manifold in contacts.manifolds.iter_mut() {
-                        for previous_manifold in old_manifolds.iter() {
-                            manifold.match_contacts(&previous_manifold.points, distance_threshold);
-                        }
+                        manifold.match_contacts(
+                            old_manifolds
+                                .iter()
+                                .flat_map(|manifold| manifold.points.iter()),
+                            distance_threshold,
+                        );
                     }
                 }
 

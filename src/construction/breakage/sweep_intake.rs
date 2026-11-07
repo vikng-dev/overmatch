@@ -267,27 +267,33 @@ fn constant_acceleration(drives: &Drives, body: Entity, rotation: Quat, inverse_
         + rotation * local_acceleration.map_or(Vec3::ZERO, |a| a.0)
 }
 
-/// StandIn: no sweep couples bodies in contact. Per body, the force its solver contacts moved
-/// into it over the last physics step from every body but `standing` construction (N, world): a
-/// sustained push the sweep adds to the drive and cast of the body it presses, so the cut ahead of
-/// pushed matter reads the pusher's force. [`ContactTransfers`] reads a contact once from each
-/// `structure` side, so each counts once: on the side that is its `body`, and on a structure
-/// side against a body that is no structure. Belt contacts act before the sweep as forces.
+/// StandIn: no sweep couples bodies in contact. The last step's non-standing solver contacts,
+/// less normal approach momentum already held in velocity, supply the next cast and cut's press
+/// (N, world). Each constraint enters once, regardless of body classification. Belt contacts
+/// already act as forces before the sweep. Batches fold independently; only collection sums
+/// their shared body entries, in batch order.
 fn pushes(
     transfers: &ContactTransfers,
-    standing: impl Fn(Entity) -> bool,
-    structure: impl Fn(Entity) -> bool,
+    standing: impl Fn(Entity) -> bool + Sync,
 ) -> BTreeMap<Entity, Vec3> {
-    let mut pushes = BTreeMap::<Entity, Vec3>::new();
-    let solved = transfers.groups().flatten();
-    for point in solved.filter(|point| point.body_collider.is_some() && !standing(point.structure))
-    {
-        let force = point.impulse / transfers.dt();
-        if !standing(point.body) {
+    let groups: Vec<_> = transfers.solver_groups().collect();
+    let batches = groups.par_splat_map(ComputeTaskPool::get(), None, |_, groups| {
+        let mut pushes = BTreeMap::<Entity, Vec3>::new();
+        for point in groups.iter().flat_map(|points| points.iter()) {
+            if standing(point.structure) || standing(point.body) {
+                continue; // Standing matter's cut judges its own contact.
+            }
+            let approach = point.normal * point.effective_mass * point.closing_speed.max(0.0);
+            let force = (point.impulse - approach) / transfers.dt();
             *pushes.entry(point.body).or_default() += force;
-        }
-        if !structure(point.body) {
             *pushes.entry(point.structure).or_default() -= force;
+        }
+        pushes
+    });
+    let mut pushes = BTreeMap::<Entity, Vec3>::new();
+    for batch in batches {
+        for (body, force) in batch {
+            *pushes.entry(body).or_default() += force;
         }
     }
     pushes
@@ -316,7 +322,6 @@ pub(super) struct Intake<'w, 's> {
             Or<(With<Piece>, Without<Breakage>)>,
         ),
     >,
-    structures: Query<'w, 's, (), With<crate::contact_transfer::StructureBody>>,
     spatial: SpatialQuery<'w, 's>,
     transfers: ResMut<'w, ContactTransfers>,
     swapped: ResMut<'w, SwappedBelts>,
@@ -561,11 +566,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
         ..
     } = *p;
     let travel = travel(substeps, dt);
-    let pushes = pushes(
-        &p.transfers,
-        |body| constructions.contains(body),
-        |body| p.structures.contains(body),
-    );
+    let pushes = pushes(&p.transfers, |body| constructions.contains(body));
     let mut gathered = bevy::utils::Parallel::<Vec<SweepSource>>::default();
     movers
         .par_iter()
@@ -1358,19 +1359,20 @@ mod tests {
     use crate::headless_test::{booted_driving_grid, driving_plane, start_fixed_clock};
 
     /// The game's environment destruction: a body a heavier one presses into rubble or standing
-    /// matter reads that push in its drive, each contact once, whichever sides the reading names
-    /// it from; standing construction pushes nothing, since its own cut judges that contact, and
-    /// a belt contact is a force already applied. Without the push, a cut ahead of pushed matter
+    /// matter reads that push in its drive, each solver contact once, regardless of classification;
+    /// standing construction pushes nothing, since its own cut judges that contact. Without the
+    /// push, a cut ahead of pushed matter
     /// reads only the pushed body's own drive and holds the pusher through it.
     #[test]
     fn a_pushed_body_reads_each_pushers_force_once() {
+        ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
         let [hull, rubble, under, wall] = [1, 2, 3, 4].map(|i| Entity::from_raw_u32(i).unwrap());
         // Fixture: one point per contact, impulses in N s over a 0.5 s step.
-        let point = |structure, body, impulse, solver: bool| ContactTransfer {
+        let point = |structure, body, impulse| ContactTransfer {
             structure,
             structure_collider: structure,
             body,
-            body_collider: solver.then_some(body),
+            body_collider: Some(body),
             point: Vec3::ZERO,
             normal: Vec3::Y,
             impulse,
@@ -1379,28 +1381,60 @@ mod tests {
         };
         let transfers = ContactTransfers::fixture(
             vec![
-                // The hull, no structure, pushes the rubble: read from the rubble's side alone.
-                vec![point(rubble, hull, Vec3::NEG_X * 6.0, true)],
-                // Two pieces, read from each side: once per body.
-                vec![point(under, rubble, Vec3::Y * 4.0, true)],
-                vec![point(rubble, under, Vec3::NEG_Y * 4.0, true)],
-                // Standing matter, read from each side: neither side's push.
-                vec![point(wall, rubble, Vec3::NEG_X * 2.0, true)],
-                vec![point(rubble, wall, Vec3::X * 2.0, true)],
-                // A belt contact the track law applied as a force before the sweep.
-                vec![point(rubble, hull, Vec3::NEG_X * 10.0, false)],
+                // The hull pushes rubble through one canonical reading.
+                vec![point(rubble, hull, Vec3::NEG_X * 6.0)],
+                // Two pieces: the canonical reading contributes to both bodies.
+                vec![point(under, rubble, Vec3::Y * 4.0)],
+                // Standing matter, in either orientation: neither side's push.
+                vec![point(wall, rubble, Vec3::NEG_X * 2.0)],
+                vec![point(rubble, wall, Vec3::X * 2.0)],
             ],
             0.5,
         );
-        let pushes = pushes(
-            &transfers,
-            |e| e == wall,
-            |e| [rubble, under, wall].contains(&e),
-        );
+        let pushes = pushes(&transfers, |e| e == wall);
         assert_eq!(pushes[&rubble], Vec3::new(12.0, 8.0, 0.0));
         assert_eq!(pushes[&hull], Vec3::NEG_X * 12.0);
         assert_eq!(pushes[&under], Vec3::NEG_Y * 8.0);
         assert!(!pushes.contains_key(&wall), "standing matter is no source");
+    }
+
+    /// The game's environment destruction: a cut ahead of a struck body must not count the
+    /// approach momentum already in its velocity as fresh drive. A body held against standing
+    /// matter still transmits its pusher's press, with or without an approach in that step.
+    #[test]
+    fn a_blow_is_not_replayed_as_a_push_but_a_press_is() {
+        ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+        let [pusher, body, wall] = [1, 2, 3].map(|i| Entity::from_raw_u32(i).unwrap());
+        // Fixture: a 23 kg effective contact mass, a 0.5 s step, normal impulses in N s.
+        for (closing_speed, impulse, force) in
+            [(10.0, 230.0, 0.0), (0.0, 3.0, 6.0), (10.0, 233.0, 6.0)]
+        {
+            let contact = |structure, body, impulse| ContactTransfer {
+                structure,
+                structure_collider: structure,
+                body,
+                body_collider: Some(body),
+                point: Vec3::ZERO,
+                normal: Vec3::X,
+                impulse: Vec3::X * impulse,
+                effective_mass: 23.0,
+                closing_speed,
+            };
+            let transfers = ContactTransfers::fixture(
+                vec![
+                    vec![contact(pusher, body, impulse)],
+                    vec![contact(wall, body, -3.0)],
+                ],
+                0.5,
+            );
+            let push = pushes(&transfers, |e| e == wall);
+            assert_eq!(
+                push[&body],
+                Vec3::X * force,
+                "approach {closing_speed}, impulse {impulse}"
+            );
+            assert_eq!(push[&pusher], Vec3::NEG_X * force);
+        }
     }
 
     /// The game's environment destruction: a cut reads the force its source drives into it, all
