@@ -526,8 +526,9 @@ at the same presentation tick. Dust-only hull departures are rejected: they remo
 the tank's path.
 A belt reaction staged on matter a cut took away (a chunk that left, or the chunk at its point of
 an element that swapped to chunks) is cancelled on its source before integration. One staged on
-matter that stands keeps its support: an element collider that retires for its chunks hands it to
-the chunk collider at its point as reconciliation builds that collider (`breakage::reconcile`). A
+matter that stands keeps its support: the sweep finds the chunk at its point once
+(`sweep_intake::SwappedBelts`), and an element collider that retires for its chunks hands it to
+the collider reconciliation builds for that chunk (`breakage::reconcile`). A
 sweep never enters the structural pulse/work calculation. Why the cancellation: the track law
 stages a belt's reaction against the surface it read before the sweep runs, and a reaction from
 matter the sweep removed has no surface to come from. Staging belts after the sweep instead would

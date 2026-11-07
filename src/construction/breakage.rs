@@ -3153,17 +3153,14 @@ fn derive_from_record(
 /// Prepared structural effects in the owner's original element-then-chunk order.
 enum ColliderChange<E, C> {
     Despawn(Entity),
-    /// An element collider retired for its chunks', and the element.
-    Swap(Entity, usize),
     Element(E),
     Chunk(usize, C),
 }
 
 impl<E: Bundle, C: Bundle> ColliderChange<E, C> {
-    /// Apply it; a built chunk collider returns its chunk and entity.
     fn apply(self, commands: &mut Commands) -> Option<(usize, Entity)> {
         match self {
-            Self::Despawn(entity) | Self::Swap(entity, _) => {
+            Self::Despawn(entity) => {
                 commands.entity(entity).despawn();
             }
             Self::Element(bundle) => {
@@ -3200,7 +3197,7 @@ fn prepare_reconcile(
     );
     for (e, swapped) in shape.swapped.iter().enumerate() {
         match (swapped, have_elements.get(&e)) {
-            (true, Some(entity)) => effects.push(ColliderChange::Swap(*entity, e)),
+            (true, Some(entity)) => effects.push(ColliderChange::Despawn(*entity)),
             (false, None) => {
                 effects.push(ColliderChange::Element((
                     ChildOf(root),
@@ -3269,8 +3266,7 @@ fn prepare_reconciliations(
 
 /// Every peer: prepare changed owners together, then commit colliders before the same-update refit.
 /// A belt reaction staged on an element collider that retires for its chunks' moves to the chunk
-/// collider at its point: the sweep cancelled those on matter that left
-/// ([`sweep_intake::cancel_retired_belts`]).
+/// collider the sweep found at its point ([`sweep_intake::SwappedBelts`]).
 fn reconcile(
     constructions: Query<
         (Entity, &Transform, &Breakage, Option<&Children>),
@@ -3280,46 +3276,29 @@ fn reconcile(
     chunks: Query<&ChunkCollider>,
     mut commands: Commands,
     mut transfers: ResMut<ContactTransfers>,
+    mut swapped: ResMut<sweep_intake::SwappedBelts>,
     stages: Option<Res<Stages>>,
 ) {
     let _refit = Stages::start(stages.as_deref(), Stage::Refit);
     let effects =
         prepare_reconciliations(ComputeTaskPool::get(), &constructions, &elements, &chunks);
-    let (mut swapped, mut built) = (BTreeMap::new(), BTreeMap::new());
+    let mut built = BTreeMap::new();
     // Direct scoped submissions collect in query order. All hulls are ready before this flush,
     // and refit_systems exposes every new collider to spatial queries in the same update.
     for (root, effects) in effects {
         for effect in effects {
-            if let &ColliderChange::Swap(entity, element) = &effect {
-                swapped.insert(entity, (root, element));
-            }
             if let Some((c, entity)) = effect.apply(&mut commands) {
                 built.insert((root, c), entity);
             }
         }
     }
-    if swapped.is_empty() {
-        return;
-    }
-    transfers.readdress(|contact| {
-        // A contact on any other collider keeps its address.
-        let &(root, element) = swapped.get(&contact.structure_collider)?;
-        let (_, transform, breakage, _) = constructions
-            .get(root)
-            .expect("a reconciled owner is still in its query");
-        let pose = breakage.frame(transform);
-        let chunk = nearest_chunk(
-            &breakage.kind.layout,
-            element,
-            pose.rotation.inverse() * (contact.point - pose.translation),
-        )
-        .expect("an element that swapped has chunks");
-        Some(
-            *built.get(&(root, chunk)).expect(
-                "a staged reaction outlives its swapped element only on a chunk that stands",
-            ),
-        )
-    });
+    let moves = std::mem::take(&mut swapped.0).into_iter();
+    transfers.readdress(moves.map(|(index, root, chunk)| {
+        let collider = built
+            .get(&(root, chunk))
+            .expect("a staged reaction outlives its swapped element only on a chunk that stands");
+        (index, *collider)
+    }));
 }
 
 /// Avian's refit of moved colliders in a frame a construction changed: the spawned chunks' bounds
@@ -3366,6 +3345,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
     crate::collider_rehome::plugin(app);
     app.init_resource::<SweepAccount>()
         .init_resource::<SweepCast>()
+        .init_resource::<sweep_intake::SwappedBelts>()
         .add_message::<crate::debris::crumble::Shed>()
         .add_systems(
             FixedPostUpdate,

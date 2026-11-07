@@ -186,7 +186,6 @@ type ContactBodies<'w, 's> = Query<
 
 impl ContactTransfers {
     /// Pre-physics staging order, before the solver reading canonicalizes contact geometry.
-    #[cfg(test)]
     pub(crate) fn staged(&self) -> &[AppliedContact] {
         &self.pending
     }
@@ -225,29 +224,29 @@ impl ContactTransfers {
         self.pending.push(contact);
     }
 
-    /// A pre-physics sweep removes occupied matter. The staged belt forces on matter that
-    /// `departed` names cease with it; the caller cancels each returned force on its source before
-    /// integration.
-    pub(crate) fn cancel_implicit(
-        &mut self,
-        departed: impl Fn(&AppliedContact) -> bool,
-    ) -> Vec<AppliedContact> {
+    /// A pre-physics sweep removes occupied matter. The staged belt forces on matter that left,
+    /// flagged in `departed` in staging order, cease with it; the caller cancels each returned
+    /// force on its source before integration.
+    pub(crate) fn cancel_implicit(&mut self, departed: &[bool]) -> Vec<AppliedContact> {
+        assert_eq!(
+            departed.len(),
+            self.pending.len(),
+            "a sweep judges every staged contact once"
+        );
+        let mut flags = departed.iter();
         let (cancelled, retained) = self
             .pending
             .drain(..)
-            .partition(|contact| departed(contact));
+            .partition(|_| *flags.next().expect("one flag per staged contact"));
         self.pending = retained;
         cancelled
     }
 
-    /// Hand each staged contact `standing` names a collider for to that collider: its collider
-    /// retired before integration while the matter under its point stands, now under a collider
-    /// of its own.
-    pub(crate) fn readdress(&mut self, standing: impl Fn(&AppliedContact) -> Option<Entity>) {
-        for contact in &mut self.pending {
-            if let Some(collider) = standing(contact) {
-                contact.structure_collider = collider;
-            }
+    /// Before integration, move staged contacts from retired colliders to the colliders covering
+    /// the same standing matter: each `(index, collider)` names one by its staging order.
+    pub(crate) fn readdress(&mut self, moves: impl IntoIterator<Item = (usize, Entity)>) {
+        for (index, collider) in moves {
+            self.pending[index].structure_collider = collider;
         }
     }
 
