@@ -749,8 +749,8 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     // Compute the effective margin based on how much the bodies
                     // are expected to move relative to each other.
                     relative_linear_velocity = lin_vel2 - lin_vel1;
-                    // The tolerance is the minimum speculative margin for both the query and
-                    // point pruning, including a resting pair with no relative velocity.
+                    // OVERMATCH PATCH: contact_tolerance floors the margin for both the query
+                    // and point pruning, including a resting pair with no relative velocity.
                     (delta_secs * relative_linear_velocity.length()).max(*self.contact_tolerance)
                 };
 
