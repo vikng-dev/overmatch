@@ -4436,6 +4436,8 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     assert!(rubble != DVec3::ZERO, "the plug leaves as server rubble");
     let before = f64::from(mass * speed) * DVec3::X;
     let total = f64::from(mass) * after.as_dvec3() + rubble;
+    // Resolution: f32 roundoff of about 1e-7 per momentum term (DERIVED), summed over the
+    // solver's substeps and the rubble bodies.
     assert!(
         (total - before).length() < 1e-4 * before.length(),
         "hull and freed rubble keep the hull's momentum: {total:?} against {before:?}"
@@ -5228,7 +5230,9 @@ fn absorbed_cut_and_unsupported_matter_keep_their_combined_momentum() {
 }
 
 /// The game's environment physics: prepared contact mass survives insertion and follows shape,
-/// scale and density changes. Occupied overrides remain separate from this contact-shape cache.
+/// scale and density changes. Tripwire for the vendored `with_mass_properties_cache` patch
+/// (`vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`), which chunk colliders prepare on
+/// workers; the piece body owns occupied mass.
 #[test]
 fn prepared_contact_mass_is_valid_at_insertion_and_invalidates_with_its_inputs() {
     use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;

@@ -13,7 +13,7 @@ use bevy::tasks::{ParallelSlice, ParallelSliceMut};
 pub(crate) struct SourceImpulse {
     pub(crate) body: Entity,
     pub(crate) linear: Vec3,
-    /// Free angular impulse, about the source COM, rather than `point cross linear`.
+    /// Free angular impulse about the source COM.
     pub(crate) angular: Vec3,
 }
 
@@ -451,7 +451,8 @@ fn geometry(p: &mut Intake, dt: f32, tick: u32, sources: &[SweepSource]) -> Vec<
 
 /// One owner's sources in body entity order, each resolved on the state the earlier ones left: a
 /// released plug's cut commits at once, and every later source resolves again on its topology
-/// with the gravity field re-solved there ([`fracture::parts::Assessment::resolved_on`]). Both
+/// with the gravity field re-solved there ([`fracture::parts::Assessment::resolved_on`]). A
+/// later source meeting only matter an earlier cut freed has no witness and so no cut. Both
 /// passes count as work; owners never meet here.
 fn owner_sequence(
     breakage: &mut Breakage,

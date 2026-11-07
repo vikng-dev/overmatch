@@ -483,7 +483,9 @@ impl JointStrength {
     }
 }
 
-/// The friction a joint's two faces hold with; a ground joint reads its chunk's own.
+/// The friction a joint's two faces hold with. The ground states no friction fact (why
+/// `Attachments::holds_anchor` refuses a resting foundation), so a ground joint reads its chunk's
+/// own for both faces: a StandIn until the ground states one.
 pub(crate) fn pair_friction(structure: &super::Structure, joint: &super::Joint) -> f64 {
     let own = structure.chunks[joint.a].material.friction;
     let other = match joint.b {

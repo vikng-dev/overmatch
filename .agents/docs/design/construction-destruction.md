@@ -469,7 +469,7 @@ on the tracked ram (`tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_m
 took 0.77 m/s off the hull and lifted it 0.63 m/s at impact +1, and 5.6 m/s, 0.63 m/s up and
 1.4 m/s sideways at +2, leaving 4.5 m/s (DERIVED from the measured impulses; the sweep's own
 exchange took 0.04 and 0.31 m/s, and the freed rubble 0.08 m/s at +2). Playtest fork F19 holds
-the alternative. The rejected alternatives: the sweep stopping the hull itself (a time-of-impact pose, a stop
+the alternative. The rejected alternative: the sweep stopping the hull itself (a time-of-impact pose, a stop
 impulse and a press of its own), with a collision hook that dropped Avian's look-ahead points
 on covered chunks so the two stops did not meet. That answered one contact with three readings
 of it (the cut's `m_eff`, the press's whole mass and the body's centre-of-mass stop plus a free
@@ -502,10 +502,14 @@ at the same presentation tick. Dust-only hull departures are rejected: they remo
 the tank's path.
 A retired element's staged belt reactions are cancelled before integration; surviving surfaces
 receive fresh solver contacts. A sweep never enters the structural pulse/work calculation.
-The cancellation is kept: the track law stages a belt's reaction against the surface it read
+Why the cancellation: the track law stages a belt's reaction against the surface it read
 before the sweep runs, and a reaction from a surface the sweep removed has no surface to come
 from. Staging belts after the sweep instead would move the drive the cut reads into the next tick
-and reorder the track law's schedule for one consumer.
+and reorder the track law's schedule for one consumer. A swapped element whose matter still
+stands beside the cut loses its belt reaction for that tick too: its element collider retires
+for the chunk colliders reconciliation builds after the sweep, which the staged reaction cannot
+name. That costs at most one tick of that belt's support, `F dt`; restaging it onto the new chunk
+colliders would carry each point through reconciliation for that one tick.
 
 Every remaining solver transfer enters the structure check as its whole mean force `J_solver/dt`.
 Physics already changed those bodies' momenta; contact intake supplies no second blow, source
