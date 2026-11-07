@@ -2500,7 +2500,11 @@ pub(crate) fn chunk_collider(kind: &ConstructionKind, c: usize, origin: Vec3) ->
 /// 11 sampled releases with the nearest face set back this far: with no gap 3 took kicks of up to
 /// 5.5 cm and 0.22 J/kg from nothing; at 1 mm none gained energy, 1 km from the origin as well.
 /// Only contacts read it; the game's damage-model rounds meet the occupied hull
-/// ([`chunk_collider`]).
+/// ([`chunk_collider`]). Set back on both sides, a joint leaves 2 mm of void, which is all
+/// the walk bridges in one run (`WalkLaws::weld_perp` and `weld_run_gap_budget`, 2 mm each). So
+/// a round crossing two such joints would read two plates where the intact element reads one. An
+/// oblique round can cross two: the shipped house's 0.25 m walls are cut into chunks 0.225 to
+/// 0.26 m across (DERIVED from its construction file).
 pub(crate) const LOOSE_GAP_M: f32 = 1e-3;
 
 /// Resolution: how far a contact hull's corner may pass one of its planes and still bound it, m:
