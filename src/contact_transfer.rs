@@ -1,5 +1,5 @@
-//! What solver contacts and implicit belt contacts moved between a standing structure and a
-//! dynamic body, one physics step at a time: the reading a body's contact load is taken from in
+//! What solver contacts moved between interacting bodies, and implicit belt contacts moved
+//! into structures, one physics step at a time: the reading a body's contact load is taken from in
 //! the game's environment destruction model (game state only; a contact never doses a tank). The model it
 //! serves is `.agents/docs/design/construction-destruction.md`, "Bodies in contact".
 //!
@@ -12,12 +12,13 @@
 //! `I_s − (1 − w) I_{s−1}`, normal and friction alike, and restitution moves its increment.
 //! [`ContactTransfers`] sums exactly that, from Avian's public solver state (`ConstraintGraph`):
 //! - before the substeps ([`SolverSystems::PreSubstep`]): one record per point of every constraint
-//!   between a [`StructureBody`] and another body, with the point's warm-start impulse as `I_{−1}`;
+//!   with the point's warm-start impulse as `I_{−1}`;
 //! - after each substep's relax pass ([`SubstepSolverSystems::Relax`]): the substep's momentum;
 //! - after restitution ([`SolverSystems::Restitution`]): its increment.
 //!
 //! Avian builds a constraint only where at least one body is dynamic. Each structure side
-//! gets its own signed reading, including two structures touching each other; the other side
+//! gets its own signed structural reading; the sweep reads every solver constraint once,
+//! independently of [`StructureBody`], through [`ContactTransfers::solver_groups`]. The other side
 //! may be fixed ground or another moving body. `ContactPoint::normal_impulse` is not this reading:
 //! Avian adds the whole accumulated impulse into it on every solve call, twice per substep, and
 //! keeps the friction impulse only as the last substep's, in a basis it does not store. The
@@ -60,25 +61,27 @@ use bevy::tasks::{ComputeTaskPool, ParallelSlice, ParallelSliceMut, TaskPool};
 use crate::ClientReplica;
 
 /// A body whose construction the destruction laws judge: an anchored or moving chunk group. Its
-/// contacts with dynamic bodies are read into [`ContactTransfers`]. Required by the components
+/// contacts select the structural reporting in [`ContactTransfers::groups`]. Required by the components
 /// that make a body a structure, never inserted by hand.
 #[derive(Component, Debug, Default, Clone, Copy)]
 pub(crate) struct StructureBody;
 
-/// One contact point between a structure and a dynamic body, over one physics step.
+/// One contact point over one physics step, oriented from `structure` into `body`.
+/// In structural reporting, `structure` has [`StructureBody`]; the generic solver stream uses
+/// Avian's first body as that reference side, regardless of classification.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ContactTransfer {
-    /// The structure's body.
+    /// The reference body.
     pub(crate) structure: Entity,
-    /// The structure's collider the point lies on.
+    /// The reference body's collider the point lies on.
     pub(crate) structure_collider: Entity,
-    /// The dynamic body.
+    /// The other body.
     pub(crate) body: Entity,
     /// The source collider, or `None` for an implicit belt contact with no solver collider.
     pub(crate) body_collider: Option<Entity>,
     /// The contact point in world space, as the narrow phase found it at the step's start (m).
     pub(crate) point: Vec3,
-    /// The contact normal, unit, from the structure into the body.
+    /// The contact normal, unit, from the reference body into the other body.
     pub(crate) normal: Vec3,
     /// The momentum the solver moved into the body through this point over the step (N·s,
     /// world), normal and friction together; the structure took its opposite.
@@ -129,7 +132,7 @@ pub(crate) struct BodyInertia {
     pub(crate) inverse_inertia: Mat3,
 }
 
-/// Every structure contact's transfer over the last physics step, and every resting contact's
+/// Every solver contact's transfer over the last physics step, and every structural resting contact's
 /// (module doc).
 #[derive(Resource, Debug, Default)]
 pub(crate) struct ContactTransfers {
@@ -148,7 +151,7 @@ pub(crate) struct ContactTransfers {
     /// The steps summed.
     steps: u64,
     /// The constraints kept this step: where each lies in Avian's constraint graph, its first
-    /// point's index in `points`, and `+1` when the dynamic body is the constraint's second body
+    /// point's index in `points`, and `+1` when `body` is the constraint's second body
     /// (the one Avian applies `+impulse` to), `−1` when it is the first.
     kept: Vec<Kept>,
     /// Per point, beside `points`: the accumulated normal and friction impulse at the last
@@ -162,6 +165,7 @@ struct Kept {
     index: usize,
     first: usize,
     sign: f32,
+    structural: bool,
 }
 
 struct PreparedContact {
@@ -205,6 +209,7 @@ impl ContactTransfers {
                 index: transfers.kept.len(),
                 first: transfers.points.len(),
                 sign: 1.0,
+                structural: true,
             });
             transfers.points.extend(points);
         }
@@ -284,9 +289,23 @@ impl ContactTransfers {
             .map(|point| (point, -point.impulse / self.dt))
     }
 
-    /// Raw contact groups in solver order, then canonical implicit-contact order. Instrumentation
-    /// can inspect metadata without evaluating the mass, blow and press laws.
+    /// Structural contact groups in solver order, then canonical implicit-contact order.
     pub(crate) fn groups(&self) -> impl Iterator<Item = &[ContactTransfer]> {
+        self.solved()
+            .filter(|(kept, _)| kept.structural)
+            .map(|(_, points)| points)
+            .chain(self.applied.values().map(Vec::as_slice))
+    }
+
+    /// Every solver constraint once, oriented from Avian's first body into its second.
+    /// Implicit belt contacts are already applied forces and do not enter this stream.
+    pub(crate) fn solver_groups(&self) -> impl Iterator<Item = &[ContactTransfer]> {
+        self.solved()
+            .filter(|(kept, _)| kept.sign == 1.0)
+            .map(|(_, points)| points)
+    }
+
+    fn solved(&self) -> impl Iterator<Item = (&Kept, &[ContactTransfer])> {
         let ends = self
             .kept
             .iter()
@@ -296,8 +315,7 @@ impl ContactTransfers {
         self.kept
             .iter()
             .zip(ends)
-            .map(|(kept, end)| &self.points[kept.first..end])
-            .chain(self.applied.values().map(Vec::as_slice))
+            .map(|(kept, end)| (kept, &self.points[kept.first..end]))
     }
 }
 
@@ -321,12 +339,13 @@ fn prepare_constraint(
 ) -> Vec<PreparedContact> {
     let mut prepared = Vec::new();
     for structure_first in [true, false] {
-        if !structures.contains(if structure_first {
+        let structural = structures.contains(if structure_first {
             constraint.body1
         } else {
             constraint.body2
-        }) {
-            continue; // Neither side need be a construction.
+        });
+        if !structure_first && !structural {
+            continue; // The generic reading already holds this constraint's first orientation.
         }
         let (_, pair) = contacts
             .get_by_id(constraint.contact_id)
@@ -390,6 +409,7 @@ fn prepare_constraint(
                 index,
                 first: 0,
                 sign,
+                structural,
             },
             body,
             inertia,
@@ -401,7 +421,7 @@ fn prepare_constraint(
 }
 
 /// Before the substeps: the resting pairs brought up to date, then a record for every point of
-/// every constraint with a structure on one side. `time` is the physics clock Avian runs its
+/// every constraint, plus the opposite reading when that side is structural. `time` is the physics clock Avian runs its
 /// schedule on.
 fn keep(
     stages: Option<Res<crate::cost::stages::Stages>>,
@@ -449,7 +469,7 @@ fn keep(
     let newly_resting = points.par_splat_map(ComputeTaskPool::get(), None, |_, points| {
         points
             .iter()
-            .filter(|point| asleep(point))
+            .filter(|point| structures.contains(point.structure) && asleep(point))
             .map(|&transfer| Resting { transfer, dt: *dt })
             .collect::<Vec<_>>()
     });
@@ -805,6 +825,61 @@ mod tests {
             .find(|pair| pair.body1 == Some(body) || pair.body2 == Some(body))
             .map(|pair| pair.body1 == Some(structure));
         (momentum(app) - before, transfer, dt, structure_first)
+    }
+
+    /// The game's environment destruction sweep relies on every solver contact, independently
+    /// of structural reporting. Missing plain-body contacts or counting both structural sides
+    /// twice breaks the equality with the source's actual momentum change.
+    #[test]
+    fn solver_inputs_do_not_depend_on_structure_markers() {
+        for structural in [false, true] {
+            let mut app = world(1.0);
+            let fixed = wall(&mut app);
+            let moving = cube(&mut app, Vec3::new(-1.3, 0.0, 0.0), Vec3::X * 3.0);
+            if structural {
+                app.world_mut().entity_mut(moving).insert(StructureBody);
+            } else {
+                app.world_mut().entity_mut(fixed).remove::<StructureBody>();
+            }
+            app.update();
+            let mut observed = false;
+            for _ in 0..24 {
+                let momentum = |app: &App| {
+                    app.world().get::<ComputedMass>(moving).unwrap().value()
+                        * app.world().get::<LinearVelocity>(moving).unwrap().0
+                };
+                let before = momentum(&app);
+                app.update();
+                let reading = app.world().resource::<ContactTransfers>();
+                let received: Vec3 = reading
+                    .solver_groups()
+                    .flatten()
+                    .map(|point| {
+                        if point.body == moving {
+                            point.impulse
+                        } else {
+                            assert_eq!(point.structure, moving, "the fixture has one contact pair");
+                            -point.impulse
+                        }
+                    })
+                    .sum();
+                // Resolution: f32 accumulation against the fixture's initial 3000 N s momentum.
+                assert!((momentum(&app) - before - received).length() <= 1e-4 * 3000.0);
+                if !structural {
+                    assert_eq!(
+                        reading.groups().count(),
+                        0,
+                        "plain bodies have no structural report"
+                    );
+                    assert!(reading.resting().is_empty());
+                }
+                observed |= received != Vec3::ZERO;
+            }
+            assert!(
+                observed,
+                "the solver stream must include the contact with markers {structural}"
+            );
+        }
     }
 
     /// Both sides of a resting joint receive the solver's one transfer with opposite signs.

@@ -565,8 +565,12 @@ cuts judged. MEASURED before removing approach momentum: the house took 35.7 kN�
 the pushed rubble freed 322 chunks there instead of 146, and the hull ran 4.77 m past first
 contact by +60 instead of 4.33; +3 still held it through rubble, as the hull's push first entered
 at +2 at 4.4 kN·s. The remaining lag is one step: a press that ended last step drives one step
-more, and a press that starts this step waits a step. The reading still requires a structure side
-(two hulls pressing each other read none).
+more, and a press that starts this step waits a step. The input reads every solver constraint
+once, independent of body classification; standing construction's contacts are excluded because
+its cut judges them. `StructureBody` selects structural reporting only, so hull-on-hull and
+rubble-on-hull contacts both transmit drive. Implicit belt contacts already enter as applied
+forces. Per-batch folds run on the compute pool; only their per-body sums merge in batch order
+(DERIVED work O(contact points), plus the ordered merge of batch body entries).
 
 The band is the default for a push's first step, a decision and not a judgement: matter a pushed body is driven into gives way, the
 body overlaps it by at most `Δv dt` for one tick (DERIVED: 3 cm for a 2 m/s shove at 64 Hz), the
