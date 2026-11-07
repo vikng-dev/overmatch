@@ -442,8 +442,18 @@ fn publish_fixture_departures(world: &mut World) {
             piece,
             RigidBody::Dynamic,
             // Fixture body geometry for the transport/reset witness; production detachment
-            // geometry is exercised by the common construction plugin's own witnesses.
+            // geometry is exercised by the common construction plugin's own witnesses. A free
+            // group carries its sweep source tree from spawn, as production pieces do.
             Collider::cuboid(1.0, 1.0, 1.0),
+            crate::construction::sweep::SourceShape(std::sync::Arc::new(
+                crate::construction::sweep::SourceTree::new(vec![
+                    crate::construction::sweep::Hull {
+                        hull: Collider::cuboid(1.0, 1.0, 1.0),
+                        position: Vec3::ZERO,
+                        rotation: Quat::IDENTITY,
+                    },
+                ]),
+            )),
             ColliderDensity(1.0),
             Friction::ZERO,
             crate::construction::breakage::piece_layers(),

@@ -686,9 +686,15 @@ construction. Design §7b owns the rule and its verification table.
 
 ## F19 — A rammed house: what stops the hull beside the hole
 
-**Status:** open · default chosen 2026-11-07 · settles by eye in the rubble stills
+**Status:** decided 2026-11-07 · the hook, as a missing verdict rather than a taste
 
 Subject: the game's environment destruction model, game state only.
+
+**Decision.** Look-ahead on a chunk outside the exact cast is a prediction the cast contradicts,
+so it is a missing verdict, not a taste. MEASURED on the tracked ram with the hook: the house
+moves nothing into the hull through unjudged chunks at +1 (it moved (−2325, 35882, 41531) N s),
+and the hull reads 10.82 m/s at +1 and 10.37 m/s at +2 (10.06 and 5.49 before). Below, the
+question as it was posed.
 
 **The question.** When a hull rams a house, the sweep frees the matter its exact cast reaches and
 whose cut breaks; Avian's contact solver owns everything else. Avian's look-ahead reaches wider

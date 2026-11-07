@@ -77,9 +77,9 @@ use std::sync::Arc;
 
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
-    AngularVelocity, Collider, ColliderAabb, ColliderOf, CollisionLayers, Forces, LayerMask,
-    LinearVelocity, Position, ReadRigidBodyForces, RigidBody, Rotation, Sensor, SpatialQuery,
-    SpatialQueryFilter, WriteRigidBodyForces,
+    ActiveCollisionHooks, AngularVelocity, Collider, ColliderAabb, ColliderOf, CollisionLayers,
+    Forces, LayerMask, LinearVelocity, Position, ReadRigidBodyForces, RigidBody, Rotation, Sensor,
+    SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces,
 };
 
 use bevy::math::DVec3;
@@ -860,7 +860,7 @@ type Colliders<'w, 's> = Query<
 >;
 
 mod sweep_intake;
-pub(crate) use sweep_intake::{ReleasedMotion, SweepAccount};
+pub(crate) use sweep_intake::{ReleasedMotion, SweepAccount, SweepCast, SweepContacts};
 
 /// AUTHORITY: each physics step's body contacts on the constructions as loads, read once a step
 /// (module doc): every point on a breakable element or chunk queued, the step's as one deposit,
@@ -2867,6 +2867,13 @@ fn spawn_group(commands: &mut Commands, departure: Departure) {
 
 /// Commit a group from its synchronous, independently prepared construction state.
 fn spawn_prepared(commands: &mut Commands, prepared: PreparedDeparture) {
+    let piece = commands.spawn_empty().id();
+    spawn_prepared_as(commands, piece, prepared);
+}
+
+/// [`spawn_prepared`] onto `piece`, an entity reserved for it: the sweep names a departure's body
+/// before it spawns.
+fn spawn_prepared_as(commands: &mut Commands, piece: Entity, prepared: PreparedDeparture) {
     let PreparedDeparture {
         departure,
         chunks,
@@ -2890,45 +2897,43 @@ fn spawn_prepared(commands: &mut Commands, prepared: PreparedDeparture) {
     let origin = *centroid;
     let at = root.translation + root.rotation * origin;
     // `Position`/`Rotation` before the body: it never flushes with avian's placeholder pose.
-    let piece = commands
-        .spawn((
-            Name::new("Piece"),
-            source,
-            Piece {
-                construction,
-                chunks: group.iter().map(|&c| c as u16).collect(),
-                born: tick,
-                retired: None,
-            },
-            Breakage {
-                kind,
-                construction,
-                live: Box::new(live),
-                origin,
-            },
-            Transform::from_translation(at).with_rotation(root.rotation),
-            Position(at),
-            Rotation(root.rotation),
-            Visibility::default(),
-            crate::debris::DebrisPiece,
-            crate::eased_dynamic_body(),
-            // The whole group owns its occupied properties at spawn. Child rehoming cannot
-            // expose a partial aggregate to driving or sweeps before Avian's prepare phase.
-            (
-                avian3d::prelude::Mass(launch.mass_properties.mass),
-                avian3d::prelude::AngularInertia::new_with_local_frame(
-                    launch.mass_properties.principal_angular_inertia,
-                    launch.mass_properties.local_inertial_frame,
-                ),
-                avian3d::prelude::CenterOfMass(launch.mass_properties.center_of_mass),
-                avian3d::prelude::NoAutoMass,
-                avian3d::prelude::NoAutoAngularInertia,
-                avian3d::prelude::NoAutoCenterOfMass,
+    commands.entity(piece).insert((
+        Name::new("Piece"),
+        source,
+        Piece {
+            construction,
+            chunks: group.iter().map(|&c| c as u16).collect(),
+            born: tick,
+            retired: None,
+        },
+        Breakage {
+            kind,
+            construction,
+            live: Box::new(live),
+            origin,
+        },
+        Transform::from_translation(at).with_rotation(root.rotation),
+        Position(at),
+        Rotation(root.rotation),
+        Visibility::default(),
+        crate::debris::DebrisPiece,
+        crate::eased_dynamic_body(),
+        // The whole group owns its occupied properties at spawn. Child rehoming cannot
+        // expose a partial aggregate to driving or sweeps before Avian's prepare phase.
+        (
+            avian3d::prelude::Mass(launch.mass_properties.mass),
+            avian3d::prelude::AngularInertia::new_with_local_frame(
+                launch.mass_properties.principal_angular_inertia,
+                launch.mass_properties.local_inertial_frame,
             ),
-            LinearVelocity(root.rotation * *velocity),
-            AngularVelocity(root.rotation * *spin),
-        ))
-        .id();
+            avian3d::prelude::CenterOfMass(launch.mass_properties.center_of_mass),
+            avian3d::prelude::NoAutoMass,
+            avian3d::prelude::NoAutoAngularInertia,
+            avian3d::prelude::NoAutoCenterOfMass,
+        ),
+        LinearVelocity(root.rotation * *velocity),
+        AngularVelocity(root.rotation * *spin),
+    ));
     for PreparedChunk {
         local,
         occupied,
@@ -3208,7 +3213,10 @@ fn prepare_reconcile(
                     ChildOf(root),
                     Transform::from_translation(kind.structure.chunks[c].centroid),
                     (with_insertion_mass(hull), friction, volume, chunk),
-                    super::element_layers(),
+                    (
+                        super::element_layers(),
+                        ActiveCollisionHooks::MODIFY_CONTACTS,
+                    ),
                     (
                         Position::PLACEHOLDER,
                         Rotation::PLACEHOLDER,
@@ -3310,6 +3318,7 @@ fn sweep(intake: sweep_intake::Intake, stages: Option<Res<Stages>>) {
 pub(crate) fn sim_plugin(app: &mut App) {
     crate::collider_rehome::plugin(app);
     app.init_resource::<SweepAccount>()
+        .init_resource::<SweepCast>()
         .add_message::<crate::debris::crumble::Shed>()
         .add_systems(
             FixedPostUpdate,

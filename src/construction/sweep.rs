@@ -25,7 +25,7 @@ pub(crate) use source::{Hull, RigidMotion, SourceShape, SourceTree};
 pub(crate) const CAST_HALF_EXTENT_M: f32 = 10.0;
 
 /// The game's environment destruction: only standing, exposed law chunks belong to the sweep.
-fn covered(structure: &Structure, state: &State, chunk: usize) -> bool {
+pub(super) fn covered(structure: &Structure, state: &State, chunk: usize) -> bool {
     state.standing(chunk) && !structure.chunks[chunk].buried
 }
 

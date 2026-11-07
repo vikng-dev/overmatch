@@ -17,6 +17,96 @@ pub(crate) struct SourceImpulse {
     pub(crate) angular: Vec3,
 }
 
+/// The game's environment destruction: this tick's exact cast, each (source body, owner root,
+/// chunk) a source's sweep met inward and a cut judged; [`SweepContacts`] reads it.
+#[derive(Resource, Default, Debug)]
+pub(crate) struct SweepCast {
+    /// The fixed-clock time the sweep built it at: a contact pass at any other time had no sweep.
+    at: Option<std::time::Duration>,
+    members: BTreeSet<(Entity, Entity, u16)>,
+}
+
+/// The game's environment destruction: the solver resolves no look-ahead point, one whose shapes
+/// are still apart, against standing matter that this tick's exact cast says a body does not
+/// reach, matter no cut judged. Overlapping points, cast members and uncovered chunks keep the
+/// solver's contact. A point within Avian's contact tolerance is look-ahead too: a freed chunk
+/// stands only [`LOOSE_GAP_M`] off the faces it shared, and the body that freed it can push it
+/// across that gap within the solve. Standing colliders enable the hook with
+/// [`ActiveCollisionHooks::MODIFY_CONTACTS`].
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct SweepContacts<'w, 's> {
+    owners: Query<
+        'w,
+        's,
+        (
+            &'static ColliderOf,
+            Option<&'static Element>,
+            Option<&'static ChunkCollider>,
+        ),
+    >,
+    standing:
+        Query<'w, 's, (&'static Breakage, &'static Position, &'static Rotation), Without<Piece>>,
+    /// Absent in physics-only apps, which run no sweep.
+    cast: Option<Res<'w, SweepCast>>,
+    fixed: Res<'w, Time<Fixed>>,
+}
+
+impl SweepContacts<'_, '_> {
+    /// Whether world `point` on `collider` is covered standing matter outside `source`'s cast
+    /// this tick. `None` when no sweep ran this tick: replicas and physics-only apps judge nothing.
+    pub(crate) fn unjudged(&self, collider: Entity, source: Entity, point: Vec3) -> Option<bool> {
+        let cast = self
+            .cast
+            .as_deref()
+            .filter(|cast| cast.at == Some(self.fixed.elapsed()))?;
+        let Ok((of, element, chunk)) = self.owners.get(collider) else {
+            return Some(false); // Not a collider of a body: no construction matter.
+        };
+        let Ok((owner, position, rotation)) = self.standing.get(of.body) else {
+            return Some(false); // A piece or any other body: no standing matter.
+        };
+        let pose = owner.physics_frame((position, rotation));
+        let at = pose.rotation.inverse() * (point - pose.translation);
+        let chunk = match (chunk, element) {
+            (Some(chunk), _) => Some(usize::from(chunk.0)),
+            (None, Some(element)) => nearest_chunk(&owner.kind.layout, usize::from(element.0), at),
+            (None, None) => None, // A standing owner's colliders are elements and chunks.
+        };
+        Some(chunk.is_some_and(|c| {
+            super::super::sweep::covered(&owner.live.structure, &owner.live.state, c)
+                && !cast.members.contains(&(source, of.body, c as u16))
+        }))
+    }
+}
+
+impl avian3d::prelude::CollisionHooks for SweepContacts<'_, '_> {
+    fn modify_contacts(
+        &self,
+        contacts: &mut avian3d::prelude::ContactPair,
+        _: &mut Commands,
+    ) -> bool {
+        let sides = [
+            (contacts.collider1, contacts.body2),
+            (contacts.collider2, contacts.body1),
+        ];
+        let unjudged = |point: Vec3| {
+            sides.iter().any(|&(collider, source)| {
+                // A collider with no body is static and meets standing matter in no solve.
+                source.is_some_and(|source| self.unjudged(collider, source, point) == Some(true))
+            })
+        };
+        for manifold in &mut contacts.manifolds {
+            manifold
+                .points
+                .retain(|point| point.penetration >= 0.0 || !unjudged(point.point));
+        }
+        contacts
+            .manifolds
+            .retain(|manifold| !manifold.points.is_empty());
+        !contacts.manifolds.is_empty()
+    }
+}
+
 /// The sweep's per-tick account, available to headless witnesses and operator instruments.
 #[derive(Resource, Default, Debug)]
 pub(crate) struct SweepAccount {
@@ -27,7 +117,12 @@ pub(crate) struct SweepAccount {
     /// Per source body, the force it drives into a cut with (N, world).
     #[cfg(test)]
     pub(crate) drives: Vec<(Entity, Vec3)>,
+    /// Sources swept this tick, departures that joined it included.
     pub(crate) sources: usize,
+    /// Sweep rounds this tick, the first included ([`DEPARTURE_ROUNDS`]).
+    pub(crate) rounds: usize,
+    /// Departures past the round cap, swept from the next tick.
+    pub(crate) unswept: usize,
     pub(crate) freed: usize,
     /// Freed fragments shed to the players as decoration.
     pub(crate) shed: usize,
@@ -184,6 +279,7 @@ pub(super) struct Intake<'w, 's> {
     spatial: SpatialQuery<'w, 's>,
     transfers: ResMut<'w, ContactTransfers>,
     fixed: Res<'w, Time<Fixed>>,
+    cast: ResMut<'w, SweepCast>,
     gravity: Res<'w, avian3d::prelude::Gravity>,
     substeps: Res<'w, avian3d::prelude::SubstepCount>,
     clock: Option<Res<'w, ShotClock>>,
@@ -196,18 +292,96 @@ pub(super) struct Intake<'w, 's> {
     chunk_entities: ChunkChildren<'w, 's>,
 }
 
+/// Resolution: how many rounds past the first one tick's departures may join its sweep as
+/// sources. Each round sweeps only the matter the round before it freed; past the cap the newest
+/// departures spawn unswept and are swept from the next tick, counted in
+/// [`SweepAccount::unswept`]. A bound on one tick's cost, not a law: the tracked ram reaches its
+/// fixed point well inside it (MEASURED in its test's report).
+const DEPARTURE_ROUNDS: usize = 8;
+
 pub(super) fn run(mut p: Intake) {
     *p.account = SweepAccount::default();
     let dt = p.fixed.timestep().as_secs_f32();
     let tick = p.clock.as_deref().map_or(0, |clock| clock.0.raw());
-    let sources = sources(&p, dt);
-    p.account.sources = sources.len();
+    *p.cast = SweepCast {
+        at: Some(p.fixed.elapsed()),
+        members: BTreeSet::new(),
+    };
+    // Freed departures join the same tick's sweep: each moves within the tick it leaves, and the
+    // remainder it meets is matter only a cut may judge (`SweepContacts`).
+    let mut sources = sources(&p, dt);
+    let (mut departures, mut recut) = (Vec::new(), BTreeSet::new());
+    for round in 0..=DEPARTURE_ROUNDS {
+        p.account.sources += sources.len();
+        p.account.rounds = round + 1;
+        let mut departing: BTreeMap<Entity, Vec<(Entity, Cut)>> = BTreeMap::new();
+        let mut exchanges = BTreeMap::new();
+        for (body, plugs) in resolve_round(&mut p, dt, tick, &sources, &recut) {
+            let exchange = match departures
+                .iter_mut()
+                .find(|(departure, _)| *departure == body)
+            {
+                Some((_, departure)) => {
+                    let exchange = exchange_departure(&p, departure, &plugs);
+                    // Its momentum entered the account when it was freed; [`commit`] adds the
+                    // share it hands on as the plugs'.
+                    p.account.outgoing_momentum -= exchange.0.impulse.as_vec3();
+                    exchange
+                }
+                None => exchange_source(&mut p, body, &plugs),
+            };
+            exchanges.insert(body, exchange);
+            for (root, cut) in plugs {
+                departing.entry(root).or_default().push((body, cut));
+            }
+        }
+        recut.extend(departing.keys().copied());
+        let fresh = commit(&mut p, &departing, &exchanges, tick);
+        if round == DEPARTURE_ROUNDS {
+            p.account.unswept = fresh.len();
+        }
+        sources = departure_sources(&p, dt, &fresh);
+        departures.extend(fresh);
+        if sources.is_empty() || round == DEPARTURE_ROUNDS {
+            break;
+        }
+    }
+    for (body, departure) in departures {
+        spawn_prepared_as(&mut p.commands, body, departure);
+    }
+    let changed = p
+        .queue
+        .0
+        .iter()
+        .flat_map(|deposit| deposit.changed.iter().copied())
+        .collect::<BTreeSet<_>>();
+    cancel_retired_belts(&mut p, changed);
+}
+
+/// One round of the sweep: `sources` resolved against their owners, `recut` the owners an earlier
+/// round of this tick cut; the account and cast record it. Returns each source's released cuts.
+fn resolve_round(
+    p: &mut Intake,
+    dt: f32,
+    tick: u32,
+    sources: &[SweepSource],
+    recut: &BTreeSet<Entity>,
+) -> BTreeMap<Entity, Vec<(Entity, Cut)>> {
     #[cfg(test)]
     p.account
         .drives
         .extend(sources.iter().map(|source| (source.body, source.drive)));
-    let mut resolved = geometry(&mut p, dt, tick, &sources);
+    let mut resolved = geometry(p, dt, tick, sources, recut);
     resolved.sort_by_key(|resolution| (sources[resolution.source].body, resolution.root));
+    p.cast.members.extend(
+        resolved
+            .iter()
+            .filter(|resolution| resolution.swept.witness.is_some())
+            .flat_map(|resolution| {
+                let body = sources[resolution.source].body;
+                (resolution.swept.chunks.iter()).map(move |&c| (body, resolution.root, c as u16))
+            }),
+    );
     let mut cuts: BTreeMap<Entity, Vec<(Entity, Cut)>> = BTreeMap::new();
     for Resolution {
         source,
@@ -241,21 +415,11 @@ pub(super) fn run(mut p: Intake) {
             cuts.entry(source.body).or_default().push((root, cut));
         }
     }
-    let mut departing: BTreeMap<Entity, Vec<(Entity, Cut)>> = BTreeMap::new();
-    let mut exchanges = BTreeMap::new();
-    for (body, plugs) in cuts {
-        exchanges.insert(body, exchange_source(&mut p, body, &plugs));
-        for (root, cut) in plugs {
-            departing.entry(root).or_default().push((body, cut));
-        }
-    }
-    commit(&mut p, &departing, &exchanges, tick);
-    let changed = p
-        .queue
-        .0
-        .iter()
-        .flat_map(|deposit| deposit.changed.iter().copied())
-        .collect::<BTreeSet<_>>();
+    cuts
+}
+
+/// Cancel each belt reaction staged against a collider this tick's cuts retired.
+fn cancel_retired_belts(p: &mut Intake, changed: BTreeSet<Entity>) {
     let retired = changed
         .into_iter()
         .flat_map(|root| {
@@ -302,10 +466,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
         ref substeps,
         ..
     } = *p;
-    // DERIVED: Avian 0.7 adds `a dt / N` to the velocity before each of its `N` substep position
-    // steps (`pre_process_velocity_increments`, then `integrate_velocities`), so a body no contact
-    // touches travels `v dt + a dt² (N + 1) / (2N)`: the cast's one velocity reaches that pose.
-    let travel = (substeps.0 + 1) as f32 / (2 * substeps.0) as f32 * dt;
+    let travel = travel(substeps, dt);
     let mut gathered = bevy::utils::Parallel::<Vec<SweepSource>>::default();
     movers
         .par_iter()
@@ -372,17 +533,12 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                 spin: forces.angular_velocity(),
                 dt,
             };
-            let roots = spatial
-                .aabb_intersections_with_aabb(shape.bounds(motion))
-                .into_iter()
-                .filter_map(|entity| {
-                    let Ok((_, _, other, _, _, _, _)) = colliders.get(entity) else {
-                        return None;
-                    };
-                    (other.body != body_entity && constructions.contains(other.body))
-                        .then_some(other.body)
-                })
-                .collect();
+            let roots = owners_met(
+                (spatial, colliders, constructions),
+                body_entity,
+                &shape,
+                motion,
+            );
             let source = SweepSource {
                 body: body_entity,
                 shape,
@@ -398,6 +554,78 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
     let mut sources: Vec<_> = gathered.drain().collect();
     sources.sort_by_key(|source| source.body);
     sources
+}
+
+/// DERIVED: Avian 0.7 adds `a dt / N` to the velocity before each of its `N` substep position
+/// steps (`pre_process_velocity_increments`, then `integrate_velocities`), so a body no contact
+/// touches travels `v dt + a dt² (N + 1) / (2N)`: the cast's one velocity, `v + a` times this,
+/// reaches that pose.
+fn travel(substeps: &avian3d::prelude::SubstepCount, dt: f32) -> f32 {
+    (substeps.0 + 1) as f32 / (2 * substeps.0) as f32 * dt
+}
+
+/// The standing owners whose colliders `shape`'s swept bounds meet, `body`'s own excepted.
+fn owners_met(
+    (spatial, colliders, constructions): (&SpatialQuery, &Hulls, &Owners),
+    body: Entity,
+    shape: &super::super::sweep::SourceTree,
+    motion: super::super::sweep::RigidMotion,
+) -> BTreeSet<Entity> {
+    spatial
+        .aabb_intersections_with_aabb(shape.bounds(motion))
+        .into_iter()
+        .filter_map(|entity| {
+            let Ok((_, _, other, _, _, _, _)) = colliders.get(entity) else {
+                return None; // Sensors are not contact hulls.
+            };
+            (other.body != body && constructions.contains(other.body)).then_some(other.body)
+        })
+        .collect()
+}
+
+/// This tick's departures as sweep sources, each under the body id it will spawn as, moving as
+/// its launch and gravity leave it: a fresh body bears no other force.
+fn departure_sources(
+    p: &Intake,
+    dt: f32,
+    departures: &[(Entity, PreparedDeparture)],
+) -> Vec<SweepSource> {
+    let travel = travel(&p.substeps, dt);
+    departures
+        .iter()
+        .map(|(body, prepared)| {
+            let Departure { root, launch, .. } = &prepared.departure;
+            let props = &launch.mass_properties;
+            let position = root.transform_point(launch.centroid);
+            let motion = super::super::sweep::RigidMotion {
+                position,
+                rotation: root.rotation,
+                centre: position + root.rotation * props.center_of_mass,
+                velocity: root.rotation * launch.velocity + p.gravity.0 * travel,
+                spin: root.rotation * launch.spin,
+                dt,
+            };
+            let shape = prepared.source.0.clone();
+            SweepSource {
+                body: *body,
+                roots: owners_met(
+                    (&p.spatial, &p.colliders, &p.constructions),
+                    *body,
+                    &shape,
+                    motion,
+                ),
+                shape,
+                motion,
+                mass: props.mass,
+                inertia: avian3d::prelude::ComputedAngularInertia::new_with_local_frame(
+                    props.principal_angular_inertia,
+                    props.local_inertial_frame,
+                ),
+                axes: default(),
+                drive: p.gravity.0 * props.mass,
+            }
+        })
+        .collect()
 }
 
 /// One source's resolution on one owner, the source by its index in the tick's sources: what
@@ -418,7 +646,13 @@ pub(super) struct Cut {
     entries: Vec<Entry>,
 }
 
-fn geometry(p: &mut Intake, dt: f32, tick: u32, sources: &[SweepSource]) -> Vec<Resolution> {
+fn geometry(
+    p: &mut Intake,
+    dt: f32,
+    tick: u32,
+    sources: &[SweepSource],
+    recut: &BTreeSet<Entity>,
+) -> Vec<Resolution> {
     let roots = sources
         .iter()
         .flat_map(|source| source.roots.iter().copied())
@@ -437,7 +671,13 @@ fn geometry(p: &mut Intake, dt: f32, tick: u32, sources: &[SweepSource]) -> Vec<
             let own: Vec<_> = (0..sources.len())
                 .filter(|&i| sources[i].roots.contains(&root))
                 .collect();
-            let resolved = owner_sequence(breakage, (root, pose), (sources, &own), dt, tick);
+            let resolved = owner_sequence(
+                breakage,
+                (root, pose),
+                (sources, &own),
+                (dt, tick),
+                recut.contains(&root),
+            );
             gathered.scope(|local| local.push(resolved));
         });
     let owners: Vec<_> = gathered.drain().collect();
@@ -453,16 +693,18 @@ fn geometry(p: &mut Intake, dt: f32, tick: u32, sources: &[SweepSource]) -> Vec<
 /// released plug's cut commits at once, and every later source resolves again on its topology
 /// with the gravity field re-solved there ([`fracture::parts::Assessment::resolved_on`]). A
 /// later source meeting only matter an earlier cut freed has no witness and so no cut. Both
-/// passes count as work; owners never meet here.
+/// passes count as work; owners never meet here. An owner an earlier round of this tick cut
+/// (`recut`) resolves every source on its current topology.
 fn owner_sequence(
     breakage: &mut Breakage,
     (root, pose): (Entity, Transform),
     (sources, own): (&[SweepSource], &[usize]),
-    dt: f32,
-    tick: u32,
+    (dt, tick): (f32, u32),
+    recut: bool,
 ) -> Vec<Resolution> {
     // `None` until a cut changes the owner, then that cut's gravity field, solved on first read.
-    let mut after: Option<Option<(fracture::parts::Assessment, fracture::parts::Gravity)>> = None;
+    let mut after: Option<Option<(fracture::parts::Assessment, fracture::parts::Gravity)>> =
+        recut.then_some(None);
     let mut resolved = Vec::with_capacity(own.len());
     let own_sources: Vec<_> = own.iter().map(|&i| &sources[i]).collect();
     let first_pass = owner_geometry(breakage, pose, &own_sources, dt, None);
@@ -572,20 +814,7 @@ fn exchange_source(
     body: Entity,
     plugs: &[(Entity, Cut)],
 ) -> (super::super::sweep::Exchange, DVec3) {
-    let parts: Vec<_> = plugs
-        .iter()
-        .flat_map(|(root, cut)| {
-            let (_, position, rotation, breakage) = p
-                .constructions
-                .get(*root)
-                .expect("sweep owner survives intake");
-            let pose = breakage.physics_frame((position, rotation));
-            cut.plug
-                .iter()
-                .map(|&c| breakage.kind.sweep.part(c, &pose))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let parts = plug_parts(p, plugs);
     let (mut forces, _, mass, inertia, com, axes, _) = p
         .bodies
         .get_mut(body)
@@ -629,14 +858,65 @@ fn exchange_source(
     (result, source.centre)
 }
 
-/// Departures prepare per owner, from its cuts and each cut's exchanged motion; ledger, queue,
-/// account and spawns then commit in (body, owner) order.
+/// Every plug's occupied parts, in world frame.
+fn plug_parts(p: &Intake, plugs: &[(Entity, Cut)]) -> Vec<super::super::sweep::Part> {
+    plugs
+        .iter()
+        .flat_map(|(root, cut)| {
+            let (_, position, rotation, breakage) = p
+                .constructions
+                .get(*root)
+                .expect("sweep owner survives intake");
+            let pose = breakage.physics_frame((position, rotation));
+            cut.plug
+                .iter()
+                .map(|&c| breakage.kind.sweep.part(c, &pose))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// A departure's one plastic exchange against the plugs it released this tick, applied to its
+/// launch before it spawns.
+fn exchange_departure(
+    p: &Intake,
+    prepared: &mut PreparedDeparture,
+    plugs: &[(Entity, Cut)],
+) -> (super::super::sweep::Exchange, DVec3) {
+    let parts = plug_parts(p, plugs);
+    let Departure { root, launch, .. } = &mut prepared.departure;
+    let props = &launch.mass_properties;
+    let rotation = root.rotation;
+    let position = root.transform_point(launch.centroid);
+    let inertia = avian3d::prelude::ComputedAngularInertia::new_with_local_frame(
+        props.principal_angular_inertia,
+        props.local_inertial_frame,
+    );
+    let source = super::super::sweep::Body {
+        centre: (position + rotation * props.center_of_mass).as_dvec3(),
+        inverse_mass: DVec3::splat(1.0 / f64::from(props.mass)),
+        inverse_inertia: inertia.rotated(rotation).inverse().to_mat3().as_dmat3(),
+        velocity: (rotation * launch.velocity).as_dvec3(),
+        spin: (rotation * launch.spin).as_dvec3(),
+    };
+    let result = super::super::sweep::exchange(&source, &parts);
+    let velocity = source.velocity - source.inverse_mass * result.impulse;
+    let spin = source.spin - source.inverse_inertia * result.angular_impulse;
+    launch.velocity = rotation.inverse() * velocity.as_vec3();
+    launch.spin = rotation.inverse() * spin.as_vec3();
+    (result, source.centre)
+}
+
+/// Departures prepare per owner, from its cuts and each cut's exchanged motion; ledger, queue
+/// and account then commit in (body, owner) order. Returns the departures that leave as server
+/// bodies, each under the entity it spawns as.
 fn commit(
     p: &mut Intake,
     departing: &BTreeMap<Entity, Vec<(Entity, Cut)>>,
     exchanges: &BTreeMap<Entity, (super::super::sweep::Exchange, DVec3)>,
     tick: u32,
-) {
+) -> Vec<(Entity, PreparedDeparture)> {
+    let mut fresh = Vec::new();
     let mut prepared = bevy::utils::Parallel::<Vec<_>>::default();
     let children = &p.children;
     let chunk_entities = &p.chunk_entities;
@@ -710,10 +990,13 @@ fn commit(
         }
         p.account.shed += sheds.len();
         p.shed.write_batch(sheds);
-        for departure in departures {
-            spawn_prepared(&mut p.commands, departure);
-        }
+        fresh.extend(
+            departures
+                .into_iter()
+                .map(|departure| (p.commands.spawn_empty().id(), departure)),
+        );
     }
+    fresh
 }
 
 /// A rigid velocity field: `velocity + spin × (x − centre)`, in the frame its user names.

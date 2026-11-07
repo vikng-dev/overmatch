@@ -607,7 +607,9 @@ mod tests {
     /// The game's environment destruction: the tracked ram recipe must open occupied hull space
     /// within the owner's two-tick contact bar, and the source must lose the momentum its chunks take.
     /// At impact +1 and +2 every source of the hull's momentum change is named, the reading that
-    /// attributes its speed loss. Counts, speeds and the advance by +60 are observations; the gate
+    /// attributes its speed loss. Every tick, every contact the solver resolves against standing
+    /// construction matter is against matter a cut judged that tick (class invariant: a contact no
+    /// cut judged stops a body without a verdict). Counts, speeds and the advance by +60 are observations; the gate
     /// pins the owner's latency and conservation.
     #[test]
     fn tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum() {
@@ -660,6 +662,7 @@ mod tests {
         const WATCHED: usize = 60;
         let mut freed = 0;
         let mut freed_by_tick = Vec::new();
+        let (mut rounds, mut unswept) = (0, 0);
         let mut entry = None;
         let mut speeds = Vec::new();
         let mut shed = 0;
@@ -673,7 +676,9 @@ mod tests {
             let before = app.world().get::<LinearVelocity>(tank).unwrap().0;
             let start = app.world().get::<Position>(tank).unwrap().0;
             drive_tick(&mut app, tank, 1.0, 0.0);
+            assert_judged_contacts(&mut app, tick);
             let account = app.world().resource::<SweepAccount>();
+            (rounds, unswept) = (rounds.max(account.rounds), unswept + account.unswept);
             if account.contacts.contains_key(&(tank, ordinal)) && contact.is_none() {
                 contact = Some(tick);
                 let met = account
@@ -784,7 +789,7 @@ mod tests {
         let (met, heading) = entry.expect("the sweep records occupied contact");
         let end = app.world().get::<Position>(tank).unwrap().0;
         println!(
-            "MEASURED ram end: advance past first contact by +{WATCHED}={} m, speed={:?}, chunks freed by tick after contact={freed_by_tick:?}, first contact={contact:?}, first sweep={initial:?}, counts={counts:?}, work by tick={per_tick:?}",
+            "MEASURED ram end: advance past first contact by +{WATCHED}={} m, speed={:?}, chunks freed by tick after contact={freed_by_tick:?}, most sweep rounds in a tick={rounds}, departures past the cap={unswept}, first contact={contact:?}, first sweep={initial:?}, counts={counts:?}, work by tick={per_tick:?}",
             (end - met).dot(heading),
             app.world().get::<LinearVelocity>(tank).unwrap().0
         );
@@ -860,6 +865,36 @@ mod tests {
                 self.unattributed
             );
         }
+    }
+
+    /// No solver point moved momentum against standing construction matter outside the cast of
+    /// the body it touches this tick; a failure lists each as (body, collider, point, impulse).
+    fn assert_judged_contacts(app: &mut App, tick: usize) {
+        use bevy::ecs::system::RunSystemOnce;
+        let unjudged = app
+            .world_mut()
+            .run_system_once(
+                |hooks: crate::construction::breakage::SweepContacts,
+                 transfers: Res<crate::contact_transfer::ContactTransfers>| {
+                    transfers
+                        .groups()
+                        .flatten()
+                        .filter(|point| {
+                            point.body_collider.is_some()
+                                && point.impulse != Vec3::ZERO
+                                && hooks
+                                    .unjudged(point.structure_collider, point.body, point.point)
+                                    .expect("the authority sweeps every tick")
+                        })
+                        .map(|p| (p.body, p.structure_collider, p.point, p.impulse))
+                        .collect::<Vec<_>>()
+                },
+            )
+            .expect("the hook's parameters are valid in the shipped app");
+        assert!(
+            unjudged.is_empty(),
+            "the solver resolved standing matter no cut judged at tick {tick}: {unjudged:?}"
+        );
     }
 
     fn momentum_sources(

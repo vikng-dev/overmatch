@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody};
+use avian3d::prelude::{ActiveCollisionHooks, Collider, CollisionLayers, LayerMask, RigidBody};
 use bevy::prelude::*;
 
 use crate::Layer;
@@ -276,6 +276,7 @@ fn element_bundle(kind: &ConstructionKind, k: usize) -> impl Bundle {
             substance: kind.asset.materials[material].clone(),
         },
         Element(u16::try_from(k).expect("the schema bounds the element count")),
+        ActiveCollisionHooks::MODIFY_CONTACTS, // `breakage::SweepContacts`.
     )
 }
 

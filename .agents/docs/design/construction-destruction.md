@@ -462,14 +462,16 @@ remove its whole plug `S*` from the standing construction. Otherwise the sweep d
 the hull: **Avian owns the stop** (owner decision, 2026-11-07). Its contact solver, speculative
 points included, stops the hull at matter whose cut holds as it stops a hull at any obstacle, and
 the structure check reads that contact as its mean force like every other; the peak force decides
-only the cut. Its reach is wider than the cut's: Avian's linearised look-ahead also brakes the
-hull at standing matter ahead of or beside this tick's exact cast, which no cut judges. MEASURED
-on the tracked ram (`tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum`, the
-57 t hull at 10.8 m/s): both ticks' cuts released, yet standing chunk colliders outside the plug
-took 0.77 m/s off the hull and lifted it 0.63 m/s at impact +1, and 5.6 m/s, 0.63 m/s up and
-1.4 m/s sideways at +2, leaving 4.5 m/s (DERIVED from the measured impulses; the sweep's own
-exchange took 0.04 and 0.31 m/s, and the freed rubble 0.08 m/s at +2). Playtest fork F19 holds
-the alternative. The rejected alternative: the sweep stopping the hull itself (a time-of-impact pose, a stop
+only the cut. Its reach stops at the cut's: a collision hook (`sweep_intake::SweepContacts`)
+drops every look-ahead point, one whose shapes are still apart, on covered standing chunks
+outside this tick's exact cast, and keeps them on cast members, so Avian still stops a hull at
+matter whose cut held; it adds no hold, press or pose. Without it Avian's linearised look-ahead
+braked and lifted the hull at standing matter no cut judged: MEASURED on the tracked ram
+(`tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum`, the 57 t hull at
+10.8 m/s), both ticks' cuts released, yet standing chunks outside the cast took 0.77 m/s off the
+hull and lifted it 0.63 m/s at impact +1. With the hook the house moves the hull through no
+unjudged matter, and the hull reads 10.82 m/s at +1 and 10.37 m/s at +2 (playtest fork F19,
+decided by this measurement). The rejected alternative: the sweep stopping the hull itself (a time-of-impact pose, a stop
 impulse and a press of its own), with a collision hook that dropped Avian's look-ahead points
 on covered chunks so the two stops did not meet. That answered one contact with three readings
 of it (the cut's `m_eff`, the press's whole mass and the body's centre-of-mass stop plus a free
@@ -493,6 +495,12 @@ The account exposes removed kinetic energy and outgoing chunk kinetic energy sep
 chunk identities, world rigid motion and authoritative tick. Internal joints stay intact. The
 cut also frees matter already disconnected from every ground path, before standing refit.
 Swept matter inherits the hull's plastic exchange; an unsupported remainder starts at rest.
+Freed server bodies join the same tick's sweep as sources, from their prepared launch and
+gravity, under the entity each spawns as; a departure that releases more matter exchanges with
+it before it spawns. Rounds repeat until one frees no server body, at most `DEPARTURE_ROUNDS`
+past the first (MEASURED: the tracked ram's busiest tick needs 2); past that cap the newest
+departures are swept from the next tick. Before this, the freed plug, pushed by the hull, met
+standing remainder in the solver that no cut judged: 84 % of the hull's momentum change at +2.
 Below-floor merging (`crumble::merge_fragments`) projects their combined linear and angular
 momentum onto the merged rigid body.
 All freed fragments use the shared size route described under **Size split**;
@@ -519,11 +527,12 @@ Physics already changed those bodies' momenta; contact intake supplies no second
 mass share, delayed cap or give-back. Sleeping contact forces persist until their contact ends.
 
 Exact sweep membership and Avian's speculative contact envelope differ. The sweep casts admitted
-hulls with the motion Avian integrates before its solve; Avian can constrain separated hulls
-against projected contact planes. Such a non-member can transmit solver momentum without
-receiving a cut-capacity verdict (MEASURED above). Post-contact speed therefore includes this
-retained contact response and contacts with released bodies, as well as the sweep's plastic
-exchange.
+hulls with the motion Avian integrates before its solve; Avian constrains separated hulls
+against projected contact planes, and a body another body pushes within the solve can close a
+gap its own free motion opens (a freed chunk stands only `LOOSE_GAP_M` off the faces it shared).
+The hook drops those points on covered non-members, so no non-member moves solver momentum; the
+tracked ram asserts it every tick. Post-contact speed is the sweep's plastic exchange, contacts
+with cast members and contacts with released bodies.
 
 Round and field impulse laws retain their own fracture-work and launch accounts.
 
