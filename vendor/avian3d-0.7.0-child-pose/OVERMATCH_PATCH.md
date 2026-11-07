@@ -132,11 +132,9 @@ Guard: `src/tests/avian_island_sleep.rs`; production impact and support-loss gua
 `Collider::with_mass_properties_cache` computes the current scaled shape's mass properties at a
 specified density before insertion. `ComputeMassProperties::mass_properties` returns that value
 for the same density; shape mutation, replacement and a changed scale invalidate it. The cache
-is cloned with the collider and omitted from serialization. The backend's existing scale and
-mass hooks remain authoritative: a different scale invalidates the cache before they read it,
-and a different density computes its own value. Sensors still install zero mass.
+is cloned with the collider and omitted from serialization. Sensors still install zero mass.
 
 The construction's `chunk_physics` prepares the contact-shape cache on workers. Its explicit
 mass, inertia and centre remain those of the entire occupied hull. Guard:
 `construction::breakage::tests::prepared_contact_mass_is_valid_at_insertion_and_invalidates_with_its_inputs`.
-This is a local draft only; no upstream issue or message has been sent.
+Local upstream draft: `upstream/avian-prepared-collider-mass.md`.
