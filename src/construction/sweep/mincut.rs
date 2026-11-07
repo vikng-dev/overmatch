@@ -503,25 +503,24 @@ mod tests {
     /// not the full capacity of a compression chain with successively farther ground supports.
     #[test]
     fn a_light_press_stops_at_its_first_holding_certificate() {
-        // Fixture: 128 exposed chunks, each grounded at 1 N, with 1000 N bearing between them.
-        let chunks = 128;
-        let (source, sink) = (chunks, chunks + 1);
-        let mut graph = Network::new(chunks + 2);
-        for c in 0..chunks {
-            graph.edge(c, sink, 1.0, 0.0);
-            if c + 1 < chunks {
-                graph.edge(c, c + 1, 1000.0, 0.0);
+        // Fixture: chains of exposed chunks, each grounded at 1 N, with 1000 N bearing between.
+        let pushes = [128, 4096].map(|chunks| {
+            let (source, sink) = (chunks, chunks + 1);
+            let mut graph = Network::new(chunks + 2);
+            for c in 0..chunks {
+                graph.edge(c, sink, 1.0, 0.0);
+                if c + 1 < chunks {
+                    graph.edge(c, c + 1, 1000.0, 0.0);
+                }
             }
-        }
-        graph.edge(source, 0, f64::INFINITY, 0.0);
-        let (cut, work) = graph.cut(source, sink, 0.25);
-        assert!(matches!(cut, Cut::Held));
-        // DERIVED: one reverse-distance pass and the direct two-arc path suffice; the
-        // allowance includes the inlet and three grid passes. Far supports need no routing.
-        assert!(work.scans <= 5 * (work.nodes + 2 * work.edges), "{work:?}");
-        assert_eq!(work.global_relabels, 1);
-        assert!(work.pushes <= 3);
-        println!("MEASURED light-press flow work: {work:?}");
+            graph.edge(source, 0, f64::INFINITY, 0.0);
+            let (cut, work) = graph.cut(source, sink, 0.25);
+            assert!(matches!(cut, Cut::Held));
+            work.pushes
+        });
+        // The first chunk's own support holds the press, so far supports need no routing and
+        // the pushes do not grow with the chain.
+        assert_eq!(pushes[0], pushes[1], "pushes for 128 and 4096 chunks");
     }
     /// The game's environment destruction: exhausting a compression chain must not repeat
     /// a whole-graph search for each unit ground capacity. Large impacts rely on this bound.

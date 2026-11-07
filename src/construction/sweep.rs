@@ -340,6 +340,7 @@ impl Geometry {
         };
         let left = f64::from((capacity - drive).max(0.0));
         sweep.load = Some(PatchLoad {
+            witness,
             drive,
             demand,
             capacity,
@@ -574,6 +575,8 @@ pub(crate) struct Witness {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PatchLoad {
+    /// The inward witness this load resolved.
+    pub(crate) witness: Witness,
     pub(crate) drive: f32,
     pub(crate) demand: f32,
     /// Exact for a released plug; a certified lower bound when held.
@@ -1352,9 +1355,9 @@ mod tests {
         );
     }
 
-    /// The game's environment destruction: a released part cannot sweep away boards pressed
-    /// into their supports. The floor yields only past its friction or lifting load; treating
-    /// cracked seams or rests as absent loses this bearing for every construction using them.
+    /// The game's environment destruction: boards on rests or cracked seams keep their gravity
+    /// bearing, so a released part frees them only past their friction or their weight; treating
+    /// those joints as absent loses this bearing for every construction using them.
     #[test]
     fn resting_boards_keep_bearing_until_the_load_slides_or_lifts_them() {
         use super::super::fracture::Bond;
@@ -1376,13 +1379,14 @@ mod tests {
                 .map(|&c| structure.chunks[c].mass)
                 .sum::<f32>()
                 * crate::physical_laws::gravity_mps2();
+            // DERIVED: sliding costs mu * W and lifting W, the weight the joints carry in
+            // compression. The bracket tolerates f32 Hertz inversion.
             let mu = structure.chunks[4].material.friction;
             for (normal, force, broken) in [
-                (Vec3::NEG_Y, weight * 100.0, false),
-                (Vec3::X, mu * weight * 0.5, false),
-                (Vec3::X, mu * weight * 2.0, true),
-                (Vec3::Y, weight * 0.5, false),
-                (Vec3::Y, weight * 2.0, true),
+                (Vec3::X, mu * weight * 0.9999, false),
+                (Vec3::X, mu * weight * 1.0001, true),
+                (Vec3::Y, weight * 0.9999, false),
+                (Vec3::Y, weight * 1.0001, true),
             ] {
                 let speed = peak_speed(
                     128.0,

@@ -191,9 +191,7 @@ pub(super) fn run(mut p: Intake) {
                 .constructions
                 .get(root)
                 .expect("swept owner survives geometry intake");
-            let witness = swept
-                .witness
-                .expect("a resolved patch has an inward witness");
+            let witness = load.witness;
             p.account
                 .contacts
                 .entry((body, owner.construction))
