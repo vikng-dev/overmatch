@@ -749,14 +749,12 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     // Compute the effective margin based on how much the bodies
                     // are expected to move relative to each other.
                     relative_linear_velocity = lin_vel2 - lin_vel1;
-                    delta_secs * relative_linear_velocity.length()
+                    // The tolerance is the minimum speculative margin for both the query and
+                    // point pruning, including a resting pair with no relative velocity.
+                    (delta_secs * relative_linear_velocity.length()).max(*self.contact_tolerance)
                 };
 
-                // The maximum distance at which contacts are detected.
-                // At least as large as the contact tolerance.
-                let max_contact_distance = effective_speculative_margin
-                    .max(*self.contact_tolerance)
-                    + collision_margin_sum;
+                let max_contact_distance = effective_speculative_margin + collision_margin_sum;
 
                 let was_touching = contacts.flags.contains(ContactPairFlags::TOUCHING);
 

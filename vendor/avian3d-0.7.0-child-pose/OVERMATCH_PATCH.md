@@ -138,3 +138,12 @@ The construction prepares the cache on workers for each chunk collider that is n
 piece body, not its colliders, owns the occupied mass, inertia and centre. Guard:
 `construction::breakage::tests::prepared_contact_mass_is_valid_at_insertion_and_invalidates_with_its_inputs`.
 Local upstream draft: `upstream/avian-prepared-collider-mass.md`.
+
+## Minimum speculative margin (`src/collision/narrow_phase/system_param.rs`)
+
+`NarrowPhase::update` applies the configured `contact_tolerance` floor to the effective speculative
+margin shared by geometry queries and point pruning. Quiet contacts inside that band survive.
+Mechanism, evidence and limits: `upstream/avian-minimum-speculative-margin.md` (local draft).
+Guards: `stationary_contacts_keep_the_configured_minimum_speculative_margin` in
+`src/tests/avian_island_sleep.rs` and `settled_freed_matter_sleeps_within_avians_rest_window` in
+`src/construction/breakage/tests.rs`.

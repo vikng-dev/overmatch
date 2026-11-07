@@ -1,4 +1,4 @@
-//! Avian island lifecycle guards for the game’s server physics. Resting bodies require a wake
+//! Avian resting-contact and island lifecycle guards for the game’s server physics. Resting bodies require a wake
 //! source; joining a sleeper must not erase an awake body's accumulated rest time.
 //! Geometry and observation counts below are Fixture data, not settlement targets.
 //! Mechanism and upstream draft: `upstream/avian-island-rest-history.md`.
@@ -251,5 +251,44 @@ fn an_impact_wakes_an_island_that_merges_again_before_the_solver() {
     assert!(
         first_id.0 < contacts.get(single, group[0]).unwrap().0.id.0,
         "the fixture must process the impact before the later sleeping merge"
+    );
+}
+
+/// Server physics relies on the configured contact tolerance retaining quiet contacts. A mutant
+/// that floors only the geometry query, then prunes against velocity alone, loses the inner pair.
+#[test]
+fn stationary_contacts_keep_the_configured_minimum_speculative_margin() {
+    let mut app = physics_app();
+    app.insert_resource(Gravity::ZERO);
+    let tolerance = app
+        .world()
+        .resource::<avian3d::collision::narrow_phase::NarrowPhaseConfig>()
+        .contact_tolerance
+        * app.world().resource::<PhysicsLengthUnit>().0;
+    // Fixture: a level support and identical cubes, one inside and one outside the contact band.
+    let support = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            Position(Vec3::NEG_Y * 0.5),
+            Collider::cuboid(20.0, 1.0, 20.0),
+        ))
+        .id();
+    let inside = body(&mut app, Vec3::new(0.0, 0.2 + tolerance / 2.0, 0.0));
+    let outside = body(&mut app, Vec3::new(4.0, 0.2 + 2.0 * tolerance, 0.0));
+    app.update();
+    app.update();
+    let contacts = app.world().resource::<ContactGraph>();
+    assert!(
+        contacts
+            .get(support, inside)
+            .is_some_and(|(edge, _)| edge.is_touching()),
+        "zero relative velocity must retain a contact inside the configured tolerance"
+    );
+    assert!(
+        !contacts
+            .get(support, outside)
+            .is_some_and(|(edge, _)| edge.is_touching()),
+        "zero relative velocity must not extend the contact band"
     );
 }

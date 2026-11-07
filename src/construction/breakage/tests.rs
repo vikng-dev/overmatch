@@ -919,6 +919,119 @@ fn a_fallen_piece_comes_to_rest_asleep_a_dynamic_body_still() {
     );
 }
 
+/// The game's environment destruction: freed matter at rest must sleep within Avian's configured
+/// rest window. The server relies on that eligibility surviving small contact gaps. Fixture: an
+/// admitted construction loses its ground supports on triangulated terrain, without a mover.
+#[test]
+fn settled_freed_matter_sleeps_within_avians_rest_window() {
+    let kind = shipped_house();
+    let (mut app, root) = composed_kind(false, &kind);
+    crate::debris::crumble::sim_plugin(&mut app);
+    crate::headless_test::start_fixed_clock(&mut app);
+    app.insert_resource(Gravity(Vec3::NEG_Y * crate::physical_laws::gravity_mps2()));
+    let manifest = crate::map::tests::shipped_manifest();
+    let grid = crate::terrain_grid::tests::shipped_grid();
+    // Fixture: the second matching placement includes an oblique contact patch.
+    let instance = manifest
+        .instances
+        .iter()
+        .filter(|i| {
+            matches!(
+                manifest.prototypes[&i.prototype],
+                crate::map::Prototype::Construction { ref asset } if *asset == kind.asset.id
+            )
+        })
+        .nth(1)
+        .unwrap();
+    let xz = instance.pose.xz();
+    let pose = Transform::from_isometry(instance.pose.at_height(grid.height_at(xz.x, xz.y)));
+    app.world_mut().entity_mut(root).insert((
+        pose,
+        Position(pose.translation),
+        Rotation(pose.rotation),
+    ));
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Position(Vec3::ZERO),
+        crate::terrain_grid::heightfield_collider(&grid),
+        crate::ground_types::GroundTypes::load_shipped().terrain_friction(),
+        CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+    ));
+    app.update();
+    app.update();
+    let supports: BTreeSet<_> = kind.asset.anchors.iter().map(|a| a.chunk).collect();
+    let contacts = kind
+        .structure
+        .chunks
+        .iter()
+        .enumerate()
+        .filter(|(c, chunk)| chunk.buried || supports.contains(&kind.layout.chunks[*c]))
+        .map(|(chunk, matter)| {
+            (
+                root,
+                Load {
+                    chunk,
+                    at: matter.centroid,
+                    // DERIVED: twice the pool removes every support without a launch impulse.
+                    energy: 2.0 * matter.volume * matter.material.crush,
+                    crushed: 2.0 * fracture::full_pool(matter),
+                    blow: Vec3::ZERO,
+                    press: Vec3::ZERO,
+                    peak: None,
+                    origin: Origin::Field,
+                },
+            )
+        })
+        .collect();
+    app.world_mut().resource_mut::<Queue>().0.push(RawDeposit {
+        contacts,
+        ..default()
+    });
+    let dt = app
+        .world()
+        .resource::<Time<Fixed>>()
+        .timestep()
+        .as_secs_f32();
+    let rest = app.world().resource::<TimeToSleep>().0;
+    let length_unit = app.world().resource::<PhysicsLengthUnit>().0;
+    // DERIVED: one step exposes the contact solve and one commits island sleeping.
+    let allowance = 2.0 * dt;
+    let mut quiet = 0.0;
+    // Fixture watchdog for the collapse transient, separate from the sleep eligibility deadline.
+    for _ in 0..((30.0 + rest + allowance) / dt).ceil() as usize {
+        app.update();
+        let pieces: Vec<_> = app
+            .world_mut()
+            .query_filtered::<Entity, With<Piece>>()
+            .iter(app.world())
+            .collect();
+        let resting = !pieces.is_empty()
+            && pieces.iter().all(|&piece| {
+                let threshold = app.world().get::<SleepThreshold>(piece).unwrap();
+                app.world().get::<LinearVelocity>(piece).unwrap().0.length()
+                    < threshold.linear * length_unit
+                    && app
+                        .world()
+                        .get::<AngularVelocity>(piece)
+                        .unwrap()
+                        .0
+                        .length()
+                        < threshold.angular
+            });
+        quiet = if resting { quiet + dt } else { 0.0 };
+        if quiet >= rest + allowance {
+            assert!(
+                pieces
+                    .iter()
+                    .all(|&piece| app.world().get::<Sleeping>(piece).is_some()),
+                "every piece rested for {quiet} s without a mover, exceeding Avian's {rest} s rest window"
+            );
+            return;
+        }
+    }
+    panic!("Fixture did not sustain rest for Avian's {rest} s sleep window");
+}
+
 /// THE DEPOSITS' WORLD BALL NEVER DROPS WHAT THE CONSTRUCTION'S BOUNDS ACCEPT: for the shipped house
 /// (fixture data) at a fixture pose, every blast direction whose ray from a fixture
 /// point the bounds' own test meets ([`Block::span`] in the construction frame) passes
