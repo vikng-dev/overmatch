@@ -219,7 +219,7 @@ pub(super) fn run(mut p: Intake) {
     {
         let source = &sources[source];
         p.account.work += swept.work;
-        if let Some(load) = swept.load {
+        if let Some(load) = swept.load() {
             let witness = load.witness;
             p.account
                 .contacts
@@ -481,7 +481,7 @@ fn owner_sequence(
                 .expect("one source resolves one patch");
             swept.work += first_work;
         }
-        let cut = swept.broken.then(|| {
+        let cut = swept.released().then(|| {
             after = Some(None);
             cut_fragments(breakage, swept.chunks.clone(), tick)
         });

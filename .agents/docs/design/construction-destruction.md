@@ -509,7 +509,10 @@ and reorder the track law's schedule for one consumer. A swapped element whose m
 stands beside the cut loses its belt reaction for that tick too: its element collider retires
 for the chunk colliders reconciliation builds after the sweep, which the staged reaction cannot
 name. That costs at most one tick of that belt's support, `F dt`; restaging it onto the new chunk
-colliders would carry each point through reconciliation for that one tick.
+colliders would carry each point through reconciliation for that one tick. The drive a cut reads
+keeps the belt reactions staged against its own owner: the floor's traction drives a hull into a
+wall of the same house, so taking out the owner's whole staged set would drop a real press, and
+the plug that would bound the subtraction to the matter cut is what the cut itself decides.
 
 Every remaining solver transfer enters the structure check as its whole mean force `J_solver/dt`.
 Physics already changed those bodies' momenta; contact intake supplies no second blow, source
