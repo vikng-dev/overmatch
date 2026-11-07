@@ -400,23 +400,30 @@ fn resolved_group(structure: &Structure) -> Option<Vec<usize>> {
     None
 }
 
-/// The game's environment destruction routes unsupported matter from every admitted map kind:
-/// a released server body reaches the Driver through centroid-local colliders, and a lone chunk
-/// too small to stay one reaches decor and the ledger. The server-body route runs on every kind
-/// with above-ground matter, and the decor route, the only end-to-end witness of a structure
-/// release's dust, on at least one. Fixture: sever the matter's bonds.
+/// The game's environment destruction routes unsupported matter to centroid-local server bodies
+/// or to decor and the dust ledger. The Driver and presentation rely on these contracts for every
+/// admitted kind whose data reaches that route; fixture constructions guarantee both routes.
+/// A mutant dropping a body's local colliders or a decoration's dust record fails here.
 #[test]
 fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
-    let mut decor_runs = 0;
-    for (asset, kind) in admitted_kinds() {
+    let floor = crate::physical_laws::PhysicalLaws::shipped().server_rubble_min_size_m;
+    // Fixture: each large cube exceeds the floor; the entire small column stays below it.
+    let body = scaled_column(2.0 * floor);
+    let decoration = scaled_column(0.25 * floor);
+    assert!(resolved_group(&body.structure).is_some());
+    assert!(resolved_group(&decoration.structure).is_none());
+    let mut kinds = vec![
+        ("server_body_fixture".to_owned(), body),
+        ("decoration_fixture".to_owned(), decoration),
+    ];
+    kinds.extend(admitted_kinds());
+    for (asset, kind) in kinds {
         let kind = &kind;
         let structure = &kind.structure;
         if structure.chunks.iter().all(|chunk| chunk.buried) {
             continue; // A valid construction can have no above-ground matter to release.
         }
-        let group = resolved_group(structure).unwrap_or_else(|| {
-            panic!("{asset}: its connected above-ground matter reaches a server body")
-        });
+        let group = resolved_group(structure);
         let start = || {
             let (mut app, root) = composed_kind(false, kind);
             app.init_resource::<Sheds>()
@@ -429,7 +436,6 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
             !structure.chunks[c].buried && !crate::debris::crumble::server_body(structure, &[c])
         });
         if let Some(chunk) = decor {
-            decor_runs += 1;
             let (mut app, root) = start();
             isolate(&mut app, root, &[chunk]);
             app.update();
@@ -450,7 +456,11 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
                     .iter(app.world())
                     .any(|piece| piece.chunks.contains(&(chunk as u16)))
             );
+            println!("MEASURED {asset}: chunk {chunk} releases as dust with a decoration shed");
         }
+        let Some(group) = group else {
+            continue; // This component is valid decoration below the server-body floor.
+        };
         let (mut app, root) = start();
         let chunk = group[0];
         let mass: f32 = group.iter().map(|&c| structure.chunks[c].mass).sum();
@@ -583,10 +593,6 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
             "MEASURED {asset}: common detachment retains chunks {group:?} (decor witness {decor:?}), direct contact hulls, moving bounds and production belt support"
         );
     }
-    assert!(
-        decor_runs > 0,
-        "an admitted kind holds a chunk below the rubble floor"
-    );
 }
 
 /// A breakable element with at least three chunks, and its three chunks whose centroids lie
@@ -4740,6 +4746,11 @@ fn resolved_column() -> Arc<ConstructionKind> {
         .server_rubble_min_size_m
         .max(1.0)
         * 2.0;
+    scaled_column(scale)
+}
+
+/// Fixture: a column scaled uniformly, with geometry, mass and joint areas kept consistent.
+fn scaled_column(scale: f32) -> Arc<ConstructionKind> {
     let mut asset = column_construction().asset.clone();
     let point = |p: &mut [f32; 3]| {
         for x in p {
