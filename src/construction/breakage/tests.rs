@@ -4493,6 +4493,7 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     assert!(rubble != DVec3::ZERO, "the plug leaves as server rubble");
     let before = f64::from(mass * speed) * DVec3::X;
     let total = f64::from(mass) * after.as_dvec3() + rubble;
+    // Resolution: f32 velocity and mass roundoff, about 1e-7 relative (DERIVED), with margin.
     assert!(
         (total - before).length() < 1e-4 * before.length(),
         "hull and freed rubble keep the hull's momentum: {total:?} against {before:?}"
