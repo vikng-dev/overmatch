@@ -2981,8 +2981,6 @@ fn spawn_prepared_as(commands: &mut Commands, piece: Entity, prepared: PreparedD
             Rotation(world.rotation),
             GlobalTransform::from(world),
         );
-        // DERIVED: the occupied sensor adds one collider-tree leaf and AABB refit per chunk
-        // per awake step; its empty collision filter creates no contact pair.
         let ballistic = CollisionLayers::new([Layer::Armor], LayerMask::NONE);
         occupied.place(commands, (ChildOf(piece), local, Sensor, ballistic), pose);
         contact.place(commands, (ChildOf(piece), local, piece_layers()), pose);

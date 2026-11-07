@@ -158,20 +158,16 @@ feature-ID path now requires known IDs; unknown points use the existing anchor-d
 with both orientations under the same unknown-feature condition. No sleep rule changes.
 
 Guard in the host crate: `src/tests/avian_warm_start.rs`, `unknown_contact_features_match_by_position`.
-A fixture's spatially matching point carries 11 N s; the published path instead copied 5 N s
-from a point one metre away (MEASURED by the guard before the fix).
 
 Local upstream draft: `upstream/avian-unknown-contact-feature-identity.md` (DRAFT, not filed).
 
 ## Nearest warm-start contact (`src/collision/contact_types/mod.rs`, `src/collision/narrow_phase/system_param.rs`)
 
-The matcher selects the closest admissible anchors across all prior manifolds of the pair,
-rather than the first point inside the radius. MEASURED by the same guard: at 0.05 m separation,
-inside the 0.1 m fixture radius, first-match also copied 5 N s instead of the coincident point's
-11 N s. `src/collision/narrow_phase/system_param.rs` supplies all prior points in one iterator,
-so a later manifold cannot overwrite an earlier closer match. No point flattening allocation is
-added. DERIVED work is O(current points × prior points), the same worst-case search bound as the
-published matcher, with a full candidate scan replacing early exit at the first match.
+The matcher selects the closest admissible anchors across all prior manifolds of the pair.
+`src/collision/narrow_phase/system_param.rs` supplies all prior points in one iterator, so a later
+manifold cannot overwrite an earlier closer match. Flattening allocates no point buffer.
+DERIVED work is O(current points × prior points), the published matcher's worst-case bound,
+with a full candidate scan replacing early exit at the first match.
 
 Pair-wide guard: `src/tests/avian_warm_start.rs::nearest_warm_start_is_selected_across_old_manifolds`.
 
