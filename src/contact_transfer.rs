@@ -958,26 +958,6 @@ mod tests {
         }
     }
 
-    /// The game's environment destruction relies on warm starts belonging to the same contact
-    /// point. UNKNOWN feature IDs carry no identity; only nearby anchors may match them.
-    #[test]
-    fn unknown_contact_features_match_by_position() {
-        use avian3d::prelude::{ContactManifold, ContactPoint};
-        // Fixture: two distinct points, both outside and inside a 0.1 m matching radius.
-        for separation in [1.0, 0.05] {
-            let at = Vec3::X * separation;
-            let mut previous = [Vec3::ZERO, at].map(|at| ContactPoint::new(at, at, at, 0.0));
-            previous[0].warm_start_normal_impulse = 5.0;
-            previous[1].warm_start_normal_impulse = 11.0;
-            let mut next = ContactManifold::new([ContactPoint::new(at, at, at, 0.0)], Vec3::Y);
-            next.match_contacts(&previous, 0.1);
-            assert_eq!(
-                next.points[0].warm_start_normal_impulse, 11.0,
-                "UNKNOWN IDs must select the closest admissible anchors, separation {separation}"
-            );
-        }
-    }
-
     /// THE READING IS THE MOMENTUM THE SOLVER MOVED (the game's environment destruction model):
     /// in every step, the transfer summed into a body that touches only a structure equals the
     /// body's momentum change less its applied force's `F·dt`, normal and friction together, with

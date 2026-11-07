@@ -13,6 +13,7 @@ mod avian_child_pose_churn;
 mod avian_collider_of_removal;
 mod avian_island_sleep;
 mod avian_moved_aabb_prune;
+mod avian_warm_start;
 mod bevy_ktx2_uastc_fallback;
 mod bevy_mesh_removal_lifecycle;
 mod bevy_shadow_view_render_layers;

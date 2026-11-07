@@ -157,7 +157,7 @@ identities, copying the first previous point's warm start regardless of anchor d
 feature-ID path now requires known IDs; unknown points use the existing anchor-distance path,
 with both orientations under the same unknown-feature condition. No sleep rule changes.
 
-Guard in the host crate: `src/contact_transfer.rs`, `unknown_contact_features_match_by_position`.
+Guard in the host crate: `src/tests/avian_warm_start.rs`, `unknown_contact_features_match_by_position`.
 A fixture's spatially matching point carries 11 N s; the published path instead copied 5 N s
 from a point one metre away (MEASURED by the guard before the fix).
 
@@ -172,5 +172,7 @@ inside the 0.1 m fixture radius, first-match also copied 5 N s instead of the co
 so a later manifold cannot overwrite an earlier closer match. No point flattening allocation is
 added. DERIVED work is O(current points × prior points), the same worst-case search bound as the
 published matcher, with a full candidate scan replacing early exit at the first match.
+
+Pair-wide guard: `src/tests/avian_warm_start.rs::nearest_warm_start_is_selected_across_old_manifolds`.
 
 Local upstream draft: `upstream/avian-nearest-warm-start-contact.md` (DRAFT, not filed).

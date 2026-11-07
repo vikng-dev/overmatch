@@ -28,7 +28,7 @@ The shipped correction is at
 ## Evidence
 
 Our commit **"physics: match unknown contact features through their anchors (#235)"** adds the
-class witness `src/contact_transfer.rs:888`, `unknown_contact_features_match_by_position`.
+class witness `src/tests/avian_warm_start.rs`, `unknown_contact_features_match_by_position`.
 Fixture inputs: predecessor anchors at the origin and one metre along x, a matching radius of
 0.1 m, cached normal impulses of 5 and 11 N s, and a new point coincident with the latter.
 **MEASURED in that commit:** the published matcher copies 5 N s rather than the coincident
