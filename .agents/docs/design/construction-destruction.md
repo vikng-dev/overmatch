@@ -473,7 +473,7 @@ chunk identities, world rigid motion and authoritative tick. Internal joints sta
 cut also frees matter already disconnected from every ground path, before standing refit.
 Swept matter inherits the hull's plastic exchange; an unsupported remainder starts at rest.
 D3 absorption projects their combined linear and angular momentum onto the merged rigid body.
-All freed fragments use the shared volume-based size route described under **Size split**;
+All freed fragments use the shared size route described under **Size split**;
 resolved rubble stays on the server and meets the hull through ordinary Avian contacts. The
 standing owner removes the chunks immediately; clients derive the hole from the joint ledger
 at the same presentation tick. Dust-only hull departures are rejected: they remove matter from
@@ -1001,16 +1001,19 @@ This replaces the moving group's contact load (the decided **Collision loads** r
 every source" now covers fields and placed constructions only); that reading is the owner's to
 confirm.
 
-**Size split.** `server_rubble_min_size_m` (`Unit`,
-`assets/ballistics/physical_laws.ron`) is the server's rubble resolution, shared by every material.
-A fragment's size is the cube root of its occupied volume. Below-floor fragments merge through
-joints parted in this event into another departing fragment, processing joint identities in
-order; retained absorption joints preserve grouping without restoring strength. A fragment with
-no such neighbour becomes decor. The shared `route` serves hull cuts, structure releases and
-landings: resolved fragments stay server bodies; decor writes its chunks as dust at the event's
-tick and sends one `Shed` (construction, chunks, frame pose, velocity, spin, seed, tick) to every
-player on `DebrisChannel`, reliable and unordered. The rejected mass floor tied resolution to
-material density.
+**Size split.** A fragment stays a server body when it reaches the server's rubble resolution or
+a hull would feel its mass (`crumble::server_body`, `assets/ballistics/physical_laws.ron`):
+`server_rubble_min_size_m` (`Resolution`, the server's body cost) compares the cube root of its
+occupied volume, shared by every material; `server_rubble_hull_kg` (`Taste`, driving through
+rubble) compares its mass, since a plastic exchange moves a hull's speed by m/(m+M). A
+fragment failing both merges through a joint parted in this event into another departing
+fragment, the largest joint area first (ties by joint identity); retained absorption joints
+preserve grouping without restoring strength. A fragment with no such neighbour becomes decor.
+The shared `route` serves hull cuts, structure releases and landings, each fragment with its own
+release motion: resolved fragments stay server bodies; decor writes its chunks as dust at the
+event's tick and sends one `Shed` (construction, chunks, frame pose, velocity, spin, seed, tick)
+to every player on `DebrisChannel`, reliable and unordered. On the shipped house, whole lintels
+and one sill pass by mass alone; roof boards pass neither (DERIVED from its construction file).
 A replica refuses a shed whose chunks its map cannot hold or whose
 motion is not finite.
 

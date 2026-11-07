@@ -860,7 +860,7 @@ type Colliders<'w, 's> = Query<
 >;
 
 mod sweep_intake;
-use sweep_intake::ReleasedMotion;
+pub(crate) use sweep_intake::ReleasedMotion;
 pub(crate) use sweep_intake::{SweepAccount, SweepContacts};
 
 /// AUTHORITY: each physics step's body contacts on the constructions as loads, read once a step
@@ -1577,9 +1577,8 @@ struct OwnerInputs<'a> {
     taken: &'a Taken,
     pressing: &'a [Load],
     resting: &'a [Load],
-    spin: Vec3,
-    /// Parent rigid velocity, spin and world COM; placed matter is at rest.
-    motion: (Vec3, Vec3, Vec3),
+    /// The owner body's rigid field in world terms; placed matter is at rest.
+    motion: ReleasedMotion,
     tick: u32,
     step: f32,
 }
@@ -1597,11 +1596,11 @@ fn evaluate_owner(
         taken,
         pressing,
         resting,
-        spin,
         motion,
         tick,
         step,
     } = inputs;
+    let spin = construction_pose.rotation.inverse() * motion.spin;
     let kind = breakage.kind.clone();
     let construction = breakage.construction;
     let live = breakage.live.as_mut();
@@ -1651,7 +1650,8 @@ fn evaluate_owner(
             .expect("each departing load belongs to one departing group")]
         .push(load);
     }
-    // A carrier which did not split releases no new fragment. Its existing matter stays with it.
+    // A carrier which did not split releases no new fragment. Its existing matter stays with it:
+    // the size split routed it when it formed.
     let unchanged = moving.is_some_and(|owned| {
         groups.len() == 1
             && groups[0]
@@ -1659,40 +1659,58 @@ fn evaluate_owner(
                 .copied()
                 .eq(owned.iter().map(|&c| usize::from(c)))
     });
-    let (kept, small): (Vec<_>, Vec<_>) =
-        groups.into_iter().zip(regrouped).partition(|(group, _)| {
-            unchanged || crate::debris::crumble::server_body(&live.structure, group)
-        });
-    changes.groups = kept;
-    for (group, _) in &small {
-        for &c in group {
-            live.state.fate[c] = Fate::Dust;
-            changes.events.push(Event::Dust(c as u16));
+    let sheds = if unchanged {
+        changes.groups = groups.into_iter().zip(regrouped).collect();
+        Vec::new()
+    } else {
+        // Groups partition matter, so each one's first chunk names its loads.
+        let mut loads: HashMap<usize, Vec<Load>> =
+            groups.iter().map(|group| group[0]).zip(regrouped).collect();
+        let mut record = Record::default();
+        let (kept, sheds) = crate::debris::crumble::route(
+            &live.structure,
+            (construction, construction_pose),
+            groups,
+            |light| {
+                // One task per decor group: its launch builds a convex hull per chunk, as a kept
+                // group's departure does.
+                pool.scope(|scope| {
+                    for group in light {
+                        let (kind, structure, loads) = (&kind, &live.structure, &loads[&group[0]]);
+                        scope.spawn(async move {
+                            let launch = launch(kind, structure, group, loads);
+                            let at = construction_pose.transform_point(launch.centre);
+                            ReleasedMotion {
+                                velocity: motion.velocity
+                                    + motion.spin.cross(at - motion.centre)
+                                    + construction_pose.rotation * launch.velocity,
+                                spin: motion.spin + construction_pose.rotation * launch.spin,
+                                centre: at,
+                            }
+                        });
+                    }
+                })
+            },
+            tick,
+            &mut record,
+        );
+        for entry in record.entries {
+            if let Event::Dust(c) = entry.event {
+                live.state.fate[usize::from(c)] = Fate::Dust;
+            }
+            changes.events.push(entry.event);
         }
-    }
-    let sheds = pool.scope(|scope| {
-        let live = &*live;
-        for (group, loads) in &small {
-            let kind = &kind;
-            scope.spawn(async move {
-                let launch = launch(kind, &live.structure, group, loads);
-                let at = construction_pose.transform_point(launch.centre);
-                crate::debris::crumble::Shed::of(
-                    &live.structure,
-                    (construction, construction_pose),
-                    group,
-                    (
-                        motion.0
-                            + motion.1.cross(at - motion.2)
-                            + construction_pose.rotation * launch.velocity,
-                        motion.1 + construction_pose.rotation * launch.spin,
-                        at,
-                    ),
-                    tick,
-                )
-            });
-        }
-    });
+        changes.groups = kept
+            .into_iter()
+            .map(|group| {
+                let loads = loads
+                    .remove(&group[0])
+                    .expect("each kept group is one the laws released");
+                (group, loads)
+            })
+            .collect();
+        sheds
+    };
     // Moving matter already has a carrier; only surviving field loads push it.
     let fields = if moving.is_some() {
         field_blows(&loads, &live.state).copied().collect()
@@ -1857,29 +1875,35 @@ fn apply_deposits(mut p: DepositParam) {
                 .par_iter_many_unique_mut(batch.keys())
                 .for_each(|(root, transform, mut breakage, piece)| {
                     let taken = &batch[&root];
-                    let frame = frames[&root];
                     let construction = breakage.physics_frame(transform);
-                    let motion = if piece.is_some() {
-                        let (body, _) = bodies
-                            .get(root)
-                            .expect("a moving group has its physics body");
-                        let centre = p
-                            .centres
-                            .get(root)
-                            .expect("a physics body has its computed COM");
-                        (
-                            body.linear_velocity(),
-                            body.angular_velocity(),
-                            body.position().0 + body.rotation().0 * centre.0,
-                        )
-                    } else {
-                        (Vec3::ZERO, Vec3::ZERO, construction.translation) // Placed matter is at rest.
-                    };
-                    let reusable = if piece.is_none() {
-                        // A construction without children has no chunk collider to rehome.
-                        reusable_colliders(children.get(root).ok(), chunk_entities)
-                    } else {
-                        BTreeMap::new() // Moving owners transfer their colliders in split_groups.
+                    let (motion, reusable) = match piece {
+                        Some(_) => {
+                            let (body, _) = bodies
+                                .get(root)
+                                .expect("a moving group has its physics body");
+                            let centre = p
+                                .centres
+                                .get(root)
+                                .expect("a physics body has its computed COM");
+                            let motion = ReleasedMotion {
+                                velocity: body.linear_velocity(),
+                                spin: body.angular_velocity(),
+                                centre: body.position().0 + body.rotation().0 * centre.0,
+                            };
+                            // Moving owners transfer their colliders in split_groups.
+                            (motion, BTreeMap::new())
+                        }
+                        None => {
+                            let motion = ReleasedMotion {
+                                velocity: Vec3::ZERO,
+                                spin: Vec3::ZERO,
+                                centre: construction.translation,
+                            }; // Placed matter is at rest.
+                            // A construction without children has no chunk collider to rehome.
+                            let reusable =
+                                reusable_colliders(children.get(root).ok(), chunk_entities);
+                            (motion, reusable)
+                        }
                     };
                     let effect = evaluate_owner(
                         root,
@@ -1892,7 +1916,6 @@ fn apply_deposits(mut p: DepositParam) {
                             taken,
                             pressing: presses.get(&root).map_or(&[][..], Vec::as_slice),
                             resting: resting.get(&root).map_or(&[][..], Vec::as_slice),
-                            spin: construction_spin(bodies, root, frame.rotation, piece.is_some()),
                             motion,
                             tick,
                             step,

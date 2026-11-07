@@ -269,13 +269,19 @@ fn a_construction_is_complete_at_spawn_and_keeps_its_state_through_splits() {
     );
 }
 
-/// Fixture support loss: sever the selected chunk's bonds and request a zero-work evaluation.
-fn isolate_chunk(app: &mut App, root: Entity, chunk: usize) {
+/// Fixture support loss: sever every bond joining `group` to other matter or the ground and
+/// request a zero-work evaluation on its first chunk.
+fn isolate(app: &mut App, root: Entity, group: &[usize]) {
+    let chunk = group[0];
     let at = {
         let mut body = app.world_mut().get_mut::<Breakage>(root).unwrap();
         let live = &mut body.live;
         for (index, joint) in live.structure.joints.iter().enumerate() {
-            if joint.a == chunk || joint.b == Side::Chunk(chunk) {
+            let inside = match joint.b {
+                Side::Chunk(b) => group.contains(&b),
+                Side::Ground => false,
+            };
+            if group.contains(&joint.a) != inside {
                 live.state.cracked[index] = true;
                 live.state.separated[index] = true;
             }
@@ -320,44 +326,65 @@ fn admitted_kinds() -> Vec<(String, Arc<ConstructionKind>)> {
         .collect()
 }
 
-/// The game's environment destruction routes unsupported matter from every admitted map kind.
-/// Resolved fragments reach the Driver through centroid-local colliders; smaller isolated
-/// fragments reach decor and the ledger. Fixture: remove one above-ground chunk's supports.
+/// Above-ground matter of `structure` grown from its first above-ground chunk across bonded
+/// joints, ascending, until it stays a server body: the fixture's choice by class. `None` when
+/// the construction has no above-ground matter or its connected matter never reaches one.
+fn resolved_group(structure: &Structure) -> Option<Vec<usize>> {
+    let first = structure.chunks.iter().position(|chunk| !chunk.buried)?;
+    let (mut group, mut frontier) = (Vec::new(), BTreeSet::from([first]));
+    while let Some(c) = frontier.pop_first() {
+        group.push(c);
+        group.sort_unstable();
+        if crate::debris::crumble::server_body(structure, &group) {
+            return Some(group);
+        }
+        for joint in &structure.joints {
+            let Side::Chunk(b) = joint.b else { continue }; // The ground grows no group.
+            let other = if joint.a == c {
+                b
+            } else if b == c {
+                joint.a
+            } else {
+                continue;
+            };
+            if joint.seam().is_some()
+                && !structure.chunks[other].buried
+                && group.binary_search(&other).is_err()
+            {
+                frontier.insert(other);
+            }
+        }
+    }
+    None
+}
 
+/// The game's environment destruction routes unsupported matter from every admitted map kind:
+/// a released server body reaches the Driver through centroid-local colliders, and a lone chunk
+/// too fine to stay one reaches decor and the ledger. Both routes run on every kind that has
+/// such matter; the server-body route must run on every kind. Fixture: sever the matter's bonds.
 #[test]
 fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
-    let manifest = crate::map::tests::shipped_manifest();
-    let assets: BTreeSet<_> = manifest
-        .prototypes
-        .values()
-        .filter_map(|prototype| match prototype {
-            crate::map::Prototype::Construction { asset } => Some(asset),
-            _ => None,
-        })
-        .collect();
-    for asset in assets {
-        let kind = manifest.constructions.get(asset).unwrap();
-        let (mut app, root) = composed_kind(false, kind);
-        app.init_resource::<Sheds>()
-            .add_systems(FixedPostUpdate, keep_sheds.after(LawSet));
-        app.update();
-        app.update();
-        let body = app.world().get::<Breakage>(root).unwrap();
-        let Some(chunk) = body
-            .live
-            .structure
-            .chunks
-            .iter()
-            .position(|chunk| !chunk.buried)
-        else {
+    for (asset, kind) in admitted_kinds() {
+        let kind = &kind;
+        let structure = &kind.structure;
+        let Some(group) = resolved_group(structure) else {
             continue; // Valid constructions can have no above-ground breakable matter to release.
         };
-        let at = body.live.structure.chunks[chunk].centroid;
-        let resolved = body.live.structure.chunks[chunk].volume.cbrt()
-            >= crate::physical_laws::PhysicalLaws::shipped().server_rubble_min_size_m;
-        isolate_chunk(&mut app, root, chunk);
-        app.update();
-        if !resolved {
+        let start = || {
+            let (mut app, root) = composed_kind(false, kind);
+            app.init_resource::<Sheds>()
+                .add_systems(FixedPostUpdate, keep_sheds.after(LawSet));
+            app.update();
+            app.update();
+            (app, root)
+        };
+        let decor = (0..structure.chunks.len()).find(|&c| {
+            !structure.chunks[c].buried && !crate::debris::crumble::server_body(structure, &[c])
+        });
+        if let Some(chunk) = decor {
+            let (mut app, root) = start();
+            isolate(&mut app, root, &[chunk]);
+            app.update();
             assert_eq!(
                 app.world().get::<Breakage>(root).unwrap().live.state.fate[chunk],
                 Fate::Dust
@@ -375,8 +402,17 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
                     .iter(app.world())
                     .any(|piece| piece.chunks.contains(&(chunk as u16)))
             );
-            continue;
         }
+        let (mut app, root) = start();
+        let chunk = group[0];
+        let mass: f32 = group.iter().map(|&c| structure.chunks[c].mass).sum();
+        let at = group
+            .iter()
+            .map(|&c| structure.chunks[c].centroid * structure.chunks[c].mass)
+            .sum::<Vec3>()
+            / mass;
+        isolate(&mut app, root, &group);
+        app.update();
         let (owner, piece) = app
             .world_mut()
             .query::<(Entity, &Piece)>()
@@ -387,11 +423,14 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
             piece.construction,
             app.world().get::<Breakage>(root).unwrap().construction
         );
-        assert_eq!(piece.chunks, [chunk as u16]);
+        assert_eq!(
+            piece.chunks,
+            group.iter().map(|&c| c as u16).collect::<Vec<_>>()
+        );
         assert_eq!(
             app.world().get::<Position>(owner).unwrap().0,
             at,
-            "an isolated chunk's dynamic frame starts at its occupied centroid"
+            "a released group's dynamic frame starts at its occupied centre of mass"
         );
         assert_eq!(
             app.world().get::<RigidBody>(owner),
@@ -403,14 +442,18 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
         ));
         let contact: Vec<_> = app
             .world_mut()
-            .query::<(Entity, &ChildOf, &CollisionLayers)>()
+            .query::<(Entity, &ChildOf, &CollisionLayers, &ChunkCollider)>()
             .iter(app.world())
-            .filter(|(_, parent, layers)| {
+            .filter(|(_, parent, layers, _)| {
                 parent.parent() == owner && layers.filters != LayerMask::NONE
             })
-            .map(|(entity, _, _)| entity)
+            .map(|(entity, _, _, chunk)| (entity, usize::from(chunk.0)))
             .collect();
-        assert_eq!(contact.len(), 1, "one contact hull owns the isolated chunk");
+        assert_eq!(
+            contact.len(),
+            group.len(),
+            "one contact hull per released chunk"
+        );
         app.world_mut()
             .entity_mut(owner)
             .insert(LinearVelocity(Vec3::X)); // Fixture motion.
@@ -420,7 +463,7 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
         } // Fixture observation window.
         let after = app.world().get::<Position>(owner).unwrap().0;
         assert!(after.x > before.x, "the common dynamic owner advances");
-        for entity in contact {
+        for (entity, chunk) in contact {
             use crate::track::rubble::{PieceData, RubbleBodies, RubbleQuery, Slab};
             use bevy::ecs::system::RunSystemOnce;
 
@@ -489,7 +532,7 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
             Fate::Fallen
         );
         println!(
-            "MEASURED {asset}: common detachment retains chunk {chunk}, direct contact hull, moving bounds and production belt support"
+            "MEASURED {asset}: common detachment retains chunks {group:?} (decor witness {decor:?}), direct contact hulls, moving bounds and production belt support"
         );
     }
 }
@@ -2470,14 +2513,10 @@ fn drop_slab() -> (
 /// witness asserts no count.
 #[test]
 fn a_released_part_lands_crumbles_and_sheds_its_small_fragments() {
-    let cut = crate::physical_laws::PhysicalLaws::shipped().server_rubble_min_size_m;
     let (kind, group, pieces, sheds, record) = drop_slab();
-    let size = |chunks: &[u16]| {
-        chunks
-            .iter()
-            .map(|&c| kind.structure.chunks[usize::from(c)].volume)
-            .sum::<f32>()
-            .cbrt()
+    let server = |chunks: &[u16]| {
+        let chunks: Vec<_> = chunks.iter().map(|&c| usize::from(c)).collect();
+        crate::debris::crumble::server_body(&kind.structure, &chunks)
     };
     let mut owned: Vec<usize> = pieces
         .iter()
@@ -2491,10 +2530,10 @@ fn a_released_part_lands_crumbles_and_sheds_its_small_fragments() {
         "the bodies and sheds partition the released part"
     );
     for piece in &pieces {
-        assert!(size(&piece.chunks) >= cut, "a kept body {:?}", piece.chunks);
+        assert!(server(&piece.chunks), "a kept body {:?}", piece.chunks);
     }
     for shed in &sheds {
-        assert!(size(&shed.chunks) < cut, "a shed {:?}", shed.chunks);
+        assert!(!server(&shed.chunks), "a shed {:?}", shed.chunks);
         for &c in &shed.chunks {
             assert!(record.entries.contains(&Entry {
                 construction: 3,
@@ -3777,8 +3816,12 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
                                 taken,
                                 pressing: &[],
                                 resting: &[],
-                                spin: Vec3::Z * 4.0,
-                                motion: (Vec3::ZERO, Vec3::Z * 4.0, Vec3::ZERO),
+                                // Fixture spin, 4 rad/s about the construction's Z.
+                                motion: sweep_intake::ReleasedMotion {
+                                    velocity: Vec3::ZERO,
+                                    spin: pose.rotation * Vec3::Z * 4.0,
+                                    centre: Vec3::ZERO,
+                                },
                                 tick: 1,
                             },
                         );
@@ -3962,7 +4005,7 @@ fn occupied_matter_queries_follow_common_release_and_sleeping_pose() {
     let volume = occupied(&mut app, root);
     crate::ballistics::assert_occupied_matter_queries(&mut app, volume);
     let chunk = kind.layout.blocks.len() / 2; // Fixture: the column's middle cube.
-    isolate_chunk(&mut app, root, chunk);
+    isolate(&mut app, root, &[chunk]);
     app.update();
     app.update();
     let owner = app
@@ -5014,7 +5057,7 @@ fn the_law_installer_reuses_departing_standing_colliders() {
                 .is_some_and(|c| c.0 == chunk)
         })
         .unwrap();
-    isolate_chunk(&mut app, root, usize::from(chunk));
+    isolate(&mut app, root, &[usize::from(chunk)]);
     app.update();
     let parent = app
         .world()

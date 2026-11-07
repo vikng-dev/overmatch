@@ -621,11 +621,12 @@ fn commit_source(
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct ReleasedMotion {
-    pub(super) velocity: Vec3,
-    pub(super) spin: Vec3,
-    pub(super) centre: Vec3,
+/// A rigid velocity field: `velocity + spin × (x − centre)`, in the frame its user names.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ReleasedMotion {
+    pub(crate) velocity: Vec3,
+    pub(crate) spin: Vec3,
+    pub(crate) centre: Vec3,
 }
 
 /// A cut's swept matter inherits its exchange; matter losing its last support starts at rest.
@@ -759,7 +760,7 @@ pub(super) fn sweep_departure(
                     &breakage.live.structure,
                     (breakage.construction, pose),
                     vec![group],
-                    (motion.velocity, motion.spin, motion.centre),
+                    |light| vec![motion; light.len()],
                     tick,
                     &mut record,
                 );

@@ -499,40 +499,40 @@ fn the_cracks_absorb_at_most_the_energy_the_landing_dissipated() {
     }
 }
 
-/// The game's environment destruction routes by occupied volume, independent of aspect ratio
-/// and material density. Comparing mass or longest extent sends these fixtures down wrong paths.
+/// The game's environment destruction keeps a fragment on the server when it reaches the
+/// server's rubble resolution or a hull would feel its mass, and only then. Each row passes by
+/// one term alone or by neither, so a size-only, mass-only or both-terms mutant routes one wrong.
 #[test]
-fn rubble_size_uses_occupied_volume_for_splinters_compact_brick_and_wood() {
+fn a_fragment_stays_a_server_body_by_its_resolution_or_by_the_mass_a_hull_feels() {
     use crate::construction::fracture::{Chunk, Material};
-    let floor = PhysicalLaws::shipped().server_rubble_min_size_m;
+    let laws = PhysicalLaws::shipped();
+    let (floor, felt) = (laws.server_rubble_min_size_m, laws.server_rubble_hull_kg);
     let registry = crate::substances::SubstanceRegistry::shipped_static();
-    for name in ["Brick", "Wood"] {
-        // Fixture material pair with different densities.
-        let material = Material::of(registry, name).unwrap().unwrap();
-        for (dimensions, server) in [
-            (Vec3::splat(floor), true),
-            (Vec3::new(floor * 10.0, floor / 10.0, floor / 10.0), false),
-        ] {
-            // Fixture: an equal-sided piece at the floor and a long, thin splinter.
-            let volume = dimensions.x * dimensions.y * dimensions.z;
-            let structure = Structure {
-                geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
-                part_of: vec![0],
-                chunks: vec![Chunk {
-                    volume,
-                    mass: material.density * volume,
-                    material,
-                    centroid: Vec3::ZERO,
-                    buried: false,
-                }],
-                joints: Vec::new(),
-            };
-            assert_eq!(
-                server_body(&structure, &[0]),
-                server,
-                "{name}: {dimensions}"
-            );
-        }
+    let material = Material::of(registry, "Brick").unwrap().unwrap();
+    let below = (0.9 * floor).powi(3);
+    // Fixture volumes (m³) and masses (kg), set from the two thresholds.
+    for (volume, mass, server) in [
+        (floor.powi(3), 0.5 * felt, true),
+        (below, 2.0 * felt, true),
+        (below, 0.5 * felt, false),
+    ] {
+        let structure = Structure {
+            geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
+            part_of: vec![0],
+            chunks: vec![Chunk {
+                volume,
+                mass,
+                material,
+                centroid: Vec3::ZERO,
+                buried: false,
+            }],
+            joints: Vec::new(),
+        };
+        assert_eq!(
+            server_body(&structure, &[0]),
+            server,
+            "{volume} m³, {mass} kg"
+        );
     }
 }
 
@@ -553,7 +553,11 @@ fn a_shed_fragment_leaves_with_its_groups_rigid_motion() {
         &part.structure,
         (5, frame),
         fragment,
-        (velocity, spin, centre),
+        ReleasedMotion {
+            velocity,
+            spin,
+            centre,
+        },
         9,
     );
     let at = frame.transform_point(part.structure.chunks[fragment[0]].centroid);
@@ -565,25 +569,27 @@ fn a_shed_fragment_leaves_with_its_groups_rigid_motion() {
 }
 
 /// The game's environment destruction keeps absorbed matter at rubble resolution. Only a joint
-/// parted in this event may absorb new matter; later evaluations must not undo that absorption.
+/// parted in this event may absorb new matter, the largest first; later evaluations must not undo
+/// that absorption. A fragment left alone below it goes to decor and the record as dust.
 #[test]
 fn a_small_parted_neighbour_joins_one_server_body_and_stays_with_it() {
     use crate::construction::fracture::{Bond, Joint};
     let mut structure = released_part().structure;
     structure.chunks.truncate(3);
     structure.part_of.truncate(3);
-    let floor = PhysicalLaws::shipped().server_rubble_min_size_m;
-    // Fixture: one below-floor fragment between two resolved fragments, with ordered joints.
+    let laws = PhysicalLaws::shipped();
+    // Fixture: one fragment below both thresholds between two resolved fragments; the joint to
+    // chunk 2 has the larger area.
     for (chunk, scale) in structure.chunks.iter_mut().zip([0.5_f32, 2.0, 2.0]) {
-        chunk.volume = (floor * scale).powi(3);
-        chunk.mass = chunk.volume * chunk.material.density;
+        chunk.volume = (laws.server_rubble_min_size_m * scale).powi(3);
+        chunk.mass = laws.server_rubble_hull_kg * scale / 4.0;
     }
     let seam = structure.chunks[0].material.seam;
-    structure.joints = [1, 2]
-        .map(|b| Joint {
+    structure.joints = [(1, 1.0), (2, 2.0)]
+        .map(|(b, area)| Joint {
             a: 0,
             b: Side::Chunk(b),
-            area: 1.0,
+            area,
             centroid: Vec3::ZERO,
             normal: Vec3::X,
             bond: Bond::Bonded(seam),
@@ -595,28 +601,60 @@ fn a_small_parted_neighbour_joins_one_server_body_and_stays_with_it() {
         merge_fragments(&structure, fragments.clone(), &[], &mut retained),
         fragments
     );
-    let merged = merge_fragments(&structure, fragments.clone(), &[1, 0], &mut retained);
+    let merged = merge_fragments(&structure, fragments.clone(), &[0, 1], &mut retained);
     assert_eq!(
         merged,
-        [vec![0, 1], vec![2]],
-        "joint order selects the neighbour"
+        [vec![0, 2], vec![1]],
+        "the larger parted joint selects the neighbour"
     );
-    assert_eq!(retained, [0]);
+    assert_eq!(retained, [1]);
     assert_eq!(
-        merge_fragments(&structure, fragments, &[], &mut retained),
+        merge_fragments(&structure, fragments.clone(), &[], &mut retained),
         merged
     );
+    let at_rest = |light: &[Vec<usize>]| {
+        vec![
+            ReleasedMotion {
+                velocity: Vec3::ZERO,
+                spin: Vec3::ZERO,
+                centre: Vec3::ZERO,
+            };
+            light.len()
+        ]
+    };
     let mut record = Record::default();
     let (bodies, decor) = route(
         &structure,
         (1, Transform::IDENTITY),
         merged,
-        (Vec3::ZERO, Vec3::ZERO, Vec3::ZERO),
+        at_rest,
         1,
         &mut record,
     );
-    assert_eq!(bodies, [vec![0, 1], vec![2]]);
+    assert_eq!(bodies, [vec![0, 2], vec![1]]);
     assert!(decor.is_empty() && record.entries.is_empty());
+    let (bodies, decor) = route(
+        &structure,
+        (1, Transform::IDENTITY),
+        fragments,
+        at_rest,
+        1,
+        &mut record,
+    );
+    assert_eq!(bodies, [vec![1], vec![2]]);
+    assert_eq!(
+        decor.iter().map(|shed| &shed.chunks).collect::<Vec<_>>(),
+        [&[0]]
+    );
+    assert_eq!(
+        record.entries,
+        [Entry {
+            construction: 1,
+            event: Event::Dust(0),
+            tick: 1,
+        }],
+        "the clients' ledger shows the decor chunk gone"
+    );
     // A neighbour which remains standing cannot absorb the leaving fragment.
     assert_eq!(
         merge_fragments(&structure, vec![vec![0]], &[0], &mut Vec::new()),
