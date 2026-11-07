@@ -3305,6 +3305,12 @@ fn reconcile(
 /// and the collider trees a spatial query walks, so the next march reads them.
 fn refit_systems() -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::ScheduleSystem> {
     (
+        |swapped: Res<sweep_intake::SwappedBelts>| {
+            assert!(
+                swapped.0.is_empty(),
+                "sweep reconciliation consumes every swapped belt before physics clears staged contacts"
+            );
+        },
         reconcile,
         update_moved_collider_aabbs::<Collider>
             .run_if(resource_exists::<ColliderTrees>)
