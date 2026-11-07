@@ -706,10 +706,11 @@ fn geometry(
 
 /// One owner's sources in body entity order, each resolved on the state the earlier ones left: a
 /// released plug's cut commits at once, and every later source resolves again on its topology
-/// with the gravity field re-solved there ([`fracture::parts::Assessment::resolved_on`]). A
-/// later source meeting only matter an earlier cut freed has no witness and so no cut. Both
-/// passes count as work; owners never meet here. An owner an earlier round of this tick cut
-/// (`recut`) resolves every source on its current topology.
+/// with the gravity field re-solved there ([`fracture::parts::Assessment::resolved_on`]), which
+/// the owner keeps as its next law stage's factor. A later source meeting only matter an earlier
+/// cut freed has no witness and so no cut. Both passes count as work; owners never meet here. An
+/// owner an earlier round of this tick cut (`recut`) has no first pass: every source resolves on
+/// its current topology.
 fn owner_sequence(
     breakage: &mut Breakage,
     (root, pose): (Entity, Transform),
@@ -721,23 +722,35 @@ fn owner_sequence(
     let mut after: Option<Option<(fracture::parts::Assessment, fracture::parts::Gravity)>> =
         recut.then_some(None);
     let mut resolved = Vec::with_capacity(own.len());
-    let own_sources: Vec<_> = own.iter().map(|&i| &sources[i]).collect();
-    let first_pass = owner_geometry(breakage, pose, &own_sources, dt, None);
-    for (&index, (source, mut swept)) in own.iter().zip(first_pass) {
-        if let Some(field) = &mut after {
-            let field = field.get_or_insert_with(|| {
-                let live = &breakage.live;
-                (
-                    live.assessment.resolved_on(&live.structure, &live.state),
-                    fracture::parts::Gravity::default(),
-                )
-            });
-            let first_work = swept.work;
-            (_, swept) = owner_geometry(breakage, pose, &[source], dt, Some(field))
-                .pop()
-                .expect("one source resolves one patch");
-            swept.work += first_work;
-        }
+    let mut first_pass = if recut {
+        Vec::new()
+    } else {
+        let own_sources: Vec<_> = own.iter().map(|&i| &sources[i]).collect();
+        owner_geometry(breakage, pose, &own_sources, dt, None)
+    }
+    .into_iter();
+    for &index in own {
+        let first = first_pass.next().map(|(_, swept)| swept);
+        let swept = match &mut after {
+            None => first.expect("an owner no cut changed resolves every source in its first pass"),
+            Some(field) => {
+                let field = field.get_or_insert_with(|| {
+                    let live = &breakage.live;
+                    (
+                        live.assessment.resolved_on(&live.structure, &live.state),
+                        fracture::parts::Gravity::default(),
+                    )
+                });
+                let (_, mut swept) =
+                    owner_geometry(breakage, pose, &[&sources[index]], dt, Some(field))
+                        .pop()
+                        .expect("one source resolves one patch");
+                if let Some(first) = first {
+                    swept.work += first.work;
+                }
+                swept
+            }
+        };
         let cut = swept.released().then(|| {
             after = Some(None);
             cut_fragments(breakage, swept.chunks.clone(), tick)
@@ -749,6 +762,9 @@ fn owner_sequence(
             swept,
             cut,
         });
+    }
+    if let Some(field) = after {
+        Arc::make_mut(&mut breakage.live.assessment).next = field.map(|(next, _)| Box::new(next));
     }
     resolved
 }

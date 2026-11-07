@@ -370,7 +370,10 @@ sources can compete for the same standing matter: all of them resolve on the con
 at the tick's start, a released plug's cut commits to its topology at once, and every later
 source resolves again on the topology that cut left, with the gravity field solved on it
 (`parts::Assessment::resolved_on`), so every committed plug is a minimum cut for its own demand on
-the matter it meets. Constructions never meet in this sequence. Each source then exchanges once
+the matter it meets. That solve is the owner's one factor for the topology the cut left: the next
+law stage adopts it while that topology stands (`parts::Assessment::next`), and a construction an
+earlier departure round of the tick cut resolves every source on it, with no first pass on the
+state it had. Constructions never meet in this sequence. Each source then exchanges once
 against all its plugs; departures prepare per construction, and their effects commit in (body,
 construction) order.
 
@@ -404,7 +407,8 @@ whenever that factor changes, so contact loads (this body's press included) neve
 preload. The column is the structure law's last; the state can run one stage ahead of it (one
 stage per tick): a joint that cracked or opened since reads it at its current strength, and
 matter that left since still loads the interfaces below it. A sweep after an earlier cut in the
-same tick reads the column re-solved on that cut's topology instead.
+same tick reads the column factored on that cut's topology instead, the factor the next law stage
+adopts.
 Each owner caches the preloads until that column or its standing chunks, cracks or separated
 joints change. Preloads stay fixed during optimization, including on supports beyond the seed
 patch; contact demand does not manufacture one.
