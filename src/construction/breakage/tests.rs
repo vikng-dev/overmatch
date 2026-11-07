@@ -16,6 +16,25 @@ use crate::scatter::MapInstance;
 /// A fixture physics step, s: the harness's 64 Hz tick (fixture data).
 const STEP: f32 = 1.0 / 64.0;
 
+/// Fixture: the source cube's side, m.
+const CUBE_SIDE_M: f32 = 0.4;
+
+/// Fixture: a dynamic cube at rest, with principal inertia equal to its mass in kg m².
+fn cube(start: Vec3, mass: f32) -> impl Bundle {
+    (
+        RigidBody::Dynamic,
+        Position(start),
+        Rotation::default(),
+        Collider::cuboid(CUBE_SIDE_M, CUBE_SIDE_M, CUBE_SIDE_M),
+        Mass(mass),
+        NoAutoMass,
+        AngularInertia::new(Vec3::splat(mass)),
+        CenterOfMass::default(),
+        LinearVelocity::ZERO,
+        piece_layers(),
+    )
+}
+
 /// The breakage sim on the offline physics with the solver's contact reading, the march probe,
 /// and the shipped house spawned at the origin (unit scale), one fixed tick per update. `replica`
 /// adds the replica marker.
@@ -4450,21 +4469,7 @@ fn a_partial_cut_keeps_belt_support_on_the_matter_that_stands() {
     // it frees the middle and top chunks while the anchored bottom chunk stands.
     let (mass, speed) = (1e6, side / STEP);
     let start = chunks[1].centroid - Vec3::X * side;
-    let source = app
-        .world_mut()
-        .spawn((
-            RigidBody::Dynamic,
-            Position(start),
-            Rotation::default(),
-            Collider::cuboid(0.4, 0.4, 0.4),
-            Mass(mass),
-            NoAutoMass,
-            AngularInertia::new(Vec3::splat(mass)),
-            CenterOfMass::default(),
-            LinearVelocity::ZERO,
-            piece_layers(),
-        ))
-        .id();
+    let source = app.world_mut().spawn(cube(start, mass)).id();
     app.update();
     let element = app
         .world_mut()
@@ -4474,7 +4479,7 @@ fn a_partial_cut_keeps_belt_support_on_the_matter_that_stands() {
         .unwrap()
         .0;
     // Fixture: belt reactions on the element's face at the chunk that leaves and at the one that
-    // stands, each force's tick impulse (1.6e5 N s) past the 1.3e4 N s tolerance below.
+    // stands, with support large enough to expose a lost reaction in the momentum assertion.
     let belts = [1, 0].map(|c| crate::contact_transfer::AppliedContact {
         structure: root,
         structure_collider: element,
@@ -4702,18 +4707,7 @@ fn a_body_the_sweep_did_not_cast_keeps_avians_contact() {
     // motion to cast, and the other moves away from the column.
     let [resting, leaving] = [1.0, 2.0].map(|offset| {
         app.world_mut()
-            .spawn((
-                RigidBody::Dynamic,
-                Position(middle - Vec3::X * side * offset),
-                Rotation::default(),
-                Collider::cuboid(0.4, 0.4, 0.4),
-                Mass(1e3),
-                NoAutoMass,
-                AngularInertia::new(Vec3::splat(1e3)),
-                CenterOfMass::default(),
-                LinearVelocity::ZERO,
-                piece_layers(),
-            ))
+            .spawn(cube(middle - Vec3::X * side * offset, 1e3))
             .id()
     });
     app.update(); // First preparation creates the collider hierarchy at rest.
@@ -4948,22 +4942,8 @@ pub(crate) fn assert_fixture_release_latency(scale: f32) {
     assert!(peak_force(effective, f64::from(speed), patch, Contactor::RIGID) > capacity);
     let middle = structure.chunks[1].centroid;
     // DERIVED: a half-side face gap, crossed within this tick at the chosen speed.
-    let start = middle - Vec3::X * (scale + 0.2);
-    let source = app
-        .world_mut()
-        .spawn((
-            RigidBody::Dynamic,
-            Position(start),
-            Rotation::default(),
-            Collider::cuboid(0.4, 0.4, 0.4),
-            Mass(mass),
-            NoAutoMass,
-            AngularInertia::new(Vec3::splat(mass)),
-            CenterOfMass::default(),
-            LinearVelocity::ZERO,
-            piece_layers(),
-        ))
-        .id();
+    let start = middle - Vec3::X * (scale + CUBE_SIDE_M / 2.0);
+    let source = app.world_mut().spawn(cube(start, mass)).id();
     app.update(); // Prepare the collider hierarchy before the driving stimulus.
     assert!(
         app.world()
