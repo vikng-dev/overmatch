@@ -305,7 +305,10 @@ impl Geometry {
                 query.inward(node, &self.hulls[c], self.centres[c], &mut result.work)
             {
                 result.chunks.push(c);
-                if result.witness.is_none_or(|first| witness.time < first.time) {
+                if result
+                    .witness
+                    .is_none_or(|first| witness.reach < first.reach)
+                {
                     result.witness = Some(witness);
                 }
             }
@@ -610,10 +613,13 @@ fn rotation_bounds(
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Witness {
-    pub(crate) time: f32,
+    /// How far along its cast the source meets the matter, as cast time, s: the pose that sets
+    /// `at`, `normal` and the lever, and the order witnesses are met in.
+    pub(crate) reach: f32,
     pub(crate) normal: Vec3,
     pub(crate) at: Vec3,
-    /// The closing speed along `normal` at `time`, m/s, never negative.
+    /// The closing speed along `normal` when the body's own motion closes the cast's gap there
+    /// ([`RigidMotion`]), m/s, never negative.
     pub(crate) speed: f32,
     /// The chunk the hull meets first, whose material and size set the impact's peak force.
     pub(crate) chunk: usize,
@@ -1061,7 +1067,7 @@ mod tests {
                 },
             );
             assert_eq!(result.chunks, [4]);
-            assert_eq!(result.witness.unwrap().time, 0.0);
+            assert_eq!(result.witness.unwrap().reach, 0.0);
             assert_eq!(
                 result.work.casts, 1,
                 "later leaves cannot improve a time-zero inward witness at {turns} turns"
@@ -1223,9 +1229,9 @@ mod tests {
                     let speed = motion.velocity.dot(normal);
                     if speed > 0.0 {
                         exhaustive.chunks.push(c);
-                        if exhaustive.witness.is_none_or(|first| time < first.time) {
+                        if exhaustive.witness.is_none_or(|first| time < first.reach) {
                             exhaustive.witness = Some(Witness {
-                                time,
+                                reach: time,
                                 normal,
                                 at,
                                 speed,
@@ -1246,8 +1252,8 @@ mod tests {
         assert_eq!(body.chunks, exhaustive.chunks);
         // DERIVED: leading face starts at -0.8 m, wall at -0.1 m, velocity 4 m/s.
         // Resolution: convex shape cast's f32 support/termination error at fixture scale.
-        assert!((body.witness.unwrap().time - 0.7 / 4.0).abs() < 1e-4);
-        assert!((body.witness.unwrap().time - exhaustive.witness.unwrap().time).abs() < 1e-5);
+        assert!((body.witness.unwrap().reach - 0.7 / 4.0).abs() < 1e-4);
+        assert!((body.witness.unwrap().reach - exhaustive.witness.unwrap().reach).abs() < 1e-5);
         let preload = preload(&structure, &state);
         // Fixture: a common finite point response and drive for both geometry queries.
         for patch in [&mut body, &mut exhaustive] {
@@ -1302,17 +1308,18 @@ mod tests {
         assert_eq!(result.chunks, [4]);
         // DERIVED: front face travels 0.8 m at 2 m/s. Resolution: fixture-scale GJK error.
         let hit = result.witness.unwrap();
-        assert!((hit.time - 0.4).abs() < 1e-4, "{hit:?}");
+        assert!((hit.reach - 0.4).abs() < 1e-4, "{hit:?}");
         assert!((hit.speed - 2.0).abs() < 1e-4);
     }
 
-    /// The game's environment destruction: a witness closes at its source's velocity at the
-    /// witness's time, `v + a t`, while the cast reaches with the velocity that carries the body
-    /// to its tick-end pose. A body pressed onto matter at rest makes no impact and loads the cut
-    /// with its drive alone; one a gap away meets it at `a t`. Reading the reach as the impact
-    /// speed charges a resting body every tick for a fall it never makes.
+    /// The game's environment destruction: a witness meets matter when, and as fast as, its
+    /// source's motion closes the cast's gap along the normal, while the cast reaches with the
+    /// velocity that carries the body to its tick-end pose. A body pressed onto matter at rest
+    /// makes no impact and loads the cut with its drive alone; one a gap away meets it at the
+    /// speed its fall reaches there. Reading the cast's straight path as the motion charges a
+    /// resting body every tick for a fall it never makes, and a falling one below its fall.
     #[test]
-    fn a_witness_closes_at_its_sources_velocity_at_the_witness_time() {
+    fn a_witness_meets_matter_when_and_as_fast_as_its_sources_motion_does() {
         let (structure, geometry) = wall(16.0);
         let state = State::new(&structure);
         let tree = SourceTree::new(vec![Hull {
@@ -1345,17 +1352,19 @@ mod tests {
         let touching = resting
             .witness
             .expect("a pressed body is inward at its matter");
-        assert_eq!(touching.time, 0.0);
+        assert_eq!(touching.reach, 0.0);
         assert_eq!(touching.speed, 0.0, "a body at rest closes at its rest");
         let falling = at_gap(0.4)
             .witness
             .expect("the reach carries the body across its gap");
-        // DERIVED: 0.4 m at the 1 m/s reach. Resolution: fixture-scale GJK error.
-        assert!((falling.time - 0.4).abs() < 1e-4, "{falling:?}");
-        // Resolution: f32 rounding of `v + a (t - lead)` at this fixture's unit scale.
+        // DERIVED: the 1 m/s cast crosses the 0.4 m gap at 0.4 s; from rest at 2 m/s² the body
+        // crosses it when `t² = 0.4`, at √0.4 ≈ 0.632 s, closing at 2√0.4 ≈ 1.265 m/s, where the
+        // cast's time would read 0.8 m/s. Resolution: fixture-scale GJK error on the cast, then
+        // f32 rounding of the root.
+        assert!((falling.reach - 0.4).abs() < 1e-4, "{falling:?}");
         assert!(
-            (falling.speed - 2.0 * falling.time).abs() < 1e-5,
-            "a body meets matter at its velocity then, not at its reach: {falling:?}"
+            (falling.speed - 2.0 * falling.reach.sqrt()).abs() < 1e-5,
+            "a body meets matter as its motion reaches it, not as its cast does: {falling:?}"
         );
         // Fixture: a 100 kg contact mass pressed by its 1 kN drive.
         let preload = preload(&structure, &state);
@@ -1549,7 +1558,7 @@ mod tests {
                         normal,
                         speed,
                         chunk: 4,
-                        time: 0.0,
+                        reach: 0.0,
                         at: structure.chunks[4].centroid,
                     }),
                     ..default()
@@ -1653,7 +1662,7 @@ mod tests {
                     Contactor::RIGID,
                 ) as f32,
                 chunk: 0,
-                time: 0.0,
+                reach: 0.0,
                 at: structure.chunks[0].centroid,
             }),
             ..default()

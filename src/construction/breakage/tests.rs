@@ -4887,7 +4887,7 @@ fn a_sweep_reads_the_slender_sources_contact_mass() {
         app.update();
         let account = app.world().resource::<SweepAccount>();
         let (_, _, _, witness) = account.patches.iter().find(|(b, ..)| *b == body).unwrap();
-        let arm = witness.at - position - offset - Vec3::X * speed * witness.time;
+        let arm = witness.at - position - offset - Vec3::X * speed * witness.reach;
         let torque = arm.cross(witness.normal);
         let effective = (mass.recip() + torque.length_squared() / (mass / 3.0)).recip();
         let expected_mass = if end { mass / 4.0 } else { mass };

@@ -464,12 +464,17 @@ No physics step enters the demand. The inward drive adds to it: all Avian integr
 its contact solve, accumulated and constant forces and gravity, on the body's free axes (a hull
 its belts hold at rest on level ground drives nothing vertically). The cast reads the same
 motion: DERIVED, Avian's `N` substeps carry a body no contact touches `v dt + a dt² (N + 1)/(2N)`,
-which the cast's one velocity reaches at the tick's end; that velocity decides only the reach and
-which motion is inward. The witness's speed `v_n` is the body's closing speed at the witness's
-time `t`, `v + a t`, never negative: a body resting on matter closes at its rest and loads the cut
+which the cast's one velocity reaches at the tick's end; that velocity decides only the reach, the
+contact pose and which motion is inward. The witness's time and speed come from the same motion
+along the contact normal: the cast closes a gap `d` there, and the body closes it at the first `t`
+in the tick with `d = v_n t + ½ a_n t²`, `v_n` the point's closing speed at the tick's start, at
+speed `v_n + a_n t`, never negative. A body resting on matter closes at its rest and loads the cut
 with its drive alone (MEASURED: a 231 kg body on a standing 8 m³ brick chunk read 20.96 kN,
-9.2 times its weight, while the reach stood in for the impact speed, and reads its 2.27 kN weight
-now). If `F > C`, break the minimum cut and
+9.2 times its weight, while the cast's speed stood in for the impact speed, and 2,266.1 to
+2,266.7 N against its 2,266.1 N weight once at rest now); a falling
+one meets matter at the speed its fall reaches there, not at the cast's straight-path time (DERIVED
+in the witness test: 1.265 m/s at 0.632 s, where the cast's time reads 0.8 m/s at 0.4 s). If
+`F > C`, break the minimum cut and
 remove its whole plug `S*` from the standing construction. Otherwise the sweep does nothing to
 the hull: **Avian owns the stop** (owner decision, 2026-11-07). Its contact solver, speculative
 points included, stops the hull at matter whose cut holds as it stops a hull at any obstacle, and

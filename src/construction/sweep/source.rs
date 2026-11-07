@@ -111,9 +111,36 @@ pub(crate) struct RigidMotion {
 }
 
 impl RigidMotion {
-    /// The COM's velocity at cast time `t`, before any contact changes it.
-    fn velocity_at(self, t: f32) -> Vec3 {
-        self.velocity + self.acceleration * (t - self.lead)
+    /// The closing speed of a cast hit at cast time `reach`, at a point the spin moves at
+    /// `turn`: `None` unless the cast closes along `normal`. The body's own motion, closing,
+    /// crosses the cast's gap `d` there at the root `t` of `d = v_n t + ½ a_n t²` it reaches
+    /// moving inward, `v_n` the point's closing speed at the tick's start, and closes at
+    /// `v_n + a_n t`.
+    fn closing(self, normal: Vec3, turn: Vec3, reach: f32) -> Option<f32> {
+        let a = self.acceleration.dot(normal);
+        let v = (self.velocity - self.acceleration * self.lead + turn).dot(normal);
+        let cast = v + a * self.lead;
+        if cast <= 0.0 {
+            return None;
+        }
+        let gap = cast * reach;
+        // DERIVED: at the closing root `v_n + a_n t = √(v_n² + 2 a_n d)`. Resolution: the floor
+        // holds f32 rounding where a decelerating body only just reaches the gap.
+        let speed = (v * v + 2.0 * a * gap).max(0.0).sqrt();
+        // The root in its form free of cancellation for each sign of `v`; a closing cast with
+        // `v <= 0` has `a > 0`.
+        let time = if v > 0.0 {
+            2.0 * gap / (v + speed)
+        } else {
+            (speed - v) / a
+        };
+        // Resolution: Avian's `N` substeps carry the body `a dt² / (2N)` past this law by the
+        // tick's end, so a gap the cast closes in that span closes at the tick's end.
+        Some(if time <= self.dt {
+            speed
+        } else {
+            v + a * self.dt
+        })
     }
 
     fn leaf(self, hull: &Hull) -> Motion<'_> {
@@ -200,7 +227,7 @@ impl QueryTree<'_> {
         let mut first: Option<Witness> = None;
         let mut stack = vec![(0.0, 0)];
         while let Some((entry, index)) = stack.pop() {
-            let limit = first.map_or(self.motion.dt, |hit| hit.time);
+            let limit = first.map_or(self.motion.dt, |hit| hit.reach);
             if entry > limit {
                 continue;
             }
@@ -222,23 +249,24 @@ impl QueryTree<'_> {
             }
             work.casts += 1;
             let motion = self.motion.leaf(&self.tree.hulls[node.chunk]);
-            let Some((time, normal, at)) = motion.hit(hull, origin, work) else {
+            let Some((reach, normal, at)) = motion.hit(hull, origin, work) else {
                 continue;
             };
+            if first.is_some_and(|first| first.reach <= reach) {
+                continue;
+            }
             let turn = motion
                 .spin
-                .cross(at - motion.centre - motion.velocity * time);
-            // The cast's reach decides inward motion; the witness closes at the body's velocity
-            // at its time. A body at rest on matter closes at its rest, not at its reach's fall,
-            // and one whose reach closes but whose velocity there still parts makes no impact.
-            if (motion.velocity + turn).dot(normal) > 0.0
-                && first.is_none_or(|first| time < first.time)
-            {
+                .cross(at - motion.centre - motion.velocity * reach);
+            // The cast decides the contact pose and inward motion; the body's motion along the
+            // normal decides when and how fast it closes. A body at rest on matter closes at its
+            // rest, not at its cast's fall.
+            if let Some(speed) = self.motion.closing(normal, turn, reach) {
                 first = Some(Witness {
-                    time,
+                    reach,
                     normal,
                     at,
-                    speed: (self.motion.velocity_at(time) + turn).dot(normal).max(0.0),
+                    speed,
                     chunk: target.chunk,
                 });
             }

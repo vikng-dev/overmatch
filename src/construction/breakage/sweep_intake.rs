@@ -165,15 +165,15 @@ impl SweepSource {
     /// DERIVED: Avian 0.7 `ContactNormalPart::generate`
     /// (`dynamics/solver/contact/normal_part.rs`), with a fixed target:
     /// `m_eff = 1 / (n dot M^-1 n + (r cross n) dot I_world^-1 (r cross n))`.
-    /// The lever and world inertia are evaluated at the witness time. Avian supplies the
+    /// The lever and world inertia are evaluated at the witness's pose. Avian supplies the
     /// locked-axis response; dominance does not enter the point mass.
     fn effective_mass(&self, witness: super::super::sweep::Witness, pose: &Transform) -> f32 {
         use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
         let normal = pose.rotation * witness.normal;
         let point = pose.translation + pose.rotation * witness.at;
         let m = self.motion;
-        let lever = point - m.centre - m.velocity * witness.time;
-        let rotation = Quat::from_scaled_axis(m.spin * witness.time) * m.rotation;
+        let lever = point - m.centre - m.velocity * witness.reach;
+        let rotation = Quat::from_scaled_axis(m.spin * witness.reach) * m.rotation;
         let response = SolverBodyInertia::new(
             self.mass.recip(),
             self.inertia.rotated(rotation).inverse(),

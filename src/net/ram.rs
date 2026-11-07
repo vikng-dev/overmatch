@@ -687,7 +687,7 @@ mod tests {
                     .patches
                     .iter()
                     .filter(|(body, construction, ..)| *body == tank && *construction == ordinal)
-                    .map(|(.., witness)| witness.time)
+                    .map(|(.., witness)| witness.reach)
                     .fold(f32::INFINITY, f32::min);
                 entry = Some((start + before * met, before.normalize()));
                 println!(
