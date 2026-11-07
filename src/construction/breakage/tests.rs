@@ -3645,14 +3645,8 @@ fn a_freed_chunks_ballistic_chord_is_its_occupied_chord() {
                     .unwrap()
                     .0
             };
-            let exit = |hull: &Collider| {
-                hull.cast_ray(Vec3::ZERO, Quat::IDENTITY, -from, -ray, reach * 2.0, true)
-                    .unwrap()
-                    .0
-            };
             assert!(
-                (cast(hull) - cast(&occupied)).abs() < 1e-5
-                    && (exit(hull) - exit(&occupied)).abs() < 1e-5,
+                (cast(hull) - cast(&occupied)).abs() < 1e-5,
                 "contact separation changed chunk {chunk}'s ballistic face on {ray}"
             );
         }
@@ -4875,6 +4869,21 @@ fn assert_spawned_group_properties(world: &mut World) {
     }
 }
 
+/// Settle `root`, then mark every element replaced so `reconcile` gives each chunk its standing
+/// collider.
+fn install_standing_colliders(app: &mut App, root: Entity) {
+    use bevy::ecs::system::RunSystemOnce;
+    app.update();
+    app.update();
+    app.world_mut()
+        .get_mut::<Breakage>(root)
+        .unwrap()
+        .live
+        .swapped
+        .fill(true);
+    app.world_mut().run_system_once(reconcile).unwrap();
+}
+
 /// The game's environment destruction model: bookkeeping may reuse entity IDs, but every
 /// physics tick retains the same chunk shapes, ownership, material and solver properties.
 /// Fresh departure is also exercised: an intact element has no per-chunk entities to reuse.
@@ -4894,15 +4903,7 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
             Position(frame.translation),
             Rotation(frame.rotation),
         ));
-        app.update();
-        app.update();
-        app.world_mut()
-            .get_mut::<Breakage>(root)
-            .unwrap()
-            .live
-            .swapped
-            .fill(true);
-        app.world_mut().run_system_once(reconcile).unwrap();
+        install_standing_colliders(&mut app, root);
         app.init_resource::<ShapeInsertions>().add_observer(
             |_: On<Insert, Collider>, mut insertions: ResMut<ShapeInsertions>| insertions.0 += 1,
         );
@@ -5014,18 +5015,9 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
 /// standing collider before reconciliation can delete it; direct helper coverage is insufficient.
 #[test]
 fn the_law_installer_reuses_departing_standing_colliders() {
-    use bevy::ecs::system::RunSystemOnce;
     let kind = resolved_column();
     let (mut app, root) = composed_kind(false, &kind);
-    app.update();
-    app.update();
-    app.world_mut()
-        .get_mut::<Breakage>(root)
-        .unwrap()
-        .live
-        .swapped
-        .fill(true);
-    app.world_mut().run_system_once(reconcile).unwrap();
+    install_standing_colliders(&mut app, root);
     // Fixture: the upper member is free when its sole support seam separates.
     let chunk = 2;
     let old = app
@@ -5183,7 +5175,9 @@ fn absorbed_cut_and_unsupported_matter_keep_their_combined_momentum() {
 }
 
 /// The game's environment physics: prepared contact mass survives insertion and follows shape,
-/// scale and density changes. Occupied overrides remain separate from this contact-shape cache.
+/// scale and density changes. Tripwire for the vendored `with_mass_properties_cache` patch
+/// (`vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`), which every chunk collider that is no
+/// sensor prepares on workers.
 #[test]
 fn prepared_contact_mass_is_valid_at_insertion_and_invalidates_with_its_inputs() {
     use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;

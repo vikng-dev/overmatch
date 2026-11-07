@@ -40,7 +40,7 @@ use crate::construction::breakage::{
 };
 use crate::construction::fracture::bondsolve::Wrench;
 use crate::construction::fracture::parts::Kernel;
-use crate::construction::fracture::{Cause, Failure, Side, State, Structure};
+use crate::construction::fracture::{Cause, Failure, Fate, Side, State, Structure};
 use crate::contact_law::{Contactor, peak_force};
 use crate::contact_transfer::ContactTransfers;
 use crate::cost::stages::{Stage, Stages, Work};
@@ -753,6 +753,14 @@ pub(crate) fn route(
         })
         .collect();
     (kept, sheds)
+}
+
+/// Mark `sheds`' chunks as dust in `state`: what [`route`] sheds leaves the simulation. Landings
+/// mark nothing, as their split keeps only owned chunks.
+pub(crate) fn mark_dust(state: &mut State, sheds: &[Shed]) {
+    for &c in sheds.iter().flat_map(|shed| &shed.chunks) {
+        state.fate[usize::from(c)] = Fate::Dust;
+    }
 }
 
 /// Mount the crumble on the authority in [`crate::construction::breakage::LandingSet`]: after the

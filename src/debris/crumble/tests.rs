@@ -610,16 +610,7 @@ fn a_small_parted_neighbour_joins_one_server_body_and_stays_with_it() {
         merge_fragments(&structure, fragments.clone(), &[], &mut retained),
         merged
     );
-    let at_rest = |light: &[Vec<usize>]| {
-        vec![
-            ReleasedMotion {
-                velocity: Vec3::ZERO,
-                spin: Vec3::ZERO,
-                centre: Vec3::ZERO,
-            };
-            light.len()
-        ]
-    };
+    let at_rest = |light: &[Vec<usize>]| vec![ReleasedMotion::at_rest(Vec3::ZERO); light.len()];
     let mut record = Record::default();
     let (bodies, decor) = route(
         &structure,

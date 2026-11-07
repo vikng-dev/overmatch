@@ -134,7 +134,7 @@ specified density before insertion. `ComputeMassProperties::mass_properties` ret
 for the same density; shape mutation, replacement and a changed scale invalidate it. The cache
 is cloned with the collider and omitted from serialization. Sensors still install zero mass.
 
-The construction prepares each chunk collider's cache on workers; the piece body, not its
-colliders, owns the occupied mass, inertia and centre. Guard:
+The construction prepares the cache on workers for each chunk collider that is no sensor; the
+piece body, not its colliders, owns the occupied mass, inertia and centre. Guard:
 `construction::breakage::tests::prepared_contact_mass_is_valid_at_insertion_and_invalidates_with_its_inputs`.
 Local upstream draft: `upstream/avian-prepared-collider-mass.md`.
