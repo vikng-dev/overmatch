@@ -2,7 +2,7 @@
 //! only). The terrain field ([`super::oracle::BlockField`]) is the heightmap and the authored
 //! blocks; a construction's elements and standing chunks and every loose piece are Avian colliders the
 //! field never holds. [`RubbleBodies`] snapshots the nearby colliders shared by every driving source, the belt's support
-//! reads each through a convex shape check over every link's footprint ([`RubbleBodies::in_slab`])
+//! reads each through a convex shape check over every link's footprint ([`RubbleBodies::in_slabs`])
 //! at the ground's own per-metre spring. In the same tick [`piece_impulses`] sizes what a loose
 //! piece takes back, [`RubbleBodies::record_static_contacts`] stages the whole opposite
 //! reaction on fixed structural construction, and [`RubbleBodies::record_moving_contacts`] the
@@ -20,9 +20,21 @@
 //! - **One support law**: `forces::contact_side` partitions overlapping footprints; the deepest
 //!   surface in each cell enters the field's own support law at its covered share of the shoe.
 //!   Stacked pieces cannot multiply the hull's support.
-//! - **Cost gate**: one AABB query per tank per tick over the footprint's bounding sphere
-//!   ([`RubbleQuery::near`], [`footprint_radius`]). With no rubble collider in it no shape is
-//!   read, so open ground is bit-identical to the field alone.
+//! - **Work while held against rubble** (DERIVED from the loops): one AABB query per tank
+//!   ([`RubbleQuery::near`], [`footprint_radius`]) selects its N candidates. Each side rejects N
+//!   candidates against its slabs' union bounds. For L stations and P survivors this means
+//!   N + L × P bounds checks, with one station dispatch when P > 0. Every slab AABB pass makes
+//!   six support-map queries; only a positive-volume pass builds the boundary triangles, once
+//!   per surface in the shared tick-start snapshot. Support-map and clipping work also depend on the shape's complexity.
+//!   `forces::collect_column_contacts` partitions the covered faces without a contact cap, so
+//!   face arrangements and their emitted patches still cost work on every held tick.
+//! - **Recipient work**: for C dynamic contacts and D gathered dynamic bodies, grouping sorts
+//!   D + C endpoint entries and the reaction pass sorts C contact keys. Each grouping pass walks
+//!   C contacts and the deduplicated endpoint slots, using sorted endpoint lookups, path-halved
+//!   roots and indexed failed-component membership. Each repeat clamps at least one body; none is
+//!   re-enabled: at most D + 1 passes (DERIVED). The query bounds space, not population;
+//!   local pile density, shape complexity and contact partitions remain cost inputs. With no
+//!   nearby collider no shape is read, and field-only driving retains its force arithmetic.
 //! - **Tick truth**: avian refits dynamic bodies' AABBs at the end of its physics step
 //!   (`update_solver_body_aabbs`) and writes each collider's `Position`/`Rotation`, so a snapshot
 //!   in `FixedUpdate` reads the poses the last step wrote.
@@ -66,9 +78,9 @@
 //!   (`ContactManifold::tangent_velocity`, set in `CollisionHooks::modify_contacts`) model the
 //!   belt twice (the field holds the tank, colliders push pieces) and push without limit.
 
-use std::borrow::Cow;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{borrow::Cow, sync::OnceLock};
 
 use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
 use avian3d::prelude::{
@@ -84,6 +96,7 @@ use bevy::tasks::{ComputeTaskPool, ParallelSlice, TaskPool};
 
 use super::terrain::FieldSurface;
 use crate::contact_transfer::{AppliedContact, BodyInertia, ContactTransfers, StructureBody};
+use crate::cost::stages::{Stage, Stages, Work};
 
 use super::forces::BeltContact;
 
@@ -223,7 +236,7 @@ struct Surface {
     rotation: Quat,
     aabb: ColliderAabb,
     /// Outward-wound convex boundary at the tick-start pose.
-    triangles: Vec<[Vec3; 3]>,
+    triangles: OnceLock<Vec<[Vec3; 3]>>,
     body: Option<usize>,
     friction: Friction,
     structure: Option<Entity>,
@@ -331,6 +344,7 @@ pub struct RubbleBodies<'a> {
     by_collider: Cow<'a, HashMap<Entity, usize>>,
     /// Indices in gather order, restricted once per source using its tick-start AABB query.
     active: Vec<usize>,
+    pub(crate) stages: Option<Stages>,
     #[cfg(test)]
     surface_checks: AtomicUsize,
     #[cfg(test)]
@@ -383,6 +397,11 @@ impl RubbleBodies<'_> {
                         .shapes
                         .get(collider)
                         .expect("a collider the spatial query returned carries its shape and pose");
+                    assert!(
+                        shape.shape_scaled().as_cuboid().is_some()
+                            || shape.shape_scaled().as_convex_polyhedron().is_some(),
+                        "belt support shapes are boxes or convex polyhedra; fix the collider constructor"
+                    );
                     (
                         Surface {
                             collider,
@@ -391,7 +410,7 @@ impl RubbleBodies<'_> {
                             position: position.0,
                             rotation: rotation.0,
                             aabb: *aabb,
-                            triangles: Surface::triangles(shape, position.0, rotation.0),
+                            triangles: OnceLock::new(),
                             body: None,
                             friction: rubble.friction(collider),
                             structure: rubble.structures.contains(body).then_some(body),
@@ -457,6 +476,7 @@ impl RubbleBodies<'_> {
             surfaces: Cow::Borrowed(&self.surfaces),
             by_collider: Cow::Borrowed(&self.by_collider),
             bodies: Cow::Borrowed(&self.bodies),
+            stages: self.stages.clone(),
             ..Default::default()
         };
         selected.select_source(source, near);
@@ -467,6 +487,7 @@ impl RubbleBodies<'_> {
     /// snapshot retains all recipients for reaction sizing, but each link tests only this tank's
     /// candidates. Sorting indices preserves gather order, including for an unordered input list.
     pub(crate) fn select_source(&mut self, source: Entity, near: &[Entity]) {
+        let _stage = Stages::start(self.stages.as_ref(), Stage::BeltRubble);
         self.active.clear();
         for collider in near {
             let index = *self
@@ -479,6 +500,13 @@ impl RubbleBodies<'_> {
         }
         self.active.sort_unstable();
         self.active.dedup();
+        self.count(Work::BeltCandidates, self.active.len());
+    }
+
+    fn count(&self, work: Work, count: usize) {
+        if let Some(stages) = &self.stages {
+            stages.add(work, count as u64);
+        }
     }
 
     fn surface(&self, collider: Entity) -> &Surface {
@@ -593,51 +621,92 @@ impl RubbleBodies<'_> {
         }
     }
 
-    /// Every gathered piece that reaches into `slab`, with its extent there, in gather order.
-    pub(crate) fn in_slab(&self, slab: &Slab) -> Vec<SlabOverlap> {
-        if self.active.is_empty() {
-            return Vec::new(); // No gathered solid can intersect this source.
+    /// Each station's overlaps in gather order. One side owns the station batch; its union
+    /// bounds reject candidates before station dispatch, without changing an individual slab.
+    pub(crate) fn in_slabs(&self, slabs: &[Slab]) -> Vec<Vec<SlabOverlap>> {
+        if self.active.is_empty() || slabs.is_empty() {
+            return vec![Vec::new(); slabs.len()];
         }
-        self.in_slab_on_pool(slab, ComputeTaskPool::get())
+        self.in_slabs_on_pool(slabs, ComputeTaskPool::get())
     }
 
-    fn in_slab_on_pool(&self, slab: &Slab, pool: &TaskPool) -> Vec<SlabOverlap> {
-        let (lo, hi) = slab.aabb();
-        let radial = (slab.face - slab.reach, slab.face + slab.travel);
-        // Candidate geometry is independent; the overlay consumes results in gather order.
-        self.active
-            .par_splat_map(pool, None, |_, candidates| {
-                candidates
+    fn in_slabs_on_pool(&self, slabs: &[Slab], pool: &TaskPool) -> Vec<Vec<SlabOverlap>> {
+        let _stage = Stages::start(self.stages.as_ref(), Stage::BeltRubble);
+        let prepared: Vec<_> = slabs.iter().map(|slab| (slab, slab.aabb())).collect();
+        let (lo, hi) = prepared.iter().fold(
+            (Vec3::INFINITY, Vec3::NEG_INFINITY),
+            |(lo, hi), &(_, (a, b))| (lo.min(a), hi.max(b)),
+        );
+        #[cfg(test)]
+        self.surface_checks
+            .fetch_add(self.active.len(), Ordering::Relaxed);
+        let candidates: Vec<_> = self
+            .active
+            .iter()
+            .copied()
+            .filter(|&piece| {
+                let aabb = self.surfaces[piece].aabb;
+                !(aabb.min.cmpgt(hi) | aabb.max.cmplt(lo)).any()
+            })
+            .collect();
+        if candidates.is_empty() {
+            return vec![Vec::new(); slabs.len()]; // The side's entire envelope is clear.
+        }
+        self.count(Work::BeltDispatches, 1);
+        self.count(Work::BeltSlabChecks, slabs.len() * candidates.len());
+        // Bevy 0.19.1 ParallelSlice preserves input order across station chunks.
+        prepared
+            .par_splat_map(pool, None, |_, stations| {
+                stations
                     .iter()
-                    .filter_map(|&piece| {
-                        #[cfg(test)]
-                        self.surface_checks.fetch_add(1, Ordering::Relaxed);
-                        let s = &self.surfaces[piece];
-                        if (s.aabb.min.cmpgt(hi) | s.aabb.max.cmplt(lo)).any() {
-                            return None; // Candidate lies outside this contact envelope.
-                        }
-                        let extent = |dir: Vec3| {
-                            (
-                                (s.support(-dir) - slab.origin).dot(dir),
-                                (s.support(dir) - slab.origin).dot(dir),
-                            )
-                        };
-                        let (u0, u1) = extent(slab.axis);
-                        let (l0, l1) = extent(slab.lat);
-                        let (inner, outer) = extent(slab.out);
-                        let u = (u0.max(0.0), u1.min(slab.len));
-                        let l = (l0.max(slab.lateral.0), l1.min(slab.lateral.1));
-                        if u.1 <= u.0 || l.1 <= l.0 || outer <= radial.0 || inner >= radial.1 {
-                            return None; // No positive volume reaches the probe envelope.
-                        }
-                        let faces = super::world_contact::convex::clip_faces(&s.triangles, slab);
-                        (!faces.is_empty()).then_some(SlabOverlap { piece, faces })
+                    .map(|&(slab, bounds)| {
+                        candidates
+                            .iter()
+                            .filter_map(|&piece| self.overlap(piece, slab, bounds))
+                            .collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>()
             })
             .into_iter()
             .flatten()
             .collect()
+    }
+
+    fn overlap(&self, piece: usize, slab: &Slab, (lo, hi): (Vec3, Vec3)) -> Option<SlabOverlap> {
+        let s = &self.surfaces[piece];
+        if (s.aabb.min.cmpgt(hi) | s.aabb.max.cmplt(lo)).any() {
+            return None; // Candidate lies outside this contact envelope.
+        }
+        self.count(Work::BeltSlabAabbPasses, 1);
+        let extent = |dir: Vec3| {
+            (
+                (s.support(-dir) - slab.origin).dot(dir),
+                (s.support(dir) - slab.origin).dot(dir),
+            )
+        };
+        let (u0, u1) = extent(slab.axis);
+        let (l0, l1) = extent(slab.lat);
+        let (inner, outer) = extent(slab.out);
+        let u = (u0.max(0.0), u1.min(slab.len));
+        let l = (l0.max(slab.lateral.0), l1.min(slab.lateral.1));
+        let radial = (slab.face - slab.reach, slab.face + slab.travel);
+        if u.1 <= u.0 || l.1 <= l.0 || outer <= radial.0 || inner >= radial.1 {
+            return None; // No positive volume reaches the probe envelope.
+        }
+        let triangles = s.triangles.get_or_init(|| {
+            self.count(Work::BeltTriangulations, 1);
+            Surface::triangles(&s.shape, s.position, s.rotation)
+        });
+        let faces = super::world_contact::convex::clip_faces(triangles, slab);
+        self.count(Work::BeltOverlaps, usize::from(!faces.is_empty()));
+        (!faces.is_empty()).then_some(SlabOverlap { piece, faces })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_slab(&self, slab: &Slab) -> Vec<SlabOverlap> {
+        self.in_slabs(std::slice::from_ref(slab))
+            .pop()
+            .expect("one slab has one result")
     }
 }
 
@@ -727,8 +796,9 @@ impl BeltSource {
 }
 
 /// The root of one connected spring/damper component, including dynamic belt sources.
-fn reaction_root(parents: &[usize], mut index: usize) -> usize {
+fn reaction_root(parents: &mut [usize], mut index: usize) -> usize {
     while parents[index] != index {
+        parents[index] = parents[parents[index]];
         index = parents[index];
     }
     index
@@ -808,8 +878,8 @@ fn explicit_recipients(
             if source.inertia.inverse_mass != Vec3::ZERO
                 || source.inertia.inverse_inertia != Mat3::ZERO
             {
-                let a = reaction_root(&parents, r);
-                let b = reaction_root(&parents, index(source.entity));
+                let a = reaction_root(&mut parents, r);
+                let b = reaction_root(&mut parents, index(source.entity));
                 parents[b] = a;
             }
             rates[r].add(
@@ -820,25 +890,23 @@ fn explicit_recipients(
         }
         let mut totals = vec![Rates::default(); entities.len()];
         for (i, rate) in rates.into_iter().enumerate() {
-            let total = &mut totals[reaction_root(&parents, i)];
+            let total = &mut totals[reaction_root(&mut parents, i)];
             total.spring += rate.spring;
             total.damper += rate.damper;
         }
-        let failing = |slot: usize| {
-            explicit[slot]
-                && !totals[reaction_root(&parents, index(bodies.bodies[slot].entity))].explicit()
-        };
-        let roots: Vec<usize> = (0..bodies.bodies.len())
-            .filter(|&slot| failing(slot))
-            .map(|slot| reaction_root(&parents, index(bodies.bodies[slot].entity)))
-            .collect();
-        if roots.is_empty() {
+        let mut failing_roots = vec![false; entities.len()];
+        for (slot, &whole) in explicit.iter().enumerate() {
+            if whole {
+                let component = reaction_root(&mut parents, index(bodies.bodies[slot].entity));
+                failing_roots[component] = !totals[component].explicit();
+            }
+        }
+        if !failing_roots.iter().any(|&failing| failing) {
             return explicit;
         }
-        // Every recipient already failing alone was clamped before the first pass, so a failing
-        // system clamps all its explicit recipients.
+        // A failing coupled system clamps all its explicit recipients together.
         for (whole, body) in explicit.iter_mut().zip(bodies.bodies.iter()) {
-            if roots.contains(&reaction_root(&parents, index(body.entity))) {
+            if failing_roots[reaction_root(&mut parents, index(body.entity))] {
                 *whole = false;
             }
         }
@@ -885,6 +953,7 @@ pub(crate) fn piece_impulses<'c>(
     contacts: impl IntoIterator<Item = (BeltSource, &'c BeltContact)>,
     dt: f32,
 ) -> Vec<Push> {
+    let _stage = Stages::start(bodies.stages.as_ref(), Stage::BeltRubble);
     let mut dynamic = Vec::new();
     for (source, contact) in contacts {
         // Field support has no recipient, and static or kinematic recipients take no impulses.
@@ -897,6 +966,17 @@ pub(crate) fn piece_impulses<'c>(
             - contact.belt_velocity)
             .dot(contact.normal);
         dynamic.push((contact, slot, collider, source, closing_speed));
+    }
+    bodies.count(Work::BeltDynamicContacts, dynamic.len());
+    if bodies.stages.is_some() {
+        let mut recipients = vec![false; bodies.bodies.len()];
+        for &(_, slot, ..) in &dynamic {
+            recipients[slot] = true;
+        }
+        bodies.count(
+            Work::BeltRecipients,
+            recipients.into_iter().filter(|seen| *seen).count(),
+        );
     }
     let explicit = explicit_recipients(bodies, &dynamic, dt);
     dynamic.sort_by_cached_key(|(contact, ..)| {
@@ -1008,7 +1088,7 @@ mod tests {
     };
     use crate::track::oracle::{BlockField, TerrainBlock, TerrainOracle};
 
-    /// One fixed tick (s).
+    /// Fixture: one fixed tick (s).
     const DT: f32 = 1.0 / 64.0;
 
     /// Avian at 64 Hz, one fixed tick per update, under `gravity`.
@@ -1143,7 +1223,22 @@ mod tests {
                         hits.len() > 1,
                         "fixture must cross candidate batch boundaries"
                     );
-                    assert_eq!(actual.in_slab_on_pool(&slab, &pool), hits);
+                    assert_eq!(
+                        actual.in_slabs_on_pool(std::slice::from_ref(&slab), &pool),
+                        vec![hits]
+                    );
+                    // Fixture: disjoint station envelopes and an empty station exercise the
+                    // side union and station chunk boundaries. Batching cannot change a station.
+                    let stations = [0.0, 9.0, 18.0, 40.0, 100.0].map(|x| Slab {
+                        origin: Vec3::new(x, 0.3, -0.1),
+                        len: 1.0,
+                        ..slab
+                    });
+                    let independent: Vec<_> =
+                        stations.iter().map(|s| reference.in_slab(s)).collect();
+                    assert!(independent.iter().any(Vec::is_empty));
+                    assert!(independent.iter().any(|hits| !hits.is_empty()));
+                    assert_eq!(actual.in_slabs_on_pool(&stations, &pool), independent);
                     assert_eq!(actual.bodies, reference.bodies);
                     assert_eq!(actual.active, reference.active);
                     assert_eq!(actual.by_collider, reference.by_collider);
@@ -2795,6 +2890,11 @@ mod tests {
                 let full = pieces.in_slab(&slab);
                 assert_eq!(full.len(), 1);
                 assert_eq!(pieces.surface_checks.swap(0, Ordering::Relaxed), 2);
+                assert!(pieces.surface(local).triangles.get().is_some());
+                assert!(
+                    pieces.surface(remote).triangles.get().is_none(),
+                    "coarse-query neighbours outside the side must not be triangulated"
+                );
                 {
                     let local_view = pieces.for_source(Entity::PLACEHOLDER, &[local]);
                     let remote_view = pieces.for_source(Entity::PLACEHOLDER, &[remote]);

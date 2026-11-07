@@ -862,6 +862,7 @@ fn driving_systems() -> ScheduleConfigs<ScheduleSystem> {
 }
 
 fn gather_drive_supports(
+    stages: Option<Res<crate::cost::stages::Stages>>,
     gear: Option<Res<TrackGear>>,
     rubble: RubbleQuery,
     bodies: Query<PieceReadData>,
@@ -869,6 +870,8 @@ fn gather_drive_supports(
     mut supports: ResMut<DriveSupports>,
     mut gathered: Local<Parallel<Vec<(BeltSource, Vec<Entity>)>>>,
 ) {
+    use crate::cost::stages::{Stage, Stages, Work};
+    let _stage = Stages::start(stages.as_deref(), Stage::BeltRubble);
     tanks.par_iter().for_each(|(entity, position, body)| {
         // Replicas have no authoritative driving pass and gather no support shapes.
         if *body != RigidBody::Dynamic {
@@ -881,6 +884,9 @@ fn gather_drive_supports(
             .as_deref()
             .expect("a dynamic tank is admitted only after startup constructs TrackGear");
         let mut local = rubble.near(position.0, gear.rubble_radius);
+        if let Some(stages) = stages.as_deref() {
+            stages.add(Work::BeltNearColliders, local.len() as u64);
+        }
         local.retain(|&collider| rubble.body_of(collider) != entity);
         let source = BeltSource::read(entity, &bodies);
         gathered.scope(|sources| sources.push((source, local)));
@@ -897,6 +903,7 @@ fn gather_drive_supports(
     near.dedup();
     // Gathering reads body state once, before any source applies its own forces.
     supports.pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+    supports.pieces.stages = stages.as_deref().cloned();
 }
 
 /// Each tank reads the common tick-start snapshot and changes only its own driving and force state.

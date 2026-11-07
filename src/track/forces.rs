@@ -771,7 +771,7 @@ fn support_stiffness(
 /// Returns the resolved contacts plus the membership evidence pass 1 cannot put in them:
 /// columns whose damped support load clipped to zero while elastic penetration remains — the
 /// pad is still ON the ground (a separating/noisy tick), and element strain must survive it.
-/// Station order — deterministic, fixed bound (`count * 3`).
+/// Station order is fixed; footprint partitions may emit several contacts per column.
 #[expect(
     clippy::too_many_arguments,
     reason = "one side's contact columns: input, stations, wraps, pose, params, oracle, velocity field, belt speed and mode"
@@ -789,6 +789,10 @@ fn collect_column_contacts<O: TerrainOracle>(
     elements_mode: bool,
     report: &mut SideReport,
 ) -> (Vec<ColumnContact>, Vec<(usize, f32)>) {
+    let _stage = crate::cost::stages::Stages::start(
+        pieces.stages.as_ref(),
+        crate::cost::stages::Stage::BeltRubble,
+    );
     let n = stations.len();
     let mut cols: Vec<ColumnContact> = Vec::with_capacity(n);
     let mut held: Vec<(usize, f32)> = Vec::new();
@@ -815,11 +819,14 @@ fn collect_column_contacts<O: TerrainOracle>(
     );
     let mut previous_end: [Option<(ProbeKey, f32)>; 3] = [None; 3];
 
+    let mut slabs = Vec::with_capacity(n);
+    let mut links = Vec::with_capacity(n);
     for i in 0..n {
         let a = stations[i];
         let b = stations[(i + 1) % n];
         let seg = b - a;
         let len = seg.length();
+        // Resolution: coincident resampled pins have no footprint or contact frame.
         if len < 1e-4 {
             continue;
         }
@@ -841,10 +848,6 @@ fn collect_column_contacts<O: TerrainOracle>(
         } else {
             [0.0; 3]
         };
-        let face_a = out * (params.face_offset + travel[0]);
-        let face_m = out * (params.face_offset + travel[1]);
-        let face_b = out * (params.face_offset + travel[2]);
-
         let slab = Slab {
             origin: wa,
             axis,
@@ -856,7 +859,15 @@ fn collect_column_contacts<O: TerrainOracle>(
             reach: params.probe_reach,
             travel: travel.into_iter().fold(0.0_f32, f32::max),
         };
-        let overlaps = pieces.in_slab(&slab);
+        slabs.push(slab);
+        links.push((i, travel, tan2, wb));
+    }
+    let overlaps = pieces.in_slabs(&slabs);
+    for ((slab, (i, travel, tan2, wb)), overlaps) in slabs.iter().zip(links).zip(overlaps) {
+        let (wa, axis, out) = (slab.origin, slab.axis, slab.out);
+        let face_a = out * (params.face_offset + travel[0]);
+        let face_m = out * (params.face_offset + travel[1]);
+        let face_b = out * (params.face_offset + travel[2]);
         let mut share = 0.0;
 
         // The shoe is sampled as three lateral COLUMNS (measured faces + centre — see
@@ -874,12 +885,8 @@ fn collect_column_contacts<O: TerrainOracle>(
             // outward normal (cast semantics).
             // Per-probe reach = base + LOCAL travel, so the ray ORIGIN sits at `face − base`
             // for every station regardless of its travel — the shipped law's origin geometry.
-            // A uniform `base + max_travel` reach put zero-travel stations' origins `travel`
-            // too deep; on the RETURN run that is downward, and a settle transient dipped the
-            // up-facing origins underground — buried-origin saturation then reported full
-            // reach of phantom penetration whose load points DOWN (−out), a self-burying
-            // feedback (measured: the headless Tiger tail-sunk at 1.46 m of 4 s full
-            // throttle).
+            // A uniform `base + max_travel` reach buries zero-travel return-run origins;
+            // buried-origin saturation then applies phantom downward support.
             let pen = probe_depths(
                 &mut previous_end[ci],
                 oracle,
@@ -925,7 +932,7 @@ fn collect_column_contacts<O: TerrainOracle>(
             share += weight;
             for patch in patches(
                 PatchQuery {
-                    slab: &slab,
+                    slab,
                     overlaps: &overlaps,
                     strip,
                     field_offset: offset,

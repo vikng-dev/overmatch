@@ -1,9 +1,9 @@
-//! Wall brackets for the game's environment destruction model (game state only).
+//! Wall brackets and work counts for the game's authority simulation (game state only).
 //! Only the authority stats consumer installs this resource. No lock is held during work,
-//! including owner-parallel evaluation; each bracket commits once on its calling thread.
+//! including owner-parallel evaluation; overlapping belt brackets publish one wall interval.
 
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Instant;
@@ -33,6 +33,7 @@ labelled!(Stage, NAMES, COUNT {
     Contacts = "contacts_us",
     Sweep = "sweep_us",
     Crumble = "crumble_us",
+    BeltRubble = "belt_rubble_us",
 });
 
 labelled!(
@@ -52,11 +53,32 @@ labelled!(
         ContactReadRoots = "contact_read_roots",
         CollidersAdded = "colliders_added",
         CollidersRemoved = "colliders_removed",
+        // Belt footprint work, independent of the construction contact reader.
+        BeltNearColliders = "belt_near_colliders",
+        BeltCandidates = "belt_candidates",
+        BeltSlabChecks = "belt_slab_checks",
+        BeltSlabAabbPasses = "belt_slab_aabb_passes",
+        BeltOverlaps = "belt_overlaps",
+        BeltDynamicContacts = "belt_dynamic_contacts",
+        BeltRecipients = "belt_recipients",
+        BeltDispatches = "belt_dispatches",
+        BeltTriangulations = "belt_triangulations",
     }
 );
 
-#[derive(Resource, Default)]
-pub(crate) struct Stages(Arc<[AtomicU64; COUNT]>, Arc<[AtomicU64; WORK_COUNT]>);
+#[derive(Resource, Default, Clone)]
+pub(crate) struct Stages(
+    Arc<[AtomicU64; COUNT]>,
+    Arc<[AtomicU64; WORK_COUNT]>,
+    Arc<Mutex<BeltReaders>>,
+);
+
+/// Belt reads from different tank owners can overlap; the phase consumer needs their wall union.
+#[derive(Default)]
+struct BeltReaders {
+    readers: usize,
+    since: Option<Instant>,
+}
 pub(crate) type NamedCounts = NamedValues<WORK_COUNT, u64>;
 pub(crate) type NamedTimes<const N: usize> = NamedValues<N, f64>;
 
@@ -91,10 +113,22 @@ impl Stages {
     }
     /// An absent resource means instrumentation is off, without reading the clock.
     pub(crate) fn start(stages: Option<&Self>, stage: Stage) -> Option<Bracket> {
-        stages.map(|stages| Bracket {
-            totals: stages.0.clone(),
-            stage,
-            start: Instant::now(),
+        stages.map(|stages| {
+            let start = Instant::now();
+            let belt = matches!(stage, Stage::BeltRubble).then(|| {
+                let mut active = stages.2.lock().expect("belt timing lock is not poisoned");
+                if active.readers == 0 {
+                    active.since = Some(Instant::now());
+                }
+                active.readers += 1;
+                stages.2.clone()
+            });
+            Bracket {
+                totals: stages.0.clone(),
+                stage,
+                start,
+                belt,
+            }
         })
     }
 
@@ -130,12 +164,27 @@ pub(crate) struct Bracket {
     totals: Arc<[AtomicU64; COUNT]>,
     stage: Stage,
     start: Instant,
+    belt: Option<Arc<Mutex<BeltReaders>>>,
 }
 
 impl Drop for Bracket {
     fn drop(&mut self) {
-        let ns = u64::try_from(self.start.elapsed().as_nanos())
-            .expect("one destruction stage cannot run for the u64 nanosecond span");
+        let elapsed = if let Some(belt) = &self.belt {
+            let mut active = belt.lock().expect("belt timing lock is not poisoned");
+            active.readers -= 1;
+            if active.readers != 0 {
+                return;
+            }
+            active
+                .since
+                .take()
+                .expect("the first belt reader opens its interval")
+                .elapsed()
+        } else {
+            self.start.elapsed()
+        };
+        let ns = u64::try_from(elapsed.as_nanos())
+            .expect("one simulation stage cannot run for the u64 nanosecond span");
         self.totals[self.stage as usize].fetch_add(ns, Ordering::Relaxed);
     }
 }
@@ -143,6 +192,21 @@ impl Drop for Bracket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parallel tank reads share one wall interval: publishing the first reader's span would
+    /// let the phase consumer subtract overlapping work twice.
+    #[test]
+    fn overlapping_belt_readers_publish_only_after_the_last_reader() {
+        let stages = Stages::default();
+        let first = Stages::start(Some(&stages), Stage::BeltRubble);
+        let second = Stages::start(Some(&stages), Stage::BeltRubble);
+        drop(first);
+        assert_eq!(stages.total_ns(), 0, "the interval still has a live reader");
+        drop(second);
+        let completed = stages.take_us();
+        assert!(completed[Stage::BeltRubble as usize] > 0.0);
+        assert_eq!(stages.take_us(), [0.0; COUNT]);
+    }
 
     /// Wave reports must distinguish allocation from collider reuse and count final removal.
     #[test]
@@ -190,7 +254,7 @@ mod tests {
         let stages = Stages::default();
         stages.0[Stage::Intake as usize].store(2000, Ordering::Relaxed); // Fixture: ns.
         stages.0[Stage::Refit as usize].store(5000, Ordering::Relaxed);
-        assert_eq!(stages.take_us(), [2.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(stages.take_us(), [2.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         assert_eq!(stages.take_us(), [0.0; COUNT]);
         assert!(Stages::start(None, Stage::Intake).is_none());
         let started = Instant::now();

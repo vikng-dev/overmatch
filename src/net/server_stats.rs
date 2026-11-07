@@ -409,7 +409,7 @@ fn record_tick(
             fixed.timestep().as_secs_f64(),
         );
         let rows = [
-            census.record(sample),
+            census.record(sample, work),
             load.as_deref_mut()
                 .and_then(|load| load.record(sample, work)),
         ];
@@ -994,6 +994,7 @@ mod tests {
                 "refit_us": null,
                 "sweep_us": null,
                 "crumble_us": null,
+                "belt_rubble_us": null,
                 "phases_us": phases::NAMES.into_iter().map(|name| (name.to_owned(), Value::Null)).collect::<serde_json::Map<_, _>>(),
                 "physics_us": {"p50": 301.0, "p95": 455.0, "p99": 600.0, "total": 200000.0, "max": 900.0},
                 "send_us": {"p50": 120.0, "p95": 180.1, "p99": 200.0, "total": 80000.0, "max": 250.0},
