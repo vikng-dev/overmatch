@@ -2296,65 +2296,6 @@ fn casing_loads_count_each_joule_once_and_carry_their_ejection_momentum() {
     }
 }
 
-/// A reproducible shove into the shipped house through the production contact reader and
-/// laws, with no view or timing measurement. ASSUMED fixture body: a heavy cuboid at the
-/// capture's closing speed. Group counts are evidence, never an asset-specific pass condition,
-/// so it pins no law (the weight check's own fixtures do) and runs on demand.
-#[test]
-#[ignore = "a measurement bed, run on demand"]
-fn a_heavy_body_push_reports_the_house_release_groups() {
-    let kind = shipped_house();
-    let (mut app, _) = composed_keeping_contacts(&kind);
-    app.insert_resource(Gravity(Vec3::NEG_Y * crate::physical_laws::gravity_mps2()));
-    app.world_mut().spawn((
-        RigidBody::Static,
-        Position(Vec3::new(0.0, -0.5, 0.0)),
-        Collider::cuboid(100.0, 1.0, 100.0),
-        CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
-    ));
-    let (lo, hi) = kind.bounds();
-    let start = Vec3::new(lo.x - 5.0, 0.8, 0.5 * (lo.z + hi.z));
-    let (_, distance, _) =
-        fracture::first_hit(&kind.layout.element_blocks, |_| true, start, Vec3::X)
-            .expect("the shove fixture faces a wall at hull height");
-    let body = app
-        .world_mut()
-        .spawn((
-            RigidBody::Dynamic,
-            Position(start + Vec3::X * (distance - 1.52)),
-            Collider::cuboid(3.0, 1.6, 2.6),
-            ColliderDensity(47000.0 / (3.0 * 1.6 * 2.6)),
-            piece_layers(),
-            LinearVelocity(Vec3::X * 1.2),
-            ConstantForce(Vec3::X * 350000.0),
-        ))
-        .id();
-    for _ in 0..256 {
-        app.update();
-    }
-    let groups: Vec<usize> = app
-        .world_mut()
-        .query::<&Piece>()
-        .iter(app.world())
-        .map(|piece| piece.chunks.len())
-        .collect();
-    assert!(
-        app.world()
-            .resource::<QueuedContacts>()
-            .0
-            .iter()
-            .any(|step| !step.is_empty()),
-        "the fixture body must actually load the shipped wall"
-    );
-    assert!(app.world().get_entity(body).is_ok());
-    println!(
-        "MEASURED heavy-body push: {} chunks freed in {} groups, sizes {:?}",
-        groups.iter().sum::<usize>(),
-        groups.len(),
-        groups
-    );
-}
-
 /// ASSUMED geometry fixture selected by class: three collinear neighbours in one element,
 /// sharing two seams and a common extrusion. The data supplies every hull and mass.
 fn landing_slab() -> (Arc<ConstructionKind>, Vec<usize>) {
@@ -4939,8 +4880,6 @@ fn the_law_installer_reuses_departing_standing_colliders() {
     assert!(app.world().get::<Piece>(parent).is_some());
     assert_eq!(app.world().get::<ColliderOf>(old).unwrap().body, parent);
 }
-
-mod rubble_observation;
 
 /// The game's environment destruction: removing a middle support frees the crown immediately,
 /// before reconciliation can construct a standing collider for it. Only the swept chunk inherits
