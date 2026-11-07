@@ -365,11 +365,14 @@ convex hit may prune later source leaves. Every occupied target joins the body's
 the earliest inward witness supplies its contact response. Parry 0.27's
 `CompositeShapeRef::cast_shape_nonlinear` returns the first geometric hit, which can be tangent
 and hide another leaf's later inward hit; its first-hit composite query therefore cannot own this
-patch. Touched constructions resolve one per task; their body queries and cuts run in
-worker-sized batches. Effects commit in body entity order because sources can compete for the
-same standing matter: a later body's plug on a construction an earlier commit changed this tick
-is resolved again on the state that commit left, so every committed plug is a minimum cut for its
-own demand.
+patch. Each touched construction resolves its sources in one task, in body entity order, because
+sources can compete for the same standing matter: all of them resolve on the construction's state
+at the tick's start, a released plug's cut commits to its topology at once, and every later
+source resolves again on the topology that cut left, with the gravity field solved on it
+(`parts::Assessment::resolved_on`), so every committed plug is a minimum cut for its own demand on
+the matter it meets. Constructions never meet in this sequence. Each source then exchanges once
+against all its plugs; departures prepare per construction, and their effects commit in (body,
+construction) order.
 
 The patch is the forced source of a directed graph over standing law chunks. Ground endpoints
 and chunks the sweep does not cover (including buried matter) are fixed sinks. Live, unseparated
@@ -399,7 +402,9 @@ interface forces inside each part. The part forces are one more column of the ow
 equilibrium: `parts::Assessment` solves gravity alone on its own factor and contact active set
 whenever that factor changes, so contact loads (this body's press included) never enter the
 preload. The column is the structure law's last; the state can run one stage ahead of it (one
-stage per tick), and a joint that cracked or opened since reads it at its current strength.
+stage per tick): a joint that cracked or opened since reads it at its current strength, and
+matter that left since still loads the interfaces below it. A sweep after an earlier cut in the
+same tick reads the column re-solved on that cut's topology instead.
 Each owner caches the preloads until that column or its standing chunks, cracks or separated
 joints change. Preloads stay fixed during optimization, including on supports beyond the seed
 patch; contact demand does not manufacture one.
@@ -451,13 +456,23 @@ stiffness). DERIVED: the first inward surface witness supplies the speed and con
 `m_eff = 1 / (1/m + (r cross n) dot I_world^-1 (r cross n))`, as in Avian 0.7's
 `ContactNormalPart::generate` against a fixed target. The lever `r` starts at the moving centre
 of mass; inertia is in world coordinates at contact time, with Avian's locked-axis response.
-No physics step enters the demand. Inward accumulated and constant
-drive forces add to the demand. If `F > C`, break the minimum cut and remove its whole plug
-`S*` from the standing construction. Otherwise the sweep does nothing to the hull: **Avian owns
-the stop** (owner decision, 2026-11-07). Its contact solver, speculative points included, stops
-the hull at matter whose cut holds as it stops a hull at any obstacle, and the structure check
-reads that contact as its mean force like every other; the peak force decides only the cut.
-The rejected alternatives: the sweep stopping the hull itself (a time-of-impact pose, a stop
+No physics step enters the demand. The inward drive adds to it: all Avian integrates before
+its contact solve, accumulated and constant forces and gravity, on the body's free axes (a hull
+its belts hold at rest on level ground drives nothing vertically). The cast reads the same
+motion: DERIVED, Avian's `N` substeps carry a body no contact touches `v dt + a dt² (N + 1)/(2N)`,
+which the cast's one velocity reaches at the tick's end. If `F > C`, break the minimum cut and
+remove its whole plug `S*` from the standing construction. Otherwise the sweep does nothing to
+the hull: **Avian owns the stop** (owner decision, 2026-11-07). Its contact solver, speculative
+points included, stops the hull at matter whose cut holds as it stops a hull at any obstacle, and
+the structure check reads that contact as its mean force like every other; the peak force decides
+only the cut. Its reach is wider than the cut's: Avian's linearised look-ahead also brakes the
+hull at standing matter ahead of or beside this tick's exact cast, which no cut judges. MEASURED
+on the tracked ram (`tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum`, the
+57 t hull at 10.8 m/s): both ticks' cuts released, yet standing chunk colliders outside the plug
+took 0.77 m/s off the hull and lifted it 0.63 m/s at impact +1, and 5.6 m/s, 0.63 m/s up and
+1.4 m/s sideways at +2, leaving 4.5 m/s (DERIVED from the measured impulses; the sweep's own
+exchange took 0.04 and 0.31 m/s, and the freed rubble 0.08 m/s at +2). Playtest fork F19 holds
+the alternative. The rejected alternative: the sweep stopping the hull itself (a time-of-impact pose, a stop
 impulse and a press of its own), with a collision hook that dropped Avian's look-ahead points
 on covered chunks so the two stops did not meet. That answered one contact with three readings
 of it (the cut's `m_eff`, the press's whole mass and the body's centre-of-mass stop plus a free
@@ -490,20 +505,28 @@ at the same presentation tick. Dust-only hull departures are rejected: they remo
 the tank's path.
 A retired element's staged belt reactions are cancelled before integration; surviving surfaces
 receive fresh solver contacts. A sweep never enters the structural pulse/work calculation.
-The cancellation is kept: the track law stages a belt's reaction against the surface it read
+Why the cancellation: the track law stages a belt's reaction against the surface it read
 before the sweep runs, and a reaction from a surface the sweep removed has no surface to come
 from. Staging belts after the sweep instead would move the drive the cut reads into the next tick
-and reorder the track law's schedule for one consumer.
+and reorder the track law's schedule for one consumer. A swapped element whose matter still
+stands beside the cut loses its belt reaction for that tick too: its element collider retires
+for the chunk colliders reconciliation builds after the sweep, which the staged reaction cannot
+name. That costs at most one tick of that belt's support, `F dt`; restaging it onto the new chunk
+colliders would carry each point through reconciliation for that one tick. The drive a cut reads
+keeps the belt reactions staged against its own owner: the floor's traction drives a hull into a
+wall of the same house, so taking out the owner's whole staged set would drop a real press, and
+the plug that would bound the subtraction to the matter cut is what the cut itself decides.
 
 Every remaining solver transfer enters the structure check as its whole mean force `J_solver/dt`.
 Physics already changed those bodies' momenta; contact intake supplies no second blow, source
 mass share, delayed cap or give-back. Sleeping contact forces persist until their contact ends.
 
 Exact sweep membership and Avian's speculative contact envelope differ. The sweep casts admitted
-hulls with the tick-start rigid motion; Avian can constrain separated hulls against projected
-contact planes. Such a non-member can transmit solver momentum without receiving a cut-capacity
-verdict. Post-contact speed therefore includes this retained contact response and contacts with
-released bodies, as well as the sweep's plastic exchange.
+hulls with the motion Avian integrates before its solve; Avian can constrain separated hulls
+against projected contact planes. Such a non-member can transmit solver momentum without
+receiving a cut-capacity verdict (MEASURED above). Post-contact speed therefore includes this
+retained contact response and contacts with released bodies, as well as the sweep's plastic
+exchange.
 
 Round and field impulse laws retain their own fracture-work and launch accounts.
 

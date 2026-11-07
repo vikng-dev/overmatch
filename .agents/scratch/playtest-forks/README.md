@@ -683,3 +683,36 @@ Subject: the game's damage model, game state only. `damage: let the Driver stati
 intent and each part scale its own supply (#228)` reads Drive through its crew, engine and
 transmission views: nobody at the Driver station means no command, and engine drag stays
 construction. Design §7b owns the rule and its verification table.
+
+## F19 — A rammed house: what stops the hull beside the hole
+
+**Status:** open · default chosen 2026-11-07 · settles by eye in the rubble stills
+
+Subject: the game's environment destruction model, game state only.
+
+**The question.** When a hull rams a house, the sweep frees the matter its exact cast reaches and
+whose cut breaks; Avian's contact solver owns everything else. Avian's look-ahead reaches wider
+than the cast: its linearised contact planes also brake and lift the hull at standing matter
+ahead of or beside the cast, which no cut has judged. Does the ram read as a hull breaking
+through, or as a hull stopped by a wall that should have given way?
+
+**Default — Avian's look-ahead as is.** MEASURED on the tracked ram (57 t hull at 10.8 m/s, both
+ticks' cuts released): standing chunk colliders outside the plug took 0.77 m/s off the hull and
+lifted it 0.63 m/s at impact +1, then 5.6 m/s, 0.63 m/s up and 1.4 m/s sideways at +2, leaving
+4.5 m/s. The sweep's own exchange took 0.04 and 0.31 m/s.
+
+**Alternative — one reach.** A narrow collision hook that drops Avian's look-ahead points only on
+covered chunks outside this tick's cast, and keeps them on cast members, so Avian still stops a
+hull at held matter. It needs no `hold`, press or pose. ≈ +90 code lines, +60 test lines
+(DERIVED from the deleted hook's footprint).
+
+**Why it's a playtest call.** Both are one contact law; they differ only in which standing matter
+may slow a hull before a cut has judged it. Watch the ram at +1 and +2: a hull that lifts and
+jinks sideways on matter that then falls reads as the look-ahead; a hull that drives through
+cleanly reads as the hook.
+
+**Revert cost.** Low. The hook is additive: one `CollisionHooks` implementation and its
+registration on the construction bundles; the default has no code to remove.
+
+**Lives in.** Design doc, "Bodies in contact" (the decision paragraph); `breakage::sweep_intake`;
+`net::ram`'s tracked ram test, which prints the attribution.

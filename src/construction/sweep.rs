@@ -25,7 +25,7 @@ pub(crate) use source::{Hull, RigidMotion, SourceShape, SourceTree};
 pub(crate) const CAST_HALF_EXTENT_M: f32 = 10.0;
 
 /// The game's environment destruction: only standing, exposed law chunks belong to the sweep.
-pub(crate) fn covered(structure: &Structure, state: &State, chunk: usize) -> bool {
+fn covered(structure: &Structure, state: &State, chunk: usize) -> bool {
     state.standing(chunk) && !structure.chunks[chunk].buried
 }
 
@@ -135,6 +135,16 @@ pub(crate) struct Work {
     pub(crate) joints: usize,
     pub(crate) queries: usize,
     pub(crate) flow: mincut::Work,
+}
+
+impl std::ops::AddAssign for Work {
+    fn add_assign(&mut self, other: Self) {
+        self.bounds += other.bounds;
+        self.casts += other.casts;
+        self.joints += other.joints;
+        self.queries += other.queries;
+        self.flow += other.flow;
+    }
 }
 
 struct Demand {
@@ -364,24 +374,25 @@ impl Geometry {
             },
             &mut sweep.work,
         );
-        let capacity = match cut {
-            mincut::Cut::Held => {
-                sweep.broken = false;
-                demand
-            }
+        let (capacity, released) = match cut {
+            mincut::Cut::Held => (demand, false),
             mincut::Cut::Released { inside, capacity } => {
-                sweep.broken = true;
                 sweep.chunks = (0..structure.chunks.len()).filter(|&c| inside[c]).collect();
-                capacity as f32
+                (capacity as f32, true)
             }
         };
         let left = f64::from((capacity - drive).max(0.0));
-        sweep.load = Some(PatchLoad {
+        let load = PatchLoad {
             witness,
             drive,
             demand,
             capacity,
             threshold: peak_speed(mass, left, patch, Contactor::RIGID) as f32,
+        };
+        sweep.verdict = Some(if released {
+            Verdict::Released(load)
+        } else {
+            Verdict::Held(load)
         });
     }
 
@@ -621,13 +632,32 @@ pub(crate) struct PatchLoad {
 
 #[derive(Default, Debug)]
 pub(crate) struct Sweep {
-    /// Occupied source patch until resolved; the minimum-cut plug when broken.
+    /// Occupied source patch until resolved; the minimum-cut plug once released.
     pub(crate) chunks: Vec<usize>,
     pub(crate) incoming: f32,
     pub(crate) witness: Option<Witness>,
-    pub(crate) broken: bool,
-    pub(crate) load: Option<PatchLoad>,
+    /// Set by [`Geometry::resolve`]; `None` while no witness meets matter inward.
+    pub(crate) verdict: Option<Verdict>,
     pub(crate) work: Work,
+}
+
+/// The game's environment destruction: a witnessed patch's cut, with the load it read.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Verdict {
+    Held(PatchLoad),
+    /// [`Sweep::chunks`] holds the plug that leaves.
+    Released(PatchLoad),
+}
+
+impl Sweep {
+    pub(crate) fn released(&self) -> bool {
+        matches!(self.verdict, Some(Verdict::Released(_)))
+    }
+
+    pub(crate) fn load(&self) -> Option<PatchLoad> {
+        self.verdict
+            .map(|(Verdict::Held(load) | Verdict::Released(load))| load)
+    }
 }
 
 /// Occupied mass properties in the frame of an exchange (SI).
@@ -1210,9 +1240,11 @@ mod tests {
         for patch in [&mut body, &mut exhaustive] {
             geometry.resolve(&structure, &state, &preload, patch, 80.0, Vec3::X * 3.0);
         }
-        assert_eq!(body.broken, exhaustive.broken);
+        assert_eq!(body.released(), exhaustive.released());
         assert_eq!(body.chunks, exhaustive.chunks);
-        assert!((body.load.unwrap().threshold - exhaustive.load.unwrap().threshold).abs() < 1e-5);
+        assert!(
+            (body.load().unwrap().threshold - exhaustive.load().unwrap().threshold).abs() < 1e-5
+        );
     }
 
     /// The game's environment destruction: a tangent leaf touching now cannot hide another
@@ -1311,7 +1343,7 @@ mod tests {
         let patch = driven_patch(&structure, &geometry, 2.0, 100.0, 0.0);
         assert_eq!(patch.chunks, [3, 4, 5]);
         assert!(
-            patch.broken,
+            patch.released(),
             "internal seams cannot hold their own moving patch in place"
         );
         assert_eq!(geometry.cut(&patch.chunks), [3, 4, 5]);
@@ -1337,7 +1369,7 @@ mod tests {
         println!(
             "MEASURED block: patch={:?}, capacity={}, source speed {} -> {}, momentum={taken:?}",
             patch.chunks,
-            patch.load.unwrap().capacity,
+            patch.load().unwrap().capacity,
             body.velocity.x,
             result.velocity.x
         );
@@ -1363,8 +1395,8 @@ mod tests {
             [(0.9999, false), (1.0001, true)].map(|(scale, broken)| {
                 let patch = driven_patch(structure, geometry, speed * scale, 128.0, drive);
                 assert_eq!(patch.chunks, [3, 4, 5]);
-                assert_eq!(patch.broken, broken, "speed={}", speed * scale);
-                patch.load.unwrap().threshold
+                assert_eq!(patch.released(), broken, "speed={}", speed * scale);
+                patch.load().unwrap().threshold
             })
         };
         // DERIVED: the speed whose peak force is the cut's 48 N.
@@ -1448,7 +1480,8 @@ mod tests {
                     Vec3::ZERO,
                 );
                 assert_eq!(
-                    swept.broken, broken,
+                    swept.released(),
+                    broken,
                     "cracked={cracked}, direction={normal}"
                 );
             }
@@ -1588,7 +1621,12 @@ mod tests {
         let capacity = 2.0 * crate::physical_laws::gravity_mps2();
         for (ratio, broken) in [(0.99, false), (1.01, true)] {
             let patch = resolved_contact(&geometry, &structure, &state, Vec3::X, capacity * ratio);
-            assert_eq!(patch.broken, broken, "ratio={ratio}, load={:?}", patch.load);
+            assert_eq!(
+                patch.released(),
+                broken,
+                "ratio={ratio}, verdict={:?}",
+                patch.verdict
+            );
             if broken {
                 assert_eq!(patch.chunks, [0, 1]);
             }
@@ -1667,9 +1705,9 @@ mod tests {
         // lies between 521 and 523 N. The 400 N press holds; 524 N releases it.
         for (force, broken) in [(400.0, false), (524.0, true)] {
             let patch = resolved_contact(&geometry, &structure, &state, direction, force);
-            assert_eq!(patch.broken, broken, "force={force}");
+            assert_eq!(patch.released(), broken, "force={force}");
             if broken {
-                assert!((521.0..523.0).contains(&patch.load.unwrap().capacity));
+                assert!((521.0..523.0).contains(&patch.load().unwrap().capacity));
             }
         }
     }
@@ -1699,7 +1737,7 @@ mod tests {
             for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
                 let patch =
                     resolved_contact(&geometry, &structure, &state, direction, capacity * ratio);
-                assert_eq!(patch.broken, broken, "cracked={cracked}, ratio={ratio}");
+                assert_eq!(patch.released(), broken, "cracked={cracked}, ratio={ratio}");
             }
         }
     }
@@ -1723,7 +1761,7 @@ mod tests {
         // DERIVED: 10 + 9 = 19 kN closing reserve; 15 kN leaves 6 kN compression.
         for (force, broken) in [(15000.0, false), (19001.0, true)] {
             let patch = resolved_contact(&geometry, &structure, &state, Vec3::Y, force);
-            assert_eq!(patch.broken, broken, "force={force}");
+            assert_eq!(patch.released(), broken, "force={force}");
         }
     }
 
@@ -1785,7 +1823,7 @@ mod tests {
         let state = State::new(&structure);
         for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
             let patch = resolved_contact(&geometry, &structure, &state, Vec3::X, 128.0 * ratio);
-            assert_eq!(patch.broken, broken);
+            assert_eq!(patch.released(), broken);
             if broken {
                 assert_eq!(patch.chunks, [0, 1]);
             }
@@ -1812,7 +1850,7 @@ mod tests {
         let state = State::new(&structure);
         for (ratio, broken) in [(0.9999, false), (1.0001, true)] {
             let patch = resolved_contact(&geometry, &structure, &state, Vec3::X, 48.0 * ratio);
-            assert_eq!(patch.broken, broken);
+            assert_eq!(patch.released(), broken);
             if broken {
                 assert_eq!(patch.chunks, [0, 2, 3]);
             }
@@ -1851,7 +1889,8 @@ mod tests {
                         reserve * ratio,
                     );
                     assert_eq!(
-                        patch.broken, broken,
+                        patch.released(),
+                        broken,
                         "reversed={reversed}, cracked={cracked}"
                     );
                     assert_eq!(
@@ -1860,7 +1899,7 @@ mod tests {
                         "a buried joist never joins the moving plug"
                     );
                     if broken {
-                        assert!((patch.load.unwrap().capacity - reserve).abs() < 0.01);
+                        assert!((patch.load().unwrap().capacity - reserve).abs() < 0.01);
                     }
                 }
             }

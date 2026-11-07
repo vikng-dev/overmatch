@@ -4561,6 +4561,109 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     }
 }
 
+/// Two 1e6 kg, 0.4 m cubes at rest one chunk side short of `resolved_column`'s middle chunk and
+/// of chunk `later`, the first by entity order at the middle; the first is launched at 128 m/s across its chunk,
+/// then the second, in the same tick or the next. Returns the app after the second's tick.
+fn two_sources(
+    kind: &Arc<ConstructionKind>,
+    later: usize,
+    same_tick: bool,
+) -> (App, Entity, Entity) {
+    let (mut app, _) = composed_kind(false, kind);
+    for _ in 0..3 {
+        app.update();
+    }
+    let chunks = &kind.structure.chunks;
+    let side = chunks[1].centroid.y - chunks[0].centroid.y;
+    let mut bodies = [1, later].map(|_| {
+        app.world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Rotation::default(),
+                Collider::cuboid(0.4, 0.4, 0.4),
+                Mass(1e6),
+                NoAutoMass,
+                AngularInertia::new(Vec3::splat(1e6)),
+                CenterOfMass::default(),
+                LinearVelocity::ZERO,
+                piece_layers(),
+            ))
+            .id()
+    });
+    // Entity order is the sweep's commit order: the earlier entity takes the middle chunk.
+    bodies.sort();
+    let [a, b] = bodies;
+    for (body, chunk) in [(a, 1), (b, later)] {
+        let start = chunks[chunk].centroid - Vec3::X * side;
+        app.world_mut()
+            .entity_mut(body)
+            .insert((Position(start), Transform::from_translation(start)));
+    }
+    app.update(); // First preparation creates the collider hierarchy at rest.
+    for (body, update) in [(a, !same_tick), (b, true)] {
+        app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = Vec3::X * 128.0;
+        if update {
+            app.update();
+        }
+    }
+    (app, a, b)
+}
+
+/// The game's environment destruction: a later source on a construction an earlier source cut
+/// this tick resolves on the topology that cut left, with the gravity field solved on it. Matter
+/// the earlier cut freed is no later plug; matter still standing yields the plug and load a sweep
+/// on that state reads a tick later, once the law has re-solved the owner. The account keeps the
+/// resolution that committed.
+#[test]
+fn a_later_source_resolves_on_the_cut_an_earlier_one_left() {
+    let kind = resolved_column();
+    let exchanged = |app: &App, body: Entity| {
+        app.world()
+            .resource::<SweepAccount>()
+            .source_changes
+            .iter()
+            .any(|(source, ..)| *source == body)
+    };
+    // The middle's cut leaves the crown unsupported.
+    let (app, a, b) = two_sources(&kind, 2, true);
+    assert!(exchanged(&app, a), "the earlier source frees its plug");
+    assert!(
+        !exchanged(&app, b),
+        "matter an earlier cut freed this tick is no later source's plug"
+    );
+    // The base still stands below the middle's cut.
+    let (contested, a, b) = two_sources(&kind, 0, true);
+    assert!(exchanged(&contested, a) && exchanged(&contested, b));
+    let (later, ..) = two_sources(&kind, 0, false);
+    let resolution = |app: &App| {
+        let account = app.world().resource::<SweepAccount>();
+        let (.., plug, _) = account
+            .patches
+            .iter()
+            .find(|(body, ..)| *body == b)
+            .unwrap();
+        let (.., load) = account
+            .samples
+            .iter()
+            .find(|(body, ..)| *body == b)
+            .unwrap();
+        (plug.clone(), *load)
+    };
+    let ((plug, load), (expected_plug, expected)) = (resolution(&contested), resolution(&later));
+    assert_eq!(plug, expected_plug);
+    // Resolution: f32 casts and loads at a 1e6 kg, 128 m/s fixture.
+    for (got, want) in [
+        (load.0, expected.0),
+        (load.1, expected.1),
+        (load.3, expected.3),
+    ] {
+        assert!(
+            (got - want).abs() <= 1e-4 * want.abs().max(1.0),
+            "the re-resolved load is the one its state reads: {load:?} against {expected:?}"
+        );
+    }
+}
+
 /// The game's environment destruction: an end contact on a slender source rotates it away,
 /// reducing the Hertz demand. The production intake must use that contact response, rather
 /// than total mass, when deciding whether the standing construction holds.
@@ -4697,10 +4800,11 @@ fn a_swept_patch_keeps_its_server_body_mass_and_rigid_motion() {
         .iter()
         .map(|&c| kind.sweep.part(c, &Transform::IDENTITY).mass as f32)
         .sum();
+    let cut = sweep_intake::cut_fragments(&mut owner, group.clone(), 7);
     let (departures, sheds) = sweep_intake::sweep_departure(
         &mut owner,
         Transform::IDENTITY,
-        group.clone(),
+        &cut,
         sweep_intake::ReleasedMotion {
             velocity: Vec3::X * 2.0,
             spin: Vec3::Z,
@@ -5084,10 +5188,11 @@ fn a_cut_frees_unsupported_matter_without_building_standing_colliders() {
     let mut record = Record::default();
     let (departures, sheds) = {
         let mut owner = app.world_mut().get_mut::<Breakage>(root).unwrap();
+        let cut = sweep_intake::cut_fragments(&mut owner, vec![1], 7);
         sweep_intake::sweep_departure(
             &mut owner,
             Transform::IDENTITY,
-            vec![1],
+            &cut,
             sweep_intake::ReleasedMotion {
                 velocity: Vec3::X * 2.0,
                 spin: Vec3::ZERO,
