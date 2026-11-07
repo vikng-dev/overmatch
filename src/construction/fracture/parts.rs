@@ -740,10 +740,14 @@ impl Signature {
 
 /// The game's environment destruction: gravity-only joint preloads, in N (positive tension), from
 /// the owner's one equilibrium: the gravity column [`Assessment`] solves on its own factor and
-/// contact active set. That field is the structure law's last; between its solves the state can
-/// run one stage ahead (the law commits one stage per tick), so a joint that cracked or opened
-/// since reads the field at its current strength, and fallen matter carries none. Contact demand
-/// never creates preload for its cut. Cached until the field or the state's topology changes.
+/// contact active set, so a press is never counted again as the preload its own cut reads. That
+/// field is the structure law's last, and the state can run one stage ahead of it (the law commits
+/// one stage per tick): a joint that cracked or opened since reads the field at its current
+/// strength, and matter that left since carries no load inside its part but still loads the
+/// interfaces below it. Until an instance's first law stage commits its design's at-rest verdict,
+/// the field is that verdict's, a stage ahead of the state. A sweep after an earlier cut this tick
+/// reads [`Assessment::resolved_on`] instead. Cached until the field or the state's topology
+/// changes.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Gravity {
     cached: Option<((u64, Signature), Vec<f64>)>,
@@ -839,7 +843,10 @@ impl Gravity {
                         let part = &graph.parts[p];
                         let mut solved = PartPreload::default();
                         let loads: Vec<_> = chunks.iter().map(|&c| boundary[c]).collect();
-                        let design = &equilibrium.kernels[part.element];
+                        let design = equilibrium.kernels.get(part.element).expect(
+                            "a sweep owner's assessment carries its design's kernels: pieces, \
+                             whose assessments start empty, are never sweep owners",
+                        );
                         let intact = (design.chunks == *chunks
                             && chunks.iter().all(|&c| {
                                 state.topology.incident[c].iter().all(|&j| {
@@ -876,6 +883,8 @@ impl Gravity {
                             }
                             &changed
                         };
+                        // Only the carried loads are the sweep's: the kernel's failures are the
+                        // law's to commit at its next stage.
                         let hold = kernel.hold(structure, &loads);
                         for (j, carried) in hold.carried {
                             let joint = &structure.joints[j];
@@ -933,9 +942,7 @@ pub(crate) struct Assessment {
     /// The solved loads per part: sustained, then sustained plus this tick's pulse.
     loads: Vec<Wrench>,
     answer: Vec<Wrench>,
-    /// Per part: gravity alone, solved on the current factor and active set whenever it changes;
-    /// the hull sweep's preload field ([`Gravity`]). Contact loads stay out of it, so a press is
-    /// never counted again as the preload its own cut reads.
+    /// Per part: gravity alone, re-solved on each new factor; [`Gravity`]'s preload field.
     gravity: Vec<Wrench>,
     /// Counts the factors `gravity` was solved on: a changed count is a changed field.
     revision: u64,
@@ -1012,6 +1019,20 @@ impl Assessment {
         // A disconnected initial component is released even when nothing loads it.
         assessment.topology_changed = !assessment.support.is_empty();
         assessment
+    }
+
+    /// The game's environment destruction: this owner's gravity field solved on `state`'s own
+    /// topology between law stages, for a hull sweep after an earlier cut this tick. Its rebuild
+    /// parts a mechanism's joints only in its own copy of `state`: the sweep commits no law
+    /// verdict, the next law stage does, and this field already reads those joints parted.
+    pub(crate) fn resolved_on(&self, structure: &Structure, state: &State) -> Self {
+        let mut current = Self {
+            slipping: self.slipping.clone(),
+            kernels: self.kernels.clone(),
+            ..Self::default()
+        };
+        current.rebuild(structure, &mut state.clone());
+        current
     }
 
     /// Rebuild the part graph and factor it. A mechanism separates the slipping rests that leave

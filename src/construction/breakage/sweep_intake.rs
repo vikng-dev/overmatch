@@ -87,9 +87,7 @@ impl SweepSource {
     }
 }
 
-/// Independent geometry queries run per construction. Sources commit in entity order; a later
-/// source's plug on an owner an earlier one changed this tick is resolved again on the state that
-/// commit left, so every committed plug is a minimum cut for its own demand. A source exchanges
+/// Sources resolve per construction, in body entity order ([`owner_sequence`]). A source exchanges
 /// against all its freed mass once.
 type Owners<'w, 's> = Query<
     'w,
@@ -165,17 +163,24 @@ pub(super) struct Intake<'w, 's> {
     bodies: Bodies<'w, 's>,
     drives: Drives<'w, 's>,
     colliders: Hulls<'w, 's>,
-    body_colliders: Query<
+    /// The bodies that can be sources. Standing constructions and sleeping bodies never are:
+    /// leaving them out by archetype lets default batching follow the awake movers, not the
+    /// static population.
+    movers: Query<
         'w,
         's,
         (
             Entity,
             &'static avian3d::prelude::RigidBodyColliders,
-            Has<avian3d::prelude::Sleeping>,
             Has<Piece>,
             Option<&'static super::super::sweep::SourceShape>,
         ),
+        (
+            Without<avian3d::prelude::Sleeping>,
+            Or<(With<Piece>, Without<Breakage>)>,
+        ),
     >,
+    body_colliders: Query<'w, 's, &'static avian3d::prelude::RigidBodyColliders>,
     spatial: SpatialQuery<'w, 's>,
     transfers: ResMut<'w, ContactTransfers>,
     fixed: Res<'w, Time<Fixed>>,
@@ -201,59 +206,50 @@ pub(super) fn run(mut p: Intake) {
     p.account
         .drives
         .extend(sources.iter().map(|source| (source.body, source.drive)));
-    let mut candidates = geometry(&mut p, dt, &sources);
-    candidates.sort_by_key(|(body, root, _)| (*body, *root));
-    let mut by_source: BTreeMap<Entity, BTreeMap<Entity, BTreeSet<usize>>> = BTreeMap::new();
-    for (body, root, swept) in candidates {
+    let mut resolved = geometry(&mut p, dt, tick, &sources);
+    resolved.sort_by_key(|resolution| (sources[resolution.source].body, resolution.root));
+    let mut cuts: BTreeMap<Entity, Vec<(Entity, Cut)>> = BTreeMap::new();
+    for Resolution {
+        source,
+        root,
+        construction,
+        swept,
+        cut,
+    } in resolved
+    {
+        let source = &sources[source];
+        p.account.work += swept.work;
         if let Some(load) = swept.load {
-            let (_, _, _, owner) = p
-                .constructions
-                .get(root)
-                .expect("swept owner survives geometry intake");
             let witness = load.witness;
             p.account
                 .contacts
-                .entry((body, owner.construction))
+                .entry((source.body, construction))
                 .and_modify(|speed| *speed = speed.max(witness.speed))
                 .or_insert(witness.speed);
             #[cfg(test)]
             p.account
                 .patches
-                .push((body, owner.construction, swept.chunks.clone(), witness));
+                .push((source.body, construction, swept.chunks.clone(), witness));
             p.account.samples.push((
-                body,
-                owner.construction,
+                source.body,
+                construction,
                 swept.incoming,
                 (load.demand, load.capacity, load.threshold, load.drive),
             ));
         }
-        p.account.work.bounds += swept.work.bounds;
-        p.account.work.casts += swept.work.casts;
-        p.account.work.joints += swept.work.joints;
-        p.account.work.queries += swept.work.queries;
-        p.account.work.flow += swept.work.flow;
-        by_source
-            .entry(body)
-            .or_default()
-            .entry(root)
-            .or_default()
-            .extend(swept.chunks.into_iter().filter(|_| swept.broken));
-    }
-    let mut committed = BTreeSet::new();
-    for (body, mut owners) in by_source {
-        let source = sources
-            .iter()
-            .find(|source| source.body == body)
-            .expect("a candidate body is a sweep source");
-        for (&root, plug) in &mut owners {
-            if committed.contains(&root) {
-                *plug = resolve_again(&mut p, root, source, dt);
-            }
+        if let Some(cut) = cut {
+            cuts.entry(source.body).or_default().push((root, cut));
         }
-        owners.retain(|_, plug| !plug.is_empty());
-        committed.extend(owners.keys().copied());
-        commit_source(&mut p, body, owners, tick);
     }
+    let mut departing: BTreeMap<Entity, Vec<(Entity, Cut)>> = BTreeMap::new();
+    let mut exchanges = BTreeMap::new();
+    for (body, plugs) in cuts {
+        exchanges.insert(body, exchange_source(&mut p, body, &plugs));
+        for (root, cut) in plugs {
+            departing.entry(root).or_default().push((body, cut));
+        }
+    }
+    commit(&mut p, &departing, &exchanges, tick);
     let changed = p
         .queue
         .0
@@ -263,7 +259,7 @@ pub(super) fn run(mut p: Intake) {
     let retired = changed
         .into_iter()
         .flat_map(|root| {
-            let (_, handles, ..) = p
+            let handles = p
                 .body_colliders
                 .get(root)
                 .expect("a swept owner retains its collider relationship until refit");
@@ -299,7 +295,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
         ref constructions,
         ref bodies,
         ref colliders,
-        ref body_colliders,
+        ref movers,
         ref drives,
         ref spatial,
         ref gravity,
@@ -311,16 +307,16 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
     // touches travels `v dt + a dt² (N + 1) / (2N)`: the cast's one velocity reaches that pose.
     let travel = (substeps.0 + 1) as f32 / (2 * substeps.0) as f32 * dt;
     let mut gathered = bevy::utils::Parallel::<Vec<SweepSource>>::default();
-    body_colliders
+    movers
         .par_iter()
-        .for_each(|(body_entity, handles, sleeping, piece, cached)| {
+        .for_each(|(body_entity, handles, piece, cached)| {
             let Ok((forces, body, mass, inertia, com, axes, scale)) = bodies.get(body_entity)
             else {
                 return; // Unmarked fixed collider roots have no dynamic force state.
             };
             // The sweep requires finite computed mass. Sleeping contacts retain their force
             // in ContactTransfers; Avian owns any source this intake does not prepare.
-            if !body.is_dynamic() || mass.inverse() == 0.0 || sleeping {
+            if !body.is_dynamic() || mass.inverse() == 0.0 {
                 return;
             }
             let axes = axes.copied().unwrap_or_default(); // Absence is Avian's unrestricted state.
@@ -404,11 +400,25 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
     sources
 }
 
-fn geometry(
-    p: &mut Intake,
-    dt: f32,
-    sources: &[SweepSource],
-) -> Vec<(Entity, Entity, super::super::sweep::Sweep)> {
+/// One source's resolution on one owner, the source by its index in the tick's sources: what
+/// the account reads, and the cut it committed.
+struct Resolution {
+    source: usize,
+    root: Entity,
+    construction: u16,
+    swept: super::super::sweep::Sweep,
+    cut: Option<Cut>,
+}
+
+/// A released plug committed to its owner's topology before the exchange ([`cut_fragments`]):
+/// the plug, the fragments it and its unsupported remainder leave as, and their ledger entries.
+pub(super) struct Cut {
+    plug: Vec<usize>,
+    fragments: Vec<Vec<usize>>,
+    entries: Vec<Entry>,
+}
+
+fn geometry(p: &mut Intake, dt: f32, tick: u32, sources: &[SweepSource]) -> Vec<Resolution> {
     let roots = sources
         .iter()
         .flat_map(|source| source.roots.iter().copied())
@@ -420,28 +430,80 @@ fn geometry(
         .par_iter_many_unique_mut(&roots)
         .batching_strategy(bevy::ecs::batching::BatchingStrategy::fixed(1))
         .for_each(|(root, position, rotation, mut breakage)| {
-            // This pass mutates only derived preload storage, never collider or ledger state.
+            // Preload storage and cuts change here; a cut owner is marked changed when its
+            // departures prepare ([`commit`]).
             let breakage = breakage.bypass_change_detection();
             let pose = breakage.physics_frame((position, rotation));
-            let own: Vec<_> = sources
-                .iter()
-                .filter(|source| source.roots.contains(&root))
+            let own: Vec<_> = (0..sources.len())
+                .filter(|&i| sources[i].roots.contains(&root))
                 .collect();
-            let results = owner_geometry(breakage, pose, &own, dt)
-                .into_iter()
-                .map(|(body, swept)| (body, root, swept));
-            gathered.scope(|local| local.extend(results));
+            let resolved = owner_sequence(breakage, (root, pose), (sources, &own), dt, tick);
+            gathered.scope(|local| local.push(resolved));
         });
-    gathered.drain().collect()
+    let owners: Vec<_> = gathered.drain().collect();
+    assert_eq!(
+        owners.len(),
+        roots.len(),
+        "`sources` admits a root only through this owner query"
+    );
+    owners.into_iter().flatten().collect()
 }
 
-/// Each of `sources`' patches on one owner, resolved against the owner's current state.
-fn owner_geometry(
+/// One owner's sources in body entity order, each resolved on the state the earlier ones left: a
+/// released plug's cut commits at once, and every later source resolves again on its topology
+/// with the gravity field re-solved there ([`fracture::parts::Assessment::resolved_on`]). Both
+/// passes count as work; owners never meet here.
+fn owner_sequence(
+    breakage: &mut Breakage,
+    (root, pose): (Entity, Transform),
+    (sources, own): (&[SweepSource], &[usize]),
+    dt: f32,
+    tick: u32,
+) -> Vec<Resolution> {
+    // `None` until a cut changes the owner, then that cut's gravity field, solved on first read.
+    let mut after: Option<Option<(fracture::parts::Assessment, fracture::parts::Gravity)>> = None;
+    let mut resolved = Vec::with_capacity(own.len());
+    let own_sources: Vec<_> = own.iter().map(|&i| &sources[i]).collect();
+    let first_pass = owner_geometry(breakage, pose, &own_sources, dt, None);
+    for (&index, (source, mut swept)) in own.iter().zip(first_pass) {
+        if let Some(field) = &mut after {
+            let field = field.get_or_insert_with(|| {
+                let live = &breakage.live;
+                (
+                    live.assessment.resolved_on(&live.structure, &live.state),
+                    fracture::parts::Gravity::default(),
+                )
+            });
+            let first_work = swept.work;
+            (_, swept) = owner_geometry(breakage, pose, &[source], dt, Some(field))
+                .pop()
+                .expect("one source resolves one patch");
+            swept.work += first_work;
+        }
+        let cut = swept.broken.then(|| {
+            after = Some(None);
+            cut_fragments(breakage, swept.chunks.clone(), tick)
+        });
+        resolved.push(Resolution {
+            source: index,
+            root,
+            construction: breakage.construction,
+            swept,
+            cut,
+        });
+    }
+    resolved
+}
+
+/// Each of `sources`' patches on one owner, resolved against the owner's current state, with the
+/// gravity `field` solved on it when given, else the owner's own ([`fracture::parts::Gravity`]).
+fn owner_geometry<'s>(
     breakage: &mut Breakage,
     pose: Transform,
-    sources: &[&SweepSource],
+    sources: &[&'s SweepSource],
     dt: f32,
-) -> Vec<(Entity, super::super::sweep::Sweep)> {
+    field: Option<&mut (fracture::parts::Assessment, fracture::parts::Gravity)>,
+) -> Vec<(&'s SweepSource, super::super::sweep::Sweep)> {
     let inverse = pose.rotation.inverse();
     let pool = ComputeTaskPool::get();
     // Results retain source order.
@@ -479,7 +541,10 @@ fn owner_geometry(
         ..
     } = &mut *breakage.live;
     if patches.iter().any(|(_, swept)| swept.witness.is_some()) {
-        let preload = gravity.get(structure, state, assessment);
+        let preload = match field {
+            Some((current, preloads)) => preloads.get(structure, state, current),
+            None => gravity.get(structure, state, assessment),
+        };
         // Body patches read the same topology and preload; only their ordered effects interact.
         patches.par_splat_map_mut(pool, None, |_, patches| {
             for (source, swept) in patches {
@@ -497,62 +562,29 @@ fn owner_geometry(
         });
     }
     patches
-        .into_iter()
-        .map(|(source, swept)| (source.body, swept))
-        .collect()
 }
 
-/// `body`'s plug on an owner an earlier source changed this tick, resolved again on the state that
-/// commit left: empty when its cut now holds.
-fn resolve_again(p: &mut Intake, root: Entity, source: &SweepSource, dt: f32) -> BTreeSet<usize> {
-    let (_, position, rotation, mut breakage) = p
-        .constructions
-        .get_mut(root)
-        .expect("a committed owner stands until refit");
-    let breakage = breakage.bypass_change_detection();
-    let pose = breakage.physics_frame((position, rotation));
-    let (_, swept) = owner_geometry(breakage, pose, &[source], dt)
-        .pop()
-        .expect("one source resolves one patch");
-    p.account.work.bounds += swept.work.bounds;
-    p.account.work.casts += swept.work.casts;
-    p.account.work.joints += swept.work.joints;
-    p.account.work.queries += swept.work.queries;
-    p.account.work.flow += swept.work.flow;
-    if swept.broken {
-        swept.chunks.into_iter().collect()
-    } else {
-        BTreeSet::new()
-    }
-}
-
-fn commit_source(
+/// `body`'s one plastic exchange against every plug it released this tick, applied to it: the
+/// exchange and the source centre it is about.
+fn exchange_source(
     p: &mut Intake,
     body: Entity,
-    owners: BTreeMap<Entity, BTreeSet<usize>>,
-    tick: u32,
-) {
-    let parts: Vec<_> = owners
+    plugs: &[(Entity, Cut)],
+) -> (super::super::sweep::Exchange, DVec3) {
+    let parts: Vec<_> = plugs
         .iter()
-        .flat_map(|(root, chunks)| {
+        .flat_map(|(root, cut)| {
             let (_, position, rotation, breakage) = p
                 .constructions
                 .get(*root)
                 .expect("sweep owner survives intake");
             let pose = breakage.physics_frame((position, rotation));
-            assert!(
-                chunks.iter().all(|&c| breakage.live.state.standing(c)),
-                "a committed plug was resolved on its owner's current state"
-            );
-            chunks
+            cut.plug
                 .iter()
                 .map(|&c| breakage.kind.sweep.part(c, &pose))
                 .collect::<Vec<_>>()
         })
         .collect();
-    if parts.is_empty() {
-        return; // Every cut this body met held.
-    }
     let (mut forces, _, mass, inertia, com, axes, _) = p
         .bodies
         .get_mut(body)
@@ -593,41 +625,64 @@ fn commit_source(
     p.account
         .exchanges
         .push((body, result.impulse.as_vec3(), result.dissipated));
-    // The source's common exchange is known. Owners prepare their own topology and geometry
-    // independently; ledger and structural effects commit in owner order before physics.
-    let mut released = bevy::utils::Parallel::<Vec<_>>::default();
+    (result, source.centre)
+}
+
+/// Departures prepare per owner, from its cuts and each cut's exchanged motion; ledger, queue,
+/// account and spawns then commit in (body, owner) order.
+fn commit(
+    p: &mut Intake,
+    departing: &BTreeMap<Entity, Vec<(Entity, Cut)>>,
+    exchanges: &BTreeMap<Entity, (super::super::sweep::Exchange, DVec3)>,
+    tick: u32,
+) {
+    let mut prepared = bevy::utils::Parallel::<Vec<_>>::default();
     let children = &p.children;
     let chunk_entities = &p.chunk_entities;
     p.constructions
-        .par_iter_many_unique_mut(owners.keys())
+        .par_iter_many_unique_mut(departing.keys())
         .for_each(|(root, position, rotation, mut breakage)| {
             let pose = breakage.physics_frame((position, rotation));
-            let chunks: Vec<_> = owners[&root].iter().copied().collect();
-            let mut record = Record::default();
+            // A construction without children has no chunk collider to rehome.
             let reusable = reusable_colliders(children.get(root).ok(), chunk_entities);
-            let departure = sweep_departure(
-                &mut breakage,
-                pose,
-                chunks.clone(),
-                ReleasedMotion {
-                    velocity: result.velocity.as_vec3(),
-                    spin: result.spin.as_vec3(),
-                    centre: source.centre.as_vec3(),
-                },
-                tick,
-                &mut record,
-                &reusable,
-            );
-            released.scope(|local| local.push((root, chunks, departure, record.entries)));
+            let released: Vec<_> = departing[&root]
+                .iter()
+                .map(|(body, cut)| {
+                    let (result, centre) = &exchanges[body];
+                    let mut record = Record::default();
+                    let (departures, sheds) = sweep_departure(
+                        &mut breakage,
+                        pose,
+                        cut,
+                        ReleasedMotion {
+                            velocity: result.velocity.as_vec3(),
+                            spin: result.spin.as_vec3(),
+                            centre: centre.as_vec3(),
+                        },
+                        tick,
+                        &mut record,
+                        &reusable,
+                    );
+                    (
+                        *body,
+                        root,
+                        cut.plug.clone(),
+                        departures,
+                        sheds,
+                        record.entries,
+                    )
+                })
+                .collect();
+            prepared.scope(|local| local.extend(released));
         });
-    let mut released: Vec<_> = released.drain().collect();
+    let mut prepared: Vec<_> = prepared.drain().collect();
     assert_eq!(
-        released.len(),
-        owners.len(),
+        prepared.len(),
+        departing.values().map(Vec::len).sum::<usize>(),
         "every owner of a committed plug stands for its departure"
     );
-    released.sort_unstable_by_key(|(root, ..)| *root);
-    for (root, chunks, (departures, sheds), entries) in released {
+    prepared.sort_unstable_by_key(|(body, root, ..)| (*body, *root));
+    for (body, root, plug, departures, sheds, entries) in prepared {
         let (_, position, rotation, breakage) = p
             .constructions
             .get(root)
@@ -639,9 +694,10 @@ fn commit_source(
             ..default()
         });
         // One ordered reduction accounts for all freed matter, on server bodies or decor.
-        for c in chunks {
+        let (result, centre) = &exchanges[&body];
+        for c in plug {
             let part = breakage.kind.sweep.part(c, &pose);
-            let velocity = result.velocity + result.spin.cross(part.centre - source.centre);
+            let velocity = result.velocity + result.spin.cross(part.centre - *centre);
             p.account.freed += 1;
             p.account
                 .chunks
@@ -719,17 +775,14 @@ pub(super) fn fragment_motion(
     }
 }
 
-/// Commit the cut before collider reconciliation. Connectivity already identifies unsupported
-/// matter; it needs no standing collider or later force solve to establish that it is free.
-fn cut_fragments(
-    breakage: &mut Breakage,
-    group: &[usize],
-    tick: u32,
-    record: &mut Record,
-) -> Vec<Vec<usize>> {
+/// Commit `plug`'s cut before collider reconciliation. Connectivity already identifies
+/// unsupported matter; it needs no standing collider or later force solve to establish that it
+/// is free.
+pub(super) fn cut_fragments(breakage: &mut Breakage, plug: Vec<usize>, tick: u32) -> Cut {
     let kind = &breakage.kind;
     let mut parted = Vec::new();
-    for j in kind.sweep.cut(group) {
+    let mut entries = Vec::new();
+    for j in kind.sweep.cut(&plug) {
         if !breakage.live.state.separated[j] {
             parted.push(j);
             breakage.live.state.cracked[j] = true;
@@ -739,7 +792,7 @@ fn cut_fragments(
             if let Side::Chunk(b) = joint.b {
                 breakage.live.swapped[usize::from(kind.layout.element_of[b])] = true;
             }
-            record.entries.push(Entry {
+            entries.push(Entry {
                 construction: breakage.construction,
                 event: Event::Separate(j as u16),
                 tick,
@@ -747,8 +800,8 @@ fn cut_fragments(
         }
     }
     let mut fragments =
-        crate::debris::crumble::fragments(&breakage.live.structure, &breakage.live.state, group);
-    for &c in group {
+        crate::debris::crumble::fragments(&breakage.live.structure, &breakage.live.state, &plug);
+    for &c in &plug {
         breakage.live.state.fate[c] = Fate::Fallen;
     }
     fragments.extend(fracture::loose_groups(
@@ -765,77 +818,75 @@ fn cut_fragments(
         breakage.live.state.fate[c] = Fate::Fallen;
         breakage.live.swapped[usize::from(kind.layout.element_of[c])] = true;
     }
-    fragments
+    Cut {
+        plug,
+        fragments,
+        entries,
+    }
 }
 
-/// Free the cut and its unsupported remainder together before physics. Size routing and
-/// below-floor merging share this event; Avian owns later contacts between the resulting bodies.
+/// Prepare a cut's departures ([`cut_fragments`]) before physics: the swept plug `driven`
+/// inherits the hull's exchanged `motion`, and matter losing its last support starts at rest.
+/// Size routing and below-floor merging share this event; Avian owns later contacts between the
+/// resulting bodies.
 pub(super) fn sweep_departure(
     breakage: &mut Breakage,
     pose: Transform,
-    group: Vec<usize>,
+    cut: &Cut,
     motion: ReleasedMotion,
     tick: u32,
     record: &mut Record,
     reusable: &ReusableColliders,
 ) -> (Vec<PreparedDeparture>, Vec<crate::debris::crumble::Shed>) {
-    let fragments = cut_fragments(breakage, &group, tick, record);
-    let driven: BTreeSet<_> = group.into_iter().collect();
-    // Each fragment prepares independently; scoped results and their ledger entries retain
-    // fragment order. Root state changes only after all workers have finished reading it.
-    let results = ComputeTaskPool::get().scope(|scope| {
+    record.entries.extend(cut.entries.iter().cloned());
+    let driven: BTreeSet<_> = cut.plug.iter().copied().collect();
+    let kind = &breakage.kind;
+    // Routing sums a fragment's mass and size, in fragment order with its ledger entries; only a
+    // server body's preparation, which builds a convex hull per chunk, takes a task.
+    let mut kept = Vec::new();
+    let mut sheds = Vec::new();
+    for group in &cut.fragments {
+        let motion = fragment_motion(kind, &pose, group, &driven, motion);
+        let (bodies, decor) = crate::debris::crumble::route(
+            &breakage.live.structure,
+            (breakage.construction, pose),
+            vec![group.clone()],
+            |light| vec![motion; light.len()],
+            tick,
+            record,
+        );
+        kept.extend(bodies.into_iter().map(|group| (group, motion)));
+        sheds.extend(decor);
+    }
+    // Root state changes only after every worker has finished reading it.
+    let departures = ComputeTaskPool::get().scope(|scope| {
         let breakage = &*breakage;
-        let driven = &driven;
-        for group in fragments {
+        for (group, motion) in kept {
             scope.spawn(async move {
-                let kind = &breakage.kind;
-                let motion = fragment_motion(kind, &pose, &group, driven, motion);
-                let mut record = Record::default();
-                let (kept, sheds) = crate::debris::crumble::route(
-                    &breakage.live.structure,
-                    (breakage.construction, pose),
-                    vec![group],
-                    |light| vec![motion; light.len()],
-                    tick,
-                    &mut record,
-                );
-                let departures = kept
-                    .into_iter()
-                    .map(|group| {
-                        let mut launch = launch(kind, &breakage.live.structure, &group, &[]);
-                        let at = pose.transform_point(launch.centre);
-                        launch.velocity = pose.rotation.inverse()
-                            * (motion.velocity + motion.spin.cross(at - motion.centre));
-                        launch.spin = pose.rotation.inverse() * motion.spin;
-                        prepare_group(
-                            Departure {
-                                kind: kind.clone(),
-                                construction: breakage.construction,
-                                root: pose,
-                                live: breakage.live.group(&group),
-                                group,
-                                launch,
-                                tick,
-                            },
-                            reusable,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                (departures, sheds, record.entries)
+                let mut launch = launch(kind, &breakage.live.structure, &group, &[]);
+                let at = pose.transform_point(launch.centre);
+                launch.velocity = pose.rotation.inverse()
+                    * (motion.velocity + motion.spin.cross(at - motion.centre));
+                launch.spin = pose.rotation.inverse() * motion.spin;
+                prepare_group(
+                    Departure {
+                        kind: kind.clone(),
+                        construction: breakage.construction,
+                        root: pose,
+                        live: breakage.live.group(&group),
+                        group,
+                        launch,
+                        tick,
+                    },
+                    reusable,
+                )
             });
         }
     });
-    let mut departures = Vec::new();
-    let mut sheds = Vec::new();
-    for (bodies, decor, entries) in results {
-        for shed in &decor {
-            for &c in &shed.chunks {
-                breakage.live.state.fate[usize::from(c)] = Fate::Dust;
-            }
+    for shed in &sheds {
+        for &c in &shed.chunks {
+            breakage.live.state.fate[usize::from(c)] = Fate::Dust;
         }
-        record.entries.extend(entries);
-        departures.extend(bodies);
-        sheds.extend(decor);
     }
     (departures, sheds)
 }

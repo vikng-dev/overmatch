@@ -137,6 +137,16 @@ pub(crate) struct Work {
     pub(crate) flow: mincut::Work,
 }
 
+impl std::ops::AddAssign for Work {
+    fn add_assign(&mut self, other: Self) {
+        self.bounds += other.bounds;
+        self.casts += other.casts;
+        self.joints += other.joints;
+        self.queries += other.queries;
+        self.flow += other.flow;
+    }
+}
+
 struct Demand {
     direction: Vec3,
     force: f64,

@@ -365,11 +365,14 @@ convex hit may prune later source leaves. Every occupied target joins the body's
 the earliest inward witness supplies its contact response. Parry 0.27's
 `CompositeShapeRef::cast_shape_nonlinear` returns the first geometric hit, which can be tangent
 and hide another leaf's later inward hit; its first-hit composite query therefore cannot own this
-patch. Touched constructions resolve one per task; their body queries and cuts run in
-worker-sized batches. Effects commit in body entity order because sources can compete for the
-same standing matter: a later body's plug on a construction an earlier commit changed this tick
-is resolved again on the state that commit left, so every committed plug is a minimum cut for its
-own demand.
+patch. Each touched construction resolves its sources in one task, in body entity order, because
+sources can compete for the same standing matter: all of them resolve on the construction's state
+at the tick's start, a released plug's cut commits to its topology at once, and every later
+source resolves again on the topology that cut left, with the gravity field solved on it
+(`parts::Assessment::resolved_on`), so every committed plug is a minimum cut for its own demand on
+the matter it meets. Constructions never meet in this sequence. Each source then exchanges once
+against all its plugs; departures prepare per construction, and their effects commit in (body,
+construction) order.
 
 The patch is the forced source of a directed graph over standing law chunks. Ground endpoints
 and chunks the sweep does not cover (including buried matter) are fixed sinks. Live, unseparated
@@ -396,7 +399,9 @@ interface forces inside each part. The part forces are one more column of the ow
 equilibrium: `parts::Assessment` solves gravity alone on its own factor and contact active set
 whenever that factor changes, so contact loads (this body's press included) never enter the
 preload. The column is the structure law's last; the state can run one stage ahead of it (one
-stage per tick), and a joint that cracked or opened since reads it at its current strength.
+stage per tick): a joint that cracked or opened since reads it at its current strength, and
+matter that left since still loads the interfaces below it. A sweep after an earlier cut in the
+same tick reads the column re-solved on that cut's topology instead.
 Each owner caches the preloads until that column or its standing chunks, cracks or separated
 joints change. Preloads stay fixed during optimization, including on supports beyond the seed
 patch; contact demand does not manufacture one.
