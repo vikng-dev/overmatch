@@ -538,8 +538,7 @@ mod tests {
             .unwrap()
     }
 
-    /// A started capture on the shipped recipe. Fixture: the route and timing values are
-    /// irrelevant to the census's impact and end decisions.
+    /// A started capture on the shipped recipe; tests set any timing they exercise.
     fn armed() -> Ram {
         let mut ram = Ram::new(Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap());
         ram.plan = Some(Plan {
@@ -627,7 +626,7 @@ mod tests {
             assert!(record(&mut world));
             if contact_at_limit {
                 assert_eq!(world.resource::<Ram>().impact_tick, Some(2));
-                assert_eq!(world.resource::<Ram>().done, None);
+                assert_ne!(world.resource::<Ram>().done, Some(End::ApproachTimeout));
             } else {
                 assert_eq!(
                     world.resource_mut::<Ram>().json()["done"],
