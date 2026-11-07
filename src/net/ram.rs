@@ -606,12 +606,12 @@ mod tests {
     }
     /// The game's environment destruction: overdriven fixtures must open occupied hull space
     /// within the owner's two-tick contact bar; the recipe's source loses the momentum its chunks take.
-    /// At impact +1 and +2 every source of the hull's momentum change is named, the reading that
+    /// At impact +1 to +5 every source of the hull's momentum change is named, the reading that
     /// attributes its speed loss. Every tick, every solver contact that moves a body the sweep cast
     /// against standing construction matter is against matter that body's cut judged that tick
-    /// (class invariant: a contact no cut judged stops a body without a verdict). Counts, speeds
-    /// and the advance by +60 are observations; the gate pins the owner's latency and
-    /// conservation.
+    /// (class invariant: a contact no cut judged stops a body without a verdict); what such
+    /// contacts move into uncast bodies is printed. Counts, speeds and the advance by +60 are
+    /// observations; the gate pins the owner's latency and conservation.
     #[test]
     fn tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum() {
         use crate::construction::breakage::{Breakage, SweepAccount};
@@ -678,6 +678,7 @@ mod tests {
         let mut initial = None;
         let mut contact = None;
         let mut losses = Vec::new();
+        let mut exempted = Vec::new();
         for tick in 0..plan.drive_ticks + WATCHED {
             let before = app.world().get::<LinearVelocity>(tank).unwrap().0;
             let start = app.world().get::<Position>(tank).unwrap().0;
@@ -718,16 +719,22 @@ mod tests {
                     .filter(|(point, _)| point.body == tank && point.structure == target)
                     .map(|(point, _)| point.impulse)
                     .sum();
-                if let Some(after) = contact.map(|first| tick - first)
-                    && after > 0
-                {
-                    momentum_sources(&app, tank, (target, ordinal), before).check(after);
-                }
                 solver_contacts.push((
                     tick,
                     app.world().get::<LinearVelocity>(tank).unwrap().0,
                     wall_impulse,
                 ));
+            }
+            // Fixture: the ticks whose hull momentum change is attributed, past the +3 at which
+            // the hull meets the house only through rubble.
+            if let Some(after) = contact.map(|first| tick - first)
+                && (1..=5).contains(&after)
+            {
+                momentum_sources(&app, tank, (target, ordinal), before).check(after);
+            }
+            let exempt = app.world().resource::<Unjudged>().exempt;
+            if exempt != Vec3::ZERO {
+                exempted.push((tick, exempt));
             }
             let chunks = account
                 .chunks
@@ -808,7 +815,7 @@ mod tests {
             .filter(|&&f| f != crate::construction::fracture::Fate::Standing)
             .count();
         println!(
-            "MEASURED tracked ram: first sweep tick={initial:?}, freed in two ticks={freed}, fragments shed as decoration by +{WATCHED}={shed}, speed by ticks after contact={speeds:?}, target chunks absent={gone}, bounds/casts/incident-joint visits/cast-contact queries={counts:?}, speeds and momentum={losses:?}, post-physics velocities and remaining wall impulses={solver_contacts:?}"
+            "MEASURED tracked ram: first sweep tick={initial:?}, freed in two ticks={freed}, fragments shed as decoration by +{WATCHED}={shed}, speed by ticks after contact={speeds:?}, target chunks absent={gone}, bounds/casts/incident-joint visits/cast-contact queries={counts:?}, speeds and momentum={losses:?}, post-physics velocities and remaining wall impulses={solver_contacts:?}, momentum uncast bodies moved through exposed standing matter, by tick (N s)={exempted:?}"
         );
     }
 
@@ -865,12 +872,16 @@ mod tests {
     }
 
     /// This tick's solver points that moved a body the sweep cast through exposed standing
-    /// construction matter outside that body's patches, as (body, collider, point, impulse). Read
-    /// after the solve and before the laws commit, so matter the structure check frees afterwards
-    /// still reads as it stood, and from the sweep's own patches and the owner's state, not from
-    /// the collision hook's predicate.
+    /// construction matter outside that body's patches, as (body, collider, point, impulse), and
+    /// the impulse such points moved into bodies the sweep did not cast, which keep Avian's
+    /// contact by design. Read after the solve and before the laws commit, so matter the structure
+    /// check frees afterwards still reads as it stood, and from the sweep's own patches and the
+    /// owner's state, not from the collision hook's predicate.
     #[derive(Resource, Default)]
-    struct Unjudged(Vec<(Entity, Entity, Vec3, Vec3)>);
+    struct Unjudged {
+        points: Vec<(Entity, Entity, Vec3, Vec3)>,
+        exempt: Vec3,
+    }
 
     fn read_unjudged_contacts(app: &mut App) {
         app.init_resource::<Unjudged>().add_systems(
@@ -882,7 +893,7 @@ mod tests {
     }
 
     fn assert_judged_contacts(app: &App, tick: usize) {
-        let unjudged = &app.world().resource::<Unjudged>().0;
+        let unjudged = &app.world().resource::<Unjudged>().points;
         assert!(
             unjudged.is_empty(),
             "the solver resolved standing matter no cut judged at tick {tick}: {unjudged:?}"
@@ -908,17 +919,14 @@ mod tests {
     ) {
         let cast: std::collections::BTreeSet<_> =
             account.drives.iter().map(|(body, _)| *body).collect();
-        unjudged.0 = transfers
+        let (points, exempt): (Vec<&crate::contact_transfer::ContactTransfer>, Vec<_>) = transfers
             .groups()
             .flatten()
             .filter(|point| {
                 let Ok((breakage, position, rotation)) = standing.get(point.structure) else {
                     return false; // A moving group's contacts are rubble's, not standing matter's.
                 };
-                if point.body_collider.is_none()
-                    || point.impulse == Vec3::ZERO
-                    || !cast.contains(&point.body)
-                {
+                if point.body_collider.is_none() || point.impulse == Vec3::ZERO {
                     return false;
                 }
                 let pose = breakage.physics_frame((position, rotation));
@@ -950,8 +958,13 @@ mod tests {
                                 && chunks.contains(&chunk)
                         })
             })
-            .map(|p| (p.body, p.structure_collider, p.point, p.impulse))
-            .collect();
+            .partition(|point| cast.contains(&point.body));
+        *unjudged = Unjudged {
+            points: (points.into_iter())
+                .map(|p| (p.body, p.structure_collider, p.point, p.impulse))
+                .collect(),
+            exempt: exempt.into_iter().map(|p| p.impulse).sum(),
+        };
     }
 
     fn momentum_sources(
