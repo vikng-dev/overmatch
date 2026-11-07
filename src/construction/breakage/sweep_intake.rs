@@ -280,13 +280,13 @@ fn pushes(
     let batches = groups.par_splat_map(ComputeTaskPool::get(), None, |_, groups| {
         let mut pushes = BTreeMap::<Entity, Vec3>::new();
         for point in groups.iter().flat_map(|points| points.iter()) {
-            if standing(point.structure) || standing(point.body) {
+            if standing(point.reference) || standing(point.other) {
                 continue; // Standing matter's cut judges its own contact.
             }
             let approach = point.normal * point.effective_mass * point.closing_speed.max(0.0);
             let force = (point.impulse - approach) / transfers.dt();
-            *pushes.entry(point.body).or_default() += force;
-            *pushes.entry(point.structure).or_default() -= force;
+            *pushes.entry(point.other).or_default() += force;
+            *pushes.entry(point.reference).or_default() -= force;
         }
         pushes
     });
@@ -1369,10 +1369,10 @@ mod tests {
         let [hull, rubble, under, wall] = [1, 2, 3, 4].map(|i| Entity::from_raw_u32(i).unwrap());
         // Fixture: one point per contact, impulses in N s over a 0.5 s step.
         let point = |structure, body, impulse| ContactTransfer {
-            structure,
-            structure_collider: structure,
-            body,
-            body_collider: Some(body),
+            reference: structure,
+            reference_collider: structure,
+            other: body,
+            other_collider: Some(body),
             point: Vec3::ZERO,
             normal: Vec3::Y,
             impulse,
@@ -1410,10 +1410,10 @@ mod tests {
             [(10.0, 230.0, 0.0), (0.0, 3.0, 6.0), (10.0, 233.0, 6.0)]
         {
             let contact = |structure, body, impulse| ContactTransfer {
-                structure,
-                structure_collider: structure,
-                body,
-                body_collider: Some(body),
+                reference: structure,
+                reference_collider: structure,
+                other: body,
+                other_collider: Some(body),
                 point: Vec3::ZERO,
                 normal: Vec3::X,
                 impulse: Vec3::X * impulse,

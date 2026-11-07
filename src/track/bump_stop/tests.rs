@@ -323,10 +323,10 @@ fn side_plate_contacts_reach_the_structure_contact_reader() {
             .resource::<ContactTransfers>()
             .presses()
             .filter(|(point, ..)| {
-                point.body == tank
-                    && point.structure == wall
+                point.other == tank
+                    && point.reference == wall
                     && point
-                        .body_collider
+                        .other_collider
                         .is_some_and(|collider| world.get::<SidePlate>(collider).is_some())
             })
             .map(|(point, ..)| point.impulse.length())

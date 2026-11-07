@@ -2144,9 +2144,10 @@ fn a_body_at_rest_against_a_construction_presses_it_once_and_starts_no_run() {
     // Fixture: 400 N normal press and 2 mm approach gap, centred on the crown.
     let force_n = 400.0;
     let cube = contact_cube(&mut app, face - w * (CUBE_SIDE / 2.0 + 0.002), Vec3::ZERO);
-    app.world_mut()
-        .entity_mut(cube)
-        .insert(ConstantForce(w * force_n));
+    app.world_mut().entity_mut(cube).insert((
+        ConstantForce(w * force_n),
+        crate::contact_transfer::StructureBody,
+    ));
     (0..640)
         .find(|_| {
             app.update();
@@ -2165,6 +2166,14 @@ fn a_body_at_rest_against_a_construction_presses_it_once_and_starts_no_run() {
         assert!(
             queued.iter().all(Vec::is_empty),
             "tick {tick}: a sleeping body's contact queues nothing: {queued:?}"
+        );
+        assert!(
+            app.world()
+                .resource::<ContactTransfers>()
+                .resting()
+                .iter()
+                .all(|rest| rest.transfer.reference == root),
+            "only the static structural side retains resting points"
         );
         let resting = app.world().resource::<RestingLoads>();
         let loads = resting.0.get(&root).cloned().unwrap_or_default();
@@ -4286,11 +4295,11 @@ fn occupied_matter_queries_follow_common_release_and_sleeping_pose() {
     }
 }
 
-/// The game's environment destruction model: owner contact conversion keeps source order,
-/// masses and frame conversion across worker assignments, including interleaved known point inputs.
+/// The game's environment destruction intake preserves source order and frame conversion across
+/// worker assignments, while moving receivers contribute no structural load.
 #[test]
 fn contact_preparation_preserves_source_order_across_workers() {
-    use bevy::ecs::system::SystemState;
+    use bevy::ecs::system::{RunSystemOnce, SystemState};
     use bevy::tasks::TaskPoolBuilder;
     let kind = column_construction();
     let mut world = World::new();
@@ -4303,14 +4312,22 @@ fn contact_preparation_preserves_source_order_across_workers() {
                 Breakage::new(kind.clone(), ordinal),
             ))
             .id();
+        if ordinal == 1 {
+            world.entity_mut(root).insert(Piece {
+                construction: ordinal,
+                chunks: vec![0],
+                born: 0,
+                retired: None,
+            });
+        }
         let collider = world.spawn((Element(0), ChildOf(root))).id();
         for sequence in 0..4 {
             inputs.push(ContactInput {
                 point: ContactTransfer {
-                    structure: root,
-                    structure_collider: collider,
-                    body: root,
-                    body_collider: None,
+                    reference: root,
+                    reference_collider: collider,
+                    other: root,
+                    other_collider: None,
                     point: Vec3::X * ordinal as f32 + kind.layout.element_blocks[0].points[0],
                     normal: Vec3::Y,
                     impulse: Vec3::ZERO,
@@ -4334,8 +4351,8 @@ fn contact_preparation_preserves_source_order_across_workers() {
         .map(|i| contact_load(&colliders, &constructions, &i.point, i.press, i.step))
         .collect();
     assert!(
-        expected.iter().all(Option::is_some),
-        "the fixture exercises real construction contacts"
+        expected.iter().any(Option::is_some) && expected.iter().any(Option::is_none),
+        "the fixture has standing receivers and moving groups with no structural load"
     );
     for threads in [1, 2] {
         let pool = TaskPoolBuilder::new().num_threads(threads).build();
@@ -4355,6 +4372,38 @@ fn contact_preparation_preserves_source_order_across_workers() {
             expected
         );
     }
+    let groups = inputs
+        .iter()
+        .map(|input| {
+            vec![ContactTransfer {
+                impulse: -input.press * input.step,
+                ..input.point
+            }]
+        })
+        .collect();
+    world.insert_resource(ContactTransfers::fixture(groups, STEP));
+    world.init_resource::<Stages>();
+    world.init_resource::<Queue>();
+    world.init_resource::<RestingLoads>();
+    ComputeTaskPool::get_or_init(Default::default);
+    world.run_system_once(read_contacts).unwrap();
+    let queued: Vec<_> = world
+        .resource::<Queue>()
+        .0
+        .iter()
+        .flat_map(|deposit| deposit.contacts.iter().copied())
+        .collect();
+    assert_eq!(
+        queued,
+        expected.iter().flatten().copied().collect::<Vec<_>>(),
+        "the intake keeps exactly the standing loads and their source order"
+    );
+    let roots: BTreeSet<_> = expected.iter().flatten().map(|(root, _)| *root).collect();
+    assert_eq!(
+        world.resource::<Stages>().take_counts().values[Work::ContactReadRoots as usize],
+        roots.len() as u64,
+        "moving receivers never enter the owner task grouping"
+    );
 }
 
 /// Collider preparation and its committed geometry are independent of worker assignment.
@@ -4634,9 +4683,9 @@ fn a_partial_cut_keeps_belt_support_on_the_matter_that_stands() {
         .resource::<ContactTransfers>()
         .groups()
         .flatten()
-        .filter(|point| point.body == source && point.body_collider.is_none())
+        .filter(|point| point.other == source && point.other_collider.is_none())
         .map(|point| {
-            let collider = app.world().entity(point.structure_collider);
+            let collider = app.world().entity(point.reference_collider);
             (
                 collider.get::<ChunkCollider>().copied(),
                 collider.get::<ChildOf>().map(ChildOf::parent),
