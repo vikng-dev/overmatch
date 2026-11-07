@@ -147,3 +147,17 @@ Mechanism, evidence and limits: `upstream/avian-minimum-speculative-margin.md` (
 Guards: `stationary_contacts_keep_the_configured_minimum_speculative_margin` in
 `src/tests/avian_island_sleep.rs` and `settled_freed_matter_sleeps_within_avians_rest_window` in
 `src/construction/breakage/tests.rs`.
+
+## Unknown contact features (`src/collision/contact_types/mod.rs`)
+
+Subject: the game's server physics and environment destruction, game state only.
+
+`ContactManifold::match_contacts` accepted equal `PackedFeatureId::UNKNOWN` values as matching
+identities, copying the first previous point's warm start regardless of anchor distance. The
+feature-ID path now requires known IDs; unknown points use the existing anchor-distance path,
+with both orientations under the same unknown-feature condition. No sleep rule changes.
+DERIVED cost: two feature-ID comparisons per candidate point match.
+
+Guard in the host crate: `src/contact_transfer.rs`, `unknown_contact_features_match_by_position`.
+A fixture's spatially matching point carries 11 N s; the published path instead copied 5 N s
+from a point one metre away (MEASURED by the guard before the fix).
