@@ -103,6 +103,7 @@ pub(crate) struct RigidMotion {
     pub(crate) velocity: Vec3,
     /// What Avian integrates before its contact solve, m/s².
     pub(crate) acceleration: Vec3,
+    /// The time into the tick at which the COM moves at `velocity`, s.
     pub(crate) lead: f32,
     pub(crate) centre: Vec3,
     pub(crate) spin: Vec3,

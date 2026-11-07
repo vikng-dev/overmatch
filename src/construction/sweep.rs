@@ -1352,6 +1352,7 @@ mod tests {
             .expect("the reach carries the body across its gap");
         // DERIVED: 0.4 m at the 1 m/s reach. Resolution: fixture-scale GJK error.
         assert!((falling.time - 0.4).abs() < 1e-4, "{falling:?}");
+        // Resolution: f32 rounding of `v + a (t - lead)` at this fixture's unit scale.
         assert!(
             (falling.speed - 2.0 * falling.time).abs() < 1e-5,
             "a body meets matter at its velocity then, not at its reach: {falling:?}"
