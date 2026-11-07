@@ -19,11 +19,9 @@
 //! crack first, it stops at the first the energy left cannot pay. What stays connected over the
 //! joints that did not part is a fragment.
 //!
-//! THE SIZE SPLIT ([`route`]). A fragment stays a server body through the construction's split
-//! path ([`crate::construction::breakage::PendingSplit`]) when its size, the cube root of its
-//! occupied volume, reaches the server's smallest body ([`PhysicalLaws::server_rubble_min_size_m`]).
-//! Any other leaves the simulation: the record writes its chunks as dust, and one [`Shed`] carries
-//! it to the players' decoration ([`super::decor`]), which only draws it.
+//! THE SIZE SPLIT ([`route`]). [`server_body`] selects fragments for the construction's split path
+//! ([`crate::construction::breakage::PendingSplit`]); the rest leave simulation as dust in the
+//! record and one [`Shed`] for players' decoration ([`super::decor`]), which only draws them.
 
 use std::collections::BTreeMap;
 
