@@ -338,9 +338,13 @@ fn spawn_departures(app: &mut App, departures: Vec<PreparedDeparture>) {
 
 /// Above-ground matter of `structure` grown from its first above-ground chunk across bonded
 /// joints, ascending, until it stays a server body: the fixture's choice by class. `None` when
-/// the construction has no above-ground matter or its connected matter never reaches one.
+/// its connected matter never reaches one.
 fn resolved_group(structure: &Structure) -> Option<Vec<usize>> {
-    let first = structure.chunks.iter().position(|chunk| !chunk.buried)?;
+    let first = structure
+        .chunks
+        .iter()
+        .position(|chunk| !chunk.buried)
+        .expect("the caller found above-ground matter");
     let (mut group, mut frontier) = (Vec::new(), BTreeSet::from([first]));
     while let Some(c) = frontier.pop_first() {
         group.push(c);
@@ -370,16 +374,21 @@ fn resolved_group(structure: &Structure) -> Option<Vec<usize>> {
 
 /// The game's environment destruction routes unsupported matter from every admitted map kind:
 /// a released server body reaches the Driver through centroid-local colliders, and a lone chunk
-/// too fine to stay one reaches decor and the ledger. Both routes run on every kind that has
-/// such matter; the server-body route must run on every kind. Fixture: sever the matter's bonds.
+/// too small to stay one reaches decor and the ledger. The server-body route runs on every kind
+/// with above-ground matter, and the decor route, the only end-to-end witness of a structure
+/// release's dust, on at least one. Fixture: sever the matter's bonds.
 #[test]
 fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
+    let mut decor_runs = 0;
     for (asset, kind) in admitted_kinds() {
         let kind = &kind;
         let structure = &kind.structure;
-        let Some(group) = resolved_group(structure) else {
-            continue; // Valid constructions can have no above-ground breakable matter to release.
-        };
+        if structure.chunks.iter().all(|chunk| chunk.buried) {
+            continue; // A valid construction can have no above-ground matter to release.
+        }
+        let group = resolved_group(structure).unwrap_or_else(|| {
+            panic!("{asset}: its connected above-ground matter reaches a server body")
+        });
         let start = || {
             let (mut app, root) = composed_kind(false, kind);
             app.init_resource::<Sheds>()
@@ -392,6 +401,7 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
             !structure.chunks[c].buried && !crate::debris::crumble::server_body(structure, &[c])
         });
         if let Some(chunk) = decor {
+            decor_runs += 1;
             let (mut app, root) = start();
             isolate(&mut app, root, &[chunk]);
             app.update();
@@ -545,6 +555,10 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
             "MEASURED {asset}: common detachment retains chunks {group:?} (decor witness {decor:?}), direct contact hulls, moving bounds and production belt support"
         );
     }
+    assert!(
+        decor_runs > 0,
+        "an admitted kind holds a chunk below the rubble floor"
+    );
 }
 
 /// A breakable element with at least three chunks, and its three chunks whose centroids lie

@@ -499,22 +499,21 @@ fn the_cracks_absorb_at_most_the_energy_the_landing_dissipated() {
     }
 }
 
-/// The game's environment destruction keeps a fragment on the server when it reaches the
-/// server's rubble resolution or a hull would feel its mass, and only then. Each row passes by
-/// one term alone or by neither, so a size-only, mass-only or both-terms mutant routes one wrong.
+/// The game's environment destruction keeps a fragment on the server when its size, the cube
+/// root of its volume, reaches the server's smallest body, and only then, whatever its mass: a
+/// mutant that compares `>`, or that lets a small heavy fragment stay by its mass, routes one row
+/// wrong.
 #[test]
-fn a_fragment_stays_a_server_body_by_its_resolution_or_by_the_mass_a_hull_feels() {
+fn a_fragment_stays_a_server_body_by_its_size_alone() {
     use crate::construction::fracture::{Chunk, Material};
-    let laws = PhysicalLaws::shipped();
-    let (floor, felt) = (laws.server_rubble_min_size_m, laws.server_rubble_hull_kg);
+    let floor = PhysicalLaws::shipped().server_rubble_min_size_m;
     let registry = crate::substances::SubstanceRegistry::shipped_static();
     let material = Material::of(registry, "Brick").unwrap().unwrap();
-    let below = (0.9 * floor).powi(3);
-    // Fixture volumes (m³) and masses (kg), set from the two thresholds.
+    // Fixture volumes (m³) and masses (kg), set from the threshold.
     for (volume, mass, server) in [
-        (floor.powi(3), 0.5 * felt, true),
-        (below, 2.0 * felt, true),
-        (below, 0.5 * felt, false),
+        (floor.powi(3), 1e-3, true),
+        ((2.0 * floor).powi(3), 1e-3, true),
+        ((0.9 * floor).powi(3), 1e6, false),
     ] {
         let structure = Structure {
             geometry: crate::construction::fracture::bondsolve::Geometry::CircularFixture,
@@ -578,11 +577,10 @@ fn a_small_parted_neighbour_joins_one_server_body_and_stays_with_it() {
     structure.chunks.truncate(3);
     structure.part_of.truncate(3);
     let laws = PhysicalLaws::shipped();
-    // Fixture: one fragment below both thresholds between two resolved fragments; the joint to
-    // chunk 2 has the larger area.
+    // Fixture: one fragment below the floor between two resolved fragments; the joint to chunk 2
+    // has the larger area.
     for (chunk, scale) in structure.chunks.iter_mut().zip([0.5_f32, 2.0, 2.0]) {
         chunk.volume = (laws.server_rubble_min_size_m * scale).powi(3);
-        chunk.mass = laws.server_rubble_hull_kg * scale / 4.0;
     }
     let seam = structure.chunks[0].material.seam;
     structure.joints = [(1, 1.0), (2, 2.0)]

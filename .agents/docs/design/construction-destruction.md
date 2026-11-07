@@ -1013,19 +1013,30 @@ This replaces the moving group's contact load (the decided **Collision loads** r
 every source" now covers fields and placed constructions only); that reading is the owner's to
 confirm.
 
-**Size split.** A fragment stays a server body when it reaches the server's rubble resolution or
-a hull would feel its mass (`crumble::server_body`, `assets/ballistics/physical_laws.ron`):
-`server_rubble_min_size_m` (`Resolution`, the server's body cost) compares the cube root of its
-occupied volume, shared by every material; `server_rubble_hull_kg` (`Taste`, driving through
-rubble) compares its mass, since a plastic exchange moves a hull's speed by m/(m+M). A
-fragment failing both merges through a joint parted in this event into another departing
-fragment, the largest joint area first (ties by joint identity); retained absorption joints
-preserve grouping without restoring strength. A fragment with no such neighbour becomes decor.
+**Size split.** A fragment stays a server body when its size, the cube root of its occupied
+volume, reaches `server_rubble_min_size_m` (`crumble::server_body`,
+`assets/ballistics/physical_laws.ron`), whatever its mass, so a long splinter counts as small.
+It is one game-scale `Taste` for every material (which freed matter the player sees stay solid),
+tuned by eye from 0.5 m. The owner decided this on 2026-11-06 and rejected a mass floor, because
+it ties the floor to material: fir at about 450 kg/m³ would need more than 1 m³ to reach 500 kg,
+and boards would never break free. Weight was allowed if it were cheaper for the same result, and
+it is not: server cost follows the number of server bodies and their contacts, not their weight,
+and a weight floor scaled by each material's density selects exactly the pieces this volume floor
+selects, so weight changes the result only where density differs, the case the owner rejected.
+A body serves hulls and rounds at once, so the same number
+decides what both meet. Its server cost is an observation, which #306's price measures: a volume
+V of collapsed matter leaves at most V / size³ bodies (DERIVED). A smaller fragment merges
+through a joint parted in this event into another departing fragment, the largest joint area
+first (ties by joint identity); retained absorption joints preserve grouping without restoring
+strength. A fragment with no such neighbour becomes decor.
 The shared `route` serves hull cuts, structure releases and landings, each fragment with its own
 release motion: resolved fragments stay server bodies; decor writes its chunks as dust at the
 event's tick and sends one `Shed` (construction, chunks, frame pose, velocity, spin, seed, tick)
-to every player on `DebrisChannel`, reliable and unordered. On the shipped house, whole lintels
-and one sill pass by mass alone; roof boards pass neither (DERIVED from its construction file).
+to every player on `DebrisChannel`, reliable and unordered. At 0.5 m (DERIVED from the
+construction files), the shipped house keeps as bodies its whole piers, gables, wall plates and
+six of its seven sills; a whole lintel (0.47–0.48 m) or roof board (0.40–0.42 m) is smaller, as is
+every single chunk (0.12–0.42 m). The shipped fir keeps its whole trunk (1.06 m), none of its
+single chunks (0.22–0.44 m).
 A replica refuses a shed whose chunks its map cannot hold or whose
 motion is not finite.
 
