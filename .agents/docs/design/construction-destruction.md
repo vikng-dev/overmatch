@@ -452,12 +452,19 @@ No physics step enters the demand. The inward drive adds to it: all Avian integr
 its contact solve, accumulated and constant forces and gravity, on the body's free axes (a hull
 its belts hold at rest on level ground drives nothing vertically). The cast reads the same
 motion: DERIVED, Avian's `N` substeps carry a body no contact touches `v dt + a dt² (N + 1)/(2N)`,
-which the cast's one velocity reaches at the tick's end. If `F > C`, break the minimum cut and remove its whole plug
-`S*` from the standing construction. Otherwise the sweep does nothing to the hull: **Avian owns
-the stop** (owner decision, 2026-11-07). Its contact solver, speculative points included, stops
-the hull at matter whose cut holds as it stops a hull at any obstacle, and the structure check
-reads that contact as its mean force like every other; the peak force decides only the cut.
-The rejected alternatives: the sweep stopping the hull itself (a time-of-impact pose, a stop
+which the cast's one velocity reaches at the tick's end. If `F > C`, break the minimum cut and
+remove its whole plug `S*` from the standing construction. Otherwise the sweep does nothing to
+the hull: **Avian owns the stop** (owner decision, 2026-11-07). Its contact solver, speculative
+points included, stops the hull at matter whose cut holds as it stops a hull at any obstacle, and
+the structure check reads that contact as its mean force like every other; the peak force decides
+only the cut. Its reach is wider than the cut's: Avian's linearised look-ahead also brakes the
+hull at standing matter ahead of or beside this tick's exact cast, which no cut judges. MEASURED
+on the tracked ram (`tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum`, the
+57 t hull at 10.8 m/s): both ticks' cuts released, yet standing chunk colliders outside the plug
+took 0.77 m/s off the hull and lifted it 0.63 m/s at impact +1, and 5.6 m/s, 0.63 m/s up and
+1.4 m/s sideways at +2, leaving 4.5 m/s (DERIVED from the measured impulses; the sweep's own
+exchange took 0.04 and 0.31 m/s, and the freed rubble 0.08 m/s at +2). Playtest fork F19 holds
+the alternative. The rejected alternatives: the sweep stopping the hull itself (a time-of-impact pose, a stop
 impulse and a press of its own), with a collision hook that dropped Avian's look-ahead points
 on covered chunks so the two stops did not meet. That answered one contact with three readings
 of it (the cut's `m_eff`, the press's whole mass and the body's centre-of-mass stop plus a free
@@ -500,10 +507,11 @@ Physics already changed those bodies' momenta; contact intake supplies no second
 mass share, delayed cap or give-back. Sleeping contact forces persist until their contact ends.
 
 Exact sweep membership and Avian's speculative contact envelope differ. The sweep casts admitted
-hulls with the motion Avian integrates before its solve; Avian can constrain separated hulls against projected
-contact planes. Such a non-member can transmit solver momentum without receiving a cut-capacity
-verdict. Post-contact speed therefore includes this retained contact response and contacts with
-released bodies, as well as the sweep's plastic exchange.
+hulls with the motion Avian integrates before its solve; Avian can constrain separated hulls
+against projected contact planes. Such a non-member can transmit solver momentum without
+receiving a cut-capacity verdict (MEASURED above). Post-contact speed therefore includes this
+retained contact response and contacts with released bodies, as well as the sweep's plastic
+exchange.
 
 Round and field impulse laws retain their own fracture-work and launch accounts.
 
