@@ -16,6 +16,25 @@ use crate::scatter::MapInstance;
 /// A fixture physics step, s: the harness's 64 Hz tick (fixture data).
 const STEP: f32 = 1.0 / 64.0;
 
+/// Fixture: the source cube's side, m.
+const CUBE_SIDE_M: f32 = 0.4;
+
+/// Fixture: a dynamic cube at rest, with principal inertia equal to its mass in kg m².
+fn cube(start: Vec3, mass: f32) -> impl Bundle {
+    (
+        RigidBody::Dynamic,
+        Position(start),
+        Rotation::default(),
+        Collider::cuboid(CUBE_SIDE_M, CUBE_SIDE_M, CUBE_SIDE_M),
+        Mass(mass),
+        NoAutoMass,
+        AngularInertia::new(Vec3::splat(mass)),
+        CenterOfMass::default(),
+        LinearVelocity::ZERO,
+        piece_layers(),
+    )
+}
+
 /// The breakage sim on the offline physics with the solver's contact reading, the march probe,
 /// and the shipped house spawned at the origin (unit scale), one fixed tick per update. `replica`
 /// adds the replica marker.
@@ -4446,25 +4465,11 @@ fn a_partial_cut_keeps_belt_support_on_the_matter_that_stands() {
     }
     let chunks = &kind.structure.chunks;
     let side = chunks[1].centroid.y - chunks[0].centroid.y;
-    // Fixture: the momentum test's 1e6 kg cube, which frees the middle chunk (and the top one it
-    // carries) and leaves the anchored bottom chunk standing.
-    let (mass, speed) = (1e6, 128.0);
+    // Fixture: a 1e6 kg cube one chunk side from the middle, travelling that distance per tick;
+    // it frees the middle and top chunks while the anchored bottom chunk stands.
+    let (mass, speed) = (1e6, side / STEP);
     let start = chunks[1].centroid - Vec3::X * side;
-    let source = app
-        .world_mut()
-        .spawn((
-            RigidBody::Dynamic,
-            Position(start),
-            Rotation::default(),
-            Collider::cuboid(0.4, 0.4, 0.4),
-            Mass(mass),
-            NoAutoMass,
-            AngularInertia::new(Vec3::splat(mass)),
-            CenterOfMass::default(),
-            LinearVelocity::ZERO,
-            piece_layers(),
-        ))
-        .id();
+    let source = app.world_mut().spawn(cube(start, mass)).id();
     app.update();
     let element = app
         .world_mut()
@@ -4474,7 +4479,7 @@ fn a_partial_cut_keeps_belt_support_on_the_matter_that_stands() {
         .unwrap()
         .0;
     // Fixture: belt reactions on the element's face at the chunk that leaves and at the one that
-    // stands, each force's tick impulse (1.6e5 N s) past the 1.3e4 N s tolerance below.
+    // stands, with support large enough to expose a lost reaction in the momentum assertion.
     let belts = [1, 0].map(|c| crate::contact_transfer::AppliedContact {
         structure: root,
         structure_collider: element,
@@ -4702,18 +4707,7 @@ fn a_body_the_sweep_did_not_cast_keeps_avians_contact() {
     // motion to cast, and the other moves away from the column.
     let [resting, leaving] = [1.0, 2.0].map(|offset| {
         app.world_mut()
-            .spawn((
-                RigidBody::Dynamic,
-                Position(middle - Vec3::X * side * offset),
-                Rotation::default(),
-                Collider::cuboid(0.4, 0.4, 0.4),
-                Mass(1e3),
-                NoAutoMass,
-                AngularInertia::new(Vec3::splat(1e3)),
-                CenterOfMass::default(),
-                LinearVelocity::ZERO,
-                piece_layers(),
-            ))
+            .spawn(cube(middle - Vec3::X * side * offset, 1e3))
             .id()
     });
     app.update(); // First preparation creates the collider hierarchy at rest.
@@ -4914,6 +4908,81 @@ fn a_sweep_reads_the_slender_sources_contact_mass() {
         peaks.push(demand);
     }
     assert!(peaks[1] < peaks[0], "rotation reduces the contact peak");
+}
+
+/// Fixture for the game's environment destruction latency gate: an impact whose Hertz demand
+/// exceeds a shear-cut bound derived without asking the sweep for its verdict.
+pub(crate) fn assert_fixture_release_latency(scale: f32) {
+    use crate::contact_law::{Contactor, peak_force, peak_speed};
+    let kind = scaled_column(scale);
+    let (mut app, root) = composed_kind(false, &kind);
+    for _ in 0..3 {
+        app.update();
+    }
+    let structure = &kind.structure;
+    // DERIVED: sliding the upper two chunks costs at most the bottom seam's cohesion times
+    // area plus friction under the entire column's weight (an upper bound on its preload).
+    let seam = &structure.joints[0];
+    let weight = structure
+        .chunks
+        .iter()
+        .map(|c| f64::from(c.mass))
+        .sum::<f64>()
+        * f64::from(crate::physical_laws::gravity_mps2());
+    let capacity = f64::from(seam.area * seam.seam().unwrap().shear.cohesion)
+        + fracture::bondsolve::pair_friction(structure, seam) * weight;
+    // Fixture: a 1e6 kg, 0.4 m cube with principal inertia equal to its mass in kg m².
+    // DERIVED: any face witness has r_y² + r_z² <= 0.08 m², so m/2 bounds effective mass below.
+    let mass = 1e6;
+    let effective = f64::from(mass) / 2.0;
+    let patch = Contactor::chunk(structure, 1);
+    // Fixture: twice the cut bound; travel at least one chunk side per tick.
+    let speed =
+        (peak_speed(effective, 2.0 * capacity, patch, Contactor::RIGID) as f32).max(scale / STEP);
+    assert!(peak_force(effective, f64::from(speed), patch, Contactor::RIGID) > capacity);
+    let middle = structure.chunks[1].centroid;
+    // DERIVED: a half-side face gap, crossed within this tick at the chosen speed.
+    let start = middle - Vec3::X * (scale + CUBE_SIDE_M / 2.0);
+    let source = app.world_mut().spawn(cube(start, mass)).id();
+    app.update(); // Prepare the collider hierarchy before the driving stimulus.
+    assert!(
+        app.world()
+            .get::<Breakage>(root)
+            .unwrap()
+            .live
+            .state
+            .standing(1)
+    );
+    app.world_mut().get_mut::<LinearVelocity>(source).unwrap().0 = Vec3::X * speed;
+    let ordinal = app.world().get::<Breakage>(root).unwrap().construction;
+    let (mut contact, mut opening) = (None, None);
+    for tick in 0..=2 {
+        app.update();
+        if app
+            .world()
+            .resource::<SweepAccount>()
+            .contacts
+            .contains_key(&(source, ordinal))
+        {
+            contact.get_or_insert(tick);
+        }
+        if !app
+            .world()
+            .get::<Breakage>(root)
+            .unwrap()
+            .live
+            .state
+            .standing(1)
+        {
+            opening.get_or_insert(tick);
+        }
+    }
+    let first = contact.expect("the fixture reaches occupied matter within one tick");
+    assert!(
+        opening.is_some_and(|tick| tick <= first + 2),
+        "an independently over-capacity fixture opens within two contact ticks"
+    );
+    println!("MEASURED fixture side={scale} m: contact={first}, opening={opening:?}");
 }
 
 /// Fixture: keep unit-column proportions while each chunk exceeds the authored rubble floor.
