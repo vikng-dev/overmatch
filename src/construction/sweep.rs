@@ -2016,8 +2016,8 @@ mod tests {
             refusal.contains("joint 0") && refusal.contains("chunk 0") && refusal.contains("bake"),
             "{refusal}"
         );
-        // Fixture: a 1.5 mm sliver between two jointed slabs, under its two setbacks.
-        let sliver = 1.5e-3;
+        // Fixture: a sliver between jointed slabs, thinner than its two face setbacks.
+        let sliver = 1.5 * super::super::breakage::LOOSE_GAP_M;
         assert!(sliver < 2.0 * super::super::breakage::LOOSE_GAP_M);
         let (blocks, structure) = slab_row(&[0.5, sliver, 0.5], None);
         let refusal = Geometry::new(&blocks, &structure).unwrap_err();
