@@ -1338,7 +1338,8 @@ mod tests {
         );
     }
 
-    /// Deleting the hook installation from server::run must lose this real startup refusal report.
+    /// The shipped server installs its panic hook before asset loading so the Worker receives
+    /// startup asset panics.
     #[test]
     fn shipped_hosted_entry_reports_a_startup_asset_panic() {
         let _child = PANIC_CHILD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -1346,7 +1347,7 @@ mod tests {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         let empty =
             std::env::temp_dir().join(format!("overmatch-crash-report-{}", std::process::id()));
-        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(empty.join("assets")).unwrap();
         let child = command
             .args([
                 "--exact",
@@ -1365,7 +1366,7 @@ mod tests {
             .spawn()
             .unwrap();
         let output = wait_for_panic_child(child);
-        std::fs::remove_dir(&empty).unwrap();
+        std::fs::remove_dir_all(&empty).unwrap();
         let report = worker.next();
         assert!(report.path.ends_with("/end"));
         assert_eq!(report.body["reason"], "panic");
