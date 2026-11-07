@@ -3,7 +3,7 @@
   "heading_deg": -3.917,
   "runup_margin": 2.0,
   "minimum_speed_fraction": 0.95,
-  "approach_s": 18,
+  "approach_s": 30,
   "deadline_s": 5,
   "settle_s": 2
 }

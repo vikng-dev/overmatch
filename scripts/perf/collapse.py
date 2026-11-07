@@ -577,7 +577,8 @@ def run_ram(args, out, recipe):
     drive_window_s = recipe["approach_s"] + recipe["deadline_s"]
     wall_limit = 2*args.startup_grace + drive_window_s
     ticks = math.ceil((wall_limit + 60)/dt)
-    # DERIVED: full throttle covers the approach budget and the entire observation.
+    # DERIVED: accepted contact is at most approach_s after capture starts, so observation
+    # ends by approach_s + deadline_s, while that much throttle starts later, at driving.
     throttle_ticks = math.ceil(drive_window_s/dt)
     if ticks > 2**32-1 or throttle_ticks > 2**32-129:
         raise ValueError("ram duration exceeds harness tick representation")

@@ -36,7 +36,8 @@ pub(super) struct Recipe {
     /// Operator margin on the ideal constant-top-gear-force acceleration distance.
     runup_margin: f64,
     minimum_speed_fraction: f64,
-    /// Approach watchdog budget; throttle also covers the post-contact deadline.
+    /// No-contact limit on the server's ram capture clock (`tick * dt`), from tank spawn;
+    /// includes client readiness and the harness lead-in before driving.
     approach_s: f64,
     deadline_s: f64,
     settle_s: f64,
