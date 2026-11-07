@@ -606,7 +606,9 @@ mod tests {
     }
     /// The game's environment destruction: the tracked ram recipe must open occupied hull space
     /// within the owner's two-tick contact bar, and the source must lose the momentum its chunks take.
-    /// Counts and resulting speeds are observations; the gate pins the owner's latency and conservation.
+    /// At impact +1 and +2 every source of the hull's momentum change is named, the reading that
+    /// attributes its speed loss. Counts and resulting speeds are observations; the gate pins the
+    /// owner's latency and conservation.
     #[test]
     fn tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum() {
         use crate::construction::breakage::{Breakage, SweepAccount};
@@ -664,6 +666,7 @@ mod tests {
         let mut contact = None;
         let mut losses = Vec::new();
         for tick in 0..plan.drive_ticks {
+            let before = app.world().get::<LinearVelocity>(tank).unwrap().0;
             drive_tick(&mut app, tank, 1.0, 0.0);
             let account = app.world().resource::<SweepAccount>();
             if account.contacts.contains_key(&(tank, ordinal)) && contact.is_none() {
@@ -692,6 +695,11 @@ mod tests {
                     .filter(|(point, _)| point.body == tank && point.structure == target)
                     .map(|(point, _)| point.impulse)
                     .sum();
+                if let Some(after) = contact.map(|first| tick - first)
+                    && after > 0
+                {
+                    momentum_sources(&app, tank, (target, ordinal), before).check(after);
+                }
                 solver_contacts.push((
                     tick,
                     app.world().get::<LinearVelocity>(tank).unwrap().0,
@@ -781,5 +789,139 @@ mod tests {
         println!(
             "MEASURED tracked ram: first sweep tick={first}, freed in two ticks={freed}, fragments shed as decoration by +10={shed}, speed by ticks after contact={speeds:?}, target chunks absent={gone}, bounds/casts/incident-joint visits/cast-contact queries={counts:?}, speeds and momentum={losses:?}, post-physics velocities and remaining wall impulses={solver_contacts:?}"
         );
+    }
+
+    /// The hull's momentum change over one tick, N s, by what moved it: the sweep's exchange, its
+    /// belts, gravity and each solver contact pair, and what the remainder leaves unattributed.
+    /// `through_chunks` is the target's share through chunk colliders rather than element ones;
+    /// `held` is what the target moved into the rubble bodies over the same step.
+    struct MomentumSources {
+        change: Vec3,
+        sweep: Vec3,
+        belts: Vec3,
+        gravity: Vec3,
+        target: Vec3,
+        through_chunks: Vec3,
+        rubble: Vec3,
+        held: Vec3,
+        unattributed: Vec3,
+    }
+
+    impl MomentumSources {
+        fn check(&self, after: usize) {
+            println!(
+                "MEASURED hull momentum change at impact +{after}, N s: change {}, sweep {}, belts {}, gravity {}, target {} ({} through chunk colliders), rubble {}, unattributed {}; target into rubble {}",
+                self.change,
+                self.sweep,
+                self.belts,
+                self.gravity,
+                self.target,
+                self.through_chunks,
+                self.rubble,
+                self.unattributed,
+                self.held
+            );
+            let terms = [
+                self.change,
+                self.sweep,
+                self.belts,
+                self.gravity,
+                self.target,
+                self.rubble,
+            ];
+            let scale: f32 = terms.iter().map(|term| term.length()).sum();
+            // Resolution: f32 roundoff over the step's summed contact points.
+            assert!(
+                self.unattributed.length() < 1e-4 * scale,
+                "every source of the hull's momentum change is named at impact +{after}: {} N s left",
+                self.unattributed
+            );
+        }
+    }
+
+    fn momentum_sources(
+        app: &App,
+        tank: Entity,
+        (target, ordinal): (Entity, u16),
+        before: Vec3,
+    ) -> MomentumSources {
+        use crate::construction::breakage::SweepAccount;
+        let world = app.world();
+        let account = world.resource::<SweepAccount>();
+        println!(
+            "MEASURED cuts the hull met, (incoming m/s, (demand, capacity, threshold, drive)): {:?}",
+            account
+                .samples
+                .iter()
+                .filter(|(body, construction, ..)| *body == tank && *construction == ordinal)
+                .map(|(_, _, incoming, load)| (incoming, load))
+                .collect::<Vec<_>>()
+        );
+        let transfers = world.resource::<crate::contact_transfer::ContactTransfers>();
+        let dt = transfers.dt();
+        let mass = world
+            .get::<avian3d::prelude::ComputedMass>(tank)
+            .unwrap()
+            .value();
+        let gravity = world.resource::<avian3d::prelude::Gravity>().0 * mass * dt;
+        let sweep: Vec3 = account
+            .source_impulses
+            .iter()
+            .filter(|impulse| impulse.body == tank)
+            .map(|impulse| impulse.linear)
+            .sum();
+        let (_, drive) = *account
+            .drives
+            .iter()
+            .find(|(body, _)| *body == tank)
+            .expect("the moving hull is a sweep source");
+        let cancelled: Vec3 = account
+            .cancelled_belts
+            .iter()
+            .filter(|belt| belt.body == tank)
+            .map(|belt| belt.force)
+            .sum();
+        let belts = (drive - cancelled) * dt - gravity;
+        let solver = || {
+            transfers
+                .groups()
+                .flatten()
+                .filter(|point| point.body_collider.is_some())
+        };
+        let on_tank = |structure: bool| -> Vec3 {
+            solver()
+                .filter(|point| point.body == tank && (point.structure == target) == structure)
+                .map(|point| point.impulse)
+                .sum()
+        };
+        let through_chunks = solver()
+            .filter(|point| {
+                point.body == tank
+                    && point.structure == target
+                    && world
+                        .get::<crate::construction::breakage::ChunkCollider>(
+                            point.structure_collider,
+                        )
+                        .is_some()
+            })
+            .map(|point| point.impulse)
+            .sum();
+        let held = solver()
+            .filter(|point| point.structure == target && point.body != tank)
+            .map(|point| point.impulse)
+            .sum();
+        let change = (world.get::<LinearVelocity>(tank).unwrap().0 - before) * mass;
+        let (target_impulse, rubble) = (on_tank(true), on_tank(false));
+        MomentumSources {
+            change,
+            sweep,
+            belts,
+            gravity,
+            target: target_impulse,
+            through_chunks,
+            rubble,
+            held,
+            unattributed: change - sweep - belts - gravity - target_impulse - rubble,
+        }
     }
 }
