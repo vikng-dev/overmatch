@@ -85,7 +85,7 @@ MEASURED counters below are `colliders created/deleted; bodies created; entities
 The immediate-drive serial and parallel observations agree at every recorded fixed boundary,
 including the shared carrier adapter. This is a one-time refactor comparison, not a retained
 historical-output assertion. All per-tick observations are in
-[rubble-session4-counts.json](rubble-session4-counts.json).
+`evidence/rubble/rubble-session4-counts.json` (orchestrator scratchpad copy).
 
 | Fixture tick | Serial patches | Parallel patches |
 |---|---|---|

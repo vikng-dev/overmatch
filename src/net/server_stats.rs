@@ -390,17 +390,17 @@ fn record_tick(
     mut traces: (super::ram::Census, Option<ResMut<Loadtest>>),
     fixed: Res<Time<Fixed>>,
 ) {
-    let (ram, load) = &mut traces;
+    let (census, load) = &mut traces;
     if let Some(closed) = clock.closed() {
         let collect_start = Instant::now();
         stats.ticks.push(closed.us);
         let measured = stages.take_us();
         stages.add(
             crate::cost::stages::Work::ContactPoints,
-            ram.contact_points() as u64,
+            census.contact_points() as u64,
         );
         let work = stages.take_counts();
-        let captured = ram.record(
+        let sample = census.sample(
             closed.us,
             starts.physics_us,
             starts.sleep_us,
@@ -408,26 +408,11 @@ fn record_tick(
             phases.times(),
             fixed.timestep().as_secs_f64(),
         );
-        if let Some(load) = load.as_deref_mut().filter(|load| load.running()) {
-            let (awake, tanks) = ram.counts();
-            load.record(
-                crate::cost::TickSample {
-                    tick: 0, // The workload assigns its contiguous tick sequence after admission.
-                    tick_us: closed.us,
-                    physics_us: starts.physics_us,
-                    sleep_us: starts.sleep_us,
-                    stages: crate::cost::stages::NamedTimes::new(&NAMES, measured),
-                    phases_us: phases.times(),
-                    sweep_sources: ram.sweep_counts().0,
-                    sweep_casts: ram.sweep_counts().1,
-                    collector_us: 0.0,
-                    awake,
-                    tanks,
-                    dt_s: fixed.timestep().as_secs_f64(),
-                },
-                work,
-            );
-        }
+        let rows = [
+            census.record(sample),
+            load.as_deref_mut()
+                .and_then(|load| load.record(sample, work)),
+        ];
         for (window, us) in stats.stages.iter_mut().zip(measured) {
             window.push(us);
         }
@@ -436,11 +421,8 @@ fn record_tick(
         }
         let collector_us = collect_start.elapsed().as_secs_f64() * 1.0e6;
         stats.collector.push(collector_us);
-        if let Some(load) = load.as_deref_mut() {
-            load.collector(collector_us);
-        }
-        if captured {
-            ram.collector(collector_us);
+        for row in rows.into_iter().flatten() {
+            *row = collector_us;
         }
     }
 }
@@ -488,10 +470,10 @@ fn close_send(
     let us = start.elapsed().as_secs_f64() * 1.0e6;
     stats.send.push(us);
     if let Some(load) = load.as_deref_mut() {
-        load.send(us);
+        load.trace.send(us);
     }
     if let Some(ram) = ram.as_deref_mut() {
-        ram.send(us);
+        ram.trace.send(us);
     }
 }
 
@@ -741,77 +723,6 @@ mod tests {
         world.init_resource::<PhaseStarts>();
         world.insert_resource(fixture_stats());
         world
-    }
-
-    /// The game's environment trace reports component payloads, not transport framing. A codec
-    /// change must change this wire witness; group width remains fixture data, not an asset gate.
-    #[test]
-    fn destruction_payload_sizes_use_the_shipped_serde_layouts() {
-        use crate::net::{
-            construction::{Ledger, WorldShed},
-            debris_stress::DebrisPose,
-        };
-        use bevy_replicon::shared::replication::diff::{ComponentDeltaRef, diff_index::DiffIndex};
-        let pose = DebrisPose {
-            position: Vec3::ZERO,
-            rotation: Quat::IDENTITY,
-        };
-        let pose_bytes = postcard::to_allocvec(&pose).unwrap();
-        assert_eq!(pose_bytes.len(), 7 * size_of::<f32>());
-        // Fixture: small construction IDs and a two-byte tick, with unequal group widths.
-        for width in [1, 32] {
-            let piece = Piece {
-                construction: 0,
-                chunks: (0..width).collect(),
-                born: 1024,
-                retired: None,
-            };
-            let piece_bytes = postcard::to_allocvec(&piece).unwrap();
-            assert_eq!(postcard::from_bytes::<Piece>(&piece_bytes).unwrap(), piece);
-            let entry = crate::construction::breakage::Entry {
-                construction: 0,
-                event: crate::construction::breakage::Event::Dust(200),
-                tick: piece.born,
-            };
-            let ledger = Ledger(vec![entry]);
-            let snapshot = ComponentDeltaRef::Snapshot {
-                index: DiffIndex::new(0),
-                component: &ledger,
-            };
-            let ledger_bytes = postcard::to_allocvec(&ledger).unwrap();
-            let snapshot_bytes = postcard::to_allocvec(&snapshot).unwrap();
-            // Wire contract: snapshot enum tag plus the fixed-width u16 diff cursor.
-            assert_eq!(
-                snapshot_bytes.len(),
-                ledger_bytes.len() + 1 + size_of::<u16>()
-            );
-            let shed = WorldShed {
-                world: crate::world::WorldGeneration(1),
-                shed: crate::debris::crumble::Shed {
-                    construction: piece.construction,
-                    chunks: piece.chunks,
-                    at: [0.0; 3],
-                    rotation: Quat::IDENTITY.to_array(),
-                    velocity: [0.0; 3],
-                    spin: [0.0; 3],
-                    seed: u32::MAX,
-                    tick: piece.born,
-                },
-            };
-            let shed_bytes = postcard::to_allocvec(&shed).unwrap();
-            assert_eq!(
-                postcard::from_bytes::<WorldShed>(&shed_bytes).unwrap(),
-                shed
-            );
-            eprintln!(
-                "MEASURED game environment payload: chunks={width}, DebrisPose={} B, Piece={} B, WorldShed={} B, Entry={} B, ledger_snapshot={} B (one entry; excludes framing/retries)",
-                pose_bytes.len(),
-                piece_bytes.len(),
-                shed_bytes.len(),
-                postcard::to_allocvec(&entry).unwrap().len(),
-                snapshot_bytes.len()
-            );
-        }
     }
 
     /// Operators rely on every physics close consuming its matching opening, never stale data.

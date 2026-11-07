@@ -96,7 +96,7 @@ MEASURED collider entity lifecycle counts through contact +320, including every 
 | Warm batch | 1,215 | 970 |
 
 Later solver-order changes move the collapse counts; subtracting these totals does not establish
-identical law events. [All per-tick event counts](sweepfix-collider-bookkeeping-counts.json) are
+identical law events. All per-tick event counts: `evidence/rubble/sweepfix-collider-bookkeeping-counts.json` (orchestrator scratchpad copy) are
 committed alongside this report; an absent tick has zero events. The table below shows the union
 of each variant's largest event ticks. Tick indices are DERIVED from the fixture's 64 Hz simulation
 clock, never wall-clock pricing.

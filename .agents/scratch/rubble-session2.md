@@ -43,7 +43,7 @@ All table cells use `colliders created / deleted; bodies created; entities spawn
 
 At the pricing spike's +2 offset, rubble adds 975 collider creations, 10 collider deletions, 7 rigid-body creations, 989 entity spawns and 10 despawns over sweepfix (DERIVED subtraction of the paired MEASURED counts). At +3 it adds 601 collider creations and 20 rigid-body creations. The added lifecycle burst is the finding; no representation was changed or duration inferred.
 
-The census fixture and full nonzero per-tick rows are in `src/net/debris_stress/tests/ram_census.rs` and [rubble-session2-counts.json](rubble-session2-counts.json). Run with:
+The census fixture and full nonzero per-tick rows are in `src/net/debris_stress/tests/ram_census.rs` and `evidence/rubble/rubble-session2-counts.json` (orchestrator scratchpad copy). Run with:
 
 ```sh
 OVERMATCH_CARGO_LOCK_WAIT_S=10800 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless \

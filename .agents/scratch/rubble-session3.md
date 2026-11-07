@@ -80,8 +80,8 @@ not duration measurements or obligations on subsequent physics. Contact is at fi
 | 1301, +38 | 0/0; 0; 0/0 | 0/0; 0; 0/0 | 0/0; 2; 4/1 |
 | Through +320 | 1998/85; 56; 2110/105 | 1091/93; 51; 1193/108 | 1091/85; 58; 1207/105 |
 
-[Per-tick counts](rubble-session3-counts.json); the original and sweepfix runs remain in
-[rubble-session2-counts.json](rubble-session2-counts.json). The permanent collider changes
+Per-tick counts: `evidence/rubble/rubble-session3-counts.json` (orchestrator scratchpad copy); the original and sweepfix runs remain in
+`evidence/rubble/rubble-session2-counts.json` (orchestrator scratchpad copy). The permanent collider changes
 contact geometry and allocation order, so later departures can move; subtracting totals does
 not imply identical physical events.
 

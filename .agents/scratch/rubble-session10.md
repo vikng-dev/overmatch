@@ -8,4 +8,4 @@ MEASURED rejected candidate A/B: maximum sweep 9.557/9.314 ms, worst tick 26.705
 Decision: discard parallel face/bond verdict batching; it missed the budget without a clear benefit for added dispatch. All probes and the candidate are deleted; retained production source equals the entry tip. The recorded source/cast/awake census moves and is not an obligation on physics.
 MEASURED retained gates: 105 targeted/guard tests pass, fmt and CI clippy pass. The completed full library suite passes: MEASURED 2497 passed, zero failed, 41 ignored.
 Remaining: isolate and reduce the outer gravity contact-set settling work; no cost fix or new retained-tip ram prices were delivered. The candidate prices above are not prices of retained code. Nothing pushed.
-[Methods, raw evidence, prices, census and load paths](rubble-session10.json).
+Methods, raw evidence, prices, census and load paths: `evidence/rubble/rubble-session10.json` (orchestrator scratchpad copy).

@@ -18,8 +18,8 @@ and engine scheduling outside PhysicsSchedule. Send bytes are attempted encrypte
 bytes before transport; raw rows also retain send time, RSS and quota throttling.
 Hosted runs require kernel evidence of two vCPU. --rehearsal is explicitly unpriced local
 plumbing on the recorded host; concurrent lanes make its timings unsuitable for pricing.
---tick-attribution saves exact tick stages/work counts and replication envelope size histograms;
-its server uses lightyear_replication::server=trace (printed by --print-server-env).
+A scheduled run saves every tick's stages and work counts; --replication-trace adds replication
+envelope size histograms, from a server started with REPLICATION_TRACE (--print-server-env).
 Full-speed ram: --ram scripts/perf/ram.json (local or hosted).
 Without --schedule or --ram, the tankless HE diagnostic remains available.
 """
@@ -54,6 +54,8 @@ HOSTED_LOG_POLL_S = 30
 LOG_FETCH_TIMEOUT_S = 30
 # session.sh logs interface: EX_TEMPFAIL means HTTP 429; all other failures remain fatal.
 LOGS_RATE_LIMITED = 75
+# The server log directive whose send_server_packets lines replication_windows parses.
+REPLICATION_TRACE = "lightyear_replication::server=trace"
 
 
 def recipe_for(path, tanks):
@@ -251,8 +253,8 @@ def run_match(args, out, recipe):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("OVERMATCH_", "SPIKE_"))}
     env.update(OVERMATCH_UNATTENDED="1", OVERMATCH_WINDOW="headless", OVERMATCH_MUTE="1", NO_COLOR="1")
     env["OVERMATCH_LOADTEST"] = json.dumps(recipe, separators=(",", ":"))
-    if args.tick_attribution:
-        env["RUST_LOG"] = env.get("RUST_LOG", "info") + ",lightyear_replication::server=trace"
+    if args.replication_trace:
+        env["RUST_LOG"] = env.get("RUST_LOG", "info") + "," + REPLICATION_TRACE
     serverlog = out / "server.log"
     (out / "rows.json").unlink(missing_ok=True)
     client_count = args.clients or args.tanks
@@ -293,11 +295,11 @@ def run_match(args, out, recipe):
                         if log.count("client: connected (entity") != 1 or "harness: released" not in log:
                             raise RuntimeError(f"client{i}: requires one connection and synchronized combat release")
                     (out / "rows.json").write_text(json.dumps(rows, indent=2) + "\n")
-                    if args.tick_attribution:
-                        trace = match_tick_summary(rows, recipe)
+                    trace = match_tick_summary(rows, recipe)
+                    if args.replication_trace:
                         trace["replication_windows"] = replication_windows(text)
-                        (out / "tick-attribution.json").write_text(json.dumps(trace, indent=2) + "\n")
-                        print(f"MEASURED match-tick-attribution: {len(trace['ticks'])} ticks, {len(trace['over_budget_ticks'])} over budget; {out / 'tick-attribution.json'}")
+                    (out / "tick-attribution.json").write_text(json.dumps(trace, indent=2) + "\n")
+                    print(f"MEASURED match-tick-attribution: {len(trace['ticks'])} ticks, {len(trace['over_budget_ticks'])} over budget; {out / 'tick-attribution.json'}")
                     report_match(windows)
                     last = windows[-1]["loadtest"]
                     print(f"COMPLETE: {args.tanks} tanks, {client_count} real links, {last['constructions']} constructions, {len(windows)} complete windows, {last['events_fired']} events; game construction outcomes {json.dumps(last['targets'])}; artifacts: {out}")
@@ -384,7 +386,7 @@ def read_tick_samples(batches, tanks, ticks=None, sends=None):
                 raise RuntimeError("missing, duplicated or reordered instrument tick")
             if tick["tanks"] != tanks:
                 raise RuntimeError("tick population differs from requested tanks")
-            required = {"tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "sweep_us", "crumble_us", "collector_us", "dt_s"}
+            required = {"tick_us", "physics_us", "sleep_us", "intake_us", "structure_us", "refit_us", "publish_us", "contacts_us", "sweep_us", "crumble_us", "collector_us", "dt_s", "phases_us"}
             if missing := required - tick.keys():
                 raise ValueError(f"missing tick timing fields: {sorted(missing)}")
             for field in {name for name in tick if name.endswith("_us") and name != "phases_us"} | {"dt_s"}:
@@ -451,11 +453,15 @@ def ram_rows(text, recipe):
     return rows, ticks, sends, last
 
 
+# Match ticks add these to the shared ram schema; ram ticks carry none of them.
+MATCH_TICK_KEYS = ("elapsed_s", "events_fired", "work")
+
+
 def tick_attribution(tick):
     stages = ram_parts(tick)
     return dict(tick=tick["tick"], tick_us=tick["tick_us"], parts_us=stages,
                 attributed_pct=100 * (1 - stages["unattributed"] / tick["tick_us"]),
-                **{key: tick[key] for key in ("elapsed_s", "events_fired", "work") if key in tick})
+                **{key: tick[key] for key in MATCH_TICK_KEYS if key in tick})
 
 
 def replication_windows(text):
@@ -488,16 +494,20 @@ def replication_windows(text):
                 for channel, histogram in sorted(channels.items())}))
             channels = {}
     if not seen:
-        raise RuntimeError("replication byte trace missing: start the server with --print-server-env --tick-attribution")
+        raise RuntimeError("replication byte trace missing: start the server with --print-server-env --replication-trace")
     # An unfinished trailing stats period is outside the complete-window report.
     return windows
 
 
 def match_tick_summary(rows, recipe):
     """Per-tick wave attribution; the ram and match share schema checks and additive accounting."""
-    ticks, sends = read_tick_samples([r["loadtest"] for r in rows], recipe["tanks"])
+    batches = [r["loadtest"] for r in rows]
+    # A server built before the match tick trace omits both fields.
+    if any("ticks" not in batch or "sends" not in batch for batch in batches):
+        raise RuntimeError("match tick trace missing: rebuild the instrumented server")
+    ticks, sends = read_tick_samples(batches, recipe["tanks"])
     if not ticks:
-        raise RuntimeError("match tick attribution missing: rebuild the instrumented server")
+        raise RuntimeError("match tick trace empty: no tick ran after admission")
     if any(t["dt_s"] != ticks[0]["dt_s"] for t in ticks):
         raise RuntimeError("match fixed timestep changed during capture")
     return dict(ticks=ticks, sends=sends,
@@ -800,13 +810,13 @@ def main():
     parser.add_argument("--bin", type=Path, default=ROOT / "target/debug", help="binary directory (default target/debug; other directories must already be built)")
     parser.add_argument("--rehearsal", action="store_true", help="local plumbing only: print unpriced observations without claiming a two-vCPU allocation")
     parser.add_argument("--print-server-env", action="store_true", help="print the recipe/environment for the operator's deployment, then exit without a build or run")
-    parser.add_argument("--tick-attribution", action="store_true", help="require and save per-tick scheduled-collapse stages (same reader as ram)")
+    parser.add_argument("--replication-trace", action="store_true", help="require and save replication envelope size histograms (the server runs REPLICATION_TRACE)")
     parser.add_argument("--holding-lock", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.bin = args.bin.resolve()
     args.tanks = args.tanks if args.tanks is not None else (1 if args.ram else 30)
-    if args.tick_attribution and not args.schedule:
-        parser.error("--tick-attribution requires --schedule")
+    if args.replication_trace and not args.schedule:
+        parser.error("--replication-trace requires --schedule")
     if args.ram and args.tanks != 1:
         parser.error("--ram requires exactly one tank")
     if args.clients is not None and args.clients > args.tanks:
@@ -839,8 +849,8 @@ def main():
         print("OVERMATCH_LOADTEST=" + json.dumps(recipe, separators=(",", ":")))
         print(f"OVERMATCH_BOT={args.tanks - (args.clients or args.tanks)}")
         print("OVERMATCH_SERVER_STATS_S=1")
-        if args.tick_attribution:
-            print("RUST_LOG=info,lightyear_replication::server=trace")
+        if args.replication_trace:
+            print("RUST_LOG=info," + REPLICATION_TRACE)
         return 0
     if recipe and args.duration <= recipe["events"][-1]["at_s"] + STATS_PERIOD_S:
         parser.error("--duration must leave a complete stats period after the last scheduled break")

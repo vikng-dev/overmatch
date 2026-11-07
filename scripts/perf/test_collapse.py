@@ -14,6 +14,14 @@ from unittest.mock import patch
 import collapse
 
 
+def tick_fixture(i, tanks):
+    # Fixture: unequal ticks expose percentile-of-percentile and nested-cost bugs.
+    return dict(tick=i, tick_us=100*i, physics_us=30, sleep_us=10,
+                intake_us=5, structure_us=15, refit_us=10, publish_us=5, contacts_us=2,
+                sweep_us=3, crumble_us=7, collector_us=1, dt_s=0.1, awake=4-i, tanks=tanks,
+                phases_us=dict(fixed_update_us=10, physics_step_us=28, construction_ecs_us=10, fixed_last_us=2))
+
+
 class CollapseTests(unittest.TestCase):
     def test_only_kernel_allocation_evidence_admits_two_vcpu(self):
         # Fixture: a wide cpuset with a two-core quota is the hosted contract, not pool sizing.
@@ -38,10 +46,12 @@ class CollapseTests(unittest.TestCase):
                    loadtest=dict(recipe=recipe, sequence=1, elapsed_s=1.1, window_start_s=0.1, combat=True,
                                  send_bytes=12000, awake_bodies=12, construction_pieces=20,
                                  constructions=10, events_fired=1,
-                                 targets=[dict(id=i, falls=1, dust=1, chunks=3) for i in ["a", "b"]]))
+                                 targets=[dict(id=i, falls=1, dust=1, chunks=3) for i in ["a", "b"]],
+                                 ticks=[tick_fixture(1, 2)], sends=[dict(tick=1, us=10)]))
         second = copy.deepcopy(row)
         second.update(period_s=2, ticks=128)
-        second["loadtest"].update(sequence=2, elapsed_s=3.1, window_start_s=1.1)
+        second["loadtest"].update(sequence=2, elapsed_s=3.1, window_start_s=1.1,
+                                  ticks=[tick_fixture(2, 2)], sends=[])
         return recipe, [row, second]
 
     def run_hosted_batches(self, statuses, *, complete=True, complete_after=2, exit_client=False):
@@ -51,7 +61,7 @@ class CollapseTests(unittest.TestCase):
         clock, polls, children, timeouts = [0.0], [], [], []
         args = SimpleNamespace(target="192.0.2.1:5888", deployment="fixture", tanks=2,
                                clients=1, duration=3, startup_grace=7 * collapse.HOSTED_LOG_POLL_S, rehearsal=False,
-                               bin=Path("/fixture/bin"), tick_attribution=False)
+                               bin=Path("/fixture/bin"), replication_trace=False)
         class Client:
             killed = False
             def poll(self):
@@ -90,6 +100,8 @@ class CollapseTests(unittest.TestCase):
             try:
                 collapse.run_match(args, Path(directory), recipe)
                 self.assertEqual(json.loads((Path(directory) / "rows.json").read_text()), rows)
+                self.assertEqual(json.loads((Path(directory) / "tick-attribution.json").read_text())["ticks"],
+                                 [t for r in rows for t in r["loadtest"]["ticks"]])
                 self.assertIn("COMPLETE:", output.getvalue())
             finally:
                 self.assertTrue(all(c.killed or c.poll() is not None for c in children))
@@ -307,13 +319,9 @@ class CollapseTests(unittest.TestCase):
 
 class RamTests(unittest.TestCase):
     def fixture(self):
-        # Fixture: unequal ticks and sends expose percentile-of-percentile and nested-cost bugs.
+        # Fixture: unequal sends expose percentile-of-percentile bugs.
         recipe = collapse.ram_recipe(collapse.ROOT / "scripts/perf/ram.json")
-        ticks = [dict(tick=i, tick_us=100*i, physics_us=30, sleep_us=10,
-                      intake_us=5, structure_us=15, refit_us=10, publish_us=5, contacts_us=2,
-                      sweep_us=3, crumble_us=7, collector_us=1, dt_s=0.1, awake=4-i, tanks=1,
-                      phases_us=dict(fixed_update_us=10, physics_step_us=28, construction_ecs_us=10, fixed_last_us=2))
-                 for i in range(1, 5)]
+        ticks = [tick_fixture(i, 1) for i in range(1, 5)]
         ram = dict(recipe=recipe, plan=dict(minimum_m_s=9, governed_m_s=10, runup_m=20,
                                            spawn=[0, 0, 0], rotation=[0, 0, 0, 1]),
                    impact=dict(tick=2, speed_m_s=10, normal_speed_m_s=10), done="deadline", ticks=ticks,
@@ -362,14 +370,16 @@ class RamTests(unittest.TestCase):
             self.assertAlmostEqual(sum(row["parts_us"].values()), row["tick_us"])
         broken = copy.deepcopy(rows)
         del broken[1]["loadtest"]["ticks"][0]["phases_us"]
-        with self.assertRaises((ValueError, KeyError)):
+        with self.assertRaisesRegex(ValueError, "missing tick timing fields.*phases_us"):
             collapse.match_tick_summary(broken, recipe)
         broken = copy.deepcopy(rows)
         broken[1]["loadtest"]["ticks"][0]["tick"] += 1
         with self.assertRaisesRegex(RuntimeError, "instrument tick"):
             collapse.match_tick_summary(broken, recipe)
-        with self.assertRaisesRegex(RuntimeError, "attribution missing"):
+        with self.assertRaisesRegex(RuntimeError, "tick trace empty"):
             collapse.match_tick_summary([dict(loadtest=dict(ticks=[], sends=[]))], recipe)
+        with self.assertRaisesRegex(RuntimeError, "rebuild the instrumented server"):
+            collapse.match_tick_summary([dict(loadtest=dict(sequence=1))], recipe)
 
     def test_ram_percentile_and_additive_split_use_only_contact_ticks(self):
         recipe, ram = self.fixture()
