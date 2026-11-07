@@ -585,11 +585,11 @@ fn commit_source(
                 &mut record,
                 &reusable,
             );
-            released.scope(|local| local.push((root, chunks, departure, record.entries, reusable)));
+            released.scope(|local| local.push((root, chunks, departure, record.entries)));
         });
     let mut released: Vec<_> = released.drain().collect();
     released.sort_unstable_by_key(|(root, ..)| *root);
-    for (root, chunks, (departures, sheds), entries, mut reusable) in released {
+    for (root, chunks, (departures, sheds), entries) in released {
         let (_, position, rotation, breakage) = p
             .constructions
             .get(root)
@@ -616,7 +616,7 @@ fn commit_source(
         p.account.shed += sheds.len();
         p.shed.write_batch(sheds);
         for departure in departures {
-            spawn_prepared(&mut p.commands, departure, &mut reusable);
+            spawn_prepared(&mut p.commands, departure);
         }
     }
 }
