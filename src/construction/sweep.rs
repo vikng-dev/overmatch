@@ -304,16 +304,10 @@ impl Geometry {
             if let Some(witness) =
                 query.inward(node, &self.hulls[c], self.centres[c], &mut result.work)
             {
-                result.chunks.push(c);
-                if result
-                    .witness
-                    .is_none_or(|first| witness.reach < first.reach)
-                {
-                    result.witness = Some(witness);
-                }
+                result.witnesses.push(witness);
             }
         }
-        result.chunks.sort_unstable();
+        result.retain_covered(structure, state);
         result
     }
 
@@ -611,7 +605,7 @@ fn rotation_bounds(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Witness {
     /// How far along its cast the source meets the matter, as cast time, s: the pose that sets
     /// `at`, `normal` and the lever, and the order witnesses are met in.
@@ -625,7 +619,7 @@ pub(crate) struct Witness {
     pub(crate) chunk: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PatchLoad {
     /// The inward witness this load resolved.
     pub(crate) witness: Witness,
@@ -639,6 +633,9 @@ pub(crate) struct PatchLoad {
 
 #[derive(Default, Debug)]
 pub(crate) struct Sweep {
+    /// Each hit target's earliest inward witness, in target traversal order. These belong only
+    /// to this source/owner motion snapshot; resolving a plug never overwrites them.
+    witnesses: Vec<Witness>,
     /// Occupied source patch until resolved; the minimum-cut plug once released.
     pub(crate) chunks: Vec<usize>,
     pub(crate) incoming: f32,
@@ -657,6 +654,24 @@ pub(crate) enum Verdict {
 }
 
 impl Sweep {
+    /// Rebuild the occupied patch within one owner's source batch. Cuts only remove covered
+    /// targets; source motion and target hulls stay fixed. Equal reaches retain traversal order.
+    /// Every load must resolve again against the current topology and preload.
+    pub(crate) fn retain_covered(&mut self, structure: &Structure, state: &State) {
+        self.witnesses
+            .retain(|witness| covered(structure, state, witness.chunk));
+        self.chunks.clear();
+        self.witness = None;
+        self.verdict = None;
+        for &witness in &self.witnesses {
+            self.chunks.push(witness.chunk);
+            if self.witness.is_none_or(|first| witness.reach < first.reach) {
+                self.witness = Some(witness);
+            }
+        }
+        self.chunks.sort_unstable();
+    }
+
     pub(crate) fn released(&self) -> bool {
         matches!(self.verdict, Some(Verdict::Released(_)))
     }
@@ -923,6 +938,67 @@ mod tests {
         structure.geometry = super::super::fracture::bondsolve::Geometry::CircularFixture;
         let geometry = Geometry::new(&blocks, &structure).expect("the fixture's chunks are small");
         (structure, geometry)
+    }
+
+    /// The game's environment destruction: ordered cuts may remove any covered target without
+    /// changing another target's inward witness. A single cached witness loses the next target;
+    /// reordering tied hits changes the material/contact response the owner resolves.
+    #[test]
+    fn retained_target_witnesses_equal_a_fresh_query_after_coverage_shrinks() {
+        let (structure, geometry) = wall(16.0);
+        let state = State::new(&structure);
+        // Fixture: overlapping source leaves with different reaches, translated and spun.
+        let source = SourceTree::new(
+            [(0.0, -0.4), (0.3, 0.4)]
+                .map(|(x, y)| Hull {
+                    hull: Collider::cuboid(0.4, 1.4, 1.2),
+                    position: Vec3::new(x, y, 0.0),
+                    rotation: Quat::IDENTITY,
+                })
+                .to_vec(),
+        );
+        for y in [-0.3, 0.0, 0.3] {
+            for spin in [Vec3::ZERO, Vec3::new(0.3, 0.7, 0.2), Vec3::Z] {
+                let motion = RigidMotion {
+                    position: Vec3::new(-2.0, y, 0.0),
+                    rotation: Quat::IDENTITY,
+                    centre: Vec3::new(-2.0, y, 0.0),
+                    velocity: Vec3::X * 4.0,
+                    acceleration: Vec3::ZERO,
+                    lead: 0.0,
+                    spin,
+                    dt: 1.0,
+                };
+                let first = geometry.swept(&structure, &state, &source, motion);
+                assert!(
+                    first.witnesses.len() > 1,
+                    "the fixture meets multiple targets"
+                );
+                let all = (1 << structure.chunks.len()) - 1;
+                for removed in std::iter::once(0)
+                    .chain((0..structure.chunks.len()).map(|c| 1 << c))
+                    .chain([all / 3, all])
+                {
+                    let mut reduced = state.clone();
+                    for c in 0..structure.chunks.len() {
+                        if removed & (1 << c) != 0 {
+                            reduced.fate[c] = super::super::fracture::Fate::Fallen;
+                        }
+                    }
+                    let mut retained = Sweep {
+                        witnesses: first.witnesses.clone(),
+                        work: first.work,
+                        ..default()
+                    };
+                    retained.retain_covered(&structure, &reduced);
+                    let fresh = geometry.swept(&structure, &reduced, &source, motion);
+                    assert_eq!(retained.witnesses, fresh.witnesses);
+                    assert_eq!(retained.chunks, fresh.chunks);
+                    assert_eq!(retained.witness, fresh.witness);
+                    assert_eq!(retained.work.casts, first.work.casts);
+                }
+            }
+        }
     }
 
     /// The game's environment destruction: the hole is occupied swept geometry, independent of
