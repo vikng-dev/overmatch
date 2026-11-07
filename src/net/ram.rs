@@ -36,7 +36,8 @@ pub(super) struct Recipe {
     /// Operator margin on the ideal constant-top-gear-force acceleration distance.
     runup_margin: f64,
     minimum_speed_fraction: f64,
-    drive_s: f64,
+    /// Approach watchdog budget; throttle also covers the post-contact deadline.
+    approach_s: f64,
     deadline_s: f64,
     settle_s: f64,
 }
@@ -47,7 +48,7 @@ impl Recipe {
             LeverError::invalid(
                 LEVER,
                 text,
-                "JSON ram recipe: nonempty instance, finite heading_deg, runup_margin >= 1, minimum_speed_fraction in (0,1], positive drive_s/deadline_s/settle_s with settle_s < deadline_s",
+                "JSON ram recipe: nonempty instance, finite heading_deg, runup_margin >= 1, minimum_speed_fraction in (0,1], positive approach_s/deadline_s/settle_s with settle_s < deadline_s",
             )
         };
         let recipe: Self = serde_json::from_str(text).map_err(|_| invalid())?;
@@ -57,7 +58,7 @@ impl Recipe {
             || recipe.runup_margin < 1.0
             || !recipe.minimum_speed_fraction.is_finite()
             || !(0.0 < recipe.minimum_speed_fraction && recipe.minimum_speed_fraction <= 1.0)
-            || [recipe.drive_s, recipe.deadline_s, recipe.settle_s]
+            || [recipe.approach_s, recipe.deadline_s, recipe.settle_s]
                 .iter()
                 .any(|v| !v.is_finite() || *v <= 0.0)
             || recipe.settle_s >= recipe.deadline_s
@@ -392,7 +393,8 @@ pub(crate) fn fixture_plan(app: &App) -> FixturePlan {
         spawn: Vec3::from_array(plan.spawn),
         rotation: Quat::from_array(plan.rotation),
         minimum_m_s: plan.minimum_m_s as f32,
-        drive_ticks: (recipe.drive_s
+        // DERIVED: full throttle covers the approach budget and the entire observation.
+        drive_ticks: ((recipe.approach_s + recipe.deadline_s)
             / app
                 .world()
                 .resource::<Time<Fixed>>()
@@ -426,7 +428,8 @@ mod tests {
             ("minimum_speed_fraction", json!(1.1)),
             ("settle_s", json!(0)),
             ("deadline_s", json!(-1)),
-            ("drive_s", json!("60")),
+            ("approach_s", json!("60")),
+            ("drive_s", json!(18)),
             ("typo", json!(1)),
         ] {
             let mut changed = value.clone();
@@ -679,7 +682,7 @@ mod tests {
         let mut contact = None;
         let mut losses = Vec::new();
         let mut exempted = Vec::new();
-        for tick in 0..plan.drive_ticks + WATCHED {
+        for tick in 0..plan.drive_ticks {
             let before = app.world().get::<LinearVelocity>(tank).unwrap().0;
             let start = app.world().get::<Position>(tank).unwrap().0;
             drive_tick(&mut app, tank, 1.0, 0.0);

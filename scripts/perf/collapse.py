@@ -320,14 +320,14 @@ def run_match(args, out, recipe):
 def ram_recipe(path):
     """Operator route choices; the server derives speed and run-up from its admitted tank data."""
     value = json.loads(path.read_text())
-    keys = {"instance", "heading_deg", "runup_margin", "minimum_speed_fraction", "drive_s", "deadline_s", "settle_s"}
+    keys = {"instance", "heading_deg", "runup_margin", "minimum_speed_fraction", "approach_s", "deadline_s", "settle_s"}
     if not isinstance(value, dict) or set(value) != keys or not isinstance(value["instance"], str) or not value["instance"]:
         raise ValueError(f"{path}: expected ram recipe fields {sorted(keys)} and a nonempty instance")
     for key in keys - {"instance"}:
         v = value[key]
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
             raise ValueError(f"{path}: {key} must be finite")
-    if value["runup_margin"] < 1 or not 0 < value["minimum_speed_fraction"] <= 1 or any(value[k] <= 0 for k in ("drive_s", "deadline_s", "settle_s")) or value["settle_s"] >= value["deadline_s"]:
+    if value["runup_margin"] < 1 or not 0 < value["minimum_speed_fraction"] <= 1 or any(value[k] <= 0 for k in ("approach_s", "deadline_s", "settle_s")) or value["settle_s"] >= value["deadline_s"]:
         raise ValueError(f"{path}: invalid ram margin, speed fraction or timing domain")
     return value
 
@@ -574,9 +574,11 @@ def run_ram(args, out, recipe):
                OVERMATCH_BOT="0", OVERMATCH_SERVER_STATS_S="1")
     dt = tick_seconds()
     # DERIVED: the client outlives approach, observation and both admission watchdog spans.
-    wall_limit = 2*args.startup_grace + recipe["drive_s"] + recipe["deadline_s"]
+    drive_window_s = recipe["approach_s"] + recipe["deadline_s"]
+    wall_limit = 2*args.startup_grace + drive_window_s
     ticks = math.ceil((wall_limit + 60)/dt)
-    throttle_ticks = math.ceil(recipe["drive_s"]/dt)
+    # DERIVED: full throttle covers the approach budget and the entire observation.
+    throttle_ticks = math.ceil(drive_window_s/dt)
     if ticks > 2**32-1 or throttle_ticks > 2**32-129:
         raise ValueError("ram duration exceeds harness tick representation")
     script = out / "ram.harness.ron"
