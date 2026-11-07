@@ -197,9 +197,7 @@ fn install_server_from(
         .add_observer(retire_construction_piece)
         .add_systems(
             FixedPostUpdate,
-            (admit_new_carriers, publish_poses)
-                .chain()
-                .in_set(crate::state::SimPhase::Publish),
+            (admit_new_carriers, publish_poses).in_set(crate::state::SimPhase::Publish),
         );
     let Some(lever) = lever else {
         return Ok(());
@@ -717,29 +715,11 @@ mod tests {
         // Fixture: a sweep departure followed by its law-stage split, both at tick 7.
         let parent = app
             .world_mut()
-            .spawn((
-                Piece {
-                    construction: 3,
-                    chunks: vec![1, 2],
-                    born: 7,
-                    retired: None,
-                },
-                Position(Vec3::ZERO),
-                Rotation(Quat::IDENTITY),
-            ))
+            .spawn(born_at_seven(vec![1, 2], Vec3::ZERO))
             .id();
         app.world_mut().flush();
         for chunk in [1, 2] {
-            app.world_mut().spawn((
-                Piece {
-                    construction: 3,
-                    chunks: vec![chunk],
-                    born: 7,
-                    retired: None,
-                },
-                Position(Vec3::Y),
-                Rotation(Quat::IDENTITY),
-            ));
+            app.world_mut().spawn(born_at_seven(vec![chunk], Vec3::Y));
         }
         app.world_mut().trigger(RetirePiece {
             entity: parent,
@@ -780,19 +760,21 @@ mod tests {
         install_server_from(&mut app, None, scenario::RON).unwrap();
         for _ in 0..2 {
             // Fixture: an invalid repeated identity, arriving in separate publication passes.
-            app.world_mut().spawn((
-                Piece {
-                    construction: 3,
-                    chunks: vec![1],
-                    born: 7,
-                    retired: None,
-                },
-                Position(Vec3::ZERO),
-                Rotation(Quat::IDENTITY),
-            ));
+            app.world_mut().spawn(born_at_seven(vec![1], Vec3::ZERO));
             app.world_mut().flush();
             app.world_mut().run_schedule(FixedPostUpdate);
         }
+    }
+
+    /// Fixture: a server body of construction 3's `chunks`, born at tick 7 and resting at `at`.
+    fn born_at_seven(chunks: Vec<u16>, at: Vec3) -> (Piece, Position, Rotation) {
+        let piece = Piece {
+            construction: 3,
+            chunks,
+            born: 7,
+            retired: None,
+        };
+        (piece, Position(at), Rotation(Quat::IDENTITY))
     }
 
     /// A piece spawned without its body pose is a construction bug, never a group that silently

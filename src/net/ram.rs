@@ -16,7 +16,7 @@ use crate::{
     },
     contact_transfer::ContactTransfers,
     cost::{
-        SendSample, TickSample, phases,
+        TickSample, Trace, phases,
         stages::{self, NamedTimes},
     },
     map::{MapManifest, Prototype},
@@ -90,16 +90,13 @@ pub(super) struct Ram {
     recipe: Recipe,
     plan: Option<Plan>,
     started: bool,
-    tick: u64,
     pre_speed: f32,
     impact: Option<Value>,
     impact_tick: Option<u64>,
     resting_s: f64,
     done: Option<End>,
     target: Option<Entity>,
-    rows: Vec<TickSample>,
-    sends: Vec<SendSample>,
-    last_send_tick: Option<u64>,
+    pub(super) trace: Trace<()>,
 }
 
 pub(super) fn install(app: &mut App, stats_on: bool) -> Result<(), LeverError> {
@@ -216,16 +213,13 @@ impl Ram {
             recipe,
             plan: None,
             started: false,
-            tick: 0,
             pre_speed: 0.0,
             impact: None,
             impact_tick: None,
             resting_s: 0.0,
             done: None,
             target: None,
-            rows: Vec::new(),
-            sends: Vec::new(),
-            last_send_tick: None,
+            trace: Trace::default(),
         }
     }
 
@@ -238,19 +232,10 @@ impl Ram {
         (plan.spawn.into(), Quat::from_array(plan.rotation))
     }
 
-    pub(super) fn send(&mut self, us: f64) {
-        if self.plan.is_some() && self.tick > 0 && self.last_send_tick != Some(self.tick) {
-            self.last_send_tick = Some(self.tick);
-            self.sends.push(SendSample {
-                tick: self.tick,
-                us,
-            });
-        }
-    }
-
     pub(super) fn json(&mut self) -> Value {
+        let (ticks, sends) = self.trace.drain();
         json!({"recipe": self.recipe, "plan": self.plan, "impact": self.impact,
-            "done": self.done, "ticks": std::mem::take(&mut self.rows), "sends": std::mem::take(&mut self.sends)})
+            "done": self.done, "ticks": ticks, "sends": sends})
     }
 }
 
@@ -272,10 +257,6 @@ pub(super) struct Census<'w, 's> {
 }
 
 impl Census<'_, '_> {
-    pub(super) fn sweep_counts(&self) -> (usize, usize) {
-        (self.sweep.sources, self.sweep.work.casts)
-    }
-
     pub(super) fn contact_points(&self) -> usize {
         self.contacts
             .groups()
@@ -283,37 +264,40 @@ impl Census<'_, '_> {
             .sum()
     }
 
-    pub(super) fn counts(&self) -> (usize, usize) {
-        (self.pieces.iter().len(), self.tanks.iter().len())
-    }
-
-    pub(super) fn collector(&mut self, us: f64) {
-        if let Some(row) = self.ram.as_deref_mut().and_then(|ram| ram.rows.last_mut()) {
-            row.collector_us = us;
-        }
-    }
-
-    pub(super) fn record(
-        &mut self,
+    /// This tick's sample, recorded by the ram and the scheduled collapse alike.
+    pub(super) fn sample(
+        &self,
         tick_us: f64,
         physics_us: f64,
         sleep_us: f64,
-        stages: [f64; crate::cost::stages::COUNT],
+        stages: [f64; stages::COUNT],
         phases_us: NamedTimes<{ phases::COUNT }>,
         dt: f64,
-    ) -> bool {
-        let Some(ram) = self
+    ) -> TickSample {
+        TickSample {
+            tick_us,
+            physics_us,
+            sleep_us,
+            stages: NamedTimes::new(&stages::NAMES, stages),
+            phases_us,
+            sweep_sources: self.sweep.sources,
+            sweep_casts: self.sweep.work.casts,
+            awake: self.pieces.iter().len(),
+            tanks: self.tanks.iter().len(),
+            dt_s: dt,
+        }
+    }
+
+    /// Records a tick of an armed, unfinished capture, returning its row's `collector_us`.
+    pub(super) fn record(&mut self, sample: TickSample) -> Option<&mut f64> {
+        let ram = self
             .ram
             .as_deref_mut()
-            .filter(|r| r.started && r.done.is_none())
-        else {
-            return false;
-        };
-        ram.tick += 1;
+            .filter(|r| r.started && r.done.is_none())?;
         let target = if let Some(target) = ram.target {
             if !self.constructions.contains(target) {
                 ram.done = Some(End::WorldChanged);
-                return false;
+                return None;
             }
             target
         } else {
@@ -326,6 +310,8 @@ impl Census<'_, '_> {
             ram.target = Some(target);
             target
         };
+        let row = ram.trace.push(sample, ());
+        let tick = row.tick;
         if ram.impact_tick.is_none() {
             // First contact is the tank's first touch by either path: the hull sweep, which runs
             // before physics and can open the matter it meets so the solver never touches it, or
@@ -358,36 +344,26 @@ impl Census<'_, '_> {
                 })
                 .map(|(_, &speed)| speed);
             if let Some(normal_speed) = solver.chain(swept).reduce(f32::max) {
-                ram.impact_tick = Some(ram.tick);
+                ram.impact_tick = Some(tick);
                 ram.impact = Some(
-                    json!({"tick": ram.tick, "speed_m_s": ram.pre_speed, "normal_speed_m_s": normal_speed}),
+                    json!({"tick": tick, "speed_m_s": ram.pre_speed, "normal_speed_m_s": normal_speed}),
                 );
             }
         }
-        let awake = self.pieces.iter().len();
         if let Some(impact_tick) = ram.impact_tick {
-            ram.resting_s = if awake == 0 { ram.resting_s + dt } else { 0.0 };
+            let dt = sample.dt_s;
+            ram.resting_s = if sample.awake == 0 {
+                ram.resting_s + dt
+            } else {
+                0.0
+            };
             if ram.resting_s >= ram.recipe.settle_s {
                 ram.done = Some(End::Rest);
-            } else if (ram.tick - impact_tick) as f64 * dt >= ram.recipe.deadline_s {
+            } else if (tick - impact_tick) as f64 * dt >= ram.recipe.deadline_s {
                 ram.done = Some(End::Deadline);
             }
         }
-        ram.rows.push(TickSample {
-            tick: ram.tick,
-            tick_us,
-            physics_us,
-            sleep_us,
-            stages: NamedTimes::new(&stages::NAMES, stages),
-            phases_us,
-            sweep_sources: self.sweep.sources,
-            sweep_casts: self.sweep.work.casts,
-            collector_us: 0.0,
-            awake,
-            tanks: self.tanks.iter().len(),
-            dt_s: dt,
-        });
-        true
+        Some(&mut row.collector_us)
     }
 }
 
@@ -501,7 +477,6 @@ mod tests {
     /// waits for spawn. Starting capture at admission would publish a zero-tank prefix to the runner.
     #[test]
     fn startup_retains_the_plan_without_starting_capture() {
-        use bevy::ecs::system::RunSystemOnce;
         let mut app = App::new();
         let mut recipe = Recipe::parse(include_str!("../../scripts/perf/ram.json")).unwrap();
         recipe.instance = "brick_0001".into(); // Fixture construction in the manifest below.
@@ -525,20 +500,7 @@ mod tests {
         let ram = app.world().resource::<Ram>();
         assert!(ram.plan.is_some());
         assert!(!ram.started);
-        assert!(
-            !app.world_mut()
-                .run_system_once(|mut census: Census| {
-                    census.record(
-                        0.0,
-                        0.0,
-                        0.0,
-                        [0.0; crate::cost::stages::COUNT],
-                        NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]),
-                        1.0,
-                    )
-                })
-                .unwrap()
-        );
+        assert!(!record(app.world_mut()));
         let mut ram = app.world_mut().resource_mut::<Ram>();
         let planned = ram.plan.as_ref().unwrap().spawn;
         assert_eq!(ram.pose().0.to_array(), planned);
@@ -549,7 +511,6 @@ mod tests {
     /// world as the old construction resting. The runner relies on that refusal.
     #[test]
     fn removed_target_refuses_the_capture() {
-        use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         let target = world.spawn_empty().id();
         world.despawn(target);
@@ -558,20 +519,20 @@ mod tests {
         let mut ram = armed();
         ram.target = Some(target);
         world.insert_resource(ram);
-        let captured = world
-            .run_system_once(|mut census: Census| {
-                census.record(
-                    0.0,
-                    0.0,
-                    0.0,
-                    [0.0; crate::cost::stages::COUNT],
-                    NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]),
-                    1.0,
-                )
-            })
-            .unwrap();
-        assert!(!captured);
+        assert!(!record(&mut world));
         assert_eq!(world.resource::<Ram>().done, Some(End::WorldChanged));
+    }
+
+    /// Runs the census once on an idle tick (fixture: one-second step); whether it captured.
+    fn record(world: &mut World) -> bool {
+        use bevy::ecs::system::RunSystemOnce;
+        world
+            .run_system_once(|mut census: Census| {
+                let times = NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]);
+                let sample = census.sample(0.0, 0.0, 0.0, [0.0; stages::COUNT], times, 1.0);
+                census.record(sample).is_some()
+            })
+            .unwrap()
     }
 
     /// A started capture on the shipped recipe. Fixture: the route and timing values are
@@ -589,14 +550,11 @@ mod tests {
         ram
     }
 
-    /// The admission gate reads the speed at first contact. The hull sweep runs before physics
-    /// and can open all the matter it meets, so the solver touches the target later and slower,
-    /// or never: a tank's sweep touch on the target sets the impact tick alone, at the sweep's
-    /// closing speed along its normal. Another body's touch and the tank's touch on another
-    /// construction are not the ram's impact.
+    /// The admission gate reads the speed at first contact, from either path: a tank's sweep
+    /// touch on the target alone sets the impact tick, at the sweep's closing speed. Another
+    /// body's touch and the tank's touch on another construction are not the ram's impact.
     #[test]
     fn a_sweep_touch_before_any_solver_contact_sets_the_impact_tick() {
-        use bevy::ecs::system::RunSystemOnce;
         use bevy::tasks::TaskPool;
         ComputeTaskPool::get_or_init(TaskPool::default);
         let mut world = World::new();
@@ -617,20 +575,6 @@ mod tests {
             },
             Breakage::new(crate::construction::tests::column_construction(), 3),
         ));
-        let record = |world: &mut World| {
-            world
-                .run_system_once(|mut census: Census| {
-                    census.record(
-                        0.0,
-                        0.0,
-                        0.0,
-                        [0.0; crate::cost::stages::COUNT],
-                        NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]),
-                        1.0,
-                    )
-                })
-                .unwrap()
-        };
         assert!(record(&mut world));
         assert_eq!(world.resource::<Ram>().impact_tick, None);
         // Fixture closing speeds, m/s; only the tank's touch on the target is the impact.

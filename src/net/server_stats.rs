@@ -390,17 +390,17 @@ fn record_tick(
     mut traces: (super::ram::Census, Option<ResMut<Loadtest>>),
     fixed: Res<Time<Fixed>>,
 ) {
-    let (ram, load) = &mut traces;
+    let (census, load) = &mut traces;
     if let Some(closed) = clock.closed() {
         let collect_start = Instant::now();
         stats.ticks.push(closed.us);
         let measured = stages.take_us();
         stages.add(
             crate::cost::stages::Work::ContactPoints,
-            ram.contact_points() as u64,
+            census.contact_points() as u64,
         );
         let work = stages.take_counts();
-        let captured = ram.record(
+        let sample = census.sample(
             closed.us,
             starts.physics_us,
             starts.sleep_us,
@@ -408,26 +408,11 @@ fn record_tick(
             phases.times(),
             fixed.timestep().as_secs_f64(),
         );
-        if let Some(load) = load.as_deref_mut().filter(|load| load.running()) {
-            let (awake, tanks) = ram.counts();
-            load.record(
-                crate::cost::TickSample {
-                    tick: 0, // The workload assigns its contiguous tick sequence after admission.
-                    tick_us: closed.us,
-                    physics_us: starts.physics_us,
-                    sleep_us: starts.sleep_us,
-                    stages: crate::cost::stages::NamedTimes::new(&NAMES, measured),
-                    phases_us: phases.times(),
-                    sweep_sources: ram.sweep_counts().0,
-                    sweep_casts: ram.sweep_counts().1,
-                    collector_us: 0.0,
-                    awake,
-                    tanks,
-                    dt_s: fixed.timestep().as_secs_f64(),
-                },
-                work,
-            );
-        }
+        let rows = [
+            census.record(sample),
+            load.as_deref_mut()
+                .and_then(|load| load.record(sample, work)),
+        ];
         for (window, us) in stats.stages.iter_mut().zip(measured) {
             window.push(us);
         }
@@ -436,11 +421,8 @@ fn record_tick(
         }
         let collector_us = collect_start.elapsed().as_secs_f64() * 1.0e6;
         stats.collector.push(collector_us);
-        if let Some(load) = load.as_deref_mut() {
-            load.collector(collector_us);
-        }
-        if captured {
-            ram.collector(collector_us);
+        for row in rows.into_iter().flatten() {
+            *row = collector_us;
         }
     }
 }
@@ -488,10 +470,10 @@ fn close_send(
     let us = start.elapsed().as_secs_f64() * 1.0e6;
     stats.send.push(us);
     if let Some(load) = load.as_deref_mut() {
-        load.send(us);
+        load.trace.send(us);
     }
     if let Some(ram) = ram.as_deref_mut() {
-        ram.send(us);
+        ram.trace.send(us);
     }
 }
 

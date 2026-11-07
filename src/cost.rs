@@ -19,10 +19,9 @@ use serde::Serialize;
 use serde_json::json;
 use stages::NamedTimes;
 
-/// Shared per-tick wire schema for the ram and scheduled-collapse instruments.
-#[derive(Serialize)]
+/// One fixed tick's measurements: the ram and scheduled-collapse instruments' shared schema.
+#[derive(Clone, Copy, Serialize)]
 pub(crate) struct TickSample {
-    pub(crate) tick: u64,
     pub(crate) tick_us: f64,
     pub(crate) physics_us: f64,
     pub(crate) sleep_us: f64,
@@ -31,16 +30,100 @@ pub(crate) struct TickSample {
     pub(crate) phases_us: NamedTimes<{ phases::COUNT }>,
     pub(crate) sweep_sources: usize,
     pub(crate) sweep_casts: usize,
-    pub(crate) collector_us: f64,
     pub(crate) awake: usize,
     pub(crate) tanks: usize,
     pub(crate) dt_s: f64,
 }
 
+#[cfg(test)]
+impl TickSample {
+    /// Fixture: an idle tick, for tests of numbering and admission that read no measurement.
+    pub(crate) fn idle() -> Self {
+        Self {
+            tick_us: 0.0,
+            physics_us: 0.0,
+            sleep_us: 0.0,
+            stages: NamedTimes::new(&stages::NAMES, [0.0; stages::COUNT]),
+            phases_us: NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]),
+            sweep_sources: 0,
+            sweep_casts: 0,
+            awake: 0,
+            tanks: 0,
+            dt_s: 0.0,
+        }
+    }
+}
+
+/// An instrument's tick trace, read by `scripts/perf/collapse.py`'s `read_tick_samples`: rows
+/// numbered from the instrument's own first tick, each with `E`'s fields, and one send per tick.
+pub(crate) struct Trace<E> {
+    tick: u64,
+    rows: Vec<Row<E>>,
+    sends: Vec<SendSample>,
+    last_send_tick: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct Row<E> {
+    pub(crate) tick: u64,
+    #[serde(flatten)]
+    sample: TickSample,
+    /// The stats collection that pushed this row, timed after the push.
+    pub(crate) collector_us: f64,
+    #[serde(flatten)]
+    extra: E,
+}
+
 #[derive(Serialize)]
 pub(crate) struct SendSample {
-    pub(crate) tick: u64,
-    pub(crate) us: f64,
+    tick: u64,
+    us: f64,
+}
+
+impl<E> Default for Trace<E> {
+    fn default() -> Self {
+        Self {
+            tick: 0,
+            rows: Vec::new(),
+            sends: Vec::new(),
+            last_send_tick: None,
+        }
+    }
+}
+
+impl<E> Trace<E> {
+    /// Numbers and keeps this tick's row; the caller writes its `collector_us`.
+    pub(crate) fn push(&mut self, sample: TickSample, extra: E) -> &mut Row<E> {
+        self.tick += 1;
+        let row = self.rows.len();
+        self.rows.push(Row {
+            tick: self.tick,
+            sample,
+            collector_us: 0.0,
+            extra,
+        });
+        &mut self.rows[row]
+    }
+
+    /// A send belongs to the last numbered tick. Before the first row there is none, and a
+    /// second send before the next row repeats that tick, so it keeps its first.
+    pub(crate) fn send(&mut self, us: f64) {
+        if self.tick > 0 && self.last_send_tick != Some(self.tick) {
+            self.last_send_tick = Some(self.tick);
+            self.sends.push(SendSample {
+                tick: self.tick,
+                us,
+            });
+        }
+    }
+
+    /// The rows and sends since the last drain; numbering continues across drains.
+    pub(crate) fn drain(&mut self) -> (Vec<Row<E>>, Vec<SendSample>) {
+        (
+            std::mem::take(&mut self.rows),
+            std::mem::take(&mut self.sends),
+        )
+    }
 }
 
 use crate::ballistics::Projectile;
@@ -367,5 +450,25 @@ mod tests {
             "only the played ticks past warmup reach the persisted table"
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// `collapse.py` refuses a gap in tick numbers and a send no tick owns. Numbering must
+    /// survive each stats line's drain, and each tick keeps exactly its first send.
+    #[test]
+    fn a_trace_numbers_rows_across_drains_and_keeps_one_send_per_tick() {
+        let mut trace = Trace::<()>::default();
+        trace.send(1.0);
+        trace.push(TickSample::idle(), ()).collector_us = 7.0;
+        trace.send(4.0);
+        trace.send(5.0);
+        let drained = serde_json::to_value(trace.drain()).unwrap();
+        assert_eq!(drained[0][0]["tick"], 1);
+        assert_eq!(drained[0][0]["collector_us"], 7.0);
+        assert_eq!(drained[1], serde_json::json!([{"tick": 1, "us": 4.0}]));
+        trace.push(TickSample::idle(), ());
+        trace.send(6.0);
+        let drained = serde_json::to_value(trace.drain()).unwrap();
+        assert_eq!(drained[0][0]["tick"], 2);
+        assert_eq!(drained[1], serde_json::json!([{"tick": 2, "us": 6.0}]));
     }
 }

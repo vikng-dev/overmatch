@@ -11,59 +11,48 @@ use std::time::Instant;
 use bevy::prelude::{Add, App, On, Remove, Res, Resource};
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
-#[derive(Clone, Copy)]
-pub(crate) enum Stage {
-    Intake,
-    Structure,
-    Refit,
-    Publish,
-    Contacts,
-    Sweep,
-    Crumble,
+/// An index enum and its wire labels, declared as one list: a variant's discriminant indexes
+/// its own label, so a label cannot drift from its variant.
+macro_rules! labelled {
+    ($(#[$doc:meta])* $name:ident, $labels:ident, $count:ident { $($variant:ident = $label:literal,)+ }) => {
+        $(#[$doc])*
+        #[derive(Clone, Copy)]
+        pub(crate) enum $name {
+            $($variant,)+
+        }
+        pub(crate) const $labels: [&str; [$($label),+].len()] = [$($label),+];
+        pub(crate) const $count: usize = $labels.len();
+    };
 }
 
-pub(crate) const NAMES: [&str; 7] = [
-    "intake_us",
-    "structure_us",
-    "refit_us",
-    "publish_us",
-    "contacts_us",
-    "sweep_us",
-    "crumble_us",
-];
-pub(crate) const COUNT: usize = NAMES.len();
+labelled!(Stage, NAMES, COUNT {
+    Intake = "intake_us",
+    Structure = "structure_us",
+    Refit = "refit_us",
+    Publish = "publish_us",
+    Contacts = "contacts_us",
+    Sweep = "sweep_us",
+    Crumble = "crumble_us",
+});
+
+labelled!(
+    /// Counts accompany wall brackets; they do not add time or change law decisions.
+    Work, WORK_NAMES, WORK_COUNT {
+        AssessedOwners = "assessed_owners",
+        StructureSolveColumns = "structure_solve_columns",
+        PreparedBodies = "prepared_bodies",
+        PreparedColliders = "prepared_colliders",
+        Landings = "landings",
+        LandingPasses = "landing_passes",
+        LandingOps = "landing_ops",
+        ContactPoints = "contact_points",
+        CollidersAdded = "colliders_added",
+        CollidersRemoved = "colliders_removed",
+    }
+);
 
 #[derive(Resource, Default)]
 pub(crate) struct Stages(Arc<[AtomicU64; COUNT]>, Arc<[AtomicU64; WORK_COUNT]>);
-
-/// Counts accompany wall brackets; they do not add time or change law decisions.
-#[derive(Clone, Copy)]
-pub(crate) enum Work {
-    AssessedOwners,
-    StructureSolveColumns,
-    PreparedBodies,
-    PreparedColliders,
-    Landings,
-    LandingPasses,
-    LandingOps,
-    ContactPoints,
-    CollidersAdded,
-    CollidersRemoved,
-}
-
-pub(crate) const WORK_NAMES: [&str; 10] = [
-    "assessed_owners",
-    "structure_solve_columns",
-    "prepared_bodies",
-    "prepared_colliders",
-    "landings",
-    "landing_passes",
-    "landing_ops",
-    "contact_points",
-    "colliders_added",
-    "colliders_removed",
-];
-pub(crate) const WORK_COUNT: usize = WORK_NAMES.len();
 pub(crate) type NamedCounts = NamedValues<WORK_COUNT, u64>;
 pub(crate) type NamedTimes<const N: usize> = NamedValues<N, f64>;
 
