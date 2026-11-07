@@ -539,7 +539,7 @@ keeps the belt reactions staged against its own owner: the floor's traction driv
 wall of the same house, so taking out the owner's whole staged set would drop a real press, and
 the plug that would bound the subtraction to the matter cut is what the cut itself decides.
 
-Every remaining solver transfer enters the structure check as its whole mean force `J_solver/dt`.
+Every remaining structural solver transfer enters the structure check as its whole mean force `J_solver/dt`.
 Physics already changed those bodies' momenta; contact intake supplies no second blow, source
 mass share, delayed cap or give-back. Sleeping contact forces persist until their contact ends.
 
@@ -548,15 +548,20 @@ hulls with the motion Avian integrates before its solve; Avian constrains separa
 against projected contact planes, and a body another body pushes within the solve can close a
 gap its own free motion opens (a freed chunk stands only `LOOSE_GAP_M` off the faces it shared).
 The hook drops those separated points on covered chunks outside the touching body's cast, Avian's
-contact tolerance band included; a body the sweep did not cast keeps every point.
+contact tolerance band included; a body the sweep did not cast keeps every point. The support-gap
+coincidence with gravity reach, and its dependence on tick rate and substeps, is stated at
+`LOOSE_GAP_M`; retaining the pair through Avian's minimum speculative margin does not remove it.
+
+Avian's warm-start matcher treats unknown feature IDs as absent identities: those contacts
+match only by nearby anchors. The engine patch and its class witness are recorded in
+`vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`, "Unknown contact features".
 
 A cut reads the touching body's own motion and drive, and a pusher reaches it only through that
 drive: the force the body's solver contacts moved into it over the last step from every body but
 standing construction, less the normal momentum that stopped the approach, is part of its drive
 and cast acceleration. Per point it reads `(J - normal × m_eff × max(closing_speed, 0)) / dt`:
 velocity already holds the approach's momentum, so replaying it as drive counts a blow twice
-(StandIn: no sweep
-couples bodies in contact; `sweep_intake::pushes`). Without it a pusher's force reached standing
+(StandIn: no sweep couples bodies in contact; `sweep_intake::pushes`). Without it a pusher's force reached standing
 matter only through the solver contact the structure check reads, a law stage late, while the cuts
 ahead of the pushed body read that body's own demand: MEASURED on the tracked ram, from +3 the hull
 meets the house only through rubble, which took 150.2 and 105.7 kN·s off the hull at +3 and +4
@@ -582,8 +587,7 @@ for separated points: an overlap moves momentum unjudged while it lasts (a body 
 face, a piece leaning on a side face, a soft-contact pushout). The tracked ram asserts the stronger
 form every tick of one straight ram, reading "judged" from the sweep's own patches before the laws
 commit; nothing else covers it, and it prints what such contacts move into bodies it did not cast.
-The objection that the hook vetoes contact by cast membership (base-truths review) is answered by
-these statements, by no cast meaning no verdict and by the push in the drive. Rejected: casting a
+Rejected: casting a
 swept body's overlapping and in-band covered chunks into its patch at closing speed `max(v_n, 0)`,
 so the hook could drop every non-member point. In the band it re-holds the plug the band releases,
 against a demand that omits the pusher behind it (the 97 kN·s departure returns); in an overlap

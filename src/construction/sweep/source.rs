@@ -115,7 +115,10 @@ impl RigidMotion {
     /// `turn`: `None` unless the cast closes along `normal`. The body's own motion, closing,
     /// crosses the cast's gap `d` there at the root `t` of `d = v_n t + ½ a_n t²` it reaches
     /// moving inward, `v_n` the point's closing speed at the tick's start, and closes at
-    /// `v_n + a_n t`.
+    /// `v_n + a_n t`. A body at rest on matter closes at rest, not at its cast's fall.
+    /// DERIVED at equal tick fractions: the continuous chord's lateral error is at most
+    /// `|a_perp| dt²/8`; Avian's substep reach adds at most `|a_perp| dt²/(2N)` for `N`
+    /// substeps, `a_perp` the acceleration across the cast direction.
     fn closing(self, normal: Vec3, turn: Vec3, reach: f32) -> Option<f32> {
         let a = self.acceleration.dot(normal);
         let v = (self.velocity - self.acceleration * self.lead + turn).dot(normal);
@@ -258,9 +261,6 @@ impl QueryTree<'_> {
             let turn = motion
                 .spin
                 .cross(at - motion.centre - motion.velocity * reach);
-            // The cast decides the contact pose and inward motion; the body's motion along the
-            // normal decides when and how fast it closes. A body at rest on matter closes at its
-            // rest, not at its cast's fall.
             if let Some(speed) = self.motion.closing(normal, turn, reach) {
                 first = Some(Witness {
                     reach,

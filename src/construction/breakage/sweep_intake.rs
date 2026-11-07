@@ -1360,8 +1360,8 @@ mod tests {
 
     /// The game's environment destruction: a body a heavier one presses into rubble or standing
     /// matter reads that push in its drive, each solver contact once, regardless of classification;
-    /// standing construction pushes nothing, since its own cut judges that contact, and
-    /// a belt contact is a force already applied. Without the push, a cut ahead of pushed matter
+    /// standing construction pushes nothing, since its own cut judges that contact. Without the
+    /// push, a cut ahead of pushed matter
     /// reads only the pushed body's own drive and holds the pusher through it.
     #[test]
     fn a_pushed_body_reads_each_pushers_force_once() {
@@ -1381,7 +1381,7 @@ mod tests {
         };
         let transfers = ContactTransfers::fixture(
             vec![
-                // The hull, no structure, pushes the rubble: read from the rubble's side alone.
+                // The hull pushes rubble through one canonical reading.
                 vec![point(rubble, hull, Vec3::NEG_X * 6.0)],
                 // Two pieces: the canonical reading contributes to both bodies.
                 vec![point(under, rubble, Vec3::Y * 4.0)],

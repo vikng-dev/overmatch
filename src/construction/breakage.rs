@@ -2516,6 +2516,9 @@ pub(crate) fn chunk_collider(kind: &ConstructionKind, c: usize, origin: Vec3) ->
 /// a round crossing two such joints would read two plates where the intact element reads one. An
 /// oblique round can cross two: the shipped house's 0.25 m walls are cut into chunks 0.225 to
 /// 0.26 m across (DERIVED from its construction file).
+/// Avian's minimum speculative margin retains a resting pair; support after release still needs
+/// the gravity cast to cross this gap: DERIVED 1.40 mm at 64 Hz with 6 substeps, against 1 mm.
+/// Tick-rate or substep changes must recheck that reach.
 pub(crate) const LOOSE_GAP_M: f32 = 1e-3;
 
 /// Resolution: how far a contact hull's corner may pass one of its planes and still bound it, m:
