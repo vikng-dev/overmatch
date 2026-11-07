@@ -20,11 +20,10 @@
 //! joints that did not part is a fragment.
 //!
 //! THE SIZE SPLIT ([`route`]). A fragment stays a server body through the construction's split
-//! path ([`crate::construction::breakage::PendingSplit`]) when its occupied volume's cube root
-//! reaches the server's rubble resolution ([`PhysicalLaws::server_rubble_min_size_m`]), or when a
-//! hull would feel its mass ([`PhysicalLaws::server_rubble_hull_kg`]). Any other leaves the
-//! simulation: the record writes its chunks as dust, and one [`Shed`] carries it to the players'
-//! decoration ([`super::decor`]), which only draws it.
+//! path ([`crate::construction::breakage::PendingSplit`]) when its size, the cube root of its
+//! occupied volume, reaches the server's smallest body ([`PhysicalLaws::server_rubble_min_size_m`]).
+//! Any other leaves the simulation: the record writes its chunks as dust, and one [`Shed`] carries
+//! it to the players' decoration ([`super::decor`]), which only draws it.
 
 use std::collections::BTreeMap;
 
@@ -41,7 +40,7 @@ use crate::construction::breakage::{
 };
 use crate::construction::fracture::bondsolve::Wrench;
 use crate::construction::fracture::parts::Kernel;
-use crate::construction::fracture::{Cause, Failure, Side, State, Structure};
+use crate::construction::fracture::{Cause, Failure, Fate, Side, State, Structure};
 use crate::contact_law::{Contactor, peak_force};
 use crate::contact_transfer::ContactTransfers;
 use crate::cost::stages::{Stage, Stages, Work};
@@ -228,18 +227,14 @@ pub(crate) fn crumble(
     }
 }
 
-/// Whether `fragment` stays a server body (module doc): it reaches the server's rubble
-/// resolution, or a hull would feel its mass.
+/// Whether `fragment` stays a server body (module doc): its size reaches the server's smallest
+/// body, whatever its mass.
 pub(crate) fn server_body(structure: &Structure, fragment: &[usize]) -> bool {
-    let laws = PhysicalLaws::shipped();
-    let (volume, mass) = fragment.iter().fold((0.0_f32, 0.0_f32), |(v, m), &c| {
-        let chunk = &structure.chunks[c];
-        (v + chunk.volume, m + chunk.mass)
-    });
-    volume.cbrt() >= laws.server_rubble_min_size_m || mass >= laws.server_rubble_hull_kg
+    let volume: f32 = fragment.iter().map(|&c| structure.chunks[c].volume).sum();
+    volume.cbrt() >= PhysicalLaws::shipped().server_rubble_min_size_m
 }
 
-/// Coarsen to the server's rubble resolution ([`server_body`]): a fragment too fine to stay a
+/// Coarsen to the server's smallest body ([`server_body`]): a fragment too small to stay a
 /// body alone joins one leaving with it across a joint parted in this event, so its matter stays
 /// present for hulls and rounds. The largest parted joint decides first, joint index breaking ties.
 /// Retained edges preserve earlier absorption without restoring material strength. Runs within
@@ -758,6 +753,14 @@ pub(crate) fn route(
         })
         .collect();
     (kept, sheds)
+}
+
+/// Mark `sheds`' chunks as dust in `state`: what [`route`] sheds leaves the simulation. Landings
+/// mark nothing, as their split keeps only owned chunks.
+pub(crate) fn mark_dust(state: &mut State, sheds: &[Shed]) {
+    for &c in sheds.iter().flat_map(|shed| &shed.chunks) {
+        state.fate[usize::from(c)] = Fate::Dust;
+    }
 }
 
 /// Mount the crumble on the authority in [`crate::construction::breakage::LandingSet`]: after the

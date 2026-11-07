@@ -724,6 +724,16 @@ pub(crate) struct ReleasedMotion {
     pub(crate) centre: Vec3,
 }
 
+impl ReleasedMotion {
+    pub(crate) fn at_rest(centre: Vec3) -> Self {
+        Self {
+            velocity: Vec3::ZERO,
+            spin: Vec3::ZERO,
+            centre,
+        }
+    }
+}
+
 /// A cut's swept matter inherits its exchange; matter losing its last support starts at rest.
 /// Below-floor merging (`crumble::merge_fragments`) can join both: project their combined linear
 /// and angular momentum onto one rigid field, using occupied mass properties. Pure fields require
@@ -740,11 +750,7 @@ pub(super) fn fragment_motion(
         return motion;
     }
     if count == 0 {
-        return ReleasedMotion {
-            velocity: Vec3::ZERO,
-            spin: Vec3::ZERO,
-            centre: pose.translation,
-        };
+        return ReleasedMotion::at_rest(pose.translation);
     }
     let parts: Vec<_> = group.iter().map(|&c| kind.sweep.part(c, pose)).collect();
     let mass: f64 = parts.iter().map(|p| p.mass).sum();
@@ -884,11 +890,7 @@ pub(super) fn sweep_departure(
             });
         }
     });
-    for shed in &sheds {
-        for &c in &shed.chunks {
-            breakage.live.state.fate[usize::from(c)] = Fate::Dust;
-        }
-    }
+    crate::debris::crumble::mark_dust(&mut breakage.live.state, &sheds);
     (departures, sheds)
 }
 

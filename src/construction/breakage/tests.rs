@@ -338,9 +338,13 @@ fn spawn_departures(app: &mut App, departures: Vec<PreparedDeparture>) {
 
 /// Above-ground matter of `structure` grown from its first above-ground chunk across bonded
 /// joints, ascending, until it stays a server body: the fixture's choice by class. `None` when
-/// the construction has no above-ground matter or its connected matter never reaches one.
+/// its connected matter never reaches one.
 fn resolved_group(structure: &Structure) -> Option<Vec<usize>> {
-    let first = structure.chunks.iter().position(|chunk| !chunk.buried)?;
+    let first = structure
+        .chunks
+        .iter()
+        .position(|chunk| !chunk.buried)
+        .expect("the caller found above-ground matter");
     let (mut group, mut frontier) = (Vec::new(), BTreeSet::from([first]));
     while let Some(c) = frontier.pop_first() {
         group.push(c);
@@ -370,16 +374,21 @@ fn resolved_group(structure: &Structure) -> Option<Vec<usize>> {
 
 /// The game's environment destruction routes unsupported matter from every admitted map kind:
 /// a released server body reaches the Driver through centroid-local colliders, and a lone chunk
-/// too fine to stay one reaches decor and the ledger. Both routes run on every kind that has
-/// such matter; the server-body route must run on every kind. Fixture: sever the matter's bonds.
+/// too small to stay one reaches decor and the ledger. The server-body route runs on every kind
+/// with above-ground matter, and the decor route, the only end-to-end witness of a structure
+/// release's dust, on at least one. Fixture: sever the matter's bonds.
 #[test]
 fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
+    let mut decor_runs = 0;
     for (asset, kind) in admitted_kinds() {
         let kind = &kind;
         let structure = &kind.structure;
-        let Some(group) = resolved_group(structure) else {
-            continue; // Valid constructions can have no above-ground breakable matter to release.
-        };
+        if structure.chunks.iter().all(|chunk| chunk.buried) {
+            continue; // A valid construction can have no above-ground matter to release.
+        }
+        let group = resolved_group(structure).unwrap_or_else(|| {
+            panic!("{asset}: its connected above-ground matter reaches a server body")
+        });
         let start = || {
             let (mut app, root) = composed_kind(false, kind);
             app.init_resource::<Sheds>()
@@ -392,6 +401,7 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
             !structure.chunks[c].buried && !crate::debris::crumble::server_body(structure, &[c])
         });
         if let Some(chunk) = decor {
+            decor_runs += 1;
             let (mut app, root) = start();
             isolate(&mut app, root, &[chunk]);
             app.update();
@@ -545,6 +555,10 @@ fn admitted_map_kinds_detach_with_common_centroid_local_colliders() {
             "MEASURED {asset}: common detachment retains chunks {group:?} (decor witness {decor:?}), direct contact hulls, moving bounds and production belt support"
         );
     }
+    assert!(
+        decor_runs > 0,
+        "an admitted kind holds a chunk below the rubble floor"
+    );
 }
 
 /// A breakable element with at least three chunks, and its three chunks whose centroids lie
@@ -3478,38 +3492,80 @@ fn a_chunk_freed_in_place_takes_no_energy_from_its_neighbours() {
 }
 
 /// The game's environment destruction separates contact only where two bodies' coplanar faces
-/// meet: on every admitted kind, each chunk-to-chunk joint lies on a face of both its chunks, and
-/// each contact hull stands exactly `LOOSE_GAP_M` behind its occupied hull on its joint faces and
-/// nowhere else. A proportional inset moves farther faces by more and fails.
+/// meet. On every admitted kind, read from the joints' own geometry rather than the code that
+/// picks faces: each contact hull is its chunk's half-spaces with the faces at its joints set back
+/// `LOOSE_GAP_M`, so two chunks freed in place stand at least twice that apart, and no other face
+/// moves. A mutant that sets back a face opposite its joint leaves the joint flush and fails; a
+/// proportional inset moves farther faces by more and fails.
 #[test]
 fn contact_hulls_set_back_only_joint_faces_by_the_contact_gap() {
+    // Resolution: f32 construction-frame coordinates (ulp 3.8 µm below 32 m, DERIVED).
+    let tolerance = 2e-5;
     for (_, kind) in admitted_kinds() {
         let structure = &kind.structure;
+        let mut expected = vec![BTreeSet::new(); structure.chunks.len()];
         for (j, joint) in structure.joints.iter().enumerate() {
-            if let Side::Chunk(b) = joint.b {
-                for c in [joint.a, b] {
-                    assert!(
-                        joint_face(&kind.layout.blocks[c], joint).is_some(),
+            let sides = match joint.b {
+                Side::Chunk(b) => vec![joint.a, b],
+                Side::Ground => vec![joint.a],
+            };
+            for c in sides {
+                let block = &kind.layout.blocks[c];
+                let centroid = structure.chunks[c].centroid;
+                let inward = if joint.normal.dot(centroid - joint.centroid) > 0.0 {
+                    joint.normal
+                } else {
+                    -joint.normal
+                };
+                // The face at the joint is the one facing out against the inward direction.
+                let (face, &(normal, offset)) = block
+                    .planes
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| (-inward).dot(a.0).total_cmp(&(-inward).dot(b.0)))
+                    .unwrap();
+                let on_face = (normal.dot(joint.centroid) - offset).abs()
+                    <= crate::construction::fracture::ON_PLANE;
+                if !on_face {
+                    assert_eq!(
+                        joint.b,
+                        Side::Ground,
                         "joint {j} lies on a face of chunk {c}"
                     );
+                    continue; // An anchor on no face sets none back.
                 }
+                expected[c].insert(face);
             }
         }
         for (c, block) in kind.layout.blocks.iter().enumerate() {
-            let joints = structure
-                .joints
-                .iter()
-                .filter(|joint| joint.a == c || joint.b == Side::Chunk(c));
-            let faces = joint_faces(block, joints);
             let centroid = structure.chunks[c].centroid;
             let hull = kind.sweep.contact_hull(c);
             let points = hull.shape().as_convex_polyhedron().unwrap().points();
+            let set_back: BTreeSet<_> = block
+                .planes
+                .iter()
+                .enumerate()
+                .filter(|(_, (normal, offset))| {
+                    let reach = points
+                        .iter()
+                        .map(|&p| normal.dot(p + centroid) - offset)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    reach < -LOOSE_GAP_M / 2.0
+                })
+                .map(|(face, _)| face)
+                .collect();
+            assert_eq!(set_back, expected[c], "chunk {c}'s set-back faces");
             let planes: Vec<_> = block
                 .planes
                 .iter()
-                .zip(&faces)
-                .map(|(&(normal, offset), &set)| {
-                    (normal, offset - if set { LOOSE_GAP_M } else { 0.0 })
+                .enumerate()
+                .map(|(face, &(normal, offset))| {
+                    let gap = if expected[c].contains(&face) {
+                        LOOSE_GAP_M
+                    } else {
+                        0.0
+                    };
+                    (normal, offset - gap)
                 })
                 .collect();
             // The hull is the set-back half-spaces' intersection: no corner passes one of their
@@ -3517,8 +3573,6 @@ fn contact_hulls_set_back_only_joint_faces_by_the_contact_gap() {
             // (a bake sliver narrower than the gap) leaves no corner on its plane.
             for &corner in points {
                 let at = corner + centroid;
-                // Resolution: f32 construction-frame coordinates (ulp 3.8 µm below 32 m, DERIVED).
-                let tolerance = 2e-5;
                 let mut on = 0;
                 for &(normal, offset) in &planes {
                     let past = normal.dot(at) - offset;
@@ -3591,14 +3645,8 @@ fn a_freed_chunks_ballistic_chord_is_its_occupied_chord() {
                     .unwrap()
                     .0
             };
-            let exit = |hull: &Collider| {
-                hull.cast_ray(Vec3::ZERO, Quat::IDENTITY, -from, -ray, reach * 2.0, true)
-                    .unwrap()
-                    .0
-            };
             assert!(
-                (cast(hull) - cast(&occupied)).abs() < 1e-5
-                    && (exit(hull) - exit(&occupied)).abs() < 1e-5,
+                (cast(hull) - cast(&occupied)).abs() < 1e-5,
                 "contact separation changed chunk {chunk}'s ballistic face on {ray}"
             );
         }
@@ -3831,7 +3879,7 @@ fn owner_laws_and_prepared_groups_do_not_depend_on_worker_assignment() {
                             OwnerInputs {
                                 step: STEP,
                                 pool: &pool,
-                                reusable: &BTreeMap::new(),
+                                reusable: &ReusableColliders::Standing(BTreeMap::new()),
                                 taken,
                                 pressing: &[],
                                 resting: &[],
@@ -3916,17 +3964,19 @@ fn prepared_group_state(prepared: PreparedDeparture) -> impl std::fmt::Debug + P
             .chunks
             .into_iter()
             .map(|chunk| {
-                let ColliderSource::Fresh(occupied) = chunk.occupied else {
-                    panic!("no collider is rehomed from an empty map");
+                let occupied = match chunk.occupied {
+                    ColliderSource::Rehome(entity) => Err(entity),
+                    ColliderSource::Fresh(occupied) => {
+                        Ok((occupied.0.mass_properties(1.0), occupied.1, occupied.3))
+                    }
                 };
-                let ColliderSource::Fresh(contact) = chunk.contact else {
-                    panic!("no collider is rehomed from an empty map");
+                let contact = match chunk.contact {
+                    ColliderSource::Rehome(entity) => Err(entity),
+                    ColliderSource::Fresh(contact) => {
+                        Ok((contact.0.mass_properties(1.0), contact.1, contact.2))
+                    }
                 };
-                (
-                    chunk.local,
-                    (occupied.0.mass_properties(1.0), occupied.1, occupied.3),
-                    (contact.0.mass_properties(1.0), contact.1, contact.2),
-                )
+                (chunk.local, occupied, contact)
             })
             .collect::<Vec<_>>(),
     )
@@ -3955,6 +4005,13 @@ fn split_preparation_keeps_child_order_and_state_across_workers() {
         spin: Vec3::new(0.3, 0.5, -0.2),
         centre: Vec3::new(0.0, 1.5, 0.0),
     };
+    // Fixture: each chunk's two colliders, as a piece carries them.
+    let mut world = World::new();
+    let reusable = ReusableColliders::Piece(
+        (0..3)
+            .map(|c| (c, [(); 2].map(|_| world.spawn_empty().id())))
+            .collect(),
+    );
     let run = |threads| {
         let pool = TaskPoolBuilder::new().num_threads(threads).build();
         let prepared = split.prepare(
@@ -3963,7 +4020,7 @@ fn split_preparation_keeps_child_order_and_state_across_workers() {
             breakage.construction,
             root,
             motion,
-            &BTreeMap::new(),
+            &reusable,
         );
         assert_eq!(
             prepared
@@ -4436,8 +4493,7 @@ fn a_sweep_opens_the_swept_chunk_before_the_solver_and_keeps_momentum() {
     assert!(rubble != DVec3::ZERO, "the plug leaves as server rubble");
     let before = f64::from(mass * speed) * DVec3::X;
     let total = f64::from(mass) * after.as_dvec3() + rubble;
-    // Resolution: f32 roundoff of about 1e-7 per momentum term (DERIVED), summed over the
-    // solver's substeps and the rubble bodies.
+    // Resolution: f32 velocity and mass roundoff, about 1e-7 relative (DERIVED), with margin.
     assert!(
         (total - before).length() < 1e-4 * before.length(),
         "hull and freed rubble keep the hull's momentum: {total:?} against {before:?}"
@@ -4728,7 +4784,7 @@ fn a_swept_patch_keeps_its_server_body_mass_and_rigid_motion() {
         },
         7,
         &mut record,
-        &BTreeMap::new(),
+        &ReusableColliders::Standing(BTreeMap::new()),
     );
     assert!(sheds.is_empty());
     assert_eq!(departures.len(), 1);
@@ -4918,6 +4974,21 @@ fn assert_spawned_group_properties(world: &mut World) {
     }
 }
 
+/// Settle `root`, then mark every element replaced so `reconcile` gives each chunk its standing
+/// collider.
+fn install_standing_colliders(app: &mut App, root: Entity) {
+    use bevy::ecs::system::RunSystemOnce;
+    app.update();
+    app.update();
+    app.world_mut()
+        .get_mut::<Breakage>(root)
+        .unwrap()
+        .live
+        .swapped
+        .fill(true);
+    app.world_mut().run_system_once(reconcile).unwrap();
+}
+
 /// The game's environment destruction model: bookkeeping may reuse entity IDs, but every
 /// physics tick retains the same chunk shapes, ownership, material and solver properties.
 /// Fresh departure is also exercised: an intact element has no per-chunk entities to reuse.
@@ -4937,29 +5008,23 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
             Position(frame.translation),
             Rotation(frame.rotation),
         ));
-        app.update();
-        app.update();
-        app.world_mut()
-            .get_mut::<Breakage>(root)
-            .unwrap()
-            .live
-            .swapped
-            .fill(true);
-        app.world_mut().run_system_once(reconcile).unwrap();
+        install_standing_colliders(&mut app, root);
         app.init_resource::<ShapeInsertions>().add_observer(
             |_: On<Insert, Collider>, mut insertions: ResMut<ShapeInsertions>| insertions.0 += 1,
         );
         // Fixture: the upper two members leave together, then split into individual bodies.
         let group = vec![1, 2];
         let mut query = SystemState::<ChunkChildren>::new(app.world_mut());
-        let mut reusable = reusable_colliders(
+        let ReusableColliders::Standing(standing) = reusable_colliders(
             app.world().get::<Children>(root),
             &query.get(app.world()).unwrap(),
-        );
-        let old: Vec<_> = reusable
+        ) else {
+            panic!("a placed construction's colliders are a standing owner's");
+        };
+        let old: Vec<_> = standing
             .iter()
             .filter(|(chunk, _)| group.contains(&usize::from(**chunk)))
-            .map(|(_, entities)| entities.occupied)
+            .map(|(_, &entity)| entity)
             .collect();
         let departure = {
             let mut body = app.world_mut().get_mut::<Breakage>(root).unwrap();
@@ -4976,13 +5041,8 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
                 tick: 0,
             }
         };
-        let mut queue = bevy::ecs::world::CommandQueue::default();
-        let mut commands = Commands::new(&mut queue, app.world());
-        if !reuse {
-            reusable.clear();
-        }
-        spawn_prepared(&mut commands, prepare_group(departure, &reusable));
-        queue.apply(app.world_mut());
+        let reusable = ReusableColliders::Standing(if reuse { standing } else { BTreeMap::new() });
+        spawn_departures(&mut app, vec![prepare_group(departure, &reusable)]);
         assert_spawned_group_properties(app.world_mut());
         app.world_mut().run_system_once(reconcile).unwrap();
         if reuse {
@@ -5060,18 +5120,9 @@ fn departure_and_split_preserve_each_chunks_collider_contract() {
 /// standing collider before reconciliation can delete it; direct helper coverage is insufficient.
 #[test]
 fn the_law_installer_reuses_departing_standing_colliders() {
-    use bevy::ecs::system::RunSystemOnce;
     let kind = resolved_column();
     let (mut app, root) = composed_kind(false, &kind);
-    app.update();
-    app.update();
-    app.world_mut()
-        .get_mut::<Breakage>(root)
-        .unwrap()
-        .live
-        .swapped
-        .fill(true);
-    app.world_mut().run_system_once(reconcile).unwrap();
+    install_standing_colliders(&mut app, root);
     // Fixture: the upper member is free when its sole support seam separates.
     let chunk = 2;
     let old = app
@@ -5121,7 +5172,7 @@ fn a_cut_frees_unsupported_matter_without_building_standing_colliders() {
             },
             7,
             &mut record,
-            &BTreeMap::new(),
+            &ReusableColliders::Standing(BTreeMap::new()),
         )
     };
     let freed: Vec<_> = departures
@@ -5231,8 +5282,8 @@ fn absorbed_cut_and_unsupported_matter_keep_their_combined_momentum() {
 
 /// The game's environment physics: prepared contact mass survives insertion and follows shape,
 /// scale and density changes. Tripwire for the vendored `with_mass_properties_cache` patch
-/// (`vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`), which chunk colliders prepare on
-/// workers; the piece body owns occupied mass.
+/// (`vendor/avian3d-0.7.0-child-pose/OVERMATCH_PATCH.md`), which every chunk collider that is no
+/// sensor prepares on workers.
 #[test]
 fn prepared_contact_mass_is_valid_at_insertion_and_invalidates_with_its_inputs() {
     use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;

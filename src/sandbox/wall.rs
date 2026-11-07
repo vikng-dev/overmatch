@@ -807,9 +807,39 @@ fn setup_wall(
     commands.insert_resource(assets);
 }
 
+/// Resolution: preserve a solid, numerically resolved drawn hull when the requested inset would
+/// consume a small chunk. This limits contraction, not the chunk's occupied geometry.
+const MIN_INSET_SCALE: f32 = 0.2;
+
+/// A certified hull's points contracted about their mean by `gap` m: the drawn seams. The nearest
+/// face moves by the gap unless MIN_INSET_SCALE limits contraction; farther faces move
+/// proportionally.
+fn inset_point(block: &Block, gap: f32) -> impl Fn(Vec3) -> Vec3 {
+    assert!(
+        block.points.len() >= 4,
+        "a certified solid hull has at least four corners"
+    );
+    assert!(
+        gap.is_finite() && gap >= 0.0,
+        "a certified hull's requested inset is finite and nonnegative"
+    );
+    let middle = block.points.iter().sum::<Vec3>() / block.points.len() as f32;
+    let radius = block
+        .planes
+        .iter()
+        .map(|(n, o)| o - n.dot(middle))
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        radius.is_finite() && radius > 0.0,
+        "a certified convex hull's corner mean is strictly inside its bounding planes"
+    );
+    let shrink = (1.0 - gap / radius).max(MIN_INSET_SCALE);
+    move |point| middle + (point - middle) * shrink
+}
+
 /// A chunk's drawn mesh, vertices about its bounding box's centre: its faces inset by [`WallTool::seam_m`].
 fn chunk_mesh(block: &Block) -> Mesh {
-    let inset = crate::construction::breakage::inset_point(block, wall_tool().seam_m.0);
+    let inset = inset_point(block, wall_tool().seam_m.0);
     let (mut positions, mut normals, mut indices) = (Vec::new(), Vec::new(), Vec::new());
     for (normal, face) in block.faces() {
         let base = positions.len() as u32;

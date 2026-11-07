@@ -453,16 +453,6 @@ impl Block {
             .expect("a certified solid has bounding planes")
     }
 
-    /// The distance from the centroid of the corners to the nearest bounding plane, m.
-    /// The caller supplies a certified solid with at least four corners.
-    pub fn inradius(&self) -> f32 {
-        let centre = self.points.iter().sum::<Vec3>() / self.points.len() as f32;
-        self.planes
-            .iter()
-            .map(|(n, o)| o - n.dot(centre))
-            .fold(f32::INFINITY, f32::min)
-    }
-
     /// Where a ray from `origin` along unit `dir` enters this shape: its distance, `None` when it
     /// misses or the shape lies behind. A ray starting inside enters at 0.
     pub fn entry(&self, origin: Vec3, dir: Vec3) -> Option<f32> {

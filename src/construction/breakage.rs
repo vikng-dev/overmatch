@@ -871,10 +871,10 @@ fn read_contacts(
     mut read: Local<u64>,
     colliders: Colliders,
     constructions: Query<((&Position, &Rotation), &Breakage, Option<&Piece>)>,
-    loads: (ResMut<Queue>, ResMut<RestingLoads>),
+    mut queue: ResMut<Queue>,
+    mut resting: ResMut<RestingLoads>,
     stages: Option<Res<Stages>>,
 ) {
-    let (mut queue, mut resting) = loads;
     let _intake = Stages::start(stages.as_deref(), Stage::Intake);
     if transfers.steps() == *read {
         return;
@@ -1344,22 +1344,34 @@ fn moving_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
     near
 }
 
-/// The spin `run_laws` reads for the body at `root`, in its construction `frame` (rad/s): a
-/// moving group's body's angular velocity; zero on a placed construction, whose groups come loose at
-/// rest.
-fn construction_spin(
+/// The rigid field of the owner at `root` in world terms, its construction frame at `origin`: a
+/// moving group's body's; a placed construction's is at rest, so its groups come loose at rest.
+fn owner_motion(
     bodies: &Query<(Forces, &RigidBody)>,
+    centres: &Query<&avian3d::prelude::ComputedCenterOfMass>,
     root: Entity,
-    rotation: Quat,
+    origin: Vec3,
     moving: bool,
-) -> Vec3 {
+) -> ReleasedMotion {
     if !moving {
-        return Vec3::ZERO;
+        return ReleasedMotion::at_rest(origin);
     }
     let (body, _) = bodies
         .get(root)
         .expect("a moving chunk group is a physics body");
-    rotation.inverse() * body.angular_velocity()
+    let centre = centres
+        .get(root)
+        .expect("a physics body has its computed COM");
+    ReleasedMotion {
+        velocity: body.linear_velocity(),
+        spin: body.angular_velocity(),
+        centre: body.position().0 + body.rotation().0 * centre.0,
+    }
+}
+
+/// The spin `run_laws` reads of `motion`, in its construction frame turned by `rotation` (rad/s).
+fn construction_spin(motion: &ReleasedMotion, rotation: Quat) -> Vec3 {
+    rotation.inverse() * motion.spin
 }
 
 /// The field loads whose blow moves a moving group's body once the laws have run on `state`: a
@@ -1599,7 +1611,7 @@ fn evaluate_owner(
         tick,
         step,
     } = inputs;
-    let spin = construction_pose.rotation.inverse() * motion.spin;
+    let spin = construction_spin(&motion, construction_pose.rotation);
     let kind = breakage.kind.clone();
     let construction = breakage.construction;
     let live = breakage.live.as_mut();
@@ -1693,12 +1705,10 @@ fn evaluate_owner(
             tick,
             &mut record,
         );
-        for entry in record.entries {
-            if let Event::Dust(c) = entry.event {
-                live.state.fate[usize::from(c)] = Fate::Dust;
-            }
-            changes.events.push(entry.event);
-        }
+        crate::debris::crumble::mark_dust(&mut live.state, &sheds);
+        changes
+            .events
+            .extend(record.entries.into_iter().map(|entry| entry.event));
         changes.groups = kept
             .into_iter()
             .map(|group| {
@@ -1781,13 +1791,12 @@ fn evaluate_owner(
 fn apply_deposits(mut p: DepositParam) {
     if p.queue.0.is_empty()
         && !p.constructions.iter().any(|(root, pose, breakage, piece)| {
+            let frame = breakage.physics_frame(pose);
             breakage.live.assessment.needs_tick()
                 || (piece.is_some()
                     && breakage.live.assessment.spin_changed(construction_spin(
-                        &p.bodies,
-                        root,
-                        breakage.physics_frame(pose).rotation,
-                        true,
+                        &owner_motion(&p.bodies, &p.centres, root, frame.translation, true),
+                        frame.rotation,
                     )))
         })
     {
@@ -1851,7 +1860,15 @@ fn apply_deposits(mut p: DepositParam) {
         drop(intake);
     }
     for (root, _, breakage, piece) in p.constructions.iter() {
-        let spin = construction_spin(&p.bodies, root, frames[&root].rotation, piece.is_some());
+        let frame = frames[&root];
+        let motion = owner_motion(
+            &p.bodies,
+            &p.centres,
+            root,
+            frame.translation,
+            piece.is_some(),
+        );
+        let spin = construction_spin(&motion, frame.rotation);
         if breakage.live.assessment.needs_tick() || breakage.live.assessment.spin_changed(spin) {
             taken.entry(root).or_default();
         }
@@ -1867,42 +1884,30 @@ fn apply_deposits(mut p: DepositParam) {
             let mut effects = bevy::utils::Parallel::<Vec<OwnerEffects>>::default();
             let children = &p.children;
             let chunk_entities = &p.chunk_entities;
-            let bodies = &p.bodies;
+            let (bodies, centres) = (&p.bodies, &p.centres);
             let resting = &p.resting.0;
             let stages = p.stages.as_deref();
+            // One owner per task: an owner's laws scale with the chunks its loads reach, from one
+            // to hundreds, so contiguous batches of owners cannot balance them.
             p.constructions
                 .par_iter_many_unique_mut(batch.keys())
+                .batching_strategy(bevy::ecs::batching::BatchingStrategy::fixed(1))
                 .for_each(|(root, transform, mut breakage, piece)| {
                     let taken = &batch[&root];
                     let construction = breakage.physics_frame(transform);
-                    let (motion, reusable) = match piece {
-                        Some(_) => {
-                            let (body, _) = bodies
-                                .get(root)
-                                .expect("a moving group has its physics body");
-                            let centre = p
-                                .centres
-                                .get(root)
-                                .expect("a physics body has its computed COM");
-                            let motion = ReleasedMotion {
-                                velocity: body.linear_velocity(),
-                                spin: body.angular_velocity(),
-                                centre: body.position().0 + body.rotation().0 * centre.0,
-                            };
-                            // Moving owners transfer their colliders in split_groups.
-                            (motion, BTreeMap::new())
-                        }
-                        None => {
-                            let motion = ReleasedMotion {
-                                velocity: Vec3::ZERO,
-                                spin: Vec3::ZERO,
-                                centre: construction.translation,
-                            }; // Placed matter is at rest.
-                            // A construction without children has no chunk collider to rehome.
-                            let reusable =
-                                reusable_colliders(children.get(root).ok(), chunk_entities);
-                            (motion, reusable)
-                        }
+                    let motion = owner_motion(
+                        bodies,
+                        centres,
+                        root,
+                        construction.translation,
+                        piece.is_some(),
+                    );
+                    let reusable = match piece {
+                        // Moving owners transfer their colliders in split_groups; their laws
+                        // prepare no departure that would read these.
+                        Some(_) => ReusableColliders::Standing(BTreeMap::new()),
+                        // A construction without children has no chunk collider to rehome.
+                        None => reusable_colliders(children.get(root).ok(), chunk_entities),
                     };
                     let effect = evaluate_owner(
                         root,
@@ -2496,11 +2501,11 @@ pub(crate) fn chunk_collider(kind: &ConstructionKind, c: usize, origin: Vec3) ->
 
 /// Resolution: how far a freed chunk's contact face stands behind a face it shares with a
 /// neighbour or the ground, m. A chunk freed in place touches those faces, and at zero separation
-/// the solver's contact normal is rounding noise (Parry's GJK/EPA). MEASURED on the shipped house,
-/// 11 sampled releases with the nearest face set back this far: with no gap 3 took kicks of up to
-/// 5.5 cm and 0.22 J/kg from nothing; at 1 mm none gained energy, 1 km from the origin as well.
-/// Only contacts read it; the game's damage-model rounds meet the occupied hull
-/// ([`chunk_collider`]). Set back on both sides, a joint leaves 2 mm of void, which is all
+/// the solver's contact normal is rounding noise (Parry's GJK/EPA): MEASURED on the shipped house,
+/// with no gap 3 of 11 sampled releases took kicks of up to 5.5 cm and 0.22 J/kg from nothing. At
+/// this gap a chunk freed in place gains no more energy than gravity's work, at the origin and
+/// 1 km out (`a_chunk_freed_in_place_takes_no_energy_from_its_neighbours`). Only contacts read
+/// it ([`OccupiedCollider`]). Set back on both sides, a joint leaves 2 mm of void, which is all
 /// the walk bridges in one run (`WalkLaws::weld_perp` and `weld_run_gap_budget`, 2 mm each). So
 /// a round crossing two such joints would read two plates where the intact element reads one. An
 /// oblique round can cross two: the shipped house's 0.25 m walls are cut into chunks 0.225 to
@@ -2522,15 +2527,24 @@ pub(crate) fn joint_face(block: &Block, joint: &Joint) -> Option<usize> {
     })
 }
 
-/// Which faces of `block` carry one of its `joints`: where another body's coplanar face can meet
-/// it, a neighbour's once the two ride different bodies, or the ground's. A joint on none of its
-/// faces (soil holding a buried chunk's side) meets it on no coplanar face, so sets none back.
-pub(crate) fn joint_faces<'a>(block: &Block, joints: impl Iterator<Item = &'a Joint>) -> Vec<bool> {
+/// Which faces of `block` carry one of its `joints` (each with its index): where another body's
+/// coplanar face can meet it, a neighbour's once the two ride different bodies, or the anchor
+/// plane's. `Err` names a chunk-to-chunk joint on none of the faces: freed, its chunk would meet
+/// that neighbour with no contact gap. A ground anchor on no face (soil bearing a chunk's side)
+/// sets none back: the terrain a freed chunk meets is a collider of its own, not that plane.
+pub(crate) fn joint_faces<'a>(
+    block: &Block,
+    joints: impl Iterator<Item = (usize, &'a Joint)>,
+) -> Result<Vec<bool>, usize> {
     let mut faces = vec![false; block.planes.len()];
-    for face in joints.filter_map(|joint| joint_face(block, joint)) {
-        faces[face] = true;
+    for (j, joint) in joints {
+        match (joint_face(block, joint), joint.b) {
+            (Some(face), _) => faces[face] = true,
+            (None, Side::Ground) => {}
+            (None, Side::Chunk(_)) => return Err(j),
+        }
     }
-    faces
+    Ok(faces)
 }
 
 /// A freed chunk's contact hull about `origin`: `block`'s occupied planes with each of its joint
@@ -2580,32 +2594,6 @@ pub(crate) fn contact_collider(block: &Block, faces: &[bool], origin: Vec3) -> O
     Collider::convex_hull(points)
 }
 
-/// Resolution: preserve a solid, numerically resolved hull when the requested inset would
-/// consume a small fragment. This limits contraction, not the fragment's occupied geometry.
-const MIN_INSET_SCALE: f32 = 0.2;
-
-/// A certified hull's points contracted about their mean by `gap` m: the sandbox wall's drawn
-/// seams. The nearest face moves by the gap unless MIN_INSET_SCALE limits contraction; farther
-/// faces move proportionally.
-pub(crate) fn inset_point(block: &Block, gap: f32) -> impl Fn(Vec3) -> Vec3 {
-    assert!(
-        block.points.len() >= 4,
-        "a certified solid hull has at least four corners"
-    );
-    assert!(
-        gap.is_finite() && gap >= 0.0,
-        "a certified hull's requested inset is finite and nonnegative"
-    );
-    let middle = block.points.iter().sum::<Vec3>() / block.points.len() as f32;
-    let radius = block.inradius();
-    assert!(
-        radius.is_finite() && radius > 0.0,
-        "a certified convex hull's corner mean is strictly inside its bounding planes"
-    );
-    let shrink = (1.0 - gap / radius).max(MIN_INSET_SCALE);
-    move |point| middle + (point - middle) * shrink
-}
-
 /// The ballistic volume of law chunk `c`: its element's substance.
 fn chunk_volume(kind: &ConstructionKind, c: usize) -> BallisticVolume {
     let element = &kind.asset.elements[usize::from(kind.layout.element_of[c])];
@@ -2630,8 +2618,8 @@ struct Departure {
 
 /// What the game's damage-model rounds meet of a chunk, standing or freed, and a standing chunk's
 /// contact surface: its occupied hull in its centroid frame, which it keeps through standing,
-/// departure and later splits. The body owns mass (`spawn_prepared`); the cache only spares
-/// Avian's insertion hook the shape's integration.
+/// departure and later splits. A freed chunk's is a sensor on [`Layer::Armor`] that meets no
+/// contact. The body owns mass (`spawn_prepared`).
 type OccupiedCollider = (
     Collider,
     avian3d::prelude::Friction,
@@ -2645,8 +2633,7 @@ type ContactCollider = (Collider, avian3d::prelude::Friction, ChunkCollider);
 fn occupied_collider(kind: &ConstructionKind, c: usize, rotation: Quat) -> OccupiedCollider {
     let hull = chunk_collider(kind, c, kind.structure.chunks[c].centroid);
     (
-        super::sweep::posed(hull, rotation)
-            .with_mass_properties_cache(avian3d::prelude::ColliderDensity::default().0),
+        super::sweep::posed(hull, rotation),
         kind.chunk_friction(c),
         chunk_volume(kind, c),
         ChunkCollider(c as u16),
@@ -2655,56 +2642,68 @@ fn occupied_collider(kind: &ConstructionKind, c: usize, rotation: Quat) -> Occup
 
 fn freed_contact(kind: &ConstructionKind, c: usize, rotation: Quat) -> ContactCollider {
     (
-        super::sweep::posed(kind.sweep.contact_hull(c).clone(), rotation)
-            .with_mass_properties_cache(avian3d::prelude::ColliderDensity::default().0),
+        with_insertion_mass(super::sweep::posed(
+            kind.sweep.contact_hull(c).clone(),
+            rotation,
+        )),
         kind.chunk_friction(c),
         ChunkCollider(c as u16),
     )
 }
 
-/// The game's damage-model rounds meet a freed chunk's occupied hull; it meets no contact.
-fn ballistic_layers() -> CollisionLayers {
-    CollisionLayers::new([Layer::Armor], LayerMask::NONE)
+/// `collider` carrying the mass Avian's insertion hook integrates for a collider that is no
+/// sensor, prepared off the system thread. A sensor installs zero mass and never reads it.
+fn with_insertion_mass(collider: Collider) -> Collider {
+    collider.with_mass_properties_cache(avian3d::prelude::ColliderDensity::default().0)
 }
 
-/// A chunk's colliders under its owner: the occupied one always, the contact one once freed.
-#[derive(Clone, Copy)]
-struct ChunkEntities {
-    occupied: Entity,
-    contact: Option<Entity>,
+/// A departing owner's existing chunk colliders, by chunk, indexed once. A standing owner holds
+/// the occupied collider of each chunk whose element has cracked, and its departing chunks build
+/// their contact hulls fresh; a piece holds both colliders of every chunk, `[occupied, contact]`,
+/// since each has ridden both since it first left.
+enum ReusableColliders {
+    Standing(BTreeMap<u16, Entity>),
+    Piece(BTreeMap<u16, [Entity; 2]>),
 }
 
 type ChunkChildren<'w, 's> = Query<'w, 's, (&'static ChunkCollider, Has<BallisticVolume>)>;
-type ReusableColliders = BTreeMap<u16, ChunkEntities>;
 
-/// Existing colliders, indexed once per departing owner.
+/// A standing owner's chunk colliders among its `children`.
 fn reusable_colliders(children: Option<&Children>, chunks: &ChunkChildren) -> ReusableColliders {
-    let (mut occupied, mut contact) = (BTreeMap::new(), BTreeMap::new());
+    let mut occupied = BTreeMap::new();
     for &entity in children.into_iter().flatten() {
         if let Ok((chunk, ballistic)) = chunks.get(entity) {
-            let side = if ballistic {
-                &mut occupied
-            } else {
-                &mut contact
-            };
+            assert!(ballistic, "a standing chunk carries no contact hull");
             assert!(
-                side.insert(chunk.0, entity).is_none(),
-                "an owner has one occupied and at most one contact collider per chunk"
+                occupied.insert(chunk.0, entity).is_none(),
+                "a standing chunk has one collider"
             );
         } // Element and view children have no chunk address.
     }
-    let reusable = occupied
-        .into_iter()
-        .map(|(chunk, occupied)| {
-            let contact = contact.remove(&chunk);
-            (chunk, ChunkEntities { occupied, contact })
-        })
-        .collect();
-    assert!(
-        contact.is_empty(),
-        "a chunk's contact collider rides beside its occupied one"
-    );
-    reusable
+    ReusableColliders::Standing(occupied)
+}
+
+/// A piece's chunk colliders among its `children`: both of every chunk it carries.
+fn piece_colliders(children: &Children, chunks: &ChunkChildren) -> ReusableColliders {
+    let mut both = BTreeMap::<u16, [Option<Entity>; 2]>::new();
+    for &entity in children {
+        if let Ok((chunk, ballistic)) = chunks.get(entity) {
+            let side = &mut both.entry(chunk.0).or_default()[usize::from(!ballistic)];
+            assert!(
+                side.replace(entity).is_none(),
+                "a piece's chunk has one occupied and one contact collider"
+            );
+        } // View children have no chunk address.
+    }
+    ReusableColliders::Piece(
+        both.into_iter()
+            .map(|(chunk, [occupied, contact])| {
+                let occupied = occupied.expect("a piece's chunk keeps its occupied collider");
+                let contact = contact.expect("a piece's chunk rides its contact hull");
+                (chunk, [occupied, contact])
+            })
+            .collect(),
+    )
 }
 
 /// Where a departing chunk's collider comes from: its existing entity, rehomed, or prepared fresh.
@@ -2714,7 +2713,6 @@ enum ColliderSource<T> {
 }
 
 impl<T: Bundle> ColliderSource<T> {
-    /// Place the collider as `placed` at world `pose`.
     fn place(
         self,
         commands: &mut Commands,
@@ -2739,12 +2737,6 @@ impl<T: Bundle> ColliderSource<T> {
     }
 }
 
-impl<T> ColliderSource<T> {
-    fn is_fresh(&self) -> bool {
-        matches!(self, Self::Fresh(_))
-    }
-}
-
 struct PreparedChunk {
     local: Transform,
     occupied: ColliderSource<OccupiedCollider>,
@@ -2766,7 +2758,10 @@ fn count_prepared(stages: Option<&Stages>, departures: &[PreparedDeparture]) {
     let fresh = departures
         .iter()
         .flat_map(|d| &d.chunks)
-        .map(|chunk| u64::from(chunk.occupied.is_fresh()) + u64::from(chunk.contact.is_fresh()))
+        .map(|chunk| {
+            u64::from(matches!(chunk.occupied, ColliderSource::Fresh(_)))
+                + u64::from(matches!(chunk.contact, ColliderSource::Fresh(_)))
+        })
         .sum();
     stages.add(Work::PreparedColliders, fresh);
 }
@@ -2779,19 +2774,30 @@ fn prepare_group(departure: Departure, reusable: &ReusableColliders) -> Prepared
         .group
         .iter()
         .map(|&c| {
-            let existing = reusable.get(&(c as u16));
+            let (occupied, contact) = match reusable {
+                ReusableColliders::Standing(occupied) => (
+                    match occupied.get(&(c as u16)) {
+                        Some(&entity) => ColliderSource::Rehome(entity),
+                        None => ColliderSource::Fresh(occupied_collider(kind, c, rotation)),
+                    },
+                    ColliderSource::Fresh(freed_contact(kind, c, rotation)),
+                ),
+                ReusableColliders::Piece(both) => {
+                    let [occupied, contact] = *both
+                        .get(&(c as u16))
+                        .expect("a split child's chunks are its parent's");
+                    (
+                        ColliderSource::Rehome(occupied),
+                        ColliderSource::Rehome(contact),
+                    )
+                }
+            };
             PreparedChunk {
                 local: Transform::from_translation(
                     kind.structure.chunks[c].centroid - departure.launch.centroid,
                 ),
-                occupied: match existing {
-                    Some(entities) => ColliderSource::Rehome(entities.occupied),
-                    None => ColliderSource::Fresh(occupied_collider(kind, c, rotation)),
-                },
-                contact: match existing.and_then(|entities| entities.contact) {
-                    Some(entity) => ColliderSource::Rehome(entity),
-                    None => ColliderSource::Fresh(freed_contact(kind, c, rotation)),
-                },
+                occupied,
+                contact,
             }
         })
         .collect();
@@ -2853,7 +2859,10 @@ fn spawn_piece(
 
 #[cfg(test)]
 fn spawn_group(commands: &mut Commands, departure: Departure) {
-    spawn_prepared(commands, prepare_group(departure, &BTreeMap::new()));
+    spawn_prepared(
+        commands,
+        prepare_group(departure, &ReusableColliders::Standing(BTreeMap::new())),
+    );
 }
 
 /// Commit a group from its synchronous, independently prepared construction state.
@@ -2933,11 +2942,8 @@ fn spawn_prepared(commands: &mut Commands, prepared: PreparedDeparture) {
             Rotation(world.rotation),
             GlobalTransform::from(world),
         );
-        occupied.place(
-            commands,
-            (ChildOf(piece), local, Sensor, ballistic_layers()),
-            pose,
-        );
+        let ballistic = CollisionLayers::new([Layer::Armor], LayerMask::NONE);
+        occupied.place(commands, (ChildOf(piece), local, Sensor, ballistic), pose);
         contact.place(commands, (ChildOf(piece), local, piece_layers()), pose);
     }
 }
@@ -3035,7 +3041,7 @@ fn split_groups(
             let root = breakage.physics_frame(body);
             let inverse = root.rotation.inverse();
             let colliders = colliders.expect("a piece owns its chunk colliders");
-            let reusable = reusable_colliders(Some(colliders), &chunks);
+            let reusable = piece_colliders(colliders, &chunks);
             let children = split.prepare(
                 ComputeTaskPool::get(),
                 breakage,
@@ -3065,7 +3071,7 @@ fn split_groups(
 }
 
 /// A loose chunk's contact filter: debris meets ground, constructions, hulls and other pieces,
-/// never a tank's armour volumes. Rounds meet a construction chunk's occupied collider instead.
+/// never a tank's armour volumes.
 pub(crate) fn piece_layers() -> CollisionLayers {
     CollisionLayers::new(
         [Layer::Debris],
@@ -3196,10 +3202,12 @@ fn prepare_reconcile(
         match (shape.chunk_present(&kind.layout, c), have_chunks.get(&c)) {
             (false, Some(entity)) => effects.push(ColliderChange::Despawn(*entity)),
             (true, None) => {
+                let (hull, friction, volume, chunk) =
+                    occupied_collider(kind, c, transform.rotation);
                 effects.push(ColliderChange::Chunk((
                     ChildOf(root),
                     Transform::from_translation(kind.structure.chunks[c].centroid),
-                    occupied_collider(kind, c, transform.rotation),
+                    (with_insertion_mass(hull), friction, volume, chunk),
                     super::element_layers(),
                     (
                         Position::PLACEHOLDER,
