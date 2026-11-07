@@ -192,8 +192,6 @@ impl SweepSource {
     }
 }
 
-/// Sources resolve per construction, in body entity order ([`owner_sequence`]). A source exchanges
-/// against all its freed mass once.
 type Owners<'w, 's> = Query<
     'w,
     's,
@@ -1266,65 +1264,69 @@ pub(super) fn changed(account: Res<SweepAccount>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::headless_test::{
-        FIXED_TICKS_PER_SECOND, booted_driving_grid, drive_tick, driving_plane, start_fixed_clock,
-    };
+    use crate::headless_test::{booted_driving_grid, driving_plane, start_fixed_clock};
 
     /// The game's environment destruction: a cut reads the force its source drives into it, all
-    /// Avian integrates besides contacts. A hull its belts hold at rest on level ground drives
-    /// nothing up or down, its support cancelling its weight; the belts read without gravity
-    /// would press the hull's whole weight up into any matter above it.
+    /// Avian integrates besides contacts: accumulated and constant forces with gravity. A body
+    /// whose support equals its weight, held by a constant force or by forces applied this tick as
+    /// the belts apply theirs, drives nothing; an unsupported one drives its weight. Read without
+    /// gravity, a hull's belts would press its whole weight up into any matter above it.
     #[test]
-    fn a_hull_resting_on_level_ground_drives_no_vertical_force() {
+    fn a_body_drives_its_support_plus_gravity() {
+        use avian3d::prelude::{Mass, NoAutoMass};
+        use bevy::ecs::system::RunSystemOnce;
         let mut app = booted_driving_grid(driving_plane(0.0));
         start_fixed_clock(&mut app);
-        let tank = app
-            .world_mut()
-            .query_filtered::<Entity, (With<crate::tank::Tank>, With<crate::tank::Controlled>)>()
-            .single(app.world())
-            .expect("one controlled tank");
-        // Fixture settling after the spawn drop.
-        for _ in 0..FIXED_TICKS_PER_SECOND * 2 {
-            drive_tick(&mut app, tank, 0.0, 0.0);
-        }
-        let weight = app
-            .world()
-            .get::<avian3d::prelude::ComputedMass>(tank)
-            .expect("the tank is a dynamic body")
-            .value()
-            * app
-                .world()
-                .resource::<avian3d::prelude::Gravity>()
-                .0
-                .length();
-        let mut vertical = Vec::new();
-        for _ in 0..FIXED_TICKS_PER_SECOND {
-            drive_tick(&mut app, tank, 0.0, 0.0);
-            let account = app.world().resource::<SweepAccount>();
-            vertical.extend(
-                account
-                    .drives
-                    .iter()
-                    .filter(|(body, _)| *body == tank)
-                    .map(|(_, drive)| drive.y),
+        let gravity = app.world().resource::<avian3d::prelude::Gravity>().0;
+        // Fixture: three 1 t cubes clear above the plane, drifting so the sweep casts them.
+        let mass = 1e3;
+        let [constant, applied, free] = [0.0, 4.0, 8.0].map(|x| {
+            app.world_mut()
+                .spawn((
+                    RigidBody::Dynamic,
+                    Position(Vec3::new(x, 5.0, 0.0)),
+                    Collider::cuboid(1.0, 1.0, 1.0),
+                    Mass(mass),
+                    NoAutoMass,
+                    avian3d::prelude::LinearVelocity(Vec3::X),
+                    super::super::piece_layers(),
+                ))
+                .id()
+        });
+        let support = -gravity * mass;
+        app.world_mut()
+            .entity_mut(constant)
+            .insert(ConstantForce(support));
+        app.update(); // First preparation creates the collider hierarchy.
+        app.world_mut()
+            .run_system_once(move |mut bodies: Query<Forces>| {
+                bodies.get_mut(applied).unwrap().apply_force(support);
+            })
+            .unwrap();
+        app.update();
+        let account = app.world().resource::<SweepAccount>();
+        let drive = |body: Entity| {
+            account
+                .drives
+                .iter()
+                .find(|(source, _)| *source == body)
+                .expect("a drifting body is a sweep source")
+                .1
+        };
+        // Resolution: f32 rounding of each force over the mass, their sum and the product back by
+        // the mass, a few ulps of the weight (DERIVED).
+        let allowance = 8.0 * f32::EPSILON * support.length();
+        for body in [constant, applied] {
+            assert!(
+                drive(body).length() <= allowance,
+                "a supported body drives nothing: {}",
+                drive(body)
             );
         }
-        let mean = vertical.iter().sum::<f32>() / vertical.len() as f32;
-        let peak = vertical.iter().fold(0.0_f32, |a, b| a.max(b.abs()));
-        println!(
-            "MEASURED resting vertical drive over {} ticks: mean {mean} N, peak {peak} N, weight {weight} N",
-            vertical.len()
-        );
-        assert_eq!(
-            vertical.len(),
-            FIXED_TICKS_PER_SECOND,
-            "a resting hull stays a sweep source every tick"
-        );
-        // Resolution: the belts' support at rest oscillates about the weight (MEASURED over this
-        // second: mean 0.8 %, peak 4.4 % of it); a drive read without gravity is 100 % of it.
         assert!(
-            mean.abs() < 0.05 * weight,
-            "a resting hull's support cancels its weight: {mean} N against {weight} N"
+            (drive(free) + support).length() <= allowance,
+            "an unsupported body drives its weight: {}",
+            drive(free)
         );
     }
 }
