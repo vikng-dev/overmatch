@@ -379,7 +379,8 @@ Both opening and compression measure the force resisting that translation:
 `C = R_n |o| + R_s s`. For compression, `R_n = max(B + p, 0)`:
 weaker-side bulk capacity `B = min(sigma_c,a, sigma_c,b) A` minus carried compression,
 plus the tension a closing load first unloads.
-A ground endpoint uses its chunk's strength.
+A ground endpoint uses its chunk's strength: the ground is one rigid surface whose settlement is
+not simulated (the one-surface doctrine).
 For opening, `R_n = max(A T - p, 0)`. The shared `bondsolve::JointStrength` law supplies
 `R_s = A cohesion + mu max(-p, 0)` and tensile strength `T`; cracked seams and rests have
 zero cohesion and tension. `p` is existing normal force, positive in tension.
@@ -419,8 +420,8 @@ Power-of-two scaling is exact except subnormal underflow, which also loses less 
 Every residual operation is exact integer arithmetic. One unit above the finite integer sum
 replaces infinity and bounds inlet supply; no finite minimum cut can cross such an arc.
 
-A synthetic inlet supplies the rounded demand, capped by that finite bound for diagnostic or
-larger demands. Sink inflow reaching supply certifies holding against the original demand:
+A synthetic inlet supplies the rounded demand, capped by that finite bound for larger
+demands. Sink inflow reaching supply certifies holding against the original demand:
 finite capacities were only lowered, and a cut below the inlet bound exists. Otherwise surplus
 returns to the inlet; residual reachability selects the smallest source-side grid minimum cut
 `S*`. No graph region is omitted. Its capacity is reported by summing original crossing
@@ -477,7 +478,8 @@ The account exposes removed kinetic energy and outgoing chunk kinetic energy sep
 chunk identities, world rigid motion and authoritative tick. Internal joints stay intact. The
 cut also frees matter already disconnected from every ground path, before standing refit.
 Swept matter inherits the hull's plastic exchange; an unsupported remainder starts at rest.
-D3 absorption projects their combined linear and angular momentum onto the merged rigid body.
+Below-floor merging (`crumble::merge_fragments`) projects their combined linear and angular
+momentum onto the merged rigid body.
 All freed fragments use the shared volume-based size route described under **Size split**;
 resolved rubble stays on the server and meets the hull through ordinary Avian contacts. The
 standing owner removes the chunks immediately; clients derive the hole from the joint ledger
@@ -502,10 +504,11 @@ released bodies, as well as the sweep's plastic exchange.
 
 Round and field impulse laws retain their own fracture-work and launch accounts.
 
-DERIVED angular bounds: a hull point at radius `R` about its COM has acceleration at most
-`R * |omega|²`. Its deviation from the endpoint chord over `dt` is therefore at most
-`R * (|omega| * dt)² / 8`. Expand the endpoint AABBs by that curvature bound and intersect with
-the full rotation-radius envelope. Exact nonlinear casts decide occupied membership.
+DERIVED angular bounds: under rotation about a fixed axis, each corner coordinate of a leaf's
+local box is `c + a cos t + b sin t`; its extrema over the tick are the endpoints and the
+stationary phases the turn reaches, whatever the turn count (`sweep::rotation_bounds`). A body's
+query box merges its leaves' rotation envelopes and adds its COM travel. Exact nonlinear casts
+decide occupied membership.
 
 DERIVED sweep work: bounds-tree traversal and exact casts choose the occupied source patch;
 live construction joints build the directed graph only on an occupied contact event. Generic

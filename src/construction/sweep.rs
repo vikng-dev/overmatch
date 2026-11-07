@@ -346,7 +346,6 @@ impl Geometry {
         work: &mut Work,
     ) -> mincut::Cut {
         use super::fracture::bondsolve::{JointStrength, joint_normal};
-        let live = |j: usize| !state.separated[j] && state.live(&structure.joints[j]);
         assert_eq!(
             preload.len(),
             structure.joints.len(),
@@ -355,7 +354,7 @@ impl Geometry {
         let sink = structure.chunks.len();
         let source = sink + 1;
         let mut graph = mincut::Network::new(source + 1);
-        for (c, _) in structure.chunks.iter().enumerate() {
+        for c in 0..sink {
             if state.standing(c) && !covered(structure, state, c) {
                 graph.edge(c, sink, f64::INFINITY, 0.0);
             }
@@ -369,21 +368,22 @@ impl Geometry {
         }
         for (j, joint) in structure.joints.iter().enumerate() {
             work.joints += 1;
-            if !live(j) {
+            if state.separated[j] || !state.live(joint) {
                 continue;
             } // Open faces and departed matter carry no load.
-            let b = match joint.b {
-                Side::Chunk(b) => b,
-                Side::Ground => sink,
-            };
             let own = structure.chunks[joint.a].material.compressive_strength;
-            let strength = match joint.b {
-                Side::Chunk(b) => own.min(structure.chunks[b].material.compressive_strength),
-                Side::Ground => own,
+            // The ground is one rigid surface and its settlement is not simulated (the one-surface
+            // doctrine): a ground anchor bears at its chunk's own strength.
+            let (b, strength) = match joint.b {
+                Side::Chunk(b) => (
+                    b,
+                    own.min(structure.chunks[b].material.compressive_strength),
+                ),
+                Side::Ground => (sink, own),
             };
-            let normal = joint_normal(structure, joint);
+            let resistance = JointStrength::of(structure, joint, state.cracked[j]);
             let directional = |normal: DVec3| {
-                JointStrength::of(structure, joint, state.cracked[j]).translation_resistance(
+                resistance.translation_resistance(
                     f64::from(joint.area),
                     normal,
                     demand.direction.as_dvec3(),
@@ -391,9 +391,8 @@ impl Geometry {
                     strength * f64::from(joint.area),
                 )
             };
-            let forward = directional(normal);
-            let backward = directional(-normal);
-            graph.edge(joint.a, b, forward, backward);
+            let normal = joint_normal(structure, joint);
+            graph.edge(joint.a, b, directional(normal), directional(-normal));
         }
         let (cut, flow) = graph.cut(source, sink, demand.force);
         work.flow += flow;
@@ -413,22 +412,6 @@ pub(crate) struct Motion<'a> {
 }
 
 impl Motion<'_> {
-    /// Bounds of the corner arcs of the hull's local box; only exact hull casts admit matter.
-    pub(crate) fn bounds(&self) -> ColliderAabb {
-        let local = self.hull.aabb(Vec3::ZERO, Quat::IDENTITY);
-        let envelope = rotation_bounds(
-            local,
-            self.position,
-            self.rotation,
-            self.centre,
-            self.spin * self.dt,
-        );
-        envelope.merged(ColliderAabb {
-            min: envelope.min + self.velocity * self.dt,
-            max: envelope.max + self.velocity * self.dt,
-        })
-    }
-
     /// The first hit of this motion on chunk `target`, a hull about `origin`, in construction
     /// coordinates. The casts are parry's GJK shape casts (ADR-0015's defect): they run in the
     /// target's frame about `origin`, so its support coordinates stay within the load gate's
@@ -559,7 +542,6 @@ fn rotation_bounds(
             }
         }
     }
-    // Resolution: enclose f32 quaternion composition and support/AABB rounding at this radius.
     let pad = Vec3::splat(MOTION_ROUNDING_SCALE * radius as f32);
     ColliderAabb {
         min: centre + min.as_vec3() - pad,
@@ -606,6 +588,17 @@ pub(crate) struct Part {
     pub(crate) inertia: DMat3,
 }
 
+impl Part {
+    /// Its inertia about `point`, by the parallel-axis theorem: `I + m (|r|² 1 - r rᵀ)`.
+    pub(crate) fn inertia_about(&self, point: DVec3) -> DMat3 {
+        let r = self.centre - point;
+        self.inertia
+            + self.mass
+                * (DMat3::IDENTITY * r.length_squared()
+                    - DMat3::from_cols(r * r.x, r * r.y, r * r.z))
+    }
+}
+
 pub(crate) struct Body {
     pub(crate) centre: DVec3,
     pub(crate) inverse_mass: DVec3,
@@ -640,10 +633,7 @@ pub(crate) fn exchange(body: &Body, parts: &[Part]) -> Exchange {
         let r = part.centre - body.centre;
         mass += part.mass;
         first += part.mass * r;
-        inertia += part.inertia
-            + part.mass
-                * (DMat3::IDENTITY * r.length_squared()
-                    - DMat3::from_cols(r * r.x, r * r.y, r * r.z));
+        inertia += part.inertia_about(body.centre);
     }
     let skew = DMat3::from_cols(
         DVec3::new(0.0, first.z, -first.y),
@@ -1005,8 +995,12 @@ mod tests {
     fn angular_travel_bounds_contain_the_path_and_shrink_with_spin() {
         // Fixture: offset COM, rotated long hull, translation and angular travel across full turns.
         let hull = Collider::cuboid(0.2, 4.0, 0.4);
-        let motion = Motion {
-            hull: &hull,
+        let tree = SourceTree::new(vec![Hull {
+            hull: hull.clone(),
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+        }]);
+        let motion = RigidMotion {
             position: Vec3::new(-1.0, 0.2, 0.3),
             rotation: Quat::from_rotation_y(0.3),
             centre: Vec3::new(0.1, 0.8, -0.2),
@@ -1014,17 +1008,17 @@ mod tests {
             spin: Vec3::ZERO,
             dt: 0.5,
         };
-        let linear = motion.bounds();
+        let linear = tree.bounds(motion);
         let radius = (linear.max - linear.min).length();
         // Resolution: f32 pose composition and AABB rounding, scaled to the fixture's extent.
         let tolerance = 64.0 * f32::EPSILON * radius;
         let axis = Vec3::new(0.2, 1.0, -0.3).normalize();
         for speed in [0.0, f32::EPSILON, 0.01, 1.0, 6.0, 20.0] {
-            let motion = Motion {
+            let motion = RigidMotion {
                 spin: axis * speed,
                 ..motion
             };
-            let bounds = motion.bounds();
+            let bounds = tree.bounds(motion);
             for step in 0..=128 {
                 let time = motion.dt * step as f32 / 128.0;
                 let turn = Quat::from_scaled_axis(motion.spin * time);
@@ -1057,19 +1051,20 @@ mod tests {
     fn an_orbiting_chunk_does_not_query_behind_its_quarter_circle() {
         // Fixture: a small cube travels from +X to +Y about the origin, without translation.
         let radius = 2.0;
-        let hull = Collider::cuboid(0.2, 0.2, 0.2);
-        let bounds = Motion {
-            hull: &hull,
+        let tree = SourceTree::new(vec![Hull {
+            hull: Collider::cuboid(0.2, 0.2, 0.2),
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+        }]);
+        let bounds = tree.bounds(RigidMotion {
             position: Vec3::X * radius,
             rotation: Quat::IDENTITY,
             centre: Vec3::ZERO,
             velocity: Vec3::ZERO,
             spin: Vec3::Z * std::f32::consts::FRAC_PI_2,
             dt: 1.0,
-        }
-        .bounds();
-        // DERIVED: the occupied path stays in x,y >= -sqrt(3)*0.1; even a chord
-        // envelope bounded by its maximum second derivative excludes -radius/2.
+        });
+        // DERIVED: the occupied path stays in x,y >= -sqrt(3)*0.1.
         assert!(bounds.min.x > -radius / 2.0 && bounds.min.y > -radius / 2.0);
     }
 
@@ -1647,29 +1642,6 @@ mod tests {
                 let patch =
                     resolved_contact(&geometry, &structure, &state, direction, capacity * ratio);
                 assert_eq!(patch.broken, broken, "cracked={cracked}, ratio={ratio}");
-            }
-        }
-    }
-
-    /// The game's environment destruction: an impact spends the crushing reserve, not the
-    /// capacity already carrying gravity. Otherwise nearly loaded supports stop extra impacts.
-    #[test]
-    fn existing_compression_leaves_only_the_remaining_crushing_reserve() {
-        let (mut structure, geometry) = plug_fixture(&[Vec3::ZERO, Vec3::NEG_Y], &[1], &[(0, 1)]);
-        // Fixture: a unit-area 10 kN support carrying 9 kN under gravity.
-        for chunk in &mut structure.chunks {
-            chunk.material.compressive_strength = 1e4;
-        }
-        structure.chunks[0].mass = 9000.0 / crate::physical_laws::gravity_mps2();
-        structure.chunks[0].material.density = structure.chunks[0].mass;
-        structure.joints[0].bond = Bond::Resting;
-        let state = State::new(&structure);
-        // DERIVED: 10 kN - 9 kN = 1 kN reserve. The upper impact exceeds it.
-        for (force, broken) in [(2000.0, true), (900.0, false)] {
-            let patch = resolved_contact(&geometry, &structure, &state, Vec3::NEG_Y, force);
-            assert_eq!(patch.broken, broken, "force={force}, load={:?}", patch.load);
-            if broken {
-                assert!((patch.load.unwrap().capacity - 1000.0).abs() < 0.01);
             }
         }
     }

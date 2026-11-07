@@ -4880,7 +4880,7 @@ fn a_cut_frees_unsupported_matter_without_building_standing_colliders() {
     );
 }
 
-/// The game's environment destruction: D3 absorption of a moving cut and stationary unsupported
+/// The game's environment destruction: below-floor merging of a moving cut and stationary unsupported
 /// matter preserves their combined momentum without adding kinetic energy. This fixture drives
 /// one of two equal unit cubes; mass and inertia come from the admitted occupied geometry.
 #[test]

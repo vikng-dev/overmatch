@@ -45,11 +45,7 @@ pub(crate) struct SweepAccount {
 struct SweepSource {
     body: Entity,
     shape: Arc<super::super::sweep::SourceTree>,
-    position: Vec3,
-    rotation: Quat,
-    velocity: Vec3,
-    centre: Vec3,
-    spin: Vec3,
+    motion: super::super::sweep::RigidMotion,
     roots: BTreeSet<Entity>,
     mass: f32,
     inertia: avian3d::prelude::ComputedAngularInertia,
@@ -67,8 +63,9 @@ impl SweepSource {
         use avian3d::dynamics::solver::solver_body::SolverBodyInertia;
         let normal = pose.rotation * witness.normal;
         let point = pose.translation + pose.rotation * witness.at;
-        let lever = point - self.centre - self.velocity * witness.time;
-        let rotation = Quat::from_scaled_axis(self.spin * witness.time) * self.rotation;
+        let m = self.motion;
+        let lever = point - m.centre - m.velocity * witness.time;
+        let rotation = Quat::from_scaled_axis(m.spin * witness.time) * m.rotation;
         let response = SolverBodyInertia::new(
             self.mass.recip(),
             self.inertia.rotated(rotation).inverse(),
@@ -363,11 +360,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
             let source = SweepSource {
                 body: body_entity,
                 shape,
-                position,
-                rotation,
-                centre,
-                velocity: forces.linear_velocity(),
-                spin: forces.angular_velocity(),
+                motion,
                 roots,
                 mass: mass.value(),
                 inertia: *inertia,
@@ -434,11 +427,11 @@ fn owner_geometry(
                         &breakage.live.state,
                         &source.shape,
                         super::super::sweep::RigidMotion {
-                            position: inverse * (source.position - pose.translation),
-                            rotation: inverse * source.rotation,
-                            velocity: inverse * source.velocity,
-                            centre: inverse * (source.centre - pose.translation),
-                            spin: inverse * source.spin,
+                            position: inverse * (source.motion.position - pose.translation),
+                            rotation: inverse * source.motion.rotation,
+                            velocity: inverse * source.motion.velocity,
+                            centre: inverse * (source.motion.centre - pose.translation),
+                            spin: inverse * source.motion.spin,
                             dt,
                         },
                     )
@@ -650,8 +643,9 @@ pub(super) struct ReleasedMotion {
 }
 
 /// A cut's swept matter inherits its exchange; matter losing its last support starts at rest.
-/// D3 absorption can join both: project their combined linear and angular momentum onto one
-/// rigid field, using occupied mass properties. Pure fields require no mass-matrix reduction.
+/// Below-floor merging (`crumble::merge_fragments`) can join both: project their combined linear
+/// and angular momentum onto one rigid field, using occupied mass properties. Pure fields require
+/// no mass-matrix reduction.
 pub(super) fn fragment_motion(
     kind: &ConstructionKind,
     pose: &Transform,
@@ -679,11 +673,7 @@ pub(super) fn fragment_motion(
     let spin = motion.spin.as_dvec3();
     for (&c, part) in group.iter().zip(parts) {
         let r = part.centre - centre;
-        // Parallel-axis theorem: I_about_centre = I_own + m (|r|² identity - r rᵀ).
-        inertia += part.inertia
-            + part.mass
-                * (DMat3::IDENTITY * r.length_squared()
-                    - DMat3::from_cols(r * r.x, r * r.y, r * r.z));
+        inertia += part.inertia_about(centre);
         if driven.contains(&c) {
             let velocity =
                 motion.velocity.as_dvec3() + spin.cross(part.centre - motion.centre.as_dvec3());
@@ -753,8 +743,8 @@ fn cut_fragments(
     fragments
 }
 
-/// Free the cut and its unsupported remainder together before physics. Size routing and D3
-/// absorption share this event; Avian owns subsequent contacts between the resulting bodies.
+/// Free the cut and its unsupported remainder together before physics. Size routing and
+/// below-floor merging share this event; Avian owns later contacts between the resulting bodies.
 pub(super) fn sweep_departure(
     breakage: &mut Breakage,
     pose: Transform,

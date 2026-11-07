@@ -190,7 +190,7 @@ impl Network {
             }
         }
         // A finite cut costs at most total units; one more makes every infinite arc
-        // uncuttable. The same bound limits diagnostic supply without overflowing a preflow.
+        // uncuttable. The same bound caps a larger demand's supply without overflowing a preflow.
         let bound = total + 1;
         for arc in self.arcs.iter_mut().flatten() {
             self.work.scans += 1;
@@ -198,13 +198,10 @@ impl Network {
                 arc.residual = bound;
             }
         }
-        let supply = if demand.is_finite() {
-            // Positive demand below the grid (including scaling underflow) still needs one
-            // unit. Rounding up makes every holding certificate conservative in force units.
-            ((demand / quantum).ceil() as u128).clamp(1, bound)
-        } else {
-            bound
-        };
+        // Positive demand below the grid (including scaling underflow) still needs one unit, and
+        // an unlimited one saturates to the bound. Rounding up makes every holding certificate
+        // conservative in force units.
+        let supply = ((demand / quantum).ceil() as u128).clamp(1, bound);
         let inlet = self.arcs.len();
         self.arcs.push(Vec::new());
         self.work.nodes += 1;

@@ -70,32 +70,25 @@ impl SourceTree {
         index
     }
 
+    /// The body's whole-tick query box: the merged rotation envelopes of its leaves, the same
+    /// envelope its traversal reads, swept along its COM travel.
     pub(crate) fn bounds(&self, motion: RigidMotion) -> ColliderAabb {
-        let envelope = self.envelope(0, motion);
+        let envelope = self.query(motion).envelopes[0];
         envelope.merged(ColliderAabb {
             min: envelope.min + motion.velocity * motion.dt,
             max: envelope.max + motion.velocity * motion.dt,
         })
     }
 
-    /// Rotation-only envelopes translate linearly with the COM. Slab entry then supplies a
-    /// lower time bound, so an inward witness can prune later leaves without losing the patch.
-    fn envelope(&self, index: usize, motion: RigidMotion) -> ColliderAabb {
-        let node = &self.nodes[index];
-        if node.children.is_none() {
-            return Motion {
-                velocity: Vec3::ZERO,
-                ..motion.leaf(&self.hulls[node.chunk])
-            }
-            .bounds();
-        }
+    /// Leaf `hull`'s rotation-only envelope, which translates linearly with the COM. Slab entry
+    /// then supplies a lower time bound, so an inward witness can prune later leaves without
+    /// losing the patch.
+    fn envelope(&self, hull: usize, motion: RigidMotion) -> ColliderAabb {
+        let leaf = motion.leaf(&self.hulls[hull]);
         rotation_bounds(
-            ColliderAabb {
-                min: node.min,
-                max: node.max,
-            },
-            motion.position,
-            motion.rotation,
+            leaf.hull.aabb(Vec3::ZERO, Quat::IDENTITY),
+            leaf.position,
+            leaf.rotation,
             motion.centre,
             motion.spin * motion.dt,
         )
@@ -111,7 +104,7 @@ impl SourceTree {
                 starts[i] = starts[a].merged(starts[b]);
                 radii[i] = radii[a].max(radii[b]);
             } else {
-                envelopes[i] = self.envelope(i, motion);
+                envelopes[i] = self.envelope(self.nodes[i].chunk, motion);
                 let leaf = motion.leaf(&self.hulls[self.nodes[i].chunk]);
                 starts[i] = leaf.hull.aabb(leaf.position, leaf.rotation);
                 radii[i] = (starts[i].min - motion.centre)
@@ -232,19 +225,14 @@ impl QueryTree<'_> {
             let node = &self.tree.nodes[index];
             work.bounds += 1;
             if let Some((a, b)) = node.children {
-                let a = self.entry(a, target, limit).map(|t| (t, a));
-                let b = self.entry(b, target, limit).map(|t| (t, b));
-                match (a, b) {
-                    (Some(a), Some(b)) => {
-                        if a.0 <= b.0 {
-                            stack.extend([b, a]);
-                        } else {
-                            stack.extend([a, b]);
-                        }
-                    }
-                    (Some(a), None) | (None, Some(a)) => stack.push(a),
-                    (None, None) => {}
+                // The earlier entry pops first; `a` wins a tie.
+                let mut next = [a, b].map(|i| self.entry(i, target, limit).map(|t| (t, i)));
+                if let [Some(a), Some(b)] = next
+                    && a.0 > b.0
+                {
+                    next.swap(0, 1);
                 }
+                stack.extend(next.into_iter().rev().flatten());
                 continue;
             }
             if self.entry(index, target, limit).is_none() {
