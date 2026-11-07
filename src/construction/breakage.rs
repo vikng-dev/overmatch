@@ -902,6 +902,7 @@ fn read_contacts(
         &transfers,
         &colliders,
         &constructions,
+        stages.as_deref(),
     );
     resting.0.clear();
     let mut contacts = Vec::new();
@@ -999,6 +1000,7 @@ fn prepare_contacts(
     transfers: &ContactTransfers,
     colliders: &Colliders,
     constructions: &Query<((&Position, &Rotation), &Breakage, Option<&Piece>)>,
+    stages: Option<&Stages>,
 ) -> Vec<Option<(Entity, Load)>> {
     let mut owners: BTreeMap<Entity, Vec<(usize, &ContactSource<'_>)>> = BTreeMap::new();
     for (index, input) in inputs.iter().enumerate() {
@@ -1012,6 +1014,9 @@ fn prepare_contacts(
             ContactSource::Point(input) => input.point.structure,
         };
         owners.entry(root).or_default().push((index, input));
+    }
+    if let Some(stages) = stages {
+        stages.add(Work::ContactReadRoots, owners.len() as u64);
     }
     let mut converted: Vec<_> = pool
         .scope(|scope| {

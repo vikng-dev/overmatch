@@ -4349,7 +4349,8 @@ fn contact_preparation_preserves_source_order_across_workers() {
                     .collect::<Vec<_>>(),
                 &ContactTransfers::default(),
                 &colliders,
-                &constructions
+                &constructions,
+                None
             ),
             expected
         );

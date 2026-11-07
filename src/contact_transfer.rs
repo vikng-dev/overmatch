@@ -476,6 +476,21 @@ fn keep(
     resting.clear();
     resting.extend(retained.into_iter().flatten());
     resting.extend(newly_resting.into_iter().flatten());
+    if let Some(stages) = stages.as_deref() {
+        use crate::cost::stages::Work;
+        let fixed = resting
+            .iter()
+            .filter(|rest| {
+                bodies
+                    .get(rest.transfer.structure)
+                    .expect("a retained contact has its reference body")
+                    .1
+                    .is_static()
+            })
+            .count();
+        stages.add(Work::RestingStaticPoints, fixed as u64);
+        stages.add(Work::RestingMovingPoints, (resting.len() - fixed) as u64);
+    }
     points.clear();
     inertias.clear();
     kept.clear();
@@ -509,6 +524,9 @@ fn keep(
         inertias.entry(contact.body).or_insert(contact.inertia);
         points.extend(contact.points);
         last.extend(contact.last);
+    }
+    if let Some(stages) = stages.as_deref() {
+        stages.add(crate::cost::stages::Work::ContactRecords, kept.len() as u64);
     }
     applied.clear();
     *receivers = std::mem::take(staged_receivers);
