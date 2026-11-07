@@ -623,10 +623,6 @@ mod tests {
         };
         use crate::tank::Controlled;
         use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
-        // Fixture: column side lengths, m; each impact independently exceeds its cut capacity.
-        for scale in [2.0, 3.0] {
-            crate::construction::breakage::tests::assert_fixture_release_latency(scale);
-        }
         let mut app = booted_sim_on(Some(crate::terrain_grid::tests::shipped_grid()));
         start_fixed_clock(&mut app);
         read_unjudged_contacts(&mut app);

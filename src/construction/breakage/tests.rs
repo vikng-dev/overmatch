@@ -5025,77 +5025,81 @@ fn a_sweep_reads_the_slender_sources_contact_mass() {
 
 /// Fixture for the game's environment destruction latency gate: an impact whose Hertz demand
 /// exceeds a shear-cut bound derived without asking the sweep for its verdict.
-pub(crate) fn assert_fixture_release_latency(scale: f32) {
-    use crate::contact_law::{Contactor, peak_force, peak_speed};
-    let kind = scaled_column(scale);
-    let (mut app, root) = composed_kind(false, &kind);
-    for _ in 0..3 {
-        app.update();
-    }
-    let structure = &kind.structure;
-    // DERIVED: sliding the upper two chunks costs at most the bottom seam's cohesion times
-    // area plus friction under the entire column's weight (an upper bound on its preload).
-    let seam = &structure.joints[0];
-    let weight = structure
-        .chunks
-        .iter()
-        .map(|c| f64::from(c.mass))
-        .sum::<f64>()
-        * f64::from(crate::physical_laws::gravity_mps2());
-    let capacity = f64::from(seam.area * seam.seam().unwrap().shear.cohesion)
-        + fracture::bondsolve::pair_friction(structure, seam) * weight;
-    // Fixture: a 1e6 kg, 0.4 m cube with principal inertia equal to its mass in kg m².
-    // DERIVED: any face witness has r_y² + r_z² <= 0.08 m², so m/2 bounds effective mass below.
-    let mass = 1e6;
-    let effective = f64::from(mass) / 2.0;
-    let patch = Contactor::chunk(structure, 1);
-    // Fixture: twice the cut bound; travel at least one chunk side per tick.
-    let speed =
-        (peak_speed(effective, 2.0 * capacity, patch, Contactor::RIGID) as f32).max(scale / STEP);
-    assert!(peak_force(effective, f64::from(speed), patch, Contactor::RIGID) > capacity);
-    let middle = structure.chunks[1].centroid;
-    // DERIVED: a half-side face gap, crossed within this tick at the chosen speed.
-    let start = middle - Vec3::X * (scale + CUBE_SIDE_M / 2.0);
-    let source = app.world_mut().spawn(cube(start, mass)).id();
-    app.update(); // Prepare the collider hierarchy before the driving stimulus.
-    assert!(
-        app.world()
-            .get::<Breakage>(root)
-            .unwrap()
-            .live
-            .state
-            .standing(1)
-    );
-    app.world_mut().get_mut::<LinearVelocity>(source).unwrap().0 = Vec3::X * speed;
-    let ordinal = app.world().get::<Breakage>(root).unwrap().construction;
-    let (mut contact, mut opening) = (None, None);
-    for tick in 0..=2 {
-        app.update();
-        if app
-            .world()
-            .resource::<SweepAccount>()
-            .contacts
-            .contains_key(&(source, ordinal))
-        {
-            contact.get_or_insert(tick);
+#[test]
+fn an_over_capacity_fixture_opens_within_two_contact_ticks() {
+    // Fixture: column side lengths, m; each impact independently exceeds its cut capacity.
+    for scale in [2.0, 3.0] {
+        use crate::contact_law::{Contactor, peak_force, peak_speed};
+        let kind = scaled_column(scale);
+        let (mut app, root) = composed_kind(false, &kind);
+        for _ in 0..3 {
+            app.update();
         }
-        if !app
-            .world()
-            .get::<Breakage>(root)
-            .unwrap()
-            .live
-            .state
-            .standing(1)
-        {
-            opening.get_or_insert(tick);
+        let structure = &kind.structure;
+        // DERIVED: sliding the upper two chunks costs at most the bottom seam's cohesion times
+        // area plus friction under the entire column's weight (an upper bound on its preload).
+        let seam = &structure.joints[0];
+        let weight = structure
+            .chunks
+            .iter()
+            .map(|c| f64::from(c.mass))
+            .sum::<f64>()
+            * f64::from(crate::physical_laws::gravity_mps2());
+        let capacity = f64::from(seam.area * seam.seam().unwrap().shear.cohesion)
+            + fracture::bondsolve::pair_friction(structure, seam) * weight;
+        // Fixture: a 1e6 kg, 0.4 m cube with principal inertia equal to its mass in kg m².
+        // DERIVED: any face witness has r_y² + r_z² <= 0.08 m², so m/2 bounds effective mass below.
+        let mass = 1e6;
+        let effective = f64::from(mass) / 2.0;
+        let patch = Contactor::chunk(structure, 1);
+        // Fixture: twice the cut bound; travel at least one chunk side per tick.
+        let speed = (peak_speed(effective, 2.0 * capacity, patch, Contactor::RIGID) as f32)
+            .max(scale / STEP);
+        assert!(peak_force(effective, f64::from(speed), patch, Contactor::RIGID) > capacity);
+        let middle = structure.chunks[1].centroid;
+        // DERIVED: a half-side face gap, crossed within this tick at the chosen speed.
+        let start = middle - Vec3::X * (scale + CUBE_SIDE_M / 2.0);
+        let source = app.world_mut().spawn(cube(start, mass)).id();
+        app.update(); // Prepare the collider hierarchy before the driving stimulus.
+        assert!(
+            app.world()
+                .get::<Breakage>(root)
+                .unwrap()
+                .live
+                .state
+                .standing(1)
+        );
+        app.world_mut().get_mut::<LinearVelocity>(source).unwrap().0 = Vec3::X * speed;
+        let ordinal = app.world().get::<Breakage>(root).unwrap().construction;
+        let (mut contact, mut opening) = (None, None);
+        for tick in 0..=2 {
+            app.update();
+            if app
+                .world()
+                .resource::<SweepAccount>()
+                .contacts
+                .contains_key(&(source, ordinal))
+            {
+                contact.get_or_insert(tick);
+            }
+            if !app
+                .world()
+                .get::<Breakage>(root)
+                .unwrap()
+                .live
+                .state
+                .standing(1)
+            {
+                opening.get_or_insert(tick);
+            }
         }
+        let first = contact.expect("the fixture reaches occupied matter within one tick");
+        assert!(
+            opening.is_some_and(|tick| tick <= first + 2),
+            "an independently over-capacity fixture opens within two contact ticks"
+        );
+        println!("MEASURED fixture side={scale} m: contact={first}, opening={opening:?}");
     }
-    let first = contact.expect("the fixture reaches occupied matter within one tick");
-    assert!(
-        opening.is_some_and(|tick| tick <= first + 2),
-        "an independently over-capacity fixture opens within two contact ticks"
-    );
-    println!("MEASURED fixture side={scale} m: contact={first}, opening={opening:?}");
 }
 
 /// Fixture: keep unit-column proportions while each chunk exceeds the authored rubble floor.
