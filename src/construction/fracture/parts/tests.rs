@@ -1586,10 +1586,10 @@ fn gravity_preloads_cover_internal_joints_and_refresh_after_structure_changes() 
     check(&mut state, true, [0.0, 0.0, 1.0]);
 }
 
-/// The game's environment destruction: one factored solve per changed owner. A law stage adopts
-/// the factor and gravity column a hull sweep solved on its topology this tick, the equilibrium
-/// its own rebuild reaches, without factoring it again; a factor solved on a topology that has
-/// changed since is not adopted.
+/// The game's environment destruction: one factored solve per topology an owner's tick passes
+/// through. A law stage adopts the factor and gravity column a hull sweep solved on its topology
+/// this tick, the equilibrium its own rebuild reaches, without factoring it again; a factor
+/// solved on a topology that has changed since is not adopted.
 #[test]
 fn a_law_stage_adopts_the_factor_a_sweep_solved_on_its_topology() {
     bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
@@ -1632,6 +1632,34 @@ fn a_law_stage_adopts_the_factor_a_sweep_solved_on_its_topology() {
         equilibrium(&stage(Some(&solved), &later)),
         equilibrium(&stage(None, &later)),
         "a factor solved on a topology since changed is the law's to redo"
+    );
+}
+
+/// The game's environment destruction: a mechanism the sweep's copy parted is no new topology. The
+/// law stage that adopts that factor commits the partings its own rebuild would make, with the
+/// same failures, state and equilibrium, and factors nothing again.
+#[test]
+fn a_law_stage_adopts_the_partings_a_sweeps_factor_made() {
+    bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::default);
+    let (sliver, loose) = SLIVERS[0];
+    assert!(loose, "the fixture's sliver parts");
+    let structure = hung(sliver);
+    let state = State::new(&structure);
+    let solved = Assessment::default().resolved_on(&structure, &state);
+    let stage = |next: Option<&Assessment>| {
+        let (mut law, mut state) = (Assessment::default(), state.clone());
+        law.next = next.cloned().map(Box::new);
+        let (failures, _) = law.advance(&structure, &mut state, &[], Vec3::ZERO, STEP, false);
+        let work = law.work;
+        ((failures, state, law.graph, law.factor, law.gravity), work)
+    };
+    let ((own, own_work), (adopted, adopted_work)) = (stage(None), stage(Some(&solved)));
+    assert!(!own.0.is_empty(), "the law's own rebuild parts the sliver");
+    assert_eq!(adopted, own);
+    assert_eq!(
+        own_work - adopted_work,
+        solved.work,
+        "the adopting stage does none of the factorization the sweep did"
     );
 }
 

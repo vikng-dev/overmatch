@@ -736,6 +736,13 @@ impl Signature {
                 .collect(),
         }
     }
+
+    /// This topology once the `parted` joints separate.
+    fn parting(mut self, parted: &[Failure]) -> Self {
+        self.joints
+            .retain(|(j, _)| !parted.iter().any(|failure| failure.joint == *j));
+        self
+    }
 }
 
 /// The game's environment destruction: gravity-only joint preloads, in N (positive tension), from
@@ -969,6 +976,9 @@ pub(crate) struct Assessment {
     /// this tick ([`Self::resolved_on`]): the next law stage adopts it while that topology
     /// stands, and factors its own otherwise.
     pub(crate) next: Option<Box<Assessment>>,
+    /// The joints [`Self::resolved_on`]'s rebuild parted in its copy of the state, which the law
+    /// stage that adopts it commits.
+    parted: Vec<Failure>,
 }
 
 impl Assessment {
@@ -1028,16 +1038,15 @@ impl Assessment {
     /// The game's environment destruction: this owner's gravity field solved on `state`'s own
     /// topology between law stages, for a hull sweep after an earlier cut this tick, and the
     /// owner's [`Self::next`] factor. Its rebuild parts a mechanism's joints only in its own copy
-    /// of `state`: the sweep commits no law verdict, and this field already reads those joints
-    /// parted; their parting leaves its topology unlike the state's, so the next law stage
-    /// factors its own and commits them.
+    /// of `state`, since the sweep commits no law verdict; it keeps them, and the law stage that
+    /// adopts it commits them ([`Self::adopt`]).
     pub(crate) fn resolved_on(&self, structure: &Structure, state: &State) -> Self {
         let mut current = Self {
             slipping: self.slipping.clone(),
             kernels: self.kernels.clone(),
             ..Self::default()
         };
-        current.rebuild(structure, &mut state.clone());
+        current.parted = current.rebuild(structure, &mut state.clone());
         current
     }
 
@@ -1051,7 +1060,13 @@ impl Assessment {
 
     /// Take `next`'s factor and gravity column as this stage's rebuild: [`Self::rebuild`] on the
     /// same topology and slips, solved earlier in the tick, whose operations stay that stage's.
-    fn adopt(&mut self, next: Self) {
+    /// Returns the joints that rebuild parted, parted on `state` as the rebuild would.
+    fn adopt(&mut self, mut next: Self, state: &mut State) -> Vec<Failure> {
+        let parted = std::mem::take(&mut next.parted);
+        for failure in &parted {
+            state.cracked[failure.joint] = true;
+            state.separated[failure.joint] = true;
+        }
         *self = Self {
             revision: self.revision + 1,
             work: self.work,
@@ -1060,6 +1075,7 @@ impl Assessment {
             support: std::mem::take(&mut self.support),
             ..next
         };
+        parted
     }
 
     /// A mechanism removes interfaces; rigid membership changes only at the next topology rebuild.
@@ -1245,10 +1261,11 @@ impl Assessment {
             self.removed
                 .extend(before.into_iter().filter(|&c| !state.standing(c)));
             match next {
-                // One factored solve per changed owner: a sweep already solved this topology.
-                Some(next) if next.signature == Signature::of(structure, state) => {
-                    self.adopt(*next);
-                    Vec::new()
+                // A sweep already solved this topology, its partings included.
+                Some(next)
+                    if next.signature == Signature::of(structure, state).parting(&next.parted) =>
+                {
+                    self.adopt(*next, state)
                 }
                 _ => self.rebuild(structure, state),
             }
