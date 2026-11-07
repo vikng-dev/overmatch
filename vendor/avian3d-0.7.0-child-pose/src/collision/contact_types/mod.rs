@@ -423,54 +423,51 @@ impl ContactManifold {
     /// matching is done based on contact positions using the given `distance_threshold`
     /// for determining if points are too far away from each other to be considered matching.
     #[inline]
-    pub fn match_contacts(
+    pub fn match_contacts<'a>(
         &mut self,
-        previous_contacts: &[ContactPoint],
+        previous_contacts: impl IntoIterator<Item = &'a ContactPoint> + Clone,
         distance_threshold: Scalar,
     ) {
-        // The squared maximum distance for two contact points to be considered matching.
         let distance_threshold_squared = distance_threshold.powi(2);
-
         for contact in self.points.iter_mut() {
-            for previous_contact in previous_contacts.iter() {
-                // If the feature IDs match, copy the contact impulses over for warm starting.
-                // OVERMATCH PATCH: UNKNOWN is absence of identity, not a shared feature.
-                let known_features = contact.feature_id1 != PackedFeatureId::UNKNOWN
-                    && contact.feature_id2 != PackedFeatureId::UNKNOWN;
-                if known_features
-                    && ((contact.feature_id1 == previous_contact.feature_id1
-                    && contact.feature_id2 == previous_contact.feature_id2) ||
-                    // we have to check both directions because the entities are sorted in order
-                    // of aabb.min.x, which could have changed even the two objects in contact are the same
-                    (contact.feature_id2 == previous_contact.feature_id1
-                    && contact.feature_id1 == previous_contact.feature_id2))
-                {
-                    contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
-                    contact.warm_start_tangent_impulse =
-                        previous_contact.warm_start_tangent_impulse;
-                    break;
-                }
-
-                let unknown_features = contact.feature_id1 == PackedFeatureId::UNKNOWN
-                    || contact.feature_id2 == PackedFeatureId::UNKNOWN;
-
-                // If the feature IDs are unknown and the contact positions match closely enough,
-                // copy the contact impulses over for warm starting.
-                if unknown_features
-                    && ((contact.anchor1.distance_squared(previous_contact.anchor1)
-                        < distance_threshold_squared
-                        && contact.anchor2.distance_squared(previous_contact.anchor2)
-                            < distance_threshold_squared)
-                        || (contact.anchor1.distance_squared(previous_contact.anchor2)
-                            < distance_threshold_squared
-                            && contact.anchor2.distance_squared(previous_contact.anchor1)
-                                < distance_threshold_squared))
-                {
-                    contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
-                    contact.warm_start_tangent_impulse =
-                        previous_contact.warm_start_tangent_impulse;
-                    break;
-                }
+            // OVERMATCH PATCH: UNKNOWN carries no identity; among admissible predecessors,
+            // the closest anchors own the warm start. A new contact has no predecessor.
+            let known_features = contact.feature_id1 != PackedFeatureId::UNKNOWN
+                && contact.feature_id2 != PackedFeatureId::UNKNOWN;
+            let matched = previous_contacts
+                .clone()
+                .into_iter()
+                .filter_map(|previous| {
+                    let same_features = known_features
+                        && ((contact.feature_id1 == previous.feature_id1
+                            && contact.feature_id2 == previous.feature_id2)
+                            || (contact.feature_id2 == previous.feature_id1
+                                && contact.feature_id1 == previous.feature_id2));
+                    let distance = [
+                        (
+                            contact.anchor1.distance_squared(previous.anchor1),
+                            contact.anchor2.distance_squared(previous.anchor2),
+                        ),
+                        (
+                            contact.anchor1.distance_squared(previous.anchor2),
+                            contact.anchor2.distance_squared(previous.anchor1),
+                        ),
+                    ]
+                    .into_iter()
+                    .filter(|&(a, b)| {
+                        same_features
+                            || (!known_features
+                                && a < distance_threshold_squared
+                                && b < distance_threshold_squared)
+                    })
+                    .map(|(a, b)| a + b)
+                    .min_by(Scalar::total_cmp)?;
+                    Some((distance, previous))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((_, previous)) = matched {
+                contact.warm_start_normal_impulse = previous.warm_start_normal_impulse;
+                contact.warm_start_tangent_impulse = previous.warm_start_tangent_impulse;
             }
         }
     }

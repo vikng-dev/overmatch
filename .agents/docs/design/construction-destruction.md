@@ -575,7 +575,7 @@ once, independent of body classification; standing construction's contacts are e
 its cut judges them. `StructureBody` selects structural reporting only, so hull-on-hull and
 rubble-on-hull contacts both transmit drive. Implicit belt contacts already enter as applied
 forces. Per-batch folds run on the compute pool; only their per-body sums merge in batch order
-(DERIVED work O(contact points), plus the ordered merge of batch body entries).
+(DERIVED: two per-body map updates per contact point, then one per batch body entry on merge).
 
 The band is the default for a push's first step, a decision and not a judgement: matter a pushed body is driven into gives way, the
 body overlaps it by at most `Δv dt` for one tick (DERIVED: 3 cm for a 2 m/s shove at 64 Hz), the
