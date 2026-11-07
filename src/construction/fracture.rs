@@ -17,6 +17,7 @@ use std::{f32::consts::PI, sync::Arc};
 use bevy::ecs::entity::Entity;
 use bevy::math::{DMat3, DVec3, Vec3};
 
+use crate::construction::schema::SurfaceFrame;
 use crate::physical_laws::PhysicalLaws;
 use crate::substances::{BlastFacts, REFERENCE_FACTOR, SubstanceRegistry};
 
@@ -39,8 +40,11 @@ pub(crate) struct Material {
     /// converts their crushing work into the volume their loads take from a pool
     /// ([`Load::crushed`]). A blast's pulse crushes by [`Self::compaction`] instead.
     pub crush: f32,
-    /// Quasi-static bulk compression, Pa, from `bulk.blast.compressive_strength`.
+    /// Quasi-static bulk compression, Pa, from `bulk.blast.compressive_strength`: across its grain
+    /// where [`Self::grain`] states one.
     pub compressive_strength: f64,
+    /// How it bears compression along a grain ([`Self::bearing`]).
+    pub grain: Grain,
     /// How a blast's pulse crushes it (Law 1, [`Compaction`]).
     pub compaction: Compaction,
     /// How a blast's pulse throws a rear scab off it (Law 2, [`Spall`]).
@@ -50,6 +54,19 @@ pub(crate) struct Material {
     /// The friction coefficient its surface brings to a contact, dimensionless: one side of a
     /// rest's pair ([`crate::substances::pair_friction`]).
     pub friction: f32,
+}
+
+/// A material's grain, the direction it bears compression best along.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Grain {
+    /// None: it bears [`Material::compressive_strength`] every way.
+    None,
+    /// It bears `along` Pa along a grain, its substance's
+    /// `bulk.along_grain_compressive_strength`, which no element has laid yet
+    /// ([`Material::laid`]).
+    Unlaid { along: f64 },
+    /// It bears `along` Pa along unit `axis`, its element's grain in the construction frame.
+    Laid { along: f64, axis: Vec3 },
 }
 
 /// A bonded seam's strength.
@@ -204,11 +221,62 @@ impl Material {
                 .map_err(|reason| format!("substance {name:?}: {reason}"))?,
             crush: (share * registry.reference_facts().cavity_strength()) as f32,
             compressive_strength: blast.compressive_strength,
+            grain: match bulk.along_grain_compressive_strength {
+                Some(along) => Grain::Unlaid { along },
+                None => Grain::None,
+            },
             compaction: Compaction::of(&blast, bulk.density),
             spall: Spall::of(&blast, bulk.density, static_tensile),
             seam,
             friction,
         }))
+    }
+
+    /// This substance's material as an element framed `frame` lays it: a grained substance along
+    /// the element's grain. Refuses a grained substance in an element that declares no grain, and
+    /// a grain declared on a substance that bears alike every way.
+    pub(crate) fn laid(self, frame: SurfaceFrame) -> Result<Self, String> {
+        let grain = match (self.grain, frame) {
+            (Grain::None, SurfaceFrame::Upright) => Grain::None,
+            (Grain::Unlaid { along }, SurfaceFrame::Grain(axis)) => Grain::Laid {
+                along,
+                axis: Vec3::from_array(axis).normalize(),
+            },
+            (Grain::Unlaid { .. }, SurfaceFrame::Upright) => {
+                return Err("its substance bears by its grain \
+                     (bulk.along_grain_compressive_strength) but the element declares none: \
+                     declare surface_frame: Grain(axis) along the element's grain"
+                    .into());
+            }
+            (Grain::None, SurfaceFrame::Grain(_)) => {
+                return Err(
+                    "the element declares a grain its substance does not bear by: author \
+                     the substance's bulk.along_grain_compressive_strength with its source, or \
+                     frame the element Upright"
+                        .into(),
+                );
+            }
+            (Grain::Laid { .. }, _) => panic!("a substance's material is laid once"),
+        };
+        Ok(Self { grain, ..self })
+    }
+
+    /// The quasi-static compression it bears, Pa, pushed along unit `normal` (construction frame):
+    /// [`Self::compressive_strength`] every way without a grain; with one, Hankinson's formula
+    /// `N = P Q / (P sin²θ + Q cos²θ)` between `P` along the grain and `Q` across it, θ the angle
+    /// from the grain (USDA FPL Wood Handbook FPL-GTR-282, 2021, Chapter 5, Eq. 5–2, p. 5–29, read
+    /// primary; its exponent spans 2–2.5 for compression, and Hankinson's own form is 2).
+    pub(crate) fn bearing(&self, normal: DVec3) -> f64 {
+        let across = self.compressive_strength;
+        match self.grain {
+            Grain::None => across,
+            Grain::Laid { along, axis } => {
+                let cos = normal.dot(axis.as_dvec3()).abs().min(1.0);
+                let sin2 = 1.0 - cos * cos;
+                along * across / (along * sin2 + across * cos * cos)
+            }
+            Grain::Unlaid { .. } => panic!("a chunk's grained material is laid by its element"),
+        }
     }
 }
 
@@ -3731,5 +3799,84 @@ mod tests {
             on_brick.mass != on_wood.mass && on_brick.velocity != on_wood.velocity,
             "a row changes the scab: {on_brick:?} vs {on_wood:?}"
         );
+    }
+
+    /// The game's environment destruction: a grained substance bears its along-grain strength
+    /// pushed along its grain, its across-grain strength pushed across it, and between them moves
+    /// monotonically with the angle (Hankinson's formula), whichever way the grain is laid. Every
+    /// shipped grained substance; `sweep::Geometry::plug`'s bearing limit relies on it.
+    #[test]
+    fn a_grain_bears_along_and_across_at_its_endpoints_and_monotonically_between() {
+        let registry = SubstanceRegistry::shipped_static();
+        let mut grained = 0;
+        for name in registry.keys() {
+            let Some(material) = Material::of(registry, name).ok().flatten() else {
+                continue; // Not breakable matter: no bearing law reads it.
+            };
+            let Grain::Unlaid { along } = material.grain else {
+                continue; // It bears alike every way.
+            };
+            grained += 1;
+            let across = material.compressive_strength;
+            // Fixture: an oblique grain.
+            let axis = Vec3::new(1.0, 2.0, 2.0) / 3.0;
+            let laid = material
+                .laid(crate::construction::schema::SurfaceFrame::Grain(
+                    axis.to_array(),
+                ))
+                .unwrap();
+            let side = axis.cross(Vec3::X).normalize().as_dvec3();
+            let at = |theta: f64| laid.bearing(axis.as_dvec3() * theta.cos() + side * theta.sin());
+            // Resolution: the grain axis is f32 (ulp 6e-8).
+            let close = |a: f64, b: f64| (a - b).abs() <= 1e-6 * b;
+            assert!(close(at(0.0), along), "{name}: along its grain");
+            assert!(
+                close(at(std::f64::consts::PI), along),
+                "{name}: either way along it"
+            );
+            assert!(
+                close(at(std::f64::consts::FRAC_PI_2), across),
+                "{name}: across it"
+            );
+            // Fixture: one-degree steps from the grain to across it.
+            let steps: Vec<f64> = (0..=90).map(|d| at(f64::from(d).to_radians())).collect();
+            assert!(
+                steps
+                    .windows(2)
+                    .all(|pair| (pair[1] - pair[0]) * (across - along) >= 0.0),
+                "{name}: monotonic between: {steps:?}"
+            );
+        }
+        assert!(grained > 0, "a shipped substance bears by its grain");
+    }
+
+    /// The game's environment destruction: an element that lays a grained substance with no grain,
+    /// or declares a grain on a substance that bears alike every way, is refused at load naming
+    /// the field to author, so `Material::bearing` never meets an unlaid grain.
+    #[test]
+    fn laying_refuses_a_grain_the_substance_and_its_element_disagree_on() {
+        use crate::construction::schema::SurfaceFrame;
+        let registry = SubstanceRegistry::shipped_static();
+        let materials: Vec<Material> = registry
+            .keys()
+            .into_iter()
+            .filter_map(|name| Material::of(registry, name).ok().flatten())
+            .collect();
+        let grained = materials
+            .iter()
+            .find(|m| matches!(m.grain, Grain::Unlaid { .. }))
+            .expect("a shipped substance bears by its grain");
+        let even = materials
+            .iter()
+            .find(|m| m.grain == Grain::None)
+            .expect("a shipped substance bears alike every way");
+        let upright = grained.laid(SurfaceFrame::Upright).unwrap_err();
+        assert!(upright.contains("surface_frame: Grain"), "{upright}");
+        let declared = even.laid(SurfaceFrame::Grain([0.0, 1.0, 0.0])).unwrap_err();
+        assert!(
+            declared.contains("along_grain_compressive_strength"),
+            "{declared}"
+        );
+        assert_eq!(even.laid(SurfaceFrame::Upright).unwrap().grain, Grain::None);
     }
 }

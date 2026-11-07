@@ -326,6 +326,34 @@ fn admitted_kinds() -> Vec<(String, Arc<ConstructionKind>)> {
         .collect()
 }
 
+/// The game's environment destruction: on every admitted kind, each chunk bears by the grain its
+/// element declares, laid along that element's axis, and a chunk of an element that declares
+/// none bears alike every way. The bearing law (`fracture::Material::bearing`) reads no other
+/// grain, so a layout that drops or crosses an element's frame fails here.
+#[test]
+fn admitted_kinds_lay_each_chunks_grain_along_its_elements() {
+    use crate::construction::fracture::Grain;
+    use crate::construction::schema::SurfaceFrame;
+    let mut grained = 0;
+    for (asset, kind) in admitted_kinds() {
+        for (c, material) in kind.layout.materials.iter().enumerate() {
+            let element = &kind.asset.elements[usize::from(kind.layout.element_of[c])];
+            match (element.surface_frame, material.grain) {
+                (SurfaceFrame::Upright, Grain::None) => {}
+                (SurfaceFrame::Grain(axis), Grain::Laid { axis: laid, .. }) => {
+                    grained += 1;
+                    assert!(
+                        laid.dot(Vec3::from_array(axis)) > 1.0 - 1e-6,
+                        "{asset}: chunk {c} bears along {laid}, its element's grain {axis:?}"
+                    );
+                }
+                (frame, grain) => panic!("{asset}: chunk {c} framed {frame:?} bears by {grain:?}"),
+            }
+        }
+    }
+    assert!(grained > 0, "an admitted kind holds grained matter");
+}
+
 /// Spawns prepared departures as the departure boundary does, through one command queue.
 fn spawn_departures(app: &mut App, departures: Vec<PreparedDeparture>) {
     let mut queue = bevy::ecs::world::CommandQueue::default();

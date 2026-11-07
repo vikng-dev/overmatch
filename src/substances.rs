@@ -177,6 +177,10 @@ pub struct BulkFacts {
     /// Sourced inputs for the blast crush and scab laws, required on every breakable row. The
     /// crush law reads them (`construction::fracture::Compaction`).
     pub blast: Option<BlastFacts>,
+    /// The quasi-static compression it bears along its grain, Pa, where it has one; across the
+    /// grain it bears `blast.compressive_strength`. `None`: it bears alike every way. The bearing
+    /// law reads both (`construction::fracture::Material::bearing`).
+    pub along_grain_compressive_strength: Option<f64>,
 }
 
 /// An isotropic solid's plane-strain contact compliance `(1 − ν²) / E`, 1/Pa, with Poisson's ratio
@@ -277,6 +281,11 @@ impl SubstanceId {
 /// One substance's entry: matter the walk resists with, a witness the walk never sees, or a
 /// substance no volume wears.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "nearly every row is Hard, held once in the registry; boxing it would end Copy for \
+              the few smaller rows' padding"
+)]
 pub enum Substance {
     /// A layer of the walk.
     Hard(HardSubstance),
@@ -447,6 +456,7 @@ struct BulkFile {
     shear_fracture_energy: Option<Sourced<f64>>,
     shear_modulus: Option<Sourced<f64>>,
     blast: Option<BlastFile>,
+    along_grain_compressive_strength: Option<Sourced<f64>>,
 }
 
 impl BulkFile {
@@ -482,6 +492,24 @@ impl BulkFile {
                 )
             })?;
         }
+        let along_grain_compressive_strength =
+            self.along_grain_compressive_strength.map(|value| value.0);
+        if let Some(along) = along_grain_compressive_strength {
+            if !(along.is_finite() && along > 0.0) {
+                return Err(format!(
+                    "substance {name:?}: bulk.along_grain_compressive_strength must be finite \
+                     and positive (got {along}); author the strength along the grain in Pa with \
+                     its material-property source"
+                ));
+            }
+            if blast.is_none() {
+                return Err(format!(
+                    "substance {name:?}: bulk.along_grain_compressive_strength stands beside no \
+                     bulk.blast.compressive_strength, the strength across the grain: author the \
+                     blast block, or drop the along-grain strength"
+                ));
+            }
+        }
         Ok(BulkFacts {
             density: self.density.0,
             tensile: self.tensile.map(|value| value.0),
@@ -490,6 +518,7 @@ impl BulkFile {
             shear_fracture_energy: self.shear_fracture_energy.map(|value| value.0),
             shear_modulus: self.shear_modulus.map(|value| value.0 as f32),
             blast,
+            along_grain_compressive_strength,
         })
     }
 }
@@ -1331,6 +1360,43 @@ mod tests {
                 .to_string();
             assert!(err.contains("provenance"), "{err}");
         }
+    }
+
+    /// A GRAIN'S STRENGTH IS POSITIVE AND STANDS BESIDE THE STRENGTH ACROSS IT (the game's
+    /// environment destruction model). The bearing law divides by it and pairs it with
+    /// `bulk.blast.compressive_strength`, so a zero, negative or non-finite value, or one on matter
+    /// with no blast block, is refused at load naming the row, the field and the repair. Fixture
+    /// data.
+    #[test]
+    fn an_along_grain_strength_loads_only_positive_beside_a_blast_block() {
+        let row = |value: &str| {
+            with(&format!(
+                r#"
+            "Fixture": Hard(resistance: Effective((20.0, Fixture("fixture"))),
+                visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Fixture("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Fixture("fixture")), metallic: (1.0, Fixture("fixture")), roughness_gain: (1.0, Fixture("fixture")), sparks: (true, Fixture("fixture"))),
+                debris_half_angle_deg: (26.2, Fixture("fixture")),
+                bulk: Some((density: (500.0, Fixture("fixture")),
+                    along_grain_compressive_strength: Some(({value}, Fixture("fixture")))))),
+        "#
+            ))
+        };
+        let refusal = |value: &str, cause: &str| {
+            let err = SubstanceRegistry::from_ron(&row(value))
+                .unwrap_err()
+                .to_string();
+            for required in [
+                "Fixture",
+                "bulk.along_grain_compressive_strength",
+                cause,
+                "author",
+            ] {
+                assert!(err.contains(required), "{value}, {required}: {err}");
+            }
+        };
+        for invalid in ["0.0", "-1.0", "NaN", "inf"] {
+            refusal(invalid, "finite and positive");
+        }
+        refusal("1e7", "bulk.blast.compressive_strength");
     }
 
     /// BREAKABLE BLAST INPUTS ARE COMPLETE AND SOURCED BEFORE PLAY (the game's environment

@@ -161,6 +161,12 @@ impl Layout {
                 elements.push(None);
                 continue;
             };
+            let material = material.laid(element.surface_frame).map_err(|err| {
+                format!(
+                    "elements[{index}] (substance {:?}): {err}",
+                    asset.materials[usize::from(element.material)]
+                )
+            })?;
             let first = chunks.len();
             for chunk in element.chunks[0]..element.chunks[1] {
                 law_of[chunk as usize] = Some(chunks.len());

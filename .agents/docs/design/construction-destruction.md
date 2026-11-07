@@ -388,8 +388,11 @@ DERIVED: for unit rigid translation, resistance equals the sum of independently 
 normal and tangential traction work (Yastrebov, *Numerical Methods in Contact Mechanics*, 2013,
 [Eq. 4.53 and normal/tangential split Eq. 4.56](https://www.yastrebov.fr/LECTURES/Yastrebov_NMCM_Wiley_ISTE.pdf)).
 Both branches tend continuously to `R_s` at grazing. A purely normal translation has no sliding
-term. `sigma_c` is the data's quasi-static `bulk.blast.compressive_strength`, carried by
-`fracture::Material::compressive_strength`, not cavity work or the dynamic compaction plateau.
+term. `sigma_c` is the data's quasi-static compression at the joint normal (`fracture::Material::bearing`),
+not cavity work or the dynamic compaction plateau: `bulk.blast.compressive_strength` for matter
+that bears alike every way; for grained matter, Hankinson's formula between
+`bulk.along_grain_compressive_strength` along its element's grain and that value across it (USDA
+FPL Wood Handbook FPL-GTR-282, 2021, Chapter 5, Eq. 5–2, exponent 2).
 The standing construction's gravity field supplies every joint's preload before optimization:
 part-law interface forces between parts, and `parts::Kernel::hold` under gravity plus those
 interface forces inside each part. The part forces are one more column of the owner's one
