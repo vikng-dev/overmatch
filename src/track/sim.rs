@@ -167,6 +167,7 @@ pub struct TrackGripEffect {
     /// Longitudinal ground reaction on `[left, right]` belts (N).
     pub belt_reaction: [f32; 2],
     /// Coarse, quantized digest of the complete element field. Diagnostic evidence only.
+    #[cfg(any(test, feature = "bitprobe"))]
     pub field_digest: u32,
     /// Per-source trace, so multi-tank headless probes read their own solve. Never replicated.
     #[cfg(feature = "bitprobe")]
@@ -209,6 +210,7 @@ impl TrackGripElements {
 /// projected to signed logarithmic bins before FNV-1a. Four bins per octave at a
 /// 0.5 mm Resolution distinguish recoverable shear without coupling to solver compliance.
 /// Determinism traces retain raw-bit state.
+#[cfg(any(test, feature = "bitprobe"))]
 pub(crate) fn coarse_grip_digest(elements: &TrackGripElements) -> u32 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     let mut write = |byte: u8| {
@@ -871,7 +873,7 @@ fn gather_drive_supports(
     mut gathered: Local<Parallel<Vec<(BeltSource, Vec<Entity>)>>>,
 ) {
     use crate::cost::stages::{Stage, Stages, Work};
-    let _stage = Stages::start(stages.as_deref(), Stage::BeltRubble);
+    let _stage = Stages::start(stages.as_deref(), Stage::BeltContacts);
     tanks.par_iter().for_each(|(entity, position, body)| {
         // Replicas have no authoritative driving pass and gather no support shapes.
         if *body != RigidBody::Dynamic {
@@ -1033,7 +1035,10 @@ fn apply_track_forces(
             }
             tank.contacts.0[si] = report.contacts;
         }
-        effect.field_digest = coarse_grip_digest(&tank.elements);
+        #[cfg(any(test, feature = "bitprobe"))]
+        {
+            effect.field_digest = coarse_grip_digest(&tank.elements);
+        }
         *tank.effect = effect;
     });
     #[cfg(feature = "bitprobe")]

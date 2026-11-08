@@ -791,7 +791,7 @@ fn collect_column_contacts<O: TerrainOracle>(
 ) -> (Vec<ColumnContact>, Vec<(usize, f32)>) {
     let _stage = crate::cost::stages::Stages::start(
         pieces.stages.as_ref(),
-        crate::cost::stages::Stage::BeltRubble,
+        crate::cost::stages::Stage::BeltContacts,
     );
     let n = stations.len();
     let mut cols: Vec<ColumnContact> = Vec::with_capacity(n);
@@ -865,6 +865,12 @@ fn collect_column_contacts<O: TerrainOracle>(
     let overlaps = pieces.in_slabs(&slabs);
     for ((slab, (i, travel, tan2, wb)), overlaps) in slabs.iter().zip(links).zip(overlaps) {
         let (wa, axis, out) = (slab.origin, slab.axis, slab.out);
+        // A global facet-gradient bound can reject terrain without sampling it. Solids still
+        // query the whole outline, and analytic ceilings retain their contact.
+        let misses_field = !oracle.profile_may_hit(out);
+        if misses_field && overlaps.is_empty() {
+            continue;
+        }
         let face_a = out * (params.face_offset + travel[0]);
         let face_m = out * (params.face_offset + travel[1]);
         let face_b = out * (params.face_offset + travel[2]);
@@ -883,7 +889,7 @@ fn collect_column_contacts<O: TerrainOracle>(
 
             let column = super::world_contact::ColumnOracle::new(
                 oracle,
-                Some((ca + cb) / 2.0 + face_m),
+                (!misses_field).then_some((ca + cb) / 2.0 + face_m),
                 pieces.stages.as_ref(),
             );
             // Adjacent columns can sample different facet planes even at a shared pin.

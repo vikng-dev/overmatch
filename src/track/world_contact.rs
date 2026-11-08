@@ -102,7 +102,7 @@ pub(crate) fn patches<O: TerrainOracle>(
     } = query;
     let faces = overlaps
         .iter()
-        .flat_map(|hit| hit.faces.iter().map(move |face| (Some(hit.piece), face)));
+        .flat_map(|hit| hit.faces.iter().map(move |face| (hit.piece, face)));
     let affected = convex::raised_faces(faces, strip, slab.len, pen, travel);
     let field_patch = SupportPatch {
         origin: slab.origin + slab.lat * field_offset,
@@ -144,7 +144,7 @@ pub(crate) fn sample<O: TerrainOracle>(
     pieces: &RubbleBodies,
 ) -> Option<SurfaceSample> {
     let (point, normal) = patch_contact(patch, axis, out, centroid, params, oracle)?;
-    let collider = patch.face.as_ref().and_then(|face| face.collider);
+    let collider = patch.face.as_ref().map(|face| face.collider);
     let surface = surface_under(params.grip, collider, point, oracle, pieces);
     Some(SurfaceSample {
         point,

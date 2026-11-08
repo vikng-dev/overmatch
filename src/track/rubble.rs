@@ -487,7 +487,7 @@ impl RubbleBodies<'_> {
     /// snapshot retains all recipients for reaction sizing, but each link tests only this tank's
     /// candidates. Sorting indices preserves gather order, including for an unordered input list.
     pub(crate) fn select_source(&mut self, source: Entity, near: &[Entity]) {
-        let _stage = Stages::start(self.stages.as_ref(), Stage::BeltRubble);
+        let _stage = Stages::start(self.stages.as_ref(), Stage::BeltContacts);
         self.active.clear();
         for collider in near {
             let index = *self
@@ -631,7 +631,7 @@ impl RubbleBodies<'_> {
     }
 
     fn in_slabs_on_pool(&self, slabs: &[Slab], pool: &TaskPool) -> Vec<Vec<SlabOverlap>> {
-        let _stage = Stages::start(self.stages.as_ref(), Stage::BeltRubble);
+        let _stage = Stages::start(self.stages.as_ref(), Stage::BeltContacts);
         let prepared: Vec<_> = slabs.iter().map(|slab| (slab, slab.aabb())).collect();
         let (lo, hi) = prepared.iter().fold(
             (Vec3::INFINITY, Vec3::NEG_INFINITY),
@@ -953,7 +953,7 @@ pub(crate) fn piece_impulses<'c>(
     contacts: impl IntoIterator<Item = (BeltSource, &'c BeltContact)>,
     dt: f32,
 ) -> Vec<Push> {
-    let _stage = Stages::start(bodies.stages.as_ref(), Stage::BeltRubble);
+    let _stage = Stages::start(bodies.stages.as_ref(), Stage::BeltContacts);
     let mut dynamic = Vec::new();
     for (source, contact) in contacts {
         // Field support has no recipient, and static or kinematic recipients take no impulses.

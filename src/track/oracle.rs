@@ -101,6 +101,11 @@ pub trait ContactOracle {
         true
     }
 
+    /// A conservative rejection: false only when no field surface can face this direction.
+    fn profile_may_hit(&self, _out: Vec3) -> bool {
+        true
+    }
+
     fn profile_contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
         self.contact_along(station, out, reach)
     }
@@ -322,10 +327,47 @@ pub struct BlockField {
     /// `h(x, z)` — the SAME surface the collider and render mesh carry (the ONE-SURFACE
     /// invariant, `terrain_grid` module doc) — instead of the flat-slab block the old world
     /// authored. Blocks still union on top.
-    height: Option<HeightGrid>,
+    height: Option<HeightTerm>,
     /// Which ground is under each point ([`ContactOracle::ground_at`]): the world's ground field,
     /// absent only from a bare fixture field, which states no ground.
     ground: Option<GroundField>,
+}
+
+/// Immutable grid and DERIVED bounds on its facet gradients, computed once at publication.
+struct HeightTerm {
+    grid: HeightGrid,
+    gradient_bounds: Vec2,
+}
+
+impl HeightTerm {
+    fn new(grid: HeightGrid) -> Self {
+        let mut bounds = Vec2::ZERO;
+        let n = grid.size() as usize;
+        for j in 0..n {
+            for i in 0..n {
+                let h = grid.sample(i, j);
+                assert!(
+                    h.is_finite(),
+                    "height grid node ({i}, {j}) must contain finite metres"
+                );
+                if i + 1 < n {
+                    bounds.x = bounds.x.max((grid.sample(i + 1, j) - h).abs());
+                }
+                if j + 1 < n {
+                    bounds.y = bounds.y.max((grid.sample(i, j + 1) - h).abs());
+                }
+            }
+        }
+        let gradient_bounds = bounds * ((grid.size() - 1) as f32 / grid.world_size());
+        assert!(
+            gradient_bounds.is_finite(),
+            "height grid world_size_m must define finite facet gradients"
+        );
+        Self {
+            grid,
+            gradient_bounds,
+        }
+    }
 }
 
 impl BlockField {
@@ -373,7 +415,7 @@ impl BlockField {
     /// Attach (or clear) the heightmap ground term. Builder-style so the sandbox's existing
     /// `BlockField::new(..)` call sites stay valid without a signature change.
     pub fn with_height(mut self, height: Option<HeightGrid>) -> Self {
-        self.height = height;
+        self.height = height.map(HeightTerm::new);
         self
     }
 
@@ -400,7 +442,7 @@ impl BlockField {
             );
         }
         out.u32("oracle.height.present", u32::from(self.height.is_some()));
-        if let Some(grid) = &self.height {
+        if let Some(grid) = self.height_grid() {
             out.u32("oracle.height.size", grid.size());
             out.u32("oracle.height.byte_sum", grid.byte_sum());
             out.f32("oracle.height.world_size", grid.world_size());
@@ -465,7 +507,7 @@ impl BlockField {
         reach: f32,
         lowering_m: f32,
     ) -> TerrainContact {
-        self.contact_with_grid(station, out, reach, self.height.as_ref(), lowering_m)
+        self.contact_with_grid(station, out, reach, self.height_grid(), lowering_m)
     }
 
     fn contact_with_grid(
@@ -526,11 +568,27 @@ impl BlockField {
 }
 
 impl ContactOracle for BlockField {
+    fn profile_may_hit(&self, out: Vec3) -> bool {
+        if !self.blocks.is_empty() {
+            return true; // Analytic blocks can present ceilings and side faces.
+        }
+        let Some(height) = &self.height else {
+            return false; // This field contains no surfaces.
+        };
+        // Every facet has upward normal proportional to (-dh/dx, 1, -dh/dz).
+        let slope = height
+            .gradient_bounds
+            .dot(Vec2::new(out.x.abs(), out.z.abs()));
+        // Resolution: a conservative float budget for the gradient products and dot product.
+        let roundoff = 16.0 * f32::EPSILON * (1.0 + slope);
+        out.y <= slope + roundoff
+    }
+
     fn refine_profile_normals(&self) -> bool {
         !self.blocks.is_empty()
     }
     fn height_grid(&self) -> Option<&HeightGrid> {
-        self.height.as_ref()
+        self.height.as_ref().map(|height| &height.grid)
     }
 
     fn profile_contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {

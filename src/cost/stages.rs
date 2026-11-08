@@ -33,7 +33,7 @@ labelled!(Stage, NAMES, COUNT {
     Contacts = "contacts_us",
     Sweep = "sweep_us",
     Crumble = "crumble_us",
-    BeltRubble = "belt_rubble_us",
+    BeltContacts = "belt_contacts_us",
 });
 
 labelled!(
@@ -116,7 +116,7 @@ impl Stages {
     pub(crate) fn start(stages: Option<&Self>, stage: Stage) -> Option<Bracket> {
         stages.map(|stages| {
             let start = Instant::now();
-            let belt = matches!(stage, Stage::BeltRubble).then(|| {
+            let belt = matches!(stage, Stage::BeltContacts).then(|| {
                 let mut active = stages.2.lock().expect("belt timing lock is not poisoned");
                 if active.readers == 0 {
                     active.since = Some(Instant::now());
@@ -199,13 +199,13 @@ mod tests {
     #[test]
     fn overlapping_belt_readers_publish_only_after_the_last_reader() {
         let stages = Stages::default();
-        let first = Stages::start(Some(&stages), Stage::BeltRubble);
-        let second = Stages::start(Some(&stages), Stage::BeltRubble);
+        let first = Stages::start(Some(&stages), Stage::BeltContacts);
+        let second = Stages::start(Some(&stages), Stage::BeltContacts);
         drop(first);
         assert_eq!(stages.total_ns(), 0, "the interval still has a live reader");
         drop(second);
         let completed = stages.take_us();
-        assert!(completed[Stage::BeltRubble as usize] > 0.0);
+        assert!(completed[Stage::BeltContacts as usize] > 0.0);
         assert_eq!(stages.take_us(), [0.0; COUNT]);
     }
 

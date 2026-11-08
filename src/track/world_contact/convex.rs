@@ -135,12 +135,12 @@ fn in_cell(polygon: &[Vec3], strip: (f32, f32), u: (f32, f32)) -> Vec<Vec3> {
 
 /// Ignore solids wholly below the sampled field so they cannot repartition its quadrature.
 pub(super) fn raised_faces<'a>(
-    faces: impl Iterator<Item = (Option<usize>, &'a ClippedFace)>,
+    faces: impl Iterator<Item = (usize, &'a ClippedFace)>,
     strip: (f32, f32),
     len: f32,
     pen: [f32; 3],
     travel: [f32; 3],
-) -> Vec<(Option<usize>, &'a ClippedFace)> {
+) -> Vec<(usize, &'a ClippedFace)> {
     faces
         .filter(|(_, face)| {
             (0..2).any(|half| {
@@ -162,7 +162,7 @@ pub(super) fn raised_faces<'a>(
 
 #[derive(Clone, Copy)]
 pub(super) struct ContactFace {
-    pub(super) collider: Option<Entity>,
+    pub(super) collider: Entity,
     pub(super) normal: Vec3,
     pub(super) point: Vec3,
 }
@@ -237,7 +237,7 @@ fn integrate(polygon: &[Vec3], depth: Vec3, width: f32) -> Option<Integral> {
 struct Cell<'a> {
     polygon: Vec<Vec3>,
     depth: Vec3,
-    face: Option<(Option<usize>, &'a ClippedFace)>,
+    face: Option<(usize, &'a ClippedFace)>,
 }
 
 /// Overlay convex entry faces onto each field half-profile. Each disjoint cell owns the deepest
@@ -248,7 +248,7 @@ pub(super) fn patches(
     field_offset: f32,
     pen: [f32; 3],
     travel: [f32; 3],
-    faces: &[(Option<usize>, &ClippedFace)],
+    faces: &[(usize, &ClippedFace)],
     pieces: &RubbleBodies,
 ) -> Vec<SupportPatch> {
     let mut result = Vec::new();
@@ -313,7 +313,7 @@ pub(super) fn patches(
                 .map(|p| p.x)
                 .fold(f32::NEG_INFINITY, f32::max);
             let face = cell.face.map(|(piece, face)| ContactFace {
-                collider: piece.map(|piece| pieces.collider(piece)),
+                collider: pieces.collider(piece),
                 normal: face.normal,
                 // Use the projected pressure integral directly. Reintegrating world triangles
                 // squares a tiny sliver's area in the vector norm and can underflow to zero.
