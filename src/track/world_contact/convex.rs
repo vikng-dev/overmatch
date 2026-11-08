@@ -52,40 +52,55 @@ fn signed_area(polygon: &[Vec3]) -> f32 {
 }
 
 impl ClippedFace {
-    /// This face as a shadow in the footprint partition, for a loose piece the belt segments
-    /// carry: a link is stiff across its width, so it rests on the piece's highest line and the
-    /// ground beside the piece is not touching it. The shadow spans the whole shoe over the
-    /// length the face covers, level across the width. `None` if none of it reaches the envelope.
-    pub(crate) fn across_shoe(self, slab: &Slab) -> Option<Self> {
-        let extent = |of: fn(&Vec3) -> f32| {
-            self.polygon.iter().map(of).fold(
-                (f32::INFINITY, f32::NEG_INFINITY),
-                |(lo, hi): (f32, f32), value| (lo.min(value), hi.max(value)),
-            )
-        };
-        let (start, end) = extent(|p| p.x);
-        let (left, right) = extent(|p| p.y);
-        let highest = (self.depth.y * left).max(self.depth.y * right);
-        let depth = Vec3::new(self.depth.x, 0.0, self.depth.z + highest);
-        let envelope = [Vec3::Z * slab.reach - depth, depth + Vec3::Z * slab.travel];
-        let polygon = envelope.iter().fold(
-            vec![
-                Vec3::new(start, slab.lateral.0, 1.0),
-                Vec3::new(end, slab.lateral.0, 1.0),
-                Vec3::new(end, slab.lateral.1, 1.0),
-                Vec3::new(start, slab.lateral.1, 1.0),
-            ],
-            |polygon, plane| clip(&polygon, *plane),
-        );
-        (signed_area(&polygon) != 0.0).then_some(Self {
-            polygon,
-            depth,
-            normal: self.normal,
-            planes: [Vec3::new(1.0, 0.0, -start), Vec3::new(-1.0, 0.0, end)]
-                .into_iter()
-                .chain(envelope)
-                .collect(),
-        })
+    /// A rigid shoe rests on the cross-width maximum at each along coordinate. On a convex
+    /// face that envelope follows one polygon chain; each edge supplies one linear interval.
+    /// Its shadow spans the shoe width only where that interval reaches the probe envelope.
+    pub(crate) fn across_shoe(self, slab: &Slab) -> Vec<Self> {
+        self.polygon
+            .iter()
+            .zip(self.polygon.iter().cycle().skip(1))
+            .take(self.polygon.len())
+            .filter_map(|(a, b)| {
+                let along = b.x - a.x;
+                // CCW polygons traverse the upper chain toward decreasing along coordinates.
+                // Vertical edges have no length; a flat depth may use either chain.
+                if along == 0.0
+                    || if self.depth.y < 0.0 {
+                        along < 0.0
+                    } else {
+                        along > 0.0
+                    }
+                {
+                    return None;
+                }
+                let lateral_slope = (b.y - a.y) / along;
+                let depth = Vec3::new(
+                    self.depth.x + self.depth.y * lateral_slope,
+                    0.0,
+                    self.depth.z + self.depth.y * (a.y - lateral_slope * a.x),
+                );
+                let (start, end) = (a.x.min(b.x), a.x.max(b.x));
+                let envelope = [Vec3::Z * slab.reach - depth, depth + Vec3::Z * slab.travel];
+                let polygon = envelope.iter().fold(
+                    vec![
+                        Vec3::new(start, slab.lateral.0, 1.0),
+                        Vec3::new(end, slab.lateral.0, 1.0),
+                        Vec3::new(end, slab.lateral.1, 1.0),
+                        Vec3::new(start, slab.lateral.1, 1.0),
+                    ],
+                    |polygon, plane| clip(&polygon, *plane),
+                );
+                (signed_area(&polygon) != 0.0).then_some(Self {
+                    polygon,
+                    depth,
+                    normal: self.normal,
+                    planes: [Vec3::new(1.0, 0.0, -start), Vec3::new(-1.0, 0.0, end)]
+                        .into_iter()
+                        .chain(envelope)
+                        .collect(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -379,6 +394,39 @@ pub(super) fn patches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ground partition must keep ground exposed where a loose piece is lower. Fixture:
+    /// projected triangle (0,0), (1,0), (1,1), depth = lateral. DERIVED: its cross-width
+    /// maximum is along, so ground at depth 1/2 is exposed over half the shoe's length.
+    #[test]
+    fn a_tilted_loose_faces_shadow_keeps_lower_ground_exposed() {
+        let slab = Slab {
+            origin: Vec3::ZERO,
+            axis: Vec3::X,
+            lat: Vec3::Y,
+            out: -Vec3::Z,
+            len: 1.0,
+            lateral: (0.0, 1.0),
+            face: 0.0,
+            reach: 2.0,
+            travel: 0.0,
+        };
+        let face = ClippedFace {
+            polygon: vec![Vec3::Z, Vec3::new(1.0, 0.0, 1.0), Vec3::ONE],
+            depth: Vec3::Y,
+            normal: Vec3::Z,
+            planes: Vec::new(),
+        };
+        let shadow: Vec<_> = face.across_shoe(&slab).into_iter().collect();
+        let above_ground: f32 = shadow
+            .iter()
+            .map(|face| signed_area(&clip(&face.polygon, face.depth - Vec3::Z * 0.5)))
+            .sum();
+        assert!(
+            (above_ground - 0.5).abs() < 1e-6,
+            "the piece suppressed ground over {above_ground} of the unit shoe"
+        );
+    }
 
     /// The contact law relies on pressure and its lever arm belonging only to covered area.
     /// Fixture: unit right triangle, depth = along coordinate. DERIVED barycentric integrals:

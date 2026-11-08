@@ -559,7 +559,7 @@ impl RubbleBodies<'_> {
         if s.loose {
             faces = faces
                 .into_iter()
-                .filter_map(|face| face.across_shoe(slab))
+                .flat_map(|face| face.across_shoe(slab))
                 .collect();
         }
         self.count(Work::BeltOverlaps, usize::from(!faces.is_empty()));
