@@ -385,25 +385,23 @@ pub(super) fn harness_record(
     )
     .unwrap_or_else(|error| crate::refuse_start(crate::trace::SinkError::Write(harness.out.clone().into(), error)));
     // Rubble telemetry (`r` line), only on a tick whose contacts pressed on a body, so open-ground
-    // captures stay byte-stable: contacts on bodies, those on dynamic ones, the sum and max
-    // |reaction| (N), and the fastest piece's linear (m/s) and angular (rad/s) speed.
+    // captures stay byte-stable: contacts on bodies and the fastest piece's linear (m/s) and
+    // angular (rad/s) speed.
     if !touches.0.is_empty() {
-        let dynamic = touches.0.iter().filter(|t| t.dynamic).count();
-        let sum: f32 = touches.0.iter().map(|t| t.reaction.length()).sum();
-        let max = touches
-            .0
-            .iter()
-            .map(|t| t.reaction.length())
-            .fold(0.0f32, f32::max);
         let (v, w) = pieces.iter().fold((0.0f32, 0.0f32), |(v, w), (lv, av)| {
             (v.max(lv.0.length()), w.max(av.0.length()))
         });
         writeln!(
             log.writer,
-            "{{\"t\":\"r\",\"k\":{k},\"touches\":{},\"dynamic\":{dynamic},\"reaction_sum\":{sum:.0},\"reaction_max\":{max:.0},\"piece_v\":{v:.4},\"piece_w\":{w:.4}}}",
+            "{{\"t\":\"r\",\"k\":{k},\"touches\":{},\"piece_v\":{v:.4},\"piece_w\":{w:.4}}}",
             touches.0.len(),
         )
-        .unwrap_or_else(|error| crate::refuse_start(crate::trace::SinkError::Write(harness.out.clone().into(), error)));
+        .unwrap_or_else(|error| {
+            crate::refuse_start(crate::trace::SinkError::Write(
+                harness.out.clone().into(),
+                error,
+            ))
+        });
     }
     // Per-element strain telemetry (`e` line): per side, the count of elements holding strain and
     // Σ|j| / max|j| (m). A separate line from `k`, so the `k` lines stay byte-stable for the

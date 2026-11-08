@@ -3,11 +3,9 @@
 //! source construction chunks, for the belts to climb and push ([`crate::track::rubble`]). The `R` tour's last spot
 //! parks the rig facing the pile; the harness reaches it with `x=`/`z=`.
 //!
-//! Gizmos, always on (they draw only where a contact presses on a body): a dot on the contact,
-//! cyan on a static body and red on a dynamic one, with a line to the body it pressed; the impulse
-//! a dynamic body took draws as an orange arrow of its mean force over the tick at
-//! [`force_viz_scale`]. The field casts layer (`9`) shows the field; the contact dots show
-//! the footprint contacts.
+//! Gizmos, always on (they draw only where a contact presses on a body): a dot on each sampled
+//! support contact on a solid, with a line to the body it pressed. The field casts layer (`9`)
+//! shows the field; the contact dots show the footprint contacts.
 
 use std::sync::Arc;
 
@@ -23,7 +21,7 @@ use crate::track::rubble::footprint_radius;
 
 use super::belt::EnvelopeLaw;
 use super::data::scene;
-use super::{RigGeom, Side, belt_loop, contact_probe, force_viz_scale};
+use super::{RigGeom, Side, belt_loop, contact_probe};
 
 /// The `R` tour's rubble spot: the rig's hull origin (xz), facing −Z at the pile, the scene's
 /// `rubble_spot_ahead_m` short of it.
@@ -152,11 +150,6 @@ pub(super) struct RubbleTouches(pub(super) Vec<Touch>);
 pub(super) struct Touch {
     pub(super) point: Vec3,
     pub(super) body: Entity,
-    /// Whether the body is dynamic, so took an impulse.
-    pub(super) dynamic: bool,
-    /// The impulse the body took over the tick, as a mean force (N, world); zero for a static
-    /// body.
-    pub(super) reaction: Vec3,
 }
 
 /// The footprint bound about the hull origin for the rubble candidate query: [`footprint_radius`]
@@ -296,14 +289,9 @@ pub(super) fn draw_rubble(
     bodies: Query<&GlobalTransform>,
 ) {
     let yard = scene();
+    let [r, g, b] = yard.rubble_static_contact_srgb.0;
+    let color = Color::srgb(r, g, b);
     for touch in &touches.0 {
-        let dynamic = touch.dynamic;
-        let [r, g, b] = if dynamic {
-            yard.rubble_dynamic_contact_srgb.0
-        } else {
-            yard.rubble_static_contact_srgb.0
-        };
-        let color = Color::srgb(r, g, b);
         gizmos.sphere(
             Isometry3d::from_translation(touch.point),
             yard.rubble_contact_radius_m.0,
@@ -315,14 +303,6 @@ pub(super) fn draw_rubble(
                 touch.point,
                 body.translation(),
                 color.with_alpha(yard.rubble_contact_link_alpha.0),
-            );
-        }
-        if dynamic {
-            let [r, g, b] = yard.rubble_reaction_srgb.0;
-            gizmos.arrow(
-                touch.point,
-                touch.point + touch.reaction * force_viz_scale(),
-                Color::srgb(r, g, b),
             );
         }
     }

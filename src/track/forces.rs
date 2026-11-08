@@ -435,7 +435,7 @@ pub struct ForceApp {
     pub force: Vec3,
     pub point: Vec3,
     /// The collider the contact presses on, `None` for the terrain field. What the collider's
-    /// body takes back follows the recipient law (`track::rubble::piece_impulses`).
+    /// body takes back is its whole opposite (`track::rubble::reactions`).
     pub collider: Option<Entity>,
 }
 
@@ -449,8 +449,7 @@ pub struct BeltContact {
     /// The profile's support rate per metre of probe depth (N/m): the per-metre spring over
     /// the patch's contacting length, at its column's weight, including the engagement ramp's
     /// slope of the spring and closing damper. For a piece's belt-parallel overlap face this
-    /// is also its normal stiffness. The recipient's reaction law
-    /// reads it as the stiffness the explicit step integrates (`track::rubble::piece_impulses`).
+    /// is also its normal stiffness.
     pub stiffness: f32,
     /// Normal damping rate of this patch (N·s/m), including engagement and column weight.
     pub damping: f32,
@@ -472,8 +471,7 @@ pub struct BeltContact {
     /// The collider under the contact, `None` for the terrain field.
     pub collider: Option<Entity>,
     /// Capacity/load coefficient: direct terrain grip or the solid-recipient material pair
-    /// ([`GripParams::pair`]). The piece's reaction is clamped by the same coefficient
-    /// (`track::rubble::piece_impulses`). Zero on a support-only rig, which grips nothing.
+    /// ([`GripParams::pair`]). Zero on a support-only rig, which grips nothing.
     pub mu: f32,
 }
 

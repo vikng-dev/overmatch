@@ -51,8 +51,7 @@ use super::forces::{
 use super::oracle::TerrainOracle;
 use super::route::build_route;
 use super::rubble::{
-    BeltSource, PieceData, PieceReadData, RubbleBodies, RubbleQuery, apply_pushes,
-    footprint_radius, piece_impulses,
+    PieceData, PieceReadData, RubbleBodies, RubbleQuery, apply_pushes, footprint_radius, reactions,
 };
 use super::side::Side;
 use super::terrain::TrackField;
@@ -887,7 +886,7 @@ struct DriveTank {
 #[derive(Resource, Default)]
 struct DriveSupports {
     pieces: RubbleBodies<'static>,
-    sources: Vec<(BeltSource, Vec<Entity>)>,
+    sources: Vec<(Entity, Vec<Entity>)>,
     hard_contacts: std::collections::BTreeMap<Entity, Vec<super::stop_contacts::BeltImpulse>>,
     hard_dt: f32,
 }
@@ -919,7 +918,7 @@ fn gather_drive_supports(
         &super::stop_contacts::BeltFace,
         &avian3d::prelude::ColliderOf,
     )>,
-    mut gathered: Local<Parallel<Vec<(BeltSource, Vec<Entity>)>>>,
+    mut gathered: Local<Parallel<Vec<(Entity, Vec<Entity>)>>>,
 ) {
     use crate::cost::stages::{Stage, Stages, Work};
     let _stage = Stages::start(stages.as_deref(), Stage::BeltContacts);
@@ -941,17 +940,14 @@ fn gather_drive_supports(
             stages.add(Work::BeltNearColliders, local.len() as u64);
         }
         local.retain(|&collider| rubble.body_of(collider) != entity);
-        let source = BeltSource::read(entity, &bodies);
-        gathered.scope(|sources| sources.push((source, local)));
+        gathered.scope(|sources| sources.push((entity, local)));
     });
     gathered.drain_into(&mut supports.sources);
     let mut near = Vec::new();
     for (_, local) in &supports.sources {
         near.extend_from_slice(local);
     }
-    supports
-        .sources
-        .sort_unstable_by_key(|(source, _)| source.entity);
+    supports.sources.sort_unstable_by_key(|(source, _)| *source);
     near.sort_unstable();
     near.dedup();
     // Gathering reads body state once, before any source applies its own forces.
@@ -995,7 +991,7 @@ fn apply_track_forces(
         .expect("a dynamic tank is admitted only after its world publishes the terrain field");
     for (source, _) in &supports.sources {
         assert!(
-            tanks.contains(source.entity),
+            tanks.contains(*source),
             "a dynamic tank carries its complete spawn-built driving state"
         );
     }
@@ -1009,7 +1005,6 @@ fn apply_track_forces(
             .last()
             .expect("dynamic sources are nonempty")
             .0
-            .entity
     });
     tanks.par_iter_mut().for_each(|mut tank| {
         if *tank.body != RigidBody::Dynamic {
@@ -1017,7 +1012,7 @@ fn apply_track_forces(
         }
         let index = supports
             .sources
-            .binary_search_by_key(&tank.entity, |(source, _)| source.entity)
+            .binary_search_by_key(&tank.entity, |(source, _)| *source)
             .expect("every dynamic tank belongs to the synchronous tick-start snapshot");
         let pieces = supports
             .pieces
@@ -1118,9 +1113,8 @@ fn apply_track_forces(
     }
 }
 
-/// Static reactions commit by ascending source entity, then side and contact emission order.
-/// Moving reactions use piece_impulses' canonical geometry order across all sources; their
-/// sequential velocity updates are a coupled solve and complete before recoil and physics.
+/// Reactions commit by ascending source entity, then side and contact emission order. Impulses
+/// on a dynamic recipient add, so no order among them matters.
 fn commit_track_contacts(
     time: Res<Time>,
     mut supports: ResMut<DriveSupports>,
@@ -1134,27 +1128,16 @@ fn commit_track_contacts(
         hard_contacts,
         ..
     } = &mut *supports;
-    for (source, _) in sources.iter() {
+    let dt = time.delta_secs();
+    for &(source, _) in sources.iter() {
         let contacts = tanks
-            .get(source.entity)
+            .get(source)
             .expect("a gathered source remains alive through its same-tick commit");
         for side in &contacts.0 {
-            pieces.record_static_contacts(source.entity, side, &mut transfers);
+            pieces.record_static_contacts(source, side, &mut transfers);
+            apply_pushes(&reactions(pieces, side, dt), &mut bodies);
         }
     }
-    let contacts = sources.iter().flat_map(|(source, _)| {
-        tanks
-            .get(source.entity)
-            .expect("a gathered source remains alive through its same-tick commit")
-            .0
-            .iter()
-            .flatten()
-            .map(move |contact| (*source, contact))
-    });
-    let dt = time.delta_secs();
-    let pushes = piece_impulses(pieces, contacts, dt);
-    pieces.record_moving_contacts(&pushes, &mut transfers, dt);
-    apply_pushes(&pushes, &mut bodies);
     *pieces = RubbleBodies::default();
     sources.clear();
     hard_contacts.clear();
@@ -1579,69 +1562,6 @@ mod tests {
         let (first, a) = support_fixture(false, true, false, 0.1);
         let (second, b) = support_fixture(true, true, false, 0.1);
         assert_eq!(support_bits(&first, &a), support_bits(&second, &b));
-    }
-
-    /// Two tanks' belts closing on one light loose plank, so each contact's clamp binds and
-    /// every impulse changes what the next is sized against. Exchanging the tanks' entity order
-    /// cannot change either tank's bits or the plank's: piece reactions are sized in one
-    /// canonical order of the contacts' geometry, never in tank-entity order. FIXTURE DATA: two
-    /// 30 t box hulls 4 m apart across, a 200 kg plank under their inner tracks, closing 0.1 m/s.
-    #[test]
-    fn exchanging_tank_entity_order_preserves_a_shared_pieces_reaction() {
-        use avian3d::prelude::*;
-        let run = |reverse: bool| {
-            let (mut app, upper_y) = adapter_app();
-            let mut sides = [-2.0_f32, 2.0];
-            if reverse {
-                sides.reverse();
-            }
-            let mut tanks: Vec<(f32, Entity)> = sides
-                .iter()
-                .map(|&x| {
-                    let tank = fixture_tank(&mut app, Vec3::new(x, upper_y, 0.0));
-                    app.world_mut().entity_mut(tank).insert(Sensor);
-                    (x, tank)
-                })
-                .collect();
-            tanks.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let plank = app
-                .world_mut()
-                .spawn((
-                    Position(Vec3::Y * 0.15),
-                    Rotation::default(),
-                    RigidBody::Dynamic,
-                    Collider::cuboid(4.0, 0.2, 1.0),
-                    Mass(200.0),
-                ))
-                .id();
-            app.update();
-            app.update();
-            let tanks: Vec<Entity> = tanks.into_iter().map(|(_, tank)| tank).collect();
-            let mut velocities: Vec<_> = tanks.iter().map(|&t| (t, Vec3::NEG_Y * 0.1)).collect();
-            velocities.push((plank, Vec3::ZERO));
-            run_adapter(&mut app, &velocities);
-            for &tank in &tanks {
-                assert!(
-                    app.world()
-                        .get::<TrackContacts>(tank)
-                        .unwrap()
-                        .0
-                        .iter()
-                        .flatten()
-                        .any(|c| c.collider.is_some() && c.load > 0.0),
-                    "both belts bear on the plank"
-                );
-            }
-            let mut bits = support_bits(&app, &tanks);
-            for v in [
-                app.world().get::<LinearVelocity>(plank).unwrap().0,
-                app.world().get::<AngularVelocity>(plank).unwrap().0,
-            ] {
-                bits.extend(v.to_array().map(|x| u64::from(x.to_bits())));
-            }
-            bits
-        };
-        assert_eq!(run(false), run(true));
     }
 
     /// On open ground, a lone hull is never its own support. A sensor reference removes the

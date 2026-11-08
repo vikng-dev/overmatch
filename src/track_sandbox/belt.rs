@@ -35,9 +35,7 @@ use crate::track::forces::{
     ForceParams, SideInput, SideReport, SideState, contact_side, phase_decompose,
 };
 use crate::track::oracle::DepthOracle;
-use crate::track::rubble::{
-    BeltSource, PieceData, RubbleBodies, RubbleQuery, apply_pushes, piece_impulses,
-};
+use crate::track::rubble::{PieceData, RubbleBodies, RubbleQuery};
 use crate::track::transmission::{self, TransmissionInput, TransmissionParams};
 use crate::track::wheels::{
     WheelParams, wheel_lift_rise_omega, wheel_lift_step, wheel_lift_target,
@@ -109,12 +107,6 @@ pub(super) fn apply_belt_support_field(
             &avian3d::prelude::Rotation,
             Forces,
             &'static mut crate::track::sim::TrackDrive,
-            (
-                &avian3d::prelude::ComputedMass,
-                &avian3d::prelude::ComputedAngularInertia,
-                &avian3d::prelude::ComputedCenterOfMass,
-                Option<&avian3d::prelude::LockedAxes>,
-            ),
         ),
         With<Hull>,
     >,
@@ -143,17 +135,17 @@ pub(super) fn apply_belt_support_field(
             &avian3d::prelude::ColliderOf,
         )>,
     ),
-    // Every body but the hull: the impulses the rubble takes.
-    (mut bodies, mut touches): (
+    // Every body but the hull, read for the support snapshot.
+    (bodies, mut touches): (
         Query<PieceData, Without<Hull>>,
         ResMut<super::rubble::RubbleTouches>,
     ),
 ) {
     let (transmission, mut trans_state, mut telemetry) = transmission_params;
     let (geom, rig_spec, envelope) = rig;
-    let (hull_entity, hull_pos, hull_rot, mut forces, mut motion, (mass, angular, com, locked)) =
-        hull.single_mut()
-            .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
+    let (hull_entity, hull_pos, hull_rot, mut forces, mut motion) = hull
+        .single_mut()
+        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let affine = bevy::math::Affine3A::from_rotation_translation(hull_rot.0, hull_pos.0);
     let to_local = affine.inverse();
     for cs in contacts.0.values_mut() {
@@ -273,29 +265,8 @@ pub(super) fn apply_belt_support_field(
     );
     telemetry.0 = Some(tr);
 
-    // Phase 3 — apply forces in the same per-side report order as ever, commit the state. A
-    // dynamic piece under a contact takes its clamped impulse in the same tick.
+    // Phase 3 — apply forces in the same per-side report order as ever, commit the state.
     touches.0.clear();
-    // No other belt source shares the sandbox. Size both tracks together, in the production
-    // law's canonical contact order, before either side changes a recipient's velocity.
-    let source = BeltSource::new(
-        hull_entity,
-        hull_pos.0 + hull_rot.0 * com.0,
-        hull_rot.0,
-        mass,
-        angular,
-        locked,
-    );
-    let pushes = belt_piece_reactions(&mut pieces, source, &reports, dt);
-    apply_pushes(&pushes, &mut bodies);
-    for push in &pushes {
-        touches.0.push(super::rubble::Touch {
-            point: push.point,
-            body: push.body,
-            dynamic: true,
-            reaction: push.impulse / dt,
-        });
-    }
     for (si, report) in reports.into_iter().enumerate() {
         let side = Side::ALL[si];
         // Apply in report order — accumulation order is part of bit-reproducibility.
@@ -303,14 +274,10 @@ pub(super) fn apply_belt_support_field(
             forces.apply_force_at_point(app.force, app.point);
         }
         for c in &report.contacts {
-            if let Some(collider) = c.collider
-                && !pieces.is_dynamic(collider)
-            {
+            if let Some(collider) = c.collider {
                 touches.0.push(super::rubble::Touch {
                     point: c.point,
                     body: rubble.body_of(collider),
-                    dynamic: false,
-                    reaction: Vec3::ZERO,
                 });
             }
         }
@@ -346,23 +313,6 @@ pub(super) fn apply_belt_support_field(
             phase: advected,
         };
     }
-}
-
-/// One recipient pass over the complete sandbox footprint, through the production law.
-fn belt_piece_reactions(
-    pieces: &mut RubbleBodies,
-    hull: BeltSource,
-    reports: &[SideReport; 2],
-    dt: f32,
-) -> Vec<crate::track::rubble::Push> {
-    piece_impulses(
-        pieces,
-        reports
-            .iter()
-            .flat_map(|report| &report.contacts)
-            .map(|contact| (hull, contact)),
-        dt,
-    )
 }
 
 /// The rig's declared transmission, built in [`build_rig`](super::build_rig) through the
@@ -787,102 +737,6 @@ mod tests {
     use super::super::rig_geom::{RigGeom, tiger_rig};
     use super::*;
     use crate::track::gear_phase::{fold, tooth_tip_angle};
-
-    /// Both tracks share the production reaction order. Sandbox tuning relies on a light
-    /// recipient seeing the same clamped impulses as the game, even when each track changes
-    /// its angular velocity. FIXTURE DATA: a 200 kg plank, two contacts closing at 0.2 m/s, each
-    /// a 10 MN/m patch.
-    #[test]
-    fn both_sandbox_tracks_share_the_production_reaction_pass() {
-        use avian3d::prelude::*;
-        use bevy::ecs::system::RunSystemOnce;
-        let mut app = App::new();
-        app.add_plugins((
-            MinimalPlugins,
-            bevy::transform::TransformPlugin,
-            AssetPlugin::default(),
-            PhysicsPlugins::default(),
-        ))
-        .init_asset::<Mesh>()
-        .insert_resource(Gravity::ZERO);
-        app.finish();
-        app.cleanup();
-        let plank = app
-            .world_mut()
-            .spawn((
-                Position(Vec3::ZERO),
-                Rotation::default(),
-                RigidBody::Dynamic,
-                Collider::cuboid(4.0, 0.2, 1.0),
-                Mass(200.0),
-            ))
-            .id();
-        app.update();
-        app.world_mut()
-            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                let mut reports = [SideReport::default(), SideReport::default()];
-                for (report, x) in reports.iter_mut().zip([-1.0, 1.0]) {
-                    report.contacts.push(crate::track::forces::BeltContact {
-                        point: Vec3::new(x, 0.1, 0.0),
-                        normal: Vec3::Y,
-                        load: 100_000.0,
-                        load_elastic: 100_000.0,
-                        stiffness: 1.0e7,
-                        damping: 0.0,
-                        slip: 0.0,
-                        slip_lat: 0.0,
-                        f_long: 0.0,
-                        f_lat: 0.0,
-                        traction: Vec3::ZERO,
-                        rolling_force: Vec3::ZERO,
-                        belt_velocity: Vec3::NEG_Y * 0.2,
-                        collider: Some(plank),
-                        mu: 0.9,
-                    });
-                }
-                let mut sandbox = RubbleBodies::gather(&rubble, &[plank], &bodies);
-                let mut production = RubbleBodies::gather(&rubble, &[plank], &bodies);
-                let dt = 1.0 / 64.0;
-                let actual = belt_piece_reactions(
-                    &mut sandbox,
-                    BeltSource::fixed(Entity::PLACEHOLDER),
-                    &reports,
-                    dt,
-                );
-                let expected = piece_impulses(
-                    &mut production,
-                    reports
-                        .iter()
-                        .flat_map(|r| &r.contacts)
-                        .map(|contact| (BeltSource::fixed(Entity::PLACEHOLDER), contact)),
-                    dt,
-                );
-                let bits = |pushes: &[crate::track::rubble::Push]| {
-                    let mut bits: Vec<_> = pushes
-                        .iter()
-                        .map(|p| {
-                            (
-                                p.point.to_array().map(f32::to_bits),
-                                p.impulse.to_array().map(f32::to_bits),
-                            )
-                        })
-                        .collect();
-                    bits.sort_unstable_by_key(|(point, _)| *point);
-                    bits
-                };
-                assert_eq!(
-                    actual.len(),
-                    2,
-                    "both fixture tracks must reach the recipient"
-                );
-                assert_eq!(
-                    bits(&actual),
-                    bits(&expected),
-                    "sandbox reactions must match the production pass bit for bit"
-                );
-            })
-            .expect("the complete reaction fixture runs");
-    }
 
     /// The flat-ground conformed loop of a side: rest circles (road wheels un-articulated), taut
     /// envelope + sag budgeted to the material length — the same construction family

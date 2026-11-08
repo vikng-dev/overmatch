@@ -81,9 +81,7 @@ pub(super) struct Scene {
     pub(super) rubble_pile_yaw_rad: Sourced<f32>,
     pub(super) rubble_piece_srgb: Sourced<[f32; 3]>,
     pub(super) rubble_wall_srgb: Sourced<[f32; 3]>,
-    pub(super) rubble_dynamic_contact_srgb: Sourced<[f32; 3]>,
     pub(super) rubble_static_contact_srgb: Sourced<[f32; 3]>,
-    pub(super) rubble_reaction_srgb: Sourced<[f32; 3]>,
     pub(super) rubble_contact_radius_m: Sourced<f32>,
     pub(super) rubble_contact_link_alpha: Sourced<f32>,
 }
@@ -324,14 +322,9 @@ impl Scene {
             ("rubble_piece_srgb", self.rubble_piece_srgb.0),
             ("rubble_wall_srgb", self.rubble_wall_srgb.0),
             (
-                "rubble_dynamic_contact_srgb",
-                self.rubble_dynamic_contact_srgb.0,
-            ),
-            (
                 "rubble_static_contact_srgb",
                 self.rubble_static_contact_srgb.0,
             ),
-            ("rubble_reaction_srgb", self.rubble_reaction_srgb.0),
         ] {
             if value
                 .iter()

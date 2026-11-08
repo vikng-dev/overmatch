@@ -37,9 +37,7 @@
 //! new transfer.
 //!
 //! IMPLICIT CONTACTS. The belt applies support and traction before physics without collider
-//! constraints. Fixed construction receives its opposite reaction through [`ContactTransfers::stage`];
-//! a moving structure receives the impulse it actually took through [`ContactTransfers::stage_on_moving`],
-//! with its tick-start inertia.
+//! constraints. Fixed construction receives its opposite reaction through [`ContactTransfers::stage`].
 //! These contacts are refreshed by the belt each tick and never enter the solver's sleeping-pair
 //! cache.
 //!
@@ -189,10 +187,6 @@ pub(crate) struct ContactTransfers {
     applied: BTreeMap<(Entity, Entity), Vec<ContactTransfer>>,
     #[cfg(test)]
     inertias: BTreeMap<Entity, BodyInertia>,
-    /// Moving structures under implicit contacts, by entity, with their inertia at staging: those
-    /// staged for the next step, and this step's.
-    staged_receivers: BTreeMap<Entity, BodyInertia>,
-    receivers: BTreeMap<Entity, BodyInertia>,
     resting: Vec<Resting>,
     /// The last step's length, s.
     dt: f32,
@@ -261,15 +255,7 @@ impl ContactTransfers {
     }
 
     /// Stage a fixed structure's opposite force this tick, before physics integrates it.
-    /// Dynamic receivers must use Self::stage_on_moving with their tick-start inertia.
     pub(crate) fn stage(&mut self, contact: AppliedContact) {
-        self.pending.push(contact);
-    }
-
-    /// Stage the impulse a moving structure actually took, `receiver` its inertia then: its
-    /// receiver provenance is checked when the physics step publishes its transfers.
-    pub(crate) fn stage_on_moving(&mut self, contact: AppliedContact, receiver: BodyInertia) {
-        self.staged_receivers.insert(contact.structure, receiver);
         self.pending.push(contact);
     }
 
@@ -521,8 +507,6 @@ fn keep(
         last,
         pending,
         applied,
-        staged_receivers,
-        receivers,
     } = &mut *transfers;
     resting.clear();
     resting.extend(retained.into_iter().flatten());
@@ -582,7 +566,6 @@ fn keep(
         stages.add(crate::cost::stages::Work::ContactRecords, kept.len() as u64);
     }
     applied.clear();
-    *receivers = std::mem::take(staged_receivers);
     // Canonical staging order fixes the floating sums.
     pending.sort_by(|a, b| {
         let key = |c: &AppliedContact| {
@@ -602,8 +585,7 @@ fn keep(
         pending.iter().map(|contact| {
             let (_, kind, ..) = bodies.get(contact.structure)
                 .expect("an implicit structural recipient survives until the contact reading");
-            assert_eq!(kind.is_dynamic(), receivers.contains_key(&contact.structure),
-                "a dynamic implicit receiver requires its staged inertia; fixed construction has none");
+            assert!(!kind.is_dynamic(), "the belt's implicit contacts land only on fixed construction; a moving group meets the belt's segments in the solver");
             let (solver, _, position, rotation, com) = bodies.get(contact.body).expect(
                 "a source that applied an implicit contact remains a dynamic body through this physics step");
             let solver = solver.expect("an implicit contact source is an active moving body");
@@ -762,12 +744,12 @@ mod tests {
 
     use super::*;
 
-    /// A dynamic implicit recipient must carry the inertia used to size its pair budget.
-    /// Structural readers rely on missing receiver state being a bug rather than a fixed-body
-    /// budget. FIXTURE: two separated cubes, an explicitly staged force on the moving one.
+    /// A moving structure meets the belt through the solver, so an implicit contact on one is a
+    /// bug. Structural readers rely on every implicit recipient being fixed construction.
+    /// FIXTURE: two separated cubes, an explicitly staged force on the moving one.
     #[test]
-    #[should_panic(expected = "a dynamic implicit receiver requires its staged inertia")]
-    fn a_moving_implicit_receiver_cannot_silently_use_a_fixed_budget() {
+    #[should_panic(expected = "the belt's implicit contacts land only on fixed construction")]
+    fn an_implicit_contact_on_a_moving_structure_is_a_bug() {
         let mut app = world(1.0);
         let receiver = cube(&mut app, Vec3::ZERO, Vec3::ZERO);
         app.world_mut().entity_mut(receiver).insert(StructureBody);

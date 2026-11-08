@@ -60,7 +60,6 @@ labelled!(
         BeltSlabAabbPasses = "belt_slab_aabb_passes",
         BeltOverlaps = "belt_overlaps",
         BeltDynamicContacts = "belt_dynamic_contacts",
-        BeltRecipients = "belt_recipients",
         BeltDispatches = "belt_dispatches",
         BeltTriangulations = "belt_triangulations",
         BeltTerrainSamples = "belt_terrain_samples",
