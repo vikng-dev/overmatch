@@ -5,14 +5,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use avian3d::prelude::{
-    ActiveCollisionHooks, Collider, ColliderOf, CollisionHooks, ContactPair, Position, Rotation,
+    ActiveCollisionHooks, ColliderOf, CollisionHooks, ContactPair, Position, Rotation,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use super::belt_segment::{BeltSegment, SegmentLaw};
 use super::oracle::ContactOracle;
-use super::rubble::Surface;
 use super::side::Side;
 use super::sim::TrackDrive;
 use super::terrain::{FieldSurface, TrackField};
@@ -91,7 +90,6 @@ pub(crate) struct WorldContacts<'w, 's> {
     segments: Query<'w, 's, &'static BeltSegment>,
     law: Option<Res<'w, SegmentLaw>>,
     belts: Query<'w, 's, (&'static TrackDrive, &'static Position, &'static Rotation)>,
-    pieces: Query<'w, 's, (&'static Collider, &'static Position, &'static Rotation)>,
     surfaces: Query<'w, 's, (), With<FieldSurface>>,
     field: Option<Res<'w, TrackField>>,
 }
@@ -123,22 +121,11 @@ impl CollisionHooks for WorldContacts<'_, '_> {
                     .law
                     .as_deref()
                     .expect("a belt segment meets a piece only after its support law is published");
-                let (shape, at, turn) = self
-                    .pieces
-                    .get(other)
-                    .expect("a belt segment's contact names a collider with its pose");
-                let covered = segment.covered_area(
-                    Surface::triangles(shape, at.0, turn.0)
-                        .into_iter()
-                        .flatten(),
-                    (position, rotation),
-                );
                 segment.shape_contacts(
                     &mut contacts.manifolds,
                     (position, rotation),
                     sign,
                     (law.stiffness_per_m, law.damping_per_m),
-                    covered,
                 );
             }
             for manifold in &mut contacts.manifolds {

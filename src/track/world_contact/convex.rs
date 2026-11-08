@@ -16,7 +16,7 @@ pub(crate) struct ClippedFace {
 
 /// Keep the nonnegative side of an affine half-plane. Homogeneous footprint coordinates keep
 /// clipping, depth comparison and surface interpolation in the same frame.
-pub(in crate::track) fn clip(polygon: &[Vec3], plane: Vec3) -> Vec<Vec3> {
+fn clip(polygon: &[Vec3], plane: Vec3) -> Vec<Vec3> {
     let Some(&last) = polygon.last() else {
         return Vec::new(); // An empty intersection remains empty.
     };
@@ -36,7 +36,7 @@ pub(in crate::track) fn clip(polygon: &[Vec3], plane: Vec3) -> Vec<Vec3> {
     result
 }
 
-pub(in crate::track) fn signed_area(polygon: &[Vec3]) -> f32 {
+fn signed_area(polygon: &[Vec3]) -> f32 {
     if polygon.len() < 3 {
         return 0.0;
     } // A point or edge has no projected area.

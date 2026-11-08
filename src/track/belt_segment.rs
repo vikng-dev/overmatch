@@ -11,18 +11,18 @@
 //!   channel reads, `envelope::wheel_travel_knots`). Built at spawn from construction data and hung
 //!   on the hull with the stop (`bump_stop::spawn_track_colliders`; ADR-0014), on
 //!   [`Layer::TrackBelt`], which meets only `Layer::Debris`.
-//! - **Support: the spring channel's law, per area of shoe face.** The calibrated per-metre
-//!   envelope law `k'` holds over the shoe's width `W`, so it is `k'/W` per square metre of face:
-//!   [`BeltSegment::shape_contacts`] gives a pair `k'/W` times the area of the segment's outer
-//!   face the piece covers ([`BeltSegment::covered_area`], the piece's silhouette on the face
-//!   clipped to it; `ContactCompliance`, an OVERMATCH PATCH in the vendored solver). A piece over
-//!   the whole face takes `k' × length`, the sampled support's law; a narrower one takes its
-//!   share, as the sampled support's covered cells do. The silhouette overstates a tilted piece's
-//!   area until it embeds (DERIVED: the sampled support reads the depth profile instead); the
-//!   force still grows from zero with penetration. [`share_segment_laws`] caps a segment's pairs
-//!   at its whole law, so stacked pieces cannot multiply the support. Past the wheels' travel the
-//!   piece meets the same outer-face stop as the ground. The end wheels have no travel and no
-//!   segment: the stop is hard there from first touch.
+//! - **Support: the running gear's law along the belt.** A shoe is a rigid plate: a piece under
+//!   part of its width still loads the road wheels through the whole link, so coverage across the
+//!   shoe moves where the force acts (the roll moment comes from the contact's position) and
+//!   leaves the stiffness alone. The calibrated per-metre envelope law is a fact along the belt
+//!   and width does not enter it. [`BeltSegment::shape_contacts`] gives a segment that law times
+//!   its length (`ContactCompliance`, an OVERMATCH PATCH in the vendored solver);
+//!   [`share_segment_laws`] shares it over every point the segment touches, so pieces side by
+//!   side or stacked cannot multiply the support. The sampled support differs at partial
+//!   coverage: over ground it is a column quadrature, so a curb under one edge takes that
+//!   column's share. Past the wheels' travel the piece meets the same outer-face stop as the
+//!   ground. The end wheels have no travel and no segment: the stop is hard there from first
+//!   touch.
 //! - **Drivetrain.** Each segment carries the stop's `BeltFace`, so the shared hook moves its
 //!   surface at belt speed and `stop_contacts::by_owner` reads its friction into the transmission
 //!   with the stop's.
@@ -37,7 +37,6 @@ use super::forces::TravelField;
 use super::rig_geom::RigGeom;
 use super::route::build_route;
 use super::side::Side;
-use super::world_contact::convex::{clip, signed_area};
 use crate::Layer;
 
 /// Resolution: belt length one segment stands for (m). Below the 0.5 m size floor of a loose
@@ -54,18 +53,12 @@ const OUTER_FACE_COS: f32 = std::f32::consts::FRAC_1_SQRT_2;
 /// One sprung belt segment, a child collider of its hull.
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct BeltSegment {
-    /// Loop length this segment stands for (m): its share of the per-metre envelope law.
+    /// Loop length this segment stands for (m), which scales the per-metre envelope law.
     length: f32,
     /// Body-local unit normal of the outer face, out of the loop.
     outward: Vec3,
     /// The outer face's plane, `outward · p` for every body-local point `p` on it (m).
     face: f32,
-    /// Body-local unit tangent of the outer face along the belt.
-    along: Vec3,
-    /// `along · p` of the outer face's start (m).
-    start: f32,
-    /// The shoe's lateral bounds, body-local x (m).
-    lateral: (f32, f32),
 }
 
 /// The calibrated envelope law a segment carries per metre of belt, the spring channel's own
@@ -146,18 +139,12 @@ pub(crate) fn segments(
             let (a, b) = (faces(i)[0], faces(j)[0]);
             let n = outward((b - a).normalize());
             let outward = Vec3::new(0.0, n.y, n.x);
-            let t = (b - a).normalize();
-            let along = Vec3::new(0.0, t.y, t.x);
-            let start = Vec3::new(0.0, a.y, a.x);
             Some((
                 collider,
                 BeltSegment {
                     length: spacing,
                     outward,
-                    face: outward.dot(start),
-                    along,
-                    start: along.dot(start),
-                    lateral: (x_in.min(x_out), x_in.max(x_out)),
+                    face: outward.dot(Vec3::new(0.0, a.y, a.x)),
                 },
             ))
         })
@@ -176,97 +163,32 @@ fn at_arc(pins: &[Vec2], mut s: f32) -> Vec2 {
     *pins.last().expect("a route has points")
 }
 
-/// The convex hull of `points` in the plane, counter-clockwise, by Andrew's monotone chain.
-fn convex_hull(mut points: Vec<Vec2>) -> Vec<Vec2> {
-    points.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
-    let chain = |points: &mut dyn Iterator<Item = Vec2>| {
-        let mut hull: Vec<Vec2> = Vec::new();
-        for p in points {
-            while let [.., a, b] = hull[..] {
-                if (b - a).perp_dot(p - a) > 0.0 {
-                    break;
-                }
-                hull.pop();
-            }
-            hull.push(p);
-        }
-        hull.pop(); // Each end starts the other chain.
-        hull
-    };
-    let mut hull = chain(&mut points.iter().copied());
-    hull.extend(chain(&mut points.iter().rev().copied()));
-    hull
-}
-
 impl BeltSegment {
-    /// The area of this segment's outer face that the convex `points` (world) cover (m²): their
-    /// silhouette on the face, clipped to it. The face's frame is along the belt and across the
-    /// shoe, with its start at zero.
-    pub(crate) fn covered_area(
-        &self,
-        points: impl Iterator<Item = Vec3>,
-        (position, rotation): (&Position, &Rotation),
-    ) -> f32 {
-        let to_body = rotation.0.inverse();
-        let silhouette = convex_hull(
-            points
-                .map(|p| {
-                    let local = to_body * (p - position.0);
-                    Vec2::new(self.along.dot(local) - self.start, local.x)
-                })
-                .collect(),
-        );
-        let polygon: Vec<Vec3> = silhouette.iter().map(|p| p.extend(1.0)).collect();
-        let (lo, hi) = self.lateral;
-        // Homogeneous half-planes of the face rectangle, each kept on its nonnegative side.
-        let clipped = [
-            Vec3::new(1.0, 0.0, 0.0),
-            Vec3::new(-1.0, 0.0, self.length),
-            Vec3::new(0.0, 1.0, -lo),
-            Vec3::new(0.0, -1.0, hi),
-        ]
-        .into_iter()
-        .fold(polygon, |polygon, plane| clip(&polygon, plane));
-        signed_area(&clipped).abs()
-    }
-
-    /// The face's whole area (m²).
-    fn face_area(&self) -> f32 {
-        self.length * (self.lateral.1 - self.lateral.0)
-    }
-
     /// Shape one pair's manifolds on this segment (`sign` −1 when it is collider 1): the world
-    /// touches the shoe only at its outer face, and the pair takes the envelope law `(k', c')`
-    /// (per metre of belt) over the part of the face it covers, `covered` (m²), shared over its
-    /// points. A pair covering none of the face has no contact: its manifolds are emptied.
+    /// touches the shoe only at its outer face, and each point takes the envelope law
+    /// `(k', c')` (per metre of belt) over this segment's length, shared over the pair's points.
+    /// [`share_segment_laws`] then shares it over every pair the segment touches.
     pub(crate) fn shape_contacts(
         &self,
-        manifolds: &mut Vec<ContactManifold>,
+        manifolds: &mut [ContactManifold],
         (position, rotation): (&Position, &Rotation),
         sign: f32,
         (stiffness, damping): (f32, f32),
-        covered: f32,
     ) {
         let points = manifolds.iter().map(|m| m.points.len()).sum::<usize>();
         if points == 0 {
             return; // Nothing touches this step.
         }
-        if covered <= 0.0 {
-            manifolds.clear(); // No face area under the piece: nothing for the law to act on.
-            return;
-        }
-        // A piece covering the whole face takes the segment's length of the per-metre law.
-        let share = self.length * (covered / self.face_area()).min(1.0) / points as f32;
         let law = ContactCompliance {
-            stiffness: stiffness * share,
-            damping: damping * share,
+            stiffness: stiffness * self.length / points as f32,
+            damping: damping * self.length / points as f32,
         };
         // A slab's end, side and inner faces are the cut of a continuous belt, never a surface of
         // it: a normal from them turns to the outer face's, its depth the other body's point past
         // that face.
         let outward = rotation.0 * self.outward;
         let face = self.face + outward.dot(position.0);
-        for manifold in manifolds.iter_mut() {
+        for manifold in manifolds {
             let normal = manifold.normal;
             if (normal * -sign).dot(outward) < OUTER_FACE_COS {
                 for point in &mut manifold.points {
@@ -281,52 +203,48 @@ impl BeltSegment {
     }
 }
 
-/// Cap each segment's contacts this step at its whole law: pieces covering more of its face
-/// than it has (stacked or overlapping silhouettes) share it, so a segment never carries more
-/// than its length's stiffness. The hook sees one pair at a time, so the cap needs every pair of
-/// the segment at once. Serial over segments with a contact: the shared contact graph is mutated
+/// Share each segment's law over every point it touches this step, across all its pairs: the
+/// hook sees one pair at a time, so a segment over two pieces would otherwise carry its length's
+/// stiffness twice. Serial over segments with a contact: the shared contact graph is mutated
 /// between the narrow phase and the solver's constraint preparation, exclusive by construction.
 pub(crate) fn share_segment_laws(
     mut graph: ResMut<ContactGraph>,
-    segments: Query<(Entity, &BeltSegment)>,
-    law: Option<Res<SegmentLaw>>,
-    mut pairs: Local<Vec<(Entity, Entity)>>,
+    segments: Query<Entity, With<BeltSegment>>,
+    mut shared: Local<Vec<(Entity, Entity, usize)>>,
 ) {
-    let Some(law) = law else {
-        return; // No driver has calibrated a belt: nothing is shaped yet.
-    };
-    for (entity, segment) in &segments {
-        pairs.clear();
-        let mut total = 0.0_f32;
-        for edge in graph.contact_edges_with(entity) {
+    for segment in &segments {
+        shared.clear();
+        let mut total = 0;
+        for edge in graph.contact_edges_with(segment) {
             if !edge.is_touching() || edge.is_sleeping() {
-                continue; // A sleeping pair keeps its last step's law.
+                continue; // A sleeping pair keeps its last step's shared law.
             }
             let pair = graph
                 .get_pair_by_edge(edge)
                 .expect("a contact edge names its pair");
-            total += pair
+            let points = pair
                 .manifolds
                 .iter()
-                .filter_map(|m| {
-                    m.compliance
-                        .map(|law| law.stiffness * m.points.len() as f32)
-                })
-                .sum::<f32>();
-            pairs.push((pair.collider1, pair.collider2));
+                .filter(|m| m.compliance.is_some())
+                .map(|m| m.points.len())
+                .sum::<usize>();
+            if points > 0 {
+                total += points;
+                shared.push((pair.collider1, pair.collider2, points));
+            }
         }
-        let whole = law.stiffness_per_m * segment.length;
-        if pairs.len() < 2 || total <= whole {
-            continue; // A pair's own coverage is at most the face; the sum is within it.
+        if shared.len() < 2 {
+            continue; // One pair already holds the segment's whole law.
         }
-        for &(a, b) in pairs.iter() {
+        for &(a, b, points) in shared.iter() {
             let (_, pair) = graph
                 .get_mut(a, b)
                 .expect("a pair read this step is still in the graph");
+            let share = points as f32 / total as f32;
             for manifold in &mut pair.manifolds {
                 if let Some(law) = &mut manifold.compliance {
-                    law.stiffness *= whole / total;
-                    law.damping *= whole / total;
+                    law.stiffness *= share;
+                    law.damping *= share;
                 }
             }
         }
@@ -341,43 +259,4 @@ pub(crate) fn plugin(app: &mut App) {
             .after(PhysicsStepSystems::NarrowPhase)
             .before(PhysicsStepSystems::Solver),
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A segment's stiffness follows the shoe face a piece covers, the sampled support's own
-    /// per-area law. Whatever relies on it (the ride height on small pieces) reads the area this
-    /// returns: a mutant that gives every pair the whole face, or ignores the shoe's bounds,
-    /// fails here. FIXTURE DATA: a 0.3 m × 0.6 m face on the ground, boxes below it.
-    #[test]
-    fn a_segment_covers_only_the_face_area_under_a_piece() {
-        let segment = BeltSegment {
-            length: 0.3,
-            outward: Vec3::NEG_Y,
-            face: 0.0,
-            along: Vec3::Z,
-            start: 0.0,
-            lateral: (-0.3, 0.3),
-        };
-        let pose = (&Position(Vec3::ZERO), &Rotation::default());
-        let boxed = |x: (f32, f32), z: (f32, f32)| {
-            [x.0, x.1].into_iter().flat_map(move |x| {
-                [z.0, z.1]
-                    .into_iter()
-                    .flat_map(move |z| [Vec3::new(x, -0.1, z), Vec3::new(x, -0.3, z)])
-            })
-        };
-        let area = |x, z| segment.covered_area(boxed(x, z), pose);
-        // The whole face, by a piece larger than it.
-        assert!((area((-1.0, 1.0), (-1.0, 1.0)) - segment.face_area()).abs() < 1e-6);
-        // Half the shoe's width.
-        assert!((area((0.0, 1.0), (-1.0, 1.0)) - segment.face_area() / 2.0).abs() < 1e-6);
-        // A piece narrower than the shoe and shorter than the segment.
-        assert!((area((-0.05, 0.05), (0.1, 0.2)) - 0.1 * 0.1).abs() < 1e-6);
-        // Beyond the face's end and beyond the shoe's edge.
-        assert_eq!(area((-1.0, 1.0), (0.4, 0.5)), 0.0);
-        assert_eq!(area((0.5, 1.0), (-1.0, 1.0)), 0.0);
-    }
 }
