@@ -169,6 +169,11 @@ pub(super) struct QueryTree<'a> {
     radii: Vec<f32>,
 }
 
+pub(super) enum TargetHit {
+    Witness(Witness),
+    Unresolved,
+}
+
 impl QueryTree<'_> {
     pub(super) fn entry(&self, source: usize, target: &Node, limit: f32) -> Option<f32> {
         let bound = self.envelopes[source];
@@ -221,14 +226,15 @@ impl QueryTree<'_> {
     }
 
     /// First *inward* leaf, not first geometric touch. Tangent/outward hits cannot prune any
-    /// other leaf: a later inward leaf may still occupy this target's patch.
+    /// other leaf: a later inward leaf may still occupy this target's patch. A hit without
+    /// geometry conservatively retains this target for the solver instead of judging its cut.
     pub(super) fn inward(
         &self,
         target: &Node,
         hull: &Collider,
         origin: Vec3,
         work: &mut Work,
-    ) -> Option<Witness> {
+    ) -> Option<TargetHit> {
         let mut first: Option<Witness> = None;
         let mut stack = vec![(0.0, 0)];
         while let Some((entry, index)) = stack.pop() {
@@ -255,8 +261,10 @@ impl QueryTree<'_> {
             work.casts += 1;
             let leaf = &self.tree.hulls[node.chunk];
             let motion = self.motion.leaf(leaf);
-            let Some((reach, normal, at)) = motion.hit(hull, origin, work) else {
-                continue;
+            let (reach, normal, at) = match motion.hit(hull, origin, work) {
+                Some(Hit::Contact { reach, normal, at }) => (reach, normal, at),
+                Some(Hit::Unresolved) => return Some(TargetHit::Unresolved),
+                None => continue, // This source leaf misses the target.
             };
             if let Some(surface) = &leaf.surface {
                 let rotation =
@@ -287,6 +295,6 @@ impl QueryTree<'_> {
                 });
             }
         }
-        first
+        first.map(TargetHit::Witness)
     }
 }

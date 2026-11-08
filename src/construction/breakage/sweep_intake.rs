@@ -431,15 +431,12 @@ fn resolve_round(
         .extend(sources.iter().map(|source| source.body));
     let mut resolved = geometry(p, dt, tick, sources, recut);
     resolved.sort_by_key(|resolution| (sources[resolution.source].body, resolution.root));
-    p.cast.members.extend(
-        resolved
-            .iter()
-            .filter(|resolution| resolution.swept.witness.is_some())
-            .flat_map(|resolution| {
-                let body = sources[resolution.source].body;
-                (resolution.swept.chunks.iter()).map(move |&c| (body, resolution.root, c as u16))
-            }),
-    );
+    p.cast
+        .members
+        .extend(resolved.iter().flat_map(|resolution| {
+            let body = sources[resolution.source].body;
+            (resolution.swept.chunks.iter()).map(move |&c| (body, resolution.root, c as u16))
+        }));
     let mut cuts: BTreeMap<Entity, Vec<(Entity, Cut)>> = BTreeMap::new();
     for Resolution {
         source,

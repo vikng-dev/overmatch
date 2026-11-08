@@ -303,10 +303,10 @@ impl Geometry {
             if !covered(structure, state, c) {
                 continue;
             }
-            if let Some(witness) =
-                query.inward(node, &self.hulls[c], self.centres[c], &mut result.work)
-            {
-                result.witnesses.push(witness);
+            match query.inward(node, &self.hulls[c], self.centres[c], &mut result.work) {
+                Some(source::TargetHit::Witness(witness)) => result.witnesses.push(witness),
+                Some(source::TargetHit::Unresolved) => result.unresolved.push(c),
+                None => {} // No inward occupied motion reaches this target.
             }
         }
         result.retain_covered(structure, state);
@@ -355,6 +355,11 @@ impl Geometry {
         mass: f32,
         drive: Vec3,
     ) {
+        // Without a normal no cut demand is defined. Keep the targets standing and their
+        // solver contacts admitted; an unresolved hit must never free a plug or erase a contact.
+        if !sweep.unresolved.is_empty() {
+            return;
+        }
         let Some(witness) = sweep.witness else {
             return;
         }; // No occupied inward motion.
@@ -469,6 +474,12 @@ pub(crate) struct Motion<'a> {
     pub(crate) dt: f32,
 }
 
+/// A numerical contact failure is distinct from a miss: the solver must retain that target.
+enum Hit {
+    Contact { reach: f32, normal: Vec3, at: Vec3 },
+    Unresolved,
+}
+
 impl Motion<'_> {
     /// The first hit of this motion on chunk `target`, a hull about `origin`, in construction
     /// coordinates. The casts are parry's GJK shape casts (ADR-0015's defect): they run in the
@@ -476,7 +487,7 @@ impl Motion<'_> {
     /// [`CAST_HALF_EXTENT_M`], and only chunk hulls are ever targets, never terrain. DERIVED error
     /// at the largest shipped chunk (fir_1's chunk 35, 5.67 m half-extent, MEASURED): with
     /// [`CAST_HALF_EXTENT_M`]'s scaling, 0.25 mm × (5.67 / 5)^1.37–1.42 ≈ 0.30 mm short.
-    fn hit(&self, target: &Collider, origin: Vec3, work: &mut Work) -> Option<(f32, Vec3, Vec3)> {
+    fn hit(&self, target: &Collider, origin: Vec3, work: &mut Work) -> Option<Hit> {
         let Self {
             hull,
             position,
@@ -501,11 +512,15 @@ impl Motion<'_> {
                 dt,
             )
             .expect("construction sweeps require supported collider shapes")
-            .map(|hit| (hit.time_of_impact, -hit.normal2, hit.point2 + origin))
+            .map(|hit| Hit::Contact {
+                reach: hit.time_of_impact,
+                normal: -hit.normal2,
+                at: hit.point2 + origin,
+            })
         } else {
             use avian3d::parry::{
                 math::Pose3,
-                query::{NonlinearRigidMotion, cast_shapes_nonlinear},
+                query::{NonlinearRigidMotion, ShapeCastStatus, cast_shapes_nonlinear},
             };
             let moving = NonlinearRigidMotion::new(
                 Pose3::from_parts(position, rotation),
@@ -534,13 +549,29 @@ impl Motion<'_> {
                     target.shape_scaled().0.as_ref(),
                     f32::MAX,
                 )
-                .expect("construction sweeps require supported contact shapes")
-                .expect("bounded convex sweep shapes have a closest contact at their cast pose");
-                (
-                    hit.time_of_impact,
-                    -contact.normal2,
-                    contact.point2 + origin,
-                )
+                .expect("construction sweeps require supported contact shapes");
+                // Parry 0.27's contact query returns None when EPA fails at a touching pose.
+                // A cast hit remains occupied: its last separating witnesses and target normal
+                // define the conservative contact even when refinement fails. The target is fixed,
+                // so its witness and normal already use this cast's construction frame.
+                let (normal, point) = match contact {
+                    Some(contact) => (-contact.normal2, contact.point2),
+                    None => {
+                        if hit.status == ShapeCastStatus::PenetratingOrWithinTargetDist
+                            || (hit.status == ShapeCastStatus::Failed && hit.time_of_impact == 0.0)
+                        {
+                            // A nonlinear cast starting in overlap may never set its geometry.
+                            // With no contact normal, retain the solver's target without a cut.
+                            return Hit::Unresolved;
+                        }
+                        (-hit.normal2, hit.witness2)
+                    }
+                };
+                Hit::Contact {
+                    reach: hit.time_of_impact,
+                    normal,
+                    at: point + origin,
+                }
             })
         }
     }
@@ -609,10 +640,11 @@ fn rotation_bounds(
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Witness {
-    /// How far along its cast the source meets the matter, as cast time, s: the pose that sets
-    /// `at`, `normal` and the lever, and the order witnesses are met in.
+    /// Cast time in s when contact is admitted; orders witnesses and sets the source's lever pose.
     pub(crate) reach: f32,
+    /// From source into target, in construction coordinates.
     pub(crate) normal: Vec3,
+    /// Target witness in construction coordinates.
     pub(crate) at: Vec3,
     /// The closing speed along `normal` when the body's own motion closes the cast's gap there
     /// ([`RigidMotion`]), m/s, never negative.
@@ -638,11 +670,13 @@ pub(crate) struct Sweep {
     /// Each hit target's earliest inward witness, in target traversal order. These belong only
     /// to this source/owner motion snapshot; resolving a plug never overwrites them.
     witnesses: Vec<Witness>,
-    /// Occupied source patch until resolved; the minimum-cut plug once released.
+    /// Cast targets without usable contact geometry: held for the solver, never cut.
+    unresolved: Vec<usize>,
+    /// Admitted contact targets until resolved; the minimum-cut plug once released.
     pub(crate) chunks: Vec<usize>,
     pub(crate) incoming: f32,
     pub(crate) witness: Option<Witness>,
-    /// Set by [`Geometry::resolve`]; `None` while no witness meets matter inward.
+    /// Set by [`Geometry::resolve`]; `None` without an inward witness or with an unresolved hit.
     pub(crate) verdict: Option<Verdict>,
     pub(crate) work: Work,
 }
@@ -662,7 +696,10 @@ impl Sweep {
     pub(crate) fn retain_covered(&mut self, structure: &Structure, state: &State) {
         self.witnesses
             .retain(|witness| covered(structure, state, witness.chunk));
+        self.unresolved
+            .retain(|&chunk| covered(structure, state, chunk));
         self.chunks.clear();
+        self.chunks.extend_from_slice(&self.unresolved);
         self.witness = None;
         self.verdict = None;
         for &witness in &self.witnesses {
@@ -814,6 +851,206 @@ pub(crate) fn exchange(body: &Body, parts: &[Part]) -> Exchange {
 mod tests {
     use super::*;
     use crate::construction::fracture::{Bond, Chunk, Joint, Material};
+
+    fn failed_contact_hulls() -> (Collider, Collider) {
+        use avian3d::parry::shape::{ConvexPolyhedron, SharedShape};
+        // Fixture: exact hull vertices/order captured from a local ram panic.
+        let hull = |points: [Vec3; 8], faces: [[u32; 4]; 6]| {
+            let indices: Vec<_> = faces
+                .into_iter()
+                .flat_map(|[a, b, c, d]| [[a, b, c], [a, c, d]])
+                .collect();
+            Collider::from(SharedShape::new(
+                ConvexPolyhedron::from_convex_mesh(points.to_vec(), &indices).unwrap(),
+            ))
+        };
+        let source = hull(
+            [
+                Vec3::new(0.125, 0.11149995, -0.12899987),
+                Vec3::new(-0.124, 0.11149995, -0.12899987),
+                Vec3::new(0.125, 0.11149995, 0.13000011),
+                Vec3::new(-0.124, 0.11149995, 0.13000011),
+                Vec3::new(0.125, -0.11149995, -0.12899987),
+                Vec3::new(-0.124, -0.11149995, -0.12899987),
+                Vec3::new(0.125, -0.11149995, 0.13000011),
+                Vec3::new(-0.124, -0.11149995, 0.13000011),
+            ],
+            [
+                [4, 5, 1, 0],
+                [3, 2, 0, 1],
+                [7, 3, 1, 5],
+                [6, 7, 5, 4],
+                [6, 4, 0, 2],
+                [6, 2, 3, 7],
+            ],
+        );
+        let target = hull(
+            [
+                Vec3::new(0.059999943, 0.11249995, -0.125),
+                Vec3::new(0.059999943, 0.11249995, 0.125),
+                Vec3::new(0.059999943, -0.11249995, 0.125),
+                Vec3::new(0.059999943, -0.11249995, -0.125),
+                Vec3::new(-0.060000062, 0.11249995, 0.125),
+                Vec3::new(-0.060000062, -0.11249995, 0.125),
+                Vec3::new(-0.060000062, 0.11249995, -0.125),
+                Vec3::new(-0.060000062, -0.11249995, -0.125),
+            ],
+            [
+                [4, 5, 2, 1],
+                [3, 0, 1, 2],
+                [7, 3, 2, 5],
+                [6, 7, 5, 4],
+                [6, 4, 1, 0],
+                [6, 0, 3, 7],
+            ],
+        );
+        (source, target)
+    }
+
+    /// The game's environment destruction: the server sweep retains a cast hit when Parry 0.27's
+    /// EPA cannot refine its touching pose; its inward witness must still reach intake.
+    #[test]
+    fn a_cast_hit_survives_a_failed_contact_solve() {
+        use avian3d::parry::{
+            math::Pose3,
+            query::{NonlinearRigidMotion, cast_shapes_nonlinear},
+        };
+        let (source, target) = failed_contact_hulls();
+        // Fixture: motion captured with the hulls.
+        let motion = Motion {
+            hull: &source,
+            position: Vec3::new(0.1849854, -4.7683716e-7, -0.0049984455),
+            rotation: Quat::IDENTITY,
+            velocity: Vec3::new(0.11285652, -0.07940081, -1.4040189),
+            centre: Vec3::new(0.0793339, -0.6656711, -3.7854028),
+            spin: Vec3::new(0.08253816, -0.21081337, -0.11620742),
+            dt: 0.015625,
+        };
+        let moving = NonlinearRigidMotion::new(
+            Pose3::from_parts(motion.position, motion.rotation),
+            motion.rotation.inverse() * (motion.centre - motion.position),
+            motion.velocity,
+            motion.spin,
+        );
+        let cast = cast_shapes_nonlinear(
+            &moving,
+            source.shape_scaled().0.as_ref(),
+            &NonlinearRigidMotion::identity(),
+            target.shape_scaled().0.as_ref(),
+            0.0,
+            motion.dt,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        let at = moving.position_at_time(cast.time_of_impact);
+        assert!(
+            avian3d::parry::query::contact(
+                &at,
+                source.shape_scaled().0.as_ref(),
+                &Pose3::IDENTITY,
+                target.shape_scaled().0.as_ref(),
+                f32::MAX
+            )
+            .unwrap()
+            .is_none(),
+            "fixture reaches the failed contact solve"
+        );
+        let Some(Hit::Contact {
+            reach,
+            normal,
+            at: point,
+        }) = motion.hit(&target, Vec3::ZERO, &mut Work::default())
+        else {
+            panic!("the server sweep retains the cast's usable inward geometry");
+        };
+        assert!(reach >= 0.0 && reach <= motion.dt);
+        assert!(normal.is_normalized() && point.is_finite());
+        assert_eq!(normal, -cast.normal2, "the cast owns the retained normal");
+        assert_eq!(point, cast.witness2, "the cast owns the target witness");
+        let velocity = motion.velocity
+            + motion
+                .spin
+                .cross(point - motion.centre - motion.velocity * reach);
+        assert!(
+            velocity.dot(normal) > 0.0,
+            "the retained witness reaches the target inward"
+        );
+    }
+
+    /// The game's environment destruction: an initial overlap without contact geometry has no
+    /// cut demand. Intake relies on retaining its target for the solver, even beside a known hit.
+    #[test]
+    fn an_unresolved_overlap_holds_its_patch_until_coverage_changes() {
+        let (source, target) = failed_contact_hulls();
+        // Fixture: a nearby initial touching pose, rotating about its own origin.
+        let position = Vec3::new(0.18406194, -0.000726223, -0.007017851);
+        let motion = Motion {
+            hull: &source,
+            position,
+            rotation: Quat::from_xyzw(6.280653e-5, -0.00016041618, -8.8426794e-5, 1.0),
+            velocity: Vec3::new(0.11285652, -0.07940081, -1.4040189),
+            centre: position,
+            spin: Vec3::new(0.08253816, -0.21081337, -0.11620742),
+            dt: 0.015625,
+        };
+        assert!(matches!(
+            motion.hit(&target, Vec3::ZERO, &mut Work::default()),
+            Some(Hit::Unresolved)
+        ));
+        let (structure, mut geometry) = wall(1.0);
+        let mut state = State::new(&structure);
+        // Fixture: only the middle chunk participates in this query.
+        geometry.tree = tree(&[target.aabb(Vec3::ZERO, Quat::IDENTITY)]);
+        geometry.tree[0].chunk = 4;
+        geometry.hulls[4] = target;
+        geometry.centres[4] = Vec3::ZERO;
+        let mut swept = single_sweep(&geometry, &structure, &state, motion);
+        assert_eq!(swept.unresolved, [4]);
+        assert_eq!(
+            swept.chunks,
+            [4],
+            "the unknown normal cannot turn a hit into a miss"
+        );
+        // Fixture: another leaf meets known matter in the same owner patch.
+        swept.witnesses.push(Witness {
+            reach: 0.0,
+            normal: Vec3::X,
+            at: Vec3::ZERO,
+            speed: 1.0,
+            chunk: 3,
+        });
+        swept.retain_covered(&structure, &state);
+        geometry.resolve(
+            &structure,
+            &state,
+            &preload(&structure, &state),
+            &mut swept,
+            1.0,
+            Vec3::X,
+        );
+        assert!(
+            !swept.released() && swept.load().is_none(),
+            "no force cut may use an unknown contact normal"
+        );
+        assert_eq!(swept.chunks, [3, 4], "intake keeps both solver targets");
+        state.fate[4] = super::super::fracture::Fate::Dust;
+        swept.retain_covered(&structure, &state);
+        assert!(swept.unresolved.is_empty());
+        assert_eq!(swept.chunks, [3]);
+        geometry.resolve(
+            &structure,
+            &state,
+            &preload(&structure, &state),
+            &mut swept,
+            1.0,
+            Vec3::X,
+        );
+        assert!(
+            swept.load().is_some(),
+            "retired unknown matter cannot block the remaining known hit"
+        );
+    }
 
     fn single_sweep(
         geometry: &Geometry,
@@ -1306,7 +1543,11 @@ mod tests {
                     spin: motion.spin,
                     dt: motion.dt,
                 };
-                if let Some((time, normal, at)) = leaf_motion.hit(
+                if let Some(Hit::Contact {
+                    reach: time,
+                    normal,
+                    at,
+                }) = leaf_motion.hit(
                     &geometry.hulls[c],
                     geometry.centres[c],
                     &mut Work::default(),
@@ -1443,13 +1684,16 @@ mod tests {
             spin: motion.spin,
             dt: motion.dt,
         };
-        let (_, normal, _) = leaf_motion
+        let Hit::Contact { normal, .. } = leaf_motion
             .hit(
                 &geometry.hulls[4],
                 geometry.centres[4],
                 &mut Work::default(),
             )
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("the radial fixture has a determinate contact");
+        };
         assert!(
             !face.accepts_normal(normal),
             "the first touch must be radial: {normal}"
