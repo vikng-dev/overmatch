@@ -206,3 +206,13 @@ The shipped value stays **97 × 3**, as dispatched. The report nominates 48 × 2
 Validation: all eight complete cards passed; final formatting, CI clippy and 49 targeted whole-tree/sandbox checks passed after the scorecard merge. The earlier 663-test track/headless/construction/scatter/state-hash/guard run passed, followed by the adjusted calibration/doc checks and both ignored observation beds. The card reader is byte-for-byte the merged score lane version; the arm seam is its only edited card file. No timing runs, captures, issue comments or pushes.
 
 Scope note: the existing `load-29` backlog row names `resolve_rig_nodes` in `src/tank/spawn.rs`; that admission code is unchanged. Only spawn-time grip dimensions in that file were changed, under the brief’s resolution/query-only scope. The multi-file admission-type work remains recorded in the backlog.
+
+## Session 3: outer-face hard limit
+
+The stop encloses the shoe's **outer face** at each wheel's full compression. Roadwheel centres rise by their authored bump travel; hull-fixed end wheels stay put. The measured pin-to-outer offset expands every pin-line circle, so plate thickness is no longer an invented compression stroke. The enclosure tests derive both roadwheel-limited and end-wheel-limited bounds from construction, allowing the route's chord sagitta.
+
+Decision: a segment with zero construction travel has **no boat spring band**. Its outer-face collider owns contact from first touch, including the return run. Such segments are rejected before terrain or convex queries. Spring-law fixtures now declare positive travel and elevate their pin lines by the same distance, preserving their stated envelope penetration; the obsolete spring response on the return run was removed. A deep-overlap zero-travel fixture refuses any oracle call.
+
+Decision: retain `SidePlate` for lateral contacts across the suspension band. Its radial contacts must not create another rigid rest-height support face; the contact-hook step will restrict it to lateral faces and carry their belt speed too.
+
+Validation of this step: formatting and CI clippy passed. The broad geometry run passed 787 checks, including headless, construction, pen-camera, field-cast and whole-tree guards; its 33 failures were zero-travel spring fixtures. After correcting those fixtures, all 68 targeted force, rubble and documentation checks passed. No tuning, captures, timing runs or pushes.

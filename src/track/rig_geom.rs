@@ -6,7 +6,7 @@
 //!
 //! Circles use the hull-local side plane `(z, y)` in front-to-rear order, with the sprocket first
 //! and idler last. Their radii reach the pin line; tread radii and pin-to-face offsets are separate
-//! physical facts. `hard_stop_polyline` encloses the compressed inner surface for rigid bottoming.
+//! physical facts. `hard_stop_polyline` encloses the compressed outer shoe surface for rigid bottoming.
 
 use std::path::Path;
 
@@ -591,31 +591,18 @@ impl RigGeom {
         build_route(&self.circles(side, pose, params), 0.0).total()
     }
 
-    /// Red rigid-bottoming boundary in `(z, y)`, extruded by [`super::bump_stop`]; softer contact
-    /// belongs to the support penalty. Wrap [`Pose::Compression`] taut (`belt_len = 0`), raising
-    /// road wheels by `params.bump_stop` while sprocket/idler stay fixed, then subtract the measured
-    /// `pin_to_inner` from every pin-line radius to reach the inner surface (wheel tread/rim).
-    ///
-    /// The full plate, `pin_to_inner + pin_to_outer` (MEASURED ~50 mm), remains available for penalty
-    /// support and grinding traction. A face stop would mask the penalty; a pin-line stop allows
-    /// only its outer portion. At unsprung end arcs, envelope travel is zero and plate thickness
-    /// is the only compliance. Bottoming can visually crush at most one full plate depth.
-    ///
-    /// Ride-height invariant: the rest pin belly is `pin_to_outer` above `-hull_rest_y`; deflation
-    /// adds `pin_to_inner` clearance and compression adds up to `bump_stop`. Thus on flat ground
-    /// at rest the stop clears the ground by a full plate plus belly rise; otherwise the rigid
-    /// collider would carry the tank instead of the belt.
-    ///
-    /// Hull the `build_route` points: raised wheels scallop its taut return run, which rides their
-    /// tops. The hard stop needs their outer convex envelope. Return it CCW and closed (first ==
-    /// last), matching `Collider::convex_hull`'s boundary and the tests' contract.
+    /// Outer shoe face at full compression, in `(z, y)`, extruded by [`super::bump_stop`].
+    /// Road wheels rise by `params.bump_stop`; hull-fixed end wheels have no travel and meet
+    /// the world rigidly from first touch. Measured `pin_to_outer` carries the pin line to
+    /// the only radial face the world can touch. The convex, closed CCW envelope bounds the
+    /// compressed wheel circles within the route's arc-chord sagitta.
     pub(crate) fn hard_stop_polyline(&self, side: Side, params: &SuspensionParams) -> Vec<Vec2> {
-        let inner: Vec<(Vec2, f32)> = self
+        let outer: Vec<(Vec2, f32)> = self
             .circles(side, Pose::Compression, params)
             .into_iter()
-            .map(|(c, r)| (c, r - self.model.pin_to_inner))
+            .map(|(c, r)| (c, r + self.model.pin_to_outer))
             .collect();
-        convex_hull_ccw(build_route(&inner, 0.0).pts)
+        convex_hull_ccw(build_route(&outer, 0.0).pts)
     }
 
     /// Hull-local `x` and load share, inboard → centre → outboard. Width enters only here and
@@ -1708,7 +1695,7 @@ mod tests {
         }
     }
 
-    /// The rigid stop follows the lowest compressed inner circle, whether a roadwheel or fixed
+    /// The rigid stop follows the lowest compressed outer circle, whether a roadwheel or fixed
     /// gear limits it. A fixture requiring roadwheel limitation from every tank would reject
     /// valid drive-wheel-limited construction; the collider's consumers rely only on enclosure.
     #[test]
@@ -1739,13 +1726,13 @@ mod tests {
                             } else {
                                 0.0
                             };
-                            centre.y + travel - (radius - rig.model.pin_to_inner)
+                            centre.y + travel - (radius + rig.model.pin_to_outer)
                         })
                         .fold(f32::INFINITY, f32::min);
                     // DERIVED worst chord sagitta: any wrap arc is at most a full revolution.
                     let max_radius = rest
                         .iter()
-                        .map(|(_, radius)| radius - rig.model.pin_to_inner)
+                        .map(|(_, radius)| radius + rig.model.pin_to_outer)
                         .fold(0.0, f32::max);
                     let half_segment =
                         std::f32::consts::PI / super::super::route::ARC_SEGMENTS as f32;
@@ -1757,23 +1744,21 @@ mod tests {
                         .fold(f32::INFINITY, f32::min);
                     assert!(
                         actual >= expected - 1e-5 && actual <= expected + sagitta + 1e-5,
-                        "the compressed inner circle envelope bounds the stop independently of route sampling"
+                        "the compressed outer circle envelope bounds the stop independently of route sampling"
                     );
                 }
             }
         }
     }
 
-    /// Bottoming must enclose every compressed inner (wheel-rim) circle within arc-chord sagitta.
+    /// Bottoming must enclose every compressed outer shoe circle within arc-chord sagitta.
     /// DERIVED: `build_route` uses 10 chords per arc, cutting inside smooth circles most at wide-sweep
     /// end arcs. The collider re-hulls these points, so its boundary is convex regardless.
-    /// Pin circles sit `pin_to_inner` outside by design; [`RigGeom::hard_stop_polyline`] owns why
-    /// only inner circles are enclosed and the full plate remains the penalty's dig-in band.
     #[test]
     fn the_hard_stop_wrap_encloses_every_compression_circle() {
         let p = SuspensionParams::default();
         let rig = tiger_rig();
-        let pti = rig.model.pin_to_inner;
+        let outer_offset = rig.model.pin_to_outer;
         for side in [Side::Left, Side::Right] {
             let poly = rig.hard_stop_polyline(side, &p);
             let circles = rig.circles(side, Pose::Compression, &p);
@@ -1782,7 +1767,7 @@ mod tests {
             // bound cannot drift from the discretisation it is bounding.
             let max_r = circles
                 .iter()
-                .map(|&(_, r)| r - pti)
+                .map(|&(_, r)| r + outer_offset)
                 .fold(0.0_f32, f32::max);
             let half_segment =
                 1.25 * std::f32::consts::PI / (2.0 * crate::track::route::ARC_SEGMENTS as f32);
@@ -1790,10 +1775,10 @@ mod tests {
             for &(c, r) in &circles {
                 for k in 0..96 {
                     let dir = Vec2::from_angle(std::f32::consts::TAU * k as f32 / 96.0);
-                    let inset_d = inset(&poly, c + (r - pti) * dir);
+                    let inset_d = inset(&poly, c + (r + outer_offset) * dir);
                     assert!(
                         inset_d >= -sagitta - 1e-4,
-                        "{side:?}: inner circle escaped past the arc sagitta (inset {inset_d}, \
+                        "{side:?}: outer circle escaped past the arc sagitta (inset {inset_d}, \
                          sagitta {sagitta})",
                     );
                 }

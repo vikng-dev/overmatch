@@ -2414,19 +2414,22 @@ mod tests {
         vel: Vec3,
         elements: &mut GripElements,
     ) -> SideReport {
+        let travel = 0.01; // Fixture spring travel (m).
         let loop_pts = [
-            Vec2::new(-1.0, 0.02),
-            Vec2::new(1.0, 0.02),
-            Vec2::new(1.0, 1.02),
-            Vec2::new(-1.0, 1.02),
-            Vec2::new(-1.0, 0.02),
+            Vec2::new(-1.0, 0.02 + travel),
+            Vec2::new(1.0, 0.02 + travel),
+            Vec2::new(1.0, 1.02 + travel),
+            Vec2::new(-1.0, 1.02 + travel),
+            Vec2::new(-1.0, 0.02 + travel),
         ];
         let input = SideInput {
             loop_pts: &loop_pts,
             count: 30,
             plane_x: 0.0,
             columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)].into(),
-            travel: TravelField { knots: &[] },
+            travel: TravelField {
+                knots: &[(0.0, travel)],
+            },
         };
         let params = ForceParams {
             face_offset: 0.025,

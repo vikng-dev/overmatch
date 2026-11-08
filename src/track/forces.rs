@@ -909,6 +909,10 @@ fn collect_column_contacts<O: TerrainOracle>(
         } else {
             [0.0; 3]
         };
+        if travel.iter().all(|&value| value == 0.0) {
+            // Hull-fixed faces have no spring band; their outer-face collider carries contact.
+            continue;
+        }
         let slab = Slab {
             origin: wa,
             axis,
@@ -1383,7 +1387,7 @@ mod tests {
             count: 2,
             plane_x: 0.0,
             columns: TEST_COLUMNS.into(),
-            travel: TravelField { knots: &[] },
+            travel: TravelField { knots: &PAD_TRAVEL },
         };
         contact_side(
             &input,
@@ -1421,9 +1425,14 @@ mod tests {
         }
     }
 
-    /// A closed rectangular pin-line loop in the side plane (z, y), bottom run traversed +z
-    /// so its outward normal points DOWN (`out2 = (tan.y, −tan.x)`). `bottom_y` positions the
-    /// pin line; the contact face sits `face_offset` further out.
+    // Fixture: explicit spring travel; pin elevation preserves the pad's stated envelope depth.
+    const PAD_TRAVEL: [(f32, f32); 1] = [(0.0, 0.01)];
+
+    fn spring_pad(bottom_y: f32) -> Vec<Vec2> {
+        rect_loop(bottom_y + PAD_TRAVEL[0].1)
+    }
+
+    /// A closed rectangular pin-line loop in `(z, y)`, with its bottom traversed toward +z.
     fn rect_loop(bottom_y: f32) -> Vec<Vec2> {
         vec![
             Vec2::new(-1.0, bottom_y),
@@ -1445,7 +1454,7 @@ mod tests {
     fn rig_params() -> ForceParams {
         ForceParams {
             face_offset: 0.025,
-            free_travel: 0.0,
+            free_travel: PAD_TRAVEL[0].1,
             support_stiffness_per_m: 2.0e6,
             support_damping_per_m: 1.0e5,
             engage_depth: 0.002,
@@ -1471,8 +1480,7 @@ mod tests {
             count: 25,
             plane_x: 0.0,
             columns: TEST_COLUMNS.into(),
-            // Empty knots: a rest-anchored zero-droop pad (the fixture's free_travel is 0).
-            travel: TravelField { knots: &[] },
+            travel: TravelField { knots: &PAD_TRAVEL },
         };
         let report = contact_side(
             &input,
@@ -1509,13 +1517,13 @@ mod tests {
                 FlatGround { surface_y: 0.0 }.contact_along(station, out, reach)
             }
         }
-        let loop_pts = rect_loop(0.02);
+        let loop_pts = spring_pad(0.02);
         let input = SideInput {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
             columns: TEST_COLUMNS.into(),
-            travel: TravelField { knots: &[] },
+            travel: TravelField { knots: &PAD_TRAVEL },
         };
         for phase in [0.0, 0.13] {
             let oracle = CountedGround {
@@ -1566,7 +1574,7 @@ mod tests {
     #[test]
     fn perceived_support_survives_dynamic_load_dropout() {
         // Fixture: a shallow pad, identical geometry, rest versus a rapid separating velocity.
-        let loop_pts = rect_loop(0.02);
+        let loop_pts = spring_pad(0.02);
         let measure = |velocity| {
             let mut state = SideState::default();
             let mut elements = GripElements::for_stations(25, 3);
@@ -1650,9 +1658,7 @@ mod tests {
              band ({} contacts)",
             report.contacts.len(),
         );
-        // Receipt: the ceiling IS inside the ungated band's reach — drop it to the face line
-        // and the top run must contact (the gate must not have killed top-run contact
-        // outright).
+        // Even penetration of the return face belongs to rigid contact: it has no spring travel.
         let report = contact_side(
             &input,
             SideState::default(),
@@ -1665,9 +1671,46 @@ mod tests {
             &mut GripElements::for_stations(25, 3),
         );
         assert!(
-            !report.contacts.is_empty(),
-            "a ceiling below the top face must still contact through the gated law"
+            report.contacts.is_empty(),
+            "a zero-travel return face is carried by its rigid collider"
         );
+    }
+
+    /// The rigid face owns zero-travel contact. Driving must neither double its load nor
+    /// spend terrain queries on a spring that construction does not contain.
+    #[test]
+    fn zero_travel_faces_do_not_query_or_apply_spring_support() {
+        struct NoQuery;
+        impl DepthOracle for NoQuery {
+            fn depth_along(&self, _: Vec3, _: Vec3, _: f32) -> f32 {
+                panic!("zero-travel construction must not query spring support")
+            }
+        }
+        impl ContactOracle for NoQuery {
+            fn contact_along(&self, _: Vec3, _: Vec3, _: f32) -> TerrainContact {
+                panic!("zero-travel construction must not query spring support")
+            }
+        }
+        let points = rect_loop(-0.1); // Fixture: deep overlap still cannot create a spring.
+        let input = SideInput {
+            loop_pts: &points,
+            count: 25,
+            plane_x: 0.0,
+            columns: TEST_COLUMNS.into(),
+            travel: TravelField { knots: &[] },
+        };
+        let report = contact_side(
+            &input,
+            SideState::default(),
+            Affine3A::IDENTITY,
+            1.0 / 64.0,
+            &rig_params(),
+            &NoQuery,
+            &RubbleBodies::default(),
+            |_| Vec3::ZERO,
+            &mut GripElements::for_stations(input.count, 3),
+        );
+        assert!(report.apps.is_empty() && report.contacts.is_empty());
     }
 
     /// Recipient stability needs the derivative of the support force, including soft engagement
@@ -1679,13 +1722,13 @@ mod tests {
     fn engagement_reports_the_support_force_derivative() {
         let mut params = rig_params();
         params.engage_depth = 0.02;
-        let loop_pts = rect_loop(params.face_offset);
+        let loop_pts = spring_pad(params.face_offset);
         let input = SideInput {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
             columns: TEST_COLUMNS.into(),
-            travel: TravelField { knots: &[] },
+            travel: TravelField { knots: &PAD_TRAVEL },
         };
         for closing in [0.0, 1.0] {
             let read = |depth: f32| {
@@ -1840,7 +1883,7 @@ mod tests {
     /// loss dwell after the last contact evidence.
     #[test]
     fn element_strain_forgets_on_definitive_departure() {
-        let loop_pts = rect_loop(0.02);
+        let loop_pts = spring_pad(0.02);
         let mut state = SideState::default();
         let mut elems = GripElements::for_stations(25, 3);
         for _ in 0..20 {
@@ -1887,7 +1930,7 @@ mod tests {
         // so element identity + strain slab persist. The pad is fading but still a live member
         // (dwell refreshed each tick); slip continues, so an `if member` integration branch WOULD
         // move the strain. It must hold instead.
-        let band = rect_loop(0.024);
+        let band = spring_pad(0.024);
         let held = elems.strain.clone();
         for _ in 0..(2 * GRIP_ELEMENT_LOSS_DWELL_TICKS as usize) {
             let report = rig_tick(
@@ -1923,7 +1966,7 @@ mod tests {
     #[test]
     fn element_below_enter_bound_never_integrates() {
         // 0.05 mm of face penetration: real contact, but orders below the enter bound.
-        let loop_pts = rect_loop(0.024_95);
+        let loop_pts = spring_pad(0.024_95);
         let mut state = SideState::default();
         let mut elems = GripElements::for_stations(25, 3);
         let leave = rig_params().grip.unwrap().side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
@@ -2120,13 +2163,13 @@ mod tests {
             (normal - Vec3::Y).length() < 1e-5,
             "flat edge support {normal}"
         );
-        let loop_pts = rect_loop(0.02);
+        let loop_pts = spring_pad(0.02);
         let input = SideInput {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 1.995,
             columns: TEST_COLUMNS.into(),
-            travel: TravelField { knots: &[] },
+            travel: TravelField { knots: &PAD_TRAVEL },
         };
         let report = contact_side(
             &input,
@@ -2173,13 +2216,13 @@ mod tests {
             solid.contact_along(Vec3::ZERO, Vec3::NEG_Y, 0.5),
             TerrainContact::Buried
         ));
-        let loop_pts = rect_loop(0.02);
+        let loop_pts = spring_pad(0.02);
         let input = SideInput {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
             columns: TEST_COLUMNS.into(),
-            travel: TravelField { knots: &[] },
+            travel: TravelField { knots: &PAD_TRAVEL },
         };
         for field in [empty, solid] {
             let report = contact_side(
@@ -2215,13 +2258,13 @@ mod tests {
             rotation,
             Vec3::new(4.0, 1.2, 2.0),
         )]);
-        let loop_pts = rect_loop(0.02);
+        let loop_pts = spring_pad(0.02);
         let input = SideInput {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
             columns: TEST_COLUMNS.into(),
-            travel: TravelField { knots: &[] },
+            travel: TravelField { knots: &PAD_TRAVEL },
         };
         let affine = Affine3A::from_rotation_translation(
             Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
@@ -2268,14 +2311,14 @@ mod tests {
             Quat::IDENTITY,
             Vec3::new(4.0, 1.2, 2.0),
         )]);
-        let loop_pts = rect_loop(0.02);
+        let loop_pts = spring_pad(0.02);
         let force = |count, z| {
             let input = SideInput {
                 loop_pts: &loop_pts,
                 count,
                 plane_x: 0.0,
                 columns: TEST_COLUMNS.into(),
-                travel: TravelField { knots: &[] },
+                travel: TravelField { knots: &PAD_TRAVEL },
             };
             let report = contact_side(
                 &input,
@@ -2346,14 +2389,14 @@ mod tests {
                     .expect("the analytic height graph has a finite gradient and a nonzero up component") }
             }
         }
-        let loop_pts = rect_loop(0.02);
+        let loop_pts = spring_pad(0.02);
         let force = |count, curve: &Bump| {
             let input = SideInput {
                 loop_pts: &loop_pts,
                 count,
                 plane_x: 0.0,
                 columns: TEST_COLUMNS.into(),
-                travel: TravelField { knots: &[] },
+                travel: TravelField { knots: &PAD_TRAVEL },
             };
             let report = contact_side(
                 &input,
@@ -2414,13 +2457,13 @@ mod tests {
             Quat::IDENTITY,
             Vec3::new(4.0, 1.2, 2.0),
         )]);
-        let loop_pts = rect_loop(0.02);
+        let loop_pts = spring_pad(0.02);
         let input = SideInput {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
             columns: TEST_COLUMNS.into(),
-            travel: TravelField { knots: &[] },
+            travel: TravelField { knots: &PAD_TRAVEL },
         };
         let mut peak = 0.0_f32;
         for z in [
@@ -2487,13 +2530,13 @@ mod tests {
         elems: &mut GripElements,
         hull_speed: f32,
     ) -> SideReport {
-        let loop_pts = rect_loop(0.02);
+        let loop_pts = spring_pad(0.02);
         let input = SideInput {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
             columns: TEST_COLUMNS.into(),
-            travel: TravelField { knots: &[] },
+            travel: TravelField { knots: &PAD_TRAVEL },
         };
         let report = contact_side(
             &input,
@@ -2616,14 +2659,14 @@ mod tests {
             let mut mass = 0.0;
             for tick in 0..64 * 20 {
                 let report = if sideways {
-                    let points = rect_loop(0.02);
+                    let points = spring_pad(0.02);
                     contact_side(
                         &SideInput {
                             loop_pts: &points,
                             count: 25,
                             plane_x: 0.0,
                             columns: TEST_COLUMNS.into(),
-                            travel: TravelField { knots: &[] },
+                            travel: TravelField { knots: &PAD_TRAVEL },
                         },
                         state,
                         Affine3A::IDENTITY,
@@ -2736,11 +2779,11 @@ mod tests {
         };
         let half = 4.27 / 2.0;
         let points = vec![
-            Vec2::new(-half, 0.02),
-            Vec2::new(half, 0.02),
-            Vec2::new(half, 0.52),
-            Vec2::new(-half, 0.52),
-            Vec2::new(-half, 0.02),
+            Vec2::new(-half, 0.02 + PAD_TRAVEL[0].1),
+            Vec2::new(half, 0.02 + PAD_TRAVEL[0].1),
+            Vec2::new(half, 0.52 + PAD_TRAVEL[0].1),
+            Vec2::new(-half, 0.52 + PAD_TRAVEL[0].1),
+            Vec2::new(-half, 0.02 + PAD_TRAVEL[0].1),
         ];
         for yaw in [0.2, 0.6] {
             let mut state = SideState {
@@ -2758,7 +2801,7 @@ mod tests {
                         count: 50,
                         plane_x: -1.4,
                         columns: TEST_COLUMNS.into(),
-                        travel: TravelField { knots: &[] },
+                        travel: TravelField { knots: &PAD_TRAVEL },
                     },
                     state,
                     Affine3A::IDENTITY,
@@ -2813,13 +2856,13 @@ mod tests {
                     surface_y: 0.0,
                     ground: ground.contact(),
                 };
-                let loop_pts = rect_loop(0.02);
+                let loop_pts = spring_pad(0.02);
                 let input = SideInput {
                     loop_pts: &loop_pts,
                     count: 25,
                     plane_x: 0.0,
                     columns: TEST_COLUMNS.into(),
-                    travel: TravelField { knots: &[] },
+                    travel: TravelField { knots: &PAD_TRAVEL },
                 };
                 let mut elements = GripElements::for_stations(input.count, 3);
                 let mut report = SideReport::default();
@@ -2876,13 +2919,13 @@ mod tests {
                         surface_y: 0.0,
                         ground: ground.contact(),
                     };
-                    let loop_pts = rect_loop(0.02);
+                    let loop_pts = spring_pad(0.02);
                     let input = SideInput {
                         loop_pts: &loop_pts,
                         count: 25,
                         plane_x: 0.0,
                         columns: TEST_COLUMNS.into(),
-                        travel: TravelField { knots: &[] },
+                        travel: TravelField { knots: &PAD_TRAVEL },
                     };
                     let pieces = RubbleBodies::default();
                     let mut elements = GripElements::for_stations(input.count, 3);
@@ -3024,13 +3067,13 @@ mod tests {
                 );
                 assert_eq!(surface.rolling, expected, "{name}");
                 assert!(surface.rolling >= previous);
-                let loop_pts = rect_loop(0.02);
+                let loop_pts = spring_pad(0.02);
                 let input = SideInput {
                     loop_pts: &loop_pts,
                     count: 25,
                     plane_x: 0.0,
                     columns: TEST_COLUMNS.into(),
-                    travel: TravelField { knots: &[] },
+                    travel: TravelField { knots: &PAD_TRAVEL },
                 };
                 let report = contact_side(
                     &input,
@@ -3097,13 +3140,13 @@ mod tests {
                     rolling_resistance: rigid_rolling_resistance(),
                 },
             };
-            let loop_pts = rect_loop(0.02);
+            let loop_pts = spring_pad(0.02);
             let input = SideInput {
                 loop_pts: &loop_pts,
                 count: 25,
                 plane_x: 0.0,
                 columns: TEST_COLUMNS.into(),
-                travel: TravelField { knots: &[] },
+                travel: TravelField { knots: &PAD_TRAVEL },
             };
             let mut elements = GripElements::for_stations(input.count, 3);
             elements.strain.fill(Vec3::X * (GRIP_SHEAR_FLOOR_M * share));
@@ -3137,13 +3180,13 @@ mod tests {
                 .get("dirt")
                 .contact(),
         };
-        let loop_pts = rect_loop(0.02);
+        let loop_pts = spring_pad(0.02);
         let input = SideInput {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
             columns: TEST_COLUMNS.into(),
-            travel: TravelField { knots: &[] },
+            travel: TravelField { knots: &PAD_TRAVEL },
         };
         let mut params = rig_params();
         let mut observed = Vec::new();
