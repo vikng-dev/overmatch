@@ -2019,6 +2019,55 @@ fn is_asleep(bed: &Bed) -> bool {
     bed.app.world().get::<Sleeping>(bed.tank).is_some()
 }
 
+fn belts_moving(bed: &Bed) -> bool {
+    bed.app
+        .world()
+        .get::<crate::track::sim::TrackDrive>(bed.tank)
+        .expect("a spawned tank carries its belt state")
+        .sides
+        .iter()
+        .any(|side| side.speed.abs() >= crate::track::transmission::PARK_ENGAGE_SPEED)
+}
+
+/// Sleep must wait for coasting belts, then persist without a new input. The parked island's
+/// economy relies on both. Fixture watchdog: 12 s to settle; the sustained window is DERIVED
+/// as twice Avian's own sleep duration, rather than accepting one sleeping frame.
+fn assert_coast_and_sleep(bed: &mut Bed) -> usize {
+    let mut moving_ticks = 0;
+    for tick in 0..12 * TICKS {
+        let coasting = belts_moving(bed);
+        bed.tick(0.0, 0.0);
+        if coasting {
+            moving_ticks += 1;
+            assert!(
+                !is_asleep(bed),
+                "slept with coasting belts at release tick {tick}"
+            );
+        }
+        if is_asleep(bed) {
+            break;
+        }
+    }
+    assert!(
+        is_asleep(bed),
+        "a tank with no demand must settle into sleep"
+    );
+    assert!(!belts_moving(bed), "sleep began before the belts stopped");
+    let window = (2.0 * bed.app.world().resource::<TimeToSleep>().0 / DT).ceil() as usize;
+    for tick in 0..window {
+        bed.tick(0.0, 0.0);
+        assert!(
+            !belts_moving(bed),
+            "parked belts moved at sleep-window tick {tick}"
+        );
+        assert!(
+            is_asleep(bed),
+            "woke without new input at sleep-window tick {tick}"
+        );
+    }
+    moving_ticks
+}
+
 /// A tank on a layer of loose pieces under each track: its whole support is solver contacts.
 fn bed_on_pile() -> Bed {
     let mut bed = Bed::on_ground(Some(base_ground()), flat());
@@ -2054,16 +2103,99 @@ fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
     let moved = (bed.hull().position - before).length();
     println!("MEASURED driven {moved} m in 0.5 s");
     assert!(moved > 0.05, "throttle gave no reaction: {moved} m");
-    let mut coasted = 0;
-    while !is_asleep(&bed) && coasted < 12 * TICKS {
-        bed.tick(0.0, 0.0);
-        coasted += 1;
-    }
-    println!("MEASURED asleep again {coasted} ticks after the command ended");
     assert!(
-        is_asleep(&bed),
-        "with its command ended and its belts stopped the tank may sleep again"
+        assert_coast_and_sleep(&mut bed) > 0,
+        "the release must witness belts coasting above the stopped tolerance"
     );
+
+    // Fixture: an external velocity change beyond Avian's rest threshold. With no command,
+    // the body must wake, move, and return to sustained sleep under the same belt condition.
+    let before = bed.hull().position;
+    let push = bed.hull().forward()
+        * (2.0
+            * bed
+                .app
+                .world()
+                .get::<SleepThreshold>(bed.tank)
+                .unwrap()
+                .linear);
+    bed.app
+        .world_mut()
+        .get_mut::<LinearVelocity>(bed.tank)
+        .unwrap()
+        .0 = push;
+    bed.tick(0.0, 0.0);
+    assert!(!is_asleep(&bed), "an external push left the tank asleep");
+    // Avian commits island waking at the end of the step; the next tick integrates the push.
+    bed.tick(0.0, 0.0);
+    assert!(
+        (bed.hull().position - before).dot(push) > 0.0,
+        "the externally pushed hull did not move"
+    );
+    assert_coast_and_sleep(&mut bed);
+}
+
+/// A motionless hull can still have a coasting belt: contact may stop the hull before its
+/// drivetrain stops. Fixture: a resting island with one belt at twice the transmission's stopped
+/// tolerance, no command. Every side and direction must wake; hull motion cannot mask this arm.
+#[test]
+fn a_tank_on_loose_pieces_wakes_for_either_coasting_belt_without_a_command() {
+    let mut bed = bed_on_pile();
+    assert_coast_and_sleep(&mut bed);
+    for side in 0..2 {
+        for direction in [-1.0, 1.0] {
+            bed.app
+                .world_mut()
+                .get_mut::<crate::track::sim::TrackDrive>(bed.tank)
+                .unwrap()
+                .sides[side]
+                .speed = direction * 2.0 * crate::track::transmission::PARK_ENGAGE_SPEED;
+            assert!(
+                is_asleep(&bed),
+                "changing belt state alone does not wake Avian"
+            );
+            assert!(assert_coast_and_sleep(&mut bed) > 0);
+        }
+    }
+}
+
+/// A braked slope within both holding capacities keeps stopped belts. Sampled support is an
+/// applied force, so this channel deliberately keeps the hull awake, unlike a parked pile.
+#[test]
+fn a_braked_tank_on_a_slope_stays_awake_under_sampled_support() {
+    let spec = shipped_spec();
+    let tr = &spec.track.powertrain.transmission;
+    let ground = base_ground();
+    let brake_limit = (2.0 * tr.brake_force * tr.brake_static_factor
+        / (spec.mass * crate::track::derive::G))
+        .min(1.0)
+        .asin();
+    // Fixture: half the smaller static holding angle leaves reserve in both laws.
+    let angle = 0.5 * brake_limit.min(ground.grip.atan());
+    let mut bed = Bed::on_ground(Some(ground), card_grid(|_, z| -z * angle.tan()));
+    bed.place(Vec3::ZERO, Quat::from_rotation_x(angle));
+    bed.start();
+    // Fixture: allow the suspension and grip to settle before checking the parked state.
+    for _ in 0..4 * TICKS {
+        bed.tick(0.0, 0.0);
+    }
+    let window = (2.0 * bed.app.world().resource::<TimeToSleep>().0 / DT).ceil() as usize;
+    for _ in 0..window {
+        bed.tick(0.0, 0.0);
+        assert!(
+            bed.app
+                .world()
+                .get::<crate::track::sim::TankTransmission>(bed.tank)
+                .unwrap()
+                .0
+                .park
+        );
+        assert!(
+            !belts_moving(&bed),
+            "the brakes did not hold the belts on the slope"
+        );
+        assert!(!is_asleep(&bed), "sampled support must keep the hull awake");
+    }
 }
 
 /// Below the sleep speed a held command still drives. Fixture: a throttle small enough to creep;
