@@ -317,17 +317,10 @@ fn draw_grip_columns(
     let winding = loop_winding(pts);
     let face = geom.model.pin_to_outer;
 
-    let columns = crate::track::forces::LateralColumns::for_shoe(
-        geom.grip_column_offsets(side),
-        resolution.lateral_points,
-    );
+    let columns = crate::track::forces::LateralColumns::from(geom.grip_column_offsets(side));
     for (ci, &(offset, _share)) in columns.samples().iter().enumerate() {
         let x = geom.side_plane_x(side) + offset;
-        let color = if resolution.lateral_points == 3 && ci == 1 {
-            YELLOW
-        } else {
-            MAGENTA
-        };
+        let color = if ci == 1 { YELLOW } else { MAGENTA };
         let lift = |p: Vec2, out: Vec2| {
             world_local(hull, Vec3::new(x, p.y + out.y * face, p.x + out.x * face))
         };

@@ -202,10 +202,7 @@ pub(super) fn apply_belt_support_field(
             loop_pts: &loop_pts,
             count: crate::track::forces::CONTACT_RESOLUTION.stations,
             plane_x: geom.side_plane_x(side),
-            columns: crate::track::forces::LateralColumns::for_shoe(
-                geom.grip_column_offsets(side),
-                crate::track::forces::CONTACT_RESOLUTION.lateral_points,
-            ),
+            columns: crate::track::forces::LateralColumns::from(geom.grip_column_offsets(side)),
             // The envelope's per-position reach profile: full droop over the road-wheel span,
             // tapering to zero at the unsprung sprocket/idler centres.
             travel: crate::track::forces::TravelField {
@@ -440,10 +437,7 @@ pub(super) fn calibrate_envelope(
         loop_pts: &loops[side.index()][..],
         plane_x: geom.side_plane_x(side),
         knots: &knots[side.index()][..],
-        columns: crate::track::forces::LateralColumns::for_shoe(
-            geom.grip_column_offsets(side),
-            crate::track::forces::CONTACT_RESOLUTION.lateral_points,
-        ),
+        columns: crate::track::forces::LateralColumns::from(geom.grip_column_offsets(side)),
     });
     let cal = envelope::calibrate(
         &sides,
@@ -723,10 +717,7 @@ pub(super) fn draw_sample_points(
     let lat_axis = affine.transform_vector3(Vec3::X);
     for side in Side::ALL {
         let resolution = crate::track::forces::CONTACT_RESOLUTION;
-        let cols = crate::track::forces::LateralColumns::for_shoe(
-            geom.grip_column_offsets(side),
-            resolution.lateral_points,
-        );
+        let cols = crate::track::forces::LateralColumns::from(geom.grip_column_offsets(side));
         let track_x = geom.side_plane_x(side);
         let mut loop_pts = belt_loop(geom.rest.get(side));
         if let Some(&first) = loop_pts.first() {
@@ -951,10 +942,7 @@ mod tests {
                 loop_pts: &loop_pts,
                 count: resolution.stations,
                 plane_x: geom.side_plane_x(side),
-                columns: crate::track::forces::LateralColumns::for_shoe(
-                    geom.grip_column_offsets(side),
-                    resolution.lateral_points,
-                ),
+                columns: crate::track::forces::LateralColumns::from(geom.grip_column_offsets(side)),
                 travel: crate::track::forces::TravelField {
                     knots: law.knots.get(side),
                 },

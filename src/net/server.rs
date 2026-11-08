@@ -47,8 +47,6 @@ const PORT: u16 = 5888;
 pub(super) const TICK: Duration = Duration::from_nanos(15_625_000);
 
 pub fn run() {
-    let track_resolution =
-        crate::track::resolution::configure().unwrap_or_else(harness::refuse_start);
     let hosted = match HostedConfig::from_env() {
         Ok(hosted) => hosted,
         Err(err) => {
@@ -78,10 +76,6 @@ pub fn run() {
         ..default()
     }));
     super::server_host::log_startup();
-    info!(
-        "track resolution: {}x{}",
-        track_resolution.stations, track_resolution.lateral_points
-    );
     // No GPU supplies compression support. Declare the loaders' existing NONE fallback explicitly;
     // the server allowlist carries only PNG textures and `load_tank_sim_assets` opens no scene.
     app.insert_resource(bevy::image::CompressedImageFormatSupport(

@@ -62,7 +62,7 @@ fn assert_tank_state_at_add(
     // The REV-14 fixed-size invariant at its source: every Tank is born with element slabs
     // pre-sized for force stations × lateral columns — never an empty vector awaiting a first-tick resize.
     let elements = elements.expect("TrackGripElements must exist in the same insertion as Tank");
-    let resolution = crate::track::resolution::selected();
+    let resolution = crate::track::forces::CONTACT_RESOLUTION;
     let expected = resolution.stations * resolution.lateral_points;
     for side in &elements.sides {
         assert_eq!(
@@ -1015,9 +1015,10 @@ fn contact_law_shipped_ground_speeds() {
                 hi - lo < 0.01,
                 "{name} rolling={rolling} must settle in speed"
             );
-            // Fixture observation precision: 0.01% of weight, much smaller than one ground row's load.
+            // Fixture observation precision: 0.05 % of weight, much smaller than one ground row's
+            // load (DERIVED, a row of the 48 stations is about 3 % of the weight).
             assert!(
-                spare_max < weight * 0.0001,
+                spare_max < weight * 0.0005,
                 "{name} rolling={rolling}: equilibrium spare {spare_max} N"
             );
             assert!(

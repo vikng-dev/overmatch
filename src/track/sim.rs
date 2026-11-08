@@ -525,7 +525,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         spec.link_count,
         &sus,
     );
-    let gear = TrackGear::from_construction(&blueprint, &geom, super::resolution::selected());
+    let gear = TrackGear::from_construction(&blueprint, &geom);
     commands.insert_resource(gear.segment_law());
     commands.insert_resource(gear);
     // Keep the marker-derived running gear alive as the game's single geometry source: the track
@@ -538,12 +538,8 @@ impl TrackGear {
     pub(crate) fn from_construction(
         blueprint: &TankBlueprint,
         geom: &super::rig_geom::RigGeom,
-        resolution: super::forces::ContactResolution,
     ) -> Self {
-        assert!(
-            resolution.stations >= 3,
-            "force resolution must enclose a loop with at least three stations"
-        );
+        let resolution = super::forces::CONTACT_RESOLUTION;
         let spec = &blueprint.spec.track;
         let sus = spec.suspension.params();
         let belt_len = geom.belt_len();
@@ -558,12 +554,8 @@ impl TrackGear {
             points
         });
         let droop = geom.droop_travel(&sus);
-        let columns = Side::ALL.map(|side| {
-            super::forces::LateralColumns::for_shoe(
-                geom.grip_column_offsets(side),
-                resolution.lateral_points,
-            )
-        });
+        let columns = Side::ALL
+            .map(|side| super::forces::LateralColumns::from(geom.grip_column_offsets(side)));
         let travel_knots = Side::ALL.map(|side| {
             super::envelope::wheel_travel_knots(
                 geom.rest.get(side),
@@ -670,23 +662,6 @@ impl TrackGear {
                 grip: Some(grip),
             },
         }
-    }
-}
-
-/// Measurement fixtures rebuild before their first fixed tick; production state stays spawn-built.
-#[cfg(test)]
-pub(crate) fn set_test_resolution(app: &mut App, resolution: super::forces::ContactResolution) {
-    let gear = TrackGear::from_construction(
-        app.world().resource::<TankBlueprint>(),
-        app.world().resource::<super::rig_geom::RigGeom>(),
-        resolution,
-    );
-    app.insert_resource(gear.segment_law());
-    app.insert_resource(gear);
-    let world = app.world_mut();
-    let mut query = world.query::<&mut TrackGripElements>();
-    for mut elements in query.iter_mut(world) {
-        *elements = TrackGripElements::for_links(resolution.stations, resolution.lateral_points);
     }
 }
 
@@ -2931,9 +2906,11 @@ mod tests {
                     );
                     let expected =
                         ROLLING_FADE_SPEED * engine_pull.min(load.grip_n) / load.rolling_n;
+                    // Resolution: the stations' passing ripple on the crawl, MEASURED 0.26 % of the
+                    // fade speed at 48 stations.
                     assert!(
-                        (late_min - expected).abs() < ROLLING_FADE_SPEED * 1e-3
-                            && (late_max - expected).abs() < ROLLING_FADE_SPEED * 1e-3,
+                        (late_min - expected).abs() < ROLLING_FADE_SPEED * 5e-3
+                            && (late_max - expected).abs() < ROLLING_FADE_SPEED * 5e-3,
                         "{case}: crawl [{late_min}, {late_max}] must follow limiting force, expected {expected}"
                     );
                     assert!(

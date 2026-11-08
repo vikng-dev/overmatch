@@ -267,7 +267,7 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     root_bundle: B,
 ) -> Entity {
     let transmission = tank_transmission(content.spec());
-    let resolution = crate::track::resolution::selected();
+    let resolution = crate::track::forces::CONTACT_RESOLUTION;
     // The element-grip slabs ride the SAME insertion that adds `Tank`: pre-sized synchronously
     // at force resolution (`track::sim::TrackGripElements` owns the fixed-size invariant),
     // never an empty vector awaiting a first-tick resize.
@@ -313,7 +313,7 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
     root_bundle: B,
 ) -> Entity {
     let transmission = tank_transmission(content.spec());
-    let resolution = crate::track::resolution::selected();
+    let resolution = crate::track::forces::CONTACT_RESOLUTION;
     let root = commands
         .spawn((
             Tank,

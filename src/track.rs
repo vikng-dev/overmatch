@@ -14,8 +14,6 @@ pub mod drive;
 #[cfg(test)]
 pub(crate) mod drive_fixture;
 pub mod forces;
-#[cfg(test)]
-mod lean_observations;
 pub mod load;
 pub mod oracle;
 // The marker-driven suspension/track model, promoted out of `track_sandbox` (mirrors `forces`):
@@ -36,7 +34,6 @@ pub(crate) mod gear_phase;
 pub(crate) mod link_view;
 pub(crate) mod loop_geom;
 pub(crate) mod marker_model;
-pub(crate) mod resolution;
 pub(crate) mod rig_geom;
 pub mod route;
 pub(crate) mod rubble;
