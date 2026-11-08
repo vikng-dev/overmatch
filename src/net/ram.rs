@@ -663,16 +663,13 @@ mod tests {
         // Resolution: allow roundoff across the multiplication and divisions in the distance.
         assert!((runup(&spec, 3.0).0 - 3.0 * heavier).abs() <= 4.0 * f32::EPSILON * heavier);
     }
-    /// The game's environment destruction: overdriven fixtures must open occupied hull space
-    /// within the owner's two-tick contact bar; the recipe's source loses the momentum its chunks take.
-    /// At impact +1 to +5 every source of the hull's momentum change is named, the reading that
-    /// attributes its speed loss. Every tick, every solver contact that moves a body the sweep cast
-    /// against standing construction matter is against matter that body's cut judged that tick
-    /// (class invariant: a contact no cut judged stops a body without a verdict); what such
-    /// contacts move into uncast bodies is printed. Counts, speeds and the advance by +60 are
-    /// observations; the gate pins the owner's latency and conservation.
+    /// The game's environment destruction: the shipped tracked recipe accounts for the hull's
+    /// sweep exchange and whole-step momentum. A cast body's solver look-ahead against exposed
+    /// standing matter must lie in its judged patch; otherwise an unjudged cut could stop the ram.
+    /// Overlaps and uncast bodies keep Avian's contacts. Opening latency belongs to
+    /// `an_over_capacity_fixture_opens_within_two_contact_ticks`; counts, speeds and advance are observations.
     #[test]
-    fn tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum() {
+    fn tracked_ram_respects_sweep_contacts_and_accounts_for_momentum() {
         use crate::construction::breakage::{Breakage, SweepAccount};
         use crate::headless_test::{
             FIXED_TICKS_PER_SECOND, booted_sim_on, drive_tick, start_fixed_clock,
@@ -930,12 +927,10 @@ mod tests {
         }
     }
 
-    /// This tick's solver points that moved a body the sweep cast through exposed standing
-    /// construction matter outside that body's patches, as (body, collider, point, impulse), and
-    /// the impulse such points moved into bodies the sweep did not cast, which keep Avian's
-    /// contact by design. Read after the solve and before the laws commit, so matter the structure
-    /// check frees afterwards still reads as it stood, and from the sweep's own patches and the
-    /// owner's state, not from the collision hook's predicate.
+    /// Solver look-ahead that moved a cast body through exposed standing matter outside its
+    /// judged patches, and the impulse into uncast bodies, whose contacts Avian owns. Read before
+    /// the laws commit, from the sweep's patches, owner state and Avian's step-start penetration,
+    /// independently of the collision hook's predicate. Overlaps remain the solver's responsibility.
     #[derive(Resource, Default)]
     struct Unjudged {
         points: Vec<(Entity, Entity, Vec3, Vec3)>,
@@ -955,13 +950,14 @@ mod tests {
         let unjudged = &app.world().resource::<Unjudged>().points;
         assert!(
             unjudged.is_empty(),
-            "the solver resolved standing matter no cut judged at tick {tick}: {unjudged:?}"
+            "solver look-ahead resolved standing matter no cut judged at tick {tick}: {unjudged:?}"
         );
     }
 
     fn read_unjudged(
         transfers: Res<crate::contact_transfer::ContactTransfers>,
         account: Res<crate::construction::breakage::SweepAccount>,
+        contacts: Res<avian3d::prelude::ContactGraph>,
         colliders: Query<(
             Option<&crate::construction::Element>,
             Option<&crate::construction::breakage::ChunkCollider>,
@@ -1016,6 +1012,26 @@ mod tests {
                                 && *construction == breakage.construction
                                 && chunks.contains(&chunk)
                         })
+            })
+            .filter(|point| {
+                if !cast.contains(&point.other) {
+                    return true; // No cast leaves Avian responsible for this body's contacts.
+                }
+                let (_, pair) = contacts
+                    .get(
+                        point.reference_collider,
+                        point
+                            .other_collider
+                            .expect("only solver contacts reach this filter"),
+                    )
+                    .expect("a solver transfer retains its contact pair through writeback");
+                let contact = pair
+                    .manifolds
+                    .iter()
+                    .flat_map(|manifold| &manifold.points)
+                    .find(|contact| contact.point == point.point)
+                    .expect("a solver transfer copies its manifold's world point");
+                contact.penetration < 0.0
             })
             .partition(|point| cast.contains(&point.other));
         *unjudged = Unjudged {
