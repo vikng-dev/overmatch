@@ -46,6 +46,25 @@ The diagnostic digest and its 1,746 logarithms per tank/tick (DERIVED at 97 x 3)
 
 MEASURED terrain samples after rejection, per-tank end-tick averages over the two fixture tanks: 288–292.5, versus 582 before rejection. Fixture forces and poses agree with the prior sampled path. Formatting, CI clippy, track/doc/server-stats checks and the observation bed passed.
 
-## Remaining steps
+## Time cap and continuation
 
-Resolution sweep and scorecard remain; the scorecard branch is available.
+The 90-minute implementation window ended at 12:19:39 local time (start 10:49:33). Steps 1 and 2 are committed and validated. Production remains at the original 97 stations and three lateral points; the 10–40-query target is not yet reached.
+
+The unvalidated resolution prototype is saved in [track-lean-resolution-wip.patch](track-lean-resolution-wip.patch), not installed in production. It introduces a separate force resolution, full-width lateral bounds with two Gauss or three Simpson nodes, spawn-sized grip fields, a pure `TrackGear::from_construction` seam, and an on-demand work matrix. It was restored out of the Rust tree at the cap. Apply the saved zero-context patch with `git apply --unidiff-zero .agents/scratch/track-fork/track-lean-resolution-wip.patch` in a leased bay.
+
+The prototype's last clippy run found two mechanical repairs still needed in that prototype: remove the unused `link_count` argument from `BeltState::reseat` and its callers (and the reset system's now-unneeded `PinBelt` read), and remove the extra borrow passed to `tank_ground_pressure_kpa` inside the new construction method. Runtime validation has not run.
+
+Before applying the prototype, avoid its incidental `src/net/protocol.rs` test edit: retain the existing `TrackGripElements` constructor name with the new dimensional parameters, rather than renaming that constructor/guard. Editing that file otherwise reaches the unrelated `net-22` ratchet row. Update the remaining link-count wording and sandbox grip visualization to distinguish force stations from drawn links. No wire type needs a change.
+
+DERIVED resolution bounds for the continuation: station count >= 3; unresolved arc interval <= perimeter/count. Two Gauss nodes preserve linear-pressure force and roll moment and have gap width/sqrt(3); three edge/centre nodes have gap width/2. Wherever detection depends on points, that gap must be below the data-owned piece size floor (currently 0.5 m, cube root of volume). Solid/piece detection here uses exact full-width footprints, so it does not depend on these nodes; no universal minimum piece width is inferred from the volume floor.
+
+| Requested stations/side | 3 points | 2 points |
+|---:|---|---|
+| 97 | Current path: MEASURED 288–292.5 end-tick average queries/tank | Not run |
+| 48 | Not run | Not run |
+| 24 | Not run | Not run |
+| 16 | Not run | Not run |
+
+The scorecard branch exists with subject `track: add the arm-agnostic driving scorecard (#198)`, but was not merged or run by this lane before the cap. Merge it after resolution validation, add a neutral arm-setup hook if needed to select each test resolution before the first fixed tick, and run all eight settings. Keep the card's geometry and law checks unchanged. No arm choice or play-feel claim is made from the incomplete sweep.
+
+Final restored-tree validation: formatting and CI clippy passed; all 48 whole-tree guards passed (`doc_citations`, `ui_ascii`, `net_boundary`, `bake::`). Rust source is exactly the two green implementation commits.
