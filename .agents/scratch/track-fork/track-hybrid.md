@@ -2,8 +2,9 @@
 
 Subject: the video game's tank driving physics (the track belt, the suspension, their contact with
 terrain, static obstacles and rubble); game state only. Lane `track-hybrid`, option D, from
-`lane/track-lean` ("Merge branch 'lane/track-score' into lane/track-lean"). One session,
-2026-11-08. Default resolution 97 × 3. No timing runs.
+`lane/track-lean` ("Merge branch 'lane/track-score' into lane/track-lean"). Two sessions,
+2026-11-08; the second added the loose heap (line 8c, last section) and the parked reader's fix.
+Default resolution 97 × 3. No timing runs.
 
 ## First screen
 
@@ -14,27 +15,33 @@ lean card predates the force-balance reader, so only the format differs). Line 8
 
 | line 8 | lean 97 × 3 | solver, session 4 | hybrid |
 |---|---|---|---|
-| reaction ratio: pile 0.6 / pile 1.0 / layer | 0.582 / 0.562 / 0.012 | 0.9999 / 0.9999 / 0.970 | **0.960 / none / 0.969** |
-| law check | not claimed | PASS | **FAIL**: pile 1.0 has no awake tick to read |
-| support from pieces, share of weight | 1.00 / 1.00 / 1.00 | 0.33 / 0.48 / 0.13 | 0.098 / 0.000 / 0.125 |
+| reaction ratio: pile 0.6 / pile 1.0 / layer | 0.582 / 0.562 / 0.012 | 0.9999 / 0.9999 / 0.970 | **1.0000 / 0.9999 / 1.0000** |
+| law check | not claimed | PASS | **PASS** |
+| support from pieces, share of weight | 1.00 / 1.00 / 1.00 | 0.33 / 0.48 / 0.13 | 1.000 / 0.996 / 1.000 |
 | reached pile centre, s (0.6 / 1.0) | 8.23 / 5.80 | not reached / 6.80 | 7.92 / 5.66 |
-| layer: hull rise (layer top 0.502 m), sink mean | 0.487 m, 23 mm | 0.536 m, 0 | 0.473 m, 28 mm |
-| asleep | never (spring forces wake it) | the island sleeps | **the island sleeps** |
+| layer: hull rise (layer top 0.502 m), sink mean | 0.487 m, 23 mm | 0.536 m, 0 | 0.481 m, 22 mm |
+| asleep | never (spring forces wake it) | the island sleeps | the island sleeps in play; held awake for the reading |
+
+The hybrid column is read with the parked tank held awake; the lean and solver columns predate
+that reader. The solver arm's island sleeps too, so its support shares (0.33 / 0.48 / 0.13) are
+likely sleep-limited the same way (DERIVED; its card was not re-run here).
 
 - **Line 4b, the walls; line 6, the curb; line 7, the ride:** identical to lean 97 × 3 (one-lane
   walls on the stop, friction vertical +54.5 / +54.7 kN, rise 40.6 mm; curb roll 0.298°; washboard
   7.36 m/s, pitch RMS 0.163°; kick passes). Segments meet only pieces, so no static obstacle sees
   them, and the solver arm's per-collider stiffness split cannot reach the curb.
-- **Line 8 fails on the card's reader, not on the reaction law.** Fully on pieces, every cell's
-  first surface is a piece, so the spring channel applies no force, nothing wakes the tank, and the
-  tank and the pieces under it fall asleep together within about half a second: Avian's island
-  sleep, the owner's "rubble is static when holding the tank up" through the engine's mechanism.
-  A sleeping island builds no constraint, so the card's reader sees no support while it sleeps:
-  12.5 % of the weight over 4 s is about 0.5 s awake (DERIVED), as the solver arm found on its
-  layer. At full throttle the pile's tank was asleep for the whole parked window, so no ratio was
-  read and the law check fails. The card's `belt_loaded_pieces_asleep_max` reads the arm's
-  out-of-solver forces, which carry no piece here, so it reads 0 and is blind (the solver arm's
-  finding). While awake the reaction is 0.96 to 0.97.
+- **Line 8 passes once the reader keeps the tank awake.** Fully on pieces, every cell's first
+  surface is a piece, so the spring channel applies no force, nothing wakes the tank, and the tank
+  and the pieces under it fall asleep together within about half a second: Avian's island sleep,
+  the owner's "rubble is static when holding the tank up" through the engine's mechanism. A
+  sleeping island builds no constraint, so a reader of solver contacts finds no support. With the
+  tank free to sleep this line read 0.960 / none / 0.969 and support 0.098 / 0.000 / 0.125, and
+  failed for want of an awake tick at full throttle. The card now inserts `SleepingDisabled` on the
+  tank for its parked window, so the island is solved and read. Other parked columns moved with
+  it: full-throttle jitter 1.2e-6 to 1.3e-3 m, parked piece speed 0.012 to 0.92 m/s (the island no
+  longer freezes), layer rise 0.473 to 0.481 m. The `belt_loaded_pieces_asleep_max` column reads
+  the arm's out-of-solver forces, which carry no piece here, so it reads 0 and is blind (the
+  solver arm's finding).
 
 **Work** (MEASURED, `arm::segment_work_counts`, per tank per tick):
 
@@ -149,8 +156,41 @@ branch was not checked; if nothing does, it and its tests go when this arm is ch
 
 ## Left
 
-1. **The card's reader on a sleeping island:** decide how a parked tank asleep on pieces counts
-   (the score lane's reader), or whether a parked tank should stay awake.
+1. **Whether a parked tank should sleep in play** on pieces: the card now reads it awake; the
+   game still lets the island sleep.
 2. **Lateral coverage** of a segment's law.
 3. **Colour overflow on piles:** 69 moving-body manifolds against 20 colours.
 4. **Delete the clamp branch** in `rubble.rs` if nothing else reaches it.
+
+## Line 8c: the loose heap (MEASURED, this arm)
+
+The sandbox's own yard pile (`track_sandbox::rubble::build_yard`, which the sandbox's spawn system
+now calls too), 108 `house_1` chunks centred 9 m ahead, settled with the tank parked until every
+piece sleeps (30 s at most), then driven straight over until the belt's rear point clears the
+heap's far edge (15 s at most). Method and column meanings are in the card's note.
+
+| column | 0.6 throttle | 1 throttle |
+|---|---:|---:|
+| belt_channel_share_of_piece_support | 0.000 | 0.000 |
+| drive_s | 6.344 | 5.078 |
+| heap_asleep_after_s | 19.953 | 19.953 |
+| heap_top_after_m | 0.573 | 0.583 |
+| heap_top_before_m | 0.682 | 0.682 |
+| hull_past_far_edge_m | 2.815 | 2.847 |
+| hull_rise_max_m | 0.205 | 0.232 |
+| hull_rise_over_heap_centre_m | 0.187 | 0.195 |
+| moved_back | 0 | 0 |
+| moved_forward | 17 | 18 |
+| moved_max_m | 2.282 | 1.585 |
+| moved_mean_m | 1.029 | 1.029 |
+| moved_sideways | 0 | 0 |
+| pieces_awake_at_drive | 0 | 0 |
+| pieces_moved | 17 | 18 |
+| pieces_removed | 0 | 0 |
+| pitch_max_nose_down_deg | 5.287 | 6.087 |
+| pitch_max_nose_up_deg | 6.157 | 6.705 |
+| reached_heap_centre_s | 5.047 | 4.000 |
+
+**The hypothesis, this arm's half: supported, not settled.** The heap holds under the belt (91 of 108 pieces stay within 0.5 m at 0.6 throttle, 90 at 1 throttle; the strip's top falls 0.10 to 0.11 m from 0.68 m) and the hull climbs it (0.19 to 0.20 m over the centre, 6 to 7° nose up), but every piece A does move goes forward, so A sweeps as well as wedges, and the rise is under a third of the top, which this card cannot split between suspension take-up and the heap giving way. Whether B parts the heap needs B's row.
+
+**Reaction ratio left out of 8c**, because it reads static balance: moving pieces carry momentum, so a ratio off 1 breaches no law, and a sleeping piece holds no solver contact to read. Line 8's parked rows carry it.
