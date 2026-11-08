@@ -538,7 +538,10 @@ mod tests {
                     count: 24,
                     plane_x: 0.0,
                     columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)].into(),
-                    travel: TravelField { knots: &[] },
+                    // Fixture: a sprung pad; a zero-travel face leaves contact to its rigid collider.
+                    travel: TravelField {
+                        knots: &[(0.0, 0.1)],
+                    },
                 };
                 let track = crate::substances::contact_friction(0.7); // Fixture material coefficient.
                 let params = ForceParams {
