@@ -27,7 +27,9 @@ use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
 use crate::spec::{TankSpec, TankSpecHandle, Trigger, ViewKind, VolumeSpec, WeaponSpec};
 use crate::substances::Matter;
-use crate::track::bump_stop::{TrackColliders, spawn_track_colliders};
+use crate::track::bump_stop::{
+    TrackColliders, spawn_replica_track_colliders, spawn_track_colliders,
+};
 use crate::track::sim::{DriveSignal, EngineRpm, TankTransmission, TrackGripElements};
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
@@ -295,6 +297,7 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     root.observe(bind_tank_view);
     let entity = root.id();
     assemble_tank_body(commands, entity, content);
+    spawn_track_colliders(commands, entity, content.track_colliders);
     entity
 }
 
@@ -327,6 +330,7 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
         ))
         .id();
     assemble_tank_body(commands, root, content);
+    spawn_track_colliders(commands, root, content.track_colliders);
     root
 }
 
@@ -358,6 +362,7 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     // owner-private component.
     root_commands.insert(RemoteServos::for_count(content.spec().servos.len()));
     assemble_tank_body(commands, root, content);
+    spawn_replica_track_colliders(commands, root, content.track_colliders);
 }
 
 /// Every spec-declared node resolved to a geometry index, in the deterministic sorted orders the
@@ -1018,7 +1023,6 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     insert_weapons(commands, geometry, root, &nodes, entity_at);
     insert_ballistic_volumes(commands, geometry, root, &nodes, entity_at);
     insert_collision_proxies(commands, geometry, spec, entity_at);
-    spawn_track_colliders(commands, root, content.track_colliders);
 
     // --- Wheels: rig stations in name-sorted order (the track view reads their side/pose; the
     // belt force model uses the BAKED rest circles — articulation is view-only).
@@ -1094,6 +1098,89 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
 mod proxy_tests {
     use super::*;
     use crate::bake::MeshGeometry;
+
+    /// Replica tanks retain every queried collider layer while only authority bodies receive
+    /// sprung belt segments. Clients render the server stream and run no belt support solve.
+    #[test]
+    fn replica_tanks_keep_queried_surfaces_without_sprung_belt_segments() {
+        use avian3d::prelude::{Position, RigidBody, Rotation};
+
+        // Fixture: the selected tank supplies construction data, not a collider-count oracle.
+        let spec: TankSpec = crate::provenance::from_shipped_str(
+            TANK_SPEC_PATH,
+            include_str!(concat!(
+                "../../assets/",
+                crate::assets::tank_file!(".tank.ron")
+            )),
+        )
+        .unwrap();
+        let glb = crate::assets::asset_root().join(crate::assets::tank_file!(".sim.glb"));
+        let geometry = crate::bake::extract_tank_geometry(
+            &glb,
+            &spec,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .unwrap();
+        let blueprint = TankBlueprint::new(TANK_SPEC_PATH.into(), geometry, spec);
+        let shapes = TrackColliders::of_blueprint(&blueprint, &glb);
+        let content = TankContent {
+            geometry: &blueprint.geometry,
+            spec: &blueprint.spec,
+            track_colliders: &shapes,
+        };
+        let mut world = World::new();
+        let mut commands = world.commands();
+        let authority = spawn_headless_tank(
+            &mut commands,
+            content,
+            (RigidBody::Dynamic, Transform::IDENTITY),
+        );
+        let replica = commands
+            .spawn((
+                Position::default(),
+                Rotation::default(),
+                EngineRpm::of(&tank_transmission(content.spec())),
+            ))
+            .id();
+        attach_replicated_tank_body(
+            &mut commands,
+            replica,
+            content,
+            TankPresentation::new(None, Handle::default()),
+            (RigidBody::Static, Transform::IDENTITY),
+        );
+        world.flush();
+
+        let collider_counts = |world: &mut World, root| {
+            let mut counts = [0; 5];
+            for (mut entity, layers) in world.query::<(Entity, &CollisionLayers)>().iter(world) {
+                while let Some(parent) = world.get::<ChildOf>(entity) {
+                    entity = parent.parent();
+                    if entity == root {
+                        for (count, layer) in counts.iter_mut().zip([
+                            Layer::Vehicle,
+                            Layer::TrackSide,
+                            Layer::Armor,
+                            Layer::Witness,
+                            Layer::TrackBelt,
+                        ]) {
+                            *count += usize::from(layers.memberships.has_all(layer));
+                        }
+                        break;
+                    }
+                }
+            }
+            counts
+        };
+        let authority_counts = collider_counts(&mut world, authority);
+        let replica_counts = collider_counts(&mut world, replica);
+        assert!(authority_counts[4] > 0);
+        assert_eq!(
+            replica_counts[4], 0,
+            "replicas have no consumer for sprung belt support colliders"
+        );
+        assert_eq!(replica_counts[..4], authority_counts[..4]);
+    }
 
     /// A structural node and a yaw actuator are distinct roles. Complete construction
     /// must resolve the sheet's handles separately even when the shipped fixture shares them.

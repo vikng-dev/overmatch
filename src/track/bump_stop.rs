@@ -1,13 +1,14 @@
 //! Rigid track contacts in the game's tank driving physics (game state only).
 //!
 //! [`TrackColliders`] caches body-local shapes from the measured running gear and authored bump
-//! travel. [`spawn_track_colliders`] attaches them synchronously with every game or sandbox body:
+//! travel. [`spawn_track_colliders`] attaches them synchronously with every simulated game or sandbox body:
 //! a full-width compression stop per side on [`Layer::Vehicle`], and thin slices at the true shoe
 //! faces on [`Layer::TrackSide`]. The slices extend the stop to the rest belt's outer surface;
 //! their thickness lies entirely inside the shoe width. Only their lateral planes meet bodies;
 //! the contact hook removes their radial contacts. Loose pieces also meet the sprung belt
 //! segments of `belt_segment` on [`Layer::TrackBelt`]. Every face carries the belt's surface speed,
 //! and the solver's friction impulses return to the transmission through `stop_contacts`.
+//! Replicas use [`spawn_replica_track_colliders`], retaining the queried stops and side plates.
 
 use avian3d::prelude::{Collider, CollisionLayers, Friction, LayerMask, SimpleCollider};
 use bevy::prelude::*;
@@ -174,34 +175,15 @@ fn side_plate_layers() -> CollisionLayers {
     )
 }
 
-/// Hang the cached shapes on `body` at identity: their vertices are already body-local, shielded
-/// as authored attachments (ADR-0015). This is the constructor for game tanks and sandbox retunes.
+/// Hang the cached shapes on a simulated `body` at identity: their vertices are body-local,
+/// shielded as authored attachments (ADR-0015). Game simulation and sandbox retunes share this.
 pub(crate) fn spawn_track_colliders(
     commands: &mut Commands,
     body: Entity,
     shapes: &TrackColliders,
 ) {
     for side in Side::ALL {
-        commands.spawn((
-            BumpStop,
-            shapes.faces.get(side)[0].clone(),
-            shapes.colliders.get(side).clone(),
-            crate::tank::authored_attachment(Transform::IDENTITY),
-            CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
-            shapes.friction,
-            ChildOf(body),
-        ));
-        for plate in shapes.side_plates.get(side) {
-            commands.spawn((
-                SidePlate,
-                shapes.faces.get(side)[1].clone(),
-                plate.clone(),
-                crate::tank::authored_attachment(Transform::IDENTITY),
-                side_plate_layers(),
-                shapes.friction,
-                ChildOf(body),
-            ));
-        }
+        spawn_side_surfaces(commands, body, shapes, side);
         for (collider, segment) in shapes.segments.get(side) {
             commands.spawn((
                 *segment,
@@ -213,6 +195,40 @@ pub(crate) fn spawn_track_colliders(
                 ChildOf(body),
             ));
         }
+    }
+}
+
+/// Replica queries read the rigid surfaces; sprung segments serve only the authority's solver.
+pub(crate) fn spawn_replica_track_colliders(
+    commands: &mut Commands,
+    body: Entity,
+    shapes: &TrackColliders,
+) {
+    for side in Side::ALL {
+        spawn_side_surfaces(commands, body, shapes, side);
+    }
+}
+
+fn spawn_side_surfaces(commands: &mut Commands, body: Entity, shapes: &TrackColliders, side: Side) {
+    commands.spawn((
+        BumpStop,
+        shapes.faces.get(side)[0].clone(),
+        shapes.colliders.get(side).clone(),
+        crate::tank::authored_attachment(Transform::IDENTITY),
+        CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+        shapes.friction,
+        ChildOf(body),
+    ));
+    for plate in shapes.side_plates.get(side) {
+        commands.spawn((
+            SidePlate,
+            shapes.faces.get(side)[1].clone(),
+            plate.clone(),
+            crate::tank::authored_attachment(Transform::IDENTITY),
+            side_plate_layers(),
+            shapes.friction,
+            ChildOf(body),
+        ));
     }
 }
 
