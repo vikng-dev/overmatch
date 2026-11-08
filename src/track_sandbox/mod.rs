@@ -47,8 +47,9 @@ mod belt;
 // The overlay camera composites on-top volumes; `mesh_layers` owns the panel's state enums.
 mod mesh_layers;
 // The rubble yard: loose brick pieces and a standing wall section cut from the shipped house, for
-// the belts to climb and push.
-mod rubble;
+// the belts to climb and push. `pub(crate)`: the track scorecard builds its heap with the yard's
+// own builder.
+pub(crate) mod rubble;
 // Binds glb wheel/sprocket/idler nodes by name and renders suspension travel + belt phase;
 // otherwise `articulate_wheels_field` would update state without moving the rendered wheels.
 mod wheel_view;

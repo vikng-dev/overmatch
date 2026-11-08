@@ -22,6 +22,9 @@
 //! Fixture: every dimension and placement below is fixture data, chosen to pose its question.
 
 mod arm;
+// The sandbox's rubble yard builds line 8c's heap; the sandbox builds with `dev_ui`.
+#[cfg(feature = "dev_ui")]
+mod heap;
 
 use super::*;
 use avian3d::prelude::*;
@@ -2010,6 +2013,8 @@ fn track_scorecard() {
     curb_and_ledge(&mut card);
     ride(&mut card);
     rubble(&mut card, &mut work_rows);
+    #[cfg(feature = "dev_ui")]
+    heap::line(&mut card);
     work_open_ground(&mut work_rows);
     card.push(Line {
         id: "work",

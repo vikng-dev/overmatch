@@ -9,11 +9,15 @@
 //! [`force_viz_scale`]. The field casts layer (`9`) shows the field; the contact dots show
 //! the footprint contacts.
 
-use avian3d::prelude::{ColliderDensity, Position, RigidBody, Rotation};
+use std::sync::Arc;
+
+use avian3d::prelude::{
+    Collider, ColliderDensity, CollisionLayers, Friction, Position, RigidBody, Rotation,
+};
 use bevy::prelude::*;
 
-use crate::construction::ConstructionLibrary;
 use crate::construction::breakage::{ChunkCollider, chunk_collider, piece_layers};
+use crate::construction::{ConstructionKind, ConstructionLibrary};
 use crate::debris::DebrisPiece;
 use crate::track::rubble::footprint_radius;
 
@@ -25,7 +29,120 @@ use super::{RigGeom, Side, belt_loop, contact_probe, force_viz_scale};
 /// `rubble_spot_ahead_m` short of it.
 pub(super) fn rubble_spot() -> Vec2 {
     let [x, _, z] = scene().rubble_pile_at_m.0;
-    Vec2::new(x, z + scene().rubble_spot_ahead_m.0)
+    Vec2::new(x, z + spot_ahead_m())
+}
+
+/// How far the `R` tour's rubble spot stands short of the pile's centre (m): the scene's
+/// `rubble_spot_ahead_m`.
+pub(crate) fn spot_ahead_m() -> f32 {
+    scene().rubble_spot_ahead_m.0
+}
+
+/// The scene's rubble source construction (`rubble_construction`), read from the shipped assets.
+pub(crate) fn yard_source() -> Arc<ConstructionKind> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    let source = scene().rubble_construction.0.as_str();
+    Arc::clone(
+        ConstructionLibrary::load(&root, [source])
+            .get(source)
+            .expect("the scene's source construction was loaded"),
+    )
+}
+
+/// A pile piece's sim body (game state only): what makes its chunk a dynamic piece, before any
+/// view.
+#[derive(Bundle)]
+pub(crate) struct PileBody {
+    piece: DebrisPiece,
+    transform: Transform,
+    position: Position,
+    rotation: Rotation,
+    body: RigidBody,
+    collider: Collider,
+    density: ColliderDensity,
+    layers: CollisionLayers,
+    friction: Friction,
+}
+
+/// One pile piece: its chunk, the chunk's centroid (the body's origin, construction frame) and
+/// its body.
+pub(crate) struct PilePiece {
+    pub(crate) chunk: usize,
+    pub(crate) centroid: Vec3,
+    pub(crate) body: PileBody,
+}
+
+/// The yard's sim parts, cut from its source construction.
+pub(crate) struct Yard {
+    /// The breakable element the wall section stands from.
+    pub(crate) wall: usize,
+    pub(crate) pile: Vec<PilePiece>,
+}
+
+/// The yard's wall element and its pile: the scene's piece count dropped on its square grid about
+/// `centre` (ground level), layer over layer, tapered and turned by the scene's taper and yaw
+/// step, to settle into a heap. The grid's spacing is twice the farthest block point from any
+/// piece's centroid.
+pub(crate) fn build_yard(kind: &ConstructionKind, centre: Vec3) -> Yard {
+    let yard = scene();
+    let source = yard.rubble_construction.0.as_str();
+    let layout = &kind.layout;
+    let (wall, pieces) = yard_geometry(source, layout, yard.rubble_pile_pieces.0)
+        .unwrap_or_else(|error| panic!("{error}"));
+    let structure = layout.structure(&kind.asset);
+    let (row_count, taper) = (yard.rubble_pile_row.0.width(), yard.rubble_pile_taper.0);
+    let spacing = pieces
+        .iter()
+        .map(|&c| {
+            let centroid = structure.chunks[c].centroid;
+            layout.blocks[c]
+                .points
+                .iter()
+                .map(|p| (*p - centroid).length())
+                .fold(0.0_f32, f32::max)
+        })
+        .fold(0.0_f32, f32::max)
+        * 2.0;
+    info!(
+        "rubble yard: {} pieces on a {spacing:.2} m drop grid",
+        pieces.len()
+    );
+    let pile = pieces
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            let centroid = structure.chunks[c].centroid;
+            let (row, col, layer) = (
+                i % row_count,
+                (i / row_count) % row_count,
+                i / yard.rubble_pile_row.0.capacity(),
+            );
+            let half = (row_count as f32 - 1.0) / 2.0;
+            let at = centre
+                + Vec3::new(
+                    (row as f32 - half) * spacing * (1.0 - taper * layer as f32),
+                    spacing * (0.5 + layer as f32),
+                    (col as f32 - half) * spacing * (1.0 - taper * layer as f32),
+                );
+            let turn = Quat::from_rotation_y(i as f32 * yard.rubble_pile_yaw_rad.0);
+            PilePiece {
+                chunk: c,
+                centroid,
+                body: PileBody {
+                    piece: DebrisPiece,
+                    transform: Transform::from_translation(at).with_rotation(turn),
+                    position: Position(at),
+                    rotation: Rotation(turn),
+                    body: RigidBody::Dynamic,
+                    collider: chunk_collider(kind, c, centroid),
+                    density: ColliderDensity(structure.chunks[c].material.density),
+                    layers: piece_layers(),
+                    friction: kind.chunk_friction(c),
+                },
+            }
+        })
+        .collect();
+    Yard { wall, pile }
 }
 
 /// The contacts of the last fixed tick that pressed on a body, for the gizmos.
@@ -102,21 +219,13 @@ pub(super) fn spawn_rubble_yard(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
     let yard = scene();
-    let source = yard.rubble_construction.0.as_str();
-    let library = ConstructionLibrary::load(&root, [source]);
-    let kind = library
-        .get(source)
-        .expect("the scene's source construction was loaded");
+    let kind = yard_source();
+    let Yard { wall, pile } = build_yard(&kind, Vec3::from_array(yard.rubble_pile_at_m.0));
     let layout = &kind.layout;
-    let (wall, pieces) = yard_geometry(source, layout, yard.rubble_pile_pieces.0)
-        .unwrap_or_else(|error| panic!("{error}"));
-    let structure = layout.structure(&kind.asset);
     let brick = materials.add(Color::srgb_from_array(yard.rubble_piece_srgb.0));
     let standing = materials.add(Color::srgb_from_array(yard.rubble_wall_srgb.0));
     let [wall_x, wall_z] = yard.rubble_wall_at_m.0;
-    let (row_count, taper) = (yard.rubble_pile_row.0.width(), yard.rubble_pile_taper.0);
 
     // The wall section: one static root, its element's chunks standing on it, turned so its long
     // axis runs along the lane (beside the rig, never across its path).
@@ -146,7 +255,7 @@ pub(super) fn spawn_rubble_yard(
             Transform::from_xyz(wall_x - mid.x, 0.0, wall_z - mid.z).with_rotation(turn),
             RigidBody::Static,
             Mesh3d(meshes.add(crate::construction::view::piece_mesh(
-                kind,
+                &kind,
                 &wall_chunks.iter().map(|&c| c as u16).collect::<Vec<_>>(),
                 Vec3::ZERO,
             ))),
@@ -154,7 +263,7 @@ pub(super) fn spawn_rubble_yard(
         ))
         .id();
     for &c in &wall_chunks {
-        let collider = chunk_collider(kind, c, Vec3::ZERO);
+        let collider = chunk_collider(&kind, c, Vec3::ZERO);
         commands.spawn((
             ChildOf(wall_root),
             Transform::IDENTITY,
@@ -165,54 +274,15 @@ pub(super) fn spawn_rubble_yard(
         ));
     }
 
-    // The pile: pieces dropped on a square grid, layer over layer, to settle into a heap.
-    let spacing = pieces
-        .iter()
-        .map(|&c| {
-            let centroid = structure.chunks[c].centroid;
-            layout.blocks[c]
-                .points
-                .iter()
-                .map(|p| (*p - centroid).length())
-                .fold(0.0_f32, f32::max)
-        })
-        .fold(0.0_f32, f32::max)
-        * 2.0;
-    info!(
-        "rubble yard: {} pieces on a {spacing:.2} m drop grid",
-        pieces.len()
-    );
-    for (i, &c) in pieces.iter().enumerate() {
-        let centroid = structure.chunks[c].centroid;
-        let collider = chunk_collider(kind, c, centroid);
-        let (row, col, layer) = (
-            i % row_count,
-            (i / row_count) % row_count,
-            i / yard.rubble_pile_row.0.capacity(),
-        );
-        let half = (row_count as f32 - 1.0) / 2.0;
-        let at = Vec3::from_array(yard.rubble_pile_at_m.0)
-            + Vec3::new(
-                (row as f32 - half) * spacing * (1.0 - taper * layer as f32),
-                spacing * (0.5 + layer as f32),
-                (col as f32 - half) * spacing * (1.0 - taper * layer as f32),
-            );
-        let turn = Quat::from_rotation_y(i as f32 * yard.rubble_pile_yaw_rad.0);
+    // The pile ([`build_yard`]), each piece with its view.
+    for piece in pile {
         commands.spawn((
             Name::new("rubble yard piece"),
-            DebrisPiece,
-            Transform::from_translation(at).with_rotation(turn),
-            Position(at),
-            Rotation(turn),
-            RigidBody::Dynamic,
-            collider,
-            ColliderDensity(structure.chunks[c].material.density),
-            piece_layers(),
-            kind.chunk_friction(c),
+            piece.body,
             Mesh3d(meshes.add(crate::construction::view::piece_mesh(
-                kind,
-                &[c as u16],
-                centroid,
+                &kind,
+                &[piece.chunk as u16],
+                piece.centroid,
             ))),
             MeshMaterial3d(brick.clone()),
         ));
