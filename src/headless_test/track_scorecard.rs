@@ -1509,6 +1509,12 @@ fn park_on_pieces(
     let (mut tank_support, mut belt_support) = (vec![], vec![]);
     let mut park_piece_speed = 0.0_f32;
     let mut asleep_under_belt = 0;
+    // A sleeping island builds no contacts, so the reader would find a resting tank held up by
+    // nothing. Sleep is a solver economy: the tank's island stays awake for this reading.
+    bed.app
+        .world_mut()
+        .entity_mut(bed.tank)
+        .insert(SleepingDisabled);
     bed.take_work();
     let park = 4 * TICKS;
     for _ in 0..park {
@@ -1666,8 +1672,10 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
              ground. Sink is the rest-pose belt bottom's depth inside pieces. The reaction ratio \
              is (world support on the awake pieces − their weight) / (the pieces' support on the \
              hull): 1 when every piece under load takes the equal and opposite reaction, 0 when \
-             the pieces hold the tank up unloaded. A sleeping piece leaves the solver: the \
-             count of belt-loaded pieces asleep says how many hold the tank as if fixed. The \
+             the pieces hold the tank up unloaded. The tank is held awake while parked \
+             (Avian's `SleepingDisabled`), so its island's contacts are solved and read. A \
+             sleeping piece outside that island leaves the solver: the count of belt-loaded \
+             pieces asleep says how many hold the tank as if fixed. The \
              reader's control, the settling pile's world support over its awake weight: \
              {control:.4} (RMS {control_rms:.4}), 1 when the reader is right. The ratio is a law \
              check only where the arm claims it (this arm: {}).",
