@@ -44,7 +44,6 @@ fn assert_tank_state_at_add(
             Has<avian3d::prelude::RotationInterpolation>,
         ),
     )>,
-    blueprint: Option<Res<TankBlueprint>>,
 ) {
     let (command, drive, elements, eased) = tanks
         .get(add.entity)
@@ -61,19 +60,15 @@ fn assert_tank_state_at_add(
         "a scenario tank must be born with translation and rotation easing",
     );
     // The REV-14 fixed-size invariant at its source: every Tank is born with element slabs
-    // pre-sized `link_count * 3` — never an empty vector awaiting a first-tick resize.
+    // pre-sized for force stations × lateral columns — never an empty vector awaiting a first-tick resize.
     let elements = elements.expect("TrackGripElements must exist in the same insertion as Tank");
-    let expected = blueprint
-        .expect("the blueprint bakes at Startup, before any Tank can spawn")
-        .spec
-        .track
-        .link_count
-        * 3;
+    let resolution = crate::track::forces::CONTACT_RESOLUTION;
+    let expected = resolution.stations * resolution.lateral_points;
     for side in &elements.sides {
         assert_eq!(
             (side.strain.len(), side.dwell.len()),
             (expected, expected),
-            "a Tank spawned with wrong-sized element slabs (want link_count*3 = {expected})",
+            "a Tank spawned with wrong-sized element slabs (want force stations*columns = {expected})",
         );
     }
 }

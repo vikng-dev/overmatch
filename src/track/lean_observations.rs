@@ -75,3 +75,68 @@ fn terrain_resolution_observations() {
         }
     }
 }
+
+/// Work observations at each requested resolution, with the shipped plugin and an empty flat
+/// fixture world. No output is a requirement; counts expose the cost of each quadrature.
+#[test]
+#[ignore = "resolution work matrix, run on demand"]
+fn resolution_work_matrix() {
+    use crate::track::forces::ContactResolution;
+    for stations in [97, 48, 24, 16] {
+        // Fixture: the requested experiment settings.
+        for lateral_points in [3, 2] {
+            let grid = HeightGrid::new(
+                vec![0.0; 4].into(),
+                2,
+                TerrainExtent {
+                    world_size_m: 64.0,
+                    height_offset_m: 0.0,
+                    height_span_m: 1.0,
+                },
+            );
+            let mut app = booted_driving_grid(grid);
+            crate::track::sim::set_test_resolution(
+                &mut app,
+                ContactResolution {
+                    stations,
+                    lateral_points,
+                },
+            );
+            let geom = app.world().resource::<crate::track::rig_geom::RigGeom>();
+            let shoe_width = geom.model.width;
+            let loop_length = geom.belt_len();
+            app.init_resource::<crate::cost::stages::Stages>();
+            start_fixed_clock(&mut app);
+            let tank = app
+                .world_mut()
+                .query_filtered::<Entity, (With<crate::tank::Tank>, With<crate::tank::Controlled>)>(
+                )
+                .single(app.world())
+                .unwrap();
+            let mut lo = f64::INFINITY;
+            let mut hi = 0.0_f64;
+            for _ in 0..128 {
+                // Fixture: sample the first 128 ticks of a straight launch.
+                app.world()
+                    .resource::<crate::cost::stages::Stages>()
+                    .take_counts();
+                drive_tick(&mut app, tank, 1.0, 0.0);
+                let work = serde_json::to_value(
+                    app.world()
+                        .resource::<crate::cost::stages::Stages>()
+                        .take_counts(),
+                )
+                .unwrap();
+                let samples = work["belt_terrain_samples"].as_f64().unwrap() / 2.0;
+                lo = lo.min(samples);
+                hi = hi.max(samples);
+            }
+            let contacts = app.world().get::<TrackContacts>(tank).unwrap();
+            println!(
+                "MEASURED resolution {stations}x{lateral_points}: terrain_samples_per_tank={lo}..{hi} shoe_width_m={shoe_width} loop_length_m={loop_length} contacts={} pose={:?}",
+                contacts.0.iter().map(Vec::len).sum::<usize>(),
+                app.world().get::<Position>(tank).unwrap().0
+            );
+        }
+    }
+}

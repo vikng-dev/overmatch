@@ -34,7 +34,7 @@ use super::rig_geom::{Pose, RigGeom};
 // `mod.rs`'s own sandbox state (a child module may read its parent's private items).
 use super::{Hull, RigSuspension};
 use crate::track::loop_geom::{loop_winding, outward_normal};
-use crate::track::route::{build_route, resample};
+use crate::track::route::{build_route, polyline_len, resample};
 use crate::track::side::Side;
 
 pub(crate) fn plugin(app: &mut App) {
@@ -58,7 +58,7 @@ pub(crate) fn plugin(app: &mut App) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum GripDetail {
     Off,
-    /// The three lateral column lines running the loop.
+    /// The selected lateral quadrature lines running the loop.
     #[default]
     Columns,
     /// ...plus each column's longitudinal collocation stations, as outward cast stubs.
@@ -295,24 +295,10 @@ fn draw_sprocket(
 /// along the link's own outward normal because that is the direction the oracle is queried in.
 const STATION_STUB: f32 = 0.06;
 
-/// Draw the contact sampler as it is actually structured: `N` link stations along the loop, each
-/// carrying 3 lateral columns, each column carrying 3 longitudinal collocation stations (start /
-/// mid / end of its link).
-///
-/// It is drawn on the MAX-DROOP route on purpose — droop is the soft datum the support penalty is
-/// measured against, so this is where the sampler lives when the suspension is doing its work.
-///
-/// Three details worth stating, because all three are easy to get backwards:
-///   * the columns come from [`RigGeom::grip_columns`] — the shoe's TRUE lateral faces and its own
-///     centre — not from `plane_x ± half·width`. The Tiger's shoe is authored ~17 mm outboard of the
-///     pin plane, so the symmetric construction this used to build put BOTH edge lines 17 mm off:
-///     it drew contact inboard where there is no shoe and missed the overhang that actually catches
-///     a rut lip. This layer exists to make that overhang visible, so it must not erase it;
-///   * the stations sit on the OUTER FACE, offset from the pin line by the measured `pin_to_outer`
-///     — that is the surface the oracle is queried from (the sim's `forces.rs` still uses the
-///     mid-plate `thickness/2`; the measured offset is the truthful one and is what we draw);
-///   * "outward" is derived from the loop's own winding (signed area), not assumed, so the stubs
-///     point away from the hull on both sides and in either route orientation.
+/// Force-resolution columns on the max-droop route, with start/mid/end cast stubs.
+/// The shoe's measured bounds locate the quadrature; its measured `pin_to_outer` locates
+/// the face. Winding determines outward on either side. This construction overlay shows
+/// the droop datum; the live `9` layer shows the rest-loop force pass and local travel.
 fn draw_grip_columns(
     gizmos: &mut Gizmos,
     hull: &GlobalTransform,
@@ -321,9 +307,9 @@ fn draw_grip_columns(
     geom: &RigGeom,
     detail: GripDetail,
 ) {
-    // Link stations: the route resampled at the link pitch — the same walk the belt model does, so
-    // the drawn stations are the stations.
-    let mut stations = resample(pts, geom.pitch, 0.0);
+    let resolution = crate::track::forces::CONTACT_RESOLUTION;
+    let mut stations = resample(pts, polyline_len(pts) / resolution.stations as f32, 0.0);
+    stations.truncate(resolution.stations);
     if stations.len() < 2 {
         return;
     }
@@ -331,17 +317,22 @@ fn draw_grip_columns(
     let winding = loop_winding(pts);
     let face = geom.model.pin_to_outer;
 
-    // Inboard → centre → outboard, already mirrored for this side and already carrying the shoe's
-    // outboard bias: the hull-local `x` is the answer, not an offset to reconstruct.
-    for (ci, (x, _share)) in geom.grip_columns(side).into_iter().enumerate() {
-        // Centre column is the weighted majority of the load (2/3 vs 1/6 per edge) — draw it as the
-        // dominant line, the edges as the rim pair.
-        let color = if ci == 1 { YELLOW } else { MAGENTA };
+    let columns = crate::track::forces::LateralColumns::for_shoe(
+        geom.grip_column_offsets(side),
+        resolution.lateral_points,
+    );
+    for (ci, &(offset, _share)) in columns.samples().iter().enumerate() {
+        let x = geom.side_plane_x(side) + offset;
+        let color = if resolution.lateral_points == 3 && ci == 1 {
+            YELLOW
+        } else {
+            MAGENTA
+        };
         let lift = |p: Vec2, out: Vec2| {
             world_local(hull, Vec3::new(x, p.y + out.y * face, p.x + out.x * face))
         };
 
-        // The column line: every link station pushed out onto the outer face at this offset.
+        // The column line: every force station pushed out onto the outer face at this offset.
         gizmos.linestrip(
             stations.windows(2).map(|w| {
                 let out = outward_normal(w[0], w[1], winding);
@@ -353,8 +344,8 @@ fn draw_grip_columns(
         if detail != GripDetail::Stations {
             continue;
         }
-        // The collocation stations: start / mid / end of each link, as outward cast stubs. The end
-        // station is the next link's start, so drawing start+mid per link covers all three without
+        // The collocation stations: start / mid / end of each force segment, as outward cast stubs. The end
+        // station is the next segment's start, so drawing start+mid per segment covers all three without
         // doubling every shared vertex.
         for w in stations.windows(2) {
             let out = outward_normal(w[0], w[1], winding);

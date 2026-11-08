@@ -103,13 +103,13 @@ pub(crate) struct EnvelopeSide<'a> {
     /// the side's pin plane): the calibration must probe the exact columns the live law
     /// rides. On the flat calibration ground the offsets are load-invariant (every column
     /// sees the same depth), but the SHARES weight the per-column engage ramps.
-    pub columns: [(f32, f32); 3],
+    pub columns: super::forces::LateralColumns,
 }
 
 /// Calibrate the envelope law. `free_travel` is the caller's chain-clamped droop
 /// (`RigGeom::droop_travel(..).effective`); each side's `columns` plus
 /// `engage_depth`/`face_offset`/`probe_reach` must be EXACTLY what the live
-/// [`ForceParams`]/[`SideInput`] will carry, `count` the material link count — the whole
+/// [`ForceParams`]/[`SideInput`] will carry, `count` the force-station count — the whole
 /// point is that the calibration pass and the live law are the same computation.
 #[expect(
     clippy::too_many_arguments,
@@ -150,7 +150,8 @@ pub(crate) fn calibrate(
     let mut area = 0.0;
     // Calibration runs support-only (`grip: None` above skips the element regime),
     // but the law owns the slab shape — pass a correctly sized scratch field.
-    let mut scratch = super::forces::GripElements::for_links(count);
+    let mut scratch =
+        super::forces::GripElements::for_stations(count, sides[0].columns.samples().len());
     for side in sides {
         let input = SideInput {
             loop_pts: side.loop_pts,
@@ -199,7 +200,7 @@ mod tests {
             loop_pts: &loop_pts,
             plane_x: 0.0,
             knots: &[],
-            columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)],
+            columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)].into(),
         };
         // FIXTURE DATA: exact ground-level faces and no travel knots produce zero support area.
         calibrate(
@@ -243,13 +244,13 @@ mod tests {
                 loop_pts: &loop_pts,
                 plane_x: -1.5,
                 knots: &knots,
-                columns,
+                columns: columns.into(),
             },
             EnvelopeSide {
                 loop_pts: &loop_pts,
                 plane_x: 1.5,
                 knots: &knots,
-                columns,
+                columns: columns.into(),
             },
         ];
         let cal = calibrate(&sides, 25, 0.025, 0.002, 0.5, weight, travel, 1.2, 0.35);
@@ -276,7 +277,7 @@ mod tests {
             loop_pts: &loop_pts,
             plane_x,
             knots: &knots,
-            columns,
+            columns: columns.into(),
         });
         let cal = calibrate(&sides, 25, 0.025, 0.002, 0.5, 100_000.0, 0.0, 1.2, 0.35);
         assert_eq!(cal.free_travel, MIN_ENVELOPE_TRAVEL);

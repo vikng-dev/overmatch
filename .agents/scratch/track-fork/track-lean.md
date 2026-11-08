@@ -46,25 +46,33 @@ The diagnostic digest and its 1,746 logarithms per tank/tick (DERIVED at 97 x 3)
 
 MEASURED terrain samples after rejection, per-tank end-tick averages over the two fixture tanks: 288–292.5, versus 582 before rejection. Fixture forces and poses agree with the prior sampled path. Formatting, CI clippy, track/doc/server-stats checks and the observation bed passed.
 
-## Time cap and continuation
+## Session 1 boundary
 
-The 90-minute implementation window ended at 12:19:39 local time (start 10:49:33). Steps 1 and 2 are committed and validated. Production remains at the original 97 stations and three lateral points; the 10–40-query target is not yet reached.
+Steps 1–2 were green at the first session's 90-minute boundary. The resolution prototype was saved outside the active Rust tree for continuation. Production remained at 97 stations and three lateral points.
 
-The unvalidated resolution prototype is saved in [track-lean-resolution-wip.patch](track-lean-resolution-wip.patch), not installed in production. It introduces a separate force resolution, full-width lateral bounds with two Gauss or three Simpson nodes, spawn-sized grip fields, a pure `TrackGear::from_construction` seam, and an on-demand work matrix. It was restored out of the Rust tree at the cap. Apply the saved zero-context patch with `git apply --unidiff-zero .agents/scratch/track-fork/track-lean-resolution-wip.patch` in a leased bay.
+## Session 2: force resolution
 
-The prototype's last clippy run found two mechanical repairs still needed in that prototype: remove the unused `link_count` argument from `BeltState::reseat` and its callers (and the reset system's now-unneeded `PinBelt` read), and remove the extra borrow passed to `tank_ground_pressure_kpa` inside the new construction method. Runtime validation has not run.
+Force stations are independent of drawn links. `CONTACT_RESOLUTION` owns their count and lateral quadrature; the shipped setting remains **97 × 3 Simpson nodes**. Grip fields are sized synchronously at spawn for stations × nodes, and their diagnostic reader uses that stride. The sandbox's live probe and grip views draw the selected force resolution. The `TrackGripElements::for_links` constructor name remains intact, preserving the network attachment guard.
 
-Before applying the prototype, avoid its incidental `src/net/protocol.rs` test edit: retain the existing `TrackGripElements` constructor name with the new dimensional parameters, rather than renaming that constructor/guard. Editing that file otherwise reaches the unrelated `net-22` ratchet row. Update the remaining link-count wording and sandbox grip visualization to distinguish force stations from drawn links. No wire type needs a change.
+`TrackGear::from_construction` runs the existing support calibration at the selected resolution. The friction, support and transmission laws are unchanged. Only test fixtures rebuild their force field before their first fixed tick; production simulation state remains spawn-built.
 
-DERIVED resolution bounds for the continuation: station count >= 3; unresolved arc interval <= perimeter/count. Two Gauss nodes preserve linear-pressure force and roll moment and have gap width/sqrt(3); three edge/centre nodes have gap width/2. Wherever detection depends on points, that gap must be below the data-owned piece size floor (currently 0.5 m, cube root of volume). Solid/piece detection here uses exact full-width footprints, so it does not depend on these nodes; no universal minimum piece width is inferred from the volume floor.
+DERIVED bounds: at least three stations enclose a loop. Its perimeter divided by station count bounds the unresolved arc interval. The fixture's MEASURED belt length is 12.651316 m, giving intervals 0.1304 / 0.2636 / 0.5271 / 0.7907 m at 97 / 48 / 24 / 16 stations. Fewer stations replace more of the curved outline with chords and coarsen the advected shear field; a sharp feature inside an interval can change contact onset and load placement.
 
-| Requested stations/side | 3 points | 2 points |
-|---:|---|---|
-| 97 | Current path: MEASURED 288–292.5 end-tick average queries/tank | Not run |
-| 48 | Not run | Not run |
-| 24 | Not run | Not run |
-| 16 | Not run | Not run |
+The lateral rules keep the complete measured shoe bounds. Three Simpson nodes use edge/centre/edge weights 1/6, 2/3, 1/6; two Gauss nodes lie at centre ± width/(2√3), with equal weights. DERIVED: both integrate linear-pressure force and roll moment exactly. MEASURED fixture width 0.7247143 m gives DERIVED node gaps 0.36236 m and 0.41841 m, respectively, below the data-owned nominal 0.5 m piece size floor. A volume floor is not a minimum piece width. Solid/piece admission here clips the full-width footprint independently of nodes, so their detection does not rely on this gap. Two nodes give up direct terrain samples at both shoe edges and the centre.
 
-The scorecard branch exists with subject `track: add the arm-agnostic driving scorecard (#198)`, but was not merged or run by this lane before the cap. Merge it after resolution validation, add a neutral arm-setup hook if needed to select each test resolution before the first fixed tick, and run all eight settings. Keep the card's geometry and law checks unchanged. No arm choice or play-feel claim is made from the incomplete sweep.
+### Work matrix
 
-Final restored-tree validation: formatting and CI clippy passed; all 48 whole-tree guards passed (`doc_citations`, `ui_ascii`, `net_boundary`, `bake::`). Rust source is exactly the two green implementation commits.
+MEASURED with the shipped plugin in a generic empty flat grid, over the first 128 ticks of a straight full-throttle launch. The world has two tanks; the counter is divided by two. Ranges are end-tick per-tank averages, not timings. Contacts and final pose belong to the controlled tank.
+
+| Stations/side | 3 Simpson: terrain queries/tank/tick | 2 Gauss: terrain queries/tank/tick | Contacts at final tick, 3 / 2 |
+|---:|---:|---:|---:|
+| 97 | 285–288 | 190–192 | 204 / 136 |
+| 48 | 138–141 | 92–94 | 105 / 72 |
+| 24 | 69–72 | 46–48 | 57 / 36 |
+| 16 | 45–48 | 30–32 | 42 / 28 |
+
+The original exact terrain path made 582 overlays/tank/tick; the sampled path before return-run rejection made 582 facet queries. Only 16 × 2 reaches the requested 10–40-query range in this launch fixture. Work on solids and pieces remains the exact convex path.
+
+MEASURED one-time comparison: at 97 × 3 the flat/incline/crease observation bed reproduces every session-1 sampled contact count, force, load and printed hull pose above exactly. No output-equality test was added. Across resolutions the launch end positions vary; these are observations for the card, never gates.
+
+Validation: formatting and CI clippy passed; 663 targeted track, sandbox, headless, construction, scatter, state-hash and whole-tree checks passed. The adjusted sandbox calibration and doc guards passed, as did the eight-setting work matrix and three-terrain observation bed. No timing runs, windows or captures.

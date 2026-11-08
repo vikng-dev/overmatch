@@ -186,7 +186,7 @@ pub(crate) fn apply_explicit_impulse(mut forces: ForcesItem<'_, '_>, impulse: Ve
 pub struct TrackContacts(pub [Vec<BeltContact>; 2]);
 
 /// Simulation per-element shear and loss dwell, one field per side. Constructed at spawn
-/// with `link_count * 3` entries per side; `contact_side` preserves that membership so a
+/// at the force station/lateral resolution; `contact_side` preserves that membership so a
 /// runtime rebuild cannot silently erase accumulated strain. Clients render the server stream.
 #[derive(Component, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[require(TrackGripEffect)]
@@ -195,12 +195,12 @@ pub struct TrackGripElements {
 }
 
 impl TrackGripElements {
-    /// Both sides pre-sized for `link_count` material links (see the type doc).
-    pub fn for_links(link_count: usize) -> Self {
+    /// Both sides pre-sized for `count` advected force cells × lateral points, independent of drawn links.
+    pub fn for_links(count: usize, lateral_points: usize) -> Self {
         Self {
             sides: [
-                GripElements::for_links(link_count),
-                GripElements::for_links(link_count),
+                GripElements::for_stations(count, lateral_points),
+                GripElements::for_stations(count, lateral_points),
             ],
         }
     }
@@ -253,10 +253,10 @@ pub struct TrackGear {
     /// [`super::forces::TravelField`] every tick.
     travel_knots: [Vec<(f32, f32)>; 2],
     /// Per-side collocation columns ([`SideInput::columns`], indexed by `Side::index()`):
-    /// the MEASURED shoe faces + centre from
-    /// [`RigGeom::grip_column_offsets`](super::rig_geom::RigGeom::grip_column_offsets) — signed
-    /// per-side because the shoe is not centred on its pins (~17 mm outboard on the Tiger).
-    columns: [[(f32, f32); 3]; 2],
+    /// quadrature across the MEASURED shoe bounds from
+    /// [`RigGeom::grip_column_offsets`](super::rig_geom::RigGeom::grip_column_offsets).
+    /// Offsets are signed per side; the shoe need not be centred on its pins.
+    columns: [super::forces::LateralColumns; 2],
     params: ForceParams,
     construction: transmission::DriveConstruction,
     /// DERIVED bound over both sides' complete support slabs, in body-local metres.
@@ -374,7 +374,8 @@ impl TrackGear {
             }
         }
         for (si, side) in ["left", "right"].into_iter().enumerate() {
-            for (index, (offset, weight)) in self.columns[si].iter().copied().enumerate() {
+            for (index, (offset, weight)) in self.columns[si].samples().iter().copied().enumerate()
+            {
                 out.f32(&format!("force.columns.{side}[{index}].offset"), offset);
                 out.f32(&format!("force.columns.{side}[{index}].weight"), weight);
             }
@@ -516,127 +517,170 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         spec.link_count,
         &sus,
     );
-    let belt_len = geom.belt_len();
-    let loop_pts = Side::ALL.map(|side| {
-        let mut points = build_route(geom.rest.get(side), belt_len).pts;
-        let first = *points
-            .first()
-            .expect("a certified running gear has a closed route");
-        if points.last() != Some(&first) {
-            points.push(first);
-        }
-        points
-    });
-    let droop = geom.droop_travel(&sus);
-    let columns = Side::ALL.map(|side| geom.grip_column_offsets(side));
-    let travel_knots = Side::ALL.map(|side| {
-        super::envelope::wheel_travel_knots(
-            geom.rest.get(side),
-            geom.side_droop_travel(side, &sus).effective,
-        )
-    });
-    let cal = super::envelope::calibrate(
-        &[Side::Left, Side::Right].map(|s| super::envelope::EnvelopeSide {
-            loop_pts: &loop_pts[s.index()],
-            plane_x: geom.side_plane_x(s),
-            knots: &travel_knots[s.index()],
-            columns: columns[s.index()],
-        }),
-        spec.link_count,
-        geom.model.pin_to_outer,
-        spec.suspension.engage,
-        0.5,
-        blueprint.spec.mass * super::derive::G,
-        droop.effective,
-        sus.ride_frequency,
-        sus.damping_ratio,
-    );
-    info!(
-        "envelope law: travel {:.1} mm ({}), k {:.0} kN/m per m, c {:.2} kN·s/m per m \
-         (ride {:.2} Hz, ζ {:.2})",
-        cal.free_travel * 1e3,
-        if droop.chain_limited() {
-            "CHAIN-limited"
-        } else {
-            "spring-limited"
-        },
-        cal.stiffness_per_m / 1e3,
-        cal.damping_per_m / 1e3,
-        sus.ride_frequency,
-        sus.damping_ratio,
-    );
-
-    // The declared transmission, derived from the authored tables against the MEASURED sprocket
-    // radius and half-tread (tiger-transmission-data.md rule: speeds are the anchors, reductions
-    // derive, so the ladder survives the 19-vs-20-tooth discrepancy).
-    let gearbox = &spec.powertrain.transmission.gearbox;
-    info!(
-        "declared transmission: {}F/{}R",
-        gearbox.forward_speeds_kmh.len(),
-        gearbox.reverse_speeds_kmh.len()
-    );
-    // Measured geometry: the sprocket pin-line pitch radius is the rest running gear's first
-    // circle (chord-exact `derive::sprocket_pitch_radius(geom.pitch, teeth)` by construction), and
-    // the half-tread is `geom.plane_x` — the same measured values the belt/envelope ride.
-    let trans = spec
-        .transmission_params(&blueprint.spec.roadwheels, geom.wrap_radii(), geom.plane_x)
-        .expect("TankSpec transmission was validated before TrackGear construction");
-
-    let mut pin_radius = 0.0_f32;
-    for side in Side::ALL {
-        for point in &loop_pts[side.index()] {
-            pin_radius =
-                pin_radius.max(Vec3::new(geom.side_plane_x(side), point.y, point.x).length());
-        }
-    }
-    let column = columns
-        .iter()
-        .flatten()
-        .map(|(x, _)| x.abs())
-        .fold(0.0_f32, f32::max);
-    let travel = travel_knots
-        .iter()
-        .flatten()
-        .map(|(_, t)| *t)
-        .fold(0.0_f32, f32::max);
-    let rubble_radius = footprint_radius(pin_radius, column, geom.model.pin_to_outer, travel, 0.5);
-    let inertia = spec
-        .reflected_inertia(&blueprint.spec.roadwheels, geom.wrap_radii())
-        .expect("running-gear admission certified the construction inertia");
-    let grip = GripParams::of(
-        &blueprint.spec,
-        crate::track::rig_geom::tank_ground_pressure_kpa(&geom),
-    );
-    let construction = transmission::DriveConstruction::new(grip, inertia);
-    commands.insert_resource(TrackGear {
-        loop_pts,
-        count: spec.link_count,
-        plane_x: Side::ALL.map(|side| geom.side_plane_x(side)),
-        travel_knots,
-        columns,
-        trans,
-        rubble_radius,
-        construction,
-        params: ForceParams {
-            // The contact-envelope suspension: measured face datum, free length at the
-            // droop envelope, spring/damper calibrated above — the authored rest pose is
-            // the flat-ground equilibrium by construction (nothing about the support law
-            // is authored except the ride model in the RON's `suspension:` block).
-            face_offset: geom.model.pin_to_outer,
-            free_travel: cal.free_travel,
-            support_stiffness_per_m: cal.stiffness_per_m,
-            support_damping_per_m: cal.damping_per_m,
-            engage_depth: spec.suspension.engage,
-            probe_reach: 0.5,
-
-            grip: Some(grip),
-        },
-    });
-
+    commands.insert_resource(TrackGear::from_construction(
+        &blueprint,
+        &geom,
+        super::forces::CONTACT_RESOLUTION,
+    ));
     // Keep the marker-derived running gear alive as the game's single geometry source: the track
     // VIEW (`track::view`) reads its rest circles / pitch / plate / plane directly, and the bit
     // probe echoes the measured scalars. Built once here alongside `TrackGear`, never re-derived.
     commands.insert_resource(geom);
+}
+
+impl TrackGear {
+    pub(crate) fn from_construction(
+        blueprint: &TankBlueprint,
+        geom: &super::rig_geom::RigGeom,
+        resolution: super::forces::ContactResolution,
+    ) -> Self {
+        assert!(
+            resolution.stations >= 3,
+            "force resolution must enclose a loop with at least three stations"
+        );
+        let spec = &blueprint.spec.track;
+        let sus = spec.suspension.params();
+        let belt_len = geom.belt_len();
+        let loop_pts = Side::ALL.map(|side| {
+            let mut points = build_route(geom.rest.get(side), belt_len).pts;
+            let first = *points
+                .first()
+                .expect("a certified running gear has a closed route");
+            if points.last() != Some(&first) {
+                points.push(first);
+            }
+            points
+        });
+        let droop = geom.droop_travel(&sus);
+        let columns = Side::ALL.map(|side| {
+            super::forces::LateralColumns::for_shoe(
+                geom.grip_column_offsets(side),
+                resolution.lateral_points,
+            )
+        });
+        let travel_knots = Side::ALL.map(|side| {
+            super::envelope::wheel_travel_knots(
+                geom.rest.get(side),
+                geom.side_droop_travel(side, &sus).effective,
+            )
+        });
+        let cal = super::envelope::calibrate(
+            &[Side::Left, Side::Right].map(|s| super::envelope::EnvelopeSide {
+                loop_pts: &loop_pts[s.index()],
+                plane_x: geom.side_plane_x(s),
+                knots: &travel_knots[s.index()],
+                columns: columns[s.index()],
+            }),
+            resolution.stations,
+            geom.model.pin_to_outer,
+            spec.suspension.engage,
+            0.5,
+            blueprint.spec.mass * super::derive::G,
+            droop.effective,
+            sus.ride_frequency,
+            sus.damping_ratio,
+        );
+        info!(
+            "envelope law: travel {:.1} mm ({}), k {:.0} kN/m per m, c {:.2} kN·s/m per m \
+         (ride {:.2} Hz, ζ {:.2})",
+            cal.free_travel * 1e3,
+            if droop.chain_limited() {
+                "CHAIN-limited"
+            } else {
+                "spring-limited"
+            },
+            cal.stiffness_per_m / 1e3,
+            cal.damping_per_m / 1e3,
+            sus.ride_frequency,
+            sus.damping_ratio,
+        );
+
+        // The declared transmission, derived from the authored tables against the MEASURED sprocket
+        // radius and half-tread (tiger-transmission-data.md rule: speeds are the anchors, reductions
+        // derive, so the ladder survives the 19-vs-20-tooth discrepancy).
+        let gearbox = &spec.powertrain.transmission.gearbox;
+        info!(
+            "declared transmission: {}F/{}R",
+            gearbox.forward_speeds_kmh.len(),
+            gearbox.reverse_speeds_kmh.len()
+        );
+        // Measured geometry: the sprocket pin-line pitch radius is the rest running gear's first
+        // circle (chord-exact `derive::sprocket_pitch_radius(geom.pitch, teeth)` by construction), and
+        // the half-tread is `geom.plane_x` — the same measured values the belt/envelope ride.
+        let trans = spec
+            .transmission_params(&blueprint.spec.roadwheels, geom.wrap_radii(), geom.plane_x)
+            .expect("TankSpec transmission was validated before TrackGear construction");
+
+        let mut pin_radius = 0.0_f32;
+        for side in Side::ALL {
+            for point in &loop_pts[side.index()] {
+                pin_radius =
+                    pin_radius.max(Vec3::new(geom.side_plane_x(side), point.y, point.x).length());
+            }
+        }
+        let column = columns
+            .iter()
+            .map(|columns| {
+                let (lo, hi) = columns.bounds();
+                lo.abs().max(hi.abs())
+            })
+            .fold(0.0_f32, f32::max);
+        let travel = travel_knots
+            .iter()
+            .flatten()
+            .map(|(_, t)| *t)
+            .fold(0.0_f32, f32::max);
+        let rubble_radius =
+            footprint_radius(pin_radius, column, geom.model.pin_to_outer, travel, 0.5);
+        let inertia = spec
+            .reflected_inertia(&blueprint.spec.roadwheels, geom.wrap_radii())
+            .expect("running-gear admission certified the construction inertia");
+        let grip = GripParams::of(
+            &blueprint.spec,
+            crate::track::rig_geom::tank_ground_pressure_kpa(geom),
+        );
+        let construction = transmission::DriveConstruction::new(grip, inertia);
+        Self {
+            loop_pts,
+            count: resolution.stations,
+            plane_x: Side::ALL.map(|side| geom.side_plane_x(side)),
+            travel_knots,
+            columns,
+            trans,
+            rubble_radius,
+            construction,
+            params: ForceParams {
+                // The contact-envelope suspension: measured face datum, free length at the
+                // droop envelope, spring/damper calibrated above — the authored rest pose is
+                // the flat-ground equilibrium by construction (nothing about the support law
+                // is authored except the ride model in the RON's `suspension:` block).
+                face_offset: geom.model.pin_to_outer,
+                free_travel: cal.free_travel,
+                support_stiffness_per_m: cal.stiffness_per_m,
+                support_damping_per_m: cal.damping_per_m,
+                engage_depth: spec.suspension.engage,
+                probe_reach: 0.5,
+
+                grip: Some(grip),
+            },
+        }
+    }
+}
+
+/// Measurement fixtures rebuild before their first fixed tick; production state stays spawn-built.
+#[cfg(test)]
+pub(crate) fn set_test_resolution(app: &mut App, resolution: super::forces::ContactResolution) {
+    let gear = TrackGear::from_construction(
+        app.world().resource::<TankBlueprint>(),
+        app.world().resource::<super::rig_geom::RigGeom>(),
+        resolution,
+    );
+    app.insert_resource(gear);
+    let world = app.world_mut();
+    let mut query = world.query::<&mut TrackGripElements>();
+    for mut elements in query.iter_mut(world) {
+        *elements = TrackGripElements::for_links(resolution.stations, resolution.lateral_points);
+    }
 }
 
 /// One tank's mutable belt/drivetrain state for [`belt_tick`] — the caller owns the storage
@@ -1155,6 +1199,7 @@ mod tests {
         let gear = app.world().resource::<TrackGear>();
         let trans = TankTransmission::from_spec(gear.trans());
         let count = gear.count;
+        let lateral_points = gear.columns[0].samples().len();
         app.world_mut()
             .spawn((
                 Tank,
@@ -1168,7 +1213,7 @@ mod tests {
                 NoAutoAngularInertia,
                 NoAutoCenterOfMass,
                 CenterOfMass(Vec3::ZERO),
-                TrackGripElements::for_links(count),
+                TrackGripElements::for_links(count, lateral_points),
                 DriveSignal::default(),
                 trans,
             ))
@@ -2518,7 +2563,8 @@ mod tests {
         let mut drive = TrackDrive::default();
         let mut signal = DriveSignal::default();
         let mut grip = TrackGrip::default();
-        let mut elements = TrackGripElements::for_links(gear.count);
+        let mut elements =
+            TrackGripElements::for_links(gear.count, gear.columns[0].samples().len());
         let mut transmission = TransmissionState::from_spec(&gear.trans);
         let pieces = RubbleBodies::default();
         let dt = 1.0 / 64.0; // Fixture tick.
@@ -2666,7 +2712,8 @@ mod tests {
             let mut drive = TrackDrive::default();
             let mut signal = DriveSignal::default();
             let mut grip = TrackGrip::default();
-            let mut elements = TrackGripElements::for_links(gear.count);
+            let mut elements =
+                TrackGripElements::for_links(gear.count, gear.columns[0].samples().len());
             let mut state = TransmissionState::from_spec(&gear.trans);
             let pieces = RubbleBodies::default();
             let dt = 1.0 / 64.0; // Fixture fixed step.
@@ -2867,7 +2914,7 @@ mod tests {
     /// Diagnostics distinguish recoverable shear states within the solver floor.
     #[test]
     fn diagnostic_digest_distinguishes_recoverable_shear() {
-        let mut elements = TrackGripElements::for_links(1);
+        let mut elements = TrackGripElements::for_links(1, 3);
         elements.sides[0].strain[0] = Vec3::X * super::super::forces::GRIP_SHEAR_FLOOR_M * 0.2; // FIXTURE capacity shares.
         let first = coarse_grip_digest(&elements);
         elements.sides[0].strain[0] = Vec3::X * super::super::forces::GRIP_SHEAR_FLOOR_M * 0.4;

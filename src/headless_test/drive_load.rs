@@ -376,7 +376,6 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
         // its geometric patches, so this expectation includes finite patch spans independently
         // of observe's own integral and catches a missing turn radius at the adapter seam.
         let construction = app.world().resource::<crate::track::sim::TrackGear>();
-        let blueprint = app.world().resource::<TankBlueprint>();
         for steer in [0.25_f32, 1.0] {
             let mut drive = TrackDrive::default();
             let mut signal = crate::track::sim::DriveSignal {
@@ -384,8 +383,10 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
                 steer,
             };
             let mut grip = crate::track::sim::TrackGrip::default();
-            let mut elements =
-                crate::track::sim::TrackGripElements::for_links(blueprint.spec.track.link_count);
+            let mut elements = crate::track::sim::TrackGripElements::for_links(
+                crate::track::forces::CONTACT_RESOLUTION.stations,
+                crate::track::forces::CONTACT_RESOLUTION.lateral_points,
+            );
             let mut state =
                 crate::track::transmission::TransmissionState::from_spec(construction.trans());
             state.gear = construction

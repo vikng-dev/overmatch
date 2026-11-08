@@ -420,20 +420,25 @@ struct SideDynamics {
 struct BeltGrip(PerSide<Vec2>);
 
 /// The per-element isotropic shear state (`track::forces::GripElements`): one world-space shear
-/// vector per material link × column. Always PRE-SIZED from the pin belt ([`Self::sized`]; startup,
+/// vector per advected force cell × column. Always PRE-SIZED at force resolution ([`Self::sized`]; startup,
 /// `R` reset, count retune): `contact_side` never resizes at runtime, and empty slabs would skip
 /// traction for the tick.
 #[derive(Resource, Default)]
 struct BeltGripElements(PerSide<crate::track::forces::GripElements>);
 
 impl BeltGripElements {
-    /// Both sides at rest, slabs pre-sized for `link_count` material links (the fixed-size
-    /// invariant — see `track::forces::GripElements::for_links`).
-    fn sized(link_count: usize) -> Self {
+    /// Both sides at rest, pre-sized for the force field's station and lateral resolution.
+    fn sized() -> Self {
         use crate::track::forces::GripElements;
         Self(PerSide::new(
-            GripElements::for_links(link_count),
-            GripElements::for_links(link_count),
+            GripElements::for_stations(
+                crate::track::forces::CONTACT_RESOLUTION.stations,
+                crate::track::forces::CONTACT_RESOLUTION.lateral_points,
+            ),
+            GripElements::for_stations(
+                crate::track::forces::CONTACT_RESOLUTION.stations,
+                crate::track::forces::CONTACT_RESOLUTION.lateral_points,
+            ),
         ))
     }
 }
@@ -1012,9 +1017,9 @@ fn build_rig(
         crate::track::transmission::TransmissionState::from_spec(&transmission.0),
     ));
     commands.insert_resource(transmission);
-    // Size grip slabs from the material loop; see `BeltGripElements` for the invariant.
+    // Size grip slabs at force resolution; see `BeltGripElements` for the invariant.
     let pin_belt = PinBelt::for_rig(&geom);
-    *grip_elements = BeltGripElements::sized(pin_belt.count);
+    *grip_elements = BeltGripElements::sized();
     commands.insert_resource(pin_belt);
 
     // Authored full x/y/z inertia extents govern mass distribution/handling, not collision
@@ -1264,17 +1269,17 @@ struct BeltState<'w> {
 }
 
 impl BeltState<'_> {
-    /// Cold state sized for `link_count` (`BeltGripElements` owns the fixed-size invariant).
+    /// Cold state sized for force resolution (`BeltGripElements` owns the slab invariant).
     /// Keep speed, drive command, transmission gear and hull pose: they are not loop-indexed,
     /// and a count tweak must not stop a rolling tank. [`reset_rig`] clears them for a teleport.
-    fn reseat(&mut self, link_count: usize) {
+    fn reseat(&mut self) {
         *self.phase = BeltPhase::default();
         // Stale contacts/dynamics display the pre-teleport tick, and
         // stale bristle strain is shear the pads never took.
         *self.contacts = BeltContacts::default();
         *self.dynamics = SideDynamics::default();
         *self.grip = BeltGrip::default();
-        *self.elements = BeltGripElements::sized(link_count);
+        *self.elements = BeltGripElements::sized();
         // Pose and loop both invalidate filter cells; re-init rather than settle from stale ones.
         self.wrap.reset();
     }
@@ -1294,7 +1299,6 @@ fn reset_rig(
     keys: Res<ButtonInput<KeyCode>>,
     mut requested: ResMut<ResetRequested>,
     mut hull: Query<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
-    pin_belt: Res<PinBelt>,
     mut spot: ResMut<ResetSpot>,
     mut belt: ResMut<BeltSpeed>,
     mut belt_state: BeltState,
@@ -1324,7 +1328,7 @@ fn reset_rig(
     // A reset is a fresh at-rest rig: stale command state would re-thrust it immediately.
     raw.0 = crate::track::drive::DriveAxes::default();
     shaped.0 = crate::track::drive::DriveAxes::default();
-    belt_state.reseat(pin_belt.count);
+    belt_state.reseat();
     // A fresh rig is in 1st gear with no shift in flight.
     *trans_state = TransState(crate::track::transmission::TransmissionState::from_spec(
         &transmission.0,
@@ -1456,7 +1460,7 @@ fn apply_rig_counts(
     transmission.0 = derived;
     *geom = next;
     *pin_belt = PinBelt::for_rig(&geom);
-    belt_state.reseat(pin_belt.count);
+    belt_state.reseat();
     // Keep tuning verdicts in the log for choosing values to commit to RON.
     let window = geom.window;
     info!(

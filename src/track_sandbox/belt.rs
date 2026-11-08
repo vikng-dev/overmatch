@@ -122,14 +122,13 @@ pub(super) fn apply_belt_support_field(
     raw: Res<RawDriveInput>,
     mut shaped: ResMut<ShapedDrive>,
     time: Res<Time>,
-    pin_belt: Res<PinBelt>,
     mut belt: ResMut<BeltSpeed>,
     mut phase: ResMut<BeltPhase>,
     mut contacts: ResMut<BeltContacts>,
     mut dynamics: ResMut<SideDynamics>,
     mut grip: ResMut<BeltGrip>,
     mut grip_elements: ResMut<BeltGripElements>,
-    // Tuple params: the function is at Bevy's 16-arg SystemParam ceiling.
+    // The transmission's shared parameters stay grouped.
     transmission_params: (
         Res<RigTransmission>,
         ResMut<TransState>,
@@ -191,9 +190,12 @@ pub(super) fn apply_belt_support_field(
         }
         let side_input = SideInput {
             loop_pts: &loop_pts,
-            count: pin_belt.count,
+            count: crate::track::forces::CONTACT_RESOLUTION.stations,
             plane_x: geom.side_plane_x(side),
-            columns: geom.grip_column_offsets(side),
+            columns: crate::track::forces::LateralColumns::for_shoe(
+                geom.grip_column_offsets(side),
+                crate::track::forces::CONTACT_RESOLUTION.lateral_points,
+            ),
             // The envelope's per-position reach profile: full droop over the road-wheel span,
             // tapering to zero at the unsprung sprocket/idler centres.
             travel: crate::track::forces::TravelField {
@@ -395,11 +397,14 @@ pub(super) fn calibrate_envelope(
         loop_pts: &loops[side.index()][..],
         plane_x: geom.side_plane_x(side),
         knots: &knots[side.index()][..],
-        columns: geom.grip_column_offsets(side),
+        columns: crate::track::forces::LateralColumns::for_shoe(
+            geom.grip_column_offsets(side),
+            crate::track::forces::CONTACT_RESOLUTION.lateral_points,
+        ),
     });
     let cal = envelope::calibrate(
         &sides,
-        geom.link_count,
+        crate::track::forces::CONTACT_RESOLUTION.stations,
         geom.model.pin_to_outer,
         engage_depth,
         contact_probe(),
@@ -645,15 +650,10 @@ pub(super) fn conform_belts_field(
 /// tapering to zero at the unsprung sprocket/idler). Grey when clear, orange when penetrating
 /// the terrain field, at the law's actual field-probe points. The rubble contact dots show the
 /// separate footprint contacts, including those between every probe line.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a gizmo layer spanning the hull, the belt, the field, the rig and the envelope"
-)]
 pub(super) fn draw_sample_points(
     mut gizmos: Gizmos,
     viz: Res<VizLayers>,
     hull: Query<&GlobalTransform, With<Hull>>,
-    pin_belt: Res<PinBelt>,
     phase: Res<BeltPhase>,
     field: Res<TerrainField>,
     geom: Res<RigGeom>,
@@ -670,17 +670,21 @@ pub(super) fn draw_sample_points(
     // Hull lateral axis: column offsets are hull-x measurements (per-side signed shoe faces).
     let lat_axis = affine.transform_vector3(Vec3::X);
     for side in Side::ALL {
-        let cols = geom.grip_column_offsets(side);
+        let resolution = crate::track::forces::CONTACT_RESOLUTION;
+        let cols = crate::track::forces::LateralColumns::for_shoe(
+            geom.grip_column_offsets(side),
+            resolution.lateral_points,
+        );
         let track_x = geom.side_plane_x(side);
         let mut loop_pts = belt_loop(geom.rest.get(side));
         if let Some(&first) = loop_pts.first() {
             loop_pts.push(first);
         }
-        let pitch = polyline_len(&loop_pts) / pin_belt.count.max(1) as f32;
+        let pitch = polyline_len(&loop_pts) / resolution.stations as f32;
         // Resample offset from the canonical decomposition (wrap count unused here).
         let (_, offset) = phase_decompose(phase.get(side), pitch);
         let mut stations = resample(&loop_pts, pitch, offset);
-        stations.truncate(pin_belt.count);
+        stations.truncate(resolution.stations);
         let n = stations.len();
         if n < 3 {
             continue;
@@ -716,7 +720,7 @@ pub(super) fn draw_sample_points(
             let face_a = out * (geom.model.pin_to_outer + travel(a.x));
             let face_m = out * (geom.model.pin_to_outer + travel((a.x + b.x) / 2.0));
             let face_b = out * (geom.model.pin_to_outer + travel(b.x));
-            for (offset, _) in cols {
+            for &(offset, _) in cols.samples() {
                 let shift = lat_axis * offset;
                 let (ca, cb) = (wa + shift, wb + shift);
                 for s in [ca + face_a, (ca + cb) / 2.0 + face_m, cb + face_b] {
@@ -845,13 +849,8 @@ mod tests {
         crate::track::route::build_route(geom.rest.get(side), geom.belt_len()).pts
     }
 
-    /// The contact-envelope model's one non-negotiable invariant, on the REAL shipped Tiger:
-    /// with the spring's free length at the droop envelope and the rate calibrated by the law's
-    /// own area integral, the tank parked at its authored rest height on flat ground carries
-    /// exactly its declared weight — "green compresses to exactly orange", by construction, so
-    /// the authored pose IS the flat-ground equilibrium. Also pins the calibrated travel to the
-    /// chain-clamped droop and the derived rate's order of magnitude (a ride-frequency spring,
-    /// orders of magnitude below a near-rigid meganewton pad).
+    /// The sandbox calibrates and evaluates at the selected force resolution: at the authored
+    /// rest pose its elastic load carries the declared weight. Fixture: the shipped tank.
     #[test]
     fn the_calibrated_envelope_holds_the_tiger_at_its_authored_rest_pose() {
         use super::super::derive::{self, SuspensionParams};
@@ -885,6 +884,7 @@ mod tests {
         };
         let affine = bevy::math::Affine3A::from_translation(Vec3::new(0.0, geom.hull_rest_y, 0.0));
         let mut total = 0.0;
+        let resolution = crate::track::forces::CONTACT_RESOLUTION;
         for side in Side::ALL {
             let mut loop_pts = belt_loop(geom.rest.get(side));
             if let Some(&first) = loop_pts.first() {
@@ -892,9 +892,12 @@ mod tests {
             }
             let input = SideInput {
                 loop_pts: &loop_pts,
-                count: geom.link_count,
+                count: resolution.stations,
                 plane_x: geom.side_plane_x(side),
-                columns: geom.grip_column_offsets(side),
+                columns: crate::track::forces::LateralColumns::for_shoe(
+                    geom.grip_column_offsets(side),
+                    resolution.lateral_points,
+                ),
                 travel: crate::track::forces::TravelField {
                     knots: law.knots.get(side),
                 },
@@ -908,7 +911,10 @@ mod tests {
                 &crate::track::envelope::FlatRest,
                 &RubbleBodies::default(),
                 |_| Vec3::ZERO,
-                &mut crate::track::forces::GripElements::for_links(geom.link_count),
+                &mut crate::track::forces::GripElements::for_stations(
+                    resolution.stations,
+                    resolution.lateral_points,
+                ),
             );
             total += report.contacts.iter().map(|c| c.load_elastic).sum::<f32>();
         }

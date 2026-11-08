@@ -3,7 +3,7 @@
 //! `contact_side` takes the pose, point velocities, terrain oracle and tick-start piece
 //! snapshot; it returns support then total tangent forces and a longitudinal belt reaction.
 //! The caller applies those forces, advances the drivetrain, then advects material phase.
-//! All loads are N, distances m, velocities m/s; strain belongs to material links and columns.
+//! All loads are N, distances m, velocities m/s; strain belongs to advected force cells and columns.
 //!
 //! Support uses the struck surface normal. Shear lies in its tangent plane and reads the
 //! surface's constitutive facts. Membership and shear capacity use elastic load, so transient
@@ -193,7 +193,7 @@ const GRIP_ELEMENT_LEAVE_FRACTION: f32 = 2.5e-4;
 /// Resolution: contact-loss dwell (fixed 64 Hz ticks): a pad whose elastic load falls below the leave
 /// bound keeps its stored shear this long before departure is definitive and it forgets —
 /// its shear was relieved by ground it no longer touches. 125 ms rides out washboard
-/// corner-contact flicker and separation ticks; it is far shorter than a material link's
+/// corner-contact flicker and separation ticks; it is far shorter than a force cell's
 /// return to the contact patch under drive (one belt loop), and a parked belt never
 /// advects, so stale world-space strain is never re-presented to different ground. Chosen
 /// over a geometric departure test: one u8 per element, deterministic, and departure
@@ -211,7 +211,7 @@ pub(crate) const GRIP_ELEMENT_LOSS_DWELL_TICKS: u8 = 8;
 /// silently treat as offset 0 — the wrap count must advance with it.
 ///
 /// CONTRACT: pitch is finite and positive, phase is finite, and the whole-pitch quotient fits
-/// the signed material-link address. These are checked in every build before integer conversion.
+/// the signed force-cell address. These are checked in every build before integer conversion.
 pub fn phase_decompose(phase: f64, pitch: f32) -> (i64, f32) {
     assert!(
         pitch.is_finite() && pitch > 0.0 && phase.is_finite(),
@@ -222,32 +222,32 @@ pub fn phase_decompose(phase: f64, pitch: f32) -> (i64, f32) {
     let whole = ((phase - r) / p).round();
     assert!(
         whole >= i64::MIN as f64 && whole < -(i64::MIN as f64),
-        "the material-link wrap count must fit its signed address before conversion"
+        "the force-cell wrap count must fit its signed address before conversion"
     );
     let mut wraps = whole as i64;
     let mut offset = r as f32;
     if offset >= pitch {
         wraps = wraps
             .checked_add(1)
-            .expect("the rounded station offset must keep a representable material-link address");
+            .expect("the rounded station offset must keep a representable force-cell address");
         offset = 0.0;
     }
     (wraps, offset)
 }
 
-/// The material link at a station after whole-pitch travel. Wide subtraction keeps the full
-/// admitted wrap range addressable; the remainder is a bijection over the nonempty link loop.
+/// The advected force cell at a station after whole force-pitch travel. Wide subtraction keeps
+/// the admitted wrap range addressable; the remainder is a bijection over the force-cell loop.
 pub(crate) fn material_link(station: usize, wraps: i64, count: usize) -> usize {
     assert!(
         count > 0,
-        "a material-link address belongs to a nonempty admitted loop"
+        "a force-cell address belongs to a nonempty admitted loop"
     );
     (station as i128 - i128::from(wraps)).rem_euclid(count as i128) as usize
 }
 
 /// The force model's parameters: vehicle data (spec-authored) + the per-metre support law.
 /// Nothing here is solver-quality policy — quality lives in the station/column geometry the
-/// caller authors (link pitch sets station density).
+/// caller selects (force resolution sets station density).
 #[derive(Clone)]
 pub struct ForceParams {
     /// Pin line → outer contact face (m), along the belt's outward normal. The measured
@@ -281,8 +281,8 @@ pub struct ForceParams {
     pub grip: Option<GripParams>,
 }
 
-/// Recoverable shear state, one WORLD-space vector (m) per material link × lateral column
-/// (flat index `link * 3 + column`). Force reads this vector divided by contact compliance,
+/// Recoverable shear state, one WORLD-space vector (m) per advected force station × lateral column
+/// (flat index `station * lateral_points + column`). Force reads this vector divided by contact compliance,
 /// capped at that contact's capacity. Sliding returns the state within one shear distance;
 /// skid travel beyond it is plastic. Architecture section 5a owns the constitutive decision.
 /// Material identity advects with belt phase. Elastic-load hysteresis and contact-loss dwell
@@ -298,13 +298,84 @@ pub struct GripElements {
     pub dwell: Vec<u8>,
 }
 
+/// Resolution of the force field, independent of the drawn chain. At least three stations
+/// enclose the loop; perimeter/count bounds each unresolved arc interval. Two or three lateral
+/// samples integrate a uniform strip's linear-pressure resultant and roll moment.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ContactResolution {
+    pub stations: usize,
+    pub lateral_points: usize,
+}
+
+/// Resolution: the scorecard explores 16–97 force stations independently of drawn links.
+/// Keep 97 until the owner judges the observations; features inside perimeter/count are unresolved.
+/// Three Simpson nodes span both edges and the centre. Two Gauss nodes preserve linear-pressure
+/// moments with fewer queries. Their gaps are width/2 and width/sqrt(3), respectively; point-based
+/// detection needs a gap below the data-owned piece size floor. Solid detection uses full bounds.
+pub(crate) const CONTACT_RESOLUTION: ContactResolution = ContactResolution {
+    stations: 97,
+    lateral_points: 3,
+};
+
+#[derive(Clone, Copy)]
+enum ColumnSamples {
+    Two([(f32, f32); 2]),
+    Three([(f32, f32); 3]),
+}
+
+/// Physical shoe bounds are independent of its quadrature nodes. Convex detection covers the
+/// complete interval even when the two Gauss nodes lie inside its edges.
+#[derive(Clone, Copy)]
+pub struct LateralColumns {
+    bounds: (f32, f32),
+    samples: ColumnSamples,
+}
+
+impl From<[(f32, f32); 3]> for LateralColumns {
+    fn from(shoe: [(f32, f32); 3]) -> Self {
+        Self {
+            bounds: (shoe[0].0.min(shoe[2].0), shoe[0].0.max(shoe[2].0)),
+            samples: ColumnSamples::Three(shoe),
+        }
+    }
+}
+
+impl LateralColumns {
+    pub(crate) fn for_shoe(shoe: [(f32, f32); 3], count: usize) -> Self {
+        let mut columns = Self::from(shoe);
+        match count {
+            3 => columns,
+            2 => {
+                // DERIVED: the two-point Gauss-Legendre nodes and normalized weights.
+                let center = (shoe[0].0 + shoe[2].0) / 2.0;
+                let offset = (shoe[2].0 - shoe[0].0) / (2.0 * 3.0_f32.sqrt());
+                columns.samples =
+                    ColumnSamples::Two([(center - offset, 0.5), (center + offset, 0.5)]);
+                columns
+            }
+            _ => panic!("force lateral resolution must select two or three points"),
+        }
+    }
+
+    pub fn samples(&self) -> &[(f32, f32)] {
+        match &self.samples {
+            ColumnSamples::Two(points) => points,
+            ColumnSamples::Three(points) => points,
+        }
+    }
+
+    pub fn bounds(&self) -> (f32, f32) {
+        self.bounds
+    }
+}
+
 impl GripElements {
-    /// Both slabs pre-sized for `link_count` material links × 3 lateral columns, at rest
+    /// Both slabs pre-sized for force stations × lateral points, at rest
     /// (zero strain, zero dwell) — the ONLY legal construction for a caller entering the
     /// element regime. [`contact_side`] refuses wrong-length slabs in every build;
     /// resizing would erase the strain the contact law carries from tick to tick.
-    pub fn for_links(link_count: usize) -> Self {
-        let n = link_count * 3;
+    pub fn for_stations(count: usize, lateral_points: usize) -> Self {
+        let n = count * lateral_points;
         Self {
             strain: vec![Vec3::ZERO; n],
             dwell: vec![0; n],
@@ -368,21 +439,12 @@ pub struct SideInput<'a> {
     /// The CLOSED pin-line loop polyline (last point == first), side plane (z, y). Rest
     /// geometry — road-wheel articulation is view-only and carries no force.
     pub loop_pts: &'a [Vec2],
-    /// Station count (the material link count).
+    /// Force-station count, independent of the drawn chain.
     pub count: usize,
     /// Signed track-centreline x (hull-local).
     pub plane_x: f32,
-    /// Lateral collocation columns: (signed hull-x offset from THIS side's pin plane, load
-    /// share), ordered inboard → centre → outboard, applied along the hull's lateral axis
-    /// (the pin axis — column placement never tilts with segment orientation). Weights sum
-    /// to 1: edge columns at the shoe's TRUE lateral faces with Simpson shares (1/6, 2/3,
-    /// 1/6) reproduce a laterally-uniform strip's load AND roll moment exactly — the shares
-    /// are a statement about the strip's shape, so they survive the shoe's own outboard
-    /// bias. Per-side and SIGNED because the shoe is not centred on its pins (the Tiger's
-    /// runs ~17 mm outboard: flush with the wheel pack inboard, overhanging outboard) —
-    /// `RigGeom::grip_column_offsets(side)` is the measured source; a symmetric
-    /// `±width/2` here is the very approximation it replaced.
-    pub columns: [(f32, f32); 3],
+    /// Physical shoe bounds and normalized quadrature weights, in inboard-to-outboard order.
+    pub columns: LateralColumns,
     /// Per-position free travel (the contact envelope's local reach), REQUIRED: production
     /// callers pass the rig's measured knot profile (`envelope::wheel_travel_knots`); test
     /// fixtures pass uniform knots (empty knots = a rest-anchored zero-droop pad).
@@ -513,7 +575,7 @@ pub fn clipped_linear_piece(x0: f32, x1: f32, p0: f32, p1: f32) -> (f32, f32, f3
 /// Force application does not feed back into `vel_at` within a tick (velocities integrate
 /// later), so reading everything first and applying afterwards is exact. `elements`: the
 /// per-element isotropic shear state (see [`GripElements`]) — the caller owns the state vector
-/// and must construct it pre-sized to `count * 3` ([`GripElements::for_links`]); wrong-length
+/// and must construct it pre-sized to `count * columns.samples().len()` ([`GripElements::for_stations`]); wrong-length
 /// slabs violate the spawn invariant and panic in every build.
 ///
 /// Returns the report with `state.speed`/`state.phase` still the input values. The caller commits
@@ -540,7 +602,7 @@ pub fn contact_side<O: TerrainOracle>(
 
     assert!(
         input.count >= 3,
-        "admitted running gear has enough material links to enclose a belt"
+        "admitted running gear has enough force stations to enclose a belt"
     );
     let pitch = polyline_len(input.loop_pts) / input.count as f32;
     let (wraps, station_offset) = phase_decompose(state.phase, pitch);
@@ -551,13 +613,13 @@ pub fn contact_side<O: TerrainOracle>(
         "admitted running gear resamples to a closed contact loop; reject degenerate construction before publication"
     );
 
-    // The caller owns fixed-size slabs constructed at spawn by `GripElements::for_links`.
+    // The caller owns fixed-size slabs constructed at spawn by `GripElements::for_stations`.
     // A size mismatch is a construction bug; resizing here would erase valid contact strain.
-    let element_len = input.count * 3;
+    let element_len = input.count * input.columns.samples().len();
     let sized = elements.strain.len() == element_len && elements.dwell.len() == element_len;
     assert!(
         sized,
-        "GripElements slabs must be pre-sized to count*3 = {element_len} at construction \
+        "GripElements slabs must be pre-sized to count*columns = {element_len} at construction \
          (strain {}, dwell {}) — runtime resizing erases contact strain",
         elements.strain.len(),
         elements.dwell.len(),
@@ -578,17 +640,18 @@ pub fn contact_side<O: TerrainOracle>(
         &mut report,
     );
     let elem_g = match &params.grip {
-        Some(grip) => update_grip_elements(
-            &cols,
-            &held,
-            elements,
-            grip.side_weight,
-            dt,
-            element_len,
-            &mut report,
-        ),
+        Some(grip) => {
+            update_grip_elements(&cols, &held, elements, grip.side_weight, dt, element_len)
+        }
         None => Vec::new(),
     };
+    #[cfg(feature = "bitprobe")]
+    for output in &mut report.bitprobe_elements {
+        let element =
+            output.material as usize * input.columns.samples().len() + output.column as usize;
+        output.strain = elements.strain[element];
+        output.dwell = u32::from(elements.dwell[element]);
+    }
     let (elem_sum, belt_reaction) = emit_contact_forces(&mut report, &cols, &elem_g, elements_mode);
 
     // The grip slot carries the summed element force (long, lat) — telemetry only (the
@@ -617,7 +680,7 @@ struct ColumnContact {
     has_plane: bool,
     slip_long: f32,
     slip_lat: f32,
-    /// Flat material-element index (`link * 3 + column`) — the per-element grip key.
+    /// Flat material-element index (`station * lateral_points + column`) — the per-element grip key.
     element: usize,
     /// [`BeltContact::belt_velocity`].
     belt_velocity: Vec3,
@@ -804,7 +867,7 @@ fn collect_column_contacts<O: TerrainOracle>(
     let travel_at = |z: f32| -> f32 { input.travel.at(z) };
 
     // Material identity under advection: station `i` samples arc `offset + i·pitch`, so the
-    // material link there is `i − wraps` (mod count) — when the sampling offset wraps, the
+    // advected force cell there is `i − wraps` (mod count) — when the sampling offset wraps, the
     // identity shift absorbs the jump (the witness-link mapping). `wraps` and the offset come
     // from the SAME [`phase_decompose`] call — the pair is consistent by construction.
     let material = |i: usize| material_link(i, wraps, input.count);
@@ -813,10 +876,8 @@ fn collect_column_contacts<O: TerrainOracle>(
     // relative to the pin plane), so they shift along the hull's lateral axis — never along
     // a per-segment cross product, whose sign would depend on the loop's winding.
     let lat_axis = affine.transform_vector3(Vec3::X);
-    let lateral = (
-        input.columns[0].0.min(input.columns[2].0),
-        input.columns[0].0.max(input.columns[2].0),
-    );
+    let lateral = input.columns.bounds();
+    let samples = input.columns.samples();
     let mut previous_end: [Option<(ProbeKey, f32)>; 3] = [None; 3];
 
     let mut slabs = Vec::with_capacity(n);
@@ -876,13 +937,13 @@ fn collect_column_contacts<O: TerrainOracle>(
         let face_b = out * (params.face_offset + travel[2]);
         let mut share = 0.0;
 
-        // The shoe is sampled as three lateral COLUMNS (measured faces + centre — see
+        // The shoe uses the selected lateral quadrature (see
         // [`SideInput::columns`]): each column runs the full profile machinery on its own
         // three stations with its weight of the per-metre coefficients and applies its
         // resultant at its own point — roll torque from a curb under one track edge,
         // cross-slope contact, and half-off-a-ledge support all emerge from the
         // application points.
-        for (ci, &(offset, weight)) in input.columns.iter().enumerate() {
+        for (ci, &(offset, weight)) in samples.iter().enumerate() {
             let shift = lat_axis * offset;
             let ca = wa + shift;
             let cb = wb + shift;
@@ -935,7 +996,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                 });
                 report.bitprobe_elements.len() - 1
             };
-            let strip = if input.columns[0].0 < input.columns[2].0 {
+            let strip = if samples[0].0 < samples[samples.len() - 1].0 {
                 (
                     lateral.0 + (lateral.1 - lateral.0) * share,
                     lateral.0 + (lateral.1 - lateral.0) * (share + weight),
@@ -997,7 +1058,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                 );
                 if load <= 0.0 {
                     if elements_mode && load_elastic > 0.0 {
-                        held.push((material(i) * 3 + ci, load_elastic));
+                        held.push((material(i) * samples.len() + ci, load_elastic));
                     }
                     continue;
                 }
@@ -1017,7 +1078,7 @@ fn collect_column_contacts<O: TerrainOracle>(
                     has_plane,
                     slip_long,
                     slip_lat,
-                    element: material(i) * 3 + ci,
+                    element: material(i) * samples.len() + ci,
                     belt_velocity,
                     collider,
                     mu: surface.mu,
@@ -1107,12 +1168,7 @@ fn update_grip_elements(
     side_weight: f32,
     dt: f32,
     element_len: usize,
-    report: &mut SideReport,
 ) -> Vec<Vec2> {
-    // `report` carries only the measurement-build probe slabs.
-    #[cfg(not(feature = "bitprobe"))]
-    let _ = &report;
-
     let enter = side_weight * GRIP_ELEMENT_ENTER_FRACTION;
     let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
     let mut work = vec![ElementWork::default(); element_len];
@@ -1192,12 +1248,6 @@ fn update_grip_elements(
         }
     }
     forget_departed_elements(&work, elements);
-    #[cfg(feature = "bitprobe")]
-    for output in &mut report.bitprobe_elements {
-        let element = output.material as usize * 3 + output.column as usize;
-        output.strain = elements.strain[element];
-        output.dwell = u32::from(elements.dwell[element]);
-    }
     elem_g
 }
 
@@ -1323,16 +1373,16 @@ mod tests {
         }
     }
 
-    /// A contact pass cannot silently succeed without an enclosing material loop. Both drive
+    /// A contact pass cannot silently succeed without an enclosing force loop. Both drive
     /// adapters rely on this construction invariant when committing transmission and belt state.
     #[test]
-    #[should_panic(expected = "admitted running gear has enough material links")]
-    fn a_contact_pass_refuses_a_non_enclosing_link_count() {
+    #[should_panic(expected = "admitted running gear has enough force stations")]
+    fn a_contact_pass_refuses_a_non_enclosing_station_count() {
         let input = SideInput {
             loop_pts: &rect_loop(0.02),
             count: 2,
             plane_x: 0.0,
-            columns: TEST_COLUMNS,
+            columns: TEST_COLUMNS.into(),
             travel: TravelField { knots: &[] },
         };
         contact_side(
@@ -1344,7 +1394,7 @@ mod tests {
             &FlatGround { surface_y: 0.0 },
             &RubbleBodies::default(),
             |_| Vec3::ZERO,
-            &mut GripElements::for_links(2),
+            &mut GripElements::for_stations(2, 3),
         );
     }
 
@@ -1420,7 +1470,7 @@ mod tests {
             loop_pts,
             count: 25,
             plane_x: 0.0,
-            columns: TEST_COLUMNS,
+            columns: TEST_COLUMNS.into(),
             // Empty knots: a rest-anchored zero-droop pad (the fixture's free_travel is 0).
             travel: TravelField { knots: &[] },
         };
@@ -1464,7 +1514,7 @@ mod tests {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
-            columns: TEST_COLUMNS,
+            columns: TEST_COLUMNS.into(),
             travel: TravelField { knots: &[] },
         };
         for phase in [0.0, 0.13] {
@@ -1483,7 +1533,7 @@ mod tests {
                 &oracle,
                 &RubbleBodies::default(),
                 |_| Vec3::ZERO,
-                &mut GripElements::for_links(input.count),
+                &mut GripElements::for_stations(input.count, 3),
             );
             // CountedGround counts scalar profile casts; the contact query is separate.
             let raw = report.bitprobe_contacts.len() * 3;
@@ -1519,7 +1569,7 @@ mod tests {
         let loop_pts = rect_loop(0.02);
         let measure = |velocity| {
             let mut state = SideState::default();
-            let mut elements = GripElements::for_links(25);
+            let mut elements = GripElements::for_stations(25, 3);
             rig_tick(&loop_pts, &mut state, &mut elements, 0.0, velocity)
         };
         let resting = measure(Vec3::ZERO);
@@ -1580,7 +1630,7 @@ mod tests {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
-            columns: TEST_COLUMNS,
+            columns: TEST_COLUMNS.into(),
             travel: TravelField { knots: &knots },
         };
         let report = contact_side(
@@ -1592,7 +1642,7 @@ mod tests {
             &Ceiling { under_y: 0.55 },
             &RubbleBodies::default(),
             |_| Vec3::ZERO,
-            &mut GripElements::for_links(25),
+            &mut GripElements::for_stations(25, 3),
         );
         assert!(
             report.contacts.is_empty(),
@@ -1612,7 +1662,7 @@ mod tests {
             &Ceiling { under_y: 0.51 },
             &RubbleBodies::default(),
             |_| Vec3::ZERO,
-            &mut GripElements::for_links(25),
+            &mut GripElements::for_stations(25, 3),
         );
         assert!(
             !report.contacts.is_empty(),
@@ -1634,7 +1684,7 @@ mod tests {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
-            columns: TEST_COLUMNS,
+            columns: TEST_COLUMNS.into(),
             travel: TravelField { knots: &[] },
         };
         for closing in [0.0, 1.0] {
@@ -1648,7 +1698,7 @@ mod tests {
                     &FlatGround { surface_y: depth },
                     &RubbleBodies::default(),
                     |_| Vec3::NEG_Y * closing,
-                    &mut GripElements::for_links(25),
+                    &mut GripElements::for_stations(25, 3),
                 );
                 (
                     report.contacts.iter().map(|c| c.load).sum::<f32>(),
@@ -1684,7 +1734,7 @@ mod tests {
                 loop_pts: &loop_pts,
                 count: 25,
                 plane_x: 0.0,
-                columns: TEST_COLUMNS,
+                columns: TEST_COLUMNS.into(),
                 travel: TravelField { knots },
             };
             contact_side(
@@ -1696,7 +1746,7 @@ mod tests {
                 &FlatGround { surface_y: 0.0 },
                 &RubbleBodies::default(),
                 |_| Vec3::ZERO,
-                &mut GripElements::for_links(25),
+                &mut GripElements::for_stations(25, 3),
             )
         };
 
@@ -1731,7 +1781,7 @@ mod tests {
     fn strained_pad() -> (Vec<Vec2>, SideState, GripElements, SideReport) {
         let loop_pts = rect_loop(0.02);
         let mut state = SideState::default();
-        let mut elems = GripElements::for_links(25);
+        let mut elems = GripElements::for_stations(25, 3);
         let mut report = rig_tick(&loop_pts, &mut state, &mut elems, 0.0, Vec3::ZERO);
         for _ in 0..20 {
             report = rig_tick(
@@ -1792,7 +1842,7 @@ mod tests {
     fn element_strain_forgets_on_definitive_departure() {
         let loop_pts = rect_loop(0.02);
         let mut state = SideState::default();
-        let mut elems = GripElements::for_links(25);
+        let mut elems = GripElements::for_stations(25, 3);
         for _ in 0..20 {
             rig_tick(
                 &loop_pts,
@@ -1833,7 +1883,7 @@ mod tests {
         );
         assert!(strain_sum(&elems) > 0.01, "rig premise: strain accumulated");
 
-        // Phase 2 — shallow contact (loads ≈ 100 N, mid-band [leave, enter)), same 25-link count
+        // Phase 2 — shallow contact (loads ≈ 100 N, mid-band [leave, enter)), same 25-station count
         // so element identity + strain slab persist. The pad is fading but still a live member
         // (dwell refreshed each tick); slip continues, so an `if member` integration branch WOULD
         // move the strain. It must hold instead.
@@ -1875,7 +1925,7 @@ mod tests {
         // 0.05 mm of face penetration: real contact, but orders below the enter bound.
         let loop_pts = rect_loop(0.024_95);
         let mut state = SideState::default();
-        let mut elems = GripElements::for_links(25);
+        let mut elems = GripElements::for_stations(25, 3);
         let leave = rig_params().grip.unwrap().side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
         for _ in 0..50 {
             let report = rig_tick(
@@ -1962,7 +2012,7 @@ mod tests {
             loop_pts: &loop_pts,
             count: 40,
             plane_x: 0.0,
-            columns: TEST_COLUMNS,
+            columns: TEST_COLUMNS.into(),
             travel: TravelField { knots: &knots },
         };
         let params = ForceParams {
@@ -1975,7 +2025,7 @@ mod tests {
                 speed,
                 ..Default::default()
             };
-            let mut elems = GripElements::for_links(input.count);
+            let mut elems = GripElements::for_stations(input.count, 3);
             let (mut reaction, mut push, mut load, mut tilted) = (0.0, Vec3::ZERO, 0.0, 0);
             for _ in 0..64 {
                 let report = contact_side(
@@ -2001,7 +2051,7 @@ mod tests {
                     &crate::track::envelope::FlatRest,
                     &RubbleBodies::default(),
                     |_| Vec3::ZERO,
-                    &mut GripElements::for_links(input.count),
+                    &mut GripElements::for_stations(input.count, 3),
                 );
                 assert_eq!(
                     report.contacts.len(),
@@ -2075,7 +2125,7 @@ mod tests {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 1.995,
-            columns: TEST_COLUMNS,
+            columns: TEST_COLUMNS.into(),
             travel: TravelField { knots: &[] },
         };
         let report = contact_side(
@@ -2087,7 +2137,7 @@ mod tests {
             &field,
             &RubbleBodies::default(),
             |_| Vec3::ZERO,
-            &mut GripElements::for_links(input.count),
+            &mut GripElements::for_stations(input.count, 3),
         );
         assert!(
             !report.contacts.is_empty(),
@@ -2128,7 +2178,7 @@ mod tests {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
-            columns: TEST_COLUMNS,
+            columns: TEST_COLUMNS.into(),
             travel: TravelField { knots: &[] },
         };
         for field in [empty, solid] {
@@ -2141,7 +2191,7 @@ mod tests {
                 &field,
                 &RubbleBodies::default(),
                 |_| Vec3::Z,
-                &mut GripElements::for_links(input.count),
+                &mut GripElements::for_stations(input.count, 3),
             );
             assert!(
                 report.apps.is_empty(),
@@ -2170,7 +2220,7 @@ mod tests {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
-            columns: TEST_COLUMNS,
+            columns: TEST_COLUMNS.into(),
             travel: TravelField { knots: &[] },
         };
         let affine = Affine3A::from_rotation_translation(
@@ -2187,7 +2237,7 @@ mod tests {
             &field,
             &RubbleBodies::default(),
             |_| velocity,
-            &mut GripElements::for_links(input.count),
+            &mut GripElements::for_stations(input.count, 3),
         );
         assert!(
             !report.contacts.is_empty(),
@@ -2224,7 +2274,7 @@ mod tests {
                 loop_pts: &loop_pts,
                 count,
                 plane_x: 0.0,
-                columns: TEST_COLUMNS,
+                columns: TEST_COLUMNS.into(),
                 travel: TravelField { knots: &[] },
             };
             let report = contact_side(
@@ -2239,7 +2289,7 @@ mod tests {
                 &field,
                 &RubbleBodies::default(),
                 |_| Vec3::ZERO,
-                &mut GripElements::for_links(count),
+                &mut GripElements::for_stations(count, 3),
             );
             report
                 .contacts
@@ -2302,7 +2352,7 @@ mod tests {
                 loop_pts: &loop_pts,
                 count,
                 plane_x: 0.0,
-                columns: TEST_COLUMNS,
+                columns: TEST_COLUMNS.into(),
                 travel: TravelField { knots: &[] },
             };
             let report = contact_side(
@@ -2317,7 +2367,7 @@ mod tests {
                 curve,
                 &RubbleBodies::default(),
                 |_| Vec3::ZERO,
-                &mut GripElements::for_links(count),
+                &mut GripElements::for_stations(count, 3),
             );
             report
                 .contacts
@@ -2369,7 +2419,7 @@ mod tests {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
-            columns: TEST_COLUMNS,
+            columns: TEST_COLUMNS.into(),
             travel: TravelField { knots: &[] },
         };
         let mut peak = 0.0_f32;
@@ -2389,7 +2439,7 @@ mod tests {
                 &field,
                 &RubbleBodies::default(),
                 |_| Vec3::NEG_Z * 2.0,
-                &mut GripElements::for_links(input.count),
+                &mut GripElements::for_stations(input.count, 3),
             );
             let force = report.apps.iter().map(|a| a.force.z).sum::<f32>();
             peak = peak.max(force);
@@ -2442,7 +2492,7 @@ mod tests {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
-            columns: TEST_COLUMNS,
+            columns: TEST_COLUMNS.into(),
             travel: TravelField { knots: &[] },
         };
         let report = contact_side(
@@ -2488,7 +2538,7 @@ mod tests {
                 speed: v0,
                 ..Default::default()
             };
-            let mut elems = GripElements::for_links(25);
+            let mut elems = GripElements::for_stations(25, 3);
             let mut hull = v0;
             let mut distance = 0.0;
             let mut mass = 0.0;
@@ -2558,7 +2608,7 @@ mod tests {
                 ground,
             };
             let mut state = SideState::default();
-            let mut elements = GripElements::for_links(25);
+            let mut elements = GripElements::for_stations(25, 3);
             let mut velocity = if sideways { 0.6 } else { 4.0 };
             let mut distance = 0.0_f32;
             let mut peak = 0.0_f32;
@@ -2572,7 +2622,7 @@ mod tests {
                             loop_pts: &points,
                             count: 25,
                             plane_x: 0.0,
-                            columns: TEST_COLUMNS,
+                            columns: TEST_COLUMNS.into(),
                             travel: TravelField { knots: &[] },
                         },
                         state,
@@ -2697,7 +2747,7 @@ mod tests {
                 speed: -yaw * 1.4,
                 ..Default::default()
             };
-            let mut elements = GripElements::for_links(50);
+            let mut elements = GripElements::for_stations(50, 3);
             let mut moment = 0.0;
             let mut price = 0.0;
             let mut samples = 0;
@@ -2707,7 +2757,7 @@ mod tests {
                         loop_pts: &points,
                         count: 50,
                         plane_x: -1.4,
-                        columns: TEST_COLUMNS,
+                        columns: TEST_COLUMNS.into(),
                         travel: TravelField { knots: &[] },
                     },
                     state,
@@ -2768,10 +2818,10 @@ mod tests {
                     loop_pts: &loop_pts,
                     count: 25,
                     plane_x: 0.0,
-                    columns: TEST_COLUMNS,
+                    columns: TEST_COLUMNS.into(),
                     travel: TravelField { knots: &[] },
                 };
-                let mut elements = GripElements::for_links(input.count);
+                let mut elements = GripElements::for_stations(input.count, 3);
                 let mut report = SideReport::default();
                 for _ in 0..256 {
                     report = contact_side(
@@ -2831,11 +2881,11 @@ mod tests {
                         loop_pts: &loop_pts,
                         count: 25,
                         plane_x: 0.0,
-                        columns: TEST_COLUMNS,
+                        columns: TEST_COLUMNS.into(),
                         travel: TravelField { knots: &[] },
                     };
                     let pieces = RubbleBodies::default();
-                    let mut elements = GripElements::for_links(input.count);
+                    let mut elements = GripElements::for_stations(input.count, 3);
                     let first = contact_side(
                         &input,
                         SideState::default(),
@@ -2933,7 +2983,7 @@ mod tests {
                 let report = grounded_tick(
                     &oracle,
                     &mut state,
-                    &mut GripElements::for_links(25),
+                    &mut GripElements::for_stations(25, 3),
                     hull_speed,
                 );
                 let load: f32 = report.contacts.iter().map(|c| c.load).sum();
@@ -2979,7 +3029,7 @@ mod tests {
                     loop_pts: &loop_pts,
                     count: 25,
                     plane_x: 0.0,
-                    columns: TEST_COLUMNS,
+                    columns: TEST_COLUMNS.into(),
                     travel: TravelField { knots: &[] },
                 };
                 let report = contact_side(
@@ -2994,7 +3044,7 @@ mod tests {
                     &oracle,
                     &RubbleBodies::default(),
                     |_| Vec3::NEG_Z * ROLLING_FADE_SPEED,
-                    &mut GripElements::for_links(input.count),
+                    &mut GripElements::for_stations(input.count, 3),
                 );
                 let normal: f32 = report.contacts.iter().map(|c| c.load).sum();
                 assert!(normal > 0.0);
@@ -3052,10 +3102,10 @@ mod tests {
                 loop_pts: &loop_pts,
                 count: 25,
                 plane_x: 0.0,
-                columns: TEST_COLUMNS,
+                columns: TEST_COLUMNS.into(),
                 travel: TravelField { knots: &[] },
             };
-            let mut elements = GripElements::for_links(input.count);
+            let mut elements = GripElements::for_stations(input.count, 3);
             elements.strain.fill(Vec3::X * (GRIP_SHEAR_FLOOR_M * share));
             let report = contact_side(
                 &input,
@@ -3092,7 +3142,7 @@ mod tests {
             loop_pts: &loop_pts,
             count: 25,
             plane_x: 0.0,
-            columns: TEST_COLUMNS,
+            columns: TEST_COLUMNS.into(),
             travel: TravelField { knots: &[] },
         };
         let mut params = rig_params();
@@ -3108,7 +3158,7 @@ mod tests {
                 &oracle,
                 &RubbleBodies::default(),
                 |_| Vec3::ZERO,
-                &mut GripElements::for_links(25),
+                &mut GripElements::for_stations(25, 3),
             );
             observed.push(super::super::load::observe(
                 report.perceived_support.iter(),
@@ -3166,21 +3216,44 @@ mod tests {
             [(Vec3::Y, 1000.0), (Vec3::Z, 1.0)],
         ] {
             let cols = normals.map(|(normal, load)| patch(normal, load));
-            let mut elements = GripElements::for_links(1);
+            let mut elements = GripElements::for_stations(1, 3);
             elements.strain[0] = Vec3::Z * 0.02; // FIXTURE elastic displacement.
-            let g = update_grip_elements(
-                &cols,
-                &[],
-                &mut elements,
-                1000.0,
-                1.0 / 64.0,
-                3,
-                &mut SideReport::default(),
-            );
+            let g = update_grip_elements(&cols, &[], &mut elements, 1000.0, 1.0 / 64.0, 3);
             let flat = normals.iter().position(|(n, _)| *n == Vec3::Y).unwrap();
             results.push(g[flat]);
         }
         assert_eq!(results[0], results[1]);
         assert!(results[0].length() > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+    /// Contact slabs require the full physical width; linear pressure requires its first two
+    /// lateral moments. Moving the Gauss nodes to the edges or shrinking bounds breaks this.
+    #[test]
+    fn quadrature_preserves_shoe_bounds_and_linear_pressure_moments() {
+        // Fixture: biased shoe interval and linear lateral pressure.
+        let (lo, hi, a, b) = (-0.3_f32, 0.5_f32, 2.0_f32, 0.5_f32);
+        let center = (lo + hi) / 2.0;
+        for points in [2, 3] {
+            let columns = LateralColumns::for_shoe(
+                [(lo, 1.0 / 6.0), (center, 2.0 / 3.0), (hi, 1.0 / 6.0)],
+                points,
+            );
+            assert_eq!(columns.bounds(), (lo, hi));
+            let force: f32 = columns.samples().iter().map(|(x, w)| w * (a + b * x)).sum();
+            let moment: f32 = columns
+                .samples()
+                .iter()
+                .map(|(x, w)| w * x * (a + b * x))
+                .sum();
+            assert!((force - (a + b * center)).abs() < 1e-6);
+            assert!(
+                (moment - (a * center + b * (center * center + (hi - lo).powi(2) / 12.0))).abs()
+                    < 1e-6
+            );
+        }
     }
 }

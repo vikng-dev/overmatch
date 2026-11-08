@@ -537,7 +537,7 @@ mod tests {
                     loop_pts: &loop_pts,
                     count: 24,
                     plane_x: 0.0,
-                    columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)],
+                    columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)].into(),
                     travel: TravelField { knots: &[] },
                 };
                 let track = crate::substances::contact_friction(0.7); // Fixture material coefficient.
@@ -574,7 +574,7 @@ mod tests {
                         &field,
                         &pieces,
                         |_| block.rotation * Vec3::Z,
-                        &mut GripElements::for_links(24),
+                        &mut GripElements::for_stations(24, 3),
                     );
                     assert!(
                         !report.contacts.is_empty(),

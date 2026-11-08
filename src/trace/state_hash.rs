@@ -256,7 +256,7 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
     }
     let trn = htr.finish();
 
-    // Explicit side then flat `link * 3 + column` order. Raw float bits and the exact
+    // Explicit side then flat `force_cell * lateral_points + column` order. Raw float bits and the exact
     // force-affecting dwell byte make this the determinism hash, not the coarse anchor digest.
     let mut hel = Fnv64::new();
     hel.write_bool(elements.is_some());
@@ -836,8 +836,8 @@ mod tests {
         );
 
         // Elements: strain and force-affecting contact lifetime are exact state, ordered by side
-        // then flat material `link * 3 + column`, and localize to the `elm` stream.
-        let elements = TrackGripElements::for_links(2);
+        // then flat material `force_cell * lateral_points + column`, and localize to the `elm` stream.
+        let elements = TrackGripElements::for_links(2, 3);
         let (gate, servos) = (test_weapon_gate(), test_servos());
         let state = TankState {
             position: p,
@@ -953,7 +953,7 @@ mod tests {
     fn fresh_app_digest_covers_the_rollback_tracer_phase() {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
-        let elements = TrackGripElements::for_links(2);
+        let elements = TrackGripElements::for_links(2, 3);
         let transmission = sample_transmission();
         let base_trace = hash_sample((p, q, lv, av), &drive, &grip, &transmission, &sim);
         let (gate, servos) = (test_weapon_gate(), test_servos());

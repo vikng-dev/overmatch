@@ -1308,7 +1308,7 @@ mod tests {
             let tangent = Vec3::new(0.4, 0.03 * 0.4 + 0.02 * 0.3, 0.3);
             let run = |field: &BlockField, pieces: &RubbleBodies, velocity: Vec3| pad_pass_gripping(
                 grip, field, pieces, pose, SideState { speed: 0.6, ..default() },
-                velocity, &mut GripElements::for_links(30),
+                velocity, &mut GripElements::for_stations(30, 3),
             );
             let empty = BlockField::default();
             let totals = |report: &SideReport| {
@@ -1548,7 +1548,7 @@ mod tests {
                         Affine3A::from_translation(Vec3::Y * 0.6),
                         SideState::default(),
                         before,
-                        &mut GripElements::for_links(30),
+                        &mut GripElements::for_stations(30, 3),
                     );
                     let expected: Vec3 = report.apps.iter().map(|app| app.force).sum();
                     assert!(expected.y > 0.0, "the surface must support the belt");
@@ -1638,7 +1638,7 @@ mod tests {
                         Affine3A::from_translation(Vec3::Y * 0.6),
                         SideState::default(),
                         before,
-                        &mut GripElements::for_links(30),
+                        &mut GripElements::for_stations(30, 3),
                     );
                     pieces.record_static_contacts(source, &report.contacts, &mut transfers);
                     let pushes = piece_impulses(
@@ -1744,7 +1744,7 @@ mod tests {
                         ..default()
                     },
                     velocity,
-                    &mut GripElements::for_links(30),
+                    &mut GripElements::for_stations(30, 3),
                 );
                 assert!(report.contacts.iter().any(|c| c.collider == Some(body)));
                 for contact in report
@@ -2180,7 +2180,7 @@ mod tests {
                     Affine3A::from_translation(Vec3::new(0.0, 0.1, 0.0)),
                     SideState::default(),
                     slide,
-                    &mut GripElements::for_links(30),
+                    &mut GripElements::for_stations(30, 3),
                 );
                 let pushes = piece_impulses(&mut pieces, sourced(&report.contacts), DT);
                 let mus = report.contacts.iter().map(|c| c.mu).collect::<Vec<_>>();
@@ -2425,7 +2425,7 @@ mod tests {
             loop_pts: &loop_pts,
             count: 30,
             plane_x: 0.0,
-            columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)],
+            columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)].into(),
             travel: TravelField { knots: &[] },
         };
         let params = ForceParams {
@@ -2463,7 +2463,7 @@ mod tests {
                 grip: Vec2::ZERO,
             },
             Vec3::new(0.0, -0.01, 0.3),
-            &mut GripElements::for_links(30),
+            &mut GripElements::for_stations(30, 3),
         )
     }
 
@@ -2486,7 +2486,7 @@ mod tests {
                         Affine3A::from_rotation_translation(rotation, Vec3::Y * 0.1),
                         SideState::default(),
                         Vec3::ZERO,
-                        &mut GripElements::for_links(30),
+                        &mut GripElements::for_stations(30, 3),
                     );
                     assert!(!report.perceived_support.is_empty());
                     let load = super::super::load::observe(
@@ -2522,7 +2522,7 @@ mod tests {
                     let report = pad_pass(
                         &ground(), &pieces,
                         Affine3A::from_rotation_translation(Quat::from_rotation_x(pitch.to_radians()), Vec3::Y * 0.1),
-                        SideState::default(), Vec3::Z * speed, &mut GripElements::for_links(30),
+                        SideState::default(), Vec3::Z * speed, &mut GripElements::for_stations(30, 3),
                     );
                     let contacts: Vec<_> = report.contacts.iter().filter(|c| c.collider.is_some()).collect();
                     assert!(!contacts.is_empty());
@@ -2546,7 +2546,7 @@ mod tests {
     fn park(app: &mut App, mut h: f32, ticks: usize) -> f32 {
         const MASS: f32 = 6000.0;
         let mut vy = 0.0;
-        let mut elements = GripElements::for_links(30);
+        let mut elements = GripElements::for_stations(30, 3);
         for _ in 0..ticks {
             let (lift, kept) = app
                 .world_mut()
@@ -2636,7 +2636,7 @@ mod tests {
                 .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                     let near = rubble.near(Vec3::ZERO, 4.0);
                     let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
-                    let mut elements = GripElements::for_links(30);
+                    let mut elements = GripElements::for_stations(30, 3);
                     let report = pad_pass(
                         &ground(),
                         &pieces,
@@ -2700,7 +2700,7 @@ mod tests {
                 .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                     let near = rubble.near(Vec3::ZERO, 4.0);
                     let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
-                    let mut elements = GripElements::for_links(30);
+                    let mut elements = GripElements::for_stations(30, 3);
                     let report = pad_pass(
                         &ground(),
                         &pieces,
@@ -2772,7 +2772,7 @@ mod tests {
                             ..Default::default()
                         },
                         hull_velocity,
-                        &mut GripElements::for_links(30),
+                        &mut GripElements::for_stations(30, 3),
                     )
                     .contacts
                     .into_iter()

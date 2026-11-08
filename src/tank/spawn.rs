@@ -268,11 +268,14 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
 ) -> Entity {
     let transmission = tank_transmission(content.spec());
     // The element-grip slabs ride the SAME insertion that adds `Tank`: pre-sized synchronously
-    // from the spec's link count (the REV-14 fixed-size invariant — `track::sim::TrackGripElements`),
+    // at force resolution (`track::sim::TrackGripElements` owns the fixed-size invariant),
     // never an empty vector awaiting a first-tick resize.
     let mut root = commands.spawn((
         presentation.root_bundle(),
-        TrackGripElements::for_links(content.spec().track.link_count),
+        TrackGripElements::for_links(
+            crate::track::forces::CONTACT_RESOLUTION.stations,
+            crate::track::forces::CONTACT_RESOLUTION.lateral_points,
+        ),
         // Complete REV-14 transmission state, synchronously constructed from spec data before the
         // root can replicate or simulate, and the public crank speed read off it.
         transmission,
@@ -315,7 +318,10 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
     let root = commands
         .spawn((
             Tank,
-            TrackGripElements::for_links(content.spec().track.link_count),
+            TrackGripElements::for_links(
+                crate::track::forces::CONTACT_RESOLUTION.stations,
+                crate::track::forces::CONTACT_RESOLUTION.lateral_points,
+            ),
             transmission,
             EngineRpm::of(&transmission),
             DriveSignal::default(),
