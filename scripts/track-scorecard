@@ -1,0 +1,8 @@
+#!/bin/sh
+# The track scorecard: every driving line of the game's tank physics, written to
+# target/track-scorecard.{md,json}. Line 8c builds the sandbox's yard, so it needs dev_ui.
+set -eu
+cd "$(dirname "$0")/.."
+export OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1
+exec scripts/serial-cargo test --lib --features dev_ui,bitprobe \
+    headless_test::track_scorecard::track_scorecard -- --ignored --nocapture

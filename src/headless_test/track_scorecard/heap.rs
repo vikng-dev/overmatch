@@ -120,7 +120,6 @@ pub(super) fn line(card: &mut Card) {
         let heading = begin.forward().with_y(0.0).normalize();
         let (mut rise_max, mut rise_centre, mut reached) = (0.0_f32, f32::NAN, f32::NAN);
         let (mut nose_up, mut nose_down) = (0.0_f32, 0.0_f32);
-        let (mut from_pieces, mut from_belt) = (0.0_f32, 0.0_f32);
         let mut driven = 0;
         while driven < 15 * TICKS {
             bed.tick(throttle, 0.0);
@@ -134,18 +133,6 @@ pub(super) fn line(card: &mut Card) {
                 reached = driven as f32 * DT;
                 rise_centre = rise;
             }
-            let on_pieces = |f: &&WorldForce| f.body.is_some_and(|b| bed.pieces.contains(&b));
-            from_pieces += bed
-                .world_forces()
-                .iter()
-                .filter(on_pieces)
-                .map(|f| f.force.y)
-                .sum::<f32>();
-            from_belt += arm::belt_forces(&bed.app, bed.tank)
-                .iter()
-                .filter(on_pieces)
-                .map(|f| f.force.y)
-                .sum::<f32>();
             // The drive ends once the belt's rear point clears the heap's far edge.
             if (hull.position + hull.rotation * Vec3::Z * rear).z < far {
                 break;
@@ -199,16 +186,11 @@ pub(super) fn line(card: &mut Card) {
             ("moved_back", json!(back)),
             ("moved_sideways", json!(sideways)),
             ("pieces_removed", json!(removed)),
-            (
-                "belt_channel_share_of_piece_support",
-                f(from_belt / from_pieces),
-            ),
         ]);
     }
     card.push(Line {
         id: "heap",
         title: "8c. Loose heap",
-        kind: Kind::Observation,
         pass: None,
         rows,
         note: format!(
@@ -224,9 +206,7 @@ pub(super) fn line(card: &mut Card) {
              {HEAP_RAY_GRID_M} m grid; past-far-edge is the hull centre's distance beyond it at \
              the end, negative short of it. Piece motion is horizontal, from each piece's settled \
              pose to the drive's end; moved is past {HEAP_MOVED_M} m, split by direction against \
-             the tank's starting heading (within 45° forward or back, else sideways). The belt \
-             channel's share is the arm's own channel's upward force on pieces over all upward \
-             force from pieces, summed over the drive. No reaction ratio: it reads static balance \
+             the tank's starting heading (within 45° forward or back, else sideways). No reaction ratio: it reads static balance \
              (the world's support on the pieces less their weight is the load), which holds only \
              for pieces at rest; on a drive the heap's pieces gain and shed momentum, so a ratio \
              off 1 breaches no law, and a sleeping piece holds no solver contact to read. Line \

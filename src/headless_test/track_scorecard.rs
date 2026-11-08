@@ -1,19 +1,18 @@
 //! The track scorecard: one driving card that judges any track model the same way (the game's
 //! tank driving physics: belt, suspension and their contact with the world; game state only).
 //!
-//! Run: `scripts/serial-cargo test --lib --features dev_ui,bitprobe track_scorecard --
-//! --ignored --nocapture`. It writes `target/track-scorecard.json` and `target/track-scorecard.md`
+//! Run: `scripts/track-scorecard`, the tracked command and this card's user. It writes `target/track-scorecard.json` and `target/track-scorecard.md`
 //! under the crate root, then fails if a law check failed.
 //!
 //! Every scenario boots the shipped plugin on a fresh app and drives the shipped tank only
-//! through `TankCommand`. It reads hull and world state: Avian body state, Avian's solver
-//! contacts and construction facts. What belongs to one track model sits behind [`arm`], the
-//! only file an arm edits.
+//! through `TankCommand`. It reads hull and world state: Avian body state, every solver contact
+//! through `ContactTransfers`, the belt's sampled support forces in `TrackContacts`, and
+//! construction facts.
 //!
 //! Each line is a **law check**, judged against a value computed from a law and the tank's
 //! data, or an **observation**, reported for judgement by eye.
 //!
-//! The world every scenario stands on, met the same way by every arm:
+//! The world every scenario stands on:
 //! - terrain is a height grid at the shipped cell spacing, with its heightfield collider;
 //! - steps, walls, curbs, bars and trenches finer than a cell are static Avian bodies, made as
 //!   the map makes a graybox block;
@@ -21,7 +20,6 @@
 //!
 //! Fixture: every dimension and placement below is fixture data, chosen to pose its question.
 
-mod arm;
 // The sandbox's rubble yard builds line 8c's heap; the sandbox builds with `dev_ui`.
 #[cfg(feature = "dev_ui")]
 mod heap;
@@ -32,10 +30,14 @@ use serde_json::{Value, json};
 
 use crate::Layer;
 use crate::contact_transfer::ContactTransfer;
+use crate::ground_field::{ContactGround, GroundField};
 use crate::terrain_grid::{HeightGrid, TerrainExtent};
+use crate::track::belt_segment::BeltSegment;
+use crate::track::bump_stop::{BumpStop, SidePlate};
 use crate::track::rig_geom::RigGeom;
 use crate::track::side::Side;
-use arm::WorldForce;
+use crate::track::sim::TrackContacts;
+use crate::track::terrain::TrackField;
 
 /// Fixture: 513 samples over 750 m, so a cell is the shipped grid's 1500 m / 1024.
 const CARD_SAMPLES: usize = 513;
@@ -45,19 +47,12 @@ const TICKS: usize = FIXED_TICKS_PER_SECOND;
 /// The shipped material the card's static fixtures and pieces are made of.
 const FIXTURE_SUBSTANCE: &str = "Brick";
 
-#[derive(Clone, Copy, PartialEq)]
-enum Kind {
-    Law,
-    Observation,
-}
-
 type Row = Vec<(&'static str, Value)>;
 
 struct Line {
     id: &'static str,
     title: &'static str,
-    kind: Kind,
-    /// `None` for an observation.
+    /// A law check's verdict; `None` for an observation.
     pass: Option<bool>,
     rows: Vec<Row>,
     note: String,
@@ -95,10 +90,7 @@ impl Card {
             self.lines
                 .iter()
                 .map(|line| {
-                    let kind = match line.kind {
-                        Kind::Law => "law",
-                        Kind::Observation => "observation",
-                    };
+                    let kind = if line.pass.is_some() { "law" } else { "observation" };
                     json!({
                         "id": line.id,
                         "title": line.title,
@@ -117,11 +109,10 @@ impl Card {
     fn markdown(&self) -> String {
         let mut out = String::from("# Track scorecard\n");
         for line in &self.lines {
-            let kind = match (line.kind, line.pass) {
-                (Kind::Law, Some(true)) => "law check: PASS",
-                (Kind::Law, Some(false)) => "law check: FAIL",
-                (Kind::Law, None) => "law check: not claimed by this arm",
-                (Kind::Observation, _) => "observation",
+            let kind = match line.pass {
+                Some(true) => "law check: PASS",
+                Some(false) => "law check: FAIL",
+                None => "observation",
             };
             out += &format!("\n## {} ({kind})\n\n{}\n", line.title, line.note);
             let Some(first) = line.rows.first() else {
@@ -195,6 +186,16 @@ impl Hull {
     }
 }
 
+/// A force on the hull from one world body, at a world point.
+#[derive(Clone, Copy)]
+struct WorldForce {
+    /// The world body, or `None` for the terrain height field the track samples itself.
+    body: Option<Entity>,
+    point: Vec3,
+    /// Newtons on the hull.
+    force: Vec3,
+}
+
 /// One booted scenario: the shipped plugin, the controlled tank alone, and the fixtures.
 struct Bed {
     app: BootedSim,
@@ -260,16 +261,20 @@ impl Bed {
         }
     }
 
-    fn on_ground(ground: Option<crate::ground_field::ContactGround>, grid: HeightGrid) -> Self {
+    fn on_ground(ground: Option<ContactGround>, grid: HeightGrid) -> Self {
         let mut bed = Self::new(grid);
         if let Some(ground) = ground {
-            arm::set_ground(&mut bed.app, ground);
+            let mut track = bed.app.world_mut().resource_mut::<TrackField>();
+            let field = track
+                .field
+                .take()
+                .expect("the booted world built its track field");
+            track.field = Some(field.with_ground(Some(GroundField::uniform(ground))));
         }
         bed
     }
 
-    /// Place the hull at rest over `ground`, before the clock starts: every arm then begins from
-    /// its own spawn state.
+    /// Place the hull at rest over `ground`, before the clock starts.
     fn place(&mut self, ground: Vec3, rotation: Quat) {
         let at = ground + rotation * Vec3::Y * self.rest_y;
         let mut e = self.app.world_mut().entity_mut(self.tank);
@@ -435,10 +440,31 @@ impl Bed {
         out
     }
 
-    /// Every force on the hull from a world body this tick: the arm's own channel plus every
-    /// solver contact between the tank and another body.
+    /// The sampled support's forces on the hull this tick, applied outside Avian's solver.
+    fn spring_forces(&self) -> Vec<WorldForce> {
+        let world = self.app.world();
+        world
+            .get::<TrackContacts>(self.tank)
+            .expect("a driving tank reports its belt contacts")
+            .0
+            .iter()
+            .flatten()
+            .map(|c| WorldForce {
+                body: c.collider.map(|collider| {
+                    world
+                        .get::<ColliderOf>(collider)
+                        .map_or(collider, |of| of.body)
+                }),
+                point: c.point,
+                force: c.normal * c.load + c.tangential_force(),
+            })
+            .collect()
+    }
+
+    /// Every force on the hull from a world body this tick: the sampled support plus every solver
+    /// contact between the tank and another body.
     fn world_forces(&self) -> Vec<WorldForce> {
-        let mut out = arm::belt_forces(&self.app, self.tank);
+        let mut out = self.spring_forces();
         out.extend(
             self.tank_solver_forces()
                 .into_iter()
@@ -462,13 +488,19 @@ impl Bed {
             })
     }
 
-    /// The role of one of the tank's colliders, from what spawned it: the arm names the colliders
-    /// it spawns; a remaining collider on the vehicle layer is a hull proxy, spawned from the
-    /// tank's authored proxy node, which names it.
+    /// The role of one of the tank's colliders, from what spawned it: a segment, stop or side
+    /// plate by its marker; a remaining collider on the vehicle layer is a hull proxy, spawned
+    /// from the tank's authored proxy node, which names it.
     fn role(&self, collider: Entity) -> String {
         let world = self.app.world();
-        if let Some(role) = arm::collider_role(world, collider) {
-            return role.to_owned();
+        if world.get::<BeltSegment>(collider).is_some() {
+            return "belt segment".to_owned();
+        }
+        if world.get::<BumpStop>(collider).is_some() {
+            return "bump stop".to_owned();
+        }
+        if world.get::<SidePlate>(collider).is_some() {
+            return "side plate".to_owned();
         }
         let vehicle = world
             .get::<CollisionLayers>(collider)
@@ -502,12 +534,10 @@ impl Bed {
         out
     }
 
-    /// What of the tank meets `body` this tick: `belt` for the arm's own channel, then the roles
-    /// of the solver colliders; `None` while nothing does.
+    /// What of the tank meets `body` this tick: `belt` for the sampled support, then the roles of
+    /// the solver colliders; `None` while nothing does.
     fn first_touch(&self, body: Entity) -> Option<String> {
-        let belt = arm::belt_forces(&self.app, self.tank)
-            .iter()
-            .any(|f| f.body == Some(body));
+        let belt = self.spring_forces().iter().any(|f| f.body == Some(body));
         let mut parts = self.touching_colliders(body);
         if belt {
             parts.insert(0, "belt".to_owned());
@@ -785,7 +815,6 @@ fn slope_hold(card: &mut Card) {
     card.push(Line {
         id: "slope",
         title: "1. Holding on a slope",
-        kind: Kind::Law,
         pass: Some(pass),
         rows,
         note: "Parked (spawn state, park lever on), no input; the law in the force-balance form \
@@ -894,7 +923,6 @@ fn turning(card: &mut Card) {
     card.push(Line {
         id: "turning",
         title: "2. Turning",
-        kind: Kind::Observation,
         pass: None,
         rows,
         note: format!(
@@ -968,7 +996,6 @@ fn acceleration(card: &mut Card) {
     card.push(Line {
         id: "acceleration",
         title: "3. Acceleration and top speed per ground",
-        kind: Kind::Observation,
         pass: None,
         rows,
         note: "Full throttle from rest, 40 s on level ground; top speed is the last second's mean."
@@ -1038,14 +1065,13 @@ fn climbing(card: &mut Card) {
     card.push(Line {
         id: "climbing",
         title: "4. Climbing",
-        kind: Kind::Observation,
         pass: None,
         rows,
         note: format!(
             "Full throttle from rest. Steps: face 6 m ahead of the belt's front point, climbed iff \
              the hull centre passes 3 m beyond the face risen by 0.8 × the step within 15 s. \
              Highest step climbed: {highest} m. first_touch names what of the tank met the \
-             obstacle on the first tick any did: `belt` for the arm's own channel, then each \
+             obstacle on the first tick any did: `belt` for the sampled support, then each \
              solver collider's role."
         ),
     });
@@ -1114,7 +1140,8 @@ fn wall_push(case: &str, span: Option<(f32, f32)>) -> Row {
                 friction += force.force - along;
             }
         }
-        let belt: Vec3 = arm::belt_forces(&bed.app, bed.tank)
+        let belt: Vec3 = bed
+            .spring_forces()
             .iter()
             .filter(|f| f.body == Some(wall))
             .map(|f| f.force)
@@ -1170,7 +1197,6 @@ fn walls(card: &mut Card) {
     card.push(Line {
         id: "walls",
         title: "4b. Walls: full width, and one belt lane wide",
-        kind: Kind::Observation,
         pass: None,
         rows,
         note: format!(
@@ -1179,8 +1205,8 @@ fn walls(card: &mut Card) {
              (its grip columns) plus {LANE_MARGIN} m each side, centred on that belt. The \
              wall's force on the hull is split per solver contact into the part along the \
              contact normal and the friction across it; vertical parts are upward positive, \
-             means over the last 2 s, peaks the largest upward value. The belt channel's \
-             force is the arm's own, unsplit. first_touch names what of the tank met the wall \
+             means over the last 2 s, peaks the largest upward value. The sampled support's \
+             force is unsplit. first_touch names what of the tank met the wall \
              on the first tick any did; pitch is nose-up positive."
         ),
     });
@@ -1246,7 +1272,6 @@ fn trenches(card: &mut Card) {
     card.push(Line {
         id: "trenches",
         title: "5. Trenches",
-        kind: Kind::Observation,
         pass: None,
         rows,
         note: format!(
@@ -1335,7 +1360,6 @@ fn curb_and_ledge(card: &mut Card) {
     card.push(Line {
         id: "curb_ledge",
         title: "6. Curb under one edge, half off a ledge",
-        kind: Kind::Observation,
         pass: None,
         rows,
         note: "Curb: means over seconds 9 to 14. Ledge: placed with the edge under the right \
@@ -1438,7 +1462,6 @@ fn ride(card: &mut Card) {
     card.push(Line {
         id: "ride",
         title: "7. Ride, and energy decay after a kick",
-        kind: Kind::Law,
         pass: Some(passive),
         rows,
         note: "Washboard (observation): RMS over the ticks the belt spans the bars. Kick (law \
@@ -1506,9 +1529,8 @@ fn park_on_pieces(
     work: &mut std::collections::BTreeMap<String, f64>,
 ) -> Row {
     let (mut ys, mut vys, mut sinks, mut ratios) = (vec![], vec![], vec![], vec![]);
-    let (mut tank_support, mut belt_support) = (vec![], vec![]);
+    let mut tank_support = vec![];
     let mut park_piece_speed = 0.0_f32;
-    let mut asleep_under_belt = 0;
     // A sleeping island builds no contacts, so the reader would find a resting tank held up by
     // nothing. Sleep is a solver economy: the tank's island stays awake for this reading.
     bed.app
@@ -1531,19 +1553,6 @@ fn park_on_pieces(
             .filter(on_pieces)
             .map(|f| f.force.y)
             .sum();
-        let belt = arm::belt_forces(&bed.app, bed.tank);
-        belt_support.push(
-            belt.iter()
-                .filter(on_pieces)
-                .map(|f| f.force.y)
-                .sum::<f32>(),
-        );
-        let asleep: std::collections::BTreeSet<Entity> = belt
-            .iter()
-            .filter_map(|f| f.body)
-            .filter(|b| bed.pieces.contains(b) && bed.app.world().get::<Sleeping>(*b).is_some())
-            .collect();
-        asleep_under_belt = asleep_under_belt.max(asleep.len());
         tank_support.push(from_pieces);
         let pressed = bed.world_support_on_pieces() - bed.awake_piece_weight();
         if from_pieces > 0.0 {
@@ -1555,7 +1564,6 @@ fn park_on_pieces(
     let (_, vy_rms) = mean_rms(&vys);
     let (sink, _) = mean_rms(&sinks);
     let (support, _) = mean_rms(&tank_support);
-    let (belt, _) = mean_rms(&belt_support);
     let (ratio, ratio_rms) = mean_rms(&ratios);
     // Resolution: the reaction law holds to 5 % of the load, a margin for solver iteration error.
     let symmetric = !ratios.is_empty() && (ratio - 1.0).abs() < 0.05;
@@ -1570,8 +1578,6 @@ fn park_on_pieces(
             "support_from_pieces_share_of_weight",
             f(support / bed.weight()),
         ),
-        ("belt_channel_share_of_that", f(belt / support)),
-        ("belt_loaded_pieces_asleep_max", json!(asleep_under_belt)),
         ("reaction_ratio", f(ratio)),
         ("reaction_ratio_rms", f(ratio_rms)),
         ("reaction_symmetric", json!(symmetric)),
@@ -1660,8 +1666,7 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
     card.push(Line {
         id: "rubble",
         title: "8. Rubble",
-        kind: Kind::Law,
-        pass: arm::CLAIMS_PIECE_REACTION.then_some(symmetric),
+        pass: Some(symmetric),
         rows,
         note: format!(
             "Pieces of {FIXTURE_SUBSTANCE} (shipped density and friction), {PIECE} m. Pile ahead: \
@@ -1673,17 +1678,9 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
              is (world support on the awake pieces − their weight) / (the pieces' support on the \
              hull): 1 when every piece under load takes the equal and opposite reaction, 0 when \
              the pieces hold the tank up unloaded. The tank is held awake while parked \
-             (Avian's `SleepingDisabled`), so its island's contacts are solved and read. A \
-             sleeping piece outside that island leaves the solver: the count of belt-loaded \
-             pieces asleep says how many hold the tank as if fixed. The \
+             (Avian's `SleepingDisabled`), so its island's contacts are solved and read. The \
              reader's control, the settling pile's world support over its awake weight: \
-             {control:.4} (RMS {control_rms:.4}), 1 when the reader is right. The ratio is a law \
-             check only where the arm claims it (this arm: {}).",
-            if arm::CLAIMS_PIECE_REACTION {
-                "claims it"
-            } else {
-                "does not"
-            }
+             {control:.4} (RMS {control_rms:.4}), 1 when the reader is right."
         ),
     });
 }
@@ -1692,7 +1689,21 @@ fn accumulate_work(bed: &Bed, work: &mut std::collections::BTreeMap<String, f64>
     for (name, count) in bed.take_work() {
         *work.entry(name).or_default() += count;
     }
-    for (name, count) in arm::work(&bed.app, bed.tank) {
+    let belt_contacts = bed
+        .app
+        .world()
+        .get::<TrackContacts>(bed.tank)
+        .expect("a driving tank reports its belt contacts")
+        .0
+        .iter()
+        .map(Vec::len)
+        .sum::<usize>() as f64;
+    // DERIVED from `track::forces::emit_contact_forces`: a support and a tangent application per
+    // contact.
+    for (name, count) in [
+        ("belt_contacts", belt_contacts),
+        ("belt_force_applications", 2.0 * belt_contacts),
+    ] {
         *work.entry(name.to_owned()).or_default() += count;
     }
     let (pairs, manifolds, points) = bed.solver_contacts();
@@ -1714,7 +1725,7 @@ fn work_row(case: &str, work: &std::collections::BTreeMap<String, f64>, ticks: u
     row
 }
 
-/// The work columns: the production counts the belt adds, the arm's own, and the solver's.
+/// The work columns: the production counts the belt adds, its contacts, and the solver's.
 const WORK_COLUMNS: [&str; 15] = [
     "belt_near_colliders",
     "belt_candidates",
@@ -1750,7 +1761,6 @@ fn work_open_ground(work_rows: &mut Vec<Row>) {
     work_rows.insert(0, work_row("driving on open ground", &work, 5 * TICKS));
 }
 
-/// The whole card, on whichever track model this branch builds.
 /// Fixture: the step heights the reach columns are read at (m above the parked tank's ground).
 const REACH_HEIGHTS: [(&str, f32); 6] = [
     ("reach_below_0.2_m", 0.2),
@@ -1981,7 +1991,6 @@ fn geometry(card: &mut Card) {
     card.push(Line {
         id: "geometry",
         title: "0. Where the tank's colliders sit",
-        kind: Kind::Observation,
         pass: None,
         rows,
         note: format!(
@@ -2027,11 +2036,10 @@ fn track_scorecard() {
     card.push(Line {
         id: "work",
         title: "9. Work per tank per tick",
-        kind: Kind::Observation,
         pass: None,
         rows: work_rows,
         note: "MEASURED counts per tick for the one tank in the world: the production `Work` \
-               counters, the arm's own counts (`arm::work`) and Avian's solver contacts with the \
+               counters, the belt's contact counts and Avian's solver contacts with the \
                tank as a party. No timing."
             .into(),
     });
