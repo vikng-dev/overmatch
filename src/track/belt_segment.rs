@@ -98,7 +98,12 @@ pub(crate) fn segments(
     // admits (the whole droop plus the bump reserve). Inward depth from the pin line:
     let inward = 2.0 * (reach + params.bump_stop);
     let length = super::route::polyline_len(&pins);
-    let count = (length / SEGMENT_M).round().max(3.0) as usize;
+    let count = (length / SEGMENT_M).round() as usize;
+    assert!(
+        count >= 3,
+        "the {side:?} belt loop is {length} m: a certified running gear closes a loop of at least \
+         three segments"
+    );
     let spacing = length / count as f32;
     let stations: Vec<Vec2> = (0..count)
         .map(|i| at_arc(&pins, i as f32 * spacing))

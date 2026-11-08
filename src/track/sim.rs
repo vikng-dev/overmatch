@@ -1515,30 +1515,12 @@ mod tests {
                 .iter()
                 .flatten()
                 .filter(|c| c.collider == Some(lower))
-                .map(|c| {
-                    (
-                        c.normal * c.load + c.tangential_force(),
-                        c.point,
-                        c.normal,
-                        c.stiffness,
-                    )
-                })
+                .map(|c| (c.normal * c.load + c.tangential_force(), c.point, c.normal))
                 .collect();
             let impulse = on_lower.iter().map(|c| c.0).sum::<Vec3>() * dt;
             assert!(impulse.y > 0.0, "the upper belt bears on the lower body");
-            // DERIVED: the explicit-limit reading of the fixture's 30 t, 30 000 kg m² box.
-            let rate: f32 = on_lower
-                .iter()
-                .map(|&(_, point, normal, stiffness)| {
-                    stiffness * (1.0 / 30_000.0 + point.cross(normal).length_squared() / 30_000.0)
-                })
-                .sum();
             let momentum = app.world().get::<LinearVelocity>(lower).unwrap().0 * 30_000.0;
-            println!(
-                "MEASURED driving {driving}: reaction {impulse} N s, momentum {momentum} N s, \
-                 dt² Σk/m {}",
-                rate * dt * dt
-            );
+            println!("MEASURED driving {driving}: reaction {impulse} N s, momentum {momentum} N s");
             (impulse, momentum)
         };
         let (tank_impulse, tank_momentum) = run(true);

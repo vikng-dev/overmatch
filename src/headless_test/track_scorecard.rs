@@ -1,8 +1,9 @@
-//! The track scorecard: one driving card that judges any track model the same way (the game's
-//! tank driving physics: belt, suspension and their contact with the world; game state only).
+//! The track scorecard: the driving card of the shipped belt (the game's tank driving physics:
+//! belt, suspension and their contact with the world; game state only).
 //!
-//! Run: `scripts/track-scorecard`, the tracked command and this card's user. It writes `target/track-scorecard.json` and `target/track-scorecard.md`
-//! under the crate root, then fails if a law check failed.
+//! Run: `scripts/track-scorecard`, the tracked command and this card's user. It writes
+//! `target/track-scorecard.json` and `target/track-scorecard.md` under the crate root, then fails
+//! if a law check failed.
 //!
 //! Every scenario boots the shipped plugin on a fresh app and drives the shipped tank only
 //! through `TankCommand`. It reads hull and world state: Avian body state, every solver contact

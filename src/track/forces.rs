@@ -446,13 +446,6 @@ pub struct BeltContact {
     pub point: Vec3,
     pub load: f32,
     pub load_elastic: f32,
-    /// The profile's support rate per metre of probe depth (N/m): the per-metre spring over
-    /// the patch's contacting length, at its column's weight, including the engagement ramp's
-    /// slope of the spring and closing damper. For a piece's belt-parallel overlap face this
-    /// is also its normal stiffness.
-    pub stiffness: f32,
-    /// Normal damping rate of this patch (N·s/m), including engagement and column weight.
-    pub damping: f32,
     /// Longitudinal slip (belt speed − ground-point speed, m/s).
     pub slip: f32,
     /// Lateral scrub speed at the contact (m/s).
@@ -648,9 +641,6 @@ struct ColumnContact {
     normal: Vec3,
     load: f32,
     load_elastic: f32,
-    /// [`BeltContact::stiffness`].
-    stiffness: f32,
-    damping: f32,
     long_dir: Vec3,
     lat_dir: Vec3,
     has_plane: bool,
@@ -781,27 +771,6 @@ fn support_load(
         * (params.support_stiffness_per_m * area + params.support_damping_per_m * length * closing)
             .max(0.0)
         * engage
-}
-
-/// The profile load's derivative under uniform probe-depth displacement, at `closing` m/s. The
-/// profile area's derivative is its contacting length; inside soft engagement the ramp scales
-/// the spring's force and the damper's, so both contribute its slope. A parting damper's
-/// negative slope is left out: the stability bound stays conservative.
-fn support_stiffness(
-    params: &ForceParams,
-    weight: f32,
-    (area, length, depth): (f32, f32, f32),
-    closing: f32,
-) -> f32 {
-    let engage = (depth / params.engage_depth).clamp(0.0, 1.0);
-    let slope = if depth < params.engage_depth {
-        params.engage_depth.recip()
-    } else {
-        0.0 // Full engagement has no remaining ramp slope.
-    };
-    let elastic = params.support_stiffness_per_m * (length * engage + area * slope);
-    let damper = params.support_damping_per_m * length * closing.max(0.0) * slope;
-    weight * (elastic + damper)
 }
 
 /// Grip needs the total support budget and load-weighted slip before force emission.
@@ -1012,8 +981,6 @@ fn collect_column_contacts<O: TerrainOracle>(
                 let closing = -normal.dot(vel);
                 let engage = (pen_max / params.engage_depth).clamp(0.0, 1.0);
                 let load_elastic = weight * params.support_stiffness_per_m * area * engage;
-                let stiffness =
-                    support_stiffness(params, weight, (area, contact_len, pen_max), closing);
                 let load = support_load(params, (weight, engage), (area, contact_len), closing);
                 #[cfg(feature = "bitprobe")]
                 probe_patch(
@@ -1045,8 +1012,6 @@ fn collect_column_contacts<O: TerrainOracle>(
                     normal,
                     load,
                     load_elastic,
-                    stiffness,
-                    damping: weight * params.support_damping_per_m * contact_len * engage,
                     long_dir,
                     lat_dir,
                     has_plane,
@@ -1292,8 +1257,6 @@ fn emit_contact_forces(
             point: c.p,
             load: c.load,
             load_elastic: c.load_elastic,
-            stiffness: c.stiffness,
-            damping: c.damping,
             slip: c.slip_long,
             slip_lat: c.slip_lat,
             f_long,
@@ -1698,55 +1661,6 @@ mod tests {
             &mut GripElements::for_stations(input.count, 3),
         );
         assert!(report.apps.is_empty() && report.contacts.is_empty());
-    }
-
-    /// Recipient stability needs the derivative of the support force, including soft engagement
-    /// and, while the belt closes, the damper's share of the ramp. FIXTURE: uniform 1 cm
-    /// penetration in a 2 cm ramp, spring 2 MN/m per m, 2 m bottom run, at rest and closing at
-    /// 1 m/s. DERIVED: F = k L p²/e + c L v p/e, so dF/dp = 2 k L p/e + c L v/e: 4 MN/m at rest,
-    /// 14 MN/m closing at the rig's 100 kN s/m per m.
-    #[test]
-    fn engagement_reports_the_support_force_derivative() {
-        let mut params = rig_params();
-        params.engage_depth = 0.02;
-        let loop_pts = spring_pad(params.face_offset);
-        let input = SideInput {
-            loop_pts: &loop_pts,
-            count: 25,
-            plane_x: 0.0,
-            columns: TEST_COLUMNS.into(),
-            travel: TravelField { knots: &PAD_TRAVEL },
-        };
-        for closing in [0.0, 1.0] {
-            let read = |depth: f32| {
-                let report = contact_side(
-                    &input,
-                    SideState::default(),
-                    Affine3A::IDENTITY,
-                    1.0 / 64.0,
-                    &params,
-                    &FlatGround { surface_y: depth },
-                    &RubbleBodies::default(),
-                    |_| Vec3::NEG_Y * closing,
-                    &mut GripElements::for_stations(25, 3),
-                );
-                (
-                    report.contacts.iter().map(|c| c.load).sum::<f32>(),
-                    report.contacts.iter().map(|c| c.stiffness).sum::<f32>(),
-                )
-            };
-            let delta = 1e-5; // FIXTURE finite-difference spacing within the ramp.
-            let derivative = (read(0.01 + delta).0 - read(0.01 - delta).0) / (2.0 * delta);
-            let reported = read(0.01).1;
-            println!(
-                "MEASURED closing {closing} m/s: ramp stiffness {reported} N/m, force derivative \
-                 {derivative} N/m"
-            );
-            assert!(
-                (reported / derivative - 1.0).abs() < 0.002,
-                "closing {closing}: reported {reported} against {derivative}"
-            );
-        }
     }
 
     /// The envelope reframing: with the rest face exactly kissing flat ground, a zero-travel
@@ -2258,12 +2172,13 @@ mod tests {
             Vec3::new(-0.005, 0.0, 0.15),
         );
         let velocity = Vec3::NEG_X * 2.0;
+        let params = rig_params();
         let report = contact_side(
             &input,
             SideState::default(),
             affine,
             1.0 / 64.0,
-            &rig_params(),
+            &params,
             &field,
             &RubbleBodies::default(),
             |_| velocity,
@@ -2275,8 +2190,15 @@ mod tests {
         );
         let mut max_closing = 0.0_f32;
         for contact in &report.contacts {
-            let closing = (contact.load - contact.load_elastic) / contact.damping;
-            max_closing = max_closing.max(closing);
+            // The damper's rate from its owners: per-metre damping over the patch's weighted
+            // length. Full engagement: the fixture's 5 mm depth exceeds its 2 mm ramp.
+            let fact = report
+                .perceived_support
+                .iter()
+                .find(|fact| fact.point == contact.point)
+                .expect("every applied contact was observed as support");
+            let rate = params.support_damping_per_m * fact.length_weight;
+            max_closing = max_closing.max((contact.load - contact.load_elastic) / rate);
         }
         println!("MEASURED vertical corner effective closing {max_closing:.6} m/s for 2 m/s hull");
         assert!(
@@ -3224,8 +3146,6 @@ mod tests {
             normal,
             load,
             load_elastic: load,
-            stiffness: 1.0,
-            damping: 0.0,
             long_dir: Vec3::X,
             lat_dir: normal.cross(Vec3::X),
             has_plane: true,

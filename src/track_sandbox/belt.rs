@@ -265,7 +265,7 @@ pub(super) fn apply_belt_support_field(
     );
     telemetry.0 = Some(tr);
 
-    // Phase 3 — apply forces in the same per-side report order as ever, commit the state.
+    // Phase 3 — apply forces in per-side report order, commit the state.
     touches.0.clear();
     for (si, report) in reports.into_iter().enumerate() {
         let side = Side::ALL[si];

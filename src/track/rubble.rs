@@ -158,9 +158,9 @@ pub(crate) type PieceData = (Forces, &'static ComputedCenterOfMass);
 pub(crate) type PieceReadData = <PieceData as QueryData>::ReadOnly;
 
 /// One rubble collider near the tank, as the footprint check reads it: its convex shape at its
-/// tick-start world pose and bounds, its owning rigid body, whether that body is dynamic (only a dynamic one takes an impulse), the
-/// structure whose load reading takes a fixed one's reaction, and the friction its surface brings
-/// to a pair.
+/// tick-start world pose and bounds, its owning rigid body, whether that body is dynamic (only a
+/// dynamic one takes an impulse), the structure whose load reading takes a fixed one's reaction,
+/// and the friction its surface brings to a pair.
 #[derive(Clone, Debug)]
 struct Surface {
     collider: Entity,
@@ -1347,14 +1347,11 @@ mod tests {
     }
 
     /// A contact pressing `load` (N) along +Y on `collider` at `point`, belt at rest, no traction.
-    /// FIXTURE DATA: its spring holds that load at a 1 cm press.
     fn press(point: Vec3, collider: Entity, load: f32) -> BeltContact {
         BeltContact {
             point,
             load,
             load_elastic: load,
-            stiffness: load / 0.01,
-            damping: 0.0,
             slip: 0.0,
             slip_lat: 0.0,
             f_long: 0.0,
