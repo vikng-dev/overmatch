@@ -162,7 +162,7 @@ pub(crate) type PieceReadData = <PieceData as QueryData>::ReadOnly;
 /// structure whose load reading takes a fixed one's reaction, and the friction its surface brings
 /// to a pair.
 #[derive(Clone, Debug)]
-struct Surface {
+pub(super) struct Surface {
     collider: Entity,
     owner: Entity,
     shape: Collider,
@@ -188,7 +188,7 @@ struct SurfaceMotion {
 }
 
 impl Surface {
-    fn triangles(shape: &Collider, position: Vec3, rotation: Quat) -> Vec<[Vec3; 3]> {
+    pub(super) fn triangles(shape: &Collider, position: Vec3, rotation: Quat) -> Vec<[Vec3; 3]> {
         let shape = shape.shape_scaled();
         let (vertices, indices) = if let Some(cuboid) = shape.as_cuboid() {
             cuboid.to_trimesh()

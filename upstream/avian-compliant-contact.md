@@ -3,7 +3,7 @@
 Subject: the video game's tank driving physics (the track belt's support); game state only.
 
 **Target:** vendored Avian 0.7.0, Bevy 0.19.1. **Status:** LOCAL DRAFT, not filed; upstream head
-was not checked. Experimental: it serves the `track-hybrid` arm of an undecided fork, where a compliant contact
+was not checked. It serves the game's track belt, where a compliant contact
 carries the belt's support against loose pieces and a separate rigid collider is its hard limit.
 
 Avian's contact softness is global (`ContactSoftnessCoefficients`), mass-normalised, and only
