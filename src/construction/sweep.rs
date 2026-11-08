@@ -1399,6 +1399,90 @@ mod tests {
         assert!((hit.speed - 2.0).abs() < 1e-4);
     }
 
+    /// The game's environment destruction: a diagonal side slice can enter a top face before
+    /// its lateral plane becomes the contact. Fixture: 64 Hz, 15 mm vertical gap, a 40 mm
+    /// slice descending 60 mm and moving 10 mm sideways during the tick.
+    #[test]
+    fn a_diagonal_side_slice_reaches_its_lateral_contact_on_the_next_tick() {
+        use crate::track::{side::Side as TrackSide, stop_contacts::BeltFace};
+        let (structure, geometry) = wall(1.0);
+        let mut state = State::new(&structure);
+        for c in 0..structure.chunks.len() {
+            if c != 4 {
+                state.fate[c] = super::super::fracture::Fate::Dust;
+            }
+        }
+        let face = BeltFace::new(
+            TrackSide::Right,
+            vec![Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y],
+            true,
+        );
+        let tree = SourceTree::new(vec![Hull {
+            surface: Some(face.clone()),
+            hull: Collider::cuboid(0.04, 0.2, 0.4),
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+        }]);
+        let position = Vec3::new(-0.115, 0.615, 0.0);
+        let motion = RigidMotion {
+            position,
+            centre: position,
+            rotation: Quat::IDENTITY,
+            velocity: Vec3::new(0.64, -3.84, 0.0),
+            acceleration: Vec3::ZERO,
+            lead: 0.0,
+            spin: Vec3::ZERO,
+            dt: 1.0 / 64.0,
+        };
+        let leaf_motion = Motion {
+            hull: &tree.hulls()[0].hull,
+            position,
+            rotation: motion.rotation,
+            velocity: motion.velocity,
+            centre: position,
+            spin: motion.spin,
+            dt: motion.dt,
+        };
+        let (_, normal, _) = leaf_motion
+            .hit(
+                &geometry.hulls[4],
+                geometry.centres[4],
+                &mut Work::default(),
+            )
+            .unwrap();
+        assert!(
+            !face.accepts_normal(normal),
+            "the first touch must be radial: {normal}"
+        );
+        let first = geometry.swept(&structure, &state, &tree, motion);
+        let next_position = position + motion.velocity * motion.dt;
+        let next = geometry.swept(
+            &structure,
+            &state,
+            &tree,
+            RigidMotion {
+                position: next_position,
+                centre: next_position,
+                ..motion
+            },
+        );
+        assert_eq!(
+            next.chunks,
+            [4],
+            "the next tick must see the same leaf's lateral overlap"
+        );
+        assert!(face.accepts_normal(next.witness.unwrap().normal));
+        assert!(
+            first.chunks.is_empty(),
+            "the first radial touch rejects this tick's leaf"
+        );
+        assert_eq!(
+            next.witness.unwrap().reach,
+            0.0,
+            "an existing lateral overlap is seen at the next tick's start"
+        );
+    }
+
     /// The game's environment destruction: a witness meets matter when, and as fast as, its
     /// source's motion closes the cast's gap along the normal, while the cast reaches with the
     /// velocity that carries the body to its tick-end pose. A body pressed onto matter at rest

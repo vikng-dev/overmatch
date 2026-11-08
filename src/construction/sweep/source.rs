@@ -262,7 +262,13 @@ impl QueryTree<'_> {
                 let rotation =
                     Quat::from_scaled_axis(self.motion.spin * reach) * self.motion.rotation;
                 if !surface.accepts_normal(rotation.inverse() * normal) {
-                    continue; // An unrepresented surface cannot seed or prune an occupied patch.
+                    // An unrepresented surface cannot seed or prune an occupied patch. A
+                    // diagonal descent can touch radially before developing lateral contact.
+                    // DERIVED: a lateral overlap present at the next tick's start is found by
+                    // its initial cast, deferring that check by one tick. SweepContacts keeps
+                    // overlapping solver points; recasting here would charge every rejected
+                    // leaf to avoid that delay.
+                    continue;
                 }
             }
             if first.is_some_and(|first| first.reach <= reach) {
