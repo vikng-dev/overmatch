@@ -4,9 +4,9 @@
 //! travel. [`spawn_track_colliders`] attaches them synchronously with every game or sandbox body:
 //! a full-width compression stop per side on [`Layer::Vehicle`], and thin slices at the true shoe
 //! faces on [`Layer::TrackSide`]. The slices extend the stop to the rest belt's outer surface;
-//! their thickness lies entirely inside the shoe width. Their vertical sides meet bodies through
-//! ordinary solver contacts, including the structure contact reader. Terrain meets only the stop:
-//! side slices never carry the belt's ground support.
+//! their thickness lies entirely inside the shoe width. Only their lateral planes meet bodies;
+//! the contact hook removes their radial contacts. Every face carries the belt's surface speed,
+//! and the solver's friction impulses return to the transmission through `stop_contacts`.
 
 use avian3d::prelude::{Collider, CollisionLayers, Friction, LayerMask, SimpleCollider};
 use bevy::prelude::*;
@@ -15,6 +15,7 @@ use super::derive::SuspensionParams;
 use super::rig_geom::RigGeom;
 use super::route::build_route;
 use super::side::{PerSide, Side};
+use super::stop_contacts::BeltFace;
 use crate::Layer;
 
 /// One side's bump-stop collider, a child of its body.
@@ -33,6 +34,7 @@ pub(crate) struct TrackColliders {
     /// Inboard then outboard, as in [`RigGeom::grip_columns`].
     side_plates: PerSide<[Collider; 2]>,
     friction: Friction,
+    faces: PerSide<[BeltFace; 2]>,
 }
 
 impl TrackColliders {
@@ -47,10 +49,23 @@ impl TrackColliders {
             plates(geom, Side::Left, params),
             plates(geom, Side::Right, params),
         );
+        let faces = PerSide(Side::ALL.map(|side| {
+            let rest: Vec<_> = geom
+                .rest
+                .get(side)
+                .iter()
+                .map(|&(centre, radius)| (centre, radius + geom.model.pin_to_outer))
+                .collect();
+            [
+                BeltFace::new(side, geom.hard_stop_polyline(side, params), false),
+                BeltFace::new(side, build_route(&rest, 0.0).pts, true),
+            ]
+        }));
         Self {
             colliders,
             side_plates,
             friction,
+            faces,
         }
     }
 
@@ -157,6 +172,7 @@ pub(crate) fn spawn_track_colliders(
     for side in Side::ALL {
         commands.spawn((
             BumpStop,
+            shapes.faces.get(side)[0].clone(),
             shapes.colliders.get(side).clone(),
             crate::tank::authored_attachment(Transform::IDENTITY),
             CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
@@ -166,6 +182,7 @@ pub(crate) fn spawn_track_colliders(
         for plate in shapes.side_plates.get(side) {
             commands.spawn((
                 SidePlate,
+                shapes.faces.get(side)[1].clone(),
                 plate.clone(),
                 crate::tank::authored_attachment(Transform::IDENTITY),
                 side_plate_layers(),

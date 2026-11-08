@@ -34,7 +34,7 @@ use super::*;
 use crate::track::forces::{
     ForceParams, SideInput, SideReport, SideState, contact_side, phase_decompose,
 };
-use crate::track::oracle::{BlockField, DepthOracle};
+use crate::track::oracle::DepthOracle;
 use crate::track::rubble::{
     BeltSource, PieceData, RubbleBodies, RubbleQuery, apply_pushes, piece_impulses,
 };
@@ -44,10 +44,9 @@ use crate::track::wheels::{
 };
 use crate::track::wrap;
 
-/// The sandbox's terrain resource: the track core's [`BlockField`], probed at [`contact_probe`]
+/// The sandbox's terrain resource: the track core's [`BlockField`](crate::track::oracle::BlockField), probed at [`contact_probe`]
 /// reach by every call site.
-#[derive(Resource, Default)]
-pub(super) struct TerrainField(pub(super) BlockField);
+pub(super) use crate::track::terrain::TrackField as TerrainField;
 
 /// Each side's **total** belt travel (m) along the reference loop — the core's advected state
 /// ([`SideState::phase`]), committed back verbatim each tick. `f64` exactly like the shared
@@ -109,6 +108,7 @@ pub(super) fn apply_belt_support_field(
             &avian3d::prelude::Position,
             &avian3d::prelude::Rotation,
             Forces,
+            &'static mut crate::track::sim::TrackDrive,
             (
                 &avian3d::prelude::ComputedMass,
                 &avian3d::prelude::ComputedAngularInertia,
@@ -136,6 +136,13 @@ pub(super) fn apply_belt_support_field(
     ),
     rig: (Res<RigGeom>, Res<RigSpec>, Res<EnvelopeLaw>),
     rubble: RubbleQuery,
+    hard_contacts: (
+        Res<crate::contact_transfer::ContactTransfers>,
+        Query<(
+            &crate::track::stop_contacts::BeltFace,
+            &avian3d::prelude::ColliderOf,
+        )>,
+    ),
     // Every body but the hull: the impulses the rubble takes.
     (mut bodies, mut touches): (
         Query<PieceData, Without<Hull>>,
@@ -144,9 +151,9 @@ pub(super) fn apply_belt_support_field(
 ) {
     let (transmission, mut trans_state, mut telemetry) = transmission_params;
     let (geom, rig_spec, envelope) = rig;
-    let (hull_entity, hull_pos, hull_rot, mut forces, (mass, angular, com, locked)) = hull
-        .single_mut()
-        .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
+    let (hull_entity, hull_pos, hull_rot, mut forces, mut motion, (mass, angular, com, locked)) =
+        hull.single_mut()
+            .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     let affine = bevy::math::Affine3A::from_rotation_translation(hull_rot.0, hull_pos.0);
     let to_local = affine.inverse();
     for cs in contacts.0.values_mut() {
@@ -172,7 +179,10 @@ pub(super) fn apply_belt_support_field(
         .collect();
     let mut pieces = RubbleBodies::gather(&rubble, &near, &bodies);
     pieces.select_source(hull_entity, &near);
-    let oracle = &field.0;
+    let oracle = field
+        .field
+        .as_ref()
+        .expect("the sandbox publishes its field before its rig");
 
     // Phase 1 — both sides' contact passes at their pre-tick belt speeds (transmission-design
     // §2 scheduling: the joint drivetrain needs both reactions before either belt
@@ -222,6 +232,20 @@ pub(super) fn apply_belt_support_field(
         reports[side.index()] = report;
     }
 
+    let (transfers, faces) = hard_contacts;
+    let owners = crate::track::stop_contacts::by_owner(&transfers, &faces);
+    let hard_reactions = crate::track::stop_contacts::reactions(
+        owners.get(&hull_entity).map_or(&[], Vec::as_slice),
+        transfers.dt(),
+        hull_pos.0,
+        hull_rot.0,
+        &faces,
+    );
+    for (si, report) in reports.iter_mut().enumerate() {
+        if let Some(reaction) = hard_reactions[si] {
+            report.belt_reaction += reaction;
+        }
+    }
     let perceived_load = crate::track::load::observe_rig(
         reports
             .iter()
@@ -313,8 +337,17 @@ pub(super) fn apply_belt_support_field(
         // Phase advects at the PRE-update speed (the belt advects before it re-integrates).
         let pre = belt.get(side);
         let advected = phase.get(side) + f64::from(pre * dt);
-        belt.set(side, tr.next_speeds[si]);
+        let speed = if hard_reactions[si].is_some() && tr.held[si] {
+            0.0
+        } else {
+            tr.next_speeds[si]
+        };
+        belt.set(side, speed);
         phase.set(side, advected);
+        motion.sides[si] = crate::track::sim::TrackDriveSide {
+            speed,
+            phase: advected,
+        };
     }
 }
 
@@ -460,7 +493,10 @@ pub(super) fn articulate_wheels_field(
         .single()
         .expect("RigGeom is published with exactly one sandbox hull in the same command flush")
         .affine();
-    let oracle = &field.0;
+    let oracle = field
+        .field
+        .as_ref()
+        .expect("the sandbox publishes its field before its rig");
     let down = affine
         .transform_vector3(Vec3::NEG_Y)
         .try_normalize()
@@ -607,7 +643,10 @@ pub(super) fn conform_belts_field(
             phase: phase.get(side),
         }),
     };
-    let oracle = &field.0;
+    let oracle = field
+        .field
+        .as_ref()
+        .expect("the sandbox publishes its field before its rig");
     let out = wrap::step(&input, oracle, &mut memory.states);
 
     for side in Side::ALL {
@@ -666,7 +705,10 @@ pub(super) fn draw_sample_points(
         .single()
         .expect("RigGeom is published with exactly one sandbox hull in the same command flush")
         .affine();
-    let oracle = &field.0;
+    let oracle = field
+        .field
+        .as_ref()
+        .expect("the sandbox publishes its field before its rig");
     // Hull lateral axis: column offsets are hull-x measurements (per-side signed shoe faces).
     let lat_axis = affine.transform_vector3(Vec3::X);
     for side in Side::ALL {

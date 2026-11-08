@@ -425,6 +425,7 @@ fn perceived_load_and_landing_gaps_on_declared_grounds() {
                     grip: &mut grip,
                     elements: &mut elements,
                     transmission: &mut state,
+                    hard_reactions: [None; 2],
                 },
             );
             let facts: Vec<_> = reports

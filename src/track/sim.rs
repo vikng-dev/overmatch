@@ -520,7 +520,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     commands.insert_resource(TrackGear::from_construction(
         &blueprint,
         &geom,
-        super::forces::CONTACT_RESOLUTION,
+        super::resolution::selected(),
     ));
     // Keep the marker-derived running gear alive as the game's single geometry source: the track
     // VIEW (`track::view`) reads its rest circles / pitch / plate / plane directly, and the bit
@@ -691,6 +691,9 @@ pub(crate) struct BeltRig<'a> {
     pub grip: &'a mut TrackGrip,
     pub elements: &'a mut TrackGripElements,
     pub transmission: &'a mut TransmissionState,
+    /// Last physics step's hard-contact reaction, N along each belt's drive direction;
+    /// None means that side had no solver contact, preserving the spring-only tick.
+    pub hard_reactions: [Option<f32>; 2],
 }
 
 /// ONE tank's complete drivetrain tick: command slew, both contact patches at their pre-tick
@@ -772,6 +775,9 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             &mut rig.elements.sides[si],
         );
         reports[si] = report;
+        if let Some(reaction) = rig.hard_reactions[si] {
+            reports[si].belt_reaction += reaction;
+        }
     }
     let tr = transmission::step(
         &gear.construction,
@@ -801,7 +807,13 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     for (si, report) in reports.iter().enumerate() {
         let pre_speed = rig.drive.sides[si].speed;
         rig.drive.sides[si] = TrackDriveSide {
-            speed: tr.next_speeds[si],
+            // A capacity-satisfied brake is a stationary surface, exactly; a rigid friction
+            // row must not amplify floating-point stop-force cancellation into belt motion.
+            speed: if rig.hard_reactions[si].is_some() && tr.held[si] {
+                0.0
+            } else {
+                tr.next_speeds[si]
+            },
             // Phase advects at the PRE-update speed — contact evaluation used those stations.
             phase: rig.drive.sides[si].phase + f64::from(pre_speed * dt),
         };
@@ -894,6 +906,8 @@ struct DriveTank {
 struct DriveSupports {
     pieces: RubbleBodies<'static>,
     sources: Vec<(BeltSource, Vec<Entity>)>,
+    hard_contacts: std::collections::BTreeMap<Entity, Vec<super::stop_contacts::BeltImpulse>>,
+    hard_dt: f32,
 }
 
 /// Snapshot -> owner-local calculation -> cross-owner effects, all in this fixed update.
@@ -907,6 +921,10 @@ fn driving_systems() -> ScheduleConfigs<ScheduleSystem> {
         .into_configs()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "tick-start geometry and solver readings share one snapshot boundary"
+)]
 fn gather_drive_supports(
     stages: Option<Res<crate::cost::stages::Stages>>,
     gear: Option<Res<TrackGear>>,
@@ -914,10 +932,17 @@ fn gather_drive_supports(
     bodies: Query<PieceReadData>,
     tanks: Query<(Entity, Option<&Position>, &RigidBody), With<Tank>>,
     mut supports: ResMut<DriveSupports>,
+    transfers: Res<crate::contact_transfer::ContactTransfers>,
+    faces: Query<(
+        &super::stop_contacts::BeltFace,
+        &avian3d::prelude::ColliderOf,
+    )>,
     mut gathered: Local<Parallel<Vec<(BeltSource, Vec<Entity>)>>>,
 ) {
     use crate::cost::stages::{Stage, Stages, Work};
     let _stage = Stages::start(stages.as_deref(), Stage::BeltContacts);
+    supports.hard_contacts = super::stop_contacts::by_owner(&transfers, &faces);
+    supports.hard_dt = transfers.dt();
     tanks.par_iter().for_each(|(entity, position, body)| {
         // Replicas have no authoritative driving pass and gather no support shapes.
         if *body != RigidBody::Dynamic {
@@ -954,6 +979,10 @@ fn gather_drive_supports(
 
 /// Each tank reads the common tick-start snapshot and changes only its own driving and force state.
 /// Bevy 0.19.1's QueryParIter batches on ComputeTaskPool; worker assignment has no effect order.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one owner reads terrain, construction and solver impulses before its joint solve"
+)]
 fn apply_track_forces(
     time: Res<Time>,
     field: Res<TrackField>,
@@ -961,6 +990,10 @@ fn apply_track_forces(
     #[cfg(feature = "bitprobe")] mut bitprobe: Option<ResMut<BitprobeCapture>>,
     volumes: Query<VolumeFacets>,
     supports: Res<DriveSupports>,
+    faces: Query<(
+        &super::stop_contacts::BeltFace,
+        &avian3d::prelude::ColliderOf,
+    )>,
     mut tanks: Query<DriveTank, With<Tank>>,
 ) {
     #[cfg(feature = "bitprobe")]
@@ -1039,6 +1072,16 @@ fn apply_track_forces(
                 grip: &mut tank.grip,
                 elements: &mut tank.elements,
                 transmission: &mut tank.transmission.0,
+                hard_reactions: super::stop_contacts::reactions(
+                    supports
+                        .hard_contacts
+                        .get(&tank.entity)
+                        .map_or(&[], Vec::as_slice),
+                    supports.hard_dt,
+                    tank.position.0,
+                    tank.rotation.0,
+                    &faces,
+                ),
             },
         );
         #[cfg(feature = "bitprobe")]
@@ -1103,7 +1146,12 @@ fn commit_track_contacts(
     mut bodies: Query<PieceData>,
     mut transfers: ResMut<crate::contact_transfer::ContactTransfers>,
 ) {
-    let DriveSupports { pieces, sources } = &mut *supports;
+    let DriveSupports {
+        pieces,
+        sources,
+        hard_contacts,
+        ..
+    } = &mut *supports;
     for (source, _) in sources.iter() {
         let contacts = tanks
             .get(source.entity)
@@ -1127,6 +1175,7 @@ fn commit_track_contacts(
     apply_pushes(&pushes, &mut bodies);
     *pieces = RubbleBodies::default();
     sources.clear();
+    hard_contacts.clear();
 }
 
 #[cfg(test)]
@@ -1231,6 +1280,76 @@ mod tests {
             ));
         }
         app.world_mut().run_schedule(DriveTest);
+    }
+
+    /// A hard contact's friction must enter the same joint transmission as the spring contacts.
+    /// An airborne fixture isolates that path; omitting the solver reading makes both runs equal.
+    #[test]
+    fn hard_contact_friction_loads_the_joint_transmission() {
+        use crate::contact_transfer::{ContactTransfer, ContactTransfers};
+        let run = |impulse: f32| {
+            let (mut app, _) = adapter_app();
+            let root = fixture_tank(&mut app, Vec3::Y * 100.0); // Fixture: no spring support.
+            let outline = vec![
+                Vec2::new(-1.0, -1.0),
+                Vec2::new(1.0, -1.0),
+                Vec2::new(1.0, 1.0),
+                Vec2::new(-1.0, 1.0),
+            ];
+            let mut drive = TrackDrive::default();
+            drive.sides.iter_mut().for_each(|side| side.speed = 2.0);
+            app.world_mut().entity_mut(root).insert((
+                super::super::stop_contacts::BeltFace::new(Side::Left, outline, false),
+                drive,
+                ParsedTankCommand::try_from(crate::command::TankCommand {
+                    throttle: 1.0,
+                    ..default()
+                })
+                .unwrap(),
+                DriveSignal {
+                    throttle: 1.0,
+                    steer: 0.0,
+                },
+            ));
+            app.update();
+            app.update();
+            let other = app.world_mut().spawn_empty().id();
+            app.insert_resource(ContactTransfers::fixture(
+                vec![vec![ContactTransfer {
+                    reference: root,
+                    reference_collider: root,
+                    other,
+                    other_collider: Some(other),
+                    point: Vec3::Y * 99.0,
+                    normal: Vec3::NEG_Y,
+                    impulse: Vec3::Z * impulse,
+                    effective_mass: 1.0,
+                    closing_speed: 0.0,
+                }]],
+                1.0 / 64.0,
+            ));
+            run_adapter(&mut app, &[(root, Vec3::ZERO)]);
+            assert!(
+                app.world()
+                    .get::<TrackContacts>(root)
+                    .unwrap()
+                    .0
+                    .iter()
+                    .all(Vec::is_empty)
+            );
+            let reaction = app
+                .world()
+                .get::<TrackGripEffect>(root)
+                .unwrap()
+                .belt_reaction;
+            assert_eq!(reaction, [impulse * 64.0, 0.0]);
+            app.world().get::<TrackDrive>(root).unwrap().sides[0].speed
+        };
+        let (free, loaded) = (run(0.0), run(16.0)); // Fixture friction impulses, N s.
+        assert!(
+            loaded < free,
+            "a delivered friction impulse must reduce belt speed: {loaded} vs {free}"
+        );
     }
 
     /// Fixture bodies run the production adapter with real data-derived running gear. The box
@@ -2598,6 +2717,7 @@ mod tests {
                     grip: &mut grip,
                     elements: &mut elements,
                     transmission: &mut transmission,
+                    hard_reactions: [None; 2],
                 },
             );
             let supports = reports.iter().flat_map(|r| r.perceived_support.iter());
@@ -2745,6 +2865,7 @@ mod tests {
                         grip: &mut grip,
                         elements: &mut elements,
                         transmission: &mut state,
+                        hard_reactions: [None; 2],
                     },
                 );
                 load = super::super::load::observe_rig(

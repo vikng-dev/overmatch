@@ -213,6 +213,99 @@ The stop encloses the shoe's **outer face** at each wheel's full compression. Ro
 
 Decision: a segment with zero construction travel has **no boat spring band**. Its outer-face collider owns contact from first touch, including the return run. Such segments are rejected before terrain or convex queries. Spring-law fixtures now declare positive travel and elevate their pin lines by the same distance, preserving their stated envelope penetration; the obsolete spring response on the return run was removed. A deep-overlap zero-travel fixture refuses any oracle call.
 
-Decision: retain `SidePlate` for lateral contacts across the suspension band. Its radial contacts must not create another rigid rest-height support face; the contact-hook step will restrict it to lateral faces and carry their belt speed too.
+Decision: retain `SidePlate` for lateral contacts across the suspension band. Its contact hook removes radial contacts, retaining only lateral faces and carrying their belt speed too.
 
 Validation of this step: formatting and CI clippy passed. The broad geometry run passed 787 checks, including headless, construction, pen-camera, field-cast and whole-tree guards; its 33 failures were zero-travel spring fixtures. After correcting those fixtures, all 68 targeted force, rubble and documentation checks passed. No tuning, captures, timing runs or pushes.
+
+
+## Session 3: moving outer faces and pricing
+
+Subject: the game's tank driving physics, game state only. **The shipped resolution remains 97 × 3.**
+
+The outer-face stop now carries the belt's surface velocity on every surviving contact. Radial faces read the contact plane's tangent; lateral faces read the closest edge of their closed construction outline. `WorldContacts` composes the construction sweep first, then belt motion. Field contacts read the field's grip; solid pairs retain the track substance's ordinary material combination. The cached shapes and motion outlines are built before spawn; every collider is attached with the body.
+
+`ContactTransfers::solver_groups` supplies actual delivered normal and friction momentum. The reader indexes it by owner in solver order; each tank projects only its own tangential impulses onto its belt directions in the parallel driving pass. The transmission receives their reaction on the next tick, with no second hull force. An absent mechanical transfer is `None`, including zero-transfer speculative rows. A capacity-satisfied brake reports its existing hold verdict; a loaded rigid face held by it has exactly zero surface speed. This exposes the existing brake constraint without changing its capacity, force equation, fuel, gearing or inertia.
+
+The sandbox shares the same field, publishes its surface speeds on its spawn-built body and feeds the same solver reading to its joint transmission. Its reset clears those speeds. No alternate motor or friction arm remains.
+
+**Decisions and costs.** End-wheel and return faces have no spring band. Their contact placement and friction are Avian manifolds rather than advected spring elements; the sprung band's support, shear and transmission laws remain. `SidePlate` stays only for lateral contact through the suspension band: removing its radial contacts gives up its former rigid rest-height support on pieces. Its lateral shape remains a filled convex slice, with surface motion taken from the nearest outline edge. The solver reaction is coupled one tick later; it is not a new belt degree of freedom inside Avian's solve.
+
+### Terrain work after the zero-travel cut
+
+MEASURED with the same first-128-tick, two-tank flat-launch fixture as session 2; counts are divided by two. These are grid-facet lookups, not Parry casts or timings. The original arm performed 582 terrain overlays/tank/tick. Every setting still performs zero terrain overlays. Full raw readings: [work-counts.txt](track-lean-session3-cards/work-counts.txt).
+
+| Stations/side | 3 Simpson: session 2 → session 3 | 2 Gauss: session 2 → session 3 | Final spring contacts, 3 / 2 |
+|---:|---:|---:|---:|
+| 97 | 285–288 → 234–237 | 190–192 → 156–158 | 201 / 132 |
+| 48 | 138–141 → 117–120 | 92–94 → 78–80 | 102 / 68 |
+| 24 | 69–72 → 60–66 | 46–48 → 40–44 | 54 / 36 |
+| 16 | 45–48 → 42–48 | 30–32 → 28–32 | 36 / 26 |
+
+Only 16 × 2 remains wholly inside the requested 10–40-query range on this fixture. No new knee or shipped setting is chosen from these counts. The longitudinal and lateral bounds and losses stated in session 2 still apply to the sprung field; the rigid outer face now resolves end-wheel contact independently of station count.
+
+### The two cards beside session 2
+
+MEASURED complete cards: [97 × 3](track-lean-session3-cards/97x3.md), [48 × 2](track-lean-session3-cards/48x2.md), with adjacent JSON retaining unrounded values. **Both cards pass every claimed law check.** The scorecard reader is unchanged; `arm.rs` is its only edited file. Below, each arrow is session 2 → session 3. Step sizes, wall dimensions, throttles and horizons are the card's generic fixture inputs, not requirements on a tank.
+
+Line 4, steps: the 0.6 m step is newly crossed at both settings. First touch there is the outer-face stop plus hull proxy; at 0.4 m it is the stop. No climb height is a gate.
+
+| Step | 97 × 3: crossing time | 48 × 2: crossing time |
+|---|---:|---:|
+| step 0.2 m | 4.594 s → 4.594 s | 4.594 s → 4.594 s |
+| step 0.4 m | 5.250 s → 5.688 s | 5.250 s → 5.578 s |
+| step 0.6 m | not crossed → 6.250 s | not crossed → 7.344 s |
+| step 0.8 m | not crossed → not crossed | not crossed → not crossed |
+| step 1 m | not crossed → not crossed | not crossed → not crossed |
+| step 1.2 m | not crossed → not crossed | not crossed → not crossed |
+
+Line 4b, walls: force means cover the last two seconds; vertical is upward-positive. Total vertical includes solver normal, solver friction and the external spring channel. The latter is zero on every new wall push. All cases stay behind the face of the 4 m wall: the one-lane cases raise the hull but do not climb over it. A full-width wall still meets the hull proxy first and reproduces its session-2 readings.
+
+| Setting / wall | First touch, before → after | Normal kN | Friction vertical kN | Total vertical kN | Maximum rise mm |
+|---|---|---:|---:|---:|---:|
+| 97x3, full width | hull proxy Hull_Collider → hull proxy Hull_Collider | 297.17 → 297.17 | -75.36 → -75.36 | -75.24 → -75.24 | 3.73 → 3.73 |
+| 97x3, left lane | belt, bump stop → bump stop | 265.03 → 197.20 | -80.30 → +54.51 | -79.49 → +54.51 | 3.73 → 40.56 |
+| 97x3, right lane | belt, bump stop → bump stop | 279.65 → 175.57 | -84.58 → +54.68 | -83.05 → +54.68 | 3.73 → 40.29 |
+| 48x2, full width | hull proxy Hull_Collider → hull proxy Hull_Collider | 286.90 → 286.90 | -78.59 → -78.59 | -78.59 → -78.59 | 3.59 → 3.59 |
+| 48x2, left lane | belt, bump stop → bump stop | 266.15 → 209.33 | -80.32 → +48.33 | -79.74 → +48.33 | 3.59 → 38.26 |
+| 48x2, right lane | belt, bump stop → bump stop | 275.22 → 212.11 | -83.06 → +54.70 | -82.13 → +54.70 | 3.59 → 38.61 |
+
+MEASURED tick traces, separate from the card summary: the first nonzero wall force is tick 116 at both settings. The upward friction peak, 1.50–1.57 MN, occupies exactly that one tick (one tick above 500 kN in each trace). There is brief onset chatter, including negative friction, followed by an upward-positive late push. The late interval has no negative friction ticks and no sustained alternating-sign cycle. DERIVED chatter duration below is last negative tick minus first contact tick, divided by the fixture's fixed tick rate. The peak overlap is the contact graph's largest stop/wall penetration, not a visual measurement.
+
+| Trace | Peak stop overlap mm | Onset sign reversals | Last negative after contact, s | Late friction range kN | Late friction standard deviation kN |
+|---|---:|---:|---:|---:|---:|
+| [97x3, left](track-lean-session3-cards/97x3-Left-wall.csv) | 1.138 | 4 | 0.344 | 52.99–57.39 | 1.212 |
+| [97x3, right](track-lean-session3-cards/97x3-Right-wall.csv) | 1.138 | 4 | 0.344 | 53.97–56.39 | 0.567 |
+| [48x2, left](track-lean-session3-cards/48x2-Left-wall.csv) | 8.309 | 13 | 0.562 | 47.20–50.38 | 0.843 |
+| [48x2, right](track-lean-session3-cards/48x2-Right-wall.csv) | 8.309 | 7 | 0.375 | 52.47–58.42 | 1.667 |
+
+Line 8, rubble: both settings now reach the pile centre even at 0.6 throttle, but the retained clamped recipient law supplies less reciprocal load as the spring channel carries more of the pile. Removing radial side-plate support exposes that limitation on the parked layer too: its belt share rises from about 92% to 100%, and its reaction ratio falls from about 0.081 to about 0.012. No loaded piece is asleep. This lane does not repair that law or claim reaction symmetry.
+
+| Setting / case | Centre time s | Final advance m | Reaction ratio | Maximum sink mm | Vertical jitter RMS mm |
+|---|---:|---:|---:|---:|---:|
+| 97x3, pile, 0.6 throttle | — → 8.234 | 0.111 → 1.952 | 1.000 → 0.582 | 0.000 → 121.594 | 1.679 → 3.566 |
+| 97x3, pile, full throttle | 6.234 → 5.797 | 1.959 → 1.962 | 1.000 → 0.562 | 0.000 → 125.193 | 0.654 → 4.151 |
+| 97x3, parked layer | — → — | — → — | 0.081 → 0.012 | 0.439 → 29.755 | 0.121 → 2.724 |
+| 48x2, pile, 0.6 throttle | — → 8.047 | 0.216 → 1.956 | 1.000 → 0.555 | 0.000 → 156.454 | 2.000 → 7.600 |
+| 48x2, pile, full throttle | 6.203 → 5.844 | 1.952 → 1.959 | 1.000 → 0.417 | 0.000 → 151.005 | 1.023 → 0.212 |
+| 48x2, parked layer | — → — | — → — | 0.081 → 0.012 | 0.462 → 29.191 | 0.124 → 2.713 |
+
+MEASURED work beside those cards (different workloads from the launch matrix):
+
+| Setting | Open-ground spring contacts | Layer spring contacts, before → after | Layer slab checks, before → after | Layer solver points, before → after |
+|---|---:|---:|---:|---:|
+| 97x3 | 203.25 | 693.35 → 693.76 | 1358 → 546 | 111.46 → 0.00 |
+| 48x2 | 69.15 | 312.13 → 303.98 | 672 → 280 | 111.35 → 0.00 |
+
+### Cold-start capture is not static hold
+
+MEASURED during the gate diagnosis: the existing cold concrete fixture at 27.867° and x = 100 m briefly asks about 144.46 kN per side of the brakes. The data supplies 144 kN static and 96 kN moving capacity per side. After that static breach, the moving capacity cannot arrest the slope's DERIVED demand of about 131 kN per side. The new contact path travels about 561.78 m over the original 60 s horizon; the committed outer-limit step captured after about 0.118 m. Disabling the moving hook did not remove the new path's cold capture failure. The small perturbation that tips this cold trajectory into breakaway was not isolated. This sensitivity remains an observation for play review, not a parameter adjustment or a claim of unchanged behavior.
+
+The old full-app gate treated a static limit as a guaranteed cold capture limit. It now asserts capture below the **moving** grip/brake limits and continuing motion above the lower **static** limit. Its numerical precision is unchanged. The transmission's independent stationary-hold/breakaway test remains, now also checking the reported hold verdict inside and outside capacity. The unchanged card's origin-based static cases pass at both requested resolutions. No stiffness, grip, brake force, rate, gear or inertia was tuned to obtain these verdicts.
+
+### Pricing lever and validation
+
+`OVERMATCH_TRACK_RESOLUTION=<stations>x<points>` is read once before dedicated-server app construction. Unset is the owner's Resolution choice **97x3**. A typed refusal rejects malformed text, non-Unicode input, fewer than three stations or a lateral count other than two or three before play. Calibration and spawn-time grip dimensions read the same parsed selection. Standalone clients keep the shipped default. `scripts/track-resolution-scorecard 97x3 48x2` uses the same selector; the retired test-only environment variable is removed.
+
+The lever's users are the orchestrator's 30-tank pricing script and the tracked scorecard script. It remains for those pricing runs and is to be deleted at landing, as dispatched. This lane measured work only: no server timing runs, captures, windows, issue comments, pushes or merges from the solver arm.
+
+Validation: formatting and CI clippy passed. The final targeted run passed **656 checks**, including track, sandbox, headless, construction and whole-tree guards; the eight-setting work matrix passed. Both complete cards and both pairs of wall traces passed (four ignored observation tests). Geometry's pen-camera and field-cast gates passed in the outer-limit step. Temporary diagnosis instrumentation and the losing hook-disabled comparison are removed. The shipped resolution remains **97 × 3**; the owner still decides the knee and whether this arm's rubble/capture costs are acceptable.

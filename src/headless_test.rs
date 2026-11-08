@@ -62,7 +62,7 @@ fn assert_tank_state_at_add(
     // The REV-14 fixed-size invariant at its source: every Tank is born with element slabs
     // pre-sized for force stations × lateral columns — never an empty vector awaiting a first-tick resize.
     let elements = elements.expect("TrackGripElements must exist in the same insertion as Tank");
-    let resolution = crate::track::forces::CONTACT_RESOLUTION;
+    let resolution = crate::track::resolution::selected();
     let expected = resolution.stations * resolution.lateral_points;
     for side in &elements.sides {
         assert_eq!(
@@ -1141,12 +1141,13 @@ fn contact_law_service_stop_publishes_capacity_and_reports_rollback() {
     );
 }
 
-/// The shipped brakes/transmission must hold below both static limits and move above the
-/// lower one. The force pad cannot witness brake breakaway. Fixture: longitudinal tilted
-/// planes and fresh parked tank. Hold for 60 seconds; observe sliding for 8 seconds so even
-/// free acceleration cannot exhaust the plane. Angle margin is one tenth of the limit.
+/// A cold contact field must arrest below both moving capacities and keep moving above
+/// either static capacity. Settling can breach a static brake before the field is loaded;
+/// static capacity alone therefore promises no capture. The transmission's
+/// `brake_capacity_breach_backdrives` test pins stationary hold and static breakaway.
+/// Fixture: tilted planes, a fresh parked tank, 60 s capture and 8 s sliding observations.
 #[test]
-fn contact_law_shipped_brakes_hold_below_both_limits_and_move_above_the_lower() {
+fn contact_law_shipped_brakes_capture_below_moving_limits_and_move_above_static_limits() {
     use avian3d::prelude::{LinearVelocity, Position};
     let spec = crate::track::rig_geom::tiger_spec();
     let tr = &spec.track.powertrain.transmission;
@@ -1154,10 +1155,16 @@ fn contact_law_shipped_brakes_hold_below_both_limits_and_move_above_the_lower() 
     let brake_limit = (2.0 * tr.brake_force * tr.brake_static_factor / weight)
         .min(1.0)
         .asin();
+    let moving_brake_limit = (2.0 * tr.brake_force / weight).min(1.0).asin();
     for (name, ground) in crate::ground_types::GroundTypes::load_shipped().types {
         let ground_limit = ground.grip.value.atan();
-        let limit = ground_limit.min(brake_limit);
         for above in [false, true] {
+            let brake = if above {
+                brake_limit
+            } else {
+                moving_brake_limit
+            };
+            let limit = ground_limit.min(brake);
             if limit == 0.0 && !above {
                 continue; // Zero grip has no positive holding-slope interval.
             }
@@ -1221,7 +1228,7 @@ fn contact_law_shipped_brakes_hold_below_both_limits_and_move_above_the_lower() 
                 angle.to_degrees(),
                 ground_limit.to_degrees(),
                 brake_limit.to_degrees(),
-                if ground_limit < brake_limit {
+                if ground_limit < brake {
                     "ground"
                 } else {
                     "brake"
@@ -1235,7 +1242,7 @@ fn contact_law_shipped_brakes_hold_below_both_limits_and_move_above_the_lower() 
             } else {
                 assert!(
                     travel.abs() < speed_precision && late_max_speed < speed_precision,
-                    "{name}: below both limits must stop and stay, travel={travel}, speed={late_max_speed}"
+                    "{name}: below both moving limits must stop and stay, travel={travel}, speed={late_max_speed}"
                 );
             }
             let contacts = app

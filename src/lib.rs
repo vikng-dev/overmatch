@@ -887,7 +887,7 @@ impl Plugin for NetClientPlugin {
 /// (`.agents/scratch/perf-2026-10-29/bookkeeping-diagnosis.md`).
 pub(crate) fn offline_physics() -> bevy::app::PluginGroupBuilder {
     PhysicsPlugins::default()
-        .with_collision_hooks::<construction::breakage::SweepContacts<'static, 'static>>()
+        .with_collision_hooks::<track::stop_contacts::WorldContacts<'static, 'static>>()
         .build()
 }
 

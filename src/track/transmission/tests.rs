@@ -511,9 +511,8 @@ fn l600_constraint_survives_m_zero_crossing() {
 fn brake_capacity_breach_backdrives() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let mut st = fresh(&tp);
-    // Above dynamic but inside static: R = 1.5·B_dynamic < 1.6·B_dynamic, zero command, zero
-    // speed -> exact hold.
-    let r_in = 1.5 * tp.brake_capacity_n;
+    // Fixture demand between the moving and static capacities, at zero command and speed.
+    let r_in = (1.0 + tp.brake_static_factor) / 2.0 * tp.brake_capacity_n;
     let rep = step(
         &fp,
         &tp,
@@ -525,13 +524,20 @@ fn brake_capacity_breach_backdrives() {
         [0.0, 0.0],
         "inside static capacity the parked brake holds exactly"
     );
-    // Past static capacity: R = 1.7·B_dynamic > 1.6·B_dynamic -> honest back-drive.
-    let r_out = 1.7 * tp.brake_capacity_n;
+    assert_eq!(
+        rep.held, [true; 2],
+        "rigid contact consumers need an exact hold verdict"
+    );
+    let r_out = (tp.brake_static_factor + 1.0) * tp.brake_capacity_n;
     let rep = step(
         &fp,
         &tp,
         &mut st,
         &input(0.0, 0.0, [0.0, 0.0], [r_out, r_out]),
+    );
+    assert_eq!(
+        rep.held, [false; 2],
+        "a brake beyond capacity cannot hold a rigid face"
     );
     assert!(
         rep.next_speeds[0] < 0.0 && rep.next_speeds[1] < 0.0,

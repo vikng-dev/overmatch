@@ -882,6 +882,8 @@ pub struct TransmissionInput {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TransmissionReport {
     pub next_speeds: [f32; 2],
+    /// Each side's capacity-limited brake supplied the exact stop force: a held constraint.
+    pub held: [bool; 2],
     pub forces: [f32; 2],
     pub rpm: f32,
     pub gear: u8,
@@ -1776,11 +1778,12 @@ fn apply_brake_stop_forces(
     fp: &DriveConstruction,
     st: &TransmissionState,
     controls: &Controls,
-) {
+) -> [bool; 2] {
     let inp = &controls.input;
     let service = controls.service;
     let one_way = controls.one_way;
     let lever = st.park || one_way;
+    let mut held = [false; 2];
     for (i, qi) in q.iter_mut().enumerate() {
         if !lever && !service {
             continue;
@@ -1793,7 +1796,9 @@ fn apply_brake_stop_forces(
             stop.clamp(-cap, cap)
         };
         *qi += brake;
+        held[i] = brake == stop;
     }
+    held
 }
 
 /// The Driver holds the crank ceiling with service brakes. Below it no brake acts; beyond
@@ -2077,7 +2082,7 @@ pub(crate) fn step(
     ];
 
     apply_ceiling_brakes(&mut q, tp, fp, st, &controls, crank);
-    apply_brake_stop_forces(&mut q, tp, fp, st, &controls);
+    let held = apply_brake_stop_forces(&mut q, tp, fp, st, &controls);
 
     // --- Integrate both sides simultaneously: I·v̇ = Q − R (the reaction ALWAYS applies).
     let next = [
@@ -2130,6 +2135,7 @@ pub(crate) fn step(
 
     TransmissionReport {
         next_speeds: next,
+        held,
         forces: q,
         // The crank state, post-tick — the report shows the same truth `readout` does.
         rpm: st.omega_e / RPM_TO_RAD,

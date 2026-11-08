@@ -234,6 +234,7 @@ pub fn plugin(app: &mut App) {
         // Tags meshes as the glb instantiates, independently of `RigGeom`.
         .add_plugins(mesh_layers::plugin)
         .add_plugins(crate::offline_physics())
+        .add_plugins(crate::contact_transfer::sim_plugin)
         // Registers the `PhysicsGizmos` group for the collider-wireframe layer; starts disabled in
         // `configure_collider_gizmos`.
         .add_plugins(PhysicsDebugPlugin)
@@ -917,9 +918,10 @@ fn spawn_environment(
     let ground = crate::ground_field::GroundField::unpainted(
         &crate::ground_types::GroundTypes::load_shipped(),
     );
-    commands.insert_resource(TerrainField(
-        BlockField::new(field).with_ground(Some(ground)),
-    ));
+    commands.insert_resource(TerrainField {
+        revision: None,
+        field: Some(BlockField::new(field).with_ground(Some(ground))),
+    });
 }
 
 /// Run condition for the one-shot [`build_rig`]: the blueprint has landed and the rig is not up yet.
@@ -1040,6 +1042,7 @@ fn build_rig(
     let hull = commands
         .spawn((
             Hull,
+            crate::track::sim::TrackDrive::default(),
             // At `hull_rest_y` the rest belt exactly kisses flat ground — the datum `RigGeom`
             // derives from the rest envelope's own lowest point, not an authored ride height.
             Transform::from_xyz(0.0, geom.hull_rest_y, 0.0),
@@ -1150,7 +1153,7 @@ fn build_rig(
 
                 // Sprocket/idler data carriers for the hub-gizmo layer — NO colliders. The RED
                 // bump-stop prism (`track::bump_stop`) is the whole rig's penetration backstop,
-                // its end arcs riding the unsprung wheels' INNER (wheel-rim) surface.
+                // its end arcs riding the unsprung wheels' outer shoe surface.
                 for (kind, (centre, _radius)) in
                     [(WheelKind::Sprocket, sprocket), (WheelKind::Idler, idler)]
                 {
@@ -1298,7 +1301,15 @@ struct ResetRequested(bool);
 fn reset_rig(
     keys: Res<ButtonInput<KeyCode>>,
     mut requested: ResMut<ResetRequested>,
-    mut hull: Query<(&mut Transform, &mut LinearVelocity, &mut AngularVelocity), With<Hull>>,
+    mut hull: Query<
+        (
+            &mut Transform,
+            &mut LinearVelocity,
+            &mut AngularVelocity,
+            &mut crate::track::sim::TrackDrive,
+        ),
+        With<Hull>,
+    >,
     mut spot: ResMut<ResetSpot>,
     mut belt: ResMut<BeltSpeed>,
     mut belt_state: BeltState,
@@ -1318,13 +1329,14 @@ fn reset_rig(
     let spots = reset_spots();
     let (x, z, label) = spots[spot.0];
     spot.0 = (spot.0 + 1) % spots.len();
-    let (mut transform, mut lin, mut ang) = hull
+    let (mut transform, mut lin, mut ang, mut motion) = hull
         .single_mut()
         .expect("RigGeom is published with exactly one sandbox hull in the same command flush");
     *transform = Transform::from_xyz(x, geom.hull_rest_y, z);
     lin.0 = Vec3::ZERO;
     ang.0 = Vec3::ZERO;
     *belt = BeltSpeed::default();
+    *motion = crate::track::sim::TrackDrive::default();
     // A reset is a fresh at-rest rig: stale command state would re-thrust it immediately.
     raw.0 = crate::track::drive::DriveAxes::default();
     shaped.0 = crate::track::drive::DriveAxes::default();

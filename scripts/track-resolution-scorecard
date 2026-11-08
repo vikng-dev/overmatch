@@ -8,12 +8,15 @@ out=target/track-lean-cards
 mkdir -p "$out"
 : > "$out/status.tsv"
 failed=0
-for stations in 97 48 24 16; do
-  for points in 3 2; do
-    setting=${stations}x${points}
+if [[ $# == 0 ]]; then set -- 97x3 97x2 48x3 48x2 24x3 24x2 16x3 16x2; fi
+for setting in "$@"; do
+    if [[ ! $setting =~ ^[0-9]+x[23]$ ]]; then
+      echo "track resolution must be STATIONSxPOINTS, with 2 or 3 points: $setting" >&2
+      exit 64
+    fi
     rm -f target/track-scorecard.json target/track-scorecard.md
     status=0
-    OVERMATCH_TRACK_SCORE_RESOLUTION=$setting scripts/serial-cargo test --lib --features dev_ui,bitprobe \
+    OVERMATCH_TRACK_RESOLUTION=$setting scripts/serial-cargo test --lib --features dev_ui,bitprobe \
       track_scorecard -- --ignored --nocapture > "$out/$setting.log" 2>&1 || status=$?
     if [[ ! -s target/track-scorecard.json || ! -s target/track-scorecard.md ]]; then
       echo "track scorecard $setting produced no card; see $out/$setting.log" >&2
@@ -24,6 +27,5 @@ for stations in 97 48 24 16; do
     printf '%s\t%s\n' "$setting" "$status" >> "$out/status.tsv"
     echo "track scorecard $setting complete (status $status)"
     if [[ $status != 0 ]]; then failed=1; fi
-  done
 done
 exit "$failed"
