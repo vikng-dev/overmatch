@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Run the lean track experiment's eight force resolutions, preserving each complete card.
+# Production remains at CONTACT_RESOLUTION. Every test process owns one setting.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export OVERMATCH_CARGO_LOCK_WAIT_S=10800 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless
+out=target/track-lean-cards
+mkdir -p "$out"
+: > "$out/status.tsv"
+failed=0
+for stations in 97 48 24 16; do
+  for points in 3 2; do
+    setting=${stations}x${points}
+    rm -f target/track-scorecard.json target/track-scorecard.md
+    status=0
+    OVERMATCH_TRACK_SCORE_RESOLUTION=$setting scripts/serial-cargo test --lib --features dev_ui,bitprobe \
+      track_scorecard -- --ignored --nocapture > "$out/$setting.log" 2>&1 || status=$?
+    if [[ ! -s target/track-scorecard.json || ! -s target/track-scorecard.md ]]; then
+      echo "track scorecard $setting produced no card; see $out/$setting.log" >&2
+      exit 1
+    fi
+    cp target/track-scorecard.json "$out/$setting.json"
+    cp target/track-scorecard.md "$out/$setting.md"
+    printf '%s\t%s\n' "$setting" "$status" >> "$out/status.tsv"
+    echo "track scorecard $setting complete (status $status)"
+    if [[ $status != 0 ]]; then failed=1; fi
+  done
+done
+exit "$failed"

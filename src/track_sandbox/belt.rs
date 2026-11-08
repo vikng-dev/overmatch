@@ -864,7 +864,12 @@ mod tests {
 
         let droop = geom.droop_travel(&sus);
         assert!(
-            (law.free_travel - droop.effective.max(0.01)).abs() < 1e-6,
+            (law.free_travel
+                - droop
+                    .effective
+                    .max(crate::track::envelope::MIN_ENVELOPE_TRAVEL))
+            .abs()
+                < 1e-6,
             "calibrated travel {} must be the chain-clamped droop {}",
             law.free_travel,
             droop.effective,
