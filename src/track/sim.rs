@@ -266,6 +266,14 @@ pub struct TrackGear {
 }
 
 impl TrackGear {
+    /// The calibrated envelope law the belt segments carry against loose pieces.
+    pub(crate) fn segment_law(&self) -> super::belt_segment::SegmentLaw {
+        super::belt_segment::SegmentLaw {
+            stiffness_per_m: self.params.support_stiffness_per_m,
+            damping_per_m: self.params.support_damping_per_m,
+        }
+    }
+
     /// The declared joint transmission params. Read-only accessor for the shared drive HUD; the
     /// field stays private so only the drive step and HUD consume it.
     pub fn trans(&self) -> &TransmissionParams {
@@ -462,7 +470,7 @@ impl TrackGear {
 }
 
 pub fn sim_plugin(app: &mut App) {
-    app.add_plugins(super::world_contact::plugin);
+    app.add_plugins((super::world_contact::plugin, super::belt_segment::plugin));
     app.init_resource::<DriveSupports>();
     app.insert_resource(super::load::DriverResolution::load());
     // Lazy one-shot: the blueprint lands at Startup (bake); the gear builds on the first
@@ -517,11 +525,9 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         spec.link_count,
         &sus,
     );
-    commands.insert_resource(TrackGear::from_construction(
-        &blueprint,
-        &geom,
-        super::resolution::selected(),
-    ));
+    let gear = TrackGear::from_construction(&blueprint, &geom, super::resolution::selected());
+    commands.insert_resource(gear.segment_law());
+    commands.insert_resource(gear);
     // Keep the marker-derived running gear alive as the game's single geometry source: the track
     // VIEW (`track::view`) reads its rest circles / pitch / plate / plane directly, and the bit
     // probe echoes the measured scalars. Built once here alongside `TrackGear`, never re-derived.
@@ -675,6 +681,7 @@ pub(crate) fn set_test_resolution(app: &mut App, resolution: super::forces::Cont
         app.world().resource::<super::rig_geom::RigGeom>(),
         resolution,
     );
+    app.insert_resource(gear.segment_law());
     app.insert_resource(gear);
     let world = app.world_mut();
     let mut query = world.query::<&mut TrackGripElements>();

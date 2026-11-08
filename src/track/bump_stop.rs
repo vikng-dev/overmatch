@@ -5,12 +5,14 @@
 //! a full-width compression stop per side on [`Layer::Vehicle`], and thin slices at the true shoe
 //! faces on [`Layer::TrackSide`]. The slices extend the stop to the rest belt's outer surface;
 //! their thickness lies entirely inside the shoe width. Only their lateral planes meet bodies;
-//! the contact hook removes their radial contacts. Every face carries the belt's surface speed,
+//! the contact hook removes their radial contacts. Loose pieces also meet the sprung belt
+//! segments of `belt_segment` on [`Layer::TrackBelt`]. Every face carries the belt's surface speed,
 //! and the solver's friction impulses return to the transmission through `stop_contacts`.
 
 use avian3d::prelude::{Collider, CollisionLayers, Friction, LayerMask, SimpleCollider};
 use bevy::prelude::*;
 
+use super::belt_segment::BeltSegment;
 use super::derive::SuspensionParams;
 use super::rig_geom::RigGeom;
 use super::route::build_route;
@@ -35,6 +37,8 @@ pub(crate) struct TrackColliders {
     side_plates: PerSide<[Collider; 2]>,
     friction: Friction,
     faces: PerSide<[BeltFace; 2]>,
+    /// The sprung belt segments loose pieces meet, each moving with the stop's face.
+    segments: PerSide<Vec<(Collider, BeltSegment)>>,
 }
 
 impl TrackColliders {
@@ -61,11 +65,14 @@ impl TrackColliders {
                 BeltFace::new(side, build_route(&rest, 0.0).pts, true),
             ]
         }));
+        let segments =
+            PerSide(Side::ALL.map(|side| super::belt_segment::segments(geom, side, params)));
         Self {
             colliders,
             side_plates,
             friction,
             faces,
+            segments,
         }
     }
 
@@ -75,6 +82,11 @@ impl TrackColliders {
         self.colliders
             .values()
             .chain(self.side_plates.values().flat_map(|pair| pair.iter()))
+            .chain(
+                self.segments
+                    .values()
+                    .flat_map(|side| side.iter().map(|(collider, _)| collider)),
+            )
             .map(|collider| {
                 let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
                 bounds.min.abs().max(bounds.max.abs()).length()
@@ -186,6 +198,17 @@ pub(crate) fn spawn_track_colliders(
                 plate.clone(),
                 crate::tank::authored_attachment(Transform::IDENTITY),
                 side_plate_layers(),
+                shapes.friction,
+                ChildOf(body),
+            ));
+        }
+        for (collider, segment) in shapes.segments.get(side) {
+            commands.spawn((
+                *segment,
+                shapes.faces.get(side)[0].clone(),
+                collider.clone(),
+                crate::tank::authored_attachment(Transform::IDENTITY),
+                super::belt_segment::segment_layers(),
                 shapes.friction,
                 ChildOf(body),
             ));

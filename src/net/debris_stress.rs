@@ -437,7 +437,12 @@ fn release_breaches(
     stress.breaches += 1;
     let layers = CollisionLayers::new(
         [Layer::Debris],
-        [Layer::Terrain, Layer::Vehicle, Layer::Debris],
+        [
+            Layer::Terrain,
+            Layer::Vehicle,
+            Layer::Debris,
+            Layer::TrackBelt,
+        ],
     );
     // This structural transaction pairs each body with its carrier before publishing the batch.
     for release in releases {

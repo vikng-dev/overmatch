@@ -9,7 +9,10 @@
 //! impulse a moving structure took.
 //!
 //! - **What the belt bears on** ([`RubbleQuery::supports`]): solid, layer-compatible colliders,
-//!   except [`super::terrain::FieldSurface`] geometry already represented by the field. Callers
+//!   except [`super::terrain::FieldSurface`] geometry already represented by the field. A loose
+//!   piece ([`RubbleBodies::loose`]) takes part in the footprint partition, so it shadows the
+//!   ground beneath it and the Driver perceives it, but carries no spring force: the belt's
+//!   segments meet it as a solver contact (`super::belt_segment`). Callers
 //!   exclude self-support by identity ([`RubbleBodies::select_source`]). Every admitted dynamic
 //!   body carries Avian force state; static construction transmits the full opposite belt
 //!   reaction to [`crate::contact_transfer::ContactTransfers`] when it has structural laws.
@@ -136,6 +139,14 @@ impl RubbleQuery<'_, '_> {
             && !self.field_surfaces.contains(collider)
     }
 
+    /// Whether `collider` is a loose piece the belt segments carry (`super::belt_segment`).
+    fn loose(&self, collider: Entity) -> bool {
+        self.layers
+            .get(collider)
+            .expect("avian requires CollisionLayers on every Collider")
+            .interacts_with(super::belt_segment::segment_layers())
+    }
+
     /// The support colliders meeting the AABB of half-extent `radius` about `center`, ascending
     /// by entity, so their contacts and the force sums over them keep one order.
     pub(crate) fn near(&self, center: Vec3, radius: f32) -> Vec<Entity> {
@@ -242,6 +253,8 @@ struct Surface {
     structure: Option<Entity>,
     /// A kinematic surface moves without taking impulses; static surfaces have no motion.
     motion: Option<SurfaceMotion>,
+    /// A loose piece: the belt segments carry it, the spring channel only partitions over it.
+    loose: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -415,6 +428,7 @@ impl RubbleBodies<'_> {
                             friction: rubble.friction(collider),
                             structure: rubble.structures.contains(body).then_some(body),
                             motion,
+                            loose: rubble.loose(collider),
                         },
                         kind.is_dynamic(),
                     )
@@ -527,6 +541,12 @@ impl RubbleBodies<'_> {
     /// Only a collider from this snapshot may be read.
     pub(crate) fn friction(&self, collider: Entity) -> Friction {
         self.surface(collider).friction
+    }
+
+    /// Whether `collider` is a loose piece, carried by the belt segments' solver contacts rather
+    /// than the spring channel. Only a collider from this snapshot may be read.
+    pub(crate) fn loose(&self, collider: Entity) -> bool {
+        self.surface(collider).loose
     }
 
     /// The collider of a [`SlabOverlap::piece`].

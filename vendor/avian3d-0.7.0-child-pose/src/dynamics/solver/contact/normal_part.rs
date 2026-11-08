@@ -31,6 +31,14 @@ pub struct ContactNormalPart {
 
     /// The softness parameters used for tuning contact response.
     pub softness: SoftnessCoefficients,
+
+    /// OVERMATCH PATCH: whether the point carries a compliant contact's spring law
+    /// ([`ContactCompliance`](crate::collision::contact_types::ContactCompliance)), solved soft in
+    /// every pass and never capped by the overlap solve speed.
+    pub compliant: bool,
+
+    /// OVERMATCH PATCH: the spring law's soft-constraint coefficients, at this point's mass.
+    pub spring: SoftnessCoefficients,
 }
 
 impl ContactNormalPart {
@@ -108,6 +116,8 @@ impl ContactNormalPart {
             total_impulse: 0.0,
             effective_mass: k.recip_or_zero(),
             softness,
+            compliant: false,
+            spring: softness,
         }
     }
 
@@ -126,9 +136,21 @@ impl ContactNormalPart {
         let normal_speed = relative_velocity.dot(normal);
 
         // Compute the incremental normal impulse.
-        let mut impulse = if separation > 0.0 {
+        let mut impulse = if separation > 0.0 && self.compliant {
+            // OVERMATCH PATCH: a spring-damper contact pushes only while it overlaps; a
+            // speculative stop at its surface would be a rigid wall in front of the spring.
+            -self.impulse
+        } else if separation > 0.0 {
             // Speculative contact: Push back the part of the velocity that would cause penetration.
             -self.effective_mass * (normal_speed + separation / delta_secs)
+        } else if self.compliant {
+            // OVERMATCH PATCH: a spring-damper contact. Its fixed point under a steady load is
+            // `impulse = k·overlap·h`, the same in the biased and relaxing passes.
+            let bias = self.spring.bias * separation;
+            let scaled_mass = self.spring.mass_scale * self.effective_mass;
+            let scaled_impulse = self.spring.impulse_scale * self.impulse;
+
+            -scaled_mass * (normal_speed + bias) - scaled_impulse
         } else if use_bias {
             // Contact using bias: Incorporate softness parameters.
             //

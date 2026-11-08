@@ -6,12 +6,15 @@
 //! contact's momentum through `ContactTransfers` (normal and friction) and construction facts
 //! (`RigGeom`, the tank spec, the transmission tables).
 //!
-//! This arm: the lean boat, with test-selected force resolution. Its belt support and grip act as forces applied outside
-//! Avian's solver, reported per tick in `TrackContacts`.
+//! This arm: the lean boat on the ground, solver contacts for pieces, with test-selected force
+//! resolution. Its belt support and grip on terrain and fixed construction act as forces applied
+//! outside Avian's solver, reported per tick in `TrackContacts`; loose pieces meet its sprung belt
+//! segments (`track::belt_segment`) as solver contacts, which the card reads itself.
 
 use bevy::prelude::*;
 
 use crate::ground_field::{ContactGround, GroundField};
+use crate::track::belt_segment::BeltSegment;
 use crate::track::bump_stop::{BumpStop, SidePlate};
 use crate::track::sim::TrackContacts;
 use crate::track::terrain::TrackField;
@@ -26,14 +29,16 @@ pub(super) struct WorldForce {
     pub(super) force: Vec3,
 }
 
-/// Whether this arm claims that a piece under load takes the equal and opposite reaction. The
-/// boat does not: `track::rubble` clamps a resting piece's normal reaction by design.
-pub(super) const CLAIMS_PIECE_REACTION: bool = false;
+/// Whether this arm claims that a piece under load takes the equal and opposite reaction. It
+/// does: a piece meets the belt segments as an ordinary two-body solver contact.
+pub(super) const CLAIMS_PIECE_REACTION: bool = true;
 
 /// The role of one of the track model's own colliders on the tank, named from the marker its
 /// spawner puts on it; `None` for a collider the track model does not spawn.
 pub(super) fn collider_role(world: &World, collider: Entity) -> Option<&'static str> {
-    if world.get::<BumpStop>(collider).is_some() {
+    if world.get::<BeltSegment>(collider).is_some() {
+        Some("belt segment")
+    } else if world.get::<BumpStop>(collider).is_some() {
         Some("bump stop")
     } else if world.get::<SidePlate>(collider).is_some() {
         Some("side plate")
@@ -174,4 +179,129 @@ fn wall_push_tick_observations() {
         std::fs::write(&path, csv).unwrap();
         println!("MEASURED wall tick trace: {path}");
     }
+}
+
+/// Belt-segment work (observation, no gate): per tank per tick, the segment colliders in the
+/// broad phase, their broad-phase pairs (contact-graph edges, after the layer filter), their
+/// narrow-phase pairs (touching), manifolds and solver points; on open ground, driving onto the
+/// card's pile and parked on it, and parked on the card's layer. Also the most manifolds the tank
+/// has with other moving bodies in one step: Avian 0.7 colours each such manifold into one of
+/// `DYNAMIC_COLOR_COUNT` (20) colours that hold the tank once, and solves the rest serially in
+/// its overflow colour.
+#[test]
+#[ignore = "work-count observation; run beside the scorecard"]
+fn segment_work_counts() {
+    use super::{Bed, TICKS, base_ground, flat, pile_ahead, pile_under};
+    use avian3d::prelude::{ColliderOf, ContactGraph, ContactPairFlags};
+
+    #[derive(Default)]
+    struct Tally {
+        sums: [f64; 5],
+        ticks: usize,
+        dynamic_manifolds_max: usize,
+    }
+    fn count(bed: &mut Bed, tally: &mut Tally) {
+        let tank = bed.tank;
+        let world = bed.app.world_mut();
+        let segments: Vec<Entity> = world
+            .query_filtered::<(Entity, &ColliderOf), With<BeltSegment>>()
+            .iter(world)
+            .filter(|(_, of)| of.body == tank)
+            .map(|(entity, _)| entity)
+            .collect();
+        let graph = world.resource::<ContactGraph>();
+        tally.ticks += 1;
+        tally.sums[0] += segments.len() as f64;
+        for segment in segments {
+            for edge in graph.contact_edges_with(segment) {
+                tally.sums[1] += 1.0;
+                if !edge.is_touching() {
+                    continue;
+                }
+                tally.sums[2] += 1.0;
+                let pair = graph
+                    .get_pair_by_edge(edge)
+                    .expect("a contact edge names its pair");
+                tally.sums[3] += pair.manifolds.len() as f64;
+                tally.sums[4] +=
+                    pair.manifolds.iter().map(|m| m.points.len()).sum::<usize>() as f64;
+            }
+        }
+        let dynamic = graph
+            .iter_active_touching()
+            .filter(|pair| pair.body1 == Some(tank) || pair.body2 == Some(tank))
+            .filter(|pair| {
+                !pair
+                    .flags
+                    .intersects(ContactPairFlags::STATIC1 | ContactPairFlags::STATIC2)
+            })
+            .map(|pair| pair.manifolds.len())
+            .sum::<usize>();
+        tally.dynamic_manifolds_max = tally.dynamic_manifolds_max.max(dynamic);
+    }
+    fn report(case: &str, tally: &Tally) {
+        let [colliders, broad, narrow, manifolds, points] =
+            tally.sums.map(|s| s / tally.ticks as f64);
+        println!(
+            "MEASURED segment work, {case}, per tank per tick over {} ticks: \
+             {colliders:.1} segment colliders, {broad:.2} broad-phase pairs, {narrow:.2} \
+             narrow-phase pairs, {manifolds:.2} manifolds, {points:.2} solver points; at most \
+             {} manifolds with moving bodies in one step",
+            tally.ticks, tally.dynamic_manifolds_max
+        );
+    }
+
+    // Each phase's bed drops before the next boots: a booted world holds the boot lease.
+    {
+        let mut bed = Bed::on_ground(Some(base_ground()), flat());
+        bed.place(Vec3::new(0.0, 0.0, 300.0), Quat::IDENTITY);
+        bed.start();
+        for _ in 0..5 * TICKS {
+            bed.tick(1.0, 0.0);
+        }
+        let mut tally = Tally::default();
+        for _ in 0..5 * TICKS {
+            bed.tick(1.0, 0.0);
+            count(&mut bed, &mut tally);
+        }
+        report("open ground, full throttle, seconds 5 to 10", &tally);
+    }
+    {
+        let mut bed = Bed::on_ground(Some(base_ground()), flat());
+        let (_, centre) = pile_ahead(&mut bed);
+        bed.place(Vec3::ZERO, Quat::IDENTITY);
+        bed.start();
+        for _ in 0..2 * TICKS {
+            bed.tick(0.0, 0.0);
+        }
+        let mut tally = Tally::default();
+        for _ in 0..15 * TICKS {
+            bed.tick(1.0, 0.0);
+            count(&mut bed, &mut tally);
+            if bed.hull().position.z < centre {
+                break;
+            }
+        }
+        report("driving onto the pile, full throttle", &tally);
+        for _ in 0..2 * TICKS {
+            let moving = bed.hull().speed() > crate::track::transmission::PARK_ENGAGE_SPEED;
+            bed.tick(if moving { -1.0 } else { 0.0 }, 0.0);
+        }
+        let mut tally = Tally::default();
+        for _ in 0..4 * TICKS {
+            bed.tick(0.0, 0.0);
+            count(&mut bed, &mut tally);
+        }
+        report("parked on the pile", &tally);
+    }
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    let level = pile_under(&mut bed);
+    bed.place(Vec3::new(0.0, level, 0.0), Quat::IDENTITY);
+    bed.start();
+    let mut tally = Tally::default();
+    for _ in 0..4 * TICKS {
+        bed.tick(0.0, 0.0);
+        count(&mut bed, &mut tally);
+    }
+    report("parked on the layer under its tracks", &tally);
 }

@@ -10,6 +10,7 @@ use avian3d::prelude::{
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use super::belt_segment::{BeltSegment, SegmentLaw};
 use super::oracle::ContactOracle;
 use super::side::Side;
 use super::sim::TrackDrive;
@@ -80,11 +81,14 @@ impl BeltFace {
 }
 
 /// Avian 0.7 permits one hook set. The construction sweep judges speculative points first;
-/// surviving shoe contacts carry the belt's motion and the field's grip at the patch.
+/// surviving shoe contacts carry the belt's motion and the field's grip at the patch, and a belt
+/// segment's contacts its support law first.
 #[derive(SystemParam)]
 pub(crate) struct WorldContacts<'w, 's> {
     sweep: crate::construction::breakage::SweepContacts<'w, 's>,
     faces: Query<'w, 's, (&'static BeltFace, &'static ColliderOf)>,
+    segments: Query<'w, 's, &'static BeltSegment>,
+    law: Option<Res<'w, SegmentLaw>>,
     belts: Query<'w, 's, (&'static TrackDrive, &'static Position, &'static Rotation)>,
     surfaces: Query<'w, 's, (), With<FieldSurface>>,
     field: Option<Res<'w, TrackField>>,
@@ -111,6 +115,18 @@ impl CollisionHooks for WorldContacts<'_, '_> {
                 contacts
                     .manifolds
                     .retain(|m| (rotation.0.inverse() * m.normal).x.abs() >= 1.0 - NORMAL_EPSILON);
+            }
+            if let Ok(segment) = self.segments.get(collider) {
+                let law = self
+                    .law
+                    .as_deref()
+                    .expect("a belt segment meets a piece only after its support law is published");
+                segment.shape_contacts(
+                    &mut contacts.manifolds,
+                    (position, rotation),
+                    sign,
+                    (law.stiffness_per_m, law.damping_per_m),
+                );
             }
             for manifold in &mut contacts.manifolds {
                 let centre = manifold.points.iter().map(|p| p.point).sum::<Vec3>()

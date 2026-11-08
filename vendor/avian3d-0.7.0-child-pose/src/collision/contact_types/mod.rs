@@ -375,6 +375,52 @@ pub struct ContactManifold {
     /// such as conveyor belts.
     #[cfg(feature = "3d")]
     pub tangent_velocity: Vector,
+    /// OVERMATCH PATCH: an absolute spring-damper law for every point of this manifold along its
+    /// normal, in place of the global contact softness. `None` keeps Avian's rigid contact.
+    /// Reset by the narrow phase each step; a contact-modification hook sets it.
+    pub compliance: Option<ContactCompliance>,
+}
+
+/// OVERMATCH PATCH: a compliant contact's per-point normal law, `F = k·overlap + c·closing`,
+/// in absolute units, so contacts compose by summation whatever the bodies' masses.
+/// The solver turns it into soft-constraint coefficients from each point's effective mass and the
+/// substep length, and keeps them in the relaxing pass too: the overlap under load is the spring's
+/// static deflection, never pushed out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+pub struct ContactCompliance {
+    /// Normal stiffness per point (N/m).
+    pub stiffness: Scalar,
+    /// Normal damping per point (N·s/m).
+    pub damping: Scalar,
+}
+
+impl ContactCompliance {
+    /// The soft-constraint coefficients of this law for a point of effective mass `mass` over a
+    /// substep `h`. Exact rewrite of `SoftnessParameters::compute_coefficients` with
+    /// `ω² = k/m`, `2ζω = c/m`: with `a = h(c + hk)`, bias `k/(c + hk)`, mass scale `a/(m + a)`,
+    /// impulse scale `m/(m + a)`. A massless point (a static pair) has no soft response.
+    pub fn coefficients(
+        self,
+        mass: Scalar,
+        h: Scalar,
+    ) -> crate::dynamics::solver::softness_parameters::SoftnessCoefficients {
+        let a = h * (self.damping + h * self.stiffness);
+        let denominator = mass + a;
+        crate::dynamics::solver::softness_parameters::SoftnessCoefficients {
+            bias: self.stiffness / (self.damping + h * self.stiffness),
+            mass_scale: if denominator > 0.0 {
+                a / denominator
+            } else {
+                1.0
+            },
+            impulse_scale: if denominator > 0.0 {
+                mass / denominator
+            } else {
+                0.0
+            },
+        }
+    }
 }
 
 impl ContactManifold {
@@ -396,6 +442,7 @@ impl ContactManifold {
             tangent_speed: 0.0,
             #[cfg(feature = "3d")]
             tangent_velocity: Vector::ZERO,
+            compliance: None,
         }
     }
 

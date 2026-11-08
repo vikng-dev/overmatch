@@ -399,6 +399,16 @@ pub(super) struct EnvelopeLaw {
     pub(super) damping_per_m: f32,
 }
 
+impl EnvelopeLaw {
+    /// The law the rig's belt segments carry against loose pieces.
+    pub(super) fn segment_law(&self) -> crate::track::belt_segment::SegmentLaw {
+        crate::track::belt_segment::SegmentLaw {
+            stiffness_per_m: self.stiffness_per_m,
+            damping_per_m: self.damping_per_m,
+        }
+    }
+}
+
 /// Calibrate the envelope law against the rig at its authored rest pose (see [`EnvelopeLaw`]).
 /// A thin adapter over the promoted [`crate::track::envelope::calibrate`] — the SAME derivation
 /// the game's `init_track_gear` runs, fed the sandbox's own per-side belt loops.

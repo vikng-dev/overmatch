@@ -1000,17 +1000,8 @@ fn collect_column_contacts<O: TerrainOracle>(
                 });
                 report.bitprobe_elements.len() - 1
             };
-            let strip = if samples[0].0 < samples[samples.len() - 1].0 {
-                (
-                    lateral.0 + (lateral.1 - lateral.0) * share,
-                    lateral.0 + (lateral.1 - lateral.0) * (share + weight),
-                )
-            } else {
-                (
-                    lateral.1 - (lateral.1 - lateral.0) * (share + weight),
-                    lateral.1 - (lateral.1 - lateral.0) * share,
-                )
-            };
+            let ascending = samples[0].0 < samples[samples.len() - 1].0;
+            let strip = column_strip(lateral, (share, weight), ascending);
             share += weight;
             for patch in patches(
                 PatchQuery {
@@ -1060,6 +1051,9 @@ fn collect_column_contacts<O: TerrainOracle>(
                     weight * contact_len,
                     (surface.mu, surface.rolling),
                 );
+                if collider.is_some_and(|piece| pieces.loose(piece)) {
+                    continue; // A loose piece shadows the ground; `belt_segment` carries it.
+                }
                 if load <= 0.0 {
                     if elements_mode && load_elastic > 0.0 {
                         held.push((material(i) * samples.len() + ci, load_elastic));
@@ -1095,6 +1089,23 @@ fn collect_column_contacts<O: TerrainOracle>(
         }
     }
     (cols, held)
+}
+
+/// One column's strip `(lo, hi)` of the lateral span `lateral`, from the shares before it and its
+/// own `weight`, laid out in the columns' order (`ascending` in `x` or not).
+fn column_strip(lateral: (f32, f32), (share, weight): (f32, f32), ascending: bool) -> (f32, f32) {
+    let span = lateral.1 - lateral.0;
+    if ascending {
+        (
+            lateral.0 + span * share,
+            lateral.0 + span * (share + weight),
+        )
+    } else {
+        (
+            lateral.1 - span * (share + weight),
+            lateral.1 - span * share,
+        )
+    }
 }
 
 /// Dupont elastic zone with Dahl return, shared by every surface. Below breakaway and

@@ -367,8 +367,11 @@ fn prepare_contact_constraints(
     bodies: Query<BodyQuery, RigidBodyActiveFilter>,
     narrow_phase_config: Res<NarrowPhaseConfig>,
     contact_softness: Res<ContactSoftnessCoefficients>,
+    substep_time: Res<Time<Substeps>>,
 ) {
     let start = crate::utils::Instant::now();
+    // OVERMATCH PATCH: compliant contacts derive their coefficients at the substep length.
+    let substep_secs = substep_time.delta_secs_f64() as Scalar;
 
     for color in constraint_graph.colors.iter_mut() {
         // TODO: Instead of clearing the vector, we could resize it, and just overwrite the old values in the loop below.
@@ -431,6 +434,7 @@ fn prepare_contact_constraints(
                 manifold_index,
                 narrow_phase_config.match_contacts,
                 &contact_softness,
+                substep_secs,
             );
 
             if !constraint.points.is_empty() {

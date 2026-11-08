@@ -608,6 +608,8 @@ pub(crate) enum Layer {
     Debris,
     /// Track side faces: physical contacts with bodies and structures, excluded from terrain.
     TrackSide,
+    /// Track belt segments: the belt's sprung outer face, meeting only loose pieces (`Debris`).
+    TrackBelt,
 }
 
 /// A non-zero, match-local identity assigned synchronously when a combatant spawns.

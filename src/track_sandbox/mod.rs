@@ -462,11 +462,13 @@ fn refresh_envelope(
     suspension: Res<RigSuspension>,
     rig: Res<RigSpec>,
     mut law: ResMut<belt::EnvelopeLaw>,
+    mut segment_law: ResMut<crate::track::belt_segment::SegmentLaw>,
 ) {
     if !(geom.is_changed() || suspension.is_changed() || rig.is_changed()) {
         return;
     }
     *law = belt::calibrate_envelope(&geom, &suspension.0, rig.weight_n, rig.engage_depth);
+    *segment_law = law.segment_law();
     info!(
         "envelope recalibrated: travel {:.1} mm ({}), k {:.0} kN/m per m, c {:.2} kN·s/m per m",
         law.free_travel * 1e3,
@@ -999,12 +1001,14 @@ fn build_rig(
         ),
     });
 
-    commands.insert_resource(belt::calibrate_envelope(
+    let envelope = belt::calibrate_envelope(
         &geom,
         &suspension.0,
         spec.mass * derive::G,
         track.suspension.engage,
-    ));
+    );
+    commands.insert_resource(envelope.segment_law());
+    commands.insert_resource(envelope);
 
     // Use the game's validated transmission seam and DERIVED chord-exact sprocket pitch
     // radius (from pin pitch and tooth count) (`geom.rest`'s first circle) + half-tread (`geom.plane_x`). The rejected τ-arc

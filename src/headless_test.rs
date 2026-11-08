@@ -1739,15 +1739,16 @@ fn a_parked_tank_loads_fixed_structure_through_its_belt() {
     );
 }
 
-/// Belt support lifts a driving hull onto loose pieces and carries it after stopping.
-/// This witnesses the hull's support path; recipient impulse delivery is outside its claim.
-/// The pieces lie between the rigid side slices: neither the slices nor the compression stops
-/// may supply their lift. FIXTURE DATA: two long pieces, height 0.1 m, each
-/// one eighth of the hull's mass; dimensions and positions otherwise come from its running gear.
-/// Positive lift and settled piece support follow from the raised support partition;
-/// the lift magnitude remains an observation.
+/// Belt support lifts a driving hull onto loose pieces and carries it after stopping, through
+/// the belt segments' solver contacts, and the spring channel adds no second support there: the
+/// pieces shadow the ground beneath them. The pieces lie between the rigid side slices, so
+/// neither the slices nor the compression stops may supply their lift. FIXTURE DATA: two long
+/// pieces, height 0.1 m, each one eighth of the hull's mass; dimensions and positions otherwise
+/// come from its running gear. The lift magnitude remains an observation.
 #[test]
 fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
+    use crate::contact_transfer::ContactTransfers;
+    use crate::track::belt_segment::BeltSegment;
     use crate::track::side::Side;
     use crate::track::sim::TrackContacts;
     use avian3d::prelude::{
@@ -1808,21 +1809,48 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
             ))
             .id()
     });
-    let mut carried = false;
-    let mut arrived = false;
-    for _ in 0..(20 * FIXED_TICKS_PER_SECOND) {
-        // Full requested power gives this support fixture its declared launch capability.
-        drive_tick(&mut app, tank, 1.0, 0.0);
+    // The segments' upward support on the hull from the pieces over the last physics step (N).
+    let segment_support = |app: &App| -> f32 {
         let world = app.world();
-        carried |= world
+        let transfers = world.resource::<ContactTransfers>();
+        transfers
+            .solver_groups()
+            .flatten()
+            .filter_map(|point| {
+                let other = point.other_collider?;
+                let sign = if pieces.contains(&other) {
+                    world.get::<BeltSegment>(point.reference_collider)?;
+                    1.0 // The segment is the reference: the piece took `impulse`.
+                } else if pieces.contains(&point.reference_collider) {
+                    world.get::<BeltSegment>(other)?;
+                    -1.0
+                } else {
+                    return None;
+                };
+                Some(-sign * point.impulse.y / transfers.dt())
+            })
+            .sum()
+    };
+    let spring_on_pieces = |app: &App| {
+        app.world()
             .get::<TrackContacts>(tank)
             .unwrap()
             .0
             .iter()
             .flatten()
-            .any(|c| {
-                c.collider.is_some_and(|e| pieces.contains(&e)) && c.normal.y > 0.5 && c.load > 0.0
-            });
+            .any(|c| c.collider.is_some_and(|e| pieces.contains(&e)))
+    };
+    let mut carried = false;
+    let mut arrived = false;
+    for _ in 0..(20 * FIXED_TICKS_PER_SECOND) {
+        // Full requested power gives this support fixture its declared launch capability.
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        carried |= segment_support(&app) > 0.0;
+        assert!(
+            !spring_on_pieces(&app),
+            "the spring channel must not support the tank on a loose piece"
+        );
+        let world = app.world();
         if world.get::<Position>(tank).unwrap().0.z > front + span {
             arrived = true;
             break;
@@ -1858,22 +1886,12 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
     );
     assert!(
         carried,
-        "the game's track reports never carried the tank on a loose piece"
+        "the belt segments never carried the tank on a loose piece"
     );
     // Resolution: 0.1% of the raised surface's height excludes position roundoff.
     assert!(rise > height * 1e-3, "raised support must lift the hull");
-    let piece_support: f32 = app
-        .world()
-        .get::<TrackContacts>(tank)
-        .unwrap()
-        .0
-        .iter()
-        .flatten()
-        .filter(|c| c.collider.is_some_and(|e| pieces.contains(&e)))
-        .map(|c| c.normal.y * c.load)
-        .sum();
     assert!(
-        piece_support > 0.0,
+        segment_support(&app) > 0.0,
         "the settled hull must still load the pieces"
     );
 }
@@ -3355,6 +3373,9 @@ fn every_collider_carries_its_materials_friction_under_the_one_rule() {
             .is_some()
             || world
                 .get::<crate::track::bump_stop::SidePlate>(collider)
+                .is_some()
+            || world
+                .get::<crate::track::belt_segment::BeltSegment>(collider)
                 .is_some()
         {
             registry.contact_friction(&spec.track.substance).unwrap()

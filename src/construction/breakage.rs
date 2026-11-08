@@ -3109,8 +3109,8 @@ fn split_groups(
     }
 }
 
-/// A loose chunk's contact filter: debris meets ground, constructions, hulls and other pieces,
-/// never a tank's armour volumes.
+/// A loose chunk's contact filter: debris meets ground, constructions, hulls, track belts and
+/// other pieces, never a tank's armour volumes.
 pub(crate) fn piece_layers() -> CollisionLayers {
     CollisionLayers::new(
         [Layer::Debris],
@@ -3119,6 +3119,7 @@ pub(crate) fn piece_layers() -> CollisionLayers {
             Layer::Vehicle,
             Layer::Debris,
             Layer::TrackSide,
+            Layer::TrackBelt,
         ],
     )
 }
