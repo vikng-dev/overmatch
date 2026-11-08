@@ -29,7 +29,7 @@ pub(crate) struct BeltFace {
 
 /// Resolution: tolerance for unit-normal components after hull-frame rotation. It separates
 /// lateral planes from radial planes without amplifying roundoff into a belt tangent.
-const NORMAL_EPSILON: f32 = 1e-4;
+const LATERAL_NORMAL_MIN_X: f32 = 1.0 - 1e-4;
 
 impl BeltFace {
     pub(crate) fn new(side: Side, mut outline: Vec<Vec2>, lateral_only: bool) -> Self {
@@ -57,9 +57,8 @@ impl BeltFace {
     /// Positive belt travel in the hull frame. Radial contact follows its plane's tangent;
     /// a lateral face reads the closest edge of its closed outer outline in `(z, y)`.
     pub(crate) fn direction(&self, point: Vec3, outward: Vec3) -> Vec3 {
-        let radial = outward.cross(Vec3::X);
-        if radial.length_squared() > NORMAL_EPSILON * NORMAL_EPSILON {
-            return radial.normalize();
+        if outward.x.abs() < LATERAL_NORMAL_MIN_X {
+            return outward.cross(Vec3::X).normalize();
         }
         let p = Vec2::new(point.z, point.y);
         let (_, tangent) = self
@@ -114,7 +113,7 @@ impl CollisionHooks for WorldContacts<'_, '_> {
             if face.lateral_only {
                 contacts
                     .manifolds
-                    .retain(|m| (rotation.0.inverse() * m.normal).x.abs() >= 1.0 - NORMAL_EPSILON);
+                    .retain(|m| (rotation.0.inverse() * m.normal).x.abs() >= LATERAL_NORMAL_MIN_X);
             }
             if let Ok(segment) = self.segments.get(collider) {
                 let law = self
@@ -256,6 +255,19 @@ mod tests {
                 (-Vec3::Z, -Vec3::Z, -Vec3::Y, false),
                 (Vec3::Y, Vec3::Y, -Vec3::Z, false),
                 (-Vec3::Y, Vec3::X, Vec3::Z, true),
+                // Fixture: tilted lateral normals remain inside the side-contact band.
+                (
+                    -Vec3::Y,
+                    Vec3::new(1.0, 0.0, 0.01).normalize(),
+                    Vec3::Z,
+                    true,
+                ),
+                (
+                    -Vec3::Y,
+                    Vec3::new(-1.0, 0.01, 0.0).normalize(),
+                    Vec3::Z,
+                    true,
+                ),
             ] {
                 for first in [false, true] {
                     let mut world = World::new();
