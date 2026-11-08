@@ -9,8 +9,10 @@ its fix (failing tests named in `git log`), no card number tuned.
    The same under a held creep (`a_creeping_tank_on_loose_pieces_never_sleeps_under_its_command`).
    Fix: `track::sim::wake_driven_tanks` writes `SleepTimer` on a non-neutral command or a non-zero
    belt speed, Avian's own wake path. A tank with no demand still sleeps with its pile, and sleeps
-   again after a drive ends. Note: `SleepingDisabled` in the card's parked rows stays; it is the
-   reader's, not the bug's.
+   again after a short drive on the row (the same test); driving onto ground keeps it awake, as any spring contact does.
+   Decision: a belt counts as stopped at the transmission's own `PARK_ENGAGE_SPEED`, so a residual
+   cannot hold a parked tank awake forever. `SleepingDisabled` in the card's parked rows stays: it
+   is the reader's, not the bug's.
 2. **P1, speculative points dilute the segment's law: reproduced** (`belt_segment::tests`: two
    overlapping of four points gave `k'L/4` for `k'L/2`; a rewrite that makes a point overlap was
    missed). Fix: only points in overlap after the normal rewrite divide the law, in both
