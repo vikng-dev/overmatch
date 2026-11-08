@@ -21,7 +21,7 @@
 
 use avian3d::dynamics::rigid_body::forces::ForcesItem;
 use avian3d::prelude::{
-    ComputedCenterOfMass, Forces, Position, ReadRigidBodyForces, RigidBody, Rotation,
+    ComputedCenterOfMass, Forces, Position, ReadRigidBodyForces, RigidBody, Rotation, SleepTimer,
     WriteRigidBodyForces,
 };
 use bevy::ecs::query::QueryData;
@@ -892,8 +892,33 @@ struct DriveSupports {
 }
 
 /// Snapshot -> owner-local calculation -> cross-owner effects, all in this fixed update.
+/// The driver's demand ends a tank's sleep. A tank wholly on loose pieces has no sampled force to
+/// reset its timer, and its island's contacts do not exist while it sleeps, so neither throttle
+/// nor belt speed could reach the hull. A parked tank with no demand keeps its timer and sleeps
+/// with its pile; hull speed alone is no test, since a held command under the sleep speed still
+/// drives. A belt counts as stopped at the transmission's own parked speed, so a residual never
+/// holds a parked tank awake forever.
+fn wake_driven_tanks(
+    mut tanks: Query<(&RigidBody, &ParsedTankCommand, &TrackDrive, &mut SleepTimer)>,
+) {
+    tanks
+        .par_iter_mut()
+        .for_each(|(body, command, drive, mut timer)| {
+            let demand = command.throttle != 0.0
+                || command.steer != 0.0
+                || drive
+                    .sides
+                    .iter()
+                    .any(|side| side.speed.abs() >= super::transmission::PARK_ENGAGE_SPEED);
+            if *body == RigidBody::Dynamic && demand && timer.0 != 0.0 {
+                timer.0 = 0.0; // Writing the timer is Avian's own wake (`wake_on_changed`).
+            }
+        });
+}
+
 fn driving_systems() -> ScheduleConfigs<ScheduleSystem> {
     (
+        wake_driven_tanks,
         gather_drive_supports,
         apply_track_forces,
         commit_track_contacts,

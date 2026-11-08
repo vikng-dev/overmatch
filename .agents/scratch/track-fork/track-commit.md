@@ -1,3 +1,55 @@
+# Session 5: the two reviews' findings, reproduced and fixed
+
+Subject: the video game's tank driving physics (the belt's contact with loose pieces); game state
+only. Numbers MEASURED unless labelled DERIVED. Each finding went red for its stated reason before
+its fix (failing tests named in `git log`), no card number tuned.
+
+1. **P0, a tank fully on loose pieces sleeps and no input wakes it: reproduced.** Asleep after 33
+   ticks; throttle left it asleep and gave 0 m of motion (`a_tank_asleep_on_loose_pieces_wakes_on_drive_demand`).
+   The same under a held creep (`a_creeping_tank_on_loose_pieces_never_sleeps_under_its_command`).
+   Fix: `track::sim::wake_driven_tanks` writes `SleepTimer` on a non-neutral command or a non-zero
+   belt speed, Avian's own wake path. A tank with no demand still sleeps with its pile, and sleeps
+   again after a drive ends. Note: `SleepingDisabled` in the card's parked rows stays; it is the
+   reader's, not the bug's.
+2. **P1, speculative points dilute the segment's law: reproduced** (`belt_segment::tests`: two
+   overlapping of four points gave `k'L/4` for `k'L/2`; a rewrite that makes a point overlap was
+   missed). Fix: only points in overlap after the normal rewrite divide the law, in both
+   `shape_contacts` and `share_segment_laws`. A wholly speculative pair keeps its whole law so the
+   solver divides nothing by zero.
+3. **P1, partial coverage counted twice: reproduced** at the sampled channel: ground kept the
+   uncovered share (9999.8 N of 19999.5 N) under a piece covering half the width. Decision: the
+   shadow, not `patches`, carries the rigid plate; a loose piece's face shadows the whole shoe strip
+   over its covered length (`ClippedFace::across_shoe`, applied at the gathering in `rubble.rs`, so
+   the partition's downstream code has no special case). The per-metre stiffness is `k'` at any
+   coverage: the ground beside the piece no longer stacks. The first pass of this test used a
+   fixture piece without `piece_layers`; its failure before the fix read the same because `patches`
+   took no `loose` branch then.
+4. **P1, a redirected contact keeps its old approach speed: reproduced** (0 for a 1 m/s approach,
+   both collider orders). Fix in `belt_segment::state_final_approach`, called from
+   `share_segment_laws`. Decision: not in the hook, which `stop_contacts.rs` owns and another lane
+   holds; the system runs after the narrow phase and before the solver reads it.
+5. **Docs fixed**: ADR-0041 and `track-contact.md` no longer say a settled pile sleeps with the tank
+   unconditionally; `debris.rs` and `rubble.rs` state the tank's sleep and the sampled channel's
+   bodies as they are (hull and a launched turret, `Layer::Vehicle`), with the stability bound as
+   a bound on mass, about 2.5 t DERIVED.
+6. **Tests that asserted nothing: restated or added.** The ride-onto-pieces test keeps only the
+   channel-boundary claim it can make, and loses a false share-law comment and an assertion a
+   sleeping island cannot satisfy. New pins: per-segment law from the running gear's own data over
+   real pile contacts (`every_segment_on_loose_pieces_carries_the_running_gears_law_once`, Σ over
+   overlap = `k'·L` and `c'·L`), hull momentum against the belts' reaction (`the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change`, single drivetrain reading).
+
+| line (session 4 -> now, fixes 2+3 together) | before | now |
+|---|---|---|
+| layer under the parked tank: hull rise / sink mean (m) | 0.483 / 0.021 | 0.490 / 0.013 |
+| pile ahead, 0.6 throttle: rise / sink (m), parked piece speed (m/s) | 0.891 / 0.147, 0.016 | 0.885 / 0.152, 0.027 |
+| pile ahead, 1 throttle: rise / sink (m), parked piece speed (m/s) | 0.833 / 0.122, 0.047 | 0.753 / 0.156, 0.283 |
+| heap, 0.6 throttle: rise max (m), nose up (deg), pieces moved | 0.185, 5.93, 18 | 0.232, 6.63, 12 |
+| heap, 1 throttle: rise max (m), nose up (deg), pieces moved | 0.223, 6.60, 21 | 0.243, 7.19, 18 |
+
+Every other card line is unchanged cell for cell; 8 and 8c move with the sharing and the shadow, not
+separately measured. Rise over 0.1 m pieces at 0.728 coverage is 0.107 m against 0.1196 before.
+Deferred as briefed: sampled forces non-waking for an idle tank on ground; parallel segment hook.
+
 # Session 4: the piece law corrected, cleanup, lens pass, docs
 
 Subject: the video game's tank driving physics (the belt's support and its contact with loose

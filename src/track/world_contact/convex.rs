@@ -51,6 +51,44 @@ fn signed_area(polygon: &[Vec3]) -> f32 {
         / 2.0
 }
 
+impl ClippedFace {
+    /// This face as a shadow in the footprint partition, for a loose piece the belt segments
+    /// carry: a link is stiff across its width, so it rests on the piece's highest line and the
+    /// ground beside the piece is not touching it. The shadow spans the whole shoe over the
+    /// length the face covers, level across the width. `None` if none of it reaches the envelope.
+    pub(crate) fn across_shoe(self, slab: &Slab) -> Option<Self> {
+        let extent = |of: fn(&Vec3) -> f32| {
+            self.polygon.iter().map(of).fold(
+                (f32::INFINITY, f32::NEG_INFINITY),
+                |(lo, hi): (f32, f32), value| (lo.min(value), hi.max(value)),
+            )
+        };
+        let (start, end) = extent(|p| p.x);
+        let (left, right) = extent(|p| p.y);
+        let highest = (self.depth.y * left).max(self.depth.y * right);
+        let depth = Vec3::new(self.depth.x, 0.0, self.depth.z + highest);
+        let envelope = [Vec3::Z * slab.reach - depth, depth + Vec3::Z * slab.travel];
+        let polygon = envelope.iter().fold(
+            vec![
+                Vec3::new(start, slab.lateral.0, 1.0),
+                Vec3::new(end, slab.lateral.0, 1.0),
+                Vec3::new(end, slab.lateral.1, 1.0),
+                Vec3::new(start, slab.lateral.1, 1.0),
+            ],
+            |polygon, plane| clip(&polygon, *plane),
+        );
+        (signed_area(&polygon) != 0.0).then_some(Self {
+            polygon,
+            depth,
+            normal: self.normal,
+            planes: [Vec3::new(1.0, 0.0, -start), Vec3::new(-1.0, 0.0, end)]
+                .into_iter()
+                .chain(envelope)
+                .collect(),
+        })
+    }
+}
+
 pub(crate) fn clip_faces(triangles: &[[Vec3; 3]], slab: &Slab) -> Vec<ClippedFace> {
     let mut faces = Vec::new();
     for &[a, b, c] in triangles {

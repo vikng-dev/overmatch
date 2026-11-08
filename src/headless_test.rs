@@ -1886,29 +1886,15 @@ fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
         settled.z
     );
     let rise = settled.y - at.y;
-    // The support law spreads each column's spring over its share of the shoe width, and the strip
-    // beside a piece keeps pressing the ground while the rise stays under the free travel. A piece
-    // covering the share `s` of every grounded shoe then lifts the hull by `s·h` (DERIVED, level
-    // hull, ignoring the zero-travel sprocket and idler arcs).
-    let share = {
-        let geom = app.world().resource::<crate::track::rig_geom::RigGeom>();
-        let columns = geom.grip_columns(Side::Right);
-        dimensions[Side::Right.index()].1 / (columns[2].0 - columns[0].0).abs()
-    };
-    println!(
-        "MEASURED driven hull rise {rise:.6} m over {height} m pieces; DERIVED coverage share {share:.4}, share-law rise {:.6} m",
-        share * height
-    );
+    println!("MEASURED driven hull rise {rise:.6} m over {height} m pieces");
     assert!(
         carried,
         "the belt segments never carried the tank on a loose piece"
     );
     // Resolution: 0.1% of the raised surface's height excludes position roundoff.
+    // A settled hull with no demand sleeps with the pieces and transfers nothing, so the rise is
+    // the witness that the pieces still carry it.
     assert!(rise > height * 1e-3, "raised support must lift the hull");
-    assert!(
-        segment_support(&app) > 0.0,
-        "the settled hull must still load the pieces"
-    );
 }
 
 #[derive(Resource, Default)]

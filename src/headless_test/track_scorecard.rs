@@ -2015,6 +2015,167 @@ fn geometry(card: &mut Card) {
     });
 }
 
+fn is_asleep(bed: &Bed) -> bool {
+    bed.app.world().get::<Sleeping>(bed.tank).is_some()
+}
+
+/// A tank on a layer of loose pieces under each track: its whole support is solver contacts.
+fn bed_on_pile() -> Bed {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    let level = pile_under(&mut bed);
+    bed.place(Vec3::new(0.0, level, 0.0), Quat::IDENTITY);
+    bed.start();
+    bed
+}
+
+/// Sleep is the economy of a parked tank and its pile; it must end when the driver asks. The
+/// solver contacts that would carry the drive do not exist while the pair sleeps, so nothing but
+/// the demand itself can wake the island.
+#[test]
+fn a_tank_asleep_on_loose_pieces_wakes_on_drive_demand() {
+    let mut bed = bed_on_pile();
+    let mut settled = 0;
+    while !is_asleep(&bed) && settled < 8 * TICKS {
+        bed.tick(0.0, 0.0);
+        settled += 1;
+    }
+    assert!(
+        is_asleep(&bed),
+        "a parked tank with no drive demand may sleep with its pile"
+    );
+    println!("MEASURED asleep after {settled} ticks");
+    let before = bed.hull().position;
+    // Short enough that the belts stay on the row of pieces: ground under any link would hold the
+    // tank awake through its sampled force.
+    for _ in 0..TICKS / 2 {
+        bed.tick(1.0, 0.0);
+    }
+    assert!(!is_asleep(&bed), "throttle left the tank asleep");
+    let moved = (bed.hull().position - before).length();
+    println!("MEASURED driven {moved} m in 0.5 s");
+    assert!(moved > 0.05, "throttle gave no reaction: {moved} m");
+    let mut coasted = 0;
+    while !is_asleep(&bed) && coasted < 12 * TICKS {
+        bed.tick(0.0, 0.0);
+        coasted += 1;
+    }
+    println!("MEASURED asleep again {coasted} ticks after the command ended");
+    assert!(
+        is_asleep(&bed),
+        "with its command ended and its belts stopped the tank may sleep again"
+    );
+}
+
+/// Below the sleep speed a held command still drives. Fixture: a throttle small enough to creep;
+/// sleep would end the drive with the demand still held.
+#[test]
+fn a_creeping_tank_on_loose_pieces_never_sleeps_under_its_command() {
+    let mut bed = bed_on_pile();
+    let mut slowest = f32::INFINITY;
+    for tick in 0..4 * TICKS {
+        bed.tick(0.01, 0.0);
+        slowest = slowest.min(bed.hull().velocity.length());
+        assert!(
+            !is_asleep(&bed),
+            "slept under a held command at tick {tick}"
+        );
+    }
+    println!("MEASURED slowest hull speed {slowest} m/s");
+}
+
+/// The running gear's law, per segment: every overlapping point of a segment together carries
+/// exactly `k' × length`, whatever it touches. Pins the compliance in the contact, the
+/// stiffness read from the tank's own law, and the sharing across pieces.
+#[test]
+fn every_segment_on_loose_pieces_carries_the_running_gears_law_once() {
+    use crate::track::belt_segment::SegmentLaw;
+    let mut bed = bed_on_pile();
+    let (mut checked, mut shared) = (0, 0);
+    for _ in 0..TICKS {
+        bed.tick(0.3, 0.0);
+        let world = bed.app.world_mut();
+        let law = *world.resource::<SegmentLaw>();
+        let segments: Vec<(Entity, f32)> = world
+            .query::<(Entity, &BeltSegment)>()
+            .iter(world)
+            .map(|(entity, segment)| (entity, segment.length))
+            .collect();
+        let graph = world.resource::<ContactGraph>();
+        for (segment, length) in segments {
+            let (mut stiffness, mut damping, mut pairs) = (0.0, 0.0, 0);
+            for pair in graph.contact_pairs_with(segment) {
+                let mut overlapped = false;
+                for manifold in &pair.manifolds {
+                    for _ in manifold.points.iter().filter(|p| p.penetration > 0.0) {
+                        let compliance = manifold
+                            .compliance
+                            .expect("a segment's contact takes the running gear's law");
+                        stiffness += compliance.stiffness;
+                        damping += compliance.damping;
+                        overlapped = true;
+                    }
+                }
+                pairs += usize::from(overlapped);
+            }
+            if pairs == 0 {
+                continue;
+            }
+            let whole = law.stiffness_per_m * length;
+            assert!(
+                (stiffness - whole).abs() < whole * 1e-4,
+                "{pairs} pairs carry {stiffness} N/m against {whole} N/m"
+            );
+            let whole = law.damping_per_m * length;
+            assert!((damping - whole).abs() < whole * 1e-4, "damping {damping}");
+            checked += 1;
+            shared += usize::from(pairs > 1);
+        }
+    }
+    println!("MEASURED segment-steps checked {checked}, across several pieces {shared}");
+    assert!(checked > 0, "no segment reached the pile");
+    assert!(shared > 0, "no segment straddled two pieces");
+}
+
+/// The drivetrain reads a loose piece's friction once. The belts' reaction is the only
+/// longitudinal force on a hull carried wholly by solver contacts, so its total over a pull
+/// equals the hull's momentum change: a reading lost or counted twice breaks the balance.
+/// Fixture: one broad heavy slab under the whole tank, and a pull short enough to stay on it.
+#[test]
+fn the_belts_reaction_on_loose_pieces_is_the_hulls_momentum_change() {
+    use crate::track::sim::TrackGripEffect;
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    let level = 0.4 + 0.002;
+    bed.spawn_piece(Vec3::Y * (level / 2.0), Vec3::new(8.0, 0.4, 16.0));
+    bed.place(Vec3::new(0.0, level, 0.0), Quat::IDENTITY);
+    bed.start();
+    for _ in 0..TICKS {
+        bed.tick(0.0, 0.0);
+    }
+    let start = bed.hull();
+    let forward = start.forward();
+    let mut impulse = 0.0;
+    let pull = TICKS;
+    for _ in 0..pull {
+        bed.tick(1.0, 0.0);
+        let effect = bed
+            .app
+            .world()
+            .get::<TrackGripEffect>(bed.tank)
+            .expect("a driven tank publishes its belt reaction");
+        impulse += (effect.belt_reaction[0] + effect.belt_reaction[1]) * DT;
+    }
+    let momentum = bed.mass() * (bed.hull().velocity - start.velocity).dot(forward);
+    println!("MEASURED belt impulse {impulse} N s, hull momentum change {momentum} N s");
+    assert!(
+        momentum.abs() > 1000.0,
+        "the pull moved nothing: {momentum}"
+    );
+    assert!(
+        (impulse.abs() / momentum.abs() - 1.0).abs() < 0.1,
+        "belts {impulse} N s against hull {momentum} N s"
+    );
+}
+
 #[test]
 #[ignore = "the track scorecard, run on demand"]
 fn track_scorecard() {

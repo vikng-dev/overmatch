@@ -17,10 +17,12 @@
 //!   leaves the stiffness alone. The calibrated per-metre envelope law is a fact along the belt
 //!   and width does not enter it. [`BeltSegment::shape_contacts`] gives a segment that law times
 //!   its length (`ContactCompliance`, an OVERMATCH PATCH in the vendored solver);
-//!   [`share_segment_laws`] shares it over every point the segment touches, so pieces side by
-//!   side or stacked cannot multiply the support. The sampled support differs at partial
-//!   coverage: over ground it is a column quadrature, so a curb under one edge takes that
-//!   column's share. Past the wheels' travel the piece meets the same outer-face stop as the
+//!   [`share_segment_laws`] shares it over every point in overlap, so pieces side by side or
+//!   stacked cannot multiply the support. The same rigid plate keeps the ground from a second
+//!   count: over the length a loose piece covers, its shadow in the spring channel's footprint
+//!   partition spans the whole shoe, and the ground beside the piece is not touching the link. The
+//!   sampled support differs at partial coverage of ground itself: a column quadrature, so a curb
+//!   under one edge takes that column's share. Past the wheels' travel the piece meets the same outer-face stop as the
 //!   ground. The end wheels have no travel and no segment: the stop is hard there from first
 //!   touch.
 //! - **Drivetrain.** Each segment carries the stop's `BeltFace`, so the shared hook moves its
@@ -28,7 +30,8 @@
 //!   with the stop's.
 
 use avian3d::prelude::{
-    Collider, CollisionLayers, ContactCompliance, ContactGraph, ContactManifold, Position, Rotation,
+    AngularVelocity, Collider, CollisionLayers, ContactCompliance, ContactGraph, ContactManifold,
+    ContactPair, LinearVelocity, Position, Rotation,
 };
 use bevy::prelude::*;
 
@@ -54,7 +57,7 @@ const OUTER_FACE_COS: f32 = std::f32::consts::FRAC_1_SQRT_2;
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct BeltSegment {
     /// Loop length this segment stands for (m), which scales the per-metre envelope law.
-    length: f32,
+    pub(crate) length: f32,
     /// Body-local unit normal of the outer face, out of the loop.
     outward: Vec3,
     /// The outer face's plane, `outward · p` for every body-local point `p` on it (m).
@@ -170,7 +173,7 @@ fn at_arc(pins: &[Vec2], mut s: f32) -> Vec2 {
 
 impl BeltSegment {
     /// Shape one pair's manifolds on this segment (`sign` −1 when it is collider 1): the world
-    /// touches the shoe only at its outer face, and each point takes the envelope law
+    /// touches the shoe only at its outer face, and each point in overlap takes the envelope law
     /// `(k', c')` (per metre of belt) over this segment's length, shared over the pair's points.
     /// [`share_segment_laws`] then shares it over every pair the segment touches.
     pub(crate) fn shape_contacts(
@@ -180,41 +183,74 @@ impl BeltSegment {
         sign: f32,
         (stiffness, damping): (f32, f32),
     ) {
-        let points = manifolds.iter().map(|m| m.points.len()).sum::<usize>();
-        if points == 0 {
-            return; // Nothing touches this step.
-        }
-        let law = ContactCompliance {
-            stiffness: stiffness * self.length / points as f32,
-            damping: damping * self.length / points as f32,
-        };
-        // A slab's end, side and inner faces are the cut of a continuous belt, never a surface of
-        // it: a normal from them turns to the outer face's, its depth the other body's point past
-        // that face.
         let outward = rotation.0 * self.outward;
         let face = self.face + outward.dot(position.0);
-        for manifold in manifolds {
+        for manifold in manifolds.iter_mut() {
             let normal = manifold.normal;
             if (normal * -sign).dot(outward) < OUTER_FACE_COS {
                 for point in &mut manifold.points {
-                    // `point` is midway between the two surfaces along `normal`, 1 into 2.
                     let other = point.point + sign * normal * (point.penetration / 2.0);
                     point.penetration = face - outward.dot(other);
                 }
                 manifold.normal = outward * -sign;
             }
+        }
+        // A compliant point at positive separation applies nothing, and the speculative margin
+        // grows with speed, so only overlap divides the law. A pair with none keeps it whole: a
+        // point that crosses within the step still has a law to evaluate.
+        let overlapping = overlapping_points(manifolds).max(1) as f32;
+        let law = ContactCompliance {
+            stiffness: stiffness * self.length / overlapping,
+            damping: damping * self.length / overlapping,
+        };
+        for manifold in manifolds {
             manifold.compliance = Some(law);
         }
     }
 }
 
-/// Share each segment's law over every point it touches this step, across all its pairs: the
-/// hook sees one pair at a time, so a segment over two pieces would otherwise carry its length's
-/// stiffness twice. Serial over segments with a contact: the shared contact graph is mutated
-/// between the narrow phase and the solver's constraint preparation, exclusive by construction.
+fn overlapping_points(manifolds: &[ContactManifold]) -> usize {
+    manifolds
+        .iter()
+        .flat_map(|manifold| &manifold.points)
+        .filter(|point| point.penetration > 0.0)
+        .count()
+}
+
+/// The narrow phase stated each point's approach speed before the hook chose its final normal, and
+/// `ContactTransfers` publishes it for landings (`debris::crumble`); restates it along that normal.
+fn state_final_approach(
+    pair: &mut ContactPair,
+    bodies: &Query<(&LinearVelocity, &AngularVelocity)>,
+) {
+    // A collider with no rigid body is fixed, and has no velocity to read.
+    let at_anchor = |body: Option<Entity>, anchor: Vec3| {
+        body.map_or(Vec3::ZERO, |body| {
+            let (linear, angular) = bodies
+                .get(body)
+                .expect("a contact's rigid body carries its velocities");
+            linear.0 + angular.0.cross(anchor)
+        })
+    };
+    let (body1, body2) = (pair.body1, pair.body2);
+    for manifold in &mut pair.manifolds {
+        let normal = manifold.normal;
+        for point in &mut manifold.points {
+            point.normal_speed =
+                (at_anchor(body2, point.anchor2) - at_anchor(body1, point.anchor1)).dot(normal);
+        }
+    }
+}
+
+/// Finish every pair a segment touches, after the narrow phase: state each point's approach along
+/// its final normal, and share the segment's whole law over every point in overlap, so pieces side
+/// by side or stacked cannot multiply its support. Runs after the narrow phase, which owns the
+/// graph, and before the solver reads the laws: serial, one pass over the contact graph, for the
+/// 14.5 narrow pairs a tank on a pile (MEASURED).
 pub(crate) fn share_segment_laws(
     mut graph: ResMut<ContactGraph>,
     segments: Query<Entity, With<BeltSegment>>,
+    bodies: Query<(&LinearVelocity, &AngularVelocity)>,
     mut shared: Local<Vec<(Entity, Entity, usize)>>,
 ) {
     for segment in &segments {
@@ -222,35 +258,31 @@ pub(crate) fn share_segment_laws(
         let mut total = 0;
         for edge in graph.contact_edges_with(segment) {
             if !edge.is_touching() || edge.is_sleeping() {
-                continue; // A sleeping pair keeps its last step's shared law.
+                continue;
             }
             let pair = graph
                 .get_pair_by_edge(edge)
                 .expect("a contact edge names its pair");
-            let points = pair
-                .manifolds
-                .iter()
-                .filter(|m| m.compliance.is_some())
-                .map(|m| m.points.len())
-                .sum::<usize>();
-            if points > 0 {
-                total += points;
-                shared.push((pair.collider1, pair.collider2, points));
-            }
-        }
-        if shared.len() < 2 {
-            continue; // One pair already holds the segment's whole law.
+            let points = overlapping_points(&pair.manifolds);
+            total += points;
+            shared.push((pair.collider1, pair.collider2, points));
         }
         for &(a, b, points) in shared.iter() {
             let (_, pair) = graph
                 .get_mut(a, b)
                 .expect("a pair read this step is still in the graph");
+            state_final_approach(pair, &bodies);
+            if points == 0 {
+                continue; // Its points apply nothing, so nothing of the law is theirs to share.
+            }
             let share = points as f32 / total as f32;
             for manifold in &mut pair.manifolds {
-                if let Some(law) = &mut manifold.compliance {
-                    law.stiffness *= share;
-                    law.damping *= share;
-                }
+                let law = manifold
+                    .compliance
+                    .as_mut()
+                    .expect("a segment's touching pair was shaped by the contact hook this step");
+                law.stiffness *= share;
+                law.damping *= share;
             }
         }
     }
@@ -264,4 +296,210 @@ pub(crate) fn plugin(app: &mut App) {
             .after(PhysicsStepSystems::NarrowPhase)
             .before(PhysicsStepSystems::Solver),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use avian3d::collision::contact_types::{ContactEdge, ContactEdgeFlags, ContactPairFlags};
+    use avian3d::prelude::ContactPoint;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// Fixture law, and a fixture 0.3 m segment whose outer face is y = 0, facing down.
+    const LAW: (f32, f32) = (2.0e6, 1.0e5);
+    const SEGMENT: BeltSegment = BeltSegment {
+        length: 0.3,
+        outward: Vec3::NEG_Y,
+        face: 0.0,
+    };
+    const WHOLE: (f32, f32) = (LAW.0 * SEGMENT.length, LAW.1 * SEGMENT.length);
+
+    fn shaped(mut manifolds: Vec<ContactManifold>, sign: f32) -> Vec<ContactManifold> {
+        SEGMENT.shape_contacts(
+            &mut manifolds,
+            (&Position::default(), &Rotation::default()),
+            sign,
+            LAW,
+        );
+        manifolds
+    }
+
+    /// `(height of the world point, penetration)` for each point.
+    fn manifold(points: &[(f32, f32)], normal: Vec3) -> ContactManifold {
+        ContactManifold::new(
+            points.iter().map(|&(y, penetration)| {
+                ContactPoint::new(Vec3::ZERO, Vec3::ZERO, Vec3::Y * y, penetration)
+            }),
+            normal,
+        )
+    }
+
+    fn law(manifold: &ContactManifold) -> (f32, f32) {
+        let law = manifold
+            .compliance
+            .expect("a shaped manifold carries the law");
+        (law.stiffness, law.damping)
+    }
+
+    /// A compliant point at positive separation applies nothing, and the speculative margin
+    /// grows with speed: a share for it would soften the segment with speed and step the law
+    /// when a point is pruned. The law covers a pair's manifolds together.
+    #[test]
+    fn speculative_points_take_no_share_of_the_law() {
+        for sign in [-1.0, 1.0] {
+            let normal = SEGMENT.outward * -sign;
+            let manifolds = shaped(
+                vec![
+                    manifold(&[(0.0, 0.01), (0.0, -0.02)], normal),
+                    manifold(&[(0.0, 0.01), (0.0, -0.02)], normal),
+                ],
+                sign,
+            );
+            for manifold in &manifolds {
+                assert_eq!(law(manifold), (WHOLE.0 / 2.0, WHOLE.1 / 2.0));
+            }
+        }
+    }
+
+    /// The rewrite states each point's depth to the outer face, so that depth is the one that
+    /// says who shares the law. Fixture: a side-face normal; the first point is proud of the
+    /// outer face only after the rewrite, the second only before it.
+    #[test]
+    fn a_point_counts_by_its_depth_to_the_outer_face() {
+        for sign in [-1.0, 1.0] {
+            let manifolds = shaped(
+                vec![manifold(
+                    &[(0.02, -0.01), (-0.02, 0.01), (0.01, -0.01)],
+                    Vec3::X,
+                )],
+                sign,
+            );
+            assert_eq!(manifolds[0].normal, SEGMENT.outward * -sign);
+            assert_eq!(law(&manifolds[0]), (WHOLE.0 / 2.0, WHOLE.1 / 2.0));
+        }
+    }
+
+    /// The solver divides by `c + hk`: a pair with no point in overlap keeps a law it can
+    /// evaluate should one cross within the step.
+    #[test]
+    fn a_wholly_speculative_pair_keeps_a_finite_law() {
+        let manifolds = shaped(vec![manifold(&[(0.0, -0.01)], Vec3::NEG_Y)], -1.0);
+        assert_eq!(law(&manifolds[0]), WHOLE);
+    }
+
+    fn contact_world() -> World {
+        let mut world = World::new();
+        world.init_resource::<ContactGraph>();
+        world
+    }
+
+    fn touching(
+        world: &mut World,
+        (collider1, collider2): (Entity, Entity),
+        bodies: (Entity, Entity),
+        manifolds: Vec<ContactManifold>,
+    ) {
+        let mut manifolds = Some(manifolds);
+        let mut graph = world.resource_mut::<ContactGraph>();
+        graph
+            .add_edge_with(ContactEdge::new(collider1, collider2), |pair| {
+                pair.body1 = Some(bodies.0);
+                pair.body2 = Some(bodies.1);
+                pair.manifolds = manifolds.take().expect("one pair per edge");
+                pair.flags.insert(ContactPairFlags::TOUCHING);
+            })
+            .expect("a new edge");
+        graph
+            .get_edge_mut(collider1, collider2)
+            .expect("the edge just added")
+            .flags
+            .insert(ContactEdgeFlags::TOUCHING);
+    }
+
+    fn finish(world: &mut World) {
+        world.run_system_once(share_segment_laws).unwrap();
+    }
+
+    /// A segment's whole law is shared over every point that overlaps, across every piece, so
+    /// pieces side by side cannot multiply its support; a pair still clear of the face takes no
+    /// part in the division. Fixture: two overlapping points on one piece, one on another.
+    #[test]
+    fn the_law_is_shared_over_every_overlapping_point_the_segment_touches() {
+        let mut world = contact_world();
+        let segment = world.spawn(SEGMENT).id();
+        let at_rest = (LinearVelocity::ZERO, AngularVelocity::ZERO);
+        let hull = world.spawn(at_rest).id();
+        let pieces: [Entity; 3] = std::array::from_fn(|_| world.spawn(at_rest).id());
+        let down = Vec3::NEG_Y;
+        for (piece, points) in pieces.into_iter().zip([
+            vec![(0.0, 0.01), (0.0, 0.02), (0.0, -0.02)],
+            vec![(0.0, 0.01)],
+            vec![(0.0, -0.01), (0.0, -0.02)],
+        ]) {
+            let manifolds = shaped(vec![manifold(&points, down)], -1.0);
+            touching(&mut world, (segment, piece), (hull, piece), manifolds);
+        }
+        finish(&mut world);
+        let graph = world.resource::<ContactGraph>();
+        let carried = |piece: Entity| {
+            let (_, pair) = graph.get(segment, piece).expect("the pair");
+            let points = pair.manifolds[0]
+                .points
+                .iter()
+                .filter(|p| p.penetration > 0.0)
+                .count() as f32;
+            let (k, c) = law(&pair.manifolds[0]);
+            (points * k, points * c, k)
+        };
+        let (one, two, clear) = (carried(pieces[0]), carried(pieces[1]), carried(pieces[2]));
+        assert!((one.0 + two.0 - WHOLE.0).abs() < WHOLE.0 * 1e-5);
+        assert!((one.1 + two.1 - WHOLE.1).abs() < WHOLE.1 * 1e-5);
+        assert_eq!(one.2, two.2, "every overlapping point takes an equal share");
+        assert_eq!(clear.2, WHOLE.0);
+    }
+
+    /// The narrow phase states `normal_speed` along the normal it found, and landings are priced
+    /// from it (`debris::crumble`). A redirected contact closes along its final normal, at the
+    /// velocity of each body's own anchor. Fixture: the hull sinks at 2 m/s and spins so its
+    /// anchor rises 1 m/s, onto a piece at rest: it closes at 1 m/s whichever collider is first.
+    #[test]
+    fn a_redirected_contact_states_its_approach_along_the_final_normal() {
+        for segment_first in [true, false] {
+            let sign = if segment_first { -1.0 } else { 1.0 };
+            let mut world = contact_world();
+            let segment = world.spawn(SEGMENT).id();
+            let hull = world
+                .spawn((LinearVelocity(Vec3::NEG_Y * 2.0), AngularVelocity(Vec3::Z)))
+                .id();
+            let piece = world
+                .spawn((LinearVelocity::ZERO, AngularVelocity::ZERO))
+                .id();
+            let (anchor1, anchor2) = if segment_first {
+                (Vec3::X, Vec3::ZERO)
+            } else {
+                (Vec3::ZERO, Vec3::X)
+            };
+            let side_face = ContactManifold::new(
+                [ContactPoint::new(anchor1, anchor2, Vec3::Y * 0.01, 0.01)],
+                Vec3::X,
+            );
+            let manifolds = shaped(vec![side_face], sign);
+            let (colliders, bodies) = if segment_first {
+                ((segment, piece), (hull, piece))
+            } else {
+                ((piece, segment), (piece, hull))
+            };
+            touching(&mut world, colliders, bodies, manifolds);
+            finish(&mut world);
+            let (_, pair) = world
+                .resource::<ContactGraph>()
+                .get(colliders.0, colliders.1)
+                .expect("the pair");
+            let speed = pair.manifolds[0].points[0].normal_speed;
+            assert!(
+                (speed + 1.0).abs() < 1e-5,
+                "segment first {segment_first}: {speed}"
+            );
+        }
+    }
 }

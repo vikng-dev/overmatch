@@ -9,16 +9,16 @@
 //! - **On `Layer::Debris`** (a construction's fallen pieces and the debris stress lever's
 //!   fragments, at any mass, [`RubbleBodies::loose`]): a solver body. It meets the belt's sprung
 //!   segments (`super::belt_segment`), so Avian resolves the equal and opposite reaction and
-//!   whatever holds the piece. The sampled support keeps it in the footprint partition, so a
-//!   covered cell takes no ground support as well, and the Driver perceives it, but applies no
-//!   spring force on it.
+//!   whatever holds the piece. The sampled support keeps it in the footprint partition, across
+//!   the whole shoe over the length it covers (a link is stiff across its width), so that length
+//!   takes no ground support as well; the Driver perceives it, but no spring force acts on it.
 //! - **Every other solid** (standing construction, map blocks, another tank's hull; terrain is the
 //!   field): the sampled support carries the belt and the solid takes the whole opposite reaction,
 //!   fixed construction into its structural load reading
 //!   ([`RubbleBodies::record_static_contacts`]), a dynamic body as an impulse ([`reactions`]). The
-//!   only dynamic body here is a hull, whose mass keeps the explicit spring stable: DERIVED, for
-//!   the shipped belt law on a 50 t hull at 64 Hz, `dt² k / m + 2 dt c / m` is about 0.2 against
-//!   a limit of 4.
+//!   dynamic bodies here are the hulls and a launched turret, on `Layer::Vehicle`. The explicit
+//!   spring is stable for a body while `dt² k / m + 2 dt c / m` stays under 4: DERIVED, about 0.2
+//!   for the shipped belt law on a 50 t body at 64 Hz, so the bound holds down to about 2.5 t.
 //!
 //! - **What the belt bears on** ([`RubbleQuery::supports`]): solid, layer-compatible colliders,
 //!   except [`super::terrain::FieldSurface`] geometry already represented by the field. Callers
@@ -555,7 +555,13 @@ impl RubbleBodies<'_> {
             self.count(Work::BeltTriangulations, 1);
             Surface::triangles(&s.shape, s.position, s.rotation)
         });
-        let faces = super::world_contact::convex::clip_faces(triangles, slab);
+        let mut faces = super::world_contact::convex::clip_faces(triangles, slab);
+        if s.loose {
+            faces = faces
+                .into_iter()
+                .filter_map(|face| face.across_shoe(slab))
+                .collect();
+        }
         self.count(Work::BeltOverlaps, usize::from(!faces.is_empty()));
         (!faces.is_empty()).then_some(SlabOverlap { piece, faces })
     }
@@ -1639,6 +1645,60 @@ mod tests {
             "wrong footprint share: {narrow}/{full}"
         );
         assert_eq!(beside, 0.0);
+    }
+
+    /// A LINK IS STIFF ACROSS ITS WIDTH, SO A LOOSE PIECE UNDER PART OF IT LIFTS ALL OF IT. The
+    /// ground beside the piece, over the covered length, is not touching the plate; the belt
+    /// segment carries that length whole, so ground left under it would count it twice. Past the
+    /// piece's length the ground keeps the belt. FIXTURE DATA: a 2 m pad 0.2 m wide, 5 mm into
+    /// the ground; the piece stands 15 mm proud of that, under half the width.
+    #[test]
+    fn a_loose_piece_under_part_of_the_width_lifts_the_whole_link_off_the_ground() {
+        let ground_load = |piece: Option<(Vec3, Vec3)>| {
+            let mut app = physics();
+            if let Some((at, size)) = piece {
+                let piece = piece_box(&mut app, at, size);
+                app.world_mut()
+                    .entity_mut(piece)
+                    .insert(crate::construction::breakage::piece_layers());
+            }
+            app.update();
+            app.world_mut()
+                .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                    let near = rubble.near(Vec3::ZERO, 4.0);
+                    let pieces = RubbleBodies::gather(&rubble, &near, &bodies);
+                    pad_pass(
+                        &ground(),
+                        &pieces,
+                        Affine3A::IDENTITY,
+                        SideState::default(),
+                        Vec3::ZERO,
+                        &mut GripElements::for_stations(30, 3),
+                    )
+                    .contacts
+                    .iter()
+                    .filter(|c| c.collider.is_none())
+                    .map(|c| c.load_elastic * c.normal.y)
+                    .sum::<f32>()
+                })
+                .unwrap()
+        };
+        let box_at = |x: f32, z: f32| Vec3::new(x, 0.015 - 0.2, z);
+        let bare = ground_load(None);
+        let whole_length = ground_load(Some((box_at(0.05, 0.0), Vec3::new(0.1, 0.4, 4.0))));
+        let half_length = ground_load(Some((box_at(0.05, 0.5), Vec3::new(0.1, 0.4, 1.0))));
+        let beside = ground_load(Some((box_at(0.2, 0.0), Vec3::new(0.1, 0.4, 4.0))));
+        println!(
+            "MEASURED ground load: bare {bare:.1} N, piece the whole length {whole_length:.1} N, \
+             half the length {half_length:.1} N, beside the shoe {beside:.1} N"
+        );
+        assert!(bare > 0.0);
+        assert_eq!(whole_length, 0.0, "ground left beside the piece");
+        assert!(
+            (half_length / bare - 0.5).abs() < 0.1,
+            "{half_length}/{bare}"
+        );
+        assert_eq!(beside, bare);
     }
 
     /// STACKED PIECES DO NOT MULTIPLY SUPPORT, AND A SPLIT ELEMENT ADVANCES ITS GRIP ONCE.

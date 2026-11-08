@@ -32,8 +32,11 @@ travel, the outer face on the droop envelope. They meet only `Layer::Debris`. Ea
 compliant contact: Avian's stock contact solves its relaxing pass rigidly along the normal, so a
 body cannot rest on it at a load-proportional deflection (DERIVED from
 `ContactNormalPart::solve_impulse`). The vendored patch adds an absolute per-point law set by the
-contact hook (`upstream/avian-compliant-contact.md`). A settled pile sleeps with the tank through
-Avian's island sleep; nothing freezes a loaded piece.
+contact hook (`upstream/avian-compliant-contact.md`). Nothing freezes a loaded piece. A tank wholly
+on pieces has no sampled force, so with no drive demand it sleeps with its pile through Avian's
+island sleep, and any drive demand ends that sleep (`track::sim::wake_driven_tanks`). A tank with
+any spring contact never sleeps: a non-zero sampled force resets the timer, so its pile stays awake
+too.
 
 **One law.** `k'` and `c'` per metre of belt are the spring channel's calibration
 (`SegmentLaw`, `ForceParams`), and the envelope comes from the same travel knots, so the segment
@@ -44,10 +47,11 @@ touches. Coverage moves where the force acts, so the roll moment follows the con
 
 Known differences between the channels, none tuned:
 
-- **Partial coverage.** The sampled support is a column quadrature over ground, so a curb under
-  one edge takes that column's share; a segment takes its whole law. Over 0.1 m pieces covering
-  0.728 of the shoe the rise is 0.119 m on segments against a covered-share reading of 0.073 m
-  (DERIVED). Width enters only the sampled channel.
+- **Partial coverage.** Over ground the sampled support is a column quadrature, so a curb under one
+  edge takes that column's share. A loose piece under part of the width carries the rigid plate
+  whole: the segment takes its whole law and the shadow lifts the shoe off the ground over that
+  length. Over 0.1 m pieces covering 0.728 of the shoe the rise is 0.107 m (MEASURED). Width enters
+  only the sampled channel's ground.
 - **No engagement ramp** in the compliant contact; the spring channel ramps over
   `suspension.engage`.
 - **Friction on pieces** is Avian's Coulomb at the pair's μ, not a belt element's strain, and no
@@ -58,9 +62,12 @@ Known differences between the channels, none tuned:
 The channel is the layer a collider was built on. `Layer::Debris` (a construction's fallen pieces
 and debris stress fragments, at any mass, `RubbleBodies::loose`) goes to the segments; the sampled
 support keeps it in the footprint partition, so a covered cell takes no ground support and the
-Driver perceives it, and applies no spring force. Every other solid stays in the sampled support.
-The only dynamic body left there is a hull. DERIVED: for the shipped belt law on a 50 t hull at
-64 Hz, `dt² k / m + 2 dt c / m` is about 0.2 against an explicit limit of 4.
+Driver perceives it, and applies no spring force. Over the length a loose piece covers, its shadow
+spans the whole shoe: a link is rigid across its width, so the ground beside the piece is not
+touching it (`ClippedFace::across_shoe`). Every other solid stays in the sampled support. The
+dynamic bodies left there are the hulls and a launched turret, which stays on `Layer::Vehicle`. The
+explicit spring is stable for a body while `dt² k / m + 2 dt c / m` stays under 4. DERIVED: about
+0.2 for the shipped belt law on a 50 t body at 64 Hz, so the bound holds down to about 2.5 t.
 
 ## Resolution
 

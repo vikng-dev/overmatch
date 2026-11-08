@@ -15,7 +15,9 @@ state only.
 - **Loose pieces take belt segments**: solver slabs along the belt's travel that meet only
   `Layer::Debris`, each carrying the calibrated law as a compliant contact (a local patch to the
   vendored Avian, drafted under `upstream/`). A piece takes its equal and opposite reaction through
-  the solver and a settled pile sleeps with the tank through the engine's island sleep.
+  the solver. A tank wholly on pieces with no drive demand sleeps with its pile through the
+  engine's island sleep; drive demand ends that sleep (`track::sim::wake_driven_tanks`). A tank with
+  any spring contact is kept awake by its sampled force, and its pile with it.
 - **The boundary is the layer a collider was built on.** Nothing asks what a body is or how heavy.
 - **One support law**: `k'` and `c'` per metre of belt and the droop envelope are shared by the
   channels. A shoe is a rigid plate, so a segment takes `k' × length` whatever the width a piece
