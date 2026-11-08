@@ -28,6 +28,7 @@ use avian3d::prelude::*;
 use serde_json::{Value, json};
 
 use crate::Layer;
+use crate::contact_transfer::ContactTransfer;
 use crate::terrain_grid::{HeightGrid, TerrainExtent};
 use crate::track::rig_geom::RigGeom;
 use crate::track::side::Side;
@@ -392,40 +393,42 @@ impl Bed {
         piece
     }
 
-    /// Every force on the hull from a world body this tick: the arm's own channel plus Avian's
-    /// solver normal impulses between the tank's colliders and other bodies.
+    /// Every solver contact point of the last physics step, with its mean force on `other` over
+    /// the step (N, world, normal and friction together): the game's one reading of what the
+    /// solver moved, `contact_transfer::ContactTransfers`.
+    fn solver_points(&self) -> Vec<(ContactTransfer, Vec3)> {
+        let transfers = self
+            .app
+            .world()
+            .resource::<crate::contact_transfer::ContactTransfers>();
+        let dt = transfers.dt();
+        transfers
+            .solver_groups()
+            .flatten()
+            .map(|point| (*point, point.impulse / dt))
+            .collect()
+    }
+
+    /// Every force on the hull from a world body this tick: the arm's own channel plus every
+    /// solver contact between the tank and another body.
     fn world_forces(&self) -> Vec<WorldForce> {
         let mut out = arm::belt_forces(&self.app, self.tank);
-        let graph = self.app.world().resource::<ContactGraph>();
-        for pair in graph.iter_active_touching() {
-            // Avian reports the impulse on body 1 against the normal, which points 1 → 2.
-            let (sign, other) = if pair.body1 == Some(self.tank) {
-                (-1.0, pair.body2.unwrap_or(pair.collider2))
-            } else if pair.body2 == Some(self.tank) {
-                (1.0, pair.body1.unwrap_or(pair.collider1))
+        for (point, force) in self.solver_points() {
+            // The transfer moves `force` into `other`; the reference takes its opposite.
+            let (other, force) = if point.other == self.tank {
+                (point.reference, force)
+            } else if point.reference == self.tank {
+                (point.other, -force)
             } else {
                 continue;
             };
-            for manifold in &pair.manifolds {
-                for point in &manifold.points {
-                    out.push(WorldForce {
-                        body: Some(other),
-                        point: point.point,
-                        force: manifold.normal * (sign * self.solver_force(point)),
-                    });
-                }
-            }
+            out.push(WorldForce {
+                body: Some(other),
+                point: point.point,
+                force,
+            });
         }
         out
-    }
-
-    /// A solver contact's mean normal force over the step (N): its last substep's impulse over
-    /// one substep. Avian 0.7's `normal_impulse` is no such total: it sums the accumulated
-    /// impulse after both the solve and the relax pass of every substep, reading about twice the
-    /// applied impulse at rest (MEASURED by this card's rubble control).
-    fn solver_force(&self, point: &ContactPoint) -> f32 {
-        let substeps = self.app.world().resource::<SubstepCount>().0 as f32;
-        point.warm_start_normal_impulse * substeps / DT
     }
 
     /// Avian solver contacts with the tank as a party: (pairs, manifolds, points).
@@ -443,26 +446,39 @@ impl Bed {
             })
     }
 
-    /// The names of the tank's colliders in solver contact with `body` this tick.
-    fn touching_colliders(&self, body: Entity) -> Vec<String> {
+    /// The role of one of the tank's colliders, from what spawned it: the arm names the colliders
+    /// it spawns; a remaining collider on the vehicle layer is a hull proxy, spawned from the
+    /// tank's authored proxy node, which names it.
+    fn role(&self, collider: Entity) -> String {
         let world = self.app.world();
-        let name = |collider: Entity| {
-            world
-                .get::<Name>(collider)
-                .or_else(|| {
-                    world
-                        .get::<ChildOf>(collider)
-                        .and_then(|parent| world.get::<Name>(parent.parent()))
-                })
-                .map_or_else(|| format!("{collider:?}"), |n| n.as_str().to_owned())
-        };
+        if let Some(role) = arm::collider_role(world, collider) {
+            return role.to_owned();
+        }
+        let vehicle = world
+            .get::<CollisionLayers>(collider)
+            .is_some_and(|layers| layers.memberships.has_all(Layer::Vehicle));
+        let node = world
+            .get::<ChildOf>(collider)
+            .and_then(|parent| world.get::<Name>(parent.parent()))
+            .map_or_else(String::new, |name| format!(" {}", name.as_str()));
+        if vehicle {
+            format!("hull proxy{node}")
+        } else {
+            format!("unclassified tank collider{node}")
+        }
+    }
+
+    /// The roles of the tank's colliders in solver contact with `body` this tick.
+    fn touching_colliders(&self, body: Entity) -> Vec<String> {
         let mut out = Vec::new();
-        for pair in world.resource::<ContactGraph>().iter_active_touching() {
-            if pair.body1 == Some(self.tank) && pair.body2.unwrap_or(pair.collider2) == body {
-                out.push(name(pair.collider1));
-            } else if pair.body2 == Some(self.tank) && pair.body1.unwrap_or(pair.collider1) == body
-            {
-                out.push(name(pair.collider2));
+        for (point, _) in self.solver_points() {
+            if point.reference == self.tank && point.other == body {
+                out.push(self.role(point.reference_collider));
+            } else if point.other == self.tank && point.reference == body {
+                let collider = point
+                    .other_collider
+                    .expect("a solver contact names both of its colliders");
+                out.push(self.role(collider));
             }
         }
         out.sort();
@@ -470,8 +486,8 @@ impl Bed {
         out
     }
 
-    /// What of the tank meets `body` this tick: `belt` for the arm's own channel, then the
-    /// solver colliders' names; `None` while nothing does.
+    /// What of the tank meets `body` this tick: `belt` for the arm's own channel, then the roles
+    /// of the solver colliders; `None` while nothing does.
     fn first_touch(&self, body: Entity) -> Option<String> {
         let belt = arm::belt_forces(&self.app, self.tank)
             .iter()
@@ -483,32 +499,36 @@ impl Bed {
         (!parts.is_empty()).then(|| parts.join(", "))
     }
 
-    /// World support on the pieces from everything except the tank and each other (N, up). A
-    /// sleeping pair keeps the impulses of its last solved step, its resting support.
+    fn awake_pieces(&self) -> Vec<Entity> {
+        self.pieces
+            .iter()
+            .copied()
+            .filter(|&p| self.app.world().get::<Sleeping>(p).is_none())
+            .collect()
+    }
+
+    /// The world's upward support on the awake pieces from everything except the tank and each
+    /// other (N). A sleeping piece leaves the solver and reads nothing: whatever it carries, it
+    /// carries as if fixed.
     fn world_support_on_pieces(&self) -> f32 {
-        let graph = self.app.world().resource::<ContactGraph>();
-        let is_piece = |e: Option<Entity>| e.is_some_and(|e| self.pieces.contains(&e));
+        let awake = self.awake_pieces();
+        let on = |e: Entity| awake.contains(&e);
         let mut up = 0.0;
-        for pair in graph
-            .iter_active_touching()
-            .chain(graph.iter_sleeping_touching())
-        {
-            let (b1, b2) = (pair.body1, pair.body2);
-            if b1 == Some(self.tank) || b2 == Some(self.tank) || is_piece(b1) == is_piece(b2) {
+        for (point, force) in self.solver_points() {
+            if point.reference == self.tank || point.other == self.tank {
                 continue;
             }
-            let sign = if is_piece(b1) { -1.0 } else { 1.0 };
-            for manifold in &pair.manifolds {
-                for point in &manifold.points {
-                    up += manifold.normal.y * sign * self.solver_force(point);
-                }
+            match (on(point.reference), on(point.other)) {
+                (false, true) if !self.pieces.contains(&point.reference) => up += force.y,
+                (true, false) if !self.pieces.contains(&point.other) => up -= force.y,
+                _ => {} // Between pieces, or with a sleeping piece: internal to the pile.
             }
         }
         up
     }
 
-    fn piece_weight(&self) -> f32 {
-        self.pieces
+    fn awake_piece_weight(&self) -> f32 {
+        self.awake_pieces()
             .iter()
             .map(|&p| {
                 self.app
@@ -1018,9 +1038,9 @@ fn climbing(card: &mut Card) {
              the hull centre passes 3 m beyond the face risen by 0.8 × the step within 15 s. \
              Highest step climbed: {highest} m. Wall: face 2 m ahead, 8 s of push; the upward \
              force is the wall's vertical force on the hull through every channel the card reads \
-             (the arm's own and Avian's solver normals). first_touch names the tank parts that met \
-             the obstacle on the first tick any did: `belt` for the arm's own channel, else the \
-             solver collider's node."
+             (the arm's own and Avian's solver contacts, friction included). first_touch names \
+             what of the tank met the obstacle on the first tick any did: `belt` for the arm's own \
+             channel, then each solver collider's role."
         ),
     });
 }
@@ -1289,134 +1309,227 @@ fn ride(card: &mut Card) {
     });
 }
 
-/// Line 8. Rubble: drive onto a pile of pieces and park on it.
-fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
-    let ground = base_ground();
-    let mut bed = Bed::on_ground(Some(ground), flat());
-    let front = front_z(bed.geom());
-    // Fixture: 0.8 × 0.5 × 0.6 m pieces (cube root of volume 0.62 m, above the 0.5 m floor), a
-    // 5 × 6 bottom layer and a 4 × 5 top layer, the pile's near edge 6 m ahead.
-    let size = Vec3::new(0.8, 0.5, 0.6);
-    let gap = 0.05;
-    let near = front - 6.0;
+/// Fixture: 0.8 × 0.5 × 0.6 m pieces (cube root of volume 0.62 m, above the 0.5 m size floor).
+const PIECE: Vec3 = Vec3::new(0.8, 0.5, 0.6);
+const PIECE_GAP: f32 = 0.05;
+
+/// A two-layer pile ahead of the tank: a 5 × 6 bottom layer and a 4 × 5 top layer, its near edge
+/// 6 m ahead of the belt's front point. Returns the near edge and the pile's centre (z).
+fn pile_ahead(bed: &mut Bed) -> (f32, f32) {
+    let near = front_z(bed.geom()) - 6.0;
     for (layer, (nx, nz)) in [(5, 6), (4, 5)].into_iter().enumerate() {
         for i in 0..nx {
             for k in 0..nz {
-                let x = (i as f32 - (nx - 1) as f32 / 2.0) * (size.x + gap);
-                let z = near - (layer as f32 * 0.5 + k as f32) * (size.z + gap) - size.z / 2.0;
-                let y = size.y * (layer as f32 + 0.5) + 0.002;
-                bed.spawn_piece(Vec3::new(x, y, z), size);
+                let x = (i as f32 - (nx - 1) as f32 / 2.0) * (PIECE.x + PIECE_GAP);
+                let z =
+                    near - (layer as f32 * 0.5 + k as f32) * (PIECE.z + PIECE_GAP) - PIECE.z / 2.0;
+                let y = PIECE.y * (layer as f32 + 0.5) + 0.002;
+                bed.spawn_piece(Vec3::new(x, y, z), PIECE);
             }
         }
     }
-    let pile_centre = near - 3.0 * (size.z + gap);
-    bed.place(Vec3::ZERO, Quat::IDENTITY);
-    bed.start();
-    // Let the pile settle with the tank parked, clear of it. The reader's control: unloaded,
-    // the world's support on the pieces is their weight.
-    let mut unloaded = Vec::new();
-    for tick in 0..2 * TICKS {
-        bed.tick(0.0, 0.0);
-        if tick >= TICKS {
-            unloaded.push(bed.world_support_on_pieces() / bed.piece_weight());
+    (near, near - 3.0 * (PIECE.z + PIECE_GAP))
+}
+
+/// One layer of pieces under each track's ground run, the tank parked on top; returns the
+/// support level (m). Each row is centred on its track's shoe and spans its road wheels.
+fn pile_under(bed: &mut Bed) -> f32 {
+    let geom = bed.geom();
+    let rows: Vec<(f32, f32, f32)> = Side::ALL
+        .iter()
+        .map(|&side| {
+            let wheels = geom.road_wheels.get(side);
+            let (lo, hi) = wheels
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), w| {
+                    (lo.min(w.z), hi.max(w.z))
+                });
+            (geom.grip_columns(side)[1].0, lo, hi)
+        })
+        .collect();
+    for (x, lo, hi) in rows {
+        let count = ((hi - lo) / (PIECE.z + PIECE_GAP)).ceil() as usize + 1;
+        let start = (lo + hi) / 2.0 - (count - 1) as f32 * (PIECE.z + PIECE_GAP) / 2.0;
+        for k in 0..count {
+            let z = start + k as f32 * (PIECE.z + PIECE_GAP);
+            bed.spawn_piece(Vec3::new(x, PIECE.y / 2.0 + 0.002, z), PIECE);
         }
     }
-    let (unloaded, _) = mean_rms(&unloaded);
-    let begin = bed.hull().position;
-    let mut drive_piece_speed = 0.0_f32;
-    let mut reached = f32::NAN;
-    for tick in 0..15 * TICKS {
-        bed.tick(0.6, 0.0);
-        drive_piece_speed = drive_piece_speed.max(bed.max_piece_speed());
-        if bed.hull().position.z < pile_centre {
-            reached = tick as f32 * DT;
-            break;
-        }
-    }
-    let advanced = near - bed.hull().position.z;
-    // Brake to a stop, then park.
-    for _ in 0..2 * TICKS {
-        let moving = bed.hull().speed() > crate::track::transmission::PARK_ENGAGE_SPEED;
-        bed.tick(if moving { -1.0 } else { 0.0 }, 0.0);
-    }
+    PIECE.y + 0.002
+}
+
+/// Parked 4 s on pieces: the row's parked measures, and the work over those ticks.
+fn park_on_pieces(
+    bed: &mut Bed,
+    begin_y: f32,
+    work: &mut std::collections::BTreeMap<String, f64>,
+) -> Row {
     let (mut ys, mut vys, mut sinks, mut ratios) = (vec![], vec![], vec![], vec![]);
-    let mut park_piece_speed = 0.0_f32;
     let (mut tank_support, mut belt_support) = (vec![], vec![]);
-    let mut work: std::collections::BTreeMap<String, f64> = Default::default();
+    let mut park_piece_speed = 0.0_f32;
+    let mut asleep_under_belt = 0;
     bed.take_work();
     let park = 4 * TICKS;
     for _ in 0..park {
         bed.tick(0.0, 0.0);
         let hull = bed.hull();
-        ys.push(hull.position.y - begin.y);
+        ys.push(hull.position.y - begin_y);
         vys.push(hull.velocity.y);
         sinks.push(bed.sink_into_pieces());
         park_piece_speed = park_piece_speed.max(bed.max_piece_speed());
+        let on_pieces = |f: &&WorldForce| f.body.is_some_and(|b| bed.pieces.contains(&b));
         let from_pieces: f32 = bed
             .world_forces()
             .iter()
-            .filter(|f| f.body.is_some_and(|b| bed.pieces.contains(&b)))
+            .filter(on_pieces)
             .map(|f| f.force.y)
             .sum();
-        tank_support.push(from_pieces);
+        let belt = arm::belt_forces(&bed.app, bed.tank);
         belt_support.push(
-            arm::belt_forces(&bed.app, bed.tank)
-                .iter()
-                .filter(|f| f.body.is_some_and(|b| bed.pieces.contains(&b)))
+            belt.iter()
+                .filter(on_pieces)
                 .map(|f| f.force.y)
                 .sum::<f32>(),
         );
-        let pressed = bed.world_support_on_pieces() - bed.piece_weight();
+        let asleep: std::collections::BTreeSet<Entity> = belt
+            .iter()
+            .filter_map(|f| f.body)
+            .filter(|b| bed.pieces.contains(b) && bed.app.world().get::<Sleeping>(*b).is_some())
+            .collect();
+        asleep_under_belt = asleep_under_belt.max(asleep.len());
+        tank_support.push(from_pieces);
+        let pressed = bed.world_support_on_pieces() - bed.awake_piece_weight();
         if from_pieces > 0.0 {
             ratios.push(pressed / from_pieces);
         }
-        accumulate_work(&bed, &mut work);
+        accumulate_work(bed, work);
     }
     let (rise, jitter) = mean_rms(&ys);
     let (_, vy_rms) = mean_rms(&vys);
     let (sink, _) = mean_rms(&sinks);
-    let sink_max = sinks.iter().copied().fold(0.0, f32::max);
     let (support, _) = mean_rms(&tank_support);
     let (belt, _) = mean_rms(&belt_support);
     let (ratio, ratio_rms) = mean_rms(&ratios);
-    let weight = bed.weight();
     // Resolution: the reaction law holds to 5 % of the load, a margin for solver iteration error.
     let symmetric = !ratios.is_empty() && (ratio - 1.0).abs() < 0.05;
-    let row = vec![
-        ("reached_pile_centre_s", f(reached)),
-        ("hull_centre_past_near_edge_m", f(advanced)),
+    vec![
         ("hull_rise_m", f(rise)),
         ("vertical_jitter_rms_m", f(jitter)),
         ("vertical_speed_rms_m_s", f(vy_rms)),
         ("sink_mean_m", f(sink)),
-        ("sink_max_m", f(sink_max)),
-        ("piece_speed_max_drive_m_s", f(drive_piece_speed)),
+        ("sink_max_m", f(sinks.iter().copied().fold(0.0, f32::max))),
         ("piece_speed_max_parked_m_s", f(park_piece_speed)),
-        ("support_from_pieces_share_of_weight", f(support / weight)),
+        (
+            "support_from_pieces_share_of_weight",
+            f(support / bed.weight()),
+        ),
         ("belt_channel_share_of_that", f(belt / support)),
-        ("reader_control_unloaded_support_over_weight", f(unloaded)),
+        ("belt_loaded_pieces_asleep_max", json!(asleep_under_belt)),
         ("reaction_ratio", f(ratio)),
         ("reaction_ratio_rms", f(ratio_rms)),
         ("reaction_symmetric", json!(symmetric)),
+    ]
+}
+
+/// Line 8. Rubble: a pile driven onto at two throttles, and a layer under the parked tank.
+fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
+    let ground = base_ground();
+    let mut rows = Vec::new();
+    let mut symmetric = true;
+    let mut control = Vec::new();
+    for throttle in [0.6, 1.0] {
+        let mut bed = Bed::on_ground(Some(ground), flat());
+        let (near, centre) = pile_ahead(&mut bed);
+        bed.place(Vec3::ZERO, Quat::IDENTITY);
+        bed.start();
+        // Let the pile settle with the tank parked clear of it. The reader's control: unloaded,
+        // the world's support on the awake pieces is their weight.
+        for tick in 0..2 * TICKS {
+            bed.tick(0.0, 0.0);
+            let weight = bed.awake_piece_weight();
+            if tick >= TICKS / 4 && weight > 0.0 {
+                control.push(bed.world_support_on_pieces() / weight);
+            }
+        }
+        let begin = bed.hull().position;
+        let mut drive_piece_speed = 0.0_f32;
+        let mut reached = f32::NAN;
+        for tick in 0..15 * TICKS {
+            bed.tick(throttle, 0.0);
+            drive_piece_speed = drive_piece_speed.max(bed.max_piece_speed());
+            if bed.hull().position.z < centre {
+                reached = tick as f32 * DT;
+                break;
+            }
+        }
+        let advanced = near - bed.hull().position.z;
+        // Brake to a stop, then park.
+        for _ in 0..2 * TICKS {
+            let moving = bed.hull().speed() > crate::track::transmission::PARK_ENGAGE_SPEED;
+            bed.tick(if moving { -1.0 } else { 0.0 }, 0.0);
+        }
+        let mut work = Default::default();
+        let mut row: Row = vec![
+            ("case", json!(format!("pile ahead, {throttle} throttle"))),
+            ("reached_pile_centre_s", f(reached)),
+            ("hull_centre_past_near_edge_m", f(advanced)),
+            ("piece_speed_max_drive_m_s", f(drive_piece_speed)),
+        ];
+        row.extend(park_on_pieces(&mut bed, begin.y, &mut work));
+        symmetric &= row
+            .iter()
+            .any(|(k, v)| *k == "reaction_symmetric" && *v == json!(true));
+        work_rows.push(work_row(
+            &format!("parked on the pile ahead, {throttle} throttle"),
+            &work,
+            4 * TICKS,
+        ));
+        rows.push(row);
+    }
+
+    let mut bed = Bed::on_ground(Some(ground), flat());
+    let level = pile_under(&mut bed);
+    bed.place(Vec3::new(0.0, level, 0.0), Quat::IDENTITY);
+    bed.start();
+    let begin_y = bed.hull().position.y - level;
+    let mut work = Default::default();
+    let mut row: Row = vec![
+        ("case", json!("a layer under the parked tank's tracks")),
+        ("reached_pile_centre_s", Value::Null),
+        ("hull_centre_past_near_edge_m", Value::Null),
+        ("piece_speed_max_drive_m_s", Value::Null),
     ];
-    work_rows.push(work_row("parked on the rubble pile", &work, park));
+    row.extend(park_on_pieces(&mut bed, begin_y, &mut work));
+    symmetric &= row
+        .iter()
+        .any(|(k, v)| *k == "reaction_symmetric" && *v == json!(true));
+    work_rows.push(work_row(
+        "parked on a layer under its tracks",
+        &work,
+        4 * TICKS,
+    ));
+    rows.push(row);
+    let (control, control_rms) = mean_rms(&control);
     card.push(Line {
         id: "rubble",
         title: "8. Rubble",
         kind: Kind::Law,
         pass: arm::CLAIMS_PIECE_REACTION.then_some(symmetric),
-        rows: vec![row],
+        rows,
         note: format!(
-            "{} pieces of {FIXTURE_SUBSTANCE} (shipped density and friction). Drive at 0.6 \
-             throttle until the hull centre is over the pile, brake, park 4 s; parked values \
-             are over those 4 s. Rise is against the hull's start on level ground. Sink is the \
-             rest-pose belt bottom's depth inside pieces. The reaction ratio is (world support \
-             on the pieces − their weight) / (the pieces' support on the hull): 1 when every \
-             piece under load takes the equal and opposite reaction, 0 when the pieces hold the \
-             tank up unloaded. The reader's control: before the tank arrives, the world's support \
-             on the pieces over their weight, which is 1 when the reader is right. The ratio is \
-             a law check only where the arm claims it (this arm: {}).",
-            bed.pieces.len(),
+            "Pieces of {FIXTURE_SUBSTANCE} (shipped density and friction), {PIECE} m. Pile ahead: \
+             5 × 6 under 4 × 5, near edge 6 m ahead of the belt's front point; drive until the \
+             hull centre is over the pile's centre (15 s at most), brake, park 4 s. Layer under: \
+             one row under each track's road wheels, the tank placed on it at rest, parked 4 s. \
+             Parked values are over those 4 s; rise is against the hull's rest level on the \
+             ground. Sink is the rest-pose belt bottom's depth inside pieces. The reaction ratio \
+             is (world support on the awake pieces − their weight) / (the pieces' support on the \
+             hull): 1 when every piece under load takes the equal and opposite reaction, 0 when \
+             the pieces hold the tank up unloaded. A sleeping piece leaves the solver: the \
+             count of belt-loaded pieces asleep says how many hold the tank as if fixed. The \
+             reader's control, the settling pile's world support over its awake weight: \
+             {control:.4} (RMS {control_rms:.4}), 1 when the reader is right. The ratio is a law \
+             check only where the arm claims it (this arm: {}).",
             if arm::CLAIMS_PIECE_REACTION {
                 "claims it"
             } else {
@@ -1489,11 +1602,175 @@ fn work_open_ground(work_rows: &mut Vec<Row>) {
 }
 
 /// The whole card, on whichever track model this branch builds.
+/// Fixture: the step heights the reach columns are read at (m above the parked tank's ground).
+const REACH_HEIGHTS: [(&str, f32); 6] = [
+    ("reach_below_0.2_m", 0.2),
+    ("reach_below_0.4_m", 0.4),
+    ("reach_below_0.6_m", 0.6),
+    ("reach_below_0.8_m", 0.8),
+    ("reach_below_1.0_m", 1.0),
+    ("reach_below_1.2_m", 1.2),
+];
+
+/// The most forward hull-frame z (forward is −z) of a convex part's points at or below height
+/// `h`: a vertex below it, or an edge between two vertices crossing it. Every pair is tried, so
+/// the answer is the section of the part's convex hull.
+fn reach_below(part: &[Vec3], h: f32) -> Option<f32> {
+    let mut best: Option<f32> = None;
+    let mut keep = |z: f32| best = Some(best.map_or(z, |b| b.min(z)));
+    for (i, a) in part.iter().enumerate() {
+        if a.y <= h {
+            keep(a.z);
+        }
+        for b in &part[i + 1..] {
+            if (a.y - h) * (b.y - h) < 0.0 {
+                keep(a.z + (h - a.y) / (b.y - a.y) * (b.z - a.z));
+            }
+        }
+    }
+    best
+}
+
+/// Line 0. Where the tank's colliders sit against its belt's front wrap: construction facts in
+/// the parked hull's frame (forward is −z), heights above the flat ground it rests on.
+fn geometry(card: &mut Card) {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
+    bed.place(Vec3::ZERO, Quat::IDENTITY);
+    bed.start();
+    for _ in 0..2 * TICKS {
+        bed.tick(0.0, 0.0);
+    }
+    let hull = bed.hull();
+    // The flat ground is world y = 0: the point under the hull origin, in the hull frame.
+    let ground = (hull.rotation.inverse() * Vec3::new(0.0, -hull.position.y, 0.0)).y;
+    let (pitch, _, _) = hull.rotation.to_euler(EulerRot::XYZ);
+    let mut parts: std::collections::BTreeMap<String, Vec<Vec<Vec3>>> = Default::default();
+    let colliders: Vec<(Entity, Vec<Vec3>)> = {
+        let world = bed.app.world_mut();
+        world
+            .query::<(
+                Entity,
+                &Collider,
+                &ColliderOf,
+                &ColliderTransform,
+                &CollisionLayers,
+            )>()
+            .iter(world)
+            // A collider with no filters (the ballistic volumes) meets nothing in the world.
+            .filter(|(_, _, of, _, layers)| {
+                of.body == bed.tank && layers.filters != LayerMask::NONE
+            })
+            .map(|(entity, collider, _, at, _)| {
+                let shape = collider.shape();
+                let local: Vec<Vec3> = if let Some(hull) = shape.as_convex_polyhedron() {
+                    hull.points().to_vec()
+                } else {
+                    let half = shape
+                        .as_cuboid()
+                        .expect("a colliding tank collider is a convex hull or a cuboid")
+                        .half_extents;
+                    (0..8)
+                        .map(|i| {
+                            half * Vec3::new(
+                                [-1.0, 1.0][i & 1],
+                                [-1.0, 1.0][(i >> 1) & 1],
+                                [-1.0, 1.0][i >> 2],
+                            )
+                        })
+                        .collect()
+                };
+                let points = local
+                    .into_iter()
+                    .map(|p| {
+                        let p = at.transform_point(p);
+                        Vec3::new(p.x, p.y - ground, p.z)
+                    })
+                    .collect();
+                (entity, points)
+            })
+            .collect()
+    };
+    for (entity, points) in colliders {
+        parts.entry(bed.role(entity)).or_default().push(points);
+    }
+    // The belt's rest outline, per side: every route circle at its outer face.
+    let geom = bed.geom();
+    let outer = geom.model.pin_to_outer;
+    for side in Side::ALL {
+        let outline = geom
+            .rest
+            .get(side)
+            .iter()
+            .flat_map(|&(centre, radius)| {
+                (0..64).map(move |step| {
+                    let angle = std::f32::consts::TAU * step as f32 / 64.0;
+                    Vec3::new(
+                        0.0,
+                        centre.y + (radius + outer) * angle.sin(),
+                        centre.x + (radius + outer) * angle.cos(),
+                    )
+                })
+            })
+            .map(|p| Vec3::new(p.x, p.y - ground, p.z))
+            .collect();
+        parts
+            .entry("belt outline (rest pose)".into())
+            .or_default()
+            .push(outline);
+    }
+    let rows = parts
+        .iter()
+        .map(|(role, parts)| {
+            let all = || parts.iter().flatten();
+            let nose = all()
+                .min_by(|a, b| a.z.total_cmp(&b.z))
+                .expect("a part has points");
+            let low = all()
+                .min_by(|a, b| a.y.total_cmp(&b.y))
+                .expect("a part has points");
+            let mut row: Row = vec![
+                ("collider", json!(role)),
+                ("parts", json!(parts.len())),
+                ("nose_z_m", f(nose.z)),
+                ("nose_height_m", f(nose.y)),
+                ("lowest_height_m", f(low.y)),
+                ("lowest_at_z_m", f(low.z)),
+            ];
+            for (key, h) in REACH_HEIGHTS {
+                let reach = parts
+                    .iter()
+                    .filter_map(|part| reach_below(part, h))
+                    .reduce(f32::min);
+                row.push((key, reach.map_or(Value::Null, f)));
+            }
+            row
+        })
+        .collect();
+    card.push(Line {
+        id: "geometry",
+        title: "0. Where the tank's colliders sit",
+        kind: Kind::Observation,
+        pass: None,
+        rows,
+        note: format!(
+            "Construction facts of the spawned tank, parked 2 s on flat ground (pitch \
+             {:.2}°, the ground at hull-frame y {ground:.4} m): every collider on the hull body, by role, in the hull frame (forward is \
+             −z), heights above the ground under the hull origin. Nose: the most forward \
+             vertex. Reach below h: the most forward point of the role at or below height h, \
+             the first thing of the tank a step of that height meets on a level approach \
+             (null: nothing of it is that low). The belt outline is every route circle of the \
+             rest pose at the belt's outer face.",
+            pitch.to_degrees()
+        ),
+    });
+}
+
 #[test]
 #[ignore = "the track scorecard, run on demand"]
 fn track_scorecard() {
     let mut card = Card::default();
     let mut work_rows = Vec::new();
+    geometry(&mut card);
     slope_hold(&mut card);
     turning(&mut card);
     acceleration(&mut card);

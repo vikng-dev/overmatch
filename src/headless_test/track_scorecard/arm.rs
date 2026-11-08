@@ -2,8 +2,9 @@
 //!
 //! Everything the card sets or reads that belongs to a track model, and nothing else, lives here.
 //! An arm that replaces the track internals edits this file and leaves the card unchanged. The
-//! card itself reads only the shipped input (`TankCommand`), Avian body state, Avian's solver
-//! contacts and construction facts (`RigGeom`, the tank spec, the transmission tables).
+//! card itself reads only the shipped input (`TankCommand`), Avian body state, every solver
+//! contact's momentum through `ContactTransfers` (normal and friction) and construction facts
+//! (`RigGeom`, the tank spec, the transmission tables).
 //!
 //! This arm: the boat (`lane/rubble`). Its belt support and grip act as forces applied outside
 //! Avian's solver, reported per tick in `TrackContacts`.
@@ -11,6 +12,7 @@
 use bevy::prelude::*;
 
 use crate::ground_field::{ContactGround, GroundField};
+use crate::track::bump_stop::{BumpStop, SidePlate};
 use crate::track::sim::TrackContacts;
 use crate::track::terrain::TrackField;
 
@@ -28,6 +30,18 @@ pub(super) struct WorldForce {
 /// boat does not: `track::rubble` clamps a resting piece's normal reaction by design.
 pub(super) const CLAIMS_PIECE_REACTION: bool = false;
 
+/// The role of one of the track model's own colliders on the tank, named from the marker its
+/// spawner puts on it; `None` for a collider the track model does not spawn.
+pub(super) fn collider_role(world: &World, collider: Entity) -> Option<&'static str> {
+    if world.get::<BumpStop>(collider).is_some() {
+        Some("bump stop")
+    } else if world.get::<SidePlate>(collider).is_some() {
+        Some("side plate")
+    } else {
+        None
+    }
+}
+
 /// Make the whole height field one ground type.
 pub(super) fn set_ground(app: &mut App, ground: ContactGround) {
     let mut track = app.world_mut().resource_mut::<TrackField>();
@@ -39,9 +53,8 @@ pub(super) fn set_ground(app: &mut App, ground: ContactGround) {
 }
 
 /// The forces this tick that the track model applied to the hull outside Avian's solver. The
-/// card adds the normal forces of Avian's solver contacts itself, and no friction: avian 0.7's
-/// contact point keeps no friction total. An arm whose contacts live in the solver returns
-/// their friction here.
+/// card adds every solver contact itself, friction included, so an arm whose contacts live in
+/// the solver returns only what it applies beside them.
 pub(super) fn belt_forces(app: &App, tank: Entity) -> Vec<WorldForce> {
     let world = app.world();
     let contacts = world
