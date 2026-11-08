@@ -1052,6 +1052,7 @@ mod tests {
                 Rig {
                     hull,
                     turret: hull,
+                    gunner_yaw: gun,
                     gun,
                     muzzle,
                 },
@@ -1499,6 +1500,7 @@ mod tests {
                 Rig {
                     hull,
                     turret: hull,
+                    gunner_yaw: gun,
                     gun,
                     muzzle,
                 },

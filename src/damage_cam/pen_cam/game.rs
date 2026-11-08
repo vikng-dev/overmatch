@@ -1339,6 +1339,7 @@ mod tests {
             crate::tank::Rig {
                 hull,
                 turret,
+                gunner_yaw: gun,
                 gun,
                 muzzle,
             },
@@ -1627,6 +1628,7 @@ mod tests {
         world.entity_mut(target).insert(crate::tank::Rig {
             hull,
             turret,
+            gunner_yaw: gun,
             gun,
             muzzle,
         });

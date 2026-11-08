@@ -40,7 +40,7 @@ pub struct ViewServo;
 /// before presentation arrived. It never creates simulation state.
 #[expect(
     clippy::too_many_arguments,
-    reason = "an observer joining a view to its skeleton: hierarchy, names, transforms and five \
+    reason = "an observer joining a view to its skeleton: hierarchy, names, transforms and \
               part-role filters"
 )]
 pub fn bind_tank_view(

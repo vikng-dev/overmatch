@@ -22,8 +22,8 @@ use crate::render_policy::{CameraProfile, VisualScope};
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
-    Controlled, GunnerYaw, RemoteServos, ServoIndex, ServoRest, ServoSpec, Tank, TankServos,
-    TankViews, rig_world_pose, shortest_angle,
+    Controlled, RemoteServos, ServoIndex, ServoRest, ServoSpec, Tank, TankServos, TankViews,
+    rig_world_pose, shortest_angle,
 };
 use crate::view::PlayerView;
 
@@ -323,7 +323,6 @@ fn resume_commit(committed_point: Option<Vec3>, moved: bool, resolved: Vec3) -> 
 #[derive(SystemParam)]
 pub(crate) struct LiveServos<'w, 's> {
     slots: Query<'w, 's, &'static ServoIndex>,
-    yaws: Query<'w, 's, &'static GunnerYaw>,
     rests: Query<'w, 's, &'static ServoRest>,
     states: Query<'w, 's, &'static TankServos>,
     remote: Query<'w, 's, &'static RemoteServos>,
@@ -433,11 +432,7 @@ pub(crate) fn drive_gunner_aim(
     let sensitivity = look::get().mouse_sensitivity_per_fov.0 * fov;
 
     // The margin below clamps intent against the gun's live lay — see [`LiveServos::angle`].
-    let yaw = servos
-        .yaws
-        .get(tank)
-        .expect("a complete player rig carries its separately resolved Gunner yaw handle")
-        .0;
+    let yaw = rig.gunner_yaw;
     let yaw_angle = servos.angle(tank, yaw);
     let pitch_angle = servos.angle(tank, rig.gun);
 
@@ -688,15 +683,13 @@ mod tests {
                 RangeTable::test_fixed(0.0),
             ))
             .id();
-        world.entity_mut(tank).insert((
-            Rig {
-                hull,
-                turret: assembly,
-                gun,
-                muzzle,
-            },
-            GunnerYaw(yaw),
-        ));
+        world.entity_mut(tank).insert((Rig {
+            hull,
+            turret: assembly,
+            gunner_yaw: yaw,
+            gun,
+            muzzle,
+        },));
         for assembly_has_servo in [false, true] {
             if assembly_has_servo {
                 world.get_mut::<Transform>(assembly).unwrap().rotation =

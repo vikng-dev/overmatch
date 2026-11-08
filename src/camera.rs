@@ -718,6 +718,7 @@ mod tests {
             app.world_mut().entity_mut(root).insert(Rig {
                 hull: root,
                 turret,
+                gunner_yaw: turret,
                 gun: turret,
                 muzzle: turret,
             });
@@ -768,6 +769,7 @@ mod tests {
         app.world_mut().entity_mut(root).insert(Rig {
             hull: root,
             turret,
+            gunner_yaw: turret,
             gun: turret,
             muzzle: turret,
         });
@@ -794,6 +796,7 @@ mod tests {
         app.world_mut().entity_mut(other).insert(Rig {
             hull: other,
             turret,
+            gunner_yaw: turret,
             gun: turret,
             muzzle: turret,
         });
@@ -826,6 +829,7 @@ mod tests {
                 Rig {
                     hull: Entity::PLACEHOLDER,
                     turret: Entity::PLACEHOLDER,
+                    gunner_yaw: Entity::PLACEHOLDER,
                     gun: Entity::PLACEHOLDER,
                     muzzle: Entity::PLACEHOLDER,
                 },

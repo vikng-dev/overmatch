@@ -2365,6 +2365,7 @@ mod tests {
             Rig {
                 hull: root,
                 turret,
+                gunner_yaw: turret,
                 gun: turret,
                 muzzle: turret,
             },

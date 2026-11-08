@@ -634,7 +634,7 @@ mod tests {
         use crate::damage::{FunctionRole, VolumeOf};
         // Fixture box and drive facts; no shipped vehicle output determines the assertions.
         let turret = TurretSpec {
-            node: None,
+            node: "Fixture_Turret".into(),
             mass: Sourced(mass),
             inertia_extents: Sourced((2.0, 1.0, 2.0)),
         };

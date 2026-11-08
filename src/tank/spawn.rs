@@ -10,13 +10,11 @@ use bevy::prelude::*;
 
 use super::integrity::authored_attachment;
 use super::model::{
-    EngineSound, Gun, GunBarrel, GunnerYaw, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot,
-    TankServos, TankSim, TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate,
-    WeaponGateState, WeaponIndex, WeaponLoad, WeaponLoads, WeaponState,
+    EngineSound, Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim,
+    TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate, WeaponGateState,
+    WeaponIndex, WeaponLoad, WeaponLoads, WeaponState,
 };
-use super::servo::{
-    RemoteServos, ServoCommand, ServoIndex, ServoMechanism, ServoRest, ServoRole, ServoSpec,
-};
+use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoMechanism, ServoRest, ServoSpec};
 use super::view::{SimParts, bind_tank_view};
 use crate::Layer;
 use crate::bake::{TankBlueprint, TankGeometry};
@@ -444,25 +442,14 @@ fn resolve_rig_nodes<'a>(geometry: &'a TankGeometry, spec: &'a TankSpec) -> RigN
          {inert:?}"
     );
     // The gunner view's node is the main mount's Pitch servo — the anchor of the gun chain.
-    let gunner_pitch = spec
-        .views
-        .get(&ViewKind::Gunner)
-        .and_then(|view| resolve(&view.node));
-    let gunner_yaw = spec.gunner_yaw.as_deref().and_then(&mut resolve);
+    let (gunner_yaw, gunner_pitch) = match spec.gunner_aim() {
+        Some((yaw, pitch)) => (resolve(yaw), resolve(pitch)),
+        None => (None, None),
+    };
+    let turret_index = resolve(&spec.turret.node);
     let hull_index = resolve("Hull");
     let com_index = resolve("Center_Of_Mass");
 
-    // The sight selects the gun chain; turret construction independently declares its assembly root.
-    let servo_nodes_with_role = |role: ServoRole| -> HashSet<usize> {
-        servo_entries
-            .iter()
-            .zip(&servo_nodes)
-            .filter(|((_, servo), _)| servo.role == role)
-            .filter_map(|(_, index)| *index)
-            .collect()
-    };
-    let pitch_indices = servo_nodes_with_role(ServoRole::Pitch);
-    let turret_index = crate::bake::turret_node(geometry, spec);
     // The single `Primary` weapon supplies the rig's main bore (`Rig.muzzle`) — what the bore HUD
     // reads and LMB fires. Trigger never speaks to aiming; the chain handles come from the gunner
     // view above.
@@ -476,22 +463,8 @@ fn resolve_rig_nodes<'a>(geometry: &'a TankGeometry, spec: &'a TankSpec) -> RigN
     if primary_muzzle_index.is_none() {
         missing.push("<a Primary weapon>".into());
     }
-    // `spec.views` and `spec.servos` are independent maps: nothing in the spec format stops the
-    // gunner view naming a node that is not a declared servo. Assembly assumes it IS one — only
-    // servo nodes (plus hull/turret/weapon/volume/wheel nodes) are entered into `needed_nodes`, so a
-    // non-servo gunner node would resolve, pass this contract, then fail far downstream in
-    // `entity_at` with "needed nodes were spawned above". Checking the role here keeps the failure
-    // where the contract is stated, and the message names the offending node.
-    match gunner_pitch {
-        None => missing.push("<a Pitch servo above the Primary weapon's muzzle>".into()),
-        Some(index) if !pitch_indices.contains(&index) => missing.push(format!(
-            "<the Gunner view's node {:?}, declared as a Pitch servo>",
-            geometry.nodes[index].name
-        )),
-        Some(_) => {}
-    }
-    if turret_index.is_none() {
-        missing.push("<a declared turret.node assembly root>".into());
+    if gunner_pitch.is_none() {
+        missing.push("<a Pitch servo above the Primary weapon's muzzle>".into());
     }
     // The declared lists resolved at extraction (a missing name fails there, naming it), so these
     // only restate the structural minimum the assembler needs.
@@ -1083,7 +1056,6 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
         },
     ));
 
-    commands.entity(root).insert(GunnerYaw(yaw));
     insert_root_components(
         commands,
         root,
@@ -1095,6 +1067,7 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
         Rig {
             hull,
             turret,
+            gunner_yaw: yaw,
             gun,
             muzzle,
         },
@@ -1154,12 +1127,9 @@ mod proxy_tests {
             root_scale: Vec3::ONE,
             primitives: Vec::new(),
         });
-        spec.turret.node = Some(name.into());
+        spec.turret.node = name.into();
         let nodes = resolve_rig_nodes(&geometry, &spec);
-        assert_eq!(
-            nodes.turret,
-            geometry.by_name[spec.turret.node.as_ref().unwrap()]
-        );
+        assert_eq!(nodes.turret, geometry.by_name[&spec.turret.node]);
         assert_eq!(
             nodes.gunner_yaw,
             geometry.by_name[spec.gunner_yaw.as_ref().unwrap()]

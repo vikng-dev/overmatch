@@ -762,6 +762,7 @@ mod tests {
         world.entity_mut(tank).insert(Rig {
             hull: tank,
             turret: tank,
+            gunner_yaw: tank,
             gun: tank,
             muzzle: tank,
         });

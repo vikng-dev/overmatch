@@ -101,13 +101,8 @@ fn scenario_world_under(scenario: &Scenario, law: Option<&spall_cone::ConeShape>
     if scenario.turret_yaw_deg != 0.0 || scenario.gun_elevation_deg != 0.0 {
         let tank = app.world().resource::<ProbeTank>().0;
         let rig = app.world().get::<Rig>(tank).expect("the tank has a rig");
-        let yaw = app
-            .world()
-            .get::<crate::tank::GunnerYaw>(tank)
-            .expect("the tank has its Gunner yaw handle")
-            .0;
         for (node, deg) in [
-            (yaw, scenario.turret_yaw_deg),
+            (rig.gunner_yaw, scenario.turret_yaw_deg),
             (rig.gun, scenario.gun_elevation_deg),
         ] {
             let slot = app
@@ -654,6 +649,7 @@ pub(super) fn fixture_tanks(volumes: &[(FixtureVolume, usize, Quat)]) -> (App, V
             app.world_mut().entity_mut(tank).insert(Rig {
                 hull: tank,
                 turret: tank,
+                gunner_yaw: tank,
                 gun: tank,
                 muzzle: tank,
             });
@@ -1523,13 +1519,7 @@ fn the_muzzle_is_read_before_the_globals_catch_up() {
     });
     let tank = app.world().resource::<ProbeTank>().0;
     let rig = app.world().get::<Rig>(tank).expect("a rig");
-    let (turret, muzzle) = (
-        app.world()
-            .get::<crate::tank::GunnerYaw>(tank)
-            .expect("the tank has its Gunner yaw handle")
-            .0,
-        rig.muzzle,
-    );
+    let (turret, muzzle) = (rig.gunner_yaw, rig.muzzle);
     let slot = app
         .world()
         .get::<ServoIndex>(turret)

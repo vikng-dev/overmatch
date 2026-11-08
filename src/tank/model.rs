@@ -56,14 +56,12 @@ pub struct Rig {
     pub hull: Entity,
     /// Detachable structural assembly. It need not itself be a servo.
     pub turret: Entity,
+    /// The Gunner's yaw servo, resolved from the sheet independently of the structural assembly.
+    /// Sight margins and the public aim-angle stream address this servo.
+    pub gunner_yaw: Entity,
     pub gun: Entity,
     pub muzzle: Entity,
 }
-
-/// Gunner yaw handle, resolved from the sheet at spawn independently of the structural Rig.
-/// Sight margins and the public aim-angle stream address this servo, never the assembly root.
-#[derive(Component)]
-pub(crate) struct GunnerYaw(pub Entity);
 
 /// Runtime camera configuration and availability gate for one authored view.
 pub struct ViewConfig {

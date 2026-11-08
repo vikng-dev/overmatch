@@ -849,11 +849,11 @@ pub(crate) mod tests {
                     Rig {
                         hull,
                         turret,
+                        gunner_yaw: turret,
                         gun,
                         muzzle,
                     },
                     TankServos::for_count(2),
-                    crate::tank::GunnerYaw(turret),
                 ))
                 .id();
             world.entity_mut(hull).insert(ChildOf(tank));
@@ -1206,6 +1206,7 @@ pub(crate) mod tests {
                     Rig {
                         hull: hulls[i],
                         turret: yaws[i],
+                        gunner_yaw: pitches[i],
                         gun: pitches[i],
                         muzzle,
                     },

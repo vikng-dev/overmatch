@@ -754,6 +754,7 @@ fn device(app: &mut App, player: Entity, camera: Entity) {
         crate::tank::Rig {
             hull,
             turret,
+            gunner_yaw: gun,
             gun,
             muzzle,
         },

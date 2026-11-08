@@ -124,6 +124,7 @@ fn tank(
     app.world_mut().entity_mut(root).insert(Rig {
         hull: root,
         turret: root,
+        gunner_yaw: root,
         gun: root,
         muzzle: root,
     });

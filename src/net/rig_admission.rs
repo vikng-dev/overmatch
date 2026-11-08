@@ -6,7 +6,6 @@ use std::collections::BTreeSet;
 use bevy::prelude::*;
 
 use crate::bake::TankBlueprint;
-use crate::spec::ViewKind;
 
 pub(super) fn plugin(app: &mut App) {
     // Startup's bake publishes the blueprint before this gate; gameplay opens in Update.
@@ -15,12 +14,7 @@ pub(super) fn plugin(app: &mut App) {
 
 fn admit(blueprint: Res<TankBlueprint>) {
     let spec = &blueprint.spec;
-    let (Some(yaw), Some(pitch)) = (
-        spec.gunner_yaw.as_deref(),
-        spec.views
-            .get(&ViewKind::Gunner)
-            .map(|view| view.node.as_str()),
-    ) else {
+    let Some((yaw, pitch)) = spec.gunner_aim() else {
         panic!(
             "{}: gunner_yaw / views[Gunner].node: ServoAngles requires both aim handles; author a playable Gunner rig before network play",
             blueprint.file
@@ -48,6 +42,7 @@ fn admit(blueprint: Res<TankBlueprint>) {
 mod tests {
     use super::*;
     use crate::bake::{NodeGeometry, TankGeometry};
+    use crate::spec::ViewKind;
 
     /// Remote clients can compose static construction but cannot invent an ancestor's motion.
     /// Mount the production admission plugin: dropping that gate admits these concealed axes.

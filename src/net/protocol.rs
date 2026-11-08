@@ -695,19 +695,11 @@ pub(super) fn publish_shot_clock(
 /// `Without<Remote>` excludes every client tank. `Predicted`/`Interpolated` cannot distinguish
 /// authority: the server carries both.
 fn publish_servo_angles(
-    mut tanks: Query<
-        (
-            &Rig,
-            Option<&crate::tank::GunnerYaw>,
-            &TankServos,
-            &mut ServoAngles,
-        ),
-        Without<Remote>,
-    >,
+    mut tanks: Query<(&Rig, &TankServos, &mut ServoAngles), Without<Remote>>,
     servo_slots: Query<&ServoIndex>,
     launched: Query<(), With<LaunchedTurret>>,
 ) {
-    for (rig, yaw, servos, mut angles) in &mut tanks {
+    for (rig, servos, mut angles) in &mut tanks {
         // The game's damage model: a detached assembly follows LaunchedTurretPose, not aim angles.
         if launched.contains(rig.turret) {
             continue;
@@ -723,10 +715,7 @@ fn publish_servo_angles(
                 .current()
         };
         angles.set_if_neq(ServoAngles {
-            gunner_yaw: angle(
-                yaw.expect("a complete player rig carries its Gunner yaw handle")
-                    .0,
-            ),
+            gunner_yaw: angle(rig.gunner_yaw),
             gunner_pitch: angle(rig.gun),
         });
     }
@@ -734,23 +723,17 @@ fn publish_servo_angles(
 
 /// Feed non-owner remote aim handles; the owner's command remains the local input writer's.
 fn apply_servo_angles(
-    tanks: Query<
-        (&ServoAngles, &Rig, Option<&crate::tank::GunnerYaw>),
-        (With<Remote>, Without<GameControlled>),
-    >,
+    tanks: Query<(&ServoAngles, &Rig), (With<Remote>, Without<GameControlled>)>,
     mut servos: Query<&mut ServoCommand>,
     launched: Query<(), With<LaunchedTurret>>,
 ) {
-    for (angles, rig, yaw) in &tanks {
+    for (angles, rig) in &tanks {
         // The game's damage model: launched construction follows its authoritative body pose.
         if launched.contains(rig.turret) {
             continue;
         }
         servos
-            .get_mut(
-                yaw.expect("a complete player rig carries its Gunner yaw handle")
-                    .0,
-            )
+            .get_mut(rig.gunner_yaw)
             .expect("complete spawn gives every attached Gunner yaw servo its command")
             .target = angles.gunner_yaw;
         servos
@@ -1281,6 +1264,8 @@ mod tests {
                 hull: root,
                 turret,
 
+                gunner_yaw: turret,
+
                 gun: turret,
                 muzzle: turret,
             },
@@ -1499,10 +1484,10 @@ mod tests {
                 Rig {
                     hull: assembly,
                     turret: assembly,
+                    gunner_yaw: yaw,
                     gun: pitch,
                     muzzle: pitch,
                 },
-                crate::tank::GunnerYaw(yaw),
                 TankServos {
                     states: vec![
                         crate::tank::ServoState::test_new(0.7, 0.7, 0.0),
@@ -1561,7 +1546,6 @@ mod tests {
             let muzzle = world.spawn_empty().id();
             let mut root = world.spawn((
                 Remote,
-                crate::tank::GunnerYaw(yaw),
                 ServoAngles {
                     gunner_yaw: 0.75,
                     gunner_pitch: -0.2,
@@ -1569,6 +1553,7 @@ mod tests {
                 Rig {
                     hull,
                     turret,
+                    gunner_yaw: yaw,
                     gun,
                     muzzle,
                 },

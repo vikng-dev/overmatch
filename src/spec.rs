@@ -1144,9 +1144,8 @@ pub struct IdlerSpec {
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TurretSpec {
-    /// Structural assembly root, independently of optics; admission refuses None.
-    #[serde(deserialize_with = "deserialize_optional_node")]
-    pub node: Option<String>,
+    /// Structural assembly root, independently of optics.
+    pub node: String,
     /// Mass (kg) of the turret with everything it carries.
     #[serde(deserialize_with = "assembly_mass")]
     pub(crate) mass: Sourced<f32>,
@@ -1376,20 +1375,41 @@ impl TankSpec {
         Ok(())
     }
 
+    /// The Gunner's aim handles, the `(yaw, pitch)` servo node names; `None` on an unarmed tooling
+    /// sheet. `validate` refuses a Gunner view without its yaw, and a yaw without its view.
+    pub(crate) fn gunner_aim(&self) -> Option<(&str, &str)> {
+        let view = self.views.get(&ViewKind::Gunner)?;
+        Some((self.gunner_yaw.as_deref()?, view.node.as_str()))
+    }
+
     /// Structural and aim handles are separate declarations; every player view has both axes.
     fn check_rig(&self) -> Result<(), String> {
-        if self
-            .turret
-            .node
-            .as_ref()
-            .is_none_or(|node| node.trim().is_empty())
-        {
-            return Err("turret.node must name the structural assembly root; author Some(\"node name\") independently of the Gunner yaw servo".into());
+        if self.turret.node.trim().is_empty() {
+            return Err("turret.node must name the structural assembly root; author \"node name\" independently of the Gunner yaw servo".into());
         }
         if let Some(view) = self.views.get(&ViewKind::Gunner) {
             let yaw = self.gunner_yaw.as_deref().ok_or(
                 "gunner_yaw is required by views[Gunner]; author Some(\"Yaw servo node\")",
             )?;
+            if !self
+                .weapons
+                .values()
+                .any(|weapon| weapon.trigger == Trigger::Primary)
+            {
+                return Err(
+                    "views[Gunner] needs a `Primary` weapon, the rig's main bore; mark one weapon \
+                     `Primary`, or drop the view for an unarmed tooling sheet"
+                        .into(),
+                );
+            }
+            // A launch detaches the assembly and the aim servos beneath it; the hull cannot leave.
+            if self.turret.node == "Hull" {
+                return Err(
+                    "turret.node names the hull, which a launch cannot detach; author the turret's \
+                     own assembly root"
+                        .into(),
+                );
+            }
             if self.servos.get(yaw).map(ServoSpec::role) != Some(crate::tank::ServoRole::Yaw) {
                 return Err(format!(
                     "gunner_yaw `{yaw}` must name a declared Yaw servo; select the Gunner's yaw row in servos"
@@ -1412,8 +1432,7 @@ impl TankSpec {
     /// Why the sheet's weapons cannot be mounted, if they cannot: a weapon its own rules refuse
     /// ([`WeaponSpec::checked`]), or more than one `Primary`. Every consumer that resolves the main
     /// bore (`tank::spawn`'s rig, `command`, `crew_sweep`) takes the first `Primary` it finds, so a
-    /// second one would be dropped unseen. A sheet with none is refused at spawn by the rig contract,
-    /// which names it.
+    /// second one would be dropped unseen. A playable sheet with none is refused by `check_rig`.
     fn check_armament(&self) -> Result<(), String> {
         for (name, weapon) in &self.weapons {
             weapon
@@ -1683,9 +1702,11 @@ impl TankSpec {
         if let Some(node) = &self.gunner_yaw {
             references.push(at(NodeRole::Servo, node, "gunner_yaw".into()));
         }
-        if let Some(node) = &self.turret.node {
-            references.push(at(NodeRole::Assembly, node, "turret.node".into()));
-        }
+        references.push(at(
+            NodeRole::Assembly,
+            &self.turret.node,
+            "turret.node".into(),
+        ));
         references.sort_unstable();
         references.dedup();
         references
@@ -2230,7 +2251,7 @@ TankSpec(
     display_name: "Fixture",
     mass: 30_000.0,
     inertia_extents: (3.0, 2.0, 6.0),
-    turret: (node: Some("Turret_Yaw"), mass: (5_000.0, Fixture("fixture assembly mass")), inertia_extents: ((2.0, 1.0, 2.0), Fixture("fixture assembly box"))),
+    turret: (node: "Turret_Yaw", mass: (5_000.0, Fixture("fixture assembly mass")), inertia_extents: ((2.0, 1.0, 2.0), Fixture("fixture assembly box"))),
     gunner_yaw: Some("Turret_Yaw"),
     track: (
         pin_plane_x: (left: -1.3, right: 1.3),
@@ -3048,12 +3069,31 @@ TankSpec(
     #[test]
     fn validate_refuses_an_absent_turret_assembly_before_spawn() {
         let mut spec = fixture();
-        spec.turret.node = None;
+        spec.turret.node = " ".into();
         let err = spec.validate().unwrap_err().to_string();
         assert!(
             err.contains("turret.node") && err.contains("author"),
             "{err}"
         );
+    }
+
+    /// A playable rig is one a spawn can complete and a launch can detach: every consumer of the
+    /// main bore and of the assembly relies on these refusals, and a mutant dropping one lets a
+    /// sheet through to panic at spawn or at a launch. FIXTURE DATA: the fixture sheet.
+    #[test]
+    fn check_rig_refuses_a_rig_spawn_or_a_launch_cannot_complete() {
+        let mut spec = fixture();
+        spec.weapons
+            .values_mut()
+            .for_each(|weapon| weapon.trigger = Trigger::Secondary);
+        assert!(spec.check_rig().unwrap_err().contains("Primary"));
+        let mut spec = fixture();
+        spec.turret.node = "Hull".into();
+        assert!(spec.check_rig().unwrap_err().contains("hull"));
+        // A yaw handle with no Gunner view has no user.
+        let mut spec = fixture();
+        spec.views.remove(&ViewKind::Gunner);
+        assert!(spec.check_rig().unwrap_err().contains("names no user"));
     }
 
     /// The optic and angle stream need declared servo roles, independently of assembly identity.
@@ -3120,8 +3160,7 @@ TankSpec(
                 "((1.0, 1.0, 1.0), Fixture(\"box\"))",
             ),
         ] {
-            let text =
-                format!("(node: Some(\"Assembly\"), mass: {mass}, inertia_extents: {extents})");
+            let text = format!("(node: \"Assembly\", mass: {mass}, inertia_extents: {extents})");
             let err =
                 crate::provenance::from_shipped_str::<TurretSpec>("construction.tank.ron", &text)
                     .err()
