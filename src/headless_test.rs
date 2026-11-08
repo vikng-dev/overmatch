@@ -3701,5 +3701,6 @@ mod contact_account;
 #[cfg(feature = "bitprobe")]
 mod drive_load;
 mod floor;
+mod track_scorecard;
 #[cfg(feature = "bitprobe")]
 pub(crate) use drive_load::coast_equilibrium;
