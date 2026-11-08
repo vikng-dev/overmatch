@@ -6,7 +6,7 @@ with terrain, static obstacles and rubble), game state only.
 **Seam contract (for the two arms that merge this):** `arm.rs`'s signatures are unchanged; one
 function is new, `collider_role(world, collider) -> Option<&'static str>`; and `belt_forces` now
 returns only what the arm applies outside Avian's solver, because the card reads every solver
-contact, friction included, through `ContactTransfers`.
+contact, friction included, through `ContactTransfers`. Session 3 left `arm.rs` untouched.
 
 ## What it is
 
@@ -17,8 +17,8 @@ scripts/serial-cargo test --lib --features dev_ui,bitprobe track_scorecard -- --
 ```
 
 It writes `target/track-scorecard.json` and `target/track-scorecard.md` under the crate root
-after every line, then fails if a law check failed. A whole card is 41 fresh boots, about
-930 simulated seconds, and 2.5 minutes of wall time on the local Mac (MEASURED 135 to 166 s).
+after every line, then fails if a law check failed. A whole card is 45 fresh boots, about
+950 simulated seconds, and 2.5 minutes of wall time on the local Mac (MEASURED 135 to 166 s).
 
 Files:
 - `src/headless_test/track_scorecard.rs`: the card, the world fixtures and the readers. An arm
@@ -64,8 +64,12 @@ Files:
    ground; every colliding collider on the hull body, by role, in the hull frame (forward is
    −z), heights above the ground: the nose (most forward vertex) and its height, the lowest
    point, and the reach below h (the most forward point at or below h, for h = 0.2 to 1.2 m),
-   which says what of the tank a step of that height meets first on a level approach. The belt's
-   rest outline (every route circle at the outer face) is a row of its own.
+   which says what of the tank a step of that height meets first on a level approach. Laterally,
+   the most forward point of each role between the belt lanes, in them and outboard of them, at
+   heights up to the walls' 4 m (a 2 cm grid of rays cast rearward): what a wall over that strip
+   meets first. A lane is one shoe's span plus 0.05 m a side, the same strip as line 4b's
+   one-lane walls. The belt's rest outline (every route circle at the outer face) is a row of
+   its own.
 1. **Holding on a slope: law check.** Per shipped ground, the limit is
    `min(atan μ, asin(2 F_brake k_static / W))` from the ground's grip and the tank's brake data.
    Slopes sit a tenth of the limit below and above it (the shipped brake test's margin rule).
@@ -77,9 +81,14 @@ Files:
    (μ the ground's grip, W the weight, L the mean road-wheel span).
 3. **Acceleration and top speed per ground: observation.** Full throttle 40 s from rest.
 4. **Climbing: observation.** A step sweep of 0.2 to 1.2 m from a fixed approach (the face 6 m
-   ahead of the belt's front point, full throttle from rest), and the owner's wall case: a 4 m
-   wall 2 m ahead, 8 s of push; the wall's upward force on the hull, the hull's rise and pitch,
-   and which tank parts met the wall.
+   ahead of the belt's front point, full throttle from rest).
+   **4b. Walls: observation.** The owner's front-wheel case: a wall 4 m tall and 2 m thick, its
+   face 2 m ahead of the belt's front point, 8 s of full-throttle push from rest. Three walls:
+   full width (10 m), and one belt lane wide under each belt in turn (the shoe's span plus
+   0.05 m a side, Fixture: it covers the approach's lateral drift, under 1 mm per 10 m in
+   line 6, and stays clear of the gap between the lanes). Reported: the first touch by role,
+   the wall's force on the hull split per solver contact into normal and friction (vertical
+   parts), the belt channel's vertical force, the hull's rise and pitch range.
 5. **Trenches: observation.** A 2 m deep cut between two static plateaus at 0.25, 0.5, 0.75 and
    1.25 × the road-wheel span: crossed or not, the sink, the pitch range.
 6. **Curb and ledge: observation.** A 0.15 m curb under the right shoe's outer edge, driven along
@@ -121,6 +130,21 @@ sits at hull-frame y 0.0597 m; pitch 0.36°).
 | bump stop | 2 | −2.943 | 0.736 | 0.208 (2.389) | — / −2.789 / −2.926 / −2.943 |
 | hull proxy Hull_Collider | 2 | −3.147 | 0.714 | 0.430 (−2.490) | — / — / −2.883 / −3.147 |
 | hull proxy Turret_Collider | 1 | −1.274 | 1.840 | 1.840 (−1.274) | — / — / — / — |
+
+Laterally (the lanes: left x −1.957 .. −1.132 m, right x 1.132 .. 1.957 m), the most forward
+point of each role at heights up to 4 m, as z at height:
+
+| collider | between the lanes | in the lanes | outboard |
+|---|---|---|---|
+| belt outline (rest pose) | — | −2.993 at 0.71 m | — |
+| side plate | — | −2.992 at 0.68 m | — |
+| bump stop | — | −2.942 at 0.73 m | — |
+| hull proxy Hull_Collider | **−3.147 at 0.99 m** | −2.271 at 1.27 m | — |
+| hull proxy Turret_Collider | −1.274 at 2.24 m | — | — |
+
+So the hull proxy's nose is between the lanes; inside a lane the belt's front wrap leads, the
+side plate level with it (1 mm behind), the bump stop 0.051 m behind, and the proxy 0.722 m
+behind. Nothing of the tank reaches outboard of the lanes.
 
 ### Fact check: the hull proxy's nose against the drawn hull and the belt's front wrap
 
@@ -197,14 +221,33 @@ earlier. Steeds' μWL/4 (W·L from construction) is 359 kN·m; only the pivot co
 ### 4. Climbing
 - Steps of 0.2 and 0.4 m are climbed; 0.6 m and higher are not. The first part to meet a step:
   the belt at 0.2 m; a bump stop at 0.4 m; the hull proxy `Hull_Collider` at 0.6 m and above.
-- **The owner's wall case does not occur on this tank.** Against the 4 m wall the hull proxy
-  meets the wall first, and the belt never touches it over 8 s of push. The wall's vertical
-  force on the hull, friction included, never points up (peak 0) and averages −73.2 kN (down)
-  over the last 2 s. Normals alone read a 14.8 kN peak and −0.45 kN, so the downward force is
-  the wall face's friction on the proxy. The hull neither rises nor pitches.
 - So the climb limit here is set by where the hull proxy's nose sits relative to the belt's
-  run-up (line 0 and the fact check above), a construction fact, not by grip. Whether the
-  shipped proxy's nose is right is a question for the asset, not for either arm.
+  run-up (line 0 and the fact check above), a construction fact, not by grip.
+
+### 4b. Walls
+
+Vertical forces upward positive, in kN; "last 2 s" is the mean over the push's last 2 s.
+
+| wall | first touch | solver colliders over the push | normal force, last 2 s | normal vertical: last 2 s, peak up | friction vertical: last 2 s, peak up | belt channel vertical, last 2 s | rise | pitch range |
+|---|---|---|---|---|---|---|---|---|
+| full width, 10 m | hull proxy Hull_Collider | hull proxy Hull_Collider | 289.6 | −0.45, 14.8 | −72.7, 0 | 0 (never touched) | 3.7 mm | −0.45° .. 2.64° |
+| left belt lane only | belt, bump stop (same tick) | bump stop | 266.3 | 0.0, 13.3 | −81.1, 150.5 | +0.93 | 3.7 mm | −0.64° .. 2.64° |
+| right belt lane only | belt, bump stop (same tick) | bump stop | 266.2 | 0.0, 18.3 | −81.1, 150.3 | +0.95 | 3.7 mm | −0.64° .. 2.64° |
+
+- **The owner's front-wheel case, on real geometry:** with the wall one lane wide, the belt and
+  the bump stop meet it on the same tick, and only the bump stop stays in solver contact over
+  the push. The two lanes agree to within 0.1 % on the normal and friction forces; the
+  normal's upward peak differs (13.3 against 18.3 kN).
+- **No climb in any case.** The hull rises 3.7 mm at most; the 2.64° nose-up peak is the launch
+  squat, the same in every case. Over the last 2 s the wall's friction pushes the hull down
+  (−73 to −81 kN) while the normal force is horizontal. The one-lane walls show a transient
+  upward friction peak of 150 kN that does not last.
+- **The belt channel carries almost no vertical force** off a one-lane wall: about +0.9 kN
+  over the last 2 s, against the bump stop's 266 kN normal push.
+- **Where the parts end up (DERIVED from the hull's end position and line 0, at the rest
+  pose):** the hull origin stops 2.888 m short of the wall face, which puts the bump stop's
+  nose 0.054 m and the belt outline's front wrap 0.105 m past the face. Against the full-width
+  wall the proxy's nose ends at the face (−3.1475 against −3.147).
 
 ### 5. Trenches
 
@@ -322,6 +365,15 @@ The curb, the ledge and the 4 m wall have no sandbox twin yet.
   such rather than folded into another role.
 - **Ballistic volumes are left out of line 0:** they have no collision filters and meet nothing
   in the world, so they cannot be what meets a step.
+- **The one-lane walls** span the shoe plus 0.05 m a side, one constant (`LANE_MARGIN`) shared
+  with line 0's lane strips, so the two read against each other. The walls moved out of line 4
+  into their own line 4b, so their columns (a force split the steps do not have) make one table;
+  the full-width wall is its first row, unchanged.
+- **The force split is per solver contact** (along the contact normal, and the rest as
+  friction). The arm's own channel is reported unsplit, because the seam's `WorldForce` carries
+  no normal and the contract stays unchanged.
+- **Line 0's lateral strips use rays**, a 2 cm grid (a `Resolution`), cast rearward at each
+  role's colliders; a ray beside a part's outline is a miss, not a failure.
 - **The rubble cases share one parked measurement**, so the three rows are comparable column by
   column, and each adds its own work row.
 - **The layer under the tracks** is one row of pieces per track, centred on the shoe's centre
@@ -343,8 +395,10 @@ The curb, the ledge and the 4 m wall have no sandbox twin yet.
 - **Why the belt does not meet the 0.4 and 0.6 m step faces first** where its rest outline leads
   the rigid colliders (line 0 against line 4). It is a fact about the boat, for whoever owns it;
   the card only reports it.
-- **The wall case.** On this tank the hull proxy meets a wall before the belt, so the owner's
-  front-wheel case never runs. The fact check gives the owner what he asked for to judge it.
+- **The one-lane wall's end pose:** at the rest pose, the bump stop's nose ends 0.054 m and the
+  belt's front wrap 0.105 m past the wall face (4b). Whether that is real overlap or a pose
+  the rest geometry does not capture (the parts' live positions) is not measured here; a
+  reading of the bump stop's contact depth would settle it.
 - **Sandbox twins** for the curb, the ledge and the 4 m wall, not built this session. The card
   places the curb and the ledge from the rig's own geometry (the right shoe's grip columns),
   but the sandbox course is built at startup, before `RigGeom` exists, into one analytic field.

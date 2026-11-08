@@ -409,10 +409,10 @@ impl Bed {
             .collect()
     }
 
-    /// Every force on the hull from a world body this tick: the arm's own channel plus every
-    /// solver contact between the tank and another body.
-    fn world_forces(&self) -> Vec<WorldForce> {
-        let mut out = arm::belt_forces(&self.app, self.tank);
+    /// Every solver contact between the tank and another body this tick, as (that body, the
+    /// contact normal, the force on the hull).
+    fn tank_solver_forces(&self) -> Vec<(WorldForce, Vec3)> {
+        let mut out = Vec::new();
         for (point, force) in self.solver_points() {
             // The transfer moves `force` into `other`; the reference takes its opposite.
             let (other, force) = if point.other == self.tank {
@@ -422,12 +422,25 @@ impl Bed {
             } else {
                 continue;
             };
-            out.push(WorldForce {
+            let world = WorldForce {
                 body: Some(other),
                 point: point.point,
                 force,
-            });
+            };
+            out.push((world, point.normal));
         }
+        out
+    }
+
+    /// Every force on the hull from a world body this tick: the arm's own channel plus every
+    /// solver contact between the tank and another body.
+    fn world_forces(&self) -> Vec<WorldForce> {
+        let mut out = arm::belt_forces(&self.app, self.tank);
+        out.extend(
+            self.tank_solver_forces()
+                .into_iter()
+                .map(|(force, _)| force),
+        );
         out
     }
 
@@ -965,22 +978,69 @@ fn climbing(card: &mut Card) {
             ("max_rise_m", f(max_rise)),
             ("max_pitch_deg", json!(deg(max_pitch))),
             ("end_z_past_face_m", f(face - hull.position.z)),
-            ("upward_force_from_obstacle_n", Value::Null),
             ("first_touch", json!(first_touch)),
         ]);
     }
 
-    // The owner's wall case: a wall taller than the run-up, pushed at full throttle.
-    let mut bed = Bed::on_ground(Some(ground), flat());
+    card.push(Line {
+        id: "climbing",
+        title: "4. Climbing",
+        kind: Kind::Observation,
+        pass: None,
+        rows,
+        note: format!(
+            "Full throttle from rest. Steps: face 6 m ahead of the belt's front point, climbed iff \
+             the hull centre passes 3 m beyond the face risen by 0.8 × the step within 15 s. \
+             Highest step climbed: {highest} m. first_touch names what of the tank met the \
+             obstacle on the first tick any did: `belt` for the arm's own channel, then each \
+             solver collider's role."
+        ),
+    });
+}
+
+/// Fixture: the walls' height above the ground (m), taller than anything of the tank reaches.
+const WALL_HEIGHT: f32 = 4.0;
+
+/// Fixture: how far a one-lane wall reaches past each edge of the shoe (m). It covers the
+/// lateral drift of a 2 m approach (line 6 measures under 1 mm over 10 m) with room to spare,
+/// and keeps the wall inside the gap between the lanes.
+const LANE_MARGIN: f32 = 0.05;
+
+/// The belt lanes, as (low x, high x) in the hull frame, sorted by x: each side's shoe span from
+/// its grip columns, widened by [`LANE_MARGIN`].
+fn lanes(geom: &RigGeom) -> [(Side, f32, f32); 2] {
+    let lane = |side: Side| {
+        let xs = geom.grip_columns(side).map(|(x, _)| x);
+        let lo = xs.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        (side, lo - LANE_MARGIN, hi + LANE_MARGIN)
+    };
+    let mut out = [lane(Side::Left), lane(Side::Right)];
+    out.sort_by(|a, b| a.1.total_cmp(&b.1));
+    out
+}
+
+/// One wall push: a wall [`WALL_HEIGHT`] tall and 2 m thick, its face 2 m ahead of the belt's
+/// front point, spanning `span` (x low, x high, hull frame; `None` for the full-width wall),
+/// pushed at full throttle for 8 s.
+fn wall_push(case: &str, span: Option<(f32, f32)>) -> Row {
+    let mut bed = Bed::on_ground(Some(base_ground()), flat());
     let front = front_z(bed.geom());
     let face = front - 2.0;
-    // Fixture: 4 m tall, 2 m thick, 10 m wide; no part of the tank reaches over it.
-    let wall = bed.spawn_static(Vec3::new(0.0, 1.5, face - 1.0), Vec3::new(10.0, 5.0, 2.0));
+    // Fixture: the full-width wall is 10 m wide, wider than the tank.
+    let (lo, hi) = span.unwrap_or((-5.0, 5.0));
+    // Sunk 1 m below the ground, so its foot has no edge for the belt to catch.
+    let wall = bed.spawn_static(
+        Vec3::new((lo + hi) / 2.0, (WALL_HEIGHT - 1.0) / 2.0, face - 1.0),
+        Vec3::new(hi - lo, WALL_HEIGHT + 1.0, 2.0),
+    );
     bed.place(Vec3::ZERO, Quat::IDENTITY);
     bed.start();
     let begin = bed.hull().position;
-    let (mut max_pitch, mut max_rise, mut max_up) = (0.0_f32, 0.0_f32, 0.0_f32);
-    let mut late_up = Vec::new();
+    let (mut max_pitch, mut min_pitch, mut max_rise) = (0.0_f32, 0.0_f32, 0.0_f32);
+    let (mut late_normal_up, mut late_friction_up, mut late_belt_up, mut late_push) =
+        (vec![], vec![], vec![], vec![]);
+    let (mut peak_normal_up, mut peak_friction_up) = (0.0_f32, 0.0_f32);
     let mut touching = std::collections::BTreeSet::new();
     let mut belt_touch = false;
     let mut first_touch = None;
@@ -991,56 +1051,84 @@ fn climbing(card: &mut Card) {
         }
         let hull = bed.hull();
         max_pitch = max_pitch.max(hull.pitch());
+        min_pitch = min_pitch.min(hull.pitch());
         max_rise = max_rise.max(hull.position.y - begin.y);
-        let forces = bed.world_forces();
-        let up: f32 = forces
+        let (mut normal, mut friction) = (Vec3::ZERO, Vec3::ZERO);
+        for (force, n) in bed.tank_solver_forces() {
+            if force.body == Some(wall) {
+                let along = n * force.force.dot(n);
+                normal += along;
+                friction += force.force - along;
+            }
+        }
+        let belt: Vec3 = arm::belt_forces(&bed.app, bed.tank)
             .iter()
             .filter(|f| f.body == Some(wall))
-            .map(|f| f.force.y)
+            .map(|f| f.force)
             .sum();
-        belt_touch |= arm::belt_forces(&bed.app, bed.tank)
-            .iter()
-            .any(|f| f.body == Some(wall));
+        belt_touch |= belt != Vec3::ZERO;
         touching.extend(bed.touching_colliders(wall));
-        max_up = max_up.max(up);
+        peak_normal_up = peak_normal_up.max(normal.y);
+        peak_friction_up = peak_friction_up.max(friction.y);
         if tick >= 6 * TICKS {
-            late_up.push(up);
+            late_normal_up.push(normal.y);
+            late_friction_up.push(friction.y);
+            late_belt_up.push(belt.y);
+            late_push.push(normal.length());
         }
     }
-    let (late, _) = mean_rms(&late_up);
-    rows.push(vec![
-        ("case", json!("wall 4 m, front wheel first")),
-        ("climbed", json!(false)),
-        ("time_s", Value::Null),
+    let mean = |v: &[f32]| mean_rms(v).0;
+    vec![
+        ("case", json!(case)),
+        ("first_touch", json!(first_touch)),
+        ("solver_colliders_over_push", json!(format!("{touching:?}"))),
+        ("belt_channel_touched", json!(belt_touch)),
+        ("normal_force_last_2s_n", f(mean(&late_push))),
+        ("normal_vertical_last_2s_n", f(mean(&late_normal_up))),
+        ("normal_vertical_peak_up_n", f(peak_normal_up)),
+        ("friction_vertical_last_2s_n", f(mean(&late_friction_up))),
+        ("friction_vertical_peak_up_n", f(peak_friction_up)),
+        ("belt_channel_vertical_last_2s_n", f(mean(&late_belt_up))),
         ("max_rise_m", f(max_rise)),
-        ("max_pitch_deg", json!(deg(max_pitch))),
-        ("end_z_past_face_m", f(face - bed.hull().position.z)),
         (
-            "upward_force_from_obstacle_n",
-            json!(format!("peak {max_up:.0}, last 2 s mean {late:.0}")),
-        ),
-        (
-            "first_touch",
+            "pitch_range_deg",
             json!(format!(
-                "{}; over the push: belt channel {belt_touch}, solver colliders {touching:?}",
-                first_touch.unwrap_or_default()
+                "{:.2} .. {:.2}",
+                min_pitch.to_degrees(),
+                max_pitch.to_degrees()
             )),
         ),
-    ]);
+        ("end_z_past_face_m", f(face - bed.hull().position.z)),
+    ]
+}
+
+/// Line 4b. Walls taller than the run-up (the owner's front-wheel case): one full width, and one
+/// a single belt lane wide under each belt, where the drawn geometry decides what meets it.
+fn walls(card: &mut Card) {
+    let belt_lanes = {
+        let bed = Bed::on_ground(Some(base_ground()), flat());
+        lanes(bed.geom())
+    }; // The bed drops here, releasing the boot lease each push takes.
+    let mut rows = vec![wall_push("full width, 10 m", None)];
+    for (side, lo, hi) in belt_lanes {
+        let case = format!("{side:?} belt lane only, x {lo:.3} .. {hi:.3} m");
+        rows.push(wall_push(&case, Some((lo, hi))));
+    }
     card.push(Line {
-        id: "climbing",
-        title: "4. Climbing",
+        id: "walls",
+        title: "4b. Walls: full width, and one belt lane wide",
         kind: Kind::Observation,
         pass: None,
         rows,
         note: format!(
-            "Full throttle from rest. Steps: face 6 m ahead of the belt's front point, climbed iff \
-             the hull centre passes 3 m beyond the face risen by 0.8 × the step within 15 s. \
-             Highest step climbed: {highest} m. Wall: face 2 m ahead, 8 s of push; the upward \
-             force is the wall's vertical force on the hull through every channel the card reads \
-             (the arm's own and Avian's solver contacts, friction included). first_touch names \
-             what of the tank met the obstacle on the first tick any did: `belt` for the arm's own \
-             channel, then each solver collider's role."
+            "A wall {WALL_HEIGHT} m tall and 2 m thick, its face 2 m ahead of the belt's front point, pushed \
+             at full throttle from rest for 8 s. The one-lane walls span one shoe's width \
+             (its grip columns) plus {LANE_MARGIN} m each side, centred on that belt. The \
+             wall's force on the hull is split per solver contact into the part along the \
+             contact normal and the friction across it; vertical parts are upward positive, \
+             means over the last 2 s, peaks the largest upward value. The belt channel's \
+             force is the arm's own, unsplit. first_touch names what of the tank met the wall \
+             on the first tick any did; pitch is nose-up positive."
         ),
     });
 }
@@ -1631,6 +1719,67 @@ fn reach_below(part: &[Vec3], h: f32) -> Option<f32> {
     best
 }
 
+/// One collider part of a role: its points (hull frame, heights above the ground) and, for a
+/// spawned collider, its shape and pose on the body.
+type Part = (Vec<Vec3>, Option<(Collider, ColliderTransform)>);
+
+/// Line 0's lateral strips against the belt lanes, in [`forward_by_region`]'s order.
+const REGIONS: [&str; 3] = [
+    "forward_between_lanes",
+    "forward_in_lanes",
+    "forward_outboard",
+];
+
+/// Resolution: the spacing of line 0's ray grid (m), a small fraction of a shoe's width.
+const RAY_GRID_M: f32 = 0.02;
+
+/// The most forward point, as (z, height), of a collider part in each lateral strip (between
+/// the lanes, in them, outboard of them), from a grid of rays cast rearward (+z) at heights up
+/// to [`WALL_HEIGHT`] above the ground.
+fn forward_by_region(
+    collider: &Collider,
+    at: &ColliderTransform,
+    points: &[Vec3],
+    ground: f32,
+    lanes: &[(Side, f32, f32); 2],
+) -> [Option<(f32, f32)>; 3] {
+    let region = |x: f32| {
+        if lanes.iter().any(|&(_, lo, hi)| (lo..=hi).contains(&x)) {
+            1
+        } else if x > lanes[0].2 && x < lanes[1].1 {
+            0
+        } else {
+            2
+        }
+    };
+    let lo = points.iter().fold(Vec3::INFINITY, |a, &p| a.min(p));
+    let hi = points.iter().fold(Vec3::NEG_INFINITY, |a, &p| a.max(p));
+    let bottom = lo.y.max(0.0);
+    let columns = ((hi.x - lo.x) / RAY_GRID_M).ceil() as usize;
+    let rows = ((hi.y.min(WALL_HEIGHT) - bottom).max(0.0) / RAY_GRID_M).ceil() as usize;
+    let mut best = [None; 3];
+    for i in 0..=columns {
+        let x = (lo.x + i as f32 * RAY_GRID_M).min(hi.x);
+        for j in 0..=rows {
+            let h = bottom + j as f32 * RAY_GRID_M;
+            let origin = Vec3::new(x, h + ground, lo.z - 1.0);
+            let reach = hi.z - lo.z + 2.0;
+            // A ray beside the part's outline misses it: nothing of the part at that (x, h).
+            let Some((distance, _)) =
+                collider.cast_ray(at.translation, at.rotation, origin, Vec3::Z, reach, true)
+            else {
+                continue;
+            };
+            let z = origin.z + distance;
+            let slot: &mut Option<(f32, f32)> = &mut best[region(x)];
+            if slot.is_none_or(|(best_z, _)| z < best_z) {
+                *slot = Some((z, h));
+            }
+        }
+    }
+    best
+}
+
 /// Line 0. Where the tank's colliders sit against its belt's front wrap: construction facts in
 /// the parked hull's frame (forward is −z), heights above the flat ground it rests on.
 fn geometry(card: &mut Card) {
@@ -1644,8 +1793,9 @@ fn geometry(card: &mut Card) {
     // The flat ground is world y = 0: the point under the hull origin, in the hull frame.
     let ground = (hull.rotation.inverse() * Vec3::new(0.0, -hull.position.y, 0.0)).y;
     let (pitch, _, _) = hull.rotation.to_euler(EulerRot::XYZ);
-    let mut parts: std::collections::BTreeMap<String, Vec<Vec<Vec3>>> = Default::default();
-    let colliders: Vec<(Entity, Vec<Vec3>)> = {
+    let lanes = lanes(bed.geom());
+    let mut parts: std::collections::BTreeMap<String, Vec<Part>> = Default::default();
+    let colliders: Vec<(Entity, Part)> = {
         let world = bed.app.world_mut();
         world
             .query::<(
@@ -1686,12 +1836,12 @@ fn geometry(card: &mut Card) {
                         Vec3::new(p.x, p.y - ground, p.z)
                     })
                     .collect();
-                (entity, points)
+                (entity, (points, Some((collider.clone(), *at))))
             })
             .collect()
     };
-    for (entity, points) in colliders {
-        parts.entry(bed.role(entity)).or_default().push(points);
+    for (entity, part) in colliders {
+        parts.entry(bed.role(entity)).or_default().push(part);
     }
     // The belt's rest outline, per side: every route circle at its outer face.
     let geom = bed.geom();
@@ -1716,12 +1866,12 @@ fn geometry(card: &mut Card) {
         parts
             .entry("belt outline (rest pose)".into())
             .or_default()
-            .push(outline);
+            .push((outline, None));
     }
     let rows = parts
         .iter()
         .map(|(role, parts)| {
-            let all = || parts.iter().flatten();
+            let all = || parts.iter().flat_map(|(points, _)| points);
             let nose = all()
                 .min_by(|a, b| a.z.total_cmp(&b.z))
                 .expect("a part has points");
@@ -1736,10 +1886,31 @@ fn geometry(card: &mut Card) {
                 ("lowest_height_m", f(low.y)),
                 ("lowest_at_z_m", f(low.z)),
             ];
+            let mut forward = [None; 3];
+            for (points, collider) in parts {
+                let part = match collider {
+                    Some((collider, at)) => forward_by_region(collider, at, points, ground, &lanes),
+                    // The belt outline is the lanes' own content.
+                    None => [None, Some((nose.z, nose.y)), None],
+                };
+                for (best, found) in forward.iter_mut().zip(part) {
+                    if let Some(found) = found
+                        && best.is_none_or(|(z, _): (f32, f32)| found.0 < z)
+                    {
+                        *best = Some(found);
+                    }
+                }
+            }
+            for (key, found) in REGIONS.into_iter().zip(forward) {
+                row.push((
+                    key,
+                    found.map_or(Value::Null, |(z, h)| json!(format!("{z:.3} at {h:.2} m"))),
+                ));
+            }
             for (key, h) in REACH_HEIGHTS {
                 let reach = parts
                     .iter()
-                    .filter_map(|part| reach_below(part, h))
+                    .filter_map(|(points, _)| reach_below(points, h))
                     .reduce(f32::min);
                 row.push((key, reach.map_or(Value::Null, f)));
             }
@@ -1758,9 +1929,18 @@ fn geometry(card: &mut Card) {
              −z), heights above the ground under the hull origin. Nose: the most forward \
              vertex. Reach below h: the most forward point of the role at or below height h, \
              the first thing of the tank a step of that height meets on a level approach \
-             (null: nothing of it is that low). The belt outline is every route circle of the \
-             rest pose at the belt's outer face.",
-            pitch.to_degrees()
+             (null: nothing of it is that low). Forward between, in and outboard of the lanes: \
+             the most forward point (z at height) of the role at heights up to {WALL_HEIGHT} m \
+             within that lateral strip, the first thing of the tank a wall over that strip \
+             meets; the lanes are each shoe's span plus {LANE_MARGIN} m a side ({}), as line \
+             4b's one-lane walls. The belt outline is every route circle of the rest pose at the \
+             belt's outer face.",
+            pitch.to_degrees(),
+            lanes
+                .iter()
+                .map(|(side, lo, hi)| format!("{side:?} x {lo:.3} .. {hi:.3} m"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     });
 }
@@ -1775,6 +1955,7 @@ fn track_scorecard() {
     turning(&mut card);
     acceleration(&mut card);
     climbing(&mut card);
+    walls(&mut card);
     trenches(&mut card);
     curb_and_ledge(&mut card);
     ride(&mut card);
