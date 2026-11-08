@@ -21,6 +21,9 @@ plumbing on the recorded host; concurrent lanes make its timings unsuitable for 
 A scheduled run saves every tick's stages and work counts; --replication-trace adds replication
 envelope size histograms, from a server started with REPLICATION_TRACE (--print-server-env).
 Full-speed ram: --ram scripts/perf/ram.json (local or hosted).
+--server-env OVERMATCH_KEY=VALUE (repeatable) sets one lever on the server only: on the local
+server in match and ram runs, or in --print-server-env's lines for a deployment. Those runs
+pass no inherited OVERMATCH_ variable to any process; the pairs are saved as server-env.json.
 Without --schedule or --ram, the tankless HE diagnostic remains available.
 """
 
@@ -56,6 +59,12 @@ LOG_FETCH_TIMEOUT_S = 30
 LOGS_RATE_LIMITED = 75
 # The server log directive whose send_server_packets lines replication_windows parses.
 REPLICATION_TRACE = "lightyear_replication::server=trace"
+# The levers this runner sets on its own server and clients; --server-env may not replace one.
+RUNNER_KEYS = frozenset({
+    "OVERMATCH_UNATTENDED", "OVERMATCH_WINDOW", "OVERMATCH_MUTE", "OVERMATCH_LOADTEST",
+    "OVERMATCH_RAM", "OVERMATCH_BOT", "OVERMATCH_SERVER_STATS_S", "OVERMATCH_SERVER_BIND",
+    "OVERMATCH_SERVER", "OVERMATCH_HARNESS",
+})
 
 
 def recipe_for(path, tanks):
@@ -274,7 +283,7 @@ def run_match(args, out, recipe):
         if local:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.bind(("127.0.0.1", 5888))
-            spawn("overmatch-server", serverlog, dict(OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_SERVER_STATS_S="1", OVERMATCH_BOT=str(args.tanks-client_count)))
+            spawn("overmatch-server", serverlog, dict(OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_SERVER_STATS_S="1", OVERMATCH_BOT=str(args.tanks-client_count), **dict(args.server_env)))
         verified_host = admit_server(snapshot, children, start + args.startup_grace, args.rehearsal)
         clients = [spawn("overmatch", out / f"client{i}.log", dict(OVERMATCH_SERVER=address, OVERMATCH_HARNESS=str(script))) for i in range(client_count)]
         deadline = start + 2 * args.startup_grace + args.duration
@@ -598,7 +607,7 @@ def run_ram(args, out, recipe):
         if local:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.bind(("127.0.0.1", 5888))
-            spawn("overmatch-server", serverlog, dict(OVERMATCH_SERVER_BIND="127.0.0.1"))
+            spawn("overmatch-server", serverlog, dict(OVERMATCH_SERVER_BIND="127.0.0.1", **dict(args.server_env)))
         host = admit_server(snapshot, children, start + args.startup_grace, local)
         spawn("overmatch", out / "client.log", dict(OVERMATCH_SERVER=address, OVERMATCH_HARNESS=str(script)))
         deadline = start + wall_limit
@@ -631,6 +640,16 @@ def run_ram(args, out, recipe):
             child.wait()
         for log in logs:
             log.close()
+
+
+def server_env(text):
+    """One --server-env pair: an OVERMATCH_ lever this runner does not set, and a value."""
+    key, sep, value = text.partition("=")
+    if not sep or not value or not re.fullmatch(r"OVERMATCH_[A-Z0-9_]+", key):
+        raise argparse.ArgumentTypeError("must be OVERMATCH_<NAME>=<non-empty value>")
+    if key in RUNNER_KEYS:
+        raise argparse.ArgumentTypeError(f"{key} is set by this runner")
+    return key, value
 
 
 def positive(text):
@@ -814,6 +833,7 @@ def main():
     parser.add_argument("--rehearsal", action="store_true", help="local plumbing only: print unpriced observations without claiming a two-vCPU allocation")
     parser.add_argument("--print-server-env", action="store_true", help="print the recipe/environment for the operator's deployment, then exit without a build or run")
     parser.add_argument("--replication-trace", action="store_true", help="require and save replication envelope size histograms (the server runs REPLICATION_TRACE)")
+    parser.add_argument("--server-env", type=server_env, action="append", default=[], metavar="OVERMATCH_KEY=VALUE", help="repeatable: set one OVERMATCH_ lever on the server only (match and ram runs; saved as server-env.json)")
     parser.add_argument("--holding-lock", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.bin = args.bin.resolve()
@@ -838,6 +858,14 @@ def main():
         parser.error("--rehearsal requires a real-match --schedule")
     if recipe and args.sample:
         parser.error("--sample belongs to the tankless diagnostic; match mode observes server windows")
+    if args.server_env:
+        keys = [key for key, _ in args.server_env]
+        if len(set(keys)) != len(keys):
+            parser.error("--server-env names a key twice")
+        if not (recipe or ram):
+            parser.error("--server-env requires --schedule or --ram")
+        if args.target != "local" and not args.print_server_env:
+            parser.error("--server-env cannot reach a running deployment; start it with --print-server-env's lines")
     if args.print_server_env:
         if ram:
             print("OVERMATCH_RAM=" + json.dumps(ram, separators=(",", ":")))
@@ -846,6 +874,8 @@ def main():
             print("OVERMATCH_UNATTENDED=1")
             print("OVERMATCH_WINDOW=headless")
             print("OVERMATCH_MUTE=1")
+            for key, value in args.server_env:
+                print(f"{key}={value}")
             return 0
         if not recipe:
             parser.error("--print-server-env requires --schedule")
@@ -854,6 +884,8 @@ def main():
         print("OVERMATCH_SERVER_STATS_S=1")
         if args.replication_trace:
             print("RUST_LOG=info," + REPLICATION_TRACE)
+        for key, value in args.server_env:
+            print(f"{key}={value}")
         return 0
     if recipe and args.duration <= recipe["events"][-1]["at_s"] + STATS_PERIOD_S:
         parser.error("--duration must leave a complete stats period after the last scheduled break")
@@ -862,6 +894,9 @@ def main():
     if args.sample and not Path("/usr/bin/sample").is_file():
         parser.error("--sample needs macOS /usr/bin/sample")
     if args.holding_lock:
+        if args.server_env:
+            (out / "server-env.json").write_text(json.dumps(dict(args.server_env), indent=2) + "\n")
+            print("server env (server only): " + " ".join(f"{k}={v}" for k, v in args.server_env), flush=True)
         if ram:
             run_ram(args, out, ram)
         elif recipe:

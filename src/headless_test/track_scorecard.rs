@@ -655,19 +655,39 @@ fn base_ground() -> crate::ground_field::ContactGround {
         .contact()
 }
 
-/// Line 1. The static friction law (the owner's decision 3): a parked tank holds while gravity's
-/// pull along the slope stays within its grip and brake capacity, and moves once it exceeds
-/// either. Per ground, `limit = min(atan μ, asin(2 F_brake k_static / W))` from the ground's grip
-/// and the tank's brake data; the slopes sit a tenth of the limit below and above it.
+/// The least-squares slope of `values` sampled once a tick (per second).
+fn slope_per_second(values: &[f32]) -> f32 {
+    let n = values.len() as f32;
+    let t_mean = (n - 1.0) / 2.0 * DT;
+    let v_mean = values.iter().sum::<f32>() / n;
+    let (mut num, mut den) = (0.0, 0.0);
+    for (i, v) in values.iter().enumerate() {
+        let t = i as f32 * DT - t_mean;
+        num += t * (v - v_mean);
+        den += t * t;
+    }
+    num / den
+}
+
+/// Line 1. The static friction law (the owner's decision 3), as a force balance along the
+/// slope. Per ground, the hold capacity per unit mass is `C(θ) = min(μ g cos θ, 2 F_brake
+/// k_static / m)` from the ground's grip and the tank's brake data, and the limit is where
+/// `g sin θ = C(θ)`; the slopes sit a tenth of the limit below and above it.
+/// - Below, the capacity exceeds the demand, so the net downhill force is zero: the mean
+///   downhill acceleration over the last 10 s is zero to within 1 % of the hold's reserve
+///   `C(θ) − g sin θ`. Creep and spring-back are observations.
+/// - Above, the demand exceeds the capacity, and once moving nothing resists more than the
+///   capacity that gave way plus the ground's motion resistance (`c_rr`, the ground's rolling
+///   resistance at the tank's nominal pressure). So the mean downhill acceleration over
+///   seconds 4 to 8 is at least `g sin θ − C(θ) − c_rr g cos θ`, to within 1 % of the static
+///   excess `g sin θ − C(θ)`, and the hull moves downhill. Where that bound is negative the law
+///   asks only that the hull gives way.
 fn slope_hold(card: &mut Card) {
     let spec = shipped_spec();
     let tr = &spec.track.powertrain.transmission;
-    let weight = spec.mass * crate::track::derive::G;
-    let brake_limit = (2.0 * tr.brake_force * tr.brake_static_factor / weight)
-        .min(1.0)
-        .asin();
-    // Resolution: 0.1 % of a tick's gravitational speed permits force and pose roundoff.
-    let precision = crate::track::derive::G * DT * 1e-3;
+    let g = crate::track::derive::G;
+    let brake_capacity = 2.0 * tr.brake_force * tr.brake_static_factor / spec.mass;
+    let brake_limit = (brake_capacity / g).min(1.0).asin();
     let mut rows = Vec::new();
     let mut pass = true;
     for (name, ground) in grounds() {
@@ -683,34 +703,55 @@ fn slope_hold(card: &mut Card) {
                 1.0_f32.to_radians()
             };
             let angle = limit + if above { margin } else { -margin };
+            let (sin, cos) = angle.sin_cos();
+            let capacity = (ground.grip.value * g * cos).min(brake_capacity);
+            let demand = g * sin;
             // The plane falls toward +z; the tank faces uphill, toward −z.
             let mut bed =
                 Bed::on_ground(Some(ground.contact()), card_grid(|_, z| -z * angle.tan()));
+            let rolling = ground.contact().rolling_at(nominal_pressure(&bed.app));
             let rotation = Quat::from_rotation_x(angle);
             let downhill = rotation * Vec3::Z;
-            let start = Vec3::new(0.0, 0.0, 0.0);
-            bed.place(start, rotation);
+            bed.place(Vec3::ZERO, rotation);
             bed.start();
             let begin = bed.hull().position;
             let seconds = if above { 8 } else { 60 };
-            let mut late_start = 0.0;
-            let mut late_speed = 0.0_f32;
-            let mut last = 0.0;
+            // Fixture: the windows the balance is read over, past the start transient.
+            let window = if above { 4 } else { 10 };
+            let (mut speeds, mut along) = (Vec::new(), Vec::new());
+            let mut spring_back = 0.0;
             for tick in 0..seconds * TICKS {
                 bed.tick(0.0, 0.0);
                 let hull = bed.hull();
-                last = (hull.position - begin).dot(downhill);
-                if tick + 1 == (seconds - 1) * TICKS {
-                    late_start = last;
+                let at = (hull.position - begin).dot(downhill);
+                if tick + 1 == 2 * TICKS {
+                    spring_back = at;
                 }
-                if tick >= (seconds - 1) * TICKS {
-                    late_speed = late_speed.max(hull.velocity.dot(downhill).abs());
+                if tick >= (seconds - window) * TICKS {
+                    speeds.push(hull.velocity.dot(downhill));
+                    along.push(at);
                 }
             }
-            let travel = last - late_start;
-            let held = travel.abs() < precision && late_speed < precision;
-            let moved = travel > precision && late_speed > precision;
-            let ok = if above { moved } else { held };
+            let accel = slope_per_second(&speeds);
+            let (creep_speed, _) = mean_rms(&speeds);
+            let peak_speed = speeds.iter().copied().fold(0.0_f32, |a, v| a.max(v.abs()));
+            let window_travel = along.last().expect("the window sampled") - along[0];
+            let end = *along.last().expect("the window sampled");
+            let (bound, precision, ok) = if above {
+                let excess = demand - capacity;
+                let bound = excess - rolling * g * cos;
+                // Resolution: 1 % of the static excess, for solver and pose roundoff.
+                let precision = 0.01 * excess;
+                (
+                    bound,
+                    precision,
+                    accel >= bound - precision && window_travel > 0.0,
+                )
+            } else {
+                // Resolution: 1 % of the hold's reserve, for solver and pose roundoff.
+                let precision = 0.01 * (capacity - demand);
+                (0.0, precision, accel.abs() <= precision)
+            };
             pass &= ok;
             rows.push(vec![
                 ("ground", json!(name)),
@@ -726,9 +767,14 @@ fn slope_hold(card: &mut Card) {
                         "brake"
                     }),
                 ),
-                ("settle_m", f(last)),
-                ("last_second_travel_m", f(travel)),
-                ("last_second_speed_m_s", f(late_speed)),
+                ("mean_accel_m_s2", f(accel)),
+                ("law_bound_m_s2", f(bound)),
+                ("precision_m_s2", f(precision)),
+                ("spring_back_m", f(spring_back)),
+                ("creep_distance_m", f(end - spring_back)),
+                ("window_travel_m", f(window_travel)),
+                ("creep_speed_mm_s", f(creep_speed * 1e3)),
+                ("peak_speed_mm_s", f(peak_speed * 1e3)),
                 ("pass", json!(ok)),
             ]);
         }
@@ -739,12 +785,16 @@ fn slope_hold(card: &mut Card) {
         kind: Kind::Law,
         pass: Some(pass),
         rows,
-        note: format!(
-            "Parked (spawn state, park lever on), no input. Below: 60 s, holds iff the last \
-             second's travel and speed are under {precision:.2e} (m, m/s; 0.1 % of g·dt). \
-             Above: 8 s, moves iff both exceed it. Limits from the ground's grip and the tank's \
-             brake data; settle_m (the spring-back and any creep) is an observation."
-        ),
+        note: "Parked (spawn state, park lever on), no input; the law in the force-balance form \
+               of `slope_hold`'s doc. mean_accel is the least-squares slope of the downhill \
+               speed over the window: the last 10 of 60 s below, seconds 4 to 8 above. Below: \
+               passes iff |mean_accel| is within the precision, 1 % of the hold's reserve. \
+               Above: passes iff mean_accel reaches the law's bound (the static excess less \
+               the ground's motion resistance at the tank's nominal pressure) less the \
+               precision, 1 % of the static excess, and the hull moves downhill. Spring-back \
+               is the downhill travel over the first 2 s; creep distance the travel after it; \
+               creep and peak speed are over the window. All four are observations."
+            .into(),
     });
 }
 

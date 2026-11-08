@@ -6,7 +6,8 @@ with terrain, static obstacles and rubble), game state only.
 **Seam contract (for the two arms that merge this):** `arm.rs`'s signatures are unchanged; one
 function is new, `collider_role(world, collider) -> Option<&'static str>`; and `belt_forces` now
 returns only what the arm applies outside Avian's solver, because the card reads every solver
-contact, friction included, through `ContactTransfers`. Session 3 left `arm.rs` untouched.
+contact, friction included, through `ContactTransfers`. Sessions 3 and 4 left `arm.rs`
+untouched.
 
 ## What it is
 
@@ -70,11 +71,22 @@ Files:
    meets first. A lane is one shoe's span plus 0.05 m a side, the same strip as line 4b's
    one-lane walls. The belt's rest outline (every route circle at the outer face) is a row of
    its own.
-1. **Holding on a slope: law check.** Per shipped ground, the limit is
-   `min(atan μ, asin(2 F_brake k_static / W))` from the ground's grip and the tank's brake data.
-   Slopes sit a tenth of the limit below and above it (the shipped brake test's margin rule).
-   Below: parked 60 s, holds iff the last second's travel and speed are under 0.1 % of g·dt.
-   Above: 8 s, moves iff both exceed it. Spring-back and creep are observations.
+1. **Holding on a slope: law check, a force balance** (the owner's decision 3 pins the static
+   friction law; creep and spring-back are observations). Per shipped ground, the hold
+   capacity per unit mass is `C(θ) = min(μ g cos θ, 2 F_brake k_static / m)` from the ground's
+   grip and the tank's brake data; the limit is where `g sin θ = C(θ)`, and the slopes sit a
+   tenth of it below and above (the shipped brake test's margin rule). The mean downhill
+   acceleration is the least-squares slope of the downhill speed over a window.
+   - **Below** (60 s, window the last 10 s): capacity exceeds demand, so the net downhill force
+     is zero. Passes iff |mean acceleration| ≤ 1 % of the hold's reserve `C(θ) − g sin θ`.
+   - **Above** (8 s, window seconds 4 to 8): demand exceeds capacity, and once moving nothing
+     resists more than the capacity that gave way plus the ground's motion resistance (its
+     rolling resistance at the tank's nominal pressure, `c_rr`). Passes iff the mean
+     acceleration reaches `g sin θ − C(θ) − c_rr g cos θ` less 1 % of the static excess
+     `g sin θ − C(θ)`, and the hull moves downhill. Where the bound is negative (motion
+     resistance exceeds the excess), the law asks only that the hull gives way.
+   - **Observations:** spring-back (downhill travel over the first 2 s), creep distance (the
+     travel after it), creep speed and peak speed over the window.
 2. **Turning: observation.** Wide and tight detents after a 3 s and a 10 s run-up, plus a
    neutral pivot. Achieved radius over geared radius, yaw rate, and the yaw moments of every
    world force on the hull, split into longitudinal and lateral parts, against Steeds' μWL/4
@@ -183,16 +195,23 @@ is listed apart. All MEASURED; offsets are DERIVED as differences of those.
 
 ### 1. Slope hold: law check PASS on all five grounds
 
-| ground | binding limit | below: settle, last-second speed | above: last-second travel |
-|---|---|---|---|
-| concrete | grip 30.96° | 0.123 m, 4.2e-7 m/s | 2.58 m |
-| dirt | grip 22.68° | 0.105 m, 2.9e-7 m/s | 0.186 m |
-| gravel | brake 31.00° | 0.078 m, 9.3e-7 m/s | 10.8 m |
-| mud | grip 15.48° | 0.088 m, 1.6e-7 m/s | 0.043 m |
-| sand | grip 28.50° | 0.100 m, 7.6e-7 m/s | 0.124 m |
+Accelerations in m/s², downhill positive; the precision is the check's 1 % band.
 
-The settle below the limit (78 to 123 mm, spring-back plus the first suspension settle) is an
-observation.
+| ground | binding limit | below: mean accel (precision) | below: spring-back, creep, creep speed | above: mean accel against bound (precision) | above: speed over the window |
+|---|---|---|---|---|---|
+| concrete | grip 30.96° | −7e-9 (4.7e-3) | 112 mm, 11 mm, 4e-4 mm/s | 0.293 against 0.293 (6.2e-3) | accelerating, 2.1 m/s mean |
+| dirt | grip 22.68° | 7e-10 (4.2e-3) | 94 mm, 11 mm, −3e-4 mm/s | 2e-5 against −0.148: gives way | steady 186 mm/s |
+| gravel | brake 31.00° | 5e-9 (4.6e-3) | 76 mm, 2 mm, −5e-4 mm/s | 1.47 against 0.025 (4.5e-3) | accelerating, 8.6 m/s mean |
+| mud | grip 15.48° | 1e-9 (2.8e-3) | 78 mm, 10 mm, 2e-4 mm/s | 9e-5 against −1.33: gives way | steady 43 mm/s |
+| sand | grip 28.50° | −6e-10 (5.6e-3) | 91 mm, 10 mm, 7e-4 mm/s | 1e-4 against −0.581: gives way | steady 124 mm/s |
+
+- **Below the limit the boat is in force balance** to 1e-8 m/s², some six orders of magnitude
+  inside the band. It is at rest by the window: the creep speeds are under 1e-3 mm/s.
+- **Above the limit, on concrete the boat sits exactly on the bound** (0.293 against 0.293):
+  it slides at the full grip plus the full motion resistance.
+- **On dirt, mud and sand the bound is negative**, because the ground's motion resistance
+  exceeds the static excess. The boat gives way and then slides at a steady speed, which the
+  law allows.
 
 ### 2. Turning (base ground gravel, μ 0.712)
 
@@ -349,8 +368,20 @@ The curb, the ledge and the 4 m wall have no sandbox twin yet.
 - **The world:** a height grid at the shipped cell spacing; fixtures as the map makes graybox
   blocks; pieces of the shipped `Brick` substance (density and friction from the registry), so
   no fixture states a material number of its own.
-- **The slope check** reuses the shipped brake test's limit and its 10 % margin rule, and its
-  0.1 % of g·dt precision.
+- **The slope check is a force balance** (the coordinator's ruling on decision 3): a speed test
+  failed a lawful steady creep. Below the limit, zero mean acceleration; above it, at least the
+  static excess less the motion resistance, the most any moving resistance can take. It keeps
+  the shipped brake test's limit and its 10 % margin rule.
+- **The precision is 1 % of the law's own scale** on each side (a `Resolution`): the hold's
+  reserve below the limit, the static excess above it. A real failure of the hold would show
+  as a fraction of g sin θ, two to three orders larger.
+- **The motion resistance in the above bound** is the ground's `rolling_resistance` at the
+  tank's nominal pressure (`rig_geom::tank_ground_pressure_kpa`), through
+  `ContactGround::rolling_at`: ground data and a construction fact, not one arm's internals.
+  Without it the bound would ask the tank to slide on dirt at 0.42 m/s² against a resistance
+  the ground data states.
+- **The mean acceleration is a least-squares slope** of the downhill speed over the window, so
+  a brief speed peak (the solver arm's 3.9 mm/s) moves it little.
 - **The passivity check** asks only that the last second's peak kinetic energy fall below the
   first second's. The decay rate is an observation.
 - **The reaction check** holds to 5 % (a `Resolution` margin for solver iteration) and is a law
