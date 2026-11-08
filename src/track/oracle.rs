@@ -33,7 +33,7 @@ pub trait DepthOracle {
     /// negative = clearance.
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32;
 
-    /// Sampled support excludes geometry supplied as exact facets; view depth retains it.
+    /// Analytic support profile; the force adapter supplies a column-local grid plane separately.
     fn profile_depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
         self.depth_along(station, out, reach)
     }
@@ -53,11 +53,26 @@ pub enum TerrainContact {
 }
 
 impl TerrainContact {
-    fn depth(self, reach: f32) -> f32 {
+    pub(super) fn depth(self, reach: f32) -> f32 {
         match self {
             Self::Miss => -reach,
             Self::Buried => reach,
             Self::Hit { depth, .. } => depth,
+        }
+    }
+
+    /// The union's first surface; a buried origin has no exposed first-hit surface.
+    pub(super) fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Buried, _) | (_, Self::Buried) => Self::Buried,
+            (Self::Miss, hit) | (hit, Self::Miss) => hit,
+            (Self::Hit { depth: a, .. }, Self::Hit { depth: b, .. }) => {
+                if a >= b {
+                    self
+                } else {
+                    other
+                }
+            }
         }
     }
 }
@@ -79,6 +94,11 @@ pub trait ContactOracle {
     /// No grid means this oracle consists entirely of sampled analytic surfaces.
     fn height_grid(&self) -> Option<&HeightGrid> {
         None
+    }
+
+    /// Rounded analytic surfaces need normal refinement; a sampled facet plane does not.
+    fn refine_profile_normals(&self) -> bool {
+        true
     }
 
     fn profile_contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
@@ -506,6 +526,9 @@ impl BlockField {
 }
 
 impl ContactOracle for BlockField {
+    fn refine_profile_normals(&self) -> bool {
+        !self.blocks.is_empty()
+    }
     fn height_grid(&self) -> Option<&HeightGrid> {
         self.height.as_ref()
     }

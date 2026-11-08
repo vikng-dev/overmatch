@@ -881,6 +881,17 @@ fn collect_column_contacts<O: TerrainOracle>(
             let ca = wa + shift;
             let cb = wb + shift;
 
+            let column = super::world_contact::ColumnOracle::new(
+                oracle,
+                Some((ca + cb) / 2.0 + face_m),
+                pieces.stages.as_ref(),
+            );
+            // Adjacent columns can sample different facet planes even at a shared pin.
+            if oracle.height_grid().is_some() {
+                previous_end[ci] = None;
+            }
+            let oracle = &column;
+
             // The three collocation stations, on the outer face; depth along the link's own
             // outward normal (cast semantics).
             // Per-probe reach = base + LOCAL travel, so the ray ORIGIN sits at `face − base`

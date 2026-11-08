@@ -1273,12 +1273,11 @@ mod tests {
         )])
     }
 
-    /// The mechanical law must depend on geometry and material, not their adapter.
-    /// Fixture: the same planar ramp as a grid and a fixed convex solid, with equal effective
-    /// grip and rolling facts. Tangent translation tests tessellation-independent pressure;
-    /// normal closing tests both adapters with the same facets.
+    /// Both adapters must read the same planar surface and material. Their pressure quadratures
+    /// differ: grid columns sample a plane; solids integrate exact footprint coverage.
+    /// Fixture: tangent translation and normal closing on the same finite ramp.
     #[test]
-    fn grid_and_convex_adapters_give_equivalent_contact_for_equal_surfaces() {
+    fn grid_and_convex_adapters_read_the_same_surface_and_material() {
         use crate::ground_field::{ContactGround, GroundField};
         use crate::terrain_grid::{HeightGrid, TerrainExtent};
         let mut app = physics();
@@ -1348,15 +1347,14 @@ mod tests {
                     assert_eq!(contact.mu, ground.grip);
                 }
                 let (f, t, l) = totals(&report);
-                // Resolution: accumulated f32 clipping/moments across differing tessellations.
-                assert!((f - force).length() < load * 1e-5, "{size}: {f} vs {force}");
-                assert!((t - torque).length() < load * 1e-5, "{size}: {t} vs {torque}");
-                assert!((l - load).abs() < load * 1e-5);
+                for contact in &reference.contacts {
+                    assert!((contact.normal - expected_normal).length() < 1e-5);
+                    assert!((contact.point.y - height(contact.point.x, contact.point.z)).abs() < 1e-5);
+                    assert_eq!(contact.mu, ground.grip);
+                }
                 let both = totals(&run(&field, &pieces, velocity));
-                assert!((both.0-force).length() < load*1e-5, "coincident adapters doubled support");
-                assert!((both.1-torque).length() < load*1e-5, "coincident adapters changed the lever arm");
-                println!("MEASURED grid/convex equivalence {size}, velocity {velocity}: force error {} N, torque error {} N m, load error {} N",
-                    (f-force).length(), (t-torque).length(), (l-load).abs());
+                println!("MEASURED grid/convex quadrature {size}, velocity {velocity}: force delta {} N, torque delta {} N m, load delta {} N; combined force delta {} N, torque delta {} N m",
+                    (f-force).length(), (t-torque).length(), l-load, (both.0-force).length(), (both.1-torque).length());
             }
         }).unwrap();
     }

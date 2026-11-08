@@ -177,6 +177,7 @@ struct Containment {
     linear_overlap_limit: f32,
     effective_mass: f32,
     omega_squared: f32,
+    discovery_step: f32,
     roundoff: f32,
     push: f32,
     energy: f32,
@@ -231,6 +232,7 @@ impl Containment {
                 / softness.bias,
             effective_mass,
             omega_squared,
+            discovery_step: world.resource::<Time<Fixed>>().timestep().as_secs_f32(),
             // Resolution: a 32-operation f32 error budget for pose composition and the AABB,
             // scaled by the fixture's coordinates; independent of observed solver overlap.
             roundoff: 32.0 * f32::EPSILON * (bed.half + radius),
@@ -271,6 +273,10 @@ impl Containment {
         let steady = self.push / stiffness;
         // DERIVED: k*x^2/2 <= E + F*x, discarding damping to bound arrival compression.
         let arrival = steady + (steady * steady + 2.0 * self.energy / stiffness).sqrt();
+        // Avian 0.7 refreshes manifolds once per physics tick, outside its solver substeps.
+        // DERIVED by Cauchy-Schwarz in the mass metric: any hull point's speed is bounded by
+        // sqrt(2E/m_eff). Discovery can add one tick of motion before contact can resist it.
+        let discovery = (2.0 * self.energy / self.effective_mass).sqrt() * self.discovery_step;
         assert!(
             arrival <= self.linear_overlap_limit,
             "{name}: arrival bound {arrival} exceeds the uncapped contact law's domain {}",
@@ -292,7 +298,7 @@ impl Containment {
         let growth = peak_of(early) + steady + self.roundoff - peak_of(late);
         let steady_margin = steady + self.roundoff - peak_of(late);
         println!(
-            "DERIVED {name}: mass={} kg, effective_mass>={} kg, omega={} rad/s, push<={} N, arrival_energy<={} J, steady<={} m, arrival<={} m, roundoff={} m; MEASURED peak={} m, side margin={} m, observed late static margin={} m, no-growth margin={} m",
+            "DERIVED {name}: mass={} kg, effective_mass>={} kg, omega={} rad/s, push<={} N, arrival_energy<={} J, steady<={} m, contact_arrival<={} m, discovery<={} m, roundoff={} m; MEASURED peak={} m, side margin={} m, observed late static margin={} m, no-growth margin={} m",
             self.mass,
             self.effective_mass,
             self.omega_squared.sqrt(),
@@ -300,13 +306,14 @@ impl Containment {
             self.energy,
             steady,
             arrival,
+            discovery,
             self.roundoff,
             peak,
-            arrival + self.roundoff - peak,
+            arrival + discovery + self.roundoff - peak,
             steady_margin,
             growth
         );
-        (arrival + self.roundoff - peak, growth)
+        (arrival + discovery + self.roundoff - peak, growth)
     }
 }
 

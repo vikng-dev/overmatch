@@ -63,6 +63,7 @@ labelled!(
         BeltRecipients = "belt_recipients",
         BeltDispatches = "belt_dispatches",
         BeltTriangulations = "belt_triangulations",
+        BeltTerrainSamples = "belt_terrain_samples",
     }
 );
 

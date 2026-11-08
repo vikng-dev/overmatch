@@ -1,56 +1,80 @@
-//! Canonical grid facets, clipped in the same footprint frame as convex entry faces.
+//! One height-grid facet plane per force column; no terrain triangulation or polygon overlay.
 
-use super::convex::{ClippedFace, clip_faces};
-use crate::terrain_grid::{HeightGrid, node_world_coord};
-use crate::track::rubble::Slab;
-use bevy::prelude::*;
+use crate::terrain_grid::HeightGrid;
+use crate::track::oracle::TerrainContact;
+use bevy::math::{Dir3, Vec3};
 
-pub(super) fn faces(grid: &HeightGrid, slab: &Slab) -> Vec<ClippedFace> {
-    let (lo, hi) = slab.aabb();
-    let half = grid.half_extent();
-    if hi.x <= -half || lo.x >= half || hi.z <= -half || lo.z >= half {
-        return Vec::new(); // A grid has no surface beyond its finite map boundary.
+pub(super) struct Plane {
+    point: Vec3,
+    normal: Dir3,
+    half_extent: f32,
+}
+
+impl Plane {
+    pub(super) fn sample(grid: &HeightGrid, at: Vec3) -> Option<Self> {
+        if !grid.contains_xz(at.x, at.z) {
+            return None; // The finite grid supplies no surface outside the map.
+        }
+        let last = (grid.size() - 1) as f32;
+        let scale = last / grid.world_size();
+        let u = (at.x + grid.half_extent()) / grid.world_size() * last;
+        let v = (at.z + grid.half_extent()) / grid.world_size() * last;
+        let i = (u as usize).min(grid.size() as usize - 2);
+        let j = (v as usize).min(grid.size() as usize - 2);
+        let h10 = grid.sample(i + 1, j);
+        let h01 = grid.sample(i, j + 1);
+        let (fu, fv) = (u - i as f32, v - j as f32);
+        // The same anti-diagonal ownership as HeightGrid::height_at and the collider.
+        let (dx, dz) = if fu + fv <= 1.0 {
+            let h00 = grid.sample(i, j);
+            ((h10 - h00) * scale, (h01 - h00) * scale)
+        } else {
+            let h11 = grid.sample(i + 1, j + 1);
+            ((h11 - h01) * scale, (h11 - h10) * scale)
+        };
+        Some(Self {
+            point: Vec3::new(at.x, grid.height_at(at.x, at.z), at.z),
+            normal: Dir3::new(Vec3::new(-dx, 1.0, -dz))
+                .expect("an admitted finite height facet has a nonzero upward normal"),
+            half_extent: grid.half_extent(),
+        })
     }
-    let last = grid.size() as usize - 2;
-    let step = grid.world_size() / (grid.size() - 1) as f32;
-    let cell = |x: f32| (((x + half) / step).floor().max(0.0) as usize).min(last);
-    let mut triangles = Vec::new();
-    for j in cell(lo.z)..=cell(hi.z) {
-        for i in cell(lo.x)..=cell(hi.x) {
-            let point = |i, j| {
-                Vec3::new(
-                    node_world_coord(grid, i),
-                    grid.sample(i, j),
-                    node_world_coord(grid, j),
-                )
-            };
-            let (a, b, c, d) = (
-                point(i, j),
-                point(i + 1, j),
-                point(i, j + 1),
-                point(i + 1, j + 1),
-            );
-            // Parry's non-zigzag anti-diagonal, wound toward the heightfield's exterior (+Y).
-            triangles.extend([[a, c, b], [b, c, d]]);
+
+    pub(super) fn contact(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
+        let along = self.normal.dot(out);
+        if along >= 0.0 {
+            return TerrainContact::Miss; // A back-facing or grazing plane cannot be entered.
+        }
+        let depth = self.normal.dot(station - self.point) / along;
+        let point = station - out * depth;
+        if point.x.abs() > self.half_extent || point.z.abs() > self.half_extent {
+            return TerrainContact::Miss; // Extrapolation never extends the finite map.
+        }
+        if depth >= reach {
+            TerrainContact::Buried
+        } else if depth < -reach {
+            TerrainContact::Miss
+        } else {
+            TerrainContact::Hit {
+                depth,
+                normal: self.normal,
+            }
         }
     }
-    clip_faces(&triangles, slab)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::terrain_grid::TerrainExtent;
-    use crate::track::forces::ForceParams;
-    use crate::track::oracle::{BlockField, DepthOracle};
-    use crate::track::rubble::RubbleBodies;
-    use crate::track::world_contact::{PatchQuery, patches, sample};
+    use crate::track::oracle::{BlockField, ContactOracle, DepthOracle};
+    use crate::track::world_contact::ColumnOracle;
 
-    // Fixture: finite flat ground; tessellation cannot change its surface.
-    fn flat_grid(size: u32) -> HeightGrid {
+    // Fixture: one nonplanar cell with distinct canonical facet normals.
+    fn grid() -> HeightGrid {
         HeightGrid::new(
-            vec![0.0; (size * size) as usize].into(),
-            size,
+            vec![0.0, 0.0, 0.0, 1.0].into(),
+            2,
             TerrainExtent {
                 world_size_m: 4.0,
                 height_offset_m: 0.0,
@@ -59,129 +83,64 @@ mod tests {
         )
     }
 
-    fn slab(x: f32) -> Slab {
-        Slab {
-            origin: Vec3::new(x, -0.1, -1.5),
-            axis: Vec3::Z,
-            lat: Vec3::X,
-            out: Vec3::NEG_Y,
-            len: 3.0,
-            lateral: (-0.25, 0.25),
-            face: 0.0,
-            reach: 1.0,
-            travel: 0.0,
-        }
-    }
-
-    // Resolve through the world interface, including the force consumer's sample.
-    fn moments(grid: HeightGrid, slab: &Slab) -> (f32, f32, Vec3) {
-        let field = BlockField::new(vec![]).with_height(Some(grid.clone()));
-        let pieces = RubbleBodies::default();
-        let params = ForceParams {
-            face_offset: slab.face,
-            free_travel: 0.0,
-            support_stiffness_per_m: 1.0,
-            support_damping_per_m: 1.0,
-            engage_depth: 0.001,
-            probe_reach: slab.reach,
-            grip: None,
-        };
-        let travel = [0.0; 3];
-        let pen = [0.0, slab.len / 2.0, slab.len]
-            .map(|u| field.profile_depth_along(slab.origin + slab.axis * u, slab.out, slab.reach));
-        let patches = patches(
-            PatchQuery {
-                slab,
-                overlaps: &[],
-                strip: slab.lateral,
-                field_offset: 0.0,
-                weight: 1.0,
-                pen,
-                travel,
-            },
-            &params,
-            &field,
-            &pieces,
-        );
-        let mut pressure = 0.0;
-        let mut length = 0.0;
-        let mut moment = Vec3::ZERO;
-        for patch in patches {
-            let Some((a, l, c)) = patch.resultant() else {
-                continue; // An uncovered footprint has no pressure resultant.
-            };
-            let surface = sample(&patch, slab.axis, slab.out, c, &params, &field, &pieces).unwrap();
-            pressure += a;
-            length += l;
-            moment += surface.point * a;
-            assert!(
-                (surface.point.y - grid.height_at(surface.point.x, surface.point.z)).abs() < 1e-6
-            );
-            let hit = grid
-                .cast_ray(surface.point + Vec3::Y, Vec3::NEG_Y, 2.0)
-                .unwrap();
-            assert!((surface.normal - hit.normal).length() < 1e-6);
-        }
-        (pressure, length, moment)
-    }
-
-    /// Driving must neither multiply pressure at internal edges nor lose the pressure lever arm.
-    /// Fixture: a fully covered flat pad crosses grid diagonals and several cell borders.
+    /// Support inside one facet must use the collider's height, normal and directional depth.
+    /// Both sides of the canonical diagonal are witnessed; bilinear normals fail this contract.
     #[test]
-    fn internal_edges_preserve_pressure_coverage_and_moment() {
-        let slab = slab(0.0);
-        for size in [2, 3, 5, 9] {
-            let (p, l, m) = moments(flat_grid(size), &slab);
-            // DERIVED: constant penetration 0.1 m over 3 m, symmetric footprint at y = 0.
-            assert!((p - 0.3).abs() < 1e-6, "{size}: pressure {p}");
-            assert!((l - 3.0).abs() < 1e-6, "{size}: length {l}");
-            assert!(m.length() < 1e-6, "{size}: moment {m}");
+    fn a_sampled_facet_agrees_with_the_canonical_surface() {
+        let grid = grid();
+        for (x, z) in [(-1.0, -1.0), (1.0, 1.0)] {
+            let at = Vec3::new(x, grid.height_at(x, z), z);
+            let plane = Plane::sample(&grid, at).unwrap();
+            for out in [Vec3::NEG_Y, Vec3::new(0.1, -1.0, 0.1).normalize()] {
+                let station = at - Vec3::Y * 0.05; // Fixture: shallow penetration.
+                let hit = grid.cast_ray(station - out * 0.5, out, 1.0).unwrap();
+                let TerrainContact::Hit { depth, normal } = plane.contact(station, out, 0.5) else {
+                    panic!("an exposed facet must carry the shallow contact");
+                };
+                assert!((depth - (0.5 - hit.t)).abs() < 1e-6);
+                assert!((*normal - hit.normal).length() < 1e-6);
+            }
         }
     }
 
-    /// Contact must retain the canonical diagonal and each facet's own normal at a crease.
-    /// Fixture: one raised corner in a single cell; bilinear or opposite-diagonal geometry
-    /// changes both the pressure integral and its moment, which driving uses as a lever arm.
+    /// A quadrature plane supplies neither phantom ground outside the finite map nor a surface
+    /// for an away-facing or buried probe. The force consumer relies on these distinct absences.
     #[test]
-    fn a_nonplanar_cell_integrates_its_canonical_facets() {
-        let grid = HeightGrid::new(
-            vec![0.0, 0.0, 0.0, 1.0].into(),
-            2,
-            TerrainExtent {
-                world_size_m: 4.0,
-                height_offset_m: 0.0,
-                height_span_m: 1.0,
-            },
-        );
-        let slab = Slab {
-            origin: Vec3::new(0.0, -0.1, -2.0),
-            len: 4.0,
-            lateral: (-2.0, 2.0),
-            reach: 2.0,
-            ..slab(0.0)
-        };
-        let (p, l, m) = moments(grid, &slab);
-        // DERIVED: lower facet h=0, upper h=(x+z)/4; integrate (h+0.1)/width over
-        // the square. Barycentric moments give pressure 16/15 and moment (2/3, 2/5, 2/3).
-        assert!((p - 16.0 / 15.0).abs() < 1e-6, "pressure {p}");
-        assert!((l - 4.0).abs() < 1e-6);
-        assert!(
-            (m - Vec3::new(2.0 / 3.0, 2.0 / 5.0, 2.0 / 3.0)).length() < 1e-6,
-            "moment {m}"
-        );
+    fn finite_extent_and_first_surface_outcomes_are_preserved() {
+        let grid = grid();
+        assert!(Plane::sample(&grid, Vec3::new(2.1, 0.0, 0.0)).is_none());
+        let plane = Plane::sample(&grid, Vec3::new(-1.0, 0.0, -1.0)).unwrap();
+        assert!(matches!(
+            plane.contact(Vec3::ZERO, Vec3::Y, 0.5),
+            TerrainContact::Miss
+        ));
+        assert!(matches!(
+            plane.contact(Vec3::NEG_Y, Vec3::NEG_Y, 0.5),
+            TerrainContact::Buried
+        ));
+        assert!(matches!(
+            plane.contact(Vec3::new(2.1, -0.1, 0.0), Vec3::NEG_Y, 0.5),
+            TerrainContact::Miss
+        ));
     }
 
-    /// The world's finite boundary clips coverage, with no clamped phantom ground or edge shove.
-    /// Fixture: half of the flat shoe width lies outside the grid, then the whole shoe does.
+    /// Work is one grid lookup per column, independent of how many depth and normal evaluations
+    /// its integration needs. Stats must expose this path even when there are no solid candidates.
     #[test]
-    fn map_edges_clip_area_without_creating_vertical_faces() {
-        for x in [-2.0, 2.0] {
-            let (p, l, m) = moments(flat_grid(5), &slab(x));
-            assert!((p - 0.15).abs() < 1e-6);
-            assert!((l - 1.5).abs() < 1e-6);
-            // DERIVED: centroid of the covered half-width is 0.125 m inside the map.
-            assert!((m.x / p - (x - x.signum() * 0.125)).abs() < 1e-6);
+    fn column_integration_reuses_its_one_counted_grid_sample() {
+        let field = BlockField::new(vec![]).with_height(Some(grid()));
+        let stages = crate::cost::stages::Stages::default();
+        let column = ColumnOracle::new(&field, Some(Vec3::new(-1.0, 0.0, -1.0)), Some(&stages));
+        for y in [-0.01, -0.02, -0.03] {
+            // Fixture: integration points in one facet.
+            let p = Vec3::new(-1.0, y, -1.0);
+            assert!((column.profile_depth_along(p, Vec3::NEG_Y, 0.5) + y).abs() < 1e-6);
+            assert!(matches!(
+                column.profile_contact_along(p, Vec3::NEG_Y, 0.5),
+                TerrainContact::Hit { .. }
+            ));
         }
-        assert_eq!(moments(flat_grid(5), &slab(2.5)), (0.0, 0.0, Vec3::ZERO));
+        let counts = serde_json::to_value(stages.take_counts()).unwrap();
+        assert_eq!(counts["belt_terrain_samples"], 1);
     }
 }

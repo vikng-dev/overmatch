@@ -1,10 +1,11 @@
 //! World-contact patches for the game's running gear (game state only).
 //! `patches` resolves coverage; `sample` supplies geometry, material and point motion to the
 //! mechanical law. Collider identity addresses the tick-start snapshot's owner and reaction.
-//! Grid and convex adapters share clipped faces; rounded analytic surfaces use sampled profiles.
+//! Grid columns sample one facet plane; solids retain exact clipped coverage. Rounded analytic
+//! surfaces refine their sampled profiles where the normal turns.
 
 use super::forces::{ForceParams, GripParams, profile_resultant, rigid_rolling_resistance};
-use super::oracle::{TerrainContact, TerrainOracle};
+use super::oracle::{ContactOracle, DepthOracle, TerrainContact, TerrainOracle};
 use super::rubble::{RubbleBodies, Slab, SlabOverlap};
 use bevy::prelude::*;
 
@@ -12,6 +13,66 @@ mod admission;
 pub(super) mod convex;
 mod terrain;
 pub(crate) use admission::{plugin, solid};
+
+/// A column holds one sampled grid plane through its integration. Analytic terrain remains
+/// directional and solids retain their footprint overlay. No integration sample re-queries the
+/// grid; creases within a column are the quadrature's approximation.
+pub(crate) struct ColumnOracle<'a, O> {
+    field: &'a O,
+    plane: Option<terrain::Plane>,
+}
+
+impl<'a, O: TerrainOracle> ColumnOracle<'a, O> {
+    pub(crate) fn new(
+        field: &'a O,
+        point: Option<Vec3>,
+        stages: Option<&crate::cost::stages::Stages>,
+    ) -> Self {
+        let plane = point.and_then(|point| {
+            field.height_grid().and_then(|grid| {
+                if let Some(stages) = stages {
+                    stages.add(crate::cost::stages::Work::BeltTerrainSamples, 1);
+                }
+                terrain::Plane::sample(grid, point)
+            })
+        });
+        Self { field, plane }
+    }
+}
+
+impl<O: TerrainOracle> DepthOracle for ColumnOracle<'_, O> {
+    fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+        self.profile_depth_along(station, out, reach)
+    }
+
+    fn profile_depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+        let field = self.field.profile_depth_along(station, out, reach);
+        self.plane.as_ref().map_or(field, |plane| {
+            field.max(plane.contact(station, out, reach).depth(reach))
+        })
+    }
+}
+
+impl<O: TerrainOracle> ContactOracle for ColumnOracle<'_, O> {
+    fn ground_at(&self, point: Vec3) -> Option<crate::ground_field::ContactGround> {
+        self.field.ground_at(point)
+    }
+
+    fn refine_profile_normals(&self) -> bool {
+        self.field.refine_profile_normals()
+    }
+
+    fn contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
+        self.profile_contact_along(station, out, reach)
+    }
+
+    fn profile_contact_along(&self, station: Vec3, out: Vec3, reach: f32) -> TerrainContact {
+        let field = self.field.profile_contact_along(station, out, reach);
+        self.plane.as_ref().map_or(field, |plane| {
+            field.union(plane.contact(station, out, reach))
+        })
+    }
+}
 
 /// One shoe column's world-contact envelope and sampled free-travel profile, in metres.
 pub(crate) struct PatchQuery<'a> {
@@ -39,13 +100,9 @@ pub(crate) fn patches<O: TerrainOracle>(
         pen,
         travel,
     } = query;
-    let grid_faces = oracle
-        .height_grid()
-        .map_or_else(Vec::new, |grid| terrain::faces(grid, slab));
     let faces = overlaps
         .iter()
-        .flat_map(|hit| hit.faces.iter().map(move |face| (Some(hit.piece), face)))
-        .chain(grid_faces.iter().map(|face| (None, face)));
+        .flat_map(|hit| hit.faces.iter().map(move |face| (Some(hit.piece), face)));
     let affected = convex::raised_faces(faces, strip, slab.len, pen, travel);
     let field_patch = SupportPatch {
         origin: slab.origin + slab.lat * field_offset,
@@ -152,6 +209,9 @@ fn terrain_surface_patches<O: TerrainOracle>(
     params: &ForceParams,
     oracle: &O,
 ) -> Vec<SupportPatch> {
+    if !oracle.refine_profile_normals() {
+        return patches.to_vec();
+    }
     fn split<O: TerrainOracle>(
         patch: SupportPatch,
         axis: Vec3,
