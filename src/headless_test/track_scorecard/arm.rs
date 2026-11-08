@@ -39,9 +39,9 @@ pub(super) fn set_ground(app: &mut App, ground: ContactGround) {
 }
 
 /// The forces this tick that the track model applied to the hull outside Avian's solver. The
-/// card adds Avian's own solver contacts itself, so an arm whose contacts live in the solver
-/// returns here only what the solver does not report: avian 0.7 keeps a contact's total normal
-/// impulse but not its total friction impulse, so a solver arm adds its friction here.
+/// card adds the normal forces of Avian's solver contacts itself, and no friction: avian 0.7's
+/// contact point keeps no friction total. An arm whose contacts live in the solver returns
+/// their friction here.
 pub(super) fn belt_forces(app: &App, tank: Entity) -> Vec<WorldForce> {
     let world = app.world();
     let contacts = world

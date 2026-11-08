@@ -411,12 +411,21 @@ impl Bed {
                     out.push(WorldForce {
                         body: Some(other),
                         point: point.point,
-                        force: manifold.normal * (sign * point.normal_impulse / DT),
+                        force: manifold.normal * (sign * self.solver_force(point)),
                     });
                 }
             }
         }
         out
+    }
+
+    /// A solver contact's mean normal force over the step (N): its last substep's impulse over
+    /// one substep. Avian 0.7's `normal_impulse` is no such total: it sums the accumulated
+    /// impulse after both the solve and the relax pass of every substep, reading about twice the
+    /// applied impulse at rest (MEASURED by this card's rubble control).
+    fn solver_force(&self, point: &ContactPoint) -> f32 {
+        let substeps = self.app.world().resource::<SubstepCount>().0 as f32;
+        point.warm_start_normal_impulse * substeps / DT
     }
 
     /// Avian solver contacts with the tank as a party: (pairs, manifolds, points).
@@ -461,12 +470,29 @@ impl Bed {
         out
     }
 
-    /// World support on the pieces from everything except the tank and each other (N, up).
+    /// What of the tank meets `body` this tick: `belt` for the arm's own channel, then the
+    /// solver colliders' names; `None` while nothing does.
+    fn first_touch(&self, body: Entity) -> Option<String> {
+        let belt = arm::belt_forces(&self.app, self.tank)
+            .iter()
+            .any(|f| f.body == Some(body));
+        let mut parts = self.touching_colliders(body);
+        if belt {
+            parts.insert(0, "belt".to_owned());
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
+    }
+
+    /// World support on the pieces from everything except the tank and each other (N, up). A
+    /// sleeping pair keeps the impulses of its last solved step, its resting support.
     fn world_support_on_pieces(&self) -> f32 {
         let graph = self.app.world().resource::<ContactGraph>();
         let is_piece = |e: Option<Entity>| e.is_some_and(|e| self.pieces.contains(&e));
         let mut up = 0.0;
-        for pair in graph.iter_active_touching() {
+        for pair in graph
+            .iter_active_touching()
+            .chain(graph.iter_sleeping_touching())
+        {
             let (b1, b2) = (pair.body1, pair.body2);
             if b1 == Some(self.tank) || b2 == Some(self.tank) || is_piece(b1) == is_piece(b2) {
                 continue;
@@ -474,7 +500,7 @@ impl Bed {
             let sign = if is_piece(b1) { -1.0 } else { 1.0 };
             for manifold in &pair.manifolds {
                 for point in &manifold.points {
-                    up += manifold.normal.y * sign * point.normal_impulse / DT;
+                    up += manifold.normal.y * sign * self.solver_force(point);
                 }
             }
         }
@@ -885,7 +911,7 @@ fn climbing(card: &mut Card) {
         let front = front_z(bed.geom());
         // Fixture: the step face 6 m ahead of the belt's front point; a 20 × 10 m plateau.
         let face = front - 6.0;
-        bed.spawn_static(
+        let step = bed.spawn_static(
             Vec3::new(0.0, (height - 1.0) / 2.0, face - 10.0),
             Vec3::new(10.0, height + 1.0, 20.0),
         );
@@ -893,8 +919,12 @@ fn climbing(card: &mut Card) {
         bed.start();
         let begin = bed.hull().position;
         let (mut max_pitch, mut max_rise, mut crossed_at) = (0.0_f32, 0.0_f32, f32::NAN);
+        let mut first_touch = None;
         for tick in 0..15 * TICKS {
             bed.tick(1.0, 0.0);
+            if first_touch.is_none() {
+                first_touch = bed.first_touch(step);
+            }
             let hull = bed.hull();
             max_pitch = max_pitch.max(hull.pitch());
             max_rise = max_rise.max(hull.position.y - begin.y);
@@ -916,7 +946,7 @@ fn climbing(card: &mut Card) {
             ("max_pitch_deg", json!(deg(max_pitch))),
             ("end_z_past_face_m", f(face - hull.position.z)),
             ("upward_force_from_obstacle_n", Value::Null),
-            ("touching", Value::Null),
+            ("first_touch", json!(first_touch)),
         ]);
     }
 
@@ -933,8 +963,12 @@ fn climbing(card: &mut Card) {
     let mut late_up = Vec::new();
     let mut touching = std::collections::BTreeSet::new();
     let mut belt_touch = false;
+    let mut first_touch = None;
     for tick in 0..8 * TICKS {
         bed.tick(1.0, 0.0);
+        if first_touch.is_none() {
+            first_touch = bed.first_touch(wall);
+        }
         let hull = bed.hull();
         max_pitch = max_pitch.max(hull.pitch());
         max_rise = max_rise.max(hull.position.y - begin.y);
@@ -966,10 +1000,10 @@ fn climbing(card: &mut Card) {
             json!(format!("peak {max_up:.0}, last 2 s mean {late:.0}")),
         ),
         (
-            "touching",
+            "first_touch",
             json!(format!(
-                "belt channel {belt_touch}; solver colliders {:?}",
-                touching
+                "{}; over the push: belt channel {belt_touch}, solver colliders {touching:?}",
+                first_touch.unwrap_or_default()
             )),
         ),
     ]);
@@ -984,7 +1018,9 @@ fn climbing(card: &mut Card) {
              the hull centre passes 3 m beyond the face risen by 0.8 × the step within 15 s. \
              Highest step climbed: {highest} m. Wall: face 2 m ahead, 8 s of push; the upward \
              force is the wall's vertical force on the hull through every channel the card reads \
-             (the arm's own and Avian's solver normals), and touching names what met it."
+             (the arm's own and Avian's solver normals). first_touch names the tank parts that met \
+             the obstacle on the first tick any did: `belt` for the arm's own channel, else the \
+             solver collider's node."
         ),
     });
 }
@@ -1018,23 +1054,26 @@ fn trenches(card: &mut Card) {
         bed.start();
         let begin = bed.hull().position;
         let (mut sink, mut max_pitch, mut min_pitch) = (0.0_f32, 0.0_f32, 0.0_f32);
-        let mut crossed_at = f32::NAN;
+        let (mut beyond_at, mut beyond_rise) = (f32::NAN, f32::NAN);
         for tick in 0..15 * TICKS {
             bed.tick(1.0, 0.0);
             let hull = bed.hull();
             sink = sink.max(begin.y - hull.position.y);
             max_pitch = max_pitch.max(hull.pitch());
             min_pitch = min_pitch.min(hull.pitch());
-            if hull.position.z < far - 6.0 && hull.position.y > begin.y - 0.5 * bed.rest_y {
-                crossed_at = tick as f32 * DT;
+            if hull.position.z < far - 6.0 {
+                beyond_at = tick as f32 * DT;
+                beyond_rise = hull.position.y - begin.y;
                 break;
             }
         }
+        let crossed = beyond_rise > -0.5 * top;
         rows.push(vec![
             ("width_m", f(width)),
             ("width_over_span", f(share)),
-            ("crossed", json!(!crossed_at.is_nan())),
-            ("time_s", f(crossed_at)),
+            ("crossed", json!(crossed)),
+            ("time_s", f(beyond_at)),
+            ("rise_6m_beyond_m", f(beyond_rise)),
             ("max_sink_m", f(sink)),
             (
                 "pitch_range_deg",
@@ -1051,9 +1090,9 @@ fn trenches(card: &mut Card) {
         rows,
         note: format!(
             "Road-wheel span {span:.3} m (construction). A {top} m deep cut between two static \
-             plateaus; full throttle from rest, the near edge 6 m ahead. Crossed iff the hull \
-             centre passes 6 m beyond the far edge within half a rest height of the plateau's \
-             rest level, within 15 s. Sink is the hull's deepest drop below its start."
+             plateaus; full throttle from rest, the near edge 6 m ahead. Crossed iff, when the \
+             hull centre first passes 6 m beyond the far edge (within 15 s), it is within half \
+             the depth of its start level. Sink is the hull's deepest drop below its start."
         ),
     });
 }
@@ -1273,10 +1312,16 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
     let pile_centre = near - 3.0 * (size.z + gap);
     bed.place(Vec3::ZERO, Quat::IDENTITY);
     bed.start();
-    // Let the pile settle with the tank parked, clear of it.
-    for _ in 0..TICKS {
+    // Let the pile settle with the tank parked, clear of it. The reader's control: unloaded,
+    // the world's support on the pieces is their weight.
+    let mut unloaded = Vec::new();
+    for tick in 0..2 * TICKS {
         bed.tick(0.0, 0.0);
+        if tick >= TICKS {
+            unloaded.push(bed.world_support_on_pieces() / bed.piece_weight());
+        }
     }
+    let (unloaded, _) = mean_rms(&unloaded);
     let begin = bed.hull().position;
     let mut drive_piece_speed = 0.0_f32;
     let mut reached = f32::NAN;
@@ -1288,6 +1333,7 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
             break;
         }
     }
+    let advanced = near - bed.hull().position.z;
     // Brake to a stop, then park.
     for _ in 0..2 * TICKS {
         let moving = bed.hull().speed() > crate::track::transmission::PARK_ENGAGE_SPEED;
@@ -1295,7 +1341,7 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
     }
     let (mut ys, mut vys, mut sinks, mut ratios) = (vec![], vec![], vec![], vec![]);
     let mut park_piece_speed = 0.0_f32;
-    let mut tank_support = vec![];
+    let (mut tank_support, mut belt_support) = (vec![], vec![]);
     let mut work: std::collections::BTreeMap<String, f64> = Default::default();
     bed.take_work();
     let park = 4 * TICKS;
@@ -1313,6 +1359,13 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
             .map(|f| f.force.y)
             .sum();
         tank_support.push(from_pieces);
+        belt_support.push(
+            arm::belt_forces(&bed.app, bed.tank)
+                .iter()
+                .filter(|f| f.body.is_some_and(|b| bed.pieces.contains(&b)))
+                .map(|f| f.force.y)
+                .sum::<f32>(),
+        );
         let pressed = bed.world_support_on_pieces() - bed.piece_weight();
         if from_pieces > 0.0 {
             ratios.push(pressed / from_pieces);
@@ -1324,12 +1377,14 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
     let (sink, _) = mean_rms(&sinks);
     let sink_max = sinks.iter().copied().fold(0.0, f32::max);
     let (support, _) = mean_rms(&tank_support);
+    let (belt, _) = mean_rms(&belt_support);
     let (ratio, ratio_rms) = mean_rms(&ratios);
     let weight = bed.weight();
     // Resolution: the reaction law holds to 5 % of the load, a margin for solver iteration error.
     let symmetric = !ratios.is_empty() && (ratio - 1.0).abs() < 0.05;
     let row = vec![
-        ("reached_pile_s", f(reached)),
+        ("reached_pile_centre_s", f(reached)),
+        ("hull_centre_past_near_edge_m", f(advanced)),
         ("hull_rise_m", f(rise)),
         ("vertical_jitter_rms_m", f(jitter)),
         ("vertical_speed_rms_m_s", f(vy_rms)),
@@ -1338,6 +1393,8 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
         ("piece_speed_max_drive_m_s", f(drive_piece_speed)),
         ("piece_speed_max_parked_m_s", f(park_piece_speed)),
         ("support_from_pieces_share_of_weight", f(support / weight)),
+        ("belt_channel_share_of_that", f(belt / support)),
+        ("reader_control_unloaded_support_over_weight", f(unloaded)),
         ("reaction_ratio", f(ratio)),
         ("reaction_ratio_rms", f(ratio_rms)),
         ("reaction_symmetric", json!(symmetric)),
@@ -1356,7 +1413,9 @@ fn rubble(card: &mut Card, work_rows: &mut Vec<Row>) {
              rest-pose belt bottom's depth inside pieces. The reaction ratio is (world support \
              on the pieces − their weight) / (the pieces' support on the hull): 1 when every \
              piece under load takes the equal and opposite reaction, 0 when the pieces hold the \
-             tank up unloaded. It is a law check only where the arm claims it (this arm: {}).",
+             tank up unloaded. The reader's control: before the tank arrives, the world's support \
+             on the pieces over their weight, which is 1 when the reader is right. The ratio is \
+             a law check only where the arm claims it (this arm: {}).",
             bed.pieces.len(),
             if arm::CLAIMS_PIECE_REACTION {
                 "claims it"
