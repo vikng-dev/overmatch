@@ -2,15 +2,16 @@
 
 > **Status: the locomotion model stands; the netcode bullet (owner-predicted, rolled back) is
 > superseded by [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15): belt state
-> replicates on the one timeline, nothing predicts it.
+> replicates on the one timeline, nothing predicts it. **How the belt meets the world is settled by
+> [[0041-track-contact-channels]]**, which replaces the contact geometry here.
 
 Tanks drive on the **track model's belt forces** — the field-belt model developed and
 feel-proven in the track sandbox, promoted wholesale. Per side, the closed rest pin-line loop
-(the same `build_route` circles the view's feasibility gate uses) is resampled into
-pitch-spaced force stations advected by belt travel; each ground-facing segment probes the
-analytic terrain field across three lateral collocation columns (Simpson weights over the shoe
-width), takes a clipped-linear pressure profile, and applies **support** (penalty spring along
-the belt's inward normal, normal-velocity damped, engagement-ramped) and **traction**
+(the same `build_route` circles the view's feasibility gate uses) is resampled into a fixed count
+of force stations advected by belt travel; each ground-facing segment reads one height-grid facet
+plane per lateral collocation column (three, with Simpson weights over the shoe width), takes a
+clipped-linear pressure profile, and applies **support** (penalty spring along the surface
+normal, normal-velocity damped, engagement-ramped) and **traction**
 (per-element isotropic shear: each grounded link accumulates a directional strain whose force
 saturates against an isotropic μ × its own elastic load — one circular budget, no friction
 ellipse and no lateral grip ratio; see [[0026-static-friction-strain-regime]] /
@@ -54,9 +55,8 @@ telemetry only: never hashed, never rolled back.
 
 ## Consequences
 
-- **Support acts along the belt normal, not the ground normal** — honest model quirk; watch
-  steep side-slope behaviour.
-- **No bump-stop cap** — deep penetration resolves through the pressure profile alone.
+- **Support acts along the surface normal**, and a stop collider per side caps the travel; a piece
+  under a belt leaves this channel ([[0041-track-contact-channels]]).
 - **Slope-parking hold shipped**: the per-element elastic–plastic strain law (the "per-element
   bristle" foreseen in the options above) landed as the grip law — a parked Tiger holds on grade
   rather than creeping. See [[0026-static-friction-strain-regime]] and the settled per-element
@@ -66,10 +66,9 @@ telemetry only: never hashed, never rolled back.
   ADR-0007-bucket-3 material: a property of the track–ground *pair*, reserved for the future
   terrain/ground-type mechanic, deliberately not vehicle spec. Vehicle spec (`.tank.ron
   track:`) carries only `powertrain` + `suspension`, scaled from sandbox tuning by mass ratio.
-- **Vehicle collision proxies run `Friction::ZERO` (min-combine)** — all grip is the model's;
-  Avian's default contact friction would silently add unmodeled hold.
+- **Vehicle collision proxies carry their declared substance's friction**, and a stop collider
+  the track's; support and traction on the ground are the model's.
 - **`Drive` capability gates the command, not the contact model** — a dead engine still
   grips and holds; it just cannot thrust.
-- **Cost**: ~stations × 3 columns × 3 probes per side per tick, analytic field only (no
-  spatial queries, no BVH rollback dependency) — measured ~66 µs/side in the sandbox;
-  rollback storms multiply it, covered by the cost trace.
+- **Cost**: 48 stations × 3 lateral points per side per tick, one facet lookup per column; solids
+  are found by spatial query. MEASURED 2026-11-08: the belt stage is 0.51 ms for 30 tanks locally.

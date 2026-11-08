@@ -1,3 +1,66 @@
+# Session 4: the piece law corrected, cleanup, lens pass, docs
+
+Subject: the video game's tank driving physics (the belt's support and its contact with loose
+pieces); game state only. Numbers MEASURED on the scorecard unless labelled DERIVED.
+
+**The law.** A track shoe is a rigid plate: a piece under part of its width still loads the running
+gear through the whole link. A segment's law is `k' × length`, damping likewise, shared among the
+pieces under it; the piece's position moves the roll moment, width does not change the stiffness.
+The covered-width law, its silhouette clipping and the shoe bounds are gone.
+
+| line | before step 5 | step 5, covered width | now |
+|---|---|---|---|
+| layer under the parked tank: hull rise / sink mean (m) | 0.483 / 0.021 | 0.475 / 0.041 | 0.483 / 0.021 |
+| pile ahead, 0.6 throttle: rise / sink (m) | 0.891 / 0.147 | 0.877 / 0.157 | 0.891 / 0.147 |
+| pile ahead, 1 throttle: rise / sink (m) | 0.833 / 0.122 | 0.798 / 0.115 | 0.833 / 0.122 |
+| heap, 0.6 throttle: rise max (m), nose up (deg), pieces moved | 0.185, 5.93, 17 | 0.104, 3.42, 23 | 0.185, 5.93, 18 |
+| heap, 1 throttle: rise max (m), nose up (deg), pieces moved | 0.223, 6.60, 21 | 0.113, 4.50, 38 | 0.223, 6.60, 21 |
+
+Observations, nothing tuned. Over 0.1 m pieces at 0.728 of the shoe the rise is 0.1196 m (the
+covered-width law gave 0.079; the sampled support's covered share is 0.073, DERIVED). The curb
+under one edge reads as it stood: roll 0.297 degrees, rise 6.6 mm, the sampled support's column
+share there (`track-contact.md` names the difference).
+
+With the law back in place every card line matched the state before step 5 cell for cell. After
+the cleanup that follows, rubble, ride and the rest match; the loose heap moves by chaotic amounts
+only (heap top 0.531 to 0.525 m, one more piece moved at 0.6 throttle). DERIVED: folding the
+`GunnerYaw` component into `Rig` changes the component set and with it the solver's body order,
+and a loose pile is sensitive to that order. Not separately verified.
+
+**The parked piece at 1.07 m/s went with the covered-width law**: 0.047 m/s now, as before step 5,
+in the pile at 1 throttle. No energy bug remains to chase there.
+
+**Done.**
+- `BeltContact.stiffness`, `damping` and `support_stiffness` are deleted. The corner test reads
+  the damper's rate from the support fact it observed and the per-metre damping; the step trace
+  reads it from `SegmentLaw` and the station spacing. The derivative test had no shipped reader
+  of what it pinned and went with the field.
+- The step trace's damping tolerance moved from 1e-5 to 1e-3 of the load: the bound now reads the
+  nominal station spacing, where it read the patch's own rate (MEASURED excess 3.0e-4).
+- Lens pass over sessions 3 and 4: a bare clamp on the segment count became an assert, the card's
+  module doc states what it is now, comments that recalled earlier states of the code are gone.
+- Backlog closed, each verified first: `load-28` (a playable rig is refused at certification: no
+  `Primary` weapon, or an assembly root on the hull), `load-29` (`turret.node` is a required
+  `String`, the Gunner aim is one accessor, the yaw is a `Rig` field and the `GunnerYaw` component
+  is gone, spawn no longer repeats `check_rig`), `load-33` (the gate's law states what it reads).
+- Docs: `.agents/docs/design/track-model/track-contact.md` (new, the one narrative), ADR-0041 (new;
+  what it changes in ADR-0025, whose false statements are corrected), glossary (outer-face stop,
+  belt segment, compliant contact, contact station), `architecture.md` and `pieces-under-belt.md`
+  point at it.
+
+**Left.**
+- `load-30`, one half: the late-view path has no witness, because `WorldInstanceReady`'s `InstanceId`
+  has no public constructor and a witness needs the real spawner over a loaded world asset. Its
+  other half (the "names no user" witness, the expect reason) is done; the row is rewritten.
+- Rows naming a file this lane touched that it did not close, each needing work of its own:
+  `load-27` (a powered row's moving load: data and a turret audit), `load-31` (the hand-arm law's
+  witness and the brake fact), `net-22` (remote aim angles against the shared delay: an owner call
+  with issue 187).
+- `net::ram::tests::tracked_ram_sweep_opens_within_two_ticks_and_accounts_for_momentum` still fails;
+  a separate lane has it. No other `net::ram` test fails.
+
+---
+
 # Track design committed: session report
 
 Subject: the video game's tank driving physics (the belt's support and its contact with loose

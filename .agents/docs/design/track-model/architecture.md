@@ -315,6 +315,10 @@ remain growth paths with no consumer. `SpatialQueryOracle` never needed one.
 
 ## 5a. Ground under a contact (#146)
 
+**Current contact design:** `track-contact.md` in this directory owns how the belt meets ground,
+structures and pieces; the terrain clipping and piece-reaction work recorded below is superseded
+there where they differ.
+
 Subject: the game's driving model, what the ground under a track changes; game state only.
 
 Surface material is the force oracle's second query: `ContactOracle::ground_at(point)` returns

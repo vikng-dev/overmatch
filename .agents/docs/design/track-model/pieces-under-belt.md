@@ -3,6 +3,9 @@
 Subject: the game's tank driving physics, game state only. Implements issue #238's bottom-support
 lane; material-pair friction and suspension construction remain separate lanes.
 
+**Status: acceptance evidence for the footprint partition, which stands.** Loose pieces no longer
+take spring force in the sampled support: `track-contact.md` owns the current design.
+
 The support-call method needs a geometric constraint: a convex shape's support vertex need not
 lie inside the link's footprint. In particular, a long horizontal piece under an inclined link
 can supply a remote vertex and saturate its depth even though the local top is low. Projected

@@ -203,12 +203,23 @@ The drive sprocket, where transmission output sets belt motion, and the idler, w
 _Avoid_: drive wheel
 
 **Track** (belt):
-The continuous material loop around one side's running gear. Its advected speed and phase are simulation state; its pitch-spaced stations are the tank's ground-contact model, while the rendered links are only its view.
+The continuous material loop around one side's running gear. Its advected speed and phase are simulation state; its contact stations are the tank's ground-contact model, while the rendered links are only its view.
 _Avoid_: cosmetic track, tread, caterpillar
 
 **Contact station**:
-A pitch-spaced sample on the belt's ground-facing route. Each station probes across the shoe width and contributes belt-normal support plus longitudinal and lateral traction.
+A sample at a fixed count round the belt's route, its count a `Resolution` number. Each probes three points across the shoe width and contributes support along the surface normal plus longitudinal and lateral traction: the **sampled support**, the belt's channel for ground and fixed structure, outside the solver.
 _Avoid_: roadwheel contact, contact patch
+
+**Outer-face stop**:
+A solver collider per side (code: `BumpStop`) on the belt's outer face past the wheels' travel, its surface moving at belt speed, so a wall meets it and friction reaches the transmission.
+_Avoid_: bump stop as a suspension spring; it is the hard limit past the travel
+
+**Belt segment**:
+A solver slab of the belt's outer face, over suspension travel, that meets only loose pieces (`Layer::Debris`). It carries the belt's per-metre support law as a compliant contact over its length, shared among the pieces under it.
+_Avoid_: conveyor, track collider
+
+**Compliant contact**:
+A solver contact holding an absolute stiffness and damping per point, so a body rests on it at a load-proportional deflection (`ContactManifold::compliance`, a local patch to the vendored Avian).
 
 **Belt element**:
 A material track-link identity crossed with one lateral collocation column. Elements advect with belt phase, so grip state follows the piece of track carrying it instead of whichever geometric station happens to occupy that place.
