@@ -234,6 +234,7 @@ type Hulls<'w, 's> = Query<
         &'static CollisionLayers,
         Option<&'static Element>,
         Option<&'static ChunkCollider>,
+        Option<&'static crate::track::stop_contacts::BeltFace>,
     ),
     Without<Sensor>,
 >;
@@ -501,7 +502,7 @@ fn cancel_retired_belts(p: &mut Intake, changed: BTreeSet<Entity>) {
         if !changed.contains(&contact.structure) {
             return Belt::Stands; // No cut this tick changed its owner.
         }
-        let (_, _, owner, _, _, element, chunk) = colliders
+        let (_, _, owner, _, _, element, chunk, _) = colliders
             .get(contact.structure_collider)
             .expect("a staged belt reaction names a contact collider of its owner");
         let (_, position, rotation, breakage) = constructions
@@ -601,12 +602,13 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
             let admitted: Vec<_> = handles
                 .iter()
                 .filter_map(|handle| {
-                    let Ok((_, hull, _, local, layers, _, _)) = colliders.get(handle) else {
+                    let Ok((_, hull, _, local, layers, _, _, surface)) = colliders.get(handle)
+                    else {
                         return None; // Sensors are not contact hulls.
                     };
                     layers
                         .interacts_with(super::super::element_layers())
-                        .then_some((hull, local))
+                        .then_some((hull, local, surface))
                 })
                 .collect();
             if admitted.is_empty() {
@@ -621,7 +623,8 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                 (false, None) => Arc::new(super::super::sweep::SourceTree::new(
                     admitted
                         .iter()
-                        .map(|(hull, local)| super::super::sweep::Hull {
+                        .map(|(hull, local, surface)| super::super::sweep::Hull {
+                            surface: surface.cloned(),
                             hull: (*hull).clone(),
                             position: local.translation,
                             rotation: local.rotation.0,
@@ -686,7 +689,7 @@ fn owners_met(
         .aabb_intersections_with_aabb(shape.bounds(motion))
         .into_iter()
         .filter_map(|entity| {
-            let Ok((_, _, other, _, _, _, _)) = colliders.get(entity) else {
+            let Ok((_, _, other, _, _, _, _, _)) = colliders.get(entity) else {
                 return None; // Sensors are not contact hulls.
             };
             (other.body != body && constructions.contains(other.body)).then_some(other.body)
@@ -1380,6 +1383,105 @@ mod tests {
     use crate::contact_transfer::ContactTransfer;
     use crate::headless_test::{booted_driving_grid, driving_plane, start_fixed_clock};
 
+    /// The game's environment destruction: a sweep must admit the same surfaces as the contact
+    /// hook. Standing matter gets no rigid demand from a side slice's radial face; lateral
+    /// approach still has a witness. Drivers rely on suspension travel preceding the hard stop.
+    #[test]
+    fn side_slice_sweeps_admit_lateral_but_not_radial_witnesses() {
+        use crate::track::{side::Side, stop_contacts::BeltFace};
+        use avian3d::prelude::{GravityScale, LinearVelocity, Mass, NoAutoMass};
+        use bevy::ecs::system::RunSystemOnce;
+
+        let kind = crate::construction::tests::column_construction();
+        // Fixture: a thin side slice approaches the top or the side of a standing column.
+        for rotation in [Quat::IDENTITY, Quat::from_rotation_z(0.37)] {
+            let pose = Transform {
+                translation: Vec3::Y * 20.0,
+                rotation,
+                ..default()
+            };
+            let mut owner = Breakage::new(kind.clone(), 0);
+            for (position, velocity, lateral) in [
+                (Vec3::new(0.0, 4.0, 0.0), Vec3::NEG_Y * 2.0, false),
+                (Vec3::new(1.0, 2.5, 0.0), Vec3::NEG_X * 2.0, true),
+            ] {
+                let mut app = booted_driving_grid(driving_plane(0.0));
+                start_fixed_clock(&mut app);
+                let body = app
+                    .world_mut()
+                    .spawn((
+                        RigidBody::Dynamic,
+                        Position(pose.translation + rotation * position),
+                        Rotation(rotation),
+                        Collider::cuboid(0.1, 0.2, 0.2),
+                        Mass(1e3),
+                        NoAutoMass,
+                        GravityScale(0.0),
+                        LinearVelocity(rotation * velocity),
+                        CollisionLayers::new(
+                            [crate::Layer::TrackSide],
+                            avian3d::prelude::LayerMask::ALL,
+                        ),
+                        BeltFace::new(
+                            Side::Left,
+                            vec![
+                                Vec2::new(-0.1, -0.1),
+                                Vec2::new(0.1, -0.1),
+                                Vec2::new(0.1, 0.1),
+                                Vec2::new(-0.1, 0.1),
+                            ],
+                            true,
+                        ),
+                    ))
+                    .id();
+                app.update();
+                let mut source = app
+                    .world_mut()
+                    .run_system_once(move |intake: Intake| {
+                        sources(&intake, 0.5)
+                            .into_iter()
+                            .find(|source| source.body == body)
+                            .expect("the moving fixture has construction-contact geometry")
+                    })
+                    .unwrap();
+                let sweeps = owner_geometry(&mut owner, pose, &[&source], source.motion.dt, None);
+                let swept = &sweeps[0].1;
+                assert_eq!(
+                    swept.witness.is_some(),
+                    lateral,
+                    "only the side slice's eligible surface can seed rigid demand: {:?}",
+                    swept.witness
+                );
+                assert_eq!(swept.verdict.is_some(), lateral);
+                if !lateral {
+                    // Fixture: a full-surface compression stop half a metre behind the side slice.
+                    // Rejecting the earlier radial hit must leave this later valid witness visible.
+                    let mut leaves = source.shape.hulls().to_vec();
+                    let mut stop = leaves[0].clone();
+                    stop.surface = None;
+                    stop.position += Vec3::Y * 0.5;
+                    let stop_only = Arc::new(super::super::super::sweep::SourceTree::new(vec![
+                        stop.clone(),
+                    ]));
+                    leaves.push(stop);
+                    source.shape = Arc::new(super::super::super::sweep::SourceTree::new(leaves));
+                    source.motion.dt = 1.0;
+                    let combined =
+                        owner_geometry(&mut owner, pose, &[&source], source.motion.dt, None)[0]
+                            .1
+                            .witness;
+                    source.shape = stop_only;
+                    let stop = owner_geometry(&mut owner, pose, &[&source], source.motion.dt, None)
+                        [0]
+                    .1
+                    .witness;
+                    assert!(stop.is_some());
+                    assert_eq!(combined, stop);
+                }
+            }
+        }
+    }
+
     /// The game's environment destruction: ordered cuts must keep a later target's witness,
     /// resolve its reduced preload, and never repeat geometry for the same source snapshot.
     #[test]
@@ -1410,6 +1512,7 @@ mod tests {
                 leaves
                     .iter()
                     .map(|&(x, c)| Hull {
+                        surface: None,
                         hull: Collider::cuboid(0.2, 0.2, 0.2),
                         position: chunks[c].centroid + Vec3::X * x,
                         rotation: Quat::IDENTITY,

@@ -19,7 +19,7 @@ use crate::contact_transfer::ContactTransfers;
 
 /// Spawn-built surface kinematics. A side slice supplies only lateral contact across the
 /// suspension band; the compressed outer outline owns every radial hard contact.
-#[derive(Component, Clone)]
+#[derive(Component, Clone, Debug)]
 #[require(ActiveCollisionHooks::MODIFY_CONTACTS)]
 pub(crate) struct BeltFace {
     pub(crate) side: Side,
@@ -52,6 +52,11 @@ impl BeltFace {
             outline: outline.into(),
             lateral_only,
         }
+    }
+
+    /// The represented contact surface in the hull frame, shared by solver and sweep witnesses.
+    pub(crate) fn accepts_normal(&self, outward: Vec3) -> bool {
+        !self.lateral_only || outward.x.abs() >= LATERAL_NORMAL_MIN_X
     }
 
     /// Positive belt travel in the hull frame. Radial contact follows its plane's tangent;
@@ -110,11 +115,9 @@ impl CollisionHooks for WorldContacts<'_, '_> {
                 .belts
                 .get(of.body)
                 .expect("a moving shoe face hangs on its spawn-built driving body");
-            if face.lateral_only {
-                contacts
-                    .manifolds
-                    .retain(|m| (rotation.0.inverse() * m.normal).x.abs() >= LATERAL_NORMAL_MIN_X);
-            }
+            contacts
+                .manifolds
+                .retain(|m| face.accepts_normal(rotation.0.inverse() * m.normal));
             if let Ok(segment) = self.segments.get(collider) {
                 let law = self
                     .law

@@ -2062,6 +2062,7 @@ fn no_bodys_kind_enters_a_contacts_loads() {
                 crate::debris::DebrisPiece,
                 super::super::sweep::SourceShape(Arc::new(super::super::sweep::SourceTree::new(
                     vec![super::super::sweep::Hull {
+                        surface: None,
                         hull,
                         position: Vec3::ZERO,
                         rotation: Quat::IDENTITY,

@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Hull {
+    /// A collider's contact restriction in the source body's frame; absent on ordinary hulls.
+    pub(crate) surface: Option<crate::track::stop_contacts::BeltFace>,
     pub(crate) hull: Collider,
     pub(crate) position: Vec3,
     pub(crate) rotation: Quat,
@@ -251,10 +253,18 @@ impl QueryTree<'_> {
                 continue;
             }
             work.casts += 1;
-            let motion = self.motion.leaf(&self.tree.hulls[node.chunk]);
+            let leaf = &self.tree.hulls[node.chunk];
+            let motion = self.motion.leaf(leaf);
             let Some((reach, normal, at)) = motion.hit(hull, origin, work) else {
                 continue;
             };
+            if let Some(surface) = &leaf.surface {
+                let rotation =
+                    Quat::from_scaled_axis(self.motion.spin * reach) * self.motion.rotation;
+                if !surface.accepts_normal(rotation.inverse() * normal) {
+                    continue; // An unrepresented surface cannot seed or prune an occupied patch.
+                }
+            }
             if first.is_some_and(|first| first.reach <= reach) {
                 continue;
             }

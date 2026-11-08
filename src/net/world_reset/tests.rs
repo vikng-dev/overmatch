@@ -448,6 +448,7 @@ fn publish_fixture_departures(world: &mut World) {
             crate::construction::sweep::SourceShape(std::sync::Arc::new(
                 crate::construction::sweep::SourceTree::new(vec![
                     crate::construction::sweep::Hull {
+                        surface: None,
                         hull: Collider::cuboid(1.0, 1.0, 1.0),
                         position: Vec3::ZERO,
                         rotation: Quat::IDENTITY,

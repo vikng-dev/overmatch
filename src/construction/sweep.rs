@@ -211,6 +211,7 @@ impl Geometry {
                     )
                 })?;
             contact_hulls.push(Hull {
+                surface: None,
                 hull,
                 position: chunk.centroid,
                 rotation: Quat::IDENTITY,
@@ -256,6 +257,7 @@ impl Geometry {
             .map(|&c| {
                 let hull = &self.contact_hulls[c];
                 Hull {
+                    surface: None,
                     hull: posed(hull.hull.clone(), rotation),
                     position: hull.position - origin,
                     rotation: hull.rotation,
@@ -820,6 +822,7 @@ mod tests {
         motion: Motion<'_>,
     ) -> Sweep {
         let source = SourceTree::new(vec![Hull {
+            surface: None,
             hull: motion.hull.clone(),
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
@@ -951,6 +954,7 @@ mod tests {
         let source = SourceTree::new(
             [(0.0, -0.4), (0.3, 0.4)]
                 .map(|(x, y)| Hull {
+                    surface: None,
                     hull: Collider::cuboid(0.4, 1.4, 1.2),
                     position: Vec3::new(x, y, 0.0),
                     rotation: Quat::IDENTITY,
@@ -1075,6 +1079,7 @@ mod tests {
         }
         // Fixture: target 5 is at z=1; the moving box occupies only |z| <= 0.1.
         let tree = SourceTree::new(vec![Hull {
+            surface: None,
             hull: Collider::cuboid(0.2, 4.0, 0.2),
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
@@ -1119,6 +1124,7 @@ mod tests {
         let tree = SourceTree::new(
             (0..16)
                 .map(|i| Hull {
+                    surface: None,
                     hull: Collider::cuboid(0.2, 0.2, 0.2),
                     position: Vec3::new(-0.19, i as f32 * 2.0, 0.0),
                     rotation: Quat::IDENTITY,
@@ -1181,6 +1187,7 @@ mod tests {
         // Fixture: offset COM, rotated long hull, translation and angular travel across full turns.
         let hull = Collider::cuboid(0.2, 4.0, 0.4);
         let tree = SourceTree::new(vec![Hull {
+            surface: None,
             hull: hull.clone(),
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
@@ -1239,6 +1246,7 @@ mod tests {
         // Fixture: a small cube travels from +X to +Y about the origin, without translation.
         let radius = 2.0;
         let tree = SourceTree::new(vec![Hull {
+            surface: None,
             hull: Collider::cuboid(0.2, 0.2, 0.2),
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
@@ -1267,6 +1275,7 @@ mod tests {
         let leaves: Vec<_> = (0..16)
             .flat_map(|i| {
                 [-1.0, 1.0].map(move |z| Hull {
+                    surface: None,
                     hull: Collider::cuboid(0.4, 0.4, 0.4),
                     position: Vec3::new(-0.4 * i as f32, 0.0, z),
                     rotation: Quat::IDENTITY,
@@ -1356,11 +1365,13 @@ mod tests {
         // Fixture: one leaf glides along the top face; the other approaches its front face.
         let tree = SourceTree::new(vec![
             Hull {
+                surface: None,
                 hull: Collider::cuboid(0.25, 0.25, 0.25),
                 position: Vec3::new(0.875, 0.625, 0.0),
                 rotation: Quat::IDENTITY,
             },
             Hull {
+                surface: None,
                 hull: Collider::cuboid(0.2, 0.2, 0.2),
                 position: Vec3::ZERO,
                 rotation: Quat::IDENTITY,
@@ -1399,6 +1410,7 @@ mod tests {
         let (structure, geometry) = wall(16.0);
         let state = State::new(&structure);
         let tree = SourceTree::new(vec![Hull {
+            surface: None,
             hull: Collider::cuboid(0.4, 0.4, 0.4),
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
