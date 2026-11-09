@@ -188,9 +188,8 @@ impl SweepAccount {
 struct SweepSource {
     body: Entity,
     /// Absent when the coarse query found no standing owner. The body still has a cast verdict.
-    shape: Option<Arc<super::super::sweep::SourceTree>>,
+    prepared: Option<Prepared>,
     motion: super::super::sweep::RigidMotion,
-    roots: BTreeSet<Entity>,
     mass: f32,
     inertia: avian3d::prelude::ComputedAngularInertia,
     axes: avian3d::prelude::LockedAxes,
@@ -198,6 +197,11 @@ struct SweepSource {
     /// The share of `drive` other bodies push with ([`pushes`]), N, world.
     #[cfg(test)]
     push: Vec3,
+}
+
+struct Prepared {
+    shape: Arc<super::super::sweep::SourceTree>,
+    roots: BTreeSet<Entity>,
 }
 
 impl SweepSource {
@@ -477,10 +481,15 @@ fn resolve_round(
         let _leaf = Stages::start(p.stages.as_deref(), Stage::SweepCensus);
         p.account.sources_prepared += sources
             .iter()
-            .filter(|source| source.shape.is_some())
+            .filter(|source| source.prepared.is_some())
             .count();
         p.account.record_sources(
-            sources.iter().map(|source| source.roots.is_empty()),
+            sources.iter().map(|source| {
+                source
+                    .prepared
+                    .as_ref()
+                    .is_none_or(|prepared| prepared.roots.is_empty())
+            }),
             resolved.iter().map(|r| (r.source, r.swept.work.casts)),
         );
     }
@@ -657,6 +666,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
             // Free groups keep immutable geometry. Articulated local poses require a current
             // box, but no cloned hulls, source tree or per-leaf motion envelopes until an owner is near.
             let bounds = match (piece, cached) {
+                // `spawn_prepared_as` gives every free group non-sensor construction-contact hulls.
                 (true, Some(shape)) => shape.0.bounds,
                 (true, None) => panic!("a free group prepares its source tree at spawn and split"),
                 (false, Some(_)) => panic!("only a free group carries a prepared source tree"),
@@ -682,7 +692,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                 spin: forces.angular_velocity(),
                 dt,
             };
-            let (shape, roots) = prepare_source(
+            let prepared = prepare_source(
                 (spatial, colliders, constructions, aabbs),
                 body_entity,
                 bounds,
@@ -703,9 +713,8 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
             );
             let source = SweepSource {
                 body: body_entity,
-                shape,
+                prepared,
                 motion,
-                roots,
                 mass: mass.value(),
                 inertia: *inertia,
                 axes,
@@ -742,10 +751,7 @@ fn prepare_source(
     bounds: super::super::sweep::SourceBounds,
     motion: super::super::sweep::RigidMotion,
     shape: impl FnOnce() -> Arc<super::super::sweep::SourceTree>,
-) -> (
-    Option<Arc<super::super::sweep::SourceTree>>,
-    BTreeSet<Entity>,
-) {
+) -> Option<Prepared> {
     let candidates: Vec<_> = spatial
         .aabb_intersections_with_aabb(bounds.swept(motion))
         .into_iter()
@@ -762,7 +768,7 @@ fn prepare_source(
         })
         .collect();
     if candidates.is_empty() {
-        return (None, BTreeSet::new()); // A swept miss, retained in SweepCast and the census.
+        return None; // A swept miss, retained in SweepCast and the census.
     }
     let shape = shape();
     let fine = shape.bounds(motion);
@@ -770,7 +776,7 @@ fn prepare_source(
         .into_iter()
         .filter_map(|(owner, bounds)| bounds.intersects(&fine).then_some(owner))
         .collect();
-    (Some(shape), roots)
+    Some(Prepared { shape, roots })
 }
 
 /// This tick's departures as sweep sources, each under the body id it will spawn as, moving as
@@ -798,7 +804,7 @@ fn departure_sources(
             spin: root.rotation * launch.spin,
             dt,
         };
-        let (shape, roots) = prepare_source(
+        let prepared = prepare_source(
             (spatial, colliders, constructions, &p.aabbs),
             *body,
             prepared.source.0.bounds,
@@ -807,8 +813,7 @@ fn departure_sources(
         );
         SweepSource {
             body: *body,
-            roots,
-            shape,
+            prepared,
             motion,
             mass: props.mass,
             inertia: avian3d::prelude::ComputedAngularInertia::new_with_local_frame(
@@ -857,7 +862,12 @@ fn geometry(
 ) -> Vec<Resolution> {
     let roots = sources
         .iter()
-        .flat_map(|source| source.roots.iter().copied())
+        .flat_map(|source| {
+            source
+                .prepared
+                .iter()
+                .flat_map(|prepared| prepared.roots.iter().copied())
+        })
         .collect::<BTreeSet<_>>();
     let mut gathered = bevy::utils::Parallel::<Vec<_>>::default();
     let stages = p.stages.as_deref();
@@ -872,7 +882,12 @@ fn geometry(
             let breakage = breakage.bypass_change_detection();
             let pose = breakage.physics_frame((position, rotation));
             let own: Vec<_> = (0..sources.len())
-                .filter(|&i| sources[i].roots.contains(&root))
+                .filter(|&i| {
+                    sources[i]
+                        .prepared
+                        .as_ref()
+                        .is_some_and(|prepared| prepared.roots.contains(&root))
+                })
                 .collect();
             let resolved = fracture::parts::record_factors(stages, || {
                 owner_sequence(
@@ -979,19 +994,17 @@ fn owner_geometry<'s>(
 ) -> Vec<(&'s SweepSource, super::super::sweep::Sweep)> {
     let inverse = pose.rotation.inverse();
     let pool = ComputeTaskPool::get();
-    // Results retain source order.
+    // Results retain source order; coarse misses have no owner patch.
     let sweeps: Vec<_> = sources
         .par_splat_map(pool, None, |_, sources| {
             sources
                 .iter()
                 .map(|source| {
-                    breakage.kind.sweep.swept(
+                    let prepared = source.prepared.as_ref()?;
+                    Some(breakage.kind.sweep.swept(
                         &breakage.live.structure,
                         &breakage.live.state,
-                        source
-                            .shape
-                            .as_deref()
-                            .expect("an owner candidate prepared fine source geometry"),
+                        &prepared.shape,
                         super::super::sweep::RigidMotion {
                             position: inverse * (source.motion.position - pose.translation),
                             rotation: inverse * source.motion.rotation,
@@ -1002,14 +1015,18 @@ fn owner_geometry<'s>(
                             spin: inverse * source.motion.spin,
                             dt,
                         },
-                    )
+                    ))
                 })
                 .collect::<Vec<_>>()
         })
         .into_iter()
         .flatten()
         .collect();
-    let mut patches: Vec<_> = sources.iter().copied().zip(sweeps).collect();
+    let mut patches: Vec<_> = sources
+        .iter()
+        .zip(sweeps)
+        .filter_map(|(&source, swept)| swept.map(|swept| (source, swept)))
+        .collect();
     resolve_patches(breakage, pose, &mut patches, field);
     patches
 }
@@ -1480,12 +1497,14 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
         let kind = crate::construction::tests::column_construction();
         // Fixture: slow and fast linear crossings, acceleration from rest, and a long hull
-        // whose quarter turn reaches a column that neither its centre nor its start box reaches.
+        // whose quarter turn reaches a column that neither its centre nor its start box reaches,
+        // plus an offset child whose body origin stays out of reach.
         let dt = 1.0 / 64.0;
         let substeps = avian3d::prelude::SubstepCount::default();
-        for (hull, velocity, acceleration, spin, reach) in [
+        for (hull, local, velocity, acceleration, spin, reach) in [
             (
                 Collider::cuboid(0.2, 0.2, 0.2),
+                Transform::IDENTITY,
                 Vec3::X,
                 Vec3::ZERO,
                 Vec3::ZERO,
@@ -1493,6 +1512,7 @@ mod tests {
             ),
             (
                 Collider::cuboid(0.2, 0.2, 0.2),
+                Transform::IDENTITY,
                 Vec3::X * 1024.0,
                 Vec3::ZERO,
                 Vec3::ZERO,
@@ -1500,6 +1520,7 @@ mod tests {
             ),
             (
                 Collider::cuboid(0.2, 0.2, 0.2),
+                Transform::IDENTITY,
                 Vec3::ZERO,
                 Vec3::X * 4096.0,
                 Vec3::ZERO,
@@ -1507,10 +1528,19 @@ mod tests {
             ),
             (
                 Collider::cuboid(0.2, 4.0, 0.2),
+                Transform::IDENTITY,
                 Vec3::ZERO,
                 Vec3::ZERO,
                 Vec3::Z * std::f32::consts::FRAC_PI_2 / dt,
                 2.0_f32.hypot(0.1),
+            ),
+            (
+                Collider::cuboid(0.2, 0.2, 0.2),
+                Transform::from_translation(Vec3::new(2.0, 0.3, 0.0)),
+                Vec3::X,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                2.0 + 0.1 + dt,
             ),
         ] {
             for inside in [true, false] {
@@ -1531,7 +1561,6 @@ mod tests {
                         RigidBody::Dynamic,
                         Position(Vec3::new(-0.5 - reach + offset, 1.5, 0.0)),
                         Rotation::default(),
-                        hull.clone(),
                         Mass(1.0),
                         NoAutoMass,
                         AngularInertia::new(Vec3::ONE),
@@ -1540,6 +1569,12 @@ mod tests {
                         piece_layers(),
                     ))
                     .id();
+                if local == Transform::IDENTITY {
+                    app.world_mut().entity_mut(body).insert(hull.clone());
+                } else {
+                    app.world_mut()
+                        .spawn((ChildOf(body), local, hull.clone(), piece_layers()));
+                }
                 app.update();
                 app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = velocity;
                 app.world_mut().get_mut::<AngularVelocity>(body).unwrap().0 = spin;
@@ -1556,21 +1591,24 @@ mod tests {
                     })
                     .unwrap();
                 assert_eq!(
-                    source.roots.contains(&root),
+                    source
+                        .prepared
+                        .as_ref()
+                        .is_some_and(|prepared| prepared.roots.contains(&root)),
                     inside,
-                    "the exact travel boundary selects the owner: velocity={velocity:?}, acceleration={acceleration:?}, spin={spin:?}, inside={inside}"
+                    "the exact travel boundary selects the owner: velocity={velocity:?}, acceleration={acceleration:?}, spin={spin:?}, local={local:?}, inside={inside}"
                 );
                 assert_eq!(
-                    source.shape.is_some(),
+                    source.prepared.is_some(),
                     inside,
                     "a coarse miss prepares no fine geometry"
                 );
-                if let Some(shape) = source.shape {
+                if let Some(prepared) = source.prepared {
                     let owner = app.world().get::<Breakage>(root).unwrap();
                     let swept = kind.sweep.swept(
                         &owner.live.structure,
                         &owner.live.state,
-                        &shape,
+                        &prepared.shape,
                         source.motion,
                     );
                     assert!(
@@ -1682,7 +1720,10 @@ mod tests {
                 if !lateral {
                     // Fixture: a full-surface compression stop half a metre behind the side slice.
                     // Rejecting the earlier radial hit must leave this later valid witness visible.
-                    let mut leaves = source.shape.as_ref().unwrap().hulls().to_vec();
+                    let Some(prepared) = &mut source.prepared else {
+                        panic!("the side-slice fixture reaches its standing owner");
+                    };
+                    let mut leaves = prepared.shape.hulls().to_vec();
                     let mut stop = leaves[0].clone();
                     stop.surface = None;
                     stop.position += Vec3::Y * 0.5;
@@ -1690,15 +1731,16 @@ mod tests {
                         stop.clone(),
                     ]));
                     leaves.push(stop);
-                    source.shape = Some(Arc::new(super::super::super::sweep::SourceTree::new(
-                        leaves,
-                    )));
+                    prepared.shape = Arc::new(super::super::super::sweep::SourceTree::new(leaves));
                     source.motion.dt = 1.0;
                     let combined =
                         owner_geometry(&mut owner, pose, &[&source], source.motion.dt, None)[0]
                             .1
                             .witness;
-                    source.shape = Some(stop_only);
+                    source.prepared = Some(Prepared {
+                        shape: stop_only,
+                        roots: BTreeSet::new(),
+                    });
                     let stop = owner_geometry(&mut owner, pose, &[&source], source.motion.dt, None)
                         [0]
                     .1
@@ -1736,17 +1778,20 @@ mod tests {
         // Fixture: low contact mass leaves the drive dominant; the upper leaf leads by 0.5 m.
         let source = |body, leaves: &[(f32, usize)], drive| SweepSource {
             body: Entity::from_raw_u32(body).unwrap(),
-            shape: Some(Arc::new(SourceTree::new(
-                leaves
-                    .iter()
-                    .map(|&(x, c)| Hull {
-                        surface: None,
-                        hull: Collider::cuboid(0.2, 0.2, 0.2),
-                        position: chunks[c].centroid + Vec3::X * x,
-                        rotation: Quat::IDENTITY,
-                    })
-                    .collect(),
-            ))),
+            prepared: Some(Prepared {
+                shape: Arc::new(SourceTree::new(
+                    leaves
+                        .iter()
+                        .map(|&(x, c)| Hull {
+                            surface: None,
+                            hull: Collider::cuboid(0.2, 0.2, 0.2),
+                            position: chunks[c].centroid + Vec3::X * x,
+                            rotation: Quat::IDENTITY,
+                        })
+                        .collect(),
+                )),
+                roots: BTreeSet::new(),
+            }),
             motion: RigidMotion {
                 position: Vec3::NEG_X * 2.0,
                 rotation: Quat::IDENTITY,
@@ -1757,7 +1802,6 @@ mod tests {
                 spin: Vec3::ZERO,
                 dt: 1.0,
             },
-            roots: BTreeSet::new(),
             mass: 1e-6,
             inertia: avian3d::prelude::ComputedAngularInertia::INFINITY,
             axes: default(),
