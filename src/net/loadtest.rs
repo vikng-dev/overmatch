@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 
 use super::{
     battle::{BattlePhase, BattleState},
+    contact_census::ContactTick,
     harness::{LeverError, env_text},
 };
 use crate::{
@@ -90,6 +91,7 @@ pub(super) struct MatchTick {
     elapsed_s: f64,
     events_fired: usize,
     work: NamedCounts,
+    contacts: ContactTick,
 }
 
 enum RunState {
@@ -112,9 +114,19 @@ struct Target {
 }
 
 impl Loadtest {
+    /// Admission has started the workload clock, so this tick reaches a row.
+    pub(super) fn recording(&self) -> bool {
+        matches!(self.state, RunState::Running { .. })
+    }
+
     /// Records a tick once admission has started the workload clock, returning its row's
     /// `collector_us`; earlier ticks belong to no workload window.
-    pub(super) fn record(&mut self, sample: TickSample, work: NamedCounts) -> Option<&mut f64> {
+    pub(super) fn record(
+        &mut self,
+        sample: TickSample,
+        work: NamedCounts,
+        contacts: ContactTick,
+    ) -> Option<&mut f64> {
         let RunState::Running { started, next, .. } = &self.state else {
             return None;
         };
@@ -122,6 +134,7 @@ impl Loadtest {
             elapsed_s: started.elapsed().as_secs_f64(),
             events_fired: *next,
             work,
+            contacts,
         };
         Some(&mut self.trace.push(sample, extra).collector_us)
     }
@@ -366,14 +379,21 @@ mod tests {
         .unwrap();
         let mut load = app.world_mut().resource_mut::<Loadtest>();
         let counts = || NamedCounts::new(&WORK_NAMES, [0; WORK_COUNT]);
-        assert!(load.record(TickSample::idle(), counts()).is_none());
+        let contacts = crate::net::contact_census::ContactTick::default();
+        assert!(
+            load.record(TickSample::idle(), counts(), contacts)
+                .is_none()
+        );
         load.trace.send(1.0);
         load.state = RunState::Running {
             started: Instant::now(),
             targets: Vec::new(),
             next: 1,
         };
-        assert!(load.record(TickSample::idle(), counts()).is_some());
+        assert!(
+            load.record(TickSample::idle(), counts(), contacts)
+                .is_some()
+        );
         let (ticks, sends) = load.trace.drain();
         let ticks = serde_json::to_value(ticks).unwrap();
         assert_eq!(ticks.as_array().unwrap().len(), 1);

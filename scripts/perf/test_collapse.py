@@ -14,6 +14,10 @@ from unittest.mock import patch
 import collapse
 
 
+# Fixture: no piece records yet, a stats line's shape before any piece exists.
+EMPTY_PIECES = dict(thresholds=None, records=[])
+
+
 def tick_fixture(i, tanks):
     # Fixture: unequal ticks expose percentile-of-percentile and nested-cost bugs.
     return dict(tick=i, tick_us=100*i, physics_us=30, sleep_us=10,
@@ -47,7 +51,8 @@ class CollapseTests(unittest.TestCase):
                                  send_bytes=12000, awake_bodies=12, construction_pieces=20,
                                  constructions=10, events_fired=1,
                                  targets=[dict(id=i, falls=1, dust=1, chunks=3) for i in ["a", "b"]],
-                                 ticks=[tick_fixture(1, 2)], sends=[dict(tick=1, us=10)]))
+                                 ticks=[tick_fixture(1, 2)], sends=[dict(tick=1, us=10)],
+                                 pieces=EMPTY_PIECES))
         second = copy.deepcopy(row)
         second.update(period_s=2, ticks=128)
         second["loadtest"].update(sequence=2, elapsed_s=3.1, window_start_s=1.1,
@@ -325,7 +330,7 @@ class RamTests(unittest.TestCase):
         ram = dict(recipe=recipe, plan=dict(minimum_m_s=9, governed_m_s=10, runup_m=20,
                                            spawn=[0, 0, 0], rotation=[0, 0, 0, 1]),
                    impact=dict(tick=2, speed_m_s=10, normal_speed_m_s=10), done="deadline", ticks=ticks,
-                   sends=[dict(tick=1, us=1000), dict(tick=3, us=40)])
+                   sends=[dict(tick=1, us=1000), dict(tick=3, us=40)], pieces=EMPTY_PIECES)
         return recipe, ram
 
     def text(self, ram):
@@ -360,8 +365,8 @@ class RamTests(unittest.TestCase):
         for tick in ticks:
             tick.update(dt_s=0.00025, elapsed_s=tick["tick"] / 10, events_fired=1, tanks=2)
         recipe = dict(tanks=2, events=[dict(at_s=0.1, instances=["a", "b"])])
-        rows = [dict(loadtest=dict(ticks=ticks[:2], sends=ram["sends"][:1])),
-                dict(loadtest=dict(ticks=ticks[2:], sends=ram["sends"][1:]))]
+        rows = [dict(loadtest=dict(ticks=ticks[:2], sends=ram["sends"][:1], pieces=EMPTY_PIECES)),
+                dict(loadtest=dict(ticks=ticks[2:], sends=ram["sends"][1:], pieces=EMPTY_PIECES))]
         result = collapse.match_tick_summary(rows, recipe)
         self.assertEqual([t["tick"] for t in result["over_budget_ticks"]], [3, 4])
         self.assertEqual(result["ticks"], ticks)
@@ -377,9 +382,29 @@ class RamTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "instrument tick"):
             collapse.match_tick_summary(broken, recipe)
         with self.assertRaisesRegex(RuntimeError, "tick trace empty"):
-            collapse.match_tick_summary([dict(loadtest=dict(ticks=[], sends=[]))], recipe)
+            collapse.match_tick_summary([dict(loadtest=dict(ticks=[], sends=[], pieces=EMPTY_PIECES))], recipe)
         with self.assertRaisesRegex(RuntimeError, "rebuild the instrumented server"):
             collapse.match_tick_summary([dict(loadtest=dict(sequence=1))], recipe)
+
+    def test_piece_census_keeps_each_pieces_latest_record_and_reads_each_island_that_slept(self):
+        # Fixture: piece 1 is re-sent asleep on the next line; island 7 is two pieces, with
+        # piece 2 the last to land and piece 1 the last to calm. Dropping a re-send, or reading
+        # the landing and the calm from one piece, breaks the row.
+        def piece(piece, first_loaded, last_fast, sleep=None, island=None):
+            return dict(piece=piece, born=1, first_ground=1, first_loaded=first_loaded, last_fast=last_fast,
+                        sleep=sleep, island=island, linear_at_sleep=0.01 * piece, angular_at_sleep=0.02,
+                        sleeps=int(sleep is not None), awake_ticks=9, gone=None)
+        batches = [dict(pieces=dict(thresholds=None, records=[piece(1, 5, 7)])),
+                   dict(pieces=dict(thresholds=dict(linear=0.15, angular=0.15, time_to_sleep_s=0.5),
+                                    records=[piece(1, 5, 90, 122, 7), piece(2, 60, 80, 122, 7), piece(3, None, 8)]))]
+        census = collapse.piece_census(batches, 0.5)
+        self.assertEqual([r["piece"] for r in census["records"]], [1, 2, 3])
+        self.assertEqual(census["records"][0]["last_fast"], 90)
+        self.assertEqual(census["thresholds"]["time_to_sleep_s"], 0.5)
+        self.assertEqual(census["islands_at_sleep"], [dict(
+            sleep=122, island=7, pieces=2, never_landed=0, last_landing=60, landing_to_sleep_s=31.0,
+            last_calm=90, landing_to_calm_s=15.0, last_to_calm=1, peak_linear_at_sleep=0.02,
+            peak_angular_at_sleep=0.02)])
 
     def test_ram_percentile_and_additive_split_use_only_contact_ticks(self):
         recipe, ram = self.fixture()
