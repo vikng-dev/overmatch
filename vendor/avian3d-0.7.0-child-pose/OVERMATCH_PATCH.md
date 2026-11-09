@@ -227,3 +227,18 @@ prepare-phase update remain in place.
 
 Guards: `src/tests/avian_spawn_batch.rs` and
 `construction::breakage::tests::departure_and_split_preserve_each_chunks_collider_contract`.
+
+## Pairless-layer broad-phase prune (`src/collision/broad_phase/bvh_broad_phase.rs`)
+
+`collect_collision_pairs` skips a moved proxy's tree traversals when its collision-layer
+memberships or filters are empty: either empty term makes `CollisionLayers::interacts_with`
+false for every partner. Proxies remain in all collider trees, preserving spatial queries.
+Eligibility reads the current proxy layers each step, including sensor and standalone proxies.
+Tree access is read-only; missing live proxies or their bounds are invariant failures.
+
+`CollisionDiagnostics::broad_phase_candidates` counts non-self BVH leaf visits before duplicate,
+layer and body filtering, reduced from worker-local counters. The existing tick trace exposes it
+under `avian`, for the ram and scheduled-collapse instruments.
+
+Guard: `src/tests/avian_broad_phase_layers.rs`. Counts and reproduction:
+`upstream/avian-pairless-broad-phase.md` (local report).

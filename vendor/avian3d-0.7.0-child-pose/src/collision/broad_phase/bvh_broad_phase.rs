@@ -49,7 +49,7 @@ where
 }
 
 fn collect_collision_pairs<H: CollisionHooks>(
-    trees: ResMut<ColliderTrees>,
+    trees: Res<ColliderTrees>,
     moved_proxies: Res<MovedProxies>,
     hooks: StaticSystemParam<H>,
     par_commands: ParallelCommands,
@@ -73,6 +73,7 @@ fn collect_collision_pairs<H: CollisionHooks>(
         None,
         |_chunk_index, proxies| {
             let mut pairs = Vec::new();
+            let mut candidates = 0;
 
             par_commands.command_scope(|mut commands| {
                 for proxy_key1 in proxies {
@@ -81,11 +82,21 @@ fn collect_collision_pairs<H: CollisionHooks>(
 
                     // Get the proxy from its appropriate tree.
                     let tree = trees.tree_for_type(proxy_type1);
-                    let proxy1 = tree.get_proxy(proxy_key1.id()).unwrap();
+                    let proxy1 = tree.get_proxy(proxy_id1).expect(
+                        "Moved proxies remain in their collider tree until broad phase ends",
+                    );
 
-                    let Some(proxy_aabb1) = tree.get_proxy_aabb(proxy_id1) else {
+                    // An empty term cannot satisfy `interacts_with` for any partner.
+                    // Keep the proxy in the tree for spatial queries.
+                    if proxy1.layers.memberships == LayerMask::NONE
+                        || proxy1.layers.filters == LayerMask::NONE
+                    {
                         continue;
-                    };
+                    }
+
+                    let proxy_aabb1 = tree
+                        .get_proxy_aabb(proxy_id1)
+                        .expect("A live moved proxy has bounds in its collider tree");
 
                     // Query dynamic tree.
                     query_tree(
@@ -102,6 +113,7 @@ fn collect_collision_pairs<H: CollisionHooks>(
                         &contact_graph,
                         &joint_graph,
                         &mut pairs,
+                        &mut candidates,
                     );
 
                     // Query kinematic tree.
@@ -119,6 +131,7 @@ fn collect_collision_pairs<H: CollisionHooks>(
                         &contact_graph,
                         &joint_graph,
                         &mut pairs,
+                        &mut candidates,
                     );
 
                     // Skip static-static body collisions unless sensors or standalone colliders are involved.
@@ -138,6 +151,7 @@ fn collect_collision_pairs<H: CollisionHooks>(
                             &contact_graph,
                             &joint_graph,
                             &mut pairs,
+                            &mut candidates,
                         );
                     }
 
@@ -156,23 +170,29 @@ fn collect_collision_pairs<H: CollisionHooks>(
                         &contact_graph,
                         &joint_graph,
                         &mut pairs,
+                        &mut candidates,
                     );
                 }
             });
 
-            pairs
+            (pairs, candidates)
         },
     );
 
     // Drain the pairs into a single vector.
-    for mut chunk in pairs {
+    for (mut chunk, candidates) in pairs {
         broad_collision_pairs.append(&mut chunk);
+        diagnostics.broad_phase_candidates += candidates;
     }
 
     // Add the found collision pairs to the contact graph.
     for (proxy_key1, proxy_key2) in broad_collision_pairs {
-        let proxy1 = trees.get_proxy(proxy_key1).unwrap();
-        let proxy2 = trees.get_proxy(proxy_key2).unwrap();
+        let proxy1 = trees
+            .get_proxy(proxy_key1)
+            .expect("Collected pair proxies remain in their trees until graph insertion");
+        let proxy2 = trees
+            .get_proxy(proxy_key2)
+            .expect("Collected pair proxies remain in their trees until graph insertion");
 
         let mut contact_edge = ContactEdge::new(proxy1.collider, proxy2.collider);
         contact_edge.body1 = proxy1.body;
@@ -221,6 +241,7 @@ fn query_tree(
     contact_graph: &ContactGraph,
     joint_graph: &JointGraph,
     pairs: &mut Vec<(ColliderTreeProxyKey, ColliderTreeProxyKey)>,
+    candidates: &mut u32,
 ) {
     tree.bvh.aabb_traverse(proxy_aabb1, |bvh, node_index| {
         let node = &bvh.nodes[node_index as usize];
@@ -236,7 +257,11 @@ fn query_tree(
                 continue;
             }
 
-            let proxy2 = tree.get_proxy(proxy_id2).unwrap();
+            *candidates += 1;
+
+            let proxy2 = tree
+                .get_proxy(proxy_id2)
+                .expect("BVH leaves refer to live collider proxies");
 
             // Avoid duplicate pairs for moving proxies.
             //

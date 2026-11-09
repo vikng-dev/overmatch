@@ -60,6 +60,8 @@ pub(crate) struct AvianStep {
     pub(crate) finalize_us: f64,
     pub(crate) store_impulses_us: f64,
     pub(crate) swept_ccd_us: f64,
+    /// Non-self broad-phase leaf visits before pair filtering; may visit both endpoints.
+    pub(crate) broad_phase_candidates: u32,
     /// Narrow-phase pairs: every contact-graph edge, touching or not.
     pub(crate) pairs: u32,
     /// Awake touching pairs and their points.
@@ -116,6 +118,7 @@ impl TickSample {
                 finalize_us: 0.0,
                 store_impulses_us: 0.0,
                 swept_ccd_us: 0.0,
+                broad_phase_candidates: 0,
                 pairs: 0,
                 touching_pairs: 0,
                 points: 0,

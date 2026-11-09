@@ -366,6 +366,7 @@ impl AvianDiagnostics<'_, '_> {
             finalize_us: us(s.finalize),
             store_impulses_us: us(s.store_impulses),
             swept_ccd_us: us(s.swept_ccd),
+            broad_phase_candidates: c.broad_phase_candidates,
             pairs: c.contact_count,
             touching_pairs,
             points,
