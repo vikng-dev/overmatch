@@ -2746,28 +2746,50 @@ enum ColliderSource<T> {
     Fresh(T),
 }
 
-impl<T: Bundle> ColliderSource<T> {
-    fn place(
-        self,
-        commands: &mut Commands,
-        placed: impl Bundle,
-        pose: (Position, Rotation, GlobalTransform),
-    ) {
-        match self {
+type ColliderPose = (Position, Rotation, GlobalTransform);
+
+/// One archetype's fresh and retained colliders. The group commits both batches before any
+/// retirement can despawn their former owner; hooks still establish each leaf's physics state.
+struct ColliderBatch<T, P> {
+    fresh: Vec<(T, P, ColliderPose)>,
+    retained: Vec<(Entity, (P, ColliderPose))>,
+}
+
+impl<T, P> Default for ColliderBatch<T, P> {
+    fn default() -> Self {
+        Self {
+            fresh: Vec::new(),
+            retained: Vec::new(),
+        }
+    }
+}
+
+impl<T, P> ColliderBatch<T, P>
+where
+    T: Bundle<Effect: bevy::ecs::bundle::NoBundleEffect>,
+    P: Bundle<Effect: bevy::ecs::bundle::NoBundleEffect>,
+{
+    fn push(&mut self, source: ColliderSource<T>, placed: P, pose: ColliderPose) {
+        match source {
             // ColliderOf's relationship hook reads the supplied world pose. No collider insertion
             // runs: its shape and mass cache stay in the chunk's own frame.
-            Self::Rehome(entity) => {
-                commands.entity(entity).insert((placed, pose));
+            ColliderSource::Rehome(entity) => {
+                self.retained.push((entity, (placed, pose)));
             }
             // Fresh colliders run Avian's local-pose initialization hook once.
-            Self::Fresh(bundle) => {
-                commands.spawn((
+            ColliderSource::Fresh(bundle) => {
+                self.fresh.push((
                     bundle,
                     placed,
                     (Position::PLACEHOLDER, Rotation::PLACEHOLDER, pose.2),
                 ));
             }
         }
+    }
+
+    fn apply(self, world: &mut World) {
+        drop(world.spawn_batch(self.fresh));
+        world.insert_batch(self.retained);
     }
 }
 
@@ -2936,7 +2958,7 @@ fn spawn_prepared_as(commands: &mut Commands, piece: Entity, prepared: PreparedD
     let origin = *centroid;
     let at = root.translation + root.rotation * origin;
     // `Position`/`Rotation` before the body: it never flushes with avian's placeholder pose.
-    commands.entity(piece).insert((
+    let body = (
         Name::new("Piece"),
         source,
         Piece {
@@ -2951,12 +2973,20 @@ fn spawn_prepared_as(commands: &mut Commands, piece: Entity, prepared: PreparedD
             live: Box::new(live),
             origin,
         },
-        Transform::from_translation(at).with_rotation(root.rotation),
-        Position(at),
-        Rotation(root.rotation),
+        (
+            Transform::from_translation(at).with_rotation(root.rotation),
+            GlobalTransform::from(Transform::from_translation(at).with_rotation(root.rotation)),
+            Position(at),
+            Rotation(root.rotation),
+        ),
         Visibility::default(),
         crate::debris::DebrisPiece,
         crate::eased_dynamic_body(),
+        // Avian 0.7's ColliderOf hook appends directly when this collection exists. Without
+        // it, a batch queues competing one-child lists. The ancestor marker also belongs to
+        // the whole group: deferring it per child would repeatedly traverse the same subtree.
+        avian3d::prelude::RigidBodyColliders::default(),
+        avian3d::AncestorMarker::<avian3d::prelude::ColliderMarker>::default(),
         // The whole group owns its occupied properties at spawn. Child rehoming cannot
         // expose a partial aggregate to driving or sweeps before Avian's prepare phase.
         (
@@ -2972,7 +3002,9 @@ fn spawn_prepared_as(commands: &mut Commands, piece: Entity, prepared: PreparedD
         ),
         LinearVelocity(root.rotation * *velocity),
         AngularVelocity(root.rotation * *spin),
-    ));
+    );
+    let mut occupied_batch = ColliderBatch::default();
+    let mut contact_batch = ColliderBatch::default();
     for PreparedChunk {
         local,
         occupied,
@@ -2987,9 +3019,37 @@ fn spawn_prepared_as(commands: &mut Commands, piece: Entity, prepared: PreparedD
             GlobalTransform::from(world),
         );
         let ballistic = CollisionLayers::new([Layer::Armor], LayerMask::NONE);
-        occupied.place(commands, (ChildOf(piece), local, Sensor, ballistic), pose);
-        contact.place(commands, (ChildOf(piece), local, piece_layers()), pose);
+        occupied_batch.push(
+            occupied,
+            (
+                ChildOf(piece),
+                ColliderOf { body: piece },
+                local,
+                Sensor,
+                ballistic,
+            ),
+            pose,
+        );
+        contact_batch.push(
+            contact,
+            (
+                ChildOf(piece),
+                ColliderOf { body: piece },
+                local,
+                piece_layers(),
+            ),
+            pose,
+        );
     }
+    // Only structural effects hold exclusive world access. The two archetypes share one
+    // command, with complete body state visible to every collider hook in the same flush.
+    commands.queue(move |world: &mut World| {
+        world.entity_mut(piece).insert(body);
+        occupied_batch.apply(world);
+        contact_batch.apply(world);
+        // insert_batch defers relationship bookkeeping; retirement must see the new membership.
+        world.flush();
+    });
 }
 
 /// A construction group retiring at `tick`: its carrier keeps the final pose and retirement

@@ -528,6 +528,8 @@ pub mod data_structures;
 
 // TODO: Where should this go?
 pub(crate) mod ancestor_marker;
+// OVERMATCH PATCH: complete spawn bundles can declare their known ancestor membership.
+pub use ancestor_marker::AncestorMarker;
 
 /// Re-exports common components, bundles, resources, plugins and types.
 pub mod prelude {

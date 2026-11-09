@@ -1,0 +1,8 @@
+{
+  "events": [
+    {
+      "at_s": 10,
+      "instances": ["house_0001"]
+    }
+  ]
+}

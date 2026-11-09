@@ -291,7 +291,10 @@ impl Plugin for MassPropertyPlugin {
         // TODO: Avoid duplicating work with the above observer.
         app.add_observer(
             |trigger: On<Insert, RigidBodyColliders>, mut mass_helper: MassPropertyHelper| {
-                mass_helper.update_mass_properties(trigger.entity);
+                // OVERMATCH PATCH: explicit body properties do not depend on collider membership.
+                if !mass_helper.explicit.contains(trigger.entity) {
+                    mass_helper.update_mass_properties(trigger.entity);
+                }
             },
         );
 
@@ -347,6 +350,16 @@ pub type WithComputedMassProperty = Or<(
     With<ComputedCenterOfMass>,
 )>;
 
+// OVERMATCH PATCH: all three outputs are supplied by the owner, independent of descendants.
+pub(super) type ExplicitMassProperties = (
+    With<Mass>,
+    With<AngularInertia>,
+    With<CenterOfMass>,
+    With<NoAutoMass>,
+    With<NoAutoAngularInertia>,
+    With<NoAutoCenterOfMass>,
+);
+
 /// A query filter for entities with changed [`Mass`], [`AngularInertia`], or [`CenterOfMass`].
 pub type MassPropertyChanged = Or<(
     Changed<Mass>,
@@ -379,8 +392,11 @@ fn queue_mass_recomputation_on_mass_change(
 /// [`Mass`], [`AngularInertia`], or [`CenterOfMass`] components of their colliders are changed.
 fn queue_mass_recomputation_on_collider_mass_change(
     mut commands: Commands,
+    explicit: Query<(), ExplicitMassProperties>,
+    changed_properties: Query<(), MassPropertyChanged>,
+    mut queued: Local<bevy::ecs::entity::EntityHashSet>,
     mut query: Query<
-        &ColliderOf,
+        (Entity, &ColliderOf),
         Or<(
             Changed<ColliderMassProperties>,
             Changed<ColliderTransform>,
@@ -388,7 +404,16 @@ fn queue_mass_recomputation_on_collider_mass_change(
         )>,
     >,
 ) {
-    for &ColliderOf { body } in &mut query {
+    queued.clear();
+    for (collider, &ColliderOf { body }) in &mut query {
+        // OVERMATCH PATCH: children cannot affect fully explicit properties. A body's own
+        // collider can still carry edits to those properties; every affected owner queues once.
+        if explicit.contains(body) && (collider != body || !changed_properties.contains(body)) {
+            continue;
+        }
+        if !queued.insert(body) {
+            continue;
+        }
         if let Ok(mut entity_commands) = commands.get_entity(body) {
             entity_commands.insert(RecomputeMassProperties);
         }

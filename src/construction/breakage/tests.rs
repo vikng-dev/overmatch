@@ -5470,6 +5470,23 @@ fn chunk_facts(world: &mut World) -> Vec<ChunkFact> {
                     "a freed chunk's occupied collider meets rounds and no contact"
                 );
                 let breakage = world.get::<Breakage>(parent.parent()).unwrap();
+                let c = usize::from(chunk.0);
+                let expected = if sensor {
+                    assert_eq!(
+                        *layers,
+                        CollisionLayers::new([Layer::Armor], LayerMask::NONE)
+                    );
+                    &breakage.kind.sweep.occupied(c).0
+                } else {
+                    assert_eq!(*layers, piece_layers());
+                    breakage.kind.sweep.contact_hull(c)
+                };
+                assert_eq!(
+                    collider.shape().as_convex_polyhedron().unwrap().points(),
+                    expected.shape().as_convex_polyhedron().unwrap().points(),
+                    "batching retains the occupied and inset contact shapes from construction data"
+                );
+                assert_eq!(friction, Some(&breakage.kind.chunk_friction(c)));
                 if !sensor {
                     let source = world
                         .get::<super::super::sweep::SourceShape>(parent.parent())
@@ -5525,16 +5542,51 @@ fn chunk_facts(world: &mut World) -> Vec<ChunkFact> {
 /// Driving and sweeps read these before Avian prepares physics. Every fresh or reused
 /// departure must already hold its complete occupied properties, including split children.
 fn assert_spawned_group_properties(world: &mut World) {
-    for (piece, owner, mass, inertia, com) in world
+    let mut chunks = world.query::<(Entity, &ChildOf, &ChunkCollider, Has<Sensor>)>();
+    for (entity, piece, owner, mass, inertia, com, colliders) in world
         .query::<(
+            Entity,
             &Piece,
             &Breakage,
             &ComputedMass,
             &avian3d::prelude::ComputedAngularInertia,
             &avian3d::prelude::ComputedCenterOfMass,
+            &RigidBodyColliders,
         )>()
         .iter(world)
     {
+        let unique: BTreeSet<_> = colliders.iter().collect();
+        assert_eq!(
+            colliders.len(),
+            unique.len(),
+            "the body's attachment list has no duplicate collider"
+        );
+        assert_eq!(
+            unique.len(),
+            2 * piece.chunks.len(),
+            "every occupied and contact collider is attached before physics or retirement"
+        );
+        let members: Vec<_> = chunks
+            .iter(world)
+            .filter(|(_, parent, ..)| parent.parent() == entity)
+            .collect();
+        assert_eq!(
+            unique,
+            members.iter().map(|(entity, ..)| *entity).collect(),
+            "the physics list names exactly this group's live chunk colliders"
+        );
+        assert_eq!(
+            members
+                .iter()
+                .map(|(_, _, chunk, sensor)| (chunk.0, *sensor))
+                .collect::<BTreeSet<_>>(),
+            piece
+                .chunks
+                .iter()
+                .flat_map(|&c| [(c, false), (c, true)])
+                .collect(),
+            "each chunk contributes its own occupied and contact collider"
+        );
         let group: Vec<_> = piece.chunks.iter().map(|&c| usize::from(c)).collect();
         let expected = launch(&owner.kind, &owner.live.structure, &group, &[]).mass_properties;
         // Resolution: convex integration, diagonalization and f32 quaternion rounding at fixture scale.

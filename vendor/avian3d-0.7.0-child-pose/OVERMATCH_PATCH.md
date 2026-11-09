@@ -194,3 +194,32 @@ partitions immutable contact and constraint reads across compute-worker batches,
 local incidence maps, and combines the integer counts after those batches complete.
 
 Guards: `src/net/ram/avian_tests.rs`.
+
+## Complete collider batches and explicit mass ownership
+
+Subject: the game's server physics and construction collapse, game state only.
+
+`src/collision/collider/collider_hierarchy/plugin.rs` keeps an existing `ColliderOf` when it
+already names the nearest body. A complete spawn bundle can therefore supply the attachment
+alongside its shape and enter the body's collider tree directly. Hierarchy-driven attachment
+and rehoming still work when ownership differs. `AncestorMarker` is re-exported from `lib.rs`
+so a prepared group can mark its collider ancestry at spawn, avoiding a deferred marker write
+and subtree walk for each member of a batch.
+
+The game's group constructor initializes `RigidBodyColliders` empty before adding the group.
+Avian's relationship hook then appends each collider directly. Without that collection, a batch
+would queue competing single-collider lists. Bevy 0.19.1's `spawn_batch` and `insert_batch` keep
+per-entity hooks and observers; the game batches the occupied sensor and contact archetypes in
+one structural command. Bevy still queues each `ChildOf` collection update, and the BVH still
+needs one leaf insertion per collider. No hook, shape initialization or leaf is bypassed.
+
+`src/dynamics/rigid_body/mass_properties/` recognizes fully explicit ownership only when `Mass`,
+`AngularInertia`, `CenterOfMass` and all three corresponding `NoAuto*` markers exist. Membership
+changes do not recompute those outputs, and their update never aggregates descendants whose
+contributions would all be replaced. Collider changes queue one request per other owner.
+Self-attached colliders still queue their owner's explicit property edits; partially explicit
+and automatic bodies retain descendant aggregation. Initial body computation and the normal
+prepare-phase update remain in place.
+
+Guards: `src/tests/avian_spawn_batch.rs` and
+`construction::breakage::tests::departure_and_split_preserve_each_chunks_collider_contract`.
