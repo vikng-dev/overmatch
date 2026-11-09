@@ -5,17 +5,18 @@
 //! along one support direction hold any load whose line falls inside the convex hull of their
 //! points, projected along that direction, so a point inside the hull adds no support its vertices
 //! lack. Contacts between the same two bodies are clustered by support normal; each normal keeps
-//! the hull vertices of the points that bear, and its deepest point when that lies clear of them.
-//! A kept point stays in its own manifold and collider pair, attributed to the chunk it touches.
+//! the hull vertices of the points that bear. A kept point stays in its own manifold and collider
+//! pair, attributed to the chunk it touches.
 //!
 //! DERIVED: each normal's support polygon is preserved to within [`HULL_TOLERANCE`]. Clusters span
 //! up to 20 degrees, so across a cluster of unequal normals this is an approximation.
 //!
-//! Three things reduction does not preserve. A removed point's share of the solved impulses goes
-//! to the points that remain. A removed point loses its warm start, and one reselected later
-//! starts cold; a loaded preference only makes that rarer. A body pair with any point landing is
-//! left whole for that step, yet its blows can still move, since another pair sharing either body
-//! may be reduced and the solve couples them.
+//! Four things reduction does not preserve. A removed point's share of the solved impulses goes
+//! to the points that remain. An interior point deeper than the hull's vertices no longer corrects
+//! its own overlap. A removed point loses its warm start, and one reselected later starts cold; a
+//! loaded preference only makes that rarer. A body pair with any point landing is left whole for
+//! that step, yet its blows can still move, since another pair sharing either body may be reduced
+//! and the solve couples them.
 
 use core::borrow::BorrowMut;
 
@@ -26,8 +27,8 @@ use crate::math::Vector2;
 use crate::prelude::*;
 
 /// A body whose contacts with another [`ReducibleContacts`] body may be reduced. Every hook-free,
-/// constraint-generating pair between two such dynamic bodies shares the reduction; a pair with a
-/// static side, an unmarked body or a contact-modification hook keeps every manifold.
+/// constraint-generating pair between two such non-static bodies shares the reduction; a pair with
+/// a static side, an unmarked body or a contact-modification hook keeps every manifold.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReducibleContacts;
 
@@ -39,10 +40,12 @@ pub const MAX_NORMALS: usize = 12;
 /// merges a wedge's two faces; narrower keeps every facet of a fractured seam separate.
 const SAME_NORMAL_COS: Scalar = 0.9397;
 
-/// Resolution: metres, in the length unit. A point within this of touching bears; two depths
-/// within it are the same depth; a point that carried load last step holds its place by this much,
-/// so near-equal points do not trade places and drop their warm starts.
-pub const SELECTION_TIE: Scalar = 0.002;
+/// Resolution: metres, in the length unit. A point separated by no more than this bears; one
+/// farther out, not loaded last step and closing slower than the rest speed, cannot touch within
+/// the step. DERIVED: about one step's closing at the rest speed, Avian's default 0.15 m/s over
+/// the game's 64 Hz step being 2.3 mm; a point that closes a little past this overlaps by a
+/// fraction of a millimetre.
+pub const BEARING_GAP: Scalar = 0.002;
 
 /// Resolution: metres, in the length unit. A hull vertex closer than this to the chord between its
 /// kept neighbours is removed, so every point that bears lies within this of the kept polygon.
@@ -149,9 +152,9 @@ pub fn reduce_body_pair<T: BorrowMut<PairManifolds>>(
         }
     }
 
-    let (tie, tolerance) = (SELECTION_TIE * length_unit, HULL_TOLERANCE * length_unit);
+    let (gap, tolerance) = (BEARING_GAP * length_unit, HULL_TOLERANCE * length_unit);
     for (index, &normal) in normals.iter().enumerate() {
-        select(&mut candidates, index, normal, tie, tolerance);
+        select(&mut candidates, index, normal, gap, tolerance);
     }
 
     // Candidates were pushed in this same order.
@@ -174,23 +177,19 @@ pub fn reduce_body_pair<T: BorrowMut<PairManifolds>>(
 }
 
 /// Marks what `normal_index`'s cluster keeps: the vertices of the projected hull of the points
-/// that bear, then the deepest point if the hull's vertices are all a tie shallower.
+/// that bear.
 fn select(
     candidates: &mut [Candidate],
     normal_index: usize,
     normal: Vector,
-    tie: Scalar,
+    gap: Scalar,
     tolerance: Scalar,
 ) {
     let (u, v) = normal.any_orthonormal_pair();
     let at = |candidate: &Candidate| Vector2::new(candidate.world.dot(u), candidate.world.dot(v));
-    let cluster: SmallVec<[usize; 32]> = (0..candidates.len())
+    let mut bearing: SmallVec<[usize; 32]> = (0..candidates.len())
         .filter(|&i| candidates[i].normal == normal_index)
-        .collect();
-    let mut bearing: SmallVec<[usize; 32]> = cluster
-        .iter()
-        .copied()
-        .filter(|&i| candidates[i].depth >= -tie || candidates[i].carried)
+        .filter(|&i| candidates[i].depth >= -gap || candidates[i].carried)
         .collect();
     bearing.sort_unstable_by(|&a, &b| {
         let (first, second) = (&candidates[a], &candidates[b]);
@@ -204,26 +203,6 @@ fn select(
 
     for i in kept_vertices(candidates, &bearing, at, tolerance) {
         candidates[i].keep = true;
-    }
-
-    let score = |c: &Candidate| c.depth + if c.carried { tie } else { 0.0 };
-    let deepest = cluster
-        .iter()
-        .copied()
-        .max_by(|&a, &b| {
-            let (first, second) = (&candidates[a], &candidates[b]);
-            score(first)
-                .total_cmp(&score(second))
-                .then(second.identity.cmp(&first.identity))
-        })
-        .expect("a cluster holds its seed's points");
-    let held = cluster
-        .iter()
-        .filter(|&&i| candidates[i].keep)
-        .map(|&i| candidates[i].depth)
-        .fold(Scalar::MIN, Scalar::max);
-    if score(&candidates[deepest]) > held + tie {
-        candidates[deepest].keep = true;
     }
 }
 

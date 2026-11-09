@@ -4,7 +4,7 @@
 //! The grids, boxes and poses are fixture data: any spread of hull pairs exercises the same laws.
 
 use avian3d::collision::contact_types::{
-    HULL_TOLERANCE, MAX_NORMALS, PairManifolds, SELECTION_TIE, reduce_body_pair,
+    BEARING_GAP, HULL_TOLERANCE, MAX_NORMALS, PairManifolds, reduce_body_pair,
 };
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -78,13 +78,17 @@ fn carried(mut manifold: ContactManifold) -> ContactManifold {
 }
 
 /// A flat seam of many hull pairs costs the solver only the corners of its footprint: the
-/// interior and the points along an edge add no support. A mutant keeping any interior or edge
-/// point, or losing a corner a body could tip about, breaks it.
+/// interior, its deepest point included, and the points along an edge add no support. A mutant
+/// keeping any interior or edge point, or losing a corner a body could tip about, breaks it.
 #[test]
 fn a_flat_many_hull_seam_keeps_only_its_footprint_corners() {
-    let mut pairs = pairs_of((-2..=2).flat_map(|x| {
-        (-2..=2).map(move |z| flat_patch(Vec3::new(x as f32, 0.0, z as f32), 0.4, 0.0))
-    }));
+    let mut manifolds: Vec<ContactManifold> = (-2..=2)
+        .flat_map(|x| {
+            (-2..=2).map(move |z| flat_patch(Vec3::new(x as f32, 0.0, z as f32), 0.4, 0.0))
+        })
+        .collect();
+    manifolds[11].points[1].penetration = 2.0 * BEARING_GAP;
+    let mut pairs = pairs_of(manifolds);
     reduce(&mut pairs);
     assert_eq!(count(&pairs), 4);
     for corner in [(2.4, 2.4), (2.4, -2.4), (-2.4, -2.4), (-2.4, 2.4)] {
@@ -201,7 +205,7 @@ fn a_reversed_pair_clusters_on_its_oriented_normal() {
         side(4, 4.0, true, -Vec3::Y),
     ];
     reduce(&mut pairs);
-    assert_eq!(count(&pairs), 4);
+    assert_eq!(count(&pairs), 4, "one face became two");
     // A face reported the opposite way is a second support: both keep their corners.
     let mut opposed = vec![
         side(1, 1.0, false, Vec3::Y),
@@ -212,7 +216,7 @@ fn a_reversed_pair_clusters_on_its_oriented_normal() {
     reduce(&mut opposed);
     assert_eq!(
         count(&opposed),
-        8,
+        2 * 4,
         "an opposite support was merged into the first"
     );
 }
@@ -236,7 +240,7 @@ fn a_landing_point_leaves_the_whole_pair_whole() {
 /// treating every point as bearing, or every carried gap as idle, breaks one side.
 #[test]
 fn only_points_that_bear_shape_the_footprint() {
-    let open = -2.0 * SELECTION_TIE;
+    let open = -2.0 * BEARING_GAP;
     let build = |gap: ContactManifold| {
         let mut pairs = pairs_of(
             [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
@@ -256,36 +260,10 @@ fn only_points_that_bear_shape_the_footprint() {
         kept_at(&build(carried(lone(outside, open))), outside),
         "a loaded point was dropped"
     );
-    let touching = -0.5 * SELECTION_TIE;
+    let touching = -0.5 * BEARING_GAP;
     assert!(
         kept_at(&build(lone(outside, touching)), outside),
         "a touching point did not bear"
-    );
-}
-
-/// A point deeper than the footprint's vertices by more than a tie stays, or nothing corrects
-/// its overlap; one within a tie of them stays out, or noise in a flat seam adds a point. A
-/// mutant dropping the deepest, or keeping it unconditionally, breaks one side.
-#[test]
-fn the_deepest_point_stays_only_when_clear_of_the_hull() {
-    let centre = Vec3::new(0.2, 0.0, 0.1);
-    let build = |depth: f32| {
-        let mut pairs = pairs_of(
-            [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
-                .map(|(x, z)| lone(Vec3::new(x, 0.0, z), 0.0))
-                .into_iter()
-                .chain([lone(centre, depth)]),
-        );
-        reduce(&mut pairs);
-        pairs
-    };
-    assert!(
-        kept_at(&build(2.0 * SELECTION_TIE), centre),
-        "the deep interior point went"
-    );
-    assert!(
-        !kept_at(&build(0.5 * SELECTION_TIE), centre),
-        "a near-tie interior point stayed"
     );
 }
 
@@ -361,8 +339,9 @@ fn a_selection_ignores_the_order_of_its_pairs() {
 
 /// Which manifold seeds a support normal comes from collider identity, not depth: normals at 0,
 /// 19 and 38 degrees make two clusters when the 0-degree manifold seeds first and one when the
-/// 19-degree does, so a seed that follows depth reselects whenever depths trade places. A mutant
-/// seeding by depth breaks it.
+/// 19-degree does, so a seed that follows depth reselects whenever depths trade places. In two
+/// clusters one end patch is a hull of its own and keeps its four corners; merged, each end lies
+/// at the far end of one hull and keeps two. A mutant seeding by depth breaks it.
 #[test]
 fn cluster_seeds_do_not_follow_depth() {
     let tilted = |degrees: f32, x: f32, depth: f32| {
@@ -371,58 +350,20 @@ fn cluster_seeds_do_not_follow_depth() {
         manifold.normal = Vec3::new(turn.sin(), turn.cos(), 0.0);
         manifold
     };
-    let build = |deep: usize| {
-        let depth = |n: usize| if n == deep { 0.5 * SELECTION_TIE } else { 0.0 };
+    for deep in 0..3 {
+        let depth = |n: usize| if n == deep { 0.5 * BEARING_GAP } else { 0.0 };
         let mut pairs = pairs_of([
             tilted(0.0, -3.0, depth(0)),
             tilted(19.0, 0.0, depth(1)),
             tilted(38.0, 3.0, depth(2)),
         ]);
         reduce(&mut pairs);
-        pairs
-    };
-    for deep in 0..3 {
-        assert_eq!(
-            count(&build(deep)),
-            8,
-            "the clusters followed depth (deepest {deep})"
-        );
-    }
-}
-
-/// A selection repeated with its own points now carrying load is the same selection, whatever
-/// noise moves the depths inside a tie: the rest of a settled pile does not churn.
-/// A mutant dropping the carried preference from the hull or the deepest breaks it.
-#[test]
-fn a_selection_that_carried_keeps_itself_under_noise() {
-    let seed = |x: f32, z: f32, depth: f32, load: bool| {
-        let manifold = lone(Vec3::new(x, 0.0, z), depth);
-        if load { carried(manifold) } else { manifold }
-    };
-    let corners = [(-5.0, -5.0), (-5.0, 5.0), (5.0, -5.0), (5.0, 5.0)];
-    let ring = [
-        (0.0, 5.0 + 0.8 * HULL_TOLERANCE),
-        (5.0 + 0.8 * HULL_TOLERANCE, 0.0),
-    ];
-    for noise in [-0.4, 0.4] {
-        let depth = noise * SELECTION_TIE;
-        let mut pairs = pairs_of(
-            corners
-                .into_iter()
-                .chain(ring)
-                .map(|(x, z)| seed(x, z, 0.0, true))
-                .chain([seed(0.1, 0.1, depth, false)]),
-        );
-        let total = pairs.len();
-        reduce(&mut pairs);
-        assert_eq!(
-            count(&pairs),
-            total - 1,
-            "a carried vertex was traded (noise {noise})"
-        );
+        let end = |side: f32| kept(&pairs).filter(|p| p.point.x * side >= 2.5).count();
         assert!(
-            !kept_at(&pairs, Vec3::new(0.1, 0.0, 0.1)),
-            "a cold interior point took a place"
+            end(-1.0) == 4 || end(1.0) == 4,
+            "the clusters followed depth (deepest {deep}): ends kept {} and {}",
+            end(-1.0),
+            end(1.0)
         );
     }
 }
@@ -579,17 +520,18 @@ fn tilt(app: &App, body: Entity) -> f32 {
 }
 
 /// The tilt a supported body may show: its contacts settling by the selection's resolutions at
-/// either side of a footprint `span` across. DERIVED from those two tolerances; a body that
-/// tips off a lost corner passes it within the first second of falling.
+/// either side of a footprint `span` across, DERIVED from those two tolerances. MEASURED: both
+/// supported fixtures read 0; with the five-legged body's far hull corner removed it leans to
+/// 0.032 rad by step 200, past this bound for its 4 m footprint.
 fn supported_tilt(span: f32) -> f32 {
-    2.0 * (SELECTION_TIE + HULL_TOLERANCE) / span
+    2.0 * (BEARING_GAP + HULL_TOLERANCE) / span
 }
 
 /// A body on many hull pairs of another body, reduced, stands where it was set and does not tip
 /// even with its centre of mass well off-centre over a corner of its footprint, and its flat
-/// interface reduces to its corners and at most the deepest point. A selection keeping interior
-/// or one-sided points tips it; a missing reduction fails the count. The unreduced twin shows
-/// the fixture has many manifolds to reduce.
+/// interface reduces to its four corners. A selection keeping interior or one-sided points tips
+/// it; a missing reduction fails the count. The unreduced twin shows the fixture has many
+/// manifolds to reduce.
 #[test]
 fn a_body_on_reduced_contacts_stays_supported_with_a_bounded_count() {
     let mut reduced = app();
@@ -598,7 +540,7 @@ fn a_body_on_reduced_contacts_stays_supported_with_a_bounded_count() {
     steps(&mut reduced, 20);
     let (pairs, manifolds, points) = contact_counts(&body_pairs(&reduced, body));
     assert!(pairs > 4, "fixture: many hull pairs touch, got {pairs}");
-    assert!(points <= 5, "{points} points over {pairs} pairs");
+    assert_eq!(points, 4, "{points} points over {pairs} pairs");
     assert!(manifolds < pairs, "reduction removed whole manifolds");
 
     let mut full = app();
@@ -620,10 +562,10 @@ fn a_body_on_reduced_contacts_stays_supported_with_a_bounded_count() {
     );
 }
 
-/// The review's counterexample in the real engine: five thin legs of a compound body stand on a
-/// marked dynamic base, four at the cardinal points and one out at (1.5, 1.5), with the centre of
-/// mass at (1.4, 1.4). Only that fifth leg's corner of the footprint holds it; a selection that
-/// keeps the four cardinal extremes tips the body over the diamond's edge.
+/// A compound footprint need not be four-sided. Five thin legs stand on a marked dynamic base,
+/// four at the cardinal points and one out at (1.5, 1.5), with the centre of mass at (1.4, 1.4):
+/// only the fifth leg's corner of the footprint holds it. A selection that keeps the four cardinal
+/// extremes loses that corner and the body leans into it.
 #[test]
 fn a_body_held_by_its_fifth_corner_stays_up() {
     let mut world = app();

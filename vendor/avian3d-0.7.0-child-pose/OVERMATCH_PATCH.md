@@ -270,12 +270,15 @@ Two bodies touching through many collider pairs (a broken piece's chunk hulls al
 one manifold per hull pair. `NarrowPhase::reduce_body_pair_contacts` runs after the pair update and
 before status bits are read: it groups the touching pairs of each two bodies and clusters their
 contacts by support normal (same-normal cosine 20 degrees). Each normal keeps the vertices of the
-projected convex hull of the points that bear (within `SELECTION_TIE` of touching, or carrying load
-last step), less those within `HULL_TOLERANCE` of the polygon the rest make, and its deepest point
-when that is clear of them by a tie. Points inside the hull are what is removed; there is no point
-ceiling. A group past `MAX_NORMALS` is left whole, so the ceiling bounds work and never removes a
-face. DERIVED: each normal's support polygon is preserved to within `HULL_TOLERANCE`; across a
-cluster of unequal normals (up to 20 degrees) that is an approximation.
+projected convex hull of the points that bear (within `BEARING_GAP` of touching, or carrying load
+last step), less those within `HULL_TOLERANCE` of the polygon the rest make. Points inside the hull
+are what is removed, the deepest included; there is no point ceiling. A group past `MAX_NORMALS` is
+left whole, so the ceiling bounds work and never removes a face. DERIVED: each normal's support
+polygon is preserved to within `HULL_TOLERANCE`; across a cluster of unequal normals (up to 20
+degrees) that is an approximation. MEASURED: also keeping each normal's deepest point, as an
+overlap corrector, kept the one-house collapse awake three to eight times longer in each of six
+runs at this tolerance, its piles sliding and breaking for seconds after the event; two of two
+runs with hull vertices alone settled as fast as the unreduced engine.
 
 Only pairs between two dynamic `ReducibleContacts` bodies qualify; a static side and a
 contact-modification hook each exclude the pair at eligibility (MEASURED on twelve collapsing

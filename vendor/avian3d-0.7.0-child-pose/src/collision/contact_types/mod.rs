@@ -12,7 +12,7 @@ mod system_param;
 pub use contact_graph::{ContactGraph, ContactGraphInternal};
 pub use feature_id::PackedFeatureId;
 pub use reduction::{
-    HULL_TOLERANCE, MAX_NORMALS, PairManifolds, ReducibleContacts, ReductionChurn, SELECTION_TIE,
+    BEARING_GAP, HULL_TOLERANCE, MAX_NORMALS, PairManifolds, ReducibleContacts, ReductionChurn,
     reduce_body_pair,
 };
 use smallvec::SmallVec;
