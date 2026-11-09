@@ -8,7 +8,8 @@ Status: decided by the owner on 2026-11-05, until a revisit before the Steam rel
 - **Ticks over budget are bugs:** a tick over its 15.625 ms budget is a cost bug to fix at its
   source, never a load the game tolerates as part of play. That includes a building collapse.
 - **One clock:** the tick is the dedicated server's only pacing clock (#278,
-  `src/net/server_runner.rs`); the library's catch-up bound is unchanged.
+  `src/net/server_runner.rs`); the library's catch-up bound is unchanged, and the runner spends
+  it one tick per frame ("One tick per frame during catch-up" below).
 
 ## Finding
 
@@ -42,8 +43,9 @@ DERIVED from the locked sources (`Cargo.lock`: Bevy 0.19.1, Lightyear 0.30.1):
 - Bevy `bevy_time/src/fixed.rs`, `run_fixed_main_schedule`, adds that delta once and
   spends the accumulator until less than a timestep remains. It never adds the time
   spent running those ticks back into the same frame's accumulator.
-- DERIVED: with unchanged timestep and unit virtual speed, the previous remainder
-  is less than one tick, so this server runs at most 16 ticks per frame.
+- DERIVED: with unchanged timestep and unit virtual speed, 250 ms is 16 ticks. That is the
+  most this server simulates for one stall; the runner delivers it one tick per frame, so
+  Bevy's own loop never expends more than one.
 - Lightyear `lightyear_core/src/plugin.rs`, `CorePlugins::build`, uses Bevy's
   `TimePlugin`. `lightyear_core/src/timeline.rs`, `TimelinePlugin`, sets the fixed
   timestep and increments its local timeline in `FixedFirst`; it does not replace
@@ -55,12 +57,12 @@ DERIVED from the locked sources (`Cargo.lock`: Bevy 0.19.1, Lightyear 0.30.1):
   `src/net/server_stats.rs`, `install`, registers the stats emitter in `Last`.
 
 There is a simulation-time bound, not an absolute wall-time bound. DERIVED: frame
-work resumes after the sum of at most 16 complete tick costs plus the frame's other
-work. Even a one-tick-per-frame policy cannot service packets during that tick.
+work resumes after one complete tick plus the frame's other work. It cannot service
+packets during that tick.
 
-A normal frame runs exactly one tick when its wake sample is less than one timestep
-past due. OS scheduling jitter and expensive frame work can still create a catch-up
-batch; that is the unchanged overload path.
+Every frame runs exactly one tick. A wake sample less than one timestep past due is
+used as it is; a later one is replaced by the deadline, and the backlog runs in the
+following frames, back to back.
 
 ## Tick-paced authority (#278)
 
@@ -74,8 +76,8 @@ server asserts unpaused, unit-speed virtual time; no authority system changes it
 `Time<Real>::update_with_instant` primes the initial zero-delta sample without
 running a frame. The first frame waits for a complete tick. After every frame the
 runner recomputes from the accumulator remainder, including the time spent doing
-frame work. An already-overdue deadline starts immediately; Bevy's virtual cap and
-fixed catch-up loop still own admitted simulation time. The client runner is unchanged.
+frame work. An already-overdue deadline starts immediately. The client runner is
+unchanged.
 
 Verified against locked Bevy 0.19.1's `bevy_app/src/app.rs`, `schedule_runner.rs`,
 `bevy_time/src/lib.rs`, `real.rs`, `virt.rs`, `fixed.rs`, and Lightyear 0.30.1's
@@ -85,8 +87,8 @@ timeline in `FixedFirst`; it does not supply another server clock.
 The controlled-clock tests mount the shipped `TickRunner` plugin and its Lightyear
 plugins. Varying sub-budget frame work and scheduler oversleep produce one tick in
 every frame, in receive/tick/send/last order, with no frame before its tick is due.
-A separate test injects overdue frames and verifies immediate catch-up under the
-library's existing admission cap. The normal-frame test goes red with the former
+Separate tests inject overdue frames: each missed tick runs unslept in its own frame, and
+a stall past the library's admission cap admits exactly that cap. The normal-frame test goes red with the former
 4 ms runner: its first frame has zero ticks and receive/send/last without tick.
 The old runner and instrumentation are absent from shipped source.
 
@@ -106,6 +108,61 @@ system depends on multiple authority frames per tick:
 - Two test comments cited the former server frame/tick ratio. They now state their
   actual removal-message/history invariants. The multi-frame test fixtures remain
   useful for render-driven clients and schedules that admit frames between steps.
+
+## One tick per frame during catch-up
+
+The owner's overload policy stands: missed ticks are caught up, up to `Time<Virtual>::max_delta`
+(250 ms, 16 ticks), and wall time past that bound is never simulated. Only the delivery changed.
+
+MEASURED, hosted v0.7.0-alpha.11, 2 vCPU, 30 tanks, one house falling at tick 1602, two runs:
+14 sends in the 199 ticks 1602 to 1800, against one per tick before. The gaps held 16 ticks each
+(the cap), with a median of 387 ms and 368 ms and a maximum of 556 ms. The simulation ran at 0.60
+and 0.63 of wall speed.
+
+**Mechanism.** `lightyear_replication` `send.rs`, `update_replication_tick`, advances Replicon's
+`ServerTick` once per frame after the fixed loop, and the send runs in `PostUpdate` when it changed.
+`bevy_replicon` `server.rs`, `collect_changes`, serializes each changed component's current value,
+stamped with the frame's last tick. A 16-tick frame therefore sends one state, the last: the 15
+states before it were never sent. Append-only diffs (the construction ledger) lose nothing.
+
+**What a player saw.** Lightyear holds a sample past the newest keyframe rather than extrapolating
+(`lightyear_interpolation` `registry.rs`, `sample_history_with_interpolation`). The shipped buffer
+is `spread + tick` beyond RTT compensation, measured earlier at 22 to 32 ms of `min_delay`
+(`net-motion-contract.md`), so a 387 ms gap held every remote hull and fallen piece still for
+about 350 ms, then stepped it 16 ticks at once: 2.5 m for a hull at 10 m/s, about 2.6 such steps a
+second for the whole fall. The arrival estimator cannot absorb this in time, because `interp_delay`
+acquires coverage at 0.1 s per second and the gaps call for more than the fall lasts.
+
+DERIVED by replaying the client's laws (`RemoteEstimate`, the sync controller, `interp_delay`
+pacing, the arrival estimator, the sample clamp) over run 1's measured send times, for a hull at
+10 m/s across the fall and the following 400 ticks, at 60 Hz and 40 ms RTT/2. The script is the
+lane's, in its scratchpad; it is a model of those laws, not a capture.
+
+| Send cadence during catch-up | Time frozen | Median / longest freeze | Steps over 0.5 m | Backward hops, largest |
+|---|---:|---:|---:|---:|
+| Once per frame (before) | 6.2 s | 233 / 517 ms | 22 | 3, 1.6 m |
+| Every tick (chosen) | 0.9 s | 17 / 117 ms | 1 | 10, 1.5 m |
+| Every 2 ticks | 1.6 s | 33 / 133 ms | 1 | 8, 1.6 m |
+
+**Decision.** Every frame runs one tick, so every tick is sent, the cadence a tick under budget
+already has. No new number exists to tune. A cadence of two ticks halves the send work and
+leaves a 33 ms hold on each send through the fall.
+
+**Cost.** MEASURED hosted: a send costs 0.7 to 1.7 ms during the fall, mean 1.1 ms. DERIVED: 199
+sends cost about 0.22 s across the 5.15 s fall (14 sends cost 0.015 s), so the simulation's speed
+falls by about 4 %, from 0.60 to roughly 0.58. The rest of each frame's work is not priced here.
+`Time<Real>::delta` omits the skipped span, so netcode's keep-alive and timeout counters run behind
+wall time by at most what an overload skips.
+
+**Still visible.** While the simulation runs at 0.6 of wall speed the client's cursor, bounded to
+about 0.81 to 1.2 of wall speed, cannot follow it. It drifts ahead of the stream until the
+controller's 10-tick margin snaps it back: the backward hops above, each about 1.5 m for a hull at
+10 m/s. Send cadence does not cause the drift, but a denser stream lets the remote estimate follow
+the slowed clock sooner, so hops that a held view used to hide now show. MEASURED, local with other
+lanes compiling, three scheduled collapses: the one client logged 28 `FRONTIER interpolation resync`
+warnings before this change and 39 after. Only lower tick cost removes them, or a client cursor
+allowed to follow a slowed stream. Raising the margin alone did not help in the replay: at 25 ticks
+the hops fell to 4 and grew to 3.8 m.
 
 ## Supplied evidence
 

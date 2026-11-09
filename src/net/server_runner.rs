@@ -59,16 +59,16 @@ impl<C: Clock> Plugin for TickRunner<C> {
                     !virtual_time.is_paused() && virtual_time.relative_speed_f64() == 1.0,
                     "the dedicated server clock is unpaused and runs at wall speed"
                 );
+                let backlog_bound = virtual_time.max_delta();
                 let fixed = world.resource::<Time<Fixed>>();
-                // Invariant: the deadline spends exactly the accumulator's missing time.
-                // TimePlugin consumes that same wake sample: less than one timestep late admits
-                // exactly one tick. Overdue frames retain Bevy's virtual cap and catch-up loop.
-                let due = world
+                let timestep = fixed.timestep();
+                let last = world
                     .resource::<Time<Real>>()
                     .last_update()
-                    .expect("the runner primes real time before its first frame")
-                    + fixed
-                        .timestep()
+                    .expect("the runner primes real time before its first frame");
+                // Invariant: the deadline spends exactly the accumulator's missing time.
+                let mut due = last
+                    + timestep
                         .checked_sub(fixed.overstep())
                         .expect("Bevy's fixed loop exhausts all complete timesteps");
                 let mut now = clock.now();
@@ -76,7 +76,20 @@ impl<C: Clock> Plugin for TickRunner<C> {
                     clock.sleep(due - now);
                     now = clock.now();
                 }
-                app.insert_resource(TimeUpdateStrategy::ManualInstant(now));
+                // Backlog past Bevy's virtual cap is never simulated. One-tick samples cannot
+                // reach that cap, so the skip happens here against the same bound.
+                let skipped = (now - last).saturating_sub(backlog_bound);
+                if !skipped.is_zero() {
+                    app.world_mut()
+                        .resource_mut::<Time<Real>>()
+                        .update_with_instant(last + skipped);
+                    due += skipped;
+                }
+                // Each frame runs one tick between receive and send, overdue or not: a sample
+                // less than a timestep past due admits exactly one, and a later wake samples the
+                // deadline itself, leaving the backlog to the next frames.
+                let sample = if now - due < timestep { now } else { due };
+                app.insert_resource(TimeUpdateStrategy::ManualInstant(sample));
                 app.update();
                 if let Some(exit) = app.should_exit() {
                     return exit;
@@ -195,35 +208,62 @@ mod tests {
         }
     }
 
-    /// An overdue frame never sleeps or bypasses Bevy's catch-up admission policy.
+    /// Clients are sent one state per frame, so a catch-up frame holding several ticks starves
+    /// their view. Every missed tick still runs, back to back, each between receive and send.
     #[test]
-    fn overdue_frames_keep_bevys_catch_up_bound_without_sleeping() {
+    fn a_missed_tick_runs_in_its_own_frame_between_receive_and_send() {
         let tick = super::super::server::TICK;
         let clock = TestClock {
             now: Arc::new(Mutex::new(Instant::now())),
             sleeps: default(),
             oversleep: Duration::ZERO,
         };
-        // Fixture: two ticks of work, then a wall stall beyond the library's admission bound.
-        let (mut app, frames) = probe(
-            clock.clone(),
-            vec![
-                tick * 2,
-                Duration::from_secs(1),
-                Duration::ZERO,
-                Duration::ZERO,
-            ],
-        );
-        let admitted = app.world().resource::<Time<Virtual>>().max_delta();
+        // Fixture: one frame overruns by five ticks, then frames cost nothing.
+        let mut work = vec![tick * 5];
+        work.resize(8, Duration::ZERO);
+        let (mut app, frames) = probe(clock.clone(), work);
         assert_eq!(app.run(), bevy::app::AppExit::Success);
         let frames = frames.0.lock().unwrap();
-        assert_eq!(frames[0].ticks, 1);
-        assert_eq!(frames[1].ticks, 2);
+        for (index, frame) in frames.iter().enumerate() {
+            assert_eq!(frame.ticks, 1, "frame {index}: {frame:?}");
+            assert_eq!(frame.stages, ["receive", "tick", "send", "last"]);
+            assert_eq!(frame.fixed_elapsed, tick * (index as u32 + 1));
+        }
+        // The first frame waits for its tick; five ticks then run unslept; the last two wait.
+        assert_eq!(clock.sleeps.lock().unwrap().len(), 3);
+    }
+
+    /// One-tick frames must not lengthen catch-up: a stall admits the same simulated time as
+    /// Bevy's virtual cap, and everything past that bound is skipped, not owed.
+    #[test]
+    fn a_stall_past_the_cap_admits_exactly_the_cap_and_skips_the_rest() {
+        let tick = super::super::server::TICK;
+        let clock = TestClock {
+            now: Arc::new(Mutex::new(Instant::now())),
+            sleeps: default(),
+            oversleep: Duration::ZERO,
+        };
+        let admitted = Time::<Virtual>::default().max_delta();
+        let cap_ticks = (admitted.as_nanos() / tick.as_nanos()) as usize;
+        // Fixture: a wall stall four times the admission bound, then costless frames.
+        let mut work = vec![admitted * 4];
+        work.resize(cap_ticks + 3, Duration::ZERO);
+        let (mut app, frames) = probe(clock.clone(), work);
         assert_eq!(
-            frames[2].ticks as u128,
-            admitted.as_nanos() / tick.as_nanos()
+            app.world().resource::<Time<Virtual>>().max_delta(),
+            admitted
         );
-        assert_eq!(frames[3].ticks, 1);
-        assert_eq!(clock.sleeps.lock().unwrap().len(), 2);
+        assert_eq!(app.run(), bevy::app::AppExit::Success);
+        let frames = frames.0.lock().unwrap();
+        assert!(frames.iter().all(|frame| frame.ticks == 1), "{frames:?}");
+        // The stalled frame's tick, then the cap's worth unslept; the next tick waits its turn.
+        assert_eq!(
+            frames[cap_ticks].fixed_elapsed,
+            tick * (cap_ticks as u32 + 1)
+        );
+        assert_eq!(clock.sleeps.lock().unwrap().len(), 3);
+        // Wall time past the bound never reached the simulation.
+        let settled = &frames[cap_ticks];
+        assert_eq!(settled.elapsed - settled.fixed_elapsed, admitted * 3);
     }
 }
