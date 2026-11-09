@@ -296,7 +296,7 @@ def ram_capacity_rows(rows):
 
 
 def capacity_verdict(rows, clients, links=None):
-    """Complete artifacts remain diagnostic evidence when the requested workload misses real time."""
+    """Fairness admits counts; only population capacity also requires the server's fixed rate."""
     # Match admission endpoints and the server period are exact, before display rounding.
     spans = [(r["loadtest"]["elapsed_s"] - r["loadtest"]["window_start_s"])
              if "loadtest" in r else r["period_s"] for r in rows]
@@ -308,15 +308,18 @@ def capacity_verdict(rows, clients, links=None):
     server_keeping_up = ticks >= expected - allowance
     keeping_up = sum(c["keeping_up"] for c in clients.values())
     links_complete = links is None or all(c["all_windows"] for c in links.values())
-    valid = server_keeping_up and keeping_up == len(clients) and links_complete
+    valid = keeping_up == len(clients) and links_complete
     return dict(valid=valid, tick_hz=ticks / seconds, server_keeping_up=server_keeping_up,
+                server_over_budget=not server_keeping_up, capacity_supported=valid and server_keeping_up,
                 clients_keeping_up=keeping_up, clients=len(clients), links_complete=links_complete)
 
 
-def require_capacity(verdict, out):
+def require_valid_run(verdict, out):
+    print(f"MEASURED server_over_budget={verdict['server_over_budget']}; "
+          f"measured rate {verdict['tick_hz']:.3f} Hz; "
+          f"capacity_supported={verdict['capacity_supported']}", flush=True)
     if not verdict["valid"]:
-        message = (f"INVALID CAPACITY: {verdict['clients_keeping_up']}/{verdict['clients']} clients keeping up, "
-                   f"tick_hz {verdict['tick_hz']:.3f}, server_keeping_up={verdict['server_keeping_up']}, "
+        message = (f"INVALID RUN: {verdict['clients_keeping_up']}/{verdict['clients']} clients keeping up, "
                    f"links_complete={verdict['links_complete']}; artifacts: {out}")
         print(message, flush=True)
         raise RuntimeError(message)
@@ -434,7 +437,7 @@ def run_match(args, out, recipe):
                     print(f"MEASURED match-tick-attribution: {len(trace['ticks'])} ticks; {out / 'tick-attribution.json'}")
                     report_match(windows)
                     last = windows[-1]["loadtest"]
-                    require_capacity(counts["capacity"], out)
+                    require_valid_run(counts["capacity"], out)
                     print(f"COMPLETE: {args.tanks} tanks, {client_count} real links, {last['constructions']} constructions, {len(windows)} complete windows, {last['events_fired']} events; game construction outcomes {json.dumps(last['targets'])}; artifacts: {out}")
                     return
             time.sleep(min(POLL_S, max(0, deadline - time.monotonic())))
@@ -794,7 +797,7 @@ def run_ram(args, out, recipe):
                     result["capacity"] = capacity_verdict(ram_capacity_rows(result["rows"]), {"client": result["client_frames"]})
                     (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
                     report_ram(result)
-                    require_capacity(result["capacity"], out)
+                    require_valid_run(result["capacity"], out)
                     print(f"COMPLETE: ram artifacts: {out}", flush=True)
                     return
             time.sleep(min(POLL_S, max(0, deadline-time.monotonic())))

@@ -67,7 +67,7 @@ class CollapseTests(unittest.TestCase):
         rows = [dict(ram=dict(ticks=[])), dict(ram=dict(ticks=[1])), dict(ram=dict(ticks=[2, 3]))]
         self.assertEqual(collapse.ram_capacity_rows(rows), rows[2:])
 
-    def test_capacity_requires_clients_server_rate_and_uninterrupted_links(self):
+    def test_run_fairness_is_independent_of_server_capacity(self):
         _, rows = self.match_fixture()
         clients = {"a": dict(keeping_up=True)}
         links = {"a": dict(all_windows=True)}
@@ -76,13 +76,25 @@ class CollapseTests(unittest.TestCase):
         self.assertEqual(valid["tick_hz"], 64)
         slow = copy.deepcopy(rows)
         slow[1]["ticks"] -= 10
-        for verdict in [collapse.capacity_verdict(slow, clients, links),
-                        collapse.capacity_verdict(rows, {"a": dict(keeping_up=False)}, links),
+        slow_verdict = collapse.capacity_verdict(slow, clients, links)
+        self.assertTrue(slow_verdict["valid"], "server overload is the workload observation")
+        self.assertTrue(slow_verdict["server_over_budget"])
+        self.assertAlmostEqual(slow_verdict["tick_hz"], (64 + 118) / 3)
+        self.assertFalse(slow_verdict["capacity_supported"], "population capacity requires real time")
+        self.assertTrue(valid["capacity_supported"])
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            collapse.require_valid_run(slow_verdict, Path("/fixture/artifacts"))
+        self.assertIn("server_over_budget=True", output.getvalue())
+        self.assertIn("60.667 Hz", output.getvalue())
+        self.assertNotIn("INVALID", output.getvalue())
+        for verdict in [collapse.capacity_verdict(rows, {"a": dict(keeping_up=False)}, links),
                         collapse.capacity_verdict(rows, clients, {"a": dict(all_windows=False)})]:
             self.assertFalse(verdict["valid"])
+            self.assertFalse(verdict["capacity_supported"])
             with contextlib.redirect_stdout(io.StringIO()) as output:
-                with self.assertRaisesRegex(RuntimeError, "INVALID CAPACITY"):
-                    collapse.require_capacity(verdict, Path("/fixture/artifacts"))
+                with self.assertRaisesRegex(RuntimeError, "INVALID RUN"):
+                    collapse.require_valid_run(verdict, Path("/fixture/artifacts"))
+            self.assertIn("/fixture/artifacts", output.getvalue())
             self.assertNotIn("COMPLETE", output.getvalue())
 
     def test_only_kernel_allocation_evidence_admits_two_vcpu(self):
@@ -117,9 +129,13 @@ class CollapseTests(unittest.TestCase):
                                   ticks=[tick_fixture(2, 2)], sends=[])
         return recipe, [row, second]
 
-    def run_hosted_batches(self, statuses, *, complete=True, complete_after=2, exit_client=False):
+    def run_hosted_batches(self, statuses, *, complete=True, complete_after=2, exit_client=False, slow_server=False, unfair=None):
         # Fixture: server timestamps cover three seconds, fetched tens of seconds later.
         recipe, rows = self.match_fixture()
+        if slow_server:
+            rows[1]["ticks"] -= 10
+        if unfair == "link":
+            rows[1]["send_clients"] = []
         host = "server: host available_parallelism=2 cpu_quota=2.00 cpus (200000/100000 us) cpuset=0-15"
         clock, polls, children, timeouts = [0.0], [], [], []
         args = SimpleNamespace(target="192.0.2.1:5888", deployment="fixture", tanks=2,
@@ -136,8 +152,10 @@ class CollapseTests(unittest.TestCase):
         def spawn(*args, **kwargs):
             kwargs["stdout"].write("client: connected (entity fixture)\nharness: released frame_s=0.000\n")
             frame_path = Path(kwargs["env"]["SPIKE_FRAME_COST"])
+            frame_hz = 25 if unfair == "client" else 100
             frame_path.with_name(frame_path.stem + ".client.jsonl").write_text("".join(
-                json.dumps(dict(t=i / 100, frame_ms=10)) + "\n" for i in range(301)))
+                json.dumps(dict(t=i / frame_hz, frame_ms=1000 / frame_hz)) + "\n"
+                for i in range(3 * frame_hz + 1)))
             kwargs["stdout"].flush()
             child = Client()
             children.append(child)
@@ -169,14 +187,37 @@ class CollapseTests(unittest.TestCase):
                 self.assertEqual(json.loads((Path(directory) / "tick-attribution.json").read_text())["ticks"],
                                  [t for r in rows for t in r["loadtest"]["ticks"]])
                 self.assertIn("COMPLETE:", output.getvalue())
+                verdict = json.loads((Path(directory) / "counts.json").read_text())["capacity"]
+                self.assertTrue(verdict["valid"])
+                self.assertEqual(verdict["server_over_budget"], slow_server)
+                self.assertEqual(verdict["capacity_supported"], not slow_server)
+                self.assertIn(f"server_over_budget={slow_server}", output.getvalue())
             finally:
                 self.assertTrue(all(c.killed or c.poll() is not None for c in children))
+                counts_path = Path(directory) / "counts.json"
+                self.hosted_counts = json.loads(counts_path.read_text()) if counts_path.exists() else None
+                self.hosted_output = output.getvalue()
                 self.hosted_polls, self.hosted_clock = polls, clock[0]
                 self.hosted_errors = errors.getvalue()
                 self.hosted_timeouts = timeouts
                 self.hosted_deadline = (2 * args.startup_grace + args.duration
                                         if children else args.startup_grace)
         return rows
+
+    def test_observed_slow_server_completes_and_saves_valid_counts(self):
+        # The count-study consumer must retain a fair overloaded workload, including its rate.
+        self.run_hosted_batches([0], slow_server=True)
+        self.assertNotIn("INVALID", self.hosted_errors)
+
+    def test_unfair_client_or_link_retains_counts_and_refuses_completion(self):
+        # Workload comparisons need the refusal and its evidence even when server rate is healthy.
+        for unfair in ("client", "link"):
+            with self.subTest(unfair=unfair), self.assertRaisesRegex(RuntimeError, "INVALID RUN"):
+                self.run_hosted_batches([0], unfair=unfair)
+            self.assertFalse(self.hosted_counts["capacity"]["valid"])
+            self.assertFalse(self.hosted_counts["capacity"]["server_over_budget"])
+            self.assertNotIn("COMPLETE:", self.hosted_output)
+            self.assertIn("MATCH RUN INVALID", self.hosted_errors)
 
     def test_hosted_batched_delivery_closes_on_server_time(self):
         rows = self.run_hosted_batches([0], complete_after=3)
