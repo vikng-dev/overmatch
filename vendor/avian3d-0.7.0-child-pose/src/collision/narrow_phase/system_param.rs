@@ -531,9 +531,10 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
             {
                 continue;
             }
-            let (Some(body1), Some(body2)) = (pair.body1, pair.body2) else {
-                continue;
-            };
+            let (body1, body2) = pair
+                .body1
+                .zip(pair.body2)
+                .expect("a reducible pair has both bodies");
             let manifolds = core::mem::take(&mut pair.manifolds);
             entries.push(ReductionEntry {
                 bodies: (body1.min(body2), body1.max(body2)),
@@ -815,10 +816,12 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 // OVERMATCH PATCH: both bodies must allow it.
                 contacts.flags.set(
                     ContactPairFlags::REDUCIBLE_CONTACTS,
-                    body1_bundle
-                        .as_ref()
-                        .zip(body2_bundle.as_ref())
-                        .is_some_and(|(a, b)| a.reducible && b.reducible),
+                    contacts.body1.is_some()
+                        && contacts.body2.is_some()
+                        && body1_bundle
+                            .as_ref()
+                            .zip(body2_bundle.as_ref())
+                            .is_some_and(|(a, b)| a.reducible && b.reducible),
                 );
 
                 // Get combined friction and restitution coefficients of the colliders
