@@ -2,10 +2,11 @@
 
 use core::time::Duration;
 
-use bevy::app::PluginsState;
+use bevy::app::{FixedMain, PluginsState, RunFixedMainLoop, RunFixedMainLoopSystems};
+use bevy::ecs::schedule::ScheduleCleanupPolicy;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
-use bevy::time::TimeUpdateStrategy;
+use bevy::time::{TimeUpdateStrategy, run_fixed_main_schedule};
 use lightyear::prelude::server::ServerPlugins;
 
 pub(super) fn plugin(app: &mut App) {
@@ -31,13 +32,48 @@ impl Clock for WallClock {
     }
 }
 
+/// Wall time elapsed since `Time<Fixed>` last admitted any. Its overstep is the admitted debt.
+#[derive(Resource, Default)]
+struct UnadmittedWall(Duration);
+
+/// Bevy's `run_fixed_main_schedule`, spending one admitted tick per frame so each is sent. A new
+/// batch is admitted only once the last is spent, under the same cap Bevy's virtual clock applies
+/// to one frame. `Time<Real>` stays wall time, because networking counts its deltas.
+fn run_one_admitted_tick(world: &mut World) {
+    let elapsed = world.resource::<Time<Real>>().delta();
+    let cap = world.resource::<Time<Virtual>>().max_delta();
+    let mut unadmitted = world.resource_mut::<UnadmittedWall>();
+    unadmitted.0 += elapsed;
+    let pending = unadmitted.0;
+    let mut fixed = world.resource_mut::<Time<Fixed>>();
+    let timestep = fixed.timestep();
+    let admits = fixed.overstep() < timestep;
+    if admits {
+        fixed.accumulate_overstep(pending.min(cap));
+    }
+    assert!(
+        fixed.overstep() >= timestep,
+        "the runner starts a frame only when a tick is due"
+    );
+    fixed.discard_overstep(timestep);
+    fixed.advance_by(timestep);
+    if admits {
+        world.resource_mut::<UnadmittedWall>().0 = Duration::ZERO;
+    }
+
+    *world.resource_mut::<Time>() = world.resource::<Time<Fixed>>().as_generic();
+    world.run_schedule(FixedMain);
+    *world.resource_mut::<Time>() = world.resource::<Time<Virtual>>().as_generic();
+}
+
 struct TickRunner<C>(C);
 
 impl<C: Clock> Plugin for TickRunner<C> {
     fn build(&self, app: &mut App) {
         app.add_plugins(ServerPlugins {
             tick_duration: super::server::TICK,
-        });
+        })
+        .init_resource::<UnadmittedWall>();
         let clock = self.0.clone();
         app.set_runner(move |mut app| {
             if app.plugins_state() != PluginsState::Cleaned {
@@ -47,6 +83,17 @@ impl<C: Clock> Plugin for TickRunner<C> {
                 app.finish();
                 app.cleanup();
             }
+
+            app.remove_systems_in_set(
+                RunFixedMainLoop,
+                run_fixed_main_schedule,
+                ScheduleCleanupPolicy::RemoveSystemsOnly,
+            )
+            .expect("TimePlugin registers Bevy's fixed loop");
+            app.add_systems(
+                RunFixedMainLoop,
+                run_one_admitted_tick.in_set(RunFixedMainLoopSystems::FixedMainLoop),
+            );
 
             // Real's first sample has zero delta. Prime it without running a tickless frame.
             app.world_mut()
@@ -59,37 +106,23 @@ impl<C: Clock> Plugin for TickRunner<C> {
                     !virtual_time.is_paused() && virtual_time.relative_speed_f64() == 1.0,
                     "the dedicated server clock is unpaused and runs at wall speed"
                 );
-                let backlog_bound = virtual_time.max_delta();
                 let fixed = world.resource::<Time<Fixed>>();
-                let timestep = fixed.timestep();
-                let last = world
+                // Invariant: the deadline spends exactly the time still missing from a tick,
+                // counting admitted debt and wall time awaiting admission.
+                let missing = fixed
+                    .timestep()
+                    .saturating_sub(fixed.overstep() + world.resource::<UnadmittedWall>().0);
+                let due = world
                     .resource::<Time<Real>>()
                     .last_update()
-                    .expect("the runner primes real time before its first frame");
-                // Invariant: the deadline spends exactly the accumulator's missing time.
-                let mut due = last
-                    + timestep
-                        .checked_sub(fixed.overstep())
-                        .expect("Bevy's fixed loop exhausts all complete timesteps");
+                    .expect("the runner primes real time before its first frame")
+                    + missing;
                 let mut now = clock.now();
                 while now < due {
                     clock.sleep(due - now);
                     now = clock.now();
                 }
-                // Backlog past Bevy's virtual cap is never simulated. One-tick samples cannot
-                // reach that cap, so the skip happens here against the same bound.
-                let skipped = (now - last).saturating_sub(backlog_bound);
-                if !skipped.is_zero() {
-                    app.world_mut()
-                        .resource_mut::<Time<Real>>()
-                        .update_with_instant(last + skipped);
-                    due += skipped;
-                }
-                // Each frame runs one tick between receive and send, overdue or not: a sample
-                // less than a timestep past due admits exactly one, and a later wake samples the
-                // deadline itself, leaving the backlog to the next frames.
-                let sample = if now - due < timestep { now } else { due };
-                app.insert_resource(TimeUpdateStrategy::ManualInstant(sample));
+                app.insert_resource(TimeUpdateStrategy::ManualInstant(now));
                 app.update();
                 if let Some(exit) = app.should_exit() {
                     return exit;
@@ -120,6 +153,22 @@ mod tests {
         fn sleep(&self, duration: Duration) {
             self.sleeps.lock().unwrap().push(duration);
             *self.now.lock().unwrap() += duration + self.oversleep;
+        }
+    }
+
+    /// Real waits, so a real socket peer keeps its pace, with injectable stalls of wall time.
+    #[derive(Clone)]
+    struct StallClock {
+        offset: Arc<Mutex<Duration>>,
+    }
+
+    impl Clock for StallClock {
+        fn now(&self) -> Instant {
+            Instant::now() + *self.offset.lock().unwrap()
+        }
+
+        fn sleep(&self, duration: Duration) {
+            std::thread::sleep(duration);
         }
     }
 
@@ -206,6 +255,171 @@ mod tests {
             assert!(frame.elapsed >= tick * (index as u32 + 1));
             assert!(frame.elapsed < tick * (index as u32 + 2));
         }
+    }
+
+    /// A batch's own cost is new wall time, admitted once the batch is spent; re-capping it while
+    /// debt remains would drop ticks Bevy's loop had already admitted.
+    #[test]
+    fn a_catch_up_frames_cost_is_admitted_after_the_batch_not_lost() {
+        let tick = super::super::server::TICK;
+        let clock = TestClock {
+            now: Arc::new(Mutex::new(Instant::now())),
+            sleeps: default(),
+            oversleep: Duration::ZERO,
+        };
+        let admitted = Time::<Virtual>::default().max_delta();
+        let batch = (admitted.as_nanos() / tick.as_nanos()) as u32;
+        // Fixture: a stall of exactly the cap, then one catch-up frame costing two ticks.
+        let later = 2;
+        let mut work = vec![admitted, tick * later];
+        let caught_up = 1 + (batch + later) as usize;
+        work.resize(caught_up + 2, Duration::ZERO);
+        let (mut app, frames) = probe(clock.clone(), work);
+        assert_eq!(app.run(), bevy::app::AppExit::Success);
+        let frames = frames.0.lock().unwrap();
+        assert!(frames.iter().all(|frame| frame.ticks == 1), "{frames:?}");
+        // The first frame waits, the batch and the frame's own cost run unslept, the last two wait.
+        assert_eq!(clock.sleeps.lock().unwrap().len(), 3);
+    }
+
+    /// Debt from wall time stays bounded under sustained overload: admitting while debt remains
+    /// would grow it without limit and leave the world ever further behind.
+    #[test]
+    fn sustained_overload_keeps_the_debt_within_the_cap() {
+        let tick = super::super::server::TICK;
+        let clock = TestClock {
+            now: Arc::new(Mutex::new(Instant::now())),
+            sleeps: default(),
+            oversleep: Duration::ZERO,
+        };
+        let admitted = Time::<Virtual>::default().max_delta();
+        let batch = (admitted.as_nanos() / tick.as_nanos()) as usize;
+        // Fixture: every frame costs two ticks, for several batches.
+        let (mut app, frames) = probe(clock, vec![tick * 2; batch * 4]);
+        assert_eq!(app.run(), bevy::app::AppExit::Success);
+        let frames = frames.0.lock().unwrap();
+        assert!(frames.iter().all(|frame| frame.ticks == 1), "{frames:?}");
+        let deepest = frames.iter().map(|frame| frame.overstep).max().unwrap();
+        assert!(deepest + tick <= admitted, "{deepest:?}");
+    }
+
+    /// Netcode counts `Time<Real>` deltas: a stall must reach its timeout whole, not one tick's
+    /// worth per catch-up frame, or a silent client stays connected seconds past its limit.
+    #[test]
+    fn a_silent_client_times_out_on_wall_time_across_a_capped_stall() {
+        use std::net::{Ipv4Addr, SocketAddr};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use lightyear::connection::client_of::ClientOf;
+        use lightyear::prelude::client::{ClientPlugins, Connect, NetcodeClient, NetcodeConfig};
+        use lightyear::prelude::server::{
+            NetcodeConfig as ServerNetcodeConfig, NetcodeServer, ServerUdpIo, Start,
+        };
+        use lightyear::prelude::*;
+
+        // Fixture: any protocol both ends share, a timeout shorter than the stall.
+        const PROTOCOL: u64 = 0x5e4d;
+        const TIMEOUT_SECS: i32 = 3;
+        let stall = Duration::from_secs(4);
+        let tick = super::super::server::TICK;
+        let port = super::super::test_harness::free_port();
+        let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
+        let silent = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
+
+        let client = {
+            let (silent, stopped) = (silent.clone(), stopped.clone());
+            std::thread::spawn(move || {
+                let mut app = App::new();
+                app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+                    .add_plugins(ClientPlugins {
+                        tick_duration: tick,
+                    });
+                app.finish();
+                app.cleanup();
+                let entity = app
+                    .world_mut()
+                    .spawn((
+                        Client,
+                        Link::default(),
+                        LocalAddr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)),
+                        PeerAddr(server_addr),
+                        NetcodeClient::new(
+                            Authentication::Manual {
+                                server_addr,
+                                client_id: 1,
+                                private_key: [0; 32],
+                                protocol_id: PROTOCOL,
+                            },
+                            NetcodeConfig {
+                                client_timeout_secs: TIMEOUT_SECS,
+                                ..default()
+                            },
+                        )
+                        .expect("a manual token builds"),
+                        UdpIo::default(),
+                    ))
+                    .id();
+                app.world_mut().commands().trigger(Connect { entity });
+                while !silent.load(Ordering::SeqCst) {
+                    app.update();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                stopped.store(true, Ordering::SeqCst);
+            })
+        };
+
+        let clock = StallClock { offset: default() };
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+            .add_plugins(TickRunner(clock.clone()));
+        let server = app
+            .world_mut()
+            .spawn((
+                NetcodeServer::new(ServerNetcodeConfig {
+                    protocol_id: PROTOCOL,
+                    private_key: [0; 32],
+                    ..default()
+                }),
+                LocalAddr(server_addr),
+                ServerUdpIo::default(),
+            ))
+            .id();
+        app.world_mut().commands().trigger(Start { entity: server });
+
+        let connected_after = Arc::new(Mutex::new(None));
+        let outcome = connected_after.clone();
+        let started = std::time::Instant::now();
+        let mut frames_after = None;
+        app.add_systems(
+            Last,
+            move |links: Query<(), (With<ClientOf>, With<Connected>)>,
+                  mut exit: MessageWriter<bevy::app::AppExit>| {
+                match frames_after {
+                    None if links.is_empty() => assert!(
+                        started.elapsed() < Duration::from_secs(30),
+                        "the loopback client never connected"
+                    ),
+                    None => {
+                        silent.store(true, Ordering::SeqCst);
+                        while !stopped.load(Ordering::SeqCst) {
+                            std::thread::yield_now();
+                        }
+                        *clock.offset.lock().unwrap() += stall;
+                        frames_after = Some(0);
+                    }
+                    // One frame reads the stall and flushes the disconnect; one more settles it.
+                    Some(1) => {
+                        *outcome.lock().unwrap() = Some(!links.is_empty());
+                        exit.write(bevy::app::AppExit::Success);
+                    }
+                    Some(count) => frames_after = Some(count + 1),
+                }
+            },
+        );
+        assert_eq!(app.run(), bevy::app::AppExit::Success);
+        client.join().unwrap();
+        assert_eq!(*connected_after.lock().unwrap(), Some(false));
     }
 
     /// Clients are sent one state per frame, so a catch-up frame holding several ticks starves

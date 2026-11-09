@@ -8,8 +8,8 @@ Status: decided by the owner on 2026-11-05, until a revisit before the Steam rel
 - **Ticks over budget are bugs:** a tick over its 15.625 ms budget is a cost bug to fix at its
   source, never a load the game tolerates as part of play. That includes a building collapse.
 - **One clock:** the tick is the dedicated server's only pacing clock (#278,
-  `src/net/server_runner.rs`); the library's catch-up bound is unchanged, and the runner spends
-  it one tick per frame ("One tick per frame during catch-up" below).
+  `src/net/server_runner.rs`). The runner admits a batch of missed ticks under the library's
+  250 ms cap and spends it one tick per frame ("One tick per frame during catch-up" below).
 
 ## Finding
 
@@ -44,8 +44,8 @@ DERIVED from the locked sources (`Cargo.lock`: Bevy 0.19.1, Lightyear 0.30.1):
   spends the accumulator until less than a timestep remains. It never adds the time
   spent running those ticks back into the same frame's accumulator.
 - DERIVED: with unchanged timestep and unit virtual speed, 250 ms is 16 ticks. That is the
-  most this server simulates for one stall; the runner delivers it one tick per frame, so
-  Bevy's own loop never expends more than one.
+  most this server admits in one batch. `net::server_runner` replaces `run_fixed_main_schedule`
+  with a loop that spends a batch one tick per frame.
 - Lightyear `lightyear_core/src/plugin.rs`, `CorePlugins::build`, uses Bevy's
   `TimePlugin`. `lightyear_core/src/timeline.rs`, `TimelinePlugin`, sets the fixed
   timestep and increments its local timeline in `FixedFirst`; it does not replace
@@ -60,18 +60,18 @@ There is a simulation-time bound, not an absolute wall-time bound. DERIVED: fram
 work resumes after one complete tick plus the frame's other work. It cannot service
 packets during that tick.
 
-Every frame runs exactly one tick. A wake sample less than one timestep past due is
-used as it is; a later one is replaced by the deadline, and the backlog runs in the
-following frames, back to back.
+Every frame runs exactly one tick. Missed ticks run in the following frames, back to
+back. Wall time that passes while they do waits for the next batch.
 
 ## Tick-paced authority (#278)
 
-The runner reads the next deadline from `Time<Real>::last_update()` plus
-`Time<Fixed>::timestep() - Time<Fixed>::overstep()`. It rechecks the clock after
-sleeping and supplies that same wake sample through `TimeUpdateStrategy::ManualInstant`.
-Bevy's time system therefore decides which ticks are due from the same sample that
-admitted the frame. There is no separately advancing frame deadline. The dedicated
-server asserts unpaused, unit-speed virtual time; no authority system changes it.
+The runner reads the next deadline from `Time<Real>::last_update()` plus the time still
+missing from a tick: `Time<Fixed>::timestep()` less the overstep and the wall time awaiting
+admission. It rechecks the clock after sleeping and supplies that wake sample through
+`TimeUpdateStrategy::ManualInstant`, so `Time<Real>` is wall time on every frame.
+`run_one_admitted_tick` reads that frame's delta and spends one tick. There is no separately
+advancing frame deadline. The dedicated server asserts unpaused, unit-speed virtual time; no
+authority system changes it.
 
 `Time<Real>::update_with_instant` primes the initial zero-delta sample without
 running a frame. The first frame waits for a complete tick. After every frame the
@@ -87,8 +87,10 @@ timeline in `FixedFirst`; it does not supply another server clock.
 The controlled-clock tests mount the shipped `TickRunner` plugin and its Lightyear
 plugins. Varying sub-budget frame work and scheduler oversleep produce one tick in
 every frame, in receive/tick/send/last order, with no frame before its tick is due.
-Separate tests inject overdue frames: each missed tick runs unslept in its own frame, and
-a stall past the library's admission cap admits exactly that cap. The normal-frame test goes red with the former
+Separate tests inject overdue frames: each missed tick runs unslept in its own frame, a
+stall past the cap admits exactly the cap, a catch-up frame's own cost is admitted after its
+batch, sustained overload keeps the debt within the cap, and a silent client on real sockets
+times out on wall time across a capped stall. The normal-frame test goes red with the former
 4 ms runner: its first frame has zero ticks and receive/send/last without tick.
 The old runner and instrumentation are absent from shipped source.
 
@@ -111,8 +113,20 @@ system depends on multiple authority frames per tick:
 
 ## One tick per frame during catch-up
 
-The owner's overload policy stands: missed ticks are caught up, up to `Time<Virtual>::max_delta`
-(250 ms, 16 ticks), and wall time past that bound is never simulated. Only the delivery changed.
+The owner's overload policy stands: missed ticks are caught up, and at most
+`Time<Virtual>::max_delta` (250 ms, 16 ticks) of newly elapsed wall time is admitted at once.
+
+**What is the same as Bevy's loop.** The admission law: when the last batch is spent, the wall time
+elapsed since it was admitted is added to the accumulator, capped at 250 ms, and the excess is
+never simulated. For the same frame costs the ticks per batch are the same.
+
+**What is not.** A batch is spent over many frames, with receive, send and the rest of the frame
+between its ticks, so that frame work lands inside the batch and lengthens it. `Time<Virtual>` no
+longer feeds `Time<Fixed>`: it still advances each frame under its own per-frame cap, so under
+overload it runs ahead of simulated time by what was skipped. Nothing on the dedicated server
+depends on the two agreeing: fixed-schedule readers of `Time` get `Time<Fixed>`, and Lightyear's
+send timer has a zero interval. `Time<Real>` is the wall clock on every frame, so netcode's
+timeouts and keep-alives count a stall in full.
 
 MEASURED, hosted v0.7.0-alpha.11, 2 vCPU, 30 tanks, one house falling at tick 1602, two runs:
 14 sends in the 199 ticks 1602 to 1800, against one per tick before. The gaps held 16 ticks each
@@ -151,8 +165,6 @@ leaves a 33 ms hold on each send through the fall.
 **Cost.** MEASURED hosted: a send costs 0.7 to 1.7 ms during the fall, mean 1.1 ms. DERIVED: 199
 sends cost about 0.22 s across the 5.15 s fall (14 sends cost 0.015 s), so the simulation's speed
 falls by about 4 %, from 0.60 to roughly 0.58. The rest of each frame's work is not priced here.
-`Time<Real>::delta` omits the skipped span, so netcode's keep-alive and timeout counters run behind
-wall time by at most what an overload skips.
 
 **Still visible.** While the simulation runs at 0.6 of wall speed the client's cursor, bounded to
 about 0.81 to 1.2 of wall speed, cannot follow it. It drifts ahead of the stream until the
@@ -160,7 +172,8 @@ controller's 10-tick margin snaps it back: the backward hops above, each about 1
 10 m/s. Send cadence does not cause the drift, but a denser stream lets the remote estimate follow
 the slowed clock sooner, so hops that a held view used to hide now show. MEASURED, local with other
 lanes compiling, three scheduled collapses: the one client logged 28 `FRONTIER interpolation resync`
-warnings before this change and 39 after. Only lower tick cost removes them, or a client cursor
+warnings before this change and 80 after, on a run that simulated 1,862 ticks in 45 s against 2,431
+before. Machine load differed between those runs, so that pair prices nothing. Only lower tick cost removes them, or a client cursor
 allowed to follow a slowed stream. Raising the margin alone did not help in the replay: at 25 ticks
 the hops fell to 4 and grew to 3.8 m.
 
