@@ -63,9 +63,6 @@ fn pairless_layers_skip_discovery_but_keep_query_proxies() {
             assert_eq!(graph.active_pairs().len(), 1, "only the two peers pair");
             assert!(graph.active_pairs()[0].is_touching());
             assert_eq!(graph.contact_pairs_with(collider).count(), 0);
-            println!(
-                "body={body:?} layers={layers:?}: candidates={candidates}, pairs=1, touching=1"
-            );
             let hit = app
                 .world_mut()
                 .run_system_once(|query: SpatialQuery| {

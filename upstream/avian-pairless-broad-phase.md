@@ -18,10 +18,10 @@ separate observations.
 ## Evidence
 
 Baseline: `e91b7174` (0.7.0-alpha.13), with the candidate counter added and without the traversal
-guard. Baseline logs: `/tmp/armour-broadphase-before.log` and
-`target/armour-broadphase-before/tick-attribution.json` in bay-1.
+guard. Baseline tick records: `target/armour-broadphase-before/tick-attribution.json` in bay-1.
 
-MEASURED constructed before/after, in each of twelve cases:
+MEASURED constructed before/after, in each of twelve cases. The before column came from an
+adapted copy of the test with the candidate assertion changed to 2:
 
 | Observation | Before | After |
 |---|---:|---:|
@@ -66,6 +66,8 @@ Implementation commit: `22d83da6`. `cargo fmt --all --check`, CI clippy with
 run passed: 63 passed, 6 existing ignored, none failed. That run includes `headless_test`,
 `avian_broad_phase_layers`, `net::ram::avian_tests`, `cost::tests`, and the three whole-tree guards
 `doc_citations`, `ui_ascii`, `net_boundary`. Both count rehearsals completed successfully.
+MEASURED: the after run was contended by machine load (77 over-budget ticks against 10 before),
+so its timings are unusable; its counts stand because both runs used `dt_s = 0.015625` every tick.
 No lens-backlog row or open sweep issue named an edited file; the diff was read against all six
 lenses. No timing claim, push, merge or release is made by this lane. Hosted pricing remains.
 
@@ -82,7 +84,7 @@ World counts (replace `before` with `after` for the guarded build):
 ```sh
 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 \
   scripts/perf/collapse.sh --target local --rehearsal \
-  --schedule /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/tracks/late-event.json \
+  --schedule <(printf '%s\n' '{"events": [{"at_s": 25, "instances": ["house_0001"]}]}') \
   --tanks 30 --clients 1 --duration 30 --out target/armour-broadphase-before
 ```
 
@@ -91,6 +93,6 @@ from `--print-server-env` (`SERVER_ADDRESS` and `DEPLOYMENT_ID` identify that de
 
 ```sh
 scripts/perf/collapse.sh --target "$SERVER_ADDRESS" --deployment "$DEPLOYMENT_ID" \
-  --schedule /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/tracks/late-event.json \
+  --schedule <(printf '%s\n' '{"events": [{"at_s": 25, "instances": ["house_0001"]}]}') \
   --tanks 30 --clients 1 --duration 60 --out target/armour-broadphase-priced
 ```

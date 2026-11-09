@@ -232,7 +232,7 @@ Guards: `src/tests/avian_spawn_batch.rs` and
 
 `collect_collision_pairs` skips a moved proxy's tree traversals when its collision-layer
 memberships or filters are empty: either empty term makes `CollisionLayers::interacts_with`
-false for every partner. Proxies remain in all collider trees, preserving spatial queries.
+false for every partner. Each proxy stays in exactly one collider tree, preserving spatial queries.
 Eligibility reads the current proxy layers each step, including sensor and standalone proxies.
 Tree access is read-only; missing live proxies or their bounds are invariant failures.
 
