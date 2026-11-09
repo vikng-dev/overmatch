@@ -172,8 +172,8 @@ controller's 10-tick margin snaps it back: the backward hops above, each about 1
 10 m/s. Send cadence does not cause the drift, but a denser stream lets the remote estimate follow
 the slowed clock sooner, so hops that a held view used to hide now show. MEASURED, local with other
 lanes compiling, three scheduled collapses: the one client logged 28 `FRONTIER interpolation resync`
-warnings before this change and 80 after, on a run that simulated 1,862 ticks in 45 s against 2,431
-before. Machine load differed between those runs, so that pair prices nothing. Only lower tick cost removes them, or a client cursor
+warnings before this change, and 55 and 80 on two runs after it, which simulated 2,253 and 1,862
+ticks in 45 s against 2,431 before. Machine load differed between the runs, so they price nothing. Only lower tick cost removes them, or a client cursor
 allowed to follow a slowed stream. Raising the margin alone did not help in the replay: at 25 ticks
 the hops fell to 4 and grew to 3.8 m.
 
