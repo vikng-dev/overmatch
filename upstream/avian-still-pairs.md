@@ -18,7 +18,7 @@ optional pointer. The cache is omitted from serialization, so restored pairs que
 | Either collider translates or rotates | Compare current world poses without a movement tolerance. Child motion reaches these poses before narrow phase. |
 | Shape replacement or scaling | Compare each collider component's change tick. Even an equal-value replacement re-tests. |
 | Body attachment or rehoming | Compare current owner entities, including their generations. |
-| Wake, including wake then sleep between queries | Compare sleep-entry ticks, with absence representing awake. A new sleep episode cannot reuse the preceding episode's stamp. |
+| Wake, including wake then sleep between queries | Sleep state controls eligibility only. Identical geometry/pruning inputs preserve the miss; waking and moving changes the pose and re-queries. |
 | Margin, global tolerance or length-unit change | Compare current query/pruning margins. Global margin caches refresh on configuration **or** length-unit changes. |
 | Velocity, COM, offset or step-length change | Compare relative linear velocity, both angular velocities, separate collider-offset and rotated-COM operands, and step length. These are the point-pruning inputs; sleeping bodies retain velocities. |
 | Bounds or collision-layer change | Test current bounds and layer compatibility before cache reuse; remove invalid pairs normally. Constraint eligibility is refreshed there too. |
@@ -28,8 +28,10 @@ optional pointer. The cache is omitted from serialization, so restored pairs que
 
 The built-in backend has unit context. An empty pre-hook geometry result depends only on the
 recorded inputs; another body's arrival creates its own uncached pair, and any resulting motion
-or wake invalidates the existing pair at the next narrow phase. No body-specific physics rule
-or change to the broad phase, solver ordering or wake scheduling is introduced.
+invalidates the existing pair at the next narrow phase. Prediction distance is derived as the
+sum of the recorded collision and speculative margins, so it needs no separate key field.
+No body-specific physics rule or change to the broad phase, solver ordering or wake scheduling
+is introduced.
 
 The sweep-contact fix `27562bd8` retains cast targets when contact refinement fails, including
 an unresolved initial overlap. Its per-step hook verdict must be reconsidered even at a held
@@ -60,9 +62,38 @@ DERIVED query reductions: 99.96% for rest and 75.41% for the ram window, from th
 MEASURED rest validation's final 640 steps: 1,979 stationary pairs per step, zero required
 geometry queries and zero awake touching pairs. Every proposed skip was a geometry miss.
 
-Validator artifacts: `/private/tmp/still-pairs-validate-rest/` and
-`/private/tmp/still-pairs-validate-ram/`. The exact temporary diff is
-`/private/tmp/still-pairs-validation.patch`; it is absent from the shipping source.
+The validator is temporary instrumentation of
+`vendor/avian3d-0.7.0-child-pose/src/collision/narrow_phase/system_param.rs`:
+
+1. In the bounds/layers rejection branch, assert `!stationary_miss`. This checks that
+   candidate/query differences in these captures count only geometry reuse.
+2. Replace the cache-hit early return with a boolean and continue through the ordinary query:
+
+   ```rust
+   let reused_miss = stationary_state.is_some()
+       && contacts.stationary_miss.as_deref() == stationary_state.as_ref();
+   contacts.stationary_miss = None;
+   ```
+
+3. Increment the geometry-query tally only for `stationary_miss && !reused_miss`, so it
+   reports the proposed cached path while all candidates actually execute geometry.
+4. Immediately after the ordinary query and point pruning, before hooks, assert:
+
+   ```rust
+   let geometry_miss = contacts.manifolds.is_empty();
+   assert!(
+       !reused_miss || geometry_miss,
+       "a cached miss must agree with recomputed geometry"
+   );
+   ```
+
+Run the rest and ram recipes below with that instrumented binary. A failed assertion refuses
+any stale miss; passing checks every proposed skip against the full query on the same inputs.
+Remove the instrumentation before shipping. The measured captures used the key with sleep-entry
+ticks and redundant prediction distance; removing those fields follows the pure-input argument
+above and is covered by the constructed tests, not by a new capture.
+Validator artifacts from that run: `/private/tmp/still-pairs-validate-rest/` and
+`/private/tmp/still-pairs-validate-ram/`.
 
 ## Independent shipping-binary captures
 
@@ -105,8 +136,12 @@ intake witness, and `doc_citations`, `ui_ascii`, `net_boundary`.
 
 The constructed cases prove: repeated misses skip; a zero-velocity teleport re-tests that
 step; touching geometry refreshes every step; rotation, shape revision, collider/body margin,
-tolerance, scale and wake/resleep invalidate; a new neighbor still discovers contact; child
-motion and rehoming invalidate; and a hook rejection is reconsidered on the next step.
+tolerance and scale invalidate; independent relative velocity, angular velocity, COM and
+step-length changes re-query; either collider's pose, shape and owner are covered; a wake
+alone reuses the miss, while wake-and-move re-queries, including after resleep; a new neighbor
+still discovers contact; child motion and rehoming invalidate; and a hook rejection is
+reconsidered on the next step. Collision margin and effective speculative margin have separate
+rows; their sum (prediction distance) has no independent input to vary.
 The initial reuse test was observed failing on the baseline (one query instead of zero).
 All six independent lens reviews are clean; no backlog row names an edited file.
 Logs: `/private/tmp/still-pairs-{red,final-tests,clippy}.log`.

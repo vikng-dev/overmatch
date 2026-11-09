@@ -248,21 +248,28 @@ fn stationary_miss_retests_on_motion_and_touching_pairs_always_query() {
     }
 }
 
-/// The narrow phase must invalidate a held miss for rotation, shape revision, either margin
-/// owner, global tolerance/scale and a wake, even when linear velocity is zero.
+/// The server must re-query when any independent geometry/pruning key field changes.
+/// Static owners retain authored velocities without integrating their pose; a small linear
+/// velocity stays under the tolerance floor, isolating it from the speculative margin.
+/// All changed magnitudes are Fixture data.
 #[test]
-fn stationary_miss_invalidates_geometry_changes_and_wake() {
+fn stationary_miss_invalidates_each_geometry_and_pruning_input() {
     for change in [
         "rotation",
+        "fixed pose",
         "shape",
+        "fixed shape",
+        "fixed owner",
+        "relative linear velocity",
+        "angular velocity",
+        "COM",
+        "step length",
         "collider margin",
         "body margin",
         "tolerance",
         "scale",
-        "wake",
-        "resleep",
     ] {
-        let (mut app, _, moving, radius) = stationary_pair();
+        let (mut app, fixed, moving, radius) = stationary_pair();
         let collider = if change == "body margin" {
             // Make the shape a child so the body owns its inherited margin.
             app.world_mut().entity_mut(moving).remove::<Collider>();
@@ -282,17 +289,46 @@ fn stationary_miss_invalidates_geometry_changes_and_wake() {
         } else {
             moving
         };
-        if matches!(change, "wake" | "resleep") {
-            app.world_mut().entity_mut(moving).insert(Sleeping);
-            for _ in 0..3 {
-                app.update();
-            }
-            assert!(app.world().get::<Sleeping>(moving).is_some());
-        }
         assert_eq!(miss_work(&app), (1, 0), "fixture primes a miss: {change}");
         match change {
             "rotation" => {
                 app.world_mut().get_mut::<Rotation>(moving).unwrap().0 = Quat::from_rotation_z(0.1)
+            }
+            "fixed pose" => {
+                app.world_mut().get_mut::<Position>(fixed).unwrap().0.z = 0.1 * radius;
+            }
+            "fixed shape" => {
+                app.world_mut()
+                    .entity_mut(fixed)
+                    .insert(Collider::sphere(radius));
+            }
+            "fixed owner" => {
+                let owner = app.world_mut().spawn(RigidBody::Static).id();
+                app.world_mut()
+                    .entity_mut(fixed)
+                    .insert(ColliderOf { body: owner });
+            }
+            "relative linear velocity" => {
+                let tolerance = app
+                    .world()
+                    .resource::<NarrowPhaseConfig>()
+                    .contact_tolerance
+                    * app.world().resource::<PhysicsLengthUnit>().0;
+                app.world_mut().get_mut::<LinearVelocity>(fixed).unwrap().0 = Vec3::X * tolerance;
+            }
+            "angular velocity" => {
+                app.world_mut().get_mut::<AngularVelocity>(fixed).unwrap().0 = Vec3::Z;
+            }
+            "COM" => {
+                app.world_mut()
+                    .get_mut::<ComputedCenterOfMass>(fixed)
+                    .unwrap()
+                    .0 = Vec3::X;
+            }
+            "step length" => {
+                let mut time = app.world_mut().resource_mut::<Time<Fixed>>();
+                let timestep = time.timestep();
+                time.set_timestep(timestep * 2);
             }
             "shape" => {
                 app.world_mut()
@@ -315,17 +351,47 @@ fn stationary_miss_invalidates_geometry_changes_and_wake() {
                     .contact_tolerance = radius
             }
             "scale" => app.world_mut().resource_mut::<PhysicsLengthUnit>().0 *= 100.0,
-            "wake" => {
-                app.world_mut().entity_mut(moving).remove::<Sleeping>();
-            }
-            "resleep" => {
-                app.world_mut().entity_mut(moving).remove::<Sleeping>();
-                app.world_mut().entity_mut(moving).insert(Sleeping);
-            }
             _ => unreachable!(),
         }
         app.update();
         assert_eq!(miss_work(&app), (1, 1), "same-step invalidation: {change}");
+    }
+}
+
+/// Waking alone cannot change the pure geometry result; waking and moving must discover
+/// contact on the same step, including after an intervening sleep episode.
+#[test]
+fn stationary_miss_retests_when_a_woken_body_moves() {
+    for resleep in [false, true] {
+        let (mut app, fixed, moving, radius) = stationary_pair();
+        app.world_mut().entity_mut(moving).insert(Sleeping);
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(app.world().get::<Sleeping>(moving).is_some());
+        assert_eq!(miss_work(&app), (1, 0));
+        app.world_mut().entity_mut(moving).remove::<Sleeping>();
+        if resleep {
+            app.world_mut().entity_mut(moving).insert(Sleeping);
+        }
+        app.update();
+        assert_eq!(
+            miss_work(&app),
+            (1, 0),
+            "unchanged inputs preserve the miss"
+        );
+        app.world_mut().entity_mut(moving).remove::<Sleeping>();
+        app.world_mut().get_mut::<Position>(moving).unwrap().0 = Vec3::X * radius;
+        app.update();
+        assert_eq!(miss_work(&app), (1, 1));
+        assert!(
+            app.world()
+                .resource::<ContactGraph>()
+                .get(fixed, moving)
+                .unwrap()
+                .1
+                .is_touching()
+        );
     }
 }
 

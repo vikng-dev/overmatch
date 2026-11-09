@@ -51,7 +51,7 @@ struct RigidBodyQuery {
     center_of_mass: Read<ComputedCenterOfMass>,
     linear_velocity: Read<LinearVelocity>,
     angular_velocity: Read<AngularVelocity>,
-    sleeping: Option<Ref<'static, Sleeping>>,
+    sleeping: Has<Sleeping>,
     // TODO: We should define these as purely collider components and not query for them here.
     friction: Option<Read<Friction>>,
     restitution: Option<Read<Restitution>>,
@@ -442,7 +442,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
             body.is_some_and(|body| {
                 self.body_query
                     .get(body)
-                    .is_ok_and(|body| !body.rb.is_static() && body.sleeping.is_none())
+                    .is_ok_and(|body| !body.rb.is_static() && !body.sleeping)
             })
         });
         // A standalone collider pair need not belong to an island.
@@ -464,7 +464,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     if body.is_some_and(|body| {
                         self.body_query
                             .get(body)
-                            .is_ok_and(|body| !body.rb.is_static() && body.sleeping.is_some())
+                            .is_ok_and(|body| !body.rb.is_static() && body.sleeping)
                     }) {
                         sleeping_colliders.push(collider);
                     }
@@ -598,7 +598,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     of.is_none()
                         || body.is_some_and(|body| {
                             body.rb.is_static()
-                                || body.sleeping.is_some()
+                                || body.sleeping
                                 || (body.linear_velocity.0 == LinearVelocity::ZERO.0
                                     && body.angular_velocity.0 == AngularVelocity::ZERO.0)
                         })
@@ -801,20 +801,9 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                             collider2.shape.last_changed(),
                         ],
                         owners: [
-                            body1_bundle.as_ref().map(|body| {
-                                (
-                                    body.entity,
-                                    body.sleeping.as_ref().map(|sleep| sleep.added()),
-                                )
-                            }),
-                            body2_bundle.as_ref().map(|body| {
-                                (
-                                    body.entity,
-                                    body.sleeping.as_ref().map(|sleep| sleep.added()),
-                                )
-                            }),
+                            body1_bundle.as_ref().map(|body| body.entity),
+                            body2_bundle.as_ref().map(|body| body.entity),
                         ],
-                        prediction_distance: max_contact_distance,
                         collision_margin: collision_margin_sum,
                         speculative_margin: effective_speculative_margin,
                         relative_linear_velocity,

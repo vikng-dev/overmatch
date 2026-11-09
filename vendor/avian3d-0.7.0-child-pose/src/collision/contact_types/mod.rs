@@ -1,4 +1,8 @@
 //! Contact types and data structures used in the collision pipeline.
+//!
+//! OVERMATCH PATCH: stationary geometry misses retain query/pruning inputs on their pair.
+//! A wake alone preserves a miss; a changed pose, shape, owner or pruning input re-queries.
+//! See `upstream/avian-still-pairs.md` for the validation and design narrative.
 
 mod contact_graph;
 mod feature_id;
@@ -180,14 +184,12 @@ pub struct ContactPair {
     pub(crate) stationary_miss: Option<Box<StationaryMiss>>,
 }
 
-// The query and point-pruning inputs for a stationary built-in collider. Owners and sleep state
-// also invalidate on attachment changes and wakes, even if the geometry stays fixed.
+// Query/pruning inputs for a stationary built-in collider, plus attachment identity.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StationaryMiss {
     pub poses: [(Position, Rotation); 2],
     pub shapes: [bevy::ecs::change_detection::Tick; 2],
-    pub owners: [Option<(Entity, Option<bevy::ecs::change_detection::Tick>)>; 2],
-    pub prediction_distance: Scalar,
+    pub owners: [Option<Entity>; 2],
     pub collision_margin: Scalar,
     pub speculative_margin: Scalar,
     pub relative_linear_velocity: Vector,
