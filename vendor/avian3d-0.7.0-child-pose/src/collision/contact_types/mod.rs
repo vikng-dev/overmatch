@@ -175,6 +175,25 @@ pub struct ContactPair {
     pub(crate) manifold_count_change: i16,
     /// Flag indicating the status and type of the contact pair.
     pub flags: ContactPairFlags,
+    // OVERMATCH PATCH: transient geometry cache, never restored from serialized contacts.
+    #[cfg_attr(feature = "serialize", serde(skip))]
+    pub(crate) stationary_miss: Option<Box<StationaryMiss>>,
+}
+
+// The query and point-pruning inputs for a stationary built-in collider. Owners and sleep state
+// also invalidate on attachment changes and wakes, even if the geometry stays fixed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct StationaryMiss {
+    pub poses: [(Position, Rotation); 2],
+    pub shapes: [bevy::ecs::change_detection::Tick; 2],
+    pub owners: [Option<(Entity, Option<bevy::ecs::change_detection::Tick>)>; 2],
+    pub prediction_distance: Scalar,
+    pub collision_margin: Scalar,
+    pub speculative_margin: Scalar,
+    pub relative_linear_velocity: Vector,
+    pub angular_velocities: [AngularVelocity; 2],
+    pub anchor_inputs: [Vector; 4],
+    pub delta_secs: Scalar,
 }
 
 /// Flags indicating the status and type of a [contact pair](ContactPair).
@@ -221,6 +240,7 @@ impl ContactPair {
             manifolds: Vec::new(),
             manifold_count_change: 0,
             flags: ContactPairFlags::empty(),
+            stationary_miss: None,
         }
     }
 

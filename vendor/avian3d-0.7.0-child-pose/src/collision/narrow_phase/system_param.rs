@@ -5,7 +5,7 @@ use core::cell::RefCell;
 use crate::{
     collision::{
         collider::EnlargedAabb,
-        contact_types::{ContactEdgeFlags, ContactId},
+        contact_types::{ContactEdgeFlags, ContactId, StationaryMiss},
     },
     data_structures::{bit_vec::BitVec, pair_key::PairKey},
     dynamics::solver::{
@@ -29,7 +29,7 @@ use thread_local::ThreadLocal;
 struct ColliderQuery<C: AnyCollider> {
     entity: Entity,
     of: Option<Read<ColliderOf>>,
-    shape: Read<C>,
+    shape: Ref<'static, C>,
     enlarged_aabb: Read<EnlargedAabb>,
     position: Read<Position>,
     rotation: Read<Rotation>,
@@ -51,7 +51,7 @@ struct RigidBodyQuery {
     center_of_mass: Read<ComputedCenterOfMass>,
     linear_velocity: Read<LinearVelocity>,
     angular_velocity: Read<AngularVelocity>,
-    is_sleeping: Has<Sleeping>,
+    sleeping: Option<Ref<'static, Sleeping>>,
     // TODO: We should define these as purely collider components and not query for them here.
     friction: Option<Read<Friction>>,
     restitution: Option<Read<Restitution>>,
@@ -130,7 +130,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
         for<'w, 's> SystemParamItem<'w, 's, H>: CollisionHooks,
     {
         // Cache default margins scaled by the length unit.
-        if self.config.is_changed() {
+        if self.config.is_changed() || self.length_unit.is_changed() {
             *self.default_speculative_margin =
                 self.length_unit.0 * self.config.default_speculative_margin;
             *self.contact_tolerance = self.length_unit.0 * self.config.contact_tolerance;
@@ -442,7 +442,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
             body.is_some_and(|body| {
                 self.body_query
                     .get(body)
-                    .is_ok_and(|body| !body.rb.is_static() && !body.is_sleeping)
+                    .is_ok_and(|body| !body.rb.is_static() && body.sleeping.is_none())
             })
         });
         // A standalone collider pair need not belong to an island.
@@ -464,7 +464,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     if body.is_some_and(|body| {
                         self.body_query
                             .get(body)
-                            .is_ok_and(|body| !body.rb.is_static() && body.is_sleeping)
+                            .is_ok_and(|body| !body.rb.is_static() && body.sleeping.is_some())
                     }) {
                         sleeping_colliders.push(collider);
                     }
@@ -598,7 +598,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     of.is_none()
                         || body.is_some_and(|body| {
                             body.rb.is_static()
-                                || body.is_sleeping
+                                || body.sleeping.is_some()
                                 || (body.linear_velocity.0 == LinearVelocity::ZERO.0
                                     && body.angular_velocity.0 == AngularVelocity::ZERO.0)
                         })
@@ -783,6 +783,54 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
 
                 let max_contact_distance = effective_speculative_margin + collision_margin_sum;
 
+                // Custom backends may read arbitrary Context state, so only the built-in
+                // backend has a geometry-only cache key.
+                #[cfg(feature = "default-collider")]
+                let local_geometry =
+                    core::any::TypeId::of::<C>() == core::any::TypeId::of::<Collider>();
+                #[cfg(not(feature = "default-collider"))]
+                let local_geometry = false;
+                let stationary_state =
+                    (stationary_miss && local_geometry).then(|| StationaryMiss {
+                        poses: [
+                            (*collider1.position, *collider1.rotation),
+                            (*collider2.position, *collider2.rotation),
+                        ],
+                        shapes: [
+                            collider1.shape.last_changed(),
+                            collider2.shape.last_changed(),
+                        ],
+                        owners: [
+                            body1_bundle.as_ref().map(|body| {
+                                (
+                                    body.entity,
+                                    body.sleeping.as_ref().map(|sleep| sleep.added()),
+                                )
+                            }),
+                            body2_bundle.as_ref().map(|body| {
+                                (
+                                    body.entity,
+                                    body.sleeping.as_ref().map(|sleep| sleep.added()),
+                                )
+                            }),
+                        ],
+                        prediction_distance: max_contact_distance,
+                        collision_margin: collision_margin_sum,
+                        speculative_margin: effective_speculative_margin,
+                        relative_linear_velocity,
+                        angular_velocities: [AngularVelocity(ang_vel1), AngularVelocity(ang_vel2)],
+                        anchor_inputs: [collider_offset1, collider_offset2, world_com1, world_com2],
+                        delta_secs,
+                    });
+                if stationary_state.is_some()
+                    && contacts.stationary_miss.as_deref() == stationary_state.as_ref()
+                {
+                    // Bounds/layers and constraint eligibility were checked above. An unchanged
+                    // miss has no manifolds, impulses or contact transitions to update.
+                    return;
+                }
+                contacts.stationary_miss = None;
+
                 let was_touching = contacts.flags.contains(ContactPairFlags::TOUCHING);
 
                 // Save the old manifolds for warm starting.
@@ -801,7 +849,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     work.set([pairs, queries + 1]);
                 }
                 collider1.shape.contact_manifolds_with_context(
-                    collider2.shape,
+                    &*collider2.shape,
                     collider1.position.0,
                     *collider1.rotation,
                     collider2.position.0,
@@ -868,7 +916,8 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 });
 
                 // Check if the colliders are now touching.
-                let mut touching = !contacts.manifolds.is_empty();
+                let geometry_miss = contacts.manifolds.is_empty();
+                let mut touching = !geometry_miss;
 
                 if touching && contacts.flags.contains(ContactPairFlags::MODIFY_CONTACTS) {
                     par_commands.command_scope(|mut commands| {
@@ -880,6 +929,10 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 }
 
                 contacts.flags.set(ContactPairFlags::TOUCHING, touching);
+                // A hook-rejected contact must be reconsidered when its outside state changes.
+                if geometry_miss {
+                    contacts.stationary_miss = stationary_state.map(Box::new);
+                }
 
                 // TODO: Manifold reduction
 

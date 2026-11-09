@@ -134,27 +134,30 @@ fn dynamic_degree_includes_overflow_and_exports_inside_avian() {
     assert_eq!(snapshot(&mut app).max_dynamic_manifold_degree, 0);
 }
 
-/// The collapse reader distinguishes active stationary misses from touching/sleeping pairs.
-/// Dropping the geometry call, counting moving pairs or retaining last step's tally breaks it.
-#[test]
-fn stationary_misses_count_queries_and_reset_each_step() {
+// Fixture: separated spheres with overlapping AABBs, at a scale whose gap exceeds the
+// configured contact tolerance. Sensors keep contact tests independent of solver response.
+fn stationary_pair() -> (App, Entity, Entity, f32) {
     let mut app = physics_app();
     let tolerance = app
         .world()
         .resource::<NarrowPhaseConfig>()
         .contact_tolerance
         * app.world().resource::<PhysicsLengthUnit>().0;
-    // Fixture scale. DERIVED: sqrt(2) * 1.5r - 2r > tolerance for r = 1 + 10t.
+    // DERIVED: sqrt(2) * 1.5r - 2r > tolerance for r = 1 + 10t.
     let radius = 1.0 + 10.0 * tolerance;
-    app.world_mut().spawn((
-        RigidBody::Static,
-        Transform::IDENTITY,
-        Collider::sphere(radius),
-    ));
+    let fixed = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            Transform::IDENTITY,
+            Collider::sphere(radius),
+        ))
+        .id();
     let moving = app
         .world_mut()
         .spawn((
             RigidBody::Dynamic,
+            Sensor,
             Transform::from_xyz(1.5 * radius, 1.5 * radius, 0.0),
             Collider::sphere(radius),
         ))
@@ -162,11 +165,25 @@ fn stationary_misses_count_queries_and_reset_each_step() {
     for _ in 0..4 {
         app.update();
     }
+    (app, fixed, moving, radius)
+}
+
+fn miss_work(app: &App) -> (u32, u32) {
+    let work = app.world().resource::<CollisionDiagnostics>();
+    (
+        work.stationary_non_touching_pairs,
+        work.stationary_non_touching_queries,
+    )
+}
+
+/// The collapse reader needs per-step counts of eligible pairs and actual geometry work.
+/// Re-testing a held miss, counting moving pairs or retaining a previous tally breaks it.
+#[test]
+fn stationary_misses_reuse_geometry_and_reset_each_step() {
+    let (mut app, _, moving, _) = stationary_pair();
     for _ in 0..2 {
         app.update();
-        let work = app.world().resource::<CollisionDiagnostics>();
-        assert_eq!(work.stationary_non_touching_pairs, 1);
-        assert_eq!(work.stationary_non_touching_queries, 1);
+        assert_eq!(miss_work(&app), (1, 0));
         assert_eq!(
             app.world()
                 .resource::<ContactGraph>()
@@ -175,24 +192,253 @@ fn stationary_misses_count_queries_and_reset_each_step() {
             0
         );
     }
-    // Fixture velocity: preserve bounds overlap while making the dynamic owner nonstationary.
+    // Fixture velocity: preserve bounds overlap while making the owner nonstationary.
     app.world_mut()
         .entity_mut(moving)
         .insert(LinearVelocity(Vec3::Z * 0.1));
     app.update();
-    let work = app.world().resource::<CollisionDiagnostics>();
-    assert_eq!(work.contact_count, 1, "moving pair must remain active");
-    assert_eq!(work.stationary_non_touching_pairs, 0);
-    assert_eq!(work.stationary_non_touching_queries, 0);
+    assert_eq!(
+        app.world().resource::<CollisionDiagnostics>().contact_count,
+        1
+    );
+    assert_eq!(miss_work(&app), (0, 0));
     app.world_mut().entity_mut(moving).despawn();
     app.update();
-    let work = app.world().resource::<CollisionDiagnostics>();
-    assert_eq!(work.stationary_non_touching_pairs, 0);
-    assert_eq!(work.stationary_non_touching_queries, 0);
+    assert_eq!(miss_work(&app), (0, 0));
     assert_eq!(
         app.world()
             .resource::<SolverDiagnostics>()
             .serial_contact_visits,
         0
+    );
+}
+
+/// A zero-velocity teleport must discover contact on that step. The solver also relies on
+/// touching pairs refreshing their geometry every step, even while their inputs stay fixed.
+#[test]
+fn stationary_miss_retests_on_motion_and_touching_pairs_always_query() {
+    let (mut app, fixed, moving, radius) = stationary_pair();
+    app.world_mut().get_mut::<Position>(moving).unwrap().0 = Vec3::X * radius;
+    app.update();
+    assert_eq!(
+        miss_work(&app),
+        (1, 1),
+        "the moved pair queries immediately"
+    );
+    assert!(
+        app.world()
+            .resource::<ContactGraph>()
+            .get(fixed, moving)
+            .unwrap()
+            .1
+            .is_touching()
+    );
+    for _ in 0..2 {
+        // Keep TOUCHING and every query input unchanged; stale manifold reuse cannot repair this.
+        app.world_mut()
+            .resource_mut::<ContactGraph>()
+            .active_pairs_mut()[0]
+            .manifolds
+            .clear();
+        app.update();
+        let graph = app.world().resource::<ContactGraph>();
+        let pair = graph.get(fixed, moving).unwrap().1;
+        assert!(pair.is_touching() && !pair.manifolds.is_empty());
+        assert_eq!(miss_work(&app), (0, 0));
+    }
+}
+
+/// The narrow phase must invalidate a held miss for rotation, shape revision, either margin
+/// owner, global tolerance/scale and a wake, even when linear velocity is zero.
+#[test]
+fn stationary_miss_invalidates_geometry_changes_and_wake() {
+    for change in [
+        "rotation",
+        "shape",
+        "collider margin",
+        "body margin",
+        "tolerance",
+        "scale",
+        "wake",
+        "resleep",
+    ] {
+        let (mut app, _, moving, radius) = stationary_pair();
+        let collider = if change == "body margin" {
+            // Make the shape a child so the body owns its inherited margin.
+            app.world_mut().entity_mut(moving).remove::<Collider>();
+            let child = app
+                .world_mut()
+                .spawn((
+                    ChildOf(moving),
+                    Transform::IDENTITY,
+                    Collider::sphere(radius),
+                    Sensor,
+                ))
+                .id();
+            for _ in 0..3 {
+                app.update();
+            }
+            child
+        } else {
+            moving
+        };
+        if matches!(change, "wake" | "resleep") {
+            app.world_mut().entity_mut(moving).insert(Sleeping);
+            for _ in 0..3 {
+                app.update();
+            }
+            assert!(app.world().get::<Sleeping>(moving).is_some());
+        }
+        assert_eq!(miss_work(&app), (1, 0), "fixture primes a miss: {change}");
+        match change {
+            "rotation" => {
+                app.world_mut().get_mut::<Rotation>(moving).unwrap().0 = Quat::from_rotation_z(0.1)
+            }
+            "shape" => {
+                app.world_mut()
+                    .entity_mut(collider)
+                    .insert(Collider::sphere(radius));
+            }
+            "collider margin" => {
+                app.world_mut()
+                    .entity_mut(collider)
+                    .insert(CollisionMargin(radius));
+            }
+            "body margin" => {
+                app.world_mut()
+                    .entity_mut(moving)
+                    .insert(CollisionMargin(radius));
+            }
+            "tolerance" => {
+                app.world_mut()
+                    .resource_mut::<NarrowPhaseConfig>()
+                    .contact_tolerance = radius
+            }
+            "scale" => app.world_mut().resource_mut::<PhysicsLengthUnit>().0 *= 100.0,
+            "wake" => {
+                app.world_mut().entity_mut(moving).remove::<Sleeping>();
+            }
+            "resleep" => {
+                app.world_mut().entity_mut(moving).remove::<Sleeping>();
+                app.world_mut().entity_mut(moving).insert(Sleeping);
+            }
+            _ => unreachable!(),
+        }
+        app.update();
+        assert_eq!(miss_work(&app), (1, 1), "same-step invalidation: {change}");
+    }
+}
+
+/// A stationary miss belongs to one pair; a newly inserted neighbor must still discover contact.
+#[test]
+fn stationary_miss_does_not_hide_a_new_neighbor() {
+    let (mut app, _, moving, radius) = stationary_pair();
+    let position = *app.world().get::<Position>(moving).unwrap();
+    let newcomer = app
+        .world_mut()
+        .spawn((RigidBody::Static, position, Collider::sphere(radius)))
+        .id();
+    app.update();
+    assert_eq!(miss_work(&app), (2, 1));
+    assert!(
+        app.world()
+            .resource::<ContactGraph>()
+            .get(moving, newcomer)
+            .unwrap()
+            .1
+            .is_touching()
+    );
+}
+
+/// Child pose changes and ownership changes invalidate the pair even while both roots stay still.
+#[test]
+fn stationary_miss_follows_child_motion_and_rehoming() {
+    let (mut app, _, body, radius) = stationary_pair();
+    app.world_mut().entity_mut(body).remove::<Collider>();
+    let child = app
+        .world_mut()
+        .spawn((
+            ChildOf(body),
+            Transform::IDENTITY,
+            Collider::sphere(radius),
+            Sensor,
+        ))
+        .id();
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(miss_work(&app), (1, 0));
+    app.world_mut()
+        .get_mut::<Transform>(child)
+        .unwrap()
+        .translation
+        .z = 0.1 * radius;
+    app.update();
+    assert_eq!(miss_work(&app), (1, 1));
+    app.update();
+    assert_eq!(miss_work(&app), (1, 0));
+    let position = *app.world().get::<Position>(body).unwrap();
+    let other = app.world_mut().spawn((RigidBody::Dynamic, position)).id();
+    app.world_mut().entity_mut(child).insert(ChildOf(other));
+    app.update();
+    assert_eq!(miss_work(&app), (1, 1));
+}
+
+#[derive(Resource)]
+struct AdmitContact(bool);
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct AdmissionHook<'w> {
+    admit: Res<'w, AdmitContact>,
+}
+
+impl CollisionHooks for AdmissionHook<'_> {
+    fn modify_contacts(&self, _: &mut ContactPair, _: &mut Commands) -> bool {
+        self.admit.0
+    }
+}
+
+/// The game's environment destruction sweep can reject a real look-ahead contact for this
+/// step only. A hook rejection is never a cached geometry miss; changed sweep state must be read.
+#[test]
+fn stationary_hook_rejection_is_reconsidered_on_the_next_step() {
+    let mut app = App::new();
+    app.add_plugins((
+        MinimalPlugins,
+        TransformPlugin,
+        AssetPlugin::default(),
+        PhysicsPlugins::default().with_collision_hooks::<AdmissionHook<'static>>(),
+    ))
+    .init_asset::<Mesh>()
+    .insert_resource(Gravity::ZERO)
+    .insert_resource(AdmitContact(false));
+    crate::headless_test::start_fixed_clock(&mut app);
+    crate::headless_test::finish_plugins(&mut app);
+    // Fixture: overlapping sensor spheres, so the solver cannot move either participant.
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::sphere(1.0),
+        ActiveCollisionHooks::MODIFY_CONTACTS,
+    ));
+    app.world_mut()
+        .spawn((RigidBody::Dynamic, Collider::sphere(1.0), Sensor));
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(
+        app.world()
+            .resource::<ContactGraph>()
+            .iter_active_touching()
+            .count(),
+        0
+    );
+    app.world_mut().resource_mut::<AdmitContact>().0 = true;
+    app.update();
+    assert_eq!(
+        app.world()
+            .resource::<ContactGraph>()
+            .iter_active_touching()
+            .count(),
+        1
     );
 }

@@ -242,3 +242,22 @@ under `avian`, for the ram and scheduled-collapse instruments.
 
 Guard: `src/tests/avian_broad_phase_layers.rs`. Counts and reproduction:
 `upstream/avian-pairless-broad-phase.md` (local report).
+
+## Stationary non-touching pair cache
+
+`ContactPair` retains a transient boxed query/pruning snapshot only after a built-in collider
+pair produces no manifolds before contact hooks. Unchanged stationary misses skip geometry;
+touching pairs and hook-rejected contacts always query. Custom backends remain uncached because
+their `Context` may supply additional inputs. Cache hits allocate nothing.
+
+The snapshot covers collider world poses, shape change ticks, owners and sleep-entry ticks,
+query/pruning margins, relative linear and angular velocities, collider offsets, rotated COMs
+and step length. Separate anchor inputs preserve the existing pruning expression's arithmetic.
+Bounds, layers and constraint eligibility are processed before reuse. New and deserialized pairs
+have no snapshot; pair removal drops it. Broad-phase discovery and wake scheduling are unchanged.
+Changing `PhysicsLengthUnit` refreshes the cached global margins alongside configuration changes.
+
+Guards: `src/net/ram/avian_tests.rs`, including wake/resleep, child rehoming, new neighbors,
+same-step motion and touching geometry refresh. The sweep's hook-only rejection remains a
+per-step decision, including the unresolved-target path fixed in `27562bd8`.
+Count evidence, same-input geometry comparison and reproduction: `upstream/avian-still-pairs.md`.
