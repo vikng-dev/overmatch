@@ -6,8 +6,8 @@ use crate::{
     collision::{
         collider::EnlargedAabb,
         contact_types::{
-            ContactEdgeFlags, ContactId, PairManifolds, ReductionChurn, SELECTION_TIE,
-            StationaryMiss, reduce_body_pair,
+            ContactEdgeFlags, ContactId, PairManifolds, ReductionChurn, StationaryMiss,
+            reduce_body_pair,
         },
     },
     data_structures::{bit_vec::BitVec, pair_key::PairKey},
@@ -543,6 +543,10 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 pair_index,
                 raw_count: manifolds.len(),
                 taken: PairManifolds {
+                    colliders: (
+                        pair.collider1.min(pair.collider2),
+                        pair.collider1.max(pair.collider2),
+                    ),
                     reversed: body2 < body1,
                     manifolds,
                 },
@@ -551,11 +555,11 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
         if entries.is_empty() {
             return;
         }
-        entries.sort_unstable_by_key(|entry| (entry.bodies, entry.pair_index));
+        entries.sort_unstable_by_key(|entry| entry.bodies);
 
         let unit = self.length_unit.0;
         let bodies = &self.body_query;
-        // A landing is any point closing past the slowest of the two bodies' rest speeds, the
+        // A landing is any point closing past the slower of the two bodies' rest speeds, the
         // comparison a contact reader makes per side (`Sleeping` compares the same threshold).
         let rest = |body: Entity| {
             bodies
@@ -575,7 +579,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
             })
             .collect();
         crate::utils::par_for_each(&mut groups, 8, |_, (rest_speed, churn, group)| {
-            *churn = reduce_body_pair(group, *rest_speed, SELECTION_TIE * unit);
+            *churn = reduce_body_pair(group, *rest_speed, unit);
         });
         for (_, churn, _) in groups {
             *self.reduction_churn += churn;
@@ -817,15 +821,14 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 contacts
                     .flags
                     .set(ContactPairFlags::GENERATE_CONSTRAINTS, !is_disabled);
-                // OVERMATCH PATCH: both bodies must allow it.
+                // OVERMATCH PATCH: both bodies must be non-static and allow it.
+                let reducible = [&body1_bundle, &body2_bundle].into_iter().all(|body| {
+                    body.as_ref()
+                        .is_some_and(|body| body.reducible && !body.rb.is_static())
+                });
                 contacts.flags.set(
                     ContactPairFlags::REDUCIBLE_CONTACTS,
-                    contacts.body1.is_some()
-                        && contacts.body2.is_some()
-                        && body1_bundle
-                            .as_ref()
-                            .zip(body2_bundle.as_ref())
-                            .is_some_and(|(a, b)| a.reducible && b.reducible),
+                    contacts.body1.is_some() && contacts.body2.is_some() && reducible,
                 );
 
                 // Get combined friction and restitution coefficients of the colliders

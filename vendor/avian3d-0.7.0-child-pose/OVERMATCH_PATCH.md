@@ -268,22 +268,39 @@ Count evidence, same-input geometry comparison and reproduction: `upstream/avian
 
 Two bodies touching through many collider pairs (a broken piece's chunk hulls along a seam) carry
 one manifold per hull pair. `NarrowPhase::reduce_body_pair_contacts` runs after the pair update and
-before status bits are read: it groups the touching pairs of each two bodies, and bounds them to at
-most `MAX_NORMALS` support normals with `MAX_POINTS_PER_NORMAL` points each, the deepest point and
-the extremes that span the footprint (same-normal cosine 20 degrees). Only pairs between two
-`ReducibleContacts` bodies qualify; a contact-modification hook excludes the pair, and so does a
-static side (MEASURED on twelve collapsing houses: reducing piece-terrain contacts doubled awake
-piece-ticks, the piles failing to settle; piece-piece alone did not). A point closing faster than the slower body's `SleepThreshold` (the reading the
-game's crumble law takes per collider) is always kept.
+before status bits are read: it groups the touching pairs of each two bodies and clusters their
+contacts by support normal (same-normal cosine 20 degrees). Each normal keeps the vertices of the
+projected convex hull of the points that bear (within `SELECTION_TIE` of touching, or carrying load
+last step), less those within `HULL_TOLERANCE` of the polygon the rest make, and its deepest point
+when that is clear of them by a tie. Points inside the hull are what is removed; there is no point
+ceiling. A group past `MAX_NORMALS` is left whole, so the ceiling bounds work and never removes a
+face. DERIVED: each normal's support polygon is preserved to within `HULL_TOLERANCE`; across a
+cluster of unequal normals (up to 20 degrees) that is an approximation.
 
-Each kept point stays in its own manifold and collider pair, so warm starting and per-collider
-impulse attribution are unchanged; a point that carried load last step wins ties
-(`SELECTION_TIE`), so a resting selection does not flip and lose its warm start. A pair left with
-no manifold stays touching (events, `CollidingEntities`, island link), with no constraint handle:
-hence the two patched status-change sites in `narrow_phase/system_param.rs` (the started-touching
-debug assertion and the stopped-touching island unlink, which now also fires for a pair with an
-island and no handle; island splitting in `dynamics/solver/islands/mod.rs` likewise walks contacts
-with an island link rather than constraint handles). The stationary-miss cache is unaffected: it only stores pairs with no
-manifold from the geometry query, and reduction runs only on pairs with manifolds after that query.
+Only pairs between two dynamic `ReducibleContacts` bodies qualify; a static side and a
+contact-modification hook each exclude the pair at eligibility (MEASURED on twelve collapsing
+houses: reducing piece-terrain contacts doubled awake piece-ticks, the piles failing to settle;
+piece-piece alone did not). Cluster seeds and every tie come from the pair's colliders and the
+points' features, never from depth or active-pair order.
+
+A body pair with any point closing faster than the slower body's `SleepThreshold` is left whole
+for that step, every press of the landing included. That does not fix the landing's blows: another
+pair sharing either body may be reduced, and the coupled solve moves them. A removed point's share
+of the solved impulses goes to the points that remain.
+
+Each kept point stays in its own manifold and collider pair, so its per-collider attribution is
+unchanged. Warm starting is not continuous: matching runs against only the previous reduced set, so
+a removed point loses its impulse and one reselected later starts cold unless the matcher finds it
+another predecessor. A loaded point holds its place by a tie, and a loaded hull vertex leaves only
+at half of `HULL_TOLERANCE`, which makes reselection rarer without ruling it out
+(`CollisionDiagnostics::reduction_warm_points_removed` counts it).
+
+A pair left with no manifold stays touching (events, `CollidingEntities`, island link), with no
+constraint handle: hence the two patched status-change sites in `narrow_phase/system_param.rs` (the
+started-touching debug assertion and the stopped-touching island unlink, which now also fires for a
+pair with an island and no handle; island splitting in `dynamics/solver/islands/mod.rs` likewise
+walks contacts with an island link rather than constraint handles). The stationary-miss cache is
+unaffected: it only stores pairs with no manifold from the geometry query, and reduction runs only
+on pairs with manifolds after that query.
 
 Guards: `src/tests/avian_contact_reduction.rs`.

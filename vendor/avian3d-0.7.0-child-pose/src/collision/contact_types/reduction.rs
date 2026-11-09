@@ -1,48 +1,61 @@
-//! OVERMATCH PATCH: the contacts between two bodies, reduced to a bounded set.
+//! OVERMATCH PATCH: the interior contacts between two bodies, removed.
 //!
 //! Each collider pair of a compound body yields its own manifolds, so two bodies touching along a
-//! seam of many hulls carry a manifold per hull pair and four points in each. Contacts between
-//! the same two bodies are clustered by support normal, and each normal keeps at most
-//! [`MAX_POINTS_PER_NORMAL`] points: the deepest and those spanning the widest footprint, each
-//! left in its own manifold and collider pair so it keeps its warm start and its attribution to
-//! the chunk it touches. A point closing faster than the rest speed is a landing, which a game's
-//! contact reader takes per collider, so it always survives.
+//! seam of many hulls carry a manifold per hull pair and up to four points in each. Normal forces
+//! along one support direction hold any load whose line falls inside the convex hull of their
+//! points, projected along that direction, so a point inside the hull adds no support its vertices
+//! lack. Contacts between the same two bodies are clustered by support normal; each normal keeps
+//! the hull vertices of the points that bear, and its deepest point when that lies clear of them.
+//! A kept point stays in its own manifold and collider pair, attributed to the chunk it touches.
+//!
+//! DERIVED: each normal's support polygon is preserved to within [`HULL_TOLERANCE`]. Clusters span
+//! up to 20 degrees, so across a cluster of unequal normals this is an approximation.
+//!
+//! Three things reduction does not preserve. A removed point's share of the solved impulses goes
+//! to the points that remain. A removed point loses its warm start, and one reselected later
+//! starts cold; a loaded preference only makes that rarer. A body pair with any point landing is
+//! left whole for that step, yet its blows can still move, since another pair sharing either body
+//! may be reduced and the solve couples them.
 
 use core::borrow::BorrowMut;
 
 use bevy::prelude::*;
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec};
 
+use crate::math::Vector2;
 use crate::prelude::*;
 
 /// A body whose contacts with another [`ReducibleContacts`] body may be reduced. Every hook-free,
-/// constraint-generating pair between two such bodies shares the bounded set; a pair with any
-/// other body, static ones included, or with a contact-modification hook keeps every manifold.
+/// constraint-generating pair between two such dynamic bodies shares the reduction; a pair with a
+/// static side, an unmarked body or a contact-modification hook keeps every manifold.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReducibleContacts;
 
-/// Resolution: a ceiling on support normals, set high so distinct faces are not traded away. A
-/// cap of 4 saved almost nothing (MEASURED, one twelve-house run each: 32.8 against 35.5 points
-/// per awake piece-tick). A cluster past it holds only the shallowest points of the pair.
+/// Resolution: distinct support normals one body pair may reduce across. A pair past it stays
+/// whole for the step, so the ceiling bounds the reducer's work and never removes a face.
 pub const MAX_NORMALS: usize = 12;
-
-/// Resolution: points kept per support normal, the count a convex footprint needs and
-/// [`ContactManifold::prune_points`] already keeps per manifold.
-pub const MAX_POINTS_PER_NORMAL: usize = 4;
 
 /// Resolution: two normals within this cosine (20 degrees) act as one support direction. Wider
 /// merges a wedge's two faces; narrower keeps every facet of a fractured seam separate.
 const SAME_NORMAL_COS: Scalar = 0.9397;
 
-/// Resolution: metres, in the length unit. Two depths or reaches within this are the same; a
-/// point that carried load last step wins by this much, so a selection does not flip between
-/// near-equal points and drop their warm start.
+/// Resolution: metres, in the length unit. A point within this of touching bears; two depths
+/// within it are the same depth; a point that carried load last step holds its place by this much,
+/// so near-equal points do not trade places and drop their warm starts.
 pub const SELECTION_TIE: Scalar = 0.002;
+
+/// Resolution: metres, in the length unit. A hull vertex closer than this to the chord between its
+/// kept neighbours is removed, so every point that bears lies within this of the kept polygon.
+/// A vertex that carried load last step leaves only at half of it, so noise about the limit does
+/// not reselect it.
+pub const HULL_TOLERANCE: Scalar = 0.01;
 
 /// One collider pair's manifolds, taken out for reduction with its neighbours of the same two
 /// bodies.
 #[derive(Clone, Debug)]
 pub struct PairManifolds {
+    /// The pair's colliders, lesser entity first: the identity that orders a selection.
+    pub colliders: (Entity, Entity),
     /// True when this pair's bodies are in the opposite order to the group's, so that its
     /// normal points the other way.
     pub reversed: bool,
@@ -67,9 +80,10 @@ impl core::ops::AddAssign for ReductionChurn {
 }
 
 struct Candidate {
-    /// Position of its manifold in the depth order, for the keep mask.
-    manifold: usize,
-    point: u32,
+    /// Pair in collider order, manifold, both features, then position in the manifold: what tells
+    /// two equal points apart the same way on every step. Depth and solver order change; this
+    /// does not.
+    identity: [u32; 5],
     world: Vector,
     depth: Scalar,
     carried: bool,
@@ -77,88 +91,79 @@ struct Candidate {
     keep: bool,
 }
 
-/// Reduces `pairs`, the touching collider pairs between one pair of bodies, in place. A point
-/// closing faster than `rest_speed` always stays; `tie` is [`SELECTION_TIE`] in world length
-/// units. A manifold left with no points is removed.
+/// Reduces `pairs`, the touching collider pairs between one pair of bodies, in place. A group with
+/// a point closing faster than `rest_speed` (a landing), or past [`MAX_NORMALS`], is left whole.
+/// A manifold left with no points is removed.
 pub fn reduce_body_pair<T: BorrowMut<PairManifolds>>(
     pairs: &mut [T],
     rest_speed: Scalar,
-    tie: Scalar,
+    length_unit: Scalar,
 ) -> ReductionChurn {
-    if pairs
-        .iter()
-        .map(|pair| pair.borrow().manifolds.len())
-        .sum::<usize>()
-        < 2
+    let manifolds = pairs.iter().flat_map(|pair| &pair.borrow().manifolds);
+    if manifolds.clone().count() < 2
+        || manifolds
+            .flat_map(|manifold| &manifold.points)
+            .any(|point| point.normal_speed < -rest_speed)
     {
         return ReductionChurn::default();
     }
-    // The deepest manifold seeds the first normal, so a normal dropped past the cap is the
-    // shallowest; ties break by pair order, so the result is the same on every run.
-    let mut order: SmallVec<[(Scalar, usize, usize); 16]> = SmallVec::new();
-    for (p, pair) in pairs.iter().enumerate() {
-        for (m, manifold) in pair.borrow().manifolds.iter().enumerate() {
-            let depth = manifold
-                .points
-                .iter()
-                .map(|point| point.penetration + carried_bonus(point, tie))
-                .fold(Scalar::MIN, Scalar::max);
-            order.push((depth, p, m));
-        }
-    }
-    order.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then((a.1, a.2).cmp(&(b.1, b.2))));
 
+    pairs.sort_unstable_by_key(|pair| pair.borrow().colliders);
     let mut normals: SmallVec<[Vector; MAX_NORMALS]> = SmallVec::new();
     let mut candidates: SmallVec<[Candidate; 32]> = SmallVec::new();
-    for (manifold_at, &(_, p, m)) in order.iter().enumerate() {
-        let pair: &PairManifolds = pairs[p].borrow();
-        let manifold = &pair.manifolds[m];
-        let oriented = if pair.reversed {
-            -manifold.normal
-        } else {
-            manifold.normal
-        };
-        let normal = normals
-            .iter()
-            .position(|known| known.dot(oriented) >= SAME_NORMAL_COS)
-            .or_else(|| {
-                (normals.len() < MAX_NORMALS).then(|| {
+    for (p, pair) in pairs.iter().enumerate() {
+        let pair: &PairManifolds = pair.borrow();
+        for (m, manifold) in pair.manifolds.iter().enumerate() {
+            let oriented = if pair.reversed {
+                -manifold.normal
+            } else {
+                manifold.normal
+            };
+            let known = normals
+                .iter()
+                .position(|known| known.dot(oriented) >= SAME_NORMAL_COS);
+            let normal = match known {
+                Some(normal) => normal,
+                None if normals.len() == MAX_NORMALS => return ReductionChurn::default(),
+                None => {
                     normals.push(oriented);
                     normals.len() - 1
-                })
-            });
-        for (index, point) in manifold.points.iter().enumerate() {
-            candidates.push(Candidate {
-                manifold: manifold_at,
-                point: index as u32,
-                world: point.point,
-                depth: point.penetration,
-                carried: point.warm_start_normal_impulse > 0.0,
-                normal: normal.unwrap_or(usize::MAX),
-                keep: point.normal_speed < -rest_speed,
-            });
+                }
+            };
+            for (index, point) in manifold.points.iter().enumerate() {
+                candidates.push(Candidate {
+                    identity: [
+                        p as u32,
+                        m as u32,
+                        point.feature_id1.0,
+                        point.feature_id2.0,
+                        index as u32,
+                    ],
+                    world: point.point,
+                    depth: point.penetration,
+                    carried: point.warm_start_normal_impulse > 0.0,
+                    normal,
+                    keep: false,
+                });
+            }
         }
     }
 
+    let (tie, tolerance) = (SELECTION_TIE * length_unit, HULL_TOLERANCE * length_unit);
     for (index, &normal) in normals.iter().enumerate() {
-        select(&mut candidates, index, normal, tie);
+        select(&mut candidates, index, normal, tie, tolerance);
     }
 
-    let mut masks: SmallVec<[u32; 16]> = SmallVec::from_elem(0, order.len());
-    for candidate in candidates.iter().filter(|candidate| candidate.keep) {
-        masks[candidate.manifold] |= 1 << candidate.point;
-    }
-    for (&(_, p, m), &mask) in order.iter().zip(&masks) {
-        let mut bit = 1;
-        pairs[p].borrow_mut().manifolds[m].points.retain(|_| {
-            let keep = mask & bit != 0;
-            bit <<= 1;
-            keep
-        });
-    }
+    // Candidates were pushed in this same order.
+    let mut keep = candidates.iter().map(|candidate| candidate.keep);
     for pair in pairs.iter_mut() {
-        pair.borrow_mut()
-            .manifolds
+        let pair: &mut PairManifolds = pair.borrow_mut();
+        for manifold in &mut pair.manifolds {
+            manifold
+                .points
+                .retain(|_| keep.next().expect("one candidate per point"));
+        }
+        pair.manifolds
             .retain(|manifold| !manifold.points.is_empty());
     }
     let count = |test: fn(&Candidate) -> bool| candidates.iter().filter(|c| test(c)).count() as u32;
@@ -168,69 +173,153 @@ pub fn reduce_body_pair<T: BorrowMut<PairManifolds>>(
     }
 }
 
-fn carried_bonus(point: &ContactPoint, bias: Scalar) -> Scalar {
-    if point.warm_start_normal_impulse > 0.0 {
-        bias
-    } else {
-        0.0
+/// Marks what `normal_index`'s cluster keeps: the vertices of the projected hull of the points
+/// that bear, then the deepest point if the hull's vertices are all a tie shallower.
+fn select(
+    candidates: &mut [Candidate],
+    normal_index: usize,
+    normal: Vector,
+    tie: Scalar,
+    tolerance: Scalar,
+) {
+    let (u, v) = normal.any_orthonormal_pair();
+    let at = |candidate: &Candidate| Vector2::new(candidate.world.dot(u), candidate.world.dot(v));
+    let cluster: SmallVec<[usize; 32]> = (0..candidates.len())
+        .filter(|&i| candidates[i].normal == normal_index)
+        .collect();
+    let mut bearing: SmallVec<[usize; 32]> = cluster
+        .iter()
+        .copied()
+        .filter(|&i| candidates[i].depth >= -tie || candidates[i].carried)
+        .collect();
+    bearing.sort_unstable_by(|&a, &b| {
+        let (first, second) = (&candidates[a], &candidates[b]);
+        let (p, q) = (at(first), at(second));
+        p.x.total_cmp(&q.x)
+            .then(p.y.total_cmp(&q.y))
+            .then(second.carried.cmp(&first.carried))
+            .then(first.identity.cmp(&second.identity))
+    });
+    bearing.dedup_by(|a, b| at(&candidates[*a]) == at(&candidates[*b]));
+
+    for i in kept_vertices(candidates, &bearing, at, tolerance) {
+        candidates[i].keep = true;
+    }
+
+    let score = |c: &Candidate| c.depth + if c.carried { tie } else { 0.0 };
+    let deepest = cluster
+        .iter()
+        .copied()
+        .max_by(|&a, &b| {
+            let (first, second) = (&candidates[a], &candidates[b]);
+            score(first)
+                .total_cmp(&score(second))
+                .then(second.identity.cmp(&first.identity))
+        })
+        .expect("a cluster holds its seed's points");
+    let held = cluster
+        .iter()
+        .filter(|&&i| candidates[i].keep)
+        .map(|&i| candidates[i].depth)
+        .fold(Scalar::MIN, Scalar::max);
+    if score(&candidates[deepest]) > held + tie {
+        candidates[deepest].keep = true;
     }
 }
 
-/// Keeps up to [`MAX_POINTS_PER_NORMAL`] of `candidates` on `normal_index`: the deepest, the
-/// point farthest from it, then the farthest on each side of the line between those two.
-fn select(candidates: &mut [Candidate], normal_index: usize, normal: Vector, tie: Scalar) {
-    let pool: SmallVec<[usize; 32]> = candidates
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.normal == normal_index && !c.keep)
-        .map(|(i, _)| i)
-        .collect();
-    if pool.len() <= MAX_POINTS_PER_NORMAL {
-        pool.iter().for_each(|&i| candidates[i].keep = true);
-        return;
+/// The vertices of the convex hull of `sorted`, ordered by position with no duplicate, less those
+/// within `tolerance` of the polygon the rest make.
+fn kept_vertices(
+    candidates: &[Candidate],
+    sorted: &[usize],
+    at: impl Fn(&Candidate) -> Vector2,
+    tolerance: Scalar,
+) -> SmallVec<[usize; 16]> {
+    let position = |i: usize| at(&candidates[i]);
+    if sorted.len() < 3 {
+        return sorted.iter().copied().collect();
     }
-    let bonus = |c: &Candidate| if c.carried { tie } else { 0.0 };
-    let tangent = |c: &Candidate, from: Vector| {
-        let offset = c.world - from;
-        offset - normal * offset.dot(normal)
+    // Andrew's monotone chain, strictly convex: a vertex exactly on an edge is interior.
+    let mut hull: SmallVec<[usize; 16]> = SmallVec::new();
+    let turn = |hull: &[usize], next: usize| {
+        let (o, a) = (
+            position(hull[hull.len() - 2]),
+            position(hull[hull.len() - 1]),
+        );
+        (a - o).perp_dot(position(next) - o)
     };
-    let best = |skip: &[usize], score: &dyn Fn(&Candidate) -> Option<Scalar>| {
-        pool.iter()
-            .filter(|i| !skip.contains(i))
-            .filter_map(|&i| score(&candidates[i]).map(|value| (i, value)))
-            .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
-            .map(|(i, _)| i)
-    };
+    for &i in sorted {
+        while hull.len() >= 2 && turn(&hull, i) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(i);
+    }
+    let lower = hull.len() + 1;
+    for &i in sorted.iter().rev().skip(1) {
+        while hull.len() >= lower && turn(&hull, i) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(i);
+    }
+    hull.pop();
+    if hull.len() < 3 {
+        return hull;
+    }
 
-    // Among the deepest (within one tie), the point farthest from the footprint's centre, so a
-    // flat rest seeds on a corner of the footprint rather than an interior point.
-    let centre = pool.iter().map(|&i| candidates[i].world).sum::<Vector>() / pool.len() as Scalar;
-    let deepest = pool
-        .iter()
-        .map(|&i| candidates[i].depth)
-        .fold(Scalar::MIN, Scalar::max);
-    let first = best(&[], &|c| {
-        (c.depth >= deepest - tie).then(|| tangent(c, centre).length() + bonus(c))
-    })
-    .expect("the deepest point is in its own tie");
-    let origin = candidates[first].world;
-    let second = best(&[first], &|c| Some(tangent(c, origin).length() + bonus(c)))
-        .expect("the pool holds more than one point");
-    let axis = tangent(&candidates[second], origin).normalize_or_zero();
-    let side = normal.cross(axis);
-    let offset = |c: &Candidate| (c.world - origin).dot(side);
-    let third = best(&[first, second], &|c| {
-        let at = offset(c);
-        (at > tie / 2.0).then(|| at + bonus(c))
-    });
-    let fourth = best(&[first, second], &|c| {
-        let at = -offset(c);
-        (at > tie / 2.0).then(|| at + bonus(c))
-    });
-    for kept in [Some(first), Some(second), third, fourth]
-        .into_iter()
-        .flatten()
-    {
-        candidates[kept].keep = true;
+    // Douglas-Peucker around the closed polygon, from two far-apart vertices. Measuring each
+    // vertex against the chord of its kept neighbours, rather than popping near-collinear ones as
+    // the chain goes, is what bounds the sum of the removals by one tolerance.
+    let bonus = |i: usize| {
+        if candidates[i].carried {
+            tolerance / 2.0
+        } else {
+            0.0
+        }
+    };
+    let farthest = |from: Vector2, skip: Option<usize>| {
+        (0..hull.len())
+            .filter(|&k| Some(k) != skip)
+            .map(|k| (k, (position(hull[k]) - from).length() + bonus(hull[k])))
+            .max_by(|a, b| {
+                a.1.total_cmp(&b.1).then(
+                    candidates[hull[b.0]]
+                        .identity
+                        .cmp(&candidates[hull[a.0]].identity),
+                )
+            })
+            .expect("a hull has at least three vertices")
+            .0
+    };
+    let n = hull.len();
+    let centre = hull.iter().map(|&i| position(i)).sum::<Vector2>() / n as Scalar;
+    let first = farthest(centre, None);
+    let second = farthest(position(hull[first]), Some(first));
+    let mut kept: SmallVec<[usize; 16]> = smallvec![hull[first], hull[second]];
+    let wrap = |from: usize, to: usize| if to > from { to } else { to + n };
+    let mut arcs: SmallVec<[(usize, usize); 16]> =
+        smallvec![(first, wrap(first, second)), (second, wrap(second, first))];
+    while let Some((from, to)) = arcs.pop() {
+        let (a, b) = (position(hull[from % n]), position(hull[to % n]));
+        let chord = (b - a).normalize();
+        let split = ((from + 1)..to)
+            .map(|k| {
+                let i = hull[k % n];
+                (k, (position(i) - a).perp_dot(chord).abs() + bonus(i))
+            })
+            .max_by(|x, y| {
+                x.1.total_cmp(&y.1).then(
+                    candidates[hull[y.0 % n]]
+                        .identity
+                        .cmp(&candidates[hull[x.0 % n]].identity),
+                )
+            });
+        if let Some((k, score)) = split
+            && score > tolerance
+        {
+            kept.push(hull[k % n]);
+            arcs.push((from, k));
+            arcs.push((k, to));
+        }
     }
+    kept
 }
