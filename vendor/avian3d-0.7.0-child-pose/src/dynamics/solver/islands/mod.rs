@@ -1130,8 +1130,11 @@ impl PhysicsIslands {
                                         return None;
                                     }
 
-                                    if contact_edge.constraint_handles.is_empty() {
-                                        // Only consider touching contacts.
+                                    // OVERMATCH PATCH: island membership, not constraint
+                                    // handles, marks a contact of this island: a pair reduced to
+                                    // no manifold (`contact_types::reduction`) stays linked with
+                                    // no handle and must be rebuilt with its island.
+                                    if contact_edge.island.is_none() {
                                         return None;
                                     }
 

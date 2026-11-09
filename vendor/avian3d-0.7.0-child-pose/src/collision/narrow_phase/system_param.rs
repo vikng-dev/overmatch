@@ -5,7 +5,10 @@ use core::cell::RefCell;
 use crate::{
     collision::{
         collider::EnlargedAabb,
-        contact_types::{ContactEdgeFlags, ContactId, StationaryMiss},
+        contact_types::{
+            ContactEdgeFlags, ContactId, PairManifolds, SELECTION_TIE, StationaryMiss,
+            reduce_body_pair,
+        },
     },
     data_structures::{bit_vec::BitVec, pair_key::PairKey},
     dynamics::solver::{
@@ -57,6 +60,9 @@ struct RigidBodyQuery {
     restitution: Option<Read<Restitution>>,
     collision_margin: Option<Read<CollisionMargin>>,
     speculative_margin: Option<Read<SpeculativeMargin>>,
+    // OVERMATCH PATCH: body-pair contact reduction reads these.
+    reducible: Has<ReducibleContacts>,
+    sleep_threshold: Option<Read<SleepThreshold>>,
 }
 
 /// A system parameter for managing the narrow phase.
@@ -93,6 +99,31 @@ pub struct NarrowPhase<'w, 's, C: AnyCollider> {
     // OVERMATCH PATCH: owner-local tallies avoid contended per-pair atomics.
     miss_work: Local<'s, ThreadLocal<Cell<[u32; 2]>>>,
     pub(super) stationary_miss_work: Local<'s, [u32; 2]>,
+    // OVERMATCH PATCH: reusable manifold buffers for body-pair reduction.
+    reduction_entries: Local<'s, Vec<ReductionEntry>>,
+}
+
+/// OVERMATCH PATCH: a reducible pair's manifolds, moved out for its body pair's reduction.
+struct ReductionEntry {
+    /// The two bodies, in ascending order: the group key.
+    bodies: (Entity, Entity),
+    /// Where the manifolds return: an index into the active pairs.
+    pair_index: usize,
+    /// The pair's manifold count before reduction.
+    raw_count: usize,
+    taken: PairManifolds,
+}
+
+impl core::borrow::Borrow<PairManifolds> for ReductionEntry {
+    fn borrow(&self) -> &PairManifolds {
+        &self.taken
+    }
+}
+
+impl core::borrow::BorrowMut<PairManifolds> for ReductionEntry {
+    fn borrow_mut(&mut self) -> &mut PairManifolds {
+        &mut self.taken
+    }
 }
 
 /// A bit vector for tracking contact status changes.
@@ -138,6 +169,9 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
 
         // Update contacts for all contact pairs.
         self.update_contacts::<H>(delta_secs, hooks, context, commands);
+
+        // OVERMATCH PATCH: bounds each body pair's contacts before the constraint graph sees them.
+        self.reduce_body_pair_contacts();
 
         // A later merge can retire an island ID before wakes are applied.
         let mut wake_bodies: Vec<Entity> = Vec::with_capacity(128);
@@ -234,8 +268,12 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                         contact_pair.collider2,
                     );
 
+                    // OVERMATCH PATCH: body-pair reduction may leave a touching pair no manifold.
                     debug_assert!(
-                        !contact_pair.manifolds.is_empty(),
+                        !contact_pair.manifolds.is_empty()
+                            || contact_pair
+                                .flags
+                                .contains(ContactPairFlags::REDUCIBLE_CONTACTS),
                         "Manifolds should not be empty when colliders start touching"
                     );
 
@@ -284,9 +322,12 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                         .flags
                         .set(ContactPairFlags::STOPPED_TOUCHING, false);
 
-                    // Remove the contact pair from the constraint graph.
+                    // Remove the contact pair from the constraint graph. OVERMATCH PATCH: the
+                    // island link is tested on its own: a pair reduced to no manifold has one
+                    // with no constraint handle.
                     if contact_pair.generates_constraints()
-                        && !contact_edge.constraint_handles.is_empty()
+                        && (!contact_edge.constraint_handles.is_empty()
+                            || contact_edge.island.is_some())
                         && let (Some(body1), Some(body2)) = (contact_pair.body1, contact_pair.body2)
                     {
                         for _ in 0..contact_edge.constraint_handles.len() {
@@ -468,6 +509,82 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     }) {
                         sleeping_colliders.push(collider);
                     }
+                }
+            }
+        }
+    }
+
+    /// OVERMATCH PATCH: reduces the contacts between each pair of [`ReducibleContacts`] bodies
+    /// (`contact_types::reduction`). Pairs group by their two bodies, whose groups own disjoint
+    /// pairs and reduce in parallel; moving the manifolds out needs no unsafe aliasing. Runs
+    /// after the pair update and before status bits are read, so the constraint graph sees only
+    /// the reduced manifolds. A pair losing all of them stays touching, keeping its events and
+    /// its island link.
+    fn reduce_body_pair_contacts(&mut self) {
+        let entries = &mut *self.reduction_entries;
+        entries.clear();
+        for (pair_index, pair) in self.contact_graph.active_pairs_mut().iter_mut().enumerate() {
+            if pair.manifolds.is_empty()
+                || !pair.flags.contains(ContactPairFlags::REDUCIBLE_CONTACTS)
+                || pair.flags.contains(ContactPairFlags::MODIFY_CONTACTS)
+                || !pair.generates_constraints()
+            {
+                continue;
+            }
+            let (Some(body1), Some(body2)) = (pair.body1, pair.body2) else {
+                continue;
+            };
+            let manifolds = core::mem::take(&mut pair.manifolds);
+            entries.push(ReductionEntry {
+                bodies: (body1.min(body2), body1.max(body2)),
+                pair_index,
+                raw_count: manifolds.len(),
+                taken: PairManifolds {
+                    reversed: body2 < body1,
+                    manifolds,
+                },
+            });
+        }
+        if entries.is_empty() {
+            return;
+        }
+        entries.sort_unstable_by_key(|entry| (entry.bodies, entry.pair_index));
+
+        let unit = self.length_unit.0;
+        let bodies = &self.body_query;
+        // A landing is any point closing past the slowest of the two bodies' rest speeds, the
+        // comparison a contact reader makes per side (`Sleeping` compares the same threshold).
+        let rest = |body: Entity| {
+            bodies
+                .get(body)
+                .ok()
+                .and_then(|body| body.sleep_threshold.map(|t| t.linear as Scalar * unit))
+        };
+        let mut groups: Vec<(Scalar, &mut [ReductionEntry])> = entries
+            .chunk_by_mut(|a, b| a.bodies == b.bodies)
+            .map(|group| {
+                let (first, second) = group[0].bodies;
+                let rest_speed = [first, second]
+                    .into_iter()
+                    .filter_map(&rest)
+                    .fold(Scalar::INFINITY, Scalar::min);
+                (rest_speed, group)
+            })
+            .collect();
+        crate::utils::par_for_each(&mut groups, 8, |_, (rest_speed, group)| {
+            reduce_body_pair(group, *rest_speed, SELECTION_TIE * unit);
+        });
+        drop(groups);
+
+        let pairs = self.contact_graph.active_pairs_mut();
+        for entry in entries.drain(..) {
+            let pair = &mut pairs[entry.pair_index];
+            let removed = entry.raw_count - entry.taken.manifolds.len();
+            pair.manifolds = entry.taken.manifolds;
+            if removed > 0 {
+                pair.manifold_count_change -= removed as i16;
+                if pair.manifold_count_change != 0 {
+                    self.contact_status_bits.set(pair.contact_id.0 as usize);
                 }
             }
         }
@@ -695,6 +812,14 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 contacts
                     .flags
                     .set(ContactPairFlags::GENERATE_CONSTRAINTS, !is_disabled);
+                // OVERMATCH PATCH: both bodies must allow it.
+                contacts.flags.set(
+                    ContactPairFlags::REDUCIBLE_CONTACTS,
+                    body1_bundle
+                        .as_ref()
+                        .zip(body2_bundle.as_ref())
+                        .is_some_and(|(a, b)| a.reducible && b.reducible),
+                );
 
                 // Get combined friction and restitution coefficients of the colliders
                 // or the bodies they are attached to. Fall back to the global defaults.

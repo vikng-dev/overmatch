@@ -667,6 +667,7 @@ pub(crate) struct ChunkCollider(pub(crate) u16);
 /// ascending. On the authority it rides the group's dynamic body; the network carries it to
 /// replicas on the body's pose carrier, with its birth and optional retirement ticks.
 #[derive(Component, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[require(avian3d::prelude::ReducibleContacts)]
 pub(crate) struct Piece {
     pub(crate) construction: u16,
     pub(crate) chunks: Vec<u16>,

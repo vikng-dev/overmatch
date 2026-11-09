@@ -12,6 +12,7 @@ mod avian_body_query_gap;
 mod avian_broad_phase_layers;
 mod avian_child_pose_churn;
 mod avian_collider_of_removal;
+mod avian_contact_reduction;
 mod avian_island_sleep;
 mod avian_moved_aabb_prune;
 mod avian_spawn_batch;

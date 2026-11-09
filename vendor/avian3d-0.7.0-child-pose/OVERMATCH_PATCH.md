@@ -263,3 +263,27 @@ Guards: `src/net/ram/avian_tests.rs`, including wake-and-move, independent pruni
 either collider, child rehoming, new neighbors, same-step motion and touching geometry refresh. The sweep's hook-only rejection remains a
 per-step decision, including the unresolved-target path fixed in `27562bd8`.
 Count evidence, same-input geometry comparison and reproduction: `upstream/avian-still-pairs.md`.
+
+## Body-pair contact reduction (`src/collision/contact_types/reduction.rs`)
+
+Two bodies touching through many collider pairs (a broken piece's chunk hulls along a seam) carry
+one manifold per hull pair. `NarrowPhase::reduce_body_pair_contacts` runs after the pair update and
+before status bits are read: it groups the touching pairs of each two bodies, and bounds them to at
+most `MAX_NORMALS` support normals with `MAX_POINTS_PER_NORMAL` points each, the deepest point and
+the extremes that span the footprint (same-normal cosine 20 degrees). Only pairs between two
+`ReducibleContacts` bodies qualify; a contact-modification hook excludes the pair, and so does a
+static side (MEASURED on twelve collapsing houses: reducing piece-terrain contacts doubled awake
+piece-ticks, the piles failing to settle; piece-piece alone did not). A point closing faster than the slower body's `SleepThreshold` (the reading the
+game's crumble law takes per collider) is always kept.
+
+Each kept point stays in its own manifold and collider pair, so warm starting and per-collider
+impulse attribution are unchanged; a point that carried load last step wins ties
+(`SELECTION_TIE`), so a resting selection does not flip and lose its warm start. A pair left with
+no manifold stays touching (events, `CollidingEntities`, island link), with no constraint handle:
+hence the two patched status-change sites in `narrow_phase/system_param.rs` (the started-touching
+debug assertion and the stopped-touching island unlink, which now also fires for a pair with an
+island and no handle; island splitting in `dynamics/solver/islands/mod.rs` likewise walks contacts
+with an island link rather than constraint handles). The stationary-miss cache is unaffected: it only stores pairs with no
+manifold from the geometry query, and reduction runs only on pairs with manifolds after that query.
+
+Guards: `src/tests/avian_contact_reduction.rs`.

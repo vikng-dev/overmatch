@@ -6,10 +6,15 @@
 
 mod contact_graph;
 mod feature_id;
+mod reduction;
 mod system_param;
 
 pub use contact_graph::{ContactGraph, ContactGraphInternal};
 pub use feature_id::PackedFeatureId;
+pub use reduction::{
+    MAX_NORMALS, MAX_POINTS_PER_NORMAL, PairManifolds, ReducibleContacts, SELECTION_TIE,
+    reduce_body_pair,
+};
 use smallvec::SmallVec;
 pub use system_param::Collisions;
 
@@ -226,6 +231,8 @@ bitflags::bitflags! {
         const STATIC2 = 1 << 7;
         /// Set if the contact pair should have a custom contact modification hook applied.
         const MODIFY_CONTACTS = 1 << 8;
+        /// OVERMATCH PATCH: both bodies allow their contacts to be reduced across the pair.
+        const REDUCIBLE_CONTACTS = 1 << 9;
     }
 }
 
