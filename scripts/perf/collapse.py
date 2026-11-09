@@ -212,6 +212,7 @@ def client_frames(log, path, duration):
     # Resolution: omit two boundary seconds for admission skew and the buffered recorder's tail.
     margin = min(2, duration / 4)
     start, end = float(release[0]) + margin, float(release[0]) + duration - margin
+    step = tick_seconds()
     rows = []
     text = path.read_text()
     lines = text.splitlines()
@@ -223,18 +224,22 @@ def client_frames(log, path, duration):
             if number == len(lines) and not text.endswith("\n"):
                 break
             raise RuntimeError(f"{path}:{number}: malformed frame row") from error
-        if "frame_ms" in row and start <= row["t"] <= end:
+        if "frame_ms" in row and start <= row["t"] < end:
             if not math.isfinite(row["frame_ms"]) or row["frame_ms"] < 0:
                 raise RuntimeError(f"{path}:{number}: invalid frame duration")
             rows.append(row)
     if len(rows) < 2 or rows[0]["t"] > start + 1 or rows[-1]["t"] < end - 1:
         raise RuntimeError(f"{path}: incomplete client frame coverage")
     span = rows[-1]["t"] - rows[0]["t"]
-    within = sum(r["frame_ms"] <= tick_seconds() * 1000 for r in rows)
+    within = sum(r["frame_ms"] <= step * 1000 for r in rows)
     frames = len(rows) - 1
+    covered = len({int((r["t"] - start) / step) for r in rows})
+    # Resolution: a billionth of one tick removes f64 subtraction noise at an exact slot edge.
+    expected = math.ceil((end - start) / step - 1e-9)
     return dict(frames=frames, span_s=span, frames_per_s=frames / span,
                 within_tick=within, over_tick=len(rows)-within,
-                keeping_up=frames >= span / tick_seconds() * SAMPLE_SPEED and within >= len(rows) * SAMPLE_SPEED)
+                covered_tick_slots=covered, expected_tick_slots=expected,
+                keeping_up=covered >= expected * SAMPLE_SPEED and within >= len(rows) * SAMPLE_SPEED)
 
 
 def match_counts(windows):

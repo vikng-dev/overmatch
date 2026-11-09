@@ -39,6 +39,15 @@ class CollapseTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "malformed frame row"):
                 collapse.client_frames(log, path, 10)
 
+    def test_bunched_fast_frames_do_not_hide_missing_update_slots(self):
+        # Fixture: 100 frames/s, 95% short frames, but long gaps cover most wall-clock ticks.
+        log = "client: connected (entity fixture)\nharness: released frame_s=0.000\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "frames.jsonl"
+            path.write_text("".join(json.dumps(dict(t=burst / 5 + i / 1000,
+                frame_ms=181 if i == 0 else 1)) + "\n" for burst in range(50) for i in range(20)))
+            self.assertFalse(collapse.client_frames(log, path, 10)["keeping_up"])
+
     def test_link_bytes_weight_wall_span_and_house_rest_requires_an_unchanged_sleeping_suffix(self):
         _, rows = self.match_fixture()
         counts = collapse.match_counts(rows)
