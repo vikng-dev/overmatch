@@ -50,7 +50,8 @@ pub const BEARING_GAP: Scalar = 0.002;
 /// Resolution: metres, in the length unit. A hull vertex closer than this to the chord between its
 /// kept neighbours is removed, so every point that bears lies within this of the kept polygon.
 /// A vertex that carried load last step leaves only at half of it, so noise about the limit does
-/// not reselect it.
+/// not reselect it. MEASURED, one twelve-house run each with a rule that also kept the deepest
+/// point: piece-piece points per awake piece-tick 11.4 at 0, 7.9 at 1 cm, 7.9 at 3 cm.
 pub const HULL_TOLERANCE: Scalar = 0.01;
 
 /// One collider pair's manifolds, taken out for reduction with its neighbours of the same two
