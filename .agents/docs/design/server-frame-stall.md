@@ -122,10 +122,12 @@ never simulated. For the same frame costs the ticks per batch are the same.
 
 **What is not.** A batch is spent over many frames, with receive, send and the rest of the frame
 between its ticks, so that frame work lands inside the batch and lengthens it. `Time<Virtual>` no
-longer feeds `Time<Fixed>`: it still advances each frame under its own per-frame cap, so under
-overload it runs ahead of simulated time by what was skipped. Nothing on the dedicated server
-depends on the two agreeing: fixed-schedule readers of `Time` get `Time<Fixed>`, and Lightyear's
-send timer has a zero interval. `Time<Real>` is the wall clock on every frame, so netcode's
+longer feeds `Time<Fixed>`: it still advances each frame under its own per-frame cap, so the two
+clocks differ by the admitted debt still unspent and by what each cap discarded. No gameplay on the
+dedicated server depends on them agreeing: fixed-schedule readers of `Time` get `Time<Fixed>`, and
+Lightyear's send timer has a zero interval. The dev capture's `fire_on_cue` runs in `Update` on
+app seconds, as documented, so its cues can fire closer together in simulated time across a stall.
+`Time<Real>` is the wall clock on every frame, so netcode's
 timeouts and keep-alives count a stall in full.
 
 MEASURED, hosted v0.7.0-alpha.11, 2 vCPU, 30 tanks, one house falling at tick 1602, two runs:
