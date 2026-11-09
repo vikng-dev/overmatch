@@ -269,34 +269,40 @@ Count evidence, same-input geometry comparison and reproduction: `upstream/avian
 Two bodies touching through many collider pairs (a broken piece's chunk hulls along a seam) carry
 one manifold per hull pair. `NarrowPhase::reduce_body_pair_contacts` runs after the pair update and
 before status bits are read: it groups the touching pairs of each two bodies and clusters their
-contacts by support normal (same-normal cosine 20 degrees). Each normal keeps the vertices of the
-projected convex hull of the points that bear (within `BEARING_GAP` of touching, or carrying load
-last step), less those within `HULL_TOLERANCE` of the polygon the rest make. Points inside the hull
-are what is removed, the deepest included; there is no point ceiling. A group past `MAX_NORMALS` is
-left whole, so the ceiling bounds work and never removes a face. DERIVED: each normal's support
-polygon is preserved to within `HULL_TOLERANCE`; across a cluster of unequal normals (up to 20
-degrees) that is an approximation. MEASURED: also keeping each normal's deepest point, as an
-overlap corrector, kept the one-house collapse awake three to eight times longer in each of six
-runs at this tolerance, its piles sliding and breaking for seconds after the event; two of two
-runs with hull vertices alone settled as fast as the unreduced engine.
+contacts by support normal; a cluster admits normals within about 20 degrees of its seed, so its
+members can differ by about 40. Each normal keeps the vertices of the projected convex hull of the
+points that bear, less those within `HULL_TOLERANCE` of the segment between their kept neighbours,
+so every bearing point lies within that tolerance of the kept outline. A point bears when its
+separation, less what its closing speed covers in the physics step, is within `BEARING_GAP`, or when
+it carried load last step; a point dropped as not bearing can overlap by the end of the step only by
+what the step's change in relative velocity adds beyond that margin, and bears on the next step.
+Points inside the hull are what is removed; there is no point ceiling. MEASURED: also keeping each
+normal's deepest point, as an overlap corrector, kept the one-house collapse awake three to eight
+times longer in each of six runs, its piles sliding and breaking for seconds after the event.
+
+A group is left whole for the step when any point closes faster than the slower body's
+`SleepThreshold` (a landing, every press of it kept), when it spans more than `MAX_NORMALS`, or when
+a point it would remove overlaps deeper than the deepest kept point of its normal by more than the
+overlap slop, `NarrowPhaseConfig::contact_tolerance` (the engine's bound on solver jitter between
+bodies in continuous contact): the kept corners would not correct that overlap. A landing pair's
+blows can still move, since another pair sharing either body may be reduced and the solve couples
+them. A removed point's share of the solved impulses goes to the points that remain.
 
 Only pairs between two dynamic `ReducibleContacts` bodies qualify; a static side and a
 contact-modification hook each exclude the pair at eligibility (MEASURED on twelve collapsing
 houses: reducing piece-terrain contacts doubled awake piece-ticks, the piles failing to settle;
-piece-piece alone did not). Cluster seeds and every tie come from the pair's colliders and the
-points' features, never from depth or active-pair order.
-
-A body pair with any point closing faster than the slower body's `SleepThreshold` is left whole
-for that step, every press of the landing included. That does not fix the landing's blows: another
-pair sharing either body may be reduced, and the coupled solve moves them. A removed point's share
-of the solved impulses goes to the points that remain.
+piece-piece alone did not). Cluster seeds and every tie follow the pairs' colliders, then each
+pair's manifolds by their least features, then the points' features, never depth or active-pair
+order; where features are unknown or repeat, ties fall to the narrow phase's generated order,
+deterministic for the same geometry but not tied to the contact.
 
 Each kept point stays in its own manifold and collider pair, so its per-collider attribution is
 unchanged. Warm starting is not continuous: matching runs against only the previous reduced set, so
 a removed point loses its impulse and one reselected later starts cold unless the matcher finds it
-another predecessor. A loaded point holds its place by a tie, and a loaded hull vertex leaves only
-at half of `HULL_TOLERANCE`, which makes reselection rarer without ruling it out
-(`CollisionDiagnostics::reduction_warm_points_removed` counts it).
+another predecessor. A loaded hull vertex leaves only at half of `HULL_TOLERANCE`, which makes
+reselection rarer without ruling it out. `CollisionDiagnostics` carries the groups offered, those
+left whole for each reason, and two warm-start selection counters: points holding a matched warm
+start that reduction removed, and points kept with none.
 
 A pair left with no manifold stays touching (events, `CollidingEntities`, island link), with no
 constraint handle: hence the two patched status-change sites in `narrow_phase/system_param.rs` (the

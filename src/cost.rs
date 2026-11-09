@@ -84,8 +84,13 @@ pub(crate) struct AvianStep {
     /// Counts active non-touching pairs examined, then their admitted geometry queries.
     pub(crate) stationary_non_touching_pairs: u32,
     pub(crate) stationary_non_touching_queries: u32,
-    /// Body-pair reduction: points that held a warm start and were removed, and points kept with
-    /// none.
+    /// Body-pair reduction: groups offered, those left whole for a landing, the normal ceiling or
+    /// an overlap; then the warm-start selection counters, points that held a warm start and were
+    /// removed and points kept with none.
+    pub(crate) reduction_groups: u32,
+    pub(crate) reduction_landing_whole: u32,
+    pub(crate) reduction_ceiling_whole: u32,
+    pub(crate) reduction_overlap_whole: u32,
     pub(crate) reduction_warm_points_removed: u32,
     pub(crate) reduction_cold_points_kept: u32,
 }
@@ -134,6 +139,10 @@ impl TickSample {
                 max_dynamic_manifold_degree: 0,
                 stationary_non_touching_pairs: 0,
                 stationary_non_touching_queries: 0,
+                reduction_groups: 0,
+                reduction_landing_whole: 0,
+                reduction_ceiling_whole: 0,
+                reduction_overlap_whole: 0,
                 reduction_warm_points_removed: 0,
                 reduction_cold_points_kept: 0,
             },

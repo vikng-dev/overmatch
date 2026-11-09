@@ -6,8 +6,8 @@ use crate::{
     collision::{
         collider::EnlargedAabb,
         contact_types::{
-            ContactEdgeFlags, ContactId, PairManifolds, ReductionChurn, StationaryMiss,
-            reduce_body_pair,
+            ContactEdgeFlags, ContactId, PairManifolds, ReductionCounts, ReductionStep,
+            StationaryMiss, reduce_body_pair,
         },
     },
     data_structures::{bit_vec::BitVec, pair_key::PairKey},
@@ -101,7 +101,7 @@ pub struct NarrowPhase<'w, 's, C: AnyCollider> {
     pub(super) stationary_miss_work: Local<'s, [u32; 2]>,
     // OVERMATCH PATCH: reusable manifold buffers for body-pair reduction.
     reduction_entries: Local<'s, Vec<ReductionEntry>>,
-    pub(super) reduction_churn: Local<'s, ReductionChurn>,
+    pub(super) reduction_counts: Local<'s, ReductionCounts>,
 }
 
 /// OVERMATCH PATCH: a reducible pair's manifolds, moved out for its body pair's reduction.
@@ -172,7 +172,7 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
         self.update_contacts::<H>(delta_secs, hooks, context, commands);
 
         // OVERMATCH PATCH: bounds each body pair's contacts before the constraint graph sees them.
-        self.reduce_body_pair_contacts();
+        self.reduce_body_pair_contacts(delta_secs);
 
         // A later merge can retire an island ID before wakes are applied.
         let mut wake_bodies: Vec<Entity> = Vec::with_capacity(128);
@@ -521,8 +521,8 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
     /// after the pair update and before status bits are read, so the constraint graph sees only
     /// the reduced manifolds. A pair losing all of them stays touching, keeping its events and
     /// its island link.
-    fn reduce_body_pair_contacts(&mut self) {
-        *self.reduction_churn = ReductionChurn::default();
+    fn reduce_body_pair_contacts(&mut self, delta_secs: Scalar) {
+        *self.reduction_counts = ReductionCounts::default();
         let entries = &mut *self.reduction_entries;
         entries.clear();
         for (pair_index, pair) in self.contact_graph.active_pairs_mut().iter_mut().enumerate() {
@@ -567,7 +567,8 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 .ok()
                 .and_then(|body| body.sleep_threshold.map(|t| t.linear as Scalar * unit))
         };
-        let mut groups: Vec<(Scalar, ReductionChurn, &mut [ReductionEntry])> = entries
+        // Borrowed slices cannot outlive the tick, so this list is the one allocation per tick.
+        let mut groups: Vec<(Scalar, ReductionCounts, &mut [ReductionEntry])> = entries
             .chunk_by_mut(|a, b| a.bodies == b.bodies)
             .map(|group| {
                 let (first, second) = group[0].bodies;
@@ -575,14 +576,19 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     .into_iter()
                     .filter_map(&rest)
                     .fold(Scalar::INFINITY, Scalar::min);
-                (rest_speed, ReductionChurn::default(), group)
+                (rest_speed, ReductionCounts::default(), group)
             })
             .collect();
-        crate::utils::par_for_each(&mut groups, 8, |_, (rest_speed, churn, group)| {
-            *churn = reduce_body_pair(group, *rest_speed, unit);
+        let step = ReductionStep {
+            delta_secs,
+            length_unit: unit,
+            overlap_slop: *self.contact_tolerance,
+        };
+        crate::utils::par_for_each(&mut groups, 8, |_, (rest_speed, counts, group)| {
+            *counts = reduce_body_pair(group, *rest_speed, step);
         });
-        for (_, churn, _) in groups {
-            *self.reduction_churn += churn;
+        for (_, counts, _) in groups {
+            *self.reduction_counts += counts;
         }
 
         let pairs = self.contact_graph.active_pairs_mut();

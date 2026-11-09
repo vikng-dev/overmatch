@@ -4,12 +4,24 @@
 //! The grids, boxes and poses are fixture data: any spread of hull pairs exercises the same laws.
 
 use avian3d::collision::contact_types::{
-    BEARING_GAP, HULL_TOLERANCE, MAX_NORMALS, PairManifolds, reduce_body_pair,
+    BEARING_GAP, HULL_TOLERANCE, MAX_NORMALS, PackedFeatureId, PairManifolds, ReductionStep,
+    reduce_body_pair,
 };
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
+/// Fixture: Avian's default rest speed, m/s, and the game's 64 Hz step.
 const REST: f32 = 0.15;
+const STEP_SECS: f32 = 1.0 / 64.0;
+
+/// The reducer's step: the fixture step, unit lengths and the engine's own overlap slop.
+fn step() -> ReductionStep {
+    ReductionStep {
+        delta_secs: STEP_SECS,
+        length_unit: 1.0,
+        overlap_slop: NarrowPhaseConfig::default().contact_tolerance,
+    }
+}
 
 fn point(at: Vec3, depth: f32) -> ContactPoint {
     ContactPoint::new(at, at, at, depth)
@@ -51,7 +63,14 @@ fn pairs_of(manifolds: impl IntoIterator<Item = ContactManifold>) -> Vec<PairMan
 }
 
 fn reduce(pairs: &mut [PairManifolds]) {
-    reduce_body_pair(pairs, REST, 1.0);
+    reduce_body_pair(pairs, REST, step());
+}
+
+/// Four lone resting points at the corners of a square `half` across each way.
+fn corners(half: f32) -> impl Iterator<Item = ContactManifold> {
+    [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
+        .into_iter()
+        .map(move |(x, z)| lone(Vec3::new(x, 0.0, z) * half, 0.0))
 }
 
 fn kept(pairs: &[PairManifolds]) -> impl Iterator<Item = &ContactPoint> {
@@ -78,8 +97,9 @@ fn carried(mut manifold: ContactManifold) -> ContactManifold {
 }
 
 /// A flat seam of many hull pairs costs the solver only the corners of its footprint: the
-/// interior, its deepest point included, and the points along an edge add no support. A mutant
-/// keeping any interior or edge point, or losing a corner a body could tip about, breaks it.
+/// interior, a point deeper by less than the overlap slop included, and the points along an edge
+/// add no support. A mutant keeping any interior or edge point, or losing a corner a body could
+/// tip about, breaks it.
 #[test]
 fn a_flat_many_hull_seam_keeps_only_its_footprint_corners() {
     let mut manifolds: Vec<ContactManifold> = (-2..=2)
@@ -87,7 +107,7 @@ fn a_flat_many_hull_seam_keeps_only_its_footprint_corners() {
             (-2..=2).map(move |z| flat_patch(Vec3::new(x as f32, 0.0, z as f32), 0.4, 0.0))
         })
         .collect();
-    manifolds[11].points[1].penetration = 2.0 * BEARING_GAP;
+    manifolds[11].points[1].penetration = 0.5 * step().overlap_slop;
     let mut pairs = pairs_of(manifolds);
     reduce(&mut pairs);
     assert_eq!(count(&pairs), 4);
@@ -368,6 +388,100 @@ fn cluster_seeds_do_not_follow_depth() {
     }
 }
 
+/// The tolerance is measured to the kept segment, not its line: a vertex past a kept end lies off
+/// the outline by more than its distance to the line. Loaded A seeds beside B, and P beyond A's
+/// end lies 0.99 of the tolerance from line AB but 1.1 from the segment. A mutant measuring to the
+/// line drops P.
+#[test]
+fn a_vertex_past_a_kept_end_is_measured_to_the_segment() {
+    let off = Vec3::new(-0.49, 0.0, 0.99) * HULL_TOLERANCE;
+    let mut pairs = pairs_of([
+        carried(lone(Vec3::ZERO, 0.0)),
+        lone(Vec3::X, 0.0),
+        lone(off, 0.0),
+    ]);
+    reduce(&mut pairs);
+    assert!(kept_at(&pairs, off), "a vertex off the outline was dropped");
+}
+
+/// A cold point whose opening its closing speed covers within the step bears, or the solver loses
+/// a support it would meet this step; the same point holding still does not. Fixture: 2.2 mm open
+/// and closing at 0.145 m/s, under the landing speed. A mutant ignoring the closing speed drops it.
+#[test]
+fn a_point_closing_within_the_step_bears() {
+    let outside = Vec3::new(2.0, 0.0, 0.0);
+    let build = |closing: f32| {
+        let mut opening = lone(outside, -0.0022);
+        opening.points[0].normal_speed = -closing;
+        let mut pairs = pairs_of(corners(1.0).chain([opening]));
+        reduce(&mut pairs);
+        pairs
+    };
+    assert!(
+        kept_at(&build(0.145), outside),
+        "a closing point did not bear"
+    );
+    assert!(!kept_at(&build(0.0), outside), "a still, open point bore");
+}
+
+/// A point inside the outline that overlaps deeper than the kept ones by more than the engine's
+/// slop leaves the whole group whole, since nothing kept would correct that overlap; one within
+/// the slop is removed. A mutant without the bypass, or bypassing at any depth, breaks one side.
+#[test]
+fn an_interior_overlap_past_the_slop_keeps_the_group_whole() {
+    let slop = step().overlap_slop;
+    let build = |depth: f32| {
+        let mut pairs = pairs_of(corners(1.0).chain([lone(Vec3::new(0.2, 0.0, 0.1), depth)]));
+        reduce(&mut pairs);
+        count(&pairs)
+    };
+    assert_eq!(
+        build(0.1),
+        5,
+        "a 0.1 m interior overlap was left uncorrected"
+    );
+    assert_eq!(build(2.0 * slop), 5, "an overlap past the slop was removed");
+    assert_eq!(
+        build(0.5 * slop),
+        4,
+        "an overlap within the slop kept the group whole"
+    );
+}
+
+/// Within one collider pair, manifolds seed in the order of their features, not the order the
+/// narrow phase listed them: listing a 19-degree manifold before its pair's 0-degree one must not
+/// merge the clusters (see [`cluster_seeds_do_not_follow_depth`]). A mutant seeding manifolds as
+/// listed breaks it.
+#[test]
+fn manifolds_seed_in_feature_order() {
+    let tilted = |degrees: f32, x: f32, feature: u32| {
+        let turn = degrees.to_radians();
+        let mut manifold = flat_patch(Vec3::X * x, 0.5, 0.0);
+        manifold.normal = Vec3::new(turn.sin(), turn.cos(), 0.0);
+        for point in &mut manifold.points {
+            point.feature_id1 = PackedFeatureId::from(feature);
+        }
+        manifold
+    };
+    let mut pairs = vec![PairManifolds {
+        colliders: (entity(1), entity(2)),
+        reversed: false,
+        manifolds: vec![
+            tilted(19.0, 0.0, 2),
+            tilted(38.0, 3.0, 3),
+            tilted(0.0, -3.0, 1),
+        ],
+    }];
+    reduce(&mut pairs);
+    let end = |side: f32| kept(&pairs).filter(|p| p.point.x * side >= 2.5).count();
+    assert!(
+        end(-1.0) == 4 || end(1.0) == 4,
+        "the listed order seeded the clusters: ends kept {} and {}",
+        end(-1.0),
+        end(1.0)
+    );
+}
+
 fn app() -> App {
     let mut app = super::avian_child_pose_churn::physics_app();
     app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
@@ -511,33 +625,64 @@ fn contact_counts(pairs: &[&ContactPair]) -> (usize, usize, usize) {
         })
 }
 
-fn tilt(app: &App, body: Entity) -> f32 {
-    app.world()
-        .get::<Rotation>(body)
-        .unwrap()
-        .0
-        .angle_between(Quat::IDENTITY)
+/// Whether `at`, seen from above, lies over the convex outline of `points`: on the inner side of
+/// every line through two points that has all the points on one side.
+fn over_outline(points: &[Vec3], at: Vec3) -> bool {
+    let flat = |p: Vec3| Vec2::new(p.x, p.z);
+    let at = flat(at);
+    points.len() >= 3
+        && points.iter().all(|&a| {
+            points.iter().all(|&b| {
+                let side = |p: Vec2| (flat(b) - flat(a)).perp_dot(p - flat(a));
+                a == b || !points.iter().all(|&p| side(flat(p)) >= 0.0) || side(at) >= 0.0
+            })
+        })
 }
 
-/// The tilt a supported body may show: its contacts settling by the selection's resolutions at
-/// either side of a footprint `span` across, DERIVED from those two tolerances. MEASURED: both
-/// supported fixtures read 0; with the five-legged body's far hull corner removed it leans to
-/// 0.032 rad by step 200, past this bound for its 4 m footprint.
-fn supported_tilt(span: f32) -> f32 {
-    2.0 * (BEARING_GAP + HULL_TOLERANCE) / span
+/// Steps `app` and checks, on every step `body` is awake, that its centre of mass (`extra` from
+/// its origin) lies over the outline of the contact points the solver keeps for it. Statics owns
+/// the criterion: a body whose centre of mass is over its support outline does not tip, so a
+/// reduction that left it outside would tip a supported body. Sleeping pairs leave the active
+/// set, so asleep steps are skipped.
+fn stays_over_its_outline(app: &mut App, body: Entity, extra: Vec3, count: usize) {
+    let mut checked = 0;
+    for _ in 0..count {
+        app.update();
+        let points: Vec<Vec3> = body_pairs(app, body)
+            .iter()
+            .flat_map(|pair| &pair.manifolds)
+            .flat_map(|manifold| &manifold.points)
+            .map(|point| point.point)
+            .collect();
+        if points.is_empty() {
+            continue;
+        }
+        let world = app.world();
+        let com =
+            world.get::<Position>(body).unwrap().0 + world.get::<Rotation>(body).unwrap().0 * extra;
+        assert!(
+            over_outline(&points, com),
+            "the centre of mass {com} left the kept outline {points:?}"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 10,
+        "fixture: the body was awake on {checked} steps"
+    );
 }
 
-/// A body on many hull pairs of another body, reduced, stands where it was set and does not tip
-/// even with its centre of mass well off-centre over a corner of its footprint, and its flat
-/// interface reduces to its four corners. A selection keeping interior or one-sided points tips
-/// it; a missing reduction fails the count. The unreduced twin shows the fixture has many
-/// manifolds to reduce.
+/// A body on many hull pairs of another body, reduced, stays supported with its centre of mass
+/// well off-centre over a corner of its footprint, and its flat interface reduces to its four
+/// corners. A selection keeping one-sided points leaves the centre of mass outside; a missing
+/// reduction fails the count. The unreduced twin shows the fixture has many manifolds to reduce.
 #[test]
 fn a_body_on_reduced_contacts_stays_supported_with_a_bounded_count() {
+    let extra = Vec3::new(1.2, 0.0, 1.2);
     let mut reduced = app();
     floor_of(&mut reduced, 14);
-    let (_, body) = stack(&mut reduced, true, Vec3::new(1.2, 0.0, 1.2), false);
-    steps(&mut reduced, 20);
+    let (_, body) = stack(&mut reduced, true, extra, false);
+    stays_over_its_outline(&mut reduced, body, extra, 20);
     let (pairs, manifolds, points) = contact_counts(&body_pairs(&reduced, body));
     assert!(pairs > 4, "fixture: many hull pairs touch, got {pairs}");
     assert_eq!(points, 4, "{points} points over {pairs} pairs");
@@ -545,38 +690,26 @@ fn a_body_on_reduced_contacts_stays_supported_with_a_bounded_count() {
 
     let mut full = app();
     floor_of(&mut full, 14);
-    let (_, unmarked) = stack(&mut full, false, Vec3::new(1.2, 0.0, 1.2), false);
+    let (_, unmarked) = stack(&mut full, false, extra, false);
     steps(&mut full, 20);
     let (_, full_manifolds, full_points) = contact_counts(&body_pairs(&full, unmarked));
     assert!(
         full_manifolds > manifolds && full_points > points,
         "fixture: the unreduced twin carries more ({full_manifolds} manifolds, {full_points} points against {manifolds}, {points})"
     );
-    steps(&mut reduced, 120);
-
-    let footprint = 4.0;
-    assert!(
-        tilt(&reduced, body) < supported_tilt(footprint),
-        "the body tipped: {}",
-        tilt(&reduced, body)
-    );
 }
 
 /// A compound footprint need not be four-sided. Five thin legs stand on a marked dynamic base,
 /// four at the cardinal points and one out at (1.5, 1.5), with the centre of mass at (1.4, 1.4):
 /// only the fifth leg's corner of the footprint holds it. A selection that keeps the four cardinal
-/// extremes loses that corner and the body leans into it.
+/// extremes leaves the centre of mass outside the kept outline.
 #[test]
 fn a_body_held_by_its_fifth_corner_stays_up() {
     let mut world = app();
     floor_of(&mut world, 14);
     wide_base(&mut world);
-    let body = body_at(
-        &mut world,
-        Vec3::new(0.3, 1.5, 0.3),
-        true,
-        Vec3::new(1.4, 0.0, 1.4),
-    );
+    let extra = Vec3::new(1.4, 0.0, 1.4);
+    let body = body_at(&mut world, Vec3::new(0.3, 1.5, 0.3), true, extra);
     for (x, z) in [(-2.0, 0.0), (2.0, 0.0), (0.0, 2.0), (0.0, -2.0), (1.5, 1.5)] {
         world.world_mut().spawn((
             ChildOf(body),
@@ -584,13 +717,7 @@ fn a_body_held_by_its_fifth_corner_stays_up() {
             Transform::from_xyz(x, 0.0, z),
         ));
     }
-    steps(&mut world, 200);
-    let footprint = 4.0;
-    assert!(
-        tilt(&world, body) < supported_tilt(footprint),
-        "the body tipped off its fifth corner: {}",
-        tilt(&world, body)
-    );
+    stays_over_its_outline(&mut world, body, extra, 40);
 }
 
 /// Two bodies resting reduced touch through pairs left with no manifold; those pairs stay in the
