@@ -2449,6 +2449,42 @@ fn a_burst_touching_a_face_crushes_it_from_its_filler_center() {
     app.world_mut().despawn(shell);
 }
 
+/// A LAUNCH SUMS THE MASS BAKED AT LOAD AS THE CHUNKS' OWN HULLS WOULD GIVE IT. A collapse must
+/// not build a hull per chunk on the tick it falls, so [`launch`] reads each chunk's properties
+/// from load; a departed group's body relies on them being the hulls'. A mutant shifting them by
+/// the wrong offset moves the centre of mass and every lever arm taken about it.
+#[test]
+fn a_launch_from_baked_chunk_mass_matches_the_chunks_hulls() {
+    use crate::debris::launch::launch_colliders;
+    let kind = shipped_house();
+    let live = Live::new(&kind);
+    let chunks = &kind.structure.chunks;
+    let group: Vec<usize> = (0..chunks.len())
+        .filter(|&c| !chunks[c].buried)
+        .take(64)
+        .collect();
+    let baked = launch(&kind, &live.structure, &group, &[]);
+    let hulls = group
+        .iter()
+        .map(|&c| (c, chunk_collider(&kind, c, baked.centroid)))
+        .collect();
+    let direct = launch_colliders(baked.centroid, hulls, |c| chunks[c].material.density, &[]);
+    let (a, b) = (baked.mass_properties, direct.mass_properties);
+    // DERIVED allowance: f32 rounding of a 64-term sum of hull properties.
+    assert!((a.mass - b.mass).abs() <= 1e-3 * b.mass);
+    assert!(a.center_of_mass.distance(b.center_of_mass) <= 1e-3);
+    let (ia, ib) = (
+        a.angular_inertia_tensor().to_mat3(),
+        b.angular_inertia_tensor().to_mat3(),
+    );
+    assert!(
+        (ia - ib)
+            .to_cols_array()
+            .iter()
+            .all(|d| d.abs() <= 1e-3 * ib.x_axis.x.abs())
+    );
+}
+
 /// THE GAME'S CASING LOADS CARRY ONE PHYSICAL ENERGY BUDGET AND ITS EJECTION MOMENTUM.
 /// The environment adapter must not amplify physical transport with the HP field's
 /// potency, nor lose a contact ray's direction. Both the wall's volume pool and its launch rely

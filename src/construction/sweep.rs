@@ -4,6 +4,7 @@
 //! An `Unresolved` target keeps solver contact and can veto every cut for its source and owner
 //! in that tick.
 
+use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::MassProperties3d;
 use avian3d::prelude::*;
 use bevy::math::{DMat3, DVec3};
 use bevy::prelude::*;
@@ -37,6 +38,8 @@ pub(crate) struct Geometry {
     /// Each chunk's contact hull about its centroid ([`super::breakage::contact_collider`]): what a
     /// freed chunk meets other bodies with, its collider's and its sweep source's shape.
     contact_hulls: Vec<Hull>,
+    /// Per chunk: its occupied hull about its centroid and that hull's mass properties.
+    occupied: Vec<(Collider, MassProperties3d)>,
     centres: Vec<Vec3>,
     parts: Vec<Part>,
     incident: Vec<Vec<usize>>,
@@ -162,6 +165,7 @@ impl Geometry {
         use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
         let mut hulls = Vec::with_capacity(blocks.len());
         let mut contact_hulls = Vec::with_capacity(blocks.len());
+        let mut occupied = Vec::with_capacity(blocks.len());
         let mut centres = Vec::with_capacity(blocks.len());
         let mut parts = Vec::with_capacity(blocks.len());
         let mut incident = vec![Vec::new(); blocks.len()];
@@ -187,7 +191,9 @@ impl Geometry {
                     .expect("admitted chunk hulls stay solid about any origin")
             };
             // Occupied physics mass uses the same centroid-centred hull as the departure path.
-            let props = about(chunk.centroid).mass_properties(chunk.material.density);
+            let centred = about(chunk.centroid);
+            let props = centred.mass_properties(chunk.material.density);
+            occupied.push((centred, props));
             parts.push(Part {
                 mass: f64::from(props.mass),
                 centre: (chunk.centroid + props.center_of_mass).as_dvec3(),
@@ -221,6 +227,7 @@ impl Geometry {
         Ok(Self {
             hulls,
             contact_hulls,
+            occupied,
             centres,
             parts,
             incident,
@@ -248,6 +255,12 @@ impl Geometry {
 
     pub(crate) fn contact_hull(&self, chunk: usize) -> &Collider {
         &self.contact_hulls[chunk].hull
+    }
+
+    /// Chunk `chunk`'s occupied hull about its centroid, with that hull's mass properties at its
+    /// material's density, in the centroid frame.
+    pub(crate) fn occupied(&self, chunk: usize) -> &(Collider, MassProperties3d) {
+        &self.occupied[chunk]
     }
 
     /// A free group's sweep source about `origin`: its chunks' contact hulls as their colliders

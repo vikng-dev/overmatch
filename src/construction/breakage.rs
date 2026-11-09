@@ -98,7 +98,7 @@ use crate::ballistics::{
     SpallMarks,
 };
 use crate::contact_transfer::{ContactGroup, ContactTransfer, ContactTransfers};
-use crate::debris::launch::{Launch, launch_colliders};
+use crate::debris::launch::{Launch, launch_mass};
 use crate::{ClientReplica, Layer, ShotClock};
 
 /// Resolution: face-stop tolerance, m, for repeated f32 intersection rounding.
@@ -1714,8 +1714,7 @@ fn evaluate_owner(
             (construction, construction_pose),
             groups,
             |light| {
-                // One task per decor group: its launch builds a convex hull per chunk, as a kept
-                // group's departure does.
+                // One task per decor group: each launch reads only its own chunks and loads.
                 pool.scope(|scope| {
                     for group in light {
                         let (kind, structure, loads) = (&kind, &live.structure, &loads[&group[0]]);
@@ -2519,6 +2518,7 @@ fn solid_collider(points: Vec<Vec3>, density: f32) -> bool {
 /// frame): its occupied volume, so its mass and inertia at its material's density are the
 /// construction's. Admission certified the hull as a solid convex collider at authored dimensions
 /// ([`Layout::checked_structure`]).
+#[cfg(any(test, feature = "dev_ui"))]
 pub(crate) fn chunk_collider(kind: &ConstructionKind, c: usize, origin: Vec3) -> Collider {
     Collider::convex_hull(
         kind.layout.blocks[c]
@@ -2665,7 +2665,7 @@ type OccupiedCollider = (
 type ContactCollider = (Collider, avian3d::prelude::Friction, ChunkCollider);
 
 fn occupied_collider(kind: &ConstructionKind, c: usize, rotation: Quat) -> OccupiedCollider {
-    let hull = chunk_collider(kind, c, kind.structure.chunks[c].centroid);
+    let hull = kind.sweep.occupied(c).0.clone();
     (
         super::sweep::posed(hull, rotation),
         kind.chunk_friction(c),
@@ -2852,6 +2852,7 @@ pub(crate) fn launch(
     group: &[usize],
     loads: &[Load],
 ) -> Launch {
+    use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::MassProperties3d;
     let chunks = &structure.chunks;
     let mass: f32 = group.iter().map(|&i| chunks[i].mass).sum();
     let centroid = group
@@ -2859,11 +2860,15 @@ pub(crate) fn launch(
         .map(|&i| chunks[i].centroid * chunks[i].mass)
         .sum::<Vec3>()
         / mass;
-    let colliders: Vec<(usize, Collider)> = group
+    // Each chunk's mass was built with its hull at load: a collapse builds no hull.
+    let total = group
         .iter()
-        .map(|&c| (c, chunk_collider(kind, c, centroid)))
-        .collect();
-    launch_colliders(centroid, colliders, |c| chunks[c].material.density, loads)
+        .map(|&c| {
+            let (_, props) = kind.sweep.occupied(c);
+            props.transformed_by(Isometry3d::from_translation(chunks[c].centroid - centroid))
+        })
+        .fold(MassProperties3d::default(), |sum, part| sum + part);
+    launch_mass(centroid, total, loads)
 }
 
 /// Spawn one loose group's body (module doc): at its chunks' centre of mass, turned as its

@@ -37,6 +37,7 @@ pub(crate) fn occupied_mass(hull: &Collider, density: f32) -> (Mass, AngularIner
 
 /// Occupied geometry and field impulses in a frame about `centroid`. Contacts carry force only;
 /// their momentum is already integrated by physics or the construction sweep.
+#[cfg(any(test, feature = "dev_ui"))]
 pub(crate) fn launch_colliders(
     centroid: Vec3,
     colliders: Vec<(usize, Collider)>,
@@ -47,6 +48,12 @@ pub(crate) fn launch_colliders(
         .iter()
         .map(|(c, shape)| shape.mass_properties(density(*c)))
         .fold(MassProperties3d::default(), |sum, part| sum + part);
+    launch_mass(centroid, total, loads)
+}
+
+/// [`launch_colliders`]'s law on the group's summed occupied mass `total`, in the frame about
+/// `centroid`.
+pub(crate) fn launch_mass(centroid: Vec3, total: MassProperties3d, loads: &[Load]) -> Launch {
     assert!(total.mass > 0.0, "a freed group has occupied mass");
     let inverse_inertia = total.angular_inertia_tensor().inverse();
     let com = centroid + total.center_of_mass;
