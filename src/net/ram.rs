@@ -8,6 +8,7 @@ use bevy::tasks::{ComputeTaskPool, ParallelSlice, ParallelSliceMut};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::contact_census::{ContactCensus, ContactTick};
 use super::harness::{LeverError, env_text};
 use crate::{
     construction::{
@@ -105,6 +106,7 @@ pub(super) struct Ram {
 #[derive(Serialize)]
 pub(super) struct RamWork {
     work: NamedCounts,
+    contacts: ContactTick,
 }
 
 pub(super) fn install(app: &mut App, stats_on: bool) -> Result<(), LeverError> {
@@ -216,6 +218,11 @@ pub(super) fn prepare(
 }
 
 impl Ram {
+    /// The capture is armed and unfinished.
+    fn recording(&self) -> bool {
+        self.started && self.done.is_none()
+    }
+
     fn new(recipe: Recipe) -> Self {
         Ram {
             recipe,
@@ -263,6 +270,7 @@ pub(super) struct Census<'w, 's> {
     contacts: Res<'w, ContactTransfers>,
     sweep: Res<'w, SweepAccount>,
     avian: AvianDiagnostics<'w, 's>,
+    contact_census: ContactCensus<'w, 's>,
 }
 
 /// Avian's step diagnostics and the contact state they describe.
@@ -378,6 +386,15 @@ impl AvianDiagnostics<'_, '_> {
 }
 
 impl Census<'_, '_> {
+    /// Whether this tick will reach a row: the census is taken only then.
+    pub(super) fn recording(&self) -> bool {
+        self.ram.as_deref().is_some_and(Ram::recording)
+    }
+
+    pub(super) fn contact_tick(&mut self) -> ContactTick {
+        self.contact_census.tick(&self.sweep)
+    }
+
     pub(super) fn contact_points(&self) -> usize {
         self.contacts.groups().map(|points| points.len()).sum()
     }
@@ -409,11 +426,13 @@ impl Census<'_, '_> {
     }
 
     /// Records a tick of an armed, unfinished capture, returning its row's `collector_us`.
-    pub(super) fn record(&mut self, sample: TickSample, work: NamedCounts) -> Option<&mut f64> {
-        let ram = self
-            .ram
-            .as_deref_mut()
-            .filter(|r| r.started && r.done.is_none())?;
+    pub(super) fn record(
+        &mut self,
+        sample: TickSample,
+        work: NamedCounts,
+        contacts: ContactTick,
+    ) -> Option<&mut f64> {
+        let ram = self.ram.as_deref_mut().filter(|ram| ram.recording())?;
         let target = if let Some(target) = ram.target {
             if !self.constructions.contains(target) {
                 ram.done = Some(End::WorldChanged);
@@ -430,7 +449,7 @@ impl Census<'_, '_> {
             ram.target = Some(target);
             target
         };
-        let row = ram.trace.push(sample, RamWork { work });
+        let row = ram.trace.push(sample, RamWork { work, contacts });
         let tick = row.tick;
         if ram.impact_tick.is_none() {
             // First contact is the tank's first touch by either path: the hull sweep, which runs
@@ -658,12 +677,19 @@ mod tests {
         world.init_resource::<avian3d::collider_tree::ColliderTreeDiagnostics>();
         world.init_resource::<avian3d::prelude::ContactGraph>();
         world.init_resource::<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>();
+        world.init_resource::<avian3d::prelude::PhysicsLengthUnit>();
+        world.init_resource::<avian3d::prelude::TimeToSleep>();
+        world.init_resource::<super::super::contact_census::PieceRecords>();
         world
             .run_system_once(|mut census: Census| {
                 let times = NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]);
                 let sample = census.sample(0.0, 0.0, 0.0, [0.0; stages::COUNT], times, 1.0);
                 census
-                    .record(sample, crate::cost::stages::Stages::default().take_counts())
+                    .record(
+                        sample,
+                        crate::cost::stages::Stages::default().take_counts(),
+                        ContactTick::default(),
+                    )
                     .is_some()
             })
             .unwrap()

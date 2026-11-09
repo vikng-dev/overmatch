@@ -5088,6 +5088,58 @@ fn two_sources(
     (app, a, b)
 }
 
+/// The game's environment destruction: the sweep split tells a source whose bounds met no
+/// standing owner from one whose bounds did. Reading `roots` wrong, or crediting a far source a
+/// cast it never made, breaks the count the reader prices a no-owner source with.
+#[test]
+fn a_source_far_from_any_owner_counts_as_meeting_none() {
+    let kind = resolved_column();
+    let (mut app, _) = composed_kind(false, &kind);
+    for _ in 0..3 {
+        app.update();
+    }
+    let chunks = &kind.structure.chunks;
+    let side = chunks[1].centroid.y - chunks[0].centroid.y;
+    let near = chunks[1].centroid - Vec3::X * side;
+    // Fixture: one body at the column's middle chunk and one a kilometre from any construction.
+    let bodies = [near, near + Vec3::X * 1000.0].map(|at| {
+        app.world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Rotation::default(),
+                Position(at),
+                Transform::from_translation(at),
+                Collider::cuboid(0.4, 0.4, 0.4),
+                Mass(1e6),
+                NoAutoMass,
+                AngularInertia::new(Vec3::splat(1e6)),
+                CenterOfMass::default(),
+                LinearVelocity::ZERO,
+                piece_layers(),
+            ))
+            .id()
+    });
+    app.update(); // First preparation creates the collider hierarchy at rest.
+    for body in bodies {
+        app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = Vec3::X * 128.0;
+    }
+    app.update();
+    let account = app.world().resource::<SweepAccount>();
+    assert_eq!(
+        account.sources_no_owner, 1,
+        "only the far body met no owner"
+    );
+    assert!(account.sources > account.sources_no_owner);
+    assert!(
+        account.work.casts > 0,
+        "the near body cast against the column"
+    );
+    assert!(
+        (1..=account.work.casts).contains(&account.max_casts_per_source),
+        "the busiest source's casts are among the tick's casts"
+    );
+}
+
 /// The game's environment destruction: a later source on a construction an earlier source cut
 /// this tick resolves on the topology that cut left, with the gravity field solved on it. Matter
 /// the earlier cut freed is no later plug; matter still standing yields the plug and load a sweep

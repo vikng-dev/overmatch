@@ -133,6 +133,10 @@ pub(crate) struct SweepAccount {
     pub(crate) pushes: Vec<(Entity, Vec3)>,
     /// Sources swept this tick, departures that joined it included.
     pub(crate) sources: usize,
+    /// Of `sources`, those whose swept bounds met no standing owner: they cast nothing.
+    pub(crate) sources_no_owner: usize,
+    /// The shape casts of the source that cast the most, summed over its owners this tick.
+    pub(crate) max_casts_per_source: usize,
     /// Sweep rounds this tick, the first included ([`DEPARTURE_ROUNDS`]).
     pub(crate) rounds: usize,
     /// Departures past the round cap, swept from the next tick; Avian keeps their contacts.
@@ -365,6 +369,7 @@ pub(super) fn run(mut p: Intake) {
     let (mut departures, mut recut) = (Vec::new(), BTreeSet::new());
     for round in 0..=DEPARTURE_ROUNDS {
         p.account.sources += sources.len();
+        p.account.sources_no_owner += sources.iter().filter(|s| s.roots.is_empty()).count();
         p.account.rounds = round + 1;
         let cuts = resolve_round(&mut p, dt, tick, &sources, &recut);
         let mut exchanges = BTreeMap::new();
@@ -439,6 +444,8 @@ fn resolve_round(
             (resolution.swept.chunks.iter()).map(move |&c| (body, resolution.root, c as u16))
         }));
     let mut cuts: BTreeMap<Entity, Vec<(Entity, Cut)>> = BTreeMap::new();
+    // `resolved` is sorted by source body, so one source's owners are adjacent.
+    let (mut last_source, mut source_casts) = (None, 0);
     for Resolution {
         source,
         root,
@@ -447,6 +454,11 @@ fn resolve_round(
         cut,
     } in resolved
     {
+        if last_source != Some(source) {
+            (last_source, source_casts) = (Some(source), 0);
+        }
+        source_casts += swept.work.casts;
+        p.account.max_casts_per_source = p.account.max_casts_per_source.max(source_casts);
         let source = &sources[source];
         p.account.work += swept.work;
         if let Some(load) = swept.load() {

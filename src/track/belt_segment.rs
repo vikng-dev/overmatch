@@ -64,6 +64,16 @@ pub(crate) struct BeltSegment {
     face: f32,
 }
 
+#[cfg(test)]
+impl BeltSegment {
+    /// Fixture: a 0.3 m segment whose outer face is y = 0, facing down.
+    pub(crate) const FIXTURE: Self = Self {
+        length: 0.3,
+        outward: Vec3::NEG_Y,
+        face: 0.0,
+    };
+}
+
 /// The calibrated envelope law a segment carries per metre of belt, the spring channel's own
 /// (`ForceParams::support_stiffness_per_m`, `support_damping_per_m`): published by whichever
 /// driver calibrated it, the game's `TrackGear` or the sandbox's rig.
@@ -305,13 +315,9 @@ mod tests {
     use avian3d::prelude::ContactPoint;
     use bevy::ecs::system::RunSystemOnce;
 
-    /// Fixture law, and a fixture 0.3 m segment whose outer face is y = 0, facing down.
+    /// Fixture law and segment.
     const LAW: (f32, f32) = (2.0e6, 1.0e5);
-    const SEGMENT: BeltSegment = BeltSegment {
-        length: 0.3,
-        outward: Vec3::NEG_Y,
-        face: 0.0,
-    };
+    const SEGMENT: BeltSegment = BeltSegment::FIXTURE;
     const WHOLE: (f32, f32) = (LAW.0 * SEGMENT.length, LAW.1 * SEGMENT.length);
 
     fn shaped(mut manifolds: Vec<ContactManifold>, sign: f32) -> Vec<ContactManifold> {

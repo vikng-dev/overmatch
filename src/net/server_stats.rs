@@ -67,6 +67,9 @@
 //! attempted encrypted send bytes. Its `ticks` use the ram schema plus admission-relative
 //! `elapsed_s`, `events_fired` and work counts; `sends` remain outside the fixed ticks.
 //! Bytes exclude IP/UDP headers and do not attest delivery.
+//!
+//! Ram and `loadtest` tick rows also carry `contacts`, the contact census ([`super::contact_census`]),
+//! and each line carries `pieces`, the piece rest records that changed since the last line.
 
 #[cfg(any(target_os = "linux", test))]
 mod linux;
@@ -86,6 +89,7 @@ use lightyear::prelude::server::ClientOf;
 use lightyear::prelude::{Connected, ConnectionSystems, Link};
 use serde_json::{Value, json};
 
+use super::contact_census::PieceRecords;
 use super::debris_stress::DebrisCensus;
 use super::harness::{LeverError, env_text};
 use super::loadtest::Loadtest;
@@ -144,6 +148,7 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         send_bytes: 0,
     });
     app.init_resource::<PhaseStarts>();
+    app.init_resource::<PieceRecords>();
     phases::install(app);
     crate::cost::stages::install_lifecycle_counts(app);
     app.add_systems(FixedMain, record_tick.after(TickClosed));
@@ -511,11 +516,15 @@ fn record_tick(
             fixed.timestep().as_secs_f64(),
         );
         sample.crumble_detail = stages.take_details();
-        let rows = [
-            census.record(sample, work),
-            load.as_deref_mut()
-                .and_then(|load| load.record(sample, work)),
-        ];
+        let recording = census.recording() || load.as_deref().is_some_and(Loadtest::recording);
+        let rows = match recording.then(|| census.contact_tick()) {
+            Some(contacts) => [
+                census.record(sample, work, contacts),
+                load.as_deref_mut()
+                    .and_then(|load| load.record(sample, work, contacts)),
+            ],
+            None => [None, None],
+        };
         for (window, us) in stats.stages.iter_mut().zip(measured) {
             window.push(us);
         }
@@ -621,6 +630,7 @@ struct Census<'w, 's> {
     pieces: Query<'w, 's, &'static Piece, With<Breakage>>,
     constructions: Query<'w, 's, (&'static MapInstance, &'static Breakage), With<Body>>,
     battle: Query<'w, 's, &'static super::battle::BattleState>,
+    piece_records: ResMut<'w, PieceRecords>,
 }
 
 /// After Last: once the period has passed, print its line and open the next one.
@@ -651,8 +661,10 @@ fn emit_line(
     let husk_strikes = recorder.husk_strikes() - stats.husk_strikes_at_start;
     stats.husk_strikes_at_start = recorder.husk_strikes();
     stats.sequence += 1;
+    let pieces = census.piece_records.drain();
     let workload = load.map(|mut load| {
         let mut value = load.json(&record, &census.constructions, now, elapsed);
+        value["pieces"] = pieces.clone();
         value["sequence"] = json!(stats.sequence);
         value["send_bytes"] = json!(std::mem::take(&mut stats.send_bytes));
         value["awake_bodies"] = json!(
@@ -732,7 +744,11 @@ fn emit_line(
         husk_strikes,
         workload,
         construction,
-        ram: census.ram.as_deref_mut().map(super::ram::Ram::json),
+        ram: census.ram.as_deref_mut().map(|ram| {
+            let mut value = ram.json();
+            value["pieces"] = pieces.clone();
+            value
+        }),
     };
     println!("{}", stats_line(&snapshot));
 }
@@ -906,6 +922,7 @@ mod tests {
     fn construction_census_excludes_live_and_retired_pose_carriers() {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
+        world.init_resource::<PieceRecords>();
         let kind = crate::construction::tests::column_construction();
         // Fixture: one authority group and its live/retired network metadata.
         let piece = Piece {

@@ -18,7 +18,8 @@ and engine scheduling outside PhysicsSchedule. Send bytes are attempted encrypte
 bytes before transport; raw rows also retain send time, RSS and quota throttling.
 Hosted runs require kernel evidence of two vCPU. --rehearsal is explicitly unpriced local
 plumbing on the recorded host; concurrent lanes make its timings unsuitable for pricing.
-A scheduled run saves every tick's stages and work counts; --replication-trace adds replication
+A scheduled run saves every tick's stages, work counts and contact census, and each piece's rest
+record (piece_census); --replication-trace adds replication
 envelope size histograms, from a server started with REPLICATION_TRACE (--print-server-env).
 Full-speed ram: --ram scripts/perf/ram.json (local or hosted).
 --server-env OVERMATCH_KEY=VALUE (repeatable) sets one lever on the server only: on the local
@@ -437,6 +438,8 @@ def ram_rows(text, recipe):
             if ram["recipe"] != recipe:
                 raise RuntimeError("server ram recipe differs from requested recipe")
             ticks, sends = read_tick_samples([ram], 1, ticks, sends)
+            if not isinstance(ram["pieces"]["records"], list):
+                raise ValueError("invalid pieces.records")
             plan, impact = ram["plan"], ram["impact"]
             if plan is not None:
                 for field in ("runup_m", "governed_m_s", "minimum_m_s"):
@@ -460,6 +463,40 @@ def ram_rows(text, recipe):
         except (ValueError, KeyError, TypeError) as error:
             raise RuntimeError(f"server log line {number}: malformed ram stats: {error}") from error
     return rows, ticks, sends, last
+
+
+def rest_summary(records, dt):
+    """One row per island that slept: how long after its last landing, and who calmed last."""
+    cohorts = collections.defaultdict(list)
+    for record in records:
+        if record["sleep"] is not None:
+            cohorts[record["sleep"], record["island"]].append(record)
+    rows = []
+    for (sleep, island), members in sorted(cohorts.items()):
+        landed = [m["first_loaded"] for m in members if m["first_loaded"] is not None]
+        last_landing = max(landed) if landed else None
+        fast = [m["last_fast"] for m in members if m["last_fast"] is not None]
+        last_calm = max(fast) if fast else None
+        rows.append(dict(sleep=sleep, island=island, pieces=len(members),
+                         never_landed=len(members) - len(landed), last_landing=last_landing,
+                         landing_to_sleep_s=None if last_landing is None else (sleep - last_landing) * dt,
+                         last_calm=last_calm, landing_to_calm_s=None if last_landing is None or last_calm is None else (last_calm - last_landing) * dt,
+                         last_to_calm=sum(m["last_fast"] == last_calm for m in members) if fast else 0,
+                         peak_linear_at_sleep=max(m["linear_at_sleep"] for m in members),
+                         peak_angular_at_sleep=max(m["angular_at_sleep"] for m in members)))
+    return rows
+
+
+def piece_census(batches, dt):
+    """Each piece's latest record; a stats line carries only the records changed since the last."""
+    records, thresholds = {}, None
+    for batch in batches:
+        pieces = batch["pieces"]
+        thresholds = pieces["thresholds"] or thresholds
+        for record in pieces["records"]:
+            records[record["piece"]] = record
+    ordered = sorted(records.values(), key=lambda r: (r["born"], r["piece"]))
+    return dict(thresholds=thresholds, records=ordered, islands_at_sleep=rest_summary(ordered, dt))
 
 
 # Match ticks add these to the shared ram schema; ram ticks carry none of them.
@@ -512,14 +549,14 @@ def match_tick_summary(rows, recipe):
     """Per-tick wave attribution; the ram and match share schema checks and additive accounting."""
     batches = [r["loadtest"] for r in rows]
     # A server built before the match tick trace omits both fields.
-    if any("ticks" not in batch or "sends" not in batch for batch in batches):
+    if any("ticks" not in batch or "sends" not in batch or "pieces" not in batch for batch in batches):
         raise RuntimeError("match tick trace missing: rebuild the instrumented server")
     ticks, sends = read_tick_samples(batches, recipe["tanks"])
     if not ticks:
         raise RuntimeError("match tick trace empty: no tick ran after admission")
     if any(t["dt_s"] != ticks[0]["dt_s"] for t in ticks):
         raise RuntimeError("match fixed timestep changed during capture")
-    return dict(ticks=ticks, sends=sends,
+    return dict(ticks=ticks, sends=sends, piece_census=piece_census(batches, ticks[0]["dt_s"]),
                 worst_tick_attribution=tick_attribution(max(ticks, key=lambda t: t["tick_us"])),
                 over_budget_ticks=[tick_attribution(t) for t in ticks if t["tick_us"] > t["dt_s"]*1e6])
 
@@ -564,11 +601,12 @@ def ram_summary(text, recipe):
                 collector_max_us=max(t["collector_us"] for t in window),
                 tick_mean_us=total/len(window), stage_us=parts,
                 share_pct={k: 100*v/total for k,v in parts.items()},
-                send_us=send_us, send_pct_of_tick_time=100*send_us/total, ticks=ticks, rows=rows)
+                send_us=send_us, send_pct_of_tick_time=100*send_us/total, ticks=ticks, rows=rows,
+                piece_census=piece_census([r["ram"] for r in rows], dt))
 
 
 def report_ram(result):
-    compact = {k: v for k, v in result.items() if k not in ("ticks", "rows")}
+    compact = {k: v for k, v in result.items() if k not in ("ticks", "rows", "piece_census")}
     print("MEASURED ram (shared physics; send outside fixed ticks): " + json.dumps(compact), flush=True)
 
 
