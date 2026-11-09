@@ -181,7 +181,7 @@ impl BattleState {
 
 /// The ordering handle of [`hold_commands`]: after every command writer, before every consumer.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct HoldCommands;
+pub(crate) struct HoldCommands;
 
 /// Both endpoints: the hold runs on the fixed tick after the input bridge.
 pub(super) fn install_hold(app: &mut App) {

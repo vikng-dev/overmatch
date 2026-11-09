@@ -429,7 +429,7 @@ mod tests {
         let counts = || NamedCounts::new(&WORK_NAMES, [0; WORK_COUNT]);
         let contacts = crate::net::contact_census::ContactTick::default();
         assert!(
-            load.record(TickSample::idle(), counts(), contacts)
+            load.record(TickSample::idle(), counts(), contacts.clone())
                 .is_none()
         );
         load.trace.send(1.0);

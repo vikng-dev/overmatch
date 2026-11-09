@@ -141,7 +141,10 @@ pub(crate) fn install(app: &mut App) {
                 .after(FixedWork::BotBrain)
                 .before(crate::command::ParseCommands)
                 .before(SimPhase::DrivingForces),
-            boundary(Phase::Driving).before(SimPhase::DrivingForces),
+            boundary(Phase::Driving)
+                .after(crate::command::ParseCommands)
+                .after(crate::net::battle::HoldCommands)
+                .before(SimPhase::DrivingForces),
             boundary(Phase::FixedGameplay)
                 .after(SimPhase::DrivingForces)
                 .before(SimPhase::WeaponFire),
@@ -267,6 +270,17 @@ mod tests {
             FixedUpdate,
             FixedWork::Servos.after(crate::state::GameplaySet),
         );
+        app.configure_sets(
+            FixedUpdate,
+            (
+                crate::command::ParseCommands
+                    .after(FixedWork::BotBrain)
+                    .before(crate::state::GameplaySet),
+                crate::net::battle::HoldCommands
+                    .after(crate::command::ParseCommands)
+                    .before(crate::state::GameplaySet),
+            ),
+        );
         arm_tick_clock(&mut app);
         if instrumented {
             install(&mut app);
@@ -350,6 +364,8 @@ mod tests {
             FixedUpdate,
             (
                 commands_in(Phase::BotBrain).in_set(FixedWork::BotBrain),
+                commands_in(Phase::FixedCommands).in_set(crate::command::ParseCommands),
+                commands_in(Phase::FixedCommands).in_set(crate::net::battle::HoldCommands),
                 commands_in(Phase::Driving).in_set(SimPhase::DrivingForces),
                 commands_in(Phase::Servos).in_set(FixedWork::Servos),
             ),
@@ -365,12 +381,42 @@ mod tests {
         ));
         app.world_mut().run_schedule(FixedMain);
         let w = &app.world().resource::<Witness>().0;
-        // Fixture: ten producers, each with one command, component hook and observer.
-        assert_eq!(w.len(), 10 * 3);
+        // Fixture: twelve producers, each with one command, component hook and observer.
+        assert_eq!(w.len(), 12 * 3);
         assert!(
             w.iter().all(|(expected, actual)| expected == actual),
             "{w:?}"
         );
+    }
+
+    /// Phase attribution relies on the owning installers' actual set membership. A synthetic
+    /// producer cannot catch a removed BotBrain/Servos registration in the shipped composition.
+    #[test]
+    fn owning_installers_register_the_measured_producers() {
+        let mut app = App::new();
+        crate::net::server::install_fixed_input(&mut app);
+        crate::tank::sim_plugin(&mut app);
+        let schedules = app.world().resource::<bevy::ecs::schedule::Schedules>();
+        let graph = schedules.get(FixedUpdate).unwrap().graph();
+        for (name, set) in [
+            ("::drive_bot", FixedWork::BotBrain),
+            ("::drive_servos", FixedWork::Servos),
+        ] {
+            let producer = graph
+                .systems
+                .iter()
+                .find(|(_, s, _)| s.name().ends_with(name))
+                .expect("the owning installer registers the producer")
+                .0;
+            let set = graph
+                .system_sets
+                .get_key(set.intern())
+                .expect("the producer names its measured phase");
+            assert!(
+                graph.hierarchy().contains_edge(set.into(), producer.into()),
+                "{name} is outside its measured phase"
+            );
+        }
     }
 
     /// Local instrument observation, not a game-performance threshold. This isolates the added

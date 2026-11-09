@@ -137,6 +137,7 @@ pub(crate) struct SweepAccount {
     pub(crate) sources_no_owner: usize,
     /// The shape casts of the source that cast the most, summed over its owners this tick.
     pub(crate) max_casts_per_source: usize,
+    pub(crate) casts_per_source: Vec<usize>,
     /// Sweep rounds this tick, the first included ([`DEPARTURE_ROUNDS`]).
     pub(crate) rounds: usize,
     /// Departures past the round cap, swept from the next tick; Avian keeps their contacts.
@@ -156,6 +157,28 @@ pub(crate) struct SweepAccount {
     pub(crate) contacts: BTreeMap<(Entity, u16), f32>,
     pub(crate) samples: Vec<(Entity, u16, f32, (f32, f32, f32, f32))>,
     pub(crate) source_changes: Vec<(Entity, Vec3, Vec3, Vec3)>,
+}
+
+impl SweepAccount {
+    fn record_sources(
+        &mut self,
+        no_owner: impl Iterator<Item = bool>,
+        casts: impl Iterator<Item = (usize, usize)>,
+    ) {
+        let mut counts: Vec<_> = no_owner
+            .map(|none| {
+                self.sources_no_owner += usize::from(none);
+                0
+            })
+            .collect();
+        for (source, casts) in casts {
+            counts[source] += casts;
+        }
+        self.max_casts_per_source = self
+            .max_casts_per_source
+            .max(counts.iter().copied().max().unwrap_or(0));
+        self.casts_per_source.extend(counts);
+    }
 }
 
 struct SweepSource {
@@ -346,6 +369,7 @@ pub(super) struct Intake<'w, 's> {
     children: Query<'w, 's, &'static Children>,
     chunk_entities: ChunkChildren<'w, 's>,
     stages: Option<Res<'w, Stages>>,
+    capture: Option<Res<'w, crate::cost::stages::Capture>>,
 }
 
 /// Resolution: how many rounds past the first one tick's departures may join its sweep as
@@ -369,7 +393,6 @@ pub(super) fn run(mut p: Intake) {
     let (mut departures, mut recut) = (Vec::new(), BTreeSet::new());
     for round in 0..=DEPARTURE_ROUNDS {
         p.account.sources += sources.len();
-        p.account.sources_no_owner += sources.iter().filter(|s| s.roots.is_empty()).count();
         p.account.rounds = round + 1;
         let cuts = resolve_round(&mut p, dt, tick, &sources, &recut);
         let mut exchanges = BTreeMap::new();
@@ -444,8 +467,13 @@ fn resolve_round(
             (resolution.swept.chunks.iter()).map(move |&c| (body, resolution.root, c as u16))
         }));
     let mut cuts: BTreeMap<Entity, Vec<(Entity, Cut)>> = BTreeMap::new();
-    // `resolved` is sorted by source body, so one source's owners are adjacent.
-    let (mut last_source, mut source_casts) = (None, 0);
+    if p.capture.as_deref().is_some_and(|capture| capture.active) {
+        let _leaf = Stages::start(p.stages.as_deref(), Stage::SweepCensus);
+        p.account.record_sources(
+            sources.iter().map(|source| source.roots.is_empty()),
+            resolved.iter().map(|r| (r.source, r.swept.work.casts)),
+        );
+    }
     for Resolution {
         source,
         root,
@@ -454,11 +482,6 @@ fn resolve_round(
         cut,
     } in resolved
     {
-        if last_source != Some(source) {
-            (last_source, source_casts) = (Some(source), 0);
-        }
-        source_casts += swept.work.casts;
-        p.account.max_casts_per_source = p.account.max_casts_per_source.max(source_casts);
         let source = &sources[source];
         p.account.work += swept.work;
         if let Some(load) = swept.load() {
@@ -1717,5 +1740,30 @@ mod tests {
             "an unsupported body drives its weight: {}",
             drive(free)
         );
+    }
+    /// The game's environment destruction census preserves unequal source workloads. A source
+    /// with two owners contributes their sum once; equal totals/maxima cannot hide redistribution.
+    #[test]
+    fn source_distribution_sums_owners_without_losing_workloads() {
+        for (owners, expected) in [
+            (
+                vec![(0, 1), (0, 3), (1, 4), (2, 1), (3, 1)],
+                vec![4, 4, 1, 1, 0],
+            ),
+            (
+                vec![(0, 1), (0, 3), (1, 3), (2, 2), (3, 1)],
+                vec![4, 3, 2, 1, 0],
+            ),
+        ] {
+            let mut account = SweepAccount::default();
+            account.record_sources(
+                [false, false, false, false, true].into_iter(),
+                owners.into_iter(),
+            );
+            assert_eq!(account.sources_no_owner, 1);
+            assert_eq!(account.casts_per_source, expected);
+            assert_eq!(account.casts_per_source.iter().sum::<usize>(), 10);
+            assert_eq!(account.max_casts_per_source, 4);
+        }
     }
 }

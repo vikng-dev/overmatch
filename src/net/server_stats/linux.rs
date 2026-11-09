@@ -3,7 +3,10 @@
 //! Kernel field order and units: https://www.kernel.org/doc/html/latest/filesystems/proc.html
 //! THP mode: https://www.kernel.org/doc/html/latest/admin-guide/mm/transhuge.html
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -132,6 +135,7 @@ pub(super) struct HostProbe {
     faults: Option<(u64, u64)>,
     threads: BTreeMap<u32, Task>,
     ticks_per_second: Reading<u64>,
+    tids: Option<Vec<u32>>,
 }
 
 impl HostProbe {
@@ -150,6 +154,7 @@ impl HostProbe {
             faults: None,
             threads: BTreeMap::new(),
             ticks_per_second,
+            tids: None,
         };
         // Log admission failures too: the first periodic sample must never disguise them as zero.
         println!("server_host_baseline {}", probe.sample(Duration::ZERO));
@@ -157,6 +162,7 @@ impl HostProbe {
     }
 
     pub(super) fn sample(&mut self, elapsed: Duration) -> Value {
+        let started = Instant::now();
         let steal = read("/proc/stat").and_then(|text| steal(&text));
         let steal_delta = steal
             .as_ref()
@@ -176,33 +182,43 @@ impl HostProbe {
             .ok()
             .map(|task| (task.minor_faults, task.major_faults));
         let threads = self.sample_threads(elapsed);
-        json!({ "clock_ticks_per_second": self.ticks_per_second, "steal_ticks": steal_delta, "page_faults": fault_delta, "thread_cpu": threads })
+        json!({ "clock_ticks_per_second": self.ticks_per_second, "steal_ticks": steal_delta, "page_faults": fault_delta, "thread_cpu": threads, "host_probe_us": started.elapsed().as_secs_f64() * 1e6 })
     }
 
     fn sample_threads(&mut self, elapsed: Duration) -> Reading<Vec<Value>> {
         let previous = std::mem::take(&mut self.threads);
         let path = "/proc/self/task";
-        let entries = std::fs::read_dir(path).map_err(|error| Unavailable::Io {
-            path: path.to_owned(),
-            cause: error.to_string(),
-        })?;
+        // ComputeTaskPool has a fixed worker cohort. Retry the census until it is complete;
+        // later periods open only those task files, and an incomplete census invalidates the cache.
+        let ids = if let Some(ids) = self.tids.take() {
+            ids
+        } else {
+            std::fs::read_dir(path)
+                .map_err(|error| Unavailable::Io {
+                    path: path.to_owned(),
+                    cause: error.to_string(),
+                })?
+                .map(|entry| {
+                    let entry = entry.map_err(|error| Unavailable::Io {
+                        path: path.to_owned(),
+                        cause: error.to_string(),
+                    })?;
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .parse::<u32>()
+                        .map_err(|_| Unavailable::Invalid {
+                            path: entry.path().display().to_string(),
+                            field: "tid".to_owned(),
+                            value: entry.file_name().to_string_lossy().into_owned(),
+                        })
+                })
+                .collect::<Reading<Vec<_>>>()?
+        };
         let mut next = BTreeMap::new();
         let mut rows = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(|error| Unavailable::Io {
-                path: path.to_owned(),
-                cause: error.to_string(),
-            })?;
-            let id = entry
-                .file_name()
-                .to_string_lossy()
-                .parse::<u32>()
-                .map_err(|_| Unavailable::Invalid {
-                    path: entry.path().display().to_string(),
-                    field: "tid".to_owned(),
-                    value: entry.file_name().to_string_lossy().into_owned(),
-                })?;
-            let stat_path = entry.path().join("stat").display().to_string();
+        for id in ids {
+            let stat_path = format!("{path}/{id}/stat");
             match read_task(&stat_path) {
                 Ok(task) if id == std::process::id() || task.name.starts_with("Compute Task") => {
                     // Bevy names compute workers "Compute Task Pool (N)"; Linux comm can truncate
@@ -245,6 +261,9 @@ impl HostProbe {
             && (expected_compute != found_compute || !main_found)
         {
             rows.push(json!({ "census": Err::<(), _>(Unavailable::ThreadCensus { expected_compute, found_compute, main_found }) }));
+        }
+        if main_found && expected_compute == Some(found_compute) {
+            self.tids = Some(next.keys().copied().collect());
         }
         self.threads = next;
         Ok(rows)
@@ -331,6 +350,13 @@ mod tests {
         let sample = probe.sample(Duration::from_secs(1));
         assert!(sample.get("page_faults").is_some());
         assert!(sample.get("thread_cpu").is_some());
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(sample["steal_ticks"]["Err"]["absence"], "io");
+            assert_eq!(sample["page_faults"]["Err"]["absence"], "io");
+            assert_eq!(sample["thread_cpu"]["Err"]["absence"], "io");
+        }
+        assert!(sample["host_probe_us"].as_f64().unwrap().is_finite());
     }
 
     /// A reset or missing baseline must remain distinguishable from an idle CPU.

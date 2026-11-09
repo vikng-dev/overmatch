@@ -16,7 +16,8 @@
 //!   PostUpdate; excludes runner pacing, startup and the stats-line collector. `frames` counts
 //!   these samples. `post_update_us` is nested in this span; both use the tick summary shape;
 //! - `linux_host`: Linux only, host steal ticks, process minor/major faults and CPU by main/compute
-//!   thread since the previous line. Every reading is an `Ok` value or an `Err` with a named
+//!   thread since the previous line. `host_probe_us` inside it times the complete periodic probe,
+//!   outside `frame_us`. Every reading is an `Ok` value or an `Err` with a named
 //!   typed absence. The host's THP mode and CPU topology log once when this recorder starts;
 //! - `overruns`: ticks longer than the fixed timestep, `budget_us`;
 //! - `clients` (connected links), `tanks`, `projectiles`, `entities`, sampled at the line;
@@ -74,7 +75,7 @@
 //! Ram and `loadtest` tick rows also carry `contacts`, the contact census ([`super::contact_census`]),
 //! and each line carries `pieces`, the piece rest records that changed since the last line.
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 mod linux;
 
 use bevy::app::MainScheduleOrder;
@@ -156,7 +157,7 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         send_by_client: BTreeMap::new(),
     });
     app.init_resource::<PhaseStarts>();
-    app.init_resource::<PieceRecords>();
+    super::contact_census::install(app);
     phases::install(app);
     crate::cost::stages::install_lifecycle_counts(app);
     app.add_systems(FixedMain, record_tick.after(TickClosed));
@@ -452,7 +453,7 @@ fn stats_line(snapshot: &Snapshot) -> String {
     };
     let tick_us = percentiles(ticks);
     let mut body = json!({
-        "period_s": tenth(period_s),
+        "period_s": period_s,
         "ticks": count,
         "tick_hz": tenth(count as f64 / period_s),
         "tick_us": tick_us,
@@ -537,7 +538,7 @@ fn record_tick(
         let recording = census.recording() || load.as_deref().is_some_and(Loadtest::recording);
         let rows = match recording.then(|| census.contact_tick()) {
             Some(contacts) => [
-                census.record(sample, work, contacts),
+                census.record(sample, work, contacts.clone()),
                 load.as_deref_mut()
                     .and_then(|load| load.record(sample, work, contacts)),
             ],
@@ -1126,7 +1127,7 @@ mod tests {
     /// an idle core.
     #[test]
     fn the_line_is_a_prefix_then_one_json_object() {
-        let full = Snapshot {
+        let mut full = Snapshot {
             elapsed: Duration::from_secs(10),
             budget_us: 15_625.0,
             ticks: Some(TickSummary {
@@ -1189,7 +1190,6 @@ mod tests {
             .expect("the grep anchor leads the line");
         assert!(!json.contains('\n'), "one line");
         let value: Value = serde_json::from_str(json).expect("the rest is one JSON object");
-        #[allow(unused_mut, reason = "Linux adds its platform-only host fields")]
         let mut expected = json!({
             "period_s": 10.0,
             "ticks": 640,
@@ -1209,15 +1209,6 @@ mod tests {
             "frame_us": null,
             "post_update_us": null,
 
-            "publish_us": null,
-            "contacts_us": null,
-            "intake_us": null,
-            "structure_us": null,
-            "refit_us": null,
-            "sweep_us": null,
-            "crumble_us": null,
-            "child_collider_writeback_us": null,
-            "belt_contacts_us": null,
             "phases_us": phases::NAMES.into_iter().map(|name| (name.to_owned(), Value::Null)).collect::<serde_json::Map<_, _>>(),
             "physics_us": {"p50": 301.0, "p95": 455.0, "p99": 600.0, "total": 200000.0, "max": 900.0},
             "send_census_us": null,
@@ -1231,11 +1222,22 @@ mod tests {
             "debris": {"live": 35, "sleeping": 140},
             "construction": {"cracked_joints": 0, "separated_joints": 0, "departed_chunks": 0},
         });
+        for name in NAMES {
+            expected[name] = Value::Null;
+        }
         #[cfg(target_os = "linux")]
         {
             expected["linux_host"] = json!({});
         }
         assert_eq!(value, expected);
+
+        full.elapsed = Duration::from_micros(10_012_345);
+        let precise: Value =
+            serde_json::from_str(stats_line(&full).strip_prefix("server_stats ").unwrap()).unwrap();
+        assert_eq!(
+            precise["period_s"], 10.012345,
+            "capacity checks need the exact wall span"
+        );
 
         let empty = Snapshot {
             ticks: None,

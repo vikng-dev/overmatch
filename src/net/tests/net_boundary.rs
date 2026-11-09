@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 /// coupling. Everything else under `src/` is scanned and must stay clean. `src/net/` is matched as a
 /// prefix: it *is* the layer.
 const NET_AWARE_FILES: &[&str] = &[
+    // Fixed-phase instruments observe the server command producer and its owning installer.
+    "src/cost/phases.rs",
     // The netcode layer itself.
     "src/net/",
     // The library facade declares the private `net` module and mounts `NetClientPlugin`.

@@ -729,8 +729,11 @@ fn crumble_landings(
                 prepared.scope(|local| local.push((entity, pending, sheds, record.entries)));
             },
         );
-    let _commit_bracket = Stages::detail(stages.as_deref(), Detail::CrumbleSplit);
     let mut prepared: Vec<_> = prepared.drain().collect();
+    if prepared.is_empty() {
+        return;
+    }
+    let _commit_bracket = Stages::detail(stages.as_deref(), Detail::CrumbleSplit);
     prepared.sort_unstable_by_key(|(entity, ..)| *entity);
     for (entity, pending, sheds, entries) in prepared {
         record.entries.extend(entries);

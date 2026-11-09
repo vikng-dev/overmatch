@@ -1985,7 +1985,6 @@ fn factor_counts_include_failure_and_distinguish_reused_ordering() {
     assert_eq!(counts["factor_new_calls"], 2);
     assert_eq!(counts["factor_failures"], 1);
     assert_eq!(counts["factor_ordering_builds"], 3);
-    assert_eq!(counts["factor_assemblies"], 4);
     // DERIVED: first 6-row column's factor-operation count, 5 trailing row updates (4 operations),
     // then its 5-entry back-substitution and division at the failed second pivot.
     assert_eq!(counts["factor_failed_ops"], 6 + 5 * 4 + 5 * 2 + 1);

@@ -145,17 +145,7 @@ pub fn run() {
             open_gameplay_gate,
         ),
     );
-    app.add_systems(
-        FixedUpdate,
-        (
-            // A bot authors its command as a device does, before the parse and the Battle's hold.
-            drive_bot
-                .in_set(crate::cost::phases::FixedWork::BotBrain)
-                .after(super::protocol::publish_shot_clock)
-                .before(crate::command::ParseCommands),
-            player_respawn_system(),
-        ),
-    );
+    install_fixed_input(&mut app);
 
     let hosting = hosted
         .as_ref()
@@ -963,6 +953,21 @@ fn spawn_player_tank(
     root
 }
 
+/// Server command producers, ordered before parsing and the Battle's hold.
+pub(crate) fn install_fixed_input(app: &mut App) {
+    app.add_systems(
+        FixedUpdate,
+        (
+            // A bot authors its command as a device does, before the parse and the Battle's hold.
+            drive_bot
+                .in_set(crate::cost::phases::FixedWork::BotBrain)
+                .after(super::protocol::publish_shot_clock)
+                .before(crate::command::ParseCommands),
+            player_respawn_system(),
+        ),
+    );
+}
+
 /// An ownerless tank whose device commands come from [`drive_bot`]. Its home and primary-fire
 /// cadence survive respawn; both are derived before the initial complete tank spawn.
 #[derive(Component, Clone, Copy)]
@@ -1532,6 +1537,73 @@ mod tests {
         }
     }
 
+    fn assert_cyclic_spread(period: u32, slots: &[u32]) {
+        let mut slots = slots.to_vec();
+        slots.sort_unstable();
+        let n = slots.len() as u32;
+        for i in 0..slots.len() {
+            let next = if i + 1 == slots.len() {
+                slots[0] + period
+            } else {
+                slots[i + 1]
+            };
+            let gap = next - slots[i];
+            assert!(
+                (period / n..=period.div_ceil(n)).contains(&gap),
+                "cyclic gap {gap} does not spread {n} bots over {period} ticks"
+            );
+        }
+    }
+
+    /// The game's damage-model workload must pass through the actual weapon gate, once per
+    /// reload for every full-capability bot. Counting clicks alone cannot detect a bot that
+    /// never fires or whose click period has drifted away from the mechanism's reload.
+    #[test]
+    fn every_bot_fires_once_per_reload_through_the_weapon_gate() {
+        use crate::sim_tick::{SimTick, TickSpan};
+        use crate::tank::TankSim;
+        // Fixture: prime reload and a cohort that does not divide it, with a nonzero release phase.
+        let (period, count, release) = (31, 7, 13);
+        let cycle = crate::spec::FireCycle::Single {
+            reload: TickSpan::of(period),
+        };
+        let mut app = App::new();
+        app.add_plugins(TaskPoolPlugin::default())
+            .insert_resource(crate::WeaponClock(SimTick::new(release)));
+        crate::shooting::mount_bot_gate_fixture(&mut app);
+        app.add_systems(Update, drive_bot.before(crate::state::SimPhase::WeaponFire));
+        let bots: Vec<_> = (0..count)
+            .map(|index| {
+                let root = crate::shooting::spawn_bot_gate_fixture(app.world_mut(), cycle);
+                app.world_mut()
+                    .entity_mut(root)
+                    .insert(Bot::new(Vec2::ZERO, index, count, cycle));
+                root
+            })
+            .collect();
+        let mut previous = vec![0; count as usize];
+        let mut shots = vec![Vec::new(); count as usize];
+        for tick in release..release + 3 * period {
+            app.world_mut().resource_mut::<crate::WeaponClock>().0 = SimTick::new(tick);
+            app.update();
+            for (i, &root) in bots.iter().enumerate() {
+                let fired = app.world().get::<TankSim>(root).unwrap().weapons[0].rounds_fired;
+                if fired != previous[i] {
+                    shots[i].push(tick);
+                }
+                previous[i] = fired;
+            }
+        }
+        for times in shots {
+            assert_eq!(
+                times.len(),
+                3,
+                "every bot must actually fire once in each reload period"
+            );
+            assert!(times.windows(2).all(|w| w[1] - w[0] == period), "{times:?}");
+        }
+    }
+
     /// The game's damage-model workload must not invent a shared volley: at most
     /// ceil(bot count / reload ticks) primary triggers share a tick, for clients observing bots.
     #[test]
@@ -1558,6 +1630,13 @@ mod tests {
                     ));
                 }
                 let ticks = period.max(1);
+                let slots: Vec<_> = app
+                    .world_mut()
+                    .query::<&Bot>()
+                    .iter(app.world())
+                    .map(|b| b.fire_phase)
+                    .collect();
+                assert_cyclic_spread(ticks, &slots);
                 let mut total = 0;
                 for tick in 0..ticks * 3 {
                     app.world_mut().resource_mut::<crate::WeaponClock>().0 = SimTick::new(tick);
@@ -1631,6 +1710,10 @@ mod tests {
             .collect();
         let period = cadence[0].0;
         assert!(cadence.iter().all(|&(ticks, _)| ticks == period));
+        assert_cyclic_spread(
+            period,
+            &cadence.iter().map(|&(_, phase)| phase).collect::<Vec<_>>(),
+        );
         for tick in 0..period {
             assert!(
                 cadence.iter().filter(|&&(_, phase)| phase == tick).count()

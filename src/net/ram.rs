@@ -8,7 +8,7 @@ use bevy::tasks::{ComputeTaskPool, ParallelSlice, ParallelSliceMut};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::contact_census::{ContactCensus, ContactTick};
+use super::contact_census::{ContactTick, StepSnapshot};
 use super::harness::{LeverError, env_text};
 use crate::{
     construction::{
@@ -219,7 +219,7 @@ pub(super) fn prepare(
 
 impl Ram {
     /// The capture is armed and unfinished.
-    fn recording(&self) -> bool {
+    pub(super) fn recording(&self) -> bool {
         self.started && self.done.is_none()
     }
 
@@ -270,7 +270,7 @@ pub(super) struct Census<'w, 's> {
     contacts: Res<'w, ContactTransfers>,
     sweep: Res<'w, SweepAccount>,
     avian: AvianDiagnostics<'w, 's>,
-    contact_census: ContactCensus<'w, 's>,
+    capture: ResMut<'w, StepSnapshot>,
 }
 
 /// Avian's step diagnostics and the contact state they describe.
@@ -392,7 +392,7 @@ impl Census<'_, '_> {
     }
 
     pub(super) fn contact_tick(&mut self) -> ContactTick {
-        self.contact_census.tick(&self.sweep)
+        super::contact_census::finish(&mut self.capture, &self.sweep)
     }
 
     pub(super) fn contact_points(&self) -> usize {
@@ -679,7 +679,7 @@ mod tests {
         world.init_resource::<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>();
         world.init_resource::<avian3d::prelude::PhysicsLengthUnit>();
         world.init_resource::<avian3d::prelude::TimeToSleep>();
-        world.init_resource::<super::super::contact_census::PieceRecords>();
+        world.init_resource::<StepSnapshot>();
         world
             .run_system_once(|mut census: Census| {
                 let times = NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]);

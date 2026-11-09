@@ -517,6 +517,30 @@ fn apply_recoil(
     }
 }
 
+/// The game's damage-model cadence fixture mounts the real deadline and fire consumers.
+#[cfg(test)]
+pub(crate) fn mount_bot_gate_fixture(app: &mut App) {
+    app.add_systems(
+        Update,
+        (tick_weapon_gate, fire)
+            .chain()
+            .in_set(SimPhase::WeaponFire),
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn spawn_bot_gate_fixture(world: &mut World, cycle: FireCycle) -> Entity {
+    let root = tests::spawn_main_gun_rig(world);
+    for (mut weapon, tank) in world.query::<(&mut Weapon, &TankRoot)>().iter_mut(world) {
+        if tank.0 == root {
+            weapon.fire_cycle = cycle;
+        }
+    }
+    world.get_mut::<WeaponGate>(root).unwrap().weapons[0] =
+        crate::tank::WeaponGateState::for_cycle(&cycle);
+    root
+}
+
 #[cfg(test)]
 mod tests {
     use avian3d::prelude::{Collider, CollisionLayers, Position, Rotation};
@@ -941,7 +965,7 @@ mod tests {
         (root, loader)
     }
 
-    fn spawn_main_gun_rig(world: &mut World) -> Entity {
+    pub(super) fn spawn_main_gun_rig(world: &mut World) -> Entity {
         let root = world
             .spawn((
                 Tank,

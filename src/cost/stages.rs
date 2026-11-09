@@ -32,6 +32,8 @@ labelled!(Stage, NAMES, COUNT {
     Publish = "publish_us",
     Contacts = "contacts_us",
     Sweep = "sweep_us",
+    SweepCensus = "sweep_census_us",
+    ContactCensus = "contact_census_us",
     Crumble = "crumble_us",
     ChildColliderWriteback = "child_collider_writeback_us",
     BeltContacts = "belt_contacts_us",
@@ -57,7 +59,6 @@ labelled!(
         FactorFailedOps = "factor_failed_ops",
         FactorFailures = "factor_failures",
         FactorOrderingBuilds = "factor_ordering_builds",
-        FactorAssemblies = "factor_assemblies",
         KernelOfCalls = "kernel_of_calls",
         KernelOfChunks = "kernel_of_chunks",
         RehomedColliders = "rehomed_colliders",
@@ -89,6 +90,12 @@ pub(crate) struct Stages(
     Arc<[AtomicU64; DETAIL_COUNT]>,
     Arc<[Mutex<BeltReaders>; DETAIL_COUNT]>,
 );
+
+/// An existing ram or scheduled capture keeps this tick. Sim instruments need no net dependency.
+#[derive(Resource, Default)]
+pub(crate) struct Capture {
+    pub(crate) active: bool,
+}
 
 /// Belt reads from different tank owners can overlap; the phase consumer needs their wall union.
 #[derive(Default)]
@@ -160,6 +167,12 @@ impl Stages {
     pub(crate) fn start(stages: Option<&Self>, stage: Stage) -> Option<Bracket> {
         stages.map(|stages| {
             let start = Instant::now();
+            let debit = matches!(stage, Stage::Sweep).then(|| {
+                (
+                    Stage::SweepCensus,
+                    stages.0[Stage::SweepCensus as usize].load(Ordering::Relaxed),
+                )
+            });
             let belt = matches!(stage, Stage::BeltContacts).then(|| {
                 let mut active = stages.2.lock().expect("belt timing lock is not poisoned");
                 if active.readers == 0 {
@@ -173,6 +186,7 @@ impl Stages {
                 stage,
                 start,
                 belt,
+                debit,
             }
         })
     }
@@ -238,6 +252,7 @@ pub(crate) struct Bracket {
     stage: Stage,
     start: Instant,
     belt: Option<Arc<Mutex<BeltReaders>>>,
+    debit: Option<(Stage, u64)>,
 }
 
 impl Drop for Bracket {
@@ -258,13 +273,42 @@ impl Drop for Bracket {
         };
         let ns = u64::try_from(elapsed.as_nanos())
             .expect("one simulation stage cannot run for the u64 nanosecond span");
-        self.totals[self.stage as usize].fetch_add(ns, Ordering::Relaxed);
+        self.record_ns(ns);
+    }
+}
+
+impl Bracket {
+    fn record_ns(&self, ns: u64) {
+        let nested = self.debit.map_or(0, |(stage, before)| {
+            self.totals[stage as usize].load(Ordering::Relaxed) - before
+        });
+        self.totals[self.stage as usize].fetch_add(
+            ns.checked_sub(nested)
+                .expect("sweep census is contained by sweep"),
+            Ordering::Relaxed,
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The census reader must be subtractable exactly once even though collection runs inside
+    /// the gameplay sweep. A parent bracket that retains the nested leaf double-counts it.
+    #[test]
+    fn sweep_excludes_its_census_leaf() {
+        let stages = Stages::default();
+        // Fixture: an earlier census consumed 11 ns; this sweep's census consumes 30 of 100 ns.
+        stages.0[Stage::SweepCensus as usize].store(11, Ordering::Relaxed);
+        let parent = Stages::start(Some(&stages), Stage::Sweep).unwrap();
+        stages.0[Stage::SweepCensus as usize].fetch_add(30, Ordering::Relaxed);
+        parent.record_ns(100);
+        std::mem::forget(parent); // The fixture supplied the elapsed time; do not sample it again.
+        let values = stages.take_us();
+        assert_eq!(values[Stage::Sweep as usize], 0.070);
+        assert_eq!(values[Stage::SweepCensus as usize], 0.041);
+    }
 
     /// Parallel tank reads share one wall interval: publishing the first reader's span would
     /// let the phase consumer subtract overlapping work twice.

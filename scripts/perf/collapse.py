@@ -45,8 +45,10 @@ from online_cost import ANSI
 ROOT = Path(__file__).resolve().parents[2]
 # Resolution: five wall seconds suppress single-frame stalls in the sustained-speed report.
 SUSTAINED_S = 5
-# Resolution: ignore deficits below 10%, above the one-decimal period quantization noise.
+# Resolution: trigger sampling only for a sustained deficit of at least 10%, beyond pacing jitter.
 SAMPLE_SPEED = 0.9
+# Resolution: admit client capacity only with 90% frame-budget compliance and wall-slot coverage.
+CLIENT_CAPACITY_SHARE = 0.9
 # Resolution: one-second telemetry bins locate burst spikes without per-tick log traffic.
 STATS_PERIOD_S = 1
 # Resolution: bound the log reader's lag without busy-waiting beside the server.
@@ -240,7 +242,14 @@ def client_frames(log, path, duration):
     return dict(frames=frames, span_s=span, frames_per_s=frames / span,
                 within_tick=within, over_tick=len(rows)-within,
                 covered_tick_slots=covered, expected_tick_slots=expected,
-                keeping_up=covered >= expected * SAMPLE_SPEED and within >= len(rows) * SAMPLE_SPEED)
+                keeping_up=covered >= expected * CLIENT_CAPACITY_SHARE and within >= len(rows) * CLIENT_CAPACITY_SHARE)
+
+
+def capacity_frames(log, path, duration):
+    try:
+        return client_frames(log, path, duration)
+    except (RuntimeError, OSError) as error:
+        return dict(keeping_up=False, reason=str(error))
 
 
 def match_counts(windows):
@@ -249,8 +258,6 @@ def match_counts(windows):
     rest = {}
     for row in windows:
         span = row["loadtest"]["elapsed_s"] - row["loadtest"]["window_start_s"]
-        if len(row["send_clients"]) != row["clients"]:
-            raise RuntimeError("send census does not cover every connected client")
         for client in row["send_clients"]:
             sample = links[client["link"]]
             sample["bytes"] += client["bytes"]
@@ -274,6 +281,33 @@ def match_counts(windows):
         target["quiet_s"] = 0 if target["since_s"] is None else end - target["since_s"]
         del target["signature"]
     return dict(links=dict(links), targets=rest)
+
+
+def capacity_verdict(rows, clients, links=None):
+    """Complete artifacts remain diagnostic evidence when the requested workload misses real time."""
+    # Match admission endpoints and the server period are exact, before display rounding.
+    spans = [(r["loadtest"]["elapsed_s"] - r["loadtest"]["window_start_s"])
+             if "loadtest" in r else r["period_s"] for r in rows]
+    seconds = sum(spans)
+    ticks = sum(r["ticks"] for r in rows)
+    expected = sum(span * 1e6 / r["budget_us"] for span, r in zip(spans, rows))
+    # Resolution: one boundary tick covers the discrete clock crossing the window endpoints.
+    allowance = 1
+    server_keeping_up = ticks >= expected - allowance
+    keeping_up = sum(c["keeping_up"] for c in clients.values())
+    links_complete = links is None or all(c["all_windows"] for c in links.values())
+    valid = server_keeping_up and keeping_up == len(clients) and links_complete
+    return dict(valid=valid, tick_hz=ticks / seconds, server_keeping_up=server_keeping_up,
+                clients_keeping_up=keeping_up, clients=len(clients), links_complete=links_complete)
+
+
+def require_capacity(verdict, out):
+    if not verdict["valid"]:
+        message = (f"INVALID CAPACITY: {verdict['clients_keeping_up']}/{verdict['clients']} clients keeping up, "
+                   f"tick_hz {verdict['tick_hz']:.3f}, server_keeping_up={verdict['server_keeping_up']}, "
+                   f"links_complete={verdict['links_complete']}; artifacts: {out}")
+        print(message, flush=True)
+        raise RuntimeError(message)
 
 
 class ServerLogs:
@@ -373,20 +407,22 @@ def run_match(args, out, recipe):
                 if windows:
                     (out / "rows.json").write_text(json.dumps(rows, indent=2) + "\n")
                     counts = match_counts(windows)
-                    counts["clients"] = {}
-                    for i, _ in enumerate(clients):
-                        log = (out / f"client{i}.log").read_text()
-                        counts["clients"][f"client{i}"] = client_frames(log, out / f"client{i}-frames.client.jsonl", args.duration)
-                    counts["all_clients_keeping_up"] = all(c["keeping_up"] for c in counts["clients"].values())
-                    (out / "counts.json").write_text(json.dumps(counts, indent=2) + "\n")
-                    print("MEASURED client/house counts: " + json.dumps(counts), flush=True)
                     trace = match_tick_summary(rows, recipe)
                     if args.replication_trace:
                         trace["replication_windows"] = replication_windows(text)
                     (out / "tick-attribution.json").write_text(json.dumps(trace, indent=2) + "\n")
-                    print(f"MEASURED match-tick-attribution: {len(trace['ticks'])} ticks, {len(trace['over_budget_ticks'])} over budget; {out / 'tick-attribution.json'}")
+                    counts["clients"] = {}
+                    for i, _ in enumerate(clients):
+                        log = (out / f"client{i}.log").read_text()
+                        counts["clients"][f"client{i}"] = capacity_frames(log, out / f"client{i}-frames.client.jsonl", args.duration)
+                    counts["all_clients_keeping_up"] = all(c["keeping_up"] for c in counts["clients"].values())
+                    counts["capacity"] = capacity_verdict(windows, counts["clients"], counts["links"])
+                    (out / "counts.json").write_text(json.dumps(counts, indent=2) + "\n")
+                    print("MEASURED client/house counts: " + json.dumps(counts), flush=True)
+                    print(f"MEASURED match-tick-attribution: {len(trace['ticks'])} ticks; {out / 'tick-attribution.json'}")
                     report_match(windows)
                     last = windows[-1]["loadtest"]
+                    require_capacity(counts["capacity"], out)
                     print(f"COMPLETE: {args.tanks} tanks, {client_count} real links, {last['constructions']} constructions, {len(windows)} complete windows, {last['events_fired']} events; game construction outcomes {json.dumps(last['targets'])}; artifacts: {out}")
                     return
             time.sleep(min(POLL_S, max(0, deadline - time.monotonic())))
@@ -548,7 +584,7 @@ def rest_summary(records, dt):
             cohorts[record["sleep"], record["island"]].append(record)
     rows = []
     for (sleep, island), members in sorted(cohorts.items()):
-        landed = [m["first_loaded"] for m in members if m["first_loaded"] is not None]
+        landed = [m["last_loaded"] for m in members if m["last_loaded"] is not None]
         last_landing = max(landed) if landed else None
         fast = [m["last_fast"] for m in members if m["last_fast"] is not None]
         last_calm = max(fast) if fast else None
@@ -564,14 +600,15 @@ def rest_summary(records, dt):
 
 def piece_census(batches, dt):
     """Each piece's latest record; a stats line carries only the records changed since the last."""
-    records, thresholds = {}, None
+    records, thresholds, episodes = {}, None, []
     for batch in batches:
         pieces = batch["pieces"]
         thresholds = pieces["thresholds"] or thresholds
+        episodes.extend(pieces["episodes"])
         for record in pieces["records"]:
             records[record["piece"]] = record
     ordered = sorted(records.values(), key=lambda r: (r["born"], r["piece"]))
-    return dict(thresholds=thresholds, records=ordered, islands_at_sleep=rest_summary(ordered, dt))
+    return dict(thresholds=thresholds, records=ordered, episodes=episodes, islands_at_sleep=rest_summary(episodes, dt))
 
 
 # Match ticks add these to the shared ram schema; ram ticks carry none of them.
@@ -722,7 +759,7 @@ def run_ram(args, out, recipe):
                 sock.bind(("127.0.0.1", 5888))
             spawn("overmatch-server", serverlog, dict(OVERMATCH_SERVER_BIND="127.0.0.1", **dict(args.server_env)))
         host = admit_server(snapshot, children, start + args.startup_grace, local)
-        spawn("overmatch", out / "client.log", dict(OVERMATCH_SERVER=address, OVERMATCH_HARNESS=str(script)))
+        spawn("overmatch", out / "client.log", dict(OVERMATCH_SERVER=address, OVERMATCH_HARNESS=str(script), SPIKE_FRAME_COST=str(out / "client-frames.jsonl")))
         deadline = start + wall_limit
         while True:
             if any(c.poll() is not None for c in children):
@@ -738,8 +775,13 @@ def run_ram(args, out, recipe):
                     log = (out / "client.log").read_text()
                     if log.count("client: connected (entity") != 1 or "harness: released" not in log:
                         raise RuntimeError("ram client needs one connection and synchronized combat release")
+                    # The release precedes the first captured tick; omit the writer's buffered tail.
+                    duration = sum(t["dt_s"] for t in result["ticks"])
+                    result["client_frames"] = capacity_frames(log, out / "client-frames.client.jsonl", duration)
+                    result["capacity"] = capacity_verdict(result["rows"], {"client": result["client_frames"]})
                     (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
                     report_ram(result)
+                    require_capacity(result["capacity"], out)
                     print(f"COMPLETE: ram artifacts: {out}", flush=True)
                     return
             time.sleep(min(POLL_S, max(0, deadline-time.monotonic())))

@@ -606,7 +606,6 @@ impl FactorPattern {
         // One attempt per numeric factorization; Factor::new delegates here.
         count_factor(crate::cost::stages::Work::FactorAttempts, 1);
         self.prepare(factor, nodes, edges);
-        count_factor(crate::cost::stages::Work::FactorAssemblies, 1);
         let Factor { columns, map, .. } = factor;
         let (blocks, prior, order) = (&self.blocks, &self.prior, &self.order);
         let n = columns.len();

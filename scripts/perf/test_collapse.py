@@ -15,7 +15,7 @@ import collapse
 
 
 # Fixture: no piece records yet, a stats line's shape before any piece exists.
-EMPTY_PIECES = dict(thresholds=None, records=[])
+EMPTY_PIECES = dict(thresholds=None, records=[], episodes=[])
 
 
 def tick_fixture(i, tanks):
@@ -62,6 +62,24 @@ class CollapseTests(unittest.TestCase):
             changed = copy.deepcopy(rows)
             changed[-1]["loadtest"]["targets"][0][field] = value
             self.assertEqual(collapse.match_counts(changed)["targets"]["a"]["quiet_s"], 0)
+
+    def test_capacity_requires_clients_server_rate_and_uninterrupted_links(self):
+        _, rows = self.match_fixture()
+        clients = {"a": dict(keeping_up=True)}
+        links = {"a": dict(all_windows=True)}
+        valid = collapse.capacity_verdict(rows, clients, links)
+        self.assertTrue(valid["valid"])
+        self.assertEqual(valid["tick_hz"], 64)
+        slow = copy.deepcopy(rows)
+        slow[1]["ticks"] -= 10
+        for verdict in [collapse.capacity_verdict(slow, clients, links),
+                        collapse.capacity_verdict(rows, {"a": dict(keeping_up=False)}, links),
+                        collapse.capacity_verdict(rows, clients, {"a": dict(all_windows=False)})]:
+            self.assertFalse(verdict["valid"])
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaisesRegex(RuntimeError, "INVALID CAPACITY"):
+                    collapse.require_capacity(verdict, Path("/fixture/artifacts"))
+            self.assertNotIn("COMPLETE", output.getvalue())
 
     def test_only_kernel_allocation_evidence_admits_two_vcpu(self):
         # Fixture: a wide cpuset with a two-core quota is the hosted contract, not pool sizing.
@@ -430,19 +448,20 @@ class RamTests(unittest.TestCase):
         # piece 2 the last to land and piece 1 the last to calm. Dropping a re-send, or reading
         # the landing and the calm from one piece, breaks the row.
         def piece(piece, first_loaded, last_fast, sleep=None, island=None):
-            return dict(piece=piece, born=1, first_ground=1, first_loaded=first_loaded, last_fast=last_fast,
+            return dict(piece=piece, born=1, first_ground=1, first_loaded=first_loaded, last_loaded=first_loaded, last_fast=last_fast,
                         sleep=sleep, island=island, linear_at_sleep=0.01 * piece, angular_at_sleep=0.02,
                         sleeps=int(sleep is not None), awake_ticks=9, gone=None)
-        batches = [dict(pieces=dict(thresholds=None, records=[piece(1, 5, 7)])),
+        batches = [dict(pieces=dict(thresholds=None, records=[piece(1, 5, 7)], episodes=[])),
                    dict(pieces=dict(thresholds=dict(linear=0.15, angular=0.15, time_to_sleep_s=0.5),
-                                    records=[piece(1, 5, 90, 122, 7), piece(2, 60, 80, 122, 7), piece(3, None, 8)]))]
+                                    records=[piece(1, 5, 90, 122, 7), piece(2, 60, 80, 122, 7), piece(3, None, 8)],
+                                    episodes=[dict(piece(1, 5, 90, 122, 7), last_loaded=100), piece(2, 60, 80, 122, 7)]))]
         census = collapse.piece_census(batches, 0.5)
         self.assertEqual([r["piece"] for r in census["records"]], [1, 2, 3])
         self.assertEqual(census["records"][0]["last_fast"], 90)
         self.assertEqual(census["thresholds"]["time_to_sleep_s"], 0.5)
         self.assertEqual(census["islands_at_sleep"], [dict(
-            sleep=122, island=7, pieces=2, never_landed=0, last_landing=60, landing_to_sleep_s=31.0,
-            last_calm=90, landing_to_calm_s=15.0, last_to_calm=1, peak_linear_at_sleep=0.02,
+            sleep=122, island=7, pieces=2, never_landed=0, last_landing=100, landing_to_sleep_s=11.0,
+            last_calm=90, landing_to_calm_s=-5.0, last_to_calm=1, peak_linear_at_sleep=0.02,
             peak_angular_at_sleep=0.02)])
 
     def test_ram_percentile_and_additive_split_use_only_contact_ticks(self):

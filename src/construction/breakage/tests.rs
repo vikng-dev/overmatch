@@ -5095,6 +5095,7 @@ fn two_sources(
 fn a_source_far_from_any_owner_counts_as_meeting_none() {
     let kind = resolved_column();
     let (mut app, _) = composed_kind(false, &kind);
+    app.insert_resource(crate::cost::stages::Capture { active: true });
     for _ in 0..3 {
         app.update();
     }
