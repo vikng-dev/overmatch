@@ -1,4 +1,4 @@
-# Pairless colliders remain queryable without initiating broad-phase traversals
+# Pairless colliders keep query-tree proxies without initiating broad-phase traversals
 
 Subject: video game server physics and the game's damage model raycasts; game state only.
 
@@ -21,23 +21,53 @@ Baseline: `e91b7174` (0.7.0-alpha.13), with the candidate counter added and with
 guard. Baseline logs: `/tmp/armour-broadphase-before.log` and
 `target/armour-broadphase-before/tick-attribution.json` in bay-1.
 
-MEASURED constructed baseline: each of the twelve cases visits 2 candidates, retains 1 peer
-pair and 1 touching pair, and produces no pair involving the pairless collider. The cases cover
-every tree (static sensor, kinematic, dynamic and standalone) and an empty filter, membership
-or both. A ray filtered to the nonempty membership finds the empty-filter collider. Restoring
-layers admits both overlapping peers. Fixture sizes and bit assignments are test data.
+MEASURED constructed before/after, in each of twelve cases:
 
-MEASURED world baseline, means per tick, using the provided late-event recipe, 30 tanks,
-1 real client, duration 30 s, local `--rehearsal`:
+| Observation | Before | After |
+|---|---:|---:|
+| Candidate visits when the pairless collider moves | 2 | 0 |
+| Pairs involving the pairless collider | 0 | 0 |
+| Peer pairs / touching peer pairs | 1 / 1 | 1 / 1 |
+| Empty-filter collider hit by a membership-filtered ray | yes | yes |
+| Contacts admitted after restoring layers | 2 | 2 |
 
-| Window, simulation seconds | Ticks | Candidate visits | Graph pairs | Awake touching pairs |
+The cases cover every tree (static sensor, kinematic, dynamic and standalone) and an empty
+filter, membership or both. Empty memberships remain excluded by spatial-query masks, as before.
+Fixture sizes and bit assignments are test data. Logs: `target/armour-broadphase-before/constructed.log`
+and `target/armour-broadphase-after/constructed.log`.
+
+MEASURED world counts; means per tick, using the provided late-event recipe, 30 tanks,
+1 real client, duration 30 s, local `--rehearsal`. Each row gives before / after:
+
+| Window, simulation seconds | Ticks per run | Candidate visits | Graph pairs | Awake touching pairs |
 |---|---:|---:|---:|---:|
-| [2, 9.5) | 480 | 36279.0375 | 150 | 0 |
-| [2, 24) | 1408 | 42197.673295454544 | 150 | 0 |
-| [26, 30) | 256 | 39463.3828125 | 2996.859375 | 221.9296875 |
+| [2, 9.5) | 480 | 36279.0 / 15193.9 | 150 / 150 | 0 / 0 |
+| [2, 24) | 1408 | 42197.7 / 17696.2 | 150 / 151.0 | 0 / 0 |
+| [26, 30) | 256 | 39463.4 / 16499.0 | 2996.9 / 2938.1 | 221.9 / 265.2 |
 
-The post-event world is an observation, not a regression oracle. Timings are unpriced: the
-orchestrator owns pricing against 0.7.0-alpha.13 on the hosted two-core allocation.
+DERIVED reduction in the clean [2, 9.5) window: 58.12% of candidate visits, from the measured
+means. Its graph and touching counts are unchanged. Full tick records:
+`target/armour-broadphase-{before,after}/tick-attribution.json` in bay-1.
+
+The post-event touching counts differ. These are independent online runs: the runner starts
+fresh server and client processes (`scripts/perf/collapse.py:398`, `:407`, `:409`), rather than
+replaying captured per-tick inputs and state. This lane has not attributed the post-event
+variation or established post-event run equivalence. Those counts are observations, not a
+regression oracle. The exact unchanged-touching claim is witnessed by the constructed case;
+the layer law excludes the same impossible pairs for any fixed input state.
+
+No player-visible change is expected from excluding those impossible pairs. Timings remain
+unpriced: the orchestrator owns pricing against 0.7.0-alpha.13 on the hosted two-core allocation.
+
+## Gates and disposition
+
+Implementation commit: `22d83da6`. `cargo fmt --all --check`, CI clippy with
+`--locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings`, and the targeted
+run passed: 63 passed, 6 existing ignored, none failed. That run includes `headless_test`,
+`avian_broad_phase_layers`, `net::ram::avian_tests`, `cost::tests`, and the three whole-tree guards
+`doc_citations`, `ui_ascii`, `net_boundary`. Both count rehearsals completed successfully.
+No lens-backlog row or open sweep issue named an edited file; the diff was read against all six
+lenses. No timing claim, push, merge or release is made by this lane. Hosted pricing remains.
 
 ## Reproduction
 
