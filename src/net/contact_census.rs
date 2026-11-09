@@ -265,9 +265,26 @@ pub(crate) struct PieceRecords {
     live: EntityHashMap<PieceRecord>,
     finished: Vec<PieceRecord>,
     episodes: Vec<PieceRecord>,
+    lifecycle_outside_tick_us: f64,
 }
 
 impl PieceRecords {
+    fn lifecycle(
+        &mut self,
+        stages: &Stages,
+        clock: Option<&crate::cost::TickClock>,
+        update: impl FnOnce(&mut Self),
+    ) {
+        if clock.is_some_and(crate::cost::TickClock::is_open) {
+            let _leaf = Stages::start(Some(stages), Stage::ContactCensus);
+            update(self);
+        } else {
+            let started = std::time::Instant::now();
+            update(self);
+            self.lifecycle_outside_tick_us += started.elapsed().as_secs_f64() * 1e6;
+        }
+    }
+
     /// The records changed since the last call.
     pub(super) fn drain(&mut self) -> Value {
         let mut records = std::mem::take(&mut self.finished);
@@ -276,11 +293,11 @@ impl PieceRecords {
                 .values_mut()
                 .filter_map(|record| std::mem::take(&mut record.changed).then_some(*record)),
         );
-        json!({"thresholds": self.thresholds, "records": records, "episodes": std::mem::take(&mut self.episodes)})
+        json!({"thresholds": self.thresholds, "records": records, "episodes": std::mem::take(&mut self.episodes), "lifecycle_outside_tick_us": std::mem::take(&mut self.lifecycle_outside_tick_us)})
     }
 }
 
-/// The existing ram/loadtest recorders own activity; sweep counters read only this tick's flag.
+/// The completed step retained until the existing ram/loadtest collector closes its row.
 #[derive(Resource, Default)]
 pub(super) struct StepSnapshot {
     row: Option<ContactTick>,
@@ -391,16 +408,18 @@ fn install_reading(app: &mut App) {
              capture: Res<Capture>,
              mut records: ResMut<PieceRecords>,
              pieces: Query<Option<&Piece>>,
-             stages: Res<Stages>| {
+             stages: Res<Stages>,
+             clock: Option<Res<crate::cost::TickClock>>| {
                 if capture.active {
-                    let _leaf = Stages::start(Some(&stages), Stage::ContactCensus);
-                    let tick = records.tick;
-                    let piece = pieces
-                        .get(event.entity)
-                        .expect("an added piece exists during its observer");
-                    records
-                        .live
-                        .insert(event.entity, PieceRecord::new(event.entity, piece, tick));
+                    records.lifecycle(&stages, clock.as_deref(), |records| {
+                        let tick = records.tick;
+                        let piece = pieces
+                            .get(event.entity)
+                            .expect("an added piece exists during its observer");
+                        records
+                            .live
+                            .insert(event.entity, PieceRecord::new(event.entity, piece, tick));
+                    });
                 }
             },
         )
@@ -409,17 +428,19 @@ fn install_reading(app: &mut App) {
              capture: Res<Capture>,
              mut records: ResMut<PieceRecords>,
              stages: Res<Stages>,
-             pieces: Query<Option<&Piece>>| {
+             pieces: Query<Option<&Piece>>,
+             clock: Option<Res<crate::cost::TickClock>>| {
                 if capture.active {
-                    let _leaf = Stages::start(Some(&stages), Stage::ContactCensus);
-                    let mut record = records.live.remove(&event.entity).unwrap_or_else(|| {
-                        let piece = pieces
-                            .get(event.entity)
-                            .expect("the retiring piece exists in its removal observer");
-                        PieceRecord::new(event.entity, piece, records.tick)
-                    }); // A piece already present at admission may retire before its first solve.
-                    record.gone = Some(records.tick);
-                    records.finished.push(record);
+                    records.lifecycle(&stages, clock.as_deref(), |records| {
+                        let mut record = records.live.remove(&event.entity).unwrap_or_else(|| {
+                            let piece = pieces
+                                .get(event.entity)
+                                .expect("the retiring piece exists in its removal observer");
+                            PieceRecord::new(event.entity, piece, records.tick)
+                        }); // A piece already present at admission may retire before its first solve.
+                        record.gone = Some(records.tick);
+                        records.finished.push(record);
+                    });
                 }
             },
         )
@@ -428,25 +449,27 @@ fn install_reading(app: &mut App) {
              capture: Res<Capture>,
              mut records: ResMut<PieceRecords>,
              pieces: Query<&BodyIslandNode, With<DebrisPiece>>,
-             stages: Res<Stages>| {
+             stages: Res<Stages>,
+             clock: Option<Res<crate::cost::TickClock>>| {
                 if capture.active
                     && let Ok(island) = pieces.get(event.entity)
                 {
-                    let _leaf = Stages::start(Some(&stages), Stage::ContactCensus);
-                    let tick = records.tick;
-                    let record = records
-                        .live
-                        .get_mut(&event.entity)
-                        .expect("a piece is recorded at birth or before sleeping");
-                    record.sleep = Some(tick);
-                    record.island = Some(island.island_id().0);
-                    record.linear_at_sleep = Some(record.motion.0);
-                    record.angular_at_sleep = Some(record.motion.1);
-                    record.sleeps += 1;
-                    record.awake = false;
-                    record.changed = true;
-                    let episode = *record;
-                    records.episodes.push(episode);
+                    records.lifecycle(&stages, clock.as_deref(), |records| {
+                        let tick = records.tick;
+                        let record = records
+                            .live
+                            .get_mut(&event.entity)
+                            .expect("a piece is recorded at birth or before sleeping");
+                        record.sleep = Some(tick);
+                        record.island = Some(island.island_id().0);
+                        record.linear_at_sleep = Some(record.motion.0);
+                        record.angular_at_sleep = Some(record.motion.1);
+                        record.sleeps += 1;
+                        record.awake = false;
+                        record.changed = true;
+                        let episode = *record;
+                        records.episodes.push(episode);
+                    });
                 }
             },
         );
@@ -630,7 +653,6 @@ impl ContactCensus<'_, '_> {
                 record.island = None;
                 record.linear_at_sleep = None;
                 record.angular_at_sleep = None;
-                record.awake_ticks = 0;
             }
             let (linear, angular) = (velocity.length(), spin.length());
             record.motion = (linear, angular);
@@ -1193,5 +1215,35 @@ mod tests {
         assert_eq!(records.episodes[0].last_fast, first.last_fast);
         assert_eq!(records.episodes[1].sleep, Some(3));
         assert_eq!(records.episodes[1].first_ground, first.first_ground);
+    }
+    /// Lifecycle changes between fixed ticks must not inflate the next tick's additive leaves.
+    /// The piece history still records them, and exposes their cost separately to the collector.
+    #[test]
+    fn lifecycle_between_ticks_has_its_own_cost_owner() {
+        let mut app = App::new();
+        app.init_resource::<Stages>();
+        install_reading(&mut app);
+        app.world_mut().resource_mut::<Capture>().active = true;
+        let entity = app.world_mut().spawn(DebrisPiece).id();
+        assert!(
+            app.world()
+                .resource::<PieceRecords>()
+                .live
+                .contains_key(&entity)
+        );
+        assert!(
+            app.world()
+                .resource::<Stages>()
+                .take_us()
+                .iter()
+                .all(|&us| us == 0.0)
+        );
+        let value = app.world_mut().resource_mut::<PieceRecords>().drain();
+        assert!(
+            value["lifecycle_outside_tick_us"]
+                .as_f64()
+                .unwrap()
+                .is_finite()
+        );
     }
 }

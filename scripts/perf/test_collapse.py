@@ -15,7 +15,7 @@ import collapse
 
 
 # Fixture: no piece records yet, a stats line's shape before any piece exists.
-EMPTY_PIECES = dict(thresholds=None, records=[], episodes=[])
+EMPTY_PIECES = dict(thresholds=None, records=[], episodes=[], lifecycle_outside_tick_us=0.0)
 
 
 def tick_fixture(i, tanks):
@@ -62,6 +62,10 @@ class CollapseTests(unittest.TestCase):
             changed = copy.deepcopy(rows)
             changed[-1]["loadtest"]["targets"][0][field] = value
             self.assertEqual(collapse.match_counts(changed)["targets"]["a"]["quiet_s"], 0)
+
+    def test_ram_capacity_omits_startup_and_the_admission_straddling_period(self):
+        rows = [dict(ram=dict(ticks=[])), dict(ram=dict(ticks=[1])), dict(ram=dict(ticks=[2, 3]))]
+        self.assertEqual(collapse.ram_capacity_rows(rows), rows[2:])
 
     def test_capacity_requires_clients_server_rate_and_uninterrupted_links(self):
         _, rows = self.match_fixture()
@@ -451,10 +455,10 @@ class RamTests(unittest.TestCase):
             return dict(piece=piece, born=1, first_ground=1, first_loaded=first_loaded, last_loaded=first_loaded, last_fast=last_fast,
                         sleep=sleep, island=island, linear_at_sleep=0.01 * piece, angular_at_sleep=0.02,
                         sleeps=int(sleep is not None), awake_ticks=9, gone=None)
-        batches = [dict(pieces=dict(thresholds=None, records=[piece(1, 5, 7)], episodes=[])),
+        batches = [dict(pieces=dict(thresholds=None, records=[piece(1, 5, 7)], episodes=[], lifecycle_outside_tick_us=0.0)),
                    dict(pieces=dict(thresholds=dict(linear=0.15, angular=0.15, time_to_sleep_s=0.5),
                                     records=[piece(1, 5, 90, 122, 7), piece(2, 60, 80, 122, 7), piece(3, None, 8)],
-                                    episodes=[dict(piece(1, 5, 90, 122, 7), last_loaded=100), piece(2, 60, 80, 122, 7)]))]
+                                    episodes=[dict(piece(1, 5, 90, 122, 7), last_loaded=100), piece(2, 60, 80, 122, 7)], lifecycle_outside_tick_us=0.0))]
         census = collapse.piece_census(batches, 0.5)
         self.assertEqual([r["piece"] for r in census["records"]], [1, 2, 3])
         self.assertEqual(census["records"][0]["last_fast"], 90)

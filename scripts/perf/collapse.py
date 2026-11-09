@@ -283,6 +283,18 @@ def match_counts(windows):
     return dict(links=dict(links), targets=rest)
 
 
+def ram_capacity_rows(rows):
+    """Drop pre-capture periods and the first period that straddles ram admission."""
+    admitted = False
+    windows = []
+    for row in rows:
+        if admitted:
+            windows.append(row)
+        elif row["ram"]["ticks"]:
+            admitted = True
+    return windows
+
+
 def capacity_verdict(rows, clients, links=None):
     """Complete artifacts remain diagnostic evidence when the requested workload misses real time."""
     # Match admission endpoints and the server period are exact, before display rounding.
@@ -600,15 +612,16 @@ def rest_summary(records, dt):
 
 def piece_census(batches, dt):
     """Each piece's latest record; a stats line carries only the records changed since the last."""
-    records, thresholds, episodes = {}, None, []
+    records, thresholds, episodes, lifecycle_us = {}, None, [], 0.0
     for batch in batches:
         pieces = batch["pieces"]
         thresholds = pieces["thresholds"] or thresholds
         episodes.extend(pieces["episodes"])
+        lifecycle_us += pieces["lifecycle_outside_tick_us"]
         for record in pieces["records"]:
             records[record["piece"]] = record
     ordered = sorted(records.values(), key=lambda r: (r["born"], r["piece"]))
-    return dict(thresholds=thresholds, records=ordered, episodes=episodes, islands_at_sleep=rest_summary(episodes, dt))
+    return dict(thresholds=thresholds, records=ordered, episodes=episodes, lifecycle_outside_tick_us=lifecycle_us, islands_at_sleep=rest_summary(episodes, dt))
 
 
 # Match ticks add these to the shared ram schema; ram ticks carry none of them.
@@ -778,7 +791,7 @@ def run_ram(args, out, recipe):
                     # The release precedes the first captured tick; omit the writer's buffered tail.
                     duration = sum(t["dt_s"] for t in result["ticks"])
                     result["client_frames"] = capacity_frames(log, out / "client-frames.client.jsonl", duration)
-                    result["capacity"] = capacity_verdict(result["rows"], {"client": result["client_frames"]})
+                    result["capacity"] = capacity_verdict(ram_capacity_rows(result["rows"]), {"client": result["client_frames"]})
                     (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
                     report_ram(result)
                     require_capacity(result["capacity"], out)

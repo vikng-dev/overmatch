@@ -277,6 +277,11 @@ impl TickClock {
         self.march_calls += 1;
     }
 
+    /// Lifecycle instruments also observe changes between fixed ticks, outside this bracket.
+    pub(crate) fn is_open(&self) -> bool {
+        self.start.is_some()
+    }
+
     /// The tick closed this `FixedMain`, for a reader ordered after [`TickClosed`].
     pub(crate) fn closed(&self) -> Option<TickCost> {
         self.closed
