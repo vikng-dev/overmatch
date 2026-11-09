@@ -50,6 +50,10 @@ const VISIBLE_MOTION_M: f32 = 0.01;
 pub(crate) struct KindCounts {
     pairs: u32,
     points: u32,
+    /// Manifolds left to the solver, its constraint count for this kind.
+    manifolds: u32,
+    /// Touching pairs whose manifolds body-pair reduction removed entirely.
+    reduced_pairs: u32,
     body_pairs: u32,
     /// Pairs whose summed normal impulse over the step is at most [`SEAM_IMPULSE_NS`], and their
     /// points.
@@ -66,6 +70,8 @@ impl std::ops::AddAssign for KindCounts {
     fn add_assign(&mut self, other: Self) {
         self.pairs += other.pairs;
         self.points += other.points;
+        self.manifolds += other.manifolds;
+        self.reduced_pairs += other.reduced_pairs;
         self.body_pairs += other.body_pairs;
         self.seam_pairs += other.seam_pairs;
         self.seam_points += other.seam_points;
@@ -631,6 +637,8 @@ impl ContactCensus<'_, '_> {
         let loaded = impulse > SEAM_IMPULSE_NS;
         counts.pairs += 1;
         counts.points += points;
+        counts.manifolds += pair.manifolds.len() as u32;
+        counts.reduced_pairs += u32::from(pair.manifolds.is_empty());
         if !loaded {
             counts.seam_pairs += 1;
             counts.seam_points += points;
@@ -640,7 +648,9 @@ impl ContactCensus<'_, '_> {
                 .flat_map(|m| m.points.iter())
                 .map(|p| -p.penetration)
                 .fold(f32::INFINITY, f32::min);
-            if separation <= SEAM_NEAR_M {
+            if pair.manifolds.is_empty() {
+                // Reduction left no point to read a separation from.
+            } else if separation <= SEAM_NEAR_M {
                 counts.seam_within_2mm += 1;
             } else if separation <= SEAM_FAR_M {
                 counts.seam_within_5mm += 1;
@@ -1024,6 +1034,7 @@ mod tests {
             ("other", kinds.other, 1, 1),
         ] {
             assert_eq!(counts.pairs, pairs, "{name} collider pairs");
+            assert_eq!(counts.manifolds, pairs, "{name} manifolds");
             assert_eq!(counts.body_pairs, bodies, "{name} body pairs");
             assert_eq!(counts.seam_pairs, pairs, "{name}: nothing is pressed");
             assert!(counts.points >= pairs, "{name} carries points");
