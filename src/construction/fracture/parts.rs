@@ -483,6 +483,39 @@ struct FactorPattern {
     builds: usize,
 }
 
+// Factor instrumentation follows authority owner tasks and their explicitly scoped kernel workers.
+// No recorder means no clock reads, allocation or atomic updates at factor entries.
+thread_local! {
+    static FACTOR_RECORDER: std::cell::RefCell<Option<crate::cost::stages::Stages>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn record_factors<T>(
+    stages: Option<&crate::cost::stages::Stages>,
+    work: impl FnOnce() -> T,
+) -> T {
+    if stages.is_none() {
+        return work();
+    }
+    struct Restore(Option<crate::cost::stages::Stages>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FACTOR_RECORDER.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+    let _restore = Restore(FACTOR_RECORDER.with(|slot| slot.replace(stages.cloned())));
+    work()
+}
+
+fn count_factor(work: crate::cost::stages::Work, count: u64) {
+    FACTOR_RECORDER.with(|slot| {
+        if let Some(stages) = &*slot.borrow() {
+            stages.add(work, count);
+        }
+    });
+}
+
 impl FactorPattern {
     fn prepare(&mut self, factor: &mut Factor, nodes: &[Node], edges: &[Edge]) {
         let mut graph = vec![std::collections::BTreeSet::new(); nodes.len()];
@@ -497,6 +530,7 @@ impl FactorPattern {
         }
         let fixed: Vec<_> = nodes.iter().map(|node| node.fixed).collect();
         if self.adjacency != graph || self.fixed != fixed || factor.map.len() != nodes.len() {
+            count_factor(crate::cost::stages::Work::FactorOrderingBuilds, 1);
             self.adjacency = graph.clone();
             self.fixed = fixed;
             #[cfg(test)]
@@ -569,7 +603,10 @@ impl FactorPattern {
         nodes: &[Node],
         edges: &[Edge],
     ) -> Result<(), Mechanism> {
+        // One attempt per numeric factorization; Factor::new delegates here.
+        count_factor(crate::cost::stages::Work::FactorAttempts, 1);
         self.prepare(factor, nodes, edges);
+        count_factor(crate::cost::stages::Work::FactorAssemblies, 1);
         let Factor { columns, map, .. } = factor;
         let (blocks, prior, order) = (&self.blocks, &self.prior, &self.order);
         let n = columns.len();
@@ -677,7 +714,11 @@ impl FactorPattern {
                         .map(|(&i, &u)| u * x[i])
                         .sum();
                     x[c] = -sum / column.upper[0];
+                    // DERIVED: multiply + add per upper entry, then one division.
+                    ops += 2 * (column.rows.len() - 1) as u64 + 1;
                 }
+                count_factor(crate::cost::stages::Work::FactorFailures, 1);
+                count_factor(crate::cost::stages::Work::FactorFailedOps, ops);
                 return Err(Mechanism {
                     node: order[j / 6],
                     mode: map
@@ -704,6 +745,7 @@ impl FactorPattern {
 impl Factor {
     /// The factor, or the mechanism whose pivot fell below [`MECHANISM`] of its elastic diagonal.
     fn new(nodes: &[Node], edges: &[Edge]) -> Result<Self, Mechanism> {
+        count_factor(crate::cost::stages::Work::FactorNewCalls, 1);
         let mut factor = Self::default();
         FactorPattern::default().refactor(&mut factor, nodes, edges)?;
         Ok(factor)
@@ -856,6 +898,7 @@ impl Gravity {
                 .filter(|(_, chunks)| !chunks.is_empty())
                 .collect();
             // Worker-sized batches bound dispatch for tiny parts; results retain part order.
+            let recorder = FACTOR_RECORDER.with(|slot| slot.borrow().clone());
             let solved = free.par_splat_map(ComputeTaskPool::get(), None, |_, parts| {
                 parts
                     .iter()
@@ -877,7 +920,9 @@ impl Gravity {
                         let kernel = if let Some(kernel) = intact {
                             kernel
                         } else {
-                            changed = Kernel::of(structure, state, chunks);
+                            changed = record_factors(recorder.as_ref(), || {
+                                Kernel::of(structure, state, chunks)
+                            });
                             #[cfg(test)]
                             {
                                 solved.built = true;
@@ -1381,6 +1426,7 @@ impl Assessment {
             .collect();
         // A part's kernel reads only its own chunks: the parts solve apart, in worker-sized
         // batches, and their verdicts commit in part order.
+        let recorder = FACTOR_RECORDER.with(|slot| slot.borrow().clone());
         let holds = parts.par_splat_map(
             ComputeTaskPool::get_or_init(TaskPool::default),
             None,
@@ -1395,7 +1441,9 @@ impl Assessment {
                         let (kernel, factored) = if design.current(structure, field, &part.chunks) {
                             (design, 0)
                         } else {
-                            changed = Kernel::of(structure, field, &part.chunks);
+                            changed = record_factors(recorder.as_ref(), || {
+                                Kernel::of(structure, field, &part.chunks)
+                            });
                             (&changed, changed.factor.ops)
                         };
                         let on_part: Vec<_> = part.chunks.iter().map(|&c| loads[c]).collect();
@@ -1451,11 +1499,13 @@ impl Assessment {
         let pool = ComputeTaskPool::get_or_init(TaskPool::default);
         let mut failures = vec![Vec::new(); parts.len()];
         let mut open: Vec<usize> = (0..parts.len()).collect();
+        let recorder = FACTOR_RECORDER.with(|slot| slot.borrow().clone());
         while !open.is_empty() {
             let field: &State = state;
             let holds = open.par_chunk_map(pool, 1, |_, part| {
                 let (chunks, loads) = &parts[part[0]];
-                let kernel = Kernel::of(structure, field, chunks);
+                let kernel =
+                    record_factors(recorder.as_ref(), || Kernel::of(structure, field, chunks));
                 let hold = kernel.hold(structure, loads);
                 (kernel.factor.ops, hold)
             });

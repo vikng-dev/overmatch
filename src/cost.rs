@@ -36,6 +36,8 @@ pub(crate) struct TickSample {
     /// Nested diagnostics for `scripts/perf/collapse.py`; the key lacks `_us` so its
     /// additive tick parts do not count these timers again.
     pub(crate) avian: AvianStep,
+    /// Nested wall unions inside crumble; different owners' solve and split work may overlap.
+    pub(crate) crumble_detail: NamedTimes<{ stages::DETAIL_COUNT }>,
 }
 
 /// Avian's work counters and timers since the physics-step reset, in microseconds, plus
@@ -43,7 +45,8 @@ pub(crate) struct TickSample {
 /// includes the game's later refit boundary.
 #[derive(Clone, Copy, Serialize)]
 pub(crate) struct AvianStep {
-    pub(crate) collider_tree_us: f64,
+    pub(crate) collider_tree_update_us: f64,
+    pub(crate) collider_tree_optimize_us: f64,
     pub(crate) broad_phase_us: f64,
     pub(crate) narrow_phase_us: f64,
     pub(crate) prepare_constraints_us: f64,
@@ -96,8 +99,10 @@ impl TickSample {
             awake: 0,
             tanks: 0,
             dt_s: 0.0,
+            crumble_detail: NamedTimes::new(&stages::DETAIL_NAMES, [0.0; stages::DETAIL_COUNT]),
             avian: AvianStep {
-                collider_tree_us: 0.0,
+                collider_tree_update_us: 0.0,
+                collider_tree_optimize_us: 0.0,
                 broad_phase_us: 0.0,
                 narrow_phase_us: 0.0,
                 prepare_constraints_us: 0.0,

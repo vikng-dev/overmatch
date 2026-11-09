@@ -40,7 +40,7 @@ use crate::construction::fracture::parts::{Assessment, Kernel};
 use crate::construction::fracture::{Cause, Failure, Fate, Load, Origin, Side, State, Structure};
 use crate::contact_law::{Contactor, peak_force};
 use crate::contact_transfer::ContactTransfers;
-use crate::cost::stages::{Stage, Stages, Work};
+use crate::cost::stages::{Detail, Stage, Stages, Work};
 use crate::physical_laws::PhysicalLaws;
 use crate::{Layer, ShotClock};
 
@@ -676,14 +676,20 @@ fn crumble_landings(
                 let frame = breakage.physics_frame(pose);
                 let kernels = breakage.kind.equilibrium.kernels.clone();
                 let live = breakage.live.as_mut();
-                let mut result = crumble(
-                    &live.structure,
-                    &live.state,
-                    &kernels,
-                    &owned,
-                    touches,
-                    *energy,
-                );
+                let solve_bracket = Stages::detail(stages.as_deref(), Detail::CrumbleSolve);
+                let mut result =
+                    crate::construction::fracture::parts::record_factors(stages.as_deref(), || {
+                        crumble(
+                            &live.structure,
+                            &live.state,
+                            &kernels,
+                            &owned,
+                            touches,
+                            *energy,
+                        )
+                    });
+                drop(solve_bracket);
+                let _split_bracket = Stages::detail(stages.as_deref(), Detail::CrumbleSplit);
                 if let Some(stages) = stages.as_deref() {
                     stages.add(Work::Landings, 1);
                     stages.add(Work::LandingPasses, result.passes as u64);
@@ -723,6 +729,7 @@ fn crumble_landings(
                 prepared.scope(|local| local.push((entity, pending, sheds, record.entries)));
             },
         );
+    let _commit_bracket = Stages::detail(stages.as_deref(), Detail::CrumbleSplit);
     let mut prepared: Vec<_> = prepared.drain().collect();
     prepared.sort_unstable_by_key(|(entity, ..)| *entity);
     for (entity, pending, sheds, entries) in prepared {

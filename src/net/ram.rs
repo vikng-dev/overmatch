@@ -343,7 +343,8 @@ impl AvianDiagnostics<'_, '_> {
             }
         }
         crate::cost::AvianStep {
-            collider_tree_us: us(self.tree.update + self.tree.optimize),
+            collider_tree_update_us: us(self.tree.update),
+            collider_tree_optimize_us: us(self.tree.optimize),
             broad_phase_us: us(c.broad_phase),
             narrow_phase_us: us(c.narrow_phase),
             prepare_constraints_us: us(s.prepare_constraints),
@@ -397,6 +398,7 @@ impl Census<'_, '_> {
             sleep_us,
             stages: NamedTimes::new(&stages::NAMES, stages),
             phases_us,
+            crumble_detail: NamedTimes::new(&stages::DETAIL_NAMES, [0.0; stages::DETAIL_COUNT]),
             sweep_sources: self.sweep.sources,
             sweep_casts: self.sweep.work.casts,
             awake: self.pieces.iter().len(),

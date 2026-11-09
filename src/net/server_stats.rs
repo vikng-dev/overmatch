@@ -12,6 +12,12 @@
 //! - `ticks`, `tick_hz`: fixed ticks run in the period, and per wall second;
 //! - `tick_us`: nearest-rank `p50`, `p95`, `p99`, `max` and summed `total` wall micros,
 //!   null when no tick ran;
+//! - `frame_us`: First through Last, including fixed ticks and their collectors, Update and
+//!   PostUpdate; excludes runner pacing, startup and the stats-line collector. `frames` counts
+//!   these samples. `post_update_us` is nested in this span; both use the tick summary shape;
+//! - `linux_host`: Linux only, host steal ticks, process minor/major faults and CPU by main/compute
+//!   thread since the previous line. Every reading is an `Ok` value or an `Err` with a named
+//!   typed absence. The host's THP mode and CPU topology log once when this recorder starts;
 //! - `overruns`: ticks longer than the fixed timestep, `budget_us`;
 //! - `clients` (connected links), `tanks`, `projectiles`, `entities`, sampled at the line;
 //! - `cpu_pct`: the process's user + system CPU over the period, as % of one core;
@@ -28,7 +34,9 @@
 //! - `sweep_us`: the hull sweep before physics: its shape casts, cuts, holds and plastic
 //!   exchanges, and the departures it routes. The refit it triggers is `refit_us`.
 //! - `crumble_us`: the landing crumble after the deposits: each moving group's landing read,
-//!   judged by its kernel and routed.
+//!   judged by its kernel and routed. Per-tick `crumble_detail` carries the solve and split
+//!   wall unions inside this leaf. Different owners can overlap those spans; never add them
+//!   to the tick's phases or leaves.
 //! - `phases_us`: complete schedule/phase intervals after debiting the leaf brackets above.
 //!   ECS application, synchronous hooks and dispatch stay in their phase; `physics_step_us`
 //!   includes sleep. Add phases and leaves once; `physics_us` and `sleep_us` are nested detail.
@@ -60,6 +68,11 @@
 //! `elapsed_s`, `events_fired` and work counts; `sends` remain outside the fixed ticks.
 //! Bytes exclude IP/UDP headers and do not attest delivery.
 
+#[cfg(any(target_os = "linux", test))]
+mod linux;
+
+use bevy::app::MainScheduleOrder;
+use bevy::ecs::schedule::{ScheduleLabel, SingleThreadedExecutor};
 use std::time::{Duration, Instant};
 
 use avian3d::prelude::{PhysicsSchedule, PhysicsStepSystems, RigidBody, Sleeping};
@@ -109,6 +122,8 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         period.as_secs_f64()
     );
     arm_tick_clock(app);
+    #[cfg(target_os = "linux")]
+    linux::log_startup();
     app.insert_resource(ServerStats {
         period: Period::new(period, Instant::now()),
         ticks: TickWindow::default(),
@@ -118,6 +133,10 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
         stages: std::array::from_fn(|_| TickWindow::default()),
         phases: std::array::from_fn(|_| TickWindow::default()),
         send: TickWindow::default(),
+        frame: TickWindow::default(),
+        post_update: TickWindow::default(),
+        #[cfg(target_os = "linux")]
+        host: linux::HostProbe::new(),
         cpu_at_start: process_cpu(),
         throttle_at_start: read_throttle(),
         husk_strikes_at_start: 0,
@@ -157,8 +176,74 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
                 .before(LinkSystems::Send),
         );
     }
-    app.add_systems(Last, emit_line);
+    install_iteration_clock(app);
+    app.add_systems(IterationClock::Close, emit_line.after(close_iteration));
     Ok(())
+}
+
+/// Schedules outside the measured iteration contain only the recorder. The frame bracket
+/// covers First through Last, including fixed ticks, their collectors, Update and PostUpdate.
+/// Runner pacing/sleep, startup and the stats-line collector are outside it. PostUpdate is nested.
+#[derive(ScheduleLabel, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum IterationClock {
+    Open,
+    PostOpen,
+    PostClose,
+    Close,
+}
+
+fn install_iteration_clock(app: &mut App) {
+    app.add_systems(IterationClock::Open, |mut starts: ResMut<PhaseStarts>| {
+        starts.frame = Some(Instant::now());
+    })
+    .add_systems(
+        IterationClock::PostOpen,
+        |mut starts: ResMut<PhaseStarts>| {
+            starts.post_update = Some(Instant::now());
+        },
+    )
+    .add_systems(
+        IterationClock::PostClose,
+        |mut starts: ResMut<PhaseStarts>, mut stats: ResMut<ServerStats>| {
+            stats.post_update.push(
+                starts
+                    .post_update
+                    .take()
+                    .expect("PostUpdate opens before it closes")
+                    .elapsed()
+                    .as_secs_f64()
+                    * 1e6,
+            );
+        },
+    )
+    .add_systems(IterationClock::Close, close_iteration);
+    for label in [
+        IterationClock::Open,
+        IterationClock::PostOpen,
+        IterationClock::PostClose,
+        IterationClock::Close,
+    ] {
+        app.edit_schedule(label, |schedule| {
+            schedule.set_executor(SingleThreadedExecutor::new());
+        });
+    }
+    let mut order = app.world_mut().resource_mut::<MainScheduleOrder>();
+    order.insert_before(First, IterationClock::Open);
+    order.insert_before(PostUpdate, IterationClock::PostOpen);
+    order.insert_after(PostUpdate, IterationClock::PostClose);
+    order.insert_after(Last, IterationClock::Close);
+}
+
+fn close_iteration(mut starts: ResMut<PhaseStarts>, mut stats: ResMut<ServerStats>) {
+    stats.frame.push(
+        starts
+            .frame
+            .take()
+            .expect("First opens the iteration before Last closes it")
+            .elapsed()
+            .as_secs_f64()
+            * 1e6,
+    );
 }
 
 /// The lever's value as a period; `None` is off.
@@ -193,6 +278,10 @@ struct ServerStats {
     phases: [TickWindow; phases::COUNT],
     /// The period's outbound brackets, wall micros.
     send: TickWindow,
+    frame: TickWindow,
+    post_update: TickWindow,
+    #[cfg(target_os = "linux")]
+    host: linux::HostProbe,
     /// The process's CPU time when the current period opened.
     cpu_at_start: Option<Duration>,
     /// The cgroup's throttle counters when the current period opened.
@@ -211,6 +300,8 @@ struct PhaseStarts {
     physics_us: f64,
     sleep_us: f64,
     send: Option<Instant>,
+    frame: Option<Instant>,
+    post_update: Option<Instant>,
 }
 
 /// The wall-clock period gate.
@@ -240,7 +331,7 @@ impl Period {
     }
 }
 
-/// One period's fixed-tick wall micros.
+/// One period's wall-microsecond samples.
 #[derive(Default)]
 struct TickWindow(Vec<f64>);
 
@@ -299,6 +390,10 @@ struct Snapshot {
     stages: [Option<TickSummary>; COUNT],
     phases: [Option<TickSummary>; phases::COUNT],
     send: Option<TickSummary>,
+    frame: Option<TickSummary>,
+    post_update: Option<TickSummary>,
+    #[cfg(target_os = "linux")]
+    host: Value,
     debris: Value,
     clients: usize,
     tanks: usize,
@@ -343,6 +438,7 @@ fn stats_line(snapshot: &Snapshot) -> String {
         "ticks": count,
         "tick_hz": tenth(count as f64 / period_s),
         "tick_us": tick_us,
+        "frames": snapshot.frame.as_ref().map_or(0, |summary| summary.ticks),
         "overruns": ticks.map_or(0, |summary| summary.overruns),
         "budget_us": tenth(snapshot.budget_us),
         "clients": snapshot.clients,
@@ -355,6 +451,8 @@ fn stats_line(snapshot: &Snapshot) -> String {
         "sleep_us": percentiles(snapshot.sleep.as_ref()),
         "collector_us": percentiles(snapshot.collector.as_ref()),
         "send_us": percentiles(snapshot.send.as_ref()),
+        "frame_us": percentiles(snapshot.frame.as_ref()),
+        "post_update_us": percentiles(snapshot.post_update.as_ref()),
         "throttled_usec": snapshot.throttled.map(|t| t.throttled_usec),
         "nr_throttled": snapshot.throttled.map(|t| t.nr_throttled),
         "husk_strikes": snapshot.husk_strikes,
@@ -369,6 +467,10 @@ fn stats_line(snapshot: &Snapshot) -> String {
             .map(|(name, summary)| (name.to_owned(), percentiles(summary.as_ref())))
             .collect(),
     );
+    #[cfg(target_os = "linux")]
+    {
+        body["linux_host"] = snapshot.host.clone();
+    }
     body["debris"] = snapshot.debris.clone();
     body["construction"] = snapshot.construction.clone();
     if let Some(workload) = &snapshot.workload {
@@ -400,7 +502,7 @@ fn record_tick(
             census.contact_points() as u64,
         );
         let work = stages.take_counts();
-        let sample = census.sample(
+        let mut sample = census.sample(
             closed.us,
             starts.physics_us,
             starts.sleep_us,
@@ -408,6 +510,7 @@ fn record_tick(
             phases.times(),
             fixed.timestep().as_secs_f64(),
         );
+        sample.crumble_detail = stages.take_details();
         let rows = [
             census.record(sample, work),
             load.as_deref_mut()
@@ -520,7 +623,7 @@ struct Census<'w, 's> {
     battle: Query<'w, 's, &'static super::battle::BattleState>,
 }
 
-/// `Last`: once the period has passed, print its line and open the next one.
+/// After Last: once the period has passed, print its line and open the next one.
 fn emit_line(
     mut stats: ResMut<ServerStats>,
     fixed: Res<Time<Fixed>>,
@@ -614,6 +717,10 @@ fn emit_line(
         stages: std::array::from_fn(|i| stats.stages[i].drain(budget_us)),
         phases: std::array::from_fn(|i| stats.phases[i].drain(budget_us)),
         send: stats.send.drain(budget_us),
+        frame: stats.frame.drain(budget_us),
+        post_update: stats.post_update.drain(budget_us),
+        #[cfg(target_os = "linux")]
+        host: stats.host.sample(elapsed),
         debris: debris.json(),
         clients: census.clients.iter().count(),
         tanks: census.tanks.iter().count(),
@@ -710,6 +817,10 @@ mod tests {
             stages: std::array::from_fn(|_| TickWindow::default()),
             phases: std::array::from_fn(|_| TickWindow::default()),
             send: TickWindow::default(),
+            frame: TickWindow::default(),
+            post_update: TickWindow::default(),
+            #[cfg(target_os = "linux")]
+            host: linux::HostProbe::new(),
             cpu_at_start: None,
             throttle_at_start: None,
             husk_strikes_at_start: 0,
@@ -754,6 +865,39 @@ mod tests {
         assert!(world.resource::<PhaseStarts>().send.is_none());
         assert_eq!(world.resource::<ServerStats>().physics.0.len(), 1);
         assert_eq!(world.resource::<ServerStats>().send.0.len(), 1);
+    }
+
+    /// Operators need complete First/Last and PostUpdate intervals, including late systems.
+    /// Running the installed timer schedules witnesses their position in MainScheduleOrder.
+    #[test]
+    fn iteration_brackets_surround_first_last_and_post_update() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<PhaseStarts>()
+            .insert_resource(fixture_stats());
+        install_iteration_clock(&mut app);
+        app.add_systems(First, |starts: Res<PhaseStarts>| {
+            assert!(starts.frame.is_some());
+            assert!(starts.post_update.is_none());
+        })
+        .add_systems(PostUpdate, |starts: Res<PhaseStarts>| {
+            assert!(starts.frame.is_some());
+            assert!(starts.post_update.is_some());
+        })
+        .add_systems(Last, |starts: Res<PhaseStarts>, stats: Res<ServerStats>| {
+            assert!(starts.frame.is_some());
+            assert!(starts.post_update.is_none());
+            assert_eq!(stats.post_update.0.len(), stats.frame.0.len() + 1);
+        });
+        for count in 1..=2 {
+            app.update();
+            assert!(app.world().resource::<PhaseStarts>().frame.is_none());
+            assert_eq!(app.world().resource::<ServerStats>().frame.0.len(), count);
+            assert_eq!(
+                app.world().resource::<ServerStats>().post_update.0.len(),
+                count
+            );
+        }
     }
 
     /// The game's destruction census counts authority-owned chunks. Pose carriers repeat Piece
@@ -944,6 +1088,10 @@ mod tests {
                 max: 250.0,
                 overruns: 0,
             }),
+            frame: None,
+            post_update: None,
+            #[cfg(target_os = "linux")]
+            host: json!({}),
             sleep: None,
             collector: None,
             stages: std::array::from_fn(|_| None),
@@ -970,41 +1118,49 @@ mod tests {
             .expect("the grep anchor leads the line");
         assert!(!json.contains('\n'), "one line");
         let value: Value = serde_json::from_str(json).expect("the rest is one JSON object");
-        assert_eq!(
-            value,
-            json!({
-                "period_s": 10.0,
-                "ticks": 640,
-                "tick_hz": 64.0,
-                "tick_us": {"p50": 812.3, "p95": 1500.0, "p99": 2000.0, "total": 600000.0, "max": 16000.0},
-                "overruns": 1,
-                "budget_us": 15625.0,
-                "clients": 2,
-                "tanks": 6,
-                "projectiles": 3,
-                "entities": 1234,
-                "cpu_pct": 37.6,
-                "rss_mb": 200.0,
-                "sleep_us": null,
-                "collector_us": null,
-                "publish_us": null,
-                "contacts_us": null,
-                "intake_us": null,
-                "structure_us": null,
-                "refit_us": null,
-                "sweep_us": null,
-                "crumble_us": null,
-                "belt_contacts_us": null,
-                "phases_us": phases::NAMES.into_iter().map(|name| (name.to_owned(), Value::Null)).collect::<serde_json::Map<_, _>>(),
-                "physics_us": {"p50": 301.0, "p95": 455.0, "p99": 600.0, "total": 200000.0, "max": 900.0},
-                "send_us": {"p50": 120.0, "p95": 180.1, "p99": 200.0, "total": 80000.0, "max": 250.0},
-                "throttled_usec": 45000,
-                "nr_throttled": 3,
-                "husk_strikes": 4,
-                "debris": {"live": 35, "sleeping": 140},
-                "construction": {"cracked_joints": 0, "separated_joints": 0, "departed_chunks": 0},
-            })
-        );
+        #[allow(unused_mut, reason = "Linux adds its platform-only host fields")]
+        let mut expected = json!({
+            "period_s": 10.0,
+            "ticks": 640,
+            "tick_hz": 64.0,
+            "frames": 0,
+            "tick_us": {"p50": 812.3, "p95": 1500.0, "p99": 2000.0, "total": 600000.0, "max": 16000.0},
+            "overruns": 1,
+            "budget_us": 15625.0,
+            "clients": 2,
+            "tanks": 6,
+            "projectiles": 3,
+            "entities": 1234,
+            "cpu_pct": 37.6,
+            "rss_mb": 200.0,
+            "sleep_us": null,
+            "collector_us": null,
+            "frame_us": null,
+            "post_update_us": null,
+
+            "publish_us": null,
+            "contacts_us": null,
+            "intake_us": null,
+            "structure_us": null,
+            "refit_us": null,
+            "sweep_us": null,
+            "crumble_us": null,
+            "child_collider_writeback_us": null,
+            "belt_contacts_us": null,
+            "phases_us": phases::NAMES.into_iter().map(|name| (name.to_owned(), Value::Null)).collect::<serde_json::Map<_, _>>(),
+            "physics_us": {"p50": 301.0, "p95": 455.0, "p99": 600.0, "total": 200000.0, "max": 900.0},
+            "send_us": {"p50": 120.0, "p95": 180.1, "p99": 200.0, "total": 80000.0, "max": 250.0},
+            "throttled_usec": 45000,
+            "nr_throttled": 3,
+            "husk_strikes": 4,
+            "debris": {"live": 35, "sleeping": 140},
+            "construction": {"cracked_joints": 0, "separated_joints": 0, "departed_chunks": 0},
+        });
+        #[cfg(target_os = "linux")]
+        {
+            expected["linux_host"] = json!({});
+        }
+        assert_eq!(value, expected);
 
         let empty = Snapshot {
             ticks: None,

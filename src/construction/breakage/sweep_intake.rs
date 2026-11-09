@@ -341,6 +341,7 @@ pub(super) struct Intake<'w, 's> {
     commands: Commands<'w, 's>,
     children: Query<'w, 's, &'static Children>,
     chunk_entities: ChunkChildren<'w, 's>,
+    stages: Option<Res<'w, Stages>>,
 }
 
 /// Resolution: how many rounds past the first one tick's departures may join its sweep as
@@ -775,6 +776,7 @@ fn geometry(
         .flat_map(|source| source.roots.iter().copied())
         .collect::<BTreeSet<_>>();
     let mut gathered = bevy::utils::Parallel::<Vec<_>>::default();
+    let stages = p.stages.as_deref();
     // One touched owner per task: owners differ widely in size, and the population is not the
     // work set.
     p.constructions
@@ -788,13 +790,15 @@ fn geometry(
             let own: Vec<_> = (0..sources.len())
                 .filter(|&i| sources[i].roots.contains(&root))
                 .collect();
-            let resolved = owner_sequence(
-                breakage,
-                (root, pose),
-                (sources, &own),
-                (dt, tick),
-                recut.contains(&root),
-            );
+            let resolved = fracture::parts::record_factors(stages, || {
+                owner_sequence(
+                    breakage,
+                    (root, pose),
+                    (sources, &own),
+                    (dt, tick),
+                    recut.contains(&root),
+                )
+            });
             gathered.scope(|local| local.push(resolved));
         });
     let owners: Vec<_> = gathered.drain().collect();

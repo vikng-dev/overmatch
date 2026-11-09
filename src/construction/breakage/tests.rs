@@ -5972,3 +5972,38 @@ fn prepared_contact_mass_is_valid_at_insertion_and_invalidates_with_its_inputs()
         replaced.mass_properties(density)
     );
 }
+
+/// The game's scenery recorder distinguishes retained collider reassignment from fresh shapes;
+/// the server's split-work census must count each reused entity exactly once at application.
+#[test]
+fn collider_batch_counts_rehomed_entities_and_excludes_fresh_shapes() {
+    let mut world = World::new();
+    world.init_resource::<Stages>();
+    let former = world.spawn_empty().id();
+    let next = world.spawn_empty().id();
+    let retained = world
+        .spawn((Collider::cuboid(1.0, 1.0, 1.0), ChildOf(former)))
+        .id();
+    let pose = || {
+        (
+            Position(Vec3::ZERO),
+            Rotation(Quat::IDENTITY),
+            GlobalTransform::IDENTITY,
+        )
+    };
+    let mut batch = ColliderBatch::default();
+    batch.push(
+        ColliderSource::Fresh(Collider::cuboid(1.0, 1.0, 1.0)),
+        ChildOf(next),
+        pose(),
+    );
+    batch.push(ColliderSource::Rehome(retained), ChildOf(next), pose());
+    batch.apply(&mut world);
+    let counts = serde_json::to_value(world.resource::<Stages>().take_counts()).unwrap();
+    assert_eq!(counts["rehomed_colliders"], 1);
+    assert_eq!(world.get::<ChildOf>(retained).unwrap().parent(), next);
+    assert_eq!(
+        world.resource::<Stages>().take_counts().values[Work::RehomedColliders as usize],
+        0
+    );
+}

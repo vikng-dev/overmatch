@@ -70,6 +70,7 @@ pub fn sim_plugin(app: &mut App) {
     .add_systems(
         FixedUpdate,
         servo::drive_servos
+            .in_set(crate::cost::phases::FixedWork::Servos)
             .run_if(in_state(AppState::Playing))
             .after(GameplaySet),
     )

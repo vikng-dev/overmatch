@@ -180,7 +180,12 @@ pub(super) fn forget_body(removed: On<Remove, RigidBody>, mut history: ResMut<Co
 /// Avian's own child placement runs before its solver; the walk reads the completed interval.
 pub(super) fn place_children(
     mut poses: avian3d::collision::collider::collider_transform::ChildColliderPoses,
+    stages: Option<Res<crate::cost::stages::Stages>>,
 ) {
+    let _bracket = crate::cost::stages::Stages::start(
+        stages.as_deref(),
+        crate::cost::stages::Stage::ChildColliderWriteback,
+    );
     poses.update();
 }
 

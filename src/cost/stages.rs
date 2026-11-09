@@ -33,7 +33,13 @@ labelled!(Stage, NAMES, COUNT {
     Contacts = "contacts_us",
     Sweep = "sweep_us",
     Crumble = "crumble_us",
+    ChildColliderWriteback = "child_collider_writeback_us",
     BeltContacts = "belt_contacts_us",
+});
+
+labelled!(Detail, DETAIL_NAMES, DETAIL_COUNT {
+    CrumbleSolve = "solve_us",
+    CrumbleSplit = "split_us",
 });
 
 labelled!(
@@ -46,6 +52,15 @@ labelled!(
         Landings = "landings",
         LandingPasses = "landing_passes",
         LandingOps = "landing_ops",
+        FactorAttempts = "factor_attempts",
+        FactorNewCalls = "factor_new_calls",
+        FactorFailedOps = "factor_failed_ops",
+        FactorFailures = "factor_failures",
+        FactorOrderingBuilds = "factor_ordering_builds",
+        FactorAssemblies = "factor_assemblies",
+        KernelOfCalls = "kernel_of_calls",
+        KernelOfChunks = "kernel_of_chunks",
+        RehomedColliders = "rehomed_colliders",
         ContactPoints = "contact_points",
         RestingStaticPoints = "resting_static_points",
         RestingMovingPoints = "resting_moving_points",
@@ -71,6 +86,8 @@ pub(crate) struct Stages(
     Arc<[AtomicU64; COUNT]>,
     Arc<[AtomicU64; WORK_COUNT]>,
     Arc<Mutex<BeltReaders>>,
+    Arc<[AtomicU64; DETAIL_COUNT]>,
+    Arc<[Mutex<BeltReaders>; DETAIL_COUNT]>,
 );
 
 /// Belt reads from different tank owners can overlap; the phase consumer needs their wall union.
@@ -97,6 +114,34 @@ pub(crate) fn install_lifecycle_counts(app: &mut App) {
 }
 
 impl Stages {
+    /// Nested wall unions across owner tasks. Solve and split can overlap on different owners;
+    /// they are detail inside Crumble, never additive leaves debited by the phase clock.
+    pub(crate) fn detail(stages: Option<&Self>, detail: Detail) -> Option<DetailBracket> {
+        stages.map(|stages| {
+            let readers = stages.4.clone();
+            let mut active = readers[detail as usize]
+                .lock()
+                .expect("detail timing lock is not poisoned");
+            if active.readers == 0 {
+                active.since = Some(Instant::now());
+            }
+            active.readers += 1;
+            drop(active);
+            DetailBracket {
+                totals: stages.3.clone(),
+                readers,
+                detail,
+            }
+        })
+    }
+
+    pub(crate) fn take_details(&self) -> NamedTimes<DETAIL_COUNT> {
+        NamedTimes::new(
+            &DETAIL_NAMES,
+            std::array::from_fn(|i| self.3[i].swap(0, Ordering::Relaxed) as f64 / 1000.0),
+        )
+    }
+
     pub(crate) fn add(&self, work: Work, count: u64) {
         self.1[work as usize].fetch_add(count, Ordering::Relaxed);
     }
@@ -160,6 +205,34 @@ impl<const N: usize, T: Serialize> Serialize for NamedValues<N, T> {
     }
 }
 
+pub(crate) struct DetailBracket {
+    totals: Arc<[AtomicU64; DETAIL_COUNT]>,
+    readers: Arc<[Mutex<BeltReaders>; DETAIL_COUNT]>,
+    detail: Detail,
+}
+
+impl Drop for DetailBracket {
+    fn drop(&mut self) {
+        let index = self.detail as usize;
+        let mut active = self.readers[index]
+            .lock()
+            .expect("detail timing lock is not poisoned");
+        active.readers -= 1;
+        if active.readers == 0 {
+            let ns = active
+                .since
+                .take()
+                .expect("the first detail reader opens its interval")
+                .elapsed()
+                .as_nanos();
+            self.totals[index].fetch_add(
+                u64::try_from(ns).expect("a detail interval fits in u64 nanoseconds"),
+                Ordering::Relaxed,
+            );
+        }
+    }
+}
+
 pub(crate) struct Bracket {
     totals: Arc<[AtomicU64; COUNT]>,
     stage: Stage,
@@ -208,6 +281,24 @@ mod tests {
         assert_eq!(stages.take_us(), [0.0; COUNT]);
     }
 
+    /// Nested crumble details can overlap between owners, but must never debit additive phases.
+    /// The last reader publishes the union once; a drain starts the next tick empty.
+    #[test]
+    fn crumble_details_do_not_add_another_leaf() {
+        let stages = Stages::default();
+        let first = Stages::detail(Some(&stages), Detail::CrumbleSolve);
+        let second = Stages::detail(Some(&stages), Detail::CrumbleSolve);
+        let split = Stages::detail(Some(&stages), Detail::CrumbleSplit);
+        drop(first);
+        assert_eq!(stages.take_details().values, [0.0; DETAIL_COUNT]);
+        drop(second);
+        drop(split);
+        assert!(stages.take_details().values.iter().all(|&us| us > 0.0));
+        assert_eq!(stages.total_ns(), 0);
+        assert_eq!(stages.take_details().values, [0.0; DETAIL_COUNT]);
+        assert!(Stages::detail(None, Detail::CrumbleSolve).is_none());
+    }
+
     /// Wave reports must distinguish allocation from collider reuse and count final removal.
     #[test]
     fn collider_lifecycle_counts_allocation_but_not_rehoming() {
@@ -254,7 +345,10 @@ mod tests {
         let stages = Stages::default();
         stages.0[Stage::Intake as usize].store(2000, Ordering::Relaxed); // Fixture: ns.
         stages.0[Stage::Refit as usize].store(5000, Ordering::Relaxed);
-        assert_eq!(stages.take_us(), [2.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let mut expected = [0.0; COUNT];
+        expected[Stage::Intake as usize] = 2.0;
+        expected[Stage::Refit as usize] = 5.0;
+        assert_eq!(stages.take_us(), expected);
         assert_eq!(stages.take_us(), [0.0; COUNT]);
         assert!(Stages::start(None, Stage::Intake).is_none());
         let started = Instant::now();

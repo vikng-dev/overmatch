@@ -18,23 +18,52 @@ enum Phase {
     FixedFirst,
     FixedPre,
     FixedUpdate,
+    BotBrain,
+    FixedCommands,
+    Driving,
+    FixedGameplay,
+    Servos,
+    FixedTail,
     SweepEcs,
     PhysicsPrepare,
+    PhysicsMass,
     PhysicsStep,
     PostPhysics,
+    ColliderPoses,
+    ProjectileMarch,
+    DamageConsequences,
+    RecordedConsequences,
     ConstructionEcs,
     PublicationEcs,
     FixedLast,
 }
 
-pub(crate) const NAMES: [&str; 10] = [
+/// Existing FixedUpdate producers, named so timer boundaries can include their deferred effects.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum FixedWork {
+    BotBrain,
+    Servos,
+}
+
+pub(crate) const NAMES: [&str; 21] = [
     "fixed_first_us",
     "fixed_pre_us",
     "fixed_update_us",
+    "bot_brain_us",
+    "fixed_commands_us",
+    "driving_us",
+    "fixed_gameplay_us",
+    "servos_us",
+    "fixed_tail_us",
     "sweep_ecs_us",
     "physics_prepare_us",
+    "physics_mass_us",
     "physics_step_us",
     "post_physics_us",
+    "collider_poses_us",
+    "projectile_march_us",
+    "damage_consequences_us",
+    "recorded_consequences_us",
     "construction_ecs_us",
     "publication_ecs_us",
     "fixed_last_us",
@@ -104,6 +133,25 @@ pub(crate) fn install(app: &mut App) {
     before_schedule(app, FixedUpdate, Phase::FixedUpdate);
     before_schedule(app, FixedPostUpdate, Phase::SweepEcs);
     before_schedule(app, FixedLast, Phase::FixedLast);
+    app.add_systems(
+        FixedUpdate,
+        (
+            boundary(Phase::BotBrain).before(FixedWork::BotBrain),
+            boundary(Phase::FixedCommands)
+                .after(FixedWork::BotBrain)
+                .before(crate::command::ParseCommands)
+                .before(SimPhase::DrivingForces),
+            boundary(Phase::Driving).before(SimPhase::DrivingForces),
+            boundary(Phase::FixedGameplay)
+                .after(SimPhase::DrivingForces)
+                .before(SimPhase::WeaponFire),
+            boundary(Phase::Servos)
+                .after(crate::state::GameplaySet)
+                .before(FixedWork::Servos),
+            boundary(Phase::FixedTail).after(FixedWork::Servos),
+        )
+            .chain_ignore_deferred(),
+    );
     // These are the simulation's existing ordered producer/consumer barriers. `after` includes
     // the producer's deferred buffers, so its hooks stay on the producer's side of the clock.
     app.add_systems(
@@ -112,12 +160,27 @@ pub(crate) fn install(app: &mut App) {
             boundary(Phase::PhysicsPrepare)
                 .after(SweepSet)
                 .before(PhysicsSystems::Prepare),
+            boundary(Phase::PhysicsMass)
+                .after(avian3d::physics_transform::PhysicsTransformSystems::TransformToPosition)
+                .before(avian3d::dynamics::rigid_body::mass_properties::MassPropertySystems::UpdateColliderMassProperties),
             boundary(Phase::PhysicsStep)
                 .after(PhysicsSystems::Prepare)
                 .before(PhysicsSystems::StepSimulation),
             boundary(Phase::PostPhysics)
                 .after(PhysicsSystems::StepSimulation)
                 .before(PhysicsSystems::Writeback),
+            boundary(Phase::ColliderPoses)
+                .after(PhysicsSystems::Writeback)
+                .before(SimPhase::ColliderPoses),
+            boundary(Phase::ProjectileMarch)
+                .after(SimPhase::ColliderPoses)
+                .before(SimPhase::ProjectileMarch),
+            boundary(Phase::DamageConsequences)
+                .after(SimPhase::ProjectileMarch)
+                .before(crate::damage::DamageConsequences),
+            boundary(Phase::RecordedConsequences)
+                .after(crate::damage::DamageConsequences)
+                .before(SimPhase::RecordedConsequences),
             boundary(Phase::ConstructionEcs)
                 .after(SimPhase::RecordedConsequences)
                 .before(LawSet),
@@ -172,12 +235,37 @@ mod tests {
                 PhysicsSystems::Prepare,
                 PhysicsSystems::StepSimulation,
                 PhysicsSystems::Writeback,
+                SimPhase::ColliderPoses,
+                SimPhase::ProjectileMarch,
+                crate::damage::DamageConsequences,
                 SimPhase::RecordedConsequences,
                 LawSet,
                 SplitSet,
                 SimPhase::Publish,
             )
                 .chain(),
+        );
+        app.configure_sets(FixedPostUpdate, (
+            avian3d::physics_transform::PhysicsTransformSystems::TransformToPosition,
+            avian3d::dynamics::rigid_body::mass_properties::MassPropertySystems::UpdateColliderMassProperties,
+        ).chain().in_set(PhysicsSystems::Prepare));
+        app.configure_sets(
+            FixedUpdate,
+            (
+                SimPhase::DrivingForces,
+                SimPhase::WeaponFire,
+                SimPhase::Recoil,
+            )
+                .chain()
+                .in_set(crate::state::GameplaySet),
+        );
+        app.configure_sets(
+            FixedUpdate,
+            FixedWork::BotBrain.before(crate::state::GameplaySet),
+        );
+        app.configure_sets(
+            FixedUpdate,
+            FixedWork::Servos.after(crate::state::GameplaySet),
         );
         arm_tick_clock(&mut app);
         if instrumented {
@@ -245,6 +333,44 @@ mod tests {
             assert!(witness.iter().all(|(expected, actual)| expected == actual));
             witness.clear();
         }
+    }
+
+    /// The recorder's new intervals must include the producer's deferred commands, hooks and
+    /// observers, for readers fitting tick work to its named phase. Empty-set ordering cannot
+    /// witness those boundaries: every measured producer below leaves all three effects.
+    #[test]
+    fn tick_work_boundaries_keep_producer_effects_in_their_named_interval() {
+        let mut app = fixture_app(true);
+        app.init_resource::<Witness>().add_observer(
+            |probe: On<Probe>, phases: Res<Phases>, mut w: ResMut<Witness>| {
+                w.0.push((probe.0, phases.active.unwrap().0));
+            },
+        );
+        app.add_systems(
+            FixedUpdate,
+            (
+                commands_in(Phase::BotBrain).in_set(FixedWork::BotBrain),
+                commands_in(Phase::Driving).in_set(SimPhase::DrivingForces),
+                commands_in(Phase::Servos).in_set(FixedWork::Servos),
+            ),
+        );
+        app.add_systems(FixedPostUpdate, (
+            commands_in(Phase::PhysicsPrepare).in_set(avian3d::physics_transform::PhysicsTransformSystems::TransformToPosition),
+            commands_in(Phase::PhysicsMass).in_set(avian3d::dynamics::rigid_body::mass_properties::MassPropertySystems::UpdateColliderMassProperties),
+            commands_in(Phase::PostPhysics).in_set(PhysicsSystems::Writeback),
+            commands_in(Phase::ColliderPoses).in_set(SimPhase::ColliderPoses),
+            commands_in(Phase::ProjectileMarch).in_set(SimPhase::ProjectileMarch),
+            commands_in(Phase::DamageConsequences).in_set(crate::damage::DamageConsequences),
+            commands_in(Phase::RecordedConsequences).in_set(SimPhase::RecordedConsequences),
+        ));
+        app.world_mut().run_schedule(FixedMain);
+        let w = &app.world().resource::<Witness>().0;
+        // Fixture: ten producers, each with one command, component hook and observer.
+        assert_eq!(w.len(), 10 * 3);
+        assert!(
+            w.iter().all(|(expected, actual)| expected == actual),
+            "{w:?}"
+        );
     }
 
     /// Local instrument observation, not a game-performance threshold. This isolates the added

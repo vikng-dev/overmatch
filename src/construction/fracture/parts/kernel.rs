@@ -58,6 +58,11 @@ pub(crate) struct Hold {
 impl Kernel {
     /// The chunk graph of `chunks`, standing chunks of one owner, under `state`.
     pub(crate) fn of(structure: &Structure, state: &State, chunks: &[usize]) -> Self {
+        super::count_factor(crate::cost::stages::Work::KernelOfCalls, 1);
+        super::count_factor(
+            crate::cost::stages::Work::KernelOfChunks,
+            chunks.len() as u64,
+        );
         let node: std::collections::HashMap<_, _> =
             chunks.iter().enumerate().map(|(i, &c)| (c, i)).collect();
         let mut nodes: Vec<Node> = chunks

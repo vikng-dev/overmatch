@@ -1943,3 +1943,79 @@ fn a_design_kernel_is_current_only_on_its_own_intact_chunks() {
     parted.separated[0] = true;
     assert!(!design.current(&structure, &parted, &[0, 1]));
 }
+
+/// The game's scenery recorder needs every factor entry, including failed attempts, while sparse
+/// ordering is counted only when rebuilt. A singular second pivot exercises partial numeric work.
+#[test]
+fn factor_counts_include_failure_and_distinguish_reused_ordering() {
+    use crate::cost::stages::Stages;
+    // Fixture: one grounded cube, then stiffness only along X, so the Y pivot is a mechanism.
+    let structure = structure(
+        vec![cube(Vec3::ZERO, 1.0, false)],
+        vec![0],
+        vec![joint(
+            0,
+            Side::Ground,
+            Vec3::ZERO,
+            Vec3::X,
+            1.0,
+            Bond::Bonded(seam(1e9, 1e9)),
+        )],
+    );
+    let graph = Graph::of(&structure, &State::new(&structure), &BTreeMap::new());
+    let stages = Stages::default();
+    record_factors(Some(&stages), || {
+        Factor::new(&graph.nodes, &graph.edges).unwrap();
+        let mut factor = Factor::default();
+        let mut pattern = FactorPattern::default();
+        pattern
+            .refactor(&mut factor, &graph.nodes, &graph.edges)
+            .unwrap();
+        pattern
+            .refactor(&mut factor, &graph.nodes, &graph.edges)
+            .unwrap();
+        let mut edge = graph.edges[0].clone();
+        edge.shear_stiffness = 0.0;
+        Factor::new(&graph.nodes, &[edge]).unwrap_err();
+    });
+    // Outside the owner scope, factors do not contribute to a recorder from an earlier task.
+    Factor::new(&graph.nodes, &graph.edges).unwrap();
+    let counts = serde_json::to_value(stages.take_counts()).unwrap();
+    assert_eq!(counts["factor_attempts"], 4);
+    assert_eq!(counts["factor_new_calls"], 2);
+    assert_eq!(counts["factor_failures"], 1);
+    assert_eq!(counts["factor_ordering_builds"], 3);
+    assert_eq!(counts["factor_assemblies"], 4);
+    // DERIVED: first 6-row column's factor-operation count, 5 trailing row updates (4 operations),
+    // then its 5-entry back-substitution and division at the failed second pivot.
+    assert_eq!(counts["factor_failed_ops"], 6 + 5 * 4 + 5 * 2 + 1);
+}
+
+/// The game's scenery recorder counts kernel input chunks once, while retries count as fresh
+/// factors. The input count is independent of the factor's coordinate count.
+#[test]
+fn kernel_counts_name_the_input_population_once() {
+    use crate::cost::stages::Stages;
+    let structure = structure(
+        vec![cube(Vec3::ZERO, 1.0, true), cube(Vec3::X, 1.0, false)],
+        vec![0, 1],
+        vec![joint(
+            0,
+            Side::Chunk(1),
+            Vec3::X * 0.5,
+            Vec3::X,
+            1.0,
+            Bond::Bonded(seam(1e9, 1e9)),
+        )],
+    );
+    let stages = Stages::default();
+    record_factors(Some(&stages), || {
+        Kernel::of(&structure, &State::new(&structure), &[0, 1]);
+    });
+    let counts = serde_json::to_value(stages.take_counts()).unwrap();
+    assert_eq!(counts["kernel_of_calls"], 1);
+    assert_eq!(counts["kernel_of_chunks"], 2);
+    assert_eq!(counts["factor_new_calls"], 1);
+    assert_eq!(counts["factor_attempts"], 1);
+    assert_eq!(counts["factor_failures"], 0);
+}

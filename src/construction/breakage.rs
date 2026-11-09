@@ -1939,22 +1939,24 @@ fn apply_deposits(mut p: DepositParam) {
                         // A construction without children has no chunk collider to rehome.
                         None => reusable_colliders(children.get(root).ok(), chunk_entities),
                     };
-                    let effect = evaluate_owner(
-                        root,
-                        breakage.bypass_change_detection(),
-                        piece.map(|piece| piece.chunks.as_slice()),
-                        construction,
-                        OwnerInputs {
-                            pool: ComputeTaskPool::get(),
-                            reusable: &reusable,
-                            taken,
-                            pressing: presses.get(&root).map_or(&[][..], Vec::as_slice),
-                            resting: resting.get(&root).map_or(&[][..], Vec::as_slice),
-                            motion,
-                            tick,
-                            step,
-                        },
-                    );
+                    let effect = fracture::parts::record_factors(stages, || {
+                        evaluate_owner(
+                            root,
+                            breakage.bypass_change_detection(),
+                            piece.map(|piece| piece.chunks.as_slice()),
+                            construction,
+                            OwnerInputs {
+                                pool: ComputeTaskPool::get(),
+                                reusable: &reusable,
+                                taken,
+                                pressing: presses.get(&root).map_or(&[][..], Vec::as_slice),
+                                resting: resting.get(&root).map_or(&[][..], Vec::as_slice),
+                                motion,
+                                tick,
+                                step,
+                            },
+                        )
+                    });
                     if let Some(stages) = stages {
                         stages.add(Work::AssessedOwners, 1);
                         stages.add(Work::StructureSolveColumns, effect.solves as u64);
@@ -2788,6 +2790,9 @@ where
     }
 
     fn apply(self, world: &mut World) {
+        if let Some(stages) = world.get_resource::<Stages>() {
+            stages.add(Work::RehomedColliders, self.retained.len() as u64);
+        }
         drop(world.spawn_batch(self.fresh));
         world.insert_batch(self.retained);
     }

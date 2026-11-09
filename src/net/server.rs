@@ -148,7 +148,9 @@ pub fn run() {
         FixedUpdate,
         (
             // A bot authors its command as a device does, before the parse and the Battle's hold.
-            drive_bot.before(crate::command::ParseCommands),
+            drive_bot
+                .in_set(crate::cost::phases::FixedWork::BotBrain)
+                .before(crate::command::ParseCommands),
             player_respawn_system(),
         ),
     );
