@@ -167,7 +167,7 @@ pub(super) fn install(app: &mut App) -> Result<(), LeverError> {
             open_physics.in_set(PhysicsStepSystems::First),
             close_physics.in_set(PhysicsStepSystems::Last),
             open_sleep
-                .after(PhysicsStepSystems::Solver)
+                .after(super::contact_census::snapshot)
                 .before(PhysicsStepSystems::Sleeping),
             close_sleep
                 .after(PhysicsStepSystems::Sleeping)

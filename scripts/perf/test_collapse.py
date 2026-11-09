@@ -488,26 +488,39 @@ class RamTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "rebuild the instrumented server"):
             collapse.match_tick_summary([dict(loadtest=dict(sequence=1))], recipe)
 
-    def test_piece_census_keeps_each_pieces_latest_record_and_reads_each_island_that_slept(self):
-        # Fixture: piece 1 is re-sent asleep on the next line; island 7 is two pieces, with
-        # piece 2 the last to land and piece 1 the last to calm. Dropping a re-send, or reading
-        # the landing and the calm from one piece, breaks the row.
-        def piece(piece, first_loaded, last_fast, sleep=None, island=None):
-            return dict(piece=piece, born=1, first_ground=1, first_loaded=first_loaded, last_loaded=first_loaded, last_fast=last_fast,
-                        sleep=sleep, island=island, linear_at_sleep=0.01 * piece, angular_at_sleep=0.02,
-                        sleeps=int(sleep is not None), awake_ticks=9, gone=None)
-        batches = [dict(pieces=dict(thresholds=None, records=[piece(1, 5, 7)], episodes=[], lifecycle_outside_tick_us=0.0)),
+    def test_piece_census_keeps_episodes_and_stillness_without_ground_load(self):
+        # Fixture: two pieces share a sleep cohort; one never bore ground load.
+        # The island waits from its last moving member, and all pieces reach the summary.
+        def piece(piece, loaded, impact, moved, fast, sleep=None, island=None):
+            return dict(piece=piece, born=1, first_loaded=loaded, last_impact=impact,
+                        last_moved=moved, last_fast=fast, sleep=sleep, island=island,
+                        linear_at_sleep=0.01 * piece, angular_at_sleep=0.02)
+        early = piece(1, 5, 10, 12, 7)
+        first = piece(1, 5, 80, 100, 90, 122, 7)
+        second = piece(2, None, None, 110, None, 122, 7)
+        batches = [dict(pieces=dict(thresholds=None, records=[early], episodes=[],
+                                    lifecycle_outside_tick_us=0.0)),
                    dict(pieces=dict(thresholds=dict(linear=0.15, angular=0.15, time_to_sleep_s=0.5),
-                                    records=[piece(1, 5, 90, 122, 7), piece(2, 60, 80, 122, 7), piece(3, None, 8)],
-                                    episodes=[dict(piece(1, 5, 90, 122, 7), last_loaded=100), piece(2, 60, 80, 122, 7)], lifecycle_outside_tick_us=0.0))]
+                                    records=[first, second], episodes=[first, second],
+                                    lifecycle_outside_tick_us=0.0))]
         census = collapse.piece_census(batches, 0.5)
-        self.assertEqual([r["piece"] for r in census["records"]], [1, 2, 3])
+        self.assertEqual([r["piece"] for r in census["records"]], [1, 2])
         self.assertEqual(census["records"][0]["last_fast"], 90)
-        self.assertEqual(census["thresholds"]["time_to_sleep_s"], 0.5)
+        self.assertEqual([r["still_s"] for r in census["episodes"]], [11.0, 6.0])
         self.assertEqual(census["islands_at_sleep"], [dict(
-            sleep=122, island=7, pieces=2, never_landed=0, last_landing=100, landing_to_sleep_s=11.0,
-            last_calm=90, landing_to_calm_s=-5.0, last_to_calm=1, peak_linear_at_sleep=0.02,
-            peak_angular_at_sleep=0.02)])
+            sleep=122, island=7, pieces=2, never_ground_loaded=1,
+            never_impacted=1, last_impact=80, impact_to_sleep_s=21.0,
+            last_moved=110, still_s=6.0, last_fast=90, below_sleep_speed_s=16.0,
+            last_to_slow=1, peak_linear_at_sleep=0.02, peak_angular_at_sleep=0.02)])
+        # An entire cohort can sleep without ever carrying ground load, impacting or exceeding
+        # sleep speed. It still has a pose-based stillness interval and remains in the summary.
+        quiet = piece(3, None, None, 100, None, 122, 8)
+        row = collapse.rest_summary([quiet], 0.5)[0]
+        self.assertEqual((row["pieces"], row["never_ground_loaded"], row["never_impacted"]), (1, 1, 1))
+        self.assertEqual(row["still_s"], 11.0)
+        self.assertIsNone(row["impact_to_sleep_s"])
+        self.assertIsNone(row["below_sleep_speed_s"])
+
 
     def test_ram_percentile_and_additive_split_use_only_contact_ticks(self):
         recipe, ram = self.fixture()

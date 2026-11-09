@@ -10,7 +10,8 @@
 
 use avian3d::dynamics::solver::islands::BodyIslandNode;
 use avian3d::prelude::{
-    AngularVelocity, ContactGraph, ContactPair, LinearVelocity, PhysicsLengthUnit, RigidBody,
+    AngularVelocity, Collider, ColliderTransform, ContactGraph, ContactPair, LinearVelocity,
+    PhysicsLengthUnit, Position, RigidBody, RigidBodyColliders, Rotation, SimpleCollider,
     SleepThreshold, Sleeping, TimeToSleep,
 };
 use bevy::ecs::entity::EntityHashMap;
@@ -37,6 +38,12 @@ const SEAM_IMPULSE_NS: f32 = 1.0e-3;
 /// Resolution: the separation bands the study asked for, metres.
 const SEAM_NEAR_M: f32 = 2.0e-3;
 const SEAM_FAR_M: f32 = 5.0e-3;
+
+/// Resolution: pose displacement below 1 cm is ignored by the stillness instrument, so solver
+/// jitter does not look like visible motion. DERIVED: the perception study's nearest case,
+/// 20 m through a 25-degree optic at 1440p, resolves 2.7 px as 1.7 cm; 1 cm is conservative.
+/// Translation plus angle times the body's bounding radius bounds motion at its own extent.
+const VISIBLE_MOTION_M: f32 = 0.01;
 
 /// One kind's touching pairs: their points, distinct body pairs, and the pairs doing no work.
 #[derive(Clone, Copy, Default, Serialize)]
@@ -223,12 +230,16 @@ struct PieceRecord {
     /// First tick touching ground or a standing structure, and first with normal impulse.
     first_ground: Option<u32>,
     first_loaded: Option<u32>,
-    /// Latest transition from no support contact to touching/loaded support in this awake episode.
-    last_ground: Option<u32>,
-    last_loaded: Option<u32>,
-    episode_born: u32,
+    /// Last solver contact closing faster than this piece's linear sleep threshold in this
+    /// awake episode, against any body (pieces included), as in crumble's landing test.
+    last_impact: Option<u32>,
+    /// Last snapshot exceeding the visibility tolerance from the held pose; retained across wakes.
+    last_moved: u32,
+    /// Bounding radius about the body origin, from its colliders in body space at first snapshot.
+    radius_m: Option<f32>,
     #[serde(skip)]
-    support: u8,
+    anchor: Option<(Vec3, Quat)>,
+    episode_born: u32,
     #[serde(skip)]
     motion: (f32, f32),
     /// Last tick its speed was not under the sleep thresholds (Avian's own comparison).
@@ -254,6 +265,7 @@ struct Thresholds {
     linear: f32,
     angular: f32,
     time_to_sleep_s: f32,
+    visible_motion_m: f32,
 }
 
 /// Every piece's record so far. Stats lines drain what changed; the reader keeps each piece's
@@ -304,6 +316,15 @@ pub(super) struct StepSnapshot {
 }
 
 impl PieceRecord {
+    fn observe_pose(&mut self, position: Vec3, rotation: Quat, radius: f32, tick: u32) {
+        if self.anchor.is_none_or(|(at, facing)| {
+            at.distance(position) + facing.angle_between(rotation) * radius > VISIBLE_MOTION_M
+        }) {
+            self.anchor = Some((position, rotation));
+            self.last_moved = tick;
+        }
+    }
+
     fn new(entity: Entity, piece: Option<&Piece>, tick: u32) -> Self {
         Self {
             piece: entity.to_bits(),
@@ -312,10 +333,11 @@ impl PieceRecord {
             born: tick,
             first_ground: None,
             first_loaded: None,
-            last_ground: None,
-            last_loaded: None,
+            last_impact: None,
+            last_moved: tick,
+            radius_m: None,
+            anchor: None,
             episode_born: tick,
-            support: 0,
             motion: (0.0, 0.0),
             last_fast: None,
             sleep: None,
@@ -366,7 +388,7 @@ fn activate(
     }
 }
 
-fn snapshot(
+pub(super) fn snapshot(
     mut census: ContactCensus,
     capture: Res<Capture>,
     mut snapshot: ResMut<StepSnapshot>,
@@ -520,8 +542,6 @@ const NON_PIECE: u8 = 2;
 /// It touches a piece that has reached ground, in each reading of [`Airborne`].
 const BLOCKED_TOUCH: u8 = 4;
 const BLOCKED_LOADED: u8 = 8;
-const GROUND: u8 = 16;
-const LOADED: u8 = 32;
 
 type PieceFields = (
     Entity,
@@ -545,6 +565,16 @@ pub(super) struct ContactCensus<'w, 's> {
     belts: Query<'w, 's, (), With<BeltSegment>>,
     pieces: Query<'w, 's, PieceFields, With<DebrisPiece>>,
     piece_marks: Query<'w, 's, (), With<DebrisPiece>>,
+    poses: Query<
+        'w,
+        's,
+        (
+            &'static Position,
+            &'static Rotation,
+            &'static RigidBodyColliders,
+        ),
+    >,
+    colliders: Query<'w, 's, (&'static Collider, &'static ColliderTransform)>,
     length_unit: Res<'w, PhysicsLengthUnit>,
     time_to_sleep: Res<'w, TimeToSleep>,
     records: ResMut<'w, PieceRecords>,
@@ -573,7 +603,7 @@ impl ContactCensus<'_, '_> {
         } else if self.bodies.get(body).is_ok_and(RigidBody::is_static) {
             Side::Ground
         } else {
-            Side::Other // Includes a body that left the world after the solve.
+            Side::Other // An unmarked dynamic or kinematic body.
         }
     }
 
@@ -638,6 +668,7 @@ impl ContactCensus<'_, '_> {
                 linear: rest.linear * unit,
                 angular: rest.angular,
                 time_to_sleep_s: time_to_sleep,
+                visible_motion_m: VISIBLE_MOTION_M,
             });
             let record = records
                 .live
@@ -645,14 +676,33 @@ impl ContactCensus<'_, '_> {
                 .or_insert_with(|| PieceRecord::new(entity, piece, tick));
             if !sleeping && !record.awake {
                 record.episode_born = tick;
-                record.last_ground = None;
-                record.last_loaded = None;
-                record.support = 0;
+                record.last_impact = None;
                 record.last_fast = None;
                 record.sleep = None;
                 record.island = None;
                 record.linear_at_sleep = None;
                 record.angular_at_sleep = None;
+            }
+            if !sleeping {
+                let (position, rotation, colliders) = self
+                    .poses
+                    .get(entity)
+                    .expect("a simulated piece has a physics pose and collider membership");
+                let radius = *record.radius_m.get_or_insert_with(|| {
+                    assert!(!colliders.is_empty(), "a simulated piece has colliders");
+                    colliders
+                        .into_iter()
+                        .map(|collider| {
+                            let (shape, pose) = self
+                                .colliders
+                                .get(collider)
+                                .expect("a body's collider membership names live colliders");
+                            let bounds = shape.aabb(pose.translation, pose.rotation);
+                            bounds.min.abs().max(bounds.max.abs()).length()
+                        })
+                        .fold(0.0, f32::max)
+                });
+                record.observe_pose(position.0, rotation.0, radius, tick);
             }
             let (linear, angular) = (velocity.length(), spin.length());
             record.motion = (linear, angular);
@@ -669,7 +719,7 @@ impl ContactCensus<'_, '_> {
         }
     }
 
-    /// This tick's census, updating every piece's record. `sweep` is this tick's account.
+    /// This tick's solver census, updating every piece's record before sleeping.
     fn tick(&mut self) -> ContactTick {
         let started = std::time::Instant::now();
         let tick = self.records.tick;
@@ -684,6 +734,20 @@ impl ContactCensus<'_, '_> {
                 point.reference_collider.max(other),
             );
             *self.normal_transfers.entry(key).or_default() += point.impulse.dot(point.normal);
+            // The two endpoints can have different rest speeds; each owns its impact test.
+            for entity in [point.reference, point.other] {
+                if let Some(record) = self.records.live.get_mut(&entity) {
+                    let rest = self
+                        .pieces
+                        .get(entity)
+                        .expect("a live recorded piece has motion and a rest threshold")
+                        .3;
+                    if point.closing_speed > rest.linear * self.length_unit.0 {
+                        record.last_impact = Some(tick);
+                        record.changed = true;
+                    }
+                }
+            }
         }
 
         // Each batch owns a disjoint pair range and its reusable buffers.
@@ -731,19 +795,12 @@ impl ContactCensus<'_, '_> {
                 *flag |= NON_PIECE;
             }
             if let Reach::Ground(loaded) = touch.reach {
-                *flag |= GROUND | if loaded { LOADED } else { 0 };
                 let record = records
                     .live
                     .get_mut(&touch.piece)
                     .expect("every piece was recorded before its pairs");
-                if record.support & 1 == 0 {
-                    record.last_ground = Some(tick);
-                }
                 record.first_ground.get_or_insert(tick);
                 if loaded {
-                    if record.support & 2 == 0 {
-                        record.last_loaded = Some(tick);
-                    }
                     record.first_loaded.get_or_insert(tick);
                 }
                 record.changed = true;
@@ -814,14 +871,6 @@ impl ContactCensus<'_, '_> {
             })
             .count() as u32;
 
-        for (entity, record) in &mut records.live {
-            // Sleeping contacts are outside the solver; their last support persists until wake.
-            if record.awake {
-                let flags = flags.get(entity).copied().unwrap_or(0);
-                record.support =
-                    u8::from(flags & GROUND != 0) | (u8::from(flags & LOADED != 0) << 1);
-            }
-        }
         *self.workers = workers;
         row.census_us = started.elapsed().as_secs_f64() * 1.0e6;
         row
@@ -1190,7 +1239,7 @@ mod tests {
         }
     }
 
-    /// A wake cannot mutate a completed sleep cohort. Last landing belongs to the new awake
+    /// A wake cannot mutate a completed sleep cohort. Impact history belongs to the new awake
     /// episode while the first contact remains the piece's first-fall evidence.
     #[test]
     fn waking_and_resleeping_preserves_completed_episodes() {
@@ -1216,6 +1265,117 @@ mod tests {
         assert_eq!(records.episodes[1].sleep, Some(3));
         assert_eq!(records.episodes[1].first_ground, first.first_ground);
     }
+    /// Stillness readers ignore bounded jitter, accumulate slow creep against the held anchor,
+    /// and count a rotation at each piece's own extent, including quaternion sign equivalence.
+    #[test]
+    fn visible_motion_uses_a_held_pose_and_the_piece_extent() {
+        let mut record = PieceRecord::new(Entity::PLACEHOLDER, None, 0);
+        let tolerance = VISIBLE_MOTION_M;
+        let radius = 2.0; // Fixture: bounding radius about the body's origin, metres.
+        record.observe_pose(Vec3::ZERO, Quat::IDENTITY, radius, 1);
+        for (tick, fraction) in [(2, 0.4), (3, -0.4), (4, 0.9)] {
+            record.observe_pose(Vec3::X * tolerance * fraction, Quat::IDENTITY, radius, tick);
+            assert_eq!(
+                record.last_moved, 1,
+                "sub-tolerance jitter retains the anchor"
+            );
+        }
+        let at = Vec3::X * tolerance * 1.1;
+        record.observe_pose(at, Quat::IDENTITY, radius, 5);
+        assert_eq!(
+            record.last_moved, 5,
+            "slow creep crosses the held anchor's tolerance"
+        );
+        record.observe_pose(at, -Quat::IDENTITY, radius, 6);
+        assert_eq!(
+            record.last_moved, 5,
+            "quaternion signs describe the same pose"
+        );
+        let rotation = Quat::from_rotation_y(2.0 * tolerance / radius);
+        record.observe_pose(at, rotation, radius, 7);
+        assert_eq!(record.last_moved, 7, "rotation moves the piece's extent");
+        let mut smaller = PieceRecord::new(Entity::PLACEHOLDER, None, 0);
+        smaller.observe_pose(at, Quat::IDENTITY, radius / 4.0, 1);
+        smaller.observe_pose(at, rotation, radius / 4.0, 2);
+        assert_eq!(
+            smaller.last_moved, 1,
+            "the same rotation moves a small piece less"
+        );
+    }
+
+    /// Rest summaries must not turn waking or a sub-rest contact into a landing; a piece-piece
+    /// impact qualifies by the same closing-speed comparison as crumble, without ground load.
+    #[test]
+    fn impacts_use_each_endpoints_rest_speed_and_wakes_in_place_are_not_impacts() {
+        use crate::contact_transfer::ContactTransfer;
+        let mut app = app(Vec3::ZERO);
+        let lower = piece(&mut app, 0.0, 10.0);
+        let upper = piece(&mut app, 0.0, 11.0);
+        step(&mut app, 1);
+        let rest = app.world().get::<SleepThreshold>(upper).unwrap().linear
+            * app.world().resource::<PhysicsLengthUnit>().0;
+        app.world_mut()
+            .get_mut::<SleepThreshold>(lower)
+            .unwrap()
+            .linear *= 2.0;
+        for (factor, impact) in [(0.0, false), (0.5, false), (1.0, false), (1.1, true)] {
+            app.world_mut().insert_resource(ContactTransfers::fixture(
+                vec![vec![ContactTransfer {
+                    reference: lower,
+                    reference_collider: lower,
+                    other: upper,
+                    other_collider: Some(upper),
+                    point: Vec3::Y * 10.5,
+                    normal: Vec3::Y,
+                    impulse: Vec3::Y,
+                    effective_mass: 1.0,
+                    closing_speed: rest * factor,
+                }]],
+                1.0 / 64.0,
+            ));
+            read_pairs(&mut app);
+            let records = app.world().resource::<PieceRecords>();
+            for (entity, impacted) in [(lower, false), (upper, impact)] {
+                assert_eq!(records.live[&entity].last_impact.is_some(), impacted);
+                assert!(records.live[&entity].first_loaded.is_none());
+            }
+        }
+        // Fixture: sleep and wake at exactly the same pose, then a solver step with no closing.
+        app.world_mut().entity_mut(upper).insert(Sleeping);
+        let first = app.world().resource::<PieceRecords>().episodes[0];
+        app.world_mut().entity_mut(upper).remove::<Sleeping>();
+        step(&mut app, 1);
+        let records = app.world().resource::<PieceRecords>();
+        let current = records.live[&upper];
+        assert!(current.last_impact.is_none());
+        assert_eq!(current.last_moved, first.last_moved);
+        assert_eq!(records.episodes[0].last_impact, first.last_impact);
+    }
+
+    /// Rotation's lever arm comes from the piece's full collider extent, including child offsets,
+    /// rather than a scene-wide size or the body's centre collider alone.
+    #[test]
+    fn visible_motion_radius_includes_offset_child_colliders() {
+        let mut app = app(Vec3::ZERO);
+        let body = piece(&mut app, 0.0, 10.0);
+        app.world_mut().spawn((
+            ChildOf(body),
+            Transform::from_xyz(4.0, 0.0, 0.0),
+            Collider::cuboid(CUBE, CUBE, CUBE),
+        ));
+        step(&mut app, 1);
+        // Fixture: farthest box corner from the body origin is (4.5, 0.5, 0.5).
+        let expected = Vec3::new(4.5, 0.5, 0.5).length();
+        assert!(
+            (app.world().resource::<PieceRecords>().live[&body]
+                .radius_m
+                .unwrap()
+                - expected)
+                .abs()
+                < 1e-5
+        );
+    }
+
     /// Lifecycle changes between fixed ticks must not inflate the next tick's additive leaves.
     /// The piece history still records them, and exposes their cost separately to the collector.
     #[test]

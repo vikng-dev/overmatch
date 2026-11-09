@@ -217,6 +217,10 @@ pub(crate) fn parse_commands(mut commands: Query<(&TankCommand, &mut ParsedTankC
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ParseCommands;
 
+/// Orders command holding after all writers and before gameplay consumers.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct HoldCommands;
+
 /// An aim intention and the frame it is measured in (ADR-0038).
 ///
 /// **The intention travels in the frame its authoring view is anchored to**, and only the author

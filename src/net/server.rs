@@ -3147,4 +3147,33 @@ mod tests {
             "a harness spawn pose is never re-sampled",
         );
     }
+    /// Phase attribution relies on the owning installers' actual set membership. A synthetic
+    /// producer cannot catch a removed BotBrain/Servos registration in the shipped composition.
+    #[test]
+    fn owning_installers_register_the_measured_producers() {
+        let mut app = App::new();
+        install_fixed_input(&mut app);
+        crate::tank::sim_plugin(&mut app);
+        let schedules = app.world().resource::<bevy::ecs::schedule::Schedules>();
+        let graph = schedules.get(FixedUpdate).unwrap().graph();
+        for (name, set) in [
+            ("::drive_bot", crate::cost::phases::FixedWork::BotBrain),
+            ("::drive_servos", crate::cost::phases::FixedWork::Servos),
+        ] {
+            let producer = graph
+                .systems
+                .iter()
+                .find(|(_, s, _)| s.name().ends_with(name))
+                .expect("the owning installer registers the producer")
+                .0;
+            let set = graph
+                .system_sets
+                .get_key(set.intern())
+                .expect("the producer names its measured phase");
+            assert!(
+                graph.hierarchy().contains_edge(set.into(), producer.into()),
+                "{name} is outside its measured phase"
+            );
+        }
+    }
 }

@@ -26,10 +26,23 @@ The operator passes the printed environment to the hosted server. It selects 22 
 
 The contact census snapshots the completed physics step before sleeping and structural retirement.
 `contact_census_us` and `sweep_census_us` are subtractable tick leaves; the latter is excluded from
-`sweep_us`. First-contact fields describe first fall; `last_ground`/`last_loaded` describe subsequent
-support transitions. `piece_census.episodes` preserves completed sleep episodes across wakeups,
-and `islands_at_sleep` uses those episodes' last loaded support transition. `casts_per_source`
-retains each source's cast count summed over all its owners, including zero-cast sources.
+`sweep_us`. The census precedes the sleep timer's opening bracket explicitly. First-contact
+fields describe first fall. `last_impact` records the latest solver point closing faster than the
+piece's own linear sleep threshold, against any body, pieces included; waking in place is no impact.
+`impact_to_sleep_s` includes any subsequent sliding or rolling and is not a visibly-still wait.
+
+`last_moved` tracks a held pose anchor: translation plus rotation angle times the piece's bounding
+radius must exceed the labelled visibility tolerance before the anchor refreshes. The radius
+encloses all scaled colliders and their offsets at first observation. `thresholds.visible_motion_m`
+reports that instrument's tolerance. Per-piece `still_s` is sleep minus last-moved in seconds;
+`islands_at_sleep.still_s` is its members' minimum. Every sleep cohort participates, including
+pieces that never carried ground load (`never_ground_loaded`) or impacted (`never_impacted`).
+`below_sleep_speed_s` is a separate velocity proxy, not a visibility measure.
+
+`piece_census.episodes` preserves completed sleep episodes across wakes. Pose anchors persist
+through sleep and wake, so repeated episodes' stillness can include earlier sleeping time; use
+`sleeps == 1` for first-sleep observations. `casts_per_source` retains each source's cast count
+summed over all its owners, including zero-cast sources.
 On Linux, `linux_host.host_probe_us` exposes the periodic `/proc` walk outside `frame_us`.
 Lifecycle observations between fixed ticks are reported as `piece_census.lifecycle_outside_tick_us`,
 separate from additive tick leaves. `awake_ticks` remains a piece's cumulative awake duration;

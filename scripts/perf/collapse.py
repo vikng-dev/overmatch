@@ -592,22 +592,26 @@ def ram_rows(text, recipe):
 
 
 def rest_summary(records, dt):
-    """One row per island that slept: how long after its last landing, and who calmed last."""
+    """Every sleep cohort, including members that never bore ground load."""
     cohorts = collections.defaultdict(list)
     for record in records:
         if record["sleep"] is not None:
             cohorts[record["sleep"], record["island"]].append(record)
     rows = []
     for (sleep, island), members in sorted(cohorts.items()):
-        landed = [m["last_loaded"] for m in members if m["last_loaded"] is not None]
-        last_landing = max(landed) if landed else None
+        impacts = [m["last_impact"] for m in members if m["last_impact"] is not None]
+        last_impact = max(impacts) if impacts else None
         fast = [m["last_fast"] for m in members if m["last_fast"] is not None]
-        last_calm = max(fast) if fast else None
+        last_fast = max(fast) if fast else None
+        last_moved = max(m["last_moved"] for m in members)
         rows.append(dict(sleep=sleep, island=island, pieces=len(members),
-                         never_landed=len(members) - len(landed), last_landing=last_landing,
-                         landing_to_sleep_s=None if last_landing is None else (sleep - last_landing) * dt,
-                         last_calm=last_calm, landing_to_calm_s=None if last_landing is None or last_calm is None else (last_calm - last_landing) * dt,
-                         last_to_calm=sum(m["last_fast"] == last_calm for m in members) if fast else 0,
+                         never_ground_loaded=sum(m["first_loaded"] is None for m in members),
+                         never_impacted=len(members) - len(impacts), last_impact=last_impact,
+                         impact_to_sleep_s=None if last_impact is None else (sleep - last_impact) * dt,
+                         last_moved=last_moved, still_s=(sleep - last_moved) * dt,
+                         last_fast=last_fast,
+                         below_sleep_speed_s=None if last_fast is None else (sleep - last_fast) * dt,
+                         last_to_slow=sum(m["last_fast"] == last_fast for m in members) if fast else 0,
                          peak_linear_at_sleep=max(m["linear_at_sleep"] for m in members),
                          peak_angular_at_sleep=max(m["angular_at_sleep"] for m in members)))
     return rows
@@ -623,7 +627,11 @@ def piece_census(batches, dt):
         lifecycle_us += pieces["lifecycle_outside_tick_us"]
         for record in pieces["records"]:
             records[record["piece"]] = record
-    ordered = sorted(records.values(), key=lambda r: (r["born"], r["piece"]))
+    def with_still(record):
+        return dict(record, still_s=None if record["sleep"] is None else
+                    (record["sleep"] - record["last_moved"]) * dt)
+    episodes = [with_still(record) for record in episodes]
+    ordered = sorted((with_still(record) for record in records.values()), key=lambda r: (r["born"], r["piece"]))
     return dict(thresholds=thresholds, records=ordered, episodes=episodes, lifecycle_outside_tick_us=lifecycle_us, islands_at_sleep=rest_summary(episodes, dt))
 
 
