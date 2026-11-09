@@ -26,6 +26,11 @@ pub struct CollisionDiagnostics {
     pub stationary_non_touching_pairs: u32,
     /// Geometry-query calls among those pairs (after bounds/layer admission).
     pub stationary_non_touching_queries: u32,
+    // OVERMATCH PATCH: body-pair reduction's selection churn.
+    /// Points holding a warm start that body-pair reduction removed this step.
+    pub reduction_warm_points_removed: u32,
+    /// Points body-pair reduction kept this step with no warm start.
+    pub reduction_cold_points_kept: u32,
 }
 
 impl PhysicsDiagnostics for CollisionDiagnostics {
@@ -48,6 +53,14 @@ impl PhysicsDiagnostics for CollisionDiagnostics {
                 Self::STATIONARY_NON_TOUCHING_QUERIES,
                 self.stationary_non_touching_queries,
             ),
+            (
+                Self::REDUCTION_WARM_POINTS_REMOVED,
+                self.reduction_warm_points_removed,
+            ),
+            (
+                Self::REDUCTION_COLD_POINTS_KEPT,
+                self.reduction_cold_points_kept,
+            ),
         ]
     }
 }
@@ -60,5 +73,7 @@ impl_diagnostic_paths! {
         CONTACT_COUNT: "avian/collision/contact_count",
         STATIONARY_NON_TOUCHING_PAIRS: "avian/collision/stationary_non_touching_pairs",
         STATIONARY_NON_TOUCHING_QUERIES: "avian/collision/stationary_non_touching_queries",
+        REDUCTION_WARM_POINTS_REMOVED: "avian/collision/reduction_warm_points_removed",
+        REDUCTION_COLD_POINTS_KEPT: "avian/collision/reduction_cold_points_kept",
     }
 }

@@ -50,6 +50,22 @@ pub struct PairManifolds {
     pub manifolds: Vec<ContactManifold>,
 }
 
+/// How much of a selection changed from the last step's, the cost of reselecting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReductionChurn {
+    /// Points holding a warm start that reduction removed.
+    pub warm_removed: u32,
+    /// Points kept with no warm start.
+    pub cold_kept: u32,
+}
+
+impl core::ops::AddAssign for ReductionChurn {
+    fn add_assign(&mut self, other: Self) {
+        self.warm_removed += other.warm_removed;
+        self.cold_kept += other.cold_kept;
+    }
+}
+
 struct Candidate {
     /// Position of its manifold in the depth order, for the keep mask.
     manifold: usize,
@@ -68,14 +84,14 @@ pub fn reduce_body_pair<T: BorrowMut<PairManifolds>>(
     pairs: &mut [T],
     rest_speed: Scalar,
     tie: Scalar,
-) {
+) -> ReductionChurn {
     if pairs
         .iter()
         .map(|pair| pair.borrow().manifolds.len())
         .sum::<usize>()
         < 2
     {
-        return;
+        return ReductionChurn::default();
     }
     // The deepest manifold seeds the first normal, so a normal dropped past the cap is the
     // shallowest; ties break by pair order, so the result is the same on every run.
@@ -144,6 +160,11 @@ pub fn reduce_body_pair<T: BorrowMut<PairManifolds>>(
         pair.borrow_mut()
             .manifolds
             .retain(|manifold| !manifold.points.is_empty());
+    }
+    let count = |test: fn(&Candidate) -> bool| candidates.iter().filter(|c| test(c)).count() as u32;
+    ReductionChurn {
+        warm_removed: count(|c| !c.keep && c.carried),
+        cold_kept: count(|c| c.keep && !c.carried),
     }
 }
 

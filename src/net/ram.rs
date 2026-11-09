@@ -382,6 +382,8 @@ impl AvianDiagnostics<'_, '_> {
             max_dynamic_manifold_degree: self.degrees.values().copied().max().unwrap_or(0),
             stationary_non_touching_pairs: c.stationary_non_touching_pairs,
             stationary_non_touching_queries: c.stationary_non_touching_queries,
+            reduction_warm_points_removed: c.reduction_warm_points_removed,
+            reduction_cold_points_kept: c.reduction_cold_points_kept,
         }
     }
 }

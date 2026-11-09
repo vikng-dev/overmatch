@@ -12,8 +12,8 @@ mod system_param;
 pub use contact_graph::{ContactGraph, ContactGraphInternal};
 pub use feature_id::PackedFeatureId;
 pub use reduction::{
-    MAX_NORMALS, MAX_POINTS_PER_NORMAL, PairManifolds, ReducibleContacts, SELECTION_TIE,
-    reduce_body_pair,
+    MAX_NORMALS, MAX_POINTS_PER_NORMAL, PairManifolds, ReducibleContacts, ReductionChurn,
+    SELECTION_TIE, reduce_body_pair,
 };
 use smallvec::SmallVec;
 pub use system_param::Collisions;

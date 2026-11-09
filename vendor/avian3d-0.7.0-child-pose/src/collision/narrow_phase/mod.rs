@@ -297,6 +297,9 @@ fn update_narrow_phase<C: AnyCollider, H: CollisionHooks + 'static>(
     diagnostics.narrow_phase = start.elapsed();
     diagnostics.stationary_non_touching_pairs = narrow_phase.stationary_miss_work[0];
     diagnostics.stationary_non_touching_queries = narrow_phase.stationary_miss_work[1];
+    let churn = *narrow_phase.reduction_churn;
+    diagnostics.reduction_warm_points_removed = churn.warm_removed;
+    diagnostics.reduction_cold_points_kept = churn.cold_kept;
     diagnostics.contact_count = narrow_phase.contact_graph.edges.edge_count() as u32;
 }
 
