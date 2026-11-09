@@ -135,6 +135,10 @@ pub(crate) struct SweepAccount {
     pub(crate) sources: usize,
     /// Of `sources`, those whose swept bounds met no standing owner: they cast nothing.
     pub(crate) sources_no_owner: usize,
+    /// Sources whose fine geometry was prepared, including cached free groups.
+    pub(crate) sources_prepared: usize,
+    /// Source-owner cuts committed to the deposit queue.
+    pub(crate) deposits: usize,
     /// The shape casts of the source that cast the most, summed over its owners this tick.
     pub(crate) max_casts_per_source: usize,
     pub(crate) casts_per_source: Vec<usize>,
@@ -183,7 +187,8 @@ impl SweepAccount {
 
 struct SweepSource {
     body: Entity,
-    shape: Arc<super::super::sweep::SourceTree>,
+    /// Absent when the coarse query found no standing owner. The body still has a cast verdict.
+    shape: Option<Arc<super::super::sweep::SourceTree>>,
     motion: super::super::sweep::RigidMotion,
     roots: BTreeSet<Entity>,
     mass: f32,
@@ -354,6 +359,7 @@ pub(super) struct Intake<'w, 's> {
         ),
     >,
     spatial: SpatialQuery<'w, 's>,
+    aabbs: Query<'w, 's, &'static ColliderAabb>,
     transfers: ResMut<'w, ContactTransfers>,
     swapped: ResMut<'w, SwappedBelts>,
     fixed: Res<'w, Time<Fixed>>,
@@ -469,6 +475,10 @@ fn resolve_round(
     let mut cuts: BTreeMap<Entity, Vec<(Entity, Cut)>> = BTreeMap::new();
     if p.capture.as_deref().is_some_and(|capture| capture.active) {
         let _leaf = Stages::start(p.stages.as_deref(), Stage::SweepCensus);
+        p.account.sources_prepared += sources
+            .iter()
+            .filter(|source| source.shape.is_some())
+            .count();
         p.account.record_sources(
             sources.iter().map(|source| source.roots.is_empty()),
             resolved.iter().map(|r| (r.source, r.swept.work.casts)),
@@ -598,6 +608,7 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
         ref movers,
         ref drives,
         ref spatial,
+        ref aabbs,
         ref gravity,
         ref substeps,
         ..
@@ -632,9 +643,8 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
             if velocity == Vec3::ZERO && forces.angular_velocity() == Vec3::ZERO {
                 return;
             }
-            let admitted: Vec<_> = handles
-                .iter()
-                .filter_map(|handle| {
+            let admitted = || {
+                handles.iter().filter_map(|handle| {
                     let Ok((_, hull, _, local, layers, _, _, surface)) = colliders.get(handle)
                     else {
                         return None; // Sensors are not contact hulls.
@@ -643,27 +653,22 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                         .interacts_with(super::super::element_layers())
                         .then_some((hull, local, surface))
                 })
-                .collect();
-            if admitted.is_empty() {
-                return;
-            } // No construction-contact geometry on this body.
-            // Free groups prepare their tree at spawn and split. Articulated bodies need a
-            // current-frame snapshot: their collider-local poses can change without a body split.
-            let shape = match (piece, cached) {
-                (true, Some(shape)) => shape.0.clone(),
+            };
+            // Free groups keep immutable geometry. Articulated local poses require a current
+            // box, but no cloned hulls, source tree or per-leaf motion envelopes until an owner is near.
+            let bounds = match (piece, cached) {
+                (true, Some(shape)) => shape.0.bounds,
                 (true, None) => panic!("a free group prepares its source tree at spawn and split"),
                 (false, Some(_)) => panic!("only a free group carries a prepared source tree"),
-                (false, None) => Arc::new(super::super::sweep::SourceTree::new(
-                    admitted
-                        .iter()
-                        .map(|(hull, local, surface)| super::super::sweep::Hull {
-                            surface: surface.cloned(),
-                            hull: (*hull).clone(),
-                            position: local.translation,
-                            rotation: local.rotation.0,
-                        })
-                        .collect(),
-                )),
+                (false, None) => {
+                    let Some(bounds) = super::super::sweep::SourceBounds::new(
+                        admitted()
+                            .map(|(hull, local, _)| (hull, local.translation, local.rotation.0)),
+                    ) else {
+                        return; // No construction-contact geometry on this body.
+                    };
+                    bounds
+                }
             };
             let position = forces.position().0;
             let centre = position + rotation * com.0;
@@ -677,11 +682,24 @@ fn sources(p: &Intake, dt: f32) -> Vec<SweepSource> {
                 spin: forces.angular_velocity(),
                 dt,
             };
-            let roots = owners_met(
-                (spatial, colliders, constructions),
+            let (shape, roots) = prepare_source(
+                (spatial, colliders, constructions, aabbs),
                 body_entity,
-                &shape,
+                bounds,
                 motion,
+                || match cached {
+                    Some(shape) => shape.0.clone(),
+                    None => Arc::new(super::super::sweep::SourceTree::new(
+                        admitted()
+                            .map(|(hull, local, surface)| super::super::sweep::Hull {
+                                surface: surface.cloned(),
+                                hull: hull.clone(),
+                                position: local.translation,
+                                rotation: local.rotation.0,
+                            })
+                            .collect(),
+                    )),
+                },
             );
             let source = SweepSource {
                 body: body_entity,
@@ -711,23 +729,48 @@ fn travel(substeps: &avian3d::prelude::SubstepCount, dt: f32) -> f32 {
     (substeps.0 + 1) as f32 / (2 * substeps.0) as f32 * dt
 }
 
-/// The standing owners whose colliders `shape`'s swept bounds meet, `body`'s own excepted.
-fn owners_met(
-    (spatial, colliders, constructions): (&SpatialQuery, &Hulls, &Owners),
+/// One spatial query before fine geometry exists. Avian 0.7's AABB query tests each returned
+/// collider's ColliderAabb; filtering those same boxes by the fine bound preserves its owner set.
+fn prepare_source(
+    (spatial, colliders, constructions, aabbs): (
+        &SpatialQuery,
+        &Hulls,
+        &Owners,
+        &Query<&ColliderAabb>,
+    ),
     body: Entity,
-    shape: &super::super::sweep::SourceTree,
+    bounds: super::super::sweep::SourceBounds,
     motion: super::super::sweep::RigidMotion,
-) -> BTreeSet<Entity> {
-    spatial
-        .aabb_intersections_with_aabb(shape.bounds(motion))
+    shape: impl FnOnce() -> Arc<super::super::sweep::SourceTree>,
+) -> (
+    Option<Arc<super::super::sweep::SourceTree>>,
+    BTreeSet<Entity>,
+) {
+    let candidates: Vec<_> = spatial
+        .aabb_intersections_with_aabb(bounds.swept(motion))
         .into_iter()
         .filter_map(|entity| {
             let Ok((_, _, other, _, _, _, _, _)) = colliders.get(entity) else {
                 return None; // Sensors are not contact hulls.
             };
-            (other.body != body && constructions.contains(other.body)).then_some(other.body)
+            (other.body != body && constructions.contains(other.body)).then(|| {
+                let bounds = aabbs
+                    .get(entity)
+                    .expect("a spatial query candidate has its collider AABB");
+                (other.body, *bounds)
+            })
         })
-        .collect()
+        .collect();
+    if candidates.is_empty() {
+        return (None, BTreeSet::new()); // A swept miss, retained in SweepCast and the census.
+    }
+    let shape = shape();
+    let fine = shape.bounds(motion);
+    let roots = candidates
+        .into_iter()
+        .filter_map(|(owner, bounds)| bounds.intersects(&fine).then_some(owner))
+        .collect();
+    (Some(shape), roots)
 }
 
 /// This tick's departures as sweep sources, each under the body id it will spawn as, moving as
@@ -755,10 +798,16 @@ fn departure_sources(
             spin: root.rotation * launch.spin,
             dt,
         };
-        let shape = prepared.source.0.clone();
+        let (shape, roots) = prepare_source(
+            (spatial, colliders, constructions, &p.aabbs),
+            *body,
+            prepared.source.0.bounds,
+            motion,
+            || prepared.source.0.clone(),
+        );
         SweepSource {
             body: *body,
-            roots: owners_met((spatial, colliders, constructions), *body, &shape, motion),
+            roots,
             shape,
             motion,
             mass: props.mass,
@@ -939,7 +988,10 @@ fn owner_geometry<'s>(
                     breakage.kind.sweep.swept(
                         &breakage.live.structure,
                         &breakage.live.state,
-                        &source.shape,
+                        source
+                            .shape
+                            .as_deref()
+                            .expect("an owner candidate prepared fine source geometry"),
                         super::super::sweep::RigidMotion {
                             position: inverse * (source.motion.position - pose.translation),
                             rotation: inverse * source.motion.rotation,
@@ -1206,6 +1258,7 @@ fn commit(
             changed: vec![root],
             ..default()
         });
+        p.account.deposits += 1;
         // One ordered reduction accounts for all freed matter, on server bodies or decor.
         let (result, centre) = &exchanges[&body];
         for c in plug {
@@ -1419,6 +1472,132 @@ mod tests {
     use crate::contact_transfer::ContactTransfer;
     use crate::headless_test::{booted_driving_grid, driving_plane, start_fixed_clock};
 
+    /// The game's environment destruction sweep must reach standing matter at the travel
+    /// boundary; drivers and falling bodies rely on the coarse query never shortening a cast.
+    #[test]
+    fn coarse_rejection_keeps_boundary_contacts_and_skips_sources_beyond_reach() {
+        use avian3d::prelude::{AngularInertia, AngularVelocity, LinearVelocity, Mass, NoAutoMass};
+        use bevy::ecs::system::RunSystemOnce;
+        let kind = crate::construction::tests::column_construction();
+        // Fixture: slow and fast linear crossings, acceleration from rest, and a long hull
+        // whose quarter turn reaches a column that neither its centre nor its start box reaches.
+        let dt = 1.0 / 64.0;
+        let substeps = avian3d::prelude::SubstepCount::default();
+        for (hull, velocity, acceleration, spin, reach) in [
+            (
+                Collider::cuboid(0.2, 0.2, 0.2),
+                Vec3::X,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                0.1 + dt,
+            ),
+            (
+                Collider::cuboid(0.2, 0.2, 0.2),
+                Vec3::X * 1024.0,
+                Vec3::ZERO,
+                Vec3::ZERO,
+                0.1 + 1024.0 * dt,
+            ),
+            (
+                Collider::cuboid(0.2, 0.2, 0.2),
+                Vec3::ZERO,
+                Vec3::X * 4096.0,
+                Vec3::ZERO,
+                0.1 + 4096.0 * travel(&substeps, dt) * dt,
+            ),
+            (
+                Collider::cuboid(0.2, 4.0, 0.2),
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Vec3::Z * std::f32::consts::FRAC_PI_2 / dt,
+                2.0_f32.hypot(0.1),
+            ),
+        ] {
+            for inside in [true, false] {
+                let (mut app, root) = super::super::tests::composed_kind(false, &kind);
+                app.world_mut().insert_resource(substeps);
+                // Fixture: the spatial query's owner box ends at its geometric face.
+                app.world_mut()
+                    .resource_mut::<avian3d::prelude::NarrowPhaseConfig>()
+                    .contact_tolerance = 0.0;
+                for _ in 0..3 {
+                    app.update();
+                }
+                // Fixture: one millimetre either side of the derived reach to the x=-0.5 face.
+                let offset = if inside { 0.001 } else { -0.001 };
+                let body = app
+                    .world_mut()
+                    .spawn((
+                        RigidBody::Dynamic,
+                        Position(Vec3::new(-0.5 - reach + offset, 1.5, 0.0)),
+                        Rotation::default(),
+                        hull.clone(),
+                        Mass(1.0),
+                        NoAutoMass,
+                        AngularInertia::new(Vec3::ONE),
+                        LinearVelocity::ZERO,
+                        AngularVelocity::ZERO,
+                        piece_layers(),
+                    ))
+                    .id();
+                app.update();
+                app.world_mut().get_mut::<LinearVelocity>(body).unwrap().0 = velocity;
+                app.world_mut().get_mut::<AngularVelocity>(body).unwrap().0 = spin;
+                app.world_mut()
+                    .entity_mut(body)
+                    .insert(ConstantLinearAcceleration(acceleration));
+                let source = app
+                    .world_mut()
+                    .run_system_once(move |intake: Intake| {
+                        sources(&intake, dt)
+                            .into_iter()
+                            .find(|source| source.body == body)
+                            .unwrap()
+                    })
+                    .unwrap();
+                assert_eq!(
+                    source.roots.contains(&root),
+                    inside,
+                    "the exact travel boundary selects the owner: velocity={velocity:?}, acceleration={acceleration:?}, spin={spin:?}, inside={inside}"
+                );
+                assert_eq!(
+                    source.shape.is_some(),
+                    inside,
+                    "a coarse miss prepares no fine geometry"
+                );
+                if let Some(shape) = source.shape {
+                    let owner = app.world().get::<Breakage>(root).unwrap();
+                    let swept = kind.sweep.swept(
+                        &owner.live.structure,
+                        &owner.live.state,
+                        &shape,
+                        source.motion,
+                    );
+                    assert!(
+                        swept.work.casts > 0,
+                        "a retained boundary source reaches fine casts"
+                    );
+                } else {
+                    app.insert_resource(crate::cost::stages::Capture { active: true });
+                    app.world_mut().run_system_once(run).unwrap();
+                    let cast = app.world().resource::<SweepCast>();
+                    assert!(
+                        cast.bodies.contains(&body),
+                        "a coarse miss is a swept verdict"
+                    );
+                    assert!(cast.members.is_empty());
+                    let account = app.world().resource::<SweepAccount>();
+                    assert_eq!(account.sources, 1);
+                    assert_eq!(account.sources_no_owner, 1);
+                    assert_eq!(account.sources_prepared, 0);
+                    assert_eq!(account.work.casts, 0);
+                    assert_eq!(account.deposits, 0);
+                    assert_eq!(account.casts_per_source, [0]);
+                }
+            }
+        }
+    }
+
     /// The game's environment destruction: a sweep must admit the same surfaces as the contact
     /// hook. Standing matter gets no rigid demand from a side slice's radial face; lateral
     /// approach still has a witness. Drivers rely on suspension travel preceding the hard stop.
@@ -1443,6 +1622,17 @@ mod tests {
             ] {
                 let mut app = booted_driving_grid(driving_plane(0.0));
                 start_fixed_clock(&mut app);
+                let root = crate::construction::spawn(
+                    &mut app.world_mut().commands(),
+                    &kind,
+                    crate::scatter::MapInstance {
+                        id: "sweep_column_fixture".into(),
+                        ordinal: u16::MAX,
+                    },
+                    Isometry3d::from_translation(pose.translation),
+                );
+                // Fixture: tilt the column after its upright spawn gate to test frame covariance.
+                app.world_mut().commands().entity(root).insert(pose);
                 let body = app
                     .world_mut()
                     .spawn((
@@ -1492,7 +1682,7 @@ mod tests {
                 if !lateral {
                     // Fixture: a full-surface compression stop half a metre behind the side slice.
                     // Rejecting the earlier radial hit must leave this later valid witness visible.
-                    let mut leaves = source.shape.hulls().to_vec();
+                    let mut leaves = source.shape.as_ref().unwrap().hulls().to_vec();
                     let mut stop = leaves[0].clone();
                     stop.surface = None;
                     stop.position += Vec3::Y * 0.5;
@@ -1500,13 +1690,15 @@ mod tests {
                         stop.clone(),
                     ]));
                     leaves.push(stop);
-                    source.shape = Arc::new(super::super::super::sweep::SourceTree::new(leaves));
+                    source.shape = Some(Arc::new(super::super::super::sweep::SourceTree::new(
+                        leaves,
+                    )));
                     source.motion.dt = 1.0;
                     let combined =
                         owner_geometry(&mut owner, pose, &[&source], source.motion.dt, None)[0]
                             .1
                             .witness;
-                    source.shape = stop_only;
+                    source.shape = Some(stop_only);
                     let stop = owner_geometry(&mut owner, pose, &[&source], source.motion.dt, None)
                         [0]
                     .1
@@ -1544,7 +1736,7 @@ mod tests {
         // Fixture: low contact mass leaves the drive dominant; the upper leaf leads by 0.5 m.
         let source = |body, leaves: &[(f32, usize)], drive| SweepSource {
             body: Entity::from_raw_u32(body).unwrap(),
-            shape: Arc::new(SourceTree::new(
+            shape: Some(Arc::new(SourceTree::new(
                 leaves
                     .iter()
                     .map(|&(x, c)| Hull {
@@ -1554,7 +1746,7 @@ mod tests {
                         rotation: Quat::IDENTITY,
                     })
                     .collect(),
-            )),
+            ))),
             motion: RigidMotion {
                 position: Vec3::NEG_X * 2.0,
                 rotation: Quat::IDENTITY,

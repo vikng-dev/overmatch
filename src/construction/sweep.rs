@@ -16,7 +16,7 @@ use crate::contact_law::{Contactor, peak_force, peak_speed};
 
 mod mincut;
 mod source;
-pub(crate) use source::{Hull, RigidMotion, SourceShape, SourceTree};
+pub(crate) use source::{Hull, RigidMotion, SourceBounds, SourceShape, SourceTree};
 
 /// The farthest a chunk hull's vertex may lie from its bounds' centre on any axis, m: ADR-0015's
 /// 10 m figure on the support coordinates of the only colliders a sweep casts against, each cast
@@ -1611,6 +1611,51 @@ pub(super) mod tests {
                     expansion.cmple(Vec3::splat(tolerance)).all(),
                     "a negligible angular path has only rounding-scale bound expansion"
                 );
+            }
+        }
+    }
+
+    /// The game's environment destruction intake may reject only boxes outside the fine sweep's
+    /// reach. Contact and cast accounting rely on containment even for empty box corners.
+    #[test]
+    fn coarse_body_bounds_contain_every_fine_query_box() {
+        // Fixture: disconnected, locally rotated leaves and an offset COM, near and far from zero.
+        let source = SourceTree::new(vec![
+            Hull {
+                surface: None,
+                hull: Collider::cuboid(0.2, 8.0, 0.4),
+                position: Vec3::new(-1.0, 0.3, 0.2),
+                rotation: Quat::from_rotation_y(0.7) * Quat::from_rotation_z(0.4),
+            },
+            Hull {
+                surface: None,
+                hull: Collider::cuboid(0.3, 0.6, 0.2),
+                position: Vec3::new(3.0, -0.5, 1.0),
+                rotation: Quat::from_rotation_x(-0.8),
+            },
+        ]);
+        for position in [Vec3::ZERO, Vec3::new(8192.0, -4096.0, 1024.0)] {
+            for rotation in [Quat::IDENTITY, Quat::from_rotation_y(0.9)] {
+                for turn in [0.0, f32::EPSILON, 0.3, std::f32::consts::TAU * 2.3] {
+                    for velocity in [Vec3::ZERO, Vec3::new(1024.0, -17.0, 300.0)] {
+                        let motion = RigidMotion {
+                            position,
+                            rotation,
+                            centre: position + rotation * Vec3::new(-0.7, 0.3, 0.5),
+                            velocity,
+                            acceleration: Vec3::ZERO,
+                            lead: 0.0,
+                            spin: Vec3::new(0.2, 1.0, -0.3).normalize() * turn,
+                            dt: 1.0,
+                        };
+                        let coarse = source.bounds.swept(motion);
+                        let fine = source.bounds(motion);
+                        assert!(
+                            fine.min.cmpge(coarse.min).all() && fine.max.cmple(coarse.max).all(),
+                            "coarse rejection must retain the fine query: coarse={coarse:?}, fine={fine:?}"
+                        );
+                    }
+                }
             }
         }
     }

@@ -199,6 +199,9 @@ pub(crate) struct Islands {
 pub(crate) struct SweepSplit {
     sources_no_owner: u32,
     sources_owner_met: u32,
+    sources_prepared: u32,
+    /// Source-owner cuts committed to the deposit queue.
+    deposits: u32,
     /// Shape casts; a source that met no owner casts none.
     casts: u32,
     /// Casts of the source that cast the most.
@@ -506,6 +509,8 @@ pub(super) fn finish(snapshot: &mut StepSnapshot, sweep: &SweepAccount) -> Conta
     row.sweep = SweepSplit {
         sources_no_owner: sweep.sources_no_owner as u32,
         sources_owner_met: (sweep.sources - sweep.sources_no_owner) as u32,
+        sources_prepared: sweep.sources_prepared as u32,
+        deposits: sweep.deposits as u32,
         casts: sweep.work.casts as u32,
         max_casts_per_source: sweep.max_casts_per_source as u32,
         casts_per_source: sweep.casts_per_source.iter().map(|&n| n as u32).collect(),

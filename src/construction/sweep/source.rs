@@ -17,10 +17,57 @@ pub(crate) struct Hull {
 #[component(immutable)]
 pub(crate) struct SourceShape(pub(crate) Arc<SourceTree>);
 
+/// A body-local box enclosing the boxes the fine sweep rotates, including their empty corners.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SourceBounds(ColliderAabb);
+
+impl SourceBounds {
+    /// No bound means the body has no construction-contact geometry.
+    pub(crate) fn new<'a>(hulls: impl Iterator<Item = (&'a Collider, Vec3, Quat)>) -> Option<Self> {
+        hulls
+            .map(|(hull, position, rotation)| {
+                rotation_bounds(
+                    hull.aabb(Vec3::ZERO, Quat::IDENTITY),
+                    position,
+                    rotation,
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                )
+            })
+            .reduce(ColliderAabb::merged)
+            .map(Self)
+    }
+
+    /// DERIVED: rigid motion preserves inclusion of every leaf box in this body box at every
+    /// time. The same rotation extrema and COM travel therefore enclose the fine query.
+    pub(crate) fn swept(self, motion: RigidMotion) -> ColliderAabb {
+        let envelope = rotation_bounds(
+            self.0,
+            motion.position,
+            motion.rotation,
+            motion.centre,
+            motion.spin * motion.dt,
+        );
+        let radius = (motion.position - motion.centre).length()
+            + self.0.min.abs().max(self.0.max.abs()).length();
+        // Resolution: two pose compositions instead of the fine sweep's one, plus world-space
+        // addition rounding. Apply outside rotation_bounds so zero spin also gets the allowance.
+        let pad = Vec3::splat(
+            2.0 * MOTION_ROUNDING_SCALE
+                * (radius + motion.position.abs().max(motion.centre.abs()).length()),
+        );
+        motion.travel_bounds(ColliderAabb {
+            min: envelope.min - pad,
+            max: envelope.max + pad,
+        })
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct SourceTree {
     hulls: Vec<Hull>,
     nodes: Vec<Node>,
+    pub(crate) bounds: SourceBounds,
 }
 
 impl SourceTree {
@@ -30,27 +77,26 @@ impl SourceTree {
     }
 
     pub(crate) fn new(hulls: Vec<Hull>) -> Self {
-        assert!(
-            !hulls.is_empty(),
-            "a sweep source has occupied contact hulls"
-        );
+        let bounds = SourceBounds::new(hulls.iter().map(|h| (&h.hull, h.position, h.rotation)))
+            .expect("a sweep source has occupied contact hulls");
         let nodes = tree(
             &hulls
                 .iter()
                 .map(|h| h.hull.aabb(h.position, h.rotation))
                 .collect::<Vec<_>>(),
         );
-        Self { hulls, nodes }
+        Self {
+            hulls,
+            nodes,
+            bounds,
+        }
     }
 
     /// The body's whole-tick query box: the merged rotation envelopes of its leaves, the same
     /// envelope its traversal reads, swept along its COM travel.
     pub(crate) fn bounds(&self, motion: RigidMotion) -> ColliderAabb {
         let envelope = self.query(motion).envelopes[0];
-        envelope.merged(ColliderAabb {
-            min: envelope.min + motion.velocity * motion.dt,
-            max: envelope.max + motion.velocity * motion.dt,
-        })
+        motion.travel_bounds(envelope)
     }
 
     /// Leaf `hull`'s rotation-only envelope, which translates linearly with the COM. Slab entry
@@ -113,6 +159,15 @@ pub(crate) struct RigidMotion {
 }
 
 impl RigidMotion {
+    /// The fine and coarse query share the cast's acceleration-adjusted COM travel.
+    fn travel_bounds(self, envelope: ColliderAabb) -> ColliderAabb {
+        let travel = self.velocity * self.dt;
+        envelope.merged(ColliderAabb {
+            min: envelope.min + travel,
+            max: envelope.max + travel,
+        })
+    }
+
     /// The closing speed of a cast hit at cast time `reach`, at a point the spin moves at
     /// `turn`: `None` unless the cast closes along `normal`. The body's own motion, closing,
     /// crosses the cast's gap `d` there at the root `t` of `d = v_n t + ½ a_n t²` it reaches

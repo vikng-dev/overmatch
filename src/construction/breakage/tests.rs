@@ -42,7 +42,7 @@ fn composed(replica: bool) -> (App, Entity) {
     composed_kind(replica, &shipped_house())
 }
 
-fn composed_kind(replica: bool, kind: &Arc<ConstructionKind>) -> (App, Entity) {
+pub(super) fn composed_kind(replica: bool, kind: &Arc<ConstructionKind>) -> (App, Entity) {
     composed_kind_with_physics(replica, kind, crate::offline_physics())
 }
 
