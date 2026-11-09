@@ -1,3 +1,4 @@
+use core::cell::Cell;
 #[cfg(feature = "parallel")]
 use core::cell::RefCell;
 
@@ -22,7 +23,6 @@ use bevy::{
     },
     prelude::*,
 };
-#[cfg(feature = "parallel")]
 use thread_local::ThreadLocal;
 
 #[derive(QueryData)]
@@ -90,6 +90,9 @@ pub struct NarrowPhase<'w, 's, C: AnyCollider> {
     // These are scaled by the length unit.
     default_speculative_margin: Local<'s, Scalar>,
     contact_tolerance: Local<'s, Scalar>,
+    // OVERMATCH PATCH: owner-local tallies avoid contended per-pair atomics.
+    miss_work: Local<'s, ThreadLocal<Cell<[u32; 2]>>>,
+    pub(super) stationary_miss_work: Local<'s, [u32; 2]>,
 }
 
 /// A bit vector for tracking contact status changes.
@@ -514,6 +517,8 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
     ) where
         for<'w, 's> SystemParamItem<'w, 's, H>: CollisionHooks,
     {
+        self.miss_work.iter_mut().for_each(|work| work.set([0, 0]));
+
         // Contact bit vecs must be sized based on the full contact capacity,
         // not the number of active contact pairs, because pair indices
         // are unstable and can be invalidated when pairs are removed.
@@ -575,6 +580,35 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 return;
             };
 
+            // OVERMATCH PATCH: stationarity is evaluated before this pair's geometry query.
+            // Standalone colliders are static. A body-query gap is unknown, not stationary.
+            let body1_bundle = collider1
+                .of
+                .and_then(|&ColliderOf { body }| self.body_query.get(body).ok());
+            let body2_bundle = collider2
+                .of
+                .and_then(|&ColliderOf { body }| self.body_query.get(body).ok());
+            let stationary_miss = !contacts.is_touching()
+                && [
+                    (collider1.of, body1_bundle.as_ref()),
+                    (collider2.of, body2_bundle.as_ref()),
+                ]
+                .into_iter()
+                .all(|(of, body)| {
+                    of.is_none()
+                        || body.is_some_and(|body| {
+                            body.rb.is_static()
+                                || body.is_sleeping
+                                || (body.linear_velocity.0 == LinearVelocity::ZERO.0
+                                    && body.angular_velocity.0 == AngularVelocity::ZERO.0)
+                        })
+                });
+            let work = self.miss_work.get_or(|| Cell::new([0, 0]));
+            if stationary_miss {
+                let [pairs, queries] = work.get();
+                work.set([pairs + 1, queries]);
+            }
+
             // Check if the AABBs of the colliders still overlap and the contact pair is valid.
             let overlap = collider1.enlarged_aabb.intersects(collider2.enlarged_aabb);
 
@@ -587,13 +621,6 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                 status_change_bits.set(contact_id);
             } else {
                 // The AABBs overlap. Compute contacts.
-
-                let body1_bundle = collider1
-                    .of
-                    .and_then(|&ColliderOf { body }| self.body_query.get(body).ok());
-                let body2_bundle = collider2
-                    .of
-                    .and_then(|&ColliderOf { body }| self.body_query.get(body).ok());
 
                 // The rigid body's friction, restitution, collision margin, and speculative margin
                 // will be used if the collider doesn't have them specified.
@@ -769,6 +796,10 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     collider2.entity,
                     collider_context,
                 );
+                if stationary_miss {
+                    let [pairs, queries] = work.get();
+                    work.set([pairs, queries + 1]);
+                }
                 collider1.shape.contact_manifolds_with_context(
                     collider2.shape,
                     collider1.position.0,
@@ -891,6 +922,11 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     status_change_bits.set(contact_id);
                 }
             };
+        });
+
+        *self.stationary_miss_work = self.miss_work.iter_mut().fold([0, 0], |sum, work| {
+            let work = work.get();
+            [sum[0] + work[0], sum[1] + work[1]]
         });
 
         #[cfg(feature = "parallel")]

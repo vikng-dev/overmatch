@@ -462,6 +462,13 @@ fn warm_start(
 ) {
     let start = crate::utils::Instant::now();
 
+    diagnostics.record_contact_batch(
+        constraint_graph.colors[COLOR_OVERFLOW_INDEX]
+            .contact_constraints
+            .len(),
+        false,
+    );
+
     // Warm start overflow constraints serially. They have lower priority, so they are solved first.
     for constraint in constraint_graph.colors[COLOR_OVERFLOW_INDEX]
         .contact_constraints
@@ -477,9 +484,12 @@ fn warm_start(
         .take(COLOR_OVERFLOW_INDEX)
         .filter(|color| !color.contact_constraints.is_empty())
     {
-        crate::utils::par_for_each(&mut color.contact_constraints, 64, |_i, constraint| {
-            warm_start_internal(&bodies, constraint, solver_config.warm_start_coefficient);
-        });
+        let count = color.contact_constraints.len();
+        let parallel =
+            crate::utils::par_for_each(&mut color.contact_constraints, 64, |_i, constraint| {
+                warm_start_internal(&bodies, constraint, solver_config.warm_start_coefficient);
+            });
+        diagnostics.record_contact_batch(count, parallel);
     }
 
     diagnostics.warm_start += start.elapsed();
@@ -545,6 +555,13 @@ fn solve_contacts<const USE_BIAS: bool>(
     let delta_secs = time.delta_seconds_adjusted();
     let max_overlap_solve_speed = solver_config.max_overlap_solve_speed * length_unit.0;
 
+    diagnostics.record_contact_batch(
+        constraint_graph.colors[COLOR_OVERFLOW_INDEX]
+            .contact_constraints
+            .len(),
+        false,
+    );
+
     // Solve overflow constraints serially. They have lower priority, so they are solved first.
     for constraint in constraint_graph.colors[COLOR_OVERFLOW_INDEX]
         .contact_constraints
@@ -565,14 +582,17 @@ fn solve_contacts<const USE_BIAS: bool>(
         .take(COLOR_OVERFLOW_INDEX)
         .filter(|color| !color.contact_constraints.is_empty())
     {
-        crate::utils::par_for_each(&mut color.contact_constraints, 64, |_i, constraint| {
-            solve_contacts_internal::<USE_BIAS>(
-                &bodies,
-                constraint,
-                max_overlap_solve_speed,
-                delta_secs,
-            );
-        });
+        let count = color.contact_constraints.len();
+        let parallel =
+            crate::utils::par_for_each(&mut color.contact_constraints, 64, |_i, constraint| {
+                solve_contacts_internal::<USE_BIAS>(
+                    &bodies,
+                    constraint,
+                    max_overlap_solve_speed,
+                    delta_secs,
+                );
+            });
+        diagnostics.record_contact_batch(count, parallel);
     }
 
     if USE_BIAS {
@@ -643,6 +663,13 @@ fn solve_restitution(
     // The restitution threshold determining the speed required for restitution to be applied.
     let threshold = solver_config.restitution_threshold * length_unit.0;
 
+    diagnostics.record_contact_batch(
+        constraint_graph.colors[COLOR_OVERFLOW_INDEX]
+            .contact_constraints
+            .len(),
+        false,
+    );
+
     // Solve restitution for overflow constraints serially. They have lower priority, so they are solved first.
     for constraint in constraint_graph.colors[COLOR_OVERFLOW_INDEX]
         .contact_constraints
@@ -663,14 +690,17 @@ fn solve_restitution(
         .take(COLOR_OVERFLOW_INDEX)
         .filter(|color| !color.contact_constraints.is_empty())
     {
-        crate::utils::par_for_each(&mut color.contact_constraints, 64, |_i, constraint| {
-            solve_restitution_internal(
-                &bodies,
-                constraint,
-                threshold,
-                solver_config.restitution_iterations,
-            );
-        });
+        let count = color.contact_constraints.len();
+        let parallel =
+            crate::utils::par_for_each(&mut color.contact_constraints, 64, |_i, constraint| {
+                solve_restitution_internal(
+                    &bodies,
+                    constraint,
+                    threshold,
+                    solver_config.restitution_iterations,
+                );
+            });
+        diagnostics.record_contact_batch(count, parallel);
     }
 
     diagnostics.apply_restitution += start.elapsed();

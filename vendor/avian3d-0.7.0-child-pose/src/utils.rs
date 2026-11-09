@@ -11,13 +11,14 @@ pub(crate) use bevy::platform::time::Instant;
 /// If `slice.len() < min_len`, serial iteration will be used.
 ///
 /// The `ComputeTaskPool` is used if parallelism is enabled.
+/// OVERMATCH PATCH: returns whether parallel chunks were actually dispatched.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let mut slice = vec![1, 2, 3, 4];
 ///
-/// par_for_each(&mut slice, |index, item| {
+/// par_for_each(&mut slice, 64, |index, item| {
 ///     *item += index;
 /// });
 ///
@@ -26,7 +27,7 @@ pub(crate) use bevy::platform::time::Instant;
 #[inline(always)]
 #[allow(unused_variables, unused_mut)]
 #[cfg(not(feature = "parallel"))]
-pub fn par_for_each<T, F>(mut slice: &mut [T], min_len: usize, mut f: F)
+pub fn par_for_each<T, F>(mut slice: &mut [T], min_len: usize, mut f: F) -> bool
 where
     T: Send + Sync,
     F: FnMut(usize, &mut T) + Send + Sync,
@@ -34,6 +35,7 @@ where
     slice.iter_mut().enumerate().for_each(|(index, item)| {
         f(index, item);
     });
+    false
 }
 
 /// A helper function for iterating over a slice in parallel or serially
@@ -42,13 +44,14 @@ where
 /// If `slice.len() < min_len`, serial iteration will be used.
 ///
 /// The `ComputeTaskPool` is used if parallelism is enabled.
+/// OVERMATCH PATCH: returns whether parallel chunks were actually dispatched.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let mut slice = vec![1, 2, 3, 4];
 ///
-/// par_for_each(&mut slice, |index, item| {
+/// par_for_each(&mut slice, 64, |index, item| {
 ///     *item += index;
 /// });
 ///
@@ -57,7 +60,7 @@ where
 #[inline(always)]
 #[allow(unused_variables, unused_mut)]
 #[cfg(feature = "parallel")]
-pub fn par_for_each<T, F>(mut slice: &mut [T], min_len: usize, mut f: F)
+pub fn par_for_each<T, F>(mut slice: &mut [T], min_len: usize, mut f: F) -> bool
 where
     T: Send + Sync,
     F: Fn(usize, &mut T) + Send + Sync,
@@ -68,6 +71,7 @@ where
         slice.iter_mut().enumerate().for_each(|(index, item)| {
             f(index, item);
         });
+        false
     } else {
         // TODO: Is there a better approach than `par_chunk_map_mut`?
         let chunk_size_ = (slice.len() / task_pool_.thread_num()).max(1);
@@ -83,5 +87,6 @@ where
                 });
             },
         );
+        true
     }
 }

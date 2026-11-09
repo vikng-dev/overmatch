@@ -4,7 +4,7 @@
 
 use avian3d::prelude::{LinearVelocity, Sleeping};
 use bevy::prelude::*;
-use bevy::tasks::{ComputeTaskPool, ParallelSlice};
+use bevy::tasks::{ComputeTaskPool, ParallelSlice, ParallelSliceMut};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -262,6 +262,118 @@ pub(super) struct Census<'w, 's> {
     constructions: Query<'w, 's, (Entity, &'static MapInstance, &'static Breakage), With<Body>>,
     contacts: Res<'w, ContactTransfers>,
     sweep: Res<'w, SweepAccount>,
+    avian: AvianDiagnostics<'w, 's>,
+}
+
+/// Avian's step diagnostics and the contact state they describe.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct AvianDiagnostics<'w, 's> {
+    solver: Res<'w, avian3d::dynamics::solver::SolverDiagnostics>,
+    collision: Res<'w, avian3d::collision::CollisionDiagnostics>,
+    tree: Res<'w, avian3d::collider_tree::ColliderTreeDiagnostics>,
+    graph: Res<'w, avian3d::prelude::ContactGraph>,
+    constraints: Res<'w, avian3d::dynamics::solver::constraint_graph::ConstraintGraph>,
+    bodies: Query<'w, 's, &'static avian3d::prelude::RigidBody>,
+    degrees: Local<'s, bevy::ecs::entity::EntityHashMap<u32>>,
+    workers: Local<'s, Vec<AvianContactWork>>,
+}
+
+/// Reusable census output owned by one compute-worker batch.
+#[derive(Default)]
+struct AvianContactWork {
+    touching_pairs: u32,
+    points: u32,
+    degrees: bevy::ecs::entity::EntityHashMap<u32>,
+}
+
+impl AvianDiagnostics<'_, '_> {
+    /// One collector snapshot of active contacts and prepared constraints, outside the tick clock.
+    fn step(&mut self) -> crate::cost::AvianStep {
+        use avian3d::dynamics::solver::constraint_graph::COLOR_OVERFLOW_INDEX;
+        let us = |d: std::time::Duration| d.as_secs_f64() * 1.0e6;
+        let (s, c) = (&*self.solver, &*self.collision);
+        let colors = &self.constraints.colors;
+        let pairs = self.graph.active_pairs();
+        let bodies = &self.bodies;
+        let pool = ComputeTaskPool::get();
+        let workers = pool.thread_num();
+        self.workers.resize_with(workers, AvianContactWork::default);
+        // Each batch owns disjoint ranges of both populations and its incidence map.
+        self.workers.par_chunk_map_mut(pool, 1, |worker, work| {
+            let work = &mut work[0];
+            work.touching_pairs = 0;
+            work.points = 0;
+            work.degrees.clear();
+            for pair in &pairs[pairs.len() * worker / workers..pairs.len() * (worker + 1) / workers]
+            {
+                if pair.is_touching() {
+                    work.touching_pairs += 1;
+                    work.points += pair
+                        .manifolds
+                        .iter()
+                        .map(|m| m.points.len() as u32)
+                        .sum::<u32>();
+                }
+            }
+            for color in colors {
+                let constraints = &color.contact_constraints;
+                for constraint in &constraints[constraints.len() * worker / workers
+                    ..constraints.len() * (worker + 1) / workers]
+                {
+                    for body in [constraint.body1, constraint.body2] {
+                        // Retired bodies can leave the world after solving and before collection.
+                        if bodies
+                            .get(body)
+                            .is_ok_and(avian3d::prelude::RigidBody::is_dynamic)
+                        {
+                            *work.degrees.entry(body).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        });
+        let (mut touching_pairs, mut points) = (0, 0);
+        self.degrees.clear();
+        // Incidence for a body can span batches; only the keyed reduction is serial.
+        for work in &*self.workers {
+            touching_pairs += work.touching_pairs;
+            points += work.points;
+            for (&body, &degree) in &work.degrees {
+                *self.degrees.entry(body).or_default() += degree;
+            }
+        }
+        crate::cost::AvianStep {
+            collider_tree_us: us(self.tree.update + self.tree.optimize),
+            broad_phase_us: us(c.broad_phase),
+            narrow_phase_us: us(c.narrow_phase),
+            prepare_constraints_us: us(s.prepare_constraints),
+            update_velocity_increments_us: us(s.update_velocity_increments),
+            integrate_velocities_us: us(s.integrate_velocities),
+            warm_start_us: us(s.warm_start),
+            solve_constraints_us: us(s.solve_constraints),
+            integrate_positions_us: us(s.integrate_positions),
+            relax_velocities_us: us(s.relax_velocities),
+            apply_restitution_us: us(s.apply_restitution),
+            finalize_us: us(s.finalize),
+            store_impulses_us: us(s.store_impulses),
+            swept_ccd_us: us(s.swept_ccd),
+            pairs: c.contact_count,
+            touching_pairs,
+            points,
+            constraints: s.contact_constraint_count,
+            colors: colors
+                .iter()
+                .filter(|color| !color.contact_constraints.is_empty())
+                .count() as u32,
+            overflow_constraints: colors[COLOR_OVERFLOW_INDEX].contact_constraints.len() as u32,
+            serial_contact_visits: s.serial_contact_visits,
+            parallel_contact_visits: s.parallel_contact_visits,
+            // No live dynamic endpoint means zero incidence.
+            max_dynamic_manifold_degree: self.degrees.values().copied().max().unwrap_or(0),
+            stationary_non_touching_pairs: c.stationary_non_touching_pairs,
+            stationary_non_touching_queries: c.stationary_non_touching_queries,
+        }
+    }
 }
 
 impl Census<'_, '_> {
@@ -271,7 +383,7 @@ impl Census<'_, '_> {
 
     /// This tick's sample, recorded by the ram and the scheduled collapse alike.
     pub(super) fn sample(
-        &self,
+        &mut self,
         tick_us: f64,
         physics_us: f64,
         sleep_us: f64,
@@ -290,6 +402,7 @@ impl Census<'_, '_> {
             awake: self.pieces.iter().len(),
             tanks: self.tanks.iter().len(),
             dt_s: dt,
+            avian: self.avian.step(),
         }
     }
 
@@ -409,6 +522,9 @@ pub(crate) fn fixture_plan(app: &App) -> FixturePlan {
         .ceil() as usize,
     }
 }
+
+#[cfg(test)]
+mod avian_tests;
 
 #[cfg(test)]
 mod tests {
@@ -535,6 +651,11 @@ mod tests {
     /// Runs the census once on an idle tick (fixture: one-second step); whether it captured.
     fn record(world: &mut World) -> bool {
         use bevy::ecs::system::RunSystemOnce;
+        world.init_resource::<avian3d::dynamics::solver::SolverDiagnostics>();
+        world.init_resource::<avian3d::collision::CollisionDiagnostics>();
+        world.init_resource::<avian3d::collider_tree::ColliderTreeDiagnostics>();
+        world.init_resource::<avian3d::prelude::ContactGraph>();
+        world.init_resource::<avian3d::dynamics::solver::constraint_graph::ConstraintGraph>();
         world
             .run_system_once(|mut census: Census| {
                 let times = NamedTimes::new(&phases::NAMES, [0.0; phases::COUNT]);

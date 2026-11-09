@@ -33,6 +33,52 @@ pub(crate) struct TickSample {
     pub(crate) awake: usize,
     pub(crate) tanks: usize,
     pub(crate) dt_s: f64,
+    /// Nested diagnostics for `scripts/perf/collapse.py`; the key lacks `_us` so its
+    /// additive tick parts do not count these timers again.
+    pub(crate) avian: AvianStep,
+}
+
+/// Avian's work counters and timers since the physics-step reset, in microseconds, plus
+/// contact state at collection. Solver timers sum their substeps; collider-tree time also
+/// includes the game's later refit boundary.
+#[derive(Clone, Copy, Serialize)]
+pub(crate) struct AvianStep {
+    pub(crate) collider_tree_us: f64,
+    pub(crate) broad_phase_us: f64,
+    pub(crate) narrow_phase_us: f64,
+    pub(crate) prepare_constraints_us: f64,
+    pub(crate) update_velocity_increments_us: f64,
+    pub(crate) integrate_velocities_us: f64,
+    pub(crate) warm_start_us: f64,
+    pub(crate) solve_constraints_us: f64,
+    pub(crate) integrate_positions_us: f64,
+    pub(crate) relax_velocities_us: f64,
+    pub(crate) apply_restitution_us: f64,
+    pub(crate) finalize_us: f64,
+    pub(crate) store_impulses_us: f64,
+    pub(crate) swept_ccd_us: f64,
+    /// Narrow-phase pairs: every contact-graph edge, touching or not.
+    pub(crate) pairs: u32,
+    /// Awake touching pairs and their points.
+    pub(crate) touching_pairs: u32,
+    pub(crate) points: u32,
+    /// Contact constraints the solver built: one per awake touching manifold.
+    pub(crate) constraints: u32,
+    /// Graph colours holding a constraint, the overflow colour included.
+    pub(crate) colors: u32,
+    /// Constraints in the overflow colour, which Avian solves on one thread: a body already in
+    /// every colour overflows.
+    pub(crate) overflow_constraints: u32,
+    /// Actual contact-pass constraint visits, summed over substeps and restitution.
+    /// Overflow is serial; zero-restitution constraint no-ops still count as visits.
+    pub(crate) serial_contact_visits: u32,
+    pub(crate) parallel_contact_visits: u32,
+    /// Prepared manifold incidence on the busiest still-live dynamic body; zero if none.
+    pub(crate) max_dynamic_manifold_degree: u32,
+    /// Narrow-phase entry: both owners static, sleeping or exactly zero linear/angular velocity.
+    /// Counts active non-touching pairs examined, then their admitted geometry queries.
+    pub(crate) stationary_non_touching_pairs: u32,
+    pub(crate) stationary_non_touching_queries: u32,
 }
 
 #[cfg(test)]
@@ -50,6 +96,33 @@ impl TickSample {
             awake: 0,
             tanks: 0,
             dt_s: 0.0,
+            avian: AvianStep {
+                collider_tree_us: 0.0,
+                broad_phase_us: 0.0,
+                narrow_phase_us: 0.0,
+                prepare_constraints_us: 0.0,
+                update_velocity_increments_us: 0.0,
+                integrate_velocities_us: 0.0,
+                warm_start_us: 0.0,
+                solve_constraints_us: 0.0,
+                integrate_positions_us: 0.0,
+                relax_velocities_us: 0.0,
+                apply_restitution_us: 0.0,
+                finalize_us: 0.0,
+                store_impulses_us: 0.0,
+                swept_ccd_us: 0.0,
+                pairs: 0,
+                touching_pairs: 0,
+                points: 0,
+                constraints: 0,
+                colors: 0,
+                overflow_constraints: 0,
+                serial_contact_visits: 0,
+                parallel_contact_visits: 0,
+                max_dynamic_manifold_degree: 0,
+                stationary_non_touching_pairs: 0,
+                stationary_non_touching_queries: 0,
+            },
         }
     }
 }

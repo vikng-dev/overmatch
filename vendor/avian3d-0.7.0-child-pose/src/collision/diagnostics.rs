@@ -17,6 +17,12 @@ pub struct CollisionDiagnostics {
     pub narrow_phase: Duration,
     /// The number of contacts.
     pub contact_count: u32,
+    // OVERMATCH PATCH: active misses, before geometry, with both owners static,
+    // sleeping or exactly zero linear/angular velocity. Body-query gaps are excluded.
+    /// Stationary non-touching active pairs examined by narrow phase this step.
+    pub stationary_non_touching_pairs: u32,
+    /// Geometry-query calls among those pairs (after bounds/layer admission).
+    pub stationary_non_touching_queries: u32,
 }
 
 impl PhysicsDiagnostics for CollisionDiagnostics {
@@ -28,7 +34,17 @@ impl PhysicsDiagnostics for CollisionDiagnostics {
     }
 
     fn counter_paths(&self) -> Vec<(&'static DiagnosticPath, u32)> {
-        vec![(Self::CONTACT_COUNT, self.contact_count)]
+        vec![
+            (Self::CONTACT_COUNT, self.contact_count),
+            (
+                Self::STATIONARY_NON_TOUCHING_PAIRS,
+                self.stationary_non_touching_pairs,
+            ),
+            (
+                Self::STATIONARY_NON_TOUCHING_QUERIES,
+                self.stationary_non_touching_queries,
+            ),
+        ]
     }
 }
 
@@ -37,5 +53,7 @@ impl_diagnostic_paths! {
         BROAD_PHASE: "avian/collision/broad_phase",
         NARROW_PHASE: "avian/collision/update_contacts",
         CONTACT_COUNT: "avian/collision/contact_count",
+        STATIONARY_NON_TOUCHING_PAIRS: "avian/collision/stationary_non_touching_pairs",
+        STATIONARY_NON_TOUCHING_QUERIES: "avian/collision/stationary_non_touching_queries",
     }
 }

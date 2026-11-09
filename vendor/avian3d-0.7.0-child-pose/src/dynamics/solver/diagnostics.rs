@@ -37,6 +37,21 @@ pub struct SolverDiagnostics {
     pub swept_ccd: Duration,
     /// The number of contact constraints generated.
     pub contact_constraint_count: u32,
+    // OVERMATCH PATCH: contact-pass exposure, summed over substeps and restitution.
+    /// Constraints dispatched serially, overflow included; zero-restitution no-ops included.
+    pub serial_contact_visits: u32,
+    /// Constraints dispatched through parallel chunks, zero-restitution no-ops included.
+    pub parallel_contact_visits: u32,
+}
+
+impl SolverDiagnostics {
+    pub(crate) fn record_contact_batch(&mut self, count: usize, parallel: bool) {
+        if parallel {
+            self.parallel_contact_visits += count as u32;
+        } else {
+            self.serial_contact_visits += count as u32;
+        }
+    }
 }
 
 impl PhysicsDiagnostics for SolverDiagnostics {
@@ -60,10 +75,14 @@ impl PhysicsDiagnostics for SolverDiagnostics {
     }
 
     fn counter_paths(&self) -> Vec<(&'static DiagnosticPath, u32)> {
-        vec![(
-            Self::CONTACT_CONSTRAINT_COUNT,
-            self.contact_constraint_count,
-        )]
+        vec![
+            (
+                Self::CONTACT_CONSTRAINT_COUNT,
+                self.contact_constraint_count,
+            ),
+            (Self::SERIAL_CONTACT_VISITS, self.serial_contact_visits),
+            (Self::PARALLEL_CONTACT_VISITS, self.parallel_contact_visits),
+        ]
     }
 }
 
@@ -81,5 +100,7 @@ impl_diagnostic_paths! {
         STORE_IMPULSES: "avian/solver/store_impulses",
         SWEPT_CCD: "avian/solver/swept_ccd",
         CONTACT_CONSTRAINT_COUNT: "avian/solver/contact_constraint_count",
+        SERIAL_CONTACT_VISITS: "avian/solver/serial_contact_visits",
+        PARALLEL_CONTACT_VISITS: "avian/solver/parallel_contact_visits",
     }
 }

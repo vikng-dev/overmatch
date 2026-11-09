@@ -172,3 +172,25 @@ with a full candidate scan replacing early exit at the first match.
 Pair-wide guard: `src/tests/avian_warm_start.rs::nearest_warm_start_is_selected_across_old_manifolds`.
 
 Local upstream draft: `upstream/avian-nearest-warm-start-contact.md` (DRAFT, not filed).
+
+## Physics work counters (`src/dynamics/solver/`, `src/collision/`, `src/utils.rs`)
+
+Contact passes add serial and parallel constraint visits to `SolverDiagnostics`, summed over
+substeps and restitution. Overflow is serial; visits include zero-restitution no-ops.
+`par_for_each` returns its existing dispatch decision, including the single-worker serial case;
+its thresholds, iteration and chunking are unchanged. No counter feeds a physics decision.
+
+Narrow phase counts active non-touching pairs whose owners are static, sleeping or have exactly
+zero linear and angular velocity, then counts their admitted geometry queries. Standalone
+colliders are static; a missing body-query result is unknown and excluded. Reusable thread-local
+cells hold the tallies, reduced after the pair jobs finish. Body reads precede bounds admission
+so rejected pairs are counted too; solver state and geometry inputs are unchanged.
+
+The existing per-step diagnostics reset clears these counters. `src/net/ram.rs` exports them
+alongside stage timers and a collector-only contact/color/dynamic-degree census through
+`src/cost.rs`. The tracked reader is `scripts/perf/collapse.py`, which saves the nested `avian`
+account in `tick-attribution.json` without adding its timers again to tick parts. The census
+partitions immutable contact and constraint reads across compute-worker batches, reuses their
+local incidence maps, and combines the integer counts after those batches complete.
+
+Guards: `src/net/ram/avian_tests.rs`.
