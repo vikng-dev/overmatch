@@ -89,7 +89,7 @@ with one real client and 29 bots. Print the deployment's recipe first:
 ```sh
 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 \
 python3 scripts/perf/collapse.py \
-  --schedule scripts/perf/spawn-batch-one-house.json \
+  --schedule .agents/scratch/spawn-batch-one-house.json \
   --tanks 30 --clients 1 --duration 60 --print-server-env
 ```
 
@@ -101,7 +101,7 @@ the main and lane server builds. The runner writes separate timestamped artifact
 ```sh
 OVERMATCH_UNATTENDED=1 OVERMATCH_WINDOW=headless OVERMATCH_MUTE=1 \
 python3 scripts/perf/collapse.py \
-  --schedule scripts/perf/spawn-batch-one-house.json \
+  --schedule .agents/scratch/spawn-batch-one-house.json \
   --tanks 30 --clients 1 --duration 60 \
   --target "$SPAWN_BATCH_TARGET" --deployment "$SPAWN_BATCH_DEPLOYMENT"
 ```

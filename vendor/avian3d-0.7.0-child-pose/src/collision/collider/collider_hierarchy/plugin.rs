@@ -26,6 +26,7 @@ impl Plugin for ColliderHierarchyPlugin {
                     return;
                 }
 
+                // Find the closest rigid body ancestor.
                 if let Some(body) = rb_query.get(entity).ok().map_or_else(
                     || {
                         parent_query
@@ -58,7 +59,11 @@ impl Plugin for ColliderHierarchyPlugin {
         );
 
         // Update `ColliderOf` components for colliders when their ancestors change.
-        app.add_observer(on_collider_body_changed);
+        app.add_observer(
+            on_collider_body_changed::<(ChildOf, AncestorMarker<ColliderMarker>), false>,
+        );
+        // OVERMATCH PATCH: a late body must repair attachments skipped before it existed.
+        app.add_observer(on_collider_body_changed::<RigidBody, true>);
 
         // Remove `ColliderOf` from colliders when their rigid bodies are removed.
         app.add_observer(on_body_removed);
@@ -67,8 +72,8 @@ impl Plugin for ColliderHierarchyPlugin {
 
 /// Updates [`ColliderOf`] components for colliders when their ancestors change
 /// or when a rigid body is added to the hierarchy.
-fn on_collider_body_changed(
-    trigger: On<Insert, (ChildOf, RigidBody, AncestorMarker<ColliderMarker>)>,
+fn on_collider_body_changed<B: Bundle, const BODY_INSERTED: bool>(
+    trigger: On<Insert, B>,
     mut commands: Commands,
     query: Query<
         Has<ColliderMarker>,
@@ -82,10 +87,12 @@ fn on_collider_body_changed(
 ) {
     let entity = trigger.entity;
 
+    // Skip if the entity is not a collider or an ancestor of a collider.
     let Ok(is_collider) = query.get(entity) else {
         return;
     };
 
+    // Find the closest rigid body ancestor.
     let Some(body) = body_query.get(entity).ok().map_or_else(
         || {
             parent_query
@@ -97,18 +104,24 @@ fn on_collider_body_changed(
         return;
     };
 
-    // OVERMATCH PATCH: unchanged ownership needs neither a relationship write nor a tree move.
-    if is_collider && !attachments.get(entity).is_ok_and(|of| of.body == body) {
+    // OVERMATCH PATCH: only hierarchy changes can skip an already installed attachment.
+    // Insert `ColliderOf` for the new child entity.
+    if is_collider && (BODY_INSERTED || !attachments.get(entity).is_ok_and(|of| of.body == body)) {
         commands.entity(entity).insert(ColliderOf { body });
     }
 
+    // Iterate over all descendants starting from the new child entity,
+    // and update the `ColliderOf` component to point to the closest rigid body ancestor.
     for child in child_query.iter_descendants(entity) {
+        // Stop traversal if we reach another rigid body.
         // FIXME: This might lead to siblings of the rigid body being skipped.
         if body_query.contains(child) {
             break;
         }
 
-        if collider_query.contains(child) && !attachments.get(child).is_ok_and(|of| of.body == body)
+        // Update the `ColliderOf` component.
+        if collider_query.contains(child)
+            && (BODY_INSERTED || !attachments.get(child).is_ok_and(|of| of.body == body))
         {
             commands.entity(child).insert(ColliderOf { body });
         }

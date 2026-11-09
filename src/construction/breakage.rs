@@ -2975,7 +2975,6 @@ fn spawn_prepared_as(commands: &mut Commands, piece: Entity, prepared: PreparedD
         },
         (
             Transform::from_translation(at).with_rotation(root.rotation),
-            GlobalTransform::from(Transform::from_translation(at).with_rotation(root.rotation)),
             Position(at),
             Rotation(root.rotation),
         ),
@@ -3047,8 +3046,6 @@ fn spawn_prepared_as(commands: &mut Commands, piece: Entity, prepared: PreparedD
         world.entity_mut(piece).insert(body);
         occupied_batch.apply(world);
         contact_batch.apply(world);
-        // insert_batch defers relationship bookkeeping; retirement must see the new membership.
-        world.flush();
     });
 }
 

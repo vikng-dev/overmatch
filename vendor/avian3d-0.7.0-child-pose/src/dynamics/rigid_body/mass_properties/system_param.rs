@@ -63,6 +63,7 @@ impl MassPropertyHelper<'_, '_> {
         let mut mass_props = if self.explicit.contains(entity) {
             MassProperties::ZERO
         } else {
+            // Compute the total mass properties of the entity and its descendants.
             self.total_mass_properties(entity)
         };
 
@@ -80,6 +81,9 @@ impl MassPropertyHelper<'_, '_> {
         else {
             return;
         };
+
+        // If automatic computation of mass properties is disabled, set them to the local `Mass`, `AngularInertia`, and `CenterOfMass`.
+        // Otherwise, use the computed total mass properties.
 
         if no_auto_mass {
             if let Some(mass) = mass {

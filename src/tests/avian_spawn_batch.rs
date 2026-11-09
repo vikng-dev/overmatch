@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use avian3d::collider_tree::{ColliderTreeProxyKey, ColliderTreeType, ColliderTrees};
 use avian3d::dynamics::rigid_body::mass_properties::components::RecomputeMassProperties;
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -47,6 +48,61 @@ fn an_explicit_spawn_attachment_is_installed_once() {
 
 #[derive(Resource, Default)]
 struct MassRequests(BTreeMap<Entity, usize>);
+
+/// Avian permits the body to arrive after its colliders. Its insertion must repair both
+/// self and child membership, moving their proxies out of the standalone tree for physics.
+#[test]
+fn a_late_body_repairs_preexisting_collider_attachments() {
+    let mut app = physics_app();
+    let body = app.world_mut().spawn(Transform::default()).id();
+    app.world_mut()
+        .entity_mut(body)
+        .insert((ColliderOf { body }, Collider::cuboid(1.0, 1.0, 1.0)));
+    let child = app
+        .world_mut()
+        .spawn((
+            ChildOf(body),
+            ColliderOf { body },
+            Transform::from_xyz(2.0, 0.0, 0.0),
+            Collider::cuboid(1.0, 1.0, 1.0),
+        ))
+        .id();
+    assert!(app.world().get::<RigidBodyColliders>(body).is_none());
+    for collider in [body, child] {
+        assert_eq!(
+            app.world()
+                .get::<ColliderTreeProxyKey>(collider)
+                .unwrap()
+                .tree_type(),
+            ColliderTreeType::Standalone
+        );
+    }
+
+    app.world_mut().entity_mut(body).insert(RigidBody::Static);
+
+    let colliders = app.world().get::<RigidBodyColliders>(body).unwrap();
+    assert_eq!(colliders.len(), 2);
+    for collider in [body, child] {
+        assert!(colliders.contains(&collider));
+        let key = *app.world().get::<ColliderTreeProxyKey>(collider).unwrap();
+        assert_eq!(key.tree_type(), ColliderTreeType::Static);
+        assert_eq!(
+            app.world()
+                .resource::<ColliderTrees>()
+                .get_proxy(key)
+                .unwrap()
+                .collider,
+            collider
+        );
+    }
+    assert!(
+        app.world()
+            .resource::<ColliderTrees>()
+            .standalone_tree
+            .proxies
+            .is_empty()
+    );
+}
 
 fn assert_mass(actual: f32, expected: f32) {
     // Resolution: ComputedMass stores the reciprocal; the round trip rounds twice.

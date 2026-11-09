@@ -199,14 +199,18 @@ Guards: `src/net/ram/avian_tests.rs`.
 
 Subject: the game's server physics and construction collapse, game state only.
 
-`src/collision/collider/collider_hierarchy/plugin.rs` keeps an existing `ColliderOf` when it
-already names the nearest body. A complete spawn bundle can therefore supply the attachment
+`src/collision/collider/collider_hierarchy/plugin.rs` keeps an existing `ColliderOf` on hierarchy
+changes when it already names the nearest body. A complete spawn bundle can therefore supply the attachment
 alongside its shape and enter the body's collider tree directly. Hierarchy-driven attachment
 and rehoming still work when ownership differs. `AncestorMarker` is re-exported from `lib.rs`
 so a prepared group can mark its collider ancestry at spawn, avoiding a deferred marker write
 and subtree walk for each member of a batch.
 
-The game's group constructor initializes `RigidBodyColliders` empty before adding the group.
+The game's group constructor inserts the body, including an empty `RigidBodyColliders`, before
+adding any collider. This order is required for direct batch attachment. A collider that precedes
+its body's `RigidBody` is initially unlisted and standalone; `Insert<RigidBody>` retains upstream's
+unconditional attachment re-insert to repair its membership and tree, even when `ColliderOf`
+already names that body. The group path has no colliders to repair at body insertion.
 Avian's relationship hook then appends each collider directly. Without that collection, a batch
 would queue competing single-collider lists. Bevy 0.19.1's `spawn_batch` and `insert_batch` keep
 per-entity hooks and observers; the game batches the occupied sensor and contact archetypes in
