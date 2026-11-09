@@ -4901,6 +4901,109 @@ fn a_body_the_sweep_did_not_cast_keeps_avians_contact() {
     );
 }
 
+/// The game's environment destruction: a detected target reaches the mounted intake and keeps
+/// the solver's look-ahead point, including a target with no inward witness or cut verdict.
+/// Filtering intake by witness presence would erase the unresolved target's solver contact.
+#[test]
+fn detected_targets_keep_lookahead_contacts_through_intake() {
+    use super::super::sweep::tests::{
+        failed_contact_hulls, failed_contact_kind, failed_contact_motion, failed_linear_motion,
+        failed_overlap_motion,
+    };
+    use bevy::ecs::system::RunSystemOnce;
+    let kind = failed_contact_kind();
+    let (hull, target) = failed_contact_hulls();
+    for (motion, has_witness) in [
+        (failed_contact_motion(&hull), true),
+        (failed_overlap_motion(&hull), false),
+        (failed_linear_motion(&hull), true),
+    ] {
+        let (mut app, root) = composed_kind(false, &kind);
+        for _ in 0..3 {
+            app.update();
+        }
+        // Fixture: a light source, prepared away from contact at rest, so the captured motion
+        // cannot release the anchored target. Its COM and shape retain the capture's frame.
+        let source = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Position(motion.position + Vec3::Y * 10.0),
+                Rotation(motion.rotation),
+                hull.clone(),
+                Mass(1e-6),
+                NoAutoMass,
+                AngularInertia::new(Vec3::ONE),
+                NoAutoAngularInertia,
+                CenterOfMass(motion.rotation.inverse() * (motion.centre - motion.position)),
+                NoAutoCenterOfMass,
+                LinearVelocity::ZERO,
+                AngularVelocity::ZERO,
+                piece_layers(),
+            ))
+            .id();
+        app.update();
+        app.world_mut().entity_mut(source).insert((
+            Position(motion.position),
+            LinearVelocity(motion.velocity),
+            AngularVelocity(motion.spin),
+        ));
+        app.update();
+        let owner = app.world().get::<Breakage>(root).unwrap();
+        assert!(
+            owner.live.state.standing(0),
+            "the fixture target must remain standing"
+        );
+        let account = app.world().resource::<SweepAccount>();
+        assert!(
+            account.sources > 0 && account.work.casts > 0,
+            "the mounted sweep cast the source against the target"
+        );
+        assert_eq!(
+            account.contacts.contains_key(&(source, owner.construction)),
+            has_witness,
+            "only usable inward geometry may produce a load"
+        );
+        let element = app
+            .world_mut()
+            .query::<(Entity, &Element, &ChildOf)>()
+            .iter(app.world())
+            .find(|(_, _, parent)| parent.parent() == root)
+            .unwrap()
+            .0;
+        // Fixture: a solver look-ahead point on the fixed target's face, separated by 1 mm.
+        let face = Vec3::new(target.aabb(Vec3::ZERO, Quat::IDENTITY).max.x, 0.0, 0.0);
+        let (unjudged, kept) = app
+            .world_mut()
+            .run_system_once(move |hooks: SweepContacts, mut commands: Commands| {
+                let unjudged = hooks.unjudged(element, source, face);
+                let mut pair = ContactPair::new(
+                    element,
+                    source,
+                    avian3d::collision::contact_types::ContactId::PLACEHOLDER,
+                );
+                pair.body1 = Some(root);
+                pair.body2 = Some(source);
+                pair.manifolds.push(ContactManifold::new(
+                    [ContactPoint::new(Vec3::ZERO, Vec3::ZERO, face, -0.001)],
+                    Vec3::X,
+                ));
+                let kept = avian3d::prelude::CollisionHooks::modify_contacts(
+                    &hooks,
+                    &mut pair,
+                    &mut commands,
+                );
+                (unjudged, kept)
+            })
+            .unwrap();
+        assert_eq!(
+            (unjudged, kept),
+            (Some(false), true),
+            "a detected target keeps Avian's look-ahead point"
+        );
+    }
+}
+
 /// Two 1e6 kg, 0.4 m cubes at rest one chunk side short of `resolved_column`'s middle chunk and
 /// of chunk `later`, the first by entity order at the middle; the first is launched at 128 m/s across its chunk,
 /// then the second, in the same tick or the next. Returns the app after the second's tick.

@@ -18,8 +18,8 @@ pub(crate) struct SourceImpulse {
 }
 
 /// The game's environment destruction: this tick's exact cast, the bodies it cast and each
-/// (source body, owner root, chunk) a source's sweep met inward and a cut judged;
-/// [`SweepContacts`] reads it.
+/// (source body, owner root, chunk) admitted by a source's inward witness or retained without
+/// usable contact geometry; [`SweepContacts`] reads it.
 #[derive(Resource, Default, Debug)]
 pub(crate) struct SweepCast {
     /// The fixed-clock time the sweep built it at: a contact pass at any other time had no sweep.

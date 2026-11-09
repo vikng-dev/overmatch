@@ -264,7 +264,7 @@ impl QueryTree<'_> {
             let (reach, normal, at) = match motion.hit(hull, origin, work) {
                 Some(Hit::Contact { reach, normal, at }) => (reach, normal, at),
                 Some(Hit::Unresolved) => return Some(TargetHit::Unresolved),
-                None => continue, // This source leaf misses the target.
+                None => continue,
             };
             if let Some(surface) = &leaf.surface {
                 let rotation =
