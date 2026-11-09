@@ -204,6 +204,72 @@ def report_match(rows):
               + f" | {row['budget_us'] / 1000:.3f} | {row['cpu_pct']:.1f} | {share:.1f}/{100-share:.1f} | {load['awake_bodies']} | {load['construction_pieces']} | {load['send_bytes']} | {row['tick_hz']:.1f} |")
 
 
+def client_frames(log, path, duration):
+    """Count update frames after release; the existing frame recorder also works without a window."""
+    release = re.findall(r"harness: released .*frame_s=([0-9.]+)", log)
+    if len(release) != 1 or log.count("client: connected (entity") != 1:
+        raise RuntimeError(f"{path}: requires one connection and combat release")
+    # Resolution: omit two boundary seconds for admission skew and the buffered recorder's tail.
+    margin = min(2, duration / 4)
+    start, end = float(release[0]) + margin, float(release[0]) + duration - margin
+    rows = []
+    text = path.read_text()
+    lines = text.splitlines()
+    for number, line in enumerate(lines, 1):
+        try:
+            row = json.loads(line)
+        except ValueError as error:
+            # A running writer may leave its final JSONL row incomplete until the next poll.
+            if number == len(lines) and not text.endswith("\n"):
+                break
+            raise RuntimeError(f"{path}:{number}: malformed frame row") from error
+        if "frame_ms" in row and start <= row["t"] <= end:
+            if not math.isfinite(row["frame_ms"]) or row["frame_ms"] < 0:
+                raise RuntimeError(f"{path}:{number}: invalid frame duration")
+            rows.append(row)
+    if len(rows) < 2 or rows[0]["t"] > start + 1 or rows[-1]["t"] < end - 1:
+        raise RuntimeError(f"{path}: incomplete client frame coverage")
+    span = rows[-1]["t"] - rows[0]["t"]
+    within = sum(r["frame_ms"] <= tick_seconds() * 1000 for r in rows)
+    frames = len(rows) - 1
+    return dict(frames=frames, span_s=span, frames_per_s=frames / span,
+                within_tick=within, over_tick=len(rows)-within,
+                keeping_up=frames >= span / tick_seconds() * SAMPLE_SPEED and within >= len(rows) * SAMPLE_SPEED)
+
+
+def match_counts(windows):
+    """Connection bytes and target-rest suffixes, without interpreting tick timings as a price."""
+    links = collections.defaultdict(lambda: dict(bytes=0, periods=0, seconds=0))
+    rest = {}
+    for row in windows:
+        span = row["loadtest"]["elapsed_s"] - row["loadtest"]["window_start_s"]
+        if len(row["send_clients"]) != row["clients"]:
+            raise RuntimeError("send census does not cover every connected client")
+        for client in row["send_clients"]:
+            sample = links[client["link"]]
+            sample["bytes"] += client["bytes"]
+            sample["seconds"] += span
+            sample["periods"] += 1
+        for target in row["loadtest"]["targets"]:
+            signature = (target["falls"], target["dust"], target["sleeping"])
+            previous = rest.get(target["id"])
+            quiet = target["falls"] > 0 and target["awake"] == 0 and target["sleeping"] > 0
+            since = None
+            if quiet:
+                since = row["loadtest"]["elapsed_s"]
+                if previous and previous["signature"] == signature and previous["since_s"] is not None:
+                    since = previous["since_s"]
+            rest[target["id"]] = dict(signature=signature, since_s=since, **target)
+    for sample in links.values():
+        sample["bytes_per_s"] = sample["bytes"] / sample["seconds"]
+        sample["all_windows"] = sample["periods"] == len(windows)
+    end = windows[-1]["loadtest"]["elapsed_s"]
+    for target in rest.values():
+        target["quiet_s"] = 0 if target["since_s"] is None else end - target["since_s"]
+        del target["signature"]
+    return dict(links=dict(links), targets=rest)
+
+
 class ServerLogs:
     """One polling/backoff/watchdog contract for every hosted recipe."""
     def __init__(self, path, deployment):
@@ -285,7 +351,7 @@ def run_match(args, out, recipe):
                 sock.bind(("127.0.0.1", 5888))
             spawn("overmatch-server", serverlog, dict(OVERMATCH_SERVER_BIND="127.0.0.1", OVERMATCH_SERVER_STATS_S="1", OVERMATCH_BOT=str(args.tanks-client_count), **dict(args.server_env)))
         verified_host = admit_server(snapshot, children, start + args.startup_grace, args.rehearsal)
-        clients = [spawn("overmatch", out / f"client{i}.log", dict(OVERMATCH_SERVER=address, OVERMATCH_HARNESS=str(script))) for i in range(client_count)]
+        clients = [spawn("overmatch", out / f"client{i}.log", dict(OVERMATCH_SERVER=address, OVERMATCH_HARNESS=str(script), SPIKE_FRAME_COST=str(out / f"client{i}-frames.jsonl"))) for i in range(client_count)]
         deadline = start + 2 * args.startup_grace + args.duration
         while True:
             if any(c.poll() is not None for c in children):
@@ -299,11 +365,15 @@ def run_match(args, out, recipe):
                 rows = match_rows(text, recipe)
                 windows = complete_windows(rows, recipe, args.duration, client_count)
                 if windows:
+                    (out / "rows.json").write_text(json.dumps(rows, indent=2) + "\n")
+                    counts = match_counts(windows)
+                    counts["clients"] = {}
                     for i, _ in enumerate(clients):
                         log = (out / f"client{i}.log").read_text()
-                        if log.count("client: connected (entity") != 1 or "harness: released" not in log:
-                            raise RuntimeError(f"client{i}: requires one connection and synchronized combat release")
-                    (out / "rows.json").write_text(json.dumps(rows, indent=2) + "\n")
+                        counts["clients"][f"client{i}"] = client_frames(log, out / f"client{i}-frames.client.jsonl", args.duration)
+                    counts["all_clients_keeping_up"] = all(c["keeping_up"] for c in counts["clients"].values())
+                    (out / "counts.json").write_text(json.dumps(counts, indent=2) + "\n")
+                    print("MEASURED client/house counts: " + json.dumps(counts), flush=True)
                     trace = match_tick_summary(rows, recipe)
                     if args.replication_trace:
                         trace["replication_windows"] = replication_windows(text)

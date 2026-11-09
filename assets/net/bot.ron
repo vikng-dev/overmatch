@@ -1,0 +1,5 @@
+(
+    home_xz: ((0.0, 12.0), Taste("bot placement: cohort origin beside the player spawn lanes; terrain supplies height")),
+    throttle: (0.5, Taste("bot driving: steady forward demand for circling remote targets")),
+    steer: (0.5, Taste("bot driving: steady differential turn demand for circling remote targets")),
+)
