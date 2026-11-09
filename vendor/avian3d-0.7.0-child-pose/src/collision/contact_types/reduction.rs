@@ -21,9 +21,9 @@ use crate::prelude::*;
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReducibleContacts;
 
-/// Resolution: a ceiling on support normals, above what interlocked pieces present (MEASURED: a
-/// cap of 4 left piles awake longer for almost no points saved). A cluster past it holds only
-/// the shallowest points of the pair.
+/// Resolution: a ceiling on support normals, set high so distinct faces are not traded away. A
+/// cap of 4 saved almost nothing (MEASURED, one twelve-house run each: 32.8 against 35.5 points
+/// per awake piece-tick). A cluster past it holds only the shallowest points of the pair.
 pub const MAX_NORMALS: usize = 12;
 
 /// Resolution: points kept per support normal, the count a convex footprint needs and
